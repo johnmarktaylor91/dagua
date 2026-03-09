@@ -153,7 +153,8 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
     result = pos.detach()
 
     # Apply direction transform
-    result = _apply_direction(result, graph.direction)
+    direction = config.direction if config else graph.direction
+    result = _apply_direction(result, direction)
 
     return result
 

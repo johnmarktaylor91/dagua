@@ -22,7 +22,7 @@ def project_overlaps(
     """
     n = pos.shape[0]
     if n <= 1:
-        return
+        return pos
 
     with torch.no_grad():
         for _ in range(iterations):
@@ -82,3 +82,5 @@ def project_overlaps(
                 sign[sign == 0] = 1.0
                 pos[y_r, 1] += sign * y_push * 0.5
                 pos[y_c, 1] -= sign * y_push * 0.5
+
+    return pos
