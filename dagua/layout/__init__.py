@@ -1,4 +1,5 @@
-"""Layout subpackage — differentiable graph layout via PyTorch optimization.
+"""Layout subpackage — differentiable graph layout via PyTorch optimization."""
 
-Re-exports the public API: layout(), individual constraint classes.
-"""
+from dagua.layout.engine import layout
+
+__all__ = ["layout"]

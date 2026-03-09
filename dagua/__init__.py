@@ -2,8 +2,26 @@
 
 __version__ = "0.0.2"
 
-# Public API will be re-exported here once modules are implemented:
-#   from dagua.elements import Node, Edge, Cluster
-#   from dagua.graph import Graph
-#   from dagua.style import NodeStyle, EdgeStyle, ClusterStyle
-#   from dagua.defaults import set_default_device, set_default_theme
+from dagua.graph import DaguaGraph
+from dagua.styles import NodeStyle, EdgeStyle, ClusterStyle
+from dagua.config import LayoutConfig
+from dagua.layout import layout
+from dagua.render import render
+
+
+def draw(graph, config=None, output=None, **kwargs):
+    """Layout + render in one call. Convenience function."""
+    positions = layout(graph, config)
+    return render(graph, positions, config, output=output, **kwargs)
+
+
+__all__ = [
+    "DaguaGraph",
+    "NodeStyle",
+    "EdgeStyle",
+    "ClusterStyle",
+    "LayoutConfig",
+    "layout",
+    "render",
+    "draw",
+]
