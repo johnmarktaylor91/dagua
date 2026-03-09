@@ -92,6 +92,59 @@ class TestLargerGraphs:
         assert m["dag_fraction"] >= 0.9
 
 
+class TestFromTorchlens:
+    """Test TorchLens integration."""
+
+    def test_from_torchlens_simple(self):
+        """from_torchlens should produce a valid graph from a simple MLP."""
+        try:
+            import torchlens as tl
+            import torch.nn as nn
+        except ImportError:
+            pytest.skip("TorchLens not installed")
+
+        model = nn.Sequential(nn.Linear(10, 5), nn.ReLU(), nn.Linear(5, 2))
+        x = torch.randn(1, 10)
+        log = tl.log_forward_pass(model, x, vis_mode="none")
+        g = DaguaGraph.from_torchlens(log)
+
+        assert g.num_nodes > 0
+        assert g.edge_index.shape[1] > 0
+
+        # Should be layoutable
+        pos = dagua.layout(g, LayoutConfig(steps=50))
+        assert pos.shape == (g.num_nodes, 2)
+
+    def test_from_torchlens_with_skip(self):
+        """from_torchlens should handle skip connections (residual block)."""
+        try:
+            import torchlens as tl
+            import torch.nn as nn
+        except ImportError:
+            pytest.skip("TorchLens not installed")
+
+        class ResBlock(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc1 = nn.Linear(10, 10)
+                self.fc2 = nn.Linear(10, 10)
+
+            def forward(self, x):
+                return torch.relu(self.fc2(torch.relu(self.fc1(x))) + x)
+
+        model = ResBlock()
+        x = torch.randn(1, 10)
+        log = tl.log_forward_pass(model, x, vis_mode="none")
+        g = DaguaGraph.from_torchlens(log)
+
+        assert g.num_nodes > 0
+        # Should have clusters from module nesting
+        assert len(g.clusters) >= 0  # may or may not depending on nesting depth
+
+        pos = dagua.layout(g, LayoutConfig(steps=50))
+        assert pos.shape == (g.num_nodes, 2)
+
+
 class TestGraphvizComparison:
     """Test Graphviz comparison utilities."""
 

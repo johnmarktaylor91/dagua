@@ -17,8 +17,14 @@ def compute_all_metrics(
     edge_index: torch.Tensor,
     node_sizes: torch.Tensor,
     clusters: Optional[Dict] = None,
+    direction: str = "TB",
 ) -> Dict[str, float]:
-    """Compute all aesthetic metrics for a layout."""
+    """Compute all aesthetic metrics for a layout.
+
+    Args:
+        direction: Layout direction ("TB", "BT", "LR", "RL"). Affects which
+            axis is used for DAG fraction and edge straightness metrics.
+    """
     pos = positions.detach().cpu()
     ei = edge_index.detach().cpu()
     ns = node_sizes.detach().cpu()
@@ -28,12 +34,12 @@ def compute_all_metrics(
     metrics["num_nodes"] = n
     metrics["num_edges"] = ei.shape[1] if ei.numel() > 0 else 0
     metrics["edge_crossings"] = count_crossings(pos, ei)
-    metrics["dag_fraction"] = compute_dag_fraction(pos, ei)
+    metrics["dag_fraction"] = compute_dag_fraction(pos, ei, direction=direction)
     metrics["node_overlaps"] = count_overlaps(pos, ns)
     metrics["mean_edge_length"] = compute_mean_edge_length(pos, ei)
     metrics["edge_length_variance"] = compute_edge_length_variance(pos, ei)
-    metrics["edge_straightness"] = compute_edge_straightness(pos, ei)
-    metrics["x_alignment"] = compute_x_alignment(pos, ei)
+    metrics["edge_straightness"] = compute_edge_straightness(pos, ei, direction=direction)
+    metrics["x_alignment"] = compute_x_alignment(pos, ei, direction=direction)
     metrics["total_area"] = compute_total_area(pos, ns)
     metrics["aspect_ratio"] = compute_aspect_ratio(pos, ns)
     metrics["min_node_gap"] = compute_min_node_gap(pos, ns)
@@ -107,14 +113,29 @@ def _segments_intersect(a, b, c, d) -> bool:
     return False
 
 
-def compute_dag_fraction(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
-    """Fraction of edges pointing downward (target.y > source.y)."""
+def compute_dag_fraction(pos: torch.Tensor, edge_index: torch.Tensor, direction: str = "TB") -> float:
+    """Fraction of edges pointing in the layout direction.
+
+    TB: target.y > source.y (downward)
+    BT: target.y < source.y (upward)
+    LR: target.x > source.x (rightward)
+    RL: target.x < source.x (leftward)
+    """
     if edge_index.numel() == 0:
         return 1.0
 
     src, tgt = edge_index[0], edge_index[1]
-    downward = (pos[tgt, 1] > pos[src, 1]).float().mean().item()
-    return downward
+    if direction == "TB":
+        correct = pos[tgt, 1] > pos[src, 1]
+    elif direction == "BT":
+        correct = pos[tgt, 1] < pos[src, 1]
+    elif direction == "LR":
+        correct = pos[tgt, 0] > pos[src, 0]
+    elif direction == "RL":
+        correct = pos[tgt, 0] < pos[src, 0]
+    else:
+        correct = pos[tgt, 1] > pos[src, 1]
+    return correct.float().mean().item()
 
 
 def count_overlaps(pos: torch.Tensor, node_sizes: torch.Tensor) -> int:
@@ -186,22 +207,36 @@ def compute_edge_length_variance(pos: torch.Tensor, edge_index: torch.Tensor) ->
     return lengths.var().item()
 
 
-def compute_edge_straightness(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
-    """Average angular deviation from vertical (in degrees)."""
+def compute_edge_straightness(pos: torch.Tensor, edge_index: torch.Tensor, direction: str = "TB") -> float:
+    """Average angular deviation from the primary axis (in degrees).
+
+    For TB/BT: deviation from vertical (atan2(dx, dy)).
+    For LR/RL: deviation from horizontal (atan2(dy, dx)).
+    """
     if edge_index.numel() == 0:
         return 0.0
     src, tgt = edge_index[0], edge_index[1]
     dx = (pos[tgt, 0] - pos[src, 0]).abs()
     dy = (pos[tgt, 1] - pos[src, 1]).abs().clamp(min=1e-6)
-    angles = torch.atan2(dx, dy) * 180 / torch.pi
+    if direction in ("LR", "RL"):
+        dx = dx.clamp(min=1e-6)
+        angles = torch.atan2(dy, dx) * 180 / torch.pi
+    else:
+        angles = torch.atan2(dx, dy) * 180 / torch.pi
     return angles.mean().item()
 
 
-def compute_x_alignment(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
-    """Mean absolute x-displacement between connected nodes."""
+def compute_x_alignment(pos: torch.Tensor, edge_index: torch.Tensor, direction: str = "TB") -> float:
+    """Mean absolute displacement along the cross-axis between connected nodes.
+
+    For TB/BT: x-displacement (edges should be vertically aligned).
+    For LR/RL: y-displacement (edges should be horizontally aligned).
+    """
     if edge_index.numel() == 0:
         return 0.0
     src, tgt = edge_index[0], edge_index[1]
+    if direction in ("LR", "RL"):
+        return (pos[src, 1] - pos[tgt, 1]).abs().mean().item()
     return (pos[src, 0] - pos[tgt, 0]).abs().mean().item()
 
 

@@ -442,6 +442,164 @@ def _torchlens_graphs() -> List[TestGraph]:
     except Exception:
         pass
 
+    # ─── Extended TorchLens architectures ────────────────────────────────
+
+    # Import example models from TorchLens test suite
+    try:
+        from tests.example_models import (
+            NestedModules,
+            SimpleBranching,
+            DiamondLoop,
+            LongLoop,
+        )
+    except ImportError:
+        # Fall back: define inline if TorchLens test models not importable
+        NestedModules = SimpleBranching = DiamondLoop = LongLoop = None
+
+    # 5. Nested module hierarchy (4-level nesting)
+    if NestedModules is not None:
+        try:
+            model = NestedModules()
+            x = torch.randn(5)
+            log = tl.log_forward_pass(model, x, vis_mode="none")
+            g = DaguaGraph.from_torchlens(log)
+            graphs.append(TestGraph(
+                name="tl_nested_modules",
+                graph=g,
+                tags={"nested-deep"},
+                source="torchlens",
+                description="TorchLens: 4-level nested module hierarchy",
+                expected_challenges="Deep module nesting, cluster layout",
+            ))
+        except Exception:
+            pass
+
+    # 6. Branching (3-way split and merge)
+    if SimpleBranching is not None:
+        try:
+            model = SimpleBranching()
+            x = torch.randn(5)
+            log = tl.log_forward_pass(model, x, vis_mode="none")
+            g = DaguaGraph.from_torchlens(log)
+            graphs.append(TestGraph(
+                name="tl_branching",
+                graph=g,
+                tags={"wide-parallel"},
+                source="torchlens",
+                description="TorchLens: 3-way branching with merge",
+                expected_challenges="Branch alignment, merge point",
+            ))
+        except Exception:
+            pass
+
+    # 7. Diamond loop (split → sin/cos → merge, repeated)
+    if DiamondLoop is not None:
+        try:
+            model = DiamondLoop()
+            x = torch.randn(5)
+            log = tl.log_forward_pass(model, x, vis_mode="none")
+            g = DaguaGraph.from_torchlens(log)
+            graphs.append(TestGraph(
+                name="tl_diamond_loop",
+                graph=g,
+                tags={"diamond", "skip-light"},
+                source="torchlens",
+                description="TorchLens: Diamond pattern with loop iterations",
+                expected_challenges="Repeated diamond pattern, loop detection",
+            ))
+        except Exception:
+            pass
+
+    # 8. Long loop (20 iterations of Linear + ReLU)
+    if LongLoop is not None:
+        try:
+            model = LongLoop()
+            x = torch.randn(5)
+            log = tl.log_forward_pass(model, x, vis_mode="none")
+            g = DaguaGraph.from_torchlens(log)
+            graphs.append(TestGraph(
+                name="tl_long_loop",
+                graph=g,
+                tags={"linear-deep"},
+                source="torchlens",
+                description="TorchLens: 20-iteration loop (Linear+ReLU)",
+                expected_challenges="Very deep chain from loop unrolling",
+            ))
+        except Exception:
+            pass
+
+    # 9. ASPP model (multi-scale parallel branches)
+    try:
+        from tests.example_models import ASPPModel
+        model = ASPPModel(in_channels=3, mid=8, rates=(1, 6, 12))
+        x = torch.randn(2, 3, 32, 32)
+        log = tl.log_forward_pass(model, x, vis_mode="none")
+        g = DaguaGraph.from_torchlens(log)
+        graphs.append(TestGraph(
+            name="tl_aspp",
+            graph=g,
+            tags={"wide-parallel", "nested-shallow"},
+            source="torchlens",
+            description="TorchLens: Atrous Spatial Pyramid Pooling (4 parallel branches)",
+            expected_challenges="Multi-scale parallel branches, wide layout",
+        ))
+    except Exception:
+        pass
+
+    # 10. Feature Pyramid Network (bidirectional multi-scale)
+    try:
+        from tests.example_models import FeaturePyramidNet
+        model = FeaturePyramidNet()
+        x = torch.randn(2, 3, 32, 32)
+        log = tl.log_forward_pass(model, x, vis_mode="none")
+        g = DaguaGraph.from_torchlens(log)
+        graphs.append(TestGraph(
+            name="tl_fpn",
+            graph=g,
+            tags={"diamond", "skip-light", "nested-shallow"},
+            source="torchlens",
+            description="TorchLens: Feature Pyramid Network with lateral connections",
+            expected_challenges="Bidirectional flow, lateral skip connections",
+        ))
+    except Exception:
+        pass
+
+    # 11. Attention block (Q/K/V self-attention)
+    try:
+        from tests.example_models import _AttentionBlock
+        model = _AttentionBlock(dim=64)
+        x = torch.randn(2, 10, 64)
+        log = tl.log_forward_pass(model, x, vis_mode="none")
+        g = DaguaGraph.from_torchlens(log)
+        graphs.append(TestGraph(
+            name="tl_attention",
+            graph=g,
+            tags={"wide-parallel", "nested-shallow"},
+            source="torchlens",
+            description="TorchLens: Self-attention with Q/K/V projections",
+            expected_challenges="Triple parallel branches, matmul merge",
+        ))
+    except Exception:
+        pass
+
+    # 12. RandomGraphModel (controllable stress test)
+    try:
+        from tests.example_models import RandomGraphModel
+        model = RandomGraphModel(target_nodes=50, nesting_depth=2, seed=42, branch_probability=0.3, hidden_dim=64)
+        x = torch.randn(2, 64)
+        log = tl.log_forward_pass(model, x, vis_mode="none")
+        g = DaguaGraph.from_torchlens(log)
+        graphs.append(TestGraph(
+            name="tl_random_50",
+            graph=g,
+            tags={"nested-deep", "skip-light", "wide-parallel"},
+            source="torchlens",
+            description="TorchLens: Random architecture (~50 nodes, mixed patterns)",
+            expected_challenges="Unpredictable topology, mixed branch/skip/nest",
+        ))
+    except Exception:
+        pass
+
     return graphs
 
 

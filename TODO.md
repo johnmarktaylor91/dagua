@@ -1,14 +1,33 @@
-# Dagua MVP TODO — Post-Build Debrief
+# Dagua TODO — Post-Sprint 2 Debrief
+
+## Runtime Scaling Results
+
+Dagua vs Graphviz (dot engine), 50 optimization steps, CPU:
+
+| Nodes | Edges | Dagua (s) | Graphviz (s) | Winner |
+|------:|------:|----------:|-------------:|--------|
+| 100 | 150 | 0.23 | 0.04 | Graphviz (5x) |
+| 500 | 750 | 0.57 | 0.18 | Graphviz (3x) |
+| 1,000 | 1,500 | 1.78 | 0.63 | Graphviz (3x) |
+| 2,000 | 3,000 | 5.18 | 1.88 | Graphviz (3x) |
+| 5,000 | 7,500 | 8.36 | 14.13 | **Dagua (1.7x)** |
+| 10,000 | 15,000 | 24.81 | 82.88 | **Dagua (3.3x)** |
+| 20,000 | 30,000 | 86.02 | >300 (timeout) | **Dagua** |
+| 50,000 | 75,000 | 502.98 | >300 (timeout) | **Dagua** |
+
+**Crossover point: ~3-4K nodes.** Above this, Dagua's O(N) grid-based algorithms
+outperform Graphviz's native C engine. At 20K+ nodes, Graphviz times out entirely
+while Dagua continues to run. Dagua handles 50K nodes in ~8 minutes on CPU.
 
 ## Known Issues (fix before v0.1)
 
 ### Layout Quality
-- [ ] Edge crossings on random DAGs (334 crossings on 50-node random DAG vs 53 for Graphviz)
-  - Crossing loss with sigmoid proxy needs temperature tuning
-  - Consider Sugiyama-style crossing minimization as preprocessing
+- [ ] Edge crossings on random DAGs still ~3x Graphviz at 50 nodes
+  - Improved from 334→191 via multi-pass barycenter + transpose heuristic + layered crossing loss
+  - Further improvement: explore median heuristic, network simplex layering
 - [ ] Seed doesn't affect layout — init is fully deterministic from topology
   - Add small random perturbation to init_positions for exploration
-- [ ] LR/RL direction: layout is computed as TB then axes swapped — node sizes should also swap
+- [ ] LR/RL direction: node_sizes not swapped before layout computation
 - [ ] Back-edge routing creates wide arcs that can overlap with other nodes
 
 ### Rendering
@@ -21,7 +40,36 @@
 - [ ] `from_edge_index` doesn't accept `labels` kwarg — must set manually
 - [ ] No `from_dict` constructor yet
 - [ ] No `to_dot` export in public API (only in graphviz_utils)
-- [ ] Graph validation (check for duplicate edges, self-loops, etc.)
+- [ ] Graph validation (check for duplicate edges, self-loops)
+- [ ] DOT export: special character escaping (backslashes, angle brackets)
+- [ ] compute_node_sizes is not idempotent (no-ops if sizes already set)
+- [ ] No progress callback for long-running layouts
+
+### Metrics
+- [x] Direction-aware metrics (dag_fraction, edge_straightness, x_alignment)
+  - Now accept `direction` parameter: TB/BT/LR/RL
+- [ ] overall_quality not normalized by graph size — area penalty dominates for large graphs
+- [ ] No per-metric normalization (scores not comparable across different-sized graphs)
+
+## Completed (Sprint 2)
+
+- [x] Multi-pass barycenter crossing reduction (10-30 passes, adaptive to graph size)
+- [x] Transpose heuristic for crossing minimization (Sugiyama Phase 2 refinement)
+- [x] Layered crossing loss with virtual node decomposition for multi-span edges
+- [x] Crossing loss `.sum()` instead of `.mean()` (proper gradient magnitude)
+- [x] Grid-based spatial hashing for overlap detection (O(N) expected)
+- [x] Grid-based overlap projection for large graphs
+- [x] Negative sampling repulsion with self-index exclusion
+- [x] O(1) edge construction via lazy tensor finalization
+- [x] Input validation in from_edge_index
+- [x] Direction-aware metrics (TB/BT/LR/RL)
+- [x] Runtime scaling benchmark (Dagua vs Graphviz, 100 → 100K nodes)
+- [x] Extended TorchLens architecture sampling (12 models across 10 categories)
+- [x] Tests for BT/RL layout directions
+- [x] Tests for self-loops, disconnected components, wide/dense graphs
+- [x] Tests for from_torchlens integration
+- [x] Sampled count_crossings (125K random pairs for >500 edges)
+- [x] Grid-based count_overlaps metric for large graphs
 
 ## Feature Roadmap
 
@@ -30,8 +78,8 @@
 - [ ] Learnable bezier control points (Tier 2 edge routing)
 - [ ] Edge-node crossing avoidance
 - [ ] Parameter auto-tuning (Optuna integration in eval/sweep.py)
-- [ ] LaTeX report generation (eval/reference.py)
-- [ ] HTML dashboard generation with interactive charts
+- [ ] Network simplex layering (better than longest-path for crossing reduction)
+- [ ] CUDA acceleration benchmarks
 
 ### Tier 2 (medium priority)
 - [ ] Edge bundling (FDEB algorithm)
@@ -49,7 +97,7 @@
 - [ ] Animation of layout optimization (frame-by-frame)
 - [ ] GPU batch layout for multiple graphs simultaneously
 - [ ] Integration with PyTorch Geometric for GNN visualization
-- [ ] 100K+ node support with spatial indexing (quadtree repulsion)
+- [ ] 100K+ node support verified with benchmarks
 
 ## Architecture Decision Records
 
@@ -73,16 +121,16 @@ Current: `-100*overlaps - 10*crossings + 50*dag_fraction - variance - 2*x_align 
 **Issue**: Area penalty dominates for large graphs. Need per-category normalization.
 **TODO**: Normalize by node count, add Graphviz-relative scoring.
 
-### ADR-5: Evaluation test graphs are all synthetic + TorchLens
+### ADR-5: Evaluation test graphs are synthetic + TorchLens
+Expanded from 4 to 12+ TorchLens models covering all structural categories.
 No hand-curated "golden" layouts yet.
 **TODO**: Create reference layouts for key graphs, compute similarity scores.
 
-## Performance Observations
-- 50 nodes: ~2s (500 steps)
-- 200 nodes: ~8s (500 steps)
-- Exact repulsion O(N²) is the bottleneck above 200 nodes
-- Negative sampling kicks in at 5000 nodes (configurable)
-- Crossing loss O(E²) — sampled at 1000 edges
+### ADR-6: Scalability strategy
+- N ≤ 500: exact O(N²) algorithms (repulsion, overlap, projection)
+- N ≤ 2000: exact repulsion, grid-based overlap/projection
+- N > 2000: sampled repulsion (k=128), grid-based everything
+- Crossover vs Graphviz at ~3-4K nodes on CPU
 
 ## Choice Points (deferred decisions)
 1. Should `layout()` return CPU tensors always, or match input device?

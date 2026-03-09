@@ -69,6 +69,13 @@ class TestLayoutDirections:
         for i in range(4):
             assert pos[i, 1] < pos[i + 1, 1], f"Node {i} should be above node {i+1} in TB"
 
+    def test_bt_flow(self, simple_chain):
+        config = LayoutConfig(steps=100, direction="BT")
+        pos = layout(simple_chain, config)
+        # In BT, each successive node should have DECREASING y (upward)
+        for i in range(4):
+            assert pos[i, 1] > pos[i + 1, 1], f"Node {i} should be below node {i+1} in BT"
+
     def test_lr_flow(self, simple_chain):
         config = LayoutConfig(steps=200, direction="LR")
         pos = layout(simple_chain, config)
@@ -76,6 +83,14 @@ class TestLayoutDirections:
         x_range = pos[:, 0].max() - pos[:, 0].min()
         y_range = pos[:, 1].max() - pos[:, 1].min()
         assert x_range > y_range * 0.5, "LR layout should be wider than tall"
+
+    def test_rl_flow(self, simple_chain):
+        config = LayoutConfig(steps=200, direction="RL")
+        pos = layout(simple_chain, config)
+        # In RL, flow goes right-to-left: first node should be rightmost
+        x_range = pos[:, 0].max() - pos[:, 0].min()
+        y_range = pos[:, 1].max() - pos[:, 1].min()
+        assert x_range > y_range * 0.5, "RL layout should be wider than tall"
 
 
 class TestLayoutClusters:

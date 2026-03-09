@@ -7,6 +7,8 @@ from dagua.metrics import (
     compute_all_metrics,
     count_crossings,
     compute_dag_fraction,
+    compute_edge_straightness,
+    compute_x_alignment,
     count_overlaps,
     compute_mean_edge_length,
     overall_quality,
@@ -81,3 +83,59 @@ class TestComputeAllMetrics:
         q_good = compute_all_metrics(pos_good, ei, ns)["overall_quality"]
         q_bad = compute_all_metrics(pos_bad, ei, ns)["overall_quality"]
         assert q_good > q_bad
+
+
+class TestDirectionAwareMetrics:
+    """Test that metrics respect layout direction."""
+
+    def test_dag_fraction_bt(self):
+        """BT: edges should go upward (target.y < source.y)."""
+        pos = torch.tensor([[0.0, 100.0], [0.0, 50.0], [0.0, 0.0]])
+        ei = torch.tensor([[0, 1], [1, 2]])
+        assert compute_dag_fraction(pos, ei, direction="BT") == 1.0
+        assert compute_dag_fraction(pos, ei, direction="TB") == 0.0
+
+    def test_dag_fraction_lr(self):
+        """LR: edges should go rightward (target.x > source.x)."""
+        pos = torch.tensor([[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]])
+        ei = torch.tensor([[0, 1], [1, 2]])
+        assert compute_dag_fraction(pos, ei, direction="LR") == 1.0
+
+    def test_dag_fraction_rl(self):
+        """RL: edges should go leftward (target.x < source.x)."""
+        pos = torch.tensor([[100.0, 0.0], [50.0, 0.0], [0.0, 0.0]])
+        ei = torch.tensor([[0, 1], [1, 2]])
+        assert compute_dag_fraction(pos, ei, direction="RL") == 1.0
+
+    def test_edge_straightness_lr(self):
+        """LR: deviation from horizontal should be small for horizontal edges."""
+        pos = torch.tensor([[0.0, 0.0], [100.0, 0.0]])  # perfectly horizontal
+        ei = torch.tensor([[0], [1]])
+        angle = compute_edge_straightness(pos, ei, direction="LR")
+        assert angle < 1.0  # nearly 0 degrees deviation from horizontal
+
+    def test_edge_straightness_tb(self):
+        """TB: deviation from vertical should be small for vertical edges."""
+        pos = torch.tensor([[0.0, 0.0], [0.0, 100.0]])  # perfectly vertical
+        ei = torch.tensor([[0], [1]])
+        angle = compute_edge_straightness(pos, ei, direction="TB")
+        assert angle < 1.0
+
+    def test_x_alignment_lr(self):
+        """LR: cross-axis displacement is along y."""
+        pos = torch.tensor([[0.0, 0.0], [100.0, 10.0]])
+        ei = torch.tensor([[0], [1]])
+        # LR: cross-axis is y, so alignment = abs(0 - 10) = 10
+        assert compute_x_alignment(pos, ei, direction="LR") == pytest.approx(10.0)
+        # TB: cross-axis is x, so alignment = abs(0 - 100) = 100
+        assert compute_x_alignment(pos, ei, direction="TB") == pytest.approx(100.0)
+
+    def test_compute_all_metrics_with_direction(self):
+        """compute_all_metrics passes direction through."""
+        pos = torch.tensor([[0.0, 100.0], [0.0, 50.0], [0.0, 0.0]])
+        ei = torch.tensor([[0, 1], [1, 2]])
+        ns = torch.tensor([[40.0, 20.0]] * 3)
+        m_bt = compute_all_metrics(pos, ei, ns, direction="BT")
+        m_tb = compute_all_metrics(pos, ei, ns, direction="TB")
+        assert m_bt["dag_fraction"] == 1.0
+        assert m_tb["dag_fraction"] == 0.0
