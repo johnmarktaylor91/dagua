@@ -1,6 +1,16 @@
 # CHANGELOG
 
 
+## v0.0.1 (2026-03-09)
+
+### Bug Fixes
+
+- **ci**: Verify PyPI trusted publishing pipeline
+  ([`36a011f`](https://github.com/johnmarktaylor91/dagua/commit/36a011f574f8d38dd64f555d5f167a1c65b5b051))
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+
 ## v0.0.0 (2026-03-09)
 
 ### Chores
