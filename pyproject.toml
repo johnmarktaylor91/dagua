@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dagua"
+version = "0.0.1"
+description = "GPU-accelerated differentiable graph layout engine built on PyTorch"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    {name = "John Mark Taylor"},
+]
+keywords = ["graph", "layout", "visualization", "pytorch", "dag", "graphviz", "hierarchical"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "torch>=1.9",
+]
+
+[project.optional-dependencies]
+render = ["matplotlib>=3.5"]
+graphviz = ["graphviz>=0.20"]
+dev = [
+    "matplotlib>=3.5",
+    "pytest>=7.0",
+    "ruff>=0.4",
+]
+test = [
+    "pytest>=7.0",
+    "matplotlib>=3.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/johnmarktaylor91/dagua"
+Repository = "https://github.com/johnmarktaylor91/dagua"
+Issues = "https://github.com/johnmarktaylor91/dagua/issues"
+
+[tool.setuptools.packages.find]
+include = ["dagua*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "smoke: quick sanity checks",
+    "slow: tests that take >10s",
+    "gpu: tests requiring CUDA",
+]
