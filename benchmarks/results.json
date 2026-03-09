@@ -78,5 +78,15 @@
     "dagua_seconds": 502.98,
     "graphviz_seconds": null,
     "speedup_dagua_over_gv": null
+  },
+  {
+    "num_nodes": 100000,
+    "num_edges": 150000,
+    "graph_type": "random",
+    "dagua_steps": 50,
+    "device": "cpu",
+    "dagua_seconds": 2096.06,
+    "graphviz_seconds": null,
+    "speedup_dagua_over_gv": null
   }
 ]

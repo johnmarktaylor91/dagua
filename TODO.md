@@ -14,10 +14,11 @@ Dagua vs Graphviz (dot engine), 50 optimization steps, CPU:
 | 10,000 | 15,000 | 24.81 | 82.88 | **Dagua (3.3x)** |
 | 20,000 | 30,000 | 86.02 | >300 (timeout) | **Dagua** |
 | 50,000 | 75,000 | 502.98 | >300 (timeout) | **Dagua** |
+| 100,000 | 150,000 | 2096.06 | N/A | **Dagua** |
 
 **Crossover point: ~3-4K nodes.** Above this, Dagua's O(N) grid-based algorithms
 outperform Graphviz's native C engine. At 20K+ nodes, Graphviz times out entirely
-while Dagua continues to run. Dagua handles 50K nodes in ~8 minutes on CPU.
+while Dagua continues to run. Dagua handles 50K nodes in ~8 min and 100K in ~35 min on CPU.
 
 ## Known Issues (fix before v0.1)
 
