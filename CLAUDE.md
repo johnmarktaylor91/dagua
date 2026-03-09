@@ -37,41 +37,107 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
 
 ```
 dagua/
-├── dagua/
-│   ├── __init__.py          # public API: layout(), render()
-│   ├── layout.py            # core optimization loop
-│   ├── constraints.py       # DAG, Repel, Attract, Cluster, Align, NoOverlap
-│   ├── edges.py             # bezier routing (heuristic + optimized)
-│   ├── render/
-│   │   ├── __init__.py
-│   │   ├── matplotlib.py    # PatchCollection/LineCollection renderer
-│   │   ├── svg.py           # direct SVG string output
-│   │   └── graphviz.py      # optional neato -n2 passthrough
-│   ├── projection.py        # hard overlap resolution
-│   └── utils.py             # graph utilities, text measurement
-├── tests/
-├── benchmarks/
-├── examples/
-├── pyproject.toml
-├── LICENSE                  # MIT
-└── README.md
+├── __init__.py          # public API re-exports (Graph, Node, Edge, Cluster, styles, defaults)
+├── graph.py             # Graph class — central orchestrator
+│                        #   holds nodes/edges/clusters, ID→index mapping
+│                        #   layout()/render() orchestration methods
+│                        #   from_* classmethods (thin wrappers over io.py)
+├── elements.py          # Node, Edge, Cluster dataclasses (pure structural data)
+├── style.py             # NodeStyle, EdgeStyle, ClusterStyle, themes, palettes
+├── defaults.py          # module-level defaults (device, theme) — minimal global state
+├── layout/              # [see layout/CLAUDE.md]
+│   ├── __init__.py      # re-exports: layout(), individual constraints
+│   ├── engine.py        # optimization loop (~200 lines of PyTorch)
+│   ├── constraints.py   # DAG, Repel, Attract, Overlap, Cluster, Align
+│   ├── projection.py    # hard overlap resolution (projected gradient descent)
+│   └── schedule.py      # annealing schedules for constraint weights
+├── render/              # [see render/CLAUDE.md]
+│   ├── __init__.py      # re-exports: render(), to_svg()
+│   ├── mpl.py           # matplotlib: PatchCollection, LineCollection, batched
+│   ├── svg.py           # direct SVG string output (zero deps)
+│   └── graphviz.py      # optional neato -n2 passthrough
+├── routing.py           # bezier edge routing (heuristic now, differentiable later)
+├── io.py                # from_edges, from_edge_index, from_networkx, from_dict, to_dot
+└── utils.py             # text measurement, graph topology helpers
+```
+
+```
+tests/                   # [see tests/CLAUDE.md]
+├── conftest.py          # shared fixtures: sample graphs, common assertions
+├── test_graph.py
+├── test_elements.py
+├── test_style.py
+├── test_layout/
+│   ├── test_engine.py
+│   ├── test_constraints.py
+│   └── test_projection.py
+├── test_render/
+│   ├── test_mpl.py
+│   └── test_svg.py
+├── test_routing.py
+└── test_io.py
+```
+
+```
+benchmarks/              # [see benchmarks/CLAUDE.md]
+├── bench_layout.py      # scaling: 100, 1K, 10K, 100K nodes
+├── bench_render.py      # rendering performance
+└── graphs/              # reference graphs for reproducible benchmarks
+```
+
+```
+examples/                # [see examples/CLAUDE.md]
+├── quickstart.py        # minimal 5-line example
+├── neural_network.py    # DNN-style graph with module clusters
+├── custom_constraints.py # writing your own constraint
+└── large_graph.py       # 10K+ node demo
 ```
 
 ## Architecture
 
-### Core Insight
+### Dependency Flow
 
-Every graph layout algorithm is constrained optimization. Dagua replaces Sugiyama's five
-discrete phases with differentiable loss functions and gradient descent.
+Clean one-way dependency flow — no circular imports:
 
-### Constraint Vocabulary
+```
+Elements/Style (pure data, no deps)
+    ↓
+Graph (holds elements, ID→index mapping, orchestration)
+    ↓
+Layout Engine (operates on TENSORS, not Graph — headless, independently testable)
+    ├── Constraints (composable loss callables)
+    ├── Projection (hard overlap resolution)
+    └── Schedule (weight annealing)
+    ↓
+Routing (bezier control points, post-layout)
+    ↓
+Render (matplotlib/SVG/graphviz — takes positions + elements + styles)
+```
 
-**Positional** — DAG ordering, rank alignment, pinning
-**Proximity** — edge attraction, repulsion, clustering, overlap avoidance
-**Symmetry** — parallel branch spreading, sequential chain tightness, uniform edge length
+### Critical Design Points
 
-Each constraint is a callable: `(positions, graph_data) -> scalar_loss`. Users compose them
-declaratively.
+1. **Layout engine is headless**: takes `edge_index`, `node_sizes`, `groups` as tensors,
+   not a Graph object. `Graph.layout()` is a thin wrapper that extracts tensors, calls
+   engine, stores results. Makes the engine independently testable and reusable.
+
+2. **Renderers accept structured data**: `Graph.render()` wraps the renderer call.
+   Renderers never import Graph.
+
+3. **Constraints are composable callables**: each is `(pos, graph_data) -> scalar loss`.
+   Users write custom constraints in ~3 lines.
+
+4. **Elements are inert data, Graph is the orchestrator**: `elements.py` holds pure
+   dataclasses (Node, Edge, Cluster) with no layout/render methods. `graph.py` holds
+   Graph which orchestrates everything. They stay as separate root-level files — no
+   `data/` folder needed since neither will exceed ~400 lines.
+
+5. **IO lives in io.py, exposed as Graph classmethods**: `io.py` holds standalone
+   functions (from_edges, from_networkx, to_dot). Graph.from_* classmethods are thin
+   wrappers. Keeps graph.py focused, keeps io.py independently testable.
+
+6. **Settings are graph-level by default**: device, theme, layout params passed to Graph.
+   `defaults.py` provides minimal module-level convenience (`set_default_device`,
+   `set_default_theme`) — plain module variables with setters, no config objects.
 
 ### Layout Pipeline
 
@@ -82,16 +148,10 @@ declaratively.
 
 ### Scaling Strategy
 
-- <5K nodes: exact O(N²) repulsion on CPU
+- <5K nodes: exact O(N^2) repulsion on CPU
 - 5K-50K: negative sampling (k=128), CPU or GPU
 - 50K-500K: negative sampling + GPU
 - 500K+: grid approximation or Barnes-Hut on GPU
-
-### Rendering (Separate from Layout)
-
-- **Matplotlib** (default): PatchCollection + LineCollection for batched rendering
-- **SVG**: direct string output, zero deps, Jupyter-friendly
-- **Graphviz passthrough** (optional): write .dot with fixed positions, render with neato -n2
 
 ## Design Principles
 
