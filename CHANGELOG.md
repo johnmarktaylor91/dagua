@@ -1,6 +1,16 @@
 # CHANGELOG
 
 
+## v0.0.2 (2026-03-09)
+
+### Bug Fixes
+
+- **ci**: Test PyPI publish with new version
+  ([`ceaac63`](https://github.com/johnmarktaylor91/dagua/commit/ceaac6372e0a856ad9f12dd6a759695c23c9a50c))
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+
 ## v0.0.1 (2026-03-09)
 
 ### Bug Fixes

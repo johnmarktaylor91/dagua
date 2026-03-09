@@ -1,6 +1,6 @@
 """Dagua: GPU-accelerated differentiable graph layout engine built on PyTorch."""
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 # Public API will be re-exported here once modules are implemented:
 #   from dagua.elements import Node, Edge, Cluster
