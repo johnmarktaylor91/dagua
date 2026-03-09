@@ -95,3 +95,4 @@ dmypy.json
 # Project-specific
 /tests/test_outputs/
 /benchmarks/results/
+/eval_output/
