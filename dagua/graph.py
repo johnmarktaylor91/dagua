@@ -17,10 +17,13 @@ class DaguaGraph:
 
     Core representation uses PyG-convention edge_index [2, E] LongTensor.
     Node IDs are mapped to integer indices internally.
+
+    Edges are accumulated in a Python list during construction and lazily
+    converted to a tensor when ``edge_index`` is first accessed, avoiding
+    O(E²) ``torch.cat`` calls during incremental ``add_edge()`` usage.
     """
 
     # Core topology
-    edge_index: torch.Tensor = field(default_factory=lambda: torch.zeros(2, 0, dtype=torch.long))
     num_nodes: int = 0
 
     # Node properties
@@ -45,6 +48,42 @@ class DaguaGraph:
     # ID mapping
     _id_to_index: Dict[Any, int] = field(default_factory=dict, repr=False)
     _theme: Dict[str, NodeStyle] = field(default_factory=lambda: dict(DEFAULT_THEME), repr=False)
+
+    # Internal edge storage — not part of the public API
+    _pending_edges: List[Tuple[int, int]] = field(default_factory=list, repr=False)
+    _edge_index_tensor: Optional[torch.Tensor] = field(default=None, repr=False)
+
+    @property
+    def edge_index(self) -> torch.Tensor:
+        """Return the [2, E] edge_index tensor, finalizing pending edges first."""
+        self._finalize_edges()
+        return self._edge_index_tensor  # type: ignore[return-value]
+
+    @edge_index.setter
+    def edge_index(self, value: torch.Tensor) -> None:
+        """Set the edge_index tensor directly (clears any pending edges)."""
+        self._pending_edges.clear()
+        self._edge_index_tensor = value
+
+    def __post_init__(self) -> None:
+        # Ensure the tensor is initialized when no edges are provided
+        if self._edge_index_tensor is None and not self._pending_edges:
+            self._edge_index_tensor = torch.zeros(2, 0, dtype=torch.long)
+
+    def _finalize_edges(self) -> None:
+        """Flush pending edges into the edge_index tensor (called lazily)."""
+        if not self._pending_edges:
+            return
+
+        new_edges = torch.tensor(self._pending_edges, dtype=torch.long).t()  # [2, K]
+
+        if self._edge_index_tensor is None or self._edge_index_tensor.numel() == 0:
+            self._edge_index_tensor = new_edges
+        else:
+            self._edge_index_tensor = torch.cat(
+                [self._edge_index_tensor, new_edges], dim=1
+            )
+        self._pending_edges.clear()
 
     def add_node(
         self,
@@ -82,11 +121,7 @@ class DaguaGraph:
         src_idx = self._id_to_index[source]
         tgt_idx = self._id_to_index[target]
 
-        new_edge = torch.tensor([[src_idx], [tgt_idx]], dtype=torch.long)
-        if self.edge_index.numel() == 0:
-            self.edge_index = new_edge
-        else:
-            self.edge_index = torch.cat([self.edge_index, new_edge], dim=1)
+        self._pending_edges.append((src_idx, tgt_idx))
 
         self.edge_labels.append(label)
         self.edge_types.append(type)
@@ -143,7 +178,8 @@ class DaguaGraph:
 
     def to(self, device: str) -> DaguaGraph:
         """Move tensors to device."""
-        self.edge_index = self.edge_index.to(device)
+        self._finalize_edges()
+        self._edge_index_tensor = self._edge_index_tensor.to(device)  # type: ignore[union-attr]
         if self.node_sizes is not None:
             self.node_sizes = self.node_sizes.to(device)
         return self
@@ -152,7 +188,10 @@ class DaguaGraph:
 
     @classmethod
     def from_edge_list(cls, edges: List[Tuple], **kwargs) -> DaguaGraph:
-        """Create graph from list of (source, target) tuples."""
+        """Create graph from list of (source, target) tuples.
+
+        Builds all edges at once for O(E) construction instead of O(E²).
+        """
         g = cls(**kwargs)
         for src, tgt in edges:
             g.add_edge(src, tgt)
@@ -175,9 +214,27 @@ class DaguaGraph:
 
     @classmethod
     def from_edge_index(cls, edge_index: torch.Tensor, num_nodes: int, **kwargs) -> DaguaGraph:
-        """Create graph from PyG-style edge_index tensor."""
+        """Create graph from PyG-style edge_index tensor.
+
+        Validates that all indices in edge_index are < num_nodes.
+        """
+        ei = edge_index.long()
+        if ei.numel() > 0:
+            max_idx = ei.max().item()
+            if max_idx >= num_nodes:
+                raise ValueError(
+                    f"edge_index contains index {max_idx} but num_nodes={num_nodes}. "
+                    f"All indices must be < num_nodes."
+                )
+            min_idx = ei.min().item()
+            if min_idx < 0:
+                raise ValueError(
+                    f"edge_index contains negative index {min_idx}. "
+                    f"All indices must be >= 0."
+                )
+
         g = cls(**kwargs)
-        g.edge_index = edge_index.long()
+        g.edge_index = ei
         g.num_nodes = num_nodes
         g.node_labels = [str(i) for i in range(num_nodes)]
         g.node_types = ["default"] * num_nodes

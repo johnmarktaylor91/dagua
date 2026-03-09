@@ -51,7 +51,7 @@ class LayoutConfig:
     edge_routing: str = "bezier"
 
     # Scale thresholds
-    exact_repulsion_threshold: int = 5000
+    exact_repulsion_threshold: int = 2000
     negative_sample_k: int = 128
 
 

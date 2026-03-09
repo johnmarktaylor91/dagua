@@ -42,7 +42,11 @@ def compute_all_metrics(
 
 
 def count_crossings(pos: torch.Tensor, edge_index: torch.Tensor) -> int:
-    """Count the number of edge pair intersections."""
+    """Count the number of edge pair intersections.
+
+    For graphs with <= 500 edges: exact O(E^2) count.
+    For larger graphs: random sample of edge pairs, scaled to estimate total.
+    """
     if edge_index.numel() == 0 or edge_index.shape[1] < 2:
         return 0
 
@@ -50,17 +54,38 @@ def count_crossings(pos: torch.Tensor, edge_index: torch.Tensor) -> int:
     src = edge_index[0]
     tgt = edge_index[1]
 
-    crossings = 0
-    # For efficiency, limit to manageable number of pairs
-    max_check = min(n_edges, 500)
-    for i in range(max_check):
-        for j in range(i + 1, max_check):
+    if n_edges <= 500:
+        # Exact count
+        crossings = 0
+        for i in range(n_edges):
+            for j in range(i + 1, n_edges):
+                a, b = pos[src[i]].numpy(), pos[tgt[i]].numpy()
+                c, d = pos[src[j]].numpy(), pos[tgt[j]].numpy()
+                if _segments_intersect(a, b, c, d):
+                    crossings += 1
+        return crossings
+    else:
+        # Random sampling: check up to 125K random pairs
+        max_pairs = 125000
+        total_pairs = n_edges * (n_edges - 1) // 2
+        crossings = 0
+        checked = 0
+        import random as _random
+        rng = _random.Random(42)
+        for _ in range(max_pairs):
+            i = rng.randint(0, n_edges - 1)
+            j = rng.randint(0, n_edges - 1)
+            if i == j:
+                continue
             a, b = pos[src[i]].numpy(), pos[tgt[i]].numpy()
             c, d = pos[src[j]].numpy(), pos[tgt[j]].numpy()
             if _segments_intersect(a, b, c, d):
                 crossings += 1
-
-    return crossings
+            checked += 1
+        if checked == 0:
+            return 0
+        # Scale up to estimate total
+        return int(crossings * total_pairs / checked)
 
 
 def _segments_intersect(a, b, c, d) -> bool:
@@ -93,21 +118,54 @@ def compute_dag_fraction(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
 
 
 def count_overlaps(pos: torch.Tensor, node_sizes: torch.Tensor) -> int:
-    """Count overlapping node bounding box pairs."""
+    """Count overlapping node bounding box pairs.
+
+    Vectorized for N <= 2000, grid-sampled for larger graphs.
+    """
     n = pos.shape[0]
     if n <= 1:
         return 0
 
-    count = 0
-    for i in range(n):
-        for j in range(i + 1, n):
-            dx = abs(pos[i, 0] - pos[j, 0]).item()
-            dy = abs(pos[i, 1] - pos[j, 1]).item()
-            min_dx = (node_sizes[i, 0] + node_sizes[j, 0]).item() / 2
-            min_dy = (node_sizes[i, 1] + node_sizes[j, 1]).item() / 2
-            if dx < min_dx and dy < min_dy:
-                count += 1
-    return count
+    if n <= 2000:
+        # Vectorized: all pairs
+        dx = (pos[:, 0].unsqueeze(0) - pos[:, 0].unsqueeze(1)).abs()
+        dy = (pos[:, 1].unsqueeze(0) - pos[:, 1].unsqueeze(1)).abs()
+        min_dx = (node_sizes[:, 0].unsqueeze(0) + node_sizes[:, 0].unsqueeze(1)) / 2
+        min_dy = (node_sizes[:, 1].unsqueeze(0) + node_sizes[:, 1].unsqueeze(1)) / 2
+        overlapping = (dx < min_dx) & (dy < min_dy)
+        overlapping.fill_diagonal_(False)
+        # Upper triangle only
+        return int(overlapping.triu(diagonal=1).sum().item())
+    else:
+        # Grid-based for large graphs
+        count = 0
+        max_w = node_sizes[:, 0].max().item()
+        max_h = node_sizes[:, 1].max().item()
+        cell_size = max(max_w, max_h) + 1.0
+        from collections import defaultdict
+        grid = defaultdict(list)
+        for i in range(n):
+            cx = int(pos[i, 0].item() // cell_size)
+            cy = int(pos[i, 1].item() // cell_size)
+            grid[(cx, cy)].append(i)
+        for (gx, gy), nodes in grid.items():
+            for ddx in range(-1, 2):
+                for ddy in range(-1, 2):
+                    nkey = (gx + ddx, gy + ddy)
+                    if nkey not in grid:
+                        continue
+                    others = grid[nkey]
+                    for i in nodes:
+                        for j in others:
+                            if j <= i:
+                                continue
+                            dx = abs(pos[i, 0] - pos[j, 0]).item()
+                            dy = abs(pos[i, 1] - pos[j, 1]).item()
+                            min_dx = (node_sizes[i, 0] + node_sizes[j, 0]).item() / 2
+                            min_dy = (node_sizes[i, 1] + node_sizes[j, 1]).item() / 2
+                            if dx < min_dx and dy < min_dy:
+                                count += 1
+        return count
 
 
 def compute_mean_edge_length(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
@@ -135,7 +193,7 @@ def compute_edge_straightness(pos: torch.Tensor, edge_index: torch.Tensor) -> fl
     src, tgt = edge_index[0], edge_index[1]
     dx = (pos[tgt, 0] - pos[src, 0]).abs()
     dy = (pos[tgt, 1] - pos[src, 1]).abs().clamp(min=1e-6)
-    angles = torch.atan2(dx, dy) * 180 / 3.14159
+    angles = torch.atan2(dx, dy) * 180 / torch.pi
     return angles.mean().item()
 
 

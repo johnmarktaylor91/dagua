@@ -6,7 +6,7 @@ Headless: operates on tensors extracted from the graph.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
@@ -24,6 +24,7 @@ from dagua.layout.constraints import (
 )
 from dagua.layout.init_placement import init_positions
 from dagua.layout.projection import project_overlaps
+from dagua.utils import longest_path_layering
 
 
 def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
@@ -72,6 +73,11 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
         rank_sep=config.rank_sep,
         device=device,
     )
+
+    # Compute layer assignments for crossing loss (adjacent-layer proxy)
+    layer_assignments: Optional[List[int]] = None
+    if edge_index.numel() > 0:
+        layer_assignments = longest_path_layering(edge_index, n)
 
     # Step 2: Set up optimization
     pos = pos.clone().detach().requires_grad_(True)
@@ -126,7 +132,10 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
         # Crossing minimization (ramps up over time)
         if w_crossing > 0:
             alpha = 1.0 + 9.0 * t  # anneal temperature 1 → 10
-            loss = loss + w_crossing * crossing_loss(pos, edge_index, alpha=alpha)
+            loss = loss + w_crossing * crossing_loss(
+                pos, edge_index, alpha=alpha,
+                layer_assignments=layer_assignments,
+            )
 
         # Edge straightness
         if config.w_straightness > 0:
