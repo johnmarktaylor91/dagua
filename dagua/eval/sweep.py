@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from dagua.config import LayoutConfig, PARAM_REGISTRY
+from dagua.config import LayoutConfig, PARAM_REGISTRY_DICT as PARAM_REGISTRY
 from dagua.eval.graphs import TestGraph, get_test_graphs
 from dagua.layout import layout
 from dagua.metrics import compute_all_metrics
