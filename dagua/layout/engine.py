@@ -212,10 +212,11 @@ def _layout_inner(
                 rvs_nn_k=config.rvs_nn_k,
             )
 
-        # Overlap avoidance (layer-local for large graphs)
+        # Overlap avoidance (layer-local for large graphs, active-subset for N>100K)
         if w_overlap > 0:
             loss = loss + w_overlap * overlap_avoidance_loss(
                 pos, node_sizes, layer_index=layer_index,
+                rvs_threshold=config.rvs_threshold,
             )
 
         # Clustering

@@ -372,6 +372,7 @@ def overlap_avoidance_loss(
     node_sizes: torch.Tensor,
     padding: float = 2.0,
     layer_index: Optional[LayerIndex] = None,
+    rvs_threshold: int = 100000,
 ) -> torch.Tensor:
     """Soft penalty on bounding box intersection.
 
@@ -385,6 +386,9 @@ def overlap_avoidance_loss(
 
     if n <= 500:
         return _overlap_exact(pos, node_sizes, padding)
+
+    if n > rvs_threshold and layer_index is not None:
+        return _overlap_active_subset(pos, node_sizes, padding, layer_index)
 
     if layer_index is not None:
         return _overlap_scatter(pos, node_sizes, padding, layer_index)
@@ -455,6 +459,74 @@ def _overlap_scatter(
     overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)  # [N, K]
 
     # Mask out self-pairs (unconditional torch.where)
+    overlap = torch.where(not_self, overlap, torch.zeros_like(overlap))
+
+    valid_count = not_self.sum().float()
+    return torch.where(
+        valid_count > 0,
+        overlap.sum() / valid_count,
+        torch.tensor(0.0, device=device),
+    )
+
+
+def _overlap_active_subset(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float,
+    layer_index: LayerIndex,
+) -> torch.Tensor:
+    """RVS-style overlap for very large graphs (N > 100K).
+
+    Instead of computing overlap for ALL N nodes with K=128 neighbors
+    (creating [N, 128] tensors = GB at millions of nodes), select an
+    active subset of N^(3/4) nodes and sample K neighbors for each.
+
+    At 5M nodes: active=88K, K=64 → [88K, 64] ≈ 22MB vs [5M, 128] ≈ 2.5GB.
+    """
+    device = pos.device
+    N = pos.shape[0]
+
+    n_active = max(int(N ** 0.75), min(N, 256))
+    K = min(64, N - 1)
+    if K <= 0:
+        return torch.tensor(0.0, device=device)
+
+    active_idx = torch.randperm(N, device=device)[:n_active]
+    A = active_idx.shape[0]
+
+    layers = layer_index.node_to_layer
+    offsets = layer_index.layer_offsets
+    sorted_nodes = layer_index.sorted_nodes
+
+    # Sample K neighbors from same layer for each active node
+    active_layers = layers[active_idx]
+    layer_start = offsets[active_layers]
+    layer_end = offsets[active_layers + 1]
+    range_size = (layer_end - layer_start).float()
+
+    rand = torch.rand(A, K, device=device)
+    sample_offsets = layer_start.unsqueeze(1) + (rand * range_size.unsqueeze(1)).long()
+    sample_offsets = sample_offsets.clamp(max=N - 1)
+    sampled = sorted_nodes[sample_offsets]  # [A, K]
+
+    # Exclude self-pairs
+    self_idx = active_idx.unsqueeze(1)
+    not_self = sampled != self_idx  # [A, K]
+
+    # Compute bounding box overlap
+    half_w_src = node_sizes[active_idx, 0].unsqueeze(1).expand(-1, K) / 2
+    half_h_src = node_sizes[active_idx, 1].unsqueeze(1).expand(-1, K) / 2
+    half_w_tgt = node_sizes[sampled, 0] / 2
+    half_h_tgt = node_sizes[sampled, 1] / 2
+
+    dx_abs = torch.abs(pos[active_idx, 0].unsqueeze(1) - pos[sampled, 0])
+    dy_abs = torch.abs(pos[active_idx, 1].unsqueeze(1) - pos[sampled, 1])
+
+    min_dx = half_w_src + half_w_tgt + padding
+    min_dy = half_h_src + half_h_tgt + padding
+
+    overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)
+
     overlap = torch.where(not_self, overlap, torch.zeros_like(overlap))
 
     valid_count = not_self.sum().float()

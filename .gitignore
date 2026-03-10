@@ -96,3 +96,4 @@ dmypy.json
 /tests/test_outputs/
 /benchmarks/results/
 /eval_output/
+node_modules/

@@ -60,6 +60,7 @@ markers = [
     "smoke: quick sanity checks",
     "slow: tests that take >10s",
     "gpu: tests requiring CUDA",
+    "rare: extreme scale tests (5M+ nodes) — never run routinely",
 ]
 
 [tool.coverage.run]

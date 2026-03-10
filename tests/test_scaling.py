@@ -166,6 +166,101 @@ class TestGraphvizComparison:
         print(f"\n  N=5000: dagua={dagua_time:.2f}s, graphviz={gv_time:.2f}s, ratio={dagua_time/gv_time:.1f}x")
 
 
+def _make_random_dag_vectorized(n: int, edge_ratio: float = 1.3, seed: int = 42) -> DaguaGraph:
+    """Vectorized random DAG for millions of nodes. Forward-only edges."""
+    torch.manual_seed(seed)
+    n_edges = int(n * edge_ratio)
+
+    src = torch.randint(0, n - 1, (n_edges,))
+    # Target must be > source for DAG property; offset by 1..max_skip
+    max_skip = max(n // 5, 10)
+    skip = torch.randint(1, max_skip + 1, (n_edges,))
+    tgt = (src + skip).clamp(max=n - 1)
+
+    # Remove self-loops and deduplicate
+    valid = src != tgt
+    src, tgt = src[valid], tgt[valid]
+    edge_hash = src.long() * n + tgt.long()
+    unique_hash = edge_hash.unique()
+    src = (unique_hash // n).to(torch.long)
+    tgt = (unique_hash % n).to(torch.long)
+    ei = torch.stack([src, tgt])
+
+    g = DaguaGraph.from_edge_index(ei, num_nodes=n)
+    # Use uniform node sizes to skip expensive text measurement
+    g.node_sizes = torch.tensor([[40.0, 20.0]]).expand(n, -1).clone()
+    return g
+
+
+class TestExtremeScale:
+    """5M and 10M node tests. Marked 'rare' — NEVER run routinely.
+
+    Run explicitly with: pytest tests/test_scaling.py -m rare -s
+    """
+
+    @pytest.mark.rare
+    def test_5m_nodes(self):
+        """5,000,000 node layout via multilevel V-cycle."""
+        n = 5_000_000
+        g = _make_random_dag_vectorized(n)
+        config = LayoutConfig(
+            steps=500,
+            device="cpu",
+            multilevel_threshold=50000,
+            multilevel_min_nodes=2000,
+            multilevel_coarse_steps=100,
+            multilevel_refine_steps=25,
+        )
+        start = time.perf_counter()
+        pos = dagua.layout(g, config)
+        elapsed = time.perf_counter() - start
+        assert pos.shape == (n, 2), f"Expected ({n}, 2), got {pos.shape}"
+        assert not torch.isnan(pos).any(), "NaN in positions"
+        assert not torch.isinf(pos).any(), "Inf in positions"
+        print(f"\n  5M nodes: {elapsed:.1f}s")
+
+    @pytest.mark.rare
+    def test_10m_nodes(self):
+        """10,000,000 node layout via multilevel V-cycle."""
+        n = 10_000_000
+        g = _make_random_dag_vectorized(n)
+        config = LayoutConfig(
+            steps=500,
+            device="cpu",
+            multilevel_threshold=50000,
+            multilevel_min_nodes=2000,
+            multilevel_coarse_steps=100,
+            multilevel_refine_steps=25,
+        )
+        start = time.perf_counter()
+        pos = dagua.layout(g, config)
+        elapsed = time.perf_counter() - start
+        assert pos.shape == (n, 2), f"Expected ({n}, 2), got {pos.shape}"
+        assert not torch.isnan(pos).any(), "NaN in positions"
+        assert not torch.isinf(pos).any(), "Inf in positions"
+        print(f"\n  10M nodes: {elapsed:.1f}s")
+
+    @pytest.mark.rare
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_5m_nodes_gpu(self):
+        """5M nodes on GPU — test VRAM limits."""
+        n = 5_000_000
+        g = _make_random_dag_vectorized(n)
+        config = LayoutConfig(
+            steps=500,
+            device="cuda",
+            multilevel_threshold=50000,
+            multilevel_min_nodes=2000,
+            multilevel_coarse_steps=100,
+            multilevel_refine_steps=25,
+        )
+        start = time.perf_counter()
+        pos = dagua.layout(g, config)
+        elapsed = time.perf_counter() - start
+        assert pos.shape == (n, 2)
+        print(f"\n  5M nodes (GPU): {elapsed:.1f}s")
+
+
 class TestEdgeCases:
     """Test graphs that could cause problems at scale."""
 
