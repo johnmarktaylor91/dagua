@@ -2,6 +2,12 @@
 
 Takes a DaguaGraph and LayoutConfig, returns [N, 2] position tensor.
 Headless: operates on tensors extracted from the graph.
+
+Scaling strategy:
+- Pre-compute LayerIndex once, pass to all layer-aware functions
+- Stochastic edge batching for O(batch) instead of O(E) per step
+- Adaptive overlap projection frequency
+- Early stopping on convergence
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from dagua.layout.constraints import (
     repulsion_loss,
 )
 from dagua.layout.init_placement import init_positions
+from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.projection import project_overlaps
 from dagua.utils import longest_path_layering
 
@@ -57,9 +64,6 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
     edge_index = graph.edge_index.to(device)
     node_sizes = graph.node_sizes.to(device)
 
-    # Handle direction: internally always use TB (y increases downward)
-    # BT: flip y at the end; LR/RL: swap axes
-
     # Set seed for determinism
     if config.seed is not None:
         torch.manual_seed(config.seed)
@@ -74,10 +78,17 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
         device=device,
     )
 
-    # Compute layer assignments for crossing loss (adjacent-layer proxy)
+    # Pre-compute layer structure (used by repulsion, overlap, projection, crossing)
     layer_assignments: Optional[List[int]] = None
+    layer_index: Optional[LayerIndex] = None
     if edge_index.numel() > 0:
         layer_assignments = longest_path_layering(edge_index, n)
+        layer_index = build_layer_index(layer_assignments, device=device)
+
+    # Determine adaptive parameters based on graph size
+    num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    edge_batch = _edge_batch_size(num_edges, config)
+    overlap_interval = _overlap_interval(n, config)
 
     # Step 2: Set up optimization
     pos = pos.clone().detach().requires_grad_(True)
@@ -85,40 +96,54 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
 
     # Step 3: Optimization loop with annealing
     steps = config.steps
+    prev_loss = float("inf")
+    stall_count = 0
+
     for step in range(steps):
         t = step / max(steps - 1, 1)  # 0 → 1
 
         optimizer.zero_grad()
 
+        # Sample edge batch for this step
+        if edge_batch > 0 and num_edges > edge_batch:
+            perm = torch.randperm(num_edges, device=device)[:edge_batch]
+            batch_edges = edge_index[:, perm]
+        else:
+            batch_edges = edge_index
+
         # Annealed weights
         w_dag = config.w_dag * (1 - 0.5 * t)
         w_repel = config.w_repel * (1 + 2 * t)
         w_overlap = config.w_overlap * (1 + t)
-        w_crossing = config.w_crossing * t  # only after structure exists
+        w_crossing = config.w_crossing * t
 
         loss = torch.tensor(0.0, device=device)
 
         # DAG ordering
         if w_dag > 0:
-            loss = loss + w_dag * dag_ordering_loss(pos, edge_index, node_sizes, config.rank_sep)
+            loss = loss + w_dag * dag_ordering_loss(pos, batch_edges, node_sizes, config.rank_sep)
 
         # Edge attraction
         if config.w_attract > 0:
             loss = loss + config.w_attract * edge_attraction_loss(
-                pos, edge_index, x_bias=config.w_attract_x_bias
+                pos, batch_edges, x_bias=config.w_attract_x_bias
             )
 
-        # Repulsion
+        # Repulsion (layer-local for large graphs, size-aware per AMD pattern)
         if w_repel > 0:
             loss = loss + w_repel * repulsion_loss(
                 pos, n,
                 threshold=config.exact_repulsion_threshold,
                 sample_k=config.negative_sample_k,
+                layer_index=layer_index,
+                node_sizes=node_sizes,
             )
 
-        # Overlap avoidance
+        # Overlap avoidance (layer-local for large graphs)
         if w_overlap > 0:
-            loss = loss + w_overlap * overlap_avoidance_loss(pos, node_sizes)
+            loss = loss + w_overlap * overlap_avoidance_loss(
+                pos, node_sizes, layer_index=layer_index,
+            )
 
         # Clustering
         if config.w_cluster > 0 and graph.clusters:
@@ -131,19 +156,19 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
 
         # Crossing minimization (ramps up over time)
         if w_crossing > 0:
-            alpha = 1.0 + 9.0 * t  # anneal temperature 1 → 10
+            alpha = 1.0 + 9.0 * t
             loss = loss + w_crossing * crossing_loss(
-                pos, edge_index, alpha=alpha,
+                pos, batch_edges, alpha=alpha,
                 layer_assignments=layer_assignments,
             )
 
         # Edge straightness
         if config.w_straightness > 0:
-            loss = loss + config.w_straightness * edge_straightness_loss(pos, edge_index)
+            loss = loss + config.w_straightness * edge_straightness_loss(pos, batch_edges)
 
         # Edge length variance
         if config.w_length_variance > 0:
-            loss = loss + config.w_length_variance * edge_length_variance_loss(pos, edge_index)
+            loss = loss + config.w_length_variance * edge_length_variance_loss(pos, batch_edges)
 
         loss.backward()
 
@@ -152,12 +177,28 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
 
         optimizer.step()
 
-        # Hard overlap projection
-        if step % 5 == 0 or step == steps - 1:
-            project_overlaps(pos, node_sizes, padding=2.0, iterations=5)
+        # Hard overlap projection (adaptive frequency)
+        if step % overlap_interval == 0 or step == steps - 1:
+            project_overlaps(
+                pos, node_sizes, padding=2.0, iterations=5,
+                layer_index=layer_index,
+            )
+
+        # Early stopping check
+        loss_val = loss.item()
+        if step > 10 and abs(prev_loss - loss_val) < prev_loss * 1e-4:
+            stall_count += 1
+            if stall_count >= 5:
+                break
+        else:
+            stall_count = 0
+        prev_loss = loss_val
 
     # Final aggressive overlap projection
-    project_overlaps(pos, node_sizes, padding=2.0, iterations=20)
+    project_overlaps(
+        pos, node_sizes, padding=2.0, iterations=20,
+        layer_index=layer_index,
+    )
 
     result = pos.detach()
 
@@ -168,17 +209,47 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
     return result
 
 
+def _edge_batch_size(num_edges: int, config: LayoutConfig) -> int:
+    """Determine edge batch size based on graph scale.
+
+    Returns 0 for "use all edges" (no batching).
+    """
+    if hasattr(config, "edge_batch_size") and config.edge_batch_size > 0:
+        return config.edge_batch_size
+
+    # Auto-scale: batch at 10K+ edges
+    if num_edges <= 10000:
+        return 0  # use all edges
+    elif num_edges <= 100000:
+        return 50000
+    elif num_edges <= 1000000:
+        return 100000
+    else:
+        return 200000
+
+
+def _overlap_interval(num_nodes: int, config: LayoutConfig) -> int:
+    """How often to run overlap projection (every N steps)."""
+    if hasattr(config, "overlap_check_interval") and config.overlap_check_interval > 0:
+        return config.overlap_check_interval
+
+    if num_nodes <= 5000:
+        return 5
+    elif num_nodes <= 50000:
+        return 10
+    else:
+        return 20
+
+
 def _apply_direction(pos: torch.Tensor, direction: str) -> torch.Tensor:
     """Transform positions based on layout direction."""
     if direction == "TB":
-        return pos  # default: y increases downward
+        return pos
     elif direction == "BT":
-        # Flip y so y increases upward
         result = pos.clone()
         result[:, 1] = -result[:, 1]
         return result
     elif direction == "LR":
-        # Swap x and y
         result = pos.clone()
         result[:, 0] = pos[:, 1]
         result[:, 1] = pos[:, 0]
