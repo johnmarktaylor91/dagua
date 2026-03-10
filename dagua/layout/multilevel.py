@@ -16,7 +16,7 @@ Coarsening strategy: layer-aware heavy-edge matching.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 
@@ -39,7 +39,7 @@ def coarsen_once(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: torch.Tensor,
-    layer_assignments: List[int],
+    layer_assignments: Union[List[int], torch.Tensor],
     device: str = "cpu",
 ) -> CoarseLevel:
     """Single coarsening step via layer-aware heavy-edge matching.
@@ -173,12 +173,14 @@ def build_hierarchy(
     current_sizes = node_sizes
     current_n = num_nodes
 
-    # Compute layers once on the original graph
+    # Compute layers once on the original graph — returns tensor for large N
     if current_ei.numel() > 0:
-        current_layers = longest_path_layering(current_ei, current_n)
+        current_la = longest_path_layering(current_ei, current_n)
     else:
-        current_layers = [0] * current_n
-    current_la_tensor = torch.tensor(current_layers, dtype=torch.long) if isinstance(current_layers, list) else current_layers
+        current_la = torch.zeros(current_n, dtype=torch.long)
+    # Ensure tensor throughout — no list conversion
+    if isinstance(current_la, list):
+        current_la = torch.tensor(current_la, dtype=torch.long)
 
     for _ in range(max_levels):
         if current_n <= min_nodes:
@@ -186,9 +188,9 @@ def build_hierarchy(
 
         level = coarsen_once(
             current_ei, current_n, current_sizes,
-            layer_assignments=current_layers, device=device,
+            layer_assignments=current_la, device=device,
         )
-        level.fine_layer_assignments = current_la_tensor
+        level.fine_layer_assignments = current_la
         levels.append(level)
 
         # Move to coarser level
@@ -204,10 +206,9 @@ def build_hierarchy(
         # (all fine nodes in a pair share the same layer by construction)
         coarse_la = torch.zeros(current_n, dtype=torch.long)
         coarse_la.scatter_reduce_(
-            0, level.fine_to_coarse, current_la_tensor, reduce="amax",
+            0, level.fine_to_coarse, current_la, reduce="amax",
         )
-        current_la_tensor = coarse_la
-        current_layers = coarse_la.tolist()
+        current_la = coarse_la
 
     return levels
 

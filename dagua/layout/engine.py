@@ -189,15 +189,15 @@ def _layout_inner(
         )
 
     # Pre-compute layer structure (used by repulsion, overlap, projection, crossing)
-    layer_assignments_list: Optional[List[int]] = None
+    layer_assignments_raw = None  # List[int] or torch.Tensor — avoid forced conversion
     layer_index: Optional[LayerIndex] = None
     if layer_assignments is not None:
         # Use pre-computed assignments (from multilevel V-cycle)
         layer_index = build_layer_index(layer_assignments, device=device)
-        layer_assignments_list = layer_assignments.tolist() if isinstance(layer_assignments, torch.Tensor) else layer_assignments
+        layer_assignments_raw = layer_assignments
     elif edge_index.numel() > 0:
-        layer_assignments_list = longest_path_layering(edge_index, n)
-        layer_index = build_layer_index(layer_assignments_list, device=device)
+        layer_assignments_raw = longest_path_layering(edge_index, n)
+        layer_index = build_layer_index(layer_assignments_raw, device=device)
 
     # Determine adaptive parameters based on graph size
     num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
@@ -242,7 +242,7 @@ def _layout_inner(
         cpu_node_sizes = node_sizes.cpu()
         if cpu_edge_index is None:
             cpu_edge_index = edge_index.cpu()
-        cpu_layer_index = build_layer_index(layer_assignments_list, device="cpu") if layer_assignments_list else None
+        cpu_layer_index = build_layer_index(layer_assignments_raw, device="cpu") if layer_assignments_raw else None
     elif edges_on_cpu:
         cpu_edge_index = edge_index
 
@@ -296,7 +296,7 @@ def _layout_inner(
         crossing_alpha_ref: List[float] = [3.0]
         loss_fns.append(("w_crossing", lambda p, ns, li: crossing_loss(
             p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
-            alpha=crossing_alpha_ref[0], layer_assignments=layer_assignments_list,
+            alpha=crossing_alpha_ref[0], layer_assignments=layer_assignments_raw,
         ), False, True))
 
     if config.w_straightness > 0:

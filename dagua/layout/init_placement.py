@@ -155,7 +155,7 @@ def _init_positions_vectorized(
     Y-coordinates always from layer assignments.
     """
     N = num_nodes
-    layer_t = torch.tensor(layers, dtype=torch.long, device=device)
+    layer_t = layers.to(dtype=torch.long, device=device) if isinstance(layers, torch.Tensor) else torch.tensor(layers, dtype=torch.long, device=device)
     num_layers = int(layer_t.max().item()) + 1 if N > 0 else 0
 
     # Build layer structure

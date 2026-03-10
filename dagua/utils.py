@@ -129,13 +129,16 @@ def topological_sort(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
     return order
 
 
-def longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
+def longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> "List[int] | torch.Tensor":
     """Assign layer indices via longest-path from sources. O(V+E).
 
     For large graphs (>10K nodes), uses a vectorized wave-based approach
-    that avoids Python-level per-node iteration.
+    that avoids Python-level per-node iteration. Returns a tensor directly
+    for large N to avoid expensive .tolist() conversions.
     """
     if edge_index.numel() == 0:
+        if num_nodes > 10000:
+            return torch.zeros(num_nodes, dtype=torch.long)
         return [0] * num_nodes
 
     if num_nodes > 10000:
@@ -166,7 +169,7 @@ def longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> List[int]
     return layers
 
 
-def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
+def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
     """Longest-path layering using hybrid wave/BFS strategy.
 
     Wide graphs (many nodes per wave): use vectorized wave approach — each
@@ -175,6 +178,8 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
 
     Heuristic: run 10 waves. If average wave size > 1000, continue with waves.
     Otherwise switch to CSR+BFS.
+
+    Returns a tensor directly (callers that need a list can convert).
     """
     import numpy as np
     from collections import deque
@@ -185,7 +190,8 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
 
     # Compute in-degree (vectorized)
     in_degree = torch.zeros(N, dtype=torch.long)
-    in_degree.scatter_add_(0, tgt, torch.ones(E, dtype=torch.long))
+    ones_E = torch.ones(E, dtype=torch.long)
+    in_degree.scatter_add_(0, tgt, ones_E)
 
     # Probe: run a few waves to decide strategy
     layers = torch.zeros(N, dtype=torch.long)
@@ -193,6 +199,9 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
     total_processed = 0
     current_layer = 0
     probe_waves = 10
+
+    # Pre-allocate wave_set once — reuse via .zero_() each wave
+    wave_set = torch.zeros(N, dtype=torch.bool)
 
     for _ in range(probe_waves):
         wave = (remaining == 0).nonzero(as_tuple=True)[0]
@@ -202,7 +211,7 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
         layers[wave] = current_layer
         remaining[wave] = -1
 
-        wave_set = torch.zeros(N, dtype=torch.bool)
+        wave_set.zero_()
         wave_set[wave] = True
         edge_mask = wave_set[src]
 
@@ -226,7 +235,7 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
             layers[wave] = current_layer
             remaining[wave] = -1
 
-            wave_set = torch.zeros(N, dtype=torch.bool)
+            wave_set.zero_()
             wave_set[wave] = True
             edge_mask = wave_set[src]
 
@@ -239,7 +248,7 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
 
             current_layer += 1
 
-        return layers.tolist()
+        return layers
 
     # Deep graph: switch to CSR + numpy BFS (true O(V+E))
     # Reset — recompute from scratch with numpy (zero-copy from torch)
@@ -250,7 +259,7 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
     csr_tgt = tgt[order].numpy()
 
     out_degree = torch.zeros(N, dtype=torch.long)
-    out_degree.scatter_add_(0, src, torch.ones(E, dtype=torch.long))
+    out_degree.scatter_add_(0, src, ones_E)
     offsets = torch.zeros(N + 1, dtype=torch.long)
     offsets[1:] = out_degree.cumsum(0)
     csr_off = offsets.numpy()
@@ -270,7 +279,7 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
             if in_deg[child] == 0:
                 queue.append(child)
 
-    return layer_arr.tolist()
+    return torch.from_numpy(layer_arr)
 
 
 def collect_cluster_leaves(cluster_dict) -> List[int]:

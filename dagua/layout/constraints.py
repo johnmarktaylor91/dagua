@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -265,7 +265,8 @@ def _repulsion_rvs(
     N = pos.shape[0]
 
     # Determine active set size and random sample count
-    n_active = max(int(N ** 0.75), min(N, 256))
+    # Cap at 1M for N > 100M to avoid multi-GB intermediate tensors
+    n_active = min(max(int(N ** 0.75), min(N, 256)), 1_000_000)
     n_random = max(int(N ** 0.25), 4)
     K_nn = min(nn_k, N - 1)
     K_total = n_random + K_nn
@@ -468,7 +469,8 @@ def _overlap_active_subset(
     device = pos.device
     N = pos.shape[0]
 
-    n_active = max(int(N ** 0.75), min(N, 256))
+    # Cap at 1M for N > 100M to avoid multi-GB intermediate tensors
+    n_active = min(max(int(N ** 0.75), min(N, 256)), 1_000_000)
     K = min(64, N - 1)
     if K <= 0:
         return torch.tensor(0.0, device=device)
@@ -660,7 +662,7 @@ def crossing_loss(
     edge_index: torch.Tensor,
     alpha: float = 5.0,
     max_pairs: int = 2000,
-    layer_assignments: Optional[List[int]] = None,
+    layer_assignments: Optional[Union[List[int], torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Differentiable crossing proxy using adjacent-layer sigmoid relaxation."""
     num_edges = edge_index.shape[1]
@@ -718,13 +720,16 @@ def _crossing_loss_layered(
     edge_index: torch.Tensor,
     alpha: float,
     max_pairs: int,
-    layer_assignments: List[int],
+    layer_assignments: Union[List[int], torch.Tensor],
 ) -> torch.Tensor:
     """Adjacent-layer crossing loss with virtual node decomposition (vectorized)."""
     device = pos.device
     num_edges = edge_index.shape[1]
 
-    layers_t = torch.tensor(layer_assignments, dtype=torch.long, device=device)
+    if isinstance(layer_assignments, torch.Tensor):
+        layers_t = layer_assignments.to(device=device)
+    else:
+        layers_t = torch.tensor(layer_assignments, dtype=torch.long, device=device)
 
     src = edge_index[0]
     tgt = edge_index[1]
