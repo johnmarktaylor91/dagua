@@ -21,7 +21,7 @@ from typing import List, Optional, Tuple
 import torch
 
 from dagua.config import LayoutConfig
-from dagua.utils import longest_path_layering
+from dagua.utils import _vram_fits, longest_path_layering
 
 
 @dataclass
@@ -32,6 +32,7 @@ class CoarseLevel:
     num_nodes: int
     fine_to_coarse: torch.Tensor   # [N_fine] maps fine node → coarse node
     num_fine: int                  # N at the finer level
+    fine_layer_assignments: Optional[torch.Tensor] = None  # [N_fine] layer assignments for fine level
 
 
 def coarsen_once(
@@ -174,10 +175,14 @@ def build_hierarchy(
         else:
             layer_assignments = [0] * current_n
 
+        # Store as tensor for reuse in refinement (avoids recomputing in _layout_inner)
+        la_tensor = torch.tensor(layer_assignments, dtype=torch.long) if isinstance(layer_assignments, list) else layer_assignments
+
         level = coarsen_once(
             current_ei, current_n, current_sizes,
             layer_assignments=layer_assignments, device=device,
         )
+        level.fine_layer_assignments = la_tensor
         levels.append(level)
 
         # Move to coarser level
@@ -220,86 +225,66 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
     2. Layout coarsest graph (many steps)
     3. Prolong + refine at each level (few steps)
     """
+    import time as _time
     from dagua.layout.engine import _layout_inner
+
+    verbose = config.verbose
+    def _vlog(msg):
+        if verbose:
+            vram = ""
+            if device == "cuda" and torch.cuda.is_available():
+                used = torch.cuda.memory_allocated() / 1024**2
+                free, total = torch.cuda.mem_get_info()
+                total_mb = total / 1024**2
+                vram = f" [VRAM {used:.0f}MB / {total_mb:.0f}MB]"
+            print(f"  [multilevel] {msg}{vram}", flush=True)
+
+    def _reset_peak():
+        if device == "cuda" and torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+    def _stage_peak_mb() -> float:
+        if device == "cuda" and torch.cuda.is_available():
+            return torch.cuda.max_memory_allocated() / 1024**2
+        return 0.0
 
     device = config.device
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
 
     n = graph.num_nodes
-    edge_index = graph.edge_index.to(device)
-    node_sizes = graph.node_sizes.to(device)
+    _t0 = _time.perf_counter()
 
     if config.seed is not None:
         torch.manual_seed(config.seed)
 
-    # Build hierarchy
+    # Build hierarchy on CPU — coarsening uses large temporary tensors
+    # (edge_hash.unique() at 50M+ edges OOMs on small GPUs).
+    # Keep all graph data on CPU; only move what's needed to GPU per-level.
+    cpu_ei = graph.edge_index
+    cpu_ns = graph.node_sizes
     min_nodes = config.multilevel_min_nodes
-    levels = build_hierarchy(edge_index, n, node_sizes, min_nodes=min_nodes, device=device)
+    _vlog(f"building hierarchy ({n:,} nodes, {cpu_ei.shape[1] if cpu_ei.numel() > 0 else 0:,} edges)...")
+    levels = build_hierarchy(cpu_ei, n, cpu_ns, min_nodes=min_nodes, device="cpu")
+    _vlog(f"hierarchy: {len(levels)} levels — " + ", ".join(f"{l.num_nodes:,}n" for l in levels))
 
     if not levels:
-        # Graph is already small enough — use direct layout (skip multilevel dispatch)
-        pos = _layout_inner(edge_index, n, node_sizes, config, device=device)
+        # Graph is already small enough — use direct layout
+        ei = cpu_ei.to(device)
+        ns = cpu_ns.to(device)
+        pos = _layout_inner(ei, n, ns, config, device=device)
         from dagua.layout.engine import _apply_direction
         direction = config.direction if config else graph.direction
         return _apply_direction(pos, direction)
 
-    # Layout coarsest graph with many steps
-    coarsest = levels[-1]
-    coarse_config = LayoutConfig(
-        steps=config.multilevel_coarse_steps,
-        lr=config.lr * 2,  # higher LR at coarse level for faster convergence
-        device=device,
-        seed=config.seed,
-        node_sep=config.node_sep,
-        rank_sep=config.rank_sep,
-        w_dag=config.w_dag,
-        w_attract=config.w_attract,
-        w_attract_x_bias=config.w_attract_x_bias,
-        w_repel=config.w_repel,
-        w_overlap=config.w_overlap,
-        w_crossing=config.w_crossing,
-        w_straightness=config.w_straightness,
-        w_length_variance=config.w_length_variance,
-        exact_repulsion_threshold=config.exact_repulsion_threshold,
-        negative_sample_k=config.negative_sample_k,
-    )
-
-    pos = _layout_inner(
-        coarsest.edge_index, coarsest.num_nodes, coarsest.node_sizes,
-        coarse_config,
-        device=device,
-    )
-
-    # Prolong + refine through hierarchy (coarsest → finest)
-    for i in range(len(levels) - 1, -1, -1):
-        level = levels[i]
-
-        # Prolong: map coarse positions to fine level
-        pos = prolong_positions(pos, level, device=device)
-
-        # Get the graph data for this fine level
-        if i == 0:
-            # Finest level = original graph
-            fine_ei = edge_index
-            fine_sizes = node_sizes
-            fine_n = n
-        else:
-            prev_level = levels[i - 1]
-            fine_ei = prev_level.edge_index
-            fine_sizes = prev_level.node_sizes
-            fine_n = prev_level.num_nodes
-
-        # Refine with fewer steps (warm start from prolongation)
-        refine_steps = config.multilevel_refine_steps
-        if i == 0:
-            refine_steps = refine_steps * 2  # More steps at finest level
-
-        refine_config = LayoutConfig(
-            steps=refine_steps,
-            lr=config.lr,
+    # Helper to build a config for a given level
+    def _make_config(steps, lr=config.lr, seed=config.seed):
+        return LayoutConfig(
+            steps=steps,
+            lr=lr,
             device=device,
-            seed=None,  # Don't reset seed for refinement
+            seed=seed,
+            verbose=config.verbose,
             node_sep=config.node_sep,
             rank_sep=config.rank_sep,
             w_dag=config.w_dag,
@@ -312,14 +297,92 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
             w_length_variance=config.w_length_variance,
             exact_repulsion_threshold=config.exact_repulsion_threshold,
             negative_sample_k=config.negative_sample_k,
+            per_loss_backward=config.per_loss_backward,
+            gradient_checkpointing=config.gradient_checkpointing,
+            hybrid_device=config.hybrid_device,
         )
 
+    # Layout coarsest graph with many steps.
+    # Pass edges on CPU — _layout_inner will stream batches to GPU.
+    # Only node_sizes go to GPU (small: [N_coarse, 2]).
+    coarsest = levels[-1]
+    n_coarse_edges = coarsest.edge_index.shape[1] if coarsest.edge_index.numel() > 0 else 0
+    _vlog(f"coarsest level: {coarsest.num_nodes:,} nodes, {n_coarse_edges:,} edges, {config.multilevel_coarse_steps} steps")
+    _reset_peak()
+    _t_level = _time.perf_counter()
+
+    coarse_config = _make_config(
+        steps=config.multilevel_coarse_steps,
+        lr=config.lr * 2,
+    )
+
+    pos = _layout_inner(
+        coarsest.edge_index,  # stays on CPU
+        coarsest.num_nodes,
+        coarsest.node_sizes.to(device),
+        coarse_config,
+        device=device,
+    )
+    _vlog(f"coarsest done in {_time.perf_counter() - _t_level:.1f}s (stage peak {_stage_peak_mb():.0f}MB)")
+
+    # Prolong + refine through hierarchy (coarsest → finest)
+    for i in range(len(levels) - 1, -1, -1):
+        level = levels[i]
+
+        # Determine this level's graph data
+        if i == 0:
+            fine_ei_cpu = cpu_ei
+            fine_sizes_cpu = cpu_ns
+            fine_n = n
+        else:
+            prev_level = levels[i - 1]
+            fine_ei_cpu = prev_level.edge_index
+            fine_sizes_cpu = prev_level.node_sizes
+            fine_n = prev_level.num_nodes
+
+        n_fine_edges = fine_ei_cpu.shape[1] if fine_ei_cpu.numel() > 0 else 0
+        refine_steps = config.multilevel_refine_steps
+        if i == 0:
+            refine_steps = refine_steps * 2
+
+        level_num = len(levels) - i
+        _vlog(f"level {level_num}/{len(levels)}: {fine_n:,} nodes, {n_fine_edges:,} edges, {refine_steps} steps")
+        _reset_peak()
+        _t_level = _time.perf_counter()
+
+        # Free previous level's GPU memory before allocating new tensors —
+        # but only when the next level won't fit alongside current allocations.
+        if device == "cuda":
+            from dagua.layout.engine import _estimate_gpu_memory
+            next_level_mem = _estimate_gpu_memory(fine_n, n_fine_edges, per_loss_bw=True)
+            if not _vram_fits(next_level_mem):
+                pos = pos.cpu()
+                torch.cuda.empty_cache()
+
+        # Prolong: map coarse positions to fine level (on CPU)
+        fine_to_coarse = level.fine_to_coarse
+        pos_cpu = pos.cpu() if pos.device.type != "cpu" else pos
+        fine_pos = pos_cpu[fine_to_coarse].clone()
+        jitter = torch.randn(level.num_fine, 2) * 5.0
+        fine_pos = fine_pos + jitter
+
+        # Positions + node_sizes to GPU; edges stay on CPU (streamed in batches)
+        fine_sizes = fine_sizes_cpu.to(device)
+        pos = fine_pos.to(device)
+
+        refine_config = _make_config(steps=refine_steps, seed=None)
+
         pos = _layout_inner(
-            fine_ei, fine_n, fine_sizes,
+            fine_ei_cpu,  # edges on CPU — engine streams batches to GPU
+            fine_n, fine_sizes,
             refine_config,
             device=device,
             init_pos=pos,
+            layer_assignments=level.fine_layer_assignments,
         )
+        _vlog(f"level {level_num}/{len(levels)} done in {_time.perf_counter() - _t_level:.1f}s (stage peak {_stage_peak_mb():.0f}MB)")
+
+    _vlog(f"total: {_time.perf_counter() - _t0:.1f}s")
 
     # Apply direction transform
     from dagua.layout.engine import _apply_direction

@@ -275,8 +275,8 @@ def _repulsion_rvs(
     sorted_nodes = layer_index.sorted_nodes
     num_layers = layer_index.num_layers
 
-    # Select active nodes uniformly at random
-    active_idx = torch.randperm(N, device=device)[:n_active]  # [A]
+    # Select active nodes uniformly at random (randint avoids [N] allocation)
+    active_idx = torch.randint(0, N, (n_active,), device=device)  # [A]
     A = active_idx.shape[0]
 
     # For each active node, compute its adjacent-layer range
@@ -301,30 +301,15 @@ def _repulsion_rvs(
     same_range = (same_end - same_start).float()  # [A]
 
     if K_nn > 0:
-        # For each active node, find its approximate position in the layer sort
-        # Then take K_nn//2 neighbors on each side
-        # Use x-position as proxy (nodes close in x are likely close spatially)
-        active_x = pos[active_idx, 0].detach()  # [A]
-
-        # Sample K_nn from same layer (nearby in sorted order)
-        nn_samples_list = []
+        # Vectorized nearest-neighbor sampling: single [A, K_nn] tensor op
+        # instead of Python loop over offsets
         half_k = K_nn // 2
-        for offset_shift in range(-half_k, half_k + 1):
-            if offset_shift == 0:
-                continue
-            # Shift position within layer
-            shifted = same_start + (
-                (torch.rand(A, device=device) * same_range).long() + offset_shift
-            ).clamp(min=0)
-            shifted = shifted.clamp(max=N - 1)
-            nn_samples_list.append(sorted_nodes[shifted].unsqueeze(1))
-
-        if nn_samples_list:
-            nn_sampled = torch.cat(nn_samples_list, dim=1)  # [A, K_nn]
-            # Trim to K_nn
-            nn_sampled = nn_sampled[:, :K_nn]
-        else:
-            nn_sampled = rand_sampled[:, :1]  # fallback
+        offsets_nn = torch.randint(-half_k, half_k + 1, (A, K_nn), device=device)
+        # Skip 0 (self) by shifting non-negative offsets up by 1
+        offsets_nn = offsets_nn + (offsets_nn >= 0).long()
+        base_pos = (torch.rand(A, K_nn, device=device) * same_range.unsqueeze(1)).long()
+        shifted = (same_start.unsqueeze(1) + base_pos + offsets_nn).clamp(min=0, max=N - 1)
+        nn_sampled = sorted_nodes[shifted]  # [A, K_nn]
     else:
         nn_sampled = torch.zeros(A, 0, dtype=torch.long, device=device)
 
@@ -491,7 +476,7 @@ def _overlap_active_subset(
     if K <= 0:
         return torch.tensor(0.0, device=device)
 
-    active_idx = torch.randperm(N, device=device)[:n_active]
+    active_idx = torch.randint(0, N, (n_active,), device=device)
     A = active_idx.shape[0]
 
     layers = layer_index.node_to_layer
@@ -784,10 +769,14 @@ def _crossing_loss_layered(
 
     total_possible_pairs = ((multi_counts * (multi_counts - 1)) // 2).sum().item()
 
+    # Pre-fetch to CPU to avoid GPU sync stalls in the loop (.item() on GPU tensors)
+    multi_offsets_cpu = multi_offsets.tolist()
+    multi_counts_cpu = multi_counts.tolist()
+
     if total_possible_pairs <= max_pairs:
-        for k in range(multi_counts.shape[0]):
-            off = multi_offsets[k].item()
-            cnt = multi_counts[k].item()
+        for k in range(len(multi_counts_cpu)):
+            off = multi_offsets_cpu[k]
+            cnt = multi_counts_cpu[k]
             idx_i, idx_j = torch.triu_indices(cnt, cnt, offset=1, device=device)
             pair_i_list.append(idx_i + off)
             pair_j_list.append(idx_j + off)
@@ -796,11 +785,12 @@ def _crossing_loss_layered(
         total_possible = pairs_per_layer.sum().float()
         samples_per_layer = (pairs_per_layer.float() / total_possible * max_pairs).long()
         samples_per_layer = samples_per_layer.clamp(min=1)
+        samples_per_layer_cpu = samples_per_layer.tolist()
 
-        for k in range(multi_counts.shape[0]):
-            off = multi_offsets[k].item()
-            cnt = multi_counts[k].item()
-            n_samp = min(samples_per_layer[k].item(), cnt * (cnt - 1) // 2)
+        for k in range(len(multi_counts_cpu)):
+            off = multi_offsets_cpu[k]
+            cnt = multi_counts_cpu[k]
+            n_samp = min(samples_per_layer_cpu[k], cnt * (cnt - 1) // 2)
 
             if cnt <= 200 and cnt * (cnt - 1) // 2 <= n_samp:
                 idx_i, idx_j = torch.triu_indices(cnt, cnt, offset=1, device=device)

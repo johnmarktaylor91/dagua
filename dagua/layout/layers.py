@@ -44,15 +44,19 @@ class LayerIndex:
 
 
 def build_layer_index(
-    layer_assignments: List[int],
+    layer_assignments,
     device: str = "cpu",
 ) -> LayerIndex:
-    """Build a LayerIndex from layer assignments (output of longest_path_layering).
+    """Build a LayerIndex from layer assignments (List[int] or torch.Tensor).
 
     O(N log N) from the sort. All subsequent per-layer operations are O(1) indexed.
     """
-    n = len(layer_assignments)
-    node_to_layer = torch.tensor(layer_assignments, dtype=torch.long, device=device)
+    if isinstance(layer_assignments, torch.Tensor):
+        node_to_layer = layer_assignments.to(dtype=torch.long, device=device)
+        n = node_to_layer.shape[0]
+    else:
+        n = len(layer_assignments)
+        node_to_layer = torch.tensor(layer_assignments, dtype=torch.long, device=device)
     num_layers = int(node_to_layer.max().item()) + 1 if n > 0 else 0
 
     # Sort nodes by layer

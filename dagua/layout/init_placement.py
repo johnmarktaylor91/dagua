@@ -166,9 +166,11 @@ def _init_positions_vectorized(
     # Sort nodes by layer for contiguous access
     sorted_by_layer = layer_t.argsort()
 
-    # Try spectral init for large graphs — provides globally-informed x-coordinates
+    # Try spectral init for large graphs — provides globally-informed x-coordinates.
+    # Skip if edge count is extreme (dense coarsened graphs from multilevel).
     spectral_order = None
-    if N > 10000 and edge_index.numel() > 0:
+    n_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    if N > 10000 and n_edges > 0 and n_edges < N * 10:
         spectral_order = _spectral_order(edge_index, N, device)
 
     if spectral_order is not None:

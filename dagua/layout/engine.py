@@ -44,7 +44,7 @@ from dagua.layout.constraints import (
 from dagua.layout.init_placement import init_positions
 from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.projection import project_overlaps
-from dagua.utils import longest_path_layering
+from dagua.utils import _vram_fits, longest_path_layering
 
 
 def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
@@ -73,10 +73,6 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
     if n == 1:
         return torch.zeros(1, 2, device=device)
 
-    # Move data to device
-    edge_index = graph.edge_index.to(device)
-    node_sizes = graph.node_sizes.to(device)
-
     # Set seed for determinism
     if config.seed is not None:
         torch.manual_seed(config.seed)
@@ -84,11 +80,15 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
             torch.cuda.manual_seed(config.seed)
 
     # Tier 3: Multilevel coarsening for very large graphs
+    # Don't move data to GPU yet — multilevel manages device transfers lazily
     if n > config.multilevel_threshold:
         from dagua.layout.multilevel import multilevel_layout
         return multilevel_layout(graph, config)
 
-    # Tier 0-2: Direct layout
+    # Tier 0-2: Direct layout — move data to device
+    edge_index = graph.edge_index.to(device)
+    node_sizes = graph.node_sizes.to(device)
+
     pos = _layout_inner(
         edge_index, n, node_sizes, config,
         device=device,
@@ -110,6 +110,7 @@ def _layout_inner(
     device: str = "cpu",
     init_pos: Optional[torch.Tensor] = None,
     clusters: Optional[dict] = None,
+    layer_assignments: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Headless optimization loop — operates on raw tensors.
 
@@ -124,11 +125,24 @@ def _layout_inner(
         device: target device
         init_pos: optional [N, 2] initial positions (for multilevel warm start)
         clusters: optional cluster dict for cluster losses
+        layer_assignments: optional pre-computed layer assignments tensor (skips recomputation)
 
     Returns:
         [N, 2] position tensor (detached)
     """
+    import time as _time
+
     n = num_nodes
+    verbose = getattr(config, "verbose", False)
+    def _vlog(msg):
+        if verbose:
+            vram = ""
+            if device == "cuda" and torch.cuda.is_available():
+                used = torch.cuda.memory_allocated() / 1024**2
+                free, total = torch.cuda.mem_get_info()
+                vram = f" [VRAM {used:.0f}MB / {total/1024**2:.0f}MB]"
+            print(f"    [engine {n:,}n] {msg}{vram}", flush=True)
+
     if n == 0:
         return torch.zeros(0, 2, device=device)
     if n == 1:
@@ -152,30 +166,55 @@ def _layout_inner(
         )
 
     # Pre-compute layer structure (used by repulsion, overlap, projection, crossing)
-    layer_assignments: Optional[List[int]] = None
+    layer_assignments_list: Optional[List[int]] = None
     layer_index: Optional[LayerIndex] = None
-    if edge_index.numel() > 0:
-        layer_assignments = longest_path_layering(edge_index, n)
+    if layer_assignments is not None:
+        # Use pre-computed assignments (from multilevel V-cycle)
         layer_index = build_layer_index(layer_assignments, device=device)
+        layer_assignments_list = layer_assignments.tolist() if isinstance(layer_assignments, torch.Tensor) else layer_assignments
+    elif edge_index.numel() > 0:
+        layer_assignments_list = longest_path_layering(edge_index, n)
+        layer_index = build_layer_index(layer_assignments_list, device=device)
 
     # Determine adaptive parameters based on graph size
     num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
     edge_batch = _edge_batch_size(num_edges, config)
     overlap_interval = _overlap_interval(n, config)
 
+    # Edge streaming: if edges are too large for GPU, keep them on CPU
+    # and stream batches to GPU each step.  This lets positions stay on GPU
+    # while edges (which can be 800MB+) stay in CPU RAM.
+    edges_on_cpu = edge_index.device.type == "cpu" and device == "cuda"
+    if not edges_on_cpu and device == "cuda" and edge_index.numel() > 0:
+        edge_bytes = edge_index.numel() * edge_index.element_size()
+        if not _vram_fits(edge_bytes):
+            edge_index = edge_index.cpu()
+            edges_on_cpu = True
+
     # Resolve memory optimization flags (VRAM-aware when on CUDA)
     use_per_loss_bw, use_checkpointing, use_hybrid = _resolve_memory_strategy(
         n, num_edges, device, config,
     )
+    flags = []
+    if use_per_loss_bw: flags.append("per_loss_bw")
+    if use_checkpointing: flags.append("checkpoint")
+    if use_hybrid: flags.append("hybrid")
+    if edges_on_cpu: flags.append("edge_stream")
+    _vlog(f"init done, {num_edges:,} edges, batch={edge_batch}, strategy=[{', '.join(flags) or 'standard'}]")
+    # Keep a reference to CPU edges for batching; full edge_index may be CPU
+    cpu_edges_ref = edge_index if edges_on_cpu else None
 
     # Hybrid device: keep positions on GPU, create CPU mirror for heavy losses
     cpu_node_sizes = None
     cpu_layer_index = None
-    cpu_edge_index = edge_index  # default: same device
+    cpu_edge_index = edge_index if edge_index.device.type == "cpu" else None
     if use_hybrid:
         cpu_node_sizes = node_sizes.cpu()
-        cpu_edge_index = edge_index.cpu()
-        cpu_layer_index = build_layer_index(layer_assignments, device="cpu") if layer_assignments else None
+        if cpu_edge_index is None:
+            cpu_edge_index = edge_index.cpu()
+        cpu_layer_index = build_layer_index(layer_assignments_list, device="cpu") if layer_assignments_list else None
+    elif edges_on_cpu:
+        cpu_edge_index = edge_index
 
     # Step 2: Set up optimization
     pos = pos.clone().detach().requires_grad_(True)
@@ -185,16 +224,23 @@ def _layout_inner(
     steps = config.steps
     prev_loss = float("inf")
     stall_count = 0
+    _t_loop = _time.perf_counter()
+    _log_interval = max(steps // 4, 1)  # log at 25%, 50%, 75%, 100%
 
     for step in range(steps):
         t = step / max(steps - 1, 1)  # 0 → 1
 
+        if verbose and step > 0 and step % _log_interval == 0:
+            _vlog(f"step {step}/{steps} ({100*step//steps}%) loss={prev_loss:.2f} [{_time.perf_counter() - _t_loop:.1f}s]")
+
         optimizer.zero_grad()
 
-        # Sample edge batch for this step
+        # Sample edge batch for this step (randint avoids [E] allocation)
         if edge_batch > 0 and num_edges > edge_batch:
-            perm = torch.randperm(num_edges, device=device)[:edge_batch]
-            batch_edges = edge_index[:, perm]
+            perm = torch.randint(0, num_edges, (edge_batch,), device="cpu")
+            batch_edges = edge_index[:, perm].to(device)
+        elif edges_on_cpu:
+            batch_edges = edge_index.to(device)
         else:
             batch_edges = edge_index
 
@@ -248,7 +294,7 @@ def _layout_inner(
             alpha = 3.0 + 7.0 * t_cross
             loss_terms.append((w_crossing, lambda p, ns, li, a=alpha: crossing_loss(
                 p, batch_edges if p.device == batch_edges.device else cpu_edge_index,
-                alpha=a, layer_assignments=layer_assignments,
+                alpha=a, layer_assignments=layer_assignments_list,
             ), False))
 
         if w_straightness > 0:
@@ -321,11 +367,16 @@ def _layout_inner(
             stall_count = 0
         prev_loss = total_loss_val
 
+    _vlog(f"optimization done: {step+1} steps in {_time.perf_counter() - _t_loop:.1f}s, final loss={prev_loss:.2f}")
+
     # Final aggressive overlap projection
+    _vlog("final projection (20 iters)...")
+    _t_proj = _time.perf_counter()
     project_overlaps(
         pos, node_sizes, padding=2.0, iterations=20,
         layer_index=layer_index,
     )
+    _vlog(f"projection done in {_time.perf_counter() - _t_proj:.1f}s")
 
     return pos.detach()
 
@@ -428,8 +479,9 @@ def _estimate_gpu_memory(n: int, num_edges: int, per_loss_bw: bool = False) -> i
 
     # Safety factor: PyTorch allocator overhead, fragmentation, autograd graph
     # metadata, multilevel hierarchy tensors, and Python/framework overhead.
-    # Empirically calibrated: raw estimates are ~3x too low.
-    safety = 3
+    # 2x provides sufficient headroom; per_loss_backward and hybrid mode
+    # are available as automatic fallbacks if VRAM is still tight.
+    safety = 2
 
     if per_loss_bw:
         # Only one term's intermediates alive at a time

@@ -1,4 +1,4 @@
-"""Graph utilities: text measurement, topology helpers."""
+"""Graph utilities: text measurement, topology helpers, VRAM checks."""
 
 from __future__ import annotations
 
@@ -6,6 +6,18 @@ from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 import torch
+
+
+def _vram_fits(needed_bytes: int, safety: float = 0.8) -> bool:
+    """Check whether *needed_bytes* fit in free GPU VRAM (with headroom).
+
+    Returns False when CUDA is unavailable, so CPU paths are unchanged.
+    *safety* (default 0.8) reserves 20% headroom for allocator fragmentation.
+    """
+    if not torch.cuda.is_available():
+        return False
+    free, _total = torch.cuda.mem_get_info()
+    return needed_bytes < int(free * safety)
 
 
 def measure_text(

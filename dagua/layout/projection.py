@@ -17,6 +17,7 @@ from typing import Optional
 import torch
 
 from dagua.layout.layers import LayerIndex
+from dagua.utils import _vram_fits
 
 
 def project_overlaps(
@@ -34,13 +35,40 @@ def project_overlaps(
     if n <= 1:
         return pos
 
+    # Run projection on CPU when argsort temp allocations won't fit in VRAM.
+    # Estimate: sort_key + indices + workspace + auxiliary ≈ N * 72 bytes.
+    # No autograd here (torch.no_grad), so the only cost is the CPU↔GPU
+    # transfer of the [N, 2] pos tensor.
+    device = pos.device
+    run_on_cpu = device.type == "cuda" and not _vram_fits(n * 72)
+
+    if run_on_cpu:
+        pos_cpu = pos.cpu()
+        ns_cpu = node_sizes.cpu()
+        if layer_index is not None:
+            li_cpu = LayerIndex(
+                node_to_layer=layer_index.node_to_layer.cpu(),
+                layer_offsets=layer_index.layer_offsets.cpu(),
+                sorted_nodes=layer_index.sorted_nodes.cpu(),
+                num_layers=layer_index.num_layers,
+            )
+        else:
+            li_cpu = None
+    else:
+        pos_cpu = pos
+        ns_cpu = node_sizes
+        li_cpu = layer_index
+
     with torch.no_grad():
         if n <= 500:
-            _project_exact(pos, node_sizes, padding, iterations)
-        elif layer_index is not None:
-            _project_sweep(pos, node_sizes, padding, iterations, layer_index)
+            _project_exact(pos_cpu, ns_cpu, padding, iterations)
+        elif li_cpu is not None:
+            _project_sweep(pos_cpu, ns_cpu, padding, iterations, li_cpu)
         else:
-            _project_grid(pos, node_sizes, padding, iterations)
+            _project_grid(pos_cpu, ns_cpu, padding, iterations)
+
+        if run_on_cpu:
+            pos.data.copy_(pos_cpu.to(device))
 
     return pos
 

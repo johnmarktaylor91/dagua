@@ -38,6 +38,9 @@ class LayoutConfig:
     # Adaptive spacing: scale node_sep and rank_sep based on graph size
     adaptive_spacing: bool = True
 
+    # Verbose: print progress at key stages (hierarchy, per-level, projection)
+    verbose: bool = False
+
     # Node placement loss weights
     w_dag: float = 10.0
     w_attract: float = 2.0
