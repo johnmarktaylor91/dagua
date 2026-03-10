@@ -92,6 +92,14 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
         from dagua.layout.multilevel import multilevel_layout
         return multilevel_layout(graph, config)
 
+    # TODO(perf): Small graph speed — graphviz dot beats us on <2K node graphs.
+    # Benchmark shows dagua takes 1-2s on tiny graphs (5-20 nodes) due to fixed
+    # overhead: init_placement, layer computation, optimizer setup, 500 steps.
+    # Investigate: (1) reduce default steps for small N (50 steps may suffice),
+    # (2) skip spectral init for N<100, (3) warm-start from topological placement
+    # without optimization for very small graphs, (4) profile per-step overhead
+    # to find the constant-factor bottleneck.
+
     # Tier 0-2: Direct layout — move data to device
     edge_index = graph.edge_index.to(device)
     node_sizes = graph.node_sizes.to(device)

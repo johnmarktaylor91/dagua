@@ -48,6 +48,13 @@ def coarsen_once(
     into a single coarse node. Preserves DAG layer structure.
 
     Fully vectorized — no Python loops over nodes.
+
+    TODO(perf): Streaming coarsening for 1B+ nodes. Current approach holds the
+    full edge_hash + argsort in memory (~19GB at 100M). Could process per-layer
+    instead of globally (coarsening is already layer-aware): iterate layers,
+    assign coarse IDs per-layer, chunk edge dedup in ~10M batches. Would drop
+    peak memory from O(N+E) to O(max_layer_size + chunk_size), enabling ~1B
+    nodes on 128GB RAM. Estimated effort: 2-3 hours.
     """
     N = num_nodes
     if isinstance(layer_assignments, list):
