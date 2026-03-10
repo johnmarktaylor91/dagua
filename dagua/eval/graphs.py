@@ -603,6 +603,225 @@ def _torchlens_graphs() -> List[TestGraph]:
     return graphs
 
 
+# ─── Scale Graph Generators ──────────────────────────────────────────────────
+
+
+def make_chain(n: int, seed: int = 42) -> TestGraph:
+    """Linear chain: 0→1→2→...→n-1."""
+    src = list(range(n - 1))
+    tgt = list(range(1, n))
+    edge_index = torch.tensor([src, tgt], dtype=torch.long)
+    g = DaguaGraph.from_edge_index(edge_index, num_nodes=n)
+    return TestGraph(
+        name=f"chain_{n}",
+        graph=g,
+        tags={"linear-deep", "scale"},
+        description=f"Linear chain with {n} nodes",
+    )
+
+
+def make_wide_dag(n: int, width: int = 0, seed: int = 42) -> TestGraph:
+    """Layered DAG with fixed width per layer."""
+    import random
+
+    rng = random.Random(seed)
+    if width <= 0:
+        width = max(int(n**0.5), 5)
+
+    n_layers = max(n // width, 2)
+    layers: List[List[int]] = []
+    node_idx = 0
+    for _ in range(n_layers):
+        layer_size = min(width, n - node_idx)
+        if layer_size <= 0:
+            break
+        layers.append(list(range(node_idx, node_idx + layer_size)))
+        node_idx += layer_size
+    if node_idx < n:
+        layers[-1].extend(range(node_idx, n))
+
+    edges_set: set = set()
+    for i in range(len(layers) - 1):
+        for node in layers[i]:
+            k = min(rng.randint(1, 3), len(layers[i + 1]))
+            targets = rng.sample(layers[i + 1], k)
+            for t in targets:
+                edges_set.add((node, t))
+
+    g = DaguaGraph.from_edge_index(
+        torch.zeros(2, 0, dtype=torch.long), num_nodes=n
+    )
+    if edges_set:
+        el = list(edges_set)
+        g.edge_index = torch.tensor([[e[0] for e in el], [e[1] for e in el]], dtype=torch.long)
+        g.edge_labels = [None] * len(el)
+        g.edge_types = ["normal"] * len(el)
+        g.edge_styles = [None] * len(el)
+
+    return TestGraph(
+        name=f"wide_dag_{n}",
+        graph=g,
+        tags={"wide-parallel", "scale"},
+        description=f"Layered DAG: {n} nodes, width ~{width}",
+    )
+
+
+def make_random_dag(n: int, density: float = 1.5, seed: int = 42) -> TestGraph:
+    """Random DAG with ~n*density edges."""
+    import random
+
+    rng = random.Random(seed)
+    n_edges = int(n * density)
+
+    g = DaguaGraph.from_edge_index(
+        torch.zeros(2, 0, dtype=torch.long), num_nodes=n
+    )
+    edges_set: set = set()
+    attempts = 0
+    while len(edges_set) < n_edges and attempts < n_edges * 20:
+        i = rng.randint(0, n - 2)
+        j = rng.randint(i + 1, min(i + max(n // 5, 10), n - 1))
+        edges_set.add((i, j))
+        attempts += 1
+
+    if edges_set:
+        el = list(edges_set)
+        g.edge_index = torch.tensor([[e[0] for e in el], [e[1] for e in el]], dtype=torch.long)
+        g.edge_labels = [None] * len(el)
+        g.edge_types = ["normal"] * len(el)
+        g.edge_styles = [None] * len(el)
+
+    return TestGraph(
+        name=f"random_dag_{n}",
+        graph=g,
+        tags={"large-sparse", "scale"},
+        description=f"Random DAG: {n} nodes, ~{n_edges} edges",
+    )
+
+
+def make_diamond(n: int, seed: int = 42) -> TestGraph:
+    """Diamond/hourglass: fan-out then fan-in."""
+    mid = n // 2
+    src, tgt = [], []
+    # fan-out: node 0 → nodes 1..mid
+    for i in range(1, min(mid + 1, n)):
+        src.append(0)
+        tgt.append(i)
+    # fan-in: nodes 1..mid → node n-1
+    if n > 2:
+        for i in range(1, min(mid + 1, n - 1)):
+            src.append(i)
+            tgt.append(n - 1)
+    # chain the middle section for larger n
+    for i in range(mid + 1, n - 1):
+        src.append(i - 1)
+        tgt.append(i)
+
+    if not src:
+        edge_index = torch.zeros(2, 0, dtype=torch.long)
+    else:
+        edge_index = torch.tensor([src, tgt], dtype=torch.long)
+    g = DaguaGraph.from_edge_index(edge_index, num_nodes=n)
+    return TestGraph(
+        name=f"diamond_{n}",
+        graph=g,
+        tags={"diamond", "scale"},
+        description=f"Diamond/hourglass: {n} nodes",
+    )
+
+
+def make_tree(n: int, branching: int = 3, seed: int = 42) -> TestGraph:
+    """Balanced tree with given branching factor."""
+    src, tgt = [], []
+    for i in range(n):
+        for b in range(branching):
+            child = i * branching + b + 1
+            if child < n:
+                src.append(i)
+                tgt.append(child)
+
+    if not src:
+        edge_index = torch.zeros(2, 0, dtype=torch.long)
+    else:
+        edge_index = torch.tensor([src, tgt], dtype=torch.long)
+    g = DaguaGraph.from_edge_index(edge_index, num_nodes=n)
+    return TestGraph(
+        name=f"tree_{n}_b{branching}",
+        graph=g,
+        tags={"tree", "scale"},
+        description=f"Balanced tree: {n} nodes, branching={branching}",
+    )
+
+
+def make_bipartite(n: int, seed: int = 42) -> TestGraph:
+    """Bipartite DAG: sources → middle → sinks in 3 layers."""
+    third = max(n // 3, 1)
+    n_src = third
+    n_mid = third
+    n_sink = n - n_src - n_mid
+
+    src, tgt = [], []
+    # source → mid
+    for i in range(n_src):
+        for j in range(n_src, n_src + n_mid):
+            src.append(i)
+            tgt.append(j)
+    # mid → sink
+    for j in range(n_src, n_src + n_mid):
+        for k in range(n_src + n_mid, n):
+            src.append(j)
+            tgt.append(k)
+
+    if not src:
+        edge_index = torch.zeros(2, 0, dtype=torch.long)
+    else:
+        edge_index = torch.tensor([src, tgt], dtype=torch.long)
+    g = DaguaGraph.from_edge_index(edge_index, num_nodes=n)
+    return TestGraph(
+        name=f"bipartite_{n}",
+        graph=g,
+        tags={"wide-parallel", "large-dense", "scale"},
+        description=f"Bipartite 3-layer DAG: {n} nodes",
+    )
+
+
+_SCALE_SIZES = {
+    "small": [100, 500, 1_000, 2_000],
+    "medium": [5_000, 10_000, 50_000],
+    "large": [100_000, 500_000, 1_000_000],
+    "huge": [5_000_000, 10_000_000, 50_000_000],
+}
+
+
+def get_scale_suite(tier: str = "small") -> List[TestGraph]:
+    """Get scale test graphs for a given tier.
+
+    Tiers:
+      small:  100, 500, 1000, 2000 nodes (all competitors)
+      medium: 5000, 10000, 50000 nodes (dagua + sfdp + spring + elk)
+      large:  100K, 500K, 1M nodes (dagua + sfdp only)
+      huge:   5M, 10M, 50M nodes (dagua only)
+
+    Each tier returns multiple graph shapes at each size.
+    """
+    if tier not in _SCALE_SIZES:
+        raise ValueError(f"Unknown tier {tier!r}. Choose from: {list(_SCALE_SIZES)}")
+
+    graphs = []
+    sizes = _SCALE_SIZES[tier]
+
+    for n in sizes:
+        # Use a subset of generators appropriate for scale
+        graphs.append(make_random_dag(n, density=1.5, seed=42))
+        graphs.append(make_wide_dag(n, seed=42))
+        if tier in ("small", "medium"):
+            # Only add extra shapes for small/medium — large/huge keep it minimal
+            graphs.append(make_chain(n))
+            graphs.append(make_tree(n, branching=3))
+
+    return graphs
+
+
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
 def list_tags() -> Set[str]:

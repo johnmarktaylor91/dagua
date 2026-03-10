@@ -291,3 +291,204 @@ def generate_html_dashboard(
 
     print(f"Dashboard saved to {path}")
     return path
+
+
+def generate_benchmark_markdown(results: list, output_path: str) -> str:
+    """Generate a GitHub-viewable markdown report from benchmark results.
+
+    Args:
+        results: List of BenchmarkResult dataclass instances.
+        output_path: Path for the output .md file.
+
+    Returns:
+        Path to the generated file.
+    """
+    import platform
+    from collections import defaultdict
+    from datetime import datetime
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Group results by graph size tier
+    def _tier_label(n_nodes: int) -> str:
+        if n_nodes <= 2_000:
+            return "small"
+        elif n_nodes <= 50_000:
+            return "medium"
+        elif n_nodes <= 1_000_000:
+            return "large"
+        else:
+            return "huge"
+
+    _TIER_HEADINGS = {
+        "small": "Small Graphs (up to 2K nodes)",
+        "medium": "Medium Graphs (5K-50K nodes)",
+        "large": "Large Graphs (100K-1M nodes)",
+        "huge": "Huge Graphs (5M+ nodes)",
+    }
+
+    # Gather data
+    by_graph: Dict[str, dict] = defaultdict(dict)
+    all_competitors: set = set()
+    for r in results:
+        by_graph[r.graph_name][r.competitor] = r
+        all_competitors.add(r.competitor)
+
+    competitor_order = sorted(all_competitors)
+
+    # Compute summary stats per competitor
+    comp_stats: Dict[str, dict] = {}
+    for comp in competitor_order:
+        scores: List[float] = []
+        runtimes: List[float] = []
+        max_n = 0
+        wins = 0
+        for gname, comp_results in by_graph.items():
+            if comp not in comp_results:
+                continue
+            r = comp_results[comp]
+            if r.error:
+                continue
+            if r.composite_score is not None:
+                scores.append(r.composite_score)
+            runtimes.append(r.runtime_seconds)
+            max_n = max(max_n, r.graph_nodes)
+
+            # Check if this competitor won on this graph
+            best_score = -1.0
+            best_comp = ""
+            for c2, r2 in comp_results.items():
+                if r2.composite_score is not None and r2.composite_score > best_score:
+                    best_score = r2.composite_score
+                    best_comp = c2
+            if best_comp == comp:
+                wins += 1
+
+        comp_stats[comp] = {
+            "avg_score": sum(scores) / len(scores) if scores else 0.0,
+            "avg_runtime": sum(runtimes) / len(runtimes) if runtimes else 0.0,
+            "max_nodes": max_n,
+            "wins": wins,
+            "n_graphs": len(runtimes),
+        }
+
+    # Build markdown
+    lines: List[str] = []
+    lines.append("# Dagua Competitive Benchmark Report\n")
+    lines.append(
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | "
+        f"Platform: {platform.platform()} | "
+        f"Graphs: {len(by_graph)}\n"
+    )
+
+    # Summary table
+    lines.append("## Summary\n")
+    lines.append(
+        "| Competitor | Avg Score | Avg Runtime | Max Nodes | Wins | Graphs Run |"
+    )
+    lines.append("|---|---|---|---|---|---|")
+    for comp in competitor_order:
+        s = comp_stats[comp]
+        lines.append(
+            f"| {comp} | {s['avg_score']:.1f} | {s['avg_runtime']:.3f}s | "
+            f"{s['max_nodes']:,} | {s['wins']}/{s['n_graphs']} | {s['n_graphs']} |"
+        )
+    lines.append("")
+
+    # Per-tier tables
+    by_tier: Dict[str, list] = defaultdict(list)
+    graph_nodes: Dict[str, int] = {}
+    for gname, comp_results in by_graph.items():
+        sample = next(iter(comp_results.values()))
+        tier = _tier_label(sample.graph_nodes)
+        by_tier[tier].append(gname)
+        graph_nodes[gname] = sample.graph_nodes
+
+    for tier in ["small", "medium", "large", "huge"]:
+        if tier not in by_tier:
+            continue
+
+        graph_names = sorted(by_tier[tier], key=lambda g: graph_nodes[g])
+        heading = _TIER_HEADINGS.get(tier, tier.title())
+        lines.append(f"## {heading}\n")
+
+        # Determine which competitors actually ran in this tier
+        tier_comps = []
+        for comp in competitor_order:
+            for gname in graph_names:
+                if comp in by_graph[gname]:
+                    tier_comps.append(comp)
+                    break
+
+        header = "| Graph | Nodes | Edges |"
+        sep = "|---|---|---|"
+        for comp in tier_comps:
+            header += f" {comp} |"
+            sep += "---|"
+        lines.append(header)
+        lines.append(sep)
+
+        for gname in graph_names:
+            comp_results = by_graph[gname]
+            sample = next(iter(comp_results.values()))
+            row = f"| {gname} | {sample.graph_nodes:,} | {sample.graph_edges:,} |"
+            for comp in tier_comps:
+                if comp not in comp_results:
+                    row += " - |"
+                else:
+                    r = comp_results[comp]
+                    if r.error:
+                        row += f" {r.error[:15]} |"
+                    elif r.composite_score is not None:
+                        row += f" {r.composite_score:.1f} ({r.runtime_seconds:.2f}s) |"
+                    else:
+                        row += f" ({r.runtime_seconds:.2f}s) |"
+            lines.append(row)
+        lines.append("")
+
+    # Key metrics breakdown (only if results have metrics data)
+    has_metrics = any(
+        r.metrics for r in results if r.metrics and "_metrics_error" not in r.metrics
+    )
+    if has_metrics:
+        lines.append("## Key Metrics Breakdown\n")
+
+        metric_keys = [
+            ("dag_consistency", "DAG Consistency"),
+            ("edge_length_cv", "Edge Length CV"),
+            ("depth_correlation", "Depth-Position Correlation"),
+            ("overlap_count", "Node Overlaps"),
+            ("edge_straightness_mean_deg", "Edge Straightness (deg)"),
+        ]
+
+        for mk, label in metric_keys:
+            lines.append(f"### {label}\n")
+            lines.append(
+                "| Graph |" + "".join(f" {c} |" for c in competitor_order)
+            )
+            lines.append("|---|" + "".join("---|" for _ in competitor_order))
+
+            for gname in sorted(by_graph.keys()):
+                comp_results = by_graph[gname]
+                row = f"| {gname} |"
+                for comp in competitor_order:
+                    if comp not in comp_results:
+                        row += " - |"
+                    else:
+                        r = comp_results[comp]
+                        if r.metrics and mk in r.metrics:
+                            v = r.metrics[mk]
+                            if isinstance(v, float):
+                                row += f" {v:.3f} |"
+                            else:
+                                row += f" {v} |"
+                        else:
+                            row += " - |"
+                lines.append(row)
+            lines.append("")
+
+    with open(output_path, "w") as f:
+        f.write("\n".join(lines))
+
+    print(f"Benchmark report saved to {output_path}")
+    return output_path
