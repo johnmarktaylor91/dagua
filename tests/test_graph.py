@@ -106,7 +106,10 @@ class TestStyles:
         g.add_node("inp")
         g.node_types[-1] = "input"  # override the default type
         style = g.get_style_for_node(0)
-        assert style.fill == "#98FB98"  # default input theme color
+        # Input type uses bluish green from Wong palette (muted fill)
+        from dagua.styles import PALETTE, make_fill
+        expected_fill = make_fill(PALETTE["bluish_green"])
+        assert style.fill == expected_fill
 
 
 class TestDeviceTransfer:

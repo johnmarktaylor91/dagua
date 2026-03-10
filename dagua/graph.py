@@ -151,14 +151,25 @@ class DaguaGraph:
         if label is not None:
             self.cluster_labels[name] = label
 
-    def compute_node_sizes(self, font_family: str = "monospace", font_size: float = 9.0) -> None:
-        """Compute node sizes from labels if not already set."""
+    def compute_node_sizes(
+        self,
+        font_family: str = "",
+        font_size: float = 8.5,
+    ) -> None:
+        """Compute node sizes from labels if not already set.
+
+        Uses per-node style padding when available, otherwise default (8, 5).
+        """
         if self.node_sizes is not None and self.node_sizes.shape[0] == self.num_nodes:
             return
 
         sizes = []
-        for label in self.node_labels:
-            w, h = compute_node_size(label, font_family, font_size)
+        for i, label in enumerate(self.node_labels):
+            style = self.get_style_for_node(i)
+            padding = style.padding
+            ff = font_family if style.font_family in ("", font_family) else style.font_family
+            fs = style.font_size if style.font_size != 8.5 else font_size
+            w, h = compute_node_size(label, ff, fs, padding)
             sizes.append([w, h])
 
         self.node_sizes = torch.tensor(sizes, dtype=torch.float32)

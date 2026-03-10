@@ -8,8 +8,21 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 
-def measure_text(text: str, font_family: str = "monospace", font_size: float = 9.0) -> Tuple[float, float]:
-    """Measure text dimensions using matplotlib TextPath."""
+def measure_text(
+    text: str,
+    font_family: str = "",
+    font_size: float = 8.5,
+) -> Tuple[float, float]:
+    """Measure text dimensions using matplotlib TextPath.
+
+    If font_family is empty, uses the resolved best-available font.
+    """
+    if not font_family:
+        try:
+            from dagua.styles import RESOLVED_FONT
+            font_family = RESOLVED_FONT
+        except ImportError:
+            font_family = "sans-serif"
     try:
         from matplotlib.font_manager import FontProperties
         from matplotlib.textpath import TextPath
@@ -22,24 +35,47 @@ def measure_text(text: str, font_family: str = "monospace", font_size: float = 9
         return measure_text_fallback(text, font_size)
 
 
-def measure_text_fallback(text: str, font_size: float = 9.0) -> Tuple[float, float]:
-    """Fast monospace approximation (no matplotlib needed)."""
+def measure_text_fallback(text: str, font_size: float = 8.5) -> Tuple[float, float]:
+    """Fast proportional-font approximation (no matplotlib needed).
+
+    For sans-serif fonts, average char width ≈ 0.52 × font_size.
+    """
     lines = text.split("\n")
     max_chars = max(len(line) for line in lines) if lines else 1
-    width = max_chars * font_size * 0.6
+    width = max_chars * font_size * 0.52
     height = len(lines) * font_size * 1.2
     return max(width, 1.0), max(height, font_size)
 
 
+# Node sizing constants
+MIN_NODE_WIDTH = 40.0
+MIN_NODE_HEIGHT = 22.0
+MAX_NODE_ASPECT_RATIO = 6.0
+
+
 def compute_node_size(
     label: str,
-    font_family: str = "monospace",
-    font_size: float = 9.0,
-    padding: Tuple[float, float] = (8.0, 4.0),
+    font_family: str = "",
+    font_size: float = 8.5,
+    padding: Tuple[float, float] = (8.0, 5.0),
 ) -> Tuple[float, float]:
-    """Compute node bounding box from label text."""
+    """Compute node bounding box from label text.
+
+    Enforces minimum dimensions and maximum aspect ratio per style guide.
+    """
     text_w, text_h = measure_text(label, font_family, font_size)
-    return text_w + padding[0] * 2, text_h + padding[1] * 2
+    w = text_w + padding[0] * 2
+    h = text_h + padding[1] * 2
+
+    # Enforce minimums
+    w = max(w, MIN_NODE_WIDTH)
+    h = max(h, MIN_NODE_HEIGHT)
+
+    # Enforce max aspect ratio (truncation would happen at render time)
+    if w / h > MAX_NODE_ASPECT_RATIO:
+        w = h * MAX_NODE_ASPECT_RATIO
+
+    return w, h
 
 
 def topological_sort(edge_index: torch.Tensor, num_nodes: int) -> List[int]:

@@ -33,6 +33,7 @@ from dagua.layout.constraints import (
     edge_straightness_loss,
     overlap_avoidance_loss,
     repulsion_loss,
+    spacing_consistency_loss,
 )
 from dagua.layout.init_placement import init_positions
 from dagua.layout.layers import LayerIndex, build_layer_index
@@ -127,14 +128,20 @@ def _layout_inner(
     if n == 1:
         return torch.zeros(1, 2, device=device)
 
+    # Apply adaptive spacing based on graph size
+    node_sep = config.node_sep
+    rank_sep = config.rank_sep
+    if config.adaptive_spacing:
+        node_sep, rank_sep = _adaptive_spacing(n, node_sep, rank_sep)
+
     # Step 1: Initialization
     if init_pos is not None:
         pos = init_pos.to(device)
     else:
         pos = init_positions(
             edge_index, n, node_sizes,
-            node_sep=config.node_sep,
-            rank_sep=config.rank_sep,
+            node_sep=node_sep,
+            rank_sep=rank_sep,
             device=device,
         )
 
@@ -181,7 +188,7 @@ def _layout_inner(
 
         # DAG ordering
         if w_dag > 0:
-            loss = loss + w_dag * dag_ordering_loss(pos, batch_edges, node_sizes, config.rank_sep)
+            loss = loss + w_dag * dag_ordering_loss(pos, batch_edges, node_sizes, rank_sep)
 
         # Edge attraction
         if config.w_attract > 0:
@@ -231,6 +238,12 @@ def _layout_inner(
         # Edge length variance
         if config.w_length_variance > 0:
             loss = loss + config.w_length_variance * edge_length_variance_loss(pos, batch_edges)
+
+        # Spacing consistency (even horizontal rhythm within layers)
+        if config.w_spacing > 0 and layer_index is not None:
+            loss = loss + config.w_spacing * spacing_consistency_loss(
+                pos, node_sizes, layer_index, target_gap=node_sep,
+            )
 
         loss.backward()
 
@@ -295,6 +308,29 @@ def _overlap_interval(num_nodes: int, config: LayoutConfig) -> int:
         return 10
     else:
         return 20
+
+
+def _adaptive_spacing(
+    num_nodes: int,
+    base_node_sep: float = 25.0,
+    base_rank_sep: float = 50.0,
+) -> tuple:
+    """Scale spacing based on graph size for density adaptation.
+
+    Small graphs (<20): more breathing room (1.3x)
+    Medium (<200): standard (1.0x)
+    Large (<1000): slightly tighter (0.85x)
+    Very large (1000+): compact (0.7x)
+    """
+    if num_nodes < 20:
+        scale = 1.3
+    elif num_nodes < 200:
+        scale = 1.0
+    elif num_nodes < 1000:
+        scale = 0.85
+    else:
+        scale = 0.7
+    return base_node_sep * scale, base_rank_sep * scale
 
 
 def _apply_direction(pos: torch.Tensor, direction: str) -> torch.Tensor:

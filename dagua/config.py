@@ -35,6 +35,9 @@ class LayoutConfig:
     device: str = "cpu"
     seed: Optional[int] = 42
 
+    # Adaptive spacing: scale node_sep and rank_sep based on graph size
+    adaptive_spacing: bool = True
+
     # Node placement loss weights
     w_dag: float = 10.0
     w_attract: float = 2.0
@@ -46,6 +49,7 @@ class LayoutConfig:
     w_crossing: float = 0.5
     w_straightness: float = 1.0
     w_length_variance: float = 0.5
+    w_spacing: float = 0.3  # penalize deviation from target node_sep within layers
 
     # Edge routing
     edge_routing: str = "bezier"

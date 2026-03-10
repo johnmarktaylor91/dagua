@@ -836,3 +836,60 @@ def cluster_separation_loss(
         total = total + overlap_x * overlap_y
 
     return total
+
+
+# ─── Spacing consistency ──────────────────────────────────────────────────────
+
+
+def spacing_consistency_loss(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    layer_index: Optional[LayerIndex],
+    target_gap: float = 25.0,
+) -> torch.Tensor:
+    """Penalize deviation from target horizontal spacing within layers.
+
+    For each layer, sort nodes by x, measure consecutive gaps, and penalize
+    variance. This produces the even "visual rhythm" the style guide describes.
+
+    Uses vectorized approach: composite sort key → consecutive pairs.
+    """
+    if layer_index is None:
+        return torch.tensor(0.0, device=pos.device)
+
+    device = pos.device
+    N = pos.shape[0]
+    if N < 2:
+        return torch.tensor(0.0, device=device)
+
+    layers = layer_index.node_to_layer
+    offsets = layer_index.layer_offsets
+    num_layers = layer_index.num_layers
+
+    # Sort all nodes by (layer, x_position) — one global sort, O(N log N)
+    sort_key = layers.float() * 1e8 + pos[:, 0].detach()
+    sorted_idx = sort_key.argsort()
+
+    sorted_layers = layers[sorted_idx]
+    sorted_x = pos[sorted_idx, 0]
+    sorted_w = node_sizes[sorted_idx, 0]
+
+    # Consecutive pairs within same layer
+    same_layer = sorted_layers[:-1] == sorted_layers[1:]
+    if not same_layer.any():
+        return torch.tensor(0.0, device=device)
+
+    # Gap = center-to-center distance minus half-widths
+    dx = sorted_x[1:] - sorted_x[:-1]
+    half_w = (sorted_w[:-1] + sorted_w[1:]) / 2.0
+    gap = dx - half_w  # actual gap between edges
+
+    # Only consider same-layer pairs
+    gap_in_layer = gap[same_layer]
+
+    if gap_in_layer.numel() == 0:
+        return torch.tensor(0.0, device=device)
+
+    # Penalize deviation from target gap (squared)
+    deviation = gap_in_layer - target_gap
+    return (deviation ** 2).mean()
