@@ -242,9 +242,74 @@ def _layout_inner(
     pos = pos.clone().detach().requires_grad_(True)
     optimizer = torch.optim.Adam([pos], lr=config.lr)
 
-    # Step 3: Optimization loop with annealing
+    # Step 3: Build loss functions ONCE (reuse across steps via mutable refs)
+    # batch_edges_ref is a mutable container so lambdas capture the reference
+    batch_edges_ref: List[Optional[torch.Tensor]] = [None]
+
+    # Static loss functions — each returns (base_weight_key, loss_fn, is_heavy, is_annealed)
+    # base_weight_key is a string to look up the annealed weight at each step
+    loss_fns: List[tuple] = []
+
+    if config.w_dag > 0:
+        loss_fns.append(("w_dag", lambda p, ns, li: dag_ordering_loss(
+            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
+            ns, rank_sep), False, True))
+
+    if config.w_attract > 0:
+        loss_fns.append(("w_attract", lambda p, ns, li: edge_attraction_loss(
+            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
+            x_bias=config.w_attract_x_bias), False, False))
+
+    if config.w_repel > 0:
+        loss_fns.append(("w_repel", lambda p, ns, li: repulsion_loss(
+            p, n,
+            threshold=config.exact_repulsion_threshold,
+            sample_k=config.negative_sample_k,
+            layer_index=li,
+            node_sizes=ns,
+            rvs_threshold=config.rvs_threshold,
+            rvs_nn_k=config.rvs_nn_k,
+        ), True, True))
+
+    if config.w_overlap > 0:
+        loss_fns.append(("w_overlap", lambda p, ns, li: overlap_avoidance_loss(
+            p, ns, layer_index=li,
+            rvs_threshold=config.rvs_threshold,
+        ), True, True))
+
+    if config.w_cluster > 0 and clusters:
+        loss_fns.append(("w_cluster", lambda p, ns, li: cluster_compactness_loss(
+            p, clusters, device=p.device), False, False))
+        loss_fns.append(("w_cluster_sep", lambda p, ns, li: cluster_separation_loss(
+            p, ns, clusters, device=p.device), False, False))
+
+    if config.w_crossing > 0:
+        # alpha is annealed per-step, captured via mutable ref
+        crossing_alpha_ref: List[float] = [3.0]
+        loss_fns.append(("w_crossing", lambda p, ns, li: crossing_loss(
+            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
+            alpha=crossing_alpha_ref[0], layer_assignments=layer_assignments_list,
+        ), False, True))
+
+    if config.w_straightness > 0:
+        loss_fns.append(("w_straightness", lambda p, ns, li: edge_straightness_loss(
+            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index), False, True))
+
+    if config.w_length_variance > 0:
+        loss_fns.append(("w_length_variance", lambda p, ns, li: edge_length_variance_loss(
+            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index), False, False))
+
+    if config.w_spacing > 0 and layer_index is not None:
+        loss_fns.append(("w_spacing", lambda p, ns, li: spacing_consistency_loss(
+            p, ns, li, target_gap=node_sep,
+        ), False, False))
+
+    # Pre-allocate edge batch buffer (avoids per-step tensor allocation)
+    batch_buf = torch.empty(2, edge_batch, dtype=torch.long, device=device) if edge_batch > 0 and num_edges > edge_batch else None
+
+    # Optimization loop with annealing
     steps = config.steps
-    prev_loss = float("inf")
+    prev_unweighted = float("inf")
     stall_count = 0
     _t_loop = _time.perf_counter()
     _log_interval = max(steps // 4, 1)  # log at 25%, 50%, 75%, 100%
@@ -253,20 +318,21 @@ def _layout_inner(
         t = step / max(steps - 1, 1)  # 0 → 1
 
         if verbose and step > 0 and step % _log_interval == 0:
-            _vlog(f"step {step}/{steps} ({100*step//steps}%) loss={prev_loss:.2f} [{_time.perf_counter() - _t_loop:.1f}s]")
+            _vlog(f"step {step}/{steps} ({100*step//steps}%) loss={prev_unweighted:.2f} [{_time.perf_counter() - _t_loop:.1f}s]")
 
         optimizer.zero_grad()
 
-        # Sample edge batch for this step (randint avoids [E] allocation)
-        if edge_batch > 0 and num_edges > edge_batch:
+        # Sample edge batch for this step — reuse pre-allocated buffer
+        if batch_buf is not None:
             perm = torch.randint(0, num_edges, (edge_batch,), device="cpu")
-            batch_edges = edge_index[:, perm].to(device)
+            batch_buf.copy_(edge_index[:, perm])
+            batch_edges_ref[0] = batch_buf
         elif edges_on_cpu:
-            batch_edges = edge_index.to(device)
+            batch_edges_ref[0] = edge_index.to(device)
         else:
-            batch_edges = edge_index
+            batch_edges_ref[0] = edge_index
 
-        # Annealed weights
+        # Compute annealed weights for this step
         w_dag = config.w_dag * (1 - 0.5 * t)
         w_repel = config.w_repel * (1 + 2 * t)
         w_overlap = config.w_overlap * (1 + t)
@@ -274,66 +340,34 @@ def _layout_inner(
         w_crossing = config.w_crossing * t_cross
         w_straightness = config.w_straightness * (1 + 0.5 * t)
 
-        # Build list of (weight, loss_fn(p, ns, li), is_heavy) tuples.
-        # Each loss_fn takes (pos, node_sizes, layer_index) so hybrid mode
-        # can pass CPU mirrors instead of GPU tensors.
+        # Update crossing alpha via mutable ref
+        if config.w_crossing > 0:
+            crossing_alpha_ref[0] = 3.0 + 7.0 * t_cross
+
+        # Map weight keys to current annealed values
+        weight_map = {
+            "w_dag": w_dag,
+            "w_attract": config.w_attract,
+            "w_repel": w_repel,
+            "w_overlap": w_overlap,
+            "w_cluster": config.w_cluster,
+            "w_cluster_sep": config.w_cluster * 0.5,
+            "w_crossing": w_crossing,
+            "w_straightness": w_straightness,
+            "w_length_variance": config.w_length_variance,
+            "w_spacing": config.w_spacing,
+        }
+
+        # Build loss_terms from static functions + current weights
         loss_terms: List[tuple] = []
-
-        if w_dag > 0:
-            loss_terms.append((w_dag, lambda p, ns, li: dag_ordering_loss(
-                p, batch_edges if p.device == batch_edges.device else cpu_edge_index,
-                ns, rank_sep), False))
-
-        if config.w_attract > 0:
-            loss_terms.append((config.w_attract, lambda p, ns, li: edge_attraction_loss(
-                p, batch_edges if p.device == batch_edges.device else cpu_edge_index,
-                x_bias=config.w_attract_x_bias), False))
-
-        if w_repel > 0:
-            loss_terms.append((w_repel, lambda p, ns, li: repulsion_loss(
-                p, n,
-                threshold=config.exact_repulsion_threshold,
-                sample_k=config.negative_sample_k,
-                layer_index=li,
-                node_sizes=ns,
-                rvs_threshold=config.rvs_threshold,
-                rvs_nn_k=config.rvs_nn_k,
-            ), True))
-
-        if w_overlap > 0:
-            loss_terms.append((w_overlap, lambda p, ns, li: overlap_avoidance_loss(
-                p, ns, layer_index=li,
-                rvs_threshold=config.rvs_threshold,
-            ), True))
-
-        if config.w_cluster > 0 and clusters:
-            loss_terms.append((config.w_cluster, lambda p, ns, li: cluster_compactness_loss(
-                p, clusters, device=p.device), False))
-            loss_terms.append((config.w_cluster * 0.5, lambda p, ns, li: cluster_separation_loss(
-                p, ns, clusters, device=p.device), False))
-
-        if w_crossing > 0:
-            alpha = 3.0 + 7.0 * t_cross
-            loss_terms.append((w_crossing, lambda p, ns, li, a=alpha: crossing_loss(
-                p, batch_edges if p.device == batch_edges.device else cpu_edge_index,
-                alpha=a, layer_assignments=layer_assignments_list,
-            ), False))
-
-        if w_straightness > 0:
-            loss_terms.append((w_straightness, lambda p, ns, li: edge_straightness_loss(
-                p, batch_edges if p.device == batch_edges.device else cpu_edge_index), False))
-
-        if config.w_length_variance > 0:
-            loss_terms.append((config.w_length_variance, lambda p, ns, li: edge_length_variance_loss(
-                p, batch_edges if p.device == batch_edges.device else cpu_edge_index), False))
-
-        if config.w_spacing > 0 and layer_index is not None:
-            loss_terms.append((config.w_spacing, lambda p, ns, li: spacing_consistency_loss(
-                p, ns, li, target_gap=node_sep,
-            ), False))
+        for key, loss_fn, is_heavy, _is_annealed in loss_fns:
+            w = weight_map[key]
+            if w > 0:
+                loss_terms.append((w, loss_fn, is_heavy))
 
         # Execute loss terms with selected memory strategy
         total_loss_val = 0.0
+        unweighted_loss_val = 0.0
 
         if use_per_loss_bw:
             if executor is not None:
@@ -346,7 +380,7 @@ def _layout_inner(
                             _hybrid_loss, pos, weight, loss_fn,
                             cpu_node_sizes, cpu_layer_index,
                         )
-                        heavy_futures.append(future)
+                        heavy_futures.append((weight, future))
                     else:
                         light_terms_list.append((weight, loss_fn))
 
@@ -355,14 +389,18 @@ def _layout_inner(
                     term = weight * loss_fn(pos, node_sizes, layer_index)
                     if term is not None and term.requires_grad:
                         term.backward()
-                        total_loss_val += term.item()
+                        val = term.item()
+                        total_loss_val += val
+                        unweighted_loss_val += val / weight if weight else 0.0
 
                 # Gather heavy loss results
-                for future in heavy_futures:
+                for weight, future in heavy_futures:
                     term = future.result()
                     if term is not None and term.requires_grad:
                         term.backward()
-                        total_loss_val += term.item()
+                        val = term.item()
+                        total_loss_val += val
+                        unweighted_loss_val += val / weight if weight else 0.0
             else:
                 # Sequential per-loss backward
                 for weight, loss_fn, is_heavy in loss_terms:
@@ -377,7 +415,9 @@ def _layout_inner(
                     )
                     if term is not None and term.requires_grad:
                         term.backward()
-                        total_loss_val += term.item()
+                        val = term.item()
+                        total_loss_val += val
+                        unweighted_loss_val += val / weight if weight else 0.0
         else:
             # Standard: accumulate all losses, single backward
             loss = torch.tensor(0.0, device=device)
@@ -393,6 +433,7 @@ def _layout_inner(
                 )
                 if term is not None:
                     loss = loss + term
+                    unweighted_loss_val += term.item() / weight if weight else 0.0
             loss.backward()
             total_loss_val = loss.item()
 
@@ -401,29 +442,31 @@ def _layout_inner(
 
         optimizer.step()
 
-        # Hard overlap projection (adaptive frequency)
+        # Hard overlap projection (adaptive frequency + adaptive iterations)
         if step % overlap_interval == 0 or step == steps - 1:
+            proj_iters = 5 if n <= 500_000 else 3 if n <= 5_000_000 else 2
             project_overlaps(
-                pos, node_sizes, padding=2.0, iterations=5,
+                pos, node_sizes, padding=2.0, iterations=proj_iters,
                 layer_index=layer_index,
             )
 
-        # Early stopping check
-        if step > 10 and abs(prev_loss - total_loss_val) < prev_loss * 1e-4:
+        # Early stopping check (use unweighted loss — immune to annealing)
+        if step > 10 and abs(prev_unweighted - unweighted_loss_val) < prev_unweighted * 1e-4:
             stall_count += 1
             if stall_count >= 5:
                 break
         else:
             stall_count = 0
-        prev_loss = total_loss_val
+        prev_unweighted = unweighted_loss_val
 
     _vlog(f"done ({_time.perf_counter() - _t_loop:.1f}s)")
 
-    # Final aggressive overlap projection
-    _vlog("final projection (20 iters)...")
+    # Final aggressive overlap projection (scale iterations with N)
+    final_proj_iters = 20 if n <= 500_000 else 10 if n <= 5_000_000 else 5
+    _vlog(f"final projection ({final_proj_iters} iters)...")
     _t_proj = _time.perf_counter()
     project_overlaps(
-        pos, node_sizes, padding=2.0, iterations=20,
+        pos, node_sizes, padding=2.0, iterations=final_proj_iters,
         layer_index=layer_index,
     )
     _vlog(f"projection done in {_time.perf_counter() - _t_proj:.1f}s")
@@ -663,8 +706,10 @@ def _overlap_interval(num_nodes: int, config: LayoutConfig) -> int:
         return 5
     elif num_nodes <= 50000:
         return 10
-    else:
+    elif num_nodes <= 1_000_000:
         return 20
+    else:
+        return 40
 
 
 def _adaptive_spacing(

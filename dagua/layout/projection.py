@@ -202,8 +202,10 @@ def _project_sweep(
 
         pos[:, 0] += push_a + push_b
 
-        # Also check near-neighbors (window=2) for wider overlaps
-        if N > 2:
+        # Also check near-neighbors (window=2) for wider overlaps.
+        # Skip for large graphs — window-1 consecutive resolution is sufficient
+        # at scale, and this doubles tensor operations per iteration.
+        if N <= 100_000 and N > 2:
             same_layer_2 = sorted_layers[:-2] == sorted_layers[2:]
             idx_a2 = sorted_indices[:-2]
             idx_b2 = sorted_indices[2:]

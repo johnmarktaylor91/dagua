@@ -165,24 +165,22 @@ def build_hierarchy(
     current_sizes = node_sizes
     current_n = num_nodes
 
+    # Compute layers once on the original graph
+    if current_ei.numel() > 0:
+        current_layers = longest_path_layering(current_ei, current_n)
+    else:
+        current_layers = [0] * current_n
+    current_la_tensor = torch.tensor(current_layers, dtype=torch.long) if isinstance(current_layers, list) else current_layers
+
     for _ in range(max_levels):
         if current_n <= min_nodes:
             break
 
-        # Compute layers for current graph
-        if current_ei.numel() > 0:
-            layer_assignments = longest_path_layering(current_ei, current_n)
-        else:
-            layer_assignments = [0] * current_n
-
-        # Store as tensor for reuse in refinement (avoids recomputing in _layout_inner)
-        la_tensor = torch.tensor(layer_assignments, dtype=torch.long) if isinstance(layer_assignments, list) else layer_assignments
-
         level = coarsen_once(
             current_ei, current_n, current_sizes,
-            layer_assignments=layer_assignments, device=device,
+            layer_assignments=current_layers, device=device,
         )
-        level.fine_layer_assignments = la_tensor
+        level.fine_layer_assignments = current_la_tensor
         levels.append(level)
 
         # Move to coarser level
@@ -193,6 +191,15 @@ def build_hierarchy(
         # Safety: stop if coarsening didn't reduce enough
         if current_n > level.num_fine * 0.7:
             break
+
+        # Propagate layers: coarse node inherits layer from its fine nodes
+        # (all fine nodes in a pair share the same layer by construction)
+        coarse_la = torch.zeros(current_n, dtype=torch.long)
+        coarse_la.scatter_reduce_(
+            0, level.fine_to_coarse, current_la_tensor, reduce="amax",
+        )
+        current_la_tensor = coarse_la
+        current_layers = coarse_la.tolist()
 
     return levels
 
@@ -343,9 +350,16 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
             fine_n = prev_level.num_nodes
 
         n_fine_edges = fine_ei_cpu.shape[1] if fine_ei_cpu.numel() > 0 else 0
-        refine_steps = config.multilevel_refine_steps
+        base_refine = config.multilevel_refine_steps
         if i == 0:
-            refine_steps = refine_steps * 2
+            # Finest level: double steps for final quality
+            refine_steps = base_refine * 2
+        elif i <= 2:
+            # Near-finest levels: full steps
+            refine_steps = base_refine
+        else:
+            # Coarser levels: half steps (positions refined further at finer levels)
+            refine_steps = max(base_refine // 2, 5)
 
         level_num = len(levels) - i
         _vlog(f"Level {level_num}/{num_refine_levels}: {fine_n:,} nodes ({refine_steps} steps)", indent="  ")

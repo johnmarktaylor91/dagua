@@ -167,62 +167,110 @@ def longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> List[int]
 
 
 def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
-    """Vectorized longest-path layering using wave-based BFS on tensors.
+    """Longest-path layering using hybrid wave/BFS strategy.
 
-    Processes all nodes at the same topological "wave" simultaneously.
-    Each wave: find all nodes with in_degree==0, assign layer, remove their edges.
+    Wide graphs (many nodes per wave): use vectorized wave approach — each
+    iteration processes an entire topological layer with tensor ops.
+    Deep graphs (few nodes per wave): use CSR + numpy BFS — true O(V+E).
+
+    Heuristic: run 10 waves. If average wave size > 1000, continue with waves.
+    Otherwise switch to CSR+BFS.
     """
-    device = edge_index.device
+    import numpy as np
+    from collections import deque
+
     N = num_nodes
+    E = edge_index.shape[1]
     src, tgt = edge_index[0], edge_index[1]
 
-    # Compute in-degrees using scatter
-    in_degree = torch.zeros(N, dtype=torch.long, device=device)
-    in_degree.scatter_add_(0, tgt, torch.ones(tgt.shape[0], dtype=torch.long, device=device))
+    # Compute in-degree (vectorized)
+    in_degree = torch.zeros(N, dtype=torch.long)
+    in_degree.scatter_add_(0, tgt, torch.ones(E, dtype=torch.long))
 
-    layers = torch.zeros(N, dtype=torch.long, device=device)
-    remaining_in_degree = in_degree.clone()
-
+    # Probe: run a few waves to decide strategy
+    layers = torch.zeros(N, dtype=torch.long)
+    remaining = in_degree.clone()
+    total_processed = 0
     current_layer = 0
-    max_iterations = N  # safety bound
+    probe_waves = 10
 
-    for _ in range(max_iterations):
-        # Find all nodes with in_degree == 0 (current wave)
-        wave = (remaining_in_degree == 0).nonzero(as_tuple=True)[0]
+    for _ in range(probe_waves):
+        wave = (remaining == 0).nonzero(as_tuple=True)[0]
         if wave.numel() == 0:
             break
-
-        # Assign layer to this wave
+        total_processed += wave.numel()
         layers[wave] = current_layer
+        remaining[wave] = -1
 
-        # Mark processed nodes (set in_degree to -1 so they're not re-processed)
-        remaining_in_degree[wave] = -1
-
-        # Find all edges from wave nodes to their children
-        # Create mask of edges whose source is in the current wave
-        wave_set = torch.zeros(N, dtype=torch.bool, device=device)
+        wave_set = torch.zeros(N, dtype=torch.bool)
         wave_set[wave] = True
         edge_mask = wave_set[src]
 
         if edge_mask.any():
-            # Get children of wave nodes and propagate layer info
-            children_of_wave = tgt[edge_mask]
-            parent_layers = layers[src[edge_mask]]
-
-            # Update children's layer to max(current, parent_layer + 1)
-            # Use scatter_reduce with amax
-            candidate_layers = parent_layers + 1
-            layers.scatter_reduce_(
-                0, children_of_wave, candidate_layers, reduce="amax",
-            )
-
-            # Decrement in_degree of children
-            ones = torch.ones(children_of_wave.shape[0], dtype=torch.long, device=device)
-            remaining_in_degree.scatter_add_(0, children_of_wave, -ones)
+            children = tgt[edge_mask]
+            candidate = layers[src[edge_mask]] + 1
+            layers.scatter_reduce_(0, children, candidate, reduce="amax")
+            ones = torch.ones(children.shape[0], dtype=torch.long)
+            remaining.scatter_add_(0, children, -ones)
 
         current_layer += 1
 
-    return layers.tolist()
+    avg_wave = total_processed / max(current_layer, 1)
+
+    # Wide graph: continue with waves (fast when few iterations needed)
+    if avg_wave > 1000:
+        for _ in range(N):
+            wave = (remaining == 0).nonzero(as_tuple=True)[0]
+            if wave.numel() == 0:
+                break
+            layers[wave] = current_layer
+            remaining[wave] = -1
+
+            wave_set = torch.zeros(N, dtype=torch.bool)
+            wave_set[wave] = True
+            edge_mask = wave_set[src]
+
+            if edge_mask.any():
+                children = tgt[edge_mask]
+                candidate = layers[src[edge_mask]] + 1
+                layers.scatter_reduce_(0, children, candidate, reduce="amax")
+                ones = torch.ones(children.shape[0], dtype=torch.long)
+                remaining.scatter_add_(0, children, -ones)
+
+            current_layer += 1
+
+        return layers.tolist()
+
+    # Deep graph: switch to CSR + numpy BFS (true O(V+E))
+    # Reset — recompute from scratch with numpy (zero-copy from torch)
+    in_deg = in_degree.numpy().copy()
+
+    # Build CSR adjacency via sort
+    order = src.argsort()
+    csr_tgt = tgt[order].numpy()
+
+    out_degree = torch.zeros(N, dtype=torch.long)
+    out_degree.scatter_add_(0, src, torch.ones(E, dtype=torch.long))
+    offsets = torch.zeros(N + 1, dtype=torch.long)
+    offsets[1:] = out_degree.cumsum(0)
+    csr_off = offsets.numpy()
+
+    # BFS from sources — true O(V+E)
+    layer_arr = np.zeros(N, dtype=np.int64)
+    queue = deque(int(i) for i in range(N) if in_deg[i] == 0)
+
+    while queue:
+        node = queue.popleft()
+        child_layer = layer_arr[node] + 1
+        for j in range(csr_off[node], csr_off[node + 1]):
+            child = int(csr_tgt[j])
+            if child_layer > layer_arr[child]:
+                layer_arr[child] = child_layer
+            in_deg[child] -= 1
+            if in_deg[child] == 0:
+                queue.append(child)
+
+    return layer_arr.tolist()
 
 
 def collect_cluster_leaves(cluster_dict) -> List[int]:
