@@ -23,6 +23,7 @@ Cross-cutting:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 import torch
@@ -45,6 +46,12 @@ from dagua.layout.init_placement import init_positions
 from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.projection import project_overlaps
 from dagua.utils import _vram_fits, longest_path_layering
+
+
+@dataclass
+class ProgressContext:
+    """Context for formatting engine progress messages."""
+    indent: str = "  "
 
 
 def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
@@ -89,10 +96,15 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
     edge_index = graph.edge_index.to(device)
     node_sizes = graph.node_sizes.to(device)
 
+    if config.verbose:
+        num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+        print(f"[dagua] Layout: {n:,} nodes, {num_edges:,} edges", flush=True)
+
     pos = _layout_inner(
         edge_index, n, node_sizes, config,
         device=device,
         clusters=graph.clusters if hasattr(graph, 'clusters') else None,
+        progress_context=ProgressContext(),
     )
 
     # Apply direction transform
@@ -111,6 +123,7 @@ def _layout_inner(
     init_pos: Optional[torch.Tensor] = None,
     clusters: Optional[dict] = None,
     layer_assignments: Optional[torch.Tensor] = None,
+    progress_context: Optional[ProgressContext] = None,
 ) -> torch.Tensor:
     """Headless optimization loop — operates on raw tensors.
 
@@ -126,6 +139,7 @@ def _layout_inner(
         init_pos: optional [N, 2] initial positions (for multilevel warm start)
         clusters: optional cluster dict for cluster losses
         layer_assignments: optional pre-computed layer assignments tensor (skips recomputation)
+        progress_context: optional context for formatting progress messages
 
     Returns:
         [N, 2] position tensor (detached)
@@ -134,6 +148,7 @@ def _layout_inner(
 
     n = num_nodes
     verbose = getattr(config, "verbose", False)
+    _indent = progress_context.indent if progress_context else "  "
     def _vlog(msg):
         if verbose:
             vram = ""
@@ -141,7 +156,7 @@ def _layout_inner(
                 used = torch.cuda.memory_allocated() / 1024**2
                 free, total = torch.cuda.mem_get_info()
                 vram = f" [VRAM {used:.0f}MB / {total/1024**2:.0f}MB]"
-            print(f"    [engine {n:,}n] {msg}{vram}", flush=True)
+            print(f"[dagua] {_indent}{msg}{vram}", flush=True)
 
     if n == 0:
         return torch.zeros(0, 2, device=device)
@@ -195,11 +210,18 @@ def _layout_inner(
     use_per_loss_bw, use_checkpointing, use_hybrid = _resolve_memory_strategy(
         n, num_edges, device, config,
     )
+    # Create thread pool for parallel hybrid losses
+    executor = None
+    if use_hybrid and use_per_loss_bw and getattr(config, 'num_workers', 0) > 0:
+        from concurrent.futures import ThreadPoolExecutor
+        executor = ThreadPoolExecutor(max_workers=config.num_workers)
+
     flags = []
     if use_per_loss_bw: flags.append("per_loss_bw")
     if use_checkpointing: flags.append("checkpoint")
     if use_hybrid: flags.append("hybrid")
     if edges_on_cpu: flags.append("edge_stream")
+    if executor is not None: flags.append(f"workers={config.num_workers}")
     _vlog(f"init done, {num_edges:,} edges, batch={edge_batch}, strategy=[{', '.join(flags) or 'standard'}]")
     # Keep a reference to CPU edges for batching; full edge_index may be CPU
     cpu_edges_ref = edge_index if edges_on_cpu else None
@@ -314,20 +336,48 @@ def _layout_inner(
         total_loss_val = 0.0
 
         if use_per_loss_bw:
-            # Per-loss backward: each term's intermediates freed before the next
-            for weight, loss_fn, is_heavy in loss_terms:
-                term = _compute_loss_term(
-                    pos, weight, loss_fn, is_heavy,
-                    use_hybrid=use_hybrid,
-                    use_checkpointing=use_checkpointing,
-                    node_sizes=node_sizes,
-                    layer_index=layer_index,
-                    cpu_node_sizes=cpu_node_sizes if use_hybrid else None,
-                    cpu_layer_index=cpu_layer_index if use_hybrid else None,
-                )
-                if term is not None and term.requires_grad:
-                    term.backward()
-                    total_loss_val += term.item()
+            if executor is not None:
+                # Parallel: heavy losses on CPU threads, light losses on GPU
+                heavy_futures = []
+                light_terms_list = []
+                for weight, loss_fn, is_heavy in loss_terms:
+                    if is_heavy:
+                        future = executor.submit(
+                            _hybrid_loss, pos, weight, loss_fn,
+                            cpu_node_sizes, cpu_layer_index,
+                        )
+                        heavy_futures.append(future)
+                    else:
+                        light_terms_list.append((weight, loss_fn))
+
+                # Compute light losses on GPU while heavy run on CPU
+                for weight, loss_fn in light_terms_list:
+                    term = weight * loss_fn(pos, node_sizes, layer_index)
+                    if term is not None and term.requires_grad:
+                        term.backward()
+                        total_loss_val += term.item()
+
+                # Gather heavy loss results
+                for future in heavy_futures:
+                    term = future.result()
+                    if term is not None and term.requires_grad:
+                        term.backward()
+                        total_loss_val += term.item()
+            else:
+                # Sequential per-loss backward
+                for weight, loss_fn, is_heavy in loss_terms:
+                    term = _compute_loss_term(
+                        pos, weight, loss_fn, is_heavy,
+                        use_hybrid=use_hybrid,
+                        use_checkpointing=use_checkpointing,
+                        node_sizes=node_sizes,
+                        layer_index=layer_index,
+                        cpu_node_sizes=cpu_node_sizes if use_hybrid else None,
+                        cpu_layer_index=cpu_layer_index if use_hybrid else None,
+                    )
+                    if term is not None and term.requires_grad:
+                        term.backward()
+                        total_loss_val += term.item()
         else:
             # Standard: accumulate all losses, single backward
             loss = torch.tensor(0.0, device=device)
@@ -367,7 +417,7 @@ def _layout_inner(
             stall_count = 0
         prev_loss = total_loss_val
 
-    _vlog(f"optimization done: {step+1} steps in {_time.perf_counter() - _t_loop:.1f}s, final loss={prev_loss:.2f}")
+    _vlog(f"done ({_time.perf_counter() - _t_loop:.1f}s)")
 
     # Final aggressive overlap projection
     _vlog("final projection (20 iters)...")
@@ -377,6 +427,9 @@ def _layout_inner(
         layer_index=layer_index,
     )
     _vlog(f"projection done in {_time.perf_counter() - _t_proj:.1f}s")
+
+    if executor is not None:
+        executor.shutdown(wait=False)
 
     return pos.detach()
 

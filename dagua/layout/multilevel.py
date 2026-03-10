@@ -226,10 +226,10 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
     3. Prolong + refine at each level (few steps)
     """
     import time as _time
-    from dagua.layout.engine import _layout_inner
+    from dagua.layout.engine import ProgressContext, _layout_inner
 
     verbose = config.verbose
-    def _vlog(msg):
+    def _vlog(msg, indent=""):
         if verbose:
             vram = ""
             if device == "cuda" and torch.cuda.is_available():
@@ -237,7 +237,7 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
                 free, total = torch.cuda.mem_get_info()
                 total_mb = total / 1024**2
                 vram = f" [VRAM {used:.0f}MB / {total_mb:.0f}MB]"
-            print(f"  [multilevel] {msg}{vram}", flush=True)
+            print(f"[dagua] {indent}{msg}{vram}", flush=True)
 
     def _reset_peak():
         if device == "cuda" and torch.cuda.is_available():
@@ -264,15 +264,16 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
     cpu_ei = graph.edge_index
     cpu_ns = graph.node_sizes
     min_nodes = config.multilevel_min_nodes
-    _vlog(f"building hierarchy ({n:,} nodes, {cpu_ei.shape[1] if cpu_ei.numel() > 0 else 0:,} edges)...")
+    _t_hier = _time.perf_counter()
     levels = build_hierarchy(cpu_ei, n, cpu_ns, min_nodes=min_nodes, device="cpu")
-    _vlog(f"hierarchy: {len(levels)} levels — " + ", ".join(f"{l.num_nodes:,}n" for l in levels))
+    _vlog(f"Phase 1/3: Building hierarchy ({n:,} nodes)... {len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)")
 
     if not levels:
         # Graph is already small enough — use direct layout
         ei = cpu_ei.to(device)
         ns = cpu_ns.to(device)
-        pos = _layout_inner(ei, n, ns, config, device=device)
+        pos = _layout_inner(ei, n, ns, config, device=device,
+                            progress_context=ProgressContext())
         from dagua.layout.engine import _apply_direction
         direction = config.direction if config else graph.direction
         return _apply_direction(pos, direction)
@@ -300,16 +301,15 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
             per_loss_backward=config.per_loss_backward,
             gradient_checkpointing=config.gradient_checkpointing,
             hybrid_device=config.hybrid_device,
+            num_workers=config.num_workers,
         )
 
     # Layout coarsest graph with many steps.
     # Pass edges on CPU — _layout_inner will stream batches to GPU.
     # Only node_sizes go to GPU (small: [N_coarse, 2]).
     coarsest = levels[-1]
-    n_coarse_edges = coarsest.edge_index.shape[1] if coarsest.edge_index.numel() > 0 else 0
-    _vlog(f"coarsest level: {coarsest.num_nodes:,} nodes, {n_coarse_edges:,} edges, {config.multilevel_coarse_steps} steps")
+    _vlog(f"Phase 2/3: Coarsest level ({coarsest.num_nodes:,} nodes, {config.multilevel_coarse_steps} steps)")
     _reset_peak()
-    _t_level = _time.perf_counter()
 
     coarse_config = _make_config(
         steps=config.multilevel_coarse_steps,
@@ -322,10 +322,12 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
         coarsest.node_sizes.to(device),
         coarse_config,
         device=device,
+        progress_context=ProgressContext(),
     )
-    _vlog(f"coarsest done in {_time.perf_counter() - _t_level:.1f}s (stage peak {_stage_peak_mb():.0f}MB)")
 
     # Prolong + refine through hierarchy (coarsest → finest)
+    num_refine_levels = len(levels)
+    _vlog(f"Phase 3/3: Refining ({num_refine_levels} levels)")
     for i in range(len(levels) - 1, -1, -1):
         level = levels[i]
 
@@ -346,9 +348,8 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
             refine_steps = refine_steps * 2
 
         level_num = len(levels) - i
-        _vlog(f"level {level_num}/{len(levels)}: {fine_n:,} nodes, {n_fine_edges:,} edges, {refine_steps} steps")
+        _vlog(f"Level {level_num}/{num_refine_levels}: {fine_n:,} nodes ({refine_steps} steps)", indent="  ")
         _reset_peak()
-        _t_level = _time.perf_counter()
 
         # Free previous level's GPU memory before allocating new tensors —
         # but only when the next level won't fit alongside current allocations.
@@ -379,10 +380,10 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
             device=device,
             init_pos=pos,
             layer_assignments=level.fine_layer_assignments,
+            progress_context=ProgressContext(indent="    "),
         )
-        _vlog(f"level {level_num}/{len(levels)} done in {_time.perf_counter() - _t_level:.1f}s (stage peak {_stage_peak_mb():.0f}MB)")
 
-    _vlog(f"total: {_time.perf_counter() - _t0:.1f}s")
+    _vlog(f"Done \u2014 {n:,} nodes in {_time.perf_counter() - _t0:.1f}s")
 
     # Apply direction transform
     from dagua.layout.engine import _apply_direction

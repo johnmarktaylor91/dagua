@@ -89,6 +89,11 @@ class LayoutConfig:
     #   Auto: on when device=cuda and N > 2M.
     hybrid_device: str = "auto"
 
+    # CPU worker threads for hybrid-mode parallel loss computation.
+    # 0 = sequential (no workers). 2+ = parallel CPU losses.
+    # Only used when hybrid_device mode is active with per_loss_backward.
+    num_workers: int = 0
+
 
 # Registry of all tunable parameters with metadata
 PARAM_REGISTRY: List[TunableParam] = [

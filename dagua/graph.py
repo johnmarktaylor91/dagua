@@ -202,8 +202,14 @@ class DaguaGraph:
         """Create graph from list of (source, target) tuples.
 
         Builds all edges at once for O(E) construction instead of O(E²).
+        If ``num_nodes`` is provided, nodes 0..num_nodes-1 are pre-created
+        before edges are added (so add_edge won't miscount).
         """
+        num_nodes = kwargs.pop("num_nodes", None)
         g = cls(**kwargs)
+        if num_nodes is not None:
+            for i in range(num_nodes):
+                g.add_node(i)
         for src, tgt in edges:
             g.add_edge(src, tgt)
         return g
