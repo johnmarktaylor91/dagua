@@ -170,7 +170,7 @@ def _init_positions_vectorized(
     # Skip if edge count is extreme (dense coarsened graphs from multilevel).
     spectral_order = None
     n_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
-    if N > 10000 and N <= 5_000_000 and n_edges > 0 and n_edges < N * 10:
+    if N > 10000 and N <= 2_000_000 and n_edges > 0 and n_edges < N * 10:
         spectral_order = _spectral_order(edge_index, N, device)
 
     if spectral_order is not None:

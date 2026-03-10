@@ -90,12 +90,13 @@ def coarsen_once(
     global_pos = torch.arange(N, dtype=torch.long, device=device)
     within_layer_pos = global_pos - layer_start_of_sorted  # [N]
 
-    # Pair index within layer: pos // 2 gives pair number
-    pair_within_layer = within_layer_pos // 2  # [N]
+    # Pair index within layer: pos // 3 gives pair number (merge triples for
+    # ~67% reduction per level instead of 50%, halving hierarchy depth)
+    pair_within_layer = within_layer_pos // 3  # [N]
 
     # Coarse ID = cumulative pairs up to this layer + pair_within_layer
-    # Number of coarse nodes per layer: ceil(layer_count / 2)
-    coarse_per_layer = (layer_counts + 1) // 2  # [L]
+    # Number of coarse nodes per layer: ceil(layer_count / 3)
+    coarse_per_layer = (layer_counts + 2) // 3  # [L]
     coarse_offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=device)
     coarse_offsets[1:] = coarse_per_layer.cumsum(0)
 
@@ -127,9 +128,9 @@ def coarsen_once(
         coarse_tgt = coarse_tgt[not_self]
 
         if coarse_src.numel() > 0:
-            # Deduplicate edges using hash
+            # Deduplicate edges using hash (no inverse — saves a large allocation)
             edge_hash = coarse_src * N_coarse + coarse_tgt
-            unique_hash, inverse = edge_hash.unique(return_inverse=True)
+            unique_hash = edge_hash.unique()
             # Recover src, tgt from hash
             unique_src = unique_hash // N_coarse
             unique_tgt = unique_hash % N_coarse

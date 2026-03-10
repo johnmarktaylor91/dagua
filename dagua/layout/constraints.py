@@ -301,15 +301,12 @@ def _repulsion_rvs(
     same_range = (same_end - same_start).float()  # [A]
 
     if K_nn > 0:
-        # Vectorized nearest-neighbor sampling: single [A, K_nn] tensor op
-        # instead of Python loop over offsets
-        half_k = K_nn // 2
-        offsets_nn = torch.randint(-half_k, half_k + 1, (A, K_nn), device=device)
-        # Skip 0 (self) by shifting non-negative offsets up by 1
-        offsets_nn = offsets_nn + (offsets_nn >= 0).long()
-        base_pos = (torch.rand(A, K_nn, device=device) * same_range.unsqueeze(1)).long()
-        shifted = (same_start.unsqueeze(1) + base_pos + offsets_nn).clamp(min=0, max=N - 1)
-        nn_sampled = sorted_nodes[shifted]  # [A, K_nn]
+        # Pure random sampling within same-layer bounds — simpler and faster
+        # than the offset-based "nearest" approach, with equivalent quality
+        # at large N where random samples are dense enough.
+        rand_nn = torch.rand(A, K_nn, device=device)
+        nn_indices = (same_start.unsqueeze(1) + (rand_nn * same_range.unsqueeze(1)).long()).clamp(min=0, max=N - 1)
+        nn_sampled = sorted_nodes[nn_indices]  # [A, K_nn]
     else:
         nn_sampled = torch.zeros(A, 0, dtype=torch.long, device=device)
 
@@ -573,37 +570,82 @@ def _overlap_grid_vectorized(
         return torch.tensor(0.0, device=device)
 
     # Cap cells processed
-    if n_multi > 5000:
-        perm = torch.randperm(n_multi, device=device)[:5000]
+    max_cells = 1000
+    if n_multi > max_cells:
+        perm = torch.randperm(n_multi, device=device)[:max_cells]
         multi_starts = multi_starts[perm]
         multi_ends = multi_ends[perm]
-        n_multi = 5000
+        n_multi = max_cells
+
+    multi_counts = multi_ends - multi_starts
+
+    # Pre-fetch cell boundaries to CPU once to avoid per-iteration GPU sync
+    starts_cpu = multi_starts.cpu().tolist()
+    ends_cpu = multi_ends.cpu().tolist()
+
+    # Batch small cells together for vectorized processing.
+    # Cells with <= max_cell nodes are padded into a single [B, max_cell] batch.
+    max_cell = 64
+    small_mask = multi_counts <= max_cell
+    n_small = small_mask.sum().item()
 
     total = torch.tensor(0.0, device=device)
     count = 0
 
-    for i in range(n_multi):
-        s = multi_starts[i].item()
-        e = multi_ends[i].item()
-        cell_nodes = sort_idx[s:e]
-        m = cell_nodes.shape[0]
-        if m > 200:
-            perm = torch.randperm(m, device=device)[:200]
-            cell_nodes = cell_nodes[perm]
-            m = 200
+    if n_small > 0:
+        # Gather small cells into a padded batch
+        small_indices = torch.where(small_mask)[0]
+        B = small_indices.shape[0]
+        batch_nodes = torch.zeros(B, max_cell, dtype=torch.long, device=device)
+        batch_valid = torch.zeros(B, max_cell, dtype=torch.bool, device=device)
+        small_idx_cpu = small_indices.cpu().tolist()
+        for bi, si in enumerate(small_idx_cpu):
+            s, e = starts_cpu[si], ends_cpu[si]
+            m = e - s
+            batch_nodes[bi, :m] = sort_idx[s:e]
+            batch_valid[bi, :m] = True
 
-        p = pos[cell_nodes]
-        sz = node_sizes[cell_nodes]
-        dx_abs = torch.abs(p[:, 0].unsqueeze(0) - p[:, 0].unsqueeze(1))
-        dy_abs = torch.abs(p[:, 1].unsqueeze(0) - p[:, 1].unsqueeze(1))
-        min_dx = (sz[:, 0].unsqueeze(0) + sz[:, 0].unsqueeze(1)) / 2 + padding
-        min_dy = (sz[:, 1].unsqueeze(0) + sz[:, 1].unsqueeze(1)) / 2 + padding
+        # Vectorized all-pairs overlap for the batch
+        bp = pos[batch_nodes]  # [B, M, 2]
+        bsz = node_sizes[batch_nodes]  # [B, M, 2]
+        dx_abs = torch.abs(bp[:, :, 0].unsqueeze(2) - bp[:, :, 0].unsqueeze(1))  # [B, M, M]
+        dy_abs = torch.abs(bp[:, :, 1].unsqueeze(2) - bp[:, :, 1].unsqueeze(1))
+        min_dx = (bsz[:, :, 0].unsqueeze(2) + bsz[:, :, 0].unsqueeze(1)) / 2 + padding
+        min_dy = (bsz[:, :, 1].unsqueeze(2) + bsz[:, :, 1].unsqueeze(1)) / 2 + padding
         overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)
-        mask = ~torch.eye(m, dtype=torch.bool, device=device)
-        cell_overlap = overlap[mask]
-        if cell_overlap.numel() > 0:
-            total = total + cell_overlap.sum()
-            count += cell_overlap.numel()
+        # Mask: valid pairs only, exclude self and padding
+        pair_valid = batch_valid.unsqueeze(2) & batch_valid.unsqueeze(1)  # [B, M, M]
+        diag_mask = ~torch.eye(max_cell, dtype=torch.bool, device=device).unsqueeze(0)
+        pair_valid = pair_valid & diag_mask
+        masked_overlap = overlap * pair_valid.float()
+        total = total + masked_overlap.sum()
+        count += pair_valid.sum().item()
+
+    # Process remaining large cells individually
+    large_mask = ~small_mask
+    if large_mask.any():
+        large_indices = torch.where(large_mask)[0].cpu().tolist()
+        for li in large_indices:
+            s, e = starts_cpu[li], ends_cpu[li]
+            cell_nodes = sort_idx[s:e]
+            m = cell_nodes.shape[0]
+            if m > 200:
+                perm2 = torch.randperm(m, device=device)[:200]
+                cell_nodes = cell_nodes[perm2]
+                m = 200
+
+            p = pos[cell_nodes]
+            sz = node_sizes[cell_nodes]
+            dx_abs = torch.abs(p[:, 0].unsqueeze(0) - p[:, 0].unsqueeze(1))
+            dy_abs = torch.abs(p[:, 1].unsqueeze(0) - p[:, 1].unsqueeze(1))
+            min_dx = (sz[:, 0].unsqueeze(0) + sz[:, 0].unsqueeze(1)) / 2 + padding
+            min_dy = (sz[:, 1].unsqueeze(0) + sz[:, 1].unsqueeze(1)) / 2 + padding
+            overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)
+            mask = ~torch.eye(m, dtype=torch.bool, device=device)
+            cell_overlap = overlap[mask]
+            if cell_overlap.numel() > 0:
+                total = total + cell_overlap.sum()
+                count += cell_overlap.numel()
 
     if count == 0:
         return torch.tensor(0.0, device=device)

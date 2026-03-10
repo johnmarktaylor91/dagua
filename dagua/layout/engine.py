@@ -462,7 +462,7 @@ def _layout_inner(
     _vlog(f"done ({_time.perf_counter() - _t_loop:.1f}s)")
 
     # Final aggressive overlap projection (scale iterations with N)
-    final_proj_iters = 20 if n <= 500_000 else 10 if n <= 5_000_000 else 5
+    final_proj_iters = 20 if n <= 500_000 else 10 if n <= 5_000_000 else 3
     _vlog(f"final projection ({final_proj_iters} iters)...")
     _t_proj = _time.perf_counter()
     project_overlaps(
