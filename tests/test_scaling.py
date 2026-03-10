@@ -261,6 +261,28 @@ class TestExtremeScale:
         print(f"\n  5M nodes (GPU): {elapsed:.1f}s")
 
 
+    @pytest.mark.rare
+    def test_20m_nodes(self):
+        """20,000,000 node layout via multilevel V-cycle (CPU only — GPU OOM at 11GB)."""
+        n = 20_000_000
+        g = _make_random_dag_vectorized(n)
+        config = LayoutConfig(
+            steps=500,
+            device="cpu",
+            multilevel_threshold=50000,
+            multilevel_min_nodes=2000,
+            multilevel_coarse_steps=100,
+            multilevel_refine_steps=25,
+        )
+        start = time.perf_counter()
+        pos = dagua.layout(g, config)
+        elapsed = time.perf_counter() - start
+        assert pos.shape == (n, 2), f"Expected ({n}, 2), got {pos.shape}"
+        assert not torch.isnan(pos).any(), "NaN in positions"
+        assert not torch.isinf(pos).any(), "Inf in positions"
+        print(f"\n  20M nodes: {elapsed:.1f}s")
+
+
 class TestEdgeCases:
     """Test graphs that could cause problems at scale."""
 

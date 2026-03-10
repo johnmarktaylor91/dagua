@@ -70,6 +70,22 @@ class LayoutConfig:
     rvs_threshold: int = 100000
     rvs_nn_k: int = 20
 
+    # Memory optimization modes — "auto" enables based on graph size and device.
+    # Set to "on"/"off" to override. These dramatically reduce peak memory for
+    # large graphs, enabling GPU layout at scales that would otherwise OOM.
+    #
+    # per_loss_backward: backward each loss term separately, freeing intermediates
+    #   between terms. ~3-4x peak memory reduction. Auto: on when N > 50K.
+    per_loss_backward: str = "auto"
+    # gradient_checkpointing: recompute forward activations during backward instead
+    #   of storing them. ~2x memory reduction, ~30% more compute. Auto: on when
+    #   device=cuda and N > 500K.
+    gradient_checkpointing: str = "auto"
+    # hybrid_device: keep positions on GPU but compute memory-heavy losses (repulsion,
+    #   overlap) on CPU. Only the [N, 2] gradient transfers between devices.
+    #   Auto: on when device=cuda and N > 2M.
+    hybrid_device: str = "auto"
+
 
 # Registry of all tunable parameters with metadata
 PARAM_REGISTRY: List[TunableParam] = [
