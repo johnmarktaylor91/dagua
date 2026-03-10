@@ -54,6 +54,18 @@ class LayoutConfig:
     exact_repulsion_threshold: int = 2000
     negative_sample_k: int = 128
 
+    # Multilevel coarsening (Tier 3: N > multilevel_threshold)
+    multilevel_threshold: int = 50000
+    multilevel_min_nodes: int = 2000
+    multilevel_coarse_steps: int = 100
+    multilevel_refine_steps: int = 25
+
+    # RVS repulsion (available for very large direct-layout cases)
+    # Default: disabled (multilevel handles N > 50K more efficiently)
+    # Lower this threshold to enable RVS for N in (rvs_threshold, multilevel_threshold]
+    rvs_threshold: int = 100000
+    rvs_nn_k: int = 20
+
 
 # Registry of all tunable parameters with metadata
 PARAM_REGISTRY: List[TunableParam] = [

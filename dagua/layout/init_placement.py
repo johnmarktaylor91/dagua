@@ -134,12 +134,12 @@ def _init_positions_vectorized(
 ) -> torch.Tensor:
     """Fully vectorized initialization for large graphs.
 
-    Uses tensor operations for barycenter ordering:
-    - index_add_ for summing parent/child positions
-    - argsort within layers via composite sort key
-    - Vectorized coordinate assignment
+    For N > 10K with edges: uses spectral initialization (Fiedler vector via lobpcg)
+    for x-coordinates, which captures the graph's natural left-right structure.
 
-    No Python loops over individual nodes.
+    For N <= 10K or no edges: uses tensor-based barycenter ordering.
+
+    Y-coordinates always from layer assignments.
     """
     N = num_nodes
     layer_t = torch.tensor(layers, dtype=torch.long, device=device)
@@ -153,8 +153,136 @@ def _init_positions_vectorized(
     # Sort nodes by layer for contiguous access
     sorted_by_layer = layer_t.argsort()
 
+    # Try spectral init for large graphs — provides globally-informed x-coordinates
+    spectral_order = None
+    if N > 10000 and edge_index.numel() > 0:
+        spectral_order = _spectral_order(edge_index, N, device)
+
+    if spectral_order is not None:
+        # Use spectral ordering within each layer
+        order = _spectral_to_layer_order(spectral_order, layer_t, counts, offsets, sorted_by_layer, N, device)
+    else:
+        # Fallback: barycenter ordering
+        order = _barycenter_order(edge_index, N, layer_t, counts, offsets, sorted_by_layer, device)
+
+    # Assign coordinates based on final ordering
+    positions = torch.zeros(N, 2, device=device)
+
+    # Y-coordinates: layer * rank_sep
+    positions[:, 1] = layer_t.float() * rank_sep
+
+    # X-coordinates: within-layer position * (avg_width + node_sep), centered
+    node_w = node_sizes[:, 0].to(device)
+    avg_w = node_w.mean()
+    spacing = avg_w + node_sep
+
+    # For each layer, compute centered x positions based on order
+    # x = (order - layer_width/2) * spacing
+    layer_widths = counts.float()  # [L]
+    node_layer_width = layer_widths[layer_t]  # [N]
+    positions[:, 0] = (order - node_layer_width / 2) * spacing
+
+    return positions
+
+
+def _spectral_order(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    device: str,
+) -> Optional[torch.Tensor]:
+    """Compute Fiedler vector (2nd eigenvector of graph Laplacian) via lobpcg.
+
+    Returns [N] tensor of spectral coordinates, or None if computation fails.
+    The Fiedler vector captures the graph's natural left-right partitioning.
+    """
+    N = num_nodes
+    src = edge_index[0].to(device)
+    tgt = edge_index[1].to(device)
+
+    # Build symmetric adjacency (DAG → undirected for Laplacian)
+    all_src = torch.cat([src, tgt])
+    all_tgt = torch.cat([tgt, src])
+
+    # Degree vector
+    degree = torch.zeros(N, device=device)
+    degree.scatter_add_(0, all_src, torch.ones(all_src.shape[0], device=device))
+
+    # Build sparse Laplacian: L = D - A
+    # Using sparse COO format
+    indices = torch.stack([all_src, all_tgt])
+    values = -torch.ones(all_src.shape[0], device=device)
+
+    # Add diagonal (degree)
+    diag_idx = torch.arange(N, device=device)
+    indices = torch.cat([indices, torch.stack([diag_idx, diag_idx])], dim=1)
+    values = torch.cat([values, degree])
+
+    L = torch.sparse_coo_tensor(indices, values, (N, N)).coalesce()
+
+    # lobpcg to find 2 smallest eigenvalues (Fiedler = 2nd smallest)
+    try:
+        # Random initial vectors
+        X0 = torch.randn(N, 2, device=device)
+        eigenvalues, eigenvectors = torch.lobpcg(L, k=2, X=X0, largest=False, niter=30)
+        # Fiedler vector is the 2nd eigenvector (1st is constant)
+        fiedler = eigenvectors[:, 1]
+        return fiedler
+    except Exception:
+        # lobpcg can fail on disconnected or degenerate graphs
+        return None
+
+
+def _spectral_to_layer_order(
+    spectral: torch.Tensor,
+    layer_t: torch.Tensor,
+    counts: torch.Tensor,
+    offsets: torch.Tensor,
+    sorted_by_layer: torch.Tensor,
+    num_nodes: int,
+    device: str,
+) -> torch.Tensor:
+    """Convert spectral coordinates to within-layer ordering.
+
+    Within each layer, sort nodes by their spectral coordinate to get
+    sequential positions (0, 1, 2, ...).
+    """
+    N = num_nodes
+    order = torch.zeros(N, device=device)
+
+    # Composite sort key: layer * (N+1) + rank_in_spectral
+    # First, normalize spectral to [0, N) for stable sorting
+    s_min = spectral.min()
+    s_range = spectral.max() - s_min + 1e-8
+    spectral_norm = (spectral - s_min) / s_range * N
+
+    sort_key = layer_t.float() * (N + 1) + spectral_norm
+    global_sorted = sort_key.argsort()
+
+    # Assign sequential positions within each layer
+    sorted_layers = layer_t[global_sorted]
+    layer_starts_expanded = offsets[sorted_layers]
+    positions_in_sort = torch.arange(N, device=device)
+    within_layer_pos = (positions_in_sort - layer_starts_expanded).float()
+    order[global_sorted] = within_layer_pos
+
+    return order
+
+
+def _barycenter_order(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    layer_t: torch.Tensor,
+    counts: torch.Tensor,
+    offsets: torch.Tensor,
+    sorted_by_layer: torch.Tensor,
+    device: str,
+) -> torch.Tensor:
+    """Tensor-based barycenter ordering for medium graphs."""
+    N = num_nodes
+
     # Initialize order values: position within initial layer grouping
     order = torch.zeros(N, device=device)
+    num_layers = counts.shape[0]
     for L in range(num_layers):
         s, e = offsets[L].item(), offsets[L + 1].item()
         if e > s:
@@ -182,13 +310,10 @@ def _init_positions_vectorized(
             # Sort within each layer by new_order (composite key trick)
             sort_key = layer_t.float() * (N + 1) + new_order
             global_sorted = sort_key.argsort()
-            # Assign sequential positions within each layer
             sorted_layers = layer_t[global_sorted]
-            # Use cumcount within each layer group
             layer_starts_expanded = offsets[sorted_layers]
             positions_in_sort = torch.arange(N, device=device)
             within_layer_pos = (positions_in_sort - layer_starts_expanded).float()
-            # Write back to original node indices
             order[global_sorted] = within_layer_pos
 
             # Backward pass: each node's order = mean of children's orders
@@ -205,24 +330,7 @@ def _init_positions_vectorized(
             within_layer_pos = (positions_in_sort - layer_starts_expanded).float()
             order[global_sorted] = within_layer_pos
 
-    # Assign coordinates based on final ordering
-    positions = torch.zeros(N, 2, device=device)
-
-    # Y-coordinates: layer * rank_sep
-    positions[:, 1] = layer_t.float() * rank_sep
-
-    # X-coordinates: within-layer position * (avg_width + node_sep), centered
-    node_w = node_sizes[:, 0].to(device)
-    avg_w = node_w.mean()
-    spacing = avg_w + node_sep
-
-    # For each layer, compute centered x positions based on order
-    # x = (order - layer_width/2) * spacing
-    layer_widths = counts.float()  # [L]
-    node_layer_width = layer_widths[layer_t]  # [N]
-    positions[:, 0] = (order - node_layer_width / 2) * spacing
-
-    return positions
+    return order
 
 
 def _transpose_heuristic(

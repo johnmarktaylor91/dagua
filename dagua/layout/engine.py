@@ -3,7 +3,13 @@
 Takes a DaguaGraph and LayoutConfig, returns [N, 2] position tensor.
 Headless: operates on tensors extracted from the graph.
 
-Scaling strategy:
+Scaling strategy (tiered):
+- Tier 0 (N < 500): exact O(N^2) repulsion, full overlap check
+- Tier 1 (500-5K): scatter sampling repulsion, layer-local overlap
+- Tier 2 (5K-50K): RVS repulsion, reduced passes, adaptive batching
+- Tier 3 (N > 50K): multilevel coarsening V-cycle
+
+Cross-cutting:
 - Pre-compute LayerIndex once, pass to all layer-aware functions
 - Stochastic edge batching for O(batch) instead of O(E) per step
 - Adaptive overlap projection frequency
@@ -70,13 +76,67 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
         if device == "cuda":
             torch.cuda.manual_seed(config.seed)
 
-    # Step 1: Algorithmic initialization
-    pos = init_positions(
-        edge_index, n, node_sizes,
-        node_sep=config.node_sep,
-        rank_sep=config.rank_sep,
+    # Tier 3: Multilevel coarsening for very large graphs
+    if n > config.multilevel_threshold:
+        from dagua.layout.multilevel import multilevel_layout
+        return multilevel_layout(graph, config)
+
+    # Tier 0-2: Direct layout
+    pos = _layout_inner(
+        edge_index, n, node_sizes, config,
         device=device,
+        clusters=graph.clusters if hasattr(graph, 'clusters') else None,
     )
+
+    # Apply direction transform
+    direction = config.direction if config else graph.direction
+    pos = _apply_direction(pos, direction)
+
+    return pos
+
+
+def _layout_inner(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    config: LayoutConfig,
+    device: str = "cpu",
+    init_pos: Optional[torch.Tensor] = None,
+    clusters: Optional[dict] = None,
+) -> torch.Tensor:
+    """Headless optimization loop — operates on raw tensors.
+
+    This is the core engine, usable by both direct layout and multilevel V-cycle.
+    No Graph object dependency.
+
+    Args:
+        edge_index: [2, E] edge tensor
+        num_nodes: number of nodes
+        node_sizes: [N, 2] width/height tensor
+        config: LayoutConfig with steps, weights, etc.
+        device: target device
+        init_pos: optional [N, 2] initial positions (for multilevel warm start)
+        clusters: optional cluster dict for cluster losses
+
+    Returns:
+        [N, 2] position tensor (detached)
+    """
+    n = num_nodes
+    if n == 0:
+        return torch.zeros(0, 2, device=device)
+    if n == 1:
+        return torch.zeros(1, 2, device=device)
+
+    # Step 1: Initialization
+    if init_pos is not None:
+        pos = init_pos.to(device)
+    else:
+        pos = init_positions(
+            edge_index, n, node_sizes,
+            node_sep=config.node_sep,
+            rank_sep=config.rank_sep,
+            device=device,
+        )
 
     # Pre-compute layer structure (used by repulsion, overlap, projection, crossing)
     layer_assignments: Optional[List[int]] = None
@@ -129,7 +189,7 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
                 pos, batch_edges, x_bias=config.w_attract_x_bias
             )
 
-        # Repulsion (layer-local for large graphs, size-aware per AMD pattern)
+        # Repulsion (tiered: exact → scatter → RVS, size-aware per AMD pattern)
         if w_repel > 0:
             loss = loss + w_repel * repulsion_loss(
                 pos, n,
@@ -137,6 +197,8 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
                 sample_k=config.negative_sample_k,
                 layer_index=layer_index,
                 node_sizes=node_sizes,
+                rvs_threshold=config.rvs_threshold,
+                rvs_nn_k=config.rvs_nn_k,
             )
 
         # Overlap avoidance (layer-local for large graphs)
@@ -146,12 +208,12 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
             )
 
         # Clustering
-        if config.w_cluster > 0 and graph.clusters:
+        if config.w_cluster > 0 and clusters:
             loss = loss + config.w_cluster * cluster_compactness_loss(
-                pos, graph.clusters, device=pos.device
+                pos, clusters, device=pos.device
             )
             loss = loss + config.w_cluster * 0.5 * cluster_separation_loss(
-                pos, node_sizes, graph.clusters, device=pos.device
+                pos, node_sizes, clusters, device=pos.device
             )
 
         # Crossing minimization (ramps up over time)
@@ -200,13 +262,7 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
         layer_index=layer_index,
     )
 
-    result = pos.detach()
-
-    # Apply direction transform
-    direction = config.direction if config else graph.direction
-    result = _apply_direction(result, direction)
-
-    return result
+    return pos.detach()
 
 
 def _edge_batch_size(num_edges: int, config: LayoutConfig) -> int:
