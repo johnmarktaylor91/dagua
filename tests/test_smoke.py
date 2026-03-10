@@ -16,7 +16,13 @@ import dagua
 from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout.engine import ProgressContext, layout
-from dagua.utils import _longest_path_layering_vectorized, longest_path_layering
+from dagua.layout import multilevel as _multilevel_mod
+from dagua.layout.multilevel import coarsen_once, _coarsen_once_streaming, _STREAMING_THRESHOLD
+from dagua.utils import (
+    _longest_path_layering_vectorized,
+    _STREAMING_NODE_THRESHOLD,
+    longest_path_layering,
+)
 
 
 @pytest.mark.smoke
@@ -197,3 +203,155 @@ class TestMultilevelVerbose:
 
         assert pos.shape == (n, 2)
         assert torch.isfinite(pos).all(), "Positions contain NaN or Inf"
+
+
+def _make_layered_dag(n_per_layer: int, n_layers: int):
+    """Create a layered DAG with edges from each layer to the next."""
+    N = n_per_layer * n_layers
+    src_list, tgt_list = [], []
+    for layer in range(n_layers - 1):
+        base_src = layer * n_per_layer
+        base_tgt = (layer + 1) * n_per_layer
+        for i in range(n_per_layer):
+            # Connect each node to 1-3 nodes in next layer
+            for offset in range(min(3, n_per_layer)):
+                tgt_node = base_tgt + (i + offset) % n_per_layer
+                src_list.append(base_src + i)
+                tgt_list.append(tgt_node)
+    edge_index = torch.tensor([src_list, tgt_list], dtype=torch.long)
+    node_sizes = torch.ones(N, 2) * 10.0
+    return edge_index, N, node_sizes
+
+
+@pytest.mark.smoke
+class TestStreamingCoarsenMatchesVectorized:
+    """Streaming coarsening produces structurally equivalent results.
+
+    The vectorized and streaming paths may produce different groupings due to
+    float32 precision loss in the composite sort key (vectorized path). Both are
+    valid coarsenings — we check structural invariants rather than exact equality.
+    """
+
+    def test_same_coarse_count(self):
+        """Both paths produce the same number of coarse nodes."""
+        edge_index, N, node_sizes = _make_layered_dag(100, 5)
+        layers = longest_path_layering(edge_index, N)
+        if isinstance(layers, list):
+            layers = torch.tensor(layers, dtype=torch.long)
+
+        result_vec = coarsen_once(edge_index, N, node_sizes, layers)
+
+        old_threshold = _multilevel_mod._STREAMING_THRESHOLD
+        try:
+            _multilevel_mod._STREAMING_THRESHOLD = 100
+            result_stream = coarsen_once(edge_index, N, node_sizes, layers)
+        finally:
+            _multilevel_mod._STREAMING_THRESHOLD = old_threshold
+
+        assert result_vec.num_nodes == result_stream.num_nodes
+
+    def test_layer_awareness_preserved(self):
+        """Streaming path never merges nodes from different layers."""
+        edge_index, N, node_sizes = _make_layered_dag(100, 5)
+        layers = longest_path_layering(edge_index, N)
+        if isinstance(layers, list):
+            layers = torch.tensor(layers, dtype=torch.long)
+
+        old_threshold = _multilevel_mod._STREAMING_THRESHOLD
+        try:
+            _multilevel_mod._STREAMING_THRESHOLD = 100
+            result = coarsen_once(edge_index, N, node_sizes, layers)
+        finally:
+            _multilevel_mod._STREAMING_THRESHOLD = old_threshold
+
+        # Every coarse group must contain nodes from exactly one layer
+        ftc = result.fine_to_coarse.tolist()
+        groups: dict = {}
+        for fine, coarse in enumerate(ftc):
+            groups.setdefault(coarse, set()).add(layers[fine].item())
+        for coarse_id, layer_set in groups.items():
+            assert len(layer_set) == 1, (
+                f"Coarse node {coarse_id} merges nodes from layers {layer_set}"
+            )
+
+    def test_group_sizes_at_most_three(self):
+        """Each coarse group merges at most 3 fine nodes (triple matching)."""
+        edge_index, N, node_sizes = _make_layered_dag(100, 5)
+        layers = longest_path_layering(edge_index, N)
+        if isinstance(layers, list):
+            layers = torch.tensor(layers, dtype=torch.long)
+
+        old_threshold = _multilevel_mod._STREAMING_THRESHOLD
+        try:
+            _multilevel_mod._STREAMING_THRESHOLD = 100
+            result = coarsen_once(edge_index, N, node_sizes, layers)
+        finally:
+            _multilevel_mod._STREAMING_THRESHOLD = old_threshold
+
+        ftc = result.fine_to_coarse.tolist()
+        from collections import Counter
+        group_sizes = Counter(ftc)
+        max_size = max(group_sizes.values())
+        assert max_size <= 3, f"Largest coarse group has {max_size} nodes, expected <= 3"
+
+    def test_no_self_loops_in_coarse_edges(self):
+        """Coarse edge index should have no self-loops."""
+        edge_index, N, node_sizes = _make_layered_dag(100, 5)
+        layers = longest_path_layering(edge_index, N)
+        if isinstance(layers, list):
+            layers = torch.tensor(layers, dtype=torch.long)
+
+        old_threshold = _multilevel_mod._STREAMING_THRESHOLD
+        try:
+            _multilevel_mod._STREAMING_THRESHOLD = 100
+            result = coarsen_once(edge_index, N, node_sizes, layers)
+        finally:
+            _multilevel_mod._STREAMING_THRESHOLD = old_threshold
+
+        if result.edge_index.numel() > 0:
+            src, tgt = result.edge_index[0], result.edge_index[1]
+            assert (src != tgt).all(), "Coarse edges contain self-loops"
+
+    def test_reduction_ratio(self):
+        """Streaming path achieves ~67% reduction (triple matching)."""
+        edge_index, N, node_sizes = _make_layered_dag(100, 5)
+        layers = longest_path_layering(edge_index, N)
+        if isinstance(layers, list):
+            layers = torch.tensor(layers, dtype=torch.long)
+
+        old_threshold = _multilevel_mod._STREAMING_THRESHOLD
+        try:
+            _multilevel_mod._STREAMING_THRESHOLD = 100
+            result = coarsen_once(edge_index, N, node_sizes, layers)
+        finally:
+            _multilevel_mod._STREAMING_THRESHOLD = old_threshold
+
+        ratio = result.num_nodes / N
+        # Triple matching: ceil(N/3) coarse nodes → ratio ~0.34
+        assert 0.3 < ratio < 0.5, f"Reduction ratio {ratio:.3f} outside expected range"
+
+
+@pytest.mark.smoke
+class TestChunkedLayeringMatchesOriginal:
+    """Chunked layering produces identical layer assignments."""
+
+    def test_layer_assignments_match(self, monkeypatch):
+        """Layer assignments should be identical with chunked vs full processing."""
+        import dagua.utils as _utils_mod
+
+        edge_index, N, _ = _make_layered_dag(100, 5)
+
+        # Run with full (non-chunked) path
+        original_threshold = _utils_mod._STREAMING_NODE_THRESHOLD
+        try:
+            _utils_mod._STREAMING_NODE_THRESHOLD = N + 1  # force non-chunked
+            layers_full = _longest_path_layering_vectorized(edge_index, N)
+
+            _utils_mod._STREAMING_NODE_THRESHOLD = 100  # force chunked
+            layers_chunked = _longest_path_layering_vectorized(edge_index, N)
+        finally:
+            _utils_mod._STREAMING_NODE_THRESHOLD = original_threshold
+
+        assert torch.equal(layers_full, layers_chunked), (
+            f"Layer assignments differ: max diff = {(layers_full - layers_chunked).abs().max().item()}"
+        )

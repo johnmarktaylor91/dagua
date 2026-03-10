@@ -21,7 +21,9 @@ from typing import List, Optional, Tuple, Union
 import torch
 
 from dagua.config import LayoutConfig
-from dagua.utils import _vram_fits, longest_path_layering
+from dagua.utils import _EDGE_CHUNK, _vram_fits, longest_path_layering
+
+_STREAMING_THRESHOLD = 100_000_000
 
 
 @dataclass
@@ -33,6 +35,110 @@ class CoarseLevel:
     fine_to_coarse: torch.Tensor   # [N_fine] maps fine node → coarse node
     num_fine: int                  # N at the finer level
     fine_layer_assignments: Optional[torch.Tensor] = None  # [N_fine] layer assignments for fine level
+
+
+def _coarsen_once_streaming(
+    edge_index: torch.Tensor,
+    N: int,
+    node_sizes: torch.Tensor,
+    layers: torch.Tensor,
+    num_layers: int,
+    layer_counts: torch.Tensor,
+    layer_offsets: torch.Tensor,
+    device: str = "cpu",
+) -> CoarseLevel:
+    """Streaming coarsening for 1B+ node graphs.
+
+    Processes edges in chunks and matches nodes per-layer to avoid
+    materializing full [N]- or [E]-sized temporaries. Peak memory ~60 GB
+    at 1B nodes (vs ~100 GB for the vectorized path).
+    """
+    E = edge_index.shape[1] if edge_index.numel() > 0 else 0
+
+    # --- Phase A: Per-layer node matching ---
+    # Compute match_score via chunked scatter_add (avoids [E]-sized ones)
+    match_score = torch.zeros(N, dtype=torch.float32, device=device)
+    if E > 0:
+        src_all, tgt_all = edge_index[0], edge_index[1]
+        in_deg = torch.zeros(N, device=device)
+        out_deg = torch.zeros(N, device=device)
+        for start in range(0, E, _EDGE_CHUNK):
+            end = min(start + _EDGE_CHUNK, E)
+            in_deg.scatter_add_(0, tgt_all[start:end], torch.ones(end - start, device=device))
+            out_deg.scatter_add_(0, src_all[start:end], torch.ones(end - start, device=device))
+        match_score = in_deg + out_deg
+        del in_deg, out_deg
+
+    # Sort nodes by layer once (8 GB at 1B nodes)
+    sorted_by_layer = layers.argsort()
+
+    # Coarse node counts per layer
+    coarse_per_layer = (layer_counts + 2) // 3
+    coarse_offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=device)
+    coarse_offsets[1:] = coarse_per_layer.cumsum(0)
+    N_coarse = coarse_offsets[-1].item()
+
+    # Assign coarse IDs per-layer (avoids global sort_key + argsort)
+    fine_to_coarse = torch.empty(N, dtype=torch.long, device=device)
+    for layer_idx in range(num_layers):
+        lo = layer_offsets[layer_idx].item()
+        hi = layer_offsets[layer_idx + 1].item()
+        if lo == hi:
+            continue
+        layer_nodes = sorted_by_layer[lo:hi]  # view into sorted array
+        local_order = match_score[layer_nodes].argsort(descending=True)
+        n_layer = hi - lo
+        coarse_base = coarse_offsets[layer_idx].item()
+        fine_to_coarse[layer_nodes[local_order]] = (
+            torch.arange(n_layer, dtype=torch.long, device=device) // 3 + coarse_base
+        )
+
+    del sorted_by_layer, match_score
+
+    # --- Phase B: Coarse node sizes ---
+    coarse_sizes = torch.zeros(N_coarse, 2, device=device)
+    coarse_sizes.scatter_reduce_(
+        0, fine_to_coarse.unsqueeze(1).expand(-1, 2),
+        node_sizes, reduce="amax",
+    )
+
+    # --- Phase C: Chunked edge dedup ---
+    if E > 0:
+        unique_chunks = []
+        for start in range(0, E, _EDGE_CHUNK):
+            end = min(start + _EDGE_CHUNK, E)
+            chunk_src = fine_to_coarse[edge_index[0, start:end]]
+            chunk_tgt = fine_to_coarse[edge_index[1, start:end]]
+            not_self = chunk_src != chunk_tgt
+            chunk_src = chunk_src[not_self]
+            chunk_tgt = chunk_tgt[not_self]
+            if chunk_src.numel() > 0:
+                chunk_hash = chunk_src * N_coarse + chunk_tgt
+                unique_chunks.append(chunk_hash.unique())
+                del chunk_hash
+            del chunk_src, chunk_tgt
+
+        if unique_chunks:
+            all_hashes = torch.cat(unique_chunks)
+            del unique_chunks
+            final = all_hashes.unique()
+            del all_hashes
+            unique_src = final // N_coarse
+            unique_tgt = final % N_coarse
+            coarse_edge_index = torch.stack([unique_src, unique_tgt])
+            del final
+        else:
+            coarse_edge_index = torch.zeros(2, 0, dtype=torch.long, device=device)
+    else:
+        coarse_edge_index = torch.zeros(2, 0, dtype=torch.long, device=device)
+
+    return CoarseLevel(
+        edge_index=coarse_edge_index,
+        node_sizes=coarse_sizes,
+        num_nodes=N_coarse,
+        fine_to_coarse=fine_to_coarse,
+        num_fine=N,
+    )
 
 
 def coarsen_once(
@@ -47,14 +153,8 @@ def coarsen_once(
     Within each layer, greedily pair adjacent nodes. Matched pairs merge
     into a single coarse node. Preserves DAG layer structure.
 
-    Fully vectorized — no Python loops over nodes.
-
-    TODO(perf): Streaming coarsening for 1B+ nodes. Current approach holds the
-    full edge_hash + argsort in memory (~19GB at 100M). Could process per-layer
-    instead of globally (coarsening is already layer-aware): iterate layers,
-    assign coarse IDs per-layer, chunk edge dedup in ~10M batches. Would drop
-    peak memory from O(N+E) to O(max_layer_size + chunk_size), enabling ~1B
-    nodes on 128GB RAM. Estimated effort: 2-3 hours.
+    Fully vectorized — no Python loops over nodes. For N > 100M, dispatches
+    to streaming path that processes edges in chunks.
     """
     N = num_nodes
     if isinstance(layer_assignments, list):
@@ -67,6 +167,13 @@ def coarsen_once(
     layer_counts = torch.bincount(layers, minlength=num_layers)
     layer_offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=device)
     layer_offsets[1:] = layer_counts.cumsum(0)
+
+    # Dispatch to streaming path for very large graphs
+    if N > _STREAMING_THRESHOLD:
+        return _coarsen_once_streaming(
+            edge_index, N, node_sizes, layers, num_layers,
+            layer_counts, layer_offsets, device,
+        )
 
     # Build adjacency for matching priority
     match_score = torch.zeros(N, dtype=torch.float32, device=device)
