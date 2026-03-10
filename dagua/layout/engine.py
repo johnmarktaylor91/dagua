@@ -182,7 +182,11 @@ def _layout_inner(
         w_dag = config.w_dag * (1 - 0.5 * t)
         w_repel = config.w_repel * (1 + 2 * t)
         w_overlap = config.w_overlap * (1 + t)
-        w_crossing = config.w_crossing * t
+        # Crossings: ramp to full by 30% of steps, then hold
+        t_cross = min(t / 0.3, 1.0)
+        w_crossing = config.w_crossing * t_cross
+        # Straightness: grows stronger over time
+        w_straightness = config.w_straightness * (1 + 0.5 * t)
 
         loss = torch.tensor(0.0, device=device)
 
@@ -223,17 +227,17 @@ def _layout_inner(
                 pos, node_sizes, clusters, device=pos.device
             )
 
-        # Crossing minimization (ramps up over time)
+        # Crossing minimization (ramps up early, held)
         if w_crossing > 0:
-            alpha = 1.0 + 9.0 * t
+            alpha = 3.0 + 7.0 * t_cross
             loss = loss + w_crossing * crossing_loss(
                 pos, batch_edges, alpha=alpha,
                 layer_assignments=layer_assignments,
             )
 
-        # Edge straightness
-        if config.w_straightness > 0:
-            loss = loss + config.w_straightness * edge_straightness_loss(pos, batch_edges)
+        # Edge straightness (annealed: grows stronger over time)
+        if w_straightness > 0:
+            loss = loss + w_straightness * edge_straightness_loss(pos, batch_edges)
 
         # Edge length variance
         if config.w_length_variance > 0:

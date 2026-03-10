@@ -62,46 +62,59 @@ def init_positions(
         node_order = {n: float(i) for i, n in enumerate(range(num_nodes))}
         sorted_layers = sorted(layer_groups.keys())
 
-        num_passes = min(max(10, num_nodes // 10), 30)
+        num_passes = min(max(15, num_nodes // 5), 40)
 
         for _pass in range(num_passes):
-            # Forward pass: order by barycenter of parents
+            # Alternate mean and median heuristics (median is more robust)
+            use_median = (_pass % 2 == 1)
+
+            # Forward pass: order by center of parents
             for layer_idx in sorted_layers[1:]:
                 nodes = layer_groups[layer_idx]
-                barycenters = []
+                centers = []
                 for node in nodes:
                     parents = parents_of[node]
                     if parents:
-                        avg_x = sum(node_order[p] for p in parents) / len(parents)
+                        vals = sorted(node_order[p] for p in parents)
+                        if use_median:
+                            mid = len(vals) // 2
+                            center = vals[mid] if len(vals) % 2 == 1 else (vals[mid - 1] + vals[mid]) / 2
+                        else:
+                            center = sum(vals) / len(vals)
                     else:
-                        avg_x = node_order[node]
-                    barycenters.append((avg_x, node))
-                barycenters.sort()
-                layer_groups[layer_idx] = [n for _, n in barycenters]
+                        center = node_order[node]
+                    centers.append((center, node))
+                centers.sort()
+                layer_groups[layer_idx] = [n for _, n in centers]
 
             _update_node_order(node_order, layer_groups, sorted_layers)
 
-            # Backward pass: order by barycenter of children
+            # Backward pass: order by center of children
             for layer_idx in reversed(sorted_layers[:-1]):
                 nodes = layer_groups[layer_idx]
-                barycenters = []
+                centers = []
                 for node in nodes:
                     kids = children_of[node]
                     if kids:
-                        avg_x = sum(node_order[k] for k in kids) / len(kids)
+                        vals = sorted(node_order[k] for k in kids)
+                        if use_median:
+                            mid = len(vals) // 2
+                            center = vals[mid] if len(vals) % 2 == 1 else (vals[mid - 1] + vals[mid]) / 2
+                        else:
+                            center = sum(vals) / len(vals)
                     else:
-                        avg_x = node_order[node]
-                    barycenters.append((avg_x, node))
-                barycenters.sort()
-                layer_groups[layer_idx] = [n for _, n in barycenters]
+                        center = node_order[node]
+                    centers.append((center, node))
+                centers.sort()
+                layer_groups[layer_idx] = [n for _, n in centers]
 
             _update_node_order(node_order, layer_groups, sorted_layers)
 
-        # Transpose heuristic — only for small graphs where the quadratic cost is manageable
+        # Transpose heuristic — swap adjacent nodes if it reduces crossings
         if num_nodes <= 500:
-            _transpose_heuristic(layer_groups, sorted_layers, children_of, parents_of, num_passes=5)
-        elif num_nodes <= 1000:
-            _transpose_heuristic(layer_groups, sorted_layers, children_of, parents_of, num_passes=2)
+            _transpose_heuristic(layer_groups, sorted_layers, children_of, parents_of, num_passes=8)
+        elif num_nodes <= 2000:
+            _transpose_heuristic(layer_groups, sorted_layers, children_of, parents_of, num_passes=3)
 
     # Step 4: Assign coordinates
     positions = torch.zeros(num_nodes, 2, device=device)
@@ -299,7 +312,7 @@ def _barycenter_order(
         out_degree.scatter_add_(0, src, torch.ones(src.shape[0], device=device))
 
         # Barycenter passes using tensor scatter operations
-        num_passes = 5  # fewer passes but tensor-based = much faster
+        num_passes = 12  # more passes for better initial ordering
         for _pass in range(num_passes):
             # Forward pass: each node's order = mean of parents' orders
             parent_sum = torch.zeros(N, device=device)

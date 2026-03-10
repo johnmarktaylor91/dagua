@@ -45,65 +45,68 @@ def coarsen_once(
 
     Within each layer, greedily pair adjacent nodes. Matched pairs merge
     into a single coarse node. Preserves DAG layer structure.
+
+    Fully vectorized — no Python loops over nodes.
     """
     N = num_nodes
-    layers = torch.tensor(layer_assignments, dtype=torch.long, device=device)
+    if isinstance(layer_assignments, list):
+        layers = torch.tensor(layer_assignments, dtype=torch.long, device=device)
+    else:
+        layers = layer_assignments.to(device)
     num_layers = int(layers.max().item()) + 1 if N > 0 else 0
 
     # Sort nodes by layer for contiguous access
-    sorted_by_layer = layers.argsort()
     layer_counts = torch.bincount(layers, minlength=num_layers)
     layer_offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=device)
     layer_offsets[1:] = layer_counts.cumsum(0)
 
     # Build adjacency for matching priority
-    # Prefer to merge nodes that share parents/children (heavier "virtual edge")
     match_score = torch.zeros(N, dtype=torch.float32, device=device)
     if edge_index.numel() > 0:
         src, tgt = edge_index[0], edge_index[1]
-        # Nodes with more edges are higher priority for matching
         in_deg = torch.zeros(N, device=device)
         out_deg = torch.zeros(N, device=device)
         in_deg.scatter_add_(0, tgt, torch.ones(tgt.shape[0], device=device))
         out_deg.scatter_add_(0, src, torch.ones(src.shape[0], device=device))
         match_score = in_deg + out_deg
 
-    # Greedy matching within each layer
-    fine_to_coarse = torch.full((N,), -1, dtype=torch.long, device=device)
-    coarse_id = 0
+    # Vectorized greedy matching: sort by (layer, -match_score) globally,
+    # then pair consecutive same-layer nodes.
+    # Composite sort key: layer dominates, match_score breaks ties (descending)
+    score_norm = match_score / (match_score.max() + 1e-8)  # [0, 1)
+    sort_key = layers.float() * 2.0 + (1.0 - score_norm)  # layer first, then descending score
+    global_order = sort_key.argsort()  # [N] — sorted by (layer, -score)
 
-    for layer in range(num_layers):
-        start = layer_offsets[layer].item()
-        end = layer_offsets[layer + 1].item()
-        layer_nodes = sorted_by_layer[start:end]
-        m = layer_nodes.shape[0]
+    # Within each layer group in global_order, consecutive pairs get same coarse ID.
+    # Compute within-layer position for each node in sorted order.
+    sorted_layers = layers[global_order]  # [N]
 
-        if m == 0:
-            continue
+    # Within-layer index: 0, 1, 2, ... for each layer
+    # Use cumsum trick: positions within layer = global_position - layer_start
+    # We can compute this from the sorted layer assignments
+    layer_of_sorted = sorted_layers
+    layer_start_of_sorted = layer_offsets[layer_of_sorted]  # [N]
+    global_pos = torch.arange(N, dtype=torch.long, device=device)
+    within_layer_pos = global_pos - layer_start_of_sorted  # [N]
 
-        # Sort by match_score descending for greedy priority
-        scores = match_score[layer_nodes]
-        order = scores.argsort(descending=True)
-        ordered_nodes = layer_nodes[order]
+    # Pair index within layer: pos // 2 gives pair number
+    pair_within_layer = within_layer_pos // 2  # [N]
 
-        # Greedy pairing: take consecutive pairs
-        matched = torch.zeros(m, dtype=torch.bool, device=device)
-        for i in range(0, m - 1, 2):
-            node_a = ordered_nodes[i].item()
-            node_b = ordered_nodes[i + 1].item()
-            fine_to_coarse[node_a] = coarse_id
-            fine_to_coarse[node_b] = coarse_id
-            matched[i] = True
-            matched[i + 1] = True
-            coarse_id += 1
+    # Coarse ID = cumulative pairs up to this layer + pair_within_layer
+    # Number of coarse nodes per layer: ceil(layer_count / 2)
+    coarse_per_layer = (layer_counts + 1) // 2  # [L]
+    coarse_offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=device)
+    coarse_offsets[1:] = coarse_per_layer.cumsum(0)
 
-        # Singleton (odd node out)
-        if m % 2 == 1:
-            node = ordered_nodes[-1].item()
-            fine_to_coarse[node] = coarse_id
-            coarse_id += 1
+    # Each node's coarse ID
+    coarse_base = coarse_offsets[layer_of_sorted]  # [N]
+    coarse_ids_sorted = coarse_base + pair_within_layer  # [N]
 
-    N_coarse = coarse_id
+    # Map back to original node order
+    fine_to_coarse = torch.empty(N, dtype=torch.long, device=device)
+    fine_to_coarse[global_order] = coarse_ids_sorted
+
+    N_coarse = coarse_offsets[-1].item()
 
     # Build coarse node sizes (max of merged pair for each dimension)
     coarse_sizes = torch.zeros(N_coarse, 2, device=device)
@@ -173,7 +176,7 @@ def build_hierarchy(
 
         level = coarsen_once(
             current_ei, current_n, current_sizes,
-            layer_assignments, device=device,
+            layer_assignments=layer_assignments, device=device,
         )
         levels.append(level)
 
