@@ -23,6 +23,58 @@ import torch
 from dagua.edges import BezierCurve
 
 
+def _build_cluster_data_for_edge_opt(graph, positions, node_sizes):
+    """Pre-compute cluster bboxes and node membership for edge optimization.
+
+    Returns:
+        cluster_bboxes: [C, 4] tensor (x_min, y_min, x_max, y_max) per cluster
+        node_cluster_mask: [N, C] bool tensor — True if node i is in cluster c
+        None, None if no clusters
+    """
+    if graph is None or not hasattr(graph, 'clusters') or not graph.clusters:
+        return None, None
+
+    from dagua.utils import collect_cluster_leaves
+
+    pos = positions.detach().cpu()
+    sizes = node_sizes.detach().cpu()
+    N = pos.shape[0]
+    cluster_names = sorted(graph.clusters.keys())
+    C = len(cluster_names)
+    if C == 0:
+        return None, None
+
+    bboxes = torch.zeros(C, 4)  # [C, 4]
+    node_mask = torch.zeros(N, C, dtype=torch.bool)
+
+    for ci, cname in enumerate(cluster_names):
+        members = graph.clusters[cname]
+        if isinstance(members, dict):
+            members = collect_cluster_leaves(members)
+        if not members:
+            continue
+        valid = [m for m in members if 0 <= m < N]
+        if not valid:
+            continue
+
+        idx = torch.tensor(valid, dtype=torch.long)
+        cstyle = graph.get_style_for_cluster(cname)
+        pad = cstyle.padding
+
+        member_pos = pos[idx]
+        member_sizes = sizes[idx]
+        half_sizes = member_sizes / 2
+
+        bboxes[ci, 0] = (member_pos[:, 0] - half_sizes[:, 0]).min() - pad
+        bboxes[ci, 1] = (member_pos[:, 1] - half_sizes[:, 1]).min() - pad
+        bboxes[ci, 2] = (member_pos[:, 0] + half_sizes[:, 0]).max() + pad
+        bboxes[ci, 3] = (member_pos[:, 1] + half_sizes[:, 1]).max() + pad
+
+        node_mask[idx, ci] = True
+
+    return bboxes, node_mask
+
+
 def optimize_edges(
     curves: List[BezierCurve],
     positions: torch.Tensor,
@@ -82,6 +134,12 @@ def optimize_edges(
     w_angular = getattr(config, "w_edge_angular_res", 2.0)
     w_curv_consistency = getattr(config, "w_edge_curvature_consistency", 1.0)
     w_curv_penalty = getattr(config, "w_edge_curvature_penalty", 0.5)
+    w_cluster_crossing = getattr(config, "w_edge_cluster_crossing", 8.0)
+
+    # Pre-compute cluster data for edge-cluster crossing loss
+    cluster_bboxes, node_cluster_mask = _build_cluster_data_for_edge_opt(
+        graph, positions, node_sizes
+    )
 
     # Pre-compute incident edge indices per node for angular resolution
     ei = edge_index.detach().cpu()
@@ -128,6 +186,12 @@ def optimize_edges(
         if w_curv_penalty > 0:
             total_loss = total_loss + w_curv_penalty * _curvature_penalty_loss(
                 endpoints, cp, t_samples
+            )
+
+        # 6. Edge-cluster crossing loss
+        if w_cluster_crossing > 0 and cluster_bboxes is not None:
+            total_loss = total_loss + w_cluster_crossing * _edge_cluster_crossing_loss(
+                points, cluster_bboxes, node_cluster_mask, src_list, tgt_list, E
             )
 
         if total_loss.requires_grad:
@@ -445,3 +509,66 @@ def _curvature_penalty_loss(
 
     kappa = cross.abs() / d1_norm**3
     return (kappa**2).mean()
+
+
+def _edge_cluster_crossing_loss(
+    points: torch.Tensor,
+    cluster_bboxes: torch.Tensor,
+    node_cluster_mask: torch.Tensor,
+    src_list: list,
+    tgt_list: list,
+    E: int,
+) -> torch.Tensor:
+    """Penalize edge sample points inside foreign cluster bboxes.
+
+    A cluster is "foreign" to an edge if neither the source nor target node
+    belongs to that cluster. Uses soft proximity: sigmoid penetration depth.
+
+    Args:
+        points: [E, T, 2] sampled bezier points
+        cluster_bboxes: [C, 4] (x_min, y_min, x_max, y_max) per cluster
+        node_cluster_mask: [N, C] bool — True if node i is in cluster c
+        src_list: source node indices per edge
+        tgt_list: target node indices per edge
+        E: number of edges
+    """
+    C = cluster_bboxes.shape[0]
+    T = points.shape[1]
+
+    # Build foreign mask: [E, C] — True if neither src nor tgt belongs to cluster c
+    src_t = torch.tensor(src_list[:E], dtype=torch.long)
+    tgt_t = torch.tensor(tgt_list[:E], dtype=torch.long)
+    src_in = node_cluster_mask[src_t]  # [E, C]
+    tgt_in = node_cluster_mask[tgt_t]  # [E, C]
+    foreign = ~(src_in | tgt_in)  # [E, C]
+
+    if not foreign.any():
+        return torch.tensor(0.0)
+
+    # For each sample point, compute penetration into each cluster bbox
+    # points: [E, T, 2], cluster_bboxes: [C, 4]
+    px = points[:, :, 0]  # [E, T]
+    py = points[:, :, 1]  # [E, T]
+
+    # Expand for broadcasting: [E, T, C]
+    bx_min = cluster_bboxes[:, 0].unsqueeze(0).unsqueeze(0)  # [1, 1, C]
+    by_min = cluster_bboxes[:, 1].unsqueeze(0).unsqueeze(0)
+    bx_max = cluster_bboxes[:, 2].unsqueeze(0).unsqueeze(0)
+    by_max = cluster_bboxes[:, 3].unsqueeze(0).unsqueeze(0)
+
+    px_exp = px.unsqueeze(2)  # [E, T, 1]
+    py_exp = py.unsqueeze(2)  # [E, T, 1]
+
+    # Penetration depth per axis (positive = inside bbox)
+    pen_x = torch.relu(px_exp - bx_min) * torch.relu(bx_max - px_exp)  # [E, T, C]
+    pen_y = torch.relu(py_exp - by_min) * torch.relu(by_max - py_exp)
+
+    # Inside bbox when both pen_x > 0 and pen_y > 0
+    # Use soft product as penetration measure
+    penetration = pen_x * pen_y  # [E, T, C]
+
+    # Mask by foreign: only penalize foreign clusters
+    foreign_exp = foreign.unsqueeze(1).expand(-1, T, -1)  # [E, T, C]
+    masked = penetration * foreign_exp.float()
+
+    return masked.mean()

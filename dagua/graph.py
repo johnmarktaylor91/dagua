@@ -46,6 +46,7 @@ class DaguaGraph:
     clusters: Dict[str, Any] = field(default_factory=dict)
     cluster_styles: Dict[str, ClusterStyle] = field(default_factory=dict)
     cluster_labels: Dict[str, str] = field(default_factory=dict)
+    cluster_parents: Dict[str, Optional[str]] = field(default_factory=dict)
 
     # Layout direction
     direction: str = "TB"  # TB, BT, LR, RL
@@ -147,9 +148,38 @@ class DaguaGraph:
         members: Union[List[Any], Dict],
         style: Optional[ClusterStyle] = None,
         label: Optional[str] = None,
+        parent: Optional[str] = None,
     ) -> None:
-        """Add a cluster. Members can be node IDs/indices or nested dict."""
-        if isinstance(members, list):
+        """Add a cluster. Members can be node IDs/indices or nested dict.
+
+        Args:
+            name: Cluster name.
+            members: List of node IDs/indices, or dict-of-dicts for nesting.
+            style: Optional ClusterStyle override.
+            label: Optional display label.
+            parent: Optional parent cluster name (for hierarchy).
+        """
+        if isinstance(members, dict):
+            # Dict-of-dicts: keys are child cluster names, values are member lists or nested dicts.
+            # Recursively flatten to get leaf indices, and auto-populate cluster_parents.
+            from dagua.utils import collect_cluster_leaves
+            all_indices = collect_cluster_leaves(members)
+            self.clusters[name] = all_indices
+            # Auto-create child clusters from dict keys
+            for child_name, child_members in members.items():
+                if isinstance(child_members, dict):
+                    self.add_cluster(child_name, child_members, parent=name)
+                else:
+                    # child_members is a list of node IDs
+                    indices = []
+                    for m in child_members:
+                        if isinstance(m, int) and m < self.num_nodes:
+                            indices.append(m)
+                        elif m in self._id_to_index:
+                            indices.append(self._id_to_index[m])
+                    self.clusters[child_name] = indices
+                    self.cluster_parents[child_name] = name
+        else:
             indices = []
             for m in members:
                 if isinstance(m, int) and m < self.num_nodes:
@@ -157,8 +187,18 @@ class DaguaGraph:
                 elif m in self._id_to_index:
                     indices.append(self._id_to_index[m])
             self.clusters[name] = indices
-        else:
-            self.clusters[name] = members
+
+        if parent is not None:
+            # Cycle detection: parent can't be a descendant of name
+            cur = parent
+            while cur is not None:
+                if cur == name:
+                    raise ValueError(
+                        f"Cluster cycle detected: '{name}' cannot have "
+                        f"'{parent}' as parent (it is a descendant)"
+                    )
+                cur = self.cluster_parents.get(cur)
+            self.cluster_parents[name] = parent
 
         if style is not None:
             self.cluster_styles[name] = style
@@ -292,6 +332,63 @@ class DaguaGraph:
         if name in self.cluster_styles:
             return self.cluster_styles[name]
         return self._theme.cluster_style
+
+    # --- Cluster hierarchy methods ---
+
+    def cluster_depth(self, name: str) -> int:
+        """Walk parent chain, return number of hops (0 = root-level cluster)."""
+        d, cur = 0, name
+        while self.cluster_parents.get(cur) is not None:
+            cur = self.cluster_parents[cur]
+            d += 1
+        return d
+
+    def cluster_children(self, name: str) -> List[str]:
+        """Return direct children of a cluster."""
+        return [c for c, p in self.cluster_parents.items() if p == name]
+
+    def leaf_cluster_members(self, name: str) -> List[int]:
+        """Recursively collect all leaf node indices (own members + children's members)."""
+        from dagua.utils import collect_cluster_leaves
+        members = self.clusters.get(name, [])
+        if isinstance(members, dict):
+            result = set(collect_cluster_leaves(members))
+        else:
+            result = set(members)
+        for child in self.cluster_children(name):
+            result.update(self.leaf_cluster_members(child))
+        return sorted(result)
+
+    @property
+    def max_cluster_depth(self) -> int:
+        """Maximum depth across all clusters (0 if no clusters or no hierarchy)."""
+        if not self.clusters:
+            return 0
+        return max(self.cluster_depth(name) for name in self.clusters)
+
+    @property
+    def cluster_ids(self) -> Optional[torch.Tensor]:
+        """Per-node [N] LongTensor, each node assigned to its deepest cluster (-1 = unassigned).
+
+        Cluster indices correspond to the sorted order of cluster names.
+        """
+        if not self.clusters or self.num_nodes == 0:
+            return None
+        from dagua.utils import collect_cluster_leaves
+        ids = torch.full((self.num_nodes,), -1, dtype=torch.long)
+        node_depth = [-1] * self.num_nodes  # track deepest assignment per node
+        cluster_name_list = sorted(self.clusters.keys())
+        name_to_idx = {n: i for i, n in enumerate(cluster_name_list)}
+        for name in cluster_name_list:
+            members = self.clusters[name]
+            if isinstance(members, dict):
+                members = collect_cluster_leaves(members)
+            depth = self.cluster_depth(name)
+            for node_idx in members:
+                if 0 <= node_idx < self.num_nodes and depth > node_depth[node_idx]:
+                    ids[node_idx] = name_to_idx[name]
+                    node_depth[node_idx] = depth
+        return ids
 
     @property
     def graph_style(self) -> GraphStyle:

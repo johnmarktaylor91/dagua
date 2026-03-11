@@ -32,6 +32,7 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from dagua.config import LayoutConfig
 from dagua.layout.constraints import (
     cluster_compactness_loss,
+    cluster_containment_loss,
     cluster_separation_loss,
     crossing_loss,
     dag_ordering_loss,
@@ -107,6 +108,7 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
             edge_index, n, node_sizes, config,
             device=device,
             clusters=graph.clusters if hasattr(graph, 'clusters') else None,
+            cluster_parents=graph.cluster_parents if hasattr(graph, 'cluster_parents') else None,
             progress_context=ProgressContext(),
         )
 
@@ -127,6 +129,7 @@ def _layout_inner(
     device: str = "cpu",
     init_pos: Optional[torch.Tensor] = None,
     clusters: Optional[dict] = None,
+    cluster_parents: Optional[dict] = None,
     layer_assignments: Optional[torch.Tensor] = None,
     progress_context: Optional[ProgressContext] = None,
 ) -> torch.Tensor:
@@ -143,6 +146,7 @@ def _layout_inner(
         device: target device
         init_pos: optional [N, 2] initial positions (for multilevel warm start)
         clusters: optional cluster dict for cluster losses
+        cluster_parents: optional parent mapping for cluster hierarchy
         layer_assignments: optional pre-computed layer assignments tensor (skips recomputation)
         progress_context: optional context for formatting progress messages
 
@@ -287,7 +291,12 @@ def _layout_inner(
         loss_fns.append(("w_cluster", lambda p, ns, li: cluster_compactness_loss(
             p, clusters, device=p.device), False, False))
         loss_fns.append(("w_cluster_sep", lambda p, ns, li: cluster_separation_loss(
-            p, ns, clusters, device=p.device), False, False))
+            p, ns, clusters, device=p.device,
+            cluster_parents=cluster_parents), False, False))
+
+    if config.w_cluster_contain > 0 and clusters and cluster_parents:
+        loss_fns.append(("w_cluster_contain", lambda p, ns, li: cluster_containment_loss(
+            p, ns, clusters, cluster_parents, device=p.device), False, False))
 
     if config.w_crossing > 0:
         # alpha is annealed per-step, captured via mutable ref
@@ -371,6 +380,7 @@ def _layout_inner(
             "w_overlap": w_overlap,
             "w_cluster": config.w_cluster,
             "w_cluster_sep": config.w_cluster * 0.5,
+            "w_cluster_contain": config.w_cluster_contain,
             "w_crossing": w_crossing,
             "w_straightness": w_straightness,
             "w_length_variance": config.w_length_variance,

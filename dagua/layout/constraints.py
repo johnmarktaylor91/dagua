@@ -869,6 +869,16 @@ def _crossing_loss_layered(
 # ─── Cluster losses ─────────────────────────────────────────────────────────
 
 
+def _resolve_cluster_members(members, device):
+    """Resolve cluster members to a flat list of indices, handling nested dicts."""
+    from dagua.utils import collect_cluster_leaves
+    if isinstance(members, dict):
+        members = collect_cluster_leaves(members)
+    if isinstance(members, list) and len(members) > 0:
+        return torch.tensor(members, device=device, dtype=torch.long)
+    return None
+
+
 def cluster_compactness_loss(
     pos: torch.Tensor,
     clusters: dict,
@@ -878,8 +888,8 @@ def cluster_compactness_loss(
     total = torch.tensor(0.0, device=device)
     count = 0
     for name, members in clusters.items():
-        if isinstance(members, list) and len(members) > 1:
-            idx = torch.tensor(members, device=device, dtype=torch.long)
+        idx = _resolve_cluster_members(members, device)
+        if idx is not None and idx.shape[0] > 1:
             centroid = pos[idx].mean(dim=0, keepdim=True)
             total = total + ((pos[idx] - centroid) ** 2).sum(dim=1).mean()
             count += 1
@@ -895,23 +905,36 @@ def cluster_separation_loss(
     clusters: dict,
     padding: float = 10.0,
     device: torch.device = None,
+    cluster_parents: Optional[Dict[str, Optional[str]]] = None,
 ) -> torch.Tensor:
-    """Sibling cluster bounding boxes repel."""
+    """Sibling cluster bounding boxes repel.
+
+    When cluster_parents is provided, only repels clusters at the same
+    hierarchy level (same parent or both root-level). Parent vs child
+    should NOT repel — containment loss handles that.
+    """
     if device is None:
         device = pos.device
 
-    cluster_list = [
-        (name, torch.tensor(members, device=device, dtype=torch.long))
-        for name, members in clusters.items()
-        if isinstance(members, list) and len(members) > 0
-    ]
+    cluster_list = []
+    for name, members in clusters.items():
+        idx = _resolve_cluster_members(members, device)
+        if idx is not None and idx.shape[0] > 0:
+            parent = cluster_parents.get(name) if cluster_parents else None
+            cluster_list.append((name, idx, parent))
 
     if len(cluster_list) < 2:
         return torch.tensor(0.0, device=device)
 
+    # Build sibling pairs: only repel clusters with the same parent
     num_clusters = len(cluster_list)
-    if num_clusters > 50:
+    if cluster_parents:
         all_pairs = []
+        for i in range(num_clusters):
+            for j in range(i + 1, num_clusters):
+                if cluster_list[i][2] == cluster_list[j][2]:  # same parent (or both None)
+                    all_pairs.append((i, j))
+    elif num_clusters > 50:
         max_sample = min(50, num_clusters * (num_clusters - 1) // 2)
         sampled = set()
         attempts = 0
@@ -919,8 +942,7 @@ def cluster_separation_loss(
             i = random.randint(0, num_clusters - 1)
             j = random.randint(0, num_clusters - 1)
             if i != j:
-                pair = (min(i, j), max(i, j))
-                sampled.add(pair)
+                sampled.add((min(i, j), max(i, j)))
             attempts += 1
         all_pairs = list(sampled)
     else:
@@ -929,6 +951,9 @@ def cluster_separation_loss(
             for i in range(num_clusters)
             for j in range(i + 1, num_clusters)
         ]
+
+    if not all_pairs:
+        return torch.tensor(0.0, device=device)
 
     total = torch.tensor(0.0, device=device)
     for i, j in all_pairs:
@@ -945,6 +970,60 @@ def cluster_separation_loss(
         total = total + overlap_x * overlap_y
 
     return total
+
+
+def cluster_containment_loss(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    clusters: dict,
+    cluster_parents: Dict[str, Optional[str]],
+    padding: float = 18.0,
+    device: torch.device = None,
+) -> torch.Tensor:
+    """Child cluster bboxes must stay inside parent cluster bboxes.
+
+    For each (child, parent) pair in cluster_parents:
+    - Compute child bbox from its leaf members
+    - Compute parent bbox from its leaf members
+    - Penalize child bbox edges extending outside parent bbox:
+      ReLU(parent_min - child_min)² + ReLU(child_max - parent_max)² per axis
+    """
+    if device is None:
+        device = pos.device
+
+    total = torch.tensor(0.0, device=device)
+    count = 0
+
+    for child_name, parent_name in cluster_parents.items():
+        if parent_name is None:
+            continue
+        if child_name not in clusters or parent_name not in clusters:
+            continue
+
+        child_idx = _resolve_cluster_members(clusters[child_name], device)
+        parent_idx = _resolve_cluster_members(clusters[parent_name], device)
+        if child_idx is None or parent_idx is None:
+            continue
+
+        # Child bbox
+        child_min = pos[child_idx].min(dim=0).values - node_sizes[child_idx].max(dim=0).values / 2
+        child_max = pos[child_idx].max(dim=0).values + node_sizes[child_idx].max(dim=0).values / 2
+
+        # Parent bbox (with padding — parent should be larger)
+        parent_min = pos[parent_idx].min(dim=0).values - node_sizes[parent_idx].max(dim=0).values / 2 - padding
+        parent_max = pos[parent_idx].max(dim=0).values + node_sizes[parent_idx].max(dim=0).values / 2 + padding
+
+        # Penalize child extending outside parent
+        violation = (
+            F.relu(parent_min - child_min) ** 2 +
+            F.relu(child_max - parent_max) ** 2
+        ).sum()
+        total = total + violation
+        count += 1
+
+    if count == 0:
+        return torch.tensor(0.0, device=device)
+    return total / count
 
 
 # ─── Spacing consistency ──────────────────────────────────────────────────────

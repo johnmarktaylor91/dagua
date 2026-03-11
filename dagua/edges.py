@@ -84,6 +84,35 @@ def route_edges(
         for rank, (e_idx, _) in enumerate(in_edges[node]):
             in_order[e_idx] = (rank, len(in_edges[node]))
 
+    # Pre-compute cluster bboxes and node membership for cluster-aware routing
+    cluster_bboxes = {}  # name -> (x_min, y_min, x_max, y_max)
+    node_cluster_set = {}  # node_idx -> set of cluster names it belongs to
+    if graph is not None and hasattr(graph, 'clusters') and graph.clusters:
+        from dagua.utils import collect_cluster_leaves
+        for cname, cmembers in graph.clusters.items():
+            if isinstance(cmembers, dict):
+                cmembers = collect_cluster_leaves(cmembers)
+            if not cmembers:
+                continue
+            # Get cluster style padding
+            cstyle = graph.get_style_for_cluster(cname)
+            cpad = cstyle.padding
+            # Compute bbox
+            cx_coords = [pos[m, 0].item() for m in cmembers if m < pos.shape[0]]
+            cy_coords = [pos[m, 1].item() for m in cmembers if m < pos.shape[0]]
+            cw_half = [sizes[m, 0].item() / 2 for m in cmembers if m < pos.shape[0]]
+            ch_half = [sizes[m, 1].item() / 2 for m in cmembers if m < pos.shape[0]]
+            if cx_coords:
+                bx_min = min(cx - hw for cx, hw in zip(cx_coords, cw_half)) - cpad
+                bx_max = max(cx + hw for cx, hw in zip(cx_coords, cw_half)) + cpad
+                by_min = min(cy - hh for cy, hh in zip(cy_coords, ch_half)) - cpad
+                by_max = max(cy + hh for cy, hh in zip(cy_coords, ch_half)) + cpad + 14
+                cluster_bboxes[cname] = (bx_min, by_min, bx_max, by_max)
+            for m in cmembers:
+                if m not in node_cluster_set:
+                    node_cluster_set[m] = set()
+                node_cluster_set[m].add(cname)
+
     curves = []
     for e_idx in range(num_edges):
         s, t = src_indices[e_idx], tgt_indices[e_idx]
@@ -129,6 +158,14 @@ def route_edges(
         curvature = edge_style.curvature if edge_style is not None else 0.4
 
         curve = _compute_curve(src_port_x, src_port_y, tgt_port_x, tgt_port_y, direction, routing, curvature)
+
+        # Cluster-aware deflection: if the curve crosses a foreign cluster bbox,
+        # push control points to route around it
+        if graph is not None and cluster_bboxes:
+            curve = _deflect_around_clusters(
+                curve, s, t, node_cluster_set, cluster_bboxes, direction,
+            )
+
         curves.append(curve)
 
     return curves
@@ -299,6 +336,79 @@ def bezier_tangent(curve: BezierCurve, t: float) -> Tuple[float, float]:
     dx = 3 * u**2 * (p1[0] - p0[0]) + 6 * u * t * (p2[0] - p1[0]) + 3 * t**2 * (p3[0] - p2[0])
     dy = 3 * u**2 * (p1[1] - p0[1]) + 6 * u * t * (p2[1] - p1[1]) + 3 * t**2 * (p3[1] - p2[1])
     return (dx, dy)
+
+
+def _deflect_around_clusters(
+    curve: BezierCurve,
+    src_idx: int,
+    tgt_idx: int,
+    node_cluster_set: dict,
+    cluster_bboxes: dict,
+    direction: str,
+    margin: float = 12.0,
+) -> BezierCurve:
+    """Deflect bezier control points to avoid crossing foreign cluster bboxes.
+
+    A cluster is "foreign" if neither the source nor target node belongs to it.
+    For each foreign cluster whose bbox the straight-line path would cross,
+    push the control points to route around the nearest side of the bbox.
+    """
+    src_clusters = node_cluster_set.get(src_idx, set())
+    tgt_clusters = node_cluster_set.get(tgt_idx, set())
+    own_clusters = src_clusters | tgt_clusters
+
+    # Sample the curve at several points to detect crossings
+    p0, p1 = curve.p0, curve.p1
+    cp1, cp2 = list(curve.cp1), list(curve.cp2)
+    modified = False
+
+    for cname, (bx_min, by_min, bx_max, by_max) in cluster_bboxes.items():
+        if cname in own_clusters:
+            continue  # skip clusters the edge belongs to
+
+        # Check if the midpoint or quarter-points of the curve fall inside this bbox
+        crossings = []
+        for t in [0.25, 0.5, 0.75]:
+            pt = evaluate_bezier(curve, t)
+            if bx_min <= pt[0] <= bx_max and by_min <= pt[1] <= by_max:
+                crossings.append(t)
+
+        if not crossings:
+            continue
+
+        # Determine which side to route around (closest edge of bbox to the midpoint)
+        mid = evaluate_bezier(curve, 0.5)
+        cx_mid = (bx_min + bx_max) / 2
+        cy_mid = (by_min + by_max) / 2
+
+        # Calculate distance to each side from the line connecting src to tgt
+        line_dx = p1[0] - p0[0]
+        line_dy = p1[1] - p0[1]
+
+        if direction in ("TB", "BT"):
+            # Prefer routing around left or right side
+            if mid[0] < cx_mid:
+                # Route around left side
+                deflect_x = bx_min - margin
+            else:
+                # Route around right side
+                deflect_x = bx_max + margin
+            cp1[0] = deflect_x
+            cp2[0] = deflect_x
+        else:
+            # Horizontal layout: route around top or bottom
+            if mid[1] < cy_mid:
+                deflect_y = by_min - margin
+            else:
+                deflect_y = by_max + margin
+            cp1[1] = deflect_y
+            cp2[1] = deflect_y
+
+        modified = True
+
+    if modified:
+        return BezierCurve(p0, tuple(cp1), tuple(cp2), p1)
+    return curve
 
 
 def place_edge_labels(

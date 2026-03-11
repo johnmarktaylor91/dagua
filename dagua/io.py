@@ -177,8 +177,9 @@ def graph_from_json(data: Union[Dict, str, Path]) -> "DaguaGraph":
         name = cluster_data["name"]
         members = cluster_data.get("members", [])
         label = cluster_data.get("label")
+        parent = cluster_data.get("parent")
         style = _dict_to_cluster_style(cluster_data["style"]) if "style" in cluster_data else None
-        g.add_cluster(name, members, label=label, style=style)
+        g.add_cluster(name, members, label=label, style=style, parent=parent)
 
     # 4. Restore back edge mask (cycle support)
     if "back_edges" in data:
@@ -266,6 +267,8 @@ def graph_to_json(graph: "DaguaGraph") -> Dict[str, Any]:
             cluster["members"] = [index_to_id.get(m, str(m)) for m in members]
         else:
             cluster["members"] = members
+        if hasattr(graph, 'cluster_parents') and name in graph.cluster_parents and graph.cluster_parents[name] is not None:
+            cluster["parent"] = graph.cluster_parents[name]
         if name in graph.cluster_labels:
             cluster["label"] = graph.cluster_labels[name]
         if name in graph.cluster_styles:
@@ -373,8 +376,10 @@ Return ONLY a JSON object (no explanation, no code fences) with this schema:
 "style": {"color": "#8C8C8C", "style": "dashed"}}
   ],
   "clusters": [
-    {"name": "group_name", "members": ["id1", "id2"], \
-"label": "Group Label", "style": {"fill": "#E5E5E0"}}
+    {"name": "outer_group", "members": ["id1", "id2", "id3"], \
+"label": "Outer Group", "style": {"fill": "#E5E5E0"}},
+    {"name": "inner_group", "members": ["id2", "id3"], \
+"parent": "outer_group", "label": "Inner Group"}
   ],
   "theme": {
     "node_styles": {
@@ -402,8 +407,9 @@ Use the base_color field and fill/stroke will be auto-derived. \
 Colorblind-safe palette available: sky=#56B4E9, vermillion=#D55E00, \
 bluish_green=#009E73, amber=#E69F00, reddish_purple=#CC79A7, blue=#0072B2, yellow=#F0E442.
 5. **Shapes**: Match node shapes — rect, roundrect, ellipse, diamond, circle.
-6. **Grouping**: If nodes are visually grouped (boxes around groups, shared background), \
-add cluster entries.
+6. **Grouping**: If nodes are visually grouped (boxes, shared background, nested regions), \
+add cluster entries. Use `parent` for nested groups — add the outermost group first, \
+then inner groups with `parent` referencing the outer.
 7. **Edge styles**: If edges have labels, colors, or dashed/dotted styles, include style dicts.
 8. **Node types**: Use "input" for input nodes, "output" for output nodes, "default" otherwise.
 9. All fields except node "id" and edge "source"/"target" are optional — omit defaults.

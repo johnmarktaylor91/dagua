@@ -48,6 +48,7 @@ class LayoutConfig:
     w_repel: float = 0.1
     w_overlap: float = 5.0
     w_cluster: float = 1.0
+    w_cluster_contain: float = 2.0  # child clusters stay within parent bbox
     w_align: float = 5.0
     w_crossing: float = 0.0
     w_straightness: float = 2.0
@@ -100,6 +101,7 @@ class LayoutConfig:
     w_edge_angular_res: float = 2.0
     w_edge_curvature_consistency: float = 1.0
     w_edge_curvature_penalty: float = 0.5
+    w_edge_cluster_crossing: float = 8.0  # penalize edges through foreign clusters
 
 
 # Registry of all tunable parameters with metadata
@@ -223,6 +225,16 @@ PARAM_REGISTRY: List[TunableParam] = [
         sweep_range=(0.01, 0.2),
         sweep_values=[0.01, 0.03, 0.05, 0.1, 0.2],
         category="optimization",
+    ),
+    TunableParam(
+        name="w_cluster_contain",
+        display_name="Cluster Containment",
+        description="How strongly child clusters are kept inside parent clusters.",
+        visual_effect="Increasing: strict nesting. Decreasing: children may escape.",
+        default=2.0,
+        sweep_range=(0.5, 10.0),
+        sweep_values=[0.5, 1.0, 2.0, 5.0, 10.0],
+        category="forces",
     ),
 ]
 

@@ -441,13 +441,33 @@ def _draw_clusters(ax, graph, pos, sizes):
     if not graph.clusters:
         return
 
-    sorted_clusters = sorted(
-        graph.clusters.items(),
-        key=lambda kv: len(collect_cluster_leaves(kv[1]) if isinstance(kv[1], dict) else kv[1]),
-        reverse=True,
-    )
+    # Compute true hierarchy depth per cluster via parent chain
+    cluster_parents = getattr(graph, 'cluster_parents', {})
+    if cluster_parents:
+        cluster_depths = {}
+        for name in graph.clusters:
+            d, cur = 0, name
+            while cluster_parents.get(cur):
+                cur = cluster_parents[cur]
+                d += 1
+            cluster_depths[name] = d
 
-    for depth, (name, members) in enumerate(sorted_clusters):
+        # Sort: shallowest first (deeper clusters render on top)
+        sorted_clusters = sorted(
+            graph.clusters.items(),
+            key=lambda kv: cluster_depths.get(kv[0], 0),
+        )
+    else:
+        # Legacy: sort by member count (largest first)
+        sorted_clusters = sorted(
+            graph.clusters.items(),
+            key=lambda kv: len(collect_cluster_leaves(kv[1]) if isinstance(kv[1], dict) else kv[1]),
+            reverse=True,
+        )
+        cluster_depths = {name: i for i, (name, _) in enumerate(sorted_clusters)}
+
+    for name, members in sorted_clusters:
+        depth = cluster_depths.get(name, 0)
         if isinstance(members, dict):
             indices = collect_cluster_leaves(members)
         else:
