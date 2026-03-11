@@ -32,6 +32,7 @@ class DaguaGraph:
     # Node properties
     node_labels: List[str] = field(default_factory=list)
     node_sizes: Optional[torch.Tensor] = None  # [N, 2] width, height
+    node_font_sizes: Optional[torch.Tensor] = None  # [N] effective font size per node
     node_types: List[str] = field(default_factory=list)
     node_styles: List[Optional[NodeStyle]] = field(default_factory=list)
 
@@ -164,27 +165,34 @@ class DaguaGraph:
     ) -> None:
         """Compute node sizes from labels if not already set.
 
-        Uses per-node style for padding, shape, font_weight, and min_width.
+        Uses per-node style for padding, shape, font_weight, min_width,
+        overflow_policy, and min_font_size. Populates both node_sizes
+        and node_font_sizes tensors.
         """
         if self.node_sizes is not None and self.node_sizes.shape[0] == self.num_nodes:
             return
 
         sizes = []
+        font_sizes = []
         for i, label in enumerate(self.node_labels):
             style = self.get_style_for_node(i)
             padding = style.padding
             ff = font_family if style.font_family in ("", font_family) else style.font_family
             fs = style.font_size if style.font_size != 8.5 else font_size
-            w, h = compute_node_size(
+            w, h, efs = compute_node_size(
                 label, ff, fs, padding,
                 shape=style.shape, font_weight=style.font_weight,
+                overflow_policy=style.overflow_policy,
+                min_font_size=style.min_font_size,
             )
             # Apply min_width if set
             if style.min_width is not None:
                 w = max(w, style.min_width)
             sizes.append([w, h])
+            font_sizes.append(efs)
 
         self.node_sizes = torch.tensor(sizes, dtype=torch.float32)
+        self.node_font_sizes = torch.tensor(font_sizes, dtype=torch.float32)
 
     def get_style_for_node(self, idx: int) -> NodeStyle:
         """Get effective style for a node (per-node override > theme > default)."""
@@ -217,6 +225,8 @@ class DaguaGraph:
         self._edge_index_tensor = self._edge_index_tensor.to(device)  # type: ignore[union-attr]
         if self.node_sizes is not None:
             self.node_sizes = self.node_sizes.to(device)
+        if self.node_font_sizes is not None:
+            self.node_font_sizes = self.node_font_sizes.to(device)
         return self
 
     # --- Class methods for construction ---

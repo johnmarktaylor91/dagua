@@ -92,17 +92,28 @@ def route_edges(
         sw, sh = sizes[s, 0].item(), sizes[s, 1].item()
         tw, th = sizes[t, 0].item(), sizes[t, 1].item()
 
-        # Port positions (distributed along node edge)
+        # Per-edge style
+        edge_style = None
+        if graph is not None:
+            edge_style = graph.get_style_for_edge(e_idx)
+
+        # Port positions
         out_rank, out_total = out_order.get(e_idx, (0, 1))
         in_rank, in_total = in_order.get(e_idx, (0, 1))
 
-        # Source port: bottom of node (outgoing)
-        src_port_x = sx - sw / 2 + sw * (out_rank + 0.5) / out_total
-        src_port_y = sy + sh / 2  # bottom
-
-        # Target port: top of node (incoming)
-        tgt_port_x = tx - tw / 2 + tw * (in_rank + 0.5) / in_total
-        tgt_port_y = ty - th / 2  # top
+        # Port style: "center" puts all ports at node center
+        port_style = edge_style.port_style if edge_style is not None else "distributed"
+        if port_style == "center":
+            src_port_x = sx
+            src_port_y = sy + sh / 2
+            tgt_port_x = tx
+            tgt_port_y = ty - th / 2
+        else:
+            # Distributed: spread across node edge
+            src_port_x = sx - sw / 2 + sw * (out_rank + 0.5) / out_total
+            src_port_y = sy + sh / 2  # bottom
+            tgt_port_x = tx - tw / 2 + tw * (in_rank + 0.5) / in_total
+            tgt_port_y = ty - th / 2  # top
 
         # Shape-aware port adjustment
         if graph is not None:
@@ -113,13 +124,11 @@ def route_edges(
                 graph, t, tx, ty, tw, th, tgt_port_x, tgt_port_y, is_source=False
             )
 
-        # Per-edge routing
-        routing = "bezier"
-        if graph is not None:
-            edge_style = graph.get_style_for_edge(e_idx)
-            routing = edge_style.routing
+        # Per-edge routing and curvature
+        routing = edge_style.routing if edge_style is not None else "bezier"
+        curvature = edge_style.curvature if edge_style is not None else 0.4
 
-        curve = _compute_curve(src_port_x, src_port_y, tgt_port_x, tgt_port_y, direction, routing)
+        curve = _compute_curve(src_port_x, src_port_y, tgt_port_x, tgt_port_y, direction, routing, curvature)
         curves.append(curve)
 
     return curves
@@ -188,6 +197,7 @@ def _compute_curve(
     tx: float, ty: float,
     direction: str = "TB",
     routing: str = "bezier",
+    curvature: float = 0.4,
 ) -> BezierCurve:
     """Compute curve based on routing mode."""
     if routing == "straight":
@@ -195,7 +205,7 @@ def _compute_curve(
     elif routing == "ortho":
         return _compute_ortho(sx, sy, tx, ty, direction)
     else:
-        return _compute_bezier(sx, sy, tx, ty, direction)
+        return _compute_bezier(sx, sy, tx, ty, direction, curvature)
 
 
 def _compute_straight(
@@ -224,13 +234,17 @@ def _compute_bezier(
     sx: float, sy: float,
     tx: float, ty: float,
     direction: str = "TB",
+    curvature: float = 0.4,
 ) -> BezierCurve:
-    """Compute cubic bezier control points based on edge geometry."""
+    """Compute cubic bezier control points based on edge geometry.
+
+    curvature controls the offset factor: 0=straight, 1=maximum curve.
+    """
     dx = tx - sx
     dy = ty - sy
     dist = (dx**2 + dy**2) ** 0.5
 
-    if dist < 1e-6:
+    if dist < 1e-6 or curvature < 1e-6:
         return BezierCurve((sx, sy), (sx, sy), (tx, ty), (tx, ty))
 
     abs_dx = abs(dx)
@@ -240,17 +254,17 @@ def _compute_bezier(
     if direction in ("TB", "BT"):
         if abs_dx < abs_dy * 0.3:
             # Nearly vertical: gentle S-curve
-            offset = abs_dy * 0.3
+            offset = abs_dy * curvature * 0.75
             cp1 = (sx, sy + offset)
             cp2 = (tx, ty - offset)
         elif dy > 0:
             # Normal downward edge: smooth bezier
-            offset_y = abs_dy * 0.4
+            offset_y = abs_dy * curvature
             cp1 = (sx, sy + offset_y)
             cp2 = (tx, ty - offset_y)
         else:
             # Back edge (upward): wide arc to the side
-            arc_width = abs_dy * 0.5 + abs_dx * 0.3 + 30
+            arc_width = abs_dy * curvature * 1.25 + abs_dx * 0.3 + 30
             side = 1 if dx >= 0 else -1
             mid_y = (sy + ty) / 2
             cp1 = (sx + side * arc_width, mid_y)
@@ -258,11 +272,11 @@ def _compute_bezier(
     else:
         # Horizontal flow (LR/RL)
         if abs_dy < abs_dx * 0.3:
-            offset = abs_dx * 0.3
+            offset = abs_dx * curvature * 0.75
             cp1 = (sx + offset, sy)
             cp2 = (tx - offset, ty)
         else:
-            offset_x = abs_dx * 0.4
+            offset_x = abs_dx * curvature
             cp1 = (sx + offset_x, sy)
             cp2 = (tx - offset_x, ty)
 
@@ -285,3 +299,111 @@ def bezier_tangent(curve: BezierCurve, t: float) -> Tuple[float, float]:
     dx = 3 * u**2 * (p1[0] - p0[0]) + 6 * u * t * (p2[0] - p1[0]) + 3 * t**2 * (p3[0] - p2[0])
     dy = 3 * u**2 * (p1[1] - p0[1]) + 6 * u * t * (p2[1] - p1[1]) + 3 * t**2 * (p3[1] - p2[1])
     return (dx, dy)
+
+
+def place_edge_labels(
+    curves: List[BezierCurve],
+    positions: torch.Tensor,
+    node_sizes: torch.Tensor,
+    edge_labels: List[Optional[str]],
+    graph: Optional[object] = None,
+) -> List[Optional[Tuple[float, float]]]:
+    """Compute collision-avoiding positions for edge labels.
+
+    Algorithm (greedy):
+    1. For each labeled edge, evaluate bezier at style.label_position
+    2. Compute label bbox and offset perpendicular to curve tangent
+    3. Check collisions with node bboxes and previously placed labels
+    4. If collision, try alternate t values then larger perpendicular offsets
+    5. Pick position with minimum overlap
+
+    Returns list of (x, y) per edge, or None for unlabeled edges.
+    """
+    from dagua.utils import measure_text_fallback
+
+    result: List[Optional[Tuple[float, float]]] = [None] * len(curves)
+
+    if not any(edge_labels):
+        return result
+
+    pos = positions.detach().cpu()
+    sizes = node_sizes.detach().cpu()
+    n = pos.shape[0]
+
+    # Pre-compute node bboxes: (x_min, y_min, x_max, y_max)
+    node_bboxes = []
+    for i in range(n):
+        hw, hh = sizes[i, 0].item() / 2, sizes[i, 1].item() / 2
+        cx, cy = pos[i, 0].item(), pos[i, 1].item()
+        node_bboxes.append((cx - hw, cy - hh, cx + hw, cy + hh))
+
+    placed_bboxes: List[Tuple[float, float, float, float]] = []
+
+    for e_idx, curve in enumerate(curves):
+        if e_idx >= len(edge_labels) or not edge_labels[e_idx]:
+            continue
+
+        label_text = edge_labels[e_idx]
+        style = graph.get_style_for_edge(e_idx) if graph is not None else None
+        label_t = style.label_position if style is not None else 0.5
+        font_size = style.label_font_size if style is not None else 7.0
+
+        # Measure label
+        lw, lh = measure_text_fallback(label_text, font_size)
+        lw += 4.0  # padding
+        lh += 2.0
+
+        best_pos = None
+        best_overlap = float("inf")
+
+        # Try candidate positions
+        for t_offset in [0.0, 0.1, -0.1, 0.2, -0.2]:
+            t = max(0.05, min(0.95, label_t + t_offset))
+            mx, my = evaluate_bezier(curve, t)
+
+            # Perpendicular offset from tangent
+            tdx, tdy = bezier_tangent(curve, t)
+            tmag = (tdx**2 + tdy**2) ** 0.5
+            if tmag < 1e-6:
+                perp_x, perp_y = 0.0, 1.0
+            else:
+                perp_x, perp_y = -tdy / tmag, tdx / tmag
+
+            for perp_scale in [4.0, 8.0, 12.0]:
+                cx = mx + perp_x * perp_scale
+                cy = my + perp_y * perp_scale
+
+                # Label bbox
+                lx0 = cx - lw / 2
+                ly0 = cy - lh / 2
+                lx1 = cx + lw / 2
+                ly1 = cy + lh / 2
+
+                # Count overlap with node bboxes
+                overlap = 0.0
+                for nb in node_bboxes:
+                    ox = max(0.0, min(lx1, nb[2]) - max(lx0, nb[0]))
+                    oy = max(0.0, min(ly1, nb[3]) - max(ly0, nb[1]))
+                    overlap += ox * oy
+
+                # Count overlap with previously placed labels
+                for pb in placed_bboxes:
+                    ox = max(0.0, min(lx1, pb[2]) - max(lx0, pb[0]))
+                    oy = max(0.0, min(ly1, pb[3]) - max(ly0, pb[1]))
+                    overlap += ox * oy
+
+                if overlap < best_overlap:
+                    best_overlap = overlap
+                    best_pos = (cx, cy)
+                    best_bbox = (lx0, ly0, lx1, ly1)
+
+                if overlap == 0.0:
+                    break
+            if best_overlap == 0.0:
+                break
+
+        if best_pos is not None:
+            result[e_idx] = best_pos
+            placed_bboxes.append(best_bbox)
+
+    return result

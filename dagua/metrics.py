@@ -16,6 +16,7 @@ All metric functions are also importable individually.
 
 from __future__ import annotations
 
+import math
 import time as _time
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
@@ -105,7 +106,7 @@ def edge_length_cv(pos: torch.Tensor, edge_index: torch.Tensor) -> Dict[str, flo
     src, tgt = edge_index[0], edge_index[1]
     lengths = torch.norm(pos[src] - pos[tgt], dim=1)
     mean_len = lengths.mean()
-    std_len = lengths.std()
+    std_len = lengths.std() if lengths.shape[0] > 1 else torch.tensor(0.0)
     cv = (std_len / mean_len).item() if mean_len > 1e-8 else 0.0
 
     return {
@@ -607,6 +608,211 @@ def layer_uniformity(pos: torch.Tensor, topo_depth) -> Dict[str, float]:
     }
 
 
+def edge_node_crossing_count(
+    curves,
+    positions: torch.Tensor,
+    node_sizes: torch.Tensor,
+    edge_index: torch.Tensor,
+    T: int = 10,
+) -> Dict[str, Any]:
+    """Count edge-node bbox crossings by sampling T points per bezier.
+
+    Tier 2 metric. Returns count and rate.
+    """
+    from dagua.edges import evaluate_bezier
+
+    if not curves or positions.shape[0] == 0:
+        return {"edge_node_crossings": 0, "edge_node_crossing_rate": 0.0}
+
+    pos = _ensure_cpu(positions)
+    sizes = _ensure_cpu(node_sizes)
+    ei = _ensure_cpu(edge_index)
+    N = pos.shape[0]
+    E = len(curves)
+
+    half_w = sizes[:, 0] / 2
+    half_h = sizes[:, 1] / 2
+    src_list = ei[0].tolist() if ei.numel() > 0 else []
+    tgt_list = ei[1].tolist() if ei.numel() > 0 else []
+
+    crossings = 0
+    for e_idx, curve in enumerate(curves):
+        src_node = src_list[e_idx] if e_idx < len(src_list) else -1
+        tgt_node = tgt_list[e_idx] if e_idx < len(tgt_list) else -1
+
+        for t_step in range(1, T):
+            t = t_step / T
+            px, py = evaluate_bezier(curve, t)
+            for n_idx in range(N):
+                if n_idx == src_node or n_idx == tgt_node:
+                    continue
+                nx, ny = pos[n_idx, 0].item(), pos[n_idx, 1].item()
+                hw, hh = half_w[n_idx].item(), half_h[n_idx].item()
+                if abs(px - nx) < hw and abs(py - ny) < hh:
+                    crossings += 1
+                    break  # count at most one crossing per sample point
+
+    rate = crossings / max(E * (T - 1), 1)
+    return {"edge_node_crossings": crossings, "edge_node_crossing_rate": rate}
+
+
+def label_overlap_count(
+    label_positions: List[Optional[Tuple[float, float]]],
+    edge_labels: list,
+    positions: torch.Tensor,
+    node_sizes: torch.Tensor,
+    label_font_size: float = 7.0,
+) -> Dict[str, int]:
+    """Count overlaps between edge labels and node bboxes, and between labels.
+
+    Tier 1 metric. Uses bbox approximation for label sizes.
+    """
+    from dagua.utils import measure_text_fallback
+
+    pos = _ensure_cpu(positions)
+    sizes = _ensure_cpu(node_sizes)
+    N = pos.shape[0]
+
+    # Build label bboxes
+    label_bboxes = []
+    for i, lp in enumerate(label_positions):
+        if lp is None or i >= len(edge_labels) or not edge_labels[i]:
+            continue
+        lw, lh = measure_text_fallback(edge_labels[i], label_font_size)
+        lw += 4.0
+        lh += 2.0
+        label_bboxes.append((lp[0] - lw / 2, lp[1] - lh / 2, lp[0] + lw / 2, lp[1] + lh / 2))
+
+    # Node bboxes
+    half_w = sizes[:, 0] / 2
+    half_h = sizes[:, 1] / 2
+
+    # Label-node overlaps
+    label_node_overlaps = 0
+    for lb in label_bboxes:
+        for n_idx in range(N):
+            nx, ny = pos[n_idx, 0].item(), pos[n_idx, 1].item()
+            hw, hh = half_w[n_idx].item(), half_h[n_idx].item()
+            nb = (nx - hw, ny - hh, nx + hw, ny + hh)
+            if lb[0] < nb[2] and lb[2] > nb[0] and lb[1] < nb[3] and lb[3] > nb[1]:
+                label_node_overlaps += 1
+
+    # Label-label overlaps
+    label_overlaps = 0
+    for i in range(len(label_bboxes)):
+        for j in range(i + 1, len(label_bboxes)):
+            a, b = label_bboxes[i], label_bboxes[j]
+            if a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]:
+                label_overlaps += 1
+
+    return {"label_overlaps": label_overlaps, "label_node_overlaps": label_node_overlaps}
+
+
+def edge_curvature_consistency(curves) -> Dict[str, float]:
+    """Compute curvature statistics across all edges.
+
+    κ at 5 sample points per edge.
+    Tier 1 metric.
+    """
+    from dagua.edges import evaluate_bezier, bezier_tangent
+
+    if not curves:
+        return {"edge_curvature_cv": 0.0, "edge_curvature_mean": 0.0}
+
+    import math
+
+    mean_curvatures = []
+    for curve in curves:
+        kappas = []
+        for t_step in range(5):
+            t = (t_step + 0.5) / 5
+            # First derivative
+            dx1, dy1 = bezier_tangent(curve, t)
+            # Second derivative (finite difference approximation)
+            dt = 0.01
+            dx2a, dy2a = bezier_tangent(curve, min(t + dt, 1.0))
+            dx2b, dy2b = bezier_tangent(curve, max(t - dt, 0.0))
+            ddx = (dx2a - dx2b) / (2 * dt)
+            ddy = (dy2a - dy2b) / (2 * dt)
+
+            cross = abs(dx1 * ddy - dy1 * ddx)
+            norm = (dx1**2 + dy1**2) ** 1.5
+            if norm > 1e-8:
+                kappas.append(cross / norm)
+
+        if kappas:
+            mean_curvatures.append(sum(kappas) / len(kappas))
+
+    if not mean_curvatures:
+        return {"edge_curvature_cv": 0.0, "edge_curvature_mean": 0.0}
+
+    mean_k = sum(mean_curvatures) / len(mean_curvatures)
+    if len(mean_curvatures) > 1 and mean_k > 1e-8:
+        var_k = sum((k - mean_k) ** 2 for k in mean_curvatures) / (len(mean_curvatures) - 1)
+        cv = var_k ** 0.5 / mean_k
+    else:
+        cv = 0.0
+
+    return {"edge_curvature_cv": cv, "edge_curvature_mean": mean_k}
+
+
+def port_angular_resolution(
+    curves,
+    edge_index: torch.Tensor,
+) -> Dict[str, float]:
+    """Minimum angle between incident edge tangents at actual ports.
+
+    Tier 2 metric.
+    """
+    from dagua.edges import bezier_tangent
+
+    if not curves or edge_index.numel() == 0:
+        return {"port_angular_res_mean_deg": 360.0}
+
+    ei = _ensure_cpu(edge_index)
+    E = len(curves)
+    src_list = ei[0].tolist()
+    tgt_list = ei[1].tolist()
+
+    # Collect tangent vectors per node
+    node_tangents: Dict[int, List[Tuple[float, float]]] = {}
+
+    for e_idx, curve in enumerate(curves):
+        if e_idx >= len(src_list):
+            break
+        s, t = src_list[e_idx], tgt_list[e_idx]
+
+        # Source tangent: B'(0)
+        sdx, sdy = bezier_tangent(curve, 0.0)
+        node_tangents.setdefault(s, []).append((sdx, sdy))
+
+        # Target tangent: B'(1)
+        tdx, tdy = bezier_tangent(curve, 1.0)
+        node_tangents.setdefault(t, []).append((tdx, tdy))
+
+    min_angles = []
+    for node, tangents in node_tangents.items():
+        if len(tangents) < 2:
+            continue
+
+        # Compute angles
+        angles = []
+        for dx, dy in tangents:
+            angles.append(math.atan2(dy, dx))
+        angles.sort()
+
+        # Min angle between adjacent
+        diffs = [angles[i + 1] - angles[i] for i in range(len(angles) - 1)]
+        diffs.append(2 * math.pi - (angles[-1] - angles[0]))
+        min_angles.append(min(diffs))
+
+    if not min_angles:
+        return {"port_angular_res_mean_deg": 360.0}
+
+    mean_deg = sum(a * 180 / math.pi for a in min_angles) / len(min_angles)
+    return {"port_angular_res_mean_deg": mean_deg}
+
+
 def within_layer_compactness(pos: torch.Tensor, topo_depth) -> Dict[str, float]:
     """Fraction of each layer's x-range that is occupied by nodes.
 
@@ -697,6 +903,17 @@ def composite(metrics: Dict[str, float]) -> float:
     else:
         score += 5 * 0.5  # neutral if no clusters
 
+    # Edge-node crossings (3) — from existing margins, lower is better
+    if "edge_node_crossing_rate" in metrics:
+        enc_score = max(0.0, 1.0 - metrics["edge_node_crossing_rate"] * 5)
+        score += 3 * enc_score
+
+    # Label overlap (2) — fewer is better
+    if "label_overlaps" in metrics or "label_node_overlaps" in metrics:
+        total_label_overlaps = metrics.get("label_overlaps", 0) + metrics.get("label_node_overlaps", 0)
+        lo_score = 1.0 if total_label_overlaps == 0 else max(0.0, 1.0 - total_label_overlaps * 0.1)
+        score += 2 * lo_score
+
     return score
 
 
@@ -777,6 +994,9 @@ def full(
     stress_targets: int = 1000,
     crossing_samples: int = 1_000_000,
     neighborhood_samples: int = 5000,
+    curves=None,
+    label_positions=None,
+    edge_labels=None,
 ) -> Dict[str, Any]:
     """All metrics including sampled Tier-2 and DAG-specific Tier-3.
 
@@ -791,6 +1011,9 @@ def full(
         stress_targets: number of targets per source.
         crossing_samples: number of edge pairs to sample.
         neighborhood_samples: number of nodes to sample.
+        curves: optional BezierCurve list for edge-aware metrics.
+        label_positions: optional pre-computed label positions.
+        edge_labels: optional edge label list for label overlap metrics.
 
     Returns:
         Flat dict of all metrics.
@@ -818,6 +1041,17 @@ def full(
     result.update(sampled_crossing_rate(pos, ei, n_samples=crossing_samples))
     result.update(neighborhood_preservation(pos, ei, N, n_samples=neighborhood_samples))
     result.update(angular_resolution(pos, ei))
+
+    # Edge-aware metrics (when curves are provided)
+    if curves is not None:
+        result.update(edge_curvature_consistency(curves))
+        result.update(port_angular_resolution(curves, ei))
+        if node_sizes is not None:
+            ns = _ensure_cpu(node_sizes)
+            result.update(edge_node_crossing_count(curves, pos, ns, ei))
+        if label_positions is not None and edge_labels is not None and node_sizes is not None:
+            ns = _ensure_cpu(node_sizes)
+            result.update(label_overlap_count(label_positions, edge_labels, pos, ns))
 
     # Tier 3: DAG-specific
     if cluster_ids is not None:

@@ -73,6 +73,7 @@ def measure_text_fallback(
 MIN_NODE_WIDTH = 40.0
 MIN_NODE_HEIGHT = 22.0
 MAX_NODE_ASPECT_RATIO = 6.0
+MAX_LABEL_WIDTH = 200.0
 
 
 def compute_node_size(
@@ -82,14 +83,32 @@ def compute_node_size(
     padding: Tuple[float, float] = (8.0, 5.0),
     shape: str = "roundrect",
     font_weight: str = "regular",
-) -> Tuple[float, float]:
+    overflow_policy: str = "shrink_text",
+    min_font_size: float = 5.0,
+) -> Tuple[float, float, float]:
     """Compute node bounding box from label text.
+
+    Returns (width, height, effective_font_size).
 
     Enforces minimum dimensions and maximum aspect ratio per style guide.
     Shape adjustments: diamonds need ~1.42x (text inscribed in rotated square),
     circles need square bounding boxes.
+
+    Overflow policies:
+    - "shrink_text" (default): reduce font_size to fit MAX_LABEL_WIDTH
+    - "expand_node": no max-width capping, aspect ratio relaxed to 10.0
+    - "overflow": standard sizing, text may exceed node bounds
     """
-    text_w, text_h = measure_text(label, font_family, font_size, font_weight)
+    effective_font_size = font_size
+
+    if overflow_policy == "shrink_text":
+        text_w, text_h = measure_text(label, font_family, font_size, font_weight)
+        while text_w > MAX_LABEL_WIDTH and effective_font_size > min_font_size:
+            effective_font_size -= 0.5
+            text_w, text_h = measure_text(label, font_family, effective_font_size, font_weight)
+    else:
+        text_w, text_h = measure_text(label, font_family, font_size, font_weight)
+
     w = text_w + padding[0] * 2
     h = text_h + padding[1] * 2
 
@@ -105,11 +124,12 @@ def compute_node_size(
         r = max(w, h)
         w = h = r  # square bounding box
 
-    # Enforce max aspect ratio (truncation would happen at render time)
-    if w / h > MAX_NODE_ASPECT_RATIO:
-        w = h * MAX_NODE_ASPECT_RATIO
+    # Enforce max aspect ratio
+    max_ratio = 10.0 if overflow_policy == "expand_node" else MAX_NODE_ASPECT_RATIO
+    if w / h > max_ratio:
+        w = h * max_ratio
 
-    return w, h
+    return w, h, effective_font_size
 
 
 def topological_sort(edge_index: torch.Tensor, num_nodes: int) -> List[int]:

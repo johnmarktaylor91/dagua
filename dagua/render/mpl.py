@@ -37,6 +37,8 @@ def render(
     dpi: int = 150,
     show: bool = False,
     title: Optional[str] = None,
+    curves: Optional[List[BezierCurve]] = None,
+    label_positions: Optional[List[Optional[Tuple[float, float]]]] = None,
 ):
     """Render graph with computed positions.
 
@@ -49,6 +51,8 @@ def render(
         dpi: resolution for raster output
         show: whether to call plt.show()
         title: optional title for the figure
+        curves: pre-computed BezierCurve list (skips re-routing if provided)
+        label_positions: pre-computed (x, y) per edge label (from place_edge_labels)
 
     Returns:
         (fig, ax) matplotlib objects
@@ -107,7 +111,8 @@ def render(
     _draw_clusters(ax, graph, pos, sizes)
 
     # --- Layer 1: Edges ---
-    curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
+    if curves is None:
+        curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
     _draw_edges(ax, graph, curves)
 
     # --- Layer 2: Nodes ---
@@ -117,7 +122,7 @@ def render(
     _draw_node_labels(ax, graph, pos, sizes)
 
     # --- Layer 4: Edge labels ---
-    _draw_edge_labels(ax, graph, curves)
+    _draw_edge_labels(ax, graph, curves, label_positions=label_positions)
 
     # Configure axes
     ax.set_xlim(x_min, x_max)
@@ -290,7 +295,11 @@ def _draw_node_labels(ax, graph, pos, sizes):
         label = graph.node_labels[i]
 
         lines = label.split("\n")
-        fontsize = style.font_size
+        # Use per-node effective font size when available, fall back to style
+        if graph.node_font_sizes is not None and i < graph.node_font_sizes.shape[0]:
+            fontsize = graph.node_font_sizes[i].item()
+        else:
+            fontsize = style.font_size
         font_family = style.font_family_list
         font_weight = style.font_weight
         font_style = style.font_style
@@ -372,10 +381,14 @@ def _draw_edges(ax, graph, curves: List[BezierCurve]):
         ax.add_patch(arrow)
 
 
-def _draw_edge_labels(ax, graph, curves: List[BezierCurve]):
+def _draw_edge_labels(
+    ax, graph, curves: List[BezierCurve],
+    label_positions: Optional[List[Optional[Tuple[float, float]]]] = None,
+):
     """Draw edge labels offset from the curve midpoint.
 
     Uses per-edge style for font size/color/background, with fallback to graph_style.
+    When label_positions is provided, uses pre-computed (x, y) positions.
     """
     gs = graph.graph_style
 
@@ -387,18 +400,21 @@ def _draw_edge_labels(ax, graph, curves: List[BezierCurve]):
             continue
 
         style = graph.get_style_for_edge(e_idx)
-        mid = evaluate_bezier(curve, 0.5)
 
-        # Per-edge style or fall back to graph style
+        # Use pre-computed position if available
+        if label_positions is not None and e_idx < len(label_positions) and label_positions[e_idx] is not None:
+            lx, ly = label_positions[e_idx]
+        else:
+            mid = evaluate_bezier(curve, style.label_position)
+            lx, ly = mid[0], mid[1] + 4.0  # default offset
+
         font_size = style.label_font_size
         font_color = style.label_font_color
         label_bg = style.label_background
         bg_opacity = gs.edge_label_background_opacity
 
-        # Offset 4pt perpendicular (approximated as upward)
-        label_offset = 4.0
         ax.text(
-            mid[0], mid[1] + label_offset, label,
+            lx, ly, label,
             ha="center", va="center",
             fontsize=font_size,
             fontweight="regular",

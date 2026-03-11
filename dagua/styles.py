@@ -183,6 +183,9 @@ class NodeStyle:
     shadow_offset: Tuple[float, float] = (1.5, -1.5)  # render-only
     shadow_color: str = "#00000020"  # render-only
     min_width: Optional[float] = None  # Layout-affecting: floor on node width
+    # New fields (Part 3) — overflow policy
+    overflow_policy: str = "shrink_text"  # "shrink_text", "expand_node", "overflow"
+    min_font_size: float = 5.0  # Floor for shrink_text policy
 
     def __post_init__(self):
         if not self.fill:
@@ -216,6 +219,11 @@ class EdgeStyle:
     label_font_size: float = 7.0  # render-only
     label_font_color: str = NEAR_BLACK  # render-only
     label_background: str = WARM_WHITE  # render-only
+    # New fields (Part 3) — edge aesthetics
+    label_position: float = 0.5  # Position along curve (0=start, 1=end)
+    curvature: float = 0.4  # Control point offset factor (0=straight, 1=max curve)
+    port_style: str = "distributed"  # "distributed" or "center"
+    label_avoidance: bool = True  # Whether to avoid label collisions
 
 
 @dataclass
@@ -460,7 +468,7 @@ MINIMAL_THEME = Theme(
         ),
     },
     edge_styles={
-        "default": EdgeStyle(color="#000000", width=0.5, opacity=0.5),
+        "default": EdgeStyle(color="#000000", width=0.5, opacity=0.5, curvature=0.0),
     },
     cluster_style=ClusterStyle(
         fill="#FFFFFF",

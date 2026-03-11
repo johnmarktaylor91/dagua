@@ -91,6 +91,16 @@ class LayoutConfig:
     # Only used when hybrid_device mode is active with per_loss_backward.
     num_workers: int = 0
 
+    # Edge optimization: gradient descent on bezier control points
+    # Set edge_opt_steps=0 to skip (zero overhead)
+    edge_opt_steps: int = 100
+    edge_opt_lr: float = 0.1
+    w_edge_crossing: float = 5.0
+    w_edge_node_crossing: float = 10.0
+    w_edge_angular_res: float = 2.0
+    w_edge_curvature_consistency: float = 1.0
+    w_edge_curvature_penalty: float = 0.5
+
 
 # Registry of all tunable parameters with metadata
 PARAM_REGISTRY: List[TunableParam] = [
