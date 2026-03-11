@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from dagua.flex import LayoutFlex
 
 
 @dataclass
@@ -91,6 +94,10 @@ class LayoutConfig:
     # 0 = sequential (no workers). 2+ = parallel CPU losses.
     # Only used when hybrid_device mode is active with per_loss_backward.
     num_workers: int = 0
+
+    # Flex layout constraints (soft targets for spacing, pins, alignment)
+    # When present, flex values override the corresponding fixed values.
+    flex: Optional["LayoutFlex"] = None
 
     # Edge optimization: gradient descent on bezier control points
     # 0 = auto-scale based on edge count, -1 = skip (zero overhead)

@@ -1029,6 +1029,110 @@ def cluster_containment_loss(
 # ─── Spacing consistency ──────────────────────────────────────────────────────
 
 
+# ─── Flex constraints (pins, alignment, flex spacing) ────────────────────────
+
+
+def position_pin_loss(
+    pos: torch.Tensor,
+    pin_indices: torch.Tensor,
+    pin_targets: torch.Tensor,
+    pin_weights: torch.Tensor,
+    pin_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Soft penalty pulling pinned nodes toward targets.
+
+    Args:
+        pos: [N, 2] node positions.
+        pin_indices: [P] indices of pinned nodes.
+        pin_targets: [P, 2] target (x, y) for each pin.
+        pin_weights: [P, 2] weight for each pin axis.
+        pin_mask: [P, 2] bool — True where the axis is constrained.
+
+    Hard pins (weight=inf) are handled via post-step projection, not here.
+    This function only computes loss for finite-weight pins.
+    """
+    if pin_indices.numel() == 0:
+        return torch.tensor(0.0, device=pos.device)
+
+    pinned_pos = pos[pin_indices]  # [P, 2]
+    diff = (pinned_pos - pin_targets) ** 2  # [P, 2]
+    weighted = diff * pin_weights * pin_mask.float()  # [P, 2]
+    return weighted.sum() / max(pin_mask.sum().item(), 1.0)
+
+
+def alignment_loss(
+    pos: torch.Tensor,
+    align_groups: List[Tuple[torch.Tensor, float, int]],
+) -> torch.Tensor:
+    """Penalize positional variance within alignment groups.
+
+    Args:
+        pos: [N, 2] node positions.
+        align_groups: list of (indices_tensor, weight, axis) where axis is 0=x, 1=y.
+    """
+    if not align_groups:
+        return torch.tensor(0.0, device=pos.device)
+
+    total = torch.tensor(0.0, device=pos.device)
+    count = 0
+    for indices, weight, axis in align_groups:
+        if indices.numel() < 2:
+            continue
+        coords = pos[indices, axis]  # [G]
+        mean = coords.mean()
+        total = total + weight * ((coords - mean) ** 2).mean()
+        count += 1
+
+    if count == 0:
+        return torch.tensor(0.0, device=pos.device)
+    return total / count
+
+
+def flex_spacing_loss(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    layer_index: Optional[LayerIndex],
+    target_sep: float,
+    weight: float,
+) -> torch.Tensor:
+    """Penalize deviation from flex spacing targets.
+
+    Similar to spacing_consistency_loss but specifically weighted
+    for the flex system. Uses the flex weight to scale the loss.
+    """
+    if layer_index is None or weight <= 0:
+        return torch.tensor(0.0, device=pos.device)
+
+    # Delegate to spacing_consistency_loss and re-weight
+    base_loss = spacing_consistency_loss(pos, node_sizes, layer_index, target_gap=target_sep)
+    return weight * base_loss
+
+
+def project_hard_pins(
+    pos: torch.Tensor,
+    pin_indices: torch.Tensor,
+    pin_targets: torch.Tensor,
+    pin_mask: torch.Tensor,
+) -> None:
+    """Project hard-pinned nodes to their target positions (in-place).
+
+    Called after optimizer.step() to enforce weight=inf pins.
+
+    Args:
+        pos: [N, 2] node positions (modified in-place).
+        pin_indices: [P] indices of hard-pinned nodes.
+        pin_targets: [P, 2] target positions.
+        pin_mask: [P, 2] bool — True where axis is hard-pinned.
+    """
+    if pin_indices.numel() == 0:
+        return
+
+    with torch.no_grad():
+        current = pos[pin_indices]  # [P, 2]
+        projected = torch.where(pin_mask, pin_targets, current)
+        pos.data[pin_indices] = projected
+
+
 def spacing_consistency_loss(
     pos: torch.Tensor,
     node_sizes: torch.Tensor,

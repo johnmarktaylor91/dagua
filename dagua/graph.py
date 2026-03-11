@@ -10,6 +10,7 @@ import torch
 from dagua.styles import (
     ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
     DEFAULT_THEME, DEFAULT_NODE_STYLES, DEFAULT_THEME_OBJ,
+    resolve_node_style, resolve_edge_style,
 )
 import copy as _copy
 from dagua.utils import compute_node_size
@@ -50,6 +51,13 @@ class DaguaGraph:
 
     # Layout direction
     direction: str = "TB"  # TB, BT, LR, RL
+
+    # Graph-level style defaults (cascade level 4)
+    default_node_style: Optional[NodeStyle] = None
+    default_edge_style: Optional[EdgeStyle] = None
+
+    # Flex layout constraints
+    flex: Optional[Any] = None  # LayoutFlex — typed as Any to avoid circular import
 
     # ID mapping
     _id_to_index: Dict[Any, int] = field(default_factory=dict, repr=False)
@@ -242,24 +250,204 @@ class DaguaGraph:
         self.node_font_sizes = torch.tensor(font_sizes, dtype=torch.float32)
 
     def get_style_for_node(self, idx: int) -> NodeStyle:
-        """Get effective style for a node (per-node override > theme > default)."""
-        if idx < len(self.node_styles) and self.node_styles[idx] is not None:
-            return self.node_styles[idx]
+        """Get effective style for a node via 5-level cascade.
+
+        Priority (highest first):
+        1. Per-element override (node_styles[idx])
+        2. Deepest cluster's member_node_style
+        3. Theme type lookup
+        4. Graph default_node_style
+        5. Global defaults (dagua.configure())
+        """
+        per_element = self.node_styles[idx] if idx < len(self.node_styles) else None
         node_type = self.node_types[idx] if idx < len(self.node_types) else "default"
-        return self._theme.get_node_style(node_type)
+        theme_style = self._theme.get_node_style(node_type)
+
+        # Collect cluster member styles (deepest first)
+        cluster_member_styles = self._get_cluster_member_node_styles(idx)
+
+        # Global defaults
+        global_default = None
+        try:
+            from dagua.defaults import get_default_node_style_overrides
+            overrides = get_default_node_style_overrides()
+            if overrides:
+                global_default = NodeStyle(**overrides)
+        except ImportError:
+            pass
+
+        # Fast path: no cascade needed if only theme matters
+        if (per_element is None and not cluster_member_styles
+                and self.default_node_style is None and global_default is None):
+            return theme_style
+
+        return resolve_node_style(
+            per_element=per_element,
+            cluster_member_styles=cluster_member_styles,
+            theme_style=theme_style,
+            graph_default=self.default_node_style,
+            global_default=global_default,
+        )
 
     def get_style_for_edge(self, idx: int) -> EdgeStyle:
-        """Get effective style for an edge (per-edge override > back edge > theme > default)."""
-        if idx < len(self.edge_styles) and self.edge_styles[idx] is not None:
-            return self.edge_styles[idx]
+        """Get effective style for an edge via 5-level cascade.
+
+        Priority (highest first):
+        1. Per-element override (edge_styles[idx])
+        2. Cluster member_edge_style (deepest cluster containing source node)
+        3. Theme type lookup (back edge > edge_type > default)
+        4. Graph default_edge_style
+        5. Global defaults (dagua.configure())
+        """
+        per_element = self.edge_styles[idx] if idx < len(self.edge_styles) else None
+
+        # Determine edge type for theme lookup
         if (
             self._back_edge_mask is not None
             and idx < self._back_edge_mask.shape[0]
             and self._back_edge_mask[idx].item()
         ):
-            return self._theme.get_edge_style("back")
-        edge_type = self.edge_types[idx] if idx < len(self.edge_types) else "default"
-        return self._theme.get_edge_style(edge_type)
+            edge_type = "back"
+        else:
+            edge_type = self.edge_types[idx] if idx < len(self.edge_types) else "default"
+        theme_style = self._theme.get_edge_style(edge_type)
+
+        # Collect cluster member edge styles for the source node
+        cluster_member_styles = None
+        self._finalize_edges()
+        if self._edge_index_tensor is not None and self._edge_index_tensor.numel() > 0 and idx < self._edge_index_tensor.shape[1]:
+            src_idx = self._edge_index_tensor[0, idx].item()
+            cluster_member_styles = self._get_cluster_member_edge_styles(src_idx)
+
+        # Global defaults
+        global_default = None
+        try:
+            from dagua.defaults import get_default_edge_style_overrides
+            overrides = get_default_edge_style_overrides()
+            if overrides:
+                global_default = EdgeStyle(**overrides)
+        except ImportError:
+            pass
+
+        # Fast path
+        if (per_element is None and not cluster_member_styles
+                and self.default_edge_style is None and global_default is None):
+            return theme_style
+
+        return resolve_edge_style(
+            per_element=per_element,
+            cluster_member_styles=cluster_member_styles,
+            theme_style=theme_style,
+            graph_default=self.default_edge_style,
+            global_default=global_default,
+        )
+
+    # --- Cluster member style helpers ---
+
+    def _get_cluster_member_node_styles(self, node_idx: int) -> Optional[List[Optional[NodeStyle]]]:
+        """Collect member_node_style from clusters containing this node, deepest first."""
+        if not self.clusters:
+            return None
+        result = []
+        for name, members in self.clusters.items():
+            if isinstance(members, list) and node_idx in members:
+                style = self.cluster_styles.get(name)
+                if style is not None and hasattr(style, 'member_node_style'):
+                    result.append((self.cluster_depth(name), style.member_node_style))
+        if not result:
+            return None
+        # Sort deepest first
+        result.sort(key=lambda x: -x[0])
+        return [s for _, s in result]
+
+    def _get_cluster_member_edge_styles(self, node_idx: int) -> Optional[List[Optional[EdgeStyle]]]:
+        """Collect member_edge_style from clusters containing this node, deepest first."""
+        if not self.clusters:
+            return None
+        result = []
+        for name, members in self.clusters.items():
+            if isinstance(members, list) and node_idx in members:
+                style = self.cluster_styles.get(name)
+                if style is not None and hasattr(style, 'member_edge_style'):
+                    result.append((self.cluster_depth(name), style.member_edge_style))
+        if not result:
+            return None
+        result.sort(key=lambda x: -x[0])
+        return [s for _, s in result]
+
+    # --- Pin, align, export helpers ---
+
+    def pin(self, node_id: Any, x: Optional[float] = None, y: Optional[float] = None,
+            weight: float = float("inf")) -> None:
+        """Pin a node's position (soft or hard).
+
+        Args:
+            node_id: The node to pin.
+            x: Target x position (None = unconstrained).
+            y: Target y position (None = unconstrained).
+            weight: Constraint strength (inf = hard pin).
+        """
+        from dagua.flex import Flex, LayoutFlex
+
+        if self.flex is None:
+            self.flex = LayoutFlex()
+        if self.flex.pins is None:
+            self.flex.pins = {}
+
+        fx = Flex(target=x, weight=weight) if x is not None else None
+        fy = Flex(target=y, weight=weight) if y is not None else None
+        self.flex.pins[node_id] = (fx, fy)
+
+    def align(self, node_ids: List[Any], axis: str = "x", weight: float = 5.0) -> None:
+        """Align a group of nodes on an axis.
+
+        Args:
+            node_ids: Nodes that should share the same x or y coordinate.
+            axis: 'x' (vertical alignment) or 'y' (horizontal alignment).
+            weight: Constraint strength.
+        """
+        from dagua.flex import AlignGroup, LayoutFlex
+
+        if self.flex is None:
+            self.flex = LayoutFlex()
+
+        group = AlignGroup(nodes=list(node_ids), weight=weight)
+        if axis == "x":
+            if self.flex.align_x is None:
+                self.flex.align_x = []
+            self.flex.align_x.append(group)
+        elif axis == "y":
+            if self.flex.align_y is None:
+                self.flex.align_y = []
+            self.flex.align_y.append(group)
+        else:
+            raise ValueError(f"axis must be 'x' or 'y', got {axis!r}")
+
+    def export_style(self, path: str) -> None:
+        """Export this graph's style settings to a YAML/JSON file."""
+        import json as _json
+        from pathlib import Path
+
+        data: Dict[str, Any] = {}
+
+        if self.default_node_style is not None:
+            import dataclasses as _dc
+            data["default_node_style"] = _dc.asdict(self.default_node_style)
+        if self.default_edge_style is not None:
+            import dataclasses as _dc
+            data["default_edge_style"] = _dc.asdict(self.default_edge_style)
+
+        p = Path(path)
+        if p.suffix in (".yaml", ".yml"):
+            try:
+                import yaml
+            except ImportError:
+                raise ImportError("PyYAML required: pip install pyyaml")
+            with open(path, "w") as f:
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        else:
+            with open(path, "w") as f:
+                _json.dump(data, f, indent=2)
 
     # --- Cycle support ---
 

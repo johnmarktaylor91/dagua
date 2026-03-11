@@ -51,7 +51,10 @@ def _dict_to_edge_style(d: Dict[str, Any]) -> EdgeStyle:
 
 
 def _dict_to_cluster_style(d: Dict[str, Any]) -> ClusterStyle:
-    """Convert a dict to ClusterStyle, filtering unknown keys."""
+    """Convert a dict to ClusterStyle, filtering unknown keys.
+
+    Handles member_node_style and member_edge_style as nested dicts.
+    """
     valid = {f.name for f in dataclasses.fields(ClusterStyle)}
     filtered = {}
     for k, v in d.items():
@@ -59,6 +62,10 @@ def _dict_to_cluster_style(d: Dict[str, Any]) -> ClusterStyle:
             continue
         if k == "label_offset" and isinstance(v, list):
             v = tuple(v)
+        if k == "member_node_style" and isinstance(v, dict):
+            v = _dict_to_node_style(v)
+        if k == "member_edge_style" and isinstance(v, dict):
+            v = _dict_to_edge_style(v)
         filtered[k] = v
     return ClusterStyle(**filtered)
 
@@ -115,6 +122,121 @@ def _dict_to_theme(d: Dict[str, Any]) -> Theme:
         cluster_style=cluster_style,
         graph_style=graph_style,
     )
+
+
+# ─── Flex dict converter ─────────────────────────────────────────────────
+
+
+def _dict_to_flex(d: Dict[str, Any]) -> "Flex":
+    """Convert a dict to a Flex value."""
+    from dagua.flex import Flex
+    if isinstance(d, (int, float)):
+        return Flex(target=float(d))
+    target = float(d.get("target", 0.0))
+    weight = float(d.get("weight", 1.0))
+    return Flex(target=target, weight=weight)
+
+
+def _dict_to_layout_flex(d: Dict[str, Any]) -> "LayoutFlex":
+    """Convert a dict to LayoutFlex."""
+    from dagua.flex import AlignGroup, Flex, LayoutFlex
+
+    node_sep = _dict_to_flex(d["node_sep"]) if "node_sep" in d else None
+    rank_sep = _dict_to_flex(d["rank_sep"]) if "rank_sep" in d else None
+
+    pins = None
+    if "pins" in d and isinstance(d["pins"], dict):
+        pins = {}
+        for node_id, pin_data in d["pins"].items():
+            if isinstance(pin_data, dict):
+                fx = Flex(target=float(pin_data["x"]), weight=float(pin_data.get("weight", float("inf")))) if "x" in pin_data else None
+                fy = Flex(target=float(pin_data["y"]), weight=float(pin_data.get("weight", float("inf")))) if "y" in pin_data else None
+                pins[node_id] = (fx, fy)
+
+    align_x = None
+    if "align_x" in d and isinstance(d["align_x"], list):
+        align_x = []
+        for group_data in d["align_x"]:
+            nodes = group_data.get("nodes", [])
+            weight = float(group_data.get("weight", 5.0))
+            align_x.append(AlignGroup(nodes=nodes, weight=weight))
+
+    align_y = None
+    if "align_y" in d and isinstance(d["align_y"], list):
+        align_y = []
+        for group_data in d["align_y"]:
+            nodes = group_data.get("nodes", [])
+            weight = float(group_data.get("weight", 5.0))
+            align_y.append(AlignGroup(nodes=nodes, weight=weight))
+
+    return LayoutFlex(
+        node_sep=node_sep,
+        rank_sep=rank_sep,
+        pins=pins,
+        align_x=align_x,
+        align_y=align_y,
+    )
+
+
+def _layout_flex_to_dict(flex) -> Dict[str, Any]:
+    """Serialize a LayoutFlex to a dict."""
+    result: Dict[str, Any] = {}
+    if flex.node_sep is not None:
+        result["node_sep"] = {"target": flex.node_sep.target, "weight": flex.node_sep.weight}
+    if flex.rank_sep is not None:
+        result["rank_sep"] = {"target": flex.rank_sep.target, "weight": flex.rank_sep.weight}
+    if flex.pins:
+        pins_dict = {}
+        for node_id, (fx, fy) in flex.pins.items():
+            pin_data: Dict[str, Any] = {}
+            if fx is not None:
+                pin_data["x"] = fx.target
+                pin_data["weight"] = fx.weight
+            if fy is not None:
+                pin_data["y"] = fy.target
+                if "weight" not in pin_data:
+                    pin_data["weight"] = fy.weight
+            pins_dict[str(node_id)] = pin_data
+        result["pins"] = pins_dict
+    if flex.align_x:
+        result["align_x"] = [{"nodes": g.nodes, "weight": g.weight} for g in flex.align_x]
+    if flex.align_y:
+        result["align_y"] = [{"nodes": g.nodes, "weight": g.weight} for g in flex.align_y]
+    return result
+
+
+# ─── Style-only load/save ────────────────────────────────────────────────
+
+
+def load_style(path: Union[str, Path]) -> Dict[str, Any]:
+    """Load a style-only file (YAML/JSON) into a dict.
+
+    Returns a dict with optional keys: node_style, edge_style, theme, flex.
+    """
+    p = str(path)
+    ext = Path(p).suffix.lower()
+
+    if ext in (".yaml", ".yml"):
+        yaml = _ensure_yaml()
+        with open(p) as f:
+            return yaml.safe_load(f) or {}
+    else:
+        with open(p) as f:
+            return json.load(f)
+
+
+def save_style(config: Dict[str, Any], path: Union[str, Path]) -> None:
+    """Save a style dict to a YAML/JSON file."""
+    p = str(path)
+    ext = Path(p).suffix.lower()
+
+    if ext in (".yaml", ".yml"):
+        yaml = _ensure_yaml()
+        with open(p, "w") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    else:
+        with open(p, "w") as f:
+            json.dump(config, f, indent=2)
 
 
 # ─── Core dict → graph converter ──────────────────────────────────────────
@@ -183,6 +305,19 @@ def _graph_from_dict(data: Dict) -> "DaguaGraph":
                     mask[idx] = True
             if mask.any():
                 g._back_edge_mask = mask
+
+    # 5. Parse graph-level defaults
+    defaults_data = data.get("defaults")
+    if isinstance(defaults_data, dict):
+        if "node_style" in defaults_data:
+            g.default_node_style = _dict_to_node_style(defaults_data["node_style"])
+        if "edge_style" in defaults_data:
+            g.default_edge_style = _dict_to_edge_style(defaults_data["edge_style"])
+
+    # 6. Parse flex constraints
+    flex_data = data.get("flex")
+    if isinstance(flex_data, dict):
+        g.flex = _dict_to_layout_flex(flex_data)
 
     return g
 
@@ -305,6 +440,25 @@ def graph_to_json(graph: "DaguaGraph") -> Dict[str, Any]:
         theme_dict = _theme_to_json(graph._theme)
         if theme_dict:
             result["theme"] = theme_dict
+
+    # Graph-level defaults
+    defaults_dict: Dict[str, Any] = {}
+    if getattr(graph, "default_node_style", None) is not None:
+        diff = _style_to_diff_dict(graph.default_node_style, _node_default_dict)
+        if diff:
+            defaults_dict["node_style"] = diff
+    if getattr(graph, "default_edge_style", None) is not None:
+        diff = _style_to_diff_dict(graph.default_edge_style, _edge_default_dict)
+        if diff:
+            defaults_dict["edge_style"] = diff
+    if defaults_dict:
+        result["defaults"] = defaults_dict
+
+    # Flex constraints
+    if getattr(graph, "flex", None) is not None:
+        flex_dict = _layout_flex_to_dict(graph.flex)
+        if flex_dict:
+            result["flex"] = flex_dict
 
     return result
 

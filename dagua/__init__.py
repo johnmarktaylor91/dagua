@@ -18,10 +18,16 @@ from dagua.io import graph_from_image as from_image
 from dagua.io import theme_from_image
 from dagua.io import (
     load, save,
+    load_style, save_style,
     graph_from_json, graph_to_json,
     graph_from_yaml, graph_to_yaml,
 )
 from dagua.styles import get_theme
+from dagua.flex import Flex, LayoutFlex, AlignGroup
+from dagua.defaults import (
+    set_theme, set_device, configure, defaults,
+    get_defaults, export_config, reset,
+)
 
 
 def draw(graph, config=None, output=None, **kwargs):
@@ -29,8 +35,15 @@ def draw(graph, config=None, output=None, **kwargs):
 
     Full pipeline: layout → route_edges → optimize_edges → place_edge_labels → render.
     Edge optimization is controlled by config.edge_opt_steps (0=auto, -1=skip, >0=explicit).
+
+    When config=None, consults global defaults (dagua.configure()) for
+    device, layout overrides, and theme settings.
     """
-    config = config or LayoutConfig()
+    if config is None:
+        from dagua.defaults import get_default_device, get_default_layout_overrides
+        layout_overrides = get_default_layout_overrides()
+        config = LayoutConfig(device=get_default_device(), **layout_overrides)
+
     positions = layout(graph, config)
     graph.compute_node_sizes()
     curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
@@ -46,29 +59,21 @@ def draw(graph, config=None, output=None, **kwargs):
 
 
 __all__ = [
+    # Core
     "DaguaGraph",
+    "LayoutConfig",
+    "layout",
+    "render",
+    "draw",
+    # Styles
     "NodeStyle",
     "EdgeStyle",
     "ClusterStyle",
     "GraphStyle",
     "Theme",
-    "LayoutConfig",
-    "layout",
-    "render",
-    "draw",
-    "route_edges",
-    "place_edge_labels",
     "PALETTE",
     "make_fill",
     "border_from_fill",
-    "from_image",
-    "theme_from_image",
-    "load",
-    "save",
-    "graph_from_json",
-    "graph_to_json",
-    "graph_from_yaml",
-    "graph_to_yaml",
     "get_theme",
     "DEFAULT_THEME_OBJ",
     "DARK_THEME",
@@ -77,4 +82,29 @@ __all__ = [
     "DEFAULT_NODE_STYLES",
     "GRAPHVIZ_MATCH_THEME",
     "GRAPHVIZ_MATCH_NODE_STYLES",
+    # Flex system
+    "Flex",
+    "LayoutFlex",
+    "AlignGroup",
+    # Global defaults
+    "set_theme",
+    "set_device",
+    "configure",
+    "defaults",
+    "get_defaults",
+    "export_config",
+    "reset",
+    # IO
+    "route_edges",
+    "place_edge_labels",
+    "from_image",
+    "theme_from_image",
+    "load",
+    "save",
+    "load_style",
+    "save_style",
+    "graph_from_json",
+    "graph_to_json",
+    "graph_from_yaml",
+    "graph_to_yaml",
 ]

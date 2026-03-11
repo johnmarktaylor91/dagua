@@ -31,6 +31,7 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from dagua.config import LayoutConfig
 from dagua.layout.constraints import (
+    alignment_loss,
     cluster_compactness_loss,
     cluster_containment_loss,
     cluster_separation_loss,
@@ -39,7 +40,10 @@ from dagua.layout.constraints import (
     edge_attraction_loss,
     edge_length_variance_loss,
     edge_straightness_loss,
+    flex_spacing_loss,
     overlap_avoidance_loss,
+    position_pin_loss,
+    project_hard_pins,
     repulsion_loss,
     spacing_consistency_loss,
 )
@@ -104,8 +108,17 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
             num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
             print(f"[dagua] Layout: {n:,} nodes, {num_edges:,} edges", flush=True)
 
+        # Resolve flex node IDs to integer indices before headless engine
+        effective_config = _resolve_flex_ids(config, graph)
+
+        # Also pick up flex from graph.flex if config doesn't have one
+        if effective_config.flex is None and getattr(graph, 'flex', None) is not None:
+            import copy as _c
+            effective_config = _c.copy(effective_config)
+            effective_config.flex = _resolve_graph_flex(graph.flex, graph._id_to_index)
+
         pos = _layout_inner(
-            edge_index, n, node_sizes, config,
+            edge_index, n, node_sizes, effective_config,
             device=device,
             clusters=graph.clusters if hasattr(graph, 'clusters') else None,
             cluster_parents=graph.cluster_parents if hasattr(graph, 'cluster_parents') else None,
@@ -319,6 +332,27 @@ def _layout_inner(
             p, ns, li, target_gap=node_sep,
         ), False, False))
 
+    # --- Flex constraints: pins, alignment, flex spacing ---
+    flex_data = _prepare_flex_data(config, n, device)
+
+    if flex_data["has_soft_pins"]:
+        _pin_idx = flex_data["pin_indices"]
+        _pin_tgt = flex_data["pin_targets"]
+        _pin_wt = flex_data["pin_weights"]
+        _pin_mask = flex_data["soft_pin_mask"]
+        loss_fns.append(("w_pin", lambda p, ns, li: position_pin_loss(
+            p, _pin_idx, _pin_tgt, _pin_wt, _pin_mask), False, False))
+
+    if flex_data["align_groups"]:
+        _ag = flex_data["align_groups"]
+        loss_fns.append(("w_align_flex", lambda p, ns, li: alignment_loss(p, _ag), False, False))
+
+    if flex_data["flex_node_sep"] is not None:
+        _fsep = flex_data["flex_node_sep"]
+        _fwt = flex_data["flex_node_sep_weight"]
+        loss_fns.append(("w_flex_spacing", lambda p, ns, li: flex_spacing_loss(
+            p, ns, li, _fsep, _fwt), False, False))
+
     # Pre-allocate edge batch buffer (avoids per-step tensor allocation)
     batch_buf = torch.empty(2, edge_batch, dtype=torch.long, device=device) if edge_batch > 0 and num_edges > edge_batch else None
 
@@ -385,6 +419,10 @@ def _layout_inner(
             "w_straightness": w_straightness,
             "w_length_variance": config.w_length_variance,
             "w_spacing": config.w_spacing,
+            # Flex constraint weights (constant — not annealed)
+            "w_pin": 1.0,
+            "w_align_flex": 1.0,
+            "w_flex_spacing": 1.0,
         }
 
         # Build loss_terms from static functions + current weights
@@ -470,6 +508,15 @@ def _layout_inner(
         torch.nn.utils.clip_grad_norm_([pos], max_norm=100.0)
 
         optimizer.step()
+
+        # Hard-pin projection (weight=inf pins snapped to exact positions)
+        if flex_data["has_hard_pins"]:
+            project_hard_pins(
+                pos,
+                flex_data["pin_indices"],
+                flex_data["pin_targets"],
+                flex_data["hard_pin_mask"],
+            )
 
         # Hard overlap projection (adaptive frequency + adaptive iterations)
         if step % overlap_interval == 0 or step == steps - 1:
@@ -780,6 +827,100 @@ def _adaptive_spacing(
     return base_node_sep * scale, base_rank_sep * scale
 
 
+def _prepare_flex_data(
+    config: LayoutConfig,
+    num_nodes: int,
+    device: str,
+) -> dict:
+    """Extract flex constraints from config into tensor form for the optimization loop.
+
+    Returns a dict with pre-computed tensors for pins, alignment groups, and flex spacing.
+    All node ID → index resolution happens here (not per-step).
+    """
+    result = {
+        "has_soft_pins": False,
+        "has_hard_pins": False,
+        "pin_indices": torch.zeros(0, dtype=torch.long, device=device),
+        "pin_targets": torch.zeros(0, 2, dtype=torch.float32, device=device),
+        "pin_weights": torch.zeros(0, 2, dtype=torch.float32, device=device),
+        "soft_pin_mask": torch.zeros(0, 2, dtype=torch.bool, device=device),
+        "hard_pin_mask": torch.zeros(0, 2, dtype=torch.bool, device=device),
+        "align_groups": [],
+        "flex_node_sep": None,
+        "flex_node_sep_weight": 0.0,
+    }
+
+    flex = config.flex
+    if flex is None:
+        return result
+
+    # --- Pins ---
+    if flex.pins:
+        indices = []
+        targets = []
+        weights = []
+        soft_mask = []
+        hard_mask = []
+
+        for node_id, (fx, fy) in flex.pins.items():
+            # node_id is already an index (int) in headless mode
+            if isinstance(node_id, int) and 0 <= node_id < num_nodes:
+                idx = node_id
+            else:
+                continue  # Skip unresolvable IDs in headless mode
+
+            tx = fx.target if fx is not None else 0.0
+            ty = fy.target if fy is not None else 0.0
+            wx = fx.weight if fx is not None else 0.0
+            wy = fy.weight if fy is not None else 0.0
+            has_x = fx is not None
+            has_y = fy is not None
+            hard_x = has_x and fx.is_hard
+            hard_y = has_y and fy.is_hard
+            soft_x = has_x and not hard_x
+            soft_y = has_y and not hard_y
+
+            indices.append(idx)
+            targets.append([tx, ty])
+            weights.append([wx if not hard_x else 0.0, wy if not hard_y else 0.0])
+            soft_mask.append([soft_x, soft_y])
+            hard_mask.append([hard_x, hard_y])
+
+        if indices:
+            result["pin_indices"] = torch.tensor(indices, dtype=torch.long, device=device)
+            result["pin_targets"] = torch.tensor(targets, dtype=torch.float32, device=device)
+            result["pin_weights"] = torch.tensor(weights, dtype=torch.float32, device=device)
+            result["soft_pin_mask"] = torch.tensor(soft_mask, dtype=torch.bool, device=device)
+            result["hard_pin_mask"] = torch.tensor(hard_mask, dtype=torch.bool, device=device)
+            result["has_soft_pins"] = any(any(row) for row in soft_mask)
+            result["has_hard_pins"] = any(any(row) for row in hard_mask)
+
+    # --- Alignment groups ---
+    align_groups = []
+    for groups, axis in [(flex.align_x, 0), (flex.align_y, 1)]:
+        if groups is None:
+            continue
+        for group in groups:
+            idx_list = []
+            for node_id in group.nodes:
+                if isinstance(node_id, int) and 0 <= node_id < num_nodes:
+                    idx_list.append(node_id)
+            if len(idx_list) >= 2:
+                align_groups.append((
+                    torch.tensor(idx_list, dtype=torch.long, device=device),
+                    group.weight,
+                    axis,
+                ))
+    result["align_groups"] = align_groups
+
+    # --- Flex spacing ---
+    if flex.node_sep is not None:
+        result["flex_node_sep"] = flex.node_sep.target
+        result["flex_node_sep_weight"] = flex.node_sep.weight
+
+    return result
+
+
 def _apply_direction(pos: torch.Tensor, direction: str) -> torch.Tensor:
     """Transform positions based on layout direction."""
     if direction == "TB":
@@ -799,3 +940,81 @@ def _apply_direction(pos: torch.Tensor, direction: str) -> torch.Tensor:
         result[:, 1] = pos[:, 0]
         return result
     return pos
+
+
+def _resolve_flex_ids(config: LayoutConfig, graph) -> LayoutConfig:
+    """Resolve flex node IDs in config to integer indices using graph._id_to_index.
+
+    Returns config unchanged if no flex, or a shallow copy with resolved flex.
+    """
+    if config.flex is None:
+        return config
+    return _resolve_config_flex(config, graph._id_to_index)
+
+
+def _resolve_config_flex(config: LayoutConfig, id_to_index: dict) -> LayoutConfig:
+    """Create a config copy with flex node IDs resolved to indices."""
+    import copy as _c
+    resolved_flex = _resolve_graph_flex(config.flex, id_to_index)
+    if resolved_flex is config.flex:
+        return config
+    new_config = _c.copy(config)
+    new_config.flex = resolved_flex
+    return new_config
+
+
+def _resolve_graph_flex(flex, id_to_index: dict):
+    """Resolve node IDs in a LayoutFlex to integer indices."""
+    from dagua.flex import AlignGroup, LayoutFlex
+
+    changed = False
+
+    # Resolve pins
+    new_pins = None
+    if flex.pins:
+        new_pins = {}
+        for node_id, val in flex.pins.items():
+            if isinstance(node_id, int):
+                new_pins[node_id] = val
+            elif node_id in id_to_index:
+                new_pins[id_to_index[node_id]] = val
+                changed = True
+            # else: skip unresolvable
+
+    # Resolve align groups
+    new_align_x = None
+    if flex.align_x:
+        new_align_x = []
+        for group in flex.align_x:
+            resolved_nodes = []
+            for nid in group.nodes:
+                if isinstance(nid, int):
+                    resolved_nodes.append(nid)
+                elif nid in id_to_index:
+                    resolved_nodes.append(id_to_index[nid])
+                    changed = True
+            new_align_x.append(AlignGroup(nodes=resolved_nodes, weight=group.weight))
+
+    new_align_y = None
+    if flex.align_y:
+        new_align_y = []
+        for group in flex.align_y:
+            resolved_nodes = []
+            for nid in group.nodes:
+                if isinstance(nid, int):
+                    resolved_nodes.append(nid)
+                elif nid in id_to_index:
+                    resolved_nodes.append(id_to_index[nid])
+                    changed = True
+            new_align_y.append(AlignGroup(nodes=resolved_nodes, weight=group.weight))
+
+    if not changed:
+        return flex
+
+    return LayoutFlex(
+        node_sep=flex.node_sep,
+        rank_sep=flex.rank_sep,
+        pins=new_pins if new_pins is not None else flex.pins,
+        align_x=new_align_x if new_align_x is not None else flex.align_x,
+        align_y=new_align_y if new_align_y is not None else flex.align_y,
+    )

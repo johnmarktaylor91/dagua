@@ -37,19 +37,20 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
 
 ```
 dagua/
-├── __init__.py          # public API re-exports (Graph, Node, Edge, Cluster, styles, defaults)
-├── graph.py             # Graph class — central orchestrator
+├── __init__.py          # public API re-exports + draw() convenience function
+├── graph.py             # DaguaGraph — central orchestrator
 │                        #   holds nodes/edges/clusters, ID→index mapping
-│                        #   layout()/render() orchestration methods
+│                        #   5-level style cascade, pin/align helpers
 │                        #   from_* classmethods (thin wrappers over io.py)
-├── elements.py          # Node, Edge, Cluster dataclasses (pure structural data)
-├── style.py             # NodeStyle, EdgeStyle, ClusterStyle, themes, palettes
-├── defaults.py          # module-level defaults (device, theme) — minimal global state
+├── flex.py              # Flex, LayoutFlex, AlignGroup — soft layout targets
+├── defaults.py          # thread-safe global defaults: configure(), defaults() ctx mgr
+├── styles.py            # NodeStyle, EdgeStyle, ClusterStyle, GraphStyle, Theme, cascade
+├── config.py            # LayoutConfig with all tunable parameters + flex field
 ├── layout/              # [see layout/CLAUDE.md]
 │   ├── __init__.py      # re-exports: layout(), individual constraints
-│   ├── engine.py        # optimization loop (~200 lines of PyTorch)
-│   ├── constraints.py   # DAG, Repel, Attract, Overlap, Cluster, Align
-│   ├── projection.py    # hard overlap resolution (projected gradient descent)
+│   ├── engine.py        # optimization loop — wires flex/pin/align constraints
+│   ├── constraints.py   # DAG, Repel, Attract, Overlap, Cluster, Pin, Align, FlexSpacing
+│   ├── projection.py    # hard overlap + hard pin projection
 │   └── schedule.py      # annealing schedules for constraint weights
 ├── render/              # [see render/CLAUDE.md]
 │   ├── __init__.py      # re-exports: render(), to_svg()
@@ -57,7 +58,7 @@ dagua/
 │   ├── svg.py           # direct SVG string output (zero deps)
 │   └── graphviz.py      # optional neato -n2 passthrough
 ├── routing.py           # bezier edge routing (heuristic now, differentiable later)
-├── io.py                # from_edges, from_edge_index, from_networkx, from_dict, to_dot
+├── io.py                # JSON/YAML IO, load_style/save_style, LLM-based construction
 └── utils.py             # text measurement, graph topology helpers
 ```
 
@@ -67,6 +68,9 @@ tests/                   # [see tests/CLAUDE.md]
 ├── test_graph.py
 ├── test_elements.py
 ├── test_style.py
+├── test_defaults.py     # configure(), context manager, thread safety
+├── test_flex.py         # Flex, pin/align losses, hard pins, integration
+├── test_cascade.py      # 5-level style resolution cascade
 ├── test_layout/
 │   ├── test_engine.py
 │   ├── test_constraints.py
@@ -135,9 +139,13 @@ Render (matplotlib/SVG/graphviz — takes positions + elements + styles)
    functions (from_edges, from_networkx, to_dot). Graph.from_* classmethods are thin
    wrappers. Keeps graph.py focused, keeps io.py independently testable.
 
-6. **Settings are graph-level by default**: device, theme, layout params passed to Graph.
-   `defaults.py` provides minimal module-level convenience (`set_default_device`,
-   `set_default_theme`) — plain module variables with setters, no config objects.
+6. **Settings cascade 5 levels**: per-element > cluster member style > theme type >
+   graph default > global default. `defaults.py` provides `configure()` (flat kwargs),
+   `defaults()` (context manager), thread-local storage. No global state hell.
+
+7. **Flex system for soft layout targets**: `Flex.soft(40)` / `Flex.locked(0)` express
+   preferences as loss terms with configurable weights. Hard pins (weight=inf) enforced
+   via post-step projection. Pins, alignment groups, and flex spacing all supported.
 
 ### Layout Pipeline
 
@@ -167,15 +175,25 @@ Render (matplotlib/SVG/graphviz — takes positions + elements + styles)
 ```python
 import dagua
 
-# Layout only
-pos = dagua.layout(edge_index, num_nodes, node_sizes=sizes,
-                   constraints=[dagua.DAG(), dagua.Repel()], device='cuda')
+# Tier 0: Zero config
+dagua.draw(g)
+dagua.set_theme('dark')
 
-# With rendering
-dagua.render(pos, edge_index, node_labels=labels, output='graph.png')
+# Tier 1: Flat configure + flex
+dagua.configure(font_size=10, node_sep=40, background_color='#1A1E24')
+with dagua.defaults(theme='minimal'):
+    dagua.draw(g)
 
-# SVG for notebooks
-svg = dagua.to_svg(pos, edge_index, node_labels=labels)
+# Flex: soft layout targets
+g.pin("input", x=0, y=0)                    # hard pin
+g.align(["a", "b", "c"], axis="x")          # vertical alignment
+config = dagua.LayoutConfig(flex=dagua.LayoutFlex(
+    node_sep=dagua.Flex.firm(40),
+))
+
+# Tier 2: Full control
+pos = dagua.layout(g, config)
+dagua.render(g, pos, config, output='graph.png')
 ```
 
 ## Relationship to TorchLens

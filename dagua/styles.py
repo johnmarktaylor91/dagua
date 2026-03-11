@@ -8,8 +8,9 @@ Aesthetics: publication-quality defaults — muted fills, strong borders, quiet 
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+import dataclasses
+from dataclasses import dataclass, field, fields as dataclass_fields
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ─── Wong/Okabe-Ito Colorblind-Safe Palette ────────────────────────────────
@@ -246,6 +247,9 @@ class ClusterStyle:
     label_offset: Tuple[float, float] = (6.0, 6.0)  # render-only
     depth_fill_step: float = 0.03  # HSL lightness step per depth level
     depth_stroke_step: float = 0.05  # HSL lightness step per depth level
+    # Member style overrides — applied to all nodes/edges within this cluster
+    member_node_style: Optional[NodeStyle] = None
+    member_edge_style: Optional[EdgeStyle] = None
 
     # Legacy constants kept for reference but replaced by depth_*_step
     LEVEL_FILLS = [PAPER, "#EDEDE8", "#E5E5E0"]
@@ -502,3 +506,102 @@ def get_theme(name: str) -> Theme:
             f"Unknown theme: {name!r}. Available: {list(THEME_REGISTRY.keys())}"
         )
     return copy.deepcopy(THEME_REGISTRY[name])
+
+
+# ─── Style Cascade Resolution ─────────────────────────────────────────────
+
+
+def _is_default_value(style_obj, field_name: str) -> bool:
+    """Check if a field on a style dataclass is still its default value."""
+    field_val = getattr(style_obj, field_name)
+    for f in dataclass_fields(type(style_obj)):
+        if f.name == field_name:
+            if f.default is not dataclasses.MISSING:
+                return field_val == f.default
+            if f.default_factory is not dataclasses.MISSING:
+                return field_val == f.default_factory()
+            return False
+    return False
+
+
+def resolve_node_style(
+    per_element: Optional[NodeStyle],
+    cluster_member_styles: Optional[List[Optional[NodeStyle]]],
+    theme_style: NodeStyle,
+    graph_default: Optional[NodeStyle] = None,
+    global_default: Optional[NodeStyle] = None,
+) -> NodeStyle:
+    """Field-level merge: most-specific scope wins.
+
+    Cascade order (highest priority first):
+    1. per_element — per-node override
+    2. cluster_member_styles — deepest cluster first
+    3. theme_style — from Theme.get_node_style()
+    4. graph_default — Graph.default_node_style
+    5. global_default — dagua.configure() overrides
+
+    For each field, picks the first non-default value walking the cascade.
+    """
+    sources: List[Optional[NodeStyle]] = [per_element]
+    if cluster_member_styles:
+        sources.extend(cluster_member_styles)
+    sources.append(theme_style)
+    sources.append(graph_default)
+    sources.append(global_default)
+
+    return _merge_style(NodeStyle, sources)
+
+
+def resolve_edge_style(
+    per_element: Optional[EdgeStyle],
+    cluster_member_styles: Optional[List[Optional[EdgeStyle]]],
+    theme_style: EdgeStyle,
+    graph_default: Optional[EdgeStyle] = None,
+    global_default: Optional[EdgeStyle] = None,
+) -> EdgeStyle:
+    """Field-level merge for edge styles. Same cascade as resolve_node_style."""
+    sources: List[Optional[EdgeStyle]] = [per_element]
+    if cluster_member_styles:
+        sources.extend(cluster_member_styles)
+    sources.append(theme_style)
+    sources.append(graph_default)
+    sources.append(global_default)
+
+    return _merge_style(EdgeStyle, sources)
+
+
+def resolve_cluster_style(
+    per_cluster: Optional[ClusterStyle],
+    theme_style: ClusterStyle,
+    global_default: Optional[ClusterStyle] = None,
+) -> ClusterStyle:
+    """Field-level merge for cluster styles."""
+    sources: List[Optional[ClusterStyle]] = [per_cluster, theme_style, global_default]
+    return _merge_style(ClusterStyle, sources)
+
+
+def _merge_style(cls, sources: List[Optional[Any]]):
+    """Generic field-level merge across a cascade of style sources.
+
+    For each field, picks the first non-default value from the sources list.
+    Falls back to the class default if no source overrides a field.
+    """
+    import dataclasses as _dc
+
+    defaults_instance = cls()
+    defaults_dict = {f.name: getattr(defaults_instance, f.name) for f in _dc.fields(cls)}
+
+    result_kwargs = {}
+    for f in _dc.fields(cls):
+        # Skip class-level constants (not constructor params)
+        if f.name in ("LEVEL_FILLS", "LEVEL_STROKES"):
+            continue
+        for source in sources:
+            if source is None:
+                continue
+            val = getattr(source, f.name)
+            if val != defaults_dict[f.name]:
+                result_kwargs[f.name] = val
+                break
+
+    return cls(**result_kwargs)
