@@ -121,45 +121,74 @@ def edge_length_cv(pos: torch.Tensor, edge_index: torch.Tensor) -> Dict[str, flo
 
 
 def dag_consistency(pos: torch.Tensor, edge_index: torch.Tensor,
-                    direction: str = "TB") -> Dict[str, float]:
+                    direction: str = "TB",
+                    back_edge_mask: Optional[torch.Tensor] = None) -> Dict[str, float]:
     """Fraction of edges pointing in the correct DAG direction + violation details.
 
     Complexity: O(|E|).
     Target: 1.0 (exact).
+
+    Args:
+        back_edge_mask: if provided, back edges are excluded from consistency
+            checks and reported separately as back_edge_count / back_edge_fraction.
     """
     if edge_index.numel() == 0:
         return {"dag_consistency": 1.0, "dag_num_violations": 0,
-                "dag_mean_violation_mag": 0.0, "dag_max_violation_mag": 0.0}
+                "dag_mean_violation_mag": 0.0, "dag_max_violation_mag": 0.0,
+                "back_edge_count": 0, "back_edge_fraction": 0.0}
 
-    src, tgt = edge_index[0], edge_index[1]
-    if direction == "TB":
-        y_src, y_tgt = pos[src, 1], pos[tgt, 1]
-        correct = y_tgt > y_src
-        violation_mag = torch.clamp(y_src[~correct] - y_tgt[~correct], min=0)
-    elif direction == "BT":
-        y_src, y_tgt = pos[src, 1], pos[tgt, 1]
-        correct = y_tgt < y_src
-        violation_mag = torch.clamp(y_tgt[~correct] - y_src[~correct], min=0)
-    elif direction == "LR":
-        x_src, x_tgt = pos[src, 0], pos[tgt, 0]
-        correct = x_tgt > x_src
-        violation_mag = torch.clamp(x_src[~correct] - x_tgt[~correct], min=0)
-    elif direction == "RL":
-        x_src, x_tgt = pos[src, 0], pos[tgt, 0]
-        correct = x_tgt < x_src
-        violation_mag = torch.clamp(x_tgt[~correct] - x_src[~correct], min=0)
+    total_edges = edge_index.shape[1]
+
+    # Filter to forward edges only when back_edge_mask is provided
+    if back_edge_mask is not None and back_edge_mask.any():
+        forward_mask = ~back_edge_mask
+        forward_ei = edge_index[:, forward_mask]
+        n_back = back_edge_mask.sum().item()
     else:
-        y_src, y_tgt = pos[src, 1], pos[tgt, 1]
-        correct = y_tgt > y_src
-        violation_mag = torch.clamp(y_src[~correct] - y_tgt[~correct], min=0)
+        forward_ei = edge_index
+        n_back = 0
 
-    n_violations = (~correct).sum().item()
-    return {
-        "dag_consistency": correct.float().mean().item(),
-        "dag_num_violations": int(n_violations),
-        "dag_mean_violation_mag": violation_mag.mean().item() if n_violations > 0 else 0.0,
-        "dag_max_violation_mag": violation_mag.max().item() if n_violations > 0 else 0.0,
-    }
+    result: Dict[str, float] = {}
+
+    if forward_ei.numel() == 0:
+        result.update({
+            "dag_consistency": 1.0, "dag_num_violations": 0,
+            "dag_mean_violation_mag": 0.0, "dag_max_violation_mag": 0.0,
+        })
+    else:
+        src, tgt = forward_ei[0], forward_ei[1]
+        if direction == "TB":
+            y_src, y_tgt = pos[src, 1], pos[tgt, 1]
+            correct = y_tgt > y_src
+            violation_mag = torch.clamp(y_src[~correct] - y_tgt[~correct], min=0)
+        elif direction == "BT":
+            y_src, y_tgt = pos[src, 1], pos[tgt, 1]
+            correct = y_tgt < y_src
+            violation_mag = torch.clamp(y_tgt[~correct] - y_src[~correct], min=0)
+        elif direction == "LR":
+            x_src, x_tgt = pos[src, 0], pos[tgt, 0]
+            correct = x_tgt > x_src
+            violation_mag = torch.clamp(x_src[~correct] - x_tgt[~correct], min=0)
+        elif direction == "RL":
+            x_src, x_tgt = pos[src, 0], pos[tgt, 0]
+            correct = x_tgt < x_src
+            violation_mag = torch.clamp(x_tgt[~correct] - x_src[~correct], min=0)
+        else:
+            y_src, y_tgt = pos[src, 1], pos[tgt, 1]
+            correct = y_tgt > y_src
+            violation_mag = torch.clamp(y_src[~correct] - y_tgt[~correct], min=0)
+
+        n_violations = (~correct).sum().item()
+        result.update({
+            "dag_consistency": correct.float().mean().item(),
+            "dag_num_violations": int(n_violations),
+            "dag_mean_violation_mag": violation_mag.mean().item() if n_violations > 0 else 0.0,
+            "dag_max_violation_mag": violation_mag.max().item() if n_violations > 0 else 0.0,
+        })
+
+    result["back_edge_count"] = int(n_back)
+    result["back_edge_fraction"] = n_back / total_edges if total_edges > 0 else 0.0
+    return result
 
 
 def depth_position_correlation(pos: torch.Tensor, topo_depth: torch.Tensor) -> Dict[str, float]:
@@ -927,6 +956,7 @@ def quick(
     topo_depth=None,
     node_sizes: Optional[torch.Tensor] = None,
     direction: str = "TB",
+    back_edge_mask: Optional[torch.Tensor] = None,
 ) -> Dict[str, Any]:
     """Tier-1 metrics only.  O(N + E), runs in seconds at any scale.
 
@@ -936,6 +966,7 @@ def quick(
         topo_depth: [N] int tensor/list of topological depths (computed if None).
         node_sizes: [N, 2] for overlap counting (skipped if None).
         direction: layout direction for DAG consistency.
+        back_edge_mask: [E] bool mask of back edges (excluded from dag_consistency).
 
     Returns:
         Flat dict of metric name -> value.
@@ -946,6 +977,10 @@ def quick(
     N = pos.shape[0]
     E = ei.shape[1] if ei.numel() > 0 else 0
 
+    bem = None
+    if back_edge_mask is not None:
+        bem = back_edge_mask.cpu() if back_edge_mask.device.type != "cpu" else back_edge_mask
+
     result: Dict[str, Any] = {
         "_graph_n_nodes": N,
         "_graph_n_edges": E,
@@ -955,7 +990,7 @@ def quick(
     result.update(edge_length_cv(pos, ei))
 
     # DAG consistency
-    result.update(dag_consistency(pos, ei, direction=direction))
+    result.update(dag_consistency(pos, ei, direction=direction, back_edge_mask=bem))
 
     # Depth-position correlation
     if topo_depth is None and ei.numel() > 0:
@@ -997,6 +1032,7 @@ def full(
     curves=None,
     label_positions=None,
     edge_labels=None,
+    back_edge_mask: Optional[torch.Tensor] = None,
 ) -> Dict[str, Any]:
     """All metrics including sampled Tier-2 and DAG-specific Tier-3.
 
@@ -1014,6 +1050,7 @@ def full(
         curves: optional BezierCurve list for edge-aware metrics.
         label_positions: optional pre-computed label positions.
         edge_labels: optional edge label list for label overlap metrics.
+        back_edge_mask: [E] bool mask of back edges (excluded from dag_consistency).
 
     Returns:
         Flat dict of all metrics.
@@ -1033,7 +1070,8 @@ def full(
         topo_depth = torch.tensor(topo_depth, dtype=torch.long)
 
     # Tier 1
-    result = quick(pos, ei, topo_depth=topo_depth, node_sizes=node_sizes, direction=direction)
+    result = quick(pos, ei, topo_depth=topo_depth, node_sizes=node_sizes,
+                   direction=direction, back_edge_mask=back_edge_mask)
 
     # Tier 2: Sampled metrics
     result.update(sampled_stress(pos, ei, N,

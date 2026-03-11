@@ -372,6 +372,7 @@ DEFAULT_THEME_OBJ = Theme(
         "if": EdgeStyle(style="dashed", color=PALETTE["amber"]),
         "then": EdgeStyle(style="dashed", color=PALETTE["bluish_green"]),
         "buffer": EdgeStyle(style="dotted", opacity=0.5),
+        "back": EdgeStyle(curvature=0.6),
     },
     cluster_style=ClusterStyle(),
     graph_style=GraphStyle(),
@@ -422,6 +423,7 @@ DARK_THEME = Theme(
         "if": EdgeStyle(style="dashed", color="#B09A3A", opacity=0.6),
         "then": EdgeStyle(style="dashed", color="#4A9A73", opacity=0.6),
         "buffer": EdgeStyle(style="dotted", color="#505050", opacity=0.4),
+        "back": EdgeStyle(color="#606060", opacity=0.6, curvature=0.6),
     },
     cluster_style=ClusterStyle(
         fill="#1E2228",
@@ -469,6 +471,7 @@ MINIMAL_THEME = Theme(
     },
     edge_styles={
         "default": EdgeStyle(color="#000000", width=0.5, opacity=0.5, curvature=0.0),
+        "back": EdgeStyle(color="#000000", width=0.5, opacity=0.5, curvature=0.6),
     },
     cluster_style=ClusterStyle(
         fill="#FFFFFF",

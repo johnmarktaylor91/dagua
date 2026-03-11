@@ -86,32 +86,37 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
         if device == "cuda":
             torch.cuda.manual_seed(config.seed)
 
-    # Tier 3: Multilevel coarsening for very large graphs
-    # Don't move data to GPU yet — multilevel manages device transfers lazily
-    if n > config.multilevel_threshold:
-        from dagua.layout.multilevel import multilevel_layout
-        return multilevel_layout(graph, config)
+    # Handle cycles: reverse back edges so the engine sees a DAG
+    graph._prepare_for_layout()
+    try:
+        # Tier 3: Multilevel coarsening for very large graphs
+        # Don't move data to GPU yet — multilevel manages device transfers lazily
+        if n > config.multilevel_threshold:
+            from dagua.layout.multilevel import multilevel_layout
+            return multilevel_layout(graph, config)
 
-    # Tier 0-2: Direct layout — move data to device
-    edge_index = graph.edge_index.to(device)
-    node_sizes = graph.node_sizes.to(device)
+        # Tier 0-2: Direct layout — move data to device
+        edge_index = graph.edge_index.to(device)
+        node_sizes = graph.node_sizes.to(device)
 
-    if config.verbose:
-        num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
-        print(f"[dagua] Layout: {n:,} nodes, {num_edges:,} edges", flush=True)
+        if config.verbose:
+            num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+            print(f"[dagua] Layout: {n:,} nodes, {num_edges:,} edges", flush=True)
 
-    pos = _layout_inner(
-        edge_index, n, node_sizes, config,
-        device=device,
-        clusters=graph.clusters if hasattr(graph, 'clusters') else None,
-        progress_context=ProgressContext(),
-    )
+        pos = _layout_inner(
+            edge_index, n, node_sizes, config,
+            device=device,
+            clusters=graph.clusters if hasattr(graph, 'clusters') else None,
+            progress_context=ProgressContext(),
+        )
 
-    # Apply direction transform
-    direction = config.direction if config else graph.direction
-    pos = _apply_direction(pos, direction)
+        # Apply direction transform
+        direction = config.direction if config else graph.direction
+        pos = _apply_direction(pos, direction)
 
-    return pos
+        return pos
+    finally:
+        graph._restore_after_layout()
 
 
 def _layout_inner(

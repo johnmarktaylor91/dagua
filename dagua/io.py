@@ -180,6 +180,19 @@ def graph_from_json(data: Union[Dict, str, Path]) -> "DaguaGraph":
         style = _dict_to_cluster_style(cluster_data["style"]) if "style" in cluster_data else None
         g.add_cluster(name, members, label=label, style=style)
 
+    # 4. Restore back edge mask (cycle support)
+    if "back_edges" in data:
+        import torch
+        g._finalize_edges()
+        E = g._edge_index_tensor.shape[1] if g._edge_index_tensor is not None else 0
+        if E > 0:
+            mask = torch.zeros(E, dtype=torch.bool)
+            for idx in data["back_edges"]:
+                if 0 <= idx < E:
+                    mask[idx] = True
+            if mask.any():
+                g._back_edge_mask = mask
+
     return g
 
 
@@ -262,6 +275,10 @@ def graph_to_json(graph: "DaguaGraph") -> Dict[str, Any]:
         clusters.append(cluster)
     if clusters:
         result["clusters"] = clusters
+
+    # Back edges (cycle support)
+    if graph._back_edge_mask is not None and graph._back_edge_mask.any():
+        result["back_edges"] = graph._back_edge_mask.nonzero(as_tuple=False).squeeze(1).tolist()
 
     # Theme (serialize only non-default sections)
     if isinstance(graph._theme, Theme):

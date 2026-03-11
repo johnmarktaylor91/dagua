@@ -11,6 +11,7 @@ from dagua.styles import (
     ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
     DEFAULT_THEME, DEFAULT_NODE_STYLES, DEFAULT_THEME_OBJ,
 )
+import copy as _copy
 from dagua.utils import compute_node_size
 
 
@@ -51,11 +52,15 @@ class DaguaGraph:
 
     # ID mapping
     _id_to_index: Dict[Any, int] = field(default_factory=dict, repr=False)
-    _theme: Any = field(default_factory=lambda: dict(DEFAULT_THEME), repr=False)  # Theme or Dict[str, NodeStyle]
+    _theme: Any = field(default_factory=lambda: _copy.deepcopy(DEFAULT_THEME_OBJ), repr=False)  # Theme or Dict[str, NodeStyle]
 
     # Internal edge storage — not part of the public API
     _pending_edges: List[Tuple[int, int]] = field(default_factory=list, repr=False)
     _edge_index_tensor: Optional[torch.Tensor] = field(default=None, repr=False)
+
+    # Cycle support — populated lazily by has_cycles / back_edge_mask
+    _back_edge_mask: Optional[torch.Tensor] = field(default=None, repr=False)
+    _original_edge_index: Optional[torch.Tensor] = field(default=None, repr=False)
 
     @property
     def edge_index(self) -> torch.Tensor:
@@ -68,6 +73,7 @@ class DaguaGraph:
         """Set the edge_index tensor directly (clears any pending edges)."""
         self._pending_edges.clear()
         self._edge_index_tensor = value
+        self._back_edge_mask = None  # invalidate cycle cache
 
     def __post_init__(self) -> None:
         # Auto-convert bare Dict[str, NodeStyle] to Theme for backwards compat
@@ -91,6 +97,7 @@ class DaguaGraph:
                 [self._edge_index_tensor, new_edges], dim=1
             )
         self._pending_edges.clear()
+        self._back_edge_mask = None  # invalidate cycle cache
 
     def add_node(
         self,
@@ -202,11 +209,83 @@ class DaguaGraph:
         return self._theme.get_node_style(node_type)
 
     def get_style_for_edge(self, idx: int) -> EdgeStyle:
-        """Get effective style for an edge (per-edge override > theme > default)."""
+        """Get effective style for an edge (per-edge override > back edge > theme > default)."""
         if idx < len(self.edge_styles) and self.edge_styles[idx] is not None:
             return self.edge_styles[idx]
+        if (
+            self._back_edge_mask is not None
+            and idx < self._back_edge_mask.shape[0]
+            and self._back_edge_mask[idx].item()
+        ):
+            return self._theme.get_edge_style("back")
         edge_type = self.edge_types[idx] if idx < len(self.edge_types) else "default"
         return self._theme.get_edge_style(edge_type)
+
+    # --- Cycle support ---
+
+    @property
+    def has_cycles(self) -> bool:
+        """Whether this graph contains cycles. Lazy detection, cached."""
+        mask = self.back_edge_mask
+        return mask is not None and mask.any().item()
+
+    @property
+    def back_edge_mask(self) -> Optional[torch.Tensor]:
+        """BoolTensor[E] marking back edges, or None for DAGs.
+
+        Lazy: runs DFS on first access, caches until edges change.
+        """
+        self._finalize_edges()
+        if self._back_edge_mask is not None:
+            return self._back_edge_mask
+        if self._edge_index_tensor is None or self._edge_index_tensor.numel() == 0:
+            return None
+        from dagua.layout.cycle import detect_back_edges
+        mask = detect_back_edges(self._edge_index_tensor, self.num_nodes)
+        if mask.any():
+            self._back_edge_mask = mask
+            return mask
+        return None
+
+    def set_back_edge_mask(self, mask: torch.Tensor) -> None:
+        """Manually override which edges are back edges.
+
+        Args:
+            mask: BoolTensor of shape [E] matching current edge count.
+        """
+        self._finalize_edges()
+        E = self._edge_index_tensor.shape[1] if self._edge_index_tensor is not None else 0
+        if mask.shape[0] != E:
+            raise ValueError(f"mask length {mask.shape[0]} != edge count {E}")
+        self._back_edge_mask = mask.bool()
+
+    def _prepare_for_layout(self) -> None:
+        """Detect cycles, reverse back edges so the engine sees a DAG.
+
+        Skips auto-detection for graphs > 1M nodes (O(V+E) DFS is too slow
+        in Python). Users can still call set_back_edge_mask() for large graphs.
+        """
+        self._finalize_edges()
+        # Use cached mask or auto-detect for reasonably sized graphs
+        if self._back_edge_mask is not None:
+            mask = self._back_edge_mask
+        elif self.num_nodes > 1_000_000:
+            self._original_edge_index = None
+            return
+        else:
+            mask = self.back_edge_mask
+        if mask is None or not mask.any():
+            self._original_edge_index = None
+            return
+        from dagua.layout.cycle import make_acyclic
+        self._original_edge_index = self._edge_index_tensor.clone()
+        self._edge_index_tensor = make_acyclic(self._edge_index_tensor, mask)
+
+    def _restore_after_layout(self) -> None:
+        """Restore original edge directions after layout."""
+        if self._original_edge_index is not None:
+            self._edge_index_tensor = self._original_edge_index
+            self._original_edge_index = None
 
     def get_style_for_cluster(self, name: str) -> ClusterStyle:
         """Get effective style for a cluster (per-cluster override > theme)."""
