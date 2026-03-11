@@ -753,24 +753,35 @@ def make_tree(n: int, branching: int = 3, seed: int = 42) -> TestGraph:
     )
 
 
-def make_bipartite(n: int, seed: int = 42) -> TestGraph:
-    """Bipartite DAG: sources → middle → sinks in 3 layers."""
+def make_bipartite(n: int, seed: int = 42, max_degree: int = 8) -> TestGraph:
+    """Bipartite DAG: sources → middle → sinks in 3 layers.
+
+    For large n, uses sparse random connections (each node connects to at most
+    max_degree nodes in the next layer) to avoid O(n²) edge blowup.
+    """
+    import random
+
+    rng = random.Random(seed)
     third = max(n // 3, 1)
     n_src = third
     n_mid = third
     n_sink = n - n_src - n_mid
 
     src, tgt = [], []
-    # source → mid
+    # source → mid (sparse for large graphs)
     for i in range(n_src):
-        for j in range(n_src, n_src + n_mid):
+        k = min(max_degree, n_mid)
+        targets = rng.sample(range(n_src, n_src + n_mid), k)
+        for j in targets:
             src.append(i)
             tgt.append(j)
-    # mid → sink
+    # mid → sink (sparse for large graphs)
     for j in range(n_src, n_src + n_mid):
-        for k in range(n_src + n_mid, n):
+        k = min(max_degree, n_sink)
+        targets = rng.sample(range(n_src + n_mid, n), k)
+        for t in targets:
             src.append(j)
-            tgt.append(k)
+            tgt.append(t)
 
     if not src:
         edge_index = torch.zeros(2, 0, dtype=torch.long)
@@ -785,12 +796,164 @@ def make_bipartite(n: int, seed: int = 42) -> TestGraph:
     )
 
 
+def make_grid(n: int, seed: int = 42) -> TestGraph:
+    """Grid DAG: √n × √n grid with edges pointing right and down."""
+    import math
+
+    cols = max(int(math.sqrt(n)), 2)
+    rows = max(n // cols, 2)
+    actual_n = rows * cols
+
+    src, tgt = [], []
+    for r in range(rows):
+        for c in range(cols):
+            idx = r * cols + c
+            # right edge
+            if c + 1 < cols:
+                src.append(idx)
+                tgt.append(idx + 1)
+            # down edge
+            if r + 1 < rows:
+                src.append(idx)
+                tgt.append(idx + cols)
+
+    edge_index = torch.tensor([src, tgt], dtype=torch.long)
+    g = DaguaGraph.from_edge_index(edge_index, num_nodes=actual_n)
+    return TestGraph(
+        name=f"grid_{actual_n}",
+        graph=g,
+        tags={"diamond", "scale"},
+        description=f"Grid DAG: {rows}×{cols} = {actual_n} nodes",
+    )
+
+
+def make_sparse_layered(
+    n: int, n_layers: int = 0, edges_per_node: int = 3, seed: int = 42
+) -> TestGraph:
+    """Layered DAG with controlled sparsity and occasional skip connections.
+
+    Each node connects to `edges_per_node` random nodes in the next layer,
+    plus ~10% skip connections that jump 2 layers ahead.
+    """
+    import random
+
+    rng = random.Random(seed)
+    if n_layers <= 0:
+        n_layers = max(int(n**0.4), 4)
+
+    # Distribute nodes across layers
+    base_size = n // n_layers
+    remainder = n % n_layers
+    layer_offsets = []
+    offset = 0
+    for i in range(n_layers):
+        size = base_size + (1 if i < remainder else 0)
+        layer_offsets.append((offset, offset + size))
+        offset += size
+    actual_n = offset
+
+    src, tgt = [], []
+    for i in range(n_layers - 1):
+        lo_s, hi_s = layer_offsets[i]
+        lo_t, hi_t = layer_offsets[i + 1]
+        layer_size_t = hi_t - lo_t
+        if layer_size_t == 0:
+            continue
+        for node in range(lo_s, hi_s):
+            k = min(edges_per_node, layer_size_t)
+            targets = rng.sample(range(lo_t, hi_t), k)
+            for t in targets:
+                src.append(node)
+                tgt.append(t)
+            # ~10% chance of skip connection (jump 2 layers)
+            if i + 2 < n_layers and rng.random() < 0.1:
+                lo_skip, hi_skip = layer_offsets[i + 2]
+                if hi_skip > lo_skip:
+                    src.append(node)
+                    tgt.append(rng.randint(lo_skip, hi_skip - 1))
+
+    edge_index = torch.tensor([src, tgt], dtype=torch.long) if src else torch.zeros(2, 0, dtype=torch.long)
+    g = DaguaGraph.from_edge_index(edge_index, num_nodes=actual_n)
+    return TestGraph(
+        name=f"sparse_layered_{actual_n}",
+        graph=g,
+        tags={"large-sparse", "skip-light", "scale"},
+        description=f"Layered DAG: {actual_n} nodes, {n_layers} layers, ~{edges_per_node} edges/node",
+    )
+
+
+def make_powerlaw_dag(n: int, seed: int = 42) -> TestGraph:
+    """DAG with power-law out-degree distribution (realistic network topology).
+
+    Uses preferential attachment: later nodes attach to earlier nodes with
+    probability proportional to their current in-degree + 1.
+    """
+    import random
+
+    rng = random.Random(seed)
+    m = 2  # edges per new node
+
+    src, tgt = [], []
+    in_degree = [0] * n
+    # Weighted pool for preferential attachment (repeat node id by degree+1)
+    pool = [0]
+
+    for i in range(1, n):
+        targets = set()
+        for _ in range(min(m, i)):
+            attempts = 0
+            while attempts < 50:
+                t = pool[rng.randint(0, len(pool) - 1)]
+                if t < i and t not in targets:
+                    targets.add(t)
+                    break
+                attempts += 1
+            else:
+                # fallback: pick any earlier node
+                t = rng.randint(0, i - 1)
+                targets.add(t)
+        for t in targets:
+            # Edge direction: earlier → later (maintains DAG property)
+            src.append(t)
+            tgt.append(i)
+            in_degree[i] += 1
+            pool.append(i)
+        pool.append(i)  # base weight of 1
+
+    edge_index = torch.tensor([src, tgt], dtype=torch.long) if src else torch.zeros(2, 0, dtype=torch.long)
+    g = DaguaGraph.from_edge_index(edge_index, num_nodes=n)
+    return TestGraph(
+        name=f"powerlaw_dag_{n}",
+        graph=g,
+        tags={"large-sparse", "scale"},
+        description=f"Power-law DAG: {n} nodes, preferential attachment",
+    )
+
+
 _SCALE_SIZES = {
     "small": [100, 500, 1_000, 2_000],
     "medium": [5_000, 10_000, 50_000],
     "large": [100_000, 500_000, 1_000_000],
     "huge": [5_000_000, 10_000_000, 50_000_000],
 }
+
+# Shapes to generate at each tier
+_SCALE_SHAPES_FULL = [
+    ("random_dag", lambda n, s: make_random_dag(n, density=1.5, seed=s)),
+    ("wide_dag", lambda n, s: make_wide_dag(n, seed=s)),
+    ("chain", lambda n, s: make_chain(n, seed=s)),
+    ("tree", lambda n, s: make_tree(n, branching=3, seed=s)),
+    ("grid", lambda n, s: make_grid(n, seed=s)),
+    ("sparse_layered", lambda n, s: make_sparse_layered(n, seed=s)),
+    ("powerlaw", lambda n, s: make_powerlaw_dag(n, seed=s)),
+    ("bipartite", lambda n, s: make_bipartite(n, seed=s)),
+]
+
+_SCALE_SHAPES_MINIMAL = [
+    ("random_dag", lambda n, s: make_random_dag(n, density=1.5, seed=s)),
+    ("sparse_layered", lambda n, s: make_sparse_layered(n, seed=s)),
+    ("powerlaw", lambda n, s: make_powerlaw_dag(n, seed=s)),
+]
 
 
 def get_scale_suite(tier: str = "small") -> List[TestGraph]:
@@ -809,15 +972,48 @@ def get_scale_suite(tier: str = "small") -> List[TestGraph]:
 
     graphs = []
     sizes = _SCALE_SIZES[tier]
+    # Full variety for small/medium, minimal for large/huge (memory)
+    shapes = _SCALE_SHAPES_FULL if tier in ("small", "medium") else _SCALE_SHAPES_MINIMAL
 
     for n in sizes:
-        # Use a subset of generators appropriate for scale
-        graphs.append(make_random_dag(n, density=1.5, seed=42))
-        graphs.append(make_wide_dag(n, seed=42))
-        if tier in ("small", "medium"):
-            # Only add extra shapes for small/medium — large/huge keep it minimal
-            graphs.append(make_chain(n))
-            graphs.append(make_tree(n, branching=3))
+        for _name, gen in shapes:
+            graphs.append(gen(n, 42))
+
+    return graphs
+
+
+def get_scaling_collection(seed: int = 42) -> List[TestGraph]:
+    """Get graphs spanning several orders of magnitude for scaling studies.
+
+    Returns graphs at sizes: 50, 200, 1K, 5K, 20K, 100K, 500K, 2M.
+    At each size, generates multiple topologies (random DAG, sparse layered,
+    power-law, grid, tree) so you can see how both size and topology affect
+    metrics.
+
+    The largest graphs (500K, 2M) use only O(n)-edge topologies to keep
+    memory reasonable.
+    """
+    sizes = [50, 200, 1_000, 5_000, 20_000, 100_000, 500_000, 2_000_000]
+
+    # All shapes up to 100K, then just sparse ones for 500K+
+    full_shapes = [
+        ("random_dag", lambda n, s: make_random_dag(n, density=1.5, seed=s)),
+        ("sparse_layered", lambda n, s: make_sparse_layered(n, seed=s)),
+        ("powerlaw", lambda n, s: make_powerlaw_dag(n, seed=s)),
+        ("grid", lambda n, s: make_grid(n, seed=s)),
+        ("tree", lambda n, s: make_tree(n, branching=3, seed=s)),
+    ]
+    sparse_shapes = [
+        ("random_dag", lambda n, s: make_random_dag(n, density=1.5, seed=s)),
+        ("sparse_layered", lambda n, s: make_sparse_layered(n, seed=s)),
+        ("powerlaw", lambda n, s: make_powerlaw_dag(n, seed=s)),
+    ]
+
+    graphs = []
+    for n in sizes:
+        shapes = full_shapes if n <= 100_000 else sparse_shapes
+        for _name, gen in shapes:
+            graphs.append(gen(n, seed))
 
     return graphs
 

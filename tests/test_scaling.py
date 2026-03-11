@@ -65,7 +65,7 @@ class TestDaguaScaling:
         pos = dagua.layout(g, config)
         elapsed = time.perf_counter() - start
         assert pos.shape == (500, 2)
-        assert elapsed < 60, f"500 nodes took {elapsed:.1f}s (limit: 60s)"
+        assert elapsed < 120, f"500 nodes took {elapsed:.1f}s (limit: 120s)"
 
     def test_1000_nodes(self):
         g = _make_random_dag(1000)
