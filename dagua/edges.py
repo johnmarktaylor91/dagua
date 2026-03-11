@@ -2,10 +2,13 @@
 
 For each edge, computes cubic bezier control points (p0, cp1, cp2, p1)
 based on the geometry of the source and target positions.
+Supports per-edge routing modes (bezier, straight, ortho) and
+shape-aware port positioning (ellipse, diamond, rectangle).
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -27,6 +30,7 @@ def route_edges(
     edge_index: torch.Tensor,
     node_sizes: torch.Tensor,
     direction: str = "TB",
+    graph: Optional[object] = None,
 ) -> List[BezierCurve]:
     """Compute bezier control points for all edges.
 
@@ -35,6 +39,7 @@ def route_edges(
         edge_index: [2, E] source-target pairs
         node_sizes: [N, 2] node widths and heights
         direction: layout direction for port placement
+        graph: optional DaguaGraph for per-edge routing and per-node shape
 
     Returns:
         List of BezierCurve objects, one per edge.
@@ -99,10 +104,120 @@ def route_edges(
         tgt_port_x = tx - tw / 2 + tw * (in_rank + 0.5) / in_total
         tgt_port_y = ty - th / 2  # top
 
-        curve = _compute_bezier(src_port_x, src_port_y, tgt_port_x, tgt_port_y, direction)
+        # Shape-aware port adjustment
+        if graph is not None:
+            src_port_x, src_port_y = _adjust_port_for_shape(
+                graph, s, sx, sy, sw, sh, src_port_x, src_port_y, is_source=True
+            )
+            tgt_port_x, tgt_port_y = _adjust_port_for_shape(
+                graph, t, tx, ty, tw, th, tgt_port_x, tgt_port_y, is_source=False
+            )
+
+        # Per-edge routing
+        routing = "bezier"
+        if graph is not None:
+            edge_style = graph.get_style_for_edge(e_idx)
+            routing = edge_style.routing
+
+        curve = _compute_curve(src_port_x, src_port_y, tgt_port_x, tgt_port_y, direction, routing)
         curves.append(curve)
 
     return curves
+
+
+def _adjust_port_for_shape(
+    graph, node_idx: int,
+    cx: float, cy: float, w: float, h: float,
+    port_x: float, port_y: float,
+    is_source: bool,
+) -> Tuple[float, float]:
+    """Adjust port position to lie on the shape boundary.
+
+    For rectangles/roundrects, ports are already on the bounding box edge — no adjustment.
+    For ellipses/circles, project onto the ellipse curve.
+    For diamonds, project onto the diamond edge.
+    """
+    style = graph.get_style_for_node(node_idx)
+    shape = style.shape
+
+    if shape in ("rect", "roundrect"):
+        return port_x, port_y
+
+    if shape in ("ellipse", "circle"):
+        # Project port onto ellipse boundary
+        a = w / 2  # semi-major (horizontal)
+        b = h / 2  # semi-minor (vertical)
+        if a < 1e-6 or b < 1e-6:
+            return port_x, port_y
+
+        # Direction from center to port
+        dx = port_x - cx
+        dy = port_y - cy
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist < 1e-6:
+            # Default: use top/bottom center
+            return cx, cy + (b if is_source else -b)
+
+        # Parametric angle
+        angle = math.atan2(dy / b, dx / a)
+        return cx + a * math.cos(angle), cy + b * math.sin(angle)
+
+    if shape == "diamond":
+        # Diamond edges: 4 sides connecting top/right/bottom/left
+        # Project port onto nearest diamond edge
+        dx = port_x - cx
+        dy = port_y - cy
+
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return cx, cy + (h / 2 if is_source else -h / 2)
+
+        # Normalize to diamond coordinates
+        # Diamond boundary: |dx|/(w/2) + |dy|/(h/2) = 1
+        hw, hh = w / 2, h / 2
+        scale = abs(dx) / hw + abs(dy) / hh
+        if scale < 1e-6:
+            return port_x, port_y
+
+        return cx + dx / scale, cy + dy / scale
+
+    return port_x, port_y
+
+
+def _compute_curve(
+    sx: float, sy: float,
+    tx: float, ty: float,
+    direction: str = "TB",
+    routing: str = "bezier",
+) -> BezierCurve:
+    """Compute curve based on routing mode."""
+    if routing == "straight":
+        return _compute_straight(sx, sy, tx, ty)
+    elif routing == "ortho":
+        return _compute_ortho(sx, sy, tx, ty, direction)
+    else:
+        return _compute_bezier(sx, sy, tx, ty, direction)
+
+
+def _compute_straight(
+    sx: float, sy: float,
+    tx: float, ty: float,
+) -> BezierCurve:
+    """Straight line: control points = endpoints (degenerate bezier)."""
+    return BezierCurve((sx, sy), (sx, sy), (tx, ty), (tx, ty))
+
+
+def _compute_ortho(
+    sx: float, sy: float,
+    tx: float, ty: float,
+    direction: str = "TB",
+) -> BezierCurve:
+    """Right-angle routing via midpoint control points."""
+    if direction in ("TB", "BT"):
+        mid_y = (sy + ty) / 2
+        return BezierCurve((sx, sy), (sx, mid_y), (tx, mid_y), (tx, ty))
+    else:
+        mid_x = (sx + tx) / 2
+        return BezierCurve((sx, sy), (mid_x, sy), (mid_x, ty), (tx, ty))
 
 
 def _compute_bezier(

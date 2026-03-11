@@ -7,7 +7,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle, DEFAULT_THEME
+from dagua.styles import (
+    ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
+    DEFAULT_THEME, DEFAULT_NODE_STYLES, DEFAULT_THEME_OBJ,
+)
 from dagua.utils import compute_node_size
 
 
@@ -47,7 +50,7 @@ class DaguaGraph:
 
     # ID mapping
     _id_to_index: Dict[Any, int] = field(default_factory=dict, repr=False)
-    _theme: Dict[str, NodeStyle] = field(default_factory=lambda: dict(DEFAULT_THEME), repr=False)
+    _theme: Any = field(default_factory=lambda: dict(DEFAULT_THEME), repr=False)  # Theme or Dict[str, NodeStyle]
 
     # Internal edge storage — not part of the public API
     _pending_edges: List[Tuple[int, int]] = field(default_factory=list, repr=False)
@@ -66,6 +69,9 @@ class DaguaGraph:
         self._edge_index_tensor = value
 
     def __post_init__(self) -> None:
+        # Auto-convert bare Dict[str, NodeStyle] to Theme for backwards compat
+        if isinstance(self._theme, dict):
+            self._theme = Theme(node_styles=dict(self._theme))
         # Ensure the tensor is initialized when no edges are provided
         if self._edge_index_tensor is None and not self._pending_edges:
             self._edge_index_tensor = torch.zeros(2, 0, dtype=torch.long)
@@ -158,7 +164,7 @@ class DaguaGraph:
     ) -> None:
         """Compute node sizes from labels if not already set.
 
-        Uses per-node style padding when available, otherwise default (8, 5).
+        Uses per-node style for padding, shape, font_weight, and min_width.
         """
         if self.node_sizes is not None and self.node_sizes.shape[0] == self.num_nodes:
             return
@@ -169,7 +175,13 @@ class DaguaGraph:
             padding = style.padding
             ff = font_family if style.font_family in ("", font_family) else style.font_family
             fs = style.font_size if style.font_size != 8.5 else font_size
-            w, h = compute_node_size(label, ff, fs, padding)
+            w, h = compute_node_size(
+                label, ff, fs, padding,
+                shape=style.shape, font_weight=style.font_weight,
+            )
+            # Apply min_width if set
+            if style.min_width is not None:
+                w = max(w, style.min_width)
             sizes.append([w, h])
 
         self.node_sizes = torch.tensor(sizes, dtype=torch.float32)
@@ -179,13 +191,25 @@ class DaguaGraph:
         if idx < len(self.node_styles) and self.node_styles[idx] is not None:
             return self.node_styles[idx]
         node_type = self.node_types[idx] if idx < len(self.node_types) else "default"
-        return self._theme.get(node_type, self._theme.get("default", NodeStyle()))
+        return self._theme.get_node_style(node_type)
 
     def get_style_for_edge(self, idx: int) -> EdgeStyle:
-        """Get effective style for an edge."""
+        """Get effective style for an edge (per-edge override > theme > default)."""
         if idx < len(self.edge_styles) and self.edge_styles[idx] is not None:
             return self.edge_styles[idx]
-        return EdgeStyle()
+        edge_type = self.edge_types[idx] if idx < len(self.edge_types) else "default"
+        return self._theme.get_edge_style(edge_type)
+
+    def get_style_for_cluster(self, name: str) -> ClusterStyle:
+        """Get effective style for a cluster (per-cluster override > theme)."""
+        if name in self.cluster_styles:
+            return self.cluster_styles[name]
+        return self._theme.cluster_style
+
+    @property
+    def graph_style(self) -> GraphStyle:
+        """Get graph-level style from the theme."""
+        return self._theme.graph_style
 
     def to(self, device: str) -> DaguaGraph:
         """Move tensors to device."""

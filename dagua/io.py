@@ -19,7 +19,10 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
-from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
+from dagua.styles import (
+    ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
+    DEFAULT_THEME_OBJ,
+)
 
 
 # ─── Style dict converters ────────────────────────────────────────────────
@@ -34,6 +37,8 @@ def _dict_to_node_style(d: Dict[str, Any]) -> NodeStyle:
             continue
         if k == "padding" and isinstance(v, list):
             v = tuple(v)
+        if k == "shadow_offset" and isinstance(v, list):
+            v = tuple(v)
         filtered[k] = v
     return NodeStyle(**filtered)
 
@@ -47,7 +52,68 @@ def _dict_to_edge_style(d: Dict[str, Any]) -> EdgeStyle:
 def _dict_to_cluster_style(d: Dict[str, Any]) -> ClusterStyle:
     """Convert a dict to ClusterStyle, filtering unknown keys."""
     valid = {f.name for f in dataclasses.fields(ClusterStyle)}
-    return ClusterStyle(**{k: v for k, v in d.items() if k in valid})
+    filtered = {}
+    for k, v in d.items():
+        if k not in valid:
+            continue
+        if k == "label_offset" and isinstance(v, list):
+            v = tuple(v)
+        filtered[k] = v
+    return ClusterStyle(**filtered)
+
+
+def _dict_to_graph_style(d: Dict[str, Any]) -> GraphStyle:
+    """Convert a dict to GraphStyle, filtering unknown keys."""
+    valid = {f.name for f in dataclasses.fields(GraphStyle)}
+    filtered = {}
+    for k, v in d.items():
+        if k not in valid:
+            continue
+        if k in ("max_figsize", "min_figsize") and isinstance(v, list):
+            v = tuple(v)
+        filtered[k] = v
+    return GraphStyle(**filtered)
+
+
+def _dict_to_theme(d: Dict[str, Any]) -> Theme:
+    """Convert a dict to a full Theme object.
+
+    Supports two formats:
+    1. Full Theme JSON: {"node_styles": {...}, "edge_styles": {...}, ...}
+    2. Legacy flat format: {"default": {...}, "input": {...}} (node styles only)
+    """
+    # Detect legacy flat format (all values are dicts with style keys)
+    if d and "node_styles" not in d and "edge_styles" not in d:
+        # Assume legacy: all keys are node type names
+        node_styles = {name: _dict_to_node_style(sd) for name, sd in d.items()}
+        return Theme(node_styles=node_styles)
+
+    node_styles = {}
+    if "node_styles" in d:
+        for name, sd in d["node_styles"].items():
+            node_styles[name] = _dict_to_node_style(sd)
+
+    edge_styles = {}
+    if "edge_styles" in d:
+        for name, sd in d["edge_styles"].items():
+            edge_styles[name] = _dict_to_edge_style(sd)
+
+    cluster_style = ClusterStyle()
+    if "cluster_style" in d:
+        cluster_style = _dict_to_cluster_style(d["cluster_style"])
+
+    graph_style = GraphStyle()
+    if "graph_style" in d:
+        graph_style = _dict_to_graph_style(d["graph_style"])
+
+    name = d.get("name", "custom")
+    return Theme(
+        name=name,
+        node_styles=node_styles,
+        edge_styles=edge_styles,
+        cluster_style=cluster_style,
+        graph_style=graph_style,
+    )
 
 
 # ─── JSON import/export ───────────────────────────────────────────────────
@@ -77,19 +143,18 @@ def graph_from_json(data: Union[Dict, str, Path]) -> "DaguaGraph":
         raise TypeError(f"Expected dict, JSON string, or file path, got {type(data).__name__}")
 
     # Build theme from top-level "theme" key
-    theme = {}
+    theme = None
     if "theme" in data:
-        for type_name, style_dict in data["theme"].items():
-            theme[type_name] = _dict_to_node_style(style_dict)
+        theme = _dict_to_theme(data["theme"])
 
     g = DaguaGraph(
         direction=data.get("direction", "TB"),
-        _theme=theme if theme else None,
+        _theme=theme if theme is not None else None,
     )
     # If no custom theme was provided, use the default
-    if g._theme is None:
+    if not isinstance(g._theme, Theme):
         from dagua.styles import DEFAULT_THEME
-        g._theme = dict(DEFAULT_THEME)
+        g._theme = Theme(node_styles=dict(DEFAULT_THEME))
 
     # 1. Add nodes
     for node_data in data.get("nodes", []):
@@ -122,6 +187,7 @@ def graph_to_json(graph: "DaguaGraph") -> Dict[str, Any]:
     """Serialize a DaguaGraph to a JSON-compatible dict.
 
     Only includes non-default style fields to keep output compact.
+    Serializes Theme if non-default.
     """
     result: Dict[str, Any] = {}
 
@@ -197,6 +263,57 @@ def graph_to_json(graph: "DaguaGraph") -> Dict[str, Any]:
     if clusters:
         result["clusters"] = clusters
 
+    # Theme (serialize only non-default sections)
+    if isinstance(graph._theme, Theme):
+        theme_dict = _theme_to_json(graph._theme)
+        if theme_dict:
+            result["theme"] = theme_dict
+
+    return result
+
+
+def _theme_to_json(theme: Theme) -> Dict[str, Any]:
+    """Serialize a Theme to a JSON dict, only including non-default sections."""
+    result: Dict[str, Any] = {}
+
+    _node_defaults = NodeStyle()
+    _node_default_dict = dataclasses.asdict(_node_defaults)
+    _edge_defaults = EdgeStyle()
+    _edge_default_dict = dataclasses.asdict(_edge_defaults)
+    _cluster_defaults = ClusterStyle()
+    _cluster_default_dict = dataclasses.asdict(_cluster_defaults)
+    _graph_defaults = GraphStyle()
+    _graph_default_dict = dataclasses.asdict(_graph_defaults)
+
+    if theme.node_styles:
+        ns = {}
+        for name, style in theme.node_styles.items():
+            diff = _style_to_diff_dict(style, _node_default_dict)
+            if diff:
+                ns[name] = diff
+        if ns:
+            result["node_styles"] = ns
+
+    if theme.edge_styles:
+        es = {}
+        for name, style in theme.edge_styles.items():
+            diff = _style_to_diff_dict(style, _edge_default_dict)
+            if diff:
+                es[name] = diff
+        if es:
+            result["edge_styles"] = es
+
+    cluster_diff = _style_to_diff_dict(theme.cluster_style, _cluster_default_dict)
+    if cluster_diff:
+        result["cluster_style"] = cluster_diff
+
+    graph_diff = _style_to_diff_dict(theme.graph_style, _graph_default_dict)
+    if graph_diff:
+        result["graph_style"] = graph_diff
+
+    if theme.name not in ("default", "custom"):
+        result["name"] = theme.name
+
     return result
 
 
@@ -243,8 +360,16 @@ Return ONLY a JSON object (no explanation, no code fences) with this schema:
 "label": "Group Label", "style": {"fill": "#E5E5E0"}}
   ],
   "theme": {
-    "default": {"base_color": "#56B4E9"},
-    "input": {"base_color": "#009E73"}
+    "node_styles": {
+      "default": {"base_color": "#56B4E9"},
+      "input": {"base_color": "#009E73"}
+    },
+    "edge_styles": {
+      "default": {"color": "#8C8C8C"}
+    },
+    "graph_style": {
+      "background_color": "#FAFAFA"
+    }
   }
 }
 
@@ -277,17 +402,22 @@ Analyze its visual aesthetics and extract a theme specification as a JSON object
 Return ONLY a JSON object (no explanation, no code fences) with this schema:
 
 {
+  "name": "custom",
   "node_styles": {
-    "default": {"shape": "roundrect", "base_color": "#56B4E9", "font_size": 9.0},
+    "default": {"shape": "roundrect", "base_color": "#56B4E9", "font_size": 9.0, \
+"font_weight": "regular"},
     "input": {"shape": "ellipse", "base_color": "#009E73"},
     "output": {"base_color": "#D55E00"}
   },
-  "edge_style": {"color": "#666666", "width": 1.0, "style": "solid"},
-  "cluster_style": {"fill": "#F0F0F0", "stroke": "#CCCCCC"},
-  "background_color": "#FFFFFF",
-  "direction": "TB",
-  "node_sep": 30.0,
-  "rank_sep": 60.0
+  "edge_styles": {
+    "default": {"color": "#666666", "width": 1.0, "style": "solid", "routing": "bezier"}
+  },
+  "cluster_style": {"fill": "#F0F0F0", "stroke": "#CCCCCC", "corner_radius": 7.0},
+  "graph_style": {
+    "background_color": "#FFFFFF",
+    "margin": 30.0,
+    "title_font_size": 10.0
+  }
 }
 
 ## Rules
@@ -297,9 +427,8 @@ Return ONLY a JSON object (no explanation, no code fences) with this schema:
 in node_styles with the appropriate base_color (hex).
 3. Extract edge color, width, and style (solid/dashed/dotted).
 4. If clusters/groups are present, extract their fill and stroke colors.
-5. Determine the background color.
-6. Estimate the flow direction (TB/BT/LR/RL) and spacing.
-7. All fields are optional — only include what you can confidently determine.
+5. Determine the background color and other graph-level settings.
+6. All fields are optional — only include what you can confidently determine.
 
 Return ONLY the JSON object."""
 
@@ -486,11 +615,11 @@ def theme_from_image(
     image_path: Union[str, Path],
     provider: Optional[str] = None,
     model: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> Theme:
     """Extract a visual theme from a graph image using an LLM.
 
-    Returns a dict with NodeStyle, EdgeStyle, and ClusterStyle objects
-    plus layout hints (direction, spacing).
+    Returns a Theme object containing node_styles, edge_styles,
+    cluster_style, and graph_style extracted from the image.
 
     Args:
         image_path: Path to the graph image (PNG, JPG, etc.).
@@ -498,36 +627,11 @@ def theme_from_image(
         model: Model name override.
 
     Returns:
-        Dict with keys: node_styles (dict[str, NodeStyle]),
-        edge_style (EdgeStyle), cluster_style (ClusterStyle),
-        background_color (str), direction (str), node_sep (float), rank_sep (float).
+        A Theme object with styles extracted from the image.
     """
     provider_name, client = _get_llm_client(provider)
     response_text = _send_image_to_llm(
         client, provider_name, str(image_path), _THEME_EXTRACTION_PROMPT, model
     )
     raw = _extract_json_from_response(response_text)
-
-    result: Dict[str, Any] = {}
-
-    # Convert node_styles dicts to NodeStyle objects
-    if "node_styles" in raw:
-        result["node_styles"] = {
-            name: _dict_to_node_style(style_dict)
-            for name, style_dict in raw["node_styles"].items()
-        }
-
-    # Convert edge_style to EdgeStyle
-    if "edge_style" in raw:
-        result["edge_style"] = _dict_to_edge_style(raw["edge_style"])
-
-    # Convert cluster_style to ClusterStyle
-    if "cluster_style" in raw:
-        result["cluster_style"] = _dict_to_cluster_style(raw["cluster_style"])
-
-    # Pass through scalar values
-    for key in ("background_color", "direction", "node_sep", "rank_sep"):
-        if key in raw:
-            result[key] = raw[key]
-
-    return result
+    return _dict_to_theme(raw)

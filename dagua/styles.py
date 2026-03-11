@@ -1,4 +1,4 @@
-"""NodeStyle, EdgeStyle, ClusterStyle dataclasses, color utilities, and theme system.
+"""NodeStyle, EdgeStyle, ClusterStyle, GraphStyle, Theme dataclasses, color utilities.
 
 Color system: Wong/Okabe-Ito colorblind-safe palette (Wong, B. 2011. Nature Methods 8:441).
 Typography: Helvetica/Arial sans-serif per Nature/Science figure guidelines.
@@ -7,6 +7,7 @@ Aesthetics: publication-quality defaults — muted fills, strong borders, quiet 
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -139,6 +140,12 @@ def border_from_fill(fill_hex: str, darken: float = 0.5) -> str:
     return _hsl_to_hex(h, min(s * 1.2, 1.0), l * (1 - darken))
 
 
+def darken_hex(hex_color: str, amount: float) -> str:
+    """Darken a hex color by reducing HSL lightness by `amount` (0-1 scale)."""
+    h, s, l = _hex_to_hsl(hex_color)
+    return _hsl_to_hex(h, s, max(l - amount, 0.0))
+
+
 def make_node_colors(base_hex: str) -> Tuple[str, str]:
     """Return (fill, stroke) pair from a base palette color.
 
@@ -169,6 +176,13 @@ class NodeStyle:
     corner_radius: float = 4.0
     opacity: float = 1.0
     base_color: str = PALETTE["sky"]  # Wong palette color
+    # New fields (Part 2)
+    font_weight: str = "regular"  # Layout-affecting: changes text width
+    font_style: str = "normal"  # normal, italic — render-only
+    shadow: bool = False  # render-only decoration
+    shadow_offset: Tuple[float, float] = (1.5, -1.5)  # render-only
+    shadow_color: str = "#00000020"  # render-only
+    min_width: Optional[float] = None  # Layout-affecting: floor on node width
 
     def __post_init__(self):
         if not self.fill:
@@ -197,6 +211,11 @@ class EdgeStyle:
     arrow_width: float = 3.5
     style: str = "solid"  # solid, dashed, dotted
     opacity: float = 0.7
+    # New fields (Part 2)
+    routing: str = "bezier"  # bezier, straight, ortho — post-layout
+    label_font_size: float = 7.0  # render-only
+    label_font_color: str = NEAR_BLACK  # render-only
+    label_background: str = WARM_WHITE  # render-only
 
 
 @dataclass
@@ -209,18 +228,75 @@ class ClusterStyle:
     stroke_dash: str = "solid"
     corner_radius: float = 7.0
     padding: float = 18.0
-    label_position: str = "top-left"
+    label_position: str = "top-left"  # top-left, top-center, top-right
     font_size: float = 9.5
     font_weight: str = "medium"
     font_color: str = DARK_GRAY
     opacity: float = 0.4
+    # New fields (Part 2)
+    font_family: str = ""  # empty = use FONT_FAMILY default, render-only
+    label_offset: Tuple[float, float] = (6.0, 6.0)  # render-only
+    depth_fill_step: float = 0.03  # HSL lightness step per depth level
+    depth_stroke_step: float = 0.05  # HSL lightness step per depth level
 
-    # Nested cluster level colors (progressively darken)
+    # Legacy constants kept for reference but replaced by depth_*_step
     LEVEL_FILLS = [PAPER, "#EDEDE8", "#E5E5E0"]
     LEVEL_STROKES = [LIGHT_GRAY, "#C8C8C8", "#BCBCBC"]
 
 
+@dataclass
+class GraphStyle:
+    """Graph-level visual settings (all render-only, no layout effect)."""
+
+    background_color: str = WARM_WHITE
+    margin: float = 30.0
+    title_font_size: float = 10.0
+    title_font_weight: str = "regular"
+    title_font_color: str = NEAR_BLACK
+    title_font_family: str = ""
+    edge_label_font_size: float = 7.0
+    edge_label_background: str = WARM_WHITE
+    edge_label_background_opacity: float = 0.85
+    node_label_secondary_scale: float = 0.85
+    max_figsize: Tuple[float, float] = (30.0, 40.0)
+    min_figsize: Tuple[float, float] = (4.0, 3.0)
+
+
 # ─── Theme System ───────────────────────────────────────────────────────────
+
+
+@dataclass
+class Theme:
+    """Unified theme bundling all style defaults for a graph."""
+
+    name: str = "default"
+    node_styles: Dict[str, NodeStyle] = field(default_factory=dict)
+    edge_styles: Dict[str, EdgeStyle] = field(default_factory=dict)
+    cluster_style: ClusterStyle = field(default_factory=ClusterStyle)
+    graph_style: GraphStyle = field(default_factory=GraphStyle)
+
+    def get_node_style(self, node_type: str) -> NodeStyle:
+        """Look up node style: type > "default" > NodeStyle()."""
+        if node_type in self.node_styles:
+            return self.node_styles[node_type]
+        if "default" in self.node_styles:
+            return self.node_styles["default"]
+        return NodeStyle()
+
+    def get_edge_style(self, edge_type: str) -> EdgeStyle:
+        """Look up edge style: type > "default" > EdgeStyle()."""
+        if edge_type in self.edge_styles:
+            return self.edge_styles[edge_type]
+        if "default" in self.edge_styles:
+            return self.edge_styles["default"]
+        return EdgeStyle()
+
+    def copy(self) -> Theme:
+        """Deep copy for user modification."""
+        return copy.deepcopy(self)
+
+
+# ─── Built-in Node Style Dicts (backwards compat) ──────────────────────────
 
 # Default: all nodes use Sky blue (Wong palette default)
 _sky_fill, _sky_stroke = make_node_colors(PALETTE["sky"])
@@ -231,7 +307,8 @@ _amber_fill, _amber_stroke = make_node_colors(PALETTE["amber"])
 _purple_fill, _purple_stroke = make_node_colors(PALETTE["reddish_purple"])
 _yellow_fill, _yellow_stroke = make_node_colors(PALETTE["yellow"])
 
-DEFAULT_THEME: Dict[str, NodeStyle] = {
+# Legacy name: bare Dict[str, NodeStyle] for backwards compat
+DEFAULT_NODE_STYLES: Dict[str, NodeStyle] = {
     "default": NodeStyle(base_color=PALETTE["sky"]),
     "input": NodeStyle(base_color=PALETTE["bluish_green"]),
     "output": NodeStyle(base_color=PALETTE["vermillion"]),
@@ -243,8 +320,7 @@ DEFAULT_THEME: Dict[str, NodeStyle] = {
     "module": NodeStyle(base_color=PALETTE["blue"]),
 }
 
-# Legacy Graphviz-matching theme (for backwards compatibility)
-GRAPHVIZ_MATCH_THEME: Dict[str, NodeStyle] = {
+GRAPHVIZ_MATCH_NODE_STYLES: Dict[str, NodeStyle] = {
     "default": NodeStyle(
         fill="#FFFFFF",
         stroke="#000000",
@@ -273,3 +349,127 @@ GRAPHVIZ_MATCH_THEME: Dict[str, NodeStyle] = {
         base_color="#FF9999",
     ),
 }
+
+# Backwards-compatible aliases
+DEFAULT_THEME: Dict[str, NodeStyle] = DEFAULT_NODE_STYLES
+GRAPHVIZ_MATCH_THEME: Dict[str, NodeStyle] = GRAPHVIZ_MATCH_NODE_STYLES
+
+# ─── Full Theme Objects ────────────────────────────────────────────────────
+
+DEFAULT_THEME_OBJ = Theme(
+    name="default",
+    node_styles=dict(DEFAULT_NODE_STYLES),
+    edge_styles={
+        "default": EdgeStyle(),
+        "if": EdgeStyle(style="dashed", color=PALETTE["amber"]),
+        "then": EdgeStyle(style="dashed", color=PALETTE["bluish_green"]),
+        "buffer": EdgeStyle(style="dotted", opacity=0.5),
+    },
+    cluster_style=ClusterStyle(),
+    graph_style=GraphStyle(),
+)
+
+DARK_THEME = Theme(
+    name="dark",
+    node_styles={
+        "default": NodeStyle(
+            base_color=PALETTE["sky"],
+            fill="#2A3A4A",
+            stroke="#5A8AB0",
+            font_color="#E0E0E0",
+        ),
+        "input": NodeStyle(
+            base_color=PALETTE["bluish_green"],
+            fill="#1A3A2A",
+            stroke="#4A9A73",
+            font_color="#E0E0E0",
+        ),
+        "output": NodeStyle(
+            base_color=PALETTE["vermillion"],
+            fill="#3A2A1A",
+            stroke="#B05A3A",
+            font_color="#E0E0E0",
+        ),
+        "buffer": NodeStyle(
+            base_color=MEDIUM_GRAY,
+            fill="#2A2A2A",
+            stroke="#6A6A6A",
+            font_color="#B0B0B0",
+        ),
+        "bool": NodeStyle(
+            base_color=PALETTE["amber"],
+            fill="#3A3A1A",
+            stroke="#B09A3A",
+            font_color="#E0E0E0",
+        ),
+        "trainable_params": NodeStyle(
+            base_color=PALETTE["blue"],
+            fill="#1A2A3A",
+            stroke="#4A7AB0",
+            font_color="#E0E0E0",
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(color="#606060", opacity=0.6),
+        "if": EdgeStyle(style="dashed", color="#B09A3A", opacity=0.6),
+        "then": EdgeStyle(style="dashed", color="#4A9A73", opacity=0.6),
+        "buffer": EdgeStyle(style="dotted", color="#505050", opacity=0.4),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1E2228",
+        stroke="#3A3E44",
+        font_color="#A0A0A0",
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(
+        background_color="#1A1E24",
+        title_font_color="#E0E0E0",
+        edge_label_background="#1A1E24",
+    ),
+)
+
+MINIMAL_THEME = Theme(
+    name="minimal",
+    node_styles={
+        "default": NodeStyle(
+            shape="rect",
+            base_color="#000000",
+            fill="#FFFFFF",
+            stroke="#000000",
+            stroke_width=0.5,
+            corner_radius=0.0,
+            font_color="#000000",
+        ),
+        "input": NodeStyle(
+            shape="rect",
+            base_color="#009E73",
+            fill="#E8F5E9",
+            stroke="#2E7D32",
+            stroke_width=0.5,
+            corner_radius=0.0,
+            font_color="#000000",
+        ),
+        "output": NodeStyle(
+            shape="rect",
+            base_color="#D55E00",
+            fill="#FBE9E7",
+            stroke="#BF360C",
+            stroke_width=0.5,
+            corner_radius=0.0,
+            font_color="#000000",
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(color="#000000", width=0.5, opacity=0.5),
+    },
+    cluster_style=ClusterStyle(
+        fill="#FFFFFF",
+        stroke="#CCCCCC",
+        stroke_width=0.5,
+        corner_radius=0.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(
+        background_color="#FFFFFF",
+    ),
+)

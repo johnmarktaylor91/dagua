@@ -54,9 +54,6 @@ class LayoutConfig:
     w_length_variance: float = 0.5
     w_spacing: float = 0.3  # penalize deviation from target node_sep within layers
 
-    # Edge routing
-    edge_routing: str = "bezier"
-
     # Scale thresholds
     exact_repulsion_threshold: int = 2000
     negative_sample_k: int = 128

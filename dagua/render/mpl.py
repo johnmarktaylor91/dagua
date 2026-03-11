@@ -5,7 +5,7 @@ Publication-quality rendering following the Dagua Aesthetic Style Guide:
 - Muted fills, strong borders, quiet edges
 - Helvetica/Arial typography
 - Warm white background (#FAFAFA)
-- Layered rendering: clusters → edges → nodes → labels
+- Layered rendering: clusters -> edges -> nodes -> labels
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from dagua.styles import (
     NEAR_BLACK,
     RESOLVED_FONT,
     WARM_WHITE,
+    darken_hex,
 )
 from dagua.utils import collect_cluster_leaves
 
@@ -57,6 +58,8 @@ def render(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    gs = graph.graph_style
+
     # Set global font preferences (use resolved font to avoid warnings)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "findfont")
@@ -65,19 +68,20 @@ def render(
 
     pos = positions.detach().cpu().numpy()
     n = graph.num_nodes
+    bg = gs.background_color
 
     if n == 0:
         fig, ax = plt.subplots(1, 1, figsize=figsize or (6, 4))
-        fig.patch.set_facecolor(WARM_WHITE)
+        fig.patch.set_facecolor(bg)
         if output:
-            fig.savefig(output, dpi=dpi, bbox_inches="tight", facecolor=WARM_WHITE)
+            fig.savefig(output, dpi=dpi, bbox_inches="tight", facecolor=bg)
         return fig, ax
 
     # Compute figure bounds
     graph.compute_node_sizes()
     sizes = graph.node_sizes.detach().cpu().numpy()
 
-    margin = 30
+    margin = gs.margin
     x_min = (pos[:, 0] - sizes[:, 0] / 2).min() - margin
     x_max = (pos[:, 0] + sizes[:, 0] / 2).max() + margin
     y_min = (pos[:, 1] - sizes[:, 1] / 2).min() - margin
@@ -87,21 +91,23 @@ def render(
     height = y_max - y_min
 
     if figsize is None:
-        scale = max(1.0, min(width / 100, 30))
+        max_w, max_h = gs.max_figsize
+        min_w, min_h = gs.min_figsize
+        scale = max(1.0, min(width / 100, max_w))
         aspect = height / max(width, 1)
-        fig_w = min(max(scale, 4), 30)
-        fig_h = min(max(fig_w * aspect, 3), 40)
+        fig_w = min(max(scale, min_w), max_w)
+        fig_h = min(max(fig_w * aspect, min_h), max_h)
         figsize = (fig_w, fig_h)
 
     fig, ax = plt.subplots(1, 1, figsize=figsize)
-    fig.patch.set_facecolor(WARM_WHITE)
-    ax.set_facecolor(WARM_WHITE)
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
 
     # --- Layer 0: Cluster backgrounds ---
     _draw_clusters(ax, graph, pos, sizes)
 
     # --- Layer 1: Edges ---
-    curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction)
+    curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
     _draw_edges(ax, graph, curves)
 
     # --- Layer 2: Nodes ---
@@ -120,13 +126,14 @@ def render(
     ax.axis("off")
 
     if title:
-        ax.set_title(title, fontsize=10, fontweight="regular", color=NEAR_BLACK,
-                      fontfamily=FONT_FAMILY[0])
+        title_ff = gs.title_font_family or FONT_FAMILY[0]
+        ax.set_title(title, fontsize=gs.title_font_size, fontweight=gs.title_font_weight,
+                      color=gs.title_font_color, fontfamily=title_ff)
 
     plt.tight_layout()
 
     if output:
-        fig.savefig(output, dpi=dpi, bbox_inches="tight", facecolor=WARM_WHITE)
+        fig.savefig(output, dpi=dpi, bbox_inches="tight", facecolor=bg)
 
     if show:
         plt.show()
@@ -143,9 +150,15 @@ def _draw_nodes(ax, graph, pos, sizes):
         w, h = sizes[i, 0], sizes[i, 1]
         style = graph.get_style_for_node(i)
 
-        # Corner radius proportional to shorter dimension (18%)
-        shorter = min(w, h)
-        cr = shorter * 0.18
+        cr = style.corner_radius
+
+        linestyle = "-"
+        if style.stroke_dash == "dashed":
+            linestyle = "--"
+
+        # Shadow (render-only decoration)
+        if style.shadow:
+            _draw_shadow(ax, x, y, w, h, style)
 
         if style.shape in ("roundrect", "rect"):
             pad = cr * 0.01 if style.shape == "roundrect" else 0
@@ -156,7 +169,7 @@ def _draw_nodes(ax, graph, pos, sizes):
                 facecolor=style.fill,
                 edgecolor=style.stroke,
                 linewidth=style.stroke_width,
-                linestyle="--" if style.stroke_dash == "dashed" else "-",
+                linestyle=linestyle,
                 alpha=style.opacity,
                 zorder=2,
             )
@@ -166,7 +179,7 @@ def _draw_nodes(ax, graph, pos, sizes):
                 facecolor=style.fill,
                 edgecolor=style.stroke,
                 linewidth=style.stroke_width,
-                linestyle="--" if style.stroke_dash == "dashed" else "-",
+                linestyle=linestyle,
                 alpha=style.opacity,
                 zorder=2,
             )
@@ -177,6 +190,7 @@ def _draw_nodes(ax, graph, pos, sizes):
                 facecolor=style.fill,
                 edgecolor=style.stroke,
                 linewidth=style.stroke_width,
+                linestyle=linestyle,
                 alpha=style.opacity,
                 zorder=2,
             )
@@ -193,6 +207,7 @@ def _draw_nodes(ax, graph, pos, sizes):
                 facecolor=style.fill,
                 edgecolor=style.stroke,
                 linewidth=style.stroke_width,
+                linestyle=linestyle,
                 alpha=style.opacity,
                 zorder=2,
             )
@@ -203,6 +218,7 @@ def _draw_nodes(ax, graph, pos, sizes):
                 facecolor=style.fill,
                 edgecolor=style.stroke,
                 linewidth=style.stroke_width,
+                linestyle=linestyle,
                 alpha=style.opacity,
                 zorder=2,
             )
@@ -210,8 +226,64 @@ def _draw_nodes(ax, graph, pos, sizes):
         ax.add_patch(patch)
 
 
+def _draw_shadow(ax, x, y, w, h, style):
+    """Draw a shadow offset duplicate patch behind the node."""
+    from matplotlib.patches import FancyBboxPatch, Ellipse, Circle
+
+    ox, oy = style.shadow_offset
+    shadow_color = style.shadow_color
+
+    if style.shape in ("roundrect", "rect"):
+        cr = style.corner_radius
+        pad = cr * 0.01 if style.shape == "roundrect" else 0
+        boxstyle = f"round,pad={pad}" if style.shape == "roundrect" else "square,pad=0"
+        shadow = FancyBboxPatch(
+            (x - w / 2 + ox, y - h / 2 + oy), w, h,
+            boxstyle=boxstyle,
+            facecolor=shadow_color,
+            edgecolor="none",
+            zorder=1.5,
+        )
+    elif style.shape == "ellipse":
+        shadow = Ellipse(
+            (x + ox, y + oy), w, h,
+            facecolor=shadow_color,
+            edgecolor="none",
+            zorder=1.5,
+        )
+    elif style.shape == "circle":
+        r = max(w, h) / 2
+        shadow = Circle(
+            (x + ox, y + oy), r,
+            facecolor=shadow_color,
+            edgecolor="none",
+            zorder=1.5,
+        )
+    elif style.shape == "diamond":
+        from matplotlib.patches import Polygon
+        pts = np.array([
+            [x + ox, y + h / 2 + oy],
+            [x + w / 2 + ox, y + oy],
+            [x + ox, y - h / 2 + oy],
+            [x - w / 2 + ox, y + oy],
+        ])
+        shadow = Polygon(pts, closed=True, facecolor=shadow_color, edgecolor="none", zorder=1.5)
+    else:
+        shadow = FancyBboxPatch(
+            (x - w / 2 + ox, y - h / 2 + oy), w, h,
+            boxstyle="round,pad=0.02",
+            facecolor=shadow_color,
+            edgecolor="none",
+            zorder=1.5,
+        )
+
+    ax.add_patch(shadow)
+
+
 def _draw_node_labels(ax, graph, pos, sizes):
     """Draw centered text labels inside nodes."""
+    gs = graph.graph_style
+
     for i in range(graph.num_nodes):
         x, y = pos[i, 0], pos[i, 1]
         style = graph.get_style_for_node(i)
@@ -220,6 +292,8 @@ def _draw_node_labels(ax, graph, pos, sizes):
         lines = label.split("\n")
         fontsize = style.font_size
         font_family = style.font_family_list
+        font_weight = style.font_weight
+        font_style = style.font_style
 
         if len(lines) == 1:
             ax.text(
@@ -228,7 +302,8 @@ def _draw_node_labels(ax, graph, pos, sizes):
                 fontsize=fontsize,
                 fontfamily=font_family[0],
                 color=style.font_color,
-                fontweight="regular",
+                fontweight=font_weight,
+                fontstyle=font_style,
                 zorder=3,
                 clip_on=True,
             )
@@ -240,14 +315,15 @@ def _draw_node_labels(ax, graph, pos, sizes):
             for j, line in enumerate(lines):
                 ly = start_y - j * line_height
                 # Secondary lines slightly smaller
-                fs = fontsize if j == 0 else fontsize * 0.85
+                fs = fontsize if j == 0 else fontsize * gs.node_label_secondary_scale
                 ax.text(
                     x, ly, line,
                     ha="center", va="center",
                     fontsize=fs,
                     fontfamily=font_family[0],
                     color=style.font_color,
-                    fontweight="regular",
+                    fontweight=font_weight,
+                    fontstyle=font_style,
                     zorder=3,
                     clip_on=True,
                 )
@@ -257,7 +333,7 @@ def _draw_edges(ax, graph, curves: List[BezierCurve]):
     """Draw bezier edges with arrowheads.
 
     Edges are quiet: medium gray at 70% opacity, 0.75pt width.
-    Arrowheads: small filled triangles (5pt × 3.5pt).
+    Arrowheads: small filled triangles (5pt x 3.5pt).
     """
     from matplotlib.path import Path
     from matplotlib.patches import FancyArrowPatch
@@ -269,10 +345,13 @@ def _draw_edges(ax, graph, curves: List[BezierCurve]):
         codes = [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4]
         path = Path(verts, codes)
 
-        # Arrow style: small filled triangle per style guide
-        arrow_l = style.arrow_length
-        arrow_w = style.arrow_width
-        arrowstyle = f"->,head_length={arrow_l},head_width={arrow_w}"
+        # Arrow style: "none" -> no arrowhead, otherwise small filled triangle
+        if style.arrow == "none":
+            arrowstyle = "-"
+        else:
+            arrow_l = style.arrow_length
+            arrow_w = style.arrow_width
+            arrowstyle = f"->,head_length={arrow_l},head_width={arrow_w}"
 
         linestyle = "-"
         if style.style == "dashed":
@@ -296,8 +375,10 @@ def _draw_edges(ax, graph, curves: List[BezierCurve]):
 def _draw_edge_labels(ax, graph, curves: List[BezierCurve]):
     """Draw edge labels offset from the curve midpoint.
 
-    Labels: 7pt regular, dark gray, with subtle background.
+    Uses per-edge style for font size/color/background, with fallback to graph_style.
     """
+    gs = graph.graph_style
+
     for e_idx, curve in enumerate(curves):
         if e_idx >= len(graph.edge_labels):
             break
@@ -305,22 +386,29 @@ def _draw_edge_labels(ax, graph, curves: List[BezierCurve]):
         if not label:
             continue
 
+        style = graph.get_style_for_edge(e_idx)
         mid = evaluate_bezier(curve, 0.5)
+
+        # Per-edge style or fall back to graph style
+        font_size = style.label_font_size
+        font_color = style.label_font_color
+        label_bg = style.label_background
+        bg_opacity = gs.edge_label_background_opacity
 
         # Offset 4pt perpendicular (approximated as upward)
         label_offset = 4.0
         ax.text(
             mid[0], mid[1] + label_offset, label,
             ha="center", va="center",
-            fontsize=7.0,
+            fontsize=font_size,
             fontweight="regular",
             fontfamily=FONT_FAMILY[0],
-            color=NEAR_BLACK,
+            color=font_color,
             bbox=dict(
                 boxstyle="round,pad=0.15",
-                facecolor=WARM_WHITE,
+                facecolor=label_bg,
                 edgecolor="none",
-                alpha=0.85,
+                alpha=bg_opacity,
             ),
             zorder=4,
         )
@@ -330,7 +418,7 @@ def _draw_clusters(ax, graph, pos, sizes):
     """Draw cluster background boxes.
 
     Barely-there fills, thin borders, progressive darkening for nesting.
-    Labels: top-left, left-aligned.
+    Labels: configurable position via label_position.
     """
     from matplotlib.patches import FancyBboxPatch
 
@@ -352,7 +440,7 @@ def _draw_clusters(ax, graph, pos, sizes):
         if not indices:
             continue
 
-        style = graph.cluster_styles.get(name, ClusterStyle())
+        style = graph.get_style_for_cluster(name)
         padding = style.padding
 
         member_pos = pos[indices]
@@ -363,37 +451,62 @@ def _draw_clusters(ax, graph, pos, sizes):
         y_min = (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding
         y_max = (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding + 14  # space for label
 
-        # Progressive nesting: deeper clusters get slightly darker fills
-        level = min(depth, len(ClusterStyle.LEVEL_FILLS) - 1)
-        fill_color = ClusterStyle.LEVEL_FILLS[level]
-        stroke_color = ClusterStyle.LEVEL_STROKES[level]
+        # Progressive depth darkening using HSL (replaces LEVEL_FILLS/LEVEL_STROKES)
+        fill_color = darken_hex(style.fill, depth * style.depth_fill_step)
+        stroke_color = darken_hex(style.stroke, depth * style.depth_stroke_step)
 
         # Opacity decreases with depth
         max_depth = len(sorted_clusters)
         opacity = style.opacity * (1 - depth * 0.15 / max(max_depth, 1))
         opacity = max(opacity, 0.08)
 
+        # Corner radius
+        cr = style.corner_radius
+        boxstyle = f"round,pad=0" if cr > 0 else "square,pad=0"
+
+        # Stroke dash
+        linestyle = "-"
+        if style.stroke_dash == "dashed":
+            linestyle = "--"
+        elif style.stroke_dash == "dotted":
+            linestyle = "-."
+
         patch = FancyBboxPatch(
             (x_min, y_min), x_max - x_min, y_max - y_min,
-            boxstyle="round,pad=0",
+            boxstyle=boxstyle,
             facecolor=fill_color,
             edgecolor=stroke_color,
             linewidth=style.stroke_width,
+            linestyle=linestyle,
             alpha=opacity,
             zorder=0,
         )
         ax.add_patch(patch)
 
-        # Cluster label: top-left, left-aligned
+        # Cluster label: position from style
         label = graph.cluster_labels.get(name, name)
-        # Font size decreases by 1pt per nesting level (min 7pt)
         label_fontsize = max(style.font_size - depth * 1.0, 7.0)
+        label_ff = style.font_family or FONT_FAMILY[0]
+        label_ox, label_oy = style.label_offset
+
+        if style.label_position == "top-center":
+            lx = (x_min + x_max) / 2
+            ha = "center"
+        elif style.label_position == "top-right":
+            lx = x_max - label_ox
+            ha = "right"
+        else:  # "top-left" (default)
+            lx = x_min + label_ox
+            ha = "left"
+
+        ly = y_max - label_oy
+
         ax.text(
-            x_min + 6, y_max - 6, label,
+            lx, ly, label,
             fontsize=label_fontsize,
             fontweight=style.font_weight,
-            fontfamily=FONT_FAMILY[0],
+            fontfamily=label_ff,
             color=style.font_color,
-            va="top", ha="left",
+            va="top", ha=ha,
             zorder=0.5,
         )

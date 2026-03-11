@@ -19,7 +19,7 @@ from dagua.io import (
     graph_to_json,
     theme_from_image,
 )
-from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
+from dagua.styles import ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme
 
 
 # ─── TestGraphFromJson ─────────────────────────────────────────────────────
@@ -102,8 +102,9 @@ class TestGraphFromJson:
             },
         }
         g = graph_from_json(data)
-        assert g._theme["input"].base_color == "#009E73"
-        assert g._theme["default"].base_color == "#56B4E9"
+        assert isinstance(g._theme, Theme)
+        assert g._theme.get_node_style("input").base_color == "#009E73"
+        assert g._theme.get_node_style("default").base_color == "#56B4E9"
 
     def test_missing_optional_fields(self):
         """Minimal valid JSON — only node IDs."""
@@ -398,7 +399,7 @@ class TestGraphFromImage:
 class TestThemeFromImage:
     """theme_from_image with mocked LLM calls."""
 
-    def test_returns_theme_dict(self):
+    def test_returns_theme(self):
         image_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         image_path.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
         image_path.close()
@@ -408,12 +409,11 @@ class TestThemeFromImage:
                 "default": {"shape": "roundrect", "base_color": "#56B4E9"},
                 "input": {"base_color": "#009E73"},
             },
-            "edge_style": {"color": "#666666", "width": 1.5},
+            "edge_styles": {
+                "default": {"color": "#666666", "width": 1.5},
+            },
             "cluster_style": {"fill": "#F0F0F0"},
-            "background_color": "#FFFFFF",
-            "direction": "TB",
-            "node_sep": 30.0,
-            "rank_sep": 60.0,
+            "graph_style": {"background_color": "#FFFFFF"},
         })
 
         try:
@@ -422,22 +422,19 @@ class TestThemeFromImage:
                 mock_get.return_value = ("anthropic", mock.MagicMock())
                 result = theme_from_image(image_path.name, provider="anthropic")
 
-            assert "node_styles" in result
-            assert isinstance(result["node_styles"]["default"], NodeStyle)
-            assert result["node_styles"]["default"].base_color == "#56B4E9"
-            assert isinstance(result["node_styles"]["input"], NodeStyle)
-            assert result["node_styles"]["input"].base_color == "#009E73"
+            assert isinstance(result, Theme)
 
-            assert isinstance(result["edge_style"], EdgeStyle)
-            assert result["edge_style"].color == "#666666"
-            assert result["edge_style"].width == 1.5
+            assert isinstance(result.get_node_style("default"), NodeStyle)
+            assert result.get_node_style("default").base_color == "#56B4E9"
+            assert isinstance(result.get_node_style("input"), NodeStyle)
+            assert result.get_node_style("input").base_color == "#009E73"
 
-            assert isinstance(result["cluster_style"], ClusterStyle)
-            assert result["cluster_style"].fill == "#F0F0F0"
+            assert result.edge_styles["default"].color == "#666666"
+            assert result.edge_styles["default"].width == 1.5
 
-            assert result["background_color"] == "#FFFFFF"
-            assert result["direction"] == "TB"
-            assert result["node_sep"] == 30.0
-            assert result["rank_sep"] == 60.0
+            assert isinstance(result.cluster_style, ClusterStyle)
+            assert result.cluster_style.fill == "#F0F0F0"
+
+            assert result.graph_style.background_color == "#FFFFFF"
         finally:
             os.unlink(image_path.name)

@@ -3,7 +3,13 @@
 __version__ = "0.0.2"
 
 from dagua.graph import DaguaGraph
-from dagua.styles import NodeStyle, EdgeStyle, ClusterStyle, PALETTE, make_fill, border_from_fill
+from dagua.styles import (
+    NodeStyle, EdgeStyle, ClusterStyle, GraphStyle, Theme,
+    PALETTE, make_fill, border_from_fill,
+    DEFAULT_THEME_OBJ, DARK_THEME, MINIMAL_THEME,
+    # Backwards-compatible aliases
+    DEFAULT_THEME, DEFAULT_NODE_STYLES, GRAPHVIZ_MATCH_THEME, GRAPHVIZ_MATCH_NODE_STYLES,
+)
 from dagua.config import LayoutConfig
 from dagua.layout import layout
 from dagua.render import render
@@ -22,6 +28,8 @@ __all__ = [
     "NodeStyle",
     "EdgeStyle",
     "ClusterStyle",
+    "GraphStyle",
+    "Theme",
     "LayoutConfig",
     "layout",
     "render",
@@ -31,4 +39,11 @@ __all__ = [
     "border_from_fill",
     "from_image",
     "theme_from_image",
+    "DEFAULT_THEME_OBJ",
+    "DARK_THEME",
+    "MINIMAL_THEME",
+    "DEFAULT_THEME",
+    "DEFAULT_NODE_STYLES",
+    "GRAPHVIZ_MATCH_THEME",
+    "GRAPHVIZ_MATCH_NODE_STYLES",
 ]

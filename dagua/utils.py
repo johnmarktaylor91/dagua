@@ -24,10 +24,12 @@ def measure_text(
     text: str,
     font_family: str = "",
     font_size: float = 8.5,
+    font_weight: str = "regular",
 ) -> Tuple[float, float]:
     """Measure text dimensions using matplotlib TextPath.
 
     If font_family is empty, uses the resolved best-available font.
+    font_weight affects text width (bold text is wider).
     """
     if not font_family:
         try:
@@ -39,22 +41,30 @@ def measure_text(
         from matplotlib.font_manager import FontProperties
         from matplotlib.textpath import TextPath
 
-        fp = FontProperties(family=font_family, size=font_size)
+        fp = FontProperties(family=font_family, size=font_size, weight=font_weight)
         tp = TextPath((0, 0), text, prop=fp)
         bbox = tp.get_extents()
         return max(bbox.width, 1.0), max(bbox.height, font_size)
     except Exception:
-        return measure_text_fallback(text, font_size)
+        return measure_text_fallback(text, font_size, font_weight)
 
 
-def measure_text_fallback(text: str, font_size: float = 8.5) -> Tuple[float, float]:
+def measure_text_fallback(
+    text: str,
+    font_size: float = 8.5,
+    font_weight: str = "regular",
+) -> Tuple[float, float]:
     """Fast proportional-font approximation (no matplotlib needed).
 
     For sans-serif fonts, average char width ≈ 0.52 × font_size.
+    Bold text is ~5% wider.
     """
     lines = text.split("\n")
     max_chars = max(len(line) for line in lines) if lines else 1
-    width = max_chars * font_size * 0.52
+    char_width = font_size * 0.52
+    if font_weight in ("bold", "heavy", "black"):
+        char_width *= 1.05
+    width = max_chars * char_width
     height = len(lines) * font_size * 1.2
     return max(width, 1.0), max(height, font_size)
 
@@ -70,18 +80,30 @@ def compute_node_size(
     font_family: str = "",
     font_size: float = 8.5,
     padding: Tuple[float, float] = (8.0, 5.0),
+    shape: str = "roundrect",
+    font_weight: str = "regular",
 ) -> Tuple[float, float]:
     """Compute node bounding box from label text.
 
     Enforces minimum dimensions and maximum aspect ratio per style guide.
+    Shape adjustments: diamonds need ~1.42x (text inscribed in rotated square),
+    circles need square bounding boxes.
     """
-    text_w, text_h = measure_text(label, font_family, font_size)
+    text_w, text_h = measure_text(label, font_family, font_size, font_weight)
     w = text_w + padding[0] * 2
     h = text_h + padding[1] * 2
 
     # Enforce minimums
     w = max(w, MIN_NODE_WIDTH)
     h = max(h, MIN_NODE_HEIGHT)
+
+    # Shape adjustments AFTER text+padding sizing
+    if shape == "diamond":
+        max_dim = max(w, h)
+        w = h = max_dim * 1.42  # sqrt(2) — text must fit inside rotated square
+    elif shape == "circle":
+        r = max(w, h)
+        w = h = r  # square bounding box
 
     # Enforce max aspect ratio (truncation would happen at render time)
     if w / h > MAX_NODE_ASPECT_RATIO:
