@@ -155,14 +155,14 @@ def test_optimize_edges_runs(simple_graph, simple_positions):
 
 
 @pytest.mark.smoke
-def test_optimize_edges_zero_steps(simple_graph, simple_positions):
-    """edge_opt_steps=0 returns original curves unchanged."""
+def test_optimize_edges_skip(simple_graph, simple_positions):
+    """edge_opt_steps=-1 returns original curves unchanged (explicit skip)."""
     from dagua.layout.edge_optimization import optimize_edges
 
     curves = route_edges(simple_positions, simple_graph.edge_index,
                          simple_graph.node_sizes, "TB", simple_graph)
     config = LayoutConfig()
-    config.edge_opt_steps = 0
+    config.edge_opt_steps = -1
 
     result = optimize_edges(curves, simple_positions, simple_graph.edge_index,
                             simple_graph.node_sizes, config, simple_graph)
@@ -265,10 +265,10 @@ def test_draw_full_pipeline(simple_graph, simple_positions):
 
 @pytest.mark.smoke
 def test_draw_no_edge_opt(simple_graph, simple_positions):
-    """draw() works with edge_opt_steps=0."""
+    """draw() works with edge_opt_steps=-1 (skip edge optimization)."""
     import dagua
     config = LayoutConfig()
-    config.edge_opt_steps = 0
+    config.edge_opt_steps = -1
     fig, ax = dagua.draw(simple_graph, config=config)
     assert fig is not None
 

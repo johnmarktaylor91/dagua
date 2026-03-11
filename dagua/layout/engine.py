@@ -92,14 +92,6 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
         from dagua.layout.multilevel import multilevel_layout
         return multilevel_layout(graph, config)
 
-    # TODO(perf): Small graph speed — graphviz dot beats us on <2K node graphs.
-    # Benchmark shows dagua takes 1-2s on tiny graphs (5-20 nodes) due to fixed
-    # overhead: init_placement, layer computation, optimizer setup, 500 steps.
-    # Investigate: (1) reduce default steps for small N (50 steps may suffice),
-    # (2) skip spectral init for N<100, (3) warm-start from topological placement
-    # without optimization for very small graphs, (4) profile per-step overhead
-    # to find the constant-factor bottleneck.
-
     # Tier 0-2: Direct layout — move data to device
     edge_index = graph.edge_index.to(device)
     node_sizes = graph.node_sizes.to(device)
@@ -318,6 +310,19 @@ def _layout_inner(
 
     # Optimization loop with annealing
     steps = config.steps
+    if steps == 0:
+        # Auto-scale: small graphs converge fast, large graphs need more steps
+        if n <= 10:
+            steps = 50
+        elif n <= 50:
+            steps = 100
+        elif n <= 200:
+            steps = 200
+        elif n <= 500:
+            steps = 300
+        else:
+            steps = 500
+
     prev_unweighted = float("inf")
     stall_count = 0
     _t_loop = _time.perf_counter()
@@ -460,9 +465,12 @@ def _layout_inner(
             )
 
         # Early stopping check (use unweighted loss — immune to annealing)
-        if step > 10 and abs(prev_unweighted - unweighted_loss_val) < prev_unweighted * 1e-4:
+        # Small graphs converge faster — detect convergence sooner
+        rel_threshold = 5e-4 if n <= 200 else 1e-4
+        stall_limit = 3 if n <= 200 else 5
+        if step > 10 and abs(prev_unweighted - unweighted_loss_val) < prev_unweighted * rel_threshold:
             stall_count += 1
-            if stall_count >= 5:
+            if stall_count >= stall_limit:
                 break
         else:
             stall_count = 0
@@ -475,7 +483,16 @@ def _layout_inner(
     pos.grad = None
 
     # Final aggressive overlap projection (scale iterations with N)
-    final_proj_iters = 20 if n <= 500_000 else 10 if n <= 5_000_000 else 3
+    if n <= 50:
+        final_proj_iters = 5
+    elif n <= 200:
+        final_proj_iters = 10
+    elif n <= 500_000:
+        final_proj_iters = 20
+    elif n <= 5_000_000:
+        final_proj_iters = 10
+    else:
+        final_proj_iters = 3
     _vlog(f"final projection ({final_proj_iters} iters)...")
     _t_proj = _time.perf_counter()
     project_overlaps(

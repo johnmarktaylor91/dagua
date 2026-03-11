@@ -35,8 +35,8 @@ def init_positions(
     # Step 1: Assign layers (y-coordinates) via longest-path
     layers = longest_path_layering(edge_index, num_nodes)
 
-    # For large graphs, use fully vectorized path
-    if num_nodes > 2000:
+    # Vectorized path is faster even at N=100 due to tensor ops vs Python loops
+    if num_nodes > 100:
         return _init_positions_vectorized(
             edge_index, num_nodes, node_sizes, layers,
             node_sep, rank_sep, device,

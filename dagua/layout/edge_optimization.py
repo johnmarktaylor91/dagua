@@ -48,9 +48,13 @@ def optimize_edges(
     if E == 0:
         return curves
 
-    steps = getattr(config, "edge_opt_steps", 100)
-    if steps <= 0:
+    steps = getattr(config, "edge_opt_steps", 0)
+    if steps < 0:
+        # Explicit skip (-1)
         return curves
+    if steps == 0:
+        # Auto-scale based on edge count
+        steps = min(100, max(20, E * 2))
 
     lr = getattr(config, "edge_opt_lr", 0.1)
 

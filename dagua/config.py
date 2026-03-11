@@ -29,8 +29,8 @@ class LayoutConfig:
     rank_sep: float = 50.0
     direction: str = "TB"
 
-    # Optimization
-    steps: int = 500
+    # Optimization (0 = auto-scale based on graph size)
+    steps: int = 0
     lr: float = 0.05
     device: str = "cpu"
     seed: Optional[int] = 42
@@ -92,8 +92,8 @@ class LayoutConfig:
     num_workers: int = 0
 
     # Edge optimization: gradient descent on bezier control points
-    # Set edge_opt_steps=0 to skip (zero overhead)
-    edge_opt_steps: int = 100
+    # 0 = auto-scale based on edge count, -1 = skip (zero overhead)
+    edge_opt_steps: int = 0
     edge_opt_lr: float = 0.1
     w_edge_crossing: float = 5.0
     w_edge_node_crossing: float = 10.0
@@ -209,7 +209,7 @@ PARAM_REGISTRY: List[TunableParam] = [
         display_name="Optimization Steps",
         description="Number of gradient descent steps.",
         visual_effect="Increasing: better quality, slower. Decreasing: faster, rougher.",
-        default=500,
+        default=0,
         sweep_range=(100.0, 2000.0),
         sweep_values=[100, 250, 500, 1000, 2000],
         category="optimization",

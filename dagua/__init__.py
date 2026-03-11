@@ -22,14 +22,14 @@ def draw(graph, config=None, output=None, **kwargs):
     """Layout + render in one call. Convenience function.
 
     Full pipeline: layout → route_edges → optimize_edges → place_edge_labels → render.
-    Edge optimization is controlled by config.edge_opt_steps (default 100, 0=skip).
+    Edge optimization is controlled by config.edge_opt_steps (0=auto, -1=skip, >0=explicit).
     """
     config = config or LayoutConfig()
     positions = layout(graph, config)
     graph.compute_node_sizes()
     curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
 
-    if getattr(config, "edge_opt_steps", 0) > 0:
+    if getattr(config, "edge_opt_steps", 0) >= 0:
         from dagua.layout.edge_optimization import optimize_edges
         curves = optimize_edges(curves, positions, graph.edge_index, graph.node_sizes, config, graph)
 
