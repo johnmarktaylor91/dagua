@@ -135,6 +135,7 @@ class TestLongestPathLayeringVectorized:
         vector_list = vector_result.tolist() if isinstance(vector_result, torch.Tensor) else vector_result
         assert scalar_list == vector_list
 
+    @pytest.mark.slow
     def test_100k_chain_completes_in_time(self):
         """Deep chain of 100K nodes must complete in <5s."""
         n = 100_000

@@ -25,6 +25,7 @@ class TestLayoutBasic:
 
 
 class TestLayoutQuality:
+    @pytest.mark.slow
     def test_no_overlaps_chain(self, simple_chain):
         config = LayoutConfig(steps=200)
         pos = layout(simple_chain, config)
@@ -32,6 +33,7 @@ class TestLayoutQuality:
         m = compute_all_metrics(pos, simple_chain.edge_index, simple_chain.node_sizes)
         assert m["node_overlaps"] == 0
 
+    @pytest.mark.slow
     def test_no_overlaps_diamond(self, diamond_graph):
         config = LayoutConfig(steps=200)
         pos = layout(diamond_graph, config)
@@ -39,6 +41,7 @@ class TestLayoutQuality:
         m = compute_all_metrics(pos, diamond_graph.edge_index, diamond_graph.node_sizes)
         assert m["node_overlaps"] == 0
 
+    @pytest.mark.slow
     def test_dag_fraction_chain(self, simple_chain):
         config = LayoutConfig(steps=200)
         pos = layout(simple_chain, config)
@@ -46,6 +49,7 @@ class TestLayoutQuality:
         m = compute_all_metrics(pos, simple_chain.edge_index, simple_chain.node_sizes)
         assert m["dag_fraction"] == 1.0
 
+    @pytest.mark.slow
     def test_dag_fraction_high(self, diamond_graph):
         config = LayoutConfig(steps=200)
         pos = layout(diamond_graph, config)
@@ -53,6 +57,7 @@ class TestLayoutQuality:
         m = compute_all_metrics(pos, diamond_graph.edge_index, diamond_graph.node_sizes)
         assert m["dag_fraction"] >= 0.9
 
+    @pytest.mark.slow
     def test_no_crossings_chain(self, simple_chain):
         config = LayoutConfig(steps=200)
         pos = layout(simple_chain, config)
@@ -76,6 +81,7 @@ class TestLayoutDirections:
         for i in range(4):
             assert pos[i, 1] > pos[i + 1, 1], f"Node {i} should be below node {i+1} in BT"
 
+    @pytest.mark.slow
     def test_lr_flow(self, simple_chain):
         config = LayoutConfig(steps=200, direction="LR")
         pos = layout(simple_chain, config)
@@ -84,6 +90,7 @@ class TestLayoutDirections:
         y_range = pos[:, 1].max() - pos[:, 1].min()
         assert x_range > y_range * 0.5, "LR layout should be wider than tall"
 
+    @pytest.mark.slow
     def test_rl_flow(self, simple_chain):
         config = LayoutConfig(steps=200, direction="RL")
         pos = layout(simple_chain, config)
@@ -94,6 +101,7 @@ class TestLayoutDirections:
 
 
 class TestLayoutClusters:
+    @pytest.mark.slow
     def test_cluster_compactness(self, clustered_graph):
         config = LayoutConfig(steps=200)
         pos = layout(clustered_graph, config)
@@ -104,6 +112,7 @@ class TestLayoutClusters:
         # Just check it's finite and reasonable
         assert enc_spread < 500
 
+    @pytest.mark.slow
     def test_cluster_separation(self, clustered_graph):
         config = LayoutConfig(steps=200)
         pos = layout(clustered_graph, config)

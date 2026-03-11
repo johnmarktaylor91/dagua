@@ -133,6 +133,7 @@ class TestGraphvizComparison:
         gv_time = self._time_graphviz(g)
         print(f"\n  N=100: dagua={dagua_time:.2f}s, graphviz={gv_time:.2f}s, ratio={dagua_time/gv_time:.1f}x")
 
+    @pytest.mark.slow
     def test_scaling_comparison_500(self, graphviz_available):
         g = _make_random_dag(500)
         g.compute_node_sizes()
@@ -143,6 +144,7 @@ class TestGraphvizComparison:
         gv_time = self._time_graphviz(g)
         print(f"\n  N=500: dagua={dagua_time:.2f}s, graphviz={gv_time:.2f}s, ratio={dagua_time/gv_time:.1f}x")
 
+    @pytest.mark.slow
     def test_scaling_comparison_1000(self, graphviz_available):
         g = _make_random_dag(1000)
         g.compute_node_sizes()
@@ -365,6 +367,7 @@ class TestEdgeCases:
         pos = dagua.layout(g, LayoutConfig(steps=50))
         assert pos.shape == (2, 2)
 
+    @pytest.mark.slow
     def test_wide_graph_500_parallel(self):
         """500 parallel nodes — all children of one root."""
         g = DaguaGraph()
@@ -379,6 +382,7 @@ class TestEdgeCases:
         assert pos.shape == (501, 2)
         assert elapsed < 60, f"Wide graph (501 nodes) took {elapsed:.1f}s"
 
+    @pytest.mark.slow
     def test_dense_bipartite(self):
         """20→20 bipartite = 400 edges. Heavily connected."""
         edges = []

@@ -59,6 +59,7 @@ class TestEndToEnd:
 class TestLargerGraphs:
     """Test with larger synthetic graphs."""
 
+    @pytest.mark.slow
     def test_50_node_dag(self):
         import random
         random.seed(42)
@@ -76,6 +77,7 @@ class TestLargerGraphs:
         assert m["node_overlaps"] == 0
         assert m["dag_fraction"] >= 0.95
 
+    @pytest.mark.slow
     def test_wide_bipartite(self):
         edges = []
         for i in range(8):
