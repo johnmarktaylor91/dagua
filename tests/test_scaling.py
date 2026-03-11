@@ -198,6 +198,7 @@ def _make_random_dag_vectorized(n: int, edge_ratio: float = 1.3, seed: int = 42)
     return g
 
 
+@pytest.mark.slow
 class TestExtremeScale:
     """5M and 10M node tests. Marked 'rare' — NEVER run routinely.
 

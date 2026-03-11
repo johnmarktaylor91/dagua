@@ -133,6 +133,10 @@ def init_positions(
             positions[node, 1] = y
             x_cursor += w + node_sep
 
+    # Post-pass: spread children of high-degree (fan-out) hubs
+    if edge_index.numel() > 0:
+        _spread_fanout_children(positions, edge_index, node_sizes_cpu, node_sep)
+
     return positions
 
 
@@ -196,6 +200,10 @@ def _init_positions_vectorized(
     layer_widths = counts.float()  # [L]
     node_layer_width = layer_widths[layer_t]  # [N]
     positions[:, 0] = (order - node_layer_width / 2) * spacing
+
+    # Post-pass: spread children of high-degree (fan-out) hubs
+    if edge_index.numel() > 0:
+        _spread_fanout_children(positions, edge_index, node_sizes, node_sep)
 
     return positions
 
@@ -428,6 +436,61 @@ def _count_local_crossings(
                     crossings += 1
 
     return crossings
+
+
+def _spread_fanout_children(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    node_sep: float,
+    degree_threshold: int = 8,
+) -> None:
+    """Re-spread children of high-degree hub nodes in a wider arc.
+
+    After barycenter ordering, hub children may be clustered too tightly.
+    This post-pass detects hubs (out_degree >= threshold) and re-distributes
+    their children symmetrically around the hub's x-coordinate.
+
+    Modifies positions in-place.
+    """
+    if edge_index.numel() == 0:
+        return
+
+    src = edge_index[0].tolist()
+    tgt = edge_index[1].tolist()
+    N = positions.shape[0]
+
+    # Compute out-degree
+    out_degree: Dict[int, int] = defaultdict(int)
+    children_of: Dict[int, List[int]] = defaultdict(list)
+    for s, t in zip(src, tgt):
+        out_degree[s] += 1
+        children_of[s].append(t)
+
+    for hub, degree in out_degree.items():
+        if degree < degree_threshold:
+            continue
+
+        children = children_of[hub]
+        k = len(children)
+        hub_x = positions[hub, 0].item()
+
+        # Compute total width needed for even distribution
+        child_widths = [node_sizes[c, 0].item() for c in children]
+        total_width = sum(child_widths) + node_sep * (k - 1)
+        # Widen by 1.5x for breathing room
+        total_width *= 1.5
+
+        # Sort children by current x to preserve relative ordering
+        children_sorted = sorted(children, key=lambda c: positions[c, 0].item())
+
+        # Distribute evenly centered on hub_x
+        x_start = hub_x - total_width / 2
+        x_cursor = x_start
+        for c in children_sorted:
+            w = node_sizes[c, 0].item()
+            positions[c, 0] = x_cursor + w / 2
+            x_cursor += w + node_sep * 1.5
 
 
 def _update_node_order(

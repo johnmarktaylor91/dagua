@@ -41,6 +41,35 @@ class TestRouteEdges:
         assert abs(c.p1[1] - 90.0) < 1.0  # ty - th/2
 
 
+    def test_self_loop_routing(self):
+        """Self-loop (s == t) should produce a valid teardrop curve with no NaN."""
+        pos = torch.tensor([[50.0, 50.0]])
+        ei = torch.tensor([[0], [0]])  # self-loop
+        ns = torch.tensor([[40.0, 20.0]])
+        curves = route_edges(pos, ei, ns)
+        assert len(curves) == 1
+        c = curves[0]
+        # No NaN in any control point
+        for pt in [c.p0, c.cp1, c.cp2, c.p1]:
+            assert not any(v != v for v in pt), f"NaN in control point: {pt}"
+        # Start and end should be the same (closed loop)
+        assert c.p0 == c.p1
+        # Control points should be above the node (lower y)
+        assert c.cp1[1] < c.p0[1]
+        assert c.cp2[1] < c.p0[1]
+
+    def test_self_loop_evaluate_no_nan(self):
+        """Evaluating a self-loop curve at various t should produce no NaN."""
+        pos = torch.tensor([[50.0, 50.0]])
+        ei = torch.tensor([[0], [0]])
+        ns = torch.tensor([[40.0, 20.0]])
+        curves = route_edges(pos, ei, ns)
+        c = curves[0]
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0]:
+            pt = evaluate_bezier(c, t)
+            assert not any(v != v for v in pt), f"NaN at t={t}: {pt}"
+
+
 class TestEvaluateBezier:
     def test_endpoints(self):
         curve = BezierCurve((0.0, 0.0), (0.0, 33.0), (0.0, 66.0), (0.0, 100.0))

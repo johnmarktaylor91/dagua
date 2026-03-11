@@ -29,7 +29,7 @@ class LayoutConfig:
 
     # Spacing
     node_sep: float = 25.0
-    rank_sep: float = 50.0
+    rank_sep: float = 40.0
     direction: str = "TB"
 
     # Optimization (0 = auto-scale based on graph size)
@@ -53,10 +53,12 @@ class LayoutConfig:
     w_cluster: float = 1.0
     w_cluster_contain: float = 2.0  # child clusters stay within parent bbox
     w_align: float = 5.0
-    w_crossing: float = 0.0
+    w_crossing: float = 1.5
     w_straightness: float = 2.0
     w_length_variance: float = 0.5
     w_spacing: float = 0.3  # penalize deviation from target node_sep within layers
+    w_fanout: float = 0.3  # penalize uneven angular spread of high-degree node children
+    w_back_edge: float = 0.3  # penalize wide back-edge arcs (horizontal distance)
 
     # Scale thresholds
     exact_repulsion_threshold: int = 2000
@@ -168,9 +170,9 @@ PARAM_REGISTRY: List[TunableParam] = [
         display_name="Crossing Minimization",
         description="Penalty for edge crossings (differentiable proxy).",
         visual_effect="Increasing: fewer crossings, may distort layout. Decreasing: ignore crossings.",
-        default=2.0,
+        default=1.5,
         sweep_range=(0.5, 5.0),
-        sweep_values=[0.5, 1.0, 2.0, 3.0, 5.0],
+        sweep_values=[0.5, 1.0, 1.5, 3.0, 5.0],
         category="aesthetics",
     ),
     TunableParam(
@@ -208,9 +210,9 @@ PARAM_REGISTRY: List[TunableParam] = [
         display_name="Rank Separation",
         description="Minimum vertical gap between layers (pixels).",
         visual_effect="Increasing: more vertical breathing room.",
-        default=50.0,
+        default=40.0,
         sweep_range=(25.0, 100.0),
-        sweep_values=[25.0, 35.0, 50.0, 75.0, 100.0],
+        sweep_values=[25.0, 35.0, 40.0, 60.0, 100.0],
         category="spacing",
     ),
     TunableParam(

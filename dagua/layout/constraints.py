@@ -669,7 +669,8 @@ def crossing_loss(
     if num_edges < 2:
         return torch.tensor(0.0, device=pos.device)
 
-    if layer_assignments is None:
+    # For small edge counts, use the simpler fallback (no virtual node overhead)
+    if layer_assignments is None or num_edges < 20:
         return _crossing_loss_fallback(pos, edge_index, alpha, max_pairs)
 
     return _crossing_loss_layered(pos, edge_index, alpha, max_pairs, layer_assignments)
@@ -1191,3 +1192,104 @@ def spacing_consistency_loss(
     # Penalize deviation from target gap (squared)
     deviation = gap_in_layer - target_gap
     return (deviation ** 2).mean()
+
+
+# ─── Fan-out distribution loss ────────────────────────────────────────────────
+
+
+def fanout_distribution_loss(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    degree_threshold: int = 5,
+) -> torch.Tensor:
+    """Penalize uneven angular distribution of children for high-degree nodes.
+
+    For hub nodes (out_degree >= degree_threshold), computes the angles from
+    hub to each child, sorts them, and penalizes variance in the angular gaps.
+    This prevents the optimizer from collapsing fan-out children into a tight cluster.
+
+    O(E) + O(K log K) per hub.
+    """
+    if edge_index.numel() == 0:
+        return torch.tensor(0.0, device=pos.device)
+
+    device = pos.device
+    N = pos.shape[0]
+    src, tgt = edge_index[0], edge_index[1]
+
+    # Compute out-degree per node
+    out_degree = torch.zeros(N, dtype=torch.long, device=device)
+    out_degree.scatter_add_(0, src, torch.ones_like(src))
+
+    # Find hub nodes
+    hub_mask = out_degree >= degree_threshold
+    hub_nodes = torch.where(hub_mask)[0]
+
+    if hub_nodes.numel() == 0:
+        return torch.tensor(0.0, device=pos.device)
+
+    total_loss = torch.tensor(0.0, device=device)
+    count = 0
+
+    for hub in hub_nodes.tolist():
+        # Get children of this hub
+        child_mask = src == hub
+        children = tgt[child_mask]
+        k = children.shape[0]
+        if k < 2:
+            continue
+
+        # Compute angles from hub to each child
+        dx = pos[children, 0] - pos[hub, 0]
+        dy = pos[children, 1] - pos[hub, 1]
+        angles = torch.atan2(dy, dx)  # [-pi, pi]
+
+        # Sort angles and compute gaps
+        sorted_angles, _ = angles.sort()
+        gaps = sorted_angles[1:] - sorted_angles[:-1]
+        # Wrap-around gap
+        wrap_gap = (2 * 3.141592653589793) - (sorted_angles[-1] - sorted_angles[0])
+        all_gaps = torch.cat([gaps, wrap_gap.unsqueeze(0)])
+
+        # Ideal gap = 2*pi / k
+        ideal_gap = (2 * 3.141592653589793) / k
+        # Penalize variance from ideal
+        total_loss = total_loss + ((all_gaps - ideal_gap) ** 2).mean()
+        count += 1
+
+    if count == 0:
+        return torch.tensor(0.0, device=device)
+    return total_loss / count
+
+
+# ─── Back-edge compactness loss ───────────────────────────────────────────────
+
+
+def back_edge_compactness_loss(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+) -> torch.Tensor:
+    """Penalize horizontal distance in back-edge pairs (target above source).
+
+    Back edges (where target y < source y) should route compactly. This loss
+    penalizes the squared horizontal distance between back-edge endpoints,
+    encouraging tighter back-edge routing.
+
+    O(E), trivially vectorized.
+    """
+    if edge_index.numel() == 0:
+        return torch.tensor(0.0, device=pos.device)
+
+    src, tgt = edge_index[0], edge_index[1]
+    src_y = pos[src, 1]
+    tgt_y = pos[tgt, 1]
+
+    # Back edges: target is above source (lower y = higher on screen)
+    back_mask = tgt_y < src_y
+
+    if not back_mask.any():
+        return torch.tensor(0.0, device=pos.device)
+
+    # Horizontal distance for back edges
+    dx = pos[src[back_mask], 0] - pos[tgt[back_mask], 0]
+    return (dx ** 2).mean()

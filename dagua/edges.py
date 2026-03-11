@@ -121,6 +121,19 @@ def route_edges(
         sw, sh = sizes[s, 0].item(), sizes[s, 1].item()
         tw, th = sizes[t, 0].item(), sizes[t, 1].item()
 
+        # Self-loop: teardrop curve above the node
+        if s == t:
+            loop_r = max(sw, sh) * 0.6
+            top_y = sy - sh / 2
+            curve = BezierCurve(
+                p0=(sx, top_y),
+                cp1=(sx - loop_r, top_y - loop_r),
+                cp2=(sx + loop_r, top_y - loop_r),
+                p1=(sx, top_y),
+            )
+            curves.append(curve)
+            continue
+
         # Per-edge style
         edge_style = None
         if graph is not None:

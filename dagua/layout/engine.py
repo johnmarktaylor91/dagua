@@ -32,6 +32,7 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from dagua.config import LayoutConfig
 from dagua.layout.constraints import (
     alignment_loss,
+    back_edge_compactness_loss,
     cluster_compactness_loss,
     cluster_containment_loss,
     cluster_separation_loss,
@@ -40,6 +41,7 @@ from dagua.layout.constraints import (
     edge_attraction_loss,
     edge_length_variance_loss,
     edge_straightness_loss,
+    fanout_distribution_loss,
     flex_spacing_loss,
     overlap_avoidance_loss,
     position_pin_loss,
@@ -311,13 +313,25 @@ def _layout_inner(
         loss_fns.append(("w_cluster_contain", lambda p, ns, li: cluster_containment_loss(
             p, ns, clusters, cluster_parents, device=p.device), False, False))
 
-    if config.w_crossing > 0:
+    if config.w_crossing > 0 and num_edges >= 4:
         # alpha is annealed per-step, captured via mutable ref
         crossing_alpha_ref: List[float] = [3.0]
-        loss_fns.append(("w_crossing", lambda p, ns, li: crossing_loss(
-            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
-            alpha=crossing_alpha_ref[0], layer_assignments=layer_assignments_raw,
-        ), False, True))
+        # Crossing loss is O(E²) — amortize by computing every N steps.
+        # Positions change slowly enough that every-step is wasteful.
+        crossing_interval = 3 if n > 500 else 5 if n > 50 else 10
+        crossing_step_ref: List[int] = [0]
+        # Scale weight up to compensate for skipped steps
+        crossing_weight_scale = float(crossing_interval)
+        def _crossing_fn(p, ns, li):
+            crossing_step_ref[0] += 1
+            if crossing_step_ref[0] % crossing_interval != 0:
+                return torch.tensor(0.0, device=p.device, requires_grad=True)
+            return crossing_weight_scale * crossing_loss(
+                p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
+                alpha=crossing_alpha_ref[0], layer_assignments=layer_assignments_raw,
+                max_pairs=500,
+            )
+        loss_fns.append(("w_crossing", _crossing_fn, False, True))
 
     if config.w_straightness > 0:
         loss_fns.append(("w_straightness", lambda p, ns, li: edge_straightness_loss(
@@ -330,6 +344,16 @@ def _layout_inner(
     if config.w_spacing > 0 and layer_index is not None:
         loss_fns.append(("w_spacing", lambda p, ns, li: spacing_consistency_loss(
             p, ns, li, target_gap=node_sep,
+        ), False, False))
+
+    if config.w_fanout > 0:
+        loss_fns.append(("w_fanout", lambda p, ns, li: fanout_distribution_loss(
+            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
+        ), False, False))
+
+    if config.w_back_edge > 0:
+        loss_fns.append(("w_back_edge", lambda p, ns, li: back_edge_compactness_loss(
+            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
         ), False, False))
 
     # --- Flex constraints: pins, alignment, flex spacing ---
@@ -402,8 +426,8 @@ def _layout_inner(
         w_crossing = config.w_crossing * t_cross
         w_straightness = config.w_straightness * (1 + 0.5 * t)
 
-        # Update crossing alpha via mutable ref
-        if config.w_crossing > 0:
+        # Update crossing alpha via mutable ref (only exists when crossing loss is active)
+        if config.w_crossing > 0 and num_edges >= 4:
             crossing_alpha_ref[0] = 3.0 + 7.0 * t_cross
 
         # Map weight keys to current annealed values
@@ -419,6 +443,8 @@ def _layout_inner(
             "w_straightness": w_straightness,
             "w_length_variance": config.w_length_variance,
             "w_spacing": config.w_spacing,
+            "w_fanout": config.w_fanout,
+            "w_back_edge": config.w_back_edge,
             # Flex constraint weights (constant — not annealed)
             "w_pin": 1.0,
             "w_align_flex": 1.0,
