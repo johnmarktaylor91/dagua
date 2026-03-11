@@ -781,6 +781,44 @@ class TestBundledGraphs:
         with pytest.raises(ValueError, match="Unknown graph.*Available"):
             dagua.graphs.load("nonexistent_graph")
 
+    def test_all_bundled_graphs_load_with_valid_invariants(self):
+        """Load every bundled graph and verify basic structural invariants."""
+        import dagua.graphs
+
+        names = dagua.graphs.list_graphs()
+        assert len(names) >= 35, f"Expected ≥35 bundled graphs, got {len(names)}"
+
+        for name in names:
+            g = dagua.graphs.load(name)
+
+            # Basic structure
+            assert isinstance(g, DaguaGraph), f"{name}: not a DaguaGraph"
+            assert g.num_nodes > 0, f"{name}: zero nodes"
+
+            # edge_index shape: [2, E]
+            assert g.edge_index.ndim == 2, f"{name}: edge_index not 2D"
+            assert g.edge_index.shape[0] == 2, f"{name}: edge_index first dim != 2"
+
+            # Node labels match count
+            assert len(g.node_labels) == g.num_nodes, (
+                f"{name}: {len(g.node_labels)} labels != {g.num_nodes} nodes"
+            )
+
+            # Edge endpoints within bounds
+            num_edges = g.edge_index.shape[1]
+            if num_edges > 0:
+                assert g.edge_index.max().item() < g.num_nodes, (
+                    f"{name}: edge references node >= num_nodes"
+                )
+                assert g.edge_index.min().item() >= 0, (
+                    f"{name}: negative node index in edge_index"
+                )
+
+            # Direction is valid
+            assert g.direction in ("TB", "BT", "LR", "RL"), (
+                f"{name}: invalid direction {g.direction!r}"
+            )
+
 
 # ─── TestClassmethods ─────────────────────────────────────────────────────
 

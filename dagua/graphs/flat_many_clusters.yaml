@@ -1,0 +1,105 @@
+# 4 parallel sibling clusters (18 nodes, 17 edges, depth 1).
+# Tests: O(C²) cluster separation, wide-layer overlap with cluster constraints.
+
+direction: TB
+
+nodes:
+  - id: src
+    label: "Source"
+    type: input
+  # Cluster 1
+  - id: a1
+    label: "A1"
+  - id: a2
+    label: "A2"
+  - id: a3
+    label: "A3"
+  # Cluster 2
+  - id: b1
+    label: "B1"
+  - id: b2
+    label: "B2"
+  - id: b3
+    label: "B3"
+  - id: b4
+    label: "B4"
+  # Cluster 3
+  - id: c1
+    label: "C1"
+  - id: c2
+    label: "C2"
+  - id: c3
+    label: "C3"
+  # Cluster 4
+  - id: d1
+    label: "D1"
+  - id: d2
+    label: "D2"
+  - id: d3
+    label: "D3"
+  - id: d4
+    label: "D4"
+  - id: d5
+    label: "D5"
+  # Merges
+  - id: merge
+    label: "Merge"
+  - id: sink
+    label: "Sink"
+    type: output
+
+edges:
+  - source: src
+    target: a1
+  - source: src
+    target: b1
+  - source: src
+    target: c1
+  - source: src
+    target: d1
+  - source: a1
+    target: a2
+  - source: a2
+    target: a3
+  - source: b1
+    target: b2
+  - source: b2
+    target: b3
+  - source: b3
+    target: b4
+  - source: c1
+    target: c2
+  - source: c2
+    target: c3
+  - source: d1
+    target: d2
+  - source: d2
+    target: d3
+  - source: d3
+    target: d4
+  - source: d4
+    target: d5
+  - source: a3
+    target: merge
+  - source: b4
+    target: merge
+  - source: c3
+    target: merge
+  - source: d5
+    target: merge
+  - source: merge
+    target: sink
+
+clusters:
+  - name: alpha
+    members: [a1, a2, a3]
+    label: "Alpha"
+  - name: beta
+    members: [b1, b2, b3, b4]
+    label: "Beta"
+  - name: gamma
+    members: [c1, c2, c3]
+    label: "Gamma"
+  - name: delta
+    members: [d1, d2, d3, d4, d5]
+    label: "Delta"
