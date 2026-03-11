@@ -16,6 +16,12 @@ from dagua.layout import layout
 from dagua.render import render
 from dagua.io import graph_from_image as from_image
 from dagua.io import theme_from_image
+from dagua.io import (
+    load, save,
+    graph_from_json, graph_to_json,
+    graph_from_yaml, graph_to_yaml,
+)
+from dagua.styles import get_theme
 
 
 def draw(graph, config=None, output=None, **kwargs):
@@ -57,6 +63,13 @@ __all__ = [
     "border_from_fill",
     "from_image",
     "theme_from_image",
+    "load",
+    "save",
+    "graph_from_json",
+    "graph_to_json",
+    "graph_from_yaml",
+    "graph_to_yaml",
+    "get_theme",
     "DEFAULT_THEME_OBJ",
     "DARK_THEME",
     "MINIMAL_THEME",

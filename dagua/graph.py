@@ -492,6 +492,40 @@ class DaguaGraph:
         return graph_to_json(self)
 
     @classmethod
+    def load(cls, source) -> DaguaGraph:
+        """Load graph from file (YAML/JSON), dict, or string.
+
+        See ``dagua.io.load`` for full documentation.
+        """
+        from dagua.io import load
+        return load(source)
+
+    def save(self, path, format=None):
+        """Save graph to file (YAML/JSON). Format auto-detected from extension.
+
+        See ``dagua.io.save`` for full documentation.
+        """
+        from dagua.io import save
+        save(self, path, format=format)
+
+    @classmethod
+    def from_yaml(cls, data) -> DaguaGraph:
+        """Create graph from YAML string or .yaml file path.
+
+        See ``dagua.io.graph_from_yaml`` for full documentation.
+        """
+        from dagua.io import graph_from_yaml
+        return graph_from_yaml(data)
+
+    def to_yaml(self, path=None) -> str:
+        """Serialize to YAML string (or write to file if path given).
+
+        See ``dagua.io.graph_to_yaml`` for full documentation.
+        """
+        from dagua.io import graph_to_yaml
+        return graph_to_yaml(self, path)
+
+    @classmethod
     def from_torchlens(
         cls,
         model_log,

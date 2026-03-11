@@ -4,7 +4,8 @@ from_edges, from_edge_index, from_networkx, from_dict — thin converters
 that build Graph instances from various input formats.
 to_dot — export to Graphviz DOT format.
 
-JSON import/export: graph_from_json, graph_to_json.
+JSON/YAML import/export: graph_from_json, graph_to_json, graph_from_yaml, graph_to_yaml.
+Unified API: load(), save() — auto-detect format from file extension.
 LLM-based construction: graph_from_image, theme_from_image.
 
 Graph.from_* classmethods are thin wrappers over functions here.
@@ -116,36 +117,25 @@ def _dict_to_theme(d: Dict[str, Any]) -> Theme:
     )
 
 
-# ─── JSON import/export ───────────────────────────────────────────────────
+# ─── Core dict → graph converter ──────────────────────────────────────────
 
 
-def graph_from_json(data: Union[Dict, str, Path]) -> "DaguaGraph":
-    """Build a DaguaGraph from JSON data.
+def _graph_from_dict(data: Dict) -> "DaguaGraph":
+    """Build a DaguaGraph from a plain dict (shared by JSON and YAML paths).
 
-    Args:
-        data: A dict, a JSON string, or a file path (str or Path) ending in .json.
-
-    Returns:
-        A fully constructed DaguaGraph.
+    Theme resolution: if ``theme`` is a string, look up a built-in theme by name.
+    If it is a dict, parse it into a Theme object.
     """
     from dagua.graph import DaguaGraph
 
-    if isinstance(data, (str, Path)):
-        s = str(data)
-        # Treat as file path if it ends with .json or the file exists
-        if s.endswith(".json") or (os.path.exists(s) and not s.strip().startswith("{")):
-            with open(s) as f:
-                data = json.load(f)
-        else:
-            data = json.loads(s)
-
-    if not isinstance(data, dict):
-        raise TypeError(f"Expected dict, JSON string, or file path, got {type(data).__name__}")
-
     # Build theme from top-level "theme" key
     theme = None
-    if "theme" in data:
-        theme = _dict_to_theme(data["theme"])
+    theme_val = data.get("theme")
+    if isinstance(theme_val, str):
+        from dagua.styles import get_theme
+        theme = get_theme(theme_val)
+    elif isinstance(theme_val, dict):
+        theme = _dict_to_theme(theme_val)
 
     g = DaguaGraph(
         direction=data.get("direction", "TB"),
@@ -195,6 +185,33 @@ def graph_from_json(data: Union[Dict, str, Path]) -> "DaguaGraph":
                 g._back_edge_mask = mask
 
     return g
+
+
+# ─── JSON import/export ───────────────────────────────────────────────────
+
+
+def graph_from_json(data: Union[Dict, str, Path]) -> "DaguaGraph":
+    """Build a DaguaGraph from JSON data.
+
+    Args:
+        data: A dict, a JSON string, or a file path (str or Path) ending in .json.
+
+    Returns:
+        A fully constructed DaguaGraph.
+    """
+    if isinstance(data, (str, Path)):
+        s = str(data)
+        # Treat as file path if it ends with .json or the file exists
+        if s.endswith(".json") or (os.path.exists(s) and not s.strip().startswith("{")):
+            with open(s) as f:
+                data = json.load(f)
+        else:
+            data = json.loads(s)
+
+    if not isinstance(data, dict):
+        raise TypeError(f"Expected dict, JSON string, or file path, got {type(data).__name__}")
+
+    return _graph_from_dict(data)
 
 
 def graph_to_json(graph: "DaguaGraph") -> Dict[str, Any]:
@@ -351,6 +368,158 @@ def _style_to_diff_dict(style: Any, defaults: Dict[str, Any]) -> Dict[str, Any]:
                 v = list(v)
             diff[k] = v
     return diff
+
+
+# ─── YAML import/export ───────────────────────────────────────────────────
+
+
+def _ensure_yaml():
+    """Import and return the yaml module, with a clear error if missing."""
+    try:
+        import yaml
+        return yaml
+    except ImportError:
+        raise ImportError(
+            "PyYAML is required for YAML support. Install it with: "
+            "pip install 'dagua[yaml]'"
+        )
+
+
+def graph_from_yaml(data: Union[str, Path]) -> "DaguaGraph":
+    """Build a DaguaGraph from YAML data.
+
+    Args:
+        data: A YAML string or a file path (str or Path) to a .yaml/.yml file.
+
+    Returns:
+        A fully constructed DaguaGraph.
+    """
+    yaml = _ensure_yaml()
+
+    s = str(data)
+    if s.endswith((".yaml", ".yml")) or (
+        os.path.exists(s) and not s.strip().startswith("{")
+    ):
+        with open(s) as f:
+            parsed = yaml.safe_load(f)
+    else:
+        parsed = yaml.safe_load(s)
+
+    if not isinstance(parsed, dict):
+        raise TypeError(f"Expected YAML mapping, got {type(parsed).__name__}")
+
+    return _graph_from_dict(parsed)
+
+
+def graph_to_yaml(graph: "DaguaGraph", path: Optional[Union[str, Path]] = None) -> str:
+    """Serialize a DaguaGraph to YAML.
+
+    Args:
+        graph: The graph to serialize.
+        path: Optional file path to write to. If None, returns YAML string.
+
+    Returns:
+        YAML string representation of the graph.
+    """
+    yaml = _ensure_yaml()
+
+    data = graph_to_json(graph)  # reuse the same dict serialization
+    yaml_str = yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    if path is not None:
+        with open(str(path), "w") as f:
+            f.write(yaml_str)
+
+    return yaml_str
+
+
+# ─── Unified load/save API ────────────────────────────────────────────────
+
+
+def load(source: Union[Dict, str, Path]) -> "DaguaGraph":
+    """Load a DaguaGraph from a file (YAML/JSON), dict, or string.
+
+    Format auto-detection:
+    - dict: parsed directly
+    - Path ending in .yaml/.yml: YAML
+    - Path ending in .json: JSON
+    - String starting with '{': JSON
+    - Otherwise: try YAML parse (falls back to JSON)
+
+    Args:
+        source: A dict, file path, JSON string, or YAML string.
+
+    Returns:
+        A fully constructed DaguaGraph.
+    """
+    if isinstance(source, dict):
+        return _graph_from_dict(source)
+
+    s = str(source)
+
+    # File path detection by extension
+    if s.endswith((".yaml", ".yml")):
+        return graph_from_yaml(s)
+    if s.endswith(".json"):
+        return graph_from_json(s)
+
+    # File path detection by existence
+    if os.path.exists(s):
+        ext = Path(s).suffix.lower()
+        if ext in (".yaml", ".yml"):
+            return graph_from_yaml(s)
+        return graph_from_json(s)
+
+    # String content detection
+    stripped = s.strip()
+    if stripped.startswith("{"):
+        return graph_from_json(s)
+
+    # Try YAML parse (YAML is a superset of JSON, so this handles both)
+    yaml = _ensure_yaml()
+    parsed = yaml.safe_load(s)
+    if isinstance(parsed, dict):
+        return _graph_from_dict(parsed)
+
+    raise TypeError(f"Cannot load graph from: {type(source).__name__}")
+
+
+def save(
+    graph: "DaguaGraph",
+    path: Union[str, Path],
+    format: Optional[str] = None,
+) -> None:
+    """Save a DaguaGraph to a file (YAML or JSON).
+
+    Format auto-detected from file extension. Defaults to YAML when ambiguous.
+
+    Args:
+        graph: The graph to save.
+        path: Output file path.
+        format: Force format — "yaml" or "json". Auto-detected from extension if None.
+    """
+    p = str(path)
+
+    if format is None:
+        ext = Path(p).suffix.lower()
+        if ext == ".json":
+            format = "json"
+        elif ext in (".yaml", ".yml"):
+            format = "yaml"
+        else:
+            format = "yaml"  # default
+
+    data = graph_to_json(graph)
+
+    if format == "json":
+        with open(p, "w") as f:
+            json.dump(data, f, indent=2)
+    elif format == "yaml":
+        yaml = _ensure_yaml()
+        with open(p, "w") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    else:
+        raise ValueError(f"Unknown format: {format!r}. Use 'yaml' or 'json'.")
 
 
 # ─── LLM infrastructure ──────────────────────────────────────────────────

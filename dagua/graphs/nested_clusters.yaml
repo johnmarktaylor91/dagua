@@ -1,0 +1,44 @@
+direction: TB
+
+nodes:
+  - id: a
+    label: "A"
+    type: input
+  - id: b
+    label: "B"
+  - id: c
+    label: "C"
+  - id: d
+    label: "D"
+  - id: e
+    label: "E"
+  - id: f
+    label: "F"
+    type: output
+
+edges:
+  - source: a
+    target: b
+  - source: a
+    target: c
+  - source: b
+    target: d
+  - source: c
+    target: e
+  - source: d
+    target: f
+  - source: e
+    target: f
+
+clusters:
+  - name: outer
+    members: [b, c, d, e]
+    label: "Outer Group"
+  - name: left
+    members: [b, d]
+    label: "Left Branch"
+    parent: outer
+  - name: right
+    members: [c, e]
+    label: "Right Branch"
+    parent: outer

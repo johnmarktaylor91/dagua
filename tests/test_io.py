@@ -1,4 +1,4 @@
-"""Tests for io.py — graph_from_json, graph_to_json, LLM-based construction."""
+"""Tests for io.py — graph_from_json, graph_to_json, YAML, unified load/save, LLM-based construction."""
 
 import json
 import os
@@ -6,6 +6,7 @@ import tempfile
 from unittest import mock
 
 import pytest
+import yaml
 
 from dagua.graph import DaguaGraph
 from dagua.io import (
@@ -16,10 +17,17 @@ from dagua.io import (
     _get_llm_client,
     graph_from_image,
     graph_from_json,
+    graph_from_yaml,
     graph_to_json,
+    graph_to_yaml,
+    load,
+    save,
     theme_from_image,
 )
-from dagua.styles import ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme
+from dagua.styles import (
+    ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
+    DARK_THEME, DEFAULT_THEME_OBJ, get_theme,
+)
 
 
 # ─── TestGraphFromJson ─────────────────────────────────────────────────────
@@ -438,3 +446,371 @@ class TestThemeFromImage:
             assert result.graph_style.background_color == "#FFFFFF"
         finally:
             os.unlink(image_path.name)
+
+
+# ─── TestGraphFromYaml ────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+class TestGraphFromYaml:
+    """graph_from_yaml: string, file, styles, clusters, theme-by-name."""
+
+    def test_basic_yaml_string(self):
+        yaml_str = """
+nodes:
+  - id: a
+    label: "Node A"
+  - id: b
+    label: "Node B"
+edges:
+  - source: a
+    target: b
+"""
+        g = graph_from_yaml(yaml_str)
+        assert g.num_nodes == 2
+        assert g.node_labels == ["Node A", "Node B"]
+        assert g.edge_index.shape == (2, 1)
+
+    def test_yaml_file(self):
+        data = {
+            "nodes": [{"id": "x"}, {"id": "y"}],
+            "edges": [{"source": "x", "target": "y"}],
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(data, f)
+            path = f.name
+        try:
+            g = graph_from_yaml(path)
+            assert g.num_nodes == 2
+        finally:
+            os.unlink(path)
+
+    def test_yaml_with_styles(self):
+        yaml_str = """
+nodes:
+  - id: a
+    label: "Styled"
+    style:
+      shape: ellipse
+      base_color: "#D55E00"
+edges:
+  - source: a
+    target: b
+    style:
+      color: "#FF0000"
+      style: dashed
+"""
+        g = graph_from_yaml(yaml_str)
+        assert g.node_styles[0].shape == "ellipse"
+        assert g.node_styles[0].base_color == "#D55E00"
+        assert g.edge_styles[0].color == "#FF0000"
+        assert g.edge_styles[0].style == "dashed"
+
+    def test_yaml_clusters_with_parent(self):
+        yaml_str = """
+nodes:
+  - id: a
+  - id: b
+  - id: c
+  - id: d
+edges:
+  - source: a
+    target: b
+  - source: c
+    target: d
+clusters:
+  - name: outer
+    members: [a, b, c, d]
+    label: "Outer"
+  - name: inner
+    members: [a, b]
+    label: "Inner"
+    parent: outer
+"""
+        g = graph_from_yaml(yaml_str)
+        assert "outer" in g.clusters
+        assert "inner" in g.clusters
+        assert g.cluster_parents["inner"] == "outer"
+        assert g.cluster_labels["outer"] == "Outer"
+
+    def test_yaml_theme_by_name(self):
+        yaml_str = """
+theme: "dark"
+nodes:
+  - id: a
+    type: input
+"""
+        g = graph_from_yaml(yaml_str)
+        assert isinstance(g._theme, Theme)
+        assert g._theme.name == "dark"
+        # Dark theme has specific graph background
+        assert g._theme.graph_style.background_color == DARK_THEME.graph_style.background_color
+
+    def test_yaml_theme_inline(self):
+        yaml_str = """
+theme:
+  node_styles:
+    default:
+      base_color: "#FF0000"
+  graph_style:
+    background_color: "#000000"
+nodes:
+  - id: a
+"""
+        g = graph_from_yaml(yaml_str)
+        assert isinstance(g._theme, Theme)
+        assert g._theme.get_node_style("default").base_color == "#FF0000"
+        assert g._theme.graph_style.background_color == "#000000"
+
+    def test_yaml_direction(self):
+        yaml_str = """
+direction: BT
+nodes:
+  - id: a
+"""
+        g = graph_from_yaml(yaml_str)
+        assert g.direction == "BT"
+
+
+# ─── TestGraphToYaml ──────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+class TestGraphToYaml:
+    """graph_to_yaml: roundtrip and serialization."""
+
+    def test_roundtrip_yaml(self):
+        yaml_str = """
+nodes:
+  - id: a
+    label: "Node A"
+  - id: b
+    label: "Node B"
+edges:
+  - source: a
+    target: b
+    label: flow
+"""
+        g = graph_from_yaml(yaml_str)
+        output = graph_to_yaml(g)
+        g2 = graph_from_yaml(output)
+        assert g2.num_nodes == 2
+        assert g2.node_labels == ["Node A", "Node B"]
+        assert g2.edge_labels == ["flow"]
+
+    def test_to_yaml_string(self):
+        g = graph_from_json({"nodes": [{"id": "a"}, {"id": "b"}]})
+        result = graph_to_yaml(g)
+        assert isinstance(result, str)
+        parsed = yaml.safe_load(result)
+        assert isinstance(parsed, dict)
+        assert len(parsed["nodes"]) == 2
+
+    def test_to_yaml_file(self):
+        g = graph_from_json({"nodes": [{"id": "a"}]})
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+        try:
+            graph_to_yaml(g, path)
+            with open(path) as f:
+                parsed = yaml.safe_load(f)
+            assert len(parsed["nodes"]) == 1
+        finally:
+            os.unlink(path)
+
+
+# ─── TestUnifiedLoadSave ─────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+class TestUnifiedLoadSave:
+    """Unified load/save API with format auto-detection."""
+
+    def test_load_json_file(self):
+        data = {"nodes": [{"id": "a"}, {"id": "b"}], "edges": [{"source": "a", "target": "b"}]}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            path = f.name
+        try:
+            g = load(path)
+            assert g.num_nodes == 2
+        finally:
+            os.unlink(path)
+
+    def test_load_yaml_file(self):
+        data = {"nodes": [{"id": "a"}, {"id": "b"}]}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(data, f)
+            path = f.name
+        try:
+            g = load(path)
+            assert g.num_nodes == 2
+        finally:
+            os.unlink(path)
+
+    def test_load_yml_file(self):
+        data = {"nodes": [{"id": "a"}]}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(data, f)
+            path = f.name
+        try:
+            g = load(path)
+            assert g.num_nodes == 1
+        finally:
+            os.unlink(path)
+
+    def test_load_dict(self):
+        g = load({"nodes": [{"id": "a"}, {"id": "b"}]})
+        assert g.num_nodes == 2
+
+    def test_load_json_string(self):
+        g = load('{"nodes": [{"id": "a"}]}')
+        assert g.num_nodes == 1
+
+    def test_save_yaml_default(self):
+        g = graph_from_json({"nodes": [{"id": "a"}]})
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as f:
+            path = f.name
+        try:
+            save(g, path)
+            with open(path) as f:
+                parsed = yaml.safe_load(f)
+            assert len(parsed["nodes"]) == 1
+        finally:
+            os.unlink(path)
+
+    def test_save_json_explicit(self):
+        g = graph_from_json({"nodes": [{"id": "a"}]})
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        try:
+            save(g, path)
+            with open(path) as f:
+                parsed = json.load(f)
+            assert len(parsed["nodes"]) == 1
+        finally:
+            os.unlink(path)
+
+    def test_save_roundtrip(self):
+        original = {"nodes": [{"id": "a", "label": "X"}, {"id": "b"}], "edges": [{"source": "a", "target": "b"}]}
+        g = graph_from_json(original)
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as f:
+            path = f.name
+        try:
+            save(g, path)
+            g2 = load(path)
+            assert g2.num_nodes == 2
+            assert g2.node_labels[0] == "X"
+            assert g2.edge_index.shape == (2, 1)
+        finally:
+            os.unlink(path)
+
+
+# ─── TestThemeRegistry ────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+class TestThemeRegistry:
+    """Theme registry: name → Theme lookup."""
+
+    def test_get_theme_default(self):
+        theme = get_theme("default")
+        assert isinstance(theme, Theme)
+        assert theme.name == "default"
+
+    def test_get_theme_dark(self):
+        theme = get_theme("dark")
+        assert isinstance(theme, Theme)
+        assert theme.name == "dark"
+        assert theme.graph_style.background_color == DARK_THEME.graph_style.background_color
+
+    def test_get_theme_unknown_raises(self):
+        with pytest.raises(ValueError, match="Unknown theme.*Available"):
+            get_theme("nonexistent")
+
+    def test_get_theme_returns_copy(self):
+        t1 = get_theme("default")
+        t2 = get_theme("default")
+        t1.name = "modified"
+        assert t2.name == "default"  # t2 is a separate copy
+
+
+# ─── TestBundledGraphs ────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+class TestBundledGraphs:
+    """Bundled graph library: dagua.graphs.load() and list_graphs()."""
+
+    def test_load_diamond(self):
+        import dagua.graphs
+        g = dagua.graphs.load("diamond")
+        assert isinstance(g, DaguaGraph)
+        assert g.num_nodes == 4
+        assert g.edge_index.shape[1] == 4
+
+    def test_load_pipeline(self):
+        import dagua.graphs
+        g = dagua.graphs.load("pipeline")
+        assert g.num_nodes == 5
+        assert g.direction == "LR"
+
+    def test_load_neural_net(self):
+        import dagua.graphs
+        g = dagua.graphs.load("neural_net")
+        assert g.num_nodes == 8
+        assert "feature_extractor" in g.clusters
+
+    def test_load_nested_clusters(self):
+        import dagua.graphs
+        g = dagua.graphs.load("nested_clusters")
+        assert g.cluster_parents["left"] == "outer"
+        assert g.cluster_parents["right"] == "outer"
+
+    def test_list_graphs(self):
+        import dagua.graphs
+        names = dagua.graphs.list_graphs()
+        assert isinstance(names, list)
+        assert "diamond" in names
+        assert "pipeline" in names
+        assert "neural_net" in names
+        assert "nested_clusters" in names
+
+    def test_unknown_graph_raises(self):
+        import dagua.graphs
+        with pytest.raises(ValueError, match="Unknown graph.*Available"):
+            dagua.graphs.load("nonexistent_graph")
+
+
+# ─── TestClassmethods ─────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+class TestGraphClassmethods:
+    """DaguaGraph.load/save/from_yaml/to_yaml classmethods."""
+
+    def test_classmethod_load(self):
+        g = DaguaGraph.load({"nodes": [{"id": "a"}]})
+        assert g.num_nodes == 1
+
+    def test_classmethod_from_yaml(self):
+        yaml_str = "nodes:\n  - id: a\n  - id: b\n"
+        g = DaguaGraph.from_yaml(yaml_str)
+        assert g.num_nodes == 2
+
+    def test_classmethod_to_yaml(self):
+        g = graph_from_json({"nodes": [{"id": "a"}]})
+        result = g.to_yaml()
+        assert isinstance(result, str)
+        assert "nodes" in result
+
+    def test_classmethod_save_and_load(self):
+        g = graph_from_json({"nodes": [{"id": "a"}, {"id": "b"}], "edges": [{"source": "a", "target": "b"}]})
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as f:
+            path = f.name
+        try:
+            g.save(path)
+            g2 = DaguaGraph.load(path)
+            assert g2.num_nodes == 2
+        finally:
+            os.unlink(path)

@@ -484,3 +484,21 @@ MINIMAL_THEME = Theme(
         background_color="#FFFFFF",
     ),
 )
+
+
+# ─── Theme Registry ──────────────────────────────────────────────────────
+
+THEME_REGISTRY: Dict[str, Theme] = {
+    "default": DEFAULT_THEME_OBJ,
+    "dark": DARK_THEME,
+    "minimal": MINIMAL_THEME,
+}
+
+
+def get_theme(name: str) -> Theme:
+    """Look up a built-in theme by name. Returns a deep copy."""
+    if name not in THEME_REGISTRY:
+        raise ValueError(
+            f"Unknown theme: {name!r}. Available: {list(THEME_REGISTRY.keys())}"
+        )
+    return copy.deepcopy(THEME_REGISTRY[name])

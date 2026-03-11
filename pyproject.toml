@@ -32,8 +32,10 @@ dependencies = [
 [project.optional-dependencies]
 render = ["matplotlib>=3.5"]
 graphviz = ["graphviz>=0.20"]
+yaml = ["pyyaml>=6.0"]
 dev = [
     "matplotlib>=3.5",
+    "pyyaml>=6.0",
     "pytest>=7.0",
     "pytest-cov",
     "ruff>=0.4",
@@ -44,6 +46,7 @@ dev = [
 test = [
     "pytest>=7.0",
     "matplotlib>=3.5",
+    "pyyaml>=6.0",
 ]
 ai = [
     "anthropic>=0.40",
@@ -57,6 +60,9 @@ Issues = "https://github.com/johnmarktaylor91/dagua/issues"
 
 [tool.setuptools.packages.find]
 include = ["dagua*"]
+
+[tool.setuptools.package-data]
+"dagua.graphs" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
