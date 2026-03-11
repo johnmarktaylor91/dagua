@@ -45,6 +45,10 @@ test = [
     "pytest>=7.0",
     "matplotlib>=3.5",
 ]
+ai = [
+    "anthropic>=0.40",
+    "openai>=1.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/johnmarktaylor91/dagua"

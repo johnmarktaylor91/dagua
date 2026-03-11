@@ -7,6 +7,8 @@ from dagua.styles import NodeStyle, EdgeStyle, ClusterStyle, PALETTE, make_fill,
 from dagua.config import LayoutConfig
 from dagua.layout import layout
 from dagua.render import render
+from dagua.io import graph_from_image as from_image
+from dagua.io import theme_from_image
 
 
 def draw(graph, config=None, output=None, **kwargs):
@@ -27,4 +29,6 @@ __all__ = [
     "PALETTE",
     "make_fill",
     "border_from_fill",
+    "from_image",
+    "theme_from_image",
 ]

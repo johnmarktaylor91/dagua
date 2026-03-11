@@ -263,6 +263,25 @@ class DaguaGraph:
         return g
 
     @classmethod
+    def from_json(cls, data: Union[Dict, str, Any]) -> DaguaGraph:
+        """Create graph from JSON (dict, JSON string, or .json file path).
+
+        See ``dagua.io.graph_from_json`` for full documentation.
+        """
+        from dagua.io import graph_from_json
+
+        return graph_from_json(data)
+
+    def to_json(self) -> Dict[str, Any]:
+        """Serialize this graph to a JSON-compatible dict.
+
+        See ``dagua.io.graph_to_json`` for full documentation.
+        """
+        from dagua.io import graph_to_json
+
+        return graph_to_json(self)
+
+    @classmethod
     def from_torchlens(
         cls,
         model_log,
