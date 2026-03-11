@@ -47,6 +47,7 @@ def _make_random_dag(n: int, edge_ratio: float = 1.5, seed: int = 42) -> DaguaGr
 class TestDaguaScaling:
     """Verify Dagua handles graphs of increasing size within time bounds."""
 
+    @pytest.mark.slow
     def test_100_nodes(self):
         g = _make_random_dag(100)
         g.compute_node_sizes()
@@ -57,6 +58,7 @@ class TestDaguaScaling:
         assert pos.shape == (100, 2)
         assert elapsed < 30, f"100 nodes took {elapsed:.1f}s (limit: 30s)"
 
+    @pytest.mark.slow
     def test_500_nodes(self):
         g = _make_random_dag(500)
         g.compute_node_sizes()
@@ -67,6 +69,7 @@ class TestDaguaScaling:
         assert pos.shape == (500, 2)
         assert elapsed < 120, f"500 nodes took {elapsed:.1f}s (limit: 120s)"
 
+    @pytest.mark.slow
     def test_1000_nodes(self):
         g = _make_random_dag(1000)
         g.compute_node_sizes()
@@ -123,6 +126,7 @@ class TestGraphvizComparison:
         assert result.returncode == 0, f"Graphviz failed: {result.stderr[:200]}"
         return elapsed
 
+    @pytest.mark.slow
     def test_scaling_comparison_100(self, graphviz_available):
         g = _make_random_dag(100)
         g.compute_node_sizes()
@@ -343,6 +347,7 @@ class TestEdgeCases:
         pos = dagua.layout(g)
         assert pos.shape == (1, 2)
 
+    @pytest.mark.slow
     def test_disconnected_components(self):
         """Multiple disconnected subgraphs."""
         ei = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)

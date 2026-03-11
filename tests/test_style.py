@@ -61,7 +61,7 @@ class TestClusterStyleNewFields:
     def test_defaults(self):
         s = ClusterStyle()
         assert s.font_family == ""
-        assert s.label_offset == (6.0, 6.0)
+        assert s.label_offset == (8.0, 20.0)
         assert s.depth_fill_step == 0.03
         assert s.depth_stroke_step == 0.05
 
@@ -79,7 +79,7 @@ class TestGraphStyle:
     def test_defaults(self):
         gs = GraphStyle()
         assert gs.background_color == WARM_WHITE
-        assert gs.margin == 30.0
+        assert gs.margin == 15.0
         assert gs.title_font_size == 10.0
         assert gs.max_figsize == (30.0, 40.0)
         assert gs.min_figsize == (4.0, 3.0)

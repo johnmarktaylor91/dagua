@@ -39,7 +39,7 @@ PALETTE_ORDER: List[str] = [
 # Neutrals
 NEAR_BLACK = "#2D2D2D"
 DARK_GRAY = "#4A4A4A"
-MEDIUM_GRAY = "#8C8C8C"
+MEDIUM_GRAY = "#6B7280"  # darkened from #8C8C8C for edge visibility
 LIGHT_GRAY = "#D4D4D4"
 WARM_WHITE = "#FAFAFA"
 PAPER = "#F5F5F0"
@@ -168,13 +168,13 @@ class NodeStyle:
     shape: str = "roundrect"  # rect, roundrect, ellipse, diamond, circle
     fill: str = ""  # empty = computed from base_color
     stroke: str = ""  # empty = computed from base_color
-    stroke_width: float = 0.75
+    stroke_width: float = 0.6
     stroke_dash: str = "solid"  # solid, dashed
     font_family: str = ""  # empty = use FONT_FAMILY default
-    font_size: float = 8.5
+    font_size: float = 9.0
     font_color: str = NEAR_BLACK
-    padding: Tuple[float, float] = (8.0, 5.0)  # horizontal, vertical
-    corner_radius: float = 4.0
+    padding: Tuple[float, float] = (10.0, 6.0)  # horizontal, vertical
+    corner_radius: float = 6.0
     opacity: float = 1.0
     base_color: str = PALETTE["sky"]  # Wong palette color
     # New fields (Part 2)
@@ -208,13 +208,13 @@ class NodeStyle:
 class EdgeStyle:
     """Visual style for an edge."""
 
-    color: str = MEDIUM_GRAY
-    width: float = 0.75
+    color: str = "#6B7280"  # medium gray — visible but recedes behind nodes
+    width: float = 1.2
     arrow: str = "normal"  # normal, none
-    arrow_length: float = 5.0
-    arrow_width: float = 3.5
+    arrow_length: float = 10.0
+    arrow_width: float = 7.0
     style: str = "solid"  # solid, dashed, dotted
-    opacity: float = 0.7
+    opacity: float = 0.65
     # New fields (Part 2)
     routing: str = "bezier"  # bezier, straight, ortho — post-layout
     label_font_size: float = 7.0  # render-only
@@ -233,18 +233,18 @@ class ClusterStyle:
 
     fill: str = PAPER
     stroke: str = LIGHT_GRAY
-    stroke_width: float = 0.5
+    stroke_width: float = 0.75
     stroke_dash: str = "solid"
-    corner_radius: float = 7.0
-    padding: float = 18.0
+    corner_radius: float = 8.0
+    padding: float = 25.0
     label_position: str = "top-left"  # top-left, top-center, top-right
     font_size: float = 9.5
-    font_weight: str = "medium"
+    font_weight: str = "bold"
     font_color: str = DARK_GRAY
-    opacity: float = 0.4
+    opacity: float = 0.5
     # New fields (Part 2)
     font_family: str = ""  # empty = use FONT_FAMILY default, render-only
-    label_offset: Tuple[float, float] = (6.0, 6.0)  # render-only
+    label_offset: Tuple[float, float] = (8.0, 20.0)  # render-only (y-offset prevents nested label overlap)
     depth_fill_step: float = 0.03  # HSL lightness step per depth level
     depth_stroke_step: float = 0.05  # HSL lightness step per depth level
     # Member style overrides — applied to all nodes/edges within this cluster
@@ -261,7 +261,7 @@ class GraphStyle:
     """Graph-level visual settings (all render-only, no layout effect)."""
 
     background_color: str = WARM_WHITE
-    margin: float = 30.0
+    margin: float = 15.0
     title_font_size: float = 10.0
     title_font_weight: str = "regular"
     title_font_color: str = NEAR_BLACK
@@ -322,8 +322,8 @@ _yellow_fill, _yellow_stroke = make_node_colors(PALETTE["yellow"])
 # Legacy name: bare Dict[str, NodeStyle] for backwards compat
 DEFAULT_NODE_STYLES: Dict[str, NodeStyle] = {
     "default": NodeStyle(base_color=PALETTE["sky"]),
-    "input": NodeStyle(base_color=PALETTE["bluish_green"]),
-    "output": NodeStyle(base_color=PALETTE["vermillion"]),
+    "input": NodeStyle(base_color=PALETTE["bluish_green"], padding=(14.0, 8.0)),
+    "output": NodeStyle(base_color=PALETTE["vermillion"], padding=(14.0, 8.0)),
     "buffer": NodeStyle(base_color=MEDIUM_GRAY),
     "bool": NodeStyle(base_color=PALETTE["amber"]),
     "trainable_params": NodeStyle(base_color=PALETTE["blue"]),

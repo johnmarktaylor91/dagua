@@ -350,7 +350,18 @@ def _draw_edges(ax, graph, curves: List[BezierCurve]):
     for e_idx, curve in enumerate(curves):
         style = graph.get_style_for_edge(e_idx)
 
-        verts = [curve.p0, curve.cp1, curve.cp2, curve.p1]
+        # Extend p1 slightly into the target node so arrowhead visually
+        # touches the node border (3px inset along curve direction)
+        p1 = curve.p1
+        if style.arrow != "none":
+            dx = p1[0] - curve.cp2[0]
+            dy = p1[1] - curve.cp2[1]
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist > 1e-6:
+                inset = 3.0
+                p1 = (p1[0] + dx / dist * inset, p1[1] + dy / dist * inset)
+
+        verts = [curve.p0, curve.cp1, curve.cp2, p1]
         codes = [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4]
         path = Path(verts, codes)
 
@@ -487,6 +498,18 @@ def _draw_clusters(ax, graph, pos, sizes):
         y_min = (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding
         y_max = (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding + 14  # space for label
 
+        # Ensure cluster bbox is wide enough to fit the label text
+        label = graph.cluster_labels.get(name, name)
+        label_fontsize = max(style.font_size - depth * 1.0, 7.0)
+        label_ox = style.label_offset[0]
+        # Rough estimate: ~0.55 * font_size per character
+        est_label_width = len(label) * label_fontsize * 0.55 + label_ox * 2
+        content_width = x_max - x_min
+        if est_label_width > content_width:
+            expand = (est_label_width - content_width) / 2
+            x_min -= expand
+            x_max += expand
+
         # Progressive depth darkening using HSL (replaces LEVEL_FILLS/LEVEL_STROKES)
         fill_color = darken_hex(style.fill, depth * style.depth_fill_step)
         stroke_color = darken_hex(style.stroke, depth * style.depth_stroke_step)
@@ -519,11 +542,9 @@ def _draw_clusters(ax, graph, pos, sizes):
         )
         ax.add_patch(patch)
 
-        # Cluster label: position from style
-        label = graph.cluster_labels.get(name, name)
-        label_fontsize = max(style.font_size - depth * 1.0, 7.0)
+        # Cluster label: position from style (label, label_fontsize already computed above)
         label_ff = style.font_family or FONT_FAMILY[0]
-        label_ox, label_oy = style.label_offset
+        label_oy = style.label_offset[1]
 
         if style.label_position == "top-center":
             lx = (x_min + x_max) / 2
@@ -535,7 +556,9 @@ def _draw_clusters(ax, graph, pos, sizes):
             lx = x_min + label_ox
             ha = "left"
 
-        ly = y_max - label_oy
+        # Offset label further down for nested clusters to prevent overlap
+        depth_label_offset = depth * label_fontsize * 1.4
+        ly = y_max - label_oy - depth_label_offset
 
         ax.text(
             lx, ly, label,

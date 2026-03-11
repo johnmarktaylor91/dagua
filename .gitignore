@@ -98,3 +98,4 @@ dmypy.json
 /benchmarks/results/
 /eval_output/
 node_modules/
+aesthetic_review/

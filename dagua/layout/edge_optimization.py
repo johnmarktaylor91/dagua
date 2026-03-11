@@ -196,11 +196,28 @@ def optimize_edges(
 
         if total_loss.requires_grad:
             total_loss.backward()
+            # Replace NaN/Inf gradients with zero before stepping
+            if cp.grad is not None and not torch.isfinite(cp.grad).all():
+                cp.grad = torch.where(torch.isfinite(cp.grad), cp.grad, torch.zeros_like(cp.grad))
             torch.nn.utils.clip_grad_norm_([cp], max_norm=50.0)
             optimizer.step()
+            # Clamp control points to stay within reasonable range of endpoints
+            with torch.no_grad():
+                if not torch.isfinite(cp).all():
+                    # Revert NaN/Inf control points to linear interpolation
+                    fallback_cp1 = endpoints[:, 0, :] * 0.667 + endpoints[:, 1, :] * 0.333
+                    fallback_cp2 = endpoints[:, 0, :] * 0.333 + endpoints[:, 1, :] * 0.667
+                    mask = ~torch.isfinite(cp[:, 0, :])
+                    cp[:, 0, :] = torch.where(mask, fallback_cp1, cp[:, 0, :])
+                    mask = ~torch.isfinite(cp[:, 1, :])
+                    cp[:, 1, :] = torch.where(mask, fallback_cp2, cp[:, 1, :])
 
-    # Convert back to BezierCurve list
+    # Convert back to BezierCurve list (with final NaN safety check)
     cp_final = cp.detach()
+    if not torch.isfinite(cp_final).all():
+        # Optimization diverged — return original curves unchanged
+        return curves
+
     result = []
     for i in range(E):
         result.append(BezierCurve(
@@ -290,8 +307,10 @@ def _edge_crossing_loss(points: torch.Tensor, E: int) -> torch.Tensor:
     cross = d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]
 
     d3 = p3 - p1
-    t = (d3[:, 0] * d2[:, 1] - d3[:, 1] * d2[:, 0]) / cross.clamp(min=1e-8)
-    u = (d3[:, 0] * d1[:, 1] - d3[:, 1] * d1[:, 0]) / cross.clamp(min=1e-8)
+    # Clamp both sides to avoid division by near-zero (cross can be negative)
+    safe_cross = cross.sign() * cross.abs().clamp(min=1e-6)
+    t = (d3[:, 0] * d2[:, 1] - d3[:, 1] * d2[:, 0]) / safe_cross
+    u = (d3[:, 0] * d1[:, 1] - d3[:, 1] * d1[:, 0]) / safe_cross
 
     # Sigmoid relaxation: crossing when both t,u in (0,1)
     sharpness = 10.0
@@ -483,7 +502,7 @@ def _curvature_consistency_loss(
     cross = d1[:, :, 0] * d2[:, :, 1] - d1[:, :, 1] * d2[:, :, 0]  # [E, T]
     d1_norm = d1.norm(dim=2).clamp(min=1e-6)  # [E, T]
 
-    kappa = cross.abs() / d1_norm**3  # [E, T]
+    kappa = cross.abs() / d1_norm.clamp(min=1.0)**3  # [E, T]  clamp avoids blowup on short edges
 
     # Mean curvature per edge, then variance across edges
     mean_kappa = kappa.mean(dim=1)  # [E]
@@ -507,7 +526,7 @@ def _curvature_penalty_loss(
     cross = d1[:, :, 0] * d2[:, :, 1] - d1[:, :, 1] * d2[:, :, 0]
     d1_norm = d1.norm(dim=2).clamp(min=1e-6)
 
-    kappa = cross.abs() / d1_norm**3
+    kappa = cross.abs() / d1_norm.clamp(min=1.0)**3  # clamp avoids blowup on short edges
     return (kappa**2).mean()
 
 
