@@ -69,31 +69,29 @@ def _coarsen_once_streaming(
         match_score = in_deg + out_deg
         del in_deg, out_deg
 
-    # Sort nodes by layer once (8 GB at 1B nodes)
-    sorted_by_layer = layers.argsort()
-
     # Coarse node counts per layer
     coarse_per_layer = (layer_counts + 2) // 3
     coarse_offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=device)
     coarse_offsets[1:] = coarse_per_layer.cumsum(0)
     N_coarse = coarse_offsets[-1].item()
 
-    # Assign coarse IDs per-layer (avoids global sort_key + argsort)
+    # Assign coarse IDs per-layer using boolean masking (no global argsort).
+    # Reuses a [N] bool mask (~1 GB at 1B) instead of sorted_by_layer (8+8 GB).
     fine_to_coarse = torch.empty(N, dtype=torch.long, device=device)
+    layer_mask = torch.empty(N, dtype=torch.bool, device=device)
     for layer_idx in range(num_layers):
-        lo = layer_offsets[layer_idx].item()
-        hi = layer_offsets[layer_idx + 1].item()
-        if lo == hi:
+        if layer_counts[layer_idx].item() == 0:
             continue
-        layer_nodes = sorted_by_layer[lo:hi]  # view into sorted array
+        torch.eq(layers, layer_idx, out=layer_mask)
+        layer_nodes = layer_mask.nonzero(as_tuple=True)[0]
         local_order = match_score[layer_nodes].argsort(descending=True)
-        n_layer = hi - lo
+        n_layer = layer_nodes.shape[0]
         coarse_base = coarse_offsets[layer_idx].item()
         fine_to_coarse[layer_nodes[local_order]] = (
             torch.arange(n_layer, dtype=torch.long, device=device) // 3 + coarse_base
         )
 
-    del sorted_by_layer, match_score
+    del layer_mask, match_score
 
     # --- Phase B: Coarse node sizes ---
     coarse_sizes = torch.zeros(N_coarse, 2, device=device)
@@ -125,8 +123,9 @@ def _coarsen_once_streaming(
             del all_hashes
             unique_src = final // N_coarse
             unique_tgt = final % N_coarse
-            coarse_edge_index = torch.stack([unique_src, unique_tgt])
             del final
+            coarse_edge_index = torch.stack([unique_src, unique_tgt])
+            del unique_src, unique_tgt
         else:
             coarse_edge_index = torch.zeros(2, 0, dtype=torch.long, device=device)
     else:
@@ -293,6 +292,8 @@ def build_hierarchy(
         if current_n <= min_nodes:
             break
 
+        prev_edge_count = current_ei.shape[1] if current_ei.numel() > 0 else 0
+
         level = coarsen_once(
             current_ei, current_n, current_sizes,
             layer_assignments=current_la, device=device,
@@ -305,9 +306,12 @@ def build_hierarchy(
         current_sizes = level.node_sizes
         current_n = level.num_nodes
 
-        # Safety: stop if coarsening didn't reduce enough
+        # Safety: stop if coarsening didn't reduce nodes or edges enough
         if current_n > level.num_fine * 0.7:
             break
+        coarse_edge_count = current_ei.shape[1] if current_ei.numel() > 0 else 0
+        if prev_edge_count > 0 and coarse_edge_count > prev_edge_count * 0.9:
+            break  # edges barely reduced — hierarchy won't help
 
         # Propagate layers: coarse node inherits layer from its fine nodes
         # (all fine nodes in a pair share the same layer by construction)
@@ -454,6 +458,23 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
     for i in range(len(levels) - 1, -1, -1):
         level = levels[i]
 
+        # Free this level's own edge_index and node_sizes — they've been consumed.
+        # levels[-1]: consumed by coarsest layout (Phase 2).
+        # levels[j<-1]: consumed at iteration j+1 as fine_ei_cpu/fine_sizes_cpu.
+        # (levels[i-1].edge_index is still alive — consumed THIS iteration below.)
+        level.edge_index = None
+        level.node_sizes = None
+
+        # Force memory return to OS — glibc holds freed pages otherwise
+        if level.num_fine > 100_000_000:
+            import ctypes
+            import gc as _gc
+            _gc.collect()
+            try:
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except OSError:
+                pass
+
         # Determine this level's graph data
         if i == 0:
             fine_ei_cpu = cpu_ei
@@ -479,6 +500,17 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
 
         level_num = len(levels) - i
         _vlog(f"Level {level_num}/{num_refine_levels}: {fine_n:,} nodes ({refine_steps} steps)", indent="  ")
+        if verbose and fine_n > 100_000_000:
+            import gc as _gc
+            import os as _os
+            _gc.collect()
+            try:
+                with open("/proc/self/statm") as _f:
+                    _rss_pages = int(_f.read().split()[1])
+                _rss_gb = _rss_pages * _os.sysconf("SC_PAGE_SIZE") / 1024**3
+                print(f"[dagua]     RSS={_rss_gb:.1f} GB before prolongation", flush=True)
+            except Exception:
+                pass
         _reset_peak()
 
         # Free previous level's GPU memory before allocating new tensors —
@@ -491,15 +523,25 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
                 torch.cuda.empty_cache()
 
         # Prolong: map coarse positions to fine level (on CPU)
+        # Use in-place ops to avoid 16 GB peak at 1B nodes
+        # (gather already creates a new tensor — clone is redundant)
         fine_to_coarse = level.fine_to_coarse
         pos_cpu = pos.cpu() if pos.device.type != "cpu" else pos
-        fine_pos = pos_cpu[fine_to_coarse].clone()
-        jitter = torch.randn(level.num_fine, 2) * 5.0
-        fine_pos = fine_pos + jitter
+        fine_pos = pos_cpu[fine_to_coarse]  # gather creates new tensor
+        fine_pos.add_(torch.randn(level.num_fine, 2).mul_(5.0))  # in-place jitter
+
+        # Free fine_to_coarse — consumed above, never needed again
+        del fine_to_coarse
+        level.fine_to_coarse = None
+
+        # Free old pos and pos_cpu — consumed by prolongation above
+        del pos_cpu
+        pos = None
 
         # Positions + node_sizes to GPU; edges stay on CPU (streamed in batches)
         fine_sizes = fine_sizes_cpu.to(device)
         pos = fine_pos.to(device)
+        del fine_pos  # pos holds the reference now
 
         refine_config = _make_config(steps=refine_steps, seed=None)
 
@@ -512,6 +554,9 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
             layer_assignments=level.fine_layer_assignments,
             progress_context=ProgressContext(indent="    "),
         )
+
+        # Free this hierarchy level entirely — never revisited
+        levels[i] = None
 
     _vlog(f"Done \u2014 {n:,} nodes in {_time.perf_counter() - _t0:.1f}s")
 

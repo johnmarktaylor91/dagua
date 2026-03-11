@@ -61,7 +61,6 @@ def build_layer_index(
 
     # Sort nodes by layer
     sorted_indices = node_to_layer.argsort()
-    sorted_layers = node_to_layer[sorted_indices]
 
     # Compute layer boundaries
     # layer_offsets[k] = first position in sorted_nodes where layer == k

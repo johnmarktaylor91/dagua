@@ -185,6 +185,7 @@ def _process_wave_edges_chunked(
 
     Mutates `layers` and `remaining` in place.
     """
+    val_dtype = remaining.dtype
     for start in range(0, E, _EDGE_CHUNK):
         end = min(start + _EDGE_CHUNK, E)
         chunk_src = src[start:end]
@@ -194,7 +195,7 @@ def _process_wave_edges_chunked(
             children = chunk_tgt[chunk_mask]
             candidate = layers[chunk_src[chunk_mask]] + 1
             layers.scatter_reduce_(0, children, candidate, reduce="amax")
-            ones = torch.ones(children.shape[0], dtype=torch.long)
+            ones = torch.ones(children.shape[0], dtype=val_dtype)
             remaining.scatter_add_(0, children, -ones)
 
 
@@ -221,18 +222,22 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
     src, tgt = edge_index[0], edge_index[1]
     chunked = N > _STREAMING_NODE_THRESHOLD
 
+    # Use int32 for working arrays when chunked (saves 12 GB at 1B nodes).
+    # Max in-degree and layer index both fit comfortably in int32.
+    val_dtype = torch.int32 if chunked else torch.long
+
     # Compute in-degree — chunked for large graphs to avoid [E]-sized ones tensor
-    in_degree = torch.zeros(N, dtype=torch.long)
+    in_degree = torch.zeros(N, dtype=val_dtype)
     if chunked:
         for start in range(0, E, _EDGE_CHUNK):
             end = min(start + _EDGE_CHUNK, E)
-            in_degree.scatter_add_(0, tgt[start:end], torch.ones(end - start, dtype=torch.long))
+            in_degree.scatter_add_(0, tgt[start:end], torch.ones(end - start, dtype=val_dtype))
     else:
         ones_E = torch.ones(E, dtype=torch.long)
         in_degree.scatter_add_(0, tgt, ones_E)
 
     # Probe: run a few waves to decide strategy
-    layers = torch.zeros(N, dtype=torch.long)
+    layers = torch.zeros(N, dtype=val_dtype)
     remaining = in_degree.clone()
     total_processed = 0
     current_layer = 0
@@ -260,7 +265,7 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
                 children = tgt[edge_mask]
                 candidate = layers[src[edge_mask]] + 1
                 layers.scatter_reduce_(0, children, candidate, reduce="amax")
-                ones = torch.ones(children.shape[0], dtype=torch.long)
+                ones = torch.ones(children.shape[0], dtype=val_dtype)
                 remaining.scatter_add_(0, children, -ones)
 
         current_layer += 1
@@ -292,6 +297,9 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
 
             current_layer += 1
 
+        if layers.dtype != torch.long:
+            del remaining, wave_set, in_degree
+            layers = layers.long()
         return layers
 
     # Deep graph: switch to CSR + numpy BFS (true O(V+E))
@@ -303,11 +311,11 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
     csr_tgt = tgt[order].numpy()
 
     # Chunked out-degree for large graphs
-    out_degree = torch.zeros(N, dtype=torch.long)
+    out_degree = torch.zeros(N, dtype=val_dtype)
     if chunked:
         for start in range(0, E, _EDGE_CHUNK):
             end = min(start + _EDGE_CHUNK, E)
-            out_degree.scatter_add_(0, src[start:end], torch.ones(end - start, dtype=torch.long))
+            out_degree.scatter_add_(0, src[start:end], torch.ones(end - start, dtype=val_dtype))
     else:
         out_degree.scatter_add_(0, src, ones_E)
     offsets = torch.zeros(N + 1, dtype=torch.long)

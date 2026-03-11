@@ -62,6 +62,8 @@ def project_overlaps(
     with torch.no_grad():
         if n <= 500:
             _project_exact(pos_cpu, ns_cpu, padding, iterations)
+        elif li_cpu is not None and n > 100_000_000:
+            _project_sweep_streaming(pos_cpu, ns_cpu, padding, iterations, li_cpu)
         elif li_cpu is not None:
             _project_sweep(pos_cpu, ns_cpu, padding, iterations, li_cpu)
         else:
@@ -221,6 +223,72 @@ def _project_sweep(
                 push_a2.scatter_add_(0, idx_a2, -push_amount2)
                 push_b2.scatter_add_(0, idx_b2, push_amount2)
                 pos[:, 0] += push_a2 + push_b2
+
+
+def _project_sweep_streaming(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float,
+    iterations: int,
+    layer_index: LayerIndex,
+) -> None:
+    """Per-layer sweep projection for very large graphs (N > 100M).
+
+    Same algorithm as _project_sweep but processes one layer at a time,
+    reducing memory from O(N) to O(max_layer_width). At 1B nodes with
+    666K per layer: ~5 MB instead of ~54 GB.
+    """
+    device = pos.device
+    num_layers = layer_index.num_layers
+    offsets = layer_index.layer_offsets
+    sorted_nodes = layer_index.sorted_nodes
+    half_w = node_sizes[:, 0] / 2
+
+    for _ in range(iterations):
+        any_push = False
+        for layer in range(num_layers):
+            lo = offsets[layer].item()
+            hi = offsets[layer + 1].item()
+            W = hi - lo
+            if W <= 1:
+                continue
+
+            layer_nodes = sorted_nodes[lo:hi]  # [W] — view into sorted_nodes
+
+            # Sort by x within this layer
+            x_pos = pos[layer_nodes, 0]  # [W]
+            order = x_pos.argsort()  # [W]
+            ordered = layer_nodes[order]  # [W]
+
+            # Check consecutive pairs (already x-sorted)
+            a = ordered[:-1]  # [W-1]
+            b = ordered[1:]   # [W-1]
+
+            dx = pos[b, 0] - pos[a, 0]  # [W-1]
+            min_sep = half_w[a] + half_w[b] + padding  # [W-1]
+            overlap = min_sep - dx  # [W-1]
+
+            mask = overlap > 0
+            if not mask.any():
+                continue
+            any_push = True
+
+            push = overlap.clamp(min=0) * 0.25  # [W-1]
+
+            # Scatter push amounts to local node array, then apply to global pos
+            push_neg = torch.zeros(W, device=device)  # a moves left
+            push_pos = torch.zeros(W, device=device)  # b moves right
+            local_a = order[:-1]  # local indices into layer_nodes
+            local_b = order[1:]
+            push_neg.scatter_add_(0, local_a, push)
+            push_pos.scatter_add_(0, local_b, push)
+
+            # Apply to global positions via advanced indexing
+            delta = push_pos - push_neg  # [W]
+            pos[layer_nodes, 0] += delta
+
+        if not any_push:
+            break
 
 
 def _project_grid(

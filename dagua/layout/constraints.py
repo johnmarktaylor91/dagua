@@ -971,6 +971,12 @@ def spacing_consistency_loss(
     if N < 2:
         return torch.tensor(0.0, device=device)
 
+    # Skip for very large graphs — global argsort on N nodes creates ~50 GB
+    # of intermediates at 1B nodes. Repulsion/overlap already handle spacing
+    # at this scale via RVS sampling.
+    if N > 100_000_000:
+        return torch.tensor(0.0, device=device)
+
     layers = layer_index.node_to_layer
     offsets = layer_index.layer_offsets
     num_layers = layer_index.num_layers

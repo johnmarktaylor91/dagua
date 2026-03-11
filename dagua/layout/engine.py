@@ -242,12 +242,13 @@ def _layout_inner(
         cpu_node_sizes = node_sizes.cpu()
         if cpu_edge_index is None:
             cpu_edge_index = edge_index.cpu()
-        cpu_layer_index = build_layer_index(layer_assignments_raw, device="cpu") if layer_assignments_raw else None
+        cpu_layer_index = build_layer_index(layer_assignments_raw, device="cpu") if layer_assignments_raw is not None else None
     elif edges_on_cpu:
         cpu_edge_index = edge_index
 
     # Step 2: Set up optimization
     pos = pos.clone().detach().requires_grad_(True)
+    del init_pos  # Free pre-clone positions (8 GB at 1B nodes)
     optimizer = torch.optim.Adam([pos], lr=config.lr)
 
     # Step 3: Build loss functions ONCE (reuse across steps via mutable refs)
@@ -468,6 +469,10 @@ def _layout_inner(
         prev_unweighted = unweighted_loss_val
 
     _vlog(f"done ({_time.perf_counter() - _t_loop:.1f}s)")
+
+    # Free optimizer and grad before final projection — no longer needed
+    del optimizer
+    pos.grad = None
 
     # Final aggressive overlap projection (scale iterations with N)
     final_proj_iters = 20 if n <= 500_000 else 10 if n <= 5_000_000 else 3
