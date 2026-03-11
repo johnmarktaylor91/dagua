@@ -23,19 +23,26 @@ def mem(label):
 
 
 LAYERS = 1500
-NODES_PER_LAYER = 1_000_000_000 // LAYERS
+NODES_PER_LAYER = -(-1_000_000_000 // LAYERS)  # ceil division — round UP over 1B
 N = NODES_PER_LAYER * LAYERS
+E_TARGET = 1_500_000_000
 
 mem("start")
-print(f"Building wide DAG: {N:,} nodes, {LAYERS} layers, ~{NODES_PER_LAYER:,} nodes/layer...", flush=True)
+print(f"Building wide DAG: {N:,} nodes, {LAYERS} layers, {NODES_PER_LAYER:,} nodes/layer...", flush=True)
 t0 = time.perf_counter()
 
 W = NODES_PER_LAYER
 
 # Build edge_index in chunks to avoid peak memory from temporaries
+# Backbone: 1 forward edge per non-last-layer node (~1B)
+# Cross: additional forward edges to next layer (up to 3 total per node)
 E_backbone = N - W
-E_cross_est = int(E_backbone * 0.06)  # 5% cross + margin — realistic for neural net DAGs
+E_cross_target = E_TARGET - E_backbone
+cross_prob = E_cross_target / E_backbone  # ~0.50 — avg ~1.5 edges/node
+E_cross_est = int(E_cross_target * 1.02)  # 2% margin
 E_est = E_backbone + E_cross_est
+
+print(f"  backbone={E_backbone:,}, cross_target={E_cross_target:,} (p={cross_prob:.3f})", flush=True)
 
 # Pre-allocate final tensor
 edge_src = torch.empty(E_est, dtype=torch.long)
@@ -47,12 +54,14 @@ edge_tgt[:E_backbone] = torch.arange(W, N, dtype=torch.long)
 mem("backbone")
 
 # Cross edges: build in chunks to avoid 8 GB arange + 4 GB mask simultaneously
+# Each cross edge goes from a node to a random node in the next layer,
+# giving up to ~3 forward edges per node (1 backbone + up to 2 cross)
 write_pos = E_backbone
 CHUNK = 50_000_000
 for start in range(0, E_backbone, CHUNK):
     end = min(start + CHUNK, E_backbone)
     chunk_n = end - start
-    mask = torch.rand(chunk_n) < 0.05  # 5% — realistic for neural net DAGs
+    mask = torch.rand(chunk_n) < cross_prob
     n_cross = mask.sum().item()
     if n_cross == 0:
         continue

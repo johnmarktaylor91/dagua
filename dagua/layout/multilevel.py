@@ -56,18 +56,16 @@ def _coarsen_once_streaming(
     E = edge_index.shape[1] if edge_index.numel() > 0 else 0
 
     # --- Phase A: Per-layer node matching ---
-    # Compute match_score via chunked scatter_add (avoids [E]-sized ones)
-    match_score = torch.zeros(N, dtype=torch.float32, device=device)
+    # Compute min_neighbor via chunked scatter_reduce (avoids [E]-sized ones).
+    # Nodes sharing a low-index neighbor become consecutive after sort →
+    # grouped into the same coarse node → shared edges collapse.
+    min_neighbor = torch.full((N,), N, dtype=torch.long, device=device)
     if E > 0:
         src_all, tgt_all = edge_index[0], edge_index[1]
-        in_deg = torch.zeros(N, device=device)
-        out_deg = torch.zeros(N, device=device)
         for start in range(0, E, _EDGE_CHUNK):
             end = min(start + _EDGE_CHUNK, E)
-            in_deg.scatter_add_(0, tgt_all[start:end], torch.ones(end - start, device=device))
-            out_deg.scatter_add_(0, src_all[start:end], torch.ones(end - start, device=device))
-        match_score = in_deg + out_deg
-        del in_deg, out_deg
+            min_neighbor.scatter_reduce_(0, src_all[start:end], tgt_all[start:end], reduce="amin")
+            min_neighbor.scatter_reduce_(0, tgt_all[start:end], src_all[start:end], reduce="amin")
 
     # Coarse node counts per layer
     coarse_per_layer = (layer_counts + 2) // 3
@@ -84,14 +82,14 @@ def _coarsen_once_streaming(
             continue
         torch.eq(layers, layer_idx, out=layer_mask)
         layer_nodes = layer_mask.nonzero(as_tuple=True)[0]
-        local_order = match_score[layer_nodes].argsort(descending=True)
+        local_order = min_neighbor[layer_nodes].argsort()  # ascending
         n_layer = layer_nodes.shape[0]
         coarse_base = coarse_offsets[layer_idx].item()
         fine_to_coarse[layer_nodes[local_order]] = (
             torch.arange(n_layer, dtype=torch.long, device=device) // 3 + coarse_base
         )
 
-    del layer_mask, match_score
+    del layer_mask, min_neighbor
 
     # --- Phase B: Coarse node sizes ---
     coarse_sizes = torch.zeros(N_coarse, 2, device=device)
@@ -174,22 +172,18 @@ def coarsen_once(
             layer_counts, layer_offsets, device,
         )
 
-    # Build adjacency for matching priority
-    match_score = torch.zeros(N, dtype=torch.float32, device=device)
+    # Build adjacency for matching priority: sort by minimum neighbor index
+    # so nodes sharing a low-index neighbor become consecutive → grouped into
+    # the same coarse node → shared edges collapse during deduplication.
+    min_neighbor = torch.full((N,), N, dtype=torch.long, device=device)
     if edge_index.numel() > 0:
         src, tgt = edge_index[0], edge_index[1]
-        in_deg = torch.zeros(N, device=device)
-        out_deg = torch.zeros(N, device=device)
-        in_deg.scatter_add_(0, tgt, torch.ones(tgt.shape[0], device=device))
-        out_deg.scatter_add_(0, src, torch.ones(src.shape[0], device=device))
-        match_score = in_deg + out_deg
+        min_neighbor.scatter_reduce_(0, src, tgt, reduce="amin")
+        min_neighbor.scatter_reduce_(0, tgt, src, reduce="amin")
 
-    # Vectorized greedy matching: sort by (layer, -match_score) globally,
-    # then pair consecutive same-layer nodes.
-    # Composite sort key: layer dominates, match_score breaks ties (descending)
-    score_norm = match_score / (match_score.max() + 1e-8)  # [0, 1)
-    sort_key = layers.float() * 2.0 + (1.0 - score_norm)  # layer first, then descending score
-    global_order = sort_key.argsort()  # [N] — sorted by (layer, -score)
+    # Composite sort key: (layer, min_neighbor) — int64, layer dominates
+    sort_key = layers * N + min_neighbor
+    global_order = sort_key.argsort()
 
     # Within each layer group in global_order, consecutive pairs get same coarse ID.
     # Compute within-layer position for each node in sorted order.
