@@ -2,6 +2,17 @@
 
 The fast commands worth remembering while iterating.
 
+## Use This Sheet Like This
+
+- Placement work:
+  - start with `benchmark-status`, `benchmark-show`, `placement-sprint`
+- Visual work:
+  - use `visual-audit-build`, `visual-audit-freeze`, `visual-session-build`
+- Scale work:
+  - use `scripts/bench_large.py` and `tail -f /tmp/dagua-bench-1b.log`
+- Docs/artifact refresh:
+  - use the `build_*.py` commands below
+
 ## Benchmarks
 
 Check current benchmark progress:
@@ -59,6 +70,12 @@ Refresh and freeze the current standard run as a named placement baseline:
 dagua placement-sprint \
   --output-dir /home/jtaylor/projects/dagua/eval_output \
   --freeze-label placement-baseline
+```
+
+Inspect the final placement summary directly:
+
+```bash
+sed -n '1,160p' /home/jtaylor/projects/dagua/eval_output/report/placement_summary.md
 ```
 
 ## Visual Audit
