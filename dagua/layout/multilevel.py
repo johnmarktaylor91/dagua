@@ -26,10 +26,24 @@ from dagua.utils import _EDGE_CHUNK, _vram_fits, longest_path_layering
 
 _STREAMING_THRESHOLD = 100_000_000
 _DEDUP_BUCKET_TARGET = 150_000_000
+_DEFAULT_NODE_SIZE = 20.0
 
 
-def _ensure_node_sizes_2d(node_sizes: torch.Tensor) -> torch.Tensor:
-    """Normalize node sizes to [N, 2], treating 1D inputs as square nodes."""
+def _ensure_node_sizes_2d(
+    node_sizes: Optional[torch.Tensor],
+    num_nodes: Optional[int] = None,
+) -> torch.Tensor:
+    """Normalize node sizes to [N, 2], synthesizing a safe fallback if absent."""
+    if node_sizes is None:
+        if num_nodes is None:
+            raise ValueError("node_sizes cannot be None unless num_nodes is provided")
+        return torch.full((num_nodes, 2), _DEFAULT_NODE_SIZE, dtype=torch.float32)
+
+    if node_sizes.numel() == 0:
+        if num_nodes is None:
+            raise ValueError("empty node_sizes requires num_nodes for fallback sizing")
+        return torch.full((num_nodes, 2), _DEFAULT_NODE_SIZE, dtype=node_sizes.dtype, device=node_sizes.device)
+
     if node_sizes.ndim == 1:
         return torch.stack([node_sizes, node_sizes], dim=1)
     if node_sizes.ndim == 2 and node_sizes.shape[1] == 1:
@@ -37,6 +51,12 @@ def _ensure_node_sizes_2d(node_sizes: torch.Tensor) -> torch.Tensor:
     if node_sizes.ndim != 2 or node_sizes.shape[1] != 2:
         raise ValueError(
             f"node_sizes must have shape [N], [N, 1], or [N, 2]; got {tuple(node_sizes.shape)}"
+        )
+    if num_nodes is not None and node_sizes.shape[0] != num_nodes:
+        if node_sizes.shape[0] == 1:
+            return node_sizes.expand(num_nodes, 2)
+        raise ValueError(
+            f"node_sizes row count {node_sizes.shape[0]} does not match num_nodes={num_nodes}"
         )
     return node_sizes
 
@@ -85,7 +105,7 @@ def _coarsen_once_streaming(
     materializing full [N]- or [E]-sized temporaries. Peak memory ~60 GB
     at 1B nodes (vs ~100 GB for the vectorized path).
     """
-    node_sizes = _ensure_node_sizes_2d(node_sizes)
+    node_sizes = _ensure_node_sizes_2d(node_sizes, N)
     E = edge_index.shape[1] if edge_index.numel() > 0 else 0
     index_dtype = torch.int32 if N <= torch.iinfo(torch.int32).max else torch.long
 
@@ -435,8 +455,8 @@ def build_hierarchy(
     """
     levels: List[CoarseLevel] = []
     current_ei = edge_index
-    current_sizes = _ensure_node_sizes_2d(node_sizes)
     current_n = num_nodes
+    current_sizes = _ensure_node_sizes_2d(node_sizes, current_n)
     current_cluster_ids = cluster_ids
 
     # Compute layers once on the original graph — returns tensor for large N
