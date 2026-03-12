@@ -16,7 +16,7 @@ Coarsening strategy: layer-aware heavy-edge matching.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
@@ -284,6 +284,7 @@ def build_hierarchy(
     min_nodes: int = 2000,
     max_levels: int = 10,
     device: str = "cpu",
+    progress: Optional[Callable[[str], None]] = None,
 ) -> List[CoarseLevel]:
     """Build coarsening hierarchy until num_nodes <= min_nodes.
 
@@ -295,6 +296,8 @@ def build_hierarchy(
     current_n = num_nodes
 
     # Compute layers once on the original graph — returns tensor for large N
+    if progress is not None:
+        progress(f"Layering full graph ({current_n:,} nodes)...")
     if current_ei.numel() > 0:
         current_la = longest_path_layering(current_ei, current_n)
     else:
@@ -302,12 +305,20 @@ def build_hierarchy(
     # Ensure tensor throughout — no list conversion
     if isinstance(current_la, list):
         current_la = torch.tensor(current_la, dtype=torch.long)
+    if progress is not None:
+        max_layer = int(current_la.max().item()) if current_la.numel() > 0 else 0
+        progress(f"Layering done ({max_layer + 1:,} layers)")
 
-    for _ in range(max_levels):
+    for level_idx in range(max_levels):
         if current_n <= min_nodes:
             break
 
         prev_edge_count = current_ei.shape[1] if current_ei.numel() > 0 else 0
+        if progress is not None:
+            progress(
+                f"Coarsen level {level_idx + 1}: "
+                f"{current_n:,} nodes, {prev_edge_count:,} edges"
+            )
 
         level = coarsen_once(
             current_ei, current_n, current_sizes,
@@ -320,12 +331,21 @@ def build_hierarchy(
         current_ei = level.edge_index
         current_sizes = level.node_sizes
         current_n = level.num_nodes
+        coarse_edge_count = current_ei.shape[1] if current_ei.numel() > 0 else 0
+        if progress is not None:
+            progress(
+                f"Coarsen level {level_idx + 1} done: "
+                f"{current_n:,} nodes, {coarse_edge_count:,} edges"
+            )
 
         # Safety: stop if coarsening didn't reduce nodes or edges enough
         if current_n > level.num_fine * 0.7:
+            if progress is not None:
+                progress("Stopping hierarchy build: node reduction below threshold")
             break
-        coarse_edge_count = current_ei.shape[1] if current_ei.numel() > 0 else 0
         if prev_edge_count > 0 and coarse_edge_count > prev_edge_count * 0.9:
+            if progress is not None:
+                progress("Stopping hierarchy build: edge reduction below threshold")
             break  # edges barely reduced — hierarchy won't help
 
         # Propagate layers: coarse node inherits layer from its fine nodes
@@ -407,7 +427,14 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
     cpu_ns = graph.node_sizes
     min_nodes = config.multilevel_min_nodes
     _t_hier = _time.perf_counter()
-    levels = build_hierarchy(cpu_ei, n, cpu_ns, min_nodes=min_nodes, device="cpu")
+    levels = build_hierarchy(
+        cpu_ei,
+        n,
+        cpu_ns,
+        min_nodes=min_nodes,
+        device="cpu",
+        progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
+    )
     _vlog(f"Phase 1/3: Building hierarchy ({n:,} nodes)... {len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)")
 
     if not levels:

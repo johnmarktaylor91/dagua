@@ -192,6 +192,8 @@ class TestMultilevelVerbose:
         # Multilevel verbose should mention hierarchy and phases
         assert "[dagua]" in captured.out
         assert "hierarchy" in captured.out.lower() or "Phase" in captured.out
+        assert "layering" in captured.out.lower()
+        assert "coarsen level" in captured.out.lower()
 
     def test_multilevel_produces_valid_positions(self):
         """Multilevel layout should produce finite, non-NaN positions."""
