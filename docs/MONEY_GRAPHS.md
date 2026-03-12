@@ -47,6 +47,30 @@ Use with:
 - typography / edge-language sheets
 - frozen baseline diffs
 
+## Downstream-Geometry Money Graphs
+
+These are the graphs to use first once the stage-2 numerical workflow for
+edges / labels / clusters is real.
+
+- `interleaved_cluster_crosstalk`
+  - cluster sibling separation + cross-cluster edge intrusion
+- `nested_cluster_label_stack`
+  - parent/child containment + cluster-label clearance
+- `edge_label_braid`
+  - edge-label collision pressure and edge-label anchor quality
+- `clustered_longlabel_handoffs`
+  - long labels interacting with cluster and edge geometry
+- `small_label_storm`
+  - dense local text-edge-node collision pressure
+
+Use with:
+
+- `docs/CRITERIA_LEDGER.md`
+- `artifact_index.md`
+- decomposition views
+- competitor stepwise comparisons
+- any future geometry-stage dashboard
+
 ## Scale / Showcase Money Graphs
 
 These are not the best for pixel-polish judgment. They are the best for telling the Dagua story.
