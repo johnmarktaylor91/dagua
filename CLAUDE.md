@@ -121,9 +121,15 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
   - `eval_output/report/benchmark_deltas.md`
   - `eval_output/report/layout_similarity.md`
   - `eval_output/report/placement_summary.md`
+  - `eval_output/report/placement_tuning.md`
   - `eval_output/visuals/comparisons/`
 - Use `layout_similarity.md` when asking whether a competitor is finding a genuinely
   different solution or merely a differently styled version of roughly the same layout.
+- The default numeric placement loop is now:
+  1. `dagua placement-tune --output-dir /home/jtaylor/projects/dagua/eval_output/report`
+  2. inspect `placement_tuning.md`
+  3. validate the winner visually in `visual_review_session`
+  4. rerun the standard benchmark with cached competitors if the candidate still looks sane
 
 ## Maintainer Hygiene
 

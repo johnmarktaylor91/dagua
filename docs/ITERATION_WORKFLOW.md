@@ -74,6 +74,12 @@ For placement iteration:
 dagua placement-sprint --output-dir /home/jtaylor/projects/dagua/eval_output
 ```
 
+For automatic numerical placement tuning:
+
+```bash
+dagua placement-tune --output-dir /home/jtaylor/projects/dagua/eval_output/report
+```
+
 For visual iteration:
 
 ```bash
@@ -126,6 +132,13 @@ Current known placement conclusion:
 - Dagua is already competitive on DAG consistency and overlap avoidance.
 - The clearest placement gap is still edge crossings against the strongest hierarchical competitors.
 - Crossing work should preserve the current wins on DAG order and overlap rather than trading them away casually.
+
+Default numerical iteration policy:
+
+1. run `placement-tune`
+2. inspect `placement_tuning.md` and `placement_tuning.json`
+3. promote only the candidates that still look sane in the visual session
+4. then rerun the standard benchmark with cached competitors
 
 ## Visual-Reset Workflow
 

@@ -64,6 +64,12 @@ Refresh the placement-facing artifacts in one shot:
 dagua placement-sprint --output-dir /home/jtaylor/projects/dagua/eval_output
 ```
 
+Run the automatic placement-only tuning loop:
+
+```bash
+dagua placement-tune --output-dir /home/jtaylor/projects/dagua/eval_output/report
+```
+
 Refresh and freeze the current standard run as a named placement baseline:
 
 ```bash

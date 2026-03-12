@@ -58,6 +58,7 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
   - `docs/OPEN_ISSUES.md`
   - `docs/BENCHMARK_ARTIFACT_GUIDE.md`
   - `eval_output/report/placement_summary.md`
+  - `eval_output/report/placement_tuning.md`
   - `eval_output/report/layout_similarity.md`
 - Visual-reset loop:
   - `docs/VISUAL_RESET_BRIEF.md`
@@ -74,6 +75,7 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 ```bash
 make benchmark-status
 make placement-sprint
+dagua placement-tune --output-dir /home/jtaylor/projects/dagua/eval_output/report
 make visual-session
 make visual-audit
 python scripts/build_glossary.py --output-dir docs/glossary
