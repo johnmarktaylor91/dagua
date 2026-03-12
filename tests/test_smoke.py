@@ -338,6 +338,24 @@ class TestStreamingCoarsenMatchesVectorized:
         # Triple matching: ceil(N/3) coarse nodes → ratio ~0.34
         assert 0.3 < ratio < 0.5, f"Reduction ratio {ratio:.3f} outside expected range"
 
+    def test_streaming_preserves_float16_node_sizes(self):
+        """Streaming coarsening must accept compact float16 node sizes."""
+        edge_index, N, node_sizes = _make_layered_dag(100, 5)
+        node_sizes = node_sizes.to(torch.float16)
+        layers = longest_path_layering(edge_index, N)
+        if isinstance(layers, list):
+            layers = torch.tensor(layers, dtype=torch.long)
+
+        old_threshold = _multilevel_mod._STREAMING_THRESHOLD
+        try:
+            _multilevel_mod._STREAMING_THRESHOLD = 100
+            result = coarsen_once(edge_index, N, node_sizes, layers)
+        finally:
+            _multilevel_mod._STREAMING_THRESHOLD = old_threshold
+
+        assert result.node_sizes.dtype == torch.float16
+        assert result.node_sizes.shape == (result.num_nodes, 2)
+
 
 @pytest.mark.smoke
 class TestChunkedLayeringMatchesOriginal:

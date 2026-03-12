@@ -111,7 +111,7 @@ def _coarsen_once_streaming(
     del layer_mask, min_neighbor
 
     # --- Phase B: Coarse node sizes ---
-    coarse_sizes = torch.zeros(N_coarse, 2, device=device)
+    coarse_sizes = torch.zeros(N_coarse, 2, dtype=node_sizes.dtype, device=device)
     coarse_sizes.scatter_reduce_(
         0, fine_to_coarse.unsqueeze(1).expand(-1, 2),
         node_sizes, reduce="amax",
@@ -239,7 +239,7 @@ def coarsen_once(
     N_coarse = coarse_offsets[-1].item()
 
     # Build coarse node sizes (max of merged pair for each dimension)
-    coarse_sizes = torch.zeros(N_coarse, 2, device=device)
+    coarse_sizes = torch.zeros(N_coarse, 2, dtype=node_sizes.dtype, device=device)
     coarse_sizes.scatter_reduce_(
         0, fine_to_coarse.unsqueeze(1).expand(-1, 2),
         node_sizes, reduce="amax",
