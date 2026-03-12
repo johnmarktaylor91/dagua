@@ -12,8 +12,10 @@ Usage:
 
 import argparse
 import gc
+import json
 import os
 import time
+from pathlib import Path
 
 import torch
 
@@ -41,6 +43,37 @@ def mem(label):
 def phase(label: str, t0: float):
     print(f"[phase] {label} @ {time.perf_counter() - t0:.1f}s", flush=True)
     mem(label)
+
+
+def _default_checkpoint_dir(size: str) -> Path:
+    slug = size.strip().lower().replace("/", "_").replace(" ", "_")
+    return Path("/tmp") / "dagua_bench_large" / slug
+
+
+def _checkpoint_paths(root: Path) -> dict[str, Path]:
+    return {
+        "root": root,
+        "meta": root / "meta.json",
+        "edge_index": root / "edge_index.pt",
+        "node_sizes": root / "node_sizes.pt",
+        "positions": root / "positions.pt",
+    }
+
+
+def _save_checkpoint_meta(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _load_graph_checkpoint(paths: dict[str, Path], n: int, layers: int) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if not paths["meta"].exists() or not paths["edge_index"].exists() or not paths["node_sizes"].exists():
+        return None
+    meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
+    if meta.get("n") != n or meta.get("layers") != layers:
+        return None
+    edge_index = torch.load(paths["edge_index"])
+    node_sizes = torch.load(paths["node_sizes"])
+    return edge_index, node_sizes
 
 
 def parse_node_count(s: str) -> int:
@@ -172,6 +205,16 @@ def main():
     parser.add_argument("--steps", type=int, default=500, help="Layout optimization steps")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
+        "--checkpoint-dir",
+        default="",
+        help="Optional checkpoint directory for graph-build artifacts and final positions",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse edge_index/node_sizes from the checkpoint dir when available",
+    )
+    parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
         choices=("cpu", "cuda"),
@@ -181,6 +224,8 @@ def main():
 
     # Resolve size
     n, layers, w = resolve_size_and_layers(args.size, args.layers)
+    checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else _default_checkpoint_dir(args.size)
+    checkpoint_paths = _checkpoint_paths(checkpoint_dir)
 
     mem("start")
     print(
@@ -190,14 +235,37 @@ def main():
     t0 = time.perf_counter()
     phase("config resolved", t0)
 
-    edge_index = build_edges(n, layers)
-    print(f"Edge index ready: {edge_index.shape[1]:,} edges in {time.perf_counter() - t0:.1f}s", flush=True)
+    node_sizes: torch.Tensor
+    restored = _load_graph_checkpoint(checkpoint_paths, n, layers) if args.resume else None
+    if restored is not None:
+        edge_index, node_sizes = restored
+        print(f"Restored graph checkpoint from {checkpoint_dir}", flush=True)
+        mem("graph restored")
+    else:
+        edge_index = build_edges(n, layers)
+        node_sizes = torch.full((n, 2), 20.0, dtype=torch.float16)
+        print(f"Edge index ready: {edge_index.shape[1]:,} edges in {time.perf_counter() - t0:.1f}s", flush=True)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(edge_index, checkpoint_paths["edge_index"])
+        torch.save(node_sizes, checkpoint_paths["node_sizes"])
+        _save_checkpoint_meta(
+            checkpoint_paths["meta"],
+            {
+                "size": args.size,
+                "n": n,
+                "layers": layers,
+                "width": w,
+                "device": args.device,
+                "seed": args.seed,
+            },
+        )
+        print(f"Saved graph checkpoint to {checkpoint_dir}", flush=True)
 
     g = dagua.DaguaGraph()
     g.num_nodes = n
     g._edge_index_tensor = edge_index
     # Uniform synthetic nodes don't need float32 precision; keep this compact.
-    g.node_sizes = torch.full((n, 2), 20.0, dtype=torch.float16)
+    g.node_sizes = node_sizes
     mem("graph built")
 
     config = dagua.LayoutConfig(
@@ -218,6 +286,8 @@ def main():
     pos = dagua.layout(g, config)
     total = time.perf_counter() - t1
     phase("layout finished", t0)
+    torch.save(pos, checkpoint_paths["positions"])
+    print(f"Saved positions checkpoint to {checkpoint_paths['positions']}", flush=True)
 
     print(f"\nResult: {pos.shape}", flush=True)
     print(f"Total layout time: {total:.1f}s", flush=True)
