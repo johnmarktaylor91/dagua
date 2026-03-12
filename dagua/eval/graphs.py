@@ -1,9 +1,9 @@
 """Test graph collection for evaluation.
 
-Provides a registry of test graphs covering 14 structural categories:
-linear-shallow, linear-deep, wide-parallel, skip-light, skip-heavy,
-tree, diamond, nested-shallow, nested-deep, mixed-width, self-loops,
-multi-edge, large-sparse, large-dense.
+Provides a registry of test graphs spanning common and niche structure families:
+linear-shallow, linear-deep, wide-parallel, skip-light, skip-heavy, tree,
+diamond, nested-shallow, nested-deep, mixed-width, self-loops, multi-edge,
+disconnected, large-sparse, and large-dense.
 
 Sources: synthetic generators + TorchLens model traces.
 """
@@ -312,6 +312,140 @@ def _synthetic_graphs() -> List[TestGraph]:
         expected_challenges="Edge crossing minimization, alignment",
     ))
 
+    # 15. Deep nested clusters with residuals across hierarchy boundaries
+    edges = [
+        ("input", "stem.conv"),
+        ("stem.conv", "stage1.block1.conv1"),
+        ("stage1.block1.conv1", "stage1.block1.conv2"),
+        ("stage1.block1.conv2", "stage1.add"),
+        ("stem.conv", "stage1.add"),
+        ("stage1.add", "stage2.block1.conv1"),
+        ("stage2.block1.conv1", "stage2.block1.conv2"),
+        ("stage2.block1.conv2", "stage2.add"),
+        ("stage1.add", "stage2.add"),
+        ("stage2.add", "head.norm"),
+        ("head.norm", "output"),
+    ]
+    g = DaguaGraph.from_edge_list(edges)
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.add_cluster("encoder", [idx["stem.conv"], idx["stage1.add"], idx["stage2.add"]], label="Encoder")
+    g.add_cluster(
+        "stage1",
+        [idx["stage1.block1.conv1"], idx["stage1.block1.conv2"], idx["stage1.add"]],
+        label="Stage 1",
+        parent="encoder",
+    )
+    g.add_cluster(
+        "stage2",
+        [idx["stage2.block1.conv1"], idx["stage2.block1.conv2"], idx["stage2.add"]],
+        label="Stage 2",
+        parent="encoder",
+    )
+    g.add_cluster(
+        "head",
+        [idx["head.norm"]],
+        label="Head",
+    )
+    g.add_cluster(
+        "stage1.block1",
+        [idx["stage1.block1.conv1"], idx["stage1.block1.conv2"]],
+        label="Stage 1 / Block 1",
+        parent="stage1",
+    )
+    graphs.append(TestGraph(
+        name="hierarchical_residual_stage",
+        graph=g,
+        tags={"nested-deep", "skip-light"},
+        description="Residual stack with 3-level cluster hierarchy",
+        expected_challenges="Nested cluster containment plus residual edges crossing cluster boundaries",
+    ))
+
+    # 16. Recurrent-style feedback with explicit self-loop and cycle
+    g = DaguaGraph.from_edge_list([
+        ("input", "state_update"),
+        ("state_prev", "state_update"),
+        ("state_update", "state_proj"),
+        ("state_proj", "output"),
+        ("output", "state_prev"),
+        ("state_proj", "state_proj"),
+    ])
+    graphs.append(TestGraph(
+        name="recurrent_feedback_cell",
+        graph=g,
+        tags={"self-loops", "skip-light"},
+        description="Small recurrent cell with feedback edge and explicit self-loop",
+        expected_challenges="Cycle breaking, self-loop routing, compact feedback placement",
+    ))
+
+    # 17. Multi-edge bundle between repeated stages
+    g = DaguaGraph()
+    for node in ("src", "mid", "dst"):
+        g.add_node(node)
+    for _ in range(3):
+        g.add_edge("src", "mid")
+    for _ in range(2):
+        g.add_edge("mid", "dst")
+    g.add_edge("src", "dst")
+    graphs.append(TestGraph(
+        name="parallel_multiedge_bundle",
+        graph=g,
+        tags={"multi-edge", "diamond"},
+        description="Duplicate edges between the same node pairs plus a direct bypass edge",
+        expected_challenges="Multi-edge routing separation and duplicate-edge stability",
+    ))
+
+    # 18. Disconnected components mixing common motifs
+    g = DaguaGraph.from_edge_list([
+        ("enc_in", "enc_conv"), ("enc_conv", "enc_relu"), ("enc_relu", "enc_out"),
+        ("res_in", "res_conv1"), ("res_conv1", "res_conv2"), ("res_in", "res_add"),
+        ("res_conv2", "res_add"), ("res_add", "res_out"),
+    ])
+    graphs.append(TestGraph(
+        name="disconnected_encoder_residual",
+        graph=g,
+        tags={"disconnected", "skip-light"},
+        description="Two disconnected components: a linear encoder and a residual block",
+        expected_challenges="Component packing, stable spacing across disconnected subgraphs",
+    ))
+
+    # 19. Mixture-of-experts style sparse routing
+    edges = [
+        ("input", "embed"), ("embed", "router"),
+        ("router", "expert_0"), ("router", "expert_3"),
+        ("embed", "expert_1"), ("embed", "expert_2"),
+        ("expert_0", "combine"), ("expert_1", "combine"),
+        ("expert_2", "combine"), ("expert_3", "combine"),
+        ("combine", "output"),
+    ]
+    g = DaguaGraph.from_edge_list(edges)
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.add_cluster("experts", [idx[f"expert_{i}"] for i in range(4)], label="Experts")
+    graphs.append(TestGraph(
+        name="moe_router_sparse",
+        graph=g,
+        tags={"wide-parallel", "large-dense", "nested-shallow"},
+        description="Mixture-of-experts routing with sparse fan-out and dense fan-in",
+        expected_challenges="Wide expert fan-out, merge alignment, cluster labeling",
+    ))
+
+    # 20. Ragged multiscale pyramid with lateral skips
+    edges = [
+        ("input", "p3"), ("p3", "p4"), ("p4", "p5"),
+        ("p5", "top_down_5"), ("top_down_5", "merge_4"),
+        ("p4", "merge_4"), ("merge_4", "top_down_4"),
+        ("top_down_4", "merge_3"), ("p3", "merge_3"),
+        ("merge_3", "detect_small"), ("merge_4", "detect_medium"), ("top_down_5", "detect_large"),
+        ("detect_small", "out"), ("detect_medium", "out"), ("detect_large", "out"),
+    ]
+    g = DaguaGraph.from_edge_list(edges)
+    graphs.append(TestGraph(
+        name="ragged_feature_pyramid",
+        graph=g,
+        tags={"skip-heavy", "wide-parallel", "diamond"},
+        description="Feature-pyramid style graph with ragged lateral merges",
+        expected_challenges="Long lateral skips, fan-in across scales, uneven branch widths",
+    ))
+
     return graphs
 
 
@@ -329,7 +463,7 @@ def _random_dag(n_nodes: int, n_edges: int, seed: int = 42) -> DaguaGraph:
         edges.add((node_names[i], node_names[j]))
         attempts += 1
 
-    return DaguaGraph.from_edge_list(list(edges))
+    return DaguaGraph.from_edge_list(list(edges), num_nodes=n_nodes)
 
 
 # ─── TorchLens Graph Extractors ──────────────────────────────────────────────
