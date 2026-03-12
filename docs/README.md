@@ -18,6 +18,7 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
   - `docs/COMMAND_CHEATSHEET.md`
 - Understand what competitors are doing downstream of placement:
   - `docs/COMPETITOR_GEOMETRY_MEMO.md`
+  - `docs/competitors/README.md`
 
 ## Start Here
 
