@@ -117,6 +117,31 @@ class TestRenderBasic:
         with pytest.raises(ValueError, match="Graph layout is missing"):
             dagua.draw(simple_chain, fast_config, relayout=False)
 
+    @pytest.mark.slow
+    def test_draw_uses_graph_direction_when_config_is_implicit(self):
+        g = DaguaGraph.from_edge_list([("a", "b"), ("b", "c"), ("c", "d")], direction="LR")
+        fig, ax = dagua.draw(g)
+        pos = g.last_positions
+        assert fig is not None
+        assert ax is not None
+        assert pos is not None
+        x_span = float(pos[:, 0].max().item() - pos[:, 0].min().item())
+        y_span = float(pos[:, 1].max().item() - pos[:, 1].min().item())
+        assert x_span > y_span
+
+    @pytest.mark.slow
+    def test_draw_direction_override_wins(self):
+        g = DaguaGraph.from_edge_list([("a", "b"), ("b", "c"), ("c", "d")], direction="TB")
+        config = LayoutConfig(steps=60, edge_opt_steps=-1, direction="TB", seed=42)
+        fig, ax = dagua.draw(g, config=config, direction="LR")
+        pos = g.last_positions
+        assert fig is not None
+        assert ax is not None
+        assert pos is not None
+        x_span = float(pos[:, 0].max().item() - pos[:, 0].min().item())
+        y_span = float(pos[:, 1].max().item() - pos[:, 1].min().item())
+        assert x_span > y_span
+
 
 class TestRenderWithClusters:
     @pytest.mark.slow
