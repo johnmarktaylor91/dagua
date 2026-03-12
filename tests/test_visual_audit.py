@@ -23,6 +23,7 @@ def test_visual_audit_suite_rebuilds(tmp_path: Path):
     assert (out / "decomposition" / "linear_3layer_mlp_decomposition.png").exists()
     assert (out / "kill_switches" / "linear_3layer_mlp_kill_switches.png").exists()
     assert (out / "diff_dashboard" / "linear_3layer_mlp_diff.png").exists()
+    assert (out / "competitor_stepwise" / "linear_3layer_mlp_competitors.png").exists()
     assert (out / "sheets" / "typography_stress.png").exists()
     assert (out / "sheets" / "edge_language_sheet.png").exists()
     assert (out / "metric_cards" / "README.md").exists()
