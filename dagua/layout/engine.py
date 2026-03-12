@@ -833,7 +833,7 @@ def _overlap_interval(num_nodes: int, config: LayoutConfig) -> int:
 def _adaptive_spacing(
     num_nodes: int,
     base_node_sep: float = 25.0,
-    base_rank_sep: float = 50.0,
+    base_rank_sep: float = 45.0,
 ) -> tuple:
     """Scale spacing based on graph size for density adaptation.
 

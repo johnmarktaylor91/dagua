@@ -29,7 +29,7 @@ class LayoutConfig:
 
     # Spacing
     node_sep: float = 25.0
-    rank_sep: float = 40.0
+    rank_sep: float = 45.0
     direction: str = "TB"
 
     # Optimization (0 = auto-scale based on graph size)
@@ -210,9 +210,9 @@ PARAM_REGISTRY: List[TunableParam] = [
         display_name="Rank Separation",
         description="Minimum vertical gap between layers (pixels).",
         visual_effect="Increasing: more vertical breathing room.",
-        default=40.0,
+        default=45.0,
         sweep_range=(25.0, 100.0),
-        sweep_values=[25.0, 35.0, 40.0, 60.0, 100.0],
+        sweep_values=[25.0, 35.0, 45.0, 60.0, 100.0],
         category="spacing",
     ),
     TunableParam(
