@@ -333,7 +333,7 @@ def export_config(path: str) -> None:
 
     if p.suffix in (".yaml", ".yml"):
         try:
-            import yaml
+            import yaml  # type: ignore[import-untyped]
         except ImportError:
             raise ImportError("PyYAML required for YAML export: pip install pyyaml")
         with open(path, "w") as f:

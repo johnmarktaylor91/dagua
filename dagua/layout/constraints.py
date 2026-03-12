@@ -780,7 +780,7 @@ def _crossing_loss_layered(
     if total_segments > max_total_segments:
         n_edges_valid = span_v.shape[0]
         avg_span = max(span_f.mean().long().item(), 1)
-        sample_n = min(n_edges_valid, max(max_total_segments // avg_span, 100))
+        sample_n = int(min(n_edges_valid, max(max_total_segments // avg_span, 100)))
         perm = torch.randperm(n_edges_valid, device=device)[:sample_n]
         actual_src_layer = actual_src_layer[perm]
         actual_tgt_layer = actual_tgt_layer[perm]
@@ -920,7 +920,7 @@ def cluster_separation_loss(
     node_sizes: torch.Tensor,
     clusters: dict,
     padding: float = 10.0,
-    device: torch.device = None,
+    device: Optional[torch.device] = None,
     cluster_parents: Optional[Dict[str, Optional[str]]] = None,
 ) -> torch.Tensor:
     """Sibling cluster bounding boxes repel.
@@ -951,8 +951,8 @@ def cluster_separation_loss(
                 if cluster_list[i][2] == cluster_list[j][2]:  # same parent (or both None)
                     all_pairs.append((i, j))
     elif num_clusters > 50:
-        max_sample = min(50, num_clusters * (num_clusters - 1) // 2)
-        sampled = set()
+        max_sample = int(min(50, num_clusters * (num_clusters - 1) // 2))
+        sampled: set[tuple[int, int]] = set()
         attempts = 0
         while len(sampled) < max_sample and attempts < max_sample * 10:
             i = random.randint(0, num_clusters - 1)
@@ -994,7 +994,7 @@ def cluster_containment_loss(
     clusters: dict,
     cluster_parents: Dict[str, Optional[str]],
     padding: float = 18.0,
-    device: torch.device = None,
+    device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     """Child cluster bboxes must stay inside parent cluster bboxes.
 

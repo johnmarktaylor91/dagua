@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 
@@ -30,7 +30,7 @@ def route_edges(
     edge_index: torch.Tensor,
     node_sizes: torch.Tensor,
     direction: str = "TB",
-    graph: Optional[object] = None,
+    graph: Optional[Any] = None,
 ) -> List[BezierCurve]:
     """Compute bezier control points for all edges.
 
@@ -57,12 +57,12 @@ def route_edges(
     widths = sizes[:, 0].tolist()
     heights = sizes[:, 1].tolist()
 
-    out_order = {}
-    in_order = {}
+    out_order: Dict[int, Tuple[int, int]] = {}
+    in_order: Dict[int, Tuple[int, int]] = {}
 
     # Track port assignment order (sort by target/source x position)
-    out_edges = {}  # node -> [(edge_idx, target_x)]
-    in_edges = {}  # node -> [(edge_idx, source_x)]
+    out_edges: Dict[int, List[Tuple[int, float]]] = {}
+    in_edges: Dict[int, List[Tuple[int, float]]] = {}
     for e_idx in range(num_edges):
         s, t = src_indices[e_idx], tgt_indices[e_idx]
         out_edges.setdefault(s, []).append((e_idx, x_coords[t]))
@@ -80,8 +80,8 @@ def route_edges(
             in_order[e_idx] = (rank, len(in_edges[node]))
 
     # Pre-compute cluster bboxes and node membership for cluster-aware routing
-    cluster_bboxes = {}  # name -> (x_min, y_min, x_max, y_max)
-    node_cluster_set = {}  # node_idx -> set of cluster names it belongs to
+    cluster_bboxes: Dict[str, Tuple[float, float, float, float]] = {}
+    node_cluster_set: Dict[int, Set[str]] = {}
     node_shapes = None
     edge_styles = None
     if graph is not None and hasattr(graph, 'clusters') and graph.clusters:
@@ -418,7 +418,7 @@ def _deflect_around_clusters(
         modified = True
 
     if modified:
-        return BezierCurve(p0, tuple(cp1), tuple(cp2), p1)
+        return BezierCurve(p0, (cp1[0], cp1[1]), (cp2[0], cp2[1]), p1)
     return curve
 
 
@@ -427,7 +427,7 @@ def place_edge_labels(
     positions: torch.Tensor,
     node_sizes: torch.Tensor,
     edge_labels: List[Optional[str]],
-    graph: Optional[object] = None,
+    graph: Optional[Any] = None,
 ) -> List[Optional[Tuple[float, float]]]:
     """Compute collision-avoiding positions for edge labels.
 
@@ -465,6 +465,7 @@ def place_edge_labels(
             continue
 
         label_text = edge_labels[e_idx]
+        assert label_text is not None
         style = graph.get_style_for_edge(e_idx) if graph is not None else None
         label_t = style.label_position if style is not None else 0.5
         font_size = style.label_font_size if style is not None else 7.0

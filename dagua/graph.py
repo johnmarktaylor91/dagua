@@ -593,7 +593,7 @@ class DaguaGraph:
         p = Path(path)
         if p.suffix in (".yaml", ".yml"):
             try:
-                import yaml
+                import yaml  # type: ignore[import-untyped]
             except ImportError:
                 raise ImportError("PyYAML required: pip install pyyaml")
             with open(path, "w") as f:

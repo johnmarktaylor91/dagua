@@ -566,7 +566,7 @@ def _style_to_diff_dict(style: Any, defaults: Dict[str, Any]) -> Dict[str, Any]:
 def _ensure_yaml():
     """Import and return the yaml module, with a clear error if missing."""
     try:
-        import yaml
+        import yaml  # type: ignore[import-untyped]
         return yaml
     except ImportError:
         raise ImportError(

@@ -247,8 +247,8 @@ def _project_sweep_streaming(
     for _ in range(iterations):
         any_push = False
         for layer in range(num_layers):
-            lo = offsets[layer].item()
-            hi = offsets[layer + 1].item()
+            lo = int(offsets[layer].item())
+            hi = int(offsets[layer + 1].item())
             W = hi - lo
             if W <= 1:
                 continue
@@ -276,8 +276,8 @@ def _project_sweep_streaming(
             push = overlap.clamp(min=0) * 0.25  # [W-1]
 
             # Scatter push amounts to local node array, then apply to global pos
-            push_neg = torch.zeros(W, device=device)  # a moves left
-            push_pos = torch.zeros(W, device=device)  # b moves right
+            push_neg = torch.zeros(int(W), device=device)  # a moves left
+            push_pos = torch.zeros(int(W), device=device)  # b moves right
             local_a = order[:-1]  # local indices into layer_nodes
             local_b = order[1:]
             push_neg.scatter_add_(0, local_a, push)
@@ -322,7 +322,7 @@ def _project_grid(
         cy_min = cy.min()
         cx_rel = cx - cx_min
         cy_rel = cy - cy_min
-        cy_range = max(cy_rel.max().item() + 1, 1)
+        cy_range = int(max(cy_rel.max().item() + 1, 1))
         cell_keys = cx_rel * cy_range + cy_rel
 
         sort_idx = cell_keys.argsort()
@@ -340,11 +340,11 @@ def _project_grid(
         multi_ends = ends[multi_mask]
 
         any_pushed = False
-        n_multi = multi_starts.shape[0]
+        n_multi = int(multi_starts.shape[0])
 
-        for i in range(min(n_multi.item() if isinstance(n_multi, torch.Tensor) else n_multi, 10000)):
-            s = multi_starts[i].item()
-            e = multi_ends[i].item()
+        for i in range(min(n_multi, 10000)):
+            s = int(multi_starts[i].item())
+            e = int(multi_ends[i].item())
             cell_nodes = sort_idx[s:e]
             m = cell_nodes.shape[0]
 
