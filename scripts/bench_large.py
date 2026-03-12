@@ -64,6 +64,23 @@ PRESETS = {
 CHUNK_THRESHOLD = 200_000_000
 
 
+def resolve_size_and_layers(size: str, layers_override: int = 0) -> tuple[int, int, int]:
+    """Resolve requested size to exact node count, layer count, and layer width."""
+    key = size.lower().replace("_", "").replace(",", "")
+    if key in PRESETS:
+        n = PRESETS[key]["n"]
+        layers = layers_override if layers_override > 0 else PRESETS[key]["layers"]
+    else:
+        n = parse_node_count(size)
+        layers = layers_override if layers_override > 0 else max(int(n**0.5 / 10) * 10, 10)
+
+    # Round upward to the next exact multiple so presets like 1b stay at or above
+    # the requested size instead of dipping just below it.
+    n = ((n + layers - 1) // layers) * layers
+    w = n // layers
+    return n, layers, w
+
+
 # ─── Edge construction ────────────────────────────────────────────────────────
 
 
@@ -156,18 +173,7 @@ def main():
     args = parser.parse_args()
 
     # Resolve size
-    key = args.size.lower().replace("_", "").replace(",", "")
-    if key in PRESETS:
-        n = PRESETS[key]["n"]
-        layers = args.layers if args.layers > 0 else PRESETS[key]["layers"]
-    else:
-        n = parse_node_count(args.size)
-        layers = args.layers if args.layers > 0 else max(int(n**0.5 / 10) * 10, 10)
-
-    # Round upward to the next exact multiple so presets like 1b stay at or above
-    # the requested size instead of dipping just below it.
-    n = ((n + layers - 1) // layers) * layers
-    w = n // layers
+    n, layers, w = resolve_size_and_layers(args.size, args.layers)
 
     mem("start")
     print(

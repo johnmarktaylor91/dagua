@@ -4,6 +4,8 @@ import pytest
 import torch
 
 from dagua.edges import route_edges, evaluate_bezier, BezierCurve
+from dagua.graph import DaguaGraph
+from dagua.styles import NodeStyle
 
 
 class TestRouteEdges:
@@ -68,6 +70,22 @@ class TestRouteEdges:
         for t in [0.0, 0.25, 0.5, 0.75, 1.0]:
             pt = evaluate_bezier(c, t)
             assert not any(v != v for v in pt), f"NaN at t={t}: {pt}"
+
+    def test_cluster_routing_ignores_invalid_members(self):
+        """Cluster-aware routing should ignore out-of-range cluster members."""
+        g = DaguaGraph.from_edge_list([(0, 1)])
+        g.node_styles[0] = NodeStyle(shape="ellipse")
+        g.node_styles[1] = NodeStyle(shape="diamond")
+        g.compute_node_sizes()
+        g.add_cluster("mixed", [0, 99], label="mixed")
+
+        pos = torch.tensor([[0.0, 0.0], [40.0, 100.0]])
+        curves = route_edges(pos, g.edge_index, g.node_sizes, graph=g)
+
+        assert len(curves) == 1
+        curve = curves[0]
+        for pt in [curve.p0, curve.cp1, curve.cp2, curve.p1]:
+            assert all(torch.isfinite(torch.tensor(pt))), f"non-finite control point: {pt}"
 
 
 class TestEvaluateBezier:
