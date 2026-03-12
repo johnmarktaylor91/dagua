@@ -37,6 +37,19 @@ If the user wants files:
 dagua.draw(g, LayoutConfig(steps=80, edge_opt_steps=8, seed=42), output="graph.png")
 ```
 
+## Serialization Policy
+
+Prefer YAML for hand-authored graph and theme specs.
+
+Prefer JSON for generated artifacts, manifests, cached outputs, and other machine-facing files.
+
+So for normal user-created files, prefer:
+
+```python
+dagua.save(g, "graph.yaml")
+g2 = dagua.load("graph.yaml")
+```
+
 ## What Dagua Is Good At
 
 - hierarchical DAG-style layout
