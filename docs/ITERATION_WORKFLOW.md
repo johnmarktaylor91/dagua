@@ -173,6 +173,12 @@ Cluster-specific rule:
   - foreign-edge intrusion through cluster interiors
   - cluster box aspect/pathology penalties
 - do not postpone all cluster quality work to the visual pass
+- use hierarchical interactions where possible:
+  - same-level elements interact directly
+  - cross-level interactions are mediated through container geometry
+  - outside nodes should often interact with a cluster envelope rather than with every
+    descendant node individually
+- this is both a quality principle and a scaling principle
 
 ## Visual-Reset Workflow
 
