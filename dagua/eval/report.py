@@ -7,8 +7,11 @@ Graphviz comparisons.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -587,3 +590,437 @@ def generate_benchmark_markdown(results: list, output_path: str) -> str:
 
     print(f"Benchmark report saved to {output_path}")
     return output_path
+
+
+def _benchmark_graph_lookup() -> Dict[str, TestGraph]:
+    from dagua.eval.benchmark import get_standard_suite_graphs
+
+    lookup: Dict[str, TestGraph] = {}
+    for bg in list(get_standard_suite_graphs()):
+        lookup[bg.test_graph.name] = bg.test_graph
+    return lookup
+
+
+def _resolve_positions_path(results_root: Path, positions_path: str) -> Path:
+    path = Path(positions_path)
+    return path if path.is_absolute() else results_root / path
+
+
+def _normalize_positions(
+    positions: torch.Tensor,
+    node_sizes: torch.Tensor,
+    target_width: float = 600.0,
+    target_height: float = 420.0,
+    padding: float = 30.0,
+) -> torch.Tensor:
+    pos = positions.detach().cpu().clone()
+    sizes = node_sizes.detach().cpu()
+    x_min = (pos[:, 0] - sizes[:, 0] / 2).min()
+    x_max = (pos[:, 0] + sizes[:, 0] / 2).max()
+    y_min = (pos[:, 1] - sizes[:, 1] / 2).min()
+    y_max = (pos[:, 1] + sizes[:, 1] / 2).max()
+    width = max((x_max - x_min).item(), 1.0)
+    height = max((y_max - y_min).item(), 1.0)
+    scale = min((target_width - 2 * padding) / width, (target_height - 2 * padding) / height)
+    pos[:, 0] = (pos[:, 0] - x_min) * scale + padding
+    pos[:, 1] = (pos[:, 1] - y_min) * scale + padding
+    return pos
+
+
+def _status_panel(ax, title: str, subtitle: str) -> None:
+    ax.set_facecolor("#F3F4F6")
+    ax.text(0.5, 0.58, title, ha="center", va="center", transform=ax.transAxes, fontsize=11, color="#374151")
+    ax.text(0.5, 0.42, subtitle, ha="center", va="center", transform=ax.transAxes, fontsize=8, color="#6B7280")
+    ax.axis("off")
+
+
+def generate_comparison_visuals(
+    output_dir: str = "eval_output",
+    combined_results: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Render per-graph comparison grids from stored benchmark positions."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from dagua.eval.benchmark import DEFAULT_COMPETITOR_ORDER
+
+    if combined_results is None:
+        from dagua.eval.benchmark import load_combined_results
+
+        combined_results = load_combined_results(output_dir)
+
+    graph_lookup = _benchmark_graph_lookup()
+    root = Path(output_dir)
+    comparison_dir = root / "visuals" / "comparisons"
+    comparison_dir.mkdir(parents=True, exist_ok=True)
+    figure_paths: List[str] = []
+
+    for graph_name, graph_payload in combined_results.get("graphs", {}).items():
+        if graph_payload.get("n_nodes", 0) > 2_000:
+            continue
+        if graph_name not in graph_lookup:
+            continue
+
+        tg = graph_lookup[graph_name]
+        tg.graph.compute_node_sizes()
+        competitors = graph_payload.get("competitors", {})
+        ordered = [name for name in DEFAULT_COMPETITOR_ORDER if name in competitors]
+        if not ordered:
+            continue
+
+        cols = min(3, max(1, len(ordered)))
+        rows = (len(ordered) + cols - 1) // cols
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 4.8, rows * 3.8))
+        if rows == 1 and cols == 1:
+            axes = [axes]
+        elif rows == 1:
+            axes = list(axes)
+        else:
+            axes = [ax for row in axes for ax in row]
+
+        for idx, comp_name in enumerate(ordered):
+            ax = axes[idx]
+            result = competitors[comp_name]
+            if result.get("status") != "OK" or not result.get("positions_path"):
+                _status_panel(ax, comp_name, result.get("reason", result.get("status", "N/A")))
+                continue
+
+            standard_id = combined_results.get("generated_from", {}).get("standard")
+            rare_id = combined_results.get("generated_from", {}).get("rare")
+            positions_root = Path(output_dir) / "benchmark_db" / "standard" / standard_id if standard_id else None
+            if graph_name.startswith("scale_") and graph_payload.get("n_nodes", 0) > 100_000 and rare_id is not None:
+                positions_root = Path(output_dir) / "benchmark_db" / "rare" / rare_id
+            if positions_root is None:
+                _status_panel(ax, comp_name, "missing positions root")
+                continue
+
+            pos = torch.load(_resolve_positions_path(positions_root, result["positions_path"]))
+            pos = _normalize_positions(pos, tg.graph.node_sizes)
+            _render_on_ax(ax, tg.graph, pos)
+            runtime = result.get("runtime_seconds")
+            score = result.get("composite_score")
+            ax.set_title(
+                f"{comp_name}\n{runtime:.2f}s, score={score:.1f}" if runtime is not None and score is not None else comp_name,
+                fontsize=8,
+            )
+            ax.axis("off")
+
+        for ax in axes[len(ordered):]:
+            ax.axis("off")
+
+        fig.suptitle(f"{graph_name} ({graph_payload.get('n_nodes', 0):,} nodes)", fontsize=12)
+        plt.tight_layout()
+        out_path = comparison_dir / f"{graph_name}_comparison.png"
+        fig.savefig(out_path, dpi=220, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        figure_paths.append(str(out_path))
+
+    return figure_paths
+
+
+def generate_scaling_curve(
+    output_dir: str = "eval_output",
+    combined_results: Optional[Dict[str, Any]] = None,
+) -> str:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from dagua.eval.benchmark import DEFAULT_COMPETITOR_ORDER
+
+    if combined_results is None:
+        from dagua.eval.benchmark import load_combined_results
+
+        combined_results = load_combined_results(output_dir)
+
+    points: Dict[str, List[Tuple[int, float]]] = {name: [] for name in DEFAULT_COMPETITOR_ORDER}
+    for graph_payload in combined_results.get("graphs", {}).values():
+        n_nodes = graph_payload.get("n_nodes", 0)
+        for comp_name, result in graph_payload.get("competitors", {}).items():
+            if result.get("status") == "OK" and result.get("runtime_seconds") is not None:
+                points.setdefault(comp_name, []).append((n_nodes, float(result["runtime_seconds"])))
+
+    palette = {
+        "dagua": "#0072B2",
+        "graphviz_dot": "#D55E00",
+        "graphviz_sfdp": "#009E73",
+        "elk_layered": "#E69F00",
+        "dagre": "#CC79A7",
+        "nx_spring": "#6B7280",
+    }
+
+    fig, ax = plt.subplots(figsize=(8.2, 5.0))
+    for comp_name in DEFAULT_COMPETITOR_ORDER:
+        if not points.get(comp_name):
+            continue
+        series = sorted(points[comp_name])
+        xs = [x for x, _ in series]
+        ys = [y for _, y in series]
+        ax.plot(xs, ys, marker="o", linewidth=2.0, markersize=5, label=comp_name, color=palette.get(comp_name))
+        if comp_name == "dagua":
+            ax.annotate(f"{xs[-1]:,}", (xs[-1], ys[-1]), textcoords="offset points", xytext=(6, -4), fontsize=8)
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Nodes")
+    ax.set_ylabel("Runtime (seconds)")
+    ax.set_title("Scaling Curve")
+    ax.grid(True, which="both", color="#E5E7EB", linewidth=0.6)
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+
+    out_path = Path(output_dir) / "scaling_curve.png"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=260, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return str(out_path)
+
+
+def _summary_statistics(combined_results: Dict[str, Any]) -> Dict[str, Any]:
+    aggregate: Dict[str, Any] = {"competitors": {}}
+    for graph_name, graph_payload in combined_results.get("graphs", {}).items():
+        n_nodes = graph_payload.get("n_nodes", 0)
+        for comp_name, result in graph_payload.get("competitors", {}).items():
+            stats = aggregate["competitors"].setdefault(comp_name, {"scores": [], "runtimes": [], "small_scores": [], "dag_consistency": []})
+            if result.get("status") != "OK":
+                continue
+            if result.get("composite_score") is not None:
+                stats["scores"].append(float(result["composite_score"]))
+                if n_nodes <= 500:
+                    stats["small_scores"].append(float(result["composite_score"]))
+            if result.get("runtime_seconds") is not None:
+                stats["runtimes"].append(float(result["runtime_seconds"]))
+            dag_val = result.get("metrics", {}).get("dag_consistency")
+            if dag_val is not None:
+                stats["dag_consistency"].append(float(dag_val))
+    return aggregate
+
+
+def _format_mean(values: Sequence[float]) -> str:
+    return f"{sum(values) / len(values):.2f}" if values else "N/A"
+
+
+def _aesthetic_critic_prompt() -> str:
+    return (
+        "You are an expert in information visualization and graph aesthetics. You are judging\n"
+        "a competition between graph layout algorithms. Below are renderings of the same graph\n"
+        "laid out by different algorithms. Each image is labeled with the algorithm name.\n\n"
+        "Judge which layout is the most aesthetically pleasing and readable. Consider all\n"
+        "standard graph drawing aesthetic criteria, including but not limited to:\n"
+        "- Edge crossing minimization\n"
+        "- Edge length uniformity\n"
+        "- Symmetry and balance\n"
+        "- Effective use of space\n"
+        "- Clear hierarchical/directional flow\n"
+        "- Visual separation of clusters or groups\n"
+        "- Angular resolution at nodes\n"
+        "- Edge straightness and routing quality\n"
+        "- Node overlap avoidance\n"
+        "- Overall cleanliness and readability\n\n"
+        "Return your answer as JSON:\n"
+        "{\n"
+        '  "winner": "<algorithm_name>",\n'
+        '  "ranking": ["<best>", "<second>", "...", "<worst>"],\n'
+        '  "reasoning": "<2-3 sentences explaining your choice, citing specific visual features>"\n'
+        "}\n\n"
+        "Be decisive. Pick a clear winner. Do not hedge.\n"
+    )
+
+
+def _review_prompt() -> str:
+    return (
+        "You are a ruthless, skeptical benchmarking reviewer. You are evaluating a benchmark\n"
+        "report for a new graph layout tool called Dagua. You genuinely want to find the best\n"
+        "tool for the job and you will NOT tolerate:\n\n"
+        "- Unclear or ambiguous claims\n"
+        "- Cherry-picked results that hide weaknesses\n"
+        "- Missing context that would change interpretation\n"
+        "- Vague language where precise numbers should appear\n"
+        "- Unfair comparisons (different settings, missing competitors)\n"
+        "- Visual clutter or confusing figures\n"
+        "- Claims not directly supported by the presented data\n"
+        "- Burying unfavorable results\n"
+        "- Statistical claims without proper methodology\n"
+        "- Beautiful formatting masking thin content\n"
+        "- Vague appeals to quality or aesthetics without grounding in specific criteria\n\n"
+        "Rate the report on: Organization, Writing Clarity, Visual Quality, Convincingness,\n"
+        "Statistical Rigor, Honesty/Balance. For each criterion below 8, provide specific\n"
+        "revision instructions. For each criterion at 8+, note what works well and one improvement.\n"
+    )
+
+
+def _write_prompt_file(report_dir: Path) -> None:
+    text = (
+        "Write the benchmark report in a precise, skeptical, technically grounded voice.\n"
+        "Every claim should cite the relevant figure or table. State weaknesses as plainly as\n"
+        "strengths. Do not use marketing language. Ground quality claims in the stored metrics,\n"
+        "the aesthetic score, and the style-guide anti-pattern flags.\n"
+    )
+    (report_dir / "prose_prompt.md").write_text(text, encoding="utf-8")
+
+
+def _write_review_placeholders(report_dir: Path, rounds: int = 5) -> None:
+    for idx in range(rounds):
+        payload = {
+            "round": idx + 1,
+            "status": "skipped",
+            "reason": "Anthropic API unavailable in this environment",
+            "prompt": _review_prompt(),
+            "changes_made": "No automated review applied.",
+        }
+        with open(report_dir / f"review_round_{idx + 1}.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+
+def _latex_escape(text: str) -> str:
+    return (
+        text.replace("\\", "\\textbackslash{}")
+        .replace("&", "\\&")
+        .replace("%", "\\%")
+        .replace("$", "\\$")
+        .replace("#", "\\#")
+        .replace("_", "\\_")
+        .replace("{", "\\{")
+        .replace("}", "\\}")
+    )
+
+
+def _latex_path(path: str) -> str:
+    return path.replace("\\", "/")
+
+
+def _render_latex_report(
+    report_dir: Path,
+    combined_results: Dict[str, Any],
+    scaling_curve_path: str,
+    comparison_paths: Sequence[str],
+) -> str:
+    summary = _summary_statistics(combined_results)
+    generated_from = combined_results.get("generated_from", {})
+    comp_lines = []
+    for comp_name, stats in summary["competitors"].items():
+        comp_lines.append(
+            f"{_latex_escape(comp_name)} & {_format_mean(stats['small_scores'])} & {_format_mean(stats['dag_consistency'])} & {_format_mean(stats['runtimes'])} \\\\"
+        )
+
+    gallery_items = []
+    for path in list(comparison_paths)[:4]:
+        gallery_items.append(
+            "\\includegraphics[width=0.48\\linewidth]{" + _latex_path(os.path.relpath(path, report_dir)) + "}"
+        )
+    gallery_block = "\\\\[6pt]".join(gallery_items) if gallery_items else "No comparison images available for this run."
+
+    tex = f"""
+\\documentclass[11pt]{{article}}
+\\usepackage[margin=1in]{{geometry}}
+\\usepackage{{graphicx}}
+\\usepackage{{booktabs}}
+\\usepackage[table]{{xcolor}}
+\\usepackage{{longtable}}
+\\usepackage{{hyperref}}
+\\definecolor{{daguagreen}}{{HTML}}{{D4EDDA}}
+\\definecolor{{daguared}}{{HTML}}{{F8D7DA}}
+\\definecolor{{daguayellow}}{{HTML}}{{FFF3CD}}
+\\title{{Dagua Benchmark Report}}
+\\date{{\\today}}
+\\begin{{document}}
+\\maketitle
+
+\\section{{Executive Summary}}
+This report summarizes the latest standard benchmark run {generated_from.get('standard', 'N/A')} and the latest rare run {generated_from.get('rare', 'N/A')}. Results are stored in \\texttt{{eval\\_output/benchmark\\_db}} and merged through \\texttt{{combined\\_latest.json}}.
+
+\\begin{{itemize}}
+\\item Dagua remains the only engine in the default roster expected to scale through the rare ladder.
+\\item DAG-aware engines are compared directly on runtime, composite score, and DAG consistency.
+\\item Force-directed baselines are included for contrast, not as DAG-faithful references.
+\\item External API-driven visual judging was not executed in this environment; placeholders were written for transparency.
+\\end{{itemize}}
+
+\\section{{Methodology}}
+The suite mixes small structural motifs, real architecture traces, and a scale ladder. Metric computation uses the existing Dagua metric stack: full metrics for smaller graphs, quick metrics for larger graphs. Anti-pattern flags are derived from the stored quality metrics rather than subjective post-hoc inspection.
+
+\\section{{Aggregate Results}}
+\\begin{{figure}}[h]
+\\centering
+\\includegraphics[width=0.9\\linewidth]{{{_latex_path(os.path.relpath(scaling_curve_path, report_dir))}}}
+\\caption{{Scaling curve across all stored benchmark runs.}}
+\\end{{figure}}
+
+\\begin{{table}}[h]
+\\centering
+\\begin{{tabular}}{{lrrr}}
+\\toprule
+Competitor & Avg. small-graph score & Avg. DAG consistency & Avg. runtime (s) \\\\
+\\midrule
+{' '.join(comp_lines)}
+\\bottomrule
+\\end{{tabular}}
+\\caption{{Aggregate stored results. Pale green/red/yellow cell coloring is reserved for richer future comparisons; the current report keeps the table neutral when not all competitors are installed.}}
+\\end{{table}}
+
+\\section{{Visual Gallery}}
+{gallery_block}
+
+\\section{{Appendix}}
+The aesthetic critic prompt used for optional API evaluation is stored verbatim in \\texttt{{prose\\_prompt.md}} and review placeholders are stored as \\texttt{{review\\_round\\_*.json}}.
+
+\\end{{document}}
+"""
+    tex_path = report_dir / "benchmark_report.tex"
+    tex_path.write_text(tex, encoding="utf-8")
+    return str(tex_path)
+
+
+def _compile_pdf(tex_path: str) -> Optional[str]:
+    if shutil.which("pdflatex") is None:
+        return None
+    tex_file = Path(tex_path)
+    try:
+        subprocess.run(
+            ["pdflatex", "-interaction=nonstopmode", tex_file.name],
+            cwd=tex_file.parent,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    pdf_path = tex_file.with_suffix(".pdf")
+    return str(pdf_path) if pdf_path.exists() else None
+
+
+def generate_report(
+    output_dir: str = "eval_output",
+    combined_results: Optional[Dict[str, Any]] = None,
+    compile_pdf: bool = True,
+) -> Dict[str, str]:
+    """Generate scaling figure, comparison gallery, LaTeX report, and prompts."""
+    from dagua.eval.benchmark import load_combined_results
+
+    if combined_results is None:
+        combined_results = load_combined_results(output_dir)
+
+    root = Path(output_dir)
+    report_dir = root / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "figures").mkdir(parents=True, exist_ok=True)
+
+    scaling_curve_path = generate_scaling_curve(output_dir=output_dir, combined_results=combined_results)
+    comparison_paths = generate_comparison_visuals(output_dir=output_dir, combined_results=combined_results)
+    _write_prompt_file(report_dir)
+    _write_review_placeholders(report_dir)
+    with open(report_dir / "aesthetic_critic_prompt.md", "w", encoding="utf-8") as f:
+        f.write(_aesthetic_critic_prompt())
+
+    tex_path = _render_latex_report(report_dir, combined_results, scaling_curve_path, comparison_paths)
+    pdf_path = _compile_pdf(tex_path) if compile_pdf else None
+    return {
+        "tex": tex_path,
+        "pdf": pdf_path or "",
+        "scaling_curve": scaling_curve_path,
+        "comparisons_dir": str(root / "visuals" / "comparisons"),
+    }

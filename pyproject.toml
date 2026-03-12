@@ -73,6 +73,7 @@ testpaths = ["tests"]
 markers = [
     "smoke: quick sanity checks",
     "slow: tests that take >10s",
+    "benchmark: benchmark suite tests and artifact generation",
     "gpu: tests requiring CUDA",
     "rare: extreme scale tests (5M+ nodes) — never run routinely",
 ]
