@@ -446,6 +446,85 @@ def _synthetic_graphs() -> List[TestGraph]:
         expected_challenges="Long lateral skips, fan-in across scales, uneven branch widths",
     ))
 
+    # 21. Kitchen sink model: nested clusters + skips + loops + multi-edges + wide fanout
+    g = DaguaGraph()
+    for node in [
+        "input", "stem.conv", "stem.norm", "stem.act",
+        "router", "expert_a.0", "expert_a.1", "expert_b.0", "expert_b.1",
+        "expert_c.0", "expert_c.1", "merge", "residual_add",
+        "memory", "memory", "feedback_gate", "head.norm",
+        "classifier", "aux_head", "output",
+    ]:
+        if node not in g._id_to_index:
+            g.add_node(node)
+
+    for edge in [
+        ("input", "stem.conv"), ("stem.conv", "stem.norm"), ("stem.norm", "stem.act"),
+        ("stem.act", "router"),
+        ("router", "expert_a.0"), ("router", "expert_b.0"), ("router", "expert_c.0"),
+        ("expert_a.0", "expert_a.1"), ("expert_b.0", "expert_b.1"), ("expert_c.0", "expert_c.1"),
+        ("expert_a.1", "merge"), ("expert_b.1", "merge"), ("expert_c.1", "merge"),
+        ("stem.act", "residual_add"), ("merge", "residual_add"),
+        ("residual_add", "head.norm"), ("head.norm", "classifier"), ("classifier", "output"),
+        ("head.norm", "aux_head"), ("aux_head", "output"),
+        ("residual_add", "feedback_gate"), ("feedback_gate", "memory"), ("memory", "router"),
+        ("memory", "memory"),
+    ]:
+        g.add_edge(*edge)
+    # Duplicate routing edge to force multi-edge handling.
+    g.add_edge("router", "expert_b.0")
+
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.add_cluster("backbone", [idx["stem.conv"], idx["stem.norm"], idx["stem.act"]], label="Backbone")
+    g.add_cluster(
+        "experts",
+        [idx["expert_a.0"], idx["expert_a.1"], idx["expert_b.0"], idx["expert_b.1"], idx["expert_c.0"], idx["expert_c.1"]],
+        label="Experts",
+    )
+    g.add_cluster("expert_a", [idx["expert_a.0"], idx["expert_a.1"]], label="Expert A", parent="experts")
+    g.add_cluster("expert_b", [idx["expert_b.0"], idx["expert_b.1"]], label="Expert B", parent="experts")
+    g.add_cluster("expert_c", [idx["expert_c.0"], idx["expert_c.1"]], label="Expert C", parent="experts")
+    g.add_cluster("expert_b.inner", [idx["expert_b.1"]], label="Expert B / Inner", parent="expert_b")
+    g.add_cluster("heads", [idx["head.norm"], idx["classifier"], idx["aux_head"]], label="Heads")
+    graphs.append(TestGraph(
+        name="kitchen_sink_hybrid_net",
+        graph=g,
+        tags={"nested-deep", "skip-heavy", "wide-parallel", "self-loops", "multi-edge", "mixed-width"},
+        description="Overloaded hybrid graph combining experts, residuals, feedback, nested clusters, aux head, and varied labels",
+        expected_challenges="Full-stack stress test: nested clusters, loops, duplicate edges, wide branches, residuals, and mixed label widths",
+    ))
+
+    # 22. Kitchen sink system graph: disconnected subsystems + dense handoffs + hierarchy
+    g = DaguaGraph.from_edge_list([
+        ("api.gateway", "auth.validate"), ("auth.validate", "router.dispatch"),
+        ("router.dispatch", "svc.search"), ("router.dispatch", "svc.reco"), ("router.dispatch", "svc.ads"),
+        ("svc.search", "join.rank"), ("svc.reco", "join.rank"), ("svc.ads", "join.rank"),
+        ("join.rank", "cache.write"), ("cache.write", "response.serialize"),
+        ("response.serialize", "response.emit"),
+        ("join.rank", "metrics.aggregate"), ("metrics.aggregate", "alerts.loop"),
+        ("alerts.loop", "metrics.aggregate"), ("alerts.loop", "alerts.loop"),
+        ("offline.ingest", "offline.train"), ("offline.train", "offline.eval"),
+        ("offline.eval", "model.registry"), ("model.registry", "router.dispatch"),
+        ("model.registry", "svc.reco"),
+        ("audit.ingest", "audit.report"),
+    ])
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.add_cluster("online", [idx[n] for n in [
+        "api.gateway", "auth.validate", "router.dispatch", "svc.search", "svc.reco",
+        "svc.ads", "join.rank", "cache.write", "response.serialize", "response.emit",
+    ]], label="Online Path")
+    g.add_cluster("services", [idx[n] for n in ["svc.search", "svc.reco", "svc.ads"]], label="Services", parent="online")
+    g.add_cluster("observability", [idx[n] for n in ["metrics.aggregate", "alerts.loop"]], label="Observability")
+    g.add_cluster("offline", [idx[n] for n in ["offline.ingest", "offline.train", "offline.eval", "model.registry"]], label="Offline")
+    g.add_cluster("audit", [idx[n] for n in ["audit.ingest", "audit.report"]], label="Audit")
+    graphs.append(TestGraph(
+        name="kitchen_sink_platform_graph",
+        graph=g,
+        tags={"nested-deep", "disconnected", "self-loops", "wide-parallel", "skip-heavy", "mixed-width"},
+        description="Platform-style graph mixing online services, offline training, observability loops, and cross-system handoffs",
+        expected_challenges="Disconnected subsystems, long handoff edges, nested service clusters, explicit loops, and varied label widths",
+    ))
+
     return graphs
 
 

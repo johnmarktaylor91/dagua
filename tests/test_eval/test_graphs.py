@@ -47,6 +47,8 @@ def test_synthetic_graphs_cover_common_and_niche_motifs():
         "disconnected_encoder_residual",
         "moe_router_sparse",
         "ragged_feature_pyramid",
+        "kitchen_sink_hybrid_net",
+        "kitchen_sink_platform_graph",
     }
     assert expected_names <= names
 
@@ -83,3 +85,15 @@ def test_special_motif_graphs_have_expected_structure():
 
     disconnected = graphs["disconnected_encoder_residual"].graph
     assert _component_count(disconnected.edge_index, disconnected.num_nodes) >= 2
+
+
+def test_kitchen_sink_graphs_combine_multiple_visual_features():
+    graphs = {tg.name: tg for tg in _synthetic_graphs()}
+
+    hybrid = graphs["kitchen_sink_hybrid_net"]
+    assert {"nested-deep", "skip-heavy", "wide-parallel", "self-loops", "multi-edge"} <= hybrid.tags
+    assert hybrid.graph.max_cluster_depth >= 2
+
+    platform = graphs["kitchen_sink_platform_graph"]
+    assert {"nested-deep", "disconnected", "self-loops", "wide-parallel"} <= platform.tags
+    assert _component_count(platform.graph.edge_index, platform.graph.num_nodes) >= 2
