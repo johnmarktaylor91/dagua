@@ -54,12 +54,13 @@ def _coarsen_once_streaming(
     at 1B nodes (vs ~100 GB for the vectorized path).
     """
     E = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    index_dtype = torch.int32 if N <= torch.iinfo(torch.int32).max else torch.long
 
     # --- Phase A: Per-layer node matching ---
     # Compute min_neighbor via chunked scatter_reduce (avoids [E]-sized ones).
     # Nodes sharing a low-index neighbor become consecutive after sort →
     # grouped into the same coarse node → shared edges collapse.
-    min_neighbor = torch.full((N,), N, dtype=torch.long, device=device)
+    min_neighbor = torch.full((N,), N, dtype=index_dtype, device=device)
     if E > 0:
         src_all, tgt_all = edge_index[0], edge_index[1]
         for start in range(0, E, _EDGE_CHUNK):
@@ -69,13 +70,13 @@ def _coarsen_once_streaming(
 
     # Coarse node counts per layer
     coarse_per_layer = (layer_counts + 2) // 3
-    coarse_offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=device)
+    coarse_offsets = torch.zeros(num_layers + 1, dtype=index_dtype, device=device)
     coarse_offsets[1:] = coarse_per_layer.cumsum(0)
     N_coarse = coarse_offsets[-1].item()
 
     # Assign coarse IDs per-layer using boolean masking (no global argsort).
     # Reuses a [N] bool mask (~1 GB at 1B) instead of sorted_by_layer (8+8 GB).
-    fine_to_coarse = torch.empty(N, dtype=torch.long, device=device)
+    fine_to_coarse = torch.empty(N, dtype=index_dtype, device=device)
     layer_mask = torch.empty(N, dtype=torch.bool, device=device)
     for layer_idx in range(num_layers):
         if layer_counts[layer_idx].item() == 0:
@@ -86,7 +87,7 @@ def _coarsen_once_streaming(
         n_layer = layer_nodes.shape[0]
         coarse_base = coarse_offsets[layer_idx].item()
         fine_to_coarse[layer_nodes[local_order]] = (
-            torch.arange(n_layer, dtype=torch.long, device=device) // 3 + coarse_base
+            torch.arange(n_layer, dtype=index_dtype, device=device) // 3 + coarse_base
         )
 
     del layer_mask, min_neighbor
@@ -100,28 +101,30 @@ def _coarsen_once_streaming(
 
     # --- Phase C: Chunked edge dedup ---
     if E > 0:
-        unique_chunks = []
+        running_unique: Optional[torch.Tensor] = None
         for start in range(0, E, _EDGE_CHUNK):
             end = min(start + _EDGE_CHUNK, E)
-            chunk_src = fine_to_coarse[edge_index[0, start:end]]
-            chunk_tgt = fine_to_coarse[edge_index[1, start:end]]
+            chunk_src = fine_to_coarse[edge_index[0, start:end]].long()
+            chunk_tgt = fine_to_coarse[edge_index[1, start:end]].long()
             not_self = chunk_src != chunk_tgt
             chunk_src = chunk_src[not_self]
             chunk_tgt = chunk_tgt[not_self]
             if chunk_src.numel() > 0:
                 chunk_hash = chunk_src * N_coarse + chunk_tgt
-                unique_chunks.append(chunk_hash.unique())
+                chunk_unique = chunk_hash.unique()
+                if running_unique is None:
+                    running_unique = chunk_unique
+                else:
+                    # Incremental merge avoids holding all per-chunk uniques plus
+                    # a final concatenation at once, which spikes memory at 1B+ scale.
+                    running_unique = torch.cat([running_unique, chunk_unique]).unique()
                 del chunk_hash
             del chunk_src, chunk_tgt
 
-        if unique_chunks:
-            all_hashes = torch.cat(unique_chunks)
-            del unique_chunks
-            final = all_hashes.unique()
-            del all_hashes
-            unique_src = final // N_coarse
-            unique_tgt = final % N_coarse
-            del final
+        if running_unique is not None:
+            unique_src = running_unique // N_coarse
+            unique_tgt = running_unique % N_coarse
+            del running_unique
             coarse_edge_index = torch.stack([unique_src, unique_tgt])
             del unique_src, unique_tgt
         else:
@@ -309,7 +312,7 @@ def build_hierarchy(
 
         # Propagate layers: coarse node inherits layer from its fine nodes
         # (all fine nodes in a pair share the same layer by construction)
-        coarse_la = torch.zeros(current_n, dtype=torch.long)
+        coarse_la = torch.zeros(current_n, dtype=current_la.dtype)
         coarse_la.scatter_reduce_(
             0, level.fine_to_coarse, current_la, reduce="amax",
         )

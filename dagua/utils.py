@@ -339,6 +339,9 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
 
             current_layer += 1
 
+        if chunked:
+            del remaining, wave_set, in_degree
+            return layers
         if layers.dtype != torch.long:
             del remaining, wave_set, in_degree
             layers = layers.long()

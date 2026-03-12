@@ -96,12 +96,13 @@ def build_edges(n: int, layers: int) -> torch.Tensor:
 
 
 def _build_edges_simple(n: int, w: int, e_backbone: int) -> torch.Tensor:
-    src_backbone = torch.arange(0, n - w, dtype=torch.long)
+    idx_dtype = torch.int32 if n <= torch.iinfo(torch.int32).max else torch.long
+    src_backbone = torch.arange(0, n - w, dtype=idx_dtype)
     tgt_backbone = src_backbone + w
 
     cross_mask = torch.rand(n - w) < 0.5
-    cross_src = torch.arange(0, n - w, dtype=torch.long)[cross_mask]
-    cross_offset = torch.randint(0, w, (cross_src.shape[0],), dtype=torch.long)
+    cross_src = torch.arange(0, n - w, dtype=idx_dtype)[cross_mask]
+    cross_offset = torch.randint(0, w, (cross_src.shape[0],), dtype=idx_dtype)
     cross_tgt_layer = cross_src // w + 1
     cross_tgt = cross_tgt_layer * w + cross_offset
 
@@ -115,16 +116,17 @@ def _build_edges_simple(n: int, w: int, e_backbone: int) -> torch.Tensor:
 
 def _build_edges_chunked(n: int, w: int, e_backbone: int) -> torch.Tensor:
     """Build edges in chunks to limit peak memory for very large graphs."""
+    idx_dtype = torch.int32 if n <= torch.iinfo(torch.int32).max else torch.long
     cross_prob = 0.5
     e_cross_est = int(e_backbone * cross_prob * 1.02)  # 2% margin
     e_est = e_backbone + e_cross_est
 
-    edge_src = torch.empty(e_est, dtype=torch.long)
-    edge_tgt = torch.empty(e_est, dtype=torch.long)
+    edge_src = torch.empty(e_est, dtype=idx_dtype)
+    edge_tgt = torch.empty(e_est, dtype=idx_dtype)
 
     # Backbone: node i → node i + w
-    edge_src[:e_backbone] = torch.arange(0, e_backbone, dtype=torch.long)
-    edge_tgt[:e_backbone] = torch.arange(w, n, dtype=torch.long)
+    edge_src[:e_backbone] = torch.arange(0, e_backbone, dtype=idx_dtype)
+    edge_tgt[:e_backbone] = torch.arange(w, n, dtype=idx_dtype)
     mem("backbone")
 
     # Cross edges in chunks
@@ -137,8 +139,8 @@ def _build_edges_chunked(n: int, w: int, e_backbone: int) -> torch.Tensor:
         n_cross = mask.sum().item()
         if n_cross == 0:
             continue
-        cross_src = torch.arange(start, end, dtype=torch.long)[mask]
-        cross_offset = torch.randint(0, w, (n_cross,), dtype=torch.long)
+        cross_src = torch.arange(start, end, dtype=idx_dtype)[mask]
+        cross_offset = torch.randint(0, w, (n_cross,), dtype=idx_dtype)
         cross_tgt_layer = cross_src // w + 1
         cross_tgt = cross_tgt_layer * w + cross_offset
         edge_src[write_pos:write_pos + n_cross] = cross_src
@@ -188,7 +190,8 @@ def main():
     g = dagua.DaguaGraph()
     g.num_nodes = n
     g._edge_index_tensor = edge_index
-    g.node_sizes = torch.full((n, 2), 20.0)
+    # Uniform synthetic nodes don't need float32 precision; keep this compact.
+    g.node_sizes = torch.full((n, 2), 20.0, dtype=torch.float16)
     mem("graph built")
 
     config = dagua.LayoutConfig(

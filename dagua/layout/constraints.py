@@ -1219,7 +1219,7 @@ def fanout_distribution_loss(
 
     # Compute out-degree per node
     out_degree = torch.zeros(N, dtype=torch.long, device=device)
-    out_degree.scatter_add_(0, src, torch.ones_like(src))
+    out_degree.scatter_add_(0, src, torch.ones(src.shape[0], dtype=out_degree.dtype, device=device))
 
     # Find hub nodes
     hub_mask = out_degree >= degree_threshold
