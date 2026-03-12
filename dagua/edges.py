@@ -52,26 +52,21 @@ def route_edges(
     num_edges = edge_index.shape[1]
     src_indices = edge_index[0].tolist()
     tgt_indices = edge_index[1].tolist()
+    x_coords = pos[:, 0].tolist()
+    y_coords = pos[:, 1].tolist()
+    widths = sizes[:, 0].tolist()
+    heights = sizes[:, 1].tolist()
 
-    # Compute port positions for each node
-    # Count outgoing and incoming edges per node
-    out_count = {}
-    in_count = {}
     out_order = {}
     in_order = {}
-
-    for e_idx in range(num_edges):
-        s, t = src_indices[e_idx], tgt_indices[e_idx]
-        out_count[s] = out_count.get(s, 0) + 1
-        in_count[t] = in_count.get(t, 0) + 1
 
     # Track port assignment order (sort by target/source x position)
     out_edges = {}  # node -> [(edge_idx, target_x)]
     in_edges = {}  # node -> [(edge_idx, source_x)]
     for e_idx in range(num_edges):
         s, t = src_indices[e_idx], tgt_indices[e_idx]
-        out_edges.setdefault(s, []).append((e_idx, pos[t, 0].item()))
-        in_edges.setdefault(t, []).append((e_idx, pos[s, 0].item()))
+        out_edges.setdefault(s, []).append((e_idx, x_coords[t]))
+        in_edges.setdefault(t, []).append((e_idx, x_coords[s]))
 
     # Sort ports by connected node x-position to reduce crossings
     for node in out_edges:
@@ -87,6 +82,8 @@ def route_edges(
     # Pre-compute cluster bboxes and node membership for cluster-aware routing
     cluster_bboxes = {}  # name -> (x_min, y_min, x_max, y_max)
     node_cluster_set = {}  # node_idx -> set of cluster names it belongs to
+    node_shapes = None
+    edge_styles = None
     if graph is not None and hasattr(graph, 'clusters') and graph.clusters:
         from dagua.utils import collect_cluster_leaves
         for cname, cmembers in graph.clusters.items():
@@ -98,28 +95,32 @@ def route_edges(
             cstyle = graph.get_style_for_cluster(cname)
             cpad = cstyle.padding
             # Compute bbox
-            cx_coords = [pos[m, 0].item() for m in cmembers if m < pos.shape[0]]
-            cy_coords = [pos[m, 1].item() for m in cmembers if m < pos.shape[0]]
-            cw_half = [sizes[m, 0].item() / 2 for m in cmembers if m < pos.shape[0]]
-            ch_half = [sizes[m, 1].item() / 2 for m in cmembers if m < pos.shape[0]]
-            if cx_coords:
-                bx_min = min(cx - hw for cx, hw in zip(cx_coords, cw_half)) - cpad
-                bx_max = max(cx + hw for cx, hw in zip(cx_coords, cw_half)) + cpad
-                by_min = min(cy - hh for cy, hh in zip(cy_coords, ch_half)) - cpad
-                by_max = max(cy + hh for cy, hh in zip(cy_coords, ch_half)) + cpad + 14
+            valid_members = [m for m in cmembers if 0 <= m < pos.shape[0]]
+            if valid_members:
+                idx = torch.tensor(valid_members, dtype=torch.long)
+                member_pos = pos[idx]
+                member_sizes = sizes[idx] / 2
+                bx_min = (member_pos[:, 0] - member_sizes[:, 0]).min().item() - cpad
+                bx_max = (member_pos[:, 0] + member_sizes[:, 0]).max().item() + cpad
+                by_min = (member_pos[:, 1] - member_sizes[:, 1]).min().item() - cpad
+                by_max = (member_pos[:, 1] + member_sizes[:, 1]).max().item() + cpad + 14
                 cluster_bboxes[cname] = (bx_min, by_min, bx_max, by_max)
-            for m in cmembers:
+            for m in valid_members:
                 if m not in node_cluster_set:
                     node_cluster_set[m] = set()
                 node_cluster_set[m].add(cname)
 
+    if graph is not None:
+        node_shapes = [graph.get_style_for_node(i).shape for i in range(pos.shape[0])]
+        edge_styles = [graph.get_style_for_edge(i) for i in range(num_edges)]
+
     curves = []
     for e_idx in range(num_edges):
         s, t = src_indices[e_idx], tgt_indices[e_idx]
-        sx, sy = pos[s, 0].item(), pos[s, 1].item()
-        tx, ty = pos[t, 0].item(), pos[t, 1].item()
-        sw, sh = sizes[s, 0].item(), sizes[s, 1].item()
-        tw, th = sizes[t, 0].item(), sizes[t, 1].item()
+        sx, sy = x_coords[s], y_coords[s]
+        tx, ty = x_coords[t], y_coords[t]
+        sw, sh = widths[s], heights[s]
+        tw, th = widths[t], heights[t]
 
         # Self-loop: teardrop curve above the node
         if s == t:
@@ -136,8 +137,8 @@ def route_edges(
 
         # Per-edge style
         edge_style = None
-        if graph is not None:
-            edge_style = graph.get_style_for_edge(e_idx)
+        if edge_styles is not None:
+            edge_style = edge_styles[e_idx]
 
         # Port positions
         out_rank, out_total = out_order.get(e_idx, (0, 1))
@@ -158,12 +159,12 @@ def route_edges(
             tgt_port_y = ty - th / 2  # top
 
         # Shape-aware port adjustment
-        if graph is not None:
+        if node_shapes is not None:
             src_port_x, src_port_y = _adjust_port_for_shape(
-                graph, s, sx, sy, sw, sh, src_port_x, src_port_y, is_source=True
+                node_shapes[s], sx, sy, sw, sh, src_port_x, src_port_y, is_source=True
             )
             tgt_port_x, tgt_port_y = _adjust_port_for_shape(
-                graph, t, tx, ty, tw, th, tgt_port_x, tgt_port_y, is_source=False
+                node_shapes[t], tx, ty, tw, th, tgt_port_x, tgt_port_y, is_source=False
             )
 
         # Per-edge routing and curvature
@@ -185,7 +186,7 @@ def route_edges(
 
 
 def _adjust_port_for_shape(
-    graph, node_idx: int,
+    shape: str,
     cx: float, cy: float, w: float, h: float,
     port_x: float, port_y: float,
     is_source: bool,
@@ -196,9 +197,6 @@ def _adjust_port_for_shape(
     For ellipses/circles, project onto the ellipse curve.
     For diamonds, project onto the diamond edge.
     """
-    style = graph.get_style_for_node(node_idx)
-    shape = style.shape
-
     if shape in ("rect", "roundrect"):
         return port_x, port_y
 

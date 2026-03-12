@@ -406,7 +406,7 @@ def _layout_inner(
         if verbose and step > 0 and step % _log_interval == 0:
             _vlog(f"step {step}/{steps} ({100*step//steps}%) loss={prev_unweighted:.2f} [{_time.perf_counter() - _t_loop:.1f}s]")
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         # Sample edge batch for this step — reuse pre-allocated buffer
         if batch_buf is not None:

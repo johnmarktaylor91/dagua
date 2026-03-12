@@ -153,7 +153,7 @@ def optimize_edges(
     t_samples = torch.linspace(0.0, 1.0, T).unsqueeze(0)  # [1, T]
 
     for step in range(steps):
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         # Evaluate bezier curves at T points: [E, T, 2]
         points = _evaluate_bezier_batch(endpoints, cp, t_samples)
