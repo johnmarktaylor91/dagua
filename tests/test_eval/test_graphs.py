@@ -59,6 +59,11 @@ def test_synthetic_graphs_cover_common_and_niche_motifs():
         "edge_label_braid",
         "nested_cluster_label_stack",
         "small_label_storm",
+        "long_range_residual_ladder",
+        "interleaved_cluster_crosstalk",
+        "asymmetric_hourglass_hub",
+        "multiscale_skip_cascade",
+        "braided_feedback_tails",
     }
     assert expected_names <= names
 
@@ -128,6 +133,32 @@ def test_visual_stress_graphs_cover_label_skew_and_component_extremes():
     src = collage.graph.edge_index[0].tolist()
     tgt = collage.graph.edge_index[1].tolist()
     assert any(s == t for s, t in zip(src, tgt))
+
+
+def test_challenge_graphs_cover_long_skips_cluster_crosstalk_and_feedback():
+    graphs = {tg.name: tg for tg in _synthetic_graphs()}
+
+    ladder = graphs["long_range_residual_ladder"]
+    assert {"linear-deep", "skip-heavy", "wide-parallel"} <= ladder.tags
+    ladder_src = ladder.graph.edge_index[0].tolist()
+    ladder_tgt = ladder.graph.edge_index[1].tolist()
+    assert max(abs(t - s) for s, t in zip(ladder_src, ladder_tgt)) >= 6
+
+    crosstalk = graphs["interleaved_cluster_crosstalk"]
+    assert {"nested-deep", "skip-heavy", "wide-parallel"} <= crosstalk.tags
+    assert crosstalk.graph.max_cluster_depth >= 2
+    cluster_names = set(crosstalk.graph.clusters)
+    assert {"encoder", "encoder.path_a", "encoder.path_b", "decoder"} <= cluster_names
+
+    multiscale = graphs["multiscale_skip_cascade"]
+    assert {"skip-heavy", "nested-shallow", "wide-parallel"} <= multiscale.tags
+    assert len(multiscale.graph.clusters) >= 3
+
+    braid = graphs["braided_feedback_tails"]
+    assert {"skip-heavy", "diamond", "linear-deep"} <= braid.tags
+    braid_src = braid.graph.edge_index[0].tolist()
+    braid_tgt = braid.graph.edge_index[1].tolist()
+    assert any(t < s for s, t in zip(braid_src, braid_tgt))
 
 
 def test_style_and_routing_stress_graphs_exercise_visual_feature_surface():
