@@ -8,6 +8,7 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
   - `docs/DEVELOPER_OVERVIEW.md`
 - Understand current project reality:
   - `docs/STATUS.md`
+  - `docs/CRITERIA_LEDGER.md`
 - Iterate on node placement:
   - `docs/ITERATION_WORKFLOW.md`
   - `docs/BENCHMARK_ARTIFACT_GUIDE.md`
@@ -36,6 +37,7 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 ## Iteration And Maintenance
 
 - Current project status: `docs/STATUS.md`
+- Criteria ledger: `docs/CRITERIA_LEDGER.md`
 - Maintenance checklist: `docs/MAINTENANCE_CHECKLIST.md`
 - Iteration workflow: `docs/ITERATION_WORKFLOW.md`
 - Money graphs shortlist: `docs/MONEY_GRAPHS.md`

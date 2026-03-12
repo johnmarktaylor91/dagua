@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import atexit
 import faulthandler
 import gc
 import json
@@ -60,6 +61,7 @@ def _checkpoint_paths(root: Path) -> dict[str, Path]:
         "node_sizes": root / "node_sizes.pt",
         "layer_assignments": root / "layer_assignments.pt",
         "positions": root / "positions.pt",
+        "active_run": root / "active_run.json",
     }
 
 
@@ -86,6 +88,54 @@ def _load_layer_checkpoint(paths: dict[str, Path], n: int, layers: int) -> torch
     if meta.get("n") != n or meta.get("layers") != layers:
         return None
     return torch.load(paths["layer_assignments"])
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _guard_duplicate_run(paths: dict[str, Path], size: str, resume: bool, force_duplicate_run: bool) -> None:
+    """Refuse to start a duplicate large run against the same checkpoint root."""
+    if force_duplicate_run or not paths["active_run"].exists():
+        return
+    try:
+        payload = json.loads(paths["active_run"].read_text(encoding="utf-8"))
+    except Exception:
+        return
+    pid = int(payload.get("pid", -1))
+    if pid <= 0 or pid == os.getpid() or not _pid_alive(pid):
+        return
+    raise SystemExit(
+        "Refusing to start a duplicate large benchmark run for "
+        f"{size!r} at {paths['root']}. Existing pid={pid}. "
+        "Use --force-duplicate-run only if you really want concurrent runs."
+    )
+
+
+def _register_active_run(paths: dict[str, Path], size: str, resume: bool) -> None:
+    payload = {
+        "pid": os.getpid(),
+        "size": size,
+        "resume": resume,
+        "checkpoint_root": str(paths["root"]),
+    }
+    paths["active_run"].parent.mkdir(parents=True, exist_ok=True)
+    paths["active_run"].write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _cleanup() -> None:
+        try:
+            if paths["active_run"].exists():
+                current = json.loads(paths["active_run"].read_text(encoding="utf-8"))
+                if int(current.get("pid", -1)) == os.getpid():
+                    paths["active_run"].unlink()
+        except Exception:
+            pass
+
+    atexit.register(_cleanup)
 
 
 def parse_node_count(s: str) -> int:
@@ -235,12 +285,19 @@ def main():
         choices=("cpu", "cuda"),
         help="Target layout device",
     )
+    parser.add_argument(
+        "--force-duplicate-run",
+        action="store_true",
+        help="Allow multiple concurrent runs against the same checkpoint root.",
+    )
     args = parser.parse_args()
 
     # Resolve size
     n, layers, w = resolve_size_and_layers(args.size, args.layers)
     checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else _default_checkpoint_dir(args.size)
     checkpoint_paths = _checkpoint_paths(checkpoint_dir)
+    _guard_duplicate_run(checkpoint_paths, args.size, args.resume, args.force_duplicate_run)
+    _register_active_run(checkpoint_paths, args.size, args.resume)
 
     mem("start")
     print(

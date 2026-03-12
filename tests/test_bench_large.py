@@ -85,3 +85,16 @@ def test_layer_checkpoint_round_trip(tmp_path: Path):
 
     assert restored is not None
     assert torch.equal(restored, layer_assignments)
+
+
+def test_duplicate_run_guard_raises_for_live_pid(tmp_path: Path, monkeypatch):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    paths["active_run"].parent.mkdir(parents=True, exist_ok=True)
+    paths["active_run"].write_text('{"pid": 999999, "size": "1b"}', encoding="utf-8")
+    monkeypatch.setattr(bench_large, "_pid_alive", lambda pid: pid == 999999)
+
+    import pytest
+
+    with pytest.raises(SystemExit, match="duplicate large benchmark run"):
+        bench_large._guard_duplicate_run(paths, "1b", resume=True, force_duplicate_run=False)
