@@ -792,6 +792,158 @@ def _synthetic_graphs() -> List[TestGraph]:
         expected_challenges="Label crowding in a small footprint with both edge and cluster annotations",
     ))
 
+    # 33. Deep ladder with many long residual bridges across stages
+    edges = []
+    for i in range(8):
+        edges.extend([
+            (f"stage{i}.main", f"stage{i}.norm"),
+            (f"stage{i}.norm", f"stage{i}.act"),
+        ])
+        if i < 7:
+            edges.append((f"stage{i}.act", f"stage{i + 1}.main"))
+    for i in range(6):
+        edges.append((f"stage{i}.main", f"stage{i + 2}.merge"))
+    for i in range(4):
+        edges.append((f"stage{i}.norm", f"stage{i + 4}.merge"))
+    for i in range(2, 8):
+        edges.append((f"stage{i}.merge", f"stage{i}.out"))
+    edges.append(("input", "stage0.main"))
+    edges.append(("stage7.out", "output"))
+    g = DaguaGraph.from_edge_list(edges)
+    graphs.append(TestGraph(
+        name="long_range_residual_ladder",
+        graph=g,
+        tags={"linear-deep", "skip-heavy", "wide-parallel"},
+        description="Deep ladder with many long residual bridges that leap multiple stages ahead",
+        expected_challenges="Long-span skip routing, preserving ladder readability, and avoiding bridge tangles",
+    ))
+
+    # 34. Interleaved sibling clusters with dense cross-talk
+    g = DaguaGraph.from_edge_list([
+        ("input", "enc.a0"),
+        ("input", "enc.b0"),
+        ("enc.a0", "enc.a1"),
+        ("enc.a1", "enc.a2"),
+        ("enc.b0", "enc.b1"),
+        ("enc.b1", "enc.b2"),
+        ("enc.a1", "enc.b2"),
+        ("enc.b1", "enc.a2"),
+        ("enc.a2", "join"),
+        ("enc.b2", "join"),
+        ("join", "decoder.left"),
+        ("join", "decoder.right"),
+        ("decoder.left", "decoder.merge"),
+        ("decoder.right", "decoder.merge"),
+        ("enc.a0", "decoder.right"),
+        ("enc.b0", "decoder.left"),
+        ("decoder.merge", "output"),
+    ])
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.add_cluster("system", [idx["enc.a0"], idx["enc.a1"], idx["enc.a2"], idx["enc.b0"], idx["enc.b1"], idx["enc.b2"], idx["decoder.left"], idx["decoder.right"], idx["decoder.merge"]], label="System")
+    g.add_cluster("encoder", [idx["enc.a0"], idx["enc.a1"], idx["enc.a2"], idx["enc.b0"], idx["enc.b1"], idx["enc.b2"]], label="Encoder", parent="system")
+    g.add_cluster("encoder.path_a", [idx["enc.a0"], idx["enc.a1"], idx["enc.a2"]], label="Path A", parent="encoder")
+    g.add_cluster("encoder.path_b", [idx["enc.b0"], idx["enc.b1"], idx["enc.b2"]], label="Path B", parent="encoder")
+    g.add_cluster("decoder", [idx["decoder.left"], idx["decoder.right"], idx["decoder.merge"]], label="Decoder", parent="system")
+    graphs.append(TestGraph(
+        name="interleaved_cluster_crosstalk",
+        graph=g,
+        tags={"nested-deep", "skip-heavy", "wide-parallel"},
+        description="Sibling clusters whose internal paths repeatedly cross-talk before merging into a decoder",
+        expected_challenges="Keeping sibling cluster identity legible while routing many inter-cluster cross-links",
+    ))
+
+    # 35. Asymmetric hourglass with a dominant hub and lopsided late merge
+    g = DaguaGraph.from_edge_list([
+        ("source_a", "pre_a"),
+        ("source_b", "pre_b"),
+        ("source_c", "pre_c"),
+        ("pre_a", "hub"),
+        ("pre_b", "hub"),
+        ("pre_c", "hub"),
+        ("hub", "thin_path"),
+        ("hub", "fat_path.0"),
+        ("fat_path.0", "fat_path.1"),
+        ("fat_path.1", "fat_path.2"),
+        ("fat_path.2", "late_join"),
+        ("thin_path", "late_join"),
+        ("source_a", "late_join"),
+        ("late_join", "head"),
+        ("head", "output"),
+    ])
+    graphs.append(TestGraph(
+        name="asymmetric_hourglass_hub",
+        graph=g,
+        tags={"diamond", "wide-parallel", "skip-light"},
+        description="Multi-source hourglass with a dominant hub, one thin path, and one much fatter late branch",
+        expected_challenges="Visual balance around a hub and preserving hourglass structure despite strong asymmetry",
+    ))
+
+    # 36. Multi-scale skip cascade with cross-resolution handoffs
+    g = DaguaGraph.from_edge_list([
+        ("input", "stem"),
+        ("stem", "p2"),
+        ("p2", "p3"),
+        ("p3", "p4"),
+        ("p4", "p5"),
+        ("p5", "topdown4"),
+        ("topdown4", "topdown3"),
+        ("topdown3", "topdown2"),
+        ("p4", "topdown4"),
+        ("p3", "topdown3"),
+        ("p2", "topdown2"),
+        ("p5", "detect_large"),
+        ("topdown4", "detect_mid"),
+        ("topdown3", "detect_small"),
+        ("topdown2", "detect_tiny"),
+        ("p2", "detect_large"),
+        ("p3", "detect_mid"),
+        ("p4", "detect_small"),
+        ("detect_large", "fuse"),
+        ("detect_mid", "fuse"),
+        ("detect_small", "fuse"),
+        ("detect_tiny", "fuse"),
+        ("fuse", "output"),
+    ])
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.add_cluster("bottom_up", [idx["stem"], idx["p2"], idx["p3"], idx["p4"], idx["p5"]], label="Bottom-Up")
+    g.add_cluster("top_down", [idx["topdown4"], idx["topdown3"], idx["topdown2"]], label="Top-Down")
+    g.add_cluster("heads", [idx["detect_large"], idx["detect_mid"], idx["detect_small"], idx["detect_tiny"]], label="Heads")
+    graphs.append(TestGraph(
+        name="multiscale_skip_cascade",
+        graph=g,
+        tags={"skip-heavy", "nested-shallow", "wide-parallel"},
+        description="Feature-pyramid-style graph with repeated cross-resolution skips and four detection heads",
+        expected_challenges="Cross-scale skip routing, head alignment, and preserving the cascade structure",
+    ))
+
+    # 37. Near-layered graph with alternating braids and back-pressure
+    g = DaguaGraph.from_edge_list([
+        ("input", "a0"),
+        ("input", "b0"),
+        ("a0", "a1"),
+        ("b0", "b1"),
+        ("a1", "a2"),
+        ("b1", "b2"),
+        ("a0", "b1"),
+        ("b0", "a1"),
+        ("a1", "b2"),
+        ("b1", "a2"),
+        ("a2", "merge"),
+        ("b2", "merge"),
+        ("merge", "tail0"),
+        ("tail0", "tail1"),
+        ("tail1", "tail2"),
+        ("tail2", "merge"),
+        ("tail2", "output"),
+    ])
+    graphs.append(TestGraph(
+        name="braided_feedback_tails",
+        graph=g,
+        tags={"skip-heavy", "diamond", "linear-deep"},
+        description="Alternating braid that looks layered at first, then folds back through a late feedback tail",
+        expected_challenges="Crossing-heavy braid alignment plus a late back-pressure loop near the sink",
+    ))
+
     return graphs
 
 
