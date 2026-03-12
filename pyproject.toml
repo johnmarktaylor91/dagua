@@ -62,6 +62,9 @@ Homepage = "https://github.com/johnmarktaylor91/dagua"
 Repository = "https://github.com/johnmarktaylor91/dagua"
 Issues = "https://github.com/johnmarktaylor91/dagua/issues"
 
+[project.scripts]
+dagua = "dagua.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["dagua*"]
 
