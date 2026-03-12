@@ -47,12 +47,22 @@ You can also render directly from saved benchmark positions, which is useful for
 large graphs where you do not want to relayout just to produce a poster or tour:
 
 ```bash
-dagua poster unused.json /tmp/residual.png \
+dagua poster graph.yaml /tmp/residual.png \
   --benchmark-graph residual_block \
   --benchmark-suite standard \
   --competitor dagua \
   --output-dir eval_output
 ```
+
+## Serialization Defaults
+
+For human-authored graph and theme specs, use YAML by default.
+
+For generated artifacts and machine-facing outputs, use JSON by default.
+
+In other words:
+- YAML for humans
+- JSON for machines
 
 ## Agent Guide
 

@@ -133,7 +133,7 @@ python /home/jtaylor/projects/dagua/scripts/build_how_dagua_works.py
 Render a poster from a benchmark graph:
 
 ```bash
-dagua poster unused.json /tmp/residual.png \
+dagua poster graph.yaml /tmp/residual.png \
   --benchmark-graph residual_block \
   --benchmark-suite standard \
   --output-dir /home/jtaylor/projects/dagua/eval_output
@@ -142,7 +142,7 @@ dagua poster unused.json /tmp/residual.png \
 Render a tour from a benchmark graph:
 
 ```bash
-dagua tour unused.json /tmp/residual-tour.mp4 \
+dagua tour graph.yaml /tmp/residual-tour.mp4 \
   --benchmark-graph residual_block \
   --benchmark-suite standard \
   --output-dir /home/jtaylor/projects/dagua/eval_output
