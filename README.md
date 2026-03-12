@@ -12,6 +12,11 @@ Graphviz has dominated graph visualization for 30 years but has hard scaling lim
 
 Pre-alpha. Under active development.
 
+Fast status references:
+- [docs/STATUS.md](docs/STATUS.md)
+- [docs/README.md](docs/README.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+
 ## CLI
 
 The package now ships with a small CLI:
