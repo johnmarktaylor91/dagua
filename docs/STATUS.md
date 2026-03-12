@@ -11,9 +11,11 @@ Current high-level project state, meant as a fast handoff note between sessions.
   - cluster box treatment
   - overall composition
 - The active strategy is:
+  0. keep the criteria ledger explicit so we do not miss whole geometry classes
   1. lock down placement quality with metrics and benchmarks
-  2. use the visual-audit/session workflow to redesign rendering defaults
-  3. keep the billion-node path alive and progressively more robust
+  2. build a real stage-2 downstream geometry workflow for edges / labels / clusters
+  3. use the visual-audit/session workflow to redesign rendering defaults
+  4. keep the billion-node path alive and progressively more robust
 
 ## Benchmarks
 
@@ -35,6 +37,7 @@ Current high-level project state, meant as a fast handoff note between sessions.
 
 Read first:
 - `docs/BENCHMARK_ARTIFACT_GUIDE.md`
+- `docs/CRITERIA_LEDGER.md`
 - `docs/ITERATION_WORKFLOW.md`
 - `docs/MONEY_GRAPHS.md`
 
@@ -57,6 +60,7 @@ Read first:
 ## Current Priorities
 
 1. Reduce the placement gap on edge crossings against the best hierarchical competitors.
-2. Keep hardening the 1B path.
-3. Iterate on default visual settings using the numbered session workflow.
-4. Expand strict typing and maintainability incrementally, not performatively.
+2. Define and implement the stage-2 numerical workflow for edge / text / cluster geometry.
+3. Keep hardening the 1B path.
+4. Iterate on default visual settings using the numbered session workflow.
+5. Expand strict typing and maintainability incrementally, not performatively.

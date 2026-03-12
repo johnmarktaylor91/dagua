@@ -70,6 +70,12 @@ Run the automatic placement-only tuning loop:
 dagua placement-tune --output-dir /home/jtaylor/projects/dagua/eval_output/report
 ```
 
+Open the report artifact front door:
+
+```bash
+sed -n '1,160p' /home/jtaylor/projects/dagua/eval_output/report/artifact_index.md
+```
+
 Refresh and freeze the current standard run as a named placement baseline:
 
 ```bash
