@@ -12,7 +12,7 @@ import shutil
 import subprocess
 from statistics import mean
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import torch
 
@@ -24,6 +24,14 @@ from dagua.metrics import compare
 def _load_json(path: Path) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _require_node_sizes(graph: Any) -> torch.Tensor:
+    """Return graph node sizes after forcing lazy computation."""
+    graph.compute_node_sizes()
+    if graph.node_sizes is None:
+        raise ValueError("graph.node_sizes unavailable after compute_node_sizes()")
+    return graph.node_sizes
 
 
 def generate_grid(
@@ -62,10 +70,10 @@ def generate_grid(
     for i, tg in enumerate(graphs):
         ax = axes[i]
         try:
-            tg.graph.compute_node_sizes()
             pos = layout(tg.graph, config)
             pos_np = pos.detach().cpu().numpy()
-            sizes = tg.graph.node_sizes.detach().cpu().numpy()
+            sizes_t = _require_node_sizes(tg.graph)
+            sizes = sizes_t.detach().cpu().numpy()
 
             x_min = (pos_np[:, 0] - sizes[:, 0] / 2).min() - 20
             x_max = (pos_np[:, 0] + sizes[:, 0] / 2).max() + 20
@@ -73,7 +81,7 @@ def generate_grid(
             y_max = (pos_np[:, 1] + sizes[:, 1] / 2).max() + 20
 
             _draw_clusters(ax, tg.graph, pos_np, sizes)
-            curves = route_edges(pos, tg.graph.edge_index, tg.graph.node_sizes, tg.graph.direction)
+            curves = route_edges(pos, tg.graph.edge_index, sizes_t, tg.graph.direction)
             _draw_edges(ax, tg.graph, curves)
             _draw_nodes(ax, tg.graph, pos_np, sizes)
             _draw_node_labels(ax, tg.graph, pos_np, sizes)
@@ -136,13 +144,13 @@ def generate_comparison_grid(
         ax_dagua = axes[i][0] if n > 1 else axes[0]
         ax_gv = axes[i][1] if n > 1 else axes[1]
 
-        tg.graph.compute_node_sizes()
+        sizes_t = _require_node_sizes(tg.graph)
 
         # Dagua
         try:
             dagua_pos = layout(tg.graph, config)
             _render_on_ax(ax_dagua, tg.graph, dagua_pos)
-            dagua_m = compute_all_metrics(dagua_pos, tg.graph.edge_index, tg.graph.node_sizes)
+            dagua_m = compute_all_metrics(dagua_pos, tg.graph.edge_index, sizes_t)
             ax_dagua.set_title(
                 f"Dagua: {tg.name}\nQ={dagua_m['overall_quality']:.0f} "
                 f"X={dagua_m['edge_crossings']} O={dagua_m['node_overlaps']}",
@@ -157,7 +165,7 @@ def generate_comparison_grid(
         try:
             gv_pos = layout_with_graphviz(tg.graph)
             _render_on_ax(ax_gv, tg.graph, gv_pos)
-            gv_m = compute_all_metrics(gv_pos, tg.graph.edge_index, tg.graph.node_sizes)
+            gv_m = compute_all_metrics(gv_pos, tg.graph.edge_index, sizes_t)
             ax_gv.set_title(
                 f"Graphviz: {tg.name}\nQ={gv_m['overall_quality']:.0f} "
                 f"X={gv_m['edge_crossings']} O={gv_m['node_overlaps']}",
@@ -186,7 +194,8 @@ def _render_on_ax(ax, graph, positions):
     from dagua.edges import route_edges
 
     pos_np = positions.detach().cpu().numpy()
-    sizes = graph.node_sizes.detach().cpu().numpy()
+    sizes_t = _require_node_sizes(graph)
+    sizes = sizes_t.detach().cpu().numpy()
 
     x_min = (pos_np[:, 0] - sizes[:, 0] / 2).min() - 20
     x_max = (pos_np[:, 0] + sizes[:, 0] / 2).max() + 20
@@ -194,7 +203,7 @@ def _render_on_ax(ax, graph, positions):
     y_max = (pos_np[:, 1] + sizes[:, 1] / 2).max() + 20
 
     _draw_clusters(ax, graph, pos_np, sizes)
-    curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction)
+    curves = route_edges(positions, graph.edge_index, sizes_t, graph.direction)
     _draw_edges(ax, graph, curves)
     _draw_nodes(ax, graph, pos_np, sizes)
     _draw_node_labels(ax, graph, pos_np, sizes)
@@ -271,6 +280,7 @@ def generate_multi_comparison_grid(
                     result = comp.layout(tg.graph)
                     if result.pos is not None:
                         _render_on_ax(ax, tg.graph, result.pos)
+                        assert tg.graph.node_sizes is not None
                         m = compute_all_metrics(
                             result.pos, tg.graph.edge_index, tg.graph.node_sizes
                         )
@@ -372,8 +382,8 @@ def generate_html_dashboard(
             for r in rs:
                 by_value[r.param_value].append(r.quality)
             avg_quality = {v: sum(qs) / len(qs) for v, qs in by_value.items()}
-            best_val = max(avg_quality, key=avg_quality.get)
-            worst_val = min(avg_quality, key=avg_quality.get)
+            best_val = max(avg_quality, key=lambda value: avg_quality[value])
+            worst_val = min(avg_quality, key=lambda value: avg_quality[value])
             html.append(f'<tr><td style="text-align:left">{param}</td>')
             html.append(f'<td>{best_val}</td><td>{avg_quality[best_val]:.1f}</td>')
             html.append(f'<td>{worst_val}</td><td>{avg_quality[worst_val]:.1f}</td></tr>')
@@ -716,7 +726,7 @@ def generate_comparison_visuals(
                 continue
 
             pos = torch.load(_resolve_positions_path(positions_root, result["positions_path"]))
-            pos = _normalize_positions(pos, tg.graph.node_sizes)
+            pos = _normalize_positions(pos, _require_node_sizes(tg.graph))
             _render_on_ax(ax, tg.graph, pos)
             runtime = result.get("runtime_seconds")
             score = result.get("composite_score")
@@ -859,7 +869,7 @@ def generate_layout_similarity_artifacts(
                 if a == b:
                     matrix[a][b] = 0.0
                     continue
-                pair = tuple(sorted((a, b)))
+                pair = cast(Tuple[str, str], tuple(sorted((a, b))))
                 disparity = float(compare(valid_positions[a], valid_positions[b]).get("procrustes_disparity", 1.0))
                 matrix[a][b] = disparity
                 pairwise_buckets.setdefault(pair, []).append(disparity)
@@ -1214,7 +1224,7 @@ def generate_benchmark_deltas(
     md_path = report_dir / "benchmark_deltas.md"
 
     if current_payload is None or previous_payload is None:
-        payload = {
+        payload: Dict[str, Any] = {
             "current_run_id": current_run_id,
             "baseline_run_id": previous_payload.get("run_id") if previous_payload else None,
             "status": "insufficient_history",

@@ -11,7 +11,7 @@ Sources: synthetic generators + TorchLens model traces.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import torch
 
@@ -1004,7 +1004,7 @@ def _random_dag(n_nodes: int, n_edges: int, seed: int = 42) -> DaguaGraph:
     rng = random.Random(seed)
 
     node_names = [f"n{i}" for i in range(n_nodes)]
-    edges = set()
+    edges: Set[tuple[str, str]] = set()
     attempts = 0
     while len(edges) < n_edges and attempts < n_edges * 10:
         i = rng.randint(0, n_nodes - 2)
@@ -1111,9 +1111,9 @@ def _torchlens_graphs() -> List[TestGraph]:
     # 4. Simple Transformer encoder layer
     try:
         layer = nn.TransformerEncoderLayer(d_model=64, nhead=4, dim_feedforward=128, batch_first=True)
-        model = nn.TransformerEncoder(layer, num_layers=1)
+        transformer_model = nn.TransformerEncoder(layer, num_layers=1)
         x = torch.randn(1, 10, 64)
-        log = tl.log_forward_pass(model, x, vis_mode="none")
+        log = tl.log_forward_pass(transformer_model, x, vis_mode="none")
         g = DaguaGraph.from_torchlens(log)
         graphs.append(TestGraph(
             name="tl_transformer_1layer",
@@ -1135,14 +1135,21 @@ def _torchlens_graphs() -> List[TestGraph]:
             DiamondLoop,
             LongLoop,
         )
+        nested_modules_cls: Any = NestedModules
+        simple_branching_cls: Any = SimpleBranching
+        diamond_loop_cls: Any = DiamondLoop
+        long_loop_cls: Any = LongLoop
     except ImportError:
-        # Fall back: define inline if TorchLens test models not importable
-        NestedModules = SimpleBranching = DiamondLoop = LongLoop = None
+        # Fall back: mark unavailable if TorchLens test models not importable.
+        nested_modules_cls = None
+        simple_branching_cls = None
+        diamond_loop_cls = None
+        long_loop_cls = None
 
     # 5. Nested module hierarchy (4-level nesting)
-    if NestedModules is not None:
+    if nested_modules_cls is not None:
         try:
-            model = NestedModules()
+            model = nested_modules_cls()
             x = torch.randn(5)
             log = tl.log_forward_pass(model, x, vis_mode="none")
             g = DaguaGraph.from_torchlens(log)
@@ -1158,9 +1165,9 @@ def _torchlens_graphs() -> List[TestGraph]:
             pass
 
     # 6. Branching (3-way split and merge)
-    if SimpleBranching is not None:
+    if simple_branching_cls is not None:
         try:
-            model = SimpleBranching()
+            model = simple_branching_cls()
             x = torch.randn(5)
             log = tl.log_forward_pass(model, x, vis_mode="none")
             g = DaguaGraph.from_torchlens(log)
@@ -1176,9 +1183,9 @@ def _torchlens_graphs() -> List[TestGraph]:
             pass
 
     # 7. Diamond loop (split → sin/cos → merge, repeated)
-    if DiamondLoop is not None:
+    if diamond_loop_cls is not None:
         try:
-            model = DiamondLoop()
+            model = diamond_loop_cls()
             x = torch.randn(5)
             log = tl.log_forward_pass(model, x, vis_mode="none")
             g = DaguaGraph.from_torchlens(log)
@@ -1194,9 +1201,9 @@ def _torchlens_graphs() -> List[TestGraph]:
             pass
 
     # 8. Long loop (20 iterations of Linear + ReLU)
-    if LongLoop is not None:
+    if long_loop_cls is not None:
         try:
-            model = LongLoop()
+            model = long_loop_cls()
             x = torch.randn(5)
             log = tl.log_forward_pass(model, x, vis_mode="none")
             g = DaguaGraph.from_torchlens(log)
@@ -1214,9 +1221,9 @@ def _torchlens_graphs() -> List[TestGraph]:
     # 9. ASPP model (multi-scale parallel branches)
     try:
         from tests.example_models import ASPPModel
-        model = ASPPModel(in_channels=3, mid=8, rates=(1, 6, 12))
+        aspp_model = ASPPModel(in_channels=3, mid=8, rates=(1, 6, 12))
         x = torch.randn(2, 3, 32, 32)
-        log = tl.log_forward_pass(model, x, vis_mode="none")
+        log = tl.log_forward_pass(aspp_model, x, vis_mode="none")
         g = DaguaGraph.from_torchlens(log)
         graphs.append(TestGraph(
             name="tl_aspp",
@@ -1232,9 +1239,9 @@ def _torchlens_graphs() -> List[TestGraph]:
     # 10. Feature Pyramid Network (bidirectional multi-scale)
     try:
         from tests.example_models import FeaturePyramidNet
-        model = FeaturePyramidNet()
+        fpn_model = FeaturePyramidNet()
         x = torch.randn(2, 3, 32, 32)
-        log = tl.log_forward_pass(model, x, vis_mode="none")
+        log = tl.log_forward_pass(fpn_model, x, vis_mode="none")
         g = DaguaGraph.from_torchlens(log)
         graphs.append(TestGraph(
             name="tl_fpn",
@@ -1250,9 +1257,9 @@ def _torchlens_graphs() -> List[TestGraph]:
     # 11. Attention block (Q/K/V self-attention)
     try:
         from tests.example_models import _AttentionBlock
-        model = _AttentionBlock(dim=64)
+        attention_model = _AttentionBlock(dim=64)
         x = torch.randn(2, 10, 64)
-        log = tl.log_forward_pass(model, x, vis_mode="none")
+        log = tl.log_forward_pass(attention_model, x, vis_mode="none")
         g = DaguaGraph.from_torchlens(log)
         graphs.append(TestGraph(
             name="tl_attention",
@@ -1268,9 +1275,11 @@ def _torchlens_graphs() -> List[TestGraph]:
     # 12. RandomGraphModel (controllable stress test)
     try:
         from tests.example_models import RandomGraphModel
-        model = RandomGraphModel(target_nodes=50, nesting_depth=2, seed=42, branch_probability=0.3, hidden_dim=64)
+        random_graph_model = RandomGraphModel(
+            target_nodes=50, nesting_depth=2, seed=42, branch_probability=0.3, hidden_dim=64
+        )
         x = torch.randn(2, 64)
-        log = tl.log_forward_pass(model, x, vis_mode="none")
+        log = tl.log_forward_pass(random_graph_model, x, vis_mode="none")
         g = DaguaGraph.from_torchlens(log)
         graphs.append(TestGraph(
             name="tl_random_50",

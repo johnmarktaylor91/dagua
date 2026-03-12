@@ -19,12 +19,16 @@ import io
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
 
 from dagua.styles import (
     ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
     DEFAULT_THEME_OBJ,
 )
+
+if TYPE_CHECKING:
+    from dagua.flex import Flex, LayoutFlex
+    from dagua.graph import DaguaGraph
 
 
 _DIRECT_IMAGE_MEDIA_TYPES = {
@@ -278,7 +282,7 @@ def save_style(config: Dict[str, Any], path: Union[str, Path]) -> None:
 # ─── Core dict → graph converter ──────────────────────────────────────────
 
 
-def _graph_from_dict(data: Dict) -> "DaguaGraph":
+def _graph_from_dict(data: Dict[str, Any]) -> "DaguaGraph":
     """Build a DaguaGraph from a plain dict (shared by JSON and YAML paths).
 
     Theme resolution: if ``theme`` is a string, look up a built-in theme by name.
@@ -309,16 +313,16 @@ def _graph_from_dict(data: Dict) -> "DaguaGraph":
         node_id = node_data["id"]
         label = node_data.get("label")
         node_type = node_data.get("type", "default")
-        style = _dict_to_node_style(node_data["style"]) if "style" in node_data else None
-        g.add_node(node_id, label=label, type=node_type, style=style)
+        node_style = _dict_to_node_style(node_data["style"]) if "style" in node_data else None
+        g.add_node(node_id, label=label, type=node_type, style=node_style)
 
     # 2. Add edges
     for edge_data in data.get("edges", []):
         source = edge_data["source"]
         target = edge_data["target"]
         label = edge_data.get("label")
-        style = _dict_to_edge_style(edge_data["style"]) if "style" in edge_data else None
-        g.add_edge(source, target, label=label, style=style)
+        edge_style = _dict_to_edge_style(edge_data["style"]) if "style" in edge_data else None
+        g.add_edge(source, target, label=label, style=edge_style)
 
     # 3. Add clusters
     for cluster_data in data.get("clusters", []):
@@ -326,8 +330,8 @@ def _graph_from_dict(data: Dict) -> "DaguaGraph":
         members = cluster_data.get("members", [])
         label = cluster_data.get("label")
         parent = cluster_data.get("parent")
-        style = _dict_to_cluster_style(cluster_data["style"]) if "style" in cluster_data else None
-        g.add_cluster(name, members, label=label, style=style, parent=parent)
+        cluster_style = _dict_to_cluster_style(cluster_data["style"]) if "style" in cluster_data else None
+        g.add_cluster(name, members, label=label, style=cluster_style, parent=parent)
 
     # 4. Restore back edge mask (cycle support)
     if "back_edges" in data:
@@ -427,8 +431,8 @@ def graph_to_json(graph: "DaguaGraph") -> Dict[str, Any]:
     ei = graph._edge_index_tensor
     if ei is not None and ei.numel() > 0:
         for j in range(ei.shape[1]):
-            src_idx = ei[0, j].item()
-            tgt_idx = ei[1, j].item()
+            src_idx = int(ei[0, j].item())
+            tgt_idx = int(ei[1, j].item())
             edge: Dict[str, Any] = {
                 "source": index_to_id.get(src_idx, str(src_idx)),
                 "target": index_to_id.get(tgt_idx, str(tgt_idx)),
@@ -522,9 +526,9 @@ def _theme_to_json(theme: Theme) -> Dict[str, Any]:
             result["node_styles"] = ns
 
     if theme.edge_styles:
-        es = {}
-        for name, style in theme.edge_styles.items():
-            diff = _style_to_diff_dict(style, _edge_default_dict)
+        es: Dict[str, Dict[str, Any]] = {}
+        for name, edge_style in theme.edge_styles.items():
+            diff = _style_to_diff_dict(edge_style, _edge_default_dict)
             if diff:
                 es[name] = diff
         if es:
@@ -878,14 +882,16 @@ def to_networkx(graph: "DaguaGraph") -> Any:
     ei = graph._edge_index_tensor
     if ei is not None and ei.numel() > 0:
         for e in range(ei.shape[1]):
-            src = index_to_id.get(ei[0, e].item(), ei[0, e].item())
-            tgt = index_to_id.get(ei[1, e].item(), ei[1, e].item())
-            attrs = {}
+            src_idx = int(ei[0, e].item())
+            tgt_idx = int(ei[1, e].item())
+            src = index_to_id.get(src_idx, src_idx)
+            tgt = index_to_id.get(tgt_idx, tgt_idx)
+            edge_attrs: Dict[str, Any] = {}
             if e < len(graph.edge_labels) and graph.edge_labels[e] is not None:
-                attrs["label"] = graph.edge_labels[e]
+                edge_attrs["label"] = graph.edge_labels[e]
             if e < len(graph.edge_types):
-                attrs["type"] = graph.edge_types[e]
-            G.add_edge(src, tgt, **attrs)
+                edge_attrs["type"] = graph.edge_types[e]
+            G.add_edge(src, tgt, **edge_attrs)
 
     return G
 
@@ -1098,12 +1104,12 @@ def from_dot(dot_string: str, **kwargs) -> "DaguaGraph":
     graphs = pydot.graph_from_dot_data(dot_string)
     if not graphs:
         raise ValueError("Could not parse DOT string")
-    pg = graphs[0]
+    pg = cast(Any, graphs[0])
 
     g = DaguaGraph(**kwargs)
 
     # Detect direction from rankdir
-    rankdir = pg.get_rankdir()
+    rankdir = cast(Optional[str], pg.get_rankdir())
     if rankdir:
         rd = rankdir.strip('"').upper()
         if rd in ("TB", "BT", "LR", "RL"):
@@ -1111,26 +1117,29 @@ def from_dot(dot_string: str, **kwargs) -> "DaguaGraph":
 
     # Add nodes
     for node in pg.get_nodes():
-        name = node.get_name().strip('"')
+        node_obj = cast(Any, node)
+        name = cast(str, node_obj.get_name()).strip('"')
         if name in ("node", "edge", "graph", ""):
             continue  # skip DOT defaults
-        label = node.get_label()
+        label = cast(Optional[str], node_obj.get_label())
         if label:
             label = label.strip('"')
         g.add_node(name, label=label)
 
     # Add edges
     for edge in pg.get_edges():
-        src = edge.get_source().strip('"')
-        dst = edge.get_destination().strip('"')
-        label = edge.get_label()
+        edge_obj = cast(Any, edge)
+        src = cast(str, edge_obj.get_source()).strip('"')
+        dst = cast(str, edge_obj.get_destination()).strip('"')
+        label = cast(Optional[str], edge_obj.get_label())
         if label:
             label = label.strip('"')
         g.add_edge(src, dst, label=label)
 
     # Add clusters from subgraphs
     for sg in pg.get_subgraphs():
-        sg_name = sg.get_name()
+        sg_obj = cast(Any, sg)
+        sg_name = cast(str, sg_obj.get_name())
         if sg_name.startswith("cluster_"):
             cluster_name = sg_name[len("cluster_"):]
         else:
@@ -1138,13 +1147,13 @@ def from_dot(dot_string: str, **kwargs) -> "DaguaGraph":
         cluster_name = cluster_name.strip('"')
 
         members = []
-        for node in sg.get_nodes():
-            node_name = node.get_name().strip('"')
+        for node in sg_obj.get_nodes():
+            node_name = cast(str, cast(Any, node).get_name()).strip('"')
             if node_name in g._id_to_index:
                 members.append(node_name)
 
         if members:
-            label = sg.get_label()
+            label = cast(Optional[str], sg_obj.get_label())
             if label:
                 label = label.strip('"')
             g.add_cluster(cluster_name, members, label=label)
@@ -1316,11 +1325,13 @@ def _unpack_llm_client_result(result, *, provider: Optional[str], model: Optiona
             base_url=base_url,
         )
     except RuntimeError:
+        normalized_provider = _normalize_provider_name(provider_name)
+        assert normalized_provider is not None
         resolved = ImageAIConfig(
-            provider=_normalize_provider_name(provider_name),
+            provider=normalized_provider,
             api_key=api_key,
             api_key_env=api_key_env,
-            model=model or _IMAGE_AI_DEFAULT_MODEL[_normalize_provider_name(provider_name)],
+            model=model or _IMAGE_AI_DEFAULT_MODEL[normalized_provider],
             base_url=base_url,
         )
     return provider_name, client, resolved
@@ -1637,6 +1648,7 @@ def graph_dict_from_image(
         api_key_env=api_key_env,
         base_url=base_url,
     )
+    assert resolved.model is not None
     response_text = _send_image_to_llm(
         client,
         provider_name,
@@ -1742,6 +1754,7 @@ def theme_dict_from_image(
         api_key_env=api_key_env,
         base_url=base_url,
     )
+    assert resolved.model is not None
     response_text = _send_image_to_llm(
         client,
         provider_name,

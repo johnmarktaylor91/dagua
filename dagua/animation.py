@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import torch
@@ -279,7 +279,7 @@ def _compute_camera_bounds(
     if not real_snaps:
         return bounds_per_frame
 
-    raw_bounds = [_snapshot_bounds(graph, snap.positions) for snap in real_snaps]
+    raw_bounds = [_snapshot_bounds(graph, cast(torch.Tensor, snap.positions)) for snap in real_snaps]
     global_bounds = (
         min(b[0] for b in raw_bounds),
         max(b[1] for b in raw_bounds),
@@ -317,7 +317,10 @@ def _compute_camera_bounds(
 
         if config.camera == "adaptive":
             alpha = 0.18
-            smoothed = tuple((1 - alpha) * smoothed[i] + alpha * target[i] for i in range(4))
+            smoothed = cast(
+                Tuple[float, float, float, float],
+                tuple((1 - alpha) * smoothed[i] + alpha * target[i] for i in range(4)),
+            )
         else:
             smoothed = target
 
@@ -461,7 +464,12 @@ def _interpolate_bounds(
     for i in range(max(duration_frames, 1)):
         t = 1.0 if duration_frames <= 1 else i / (duration_frames - 1)
         w = _ease_value(t, easing)
-        frames.append(tuple((1 - w) * start[j] + w * end[j] for j in range(4)))
+        frames.append(
+            cast(
+                Tuple[float, float, float, float],
+                tuple((1 - w) * start[j] + w * end[j] for j in range(4)),
+            )
+        )
     return frames
 
 
@@ -761,8 +769,9 @@ def _card_frame(graph, title: str, subtitle: Optional[str], figsize, dpi: int) -
             color="#6B7280",
             fontfamily=gs.title_font_family or "sans-serif",
         )
-    fig.canvas.draw()
-    frame = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
+    canvas = cast(Any, fig.canvas)
+    canvas.draw()
+    frame = np.asarray(canvas.buffer_rgba())[..., :3].copy()
     plt.close(fig)
     return frame
 
@@ -800,8 +809,9 @@ def _render_snapshot_frame(
     if anim_cfg.overlay_title:
         title, subtitle = _frame_title(snap)
         _overlay_text(ax, graph, title, subtitle)
-    fig.canvas.draw()
-    frame = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
+    canvas = cast(Any, fig.canvas)
+    canvas.draw()
+    frame = np.asarray(canvas.buffer_rgba())[..., :3].copy()
     plt.close(fig)
     return frame
 
@@ -834,8 +844,9 @@ def _render_tour_frame(
     ax.set_ylim(camera_bounds[2], camera_bounds[3])
     if tour_cfg.show_titles and title:
         _overlay_text(ax, graph, title, subtitle)
-    fig.canvas.draw()
-    frame = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
+    canvas = cast(Any, fig.canvas)
+    canvas.draw()
+    frame = np.asarray(canvas.buffer_rgba())[..., :3].copy()
     plt.close(fig)
     return frame
 
@@ -911,7 +922,7 @@ def _render_large_tour_frame(
             if len(segs) > 6000:
                 step = max(len(segs) // 6000, 1)
                 segs = segs[::step]
-            lc = LineCollection(segs, colors="#266b8ccc", linewidths=0.35, alpha=0.16, zorder=2)
+            lc = LineCollection(cast(Any, segs), colors="#266b8ccc", linewidths=0.35, alpha=0.16, zorder=2)
             ax.add_collection(lc)
 
     if 0 < visible_count <= tour_cfg.detail_node_limit:
@@ -956,8 +967,9 @@ def _render_large_tour_frame(
             sub = f"{subtitle} · {trailer}" if subtitle else trailer
         _overlay_text(ax, graph, title, sub)
 
-    fig.canvas.draw()
-    frame = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
+    canvas = cast(Any, fig.canvas)
+    canvas.draw()
+    frame = np.asarray(canvas.buffer_rgba())[..., :3].copy()
     plt.close(fig)
     return frame
 
@@ -1210,6 +1222,7 @@ def tour(
             title = kf.title if frame_idx >= max(len(path) // 4, 1) else None
             subtitle = kf.subtitle if title else None
             if use_large_lod:
+                assert large_state is not None
                 frames.append(
                     _render_large_tour_frame(
                         graph,
@@ -1221,6 +1234,7 @@ def tour(
                     )
                 )
             else:
+                assert curves is not None
                 frames.append(
                     _render_tour_frame(
                         graph,
