@@ -68,6 +68,7 @@ class VisualAuditResult:
     kill_switch_paths: List[str] = field(default_factory=list)
     diff_paths: List[str] = field(default_factory=list)
     competitor_paths: List[str] = field(default_factory=list)
+    baseline_diff_paths: List[str] = field(default_factory=list)
     sheet_paths: List[str] = field(default_factory=list)
     metric_paths: List[str] = field(default_factory=list)
     frozen_paths: List[str] = field(default_factory=list)
@@ -92,12 +93,27 @@ def build_visual_audit_suite(
     steps: int = 80,
     edge_opt_steps: int = 12,
     graph_names: Optional[Sequence[str]] = None,
+    compare_to_baseline: Optional[str] = "reference",
+    panels: Optional[Sequence[str]] = None,
 ) -> VisualAuditResult:
     """Build the full visual iteration suite."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     specs = [spec for spec in _LADDER_SPECS if graph_names is None or spec.graph_name in set(graph_names)]
+    panel_set = set(panels) if panels is not None else {
+        "ladder",
+        "decomposition",
+        "kill_switches",
+        "diff_dashboard",
+        "competitor_stepwise",
+        "metric_cards",
+        "sheets",
+        "frozen_baselines",
+        "run_to_run_diff",
+        "readme",
+        "manifest",
+    }
     graph_map = {tg.name: tg for tg in get_test_graphs()}
     result = VisualAuditResult(
         output_dir=str(out),
@@ -110,10 +126,11 @@ def build_visual_audit_suite(
     kill_dir = out / "kill_switches"
     diff_dir = out / "diff_dashboard"
     competitor_dir = out / "competitor_stepwise"
+    baseline_diff_dir = out / "run_to_run_diff"
     sheet_dir = out / "sheets"
     metric_dir = out / "metric_cards"
     frozen_dir = out / "frozen_baselines" / "current"
-    for d in (ladder_dir, decomp_dir, kill_dir, diff_dir, competitor_dir, sheet_dir, metric_dir, frozen_dir):
+    for d in (ladder_dir, decomp_dir, kill_dir, diff_dir, competitor_dir, baseline_diff_dir, sheet_dir, metric_dir, frozen_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     manifest: Dict[str, object] = {
@@ -122,6 +139,7 @@ def build_visual_audit_suite(
         "kill_switches": [],
         "diff_dashboard": [],
         "competitor_stepwise": [],
+        "run_to_run_diff": [],
         "sheets": [],
         "metric_cards": [],
         "frozen_baselines": [],
@@ -150,26 +168,30 @@ def build_visual_audit_suite(
         )
 
         ladder_path = ladder_dir / f"{spec.graph_name}_ladder.png"
-        _render_complexity_ladder(graph, pos, curves, label_positions, spec, ladder_path)
-        result.ladder_paths.append(str(ladder_path))
-        manifest["ladder"].append({"graph": spec.graph_name, "path": str(ladder_path), "failure_modes": list(spec.failure_modes)})
+        if "ladder" in panel_set:
+            _render_complexity_ladder(graph, pos, curves, label_positions, spec, ladder_path)
+            result.ladder_paths.append(str(ladder_path))
+            manifest["ladder"].append({"graph": spec.graph_name, "path": str(ladder_path), "failure_modes": list(spec.failure_modes)})
 
-        if len(result.decomposition_paths) < 4:
+        if "decomposition" in panel_set and len(result.decomposition_paths) < 4:
             decomp_path = decomp_dir / f"{spec.graph_name}_decomposition.png"
             _render_decomposition(graph, pos, curves, label_positions, spec, decomp_path)
             result.decomposition_paths.append(str(decomp_path))
             manifest["decomposition"].append({"graph": spec.graph_name, "path": str(decomp_path)})
 
+        if "kill_switches" in panel_set and len(result.kill_switch_paths) < 4:
             kill_path = kill_dir / f"{spec.graph_name}_kill_switches.png"
             _render_kill_switch_matrix(graph, pos, curves, label_positions, spec, kill_path)
             result.kill_switch_paths.append(str(kill_path))
             manifest["kill_switches"].append({"graph": spec.graph_name, "path": str(kill_path)})
 
+        if "diff_dashboard" in panel_set and len(result.diff_paths) < 4:
             diff_path = diff_dir / f"{spec.graph_name}_diff.png"
             _render_diff_dashboard(graph, pos, curves, label_positions, spec, diff_path)
             result.diff_paths.append(str(diff_path))
             manifest["diff_dashboard"].append({"graph": spec.graph_name, "path": str(diff_path)})
 
+        if "competitor_stepwise" in panel_set and len(result.competitor_paths) < 4:
             competitor_path = competitor_dir / f"{spec.graph_name}_competitors.png"
             _render_competitor_stepwise(graph, spec, competitors, competitor_path, steps, edge_opt_steps)
             result.competitor_paths.append(str(competitor_path))
@@ -177,39 +199,58 @@ def build_visual_audit_suite(
 
         thumb_rel = Path("..") / "complexity_ladder" / ladder_path.name
         metric_path = metric_dir / f"{spec.graph_name}.json"
-        metric_path.write_text(json.dumps({
-            "graph": spec.graph_name,
-            "rung_title": spec.rung_title,
-            "rationale": spec.rationale,
-            "failure_modes": list(spec.failure_modes),
-            "metrics": {k: _json_safe(v) for k, v in metrics.items()},
-            "thumbnail": str(thumb_rel),
-        }, indent=2), encoding="utf-8")
-        result.metric_paths.append(str(metric_path))
-        manifest["metric_cards"].append({"graph": spec.graph_name, "path": str(metric_path)})
+        if "metric_cards" in panel_set:
+            metric_path.write_text(json.dumps({
+                "graph": spec.graph_name,
+                "rung_title": spec.rung_title,
+                "rationale": spec.rationale,
+                "failure_modes": list(spec.failure_modes),
+                "metrics": {k: _json_safe(v) for k, v in metrics.items()},
+                "thumbnail": str(thumb_rel),
+            }, indent=2), encoding="utf-8")
+            result.metric_paths.append(str(metric_path))
+            manifest["metric_cards"].append({"graph": spec.graph_name, "path": str(metric_path)})
         metric_rows.append((spec, metrics, thumb_rel))
 
         frozen_target = frozen_dir / ladder_path.name
-        shutil.copy2(ladder_path, frozen_target)
-        result.frozen_paths.append(str(frozen_target))
-        manifest["frozen_baselines"].append({"graph": spec.graph_name, "path": str(frozen_target)})
+        if "frozen_baselines" in panel_set and ladder_path.exists():
+            shutil.copy2(ladder_path, frozen_target)
+            result.frozen_paths.append(str(frozen_target))
+            manifest["frozen_baselines"].append({"graph": spec.graph_name, "path": str(frozen_target)})
 
-    typography_path = sheet_dir / "typography_stress.png"
-    _render_typography_sheet(copy.deepcopy(graph_map["extreme_mixed_width_transformer"].graph), steps, edge_opt_steps, typography_path)
-    result.sheet_paths.append(str(typography_path))
-    manifest["sheets"].append({"kind": "typography", "path": str(typography_path)})
+        if "run_to_run_diff" in panel_set and compare_to_baseline:
+            baseline_root = out / "frozen_baselines" / compare_to_baseline
+            baseline_source = baseline_root / ladder_path.name
+            if baseline_source.exists():
+                baseline_diff_path = baseline_diff_dir / f"{spec.graph_name}_vs_{compare_to_baseline}.png"
+                _render_run_to_run_diff(ladder_path, baseline_source, baseline_diff_path, spec, compare_to_baseline)
+                result.baseline_diff_paths.append(str(baseline_diff_path))
+                manifest["run_to_run_diff"].append({
+                    "graph": spec.graph_name,
+                    "baseline": compare_to_baseline,
+                    "path": str(baseline_diff_path),
+                })
 
-    edge_sheet_path = sheet_dir / "edge_language_sheet.png"
-    _render_edge_language_sheet(copy.deepcopy(graph_map["edge_label_braid"].graph), steps, edge_opt_steps, edge_sheet_path)
-    result.sheet_paths.append(str(edge_sheet_path))
-    manifest["sheets"].append({"kind": "edge_language", "path": str(edge_sheet_path)})
+    if "sheets" in panel_set:
+        typography_path = sheet_dir / "typography_stress.png"
+        _render_typography_sheet(copy.deepcopy(graph_map["extreme_mixed_width_transformer"].graph), steps, edge_opt_steps, typography_path)
+        result.sheet_paths.append(str(typography_path))
+        manifest["sheets"].append({"kind": "typography", "path": str(typography_path)})
 
-    metric_md = metric_dir / "README.md"
-    metric_md.write_text(_metric_cards_markdown(metric_rows), encoding="utf-8")
-    result.metric_paths.append(str(metric_md))
+        edge_sheet_path = sheet_dir / "edge_language_sheet.png"
+        _render_edge_language_sheet(copy.deepcopy(graph_map["edge_label_braid"].graph), steps, edge_opt_steps, edge_sheet_path)
+        result.sheet_paths.append(str(edge_sheet_path))
+        manifest["sheets"].append({"kind": "edge_language", "path": str(edge_sheet_path)})
 
-    Path(result.manifest_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    Path(result.readme_path).write_text(_suite_readme(result, specs), encoding="utf-8")
+    if "metric_cards" in panel_set:
+        metric_md = metric_dir / "README.md"
+        metric_md.write_text(_metric_cards_markdown(metric_rows), encoding="utf-8")
+        result.metric_paths.append(str(metric_md))
+
+    if "manifest" in panel_set:
+        Path(result.manifest_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    if "readme" in panel_set:
+        Path(result.readme_path).write_text(_suite_readme(result, specs), encoding="utf-8")
     return result
 
 
@@ -510,6 +551,7 @@ def _suite_readme(result: VisualAuditResult, specs: Sequence[AuditSpec]) -> str:
         "- `kill_switches/`: quick isolation of labels/clusters/theme effects\n"
         "- `diff_dashboard/`: current vs neutral vs placement-only views\n"
         "- `competitor_stepwise/`: the same stepwise graphs shown side by side with competing engines\n"
+        "- `run_to_run_diff/`: current ladder renders compared to a frozen named baseline\n"
         "- `sheets/`: typography and edge-language stress sheets\n"
         "- `metric_cards/`: metrics paired with thumbnails and failure-mode tags\n"
         "- `frozen_baselines/current/`: current frozen key renders for future comparison\n\n"
@@ -523,6 +565,24 @@ def _json_safe(value):
     if isinstance(value, (np.integer,)):
         return int(value)
     return value
+
+
+def freeze_visual_audit_baseline(
+    output_dir: str = "eval_output/visual_audit",
+    label: str = "reference",
+    overwrite: bool = False,
+) -> str:
+    out = Path(output_dir)
+    current = out / "frozen_baselines" / "current"
+    if not current.exists():
+        raise FileNotFoundError(f"No current visual-audit baseline found at {current}")
+    target = out / "frozen_baselines" / label
+    if target.exists():
+        if not overwrite:
+            raise FileExistsError(f"Visual-audit baseline already exists: {target}")
+        shutil.rmtree(target)
+    shutil.copytree(current, target)
+    return str(target)
 
 
 def _audit_competitors() -> List[CompetitorBase]:
@@ -627,3 +687,27 @@ def _normalize_positions_for_audit(
     pos[:, 0] = (pos[:, 0] - x_min) * scale + padding
     pos[:, 1] = (pos[:, 1] - y_min) * scale + padding
     return pos
+
+
+def _render_run_to_run_diff(current_path: Path, baseline_path: Path, out_path: Path, spec: AuditSpec, baseline_label: str) -> None:
+    import matplotlib.pyplot as plt
+    from PIL import Image
+
+    with Image.open(current_path) as current_img, Image.open(baseline_path) as baseline_img:
+        current = np.asarray(current_img.convert("RGB"))
+        baseline = np.asarray(baseline_img.convert("RGB").resize((current.shape[1], current.shape[0])))
+    diff = np.abs(current.astype(np.int16) - baseline.astype(np.int16)).astype(np.uint8)
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.8))
+    for ax, img, title in zip(
+        axes,
+        (baseline, current, diff),
+        (f"Baseline: {baseline_label}", "Current", "Absolute diff"),
+    ):
+        ax.imshow(img)
+        ax.set_title(title, fontfamily=RESOLVED_FONT)
+        ax.axis("off")
+    fig.suptitle(f"Run-to-run diff — {spec.graph_name}", fontsize=12, fontfamily=RESOLVED_FONT)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=170, bbox_inches="tight")
+    plt.close(fig)
