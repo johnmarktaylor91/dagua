@@ -28,6 +28,8 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, Optional
 
+import torch
+
 from dagua.styles import (
     ClusterStyle,
     EdgeStyle,
@@ -45,7 +47,7 @@ def _field_names(cls) -> set:
     return {f.name for f in dataclasses.fields(cls)}
 
 
-_META_FIELDS = {"theme", "device"}
+_META_FIELDS = {"theme", "device", "index_dtype", "size_dtype"}
 _NODE_STYLE_FIELDS = _field_names(NodeStyle)
 _EDGE_STYLE_FIELDS = _field_names(EdgeStyle)
 _GRAPH_STYLE_FIELDS = _field_names(GraphStyle)
@@ -66,6 +68,40 @@ def _get_layout_config_fields() -> set:
 # Prefixed fields route to their style class after stripping prefix
 _EDGE_PREFIX = "edge_"
 _GRAPH_PREFIX = "graph_"
+
+_DTYPE_NAME_TO_TORCH = {
+    "int32": torch.int32,
+    "int64": torch.int64,
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "float64": torch.float64,
+}
+
+
+def _dtype_name(dtype: torch.dtype) -> str:
+    for name, torch_dtype in _DTYPE_NAME_TO_TORCH.items():
+        if dtype == torch_dtype:
+            return name
+    raise TypeError(f"Unsupported dtype: {dtype}")
+
+
+def _normalize_index_dtype(value: Any) -> torch.dtype:
+    if isinstance(value, str):
+        value = _DTYPE_NAME_TO_TORCH.get(value)
+    if value not in (torch.int32, torch.int64):
+        raise TypeError("index_dtype must be one of: torch.int32, torch.int64, 'int32', 'int64'")
+    return value
+
+
+def _normalize_size_dtype(value: Any) -> torch.dtype:
+    if isinstance(value, str):
+        value = _DTYPE_NAME_TO_TORCH.get(value)
+    if value not in (torch.float16, torch.float32, torch.float64):
+        raise TypeError(
+            "size_dtype must be one of: torch.float16, torch.float32, torch.float64, "
+            "'float16', 'float32', 'float64'"
+        )
+    return value
 
 # All valid kwarg names (union across all targets)
 def _all_valid_names() -> set:
@@ -109,6 +145,8 @@ class _Defaults:
         self.theme_name: str = "default"
         self.theme: Theme = copy.deepcopy(DEFAULT_THEME_OBJ)
         self.device: str = "cpu"
+        self.index_dtype: torch.dtype = torch.int64
+        self.size_dtype: torch.dtype = torch.float32
         self.node_style_overrides: Dict[str, Any] = {}
         self.edge_style_overrides: Dict[str, Any] = {}
         self.graph_style_overrides: Dict[str, Any] = {}
@@ -119,6 +157,8 @@ class _Defaults:
         d.theme_name = self.theme_name
         d.theme = copy.deepcopy(self.theme)
         d.device = self.device
+        d.index_dtype = self.index_dtype
+        d.size_dtype = self.size_dtype
         d.node_style_overrides = dict(self.node_style_overrides)
         d.edge_style_overrides = dict(self.edge_style_overrides)
         d.graph_style_overrides = dict(self.graph_style_overrides)
@@ -181,6 +221,10 @@ def configure(**kwargs: Any) -> None:
                 raise TypeError(f"theme must be a string or Theme, got {type(value).__name__}")
         elif key == "device":
             cur.device = value
+        elif key == "index_dtype":
+            cur.index_dtype = _normalize_index_dtype(value)
+        elif key == "size_dtype":
+            cur.size_dtype = _normalize_size_dtype(value)
         elif key in layout_fields:
             cur.layout_overrides[key] = value
         elif key in _NODE_STYLE_FIELDS:
@@ -222,6 +266,8 @@ def get_defaults() -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "theme": cur.theme_name,
         "device": cur.device,
+        "index_dtype": _dtype_name(cur.index_dtype),
+        "size_dtype": _dtype_name(cur.size_dtype),
     }
     for k, v in cur.layout_overrides.items():
         result[k] = v
@@ -242,6 +288,16 @@ def get_default_theme() -> Theme:
 def get_default_device() -> str:
     """Return the current default device."""
     return _current().device
+
+
+def get_default_index_dtype() -> torch.dtype:
+    """Return the current default storage dtype for graph indices."""
+    return _current().index_dtype
+
+
+def get_default_size_dtype() -> torch.dtype:
+    """Return the current default storage dtype for computed node sizes."""
+    return _current().size_dtype
 
 
 def get_default_node_style_overrides() -> Dict[str, Any]:

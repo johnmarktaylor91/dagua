@@ -37,6 +37,23 @@ class TestGraphConstruction:
         assert "x" in g._id_to_index
         assert "y" in g._id_to_index
 
+    def test_graph_uses_configured_storage_dtypes(self):
+        import dagua
+
+        dagua.configure(index_dtype="int32", size_dtype="float16")
+        g = DaguaGraph()
+        g.add_edge("a", "b")
+        g.compute_node_sizes()
+        assert g.edge_index.dtype == torch.int32
+        assert g.node_sizes.dtype == torch.float16
+
+    def test_per_graph_storage_dtype_override(self):
+        g = DaguaGraph(index_dtype="int32", size_dtype="float64")
+        g.add_edge("a", "b")
+        g.compute_node_sizes()
+        assert g.edge_index.dtype == torch.int32
+        assert g.node_sizes.dtype == torch.float64
+
     def test_add_cluster(self):
         g = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
         g.add_cluster("group1", [0, 1], label="My Group")
@@ -67,6 +84,11 @@ class TestFromEdgeIndex:
         g = DaguaGraph.from_edge_index(ei, num_nodes=3)
         assert g.num_nodes == 3
         assert g.edge_index.shape == (2, 2)
+
+    def test_respects_index_dtype_override(self):
+        ei = torch.tensor([[0, 1], [1, 2]], dtype=torch.int64)
+        g = DaguaGraph.from_edge_index(ei, num_nodes=3, index_dtype=torch.int32)
+        assert g.edge_index.dtype == torch.int32
 
     def test_with_labels(self):
         ei = torch.tensor([[0, 1], [1, 2]])

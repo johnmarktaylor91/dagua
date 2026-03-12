@@ -3,12 +3,15 @@
 import threading
 
 import pytest
+import torch
 
 import dagua
 from dagua.defaults import (
     configure,
     defaults,
     get_default_device,
+    get_default_index_dtype,
+    get_default_size_dtype,
     get_default_theme,
     get_defaults,
     reset,
@@ -36,11 +39,25 @@ class TestConfigure:
         configure(device="cuda")
         assert get_default_device() == "cuda"
 
+    def test_storage_dtype_overrides(self):
+        configure(index_dtype="int32", size_dtype=torch.float16)
+        d = get_defaults()
+        assert d["index_dtype"] == "int32"
+        assert d["size_dtype"] == "float16"
+        assert get_default_index_dtype() == torch.int32
+        assert get_default_size_dtype() == torch.float16
+
     def test_layout_override(self):
         configure(node_sep=40, rank_sep=80)
         d = get_defaults()
         assert d["node_sep"] == 40
         assert d["rank_sep"] == 80
+
+    def test_invalid_storage_dtype_raises(self):
+        with pytest.raises(TypeError, match="index_dtype"):
+            configure(index_dtype=torch.float32)
+        with pytest.raises(TypeError, match="size_dtype"):
+            configure(size_dtype="int32")
 
     def test_node_style_override(self):
         configure(font_size=12.0)
@@ -130,11 +147,13 @@ class TestContextManager:
 
 class TestReset:
     def test_reset(self):
-        configure(theme="dark", device="cuda", node_sep=99)
+        configure(theme="dark", device="cuda", node_sep=99, index_dtype="int32", size_dtype="float16")
         reset()
         d = get_defaults()
         assert d["theme"] == "default"
         assert d["device"] == "cpu"
+        assert d["index_dtype"] == "int64"
+        assert d["size_dtype"] == "float32"
         assert "node_sep" not in d
 
 
@@ -162,7 +181,7 @@ class TestThreadSafety:
 
 class TestExportConfig:
     def test_export_json(self, tmp_path):
-        configure(node_sep=40, theme="dark")
+        configure(node_sep=40, theme="dark", index_dtype="int32", size_dtype="float16")
         path = str(tmp_path / "config.json")
         dagua.export_config(path)
 
@@ -171,6 +190,8 @@ class TestExportConfig:
             data = json.load(f)
         assert data["node_sep"] == 40
         assert data["theme"] == "dark"
+        assert data["index_dtype"] == "int32"
+        assert data["size_dtype"] == "float16"
 
     def test_export_yaml(self, tmp_path):
         pytest.importorskip("yaml")

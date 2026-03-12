@@ -15,6 +15,14 @@ from dagua.styles import (
 import copy as _copy
 from dagua.utils import compute_node_size
 
+_DTYPE_NAME_TO_TORCH = {
+    "int32": torch.int32,
+    "int64": torch.int64,
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "float64": torch.float64,
+}
+
 
 @dataclass
 class DaguaGraph:
@@ -59,6 +67,10 @@ class DaguaGraph:
     # Flex layout constraints
     flex: Optional[Any] = None  # LayoutFlex — typed as Any to avoid circular import
 
+    # Storage precision controls
+    index_dtype: Optional[torch.dtype] = None
+    size_dtype: Optional[torch.dtype] = None
+
     # ID mapping
     _id_to_index: Dict[Any, int] = field(default_factory=dict, repr=False)
     _theme: Any = field(default_factory=lambda: _copy.deepcopy(DEFAULT_THEME_OBJ), repr=False)  # Theme or Dict[str, NodeStyle]
@@ -81,23 +93,60 @@ class DaguaGraph:
     def edge_index(self, value: torch.Tensor) -> None:
         """Set the edge_index tensor directly (clears any pending edges)."""
         self._pending_edges.clear()
+        value = value.to(dtype=self.index_dtype)
+        self._validate_index_range(value)
         self._edge_index_tensor = value
         self._back_edge_mask = None  # invalidate cycle cache
 
     def __post_init__(self) -> None:
+        from dagua.defaults import get_default_index_dtype, get_default_size_dtype
+
         # Auto-convert bare Dict[str, NodeStyle] to Theme for backwards compat
         if isinstance(self._theme, dict):
             self._theme = Theme(node_styles=dict(self._theme))
+        self.index_dtype = self._normalize_index_dtype(
+            self.index_dtype if self.index_dtype is not None else get_default_index_dtype()
+        )
+        self.size_dtype = self._normalize_size_dtype(
+            self.size_dtype if self.size_dtype is not None else get_default_size_dtype()
+        )
         # Ensure the tensor is initialized when no edges are provided
         if self._edge_index_tensor is None and not self._pending_edges:
-            self._edge_index_tensor = torch.zeros(2, 0, dtype=torch.long)
+            self._edge_index_tensor = torch.zeros(2, 0, dtype=self.index_dtype)
+        elif self._edge_index_tensor is not None:
+            self._edge_index_tensor = self._edge_index_tensor.to(dtype=self.index_dtype)
+
+    @staticmethod
+    def _normalize_index_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
+        if isinstance(dtype, str):
+            dtype = _DTYPE_NAME_TO_TORCH.get(dtype)
+        if dtype not in (torch.int32, torch.int64):
+            raise TypeError("index_dtype must be torch.int32 or torch.int64")
+        return dtype
+
+    @staticmethod
+    def _normalize_size_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
+        if isinstance(dtype, str):
+            dtype = _DTYPE_NAME_TO_TORCH.get(dtype)
+        if dtype not in (torch.float16, torch.float32, torch.float64):
+            raise TypeError("size_dtype must be torch.float16, torch.float32, or torch.float64")
+        return dtype
+
+    def _validate_index_range(self, tensor: torch.Tensor) -> None:
+        if tensor.numel() == 0 or self.index_dtype != torch.int32:
+            return
+        min_idx = int(tensor.min().item())
+        max_idx = int(tensor.max().item())
+        if min_idx < 0 or max_idx > torch.iinfo(torch.int32).max:
+            raise ValueError("edge indices do not fit in int32 storage")
 
     def _finalize_edges(self) -> None:
         """Flush pending edges into the edge_index tensor (called lazily)."""
         if not self._pending_edges:
             return
 
-        new_edges = torch.tensor(self._pending_edges, dtype=torch.long).t()  # [2, K]
+        new_edges = torch.tensor(self._pending_edges, dtype=self.index_dtype).t()  # [2, K]
+        self._validate_index_range(new_edges)
 
         if self._edge_index_tensor is None or self._edge_index_tensor.numel() == 0:
             self._edge_index_tensor = new_edges
@@ -246,7 +295,7 @@ class DaguaGraph:
             sizes.append([w, h])
             font_sizes.append(efs)
 
-        self.node_sizes = torch.tensor(sizes, dtype=torch.float32)
+        self.node_sizes = torch.tensor(sizes, dtype=self.size_dtype)
         self.node_font_sizes = torch.tensor(font_sizes, dtype=torch.float32)
 
     def get_style_for_node(self, idx: int) -> NodeStyle:
@@ -633,7 +682,12 @@ class DaguaGraph:
 
         Validates that all indices in edge_index are < num_nodes.
         """
-        ei = edge_index.long()
+        requested_dtype = kwargs.get("index_dtype")
+        if requested_dtype is None:
+            from dagua.defaults import get_default_index_dtype
+            requested_dtype = get_default_index_dtype()
+        requested_dtype = cls._normalize_index_dtype(requested_dtype)
+        ei = edge_index.to(dtype=requested_dtype)
         if ei.numel() > 0:
             max_idx = ei.max().item()
             if max_idx >= num_nodes:
