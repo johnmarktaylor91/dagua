@@ -1032,13 +1032,13 @@ def _torchlens_graphs() -> List[TestGraph]:
 
     # 1. Simple MLP
     try:
-        model = nn.Sequential(
+        mlp_model = nn.Sequential(
             nn.Linear(10, 20), nn.ReLU(),
             nn.Linear(20, 10), nn.ReLU(),
             nn.Linear(10, 5),
         )
         x = torch.randn(1, 10)
-        log = tl.log_forward_pass(model, x, vis_mode="none")
+        log = tl.log_forward_pass(mlp_model, x, vis_mode="none")
         g = DaguaGraph.from_torchlens(log)
         graphs.append(TestGraph(
             name="tl_mlp_3layer",
@@ -1052,14 +1052,14 @@ def _torchlens_graphs() -> List[TestGraph]:
 
     # 2. CNN
     try:
-        model = nn.Sequential(
+        cnn_model = nn.Sequential(
             nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
             nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
             nn.Flatten(),
             nn.Linear(32 * 8 * 8, 10),
         )
         x = torch.randn(1, 3, 32, 32)
-        log = tl.log_forward_pass(model, x, vis_mode="none")
+        log = tl.log_forward_pass(cnn_model, x, vis_mode="none")
         g = DaguaGraph.from_torchlens(log)
         graphs.append(TestGraph(
             name="tl_cnn_small",
@@ -1087,7 +1087,7 @@ def _torchlens_graphs() -> List[TestGraph]:
                 out = self.bn2(self.conv2(out))
                 return torch.relu(out + identity)
 
-        model = nn.Sequential(
+        resnet_like_model = nn.Sequential(
             nn.Conv2d(3, 16, 3, padding=1),
             ResBlock(16),
             ResBlock(16),
@@ -1096,7 +1096,7 @@ def _torchlens_graphs() -> List[TestGraph]:
             nn.Linear(16, 10),
         )
         x = torch.randn(1, 3, 32, 32)
-        log = tl.log_forward_pass(model, x, vis_mode="none")
+        log = tl.log_forward_pass(resnet_like_model, x, vis_mode="none")
         g = DaguaGraph.from_torchlens(log)
         graphs.append(TestGraph(
             name="tl_resnet_2block",
@@ -1149,9 +1149,9 @@ def _torchlens_graphs() -> List[TestGraph]:
     # 5. Nested module hierarchy (4-level nesting)
     if nested_modules_cls is not None:
         try:
-            model = nested_modules_cls()
+            nested_modules_model = nested_modules_cls()
             x = torch.randn(5)
-            log = tl.log_forward_pass(model, x, vis_mode="none")
+            log = tl.log_forward_pass(nested_modules_model, x, vis_mode="none")
             g = DaguaGraph.from_torchlens(log)
             graphs.append(TestGraph(
                 name="tl_nested_modules",
@@ -1167,9 +1167,9 @@ def _torchlens_graphs() -> List[TestGraph]:
     # 6. Branching (3-way split and merge)
     if simple_branching_cls is not None:
         try:
-            model = simple_branching_cls()
+            branching_model = simple_branching_cls()
             x = torch.randn(5)
-            log = tl.log_forward_pass(model, x, vis_mode="none")
+            log = tl.log_forward_pass(branching_model, x, vis_mode="none")
             g = DaguaGraph.from_torchlens(log)
             graphs.append(TestGraph(
                 name="tl_branching",
@@ -1185,9 +1185,9 @@ def _torchlens_graphs() -> List[TestGraph]:
     # 7. Diamond loop (split → sin/cos → merge, repeated)
     if diamond_loop_cls is not None:
         try:
-            model = diamond_loop_cls()
+            diamond_loop_model = diamond_loop_cls()
             x = torch.randn(5)
-            log = tl.log_forward_pass(model, x, vis_mode="none")
+            log = tl.log_forward_pass(diamond_loop_model, x, vis_mode="none")
             g = DaguaGraph.from_torchlens(log)
             graphs.append(TestGraph(
                 name="tl_diamond_loop",
@@ -1203,9 +1203,9 @@ def _torchlens_graphs() -> List[TestGraph]:
     # 8. Long loop (20 iterations of Linear + ReLU)
     if long_loop_cls is not None:
         try:
-            model = long_loop_cls()
+            long_loop_model = long_loop_cls()
             x = torch.randn(5)
-            log = tl.log_forward_pass(model, x, vis_mode="none")
+            log = tl.log_forward_pass(long_loop_model, x, vis_mode="none")
             g = DaguaGraph.from_torchlens(log)
             graphs.append(TestGraph(
                 name="tl_long_loop",
