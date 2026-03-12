@@ -99,7 +99,12 @@ Public API most agents care about:
   - `dagua.save(...)`
   - `dagua.load(...)`
   - `dagua.from_image(...)`
+  - `dagua.graph_dict_from_image(...)`
+  - `dagua.graph_code_from_image(...)`
   - `dagua.theme_from_image(...)`
+  - `dagua.theme_dict_from_image(...)`
+  - `dagua.theme_code_from_image(...)`
+  - `dagua.configure_image_ai(...)`
 
 ## Common Tasks
 
@@ -135,6 +140,23 @@ g.add_cluster("Main Stage", ["branch_a", "branch_b"], label="Main Stage", style=
 dagua.save(g, "graph.yaml")
 g2 = dagua.load("graph.yaml")
 ```
+
+### Turn an image into a graph, dict, code, or theme
+
+```python
+dagua.configure_image_ai(provider="openai", api_key_env="OPENAI_API_KEY")
+
+graph = dagua.from_image("diagram.png")
+graph_dict = dagua.graph_dict_from_image("diagram.png")
+graph_code = dagua.graph_code_from_image("diagram.png")
+
+theme = dagua.theme_from_image("reference.png")
+theme_dict = dagua.theme_dict_from_image("reference.png")
+theme_code = dagua.theme_code_from_image("reference.png")
+```
+
+Use the `*_code_from_image(...)` helpers when the user wants editable source, because
+those helpers emit the cleaner Dagua builder style rather than model-specific freeform code.
 
 ### Render explicitly
 

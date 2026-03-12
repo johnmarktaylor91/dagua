@@ -19,7 +19,7 @@ import io
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dagua.styles import (
     ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
@@ -33,6 +33,18 @@ _DIRECT_IMAGE_MEDIA_TYPES = {
     ".jpeg": "image/jpeg",
     ".gif": "image/gif",
     ".webp": "image/webp",
+}
+
+_SVG_COMPAT_IMAGE_EXTENSIONS = {".svg"}
+
+_IMAGE_AI_PROVIDER_ENV_KEYS = {
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+}
+
+_IMAGE_AI_DEFAULT_MODEL = {
+    "anthropic": "claude-sonnet-4-20250514",
+    "openai": "gpt-4o",
 }
 
 _PIL_COMPAT_IMAGE_EXTENSIONS = {
@@ -806,6 +818,20 @@ Return ONLY the JSON object."""
 # ─── Export functions ──────────────────────────────────────────────────────
 
 
+@dataclasses.dataclass
+class ImageAIConfig:
+    """Configuration for image-to-graph/theme AI calls."""
+
+    provider: Optional[str] = None
+    api_key: Optional[str] = None
+    api_key_env: Optional[str] = None
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+
+
+_IMAGE_AI_CONFIG = ImageAIConfig()
+
+
 def to_networkx(graph: "DaguaGraph") -> Any:
     """Export a DaguaGraph to a NetworkX DiGraph.
 
@@ -1129,43 +1155,175 @@ def from_dot(dot_string: str, **kwargs) -> "DaguaGraph":
 # ─── LLM infrastructure ──────────────────────────────────────────────────
 
 
+def configure_image_ai(
+    provider: Optional[str] = None,
+    api_key: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> ImageAIConfig:
+    """Set process-wide defaults for image-to-graph/theme AI calls."""
+    global _IMAGE_AI_CONFIG
+    _IMAGE_AI_CONFIG = ImageAIConfig(
+        provider=provider,
+        api_key=api_key,
+        api_key_env=api_key_env,
+        model=model,
+        base_url=base_url,
+    )
+    return dataclasses.replace(_IMAGE_AI_CONFIG)
+
+
+def get_image_ai_config() -> ImageAIConfig:
+    """Return the current process-wide image AI configuration."""
+    return dataclasses.replace(_IMAGE_AI_CONFIG)
+
+
+def _normalize_provider_name(provider: Optional[str]) -> Optional[str]:
+    if provider is None:
+        return None
+    normalized = provider.lower().strip()
+    aliases = {
+        "claude": "anthropic",
+        "anthropic": "anthropic",
+        "openai": "openai",
+        "gpt": "openai",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            f"Unknown provider: {provider!r}. Use 'anthropic' or 'openai'."
+        )
+    return aliases[normalized]
+
+
+def _resolve_image_ai_config(
+    config: Optional[ImageAIConfig] = None,
+    provider: Optional[str] = None,
+    api_key: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> ImageAIConfig:
+    """Resolve explicit args, configured defaults, and env variables into one config."""
+    base = config or _IMAGE_AI_CONFIG
+    provider_name = _normalize_provider_name(
+        provider
+        or base.provider
+        or os.environ.get("DAGUA_IMAGE_AI_PROVIDER")
+    )
+
+    if provider_name is None:
+        for candidate, env_keys in _IMAGE_AI_PROVIDER_ENV_KEYS.items():
+            if any(os.environ.get(key) for key in env_keys):
+                provider_name = candidate
+                break
+
+    env_name = api_key_env or base.api_key_env or os.environ.get("DAGUA_IMAGE_AI_API_KEY_ENV")
+    resolved_api_key = api_key or base.api_key or os.environ.get("DAGUA_IMAGE_AI_API_KEY")
+    if resolved_api_key is None and env_name:
+        resolved_api_key = os.environ.get(env_name)
+
+    if provider_name and resolved_api_key is None:
+        for env_key in _IMAGE_AI_PROVIDER_ENV_KEYS.get(provider_name, ()):
+            resolved_api_key = os.environ.get(env_key)
+            if resolved_api_key:
+                break
+
+    resolved_model = model or base.model or os.environ.get("DAGUA_IMAGE_AI_MODEL")
+    resolved_base_url = base_url or base.base_url or os.environ.get("DAGUA_IMAGE_AI_BASE_URL")
+
+    if provider_name is None:
+        raise RuntimeError(
+            "No image AI provider configured. Pass provider=..., call configure_image_ai(...), "
+            "or set DAGUA_IMAGE_AI_PROVIDER / provider-specific API key env vars."
+        )
+    if resolved_api_key is None:
+        provider_envs = ", ".join(_IMAGE_AI_PROVIDER_ENV_KEYS.get(provider_name, ()))
+        raise RuntimeError(
+            "No image AI API key found. Pass api_key=..., set api_key_env=..., call "
+            "configure_image_ai(...), or set one of: DAGUA_IMAGE_AI_API_KEY, "
+            f"DAGUA_IMAGE_AI_API_KEY_ENV, {provider_envs}."
+        )
+
+    return ImageAIConfig(
+        provider=provider_name,
+        api_key=resolved_api_key,
+        api_key_env=env_name,
+        model=resolved_model or _IMAGE_AI_DEFAULT_MODEL[provider_name],
+        base_url=resolved_base_url,
+    )
+
+
 def _get_llm_client(
     provider: Optional[str] = None,
-) -> Tuple[str, Any]:
-    """Auto-detect and return (provider_name, client) from environment.
+    *,
+    config: Optional[ImageAIConfig] = None,
+    api_key: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> Tuple[str, Any, ImageAIConfig]:
+    """Resolve provider config and return (provider_name, client, resolved_config)."""
+    resolved = _resolve_image_ai_config(
+        config=config,
+        provider=provider,
+        api_key=api_key,
+        api_key_env=api_key_env,
+        model=model,
+        base_url=base_url,
+    )
 
-    Checks ANTHROPIC_API_KEY, then OPENAI_API_KEY.
-    """
-    if provider is None:
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            provider = "anthropic"
-        elif os.environ.get("OPENAI_API_KEY"):
-            provider = "openai"
-        else:
-            raise RuntimeError(
-                "No LLM API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, "
-                "and install the corresponding SDK: pip install 'dagua[ai]'"
-            )
-
-    if provider == "anthropic":
+    if resolved.provider == "anthropic":
         try:
             import anthropic
         except ImportError:
             raise ImportError(
                 "anthropic SDK not installed. Run: pip install 'dagua[ai]'"
             )
-        return "anthropic", anthropic.Anthropic()
+        kwargs = {"api_key": resolved.api_key}
+        if resolved.base_url:
+            kwargs["base_url"] = resolved.base_url
+        return "anthropic", anthropic.Anthropic(**kwargs), resolved
 
-    if provider == "openai":
+    if resolved.provider == "openai":
         try:
             import openai
         except ImportError:
             raise ImportError(
                 "openai SDK not installed. Run: pip install 'dagua[ai]'"
             )
-        return "openai", openai.OpenAI()
+        kwargs = {"api_key": resolved.api_key}
+        if resolved.base_url:
+            kwargs["base_url"] = resolved.base_url
+        return "openai", openai.OpenAI(**kwargs), resolved
 
-    raise ValueError(f"Unknown provider: {provider!r}. Use 'anthropic' or 'openai'.")
+    raise ValueError(f"Unknown provider: {resolved.provider!r}. Use 'anthropic' or 'openai'.")
+
+
+def _unpack_llm_client_result(result, *, provider: Optional[str], model: Optional[str], config: Optional[ImageAIConfig], api_key: Optional[str], api_key_env: Optional[str], base_url: Optional[str]) -> Tuple[str, Any, ImageAIConfig]:
+    """Accept both legacy 2-tuples and new 3-tuples from _get_llm_client mocks."""
+    if len(result) == 3:
+        return result
+    provider_name, client = result
+    provider_name = provider_name or provider or "anthropic"
+    try:
+        resolved = _resolve_image_ai_config(
+            config=config,
+            provider=provider_name,
+            api_key=api_key,
+            api_key_env=api_key_env,
+            model=model,
+            base_url=base_url,
+        )
+    except RuntimeError:
+        resolved = ImageAIConfig(
+            provider=_normalize_provider_name(provider_name),
+            api_key=api_key,
+            api_key_env=api_key_env,
+            model=model or _IMAGE_AI_DEFAULT_MODEL[_normalize_provider_name(provider_name)],
+            base_url=base_url,
+        )
+    return provider_name, client, resolved
 
 
 def _send_image_to_llm(
@@ -1173,14 +1331,13 @@ def _send_image_to_llm(
     provider: str,
     image_path: str,
     prompt: str,
-    model: Optional[str] = None,
+    model: str,
 ) -> str:
     """Send an image + prompt to an LLM and return the text response."""
     image_bytes, media_type = _prepare_image_for_llm(image_path)
     image_data = base64.b64encode(image_bytes).decode("utf-8")
 
     if provider == "anthropic":
-        model = model or "claude-sonnet-4-20250514"
         response = client.messages.create(
             model=model,
             max_tokens=4096,
@@ -1202,7 +1359,6 @@ def _send_image_to_llm(
         return response.content[0].text
 
     if provider == "openai":
-        model = model or "gpt-4o"
         response = client.chat.completions.create(
             model=model,
             max_tokens=4096,
@@ -1237,10 +1393,20 @@ def _prepare_image_for_llm(image_path: Union[str, Path]) -> Tuple[bytes, str]:
         with open(path, "rb") as f:
             return f.read(), _DIRECT_IMAGE_MEDIA_TYPES[ext]
 
+    if ext in _SVG_COMPAT_IMAGE_EXTENSIONS:
+        try:
+            import cairosvg
+        except ImportError as exc:
+            raise ImportError(
+                "SVG image input requires cairosvg. Install it with: pip install cairosvg"
+            ) from exc
+        png_bytes = cairosvg.svg2png(url=str(path))
+        return png_bytes, "image/png"
+
     if ext not in _PIL_COMPAT_IMAGE_EXTENSIONS:
         raise ValueError(
             f"Unsupported image format: {ext or '<none>'}. "
-            "Supported input formats include PNG, JPEG, GIF, WebP, BMP, and TIFF."
+            "Supported input formats include PNG, JPEG, GIF, WebP, BMP, TIFF, and SVG."
         )
 
     try:
@@ -1301,10 +1467,194 @@ def _extract_json_from_response(text: str) -> Dict[str, Any]:
 # ─── Public LLM-based functions ───────────────────────────────────────────
 
 
+def _python_literal(value: Any) -> str:
+    if isinstance(value, str):
+        return repr(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_python_literal(v) for v in value) + "]"
+    if isinstance(value, tuple):
+        return "(" + ", ".join(_python_literal(v) for v in value) + ("," if len(value) == 1 else "") + ")"
+    if isinstance(value, dict):
+        items = ", ".join(f"{_python_literal(k)}: {_python_literal(v)}" for k, v in value.items())
+        return "{" + items + "}"
+    return repr(value)
+
+
+def _constructor_expr(class_name: str, data: Dict[str, Any]) -> str:
+    if not data:
+        return f"{class_name}()"
+    args = ", ".join(f"{key}={_python_literal(value)}" for key, value in data.items())
+    return f"{class_name}({args})"
+
+
+def graph_code_from_dict(graph_dict: Dict[str, Any], function_name: str = "build_graph") -> str:
+    """Return canonical Dagua Python code for a graph dict."""
+    nodes = graph_dict.get("nodes", [])
+    edges = graph_dict.get("edges", [])
+    clusters = graph_dict.get("clusters", [])
+    imports = ["import dagua", "from dagua import DaguaGraph"]
+
+    needs_node_style = any("style" in node for node in nodes)
+    needs_edge_style = any("style" in edge for edge in edges)
+    needs_cluster_style = any("style" in cluster for cluster in clusters)
+    style_imports: List[str] = []
+    if needs_node_style:
+        style_imports.append("NodeStyle")
+    if needs_edge_style:
+        style_imports.append("EdgeStyle")
+    if needs_cluster_style:
+        style_imports.append("ClusterStyle")
+    if style_imports:
+        imports.append("from dagua import " + ", ".join(style_imports))
+
+    lines = imports + ["", f"def {function_name}() -> DaguaGraph:", f"    g = DaguaGraph(direction={_python_literal(graph_dict.get('direction', 'TB'))})"]
+
+    for node in nodes:
+        parts = [f"    g.add_node({_python_literal(node['id'])}"]
+        if "label" in node:
+            parts.append(f"label={_python_literal(node['label'])}")
+        if "type" in node:
+            parts.append(f"type={_python_literal(node['type'])}")
+        if "style" in node:
+            parts.append(f"style={_constructor_expr('NodeStyle', node['style'])}")
+        lines.append(", ".join(parts) + ")")
+
+    if nodes:
+        lines.append("")
+
+    for edge in edges:
+        parts = [
+            f"    g.add_edge({_python_literal(edge['source'])}",
+            _python_literal(edge["target"]),
+        ]
+        if "label" in edge:
+            parts.append(f"label={_python_literal(edge['label'])}")
+        if "type" in edge:
+            parts.append(f"type={_python_literal(edge['type'])}")
+        if "style" in edge:
+            parts.append(f"style={_constructor_expr('EdgeStyle', edge['style'])}")
+        lines.append(", ".join(parts) + ")")
+
+    if clusters:
+        lines.append("")
+    for cluster in clusters:
+        parts = [
+            f"    g.add_cluster({_python_literal(cluster['name'])}",
+            _python_literal(cluster.get("members", [])),
+        ]
+        if "label" in cluster:
+            parts.append(f"label={_python_literal(cluster['label'])}")
+        if "parent" in cluster:
+            parts.append(f"parent={_python_literal(cluster['parent'])}")
+        if "style" in cluster:
+            parts.append(f"style={_constructor_expr('ClusterStyle', cluster['style'])}")
+        lines.append(", ".join(parts) + ")")
+
+    lines.extend(["", "    g.compute_node_sizes()", "    return g", "", f"graph = {function_name}()"])
+    return "\n".join(lines)
+
+
+def theme_code_from_dict(theme_dict: Dict[str, Any], variable_name: str = "theme") -> str:
+    """Return canonical Dagua Python code for a theme dict."""
+    imports = [
+        "from dagua.styles import Theme, NodeStyle, EdgeStyle, ClusterStyle, GraphStyle",
+        "",
+    ]
+    node_styles = theme_dict.get("node_styles", {})
+    edge_styles = theme_dict.get("edge_styles", {})
+    cluster_style = theme_dict.get("cluster_style", {})
+    graph_style = theme_dict.get("graph_style", {})
+    lines = imports + [f"{variable_name} = Theme("]
+    if "name" in theme_dict:
+        lines.append(f"    name={_python_literal(theme_dict['name'])},")
+    if node_styles:
+        lines.append("    node_styles={")
+        for key, value in node_styles.items():
+            lines.append(f"        {_python_literal(key)}: {_constructor_expr('NodeStyle', value)},")
+        lines.append("    },")
+    if edge_styles:
+        lines.append("    edge_styles={")
+        for key, value in edge_styles.items():
+            lines.append(f"        {_python_literal(key)}: {_constructor_expr('EdgeStyle', value)},")
+        lines.append("    },")
+    if cluster_style:
+        lines.append(f"    cluster_style={_constructor_expr('ClusterStyle', cluster_style)},")
+    if graph_style:
+        lines.append(f"    graph_style={_constructor_expr('GraphStyle', graph_style)},")
+    lines.append(")")
+    return "\n".join(lines)
+
+
+def graph_dict_from_image(
+    image_path: Union[str, Path],
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    *,
+    api_key: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    base_url: Optional[str] = None,
+    config: Optional[ImageAIConfig] = None,
+) -> Dict[str, Any]:
+    """Extract a graph JSON dict from an image using a configured AI provider."""
+    provider_name, client, resolved = _unpack_llm_client_result(
+        _get_llm_client(
+            provider,
+            config=config,
+            api_key=api_key,
+            api_key_env=api_key_env,
+            model=model,
+            base_url=base_url,
+        ),
+        provider=provider,
+        model=model,
+        config=config,
+        api_key=api_key,
+        api_key_env=api_key_env,
+        base_url=base_url,
+    )
+    response_text = _send_image_to_llm(
+        client,
+        provider_name,
+        str(image_path),
+        _GRAPH_EXTRACTION_PROMPT,
+        resolved.model,
+    )
+    return _extract_json_from_response(response_text)
+
+
+def graph_code_from_image(
+    image_path: Union[str, Path],
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    *,
+    api_key: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    base_url: Optional[str] = None,
+    config: Optional[ImageAIConfig] = None,
+    function_name: str = "build_graph",
+) -> str:
+    """Return canonical Dagua code reconstructed from an image."""
+    graph_dict = graph_dict_from_image(
+        image_path,
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        api_key_env=api_key_env,
+        base_url=base_url,
+        config=config,
+    )
+    return graph_code_from_dict(graph_dict, function_name=function_name)
+
+
 def graph_from_image(
     image_path: Union[str, Path],
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    *,
+    api_key: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    base_url: Optional[str] = None,
+    config: Optional[ImageAIConfig] = None,
 ) -> "DaguaGraph":
     """Construct a DaguaGraph from an image using an LLM.
 
@@ -1320,18 +1670,88 @@ def graph_from_image(
     Returns:
         A DaguaGraph reconstructed from the image.
     """
-    provider_name, client = _get_llm_client(provider)
-    response_text = _send_image_to_llm(
-        client, provider_name, str(image_path), _GRAPH_EXTRACTION_PROMPT, model
+    graph_dict = graph_dict_from_image(
+        image_path,
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        api_key_env=api_key_env,
+        base_url=base_url,
+        config=config,
     )
-    graph_dict = _extract_json_from_response(response_text)
     return graph_from_json(graph_dict)
+
+
+def theme_dict_from_image(
+    image_path: Union[str, Path],
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    *,
+    api_key: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    base_url: Optional[str] = None,
+    config: Optional[ImageAIConfig] = None,
+) -> Dict[str, Any]:
+    """Extract a theme JSON dict from an image using a configured AI provider."""
+    provider_name, client, resolved = _unpack_llm_client_result(
+        _get_llm_client(
+            provider,
+            config=config,
+            api_key=api_key,
+            api_key_env=api_key_env,
+            model=model,
+            base_url=base_url,
+        ),
+        provider=provider,
+        model=model,
+        config=config,
+        api_key=api_key,
+        api_key_env=api_key_env,
+        base_url=base_url,
+    )
+    response_text = _send_image_to_llm(
+        client,
+        provider_name,
+        str(image_path),
+        _THEME_EXTRACTION_PROMPT,
+        resolved.model,
+    )
+    return _extract_json_from_response(response_text)
+
+
+def theme_code_from_image(
+    image_path: Union[str, Path],
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    *,
+    api_key: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    base_url: Optional[str] = None,
+    config: Optional[ImageAIConfig] = None,
+    variable_name: str = "theme",
+) -> str:
+    """Return canonical Dagua theme code reconstructed from an image."""
+    theme_dict = theme_dict_from_image(
+        image_path,
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        api_key_env=api_key_env,
+        base_url=base_url,
+        config=config,
+    )
+    return theme_code_from_dict(theme_dict, variable_name=variable_name)
 
 
 def theme_from_image(
     image_path: Union[str, Path],
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    *,
+    api_key: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    base_url: Optional[str] = None,
+    config: Optional[ImageAIConfig] = None,
 ) -> Theme:
     """Extract a visual theme from a graph image using an LLM.
 
@@ -1346,9 +1766,13 @@ def theme_from_image(
     Returns:
         A Theme object with styles extracted from the image.
     """
-    provider_name, client = _get_llm_client(provider)
-    response_text = _send_image_to_llm(
-        client, provider_name, str(image_path), _THEME_EXTRACTION_PROMPT, model
+    raw = theme_dict_from_image(
+        image_path,
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        api_key_env=api_key_env,
+        base_url=base_url,
+        config=config,
     )
-    raw = _extract_json_from_response(response_text)
     return _dict_to_theme(raw)

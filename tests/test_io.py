@@ -10,12 +10,17 @@ import yaml
 
 from dagua.graph import DaguaGraph
 from dagua.io import (
+    ImageAIConfig,
     _dict_to_cluster_style,
     _dict_to_edge_style,
     _dict_to_node_style,
     _extract_json_from_response,
     _get_llm_client,
     _prepare_image_for_llm,
+    configure_image_ai,
+    get_image_ai_config,
+    graph_code_from_image,
+    graph_dict_from_image,
     graph_from_image,
     graph_from_json,
     graph_from_yaml,
@@ -23,6 +28,8 @@ from dagua.io import (
     graph_to_yaml,
     load,
     save,
+    theme_code_from_image,
+    theme_dict_from_image,
     theme_from_image,
 )
 from dagua.styles import (
@@ -348,6 +355,44 @@ class TestGraphFromImage:
         finally:
             os.unlink(image_path)
 
+    def test_graph_dict_from_image(self):
+        image_path = self._mock_image_path()
+        mock_response = json.dumps({
+            "direction": "LR",
+            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            "edges": [{"source": "a", "target": "b", "label": "flows to"}],
+        })
+        try:
+            with mock.patch("dagua.io._get_llm_client") as mock_get, \
+                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
+                mock_get.return_value = ("anthropic", mock.MagicMock(), ImageAIConfig(provider="anthropic", model="x", api_key="k"))
+                result = graph_dict_from_image(image_path, provider="anthropic")
+
+            assert result["direction"] == "LR"
+            assert result["edges"][0]["label"] == "flows to"
+        finally:
+            os.unlink(image_path)
+
+    def test_graph_code_from_image_returns_best_practice_builder(self):
+        image_path = self._mock_image_path()
+        mock_response = json.dumps({
+            "direction": "TB",
+            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            "edges": [{"source": "a", "target": "b"}],
+        })
+        try:
+            with mock.patch("dagua.io._get_llm_client") as mock_get, \
+                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
+                mock_get.return_value = ("anthropic", mock.MagicMock(), ImageAIConfig(provider="anthropic", model="x", api_key="k"))
+                code = graph_code_from_image(image_path, provider="anthropic")
+
+            assert "def build_graph() -> DaguaGraph:" in code
+            assert "g = DaguaGraph(direction='TB')" in code
+            assert "g.add_node('a', label='A')" in code
+            assert "graph = build_graph()" in code
+        finally:
+            os.unlink(image_path)
+
     def test_provider_auto_detection_anthropic(self):
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
             with mock.patch("dagua.io.anthropic", create=True) as mock_anthropic:
@@ -358,8 +403,9 @@ class TestGraphFromImage:
                 sys.modules["anthropic"] = mock_anthropic
 
                 try:
-                    provider, client = _get_llm_client()
+                    provider, client, resolved = _get_llm_client()
                     assert provider == "anthropic"
+                    assert resolved.api_key == "test-key"
                 finally:
                     del sys.modules["anthropic"]
 
@@ -378,14 +424,15 @@ class TestGraphFromImage:
                 sys.modules["openai"] = mock_openai
 
                 try:
-                    provider, client = _get_llm_client()
+                    provider, client, resolved = _get_llm_client()
                     assert provider == "openai"
+                    assert resolved.api_key == "test-key"
                 finally:
                     del sys.modules["openai"]
 
     def test_missing_api_key_raises(self):
         with mock.patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(RuntimeError, match="No LLM API key found"):
+            with pytest.raises(RuntimeError, match="No image AI provider configured"):
                 _get_llm_client()
 
     def test_missing_sdk_raises(self):
@@ -400,6 +447,45 @@ class TestGraphFromImage:
             finally:
                 if saved is not None:
                     sys.modules["anthropic"] = saved
+
+    def test_explicit_api_key_beats_environment(self):
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "env-key"}, clear=False):
+            import sys
+            mock_openai = mock.MagicMock()
+            sys.modules["openai"] = mock_openai
+            try:
+                _, _, resolved = _get_llm_client("openai", api_key="passed-key")
+                assert resolved.api_key == "passed-key"
+            finally:
+                del sys.modules["openai"]
+
+    def test_api_key_env_override(self):
+        with mock.patch.dict(os.environ, {"MY_CUSTOM_KEY": "custom-key"}, clear=False):
+            import sys
+            mock_openai = mock.MagicMock()
+            sys.modules["openai"] = mock_openai
+            try:
+                _, _, resolved = _get_llm_client("openai", api_key_env="MY_CUSTOM_KEY")
+                assert resolved.api_key == "custom-key"
+            finally:
+                del sys.modules["openai"]
+
+    def test_global_image_ai_configuration(self):
+        original = get_image_ai_config()
+        try:
+            configured = configure_image_ai(provider="openai", api_key="abc", model="gpt-test")
+            current = get_image_ai_config()
+            assert configured.provider == "openai"
+            assert current.api_key == "abc"
+            assert current.model == "gpt-test"
+        finally:
+            configure_image_ai(
+                provider=original.provider,
+                api_key=original.api_key,
+                api_key_env=original.api_key_env,
+                model=original.model,
+                base_url=original.base_url,
+            )
 
     def test_prepare_image_normalizes_tiff_to_png(self):
         Image = pytest.importorskip("PIL.Image")
@@ -466,6 +552,35 @@ class TestThemeFromImage:
             assert result.cluster_style.fill == "#F0F0F0"
 
             assert result.graph_style.background_color == "#FFFFFF"
+        finally:
+            os.unlink(image_path.name)
+
+    def test_theme_dict_from_image(self):
+        image_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        image_path.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        image_path.close()
+        mock_response = json.dumps({"node_styles": {"default": {"base_color": "#56B4E9"}}})
+        try:
+            with mock.patch("dagua.io._get_llm_client") as mock_get, \
+                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
+                mock_get.return_value = ("anthropic", mock.MagicMock(), ImageAIConfig(provider="anthropic", model="x", api_key="k"))
+                result = theme_dict_from_image(image_path.name, provider="anthropic")
+            assert result["node_styles"]["default"]["base_color"] == "#56B4E9"
+        finally:
+            os.unlink(image_path.name)
+
+    def test_theme_code_from_image(self):
+        image_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        image_path.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        image_path.close()
+        mock_response = json.dumps({"name": "magical", "node_styles": {"default": {"base_color": "#56B4E9"}}})
+        try:
+            with mock.patch("dagua.io._get_llm_client") as mock_get, \
+                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
+                mock_get.return_value = ("anthropic", mock.MagicMock(), ImageAIConfig(provider="anthropic", model="x", api_key="k"))
+                code = theme_code_from_image(image_path.name, provider="anthropic")
+            assert "theme = Theme(" in code
+            assert "'default': NodeStyle(base_color='#56B4E9')" in code
         finally:
             os.unlink(image_path.name)
 
