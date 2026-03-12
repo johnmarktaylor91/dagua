@@ -1,4 +1,4 @@
-"""Large-scale layout benchmark — wide DAG, CPU-only.
+"""Large-scale layout benchmark — wide DAG.
 
 Usage:
     python scripts/bench_large.py 50m
@@ -7,6 +7,7 @@ Usage:
     python scripts/bench_large.py 1b
     python scripts/bench_large.py 10_000_000          # arbitrary node count
     python scripts/bench_large.py 50m --layers 500 --workers 8
+    python scripts/bench_large.py 1b --device cuda
 """
 
 import argparse
@@ -146,6 +147,12 @@ def main():
     parser.add_argument("--workers", type=int, default=4, help="Num parallel workers")
     parser.add_argument("--steps", type=int, default=500, help="Layout optimization steps")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        choices=("cpu", "cuda"),
+        help="Target layout device",
+    )
     args = parser.parse_args()
 
     # Resolve size
@@ -157,11 +164,16 @@ def main():
         n = parse_node_count(args.size)
         layers = args.layers if args.layers > 0 else max(int(n**0.5 / 10) * 10, 10)
 
+    # Round upward to the next exact multiple so presets like 1b stay at or above
+    # the requested size instead of dipping just below it.
+    n = ((n + layers - 1) // layers) * layers
     w = n // layers
-    n = w * layers  # round to exact multiple
 
     mem("start")
-    print(f"Building wide DAG: {n:,} nodes, {layers} layers, ~{w:,} nodes/layer...", flush=True)
+    print(
+        f"Building wide DAG: {n:,} nodes, {layers} layers, ~{w:,} nodes/layer on {args.device}...",
+        flush=True,
+    )
     t0 = time.perf_counter()
 
     edge_index = build_edges(n, layers)
@@ -174,7 +186,7 @@ def main():
     mem("graph built")
 
     config = dagua.LayoutConfig(
-        device="cpu",
+        device=args.device,
         verbose=True,
         num_workers=args.workers,
         multilevel_threshold=50000,
