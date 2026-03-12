@@ -234,7 +234,9 @@ Yes.
 For humans:
 - tutorial notebook: [docs/tutorial_walkthrough.ipynb](docs/tutorial_walkthrough.ipynb)
 - glossary/reference: [docs/glossary/dagua_glossary.pdf](docs/glossary/dagua_glossary.pdf)
+- how Dagua works: [docs/how_dagua_works.md](docs/how_dagua_works.md)
 - showcase gallery: [docs/gallery/README.md](docs/gallery/README.md)
+- video resources: [docs/video/README.md](docs/video/README.md)
 
 For agents using Dagua:
 - [docs/LLM_TUTORIAL.md](docs/LLM_TUTORIAL.md)
