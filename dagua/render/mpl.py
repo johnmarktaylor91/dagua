@@ -11,8 +11,10 @@ Publication-quality rendering following the Dagua Aesthetic Style Guide:
 from __future__ import annotations
 
 import io
+import gzip
 from pathlib import Path
 from typing import List, Optional, Tuple
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
@@ -48,6 +50,7 @@ def _save_figure(fig, output: str, bg: str, dpi: int, format: Optional[str] = No
     fmt = _detect_output_format(output, format)
     if fmt is None:
         fmt = "png"
+    svg_hover_map = getattr(fig, "_dagua_svg_hover_map", None)
 
     common = {
         "bbox_inches": "tight",
@@ -59,6 +62,8 @@ def _save_figure(fig, output: str, bg: str, dpi: int, format: Optional[str] = No
 
     if fmt in _VECTOR_FORMATS:
         fig.savefig(output, format=fmt, **common)
+        if fmt in {"svg", "svgz"} and svg_hover_map:
+            _inject_svg_hover_text(output, svg_hover_map, compressed=(fmt == "svgz"))
         return
 
     if fmt not in _RASTER_FORMATS:
@@ -103,6 +108,7 @@ def render(
     title: Optional[str] = None,
     curves: Optional[List[BezierCurve]] = None,
     label_positions: Optional[List[Optional[Tuple[float, float]]]] = None,
+    svg_hover_text: bool = True,
 ):
     """Render graph with computed positions.
 
@@ -171,23 +177,25 @@ def render(
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     fig.patch.set_facecolor(bg)
     ax.set_facecolor(bg)
+    setattr(fig, "_dagua_svg_hover_map", {} if svg_hover_text else None)
+    svg_hover_map = getattr(fig, "_dagua_svg_hover_map")
 
     # --- Layer 0: Cluster backgrounds ---
-    _draw_clusters(ax, graph, pos, sizes)
+    _draw_clusters(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
 
     # --- Layer 1: Edges ---
     if curves is None:
         curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
-    _draw_edges(ax, graph, curves)
+    _draw_edges(ax, graph, curves, svg_hover_map=svg_hover_map)
 
     # --- Layer 2: Nodes ---
-    _draw_nodes(ax, graph, pos, sizes)
+    _draw_nodes(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
 
     # --- Layer 3: Node labels ---
-    _draw_node_labels(ax, graph, pos, sizes)
+    _draw_node_labels(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
 
     # --- Layer 4: Edge labels ---
-    _draw_edge_labels(ax, graph, curves, label_positions=label_positions)
+    _draw_edge_labels(ax, graph, curves, label_positions=label_positions, svg_hover_map=svg_hover_map)
 
     # Configure axes
     ax.set_xlim(x_min, x_max)
@@ -211,7 +219,54 @@ def render(
     return fig, ax
 
 
-def _draw_nodes(ax, graph, pos, sizes):
+def _set_svg_hover(artist, gid: str, text: str, svg_hover_map) -> None:
+    if svg_hover_map is None:
+        return
+    artist.set_gid(gid)
+    svg_hover_map[gid] = text
+
+
+def _edge_hover_text(graph, edge_idx: int) -> str:
+    src_idx = int(graph.edge_index[0, edge_idx])
+    dst_idx = int(graph.edge_index[1, edge_idx])
+    src = graph.node_labels[src_idx]
+    dst = graph.node_labels[dst_idx]
+    label = graph.edge_labels[edge_idx] if edge_idx < len(graph.edge_labels) else None
+    return f"{src} -> {dst}: {label}" if label else f"{src} -> {dst}"
+
+
+def _cluster_hover_text(name: str, graph, indices: List[int]) -> str:
+    label = graph.cluster_labels.get(name, name)
+    return f"Cluster: {label} ({len(indices)} members)"
+
+
+def _inject_svg_hover_text(output: str, svg_hover_map, compressed: bool = False) -> None:
+    if compressed:
+        with gzip.open(output, "rt", encoding="utf-8") as f:
+            svg_text = f.read()
+    else:
+        svg_text = Path(output).read_text(encoding="utf-8")
+
+    root = ET.fromstring(svg_text)
+    title_tag = "{http://www.w3.org/2000/svg}title"
+    for elem in root.iter():
+        gid = elem.attrib.get("id")
+        if gid and gid in svg_hover_map:
+            title = elem.find(title_tag)
+            if title is None:
+                title = ET.Element("title")
+                elem.insert(0, title)
+            title.text = svg_hover_map[gid]
+
+    svg_text = ET.tostring(root, encoding="unicode")
+    if compressed:
+        with gzip.open(output, "wt", encoding="utf-8") as f:
+            f.write(svg_text)
+    else:
+        Path(output).write_text(svg_text, encoding="utf-8")
+
+
+def _draw_nodes(ax, graph, pos, sizes, svg_hover_map=None):
     """Draw node shapes with muted fills and strong borders."""
     from matplotlib.patches import FancyBboxPatch, Ellipse, Circle
 
@@ -294,6 +349,7 @@ def _draw_nodes(ax, graph, pos, sizes):
             )
 
         ax.add_patch(patch)
+        _set_svg_hover(patch, f"dagua-node-{i}", graph.node_labels[i], svg_hover_map)
 
 
 def _draw_shadow(ax, x, y, w, h, style):
@@ -350,7 +406,7 @@ def _draw_shadow(ax, x, y, w, h, style):
     ax.add_patch(shadow)
 
 
-def _draw_node_labels(ax, graph, pos, sizes):
+def _draw_node_labels(ax, graph, pos, sizes, svg_hover_map=None):
     """Draw centered text labels inside nodes."""
     gs = graph.graph_style
 
@@ -370,7 +426,7 @@ def _draw_node_labels(ax, graph, pos, sizes):
         font_style = style.font_style
 
         if len(lines) == 1:
-            ax.text(
+            text_artist = ax.text(
                 x, y, label,
                 ha="center", va="center",
                 fontsize=fontsize,
@@ -381,6 +437,7 @@ def _draw_node_labels(ax, graph, pos, sizes):
                 zorder=3,
                 clip_on=True,
             )
+            _set_svg_hover(text_artist, f"dagua-node-label-{i}", label, svg_hover_map)
         else:
             line_height = fontsize * 1.2
             total_height = line_height * len(lines)
@@ -390,7 +447,7 @@ def _draw_node_labels(ax, graph, pos, sizes):
                 ly = start_y - j * line_height
                 # Secondary lines slightly smaller
                 fs = fontsize if j == 0 else fontsize * gs.node_label_secondary_scale
-                ax.text(
+                text_artist = ax.text(
                     x, ly, line,
                     ha="center", va="center",
                     fontsize=fs,
@@ -401,9 +458,10 @@ def _draw_node_labels(ax, graph, pos, sizes):
                     zorder=3,
                     clip_on=True,
                 )
+                _set_svg_hover(text_artist, f"dagua-node-label-{i}-{j}", label, svg_hover_map)
 
 
-def _draw_edges(ax, graph, curves: List[BezierCurve]):
+def _draw_edges(ax, graph, curves: List[BezierCurve], svg_hover_map=None):
     """Draw bezier edges with arrowheads.
 
     Edges are quiet: medium gray at 70% opacity, 0.75pt width.
@@ -455,11 +513,13 @@ def _draw_edges(ax, graph, curves: List[BezierCurve]):
             mutation_scale=1,
         )
         ax.add_patch(arrow)
+        _set_svg_hover(arrow, f"dagua-edge-{e_idx}", _edge_hover_text(graph, e_idx), svg_hover_map)
 
 
 def _draw_edge_labels(
     ax, graph, curves: List[BezierCurve],
     label_positions: Optional[List[Optional[Tuple[float, float]]]] = None,
+    svg_hover_map=None,
 ):
     """Draw edge labels offset from the curve midpoint.
 
@@ -489,7 +549,7 @@ def _draw_edge_labels(
         label_bg = style.label_background
         bg_opacity = gs.edge_label_background_opacity
 
-        ax.text(
+        text_artist = ax.text(
             lx, ly, label,
             ha="center", va="center",
             fontsize=font_size,
@@ -504,9 +564,10 @@ def _draw_edge_labels(
             ),
             zorder=4,
         )
+        _set_svg_hover(text_artist, f"dagua-edge-label-{e_idx}", _edge_hover_text(graph, e_idx), svg_hover_map)
 
 
-def _draw_clusters(ax, graph, pos, sizes):
+def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
     """Draw cluster background boxes.
 
     Barely-there fills, thin borders, progressive darkening for nesting.
@@ -606,6 +667,7 @@ def _draw_clusters(ax, graph, pos, sizes):
             zorder=0,
         )
         ax.add_patch(patch)
+        _set_svg_hover(patch, f"dagua-cluster-{name}", _cluster_hover_text(name, graph, indices), svg_hover_map)
 
         # Cluster label: position from style (label, label_fontsize already computed above)
         label_ff = style.font_family or RESOLVED_FONT
@@ -625,7 +687,7 @@ def _draw_clusters(ax, graph, pos, sizes):
         depth_label_offset = depth * label_fontsize * 1.4
         ly = y_max - label_oy - depth_label_offset
 
-        ax.text(
+        text_artist = ax.text(
             lx, ly, label,
             fontsize=label_fontsize,
             fontweight=style.font_weight,
@@ -634,3 +696,4 @@ def _draw_clusters(ax, graph, pos, sizes):
             va="top", ha=ha,
             zorder=0.5,
         )
+        _set_svg_hover(text_artist, f"dagua-cluster-label-{name}", _cluster_hover_text(name, graph, indices), svg_hover_map)
