@@ -2,11 +2,13 @@
 
 __version__ = "0.0.2"
 
+from dataclasses import replace
+
 from dagua.graph import DaguaGraph
 from dagua.styles import (
     NodeStyle, EdgeStyle, ClusterStyle, GraphStyle, Theme,
     PALETTE, make_fill, border_from_fill,
-    DEFAULT_THEME_OBJ, DARK_THEME, MINIMAL_THEME,
+    DEFAULT_THEME_OBJ, DARK_THEME, MINIMAL_THEME, TORCHLENS_THEME,
     # Backwards-compatible aliases
     DEFAULT_THEME, DEFAULT_NODE_STYLES, GRAPHVIZ_MATCH_THEME, GRAPHVIZ_MATCH_NODE_STYLES,
 )
@@ -45,7 +47,7 @@ from dagua.defaults import (
 )
 
 
-def draw(graph, config=None, output=None, relayout=None, use_cached=False, **kwargs):
+def draw(graph, config=None, output=None, relayout=None, use_cached=False, direction=None, **kwargs):
     """Layout + render in one call. Convenience function.
 
     Full pipeline: layout → route_edges → optimize_edges → place_edge_labels → render.
@@ -58,7 +60,18 @@ def draw(graph, config=None, output=None, relayout=None, use_cached=False, **kwa
     if config is None:
         from dagua.defaults import get_default_device, get_default_layout_overrides
         layout_overrides = get_default_layout_overrides()
-        config = LayoutConfig(device=get_default_device(), **layout_overrides)
+        effective_direction = direction or graph.direction
+        config = LayoutConfig(
+            device=get_default_device(),
+            direction=effective_direction,
+            **layout_overrides,
+        )
+    else:
+        effective_direction = direction or config.direction
+        if direction is not None and config.direction != direction:
+            config = replace(config, direction=direction)
+
+    effective_direction = config.direction
 
     if relayout is False or use_cached:
         if not graph.has_fresh_layout:
@@ -73,7 +86,7 @@ def draw(graph, config=None, output=None, relayout=None, use_cached=False, **kwa
         positions = layout(graph, config)
 
     graph.compute_node_sizes()
-    curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
+    curves = route_edges(positions, graph.edge_index, graph.node_sizes, effective_direction, graph)
 
     if getattr(config, "edge_opt_steps", 0) >= 0:
         from dagua.layout.edge_optimization import optimize_edges
@@ -115,6 +128,7 @@ __all__ = [
     "DEFAULT_THEME_OBJ",
     "DARK_THEME",
     "MINIMAL_THEME",
+    "TORCHLENS_THEME",
     "DEFAULT_THEME",
     "DEFAULT_NODE_STYLES",
     "GRAPHVIZ_MATCH_THEME",
