@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Set
 import torch
 
 from dagua.graph import DaguaGraph
+from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
 
 
 @dataclass
@@ -617,6 +618,82 @@ def _synthetic_graphs() -> List[TestGraph]:
         tags={"mixed-width", "disconnected", "self-loops"},
         description="Disconnected collage mixing a tiny chain, a huge label, a directed cycle, and a self-loop",
         expected_challenges="Component packing under wildly different local scales and cyclic structures",
+    ))
+
+    # 27. Mixed node shapes and routing modes
+    g = DaguaGraph.from_edge_list([
+        ("input", "ellipse_norm"),
+        ("ellipse_norm", "diamond_gate"),
+        ("ellipse_norm", "roundrect_path"),
+        ("diamond_gate", "merge"),
+        ("roundrect_path", "merge"),
+        ("merge", "circle_sink"),
+    ])
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.node_styles[idx["input"]] = NodeStyle(shape="rect")
+    g.node_styles[idx["ellipse_norm"]] = NodeStyle(shape="ellipse")
+    g.node_styles[idx["diamond_gate"]] = NodeStyle(shape="diamond")
+    g.node_styles[idx["roundrect_path"]] = NodeStyle(shape="roundrect")
+    g.node_styles[idx["circle_sink"]] = NodeStyle(shape="circle")
+    g.edge_styles[0] = EdgeStyle(routing="straight", port_style="center", curvature=0.0)
+    g.edge_styles[1] = EdgeStyle(routing="ortho", port_style="distributed", curvature=0.2)
+    g.edge_styles[2] = EdgeStyle(routing="bezier", port_style="center", curvature=0.7)
+    graphs.append(TestGraph(
+        name="shape_and_routing_matrix",
+        graph=g,
+        tags={"mixed-width", "diamond", "wide-parallel"},
+        description="Mixed node shapes with straight, ortho, and bezier edge routing modes",
+        expected_challenges="Shape-aware ports, mixed routing styles, and asymmetric merge geometry",
+    ))
+
+    # 28. Center-port hub with aggressive back-edge and cycle pressure
+    g = DaguaGraph.from_edge_list([
+        ("hub", "decode_a"),
+        ("hub", "decode_b"),
+        ("hub", "decode_c"),
+        ("decode_a", "join"),
+        ("decode_b", "join"),
+        ("decode_c", "join"),
+        ("join", "head"),
+        ("head", "hub"),
+        ("decode_b", "decode_b"),
+    ])
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.node_styles[idx["hub"]] = NodeStyle(shape="ellipse")
+    for e_idx in range(len(g.edge_styles)):
+        g.edge_styles[e_idx] = EdgeStyle(port_style="center", routing="bezier", curvature=0.6)
+    graphs.append(TestGraph(
+        name="center_port_backedge_hub",
+        graph=g,
+        tags={"self-loops", "skip-heavy", "wide-parallel"},
+        description="Center-port fanout hub with explicit back-edge and self-loop",
+        expected_challenges="Cycle breaking around a dominant hub and crowded center-port routing",
+    ))
+
+    # 29. Cluster member style stress with inter-cluster edge variety
+    g = DaguaGraph.from_edge_list([
+        ("ingest", "prep.clean"),
+        ("prep.clean", "prep.batch"),
+        ("prep.batch", "core.encode"),
+        ("core.encode", "core.route"),
+        ("core.route", "core.decode"),
+        ("core.decode", "post.merge"),
+        ("prep.batch", "post.merge"),
+        ("post.merge", "serve"),
+    ])
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.add_cluster("prep", [idx["prep.clean"], idx["prep.batch"]], label="Prep")
+    g.add_cluster("core", [idx["core.encode"], idx["core.route"], idx["core.decode"]], label="Core")
+    g.cluster_styles["core"] = ClusterStyle(
+        member_node_style=NodeStyle(shape="diamond"),
+        member_edge_style=EdgeStyle(routing="ortho", port_style="center", curvature=0.1),
+    )
+    graphs.append(TestGraph(
+        name="cluster_member_style_stress",
+        graph=g,
+        tags={"nested-shallow", "skip-light", "diamond"},
+        description="Clusters with member style overrides that alter node shapes and edge routing defaults",
+        expected_challenges="Cluster-scoped style cascades combined with cross-cluster skip edges",
     ))
 
     return graphs

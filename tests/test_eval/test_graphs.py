@@ -53,6 +53,9 @@ def test_synthetic_graphs_cover_common_and_niche_motifs():
         "hub_fanout_label_skew",
         "clustered_longlabel_handoffs",
         "disconnected_label_cycle_collage",
+        "shape_and_routing_matrix",
+        "center_port_backedge_hub",
+        "cluster_member_style_stress",
     }
     assert expected_names <= names
 
@@ -122,3 +125,38 @@ def test_visual_stress_graphs_cover_label_skew_and_component_extremes():
     src = collage.graph.edge_index[0].tolist()
     tgt = collage.graph.edge_index[1].tolist()
     assert any(s == t for s, t in zip(src, tgt))
+
+
+def test_style_and_routing_stress_graphs_exercise_visual_feature_surface():
+    graphs = {tg.name: tg for tg in _synthetic_graphs()}
+
+    shape_graph = graphs["shape_and_routing_matrix"].graph
+    shape_set = {
+        style.shape
+        for style in shape_graph.node_styles
+        if style is not None
+    }
+    assert {"rect", "ellipse", "diamond", "roundrect", "circle"} <= shape_set
+    routing_modes = {
+        style.routing
+        for style in shape_graph.edge_styles
+        if style is not None
+    }
+    assert {"straight", "ortho", "bezier"} <= routing_modes
+
+    center_port = graphs["center_port_backedge_hub"].graph
+    assert all(
+        style is not None and style.port_style == "center"
+        for style in center_port.edge_styles
+    )
+    src = center_port.edge_index[0].tolist()
+    tgt = center_port.edge_index[1].tolist()
+    assert any(s == t for s, t in zip(src, tgt))
+    assert any(t == center_port._id_to_index["hub"] for t in tgt)
+
+    cluster_style_graph = graphs["cluster_member_style_stress"].graph
+    core_style = cluster_style_graph.cluster_styles["core"]
+    assert core_style.member_node_style is not None
+    assert core_style.member_node_style.shape == "diamond"
+    assert core_style.member_edge_style is not None
+    assert core_style.member_edge_style.routing == "ortho"
