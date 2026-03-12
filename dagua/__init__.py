@@ -22,10 +22,17 @@ from dagua.animation import (
 from dagua.io import graph_from_image as from_image
 from dagua.io import theme_from_image
 from dagua.io import (
+    ImageAIConfig,
+    configure_image_ai,
+    get_image_ai_config,
+    graph_code_from_image,
+    graph_dict_from_image,
     load, save,
     load_style, save_style,
     graph_from_json, graph_to_json,
     graph_from_yaml, graph_to_yaml,
+    theme_code_from_image,
+    theme_dict_from_image,
     to_networkx, to_igraph, to_pyg, to_scipy,
     from_igraph, from_scipy, from_dot,
 )
@@ -115,6 +122,13 @@ __all__ = [
     "place_edge_labels",
     "from_image",
     "theme_from_image",
+    "graph_dict_from_image",
+    "graph_code_from_image",
+    "theme_dict_from_image",
+    "theme_code_from_image",
+    "ImageAIConfig",
+    "configure_image_ai",
+    "get_image_ai_config",
     "load",
     "save",
     "load_style",

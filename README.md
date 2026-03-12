@@ -64,6 +64,46 @@ It is separate from `CLAUDE.md` / `AGENTS.md`, which are for developing the repo
 The LLM tutorial is the short, task-oriented entrypoint for agents that want to build,
 layout, render, and export graphs efficiently.
 
+## Image To Graph / Theme
+
+Dagua can also turn a graph screenshot or reference visualization into:
+- a `DaguaGraph`
+- a raw graph/theme dict
+- best-practice Dagua code
+- a `Theme`
+
+Canonical setup:
+
+```python
+import dagua
+
+dagua.configure_image_ai(provider="openai", api_key_env="OPENAI_API_KEY")
+```
+
+Then use whichever return mode you want:
+
+```python
+graph = dagua.from_image("diagram.png")
+graph_dict = dagua.graph_dict_from_image("diagram.png")
+graph_code = dagua.graph_code_from_image("diagram.png")
+
+theme = dagua.theme_from_image("diagram.png")
+theme_dict = dagua.theme_dict_from_image("diagram.png")
+theme_code = dagua.theme_code_from_image("diagram.png")
+```
+
+Supported common formats include:
+- PNG
+- JPEG
+- GIF
+- WebP
+- BMP
+- TIFF
+- SVG
+
+The code-return helpers intentionally emit the cleaner Dagua style: explicit graph
+construction, clusters, and styles in a reusable builder function instead of ad hoc blobs.
+
 ## License
 
 MIT
