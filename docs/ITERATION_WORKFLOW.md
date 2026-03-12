@@ -12,6 +12,8 @@ Separate:
 - visual language
 - scale robustness
 
+And be explicit about which loop you are in before changing code.
+
 Do not let a weak visual layer trick you into misreading a strong placement engine.
 
 ## Default Loop
@@ -119,6 +121,12 @@ When the question is “is the node placement good?”:
 
 The placement engine is the thing to protect.
 
+Current known placement conclusion:
+
+- Dagua is already competitive on DAG consistency and overlap avoidance.
+- The clearest placement gap is still edge crossings against the strongest hierarchical competitors.
+- Crossing work should preserve the current wins on DAG order and overlap rather than trading them away casually.
+
 ## Visual-Reset Workflow
 
 When the question is “does this look good?”:
@@ -185,6 +193,9 @@ When the question is “does it survive at giant scale?”:
 2. record where it dies
 3. patch the narrowest real blocker
 4. relaunch
+
+Do not mix scale debugging with visual judgment. Giant-run failures are almost
+always infrastructure, memory, or tensor-shape issues first.
 
 Use:
 

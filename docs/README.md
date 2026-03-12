@@ -2,6 +2,22 @@
 
 Public documentation surfaces, roughly in the order a new user or reviewer is likely to need them.
 
+## If You Need One Thing Fast
+
+- Understand the codebase end to end:
+  - `docs/DEVELOPER_OVERVIEW.md`
+- Understand current project reality:
+  - `docs/STATUS.md`
+- Iterate on node placement:
+  - `docs/ITERATION_WORKFLOW.md`
+  - `docs/BENCHMARK_ARTIFACT_GUIDE.md`
+- Iterate on visuals:
+  - `docs/VISUAL_RESET_BRIEF.md`
+  - `docs/MONEY_GRAPHS.md`
+  - `docs/COMMAND_CHEATSHEET.md`
+- Understand what competitors are doing downstream of placement:
+  - `docs/COMPETITOR_GEOMETRY_MEMO.md`
+
 ## Start Here
 
 - Tutorial walkthrough: `docs/tutorial_walkthrough.ipynb`
@@ -34,6 +50,24 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 - Visual-audit workflow output root: `eval_output/visual_audit/`
 - Numbered collaborative visual review root: `eval_output/visual_review_session/`
 - Benchmark report output root: `eval_output/report/`
+
+## Working Sets
+
+- Placement-first loop:
+  - `docs/STATUS.md`
+  - `docs/OPEN_ISSUES.md`
+  - `docs/BENCHMARK_ARTIFACT_GUIDE.md`
+  - `eval_output/report/placement_summary.md`
+  - `eval_output/report/layout_similarity.md`
+- Visual-reset loop:
+  - `docs/VISUAL_RESET_BRIEF.md`
+  - `docs/MONEY_GRAPHS.md`
+  - `eval_output/visual_audit/`
+  - `eval_output/visual_review_session/`
+- Scale/billion loop:
+  - `scripts/bench_large.py`
+  - `/tmp/dagua-bench-1b.log`
+  - `docs/OPEN_ISSUES.md`
 
 ## Regeneration Commands
 
