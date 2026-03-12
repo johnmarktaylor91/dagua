@@ -852,3 +852,254 @@ class TestGraphClassmethods:
             assert g2.num_nodes == 2
         finally:
             os.unlink(path)
+
+
+# ─── TestToNetworkx ──────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+class TestToNetworkx:
+    """to_networkx export and roundtrip."""
+
+    def test_basic_export(self):
+        nx = pytest.importorskip("networkx")
+        from dagua.io import to_networkx
+
+        g = graph_from_json({
+            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            "edges": [{"source": "a", "target": "b"}],
+        })
+        G = to_networkx(g)
+        assert isinstance(G, nx.DiGraph)
+        assert G.number_of_nodes() == 2
+        assert G.number_of_edges() == 1
+        assert G.nodes["a"]["label"] == "A"
+
+    def test_roundtrip(self):
+        pytest.importorskip("networkx")
+        from dagua.io import to_networkx
+
+        g = graph_from_json({
+            "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+            "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "c"}],
+        })
+        G = to_networkx(g)
+        g2 = DaguaGraph.from_networkx(G)
+        assert g2.num_nodes == 3
+        assert g2.edge_index.shape[1] == 2
+
+    def test_cluster_attribute(self):
+        pytest.importorskip("networkx")
+        from dagua.io import to_networkx
+
+        g = graph_from_json({
+            "nodes": [{"id": "a"}, {"id": "b"}],
+            "edges": [{"source": "a", "target": "b"}],
+            "clusters": [{"name": "grp", "members": ["a", "b"]}],
+        })
+        G = to_networkx(g)
+        assert G.nodes["a"]["cluster"] == "grp"
+
+    def test_classmethod_wrapper(self):
+        pytest.importorskip("networkx")
+
+        g = graph_from_json({"nodes": [{"id": "x"}]})
+        G = g.to_networkx()
+        assert G.number_of_nodes() == 1
+
+
+# ─── TestToIgraph ────────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+class TestToIgraph:
+    """to_igraph export and roundtrip."""
+
+    def test_basic_export(self):
+        igraph = pytest.importorskip("igraph")
+        from dagua.io import to_igraph
+
+        g = graph_from_json({
+            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            "edges": [{"source": "a", "target": "b"}],
+        })
+        ig = to_igraph(g)
+        assert isinstance(ig, igraph.Graph)
+        assert ig.vcount() == 2
+        assert ig.ecount() == 1
+        assert ig.vs[0]["label"] == "A"
+
+    def test_roundtrip(self):
+        pytest.importorskip("igraph")
+        from dagua.io import to_igraph, from_igraph
+
+        g = graph_from_json({
+            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            "edges": [{"source": "a", "target": "b"}],
+        })
+        ig = to_igraph(g)
+        g2 = from_igraph(ig)
+        assert g2.num_nodes == 2
+        assert g2.edge_index.shape[1] == 1
+        assert g2.node_labels[0] == "A"
+
+    def test_classmethod_wrappers(self):
+        igraph = pytest.importorskip("igraph")
+
+        g = graph_from_json({
+            "nodes": [{"id": "x"}, {"id": "y"}],
+            "edges": [{"source": "x", "target": "y"}],
+        })
+        ig = g.to_igraph()
+        assert ig.vcount() == 2
+
+        g2 = DaguaGraph.from_igraph(ig)
+        assert g2.num_nodes == 2
+
+
+# ─── TestToScipy ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+class TestToScipy:
+    """to_scipy export and roundtrip."""
+
+    def test_basic_export(self):
+        scipy_sparse = pytest.importorskip("scipy.sparse")
+        from dagua.io import to_scipy
+
+        g = graph_from_json({
+            "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+            "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "c"}],
+        })
+        adj = to_scipy(g)
+        assert adj.shape == (3, 3)
+        assert adj.nnz == 2
+
+    def test_roundtrip(self):
+        pytest.importorskip("scipy.sparse")
+        from dagua.io import to_scipy, from_scipy
+
+        g = graph_from_json({
+            "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+            "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "c"}],
+        })
+        adj = to_scipy(g)
+        g2 = from_scipy(adj, labels=["a", "b", "c"])
+        assert g2.num_nodes == 3
+        assert g2.edge_index.shape[1] == 2
+
+    def test_empty_graph(self):
+        pytest.importorskip("scipy.sparse")
+        from dagua.io import to_scipy
+
+        g = graph_from_json({"nodes": [{"id": "a"}, {"id": "b"}]})
+        adj = to_scipy(g)
+        assert adj.shape == (2, 2)
+        assert adj.nnz == 0
+
+    def test_classmethod_wrappers(self):
+        scipy_sparse = pytest.importorskip("scipy.sparse")
+
+        g = graph_from_json({
+            "nodes": [{"id": "a"}, {"id": "b"}],
+            "edges": [{"source": "a", "target": "b"}],
+        })
+        adj = g.to_scipy()
+        assert adj.shape == (2, 2)
+
+        g2 = DaguaGraph.from_scipy(adj)
+        assert g2.num_nodes == 2
+
+
+# ─── TestToPyg ───────────────────────────────────────────────────────────
+
+
+class TestToPyg:
+    """to_pyg export."""
+
+    def test_basic_export(self):
+        torch_geometric = pytest.importorskip("torch_geometric")
+        from dagua.io import to_pyg
+
+        g = graph_from_json({
+            "nodes": [{"id": "a"}, {"id": "b"}],
+            "edges": [{"source": "a", "target": "b"}],
+        })
+        data = to_pyg(g)
+        assert data.num_nodes == 2
+        assert data.edge_index.shape == (2, 1)
+
+    def test_classmethod_wrapper(self):
+        pytest.importorskip("torch_geometric")
+
+        g = graph_from_json({
+            "nodes": [{"id": "a"}, {"id": "b"}],
+            "edges": [{"source": "a", "target": "b"}],
+        })
+        data = g.to_pyg()
+        assert data.num_nodes == 2
+
+
+# ─── TestFromDot ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+class TestFromDot:
+    """from_dot DOT parsing."""
+
+    def test_basic_parse(self):
+        pytest.importorskip("pydot")
+        from dagua.io import from_dot
+
+        dot = '''digraph G {
+            rankdir=LR;
+            a [label="Node A"];
+            b [label="Node B"];
+            a -> b;
+        }'''
+        g = from_dot(dot)
+        assert g.num_nodes == 2
+        assert g.edge_index.shape[1] == 1
+        assert g.direction == "LR"
+
+    def test_with_clusters(self):
+        pytest.importorskip("pydot")
+        from dagua.io import from_dot
+
+        dot = '''digraph G {
+            a; b; c;
+            a -> b;
+            b -> c;
+            subgraph cluster_grp {
+                label="Group";
+                a; b;
+            }
+        }'''
+        g = from_dot(dot)
+        assert g.num_nodes == 3
+        assert "grp" in g.clusters
+
+    def test_classmethod_wrapper(self):
+        pytest.importorskip("pydot")
+
+        dot = 'digraph G { a -> b; }'
+        g = DaguaGraph.from_dot(dot)
+        assert g.num_nodes == 2
+
+    def test_roundtrip_dot_export_import(self):
+        """Export to DOT via graphviz_utils.to_dot, re-import via from_dot."""
+        pytest.importorskip("pydot")
+        from dagua.io import from_dot
+        from dagua.graphviz_utils import to_dot
+
+        g = graph_from_json({
+            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            "edges": [{"source": "a", "target": "b"}],
+        })
+        g.compute_node_sizes()
+        dot_str = to_dot(g)
+        g2 = from_dot(dot_str)
+        # The DOT export uses n0, n1 as node names
+        assert g2.num_nodes == 2
+        assert g2.edge_index.shape[1] == 1

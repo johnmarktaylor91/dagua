@@ -48,6 +48,10 @@ test = [
     "matplotlib>=3.5",
     "pyyaml>=6.0",
 ]
+igraph = ["igraph>=0.10"]
+scipy = ["scipy>=1.7"]
+pydot = ["pydot>=1.4"]
+interop = ["igraph>=0.10", "scipy>=1.7", "pydot>=1.4"]
 ai = [
     "anthropic>=0.40",
     "openai>=1.0",

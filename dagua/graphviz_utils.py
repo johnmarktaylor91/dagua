@@ -270,6 +270,67 @@ def _render_on_axes(ax, graph, positions, title: str):
     ax.axis("off")
 
 
+def render_multi_comparison(
+    graph: DaguaGraph,
+    positions_dict: Dict[str, torch.Tensor],
+    output: str,
+    config=None,
+    dpi: int = 150,
+) -> str:
+    """Render N engine layouts side-by-side for the same graph.
+
+    Args:
+        graph: The DaguaGraph to render.
+        positions_dict: Mapping of engine_name -> [N, 2] position tensor.
+        output: Path for the output image.
+        config: Optional LayoutConfig (unused currently, reserved for future).
+        dpi: Output DPI.
+
+    Returns:
+        Path to the output file.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from dagua.metrics import compute_all_metrics
+
+    n_engines = len(positions_dict)
+    if n_engines == 0:
+        raise ValueError("positions_dict must contain at least one engine")
+
+    fig, axes = plt.subplots(1, n_engines, figsize=(10 * n_engines, 10))
+    if n_engines == 1:
+        axes = [axes]
+
+    graph.compute_node_sizes()
+
+    for ax, (engine_name, pos) in zip(axes, positions_dict.items()):
+        try:
+            _render_on_axes(ax, graph, pos, engine_name)
+            metrics = compute_all_metrics(pos, graph.edge_index, graph.node_sizes)
+            ax.set_title(
+                f"{engine_name}\ncrossings={metrics['edge_crossings']}, "
+                f"overlaps={metrics['node_overlaps']}, "
+                f"dag%={metrics['dag_fraction']:.2f}, "
+                f"quality={metrics['overall_quality']:.1f}",
+                fontsize=10,
+            )
+        except Exception as e:
+            ax.text(
+                0.5, 0.5, f"{engine_name}\nError: {e}",
+                ha="center", va="center", transform=ax.transAxes, fontsize=10,
+            )
+            ax.axis("off")
+
+    plt.tight_layout()
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+    return output
+
+
 def render_comparison_native(
     graph: DaguaGraph,
     dagua_output: str,

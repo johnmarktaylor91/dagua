@@ -194,6 +194,101 @@ def _render_on_ax(ax, graph, positions):
     ax.set_aspect("equal")
 
 
+def generate_multi_comparison_grid(
+    graphs: Optional[List[TestGraph]] = None,
+    competitors: Optional[List[str]] = None,
+    config: Optional[LayoutConfig] = None,
+    output_dir: str = "eval_output/grids",
+    dpi: int = 100,
+) -> str:
+    """Generate a grid comparing N engines for each test graph.
+
+    Rows = test graphs, columns = competitors.
+    Each cell: rendered graph with metrics in title.
+
+    Args:
+        graphs: Test graphs. If None, uses all test graphs.
+        competitors: Engine names to include. If None, uses all available.
+        config: LayoutConfig for Dagua competitor.
+        output_dir: Output directory.
+        dpi: Output DPI.
+
+    Returns:
+        Path to the grid image.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from dagua.eval.competitors import get_available_competitors
+    from dagua.metrics import compute_all_metrics
+
+    if graphs is None:
+        graphs = get_test_graphs(max_nodes=200)
+    if config is None:
+        config = LayoutConfig()
+
+    available = get_available_competitors()
+    if competitors is not None:
+        comp_set = set(competitors)
+        available = [c for c in available if c.name in comp_set]
+
+    if not available:
+        raise RuntimeError("No competitors available")
+
+    n_rows = len(graphs)
+    n_cols = len(available)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+    if n_rows == 1 and n_cols == 1:
+        axes = [[axes]]
+    elif n_rows == 1:
+        axes = [list(axes)]
+    elif n_cols == 1:
+        axes = [[ax] for ax in axes]
+
+    for i, tg in enumerate(graphs):
+        tg.graph.compute_node_sizes()
+
+        for j, comp in enumerate(available):
+            ax = axes[i][j]
+            try:
+                if tg.graph.num_nodes > comp.max_nodes:
+                    ax.text(0.5, 0.5, "Too large", ha="center", va="center",
+                            transform=ax.transAxes, fontsize=8)
+                    ax.set_title(f"{comp.name}: {tg.name}", fontsize=7)
+                else:
+                    result = comp.layout(tg.graph)
+                    if result.pos is not None:
+                        _render_on_ax(ax, tg.graph, result.pos)
+                        m = compute_all_metrics(
+                            result.pos, tg.graph.edge_index, tg.graph.node_sizes
+                        )
+                        ax.set_title(
+                            f"{comp.name}: {tg.name}\n"
+                            f"Q={m['overall_quality']:.0f} "
+                            f"X={m['edge_crossings']} O={m['node_overlaps']}",
+                            fontsize=7,
+                        )
+                    else:
+                        ax.text(0.5, 0.5, f"Error:\n{result.error}", ha="center",
+                                va="center", transform=ax.transAxes, fontsize=7)
+                        ax.set_title(f"{comp.name}: {tg.name}", fontsize=7)
+            except Exception as e:
+                ax.text(0.5, 0.5, f"Error:\n{e}", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=7)
+                ax.set_title(f"{comp.name}: {tg.name}", fontsize=7)
+            ax.axis("off")
+
+    plt.tight_layout()
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    path = str(Path(output_dir) / "multi_comparison_grid.png")
+    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"Multi-comparison grid saved to {path}")
+    return path
+
+
 def generate_html_dashboard(
     comparison_results: list,
     sweep_results: list,

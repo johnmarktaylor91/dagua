@@ -136,6 +136,143 @@ def print_comparison_table(results: List[ComparisonResult]):
     print(f"\nDagua wins: {wins}/{len(results)}")
 
 
+@dataclass
+class MultiComparisonResult:
+    """Result of comparing N engines on a single graph."""
+    graph_name: str
+    engine_metrics: Dict[str, Dict[str, float]]
+    engine_positions: Dict[str, Optional[torch.Tensor]]
+    winner: str = ""
+
+    def __post_init__(self):
+        if not self.winner and self.engine_metrics:
+            best_q = -1.0
+            for name, m in self.engine_metrics.items():
+                q = m.get("overall_quality", 0)
+                if q > best_q:
+                    best_q = q
+                    self.winner = name
+
+
+def compare_engines(
+    graphs: Optional[List[TestGraph]] = None,
+    engines: Optional[List[str]] = None,
+    config: Optional[LayoutConfig] = None,
+    output_dir: Optional[str] = None,
+    max_nodes: int = 500,
+) -> List[MultiComparisonResult]:
+    """Compare multiple layout engines on a collection of graphs.
+
+    Uses the competitor registry to run all available engines (or a filtered subset).
+
+    Args:
+        graphs: Test graphs. If None, uses all test graphs.
+        engines: Engine names to include. If None, uses all available.
+        config: LayoutConfig for Dagua. If None, uses defaults.
+        output_dir: If set, saves multi-comparison images here.
+        max_nodes: Skip graphs larger than this.
+
+    Returns:
+        List of MultiComparisonResult objects.
+    """
+    from dagua.eval.competitors import get_available_competitors
+    from dagua.graphviz_utils import render_multi_comparison
+
+    if graphs is None:
+        graphs = get_test_graphs(max_nodes=max_nodes)
+    if config is None:
+        config = LayoutConfig()
+
+    competitors = get_available_competitors()
+    if engines is not None:
+        engine_set = set(engines)
+        competitors = [c for c in competitors if c.name in engine_set]
+
+    if output_dir:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    results = []
+    for tg in graphs:
+        if tg.graph.num_nodes > max_nodes:
+            continue
+
+        tg.graph.compute_node_sizes()
+        engine_metrics: Dict[str, Dict[str, float]] = {}
+        engine_positions: Dict[str, Optional[torch.Tensor]] = {}
+
+        for comp in competitors:
+            if tg.graph.num_nodes > comp.max_nodes:
+                continue
+            try:
+                result = comp.layout(tg.graph)
+                if result.pos is not None:
+                    m = compute_all_metrics(
+                        result.pos, tg.graph.edge_index, tg.graph.node_sizes
+                    )
+                    engine_metrics[comp.name] = m
+                    engine_positions[comp.name] = result.pos
+            except Exception as e:
+                print(f"  [{comp.name}] {tg.name}: {e}")
+
+        if not engine_metrics:
+            continue
+
+        mr = MultiComparisonResult(
+            graph_name=tg.name,
+            engine_metrics=engine_metrics,
+            engine_positions=engine_positions,
+        )
+        results.append(mr)
+
+        # Save multi-comparison image
+        if output_dir and engine_positions:
+            valid_pos = {k: v for k, v in engine_positions.items() if v is not None}
+            if valid_pos:
+                img_path = str(Path(output_dir) / f"multi_{tg.name}.png")
+                try:
+                    render_multi_comparison(tg.graph, valid_pos, img_path, config)
+                except Exception:
+                    pass
+
+    return results
+
+
+def print_multi_comparison_table(results: List[MultiComparisonResult]):
+    """Print a summary table of multi-engine comparison results."""
+    if not results:
+        print("No comparison results.")
+        return
+
+    # Collect all engine names
+    all_engines = set()
+    for r in results:
+        all_engines.update(r.engine_metrics.keys())
+    engine_list = sorted(all_engines)
+
+    # Header
+    header = f"{'Graph':<25}"
+    for eng in engine_list:
+        header += f" | {eng:>12}"
+    header += " | Winner"
+    print(f"\n{header}")
+    print("-" * len(header))
+
+    # Rows (overall quality)
+    wins: Dict[str, int] = {e: 0 for e in engine_list}
+    for r in results:
+        row = f"{r.graph_name:<25}"
+        for eng in engine_list:
+            q = r.engine_metrics.get(eng, {}).get("overall_quality", 0)
+            row += f" | {q:>12.1f}" if eng in r.engine_metrics else f" | {'—':>12}"
+        row += f" | {r.winner}"
+        print(row)
+        if r.winner in wins:
+            wins[r.winner] += 1
+
+    print("-" * len(header))
+    print("Wins:", ", ".join(f"{e}={w}" for e, w in sorted(wins.items(), key=lambda x: -x[1])))
+
+
 def save_comparison_json(results: List[ComparisonResult], path: str):
     """Save comparison results as JSON."""
     data = []

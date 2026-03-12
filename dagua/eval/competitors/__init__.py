@@ -19,6 +19,7 @@ from dagua.eval.competitors import graphviz_competitor  # noqa: F401
 from dagua.eval.competitors import elk_competitor  # noqa: F401
 from dagua.eval.competitors import dagre_competitor  # noqa: F401
 from dagua.eval.competitors import networkx_competitor  # noqa: F401
+from dagua.eval.competitors import igraph_competitor  # noqa: F401
 
 __all__ = [
     "CompetitorBase",

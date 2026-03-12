@@ -779,6 +779,332 @@ in node_styles with the appropriate base_color (hex).
 Return ONLY the JSON object."""
 
 
+# ─── Export functions ──────────────────────────────────────────────────────
+
+
+def to_networkx(graph: "DaguaGraph") -> Any:
+    """Export a DaguaGraph to a NetworkX DiGraph.
+
+    Node attributes: label, type, cluster (deepest cluster name or None).
+    Edge attributes: label, type.
+
+    Requires: ``pip install networkx``
+    """
+    try:
+        import networkx as nx
+    except ImportError:
+        raise ImportError(
+            "NetworkX is required for to_networkx(). Install it with: "
+            "pip install networkx"
+        )
+
+    G = nx.DiGraph()
+
+    # Reverse mapping for cluster membership (deepest cluster per node)
+    node_cluster: Dict[int, Optional[str]] = {i: None for i in range(graph.num_nodes)}
+    if graph.clusters:
+        node_depth: Dict[int, int] = {}
+        for name, members in graph.clusters.items():
+            if not isinstance(members, list):
+                continue
+            depth = graph.cluster_depth(name)
+            for idx in members:
+                if idx < graph.num_nodes and depth > node_depth.get(idx, -1):
+                    node_cluster[idx] = name
+                    node_depth[idx] = depth
+
+    index_to_id = {v: k for k, v in graph._id_to_index.items()}
+    for i in range(graph.num_nodes):
+        node_id = index_to_id.get(i, i)
+        attrs: Dict[str, Any] = {
+            "label": graph.node_labels[i] if i < len(graph.node_labels) else str(i),
+            "type": graph.node_types[i] if i < len(graph.node_types) else "default",
+        }
+        if node_cluster[i] is not None:
+            attrs["cluster"] = node_cluster[i]
+        G.add_node(node_id, **attrs)
+
+    graph._finalize_edges()
+    ei = graph._edge_index_tensor
+    if ei is not None and ei.numel() > 0:
+        for e in range(ei.shape[1]):
+            src = index_to_id.get(ei[0, e].item(), ei[0, e].item())
+            tgt = index_to_id.get(ei[1, e].item(), ei[1, e].item())
+            attrs = {}
+            if e < len(graph.edge_labels) and graph.edge_labels[e] is not None:
+                attrs["label"] = graph.edge_labels[e]
+            if e < len(graph.edge_types):
+                attrs["type"] = graph.edge_types[e]
+            G.add_edge(src, tgt, **attrs)
+
+    return G
+
+
+def to_igraph(graph: "DaguaGraph") -> Any:
+    """Export a DaguaGraph to an igraph.Graph.
+
+    Vertex attributes: name (original ID), label, type.
+    Edge attributes: label, type.
+
+    Requires: ``pip install igraph``
+    """
+    try:
+        import igraph
+    except ImportError:
+        raise ImportError(
+            "igraph is required for to_igraph(). Install it with: "
+            "pip install igraph"
+        )
+
+    index_to_id = {v: k for k, v in graph._id_to_index.items()}
+
+    g = igraph.Graph(directed=True)
+    g.add_vertices(graph.num_nodes)
+
+    # Vertex attributes
+    g.vs["name"] = [str(index_to_id.get(i, i)) for i in range(graph.num_nodes)]
+    g.vs["label"] = [
+        graph.node_labels[i] if i < len(graph.node_labels) else str(i)
+        for i in range(graph.num_nodes)
+    ]
+    g.vs["type"] = [
+        graph.node_types[i] if i < len(graph.node_types) else "default"
+        for i in range(graph.num_nodes)
+    ]
+
+    # Edges
+    graph._finalize_edges()
+    ei = graph._edge_index_tensor
+    if ei is not None and ei.numel() > 0:
+        edges = [(ei[0, e].item(), ei[1, e].item()) for e in range(ei.shape[1])]
+        g.add_edges(edges)
+
+        labels = []
+        types = []
+        for e in range(ei.shape[1]):
+            labels.append(
+                graph.edge_labels[e] if e < len(graph.edge_labels) else None
+            )
+            types.append(
+                graph.edge_types[e] if e < len(graph.edge_types) else "normal"
+            )
+        g.es["label"] = labels
+        g.es["type"] = types
+
+    return g
+
+
+def to_pyg(graph: "DaguaGraph") -> Any:
+    """Export a DaguaGraph to a torch_geometric.data.Data object.
+
+    Contains edge_index [2, E] and num_nodes.
+
+    Requires: ``pip install torch-geometric``
+    """
+    try:
+        from torch_geometric.data import Data
+    except ImportError:
+        raise ImportError(
+            "torch_geometric is required for to_pyg(). Install it with: "
+            "pip install torch-geometric"
+        )
+
+    import torch
+
+    graph._finalize_edges()
+    ei = graph._edge_index_tensor
+    if ei is None or ei.numel() == 0:
+        ei = torch.zeros(2, 0, dtype=torch.long)
+
+    return Data(edge_index=ei.clone(), num_nodes=graph.num_nodes)
+
+
+def to_scipy(graph: "DaguaGraph") -> Any:
+    """Export a DaguaGraph to a scipy.sparse.csr_matrix adjacency matrix.
+
+    Returns an [N, N] sparse matrix where entry (i, j) = 1 if edge i→j exists.
+
+    Requires: ``pip install scipy``
+    """
+    try:
+        import scipy.sparse
+    except ImportError:
+        raise ImportError(
+            "scipy is required for to_scipy(). Install it with: "
+            "pip install scipy"
+        )
+
+    import numpy as np
+
+    N = graph.num_nodes
+    graph._finalize_edges()
+    ei = graph._edge_index_tensor
+
+    if ei is None or ei.numel() == 0:
+        return scipy.sparse.csr_matrix((N, N), dtype=np.int8)
+
+    rows = ei[0].numpy()
+    cols = ei[1].numpy()
+    data = np.ones(ei.shape[1], dtype=np.int8)
+    return scipy.sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
+
+
+# ─── Import functions ──────────────────────────────────────────────────────
+
+
+def from_igraph(ig_graph, **kwargs) -> "DaguaGraph":
+    """Build a DaguaGraph from an igraph.Graph.
+
+    Reads vertex attributes: name (→ node ID), label, type.
+    Reads edge attributes: label.
+
+    Args:
+        ig_graph: An igraph.Graph instance.
+        **kwargs: Extra keyword arguments passed to DaguaGraph().
+
+    Returns:
+        A DaguaGraph.
+    """
+    from dagua.graph import DaguaGraph
+
+    g = DaguaGraph(**kwargs)
+
+    for v in ig_graph.vs:
+        node_id = v["name"] if "name" in v.attributes() else v.index
+        label = v["label"] if "label" in v.attributes() else None
+        node_type = v["type"] if "type" in v.attributes() else "default"
+        g.add_node(node_id, label=label, type=node_type)
+
+    for e in ig_graph.es:
+        src_v = ig_graph.vs[e.source]
+        tgt_v = ig_graph.vs[e.target]
+        src_id = src_v["name"] if "name" in src_v.attributes() else e.source
+        tgt_id = tgt_v["name"] if "name" in tgt_v.attributes() else e.target
+        label = e["label"] if "label" in e.attributes() else None
+        g.add_edge(src_id, tgt_id, label=label)
+
+    return g
+
+
+def from_scipy(adj_matrix, labels=None, **kwargs) -> "DaguaGraph":
+    """Build a DaguaGraph from a scipy sparse adjacency matrix.
+
+    Args:
+        adj_matrix: A scipy sparse matrix of shape [N, N].
+        labels: Optional list of node labels (length N).
+        **kwargs: Extra keyword arguments passed to DaguaGraph().
+
+    Returns:
+        A DaguaGraph.
+    """
+    import torch
+
+    from dagua.graph import DaguaGraph
+
+    try:
+        import scipy.sparse
+    except ImportError:
+        raise ImportError(
+            "scipy is required for from_scipy(). Install it with: "
+            "pip install scipy"
+        )
+
+    coo = scipy.sparse.coo_matrix(adj_matrix)
+    N = coo.shape[0]
+
+    g = DaguaGraph(**kwargs)
+    for i in range(N):
+        label = labels[i] if labels is not None and i < len(labels) else None
+        g.add_node(i, label=label)
+
+    for src, tgt in zip(coo.row, coo.col):
+        g.add_edge(int(src), int(tgt))
+
+    return g
+
+
+def from_dot(dot_string: str, **kwargs) -> "DaguaGraph":
+    """Build a DaguaGraph from a DOT string.
+
+    Parses DOT format via pydot (pure Python, no system Graphviz dependency).
+
+    Args:
+        dot_string: A DOT-format string.
+        **kwargs: Extra keyword arguments passed to DaguaGraph().
+
+    Returns:
+        A DaguaGraph.
+    """
+    try:
+        import pydot
+    except ImportError:
+        raise ImportError(
+            "pydot is required for from_dot(). Install it with: "
+            "pip install pydot"
+        )
+
+    from dagua.graph import DaguaGraph
+
+    graphs = pydot.graph_from_dot_data(dot_string)
+    if not graphs:
+        raise ValueError("Could not parse DOT string")
+    pg = graphs[0]
+
+    g = DaguaGraph(**kwargs)
+
+    # Detect direction from rankdir
+    rankdir = pg.get_rankdir()
+    if rankdir:
+        rd = rankdir.strip('"').upper()
+        if rd in ("TB", "BT", "LR", "RL"):
+            g.direction = rd
+
+    # Add nodes
+    for node in pg.get_nodes():
+        name = node.get_name().strip('"')
+        if name in ("node", "edge", "graph", ""):
+            continue  # skip DOT defaults
+        label = node.get_label()
+        if label:
+            label = label.strip('"')
+        g.add_node(name, label=label)
+
+    # Add edges
+    for edge in pg.get_edges():
+        src = edge.get_source().strip('"')
+        dst = edge.get_destination().strip('"')
+        label = edge.get_label()
+        if label:
+            label = label.strip('"')
+        g.add_edge(src, dst, label=label)
+
+    # Add clusters from subgraphs
+    for sg in pg.get_subgraphs():
+        sg_name = sg.get_name()
+        if sg_name.startswith("cluster_"):
+            cluster_name = sg_name[len("cluster_"):]
+        else:
+            cluster_name = sg_name
+        cluster_name = cluster_name.strip('"')
+
+        members = []
+        for node in sg.get_nodes():
+            node_name = node.get_name().strip('"')
+            if node_name in g._id_to_index:
+                members.append(node_name)
+
+        if members:
+            label = sg.get_label()
+            if label:
+                label = label.strip('"')
+            g.add_cluster(cluster_name, members, label=label)
+
+    return g
+
+
+# ─── LLM infrastructure ──────────────────────────────────────────────────
+
+
 def _get_llm_client(
     provider: Optional[str] = None,
 ) -> Tuple[str, Any]:

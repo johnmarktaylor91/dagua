@@ -713,6 +713,44 @@ class DaguaGraph:
         from dagua.io import graph_to_yaml
         return graph_to_yaml(self, path)
 
+    def to_networkx(self):
+        """Export to NetworkX DiGraph. See ``dagua.io.to_networkx``."""
+        from dagua.io import to_networkx
+        return to_networkx(self)
+
+    def to_igraph(self):
+        """Export to igraph.Graph. See ``dagua.io.to_igraph``."""
+        from dagua.io import to_igraph
+        return to_igraph(self)
+
+    def to_pyg(self):
+        """Export to torch_geometric.data.Data. See ``dagua.io.to_pyg``."""
+        from dagua.io import to_pyg
+        return to_pyg(self)
+
+    def to_scipy(self):
+        """Export to scipy.sparse.csr_matrix. See ``dagua.io.to_scipy``."""
+        from dagua.io import to_scipy
+        return to_scipy(self)
+
+    @classmethod
+    def from_igraph(cls, ig_graph, **kwargs) -> DaguaGraph:
+        """Create graph from igraph.Graph. See ``dagua.io.from_igraph``."""
+        from dagua.io import from_igraph
+        return from_igraph(ig_graph, **kwargs)
+
+    @classmethod
+    def from_scipy(cls, adj_matrix, labels=None, **kwargs) -> DaguaGraph:
+        """Create graph from scipy sparse adjacency. See ``dagua.io.from_scipy``."""
+        from dagua.io import from_scipy
+        return from_scipy(adj_matrix, labels=labels, **kwargs)
+
+    @classmethod
+    def from_dot(cls, dot_string: str, **kwargs) -> DaguaGraph:
+        """Create graph from DOT string. See ``dagua.io.from_dot``."""
+        from dagua.io import from_dot
+        return from_dot(dot_string, **kwargs)
+
     @classmethod
     def from_torchlens(
         cls,

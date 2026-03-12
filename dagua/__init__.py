@@ -21,6 +21,8 @@ from dagua.io import (
     load_style, save_style,
     graph_from_json, graph_to_json,
     graph_from_yaml, graph_to_yaml,
+    to_networkx, to_igraph, to_pyg, to_scipy,
+    from_igraph, from_scipy, from_dot,
 )
 from dagua.styles import get_theme
 from dagua.flex import Flex, LayoutFlex, AlignGroup
@@ -107,4 +109,13 @@ __all__ = [
     "graph_to_json",
     "graph_from_yaml",
     "graph_to_yaml",
+    # Interop exports
+    "to_networkx",
+    "to_igraph",
+    "to_pyg",
+    "to_scipy",
+    # Interop imports
+    "from_igraph",
+    "from_scipy",
+    "from_dot",
 ]
