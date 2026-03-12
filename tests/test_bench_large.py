@@ -87,6 +87,27 @@ def test_layer_checkpoint_round_trip(tmp_path: Path):
     assert torch.equal(restored, layer_assignments)
 
 
+def test_load_graph_checkpoint_rejects_bad_shapes(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": 8, "layers": 2})
+    torch.save(torch.zeros(8, dtype=torch.int32), paths["edge_index"])
+    torch.save(torch.zeros((8, 3), dtype=torch.float16), paths["node_sizes"])
+
+    assert bench_large._load_graph_checkpoint(paths, n=8, layers=2) is None
+
+
+def test_load_layer_checkpoint_rejects_bad_shape(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": 8, "layers": 2})
+    torch.save(torch.zeros((8, 1), dtype=torch.int32), paths["layer_assignments"])
+
+    assert bench_large._load_layer_checkpoint(paths, n=8, layers=2) is None
+
+
 def test_duplicate_run_guard_raises_for_live_pid(tmp_path: Path, monkeypatch):
     checkpoint_dir = tmp_path / "bench_ckpt"
     paths = bench_large._checkpoint_paths(checkpoint_dir)
