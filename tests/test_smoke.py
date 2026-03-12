@@ -373,6 +373,7 @@ class TestStreamingCoarsenMatchesVectorized:
 
         assert result.node_sizes.dtype == torch.float16
         assert result.node_sizes.shape == (result.num_nodes, 2)
+        assert torch.isfinite(result.node_sizes).all()
 
     def test_streaming_bucketed_dedup_matches_default(self):
         """Forced multi-bucket dedup should preserve the same coarse edges."""

@@ -114,10 +114,8 @@ def _coarsen_once_streaming(
 
     # --- Phase B: Coarse node sizes ---
     coarse_sizes = torch.zeros(N_coarse, 2, dtype=node_sizes.dtype, device=device)
-    coarse_sizes.scatter_reduce_(
-        0, fine_to_coarse.unsqueeze(1).expand(-1, 2),
-        node_sizes, reduce="amax",
-    )
+    coarse_sizes[:, 0].scatter_reduce_(0, fine_to_coarse, node_sizes[:, 0], reduce="amax")
+    coarse_sizes[:, 1].scatter_reduce_(0, fine_to_coarse, node_sizes[:, 1], reduce="amax")
 
     # --- Phase C: Chunked edge dedup ---
     if E > 0:
