@@ -79,7 +79,7 @@ class TestGraphStyle:
     def test_defaults(self):
         gs = GraphStyle()
         assert gs.background_color == WARM_WHITE
-        assert gs.margin == 15.0
+        assert gs.margin == 18.0
         assert gs.title_font_size == 10.0
         assert gs.max_figsize == (30.0, 40.0)
         assert gs.min_figsize == (4.0, 3.0)
@@ -146,6 +146,10 @@ class TestBuiltInThemes:
         assert "input" in DEFAULT_THEME_OBJ.node_styles
         assert "if" in DEFAULT_THEME_OBJ.edge_styles
         assert "then" in DEFAULT_THEME_OBJ.edge_styles
+        assert DEFAULT_THEME_OBJ.get_node_style("default").stroke_width == 0.57
+        assert DEFAULT_THEME_OBJ.cluster_style.stroke_width == 0.7
+        assert DEFAULT_THEME_OBJ.cluster_style.opacity == 0.32
+        assert DEFAULT_THEME_OBJ.graph_style.margin == 18.0
 
     def test_dark_theme(self):
         assert DARK_THEME.name == "dark"

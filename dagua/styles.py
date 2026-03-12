@@ -168,7 +168,7 @@ class NodeStyle:
     shape: str = "roundrect"  # rect, roundrect, ellipse, diamond, circle
     fill: str = ""  # empty = computed from base_color
     stroke: str = ""  # empty = computed from base_color
-    stroke_width: float = 0.6
+    stroke_width: float = 0.57
     stroke_dash: str = "solid"  # solid, dashed
     font_family: str = ""  # empty = use FONT_FAMILY default
     font_size: float = 9.0
@@ -233,7 +233,7 @@ class ClusterStyle:
 
     fill: str = PAPER
     stroke: str = LIGHT_GRAY
-    stroke_width: float = 0.75
+    stroke_width: float = 0.7
     stroke_dash: str = "solid"
     corner_radius: float = 8.0
     padding: float = 25.0
@@ -241,7 +241,7 @@ class ClusterStyle:
     font_size: float = 9.5
     font_weight: str = "bold"
     font_color: str = DARK_GRAY
-    opacity: float = 0.5
+    opacity: float = 0.32
     # New fields (Part 2)
     font_family: str = ""  # empty = use FONT_FAMILY default, render-only
     label_offset: Tuple[float, float] = (8.0, 20.0)  # render-only (y-offset prevents nested label overlap)
@@ -261,7 +261,7 @@ class GraphStyle:
     """Graph-level visual settings (all render-only, no layout effect)."""
 
     background_color: str = WARM_WHITE
-    margin: float = 15.0
+    margin: float = 18.0
     title_font_size: float = 10.0
     title_font_weight: str = "regular"
     title_font_color: str = NEAR_BLACK
