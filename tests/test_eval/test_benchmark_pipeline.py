@@ -429,3 +429,41 @@ def test_benchmark_run_status_reports_partial_progress(tmp_path):
     assert status["remaining_graphs"] == 2
     assert status["graphs"]["done_graph"] == "complete"
     assert status["graphs"]["todo_graph"] == "incomplete"
+
+
+@pytest.mark.smoke
+def test_standard_suite_writes_partial_checkpoints(tmp_path, monkeypatch):
+    output_dir = tmp_path / "eval_output"
+    graph = DaguaGraph.from_edge_list([("a", "b")])
+    tg = TestGraph(
+        name="tiny_standard",
+        graph=graph,
+        tags={"linear"},
+        description="tiny standard",
+        source="synthetic",
+        expected_challenges="none",
+    )
+    suite = [BenchmarkGraph(tg, "linear", "standard", True, "small")]
+    pos = torch.tensor([[0.0, 0.0], [0.0, 50.0]], dtype=torch.float32)
+
+    class FakeCompetitor:
+        def __init__(self, name):
+            self.name = name
+            self.max_nodes = 10
+
+        def available(self):
+            return True
+
+        def layout(self, graph, timeout=300.0):
+            return type("Result", (), {"pos": pos, "runtime_seconds": 0.01, "error": None})()
+
+    monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
+    monkeypatch.setattr("dagua.eval.benchmark._competitor_map", lambda names=None: [FakeCompetitor("dagua")])
+    monkeypatch.setattr("dagua.eval.benchmark._system_metadata", lambda: {"dagua_git_hash": "new"})
+    monkeypatch.setattr("dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}})
+    monkeypatch.setattr("dagua.eval.report.generate_report", lambda *args, **kwargs: {})
+
+    payload = run_standard_suite(output_dir=str(output_dir), reuse_cached=False)
+    run_dir = output_dir / "benchmark_db" / "standard" / payload["run_id"]
+    assert not (run_dir / "results.partial.json").exists()
+    assert (run_dir / "results.json").exists()

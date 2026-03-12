@@ -899,6 +899,7 @@ def run_standard_suite(
     reuse_cached: bool = True,
     rerun_competitors: Optional[Sequence[str]] = None,
     resume_incomplete: bool = True,
+    checkpoint_each_graph: bool = True,
 ) -> Dict[str, Any]:
     return run_suite(
         suite=STANDARD_SUITE,
@@ -909,7 +910,7 @@ def run_standard_suite(
         reuse_cached=reuse_cached,
         rerun_competitors=rerun_competitors,
         resume_incomplete=resume_incomplete,
-        checkpoint_each_graph=False,
+        checkpoint_each_graph=checkpoint_each_graph,
     )
 
 
