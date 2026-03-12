@@ -476,7 +476,10 @@ def build_hierarchy(
     # Allow a precomputed checkpoint for giant runs so retries can skip the
     # longest-path layering pass entirely.
     if initial_layer_assignments is not None:
-        current_la = initial_layer_assignments.to(dtype=torch.long, device="cpu")
+        # Preserve the checkpoint dtype when resuming giant runs. Upcasting a
+        # billion-element layering tensor to int64 duplicates several GB right
+        # before coarsening and has no algorithmic benefit here.
+        current_la = initial_layer_assignments.to(device="cpu")
         if progress is not None:
             max_layer = int(current_la.max().item()) if current_la.numel() > 0 else 0
             progress(f"Restored layering ({max_layer + 1:,} layers)")
