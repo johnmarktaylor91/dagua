@@ -19,14 +19,18 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 
 ## Iteration And Maintenance
 
+- Current project status: `docs/STATUS.md`
 - Maintenance checklist: `docs/MAINTENANCE_CHECKLIST.md`
 - Iteration workflow: `docs/ITERATION_WORKFLOW.md`
 - Money graphs shortlist: `docs/MONEY_GRAPHS.md`
 - Benchmark artifact guide: `docs/BENCHMARK_ARTIFACT_GUIDE.md`
+- Benchmark failure taxonomy: `docs/BENCHMARK_FAILURE_TAXONOMY.md`
+- Layout vs render reference: `docs/LAYOUT_VS_RENDER_REFERENCE.md`
 - Command cheat sheet: `docs/COMMAND_CHEATSHEET.md`
 - Baseline playbook: `docs/BASELINE_PLAYBOOK.md`
 - Visual reset brief: `docs/VISUAL_RESET_BRIEF.md`
 - Open issues ledger: `docs/OPEN_ISSUES.md`
+- Contributing guide: `CONTRIBUTING.md`
 - Visual-audit workflow output root: `eval_output/visual_audit/`
 - Numbered collaborative visual review root: `eval_output/visual_review_session/`
 - Benchmark report output root: `eval_output/report/`
@@ -34,6 +38,10 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 ## Regeneration Commands
 
 ```bash
+make benchmark-status
+make placement-sprint
+make visual-session
+make visual-audit
 python scripts/build_glossary.py --output-dir docs/glossary
 python scripts/build_gallery.py --output-dir docs/gallery
 python scripts/build_how_dagua_works.py
