@@ -12,6 +12,12 @@ This is developer-facing. It complements:
 - `docs/LLM_TUTORIAL.md` for agent-efficient usage guidance
 - `CLAUDE.md` / `AGENTS.md` for maintainer workflow notes
 
+For current iteration strategy, also read:
+
+- `docs/CRITERIA_LEDGER.md`
+- `docs/ITERATION_WORKFLOW.md`
+- `docs/STATUS.md`
+
 ## 1. What Dagua Is
 
 Dagua is a Python library for:
@@ -35,6 +41,16 @@ At a high level, the default user flow is:
 5. render or export
 
 The convenience entrypoint `dagua.draw(...)` performs that full pipeline in one call.
+
+At a high level, the current optimization strategy is:
+
+1. stage 0: keep the criteria inventory explicit
+2. stage 1: optimize node placement numerically
+3. stage 2: optimize downstream geometry numerically
+4. stage 3: narrow the remaining aesthetic defaults visually
+
+That staged split matters because Dagua's current weak layer is largely in stage 2
+and stage 3, not in the existence of a layout engine at all.
 
 ## 2. Top-Level Codebase Map
 
@@ -237,6 +253,15 @@ This lives in:
 This is important because layout operates on node boxes, not abstract points.
 
 ### Step C: Layout Entry
+
+For iteration purposes, it helps to think of the runtime in two separate geometry phases:
+
+- node placement
+- downstream geometry
+
+Those map only partly onto code today. The code already separates node layout from
+edge routing/refinement, but the evaluation workflow is still catching up to that
+architecture.
 
 Public layout entrypoints:
 

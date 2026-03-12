@@ -6,6 +6,8 @@ This is the fast answer to: "If I change this, do I need to relayout?"
 
 These can change node positions and should be treated as relayout inputs.
 
+This is stage-1 geometry work in the current optimization plan.
+
 - Graph topology
   - nodes
   - edges
@@ -33,6 +35,8 @@ These can change node positions and should be treated as relayout inputs.
 
 These do not necessarily move nodes, but they change edge geometry and label placement.
 
+This is the start of stage-2 geometry work in the current optimization plan.
+
 - `EdgeStyle.routing`
 - `EdgeStyle.curvature`
 - `EdgeStyle.port_style`
@@ -42,9 +46,17 @@ These do not necessarily move nodes, but they change edge geometry and label pla
 - edge label text
 - cluster geometry when edges route around cluster bounds
 
+Also treat these as stage-2 geometry inputs when present:
+
+- cluster padding / label placement policies
+- cluster-label text when it changes cluster box pressure materially
+- any future edge / text / cluster collision-loss settings
+
 ## Render-Only
 
 These should not require node relayout.
+
+This is mostly stage-3 visual-default work.
 
 - fill / stroke colors
 - opacity
@@ -69,3 +81,13 @@ If you are unsure:
 - `dagua.draw(g)` should do the right thing automatically.
 - `dagua.layout(g)` is the explicit seam for power users.
 - stale cached layout state should be inspectable, not mysterious.
+
+## Cluster Caveat
+
+Clusters blur the line between layout and downstream geometry:
+
+- cluster membership is layout-affecting
+- cluster padding / label policy is downstream geometry
+- bad cluster boxes are often a sign that stage-1 placement was not cluster-aware enough
+
+So do not treat clusters as a purely render-only surface.
