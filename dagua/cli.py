@@ -26,6 +26,7 @@ from dagua.eval.benchmark import (
 )
 from dagua.eval.report import (
     generate_benchmark_deltas,
+    generate_report_artifact_index,
     generate_placement_dashboard_artifacts,
     generate_placement_summary_artifacts,
     generate_report,
@@ -331,6 +332,7 @@ def _run_placement_sprint(args: argparse.Namespace) -> int:
         output_dir=args.output_dir,
         combined_results=combined,
     )
+    artifact_index_json, artifact_index_md = generate_report_artifact_index(output_dir=args.output_dir)
 
     frozen_dir = None
     if args.freeze_label:
@@ -366,6 +368,8 @@ def _run_placement_sprint(args: argparse.Namespace) -> int:
                 "placement_dashboard_md": placement_dashboard_md,
                 "benchmark_deltas_json": benchmark_deltas_json,
                 "benchmark_deltas_md": benchmark_deltas_md,
+                "artifact_index_json": artifact_index_json,
+                "artifact_index_md": artifact_index_md,
                 "frozen_dir": frozen_dir,
             },
             indent=2,

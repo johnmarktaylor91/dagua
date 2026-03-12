@@ -1320,6 +1320,69 @@ def generate_benchmark_deltas(
     return str(json_path), str(md_path)
 
 
+def generate_report_artifact_index(
+    output_dir: str = "eval_output",
+    generated_paths: Optional[Dict[str, str]] = None,
+) -> Tuple[str, str]:
+    """Write a compact index of the key report-side artifacts.
+
+    The report directory has grown enough that a single front door is useful
+    during iteration. This index is intentionally descriptive rather than
+    exhaustive; it points to the artifacts humans should open first.
+    """
+    report_dir = Path(output_dir) / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    json_path = report_dir / "artifact_index.json"
+    md_path = report_dir / "artifact_index.md"
+
+    payload: Dict[str, Any] = {
+        "placement": {
+            "summary_md": str(report_dir / "placement_summary.md"),
+            "dashboard_md": str(report_dir / "placement_dashboard.md"),
+            "tuning_md": str(report_dir / "placement_tuning.md"),
+            "similarity_md": str(report_dir / "layout_similarity.md"),
+        },
+        "benchmark": {
+            "deltas_md": str(report_dir / "benchmark_deltas.md"),
+            "report_tex": str(report_dir / "benchmark_report.tex"),
+            "report_pdf": str(report_dir / "benchmark_report.pdf"),
+        },
+        "visuals": {
+            "comparisons_dir": str(Path(output_dir) / "visuals" / "comparisons"),
+            "scaling_curve": str(Path(output_dir) / "scaling_curve.png"),
+        },
+    }
+    if generated_paths:
+        payload["generated_paths"] = generated_paths
+
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    lines = [
+        "# Report Artifact Index",
+        "",
+        "Open these first during placement and benchmark iteration.",
+        "",
+        "## Placement",
+        "",
+        f"- summary: `{payload['placement']['summary_md']}`",
+        f"- dashboard: `{payload['placement']['dashboard_md']}`",
+        f"- tuning: `{payload['placement']['tuning_md']}`",
+        f"- similarity: `{payload['placement']['similarity_md']}`",
+        "",
+        "## Benchmark",
+        "",
+        f"- deltas: `{payload['benchmark']['deltas_md']}`",
+        f"- report tex: `{payload['benchmark']['report_tex']}`",
+        f"- report pdf: `{payload['benchmark']['report_pdf']}`",
+        "",
+        "## Visuals",
+        "",
+        f"- comparisons: `{payload['visuals']['comparisons_dir']}`",
+        f"- scaling curve: `{payload['visuals']['scaling_curve']}`",
+    ]
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(json_path), str(md_path)
+
+
 def _summary_statistics(combined_results: Dict[str, Any]) -> Dict[str, Any]:
     aggregate: Dict[str, Any] = {"competitors": {}}
     for graph_name, graph_payload in combined_results.get("graphs", {}).items():
@@ -1585,6 +1648,18 @@ def generate_report(
         placement_dashboard_md_path,
     )
     pdf_path = _compile_pdf(tex_path) if compile_pdf else None
+    artifact_index_json_path, artifact_index_md_path = generate_report_artifact_index(
+        output_dir=output_dir,
+        generated_paths={
+            "tex": tex_path,
+            "pdf": pdf_path or "",
+            "scaling_curve": scaling_curve_path,
+            "benchmark_deltas_md": delta_md_path,
+            "layout_similarity_md": similarity_md_path,
+            "placement_summary_md": placement_md_path,
+            "placement_dashboard_md": placement_dashboard_md_path,
+        },
+    )
     return {
         "tex": tex_path,
         "pdf": pdf_path or "",
@@ -1598,4 +1673,6 @@ def generate_report(
         "placement_summary_md": placement_md_path,
         "placement_dashboard_json": placement_dashboard_json_path,
         "placement_dashboard_md": placement_dashboard_md_path,
+        "artifact_index_json": artifact_index_json_path,
+        "artifact_index_md": artifact_index_md_path,
     }
