@@ -1,0 +1,136 @@
+# Dagua Command Cheat Sheet
+
+The fast commands worth remembering while iterating.
+
+## Benchmarks
+
+Check current benchmark progress:
+
+```bash
+dagua benchmark-status --output-dir eval_output --suite standard
+```
+
+Watch progress live:
+
+```bash
+dagua benchmark-watch --output-dir eval_output --suite standard --follow --interval 15
+```
+
+List stored runs:
+
+```bash
+dagua benchmark-list --output-dir eval_output --suite standard
+```
+
+Show one graph's stored result:
+
+```bash
+dagua benchmark-show residual_block --output-dir eval_output --suite standard --competitor dagua
+```
+
+Freeze a benchmark baseline:
+
+```bash
+dagua benchmark-freeze placement-baseline --output-dir eval_output --suite standard
+```
+
+Compare two runs:
+
+```bash
+dagua benchmark-compare-runs RUN_A RUN_B --output-dir eval_output --suite standard --competitor dagua
+```
+
+Regenerate report artifacts:
+
+```bash
+dagua benchmark-report --output-dir eval_output --no-pdf
+dagua benchmark-deltas --output-dir eval_output
+```
+
+## Visual Audit
+
+Build the full suite:
+
+```bash
+dagua visual-audit-build --output-dir eval_output/visual_audit
+```
+
+Fast partial rebuild for one graph:
+
+```bash
+dagua visual-audit-build \
+  --output-dir eval_output/visual_audit \
+  --graphs residual_block \
+  --panels ladder competitor_stepwise run_to_run_diff
+```
+
+Freeze a named visual baseline:
+
+```bash
+dagua visual-audit-freeze reference --output-dir eval_output/visual_audit
+```
+
+Rebuild against a frozen baseline:
+
+```bash
+dagua visual-audit-build \
+  --output-dir eval_output/visual_audit \
+  --graphs residual_block \
+  --panels ladder run_to_run_diff \
+  --compare-to-baseline reference
+```
+
+## Docs
+
+Rebuild glossary:
+
+```bash
+python scripts/build_glossary.py --output-dir docs/glossary
+```
+
+Rebuild showcase gallery:
+
+```bash
+python scripts/build_gallery.py --output-dir docs/gallery
+```
+
+Rebuild algorithm explainer visuals:
+
+```bash
+python scripts/build_how_dagua_works.py
+```
+
+## Showcase Exports
+
+Render a poster from a benchmark graph:
+
+```bash
+dagua poster unused.json /tmp/residual.png \
+  --benchmark-graph residual_block \
+  --benchmark-suite standard \
+  --output-dir eval_output
+```
+
+Render a tour from a benchmark graph:
+
+```bash
+dagua tour unused.json /tmp/residual-tour.mp4 \
+  --benchmark-graph residual_block \
+  --benchmark-suite standard \
+  --output-dir eval_output
+```
+
+## Billion Benchmark
+
+Launch:
+
+```bash
+cd .
+python -u scripts/bench_large.py 1b --device cuda
+```
+
+Tail the log used in tmux/nohup workflows:
+
+```bash
+tail -f /tmp/dagua-bench-1b.log
+```

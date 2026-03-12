@@ -174,6 +174,8 @@ def test_merge_latest_results_and_generate_report(tmp_path):
     assert Path(artifacts["layout_similarity_md"]).exists()
     assert Path(artifacts["placement_summary_json"]).exists()
     assert Path(artifacts["placement_summary_md"]).exists()
+    assert Path(artifacts["placement_dashboard_json"]).exists()
+    assert Path(artifacts["placement_dashboard_md"]).exists()
     assert (output_dir / "visuals" / "comparisons" / "residual_block_comparison.png").exists()
     assert (output_dir / "report" / "prose_prompt.md").exists()
     assert (output_dir / "report" / "review_round_1.json").exists()

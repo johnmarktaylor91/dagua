@@ -119,6 +119,8 @@ Important report-side artifacts:
 - `eval_output/report/layout_similarity.md`
 - `eval_output/report/placement_summary.json`
 - `eval_output/report/placement_summary.md`
+- `eval_output/report/placement_dashboard.json`
+- `eval_output/report/placement_dashboard.md`
 - benchmark-run `progress.json` files alongside partial results
 
 Update when:

@@ -19,6 +19,10 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 ## Iteration And Maintenance
 
 - Maintenance checklist: `docs/MAINTENANCE_CHECKLIST.md`
+- Command cheat sheet: `docs/COMMAND_CHEATSHEET.md`
+- Baseline playbook: `docs/BASELINE_PLAYBOOK.md`
+- Visual reset brief: `docs/VISUAL_RESET_BRIEF.md`
+- Open issues ledger: `docs/OPEN_ISSUES.md`
 - Visual-audit workflow output root: `eval_output/visual_audit/`
 - Benchmark report output root: `eval_output/report/`
 
