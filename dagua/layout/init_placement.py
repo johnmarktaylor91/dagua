@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 from dagua.utils import longest_path_layering
+from dagua.utils import _vram_fits
 
 
 def init_positions(
@@ -159,12 +160,13 @@ def _init_positions_vectorized(
     Y-coordinates always from layer assignments.
     """
     N = num_nodes
-    layer_t = layers.to(dtype=torch.long, device=device) if isinstance(layers, torch.Tensor) else torch.tensor(layers, dtype=torch.long, device=device)
+    compute_device = _choose_init_device(edge_index, num_nodes, node_sizes, device)
+    layer_t = layers.to(dtype=torch.long, device=compute_device) if isinstance(layers, torch.Tensor) else torch.tensor(layers, dtype=torch.long, device=compute_device)
     num_layers = int(layer_t.max().item()) + 1 if N > 0 else 0
 
     # Build layer structure
     counts = torch.bincount(layer_t, minlength=num_layers)
-    offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=device)
+    offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=compute_device)
     offsets[1:] = counts.cumsum(0)
 
     # Sort nodes by layer for contiguous access
@@ -175,23 +177,23 @@ def _init_positions_vectorized(
     spectral_order = None
     n_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
     if N > 10000 and N <= 2_000_000 and n_edges > 0 and n_edges < N * 10:
-        spectral_order = _spectral_order(edge_index, N, device)
+        spectral_order = _spectral_order(edge_index, N, compute_device)
 
     if spectral_order is not None:
         # Use spectral ordering within each layer
-        order = _spectral_to_layer_order(spectral_order, layer_t, counts, offsets, sorted_by_layer, N, device)
+        order = _spectral_to_layer_order(spectral_order, layer_t, counts, offsets, sorted_by_layer, N, compute_device)
     else:
         # Fallback: barycenter ordering
-        order = _barycenter_order(edge_index, N, layer_t, counts, offsets, sorted_by_layer, device)
+        order = _barycenter_order(edge_index, N, layer_t, counts, offsets, sorted_by_layer, compute_device)
 
     # Assign coordinates based on final ordering
-    positions = torch.zeros(N, 2, device=device)
+    positions = torch.zeros(N, 2, device=compute_device)
 
     # Y-coordinates: layer * rank_sep
     positions[:, 1] = layer_t.float() * rank_sep
 
     # X-coordinates: within-layer position * (avg_width + node_sep), centered
-    node_w = node_sizes[:, 0].to(device)
+    node_w = node_sizes[:, 0].to(compute_device)
     avg_w = node_w.mean()
     spacing = avg_w + node_sep
 
@@ -205,7 +207,32 @@ def _init_positions_vectorized(
     if edge_index.numel() > 0:
         _spread_fanout_children(positions, edge_index, node_sizes, node_sep)
 
-    return positions
+    return positions.to(device) if compute_device != device else positions
+
+
+def _choose_init_device(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    device: str,
+) -> str:
+    """Pick a safe device for initialization ordering.
+
+    The vectorized barycenter path can require copying the full edge index plus
+    several large work tensors to the compute device. For very large coarsened
+    graphs, that can exceed VRAM even when later optimization fits. In that
+    case, build the initial ordering on CPU and move only the final positions.
+    """
+    if device != "cuda" or not torch.cuda.is_available():
+        return device
+
+    edge_elements = int(edge_index.numel())
+    edge_bytes = edge_elements * edge_index.element_size()
+    node_bytes = int(node_sizes.numel()) * node_sizes.element_size()
+    # Conservative estimate for layer/order/degree/work buffers plus the copied
+    # src/tgt edge arrays and output positions.
+    needed_bytes = edge_bytes * 3 + num_nodes * 64 + node_bytes + num_nodes * 8
+    return device if _vram_fits(needed_bytes, safety=0.65) else "cpu"
 
 
 def _spectral_order(
