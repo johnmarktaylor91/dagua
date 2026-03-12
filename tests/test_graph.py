@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+import dagua
 
 from dagua.graph import DaguaGraph
 from dagua.styles import NodeStyle, EdgeStyle
@@ -61,6 +62,28 @@ class TestGraphConstruction:
         assert g.clusters["group1"] == [0, 1]
         assert g.cluster_labels["group1"] == "My Group"
 
+    def test_add_cluster_unknown_member_raises_by_default(self):
+        g = DaguaGraph()
+        with pytest.raises(KeyError, match="Unknown cluster member"):
+            g.add_cluster("group1", ["missing"])
+
+    def test_add_cluster_can_be_non_strict(self):
+        g = DaguaGraph()
+        g.add_cluster("group1", ["missing"], strict=False)
+        assert g.clusters["group1"] == []
+
+    def test_mutation_invalidates_cached_layout(self, fast_config):
+        g = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
+        pos = dagua.layout(g, fast_config)
+        assert g.has_fresh_layout
+        assert g.layout_status == "fresh"
+        assert g.last_positions is not None
+
+        g.add_edge("c", "d")
+        assert not g.has_fresh_layout
+        assert g.layout_status == "missing"
+        assert g.last_positions is None
+
 
 class TestFromEdgeList:
     def test_basic(self):
@@ -108,6 +131,16 @@ class TestNodeSizes:
         g.compute_node_sizes()
         # Longer label should produce wider node
         assert g.node_sizes[1, 0] > g.node_sizes[0, 0]
+
+    def test_size_cache_invalidates_when_label_changes(self):
+        g = DaguaGraph.from_edge_list([("a", "b")])
+        g.compute_node_sizes()
+        width_before = g.node_sizes[0, 0].item()
+        g.node_labels[0] = "a much longer label"
+        g.invalidate_layout()
+        g._touch()
+        g.compute_node_sizes()
+        assert g.node_sizes[0, 0].item() > width_before
 
 
 class TestStyles:

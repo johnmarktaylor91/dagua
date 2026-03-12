@@ -45,7 +45,7 @@ from dagua.defaults import (
 )
 
 
-def draw(graph, config=None, output=None, **kwargs):
+def draw(graph, config=None, output=None, relayout=None, use_cached=False, **kwargs):
     """Layout + render in one call. Convenience function.
 
     Full pipeline: layout → route_edges → optimize_edges → place_edge_labels → render.
@@ -54,12 +54,24 @@ def draw(graph, config=None, output=None, **kwargs):
     When config=None, consults global defaults (dagua.configure()) for
     device, layout overrides, and theme settings.
     """
+    user_supplied_config = config is not None
     if config is None:
         from dagua.defaults import get_default_device, get_default_layout_overrides
         layout_overrides = get_default_layout_overrides()
         config = LayoutConfig(device=get_default_device(), **layout_overrides)
 
-    positions = layout(graph, config)
+    if relayout is False or use_cached:
+        if not graph.has_fresh_layout:
+            raise ValueError(
+                f"Graph layout is {graph.layout_status}. Re-run dagua.layout() or dagua.draw(), "
+                "or pass relayout=True."
+            )
+        positions = graph.last_positions.to(config.device)
+    elif relayout is None and graph.has_fresh_layout and not user_supplied_config:
+        positions = graph.last_positions.to(config.device)
+    else:
+        positions = layout(graph, config)
+
     graph.compute_node_sizes()
     curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
 
@@ -68,6 +80,7 @@ def draw(graph, config=None, output=None, **kwargs):
         curves = optimize_edges(curves, positions, graph.edge_index, graph.node_sizes, config, graph)
 
     label_positions = place_edge_labels(curves, positions, graph.node_sizes, graph.edge_labels, graph)
+    graph.cache_routing(curves, label_positions)
 
     return render(graph, positions, config, output=output,
                   curves=curves, label_positions=label_positions, **kwargs)

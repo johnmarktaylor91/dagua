@@ -83,6 +83,16 @@ class DaguaGraph:
     _back_edge_mask: Optional[torch.Tensor] = field(default=None, repr=False)
     _original_edge_index: Optional[torch.Tensor] = field(default=None, repr=False)
 
+    # Lifecycle / cached layout state
+    revision: int = 0
+    _node_sizes_revision: int = field(default=-1, repr=False)
+    _layout_positions: Optional[torch.Tensor] = field(default=None, repr=False)
+    _layout_revision: int = field(default=-1, repr=False)
+    _layout_curves: Optional[Any] = field(default=None, repr=False)
+    _routing_revision: int = field(default=-1, repr=False)
+    _layout_label_positions: Optional[List[Optional[Tuple[float, float]]]] = field(default=None, repr=False)
+    _label_revision: int = field(default=-1, repr=False)
+
     @property
     def edge_index(self) -> torch.Tensor:
         """Return the [2, E] edge_index tensor, finalizing pending edges first."""
@@ -97,6 +107,8 @@ class DaguaGraph:
         self._validate_index_range(value)
         self._edge_index_tensor = value
         self._back_edge_mask = None  # invalidate cycle cache
+        self.invalidate_layout()
+        self._touch()
 
     def __post_init__(self) -> None:
         from dagua.defaults import get_default_index_dtype, get_default_size_dtype
@@ -157,6 +169,72 @@ class DaguaGraph:
         self._pending_edges.clear()
         self._back_edge_mask = None  # invalidate cycle cache
 
+    def _touch(self) -> None:
+        """Bump graph revision after a user-visible mutation."""
+        self.revision += 1
+
+    def invalidate_layout(self) -> None:
+        """Drop cached layout-derived artifacts."""
+        self._layout_positions = None
+        self._layout_revision = -1
+        self._layout_curves = None
+        self._routing_revision = -1
+        self._layout_label_positions = None
+        self._label_revision = -1
+        self._node_sizes_revision = -1
+        self.node_sizes = None
+        self.node_font_sizes = None
+
+    def _invalidate_routing(self) -> None:
+        """Drop cached post-layout routing artifacts while keeping positions."""
+        self._layout_curves = None
+        self._routing_revision = -1
+        self._layout_label_positions = None
+        self._label_revision = -1
+
+    @property
+    def has_fresh_layout(self) -> bool:
+        """Whether cached positions match the current graph revision."""
+        return self._layout_positions is not None and self._layout_revision == self.revision
+
+    @property
+    def layout_status(self) -> str:
+        """Human-readable layout cache state: missing, fresh, or stale."""
+        if self._layout_positions is None:
+            return "missing"
+        if self._layout_revision == self.revision:
+            return "fresh"
+        return "stale"
+
+    @property
+    def last_positions(self) -> Optional[torch.Tensor]:
+        """Most recently cached layout positions, if any."""
+        return self._layout_positions
+
+    @property
+    def last_curves(self):
+        """Most recently cached routed curves, if any."""
+        return self._layout_curves
+
+    @property
+    def last_label_positions(self) -> Optional[List[Optional[Tuple[float, float]]]]:
+        """Most recently cached edge label positions, if any."""
+        return self._layout_label_positions
+
+    def cache_layout(self, positions: torch.Tensor) -> torch.Tensor:
+        """Cache positions as the current fresh layout."""
+        self._layout_positions = positions.detach().cpu().clone()
+        self._layout_revision = self.revision
+        self._invalidate_routing()
+        return positions
+
+    def cache_routing(self, curves, label_positions: Optional[List[Optional[Tuple[float, float]]]] = None) -> None:
+        """Cache routed edges and optional label positions for the current revision."""
+        self._layout_curves = curves
+        self._routing_revision = self.revision
+        self._layout_label_positions = label_positions
+        self._label_revision = self.revision if label_positions is not None else -1
+
     def add_node(
         self,
         node_id: Any,
@@ -174,6 +252,8 @@ class DaguaGraph:
         self.node_labels.append(label if label is not None else str(node_id))
         self.node_types.append(type)
         self.node_styles.append(style)
+        self.invalidate_layout()
+        self._touch()
         return idx
 
     def add_edge(
@@ -198,6 +278,8 @@ class DaguaGraph:
         self.edge_labels.append(label)
         self.edge_types.append(type)
         self.edge_styles.append(style)
+        self.invalidate_layout()
+        self._touch()
 
     def add_cluster(
         self,
@@ -206,6 +288,7 @@ class DaguaGraph:
         style: Optional[ClusterStyle] = None,
         label: Optional[str] = None,
         parent: Optional[str] = None,
+        strict: bool = True,
     ) -> None:
         """Add a cluster. Members can be node IDs/indices or nested dict.
 
@@ -234,6 +317,11 @@ class DaguaGraph:
                             indices.append(m)
                         elif m in self._id_to_index:
                             indices.append(self._id_to_index[m])
+                        elif strict:
+                            raise KeyError(
+                                f"Unknown cluster member {m!r} for cluster {child_name!r}. "
+                                "Add the node first or pass strict=False."
+                            )
                     self.clusters[child_name] = indices
                     self.cluster_parents[child_name] = name
         else:
@@ -243,6 +331,11 @@ class DaguaGraph:
                     indices.append(m)
                 elif m in self._id_to_index:
                     indices.append(self._id_to_index[m])
+                elif strict:
+                    raise KeyError(
+                        f"Unknown cluster member {m!r} for cluster {name!r}. "
+                        "Add the node first or pass strict=False."
+                    )
             self.clusters[name] = indices
 
         if parent is not None:
@@ -261,6 +354,8 @@ class DaguaGraph:
             self.cluster_styles[name] = style
         if label is not None:
             self.cluster_labels[name] = label
+        self.invalidate_layout()
+        self._touch()
 
     def compute_node_sizes(
         self,
@@ -273,7 +368,11 @@ class DaguaGraph:
         overflow_policy, and min_font_size. Populates both node_sizes
         and node_font_sizes tensors.
         """
-        if self.node_sizes is not None and self.node_sizes.shape[0] == self.num_nodes:
+        if (
+            self.node_sizes is not None
+            and self.node_sizes.shape[0] == self.num_nodes
+            and self._node_sizes_revision == self.revision
+        ):
             return
 
         sizes = []
@@ -297,6 +396,7 @@ class DaguaGraph:
 
         self.node_sizes = torch.tensor(sizes, dtype=self.size_dtype)
         self.node_font_sizes = torch.tensor(font_sizes, dtype=torch.float32)
+        self._node_sizes_revision = self.revision
 
     def get_style_for_node(self, idx: int) -> NodeStyle:
         """Get effective style for a node via 5-level cascade.
@@ -446,6 +546,8 @@ class DaguaGraph:
         fx = Flex(target=x, weight=weight) if x is not None else None
         fy = Flex(target=y, weight=weight) if y is not None else None
         self.flex.pins[node_id] = (fx, fy)
+        self.invalidate_layout()
+        self._touch()
 
     def align(self, node_ids: List[Any], axis: str = "x", weight: float = 5.0) -> None:
         """Align a group of nodes on an axis.
@@ -471,6 +573,8 @@ class DaguaGraph:
             self.flex.align_y.append(group)
         else:
             raise ValueError(f"axis must be 'x' or 'y', got {axis!r}")
+        self.invalidate_layout()
+        self._touch()
 
     def export_style(self, path: str) -> None:
         """Export this graph's style settings to a YAML/JSON file."""

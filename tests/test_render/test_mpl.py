@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import torch
+import dagua
 
 from dagua.graph import DaguaGraph
 from dagua.config import LayoutConfig
@@ -103,6 +104,18 @@ class TestRenderBasic:
         w, h = fig.get_size_inches()
         assert abs(w - 10) < 0.1
         assert abs(h - 8) < 0.1
+
+    @pytest.mark.slow
+    def test_render_can_use_cached_positions(self, simple_chain, fast_config):
+        layout(simple_chain, fast_config)
+        fig, ax = render(simple_chain)
+        assert fig is not None
+        assert ax is not None
+
+    @pytest.mark.slow
+    def test_draw_relayout_false_requires_fresh_layout(self, simple_chain, fast_config):
+        with pytest.raises(ValueError, match="Graph layout is missing"):
+            dagua.draw(simple_chain, fast_config, relayout=False)
 
 
 class TestRenderWithClusters:

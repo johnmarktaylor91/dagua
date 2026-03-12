@@ -98,7 +98,7 @@ def _save_figure(fig, output: str, bg: str, dpi: int, format: Optional[str] = No
 
 def render(
     graph,
-    positions,
+    positions=None,
     config=None,
     output: Optional[str] = None,
     format: Optional[str] = None,
@@ -134,6 +134,15 @@ def render(
     import matplotlib.pyplot as plt
 
     gs = graph.graph_style
+
+    if positions is None:
+        if graph.has_fresh_layout:
+            positions = graph.last_positions
+        else:
+            raise ValueError(
+                f"positions=None but graph layout is {graph.layout_status}. "
+                "Call dagua.layout(), dagua.draw(), or pass explicit positions."
+            )
 
     # Set global font preferences (use resolved font to avoid warnings)
     with warnings.catch_warnings():
