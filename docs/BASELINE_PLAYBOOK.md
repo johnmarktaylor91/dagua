@@ -37,12 +37,15 @@ dagua visual-audit-freeze reference \
 Before changing anything major:
 
 ```bash
+dagua placement-tune --output-dir /home/jtaylor/projects/dagua/eval_output/report
 dagua benchmark-report --output-dir /home/jtaylor/projects/dagua/eval_output --no-pdf
 dagua benchmark-deltas --output-dir /home/jtaylor/projects/dagua/eval_output
 ```
 
 Then consult:
 
+- `eval_output/report/artifact_index.md`
+- `eval_output/report/placement_tuning.md`
 - `eval_output/report/placement_dashboard.md`
 - `eval_output/report/placement_summary.md`
 - `eval_output/report/layout_similarity.md`
@@ -64,12 +67,24 @@ dagua visual-audit-build \
 
 Prefer reading:
 
+- `artifact_index.md`
+- `placement_tuning.md`
 - `placement_dashboard.md`
 - `placement_summary.md`
 
 before looking at full visual outputs.
 
 That keeps the judgment focused on node placement rather than on the currently weak visual layer.
+
+## 5.5 During Criteria / Geometry Planning
+
+Before changing losses or adding a new optimization stage, read:
+
+- `docs/CRITERIA_LEDGER.md`
+- `docs/ITERATION_WORKFLOW.md`
+- `docs/OPEN_ISSUES.md`
+
+This keeps stage-0 criteria work explicit instead of implicit.
 
 ## 6. Keep A Short Written Note
 
