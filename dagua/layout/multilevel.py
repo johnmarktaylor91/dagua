@@ -16,7 +16,7 @@ Coarsening strategy: layer-aware heavy-edge matching.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -44,10 +44,10 @@ def _ensure_node_sizes_2d(node_sizes: torch.Tensor) -> torch.Tensor:
 @dataclass
 class CoarseLevel:
     """One level of the coarsening hierarchy."""
-    edge_index: torch.Tensor       # [2, E_c] coarsened edges
-    node_sizes: torch.Tensor       # [N_c, 2]
+    edge_index: Optional[torch.Tensor]       # [2, E_c] coarsened edges
+    node_sizes: Optional[torch.Tensor]       # [N_c, 2]
     num_nodes: int
-    fine_to_coarse: torch.Tensor   # [N_fine] maps fine node → coarse node
+    fine_to_coarse: Optional[torch.Tensor]   # [N_fine] maps fine node → coarse node
     num_fine: int                  # N at the finer level
     fine_layer_assignments: Optional[torch.Tensor] = None  # [N_fine] layer assignments for fine level
 
@@ -106,7 +106,7 @@ def _coarsen_once_streaming(
     coarse_per_layer = (layer_counts + 2) // 3
     coarse_offsets = torch.zeros(num_layers + 1, dtype=index_dtype, device=device)
     coarse_offsets[1:] = coarse_per_layer.cumsum(0)
-    N_coarse = coarse_offsets[-1].item()
+    N_coarse = int(coarse_offsets[-1].item())
 
     # Assign coarse IDs per-layer using boolean masking (no global argsort).
     # Reuses a [N] bool mask (~1 GB at 1B) instead of sorted_by_layer (8+8 GB).
@@ -119,7 +119,7 @@ def _coarsen_once_streaming(
         layer_nodes = layer_mask.nonzero(as_tuple=True)[0]
         local_order = min_neighbor[layer_nodes].argsort()  # ascending
         n_layer = layer_nodes.shape[0]
-        coarse_base = coarse_offsets[layer_idx].item()
+        coarse_base = int(coarse_offsets[layer_idx].item())
         fine_to_coarse[layer_nodes[local_order]] = (
             torch.arange(n_layer, dtype=index_dtype, device=device) // 3 + coarse_base
         )
@@ -177,7 +177,7 @@ def _coarsen_once_streaming(
     return CoarseLevel(
         edge_index=coarse_edge_index,
         node_sizes=coarse_sizes,
-        num_nodes=N_coarse,
+        num_nodes=int(N_coarse),
         fine_to_coarse=fine_to_coarse,
         num_fine=N,
     )
@@ -246,7 +246,7 @@ def coarsen_once(
         mean_span = mean_span / (in_degree + out_degree).clamp_min(1).to(torch.float32)
         skip_mask = span > 1.0
         if skip_mask.any():
-            skip_one = torch.ones(skip_mask.sum(), dtype=torch.long, device=device)
+            skip_one = torch.ones((int(skip_mask.sum().item()),), dtype=torch.long, device=device)
             skip_degree.scatter_add_(0, src[skip_mask], skip_one)
             skip_degree.scatter_add_(0, tgt[skip_mask], skip_one)
 
@@ -413,7 +413,7 @@ def coarsen_once(
     return CoarseLevel(
         edge_index=coarse_edge_index,
         node_sizes=coarse_sizes,
-        num_nodes=N_coarse,
+        num_nodes=int(N_coarse),
         fine_to_coarse=fine_to_coarse,
         num_fine=N,
     )
@@ -472,6 +472,8 @@ def build_hierarchy(
         levels.append(level)
 
         # Move to coarser level
+        assert level.edge_index is not None
+        assert level.node_sizes is not None
         current_ei = level.edge_index
         current_sizes = level.node_sizes
         current_n = level.num_nodes
@@ -494,6 +496,7 @@ def build_hierarchy(
 
         # Propagate layers: coarse node inherits layer from its fine nodes
         # (all fine nodes in a pair share the same layer by construction)
+        assert level.fine_to_coarse is not None
         coarse_la = torch.zeros(current_n, dtype=current_la.dtype)
         coarse_la.scatter_reduce_(
             0, level.fine_to_coarse, current_la, reduce="amax",
@@ -535,7 +538,7 @@ def prolong_positions(
     return fine_pos
 
 
-def multilevel_layout(graph, config: LayoutConfig, trace=None) -> torch.Tensor:
+def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = None) -> torch.Tensor:
     """Multilevel V-cycle layout for large graphs.
 
     1. Build coarsening hierarchy
@@ -546,7 +549,7 @@ def multilevel_layout(graph, config: LayoutConfig, trace=None) -> torch.Tensor:
     from dagua.layout.engine import ProgressContext, _layout_inner
 
     verbose = config.verbose
-    def _vlog(msg, indent=""):
+    def _vlog(msg: str, indent: str = "") -> None:
         if verbose:
             vram = ""
             if device == "cuda" and torch.cuda.is_available():
@@ -556,7 +559,7 @@ def multilevel_layout(graph, config: LayoutConfig, trace=None) -> torch.Tensor:
                 vram = f" [VRAM {used:.0f}MB / {total_mb:.0f}MB]"
             print(f"[dagua] {indent}{msg}{vram}", flush=True)
 
-    def _reset_peak():
+    def _reset_peak() -> None:
         if device == "cuda" and torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
@@ -599,14 +602,14 @@ def multilevel_layout(graph, config: LayoutConfig, trace=None) -> torch.Tensor:
         ns = cpu_ns.to(device)
         if trace is not None and hasattr(trace, "mark_phase"):
             trace.mark_phase("Direct Layout", f"{n:,} nodes")
-        pos = _layout_inner(ei, n, ns, config, device=device,
-                            progress_context=ProgressContext(), trace=trace)
+        direct_pos = _layout_inner(ei, n, ns, config, device=device,
+                                   progress_context=ProgressContext(), trace=trace)
         from dagua.layout.engine import _apply_direction
         direction = config.direction if config else graph.direction
-        return _apply_direction(pos, direction)
+        return _apply_direction(direct_pos, direction)
 
     # Helper to build a config for a given level
-    def _make_config(steps, lr=config.lr, seed=config.seed):
+    def _make_config(steps: int, lr: float = config.lr, seed: Optional[int] = config.seed) -> LayoutConfig:
         return LayoutConfig(
             steps=steps,
             lr=lr,
@@ -646,7 +649,9 @@ def multilevel_layout(graph, config: LayoutConfig, trace=None) -> torch.Tensor:
         lr=config.lr * 2,
     )
 
-    pos = _layout_inner(
+    assert coarsest.edge_index is not None
+    assert coarsest.node_sizes is not None
+    pos: Optional[torch.Tensor] = _layout_inner(
         coarsest.edge_index,  # stays on CPU
         coarsest.num_nodes,
         coarsest.node_sizes.to(device),
@@ -660,6 +665,7 @@ def multilevel_layout(graph, config: LayoutConfig, trace=None) -> torch.Tensor:
     _vlog(f"Phase 3/3: Refining ({num_refine_levels} levels)")
     for i in range(len(levels) - 1, -1, -1):
         level = levels[i]
+        assert level is not None
 
         # Free this level's own edge_index and node_sizes — they've been consumed.
         # levels[-1]: consumed by coarsest layout (Phase 2).
@@ -685,6 +691,9 @@ def multilevel_layout(graph, config: LayoutConfig, trace=None) -> torch.Tensor:
             fine_n = n
         else:
             prev_level = levels[i - 1]
+            assert prev_level is not None
+            assert prev_level.edge_index is not None
+            assert prev_level.node_sizes is not None
             fine_ei_cpu = prev_level.edge_index
             fine_sizes_cpu = prev_level.node_sizes
             fine_n = prev_level.num_nodes
@@ -722,12 +731,16 @@ def multilevel_layout(graph, config: LayoutConfig, trace=None) -> torch.Tensor:
             from dagua.layout.engine import _estimate_gpu_memory
             next_level_mem = _estimate_gpu_memory(fine_n, n_fine_edges, per_loss_bw=True)
             if not _vram_fits(next_level_mem):
+                assert pos is not None
                 pos = pos.cpu()
                 torch.cuda.empty_cache()
 
+        assert pos is not None
+        assert level.fine_to_coarse is not None
         fine_to_coarse = level.fine_to_coarse
         use_gpu_prolong = _can_prolong_on_gpu(pos, fine_to_coarse, level.num_fine, device)
 
+        pos_cpu: Optional[torch.Tensor]
         if use_gpu_prolong:
             fine_to_coarse_dev = fine_to_coarse.to(device)
             fine_pos = pos[fine_to_coarse_dev]
@@ -774,13 +787,21 @@ def multilevel_layout(graph, config: LayoutConfig, trace=None) -> torch.Tensor:
         )
 
         # Free this hierarchy level entirely — never revisited
-        levels[i] = None
+        levels[i] = CoarseLevel(
+            edge_index=None,
+            node_sizes=None,
+            num_nodes=level.num_nodes,
+            fine_to_coarse=None,
+            num_fine=level.num_fine,
+            fine_layer_assignments=None,
+        )
 
     _vlog(f"Done \u2014 {n:,} nodes in {_time.perf_counter() - _t0:.1f}s")
 
     # Apply direction transform
     from dagua.layout.engine import _apply_direction
     direction = config.direction if config else graph.direction
+    assert pos is not None
     pos = _apply_direction(pos, direction)
 
     return pos
