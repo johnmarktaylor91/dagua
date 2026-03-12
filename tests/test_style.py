@@ -43,15 +43,24 @@ class TestEdgeStyleNewFields:
         assert s.label_font_size == 7.0
         assert s.label_font_color == NEAR_BLACK
         assert s.label_background == WARM_WHITE
+        assert s.label_offset == 8.0
+        assert s.label_side == "auto"
 
     def test_custom_routing(self):
         s = EdgeStyle(routing="straight")
         assert s.routing == "straight"
 
     def test_custom_label_style(self):
-        s = EdgeStyle(label_font_size=9.0, label_font_color="#FF0000")
+        s = EdgeStyle(
+            label_font_size=9.0,
+            label_font_color="#FF0000",
+            label_offset=12.0,
+            label_side="right",
+        )
         assert s.label_font_size == 9.0
         assert s.label_font_color == "#FF0000"
+        assert s.label_offset == 12.0
+        assert s.label_side == "right"
 
 
 @pytest.mark.smoke

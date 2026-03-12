@@ -222,6 +222,8 @@ class EdgeStyle:
     label_background: str = WARM_WHITE  # render-only
     # New fields (Part 3) — edge aesthetics
     label_position: float = 0.5  # Position along curve (0=start, 1=end)
+    label_offset: float = 8.0  # Perpendicular distance from edge centerline
+    label_side: str = "auto"  # "auto", "left", or "right" relative to edge direction
     curvature: float = 0.4  # Control point offset factor (0=straight, 1=max curve)
     port_style: str = "distributed"  # "distributed" or "center"
     label_avoidance: bool = True  # Whether to avoid label collisions

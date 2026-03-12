@@ -42,6 +42,8 @@ def test_edge_style_new_fields():
     """EdgeStyle has curvature, label_position, port_style, label_avoidance."""
     es = EdgeStyle()
     assert es.label_position == 0.5
+    assert es.label_offset == 8.0
+    assert es.label_side == "auto"
     assert es.curvature == 0.4
     assert es.port_style == "distributed"
     assert es.label_avoidance is True
@@ -200,6 +202,31 @@ def test_place_edge_labels_no_labels():
     positions = place_edge_labels(curves, pos, g.node_sizes, g.edge_labels, g)
     assert len(positions) == 1
     assert positions[0] is None
+
+
+@pytest.mark.smoke
+def test_place_edge_labels_respects_side_and_offset():
+    """Edge label placement honors left/right side and offset distance."""
+    g = DaguaGraph()
+    g.add_node(0, label="a")
+    g.add_node(1, label="b")
+    g.add_edge(0, 1, label="edge", style=EdgeStyle(label_side="left", label_offset=12.0, label_avoidance=False))
+    g.compute_node_sizes()
+    pos = torch.tensor([[0.0, 0.0], [0.0, 60.0]])
+    curves = route_edges(pos, g.edge_index, g.node_sizes, "TB", g)
+    left_pos = place_edge_labels(curves, pos, g.node_sizes, g.edge_labels, g)[0]
+    assert left_pos is not None
+    assert left_pos[0] < 0.0
+
+    g.edge_styles[0] = EdgeStyle(label_side="right", label_offset=12.0, label_avoidance=False)
+    right_pos = place_edge_labels(curves, pos, g.node_sizes, g.edge_labels, g)[0]
+    assert right_pos is not None
+    assert right_pos[0] > 0.0
+
+    g.edge_styles[0] = EdgeStyle(label_side="right", label_offset=20.0, label_avoidance=False)
+    farther_pos = place_edge_labels(curves, pos, g.node_sizes, g.edge_labels, g)[0]
+    assert farther_pos is not None
+    assert abs(farther_pos[0]) > abs(right_pos[0])
 
 
 # --- Phase 6: New metrics ---

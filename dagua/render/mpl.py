@@ -18,7 +18,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from dagua.edges import BezierCurve, evaluate_bezier, route_edges
+from dagua.edges import BezierCurve, evaluate_bezier, preferred_edge_label_position, route_edges
 from dagua.styles import (
     ClusterStyle,
     EdgeStyle,
@@ -550,8 +550,12 @@ def _draw_edge_labels(
         if label_positions is not None and e_idx < len(label_positions) and label_positions[e_idx] is not None:
             lx, ly = label_positions[e_idx]
         else:
-            mid = evaluate_bezier(curve, style.label_position)
-            lx, ly = mid[0], mid[1] + 4.0  # default offset
+            lx, ly = preferred_edge_label_position(
+                curve,
+                label_position=style.label_position,
+                label_offset=style.label_offset,
+                label_side=style.label_side,
+            )
 
         font_size = style.label_font_size
         font_color = style.label_font_color

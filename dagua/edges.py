@@ -468,6 +468,9 @@ def place_edge_labels(
         style = graph.get_style_for_edge(e_idx) if graph is not None else None
         label_t = style.label_position if style is not None else 0.5
         font_size = style.label_font_size if style is not None else 7.0
+        label_offset = style.label_offset if style is not None else 8.0
+        label_side = style.label_side if style is not None else "auto"
+        label_avoidance = style.label_avoidance if style is not None else True
 
         # Measure label
         lw, lh = measure_text_fallback(label_text, font_size)
@@ -477,8 +480,12 @@ def place_edge_labels(
         best_pos = None
         best_overlap = float("inf")
 
+        t_offsets = [0.0, 0.1, -0.1, 0.2, -0.2] if label_avoidance else [0.0]
+        perp_scales = _label_offset_candidates(label_offset, allow_search=label_avoidance)
+        side_signs = _label_side_candidates(label_side, allow_search=label_avoidance)
+
         # Try candidate positions
-        for t_offset in [0.0, 0.1, -0.1, 0.2, -0.2]:
+        for t_offset in t_offsets:
             t = max(0.05, min(0.95, label_t + t_offset))
             mx, my = evaluate_bezier(curve, t)
 
@@ -490,35 +497,38 @@ def place_edge_labels(
             else:
                 perp_x, perp_y = -tdy / tmag, tdx / tmag
 
-            for perp_scale in [4.0, 8.0, 12.0]:
-                cx = mx + perp_x * perp_scale
-                cy = my + perp_y * perp_scale
+            for side_sign in side_signs:
+                for perp_scale in perp_scales:
+                    cx = mx + perp_x * perp_scale * side_sign
+                    cy = my + perp_y * perp_scale * side_sign
 
-                # Label bbox
-                lx0 = cx - lw / 2
-                ly0 = cy - lh / 2
-                lx1 = cx + lw / 2
-                ly1 = cy + lh / 2
+                    # Label bbox
+                    lx0 = cx - lw / 2
+                    ly0 = cy - lh / 2
+                    lx1 = cx + lw / 2
+                    ly1 = cy + lh / 2
 
-                # Count overlap with node bboxes
-                overlap = 0.0
-                for nb in node_bboxes:
-                    ox = max(0.0, min(lx1, nb[2]) - max(lx0, nb[0]))
-                    oy = max(0.0, min(ly1, nb[3]) - max(ly0, nb[1]))
-                    overlap += ox * oy
+                    # Count overlap with node bboxes
+                    overlap = 0.0
+                    for nb in node_bboxes:
+                        ox = max(0.0, min(lx1, nb[2]) - max(lx0, nb[0]))
+                        oy = max(0.0, min(ly1, nb[3]) - max(ly0, nb[1]))
+                        overlap += ox * oy
 
-                # Count overlap with previously placed labels
-                for pb in placed_bboxes:
-                    ox = max(0.0, min(lx1, pb[2]) - max(lx0, pb[0]))
-                    oy = max(0.0, min(ly1, pb[3]) - max(ly0, pb[1]))
-                    overlap += ox * oy
+                    # Count overlap with previously placed labels
+                    for pb in placed_bboxes:
+                        ox = max(0.0, min(lx1, pb[2]) - max(lx0, pb[0]))
+                        oy = max(0.0, min(ly1, pb[3]) - max(ly0, pb[1]))
+                        overlap += ox * oy
 
-                if overlap < best_overlap:
-                    best_overlap = overlap
-                    best_pos = (cx, cy)
-                    best_bbox = (lx0, ly0, lx1, ly1)
+                    if overlap < best_overlap:
+                        best_overlap = overlap
+                        best_pos = (cx, cy)
+                        best_bbox = (lx0, ly0, lx1, ly1)
 
-                if overlap == 0.0:
+                    if overlap == 0.0:
+                        break
+                if best_overlap == 0.0:
                     break
             if best_overlap == 0.0:
                 break
@@ -528,3 +538,37 @@ def place_edge_labels(
             placed_bboxes.append(best_bbox)
 
     return result
+
+
+def preferred_edge_label_position(
+    curve: BezierCurve,
+    label_position: float = 0.5,
+    label_offset: float = 8.0,
+    label_side: str = "auto",
+) -> Tuple[float, float]:
+    """Return the preferred label anchor before collision-avoidance search."""
+    t = max(0.05, min(0.95, label_position))
+    mx, my = evaluate_bezier(curve, t)
+    tdx, tdy = bezier_tangent(curve, t)
+    tmag = (tdx**2 + tdy**2) ** 0.5
+    if tmag < 1e-6:
+        perp_x, perp_y = 0.0, 1.0
+    else:
+        perp_x, perp_y = -tdy / tmag, tdx / tmag
+    side_sign = _label_side_candidates(label_side, allow_search=False)[0]
+    return mx + perp_x * label_offset * side_sign, my + perp_y * label_offset * side_sign
+
+
+def _label_side_candidates(label_side: str, allow_search: bool) -> List[float]:
+    if label_side == "left":
+        return [1.0]
+    if label_side == "right":
+        return [-1.0]
+    return [1.0, -1.0] if allow_search else [1.0]
+
+
+def _label_offset_candidates(label_offset: float, allow_search: bool) -> List[float]:
+    base = max(1.0, float(label_offset))
+    if not allow_search:
+        return [base]
+    return [base, max(4.0, base * 1.5), max(2.0, base * 0.5)]
