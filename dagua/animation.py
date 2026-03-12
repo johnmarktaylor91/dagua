@@ -21,6 +21,8 @@ from dagua.render import render
 
 _ANIM_RASTER_FORMATS = {"gif", "webp"}
 _ANIM_VIDEO_FORMATS = {"mp4", "m4v", "mov", "avi"}
+_STILL_RASTER_FORMATS = {"png", "jpg", "jpeg", "webp", "tiff", "bmp"}
+_STILL_VECTOR_FORMATS = {"pdf", "svg", "eps", "ps"}
 
 
 @dataclass
@@ -57,6 +59,37 @@ class AnimationResult:
     frame_count: int
     layout_snapshots: int
     edge_snapshots: int
+
+
+@dataclass
+class PosterConfig:
+    """Single-frame showcase export using the cinematic tour camera logic."""
+
+    dpi: int = 220
+    figsize: Optional[Tuple[float, float]] = None
+    format: Optional[str] = None
+    output: Optional[str] = None
+    scene: str = "auto"
+    keyframes: Optional[List["CameraKeyframe"]] = None
+    keyframe_index: Optional[int] = None
+    show_titles: bool = True
+    follow_padding: float = 80.0
+    lod_threshold: int = 100_000
+    detail_node_limit: int = 12_000
+    label_node_limit: int = 160
+    edge_sample_limit: int = 60_000
+    density_bins: int = 280
+    density_gamma: float = 0.52
+
+
+@dataclass
+class PosterResult:
+    """Summary of an exported still render."""
+
+    output: Optional[str]
+    format: str
+    bounds: Tuple[float, float, float, float]
+    used_large_lod: bool
 
 
 @dataclass
@@ -126,6 +159,15 @@ def _detect_animation_format(output: Optional[str], format: Optional[str]) -> st
         return "gif"
     suffix = Path(output).suffix.lower().lstrip(".")
     return suffix or "gif"
+
+
+def _detect_still_format(output: Optional[str], format: Optional[str]) -> str:
+    if format is not None:
+        return format.lower().lstrip(".")
+    if output is None:
+        return "png"
+    suffix = Path(output).suffix.lower().lstrip(".")
+    return suffix or "png"
 
 
 def _step_interval(total_steps: int, max_frames: int) -> int:
@@ -580,6 +622,49 @@ def _tour_keyframes(
     return _default_tour_keyframes(graph, positions, config)
 
 
+def _poster_keyframe(
+    graph,
+    positions: torch.Tensor,
+    config: PosterConfig,
+) -> CameraKeyframe:
+    keyframes = _tour_keyframes(
+        graph,
+        positions,
+        TourConfig(
+            dpi=config.dpi,
+            figsize=config.figsize,
+            format=config.format,
+            output=config.output,
+            scene=config.scene,
+            keyframes=config.keyframes,
+            show_titles=config.show_titles,
+            follow_padding=config.follow_padding,
+            lod_threshold=config.lod_threshold,
+            detail_node_limit=config.detail_node_limit,
+            label_node_limit=config.label_node_limit,
+            edge_sample_limit=config.edge_sample_limit,
+            density_bins=config.density_bins,
+            density_gamma=config.density_gamma,
+        ),
+    )
+    if config.keyframe_index is not None:
+        idx = max(0, min(config.keyframe_index, len(keyframes) - 1))
+        return keyframes[idx]
+
+    preferred_idx = {
+        "auto": 1,
+        "powers_of_ten": 2,
+        "zoom_pan": 3,
+        "panorama": 1,
+        "layer_sweep": 1,
+        "cathedral": 1,
+        "motif_orbit": 1,
+        "keyframes": 0,
+    }.get(config.scene, 0)
+    idx = max(0, min(preferred_idx, len(keyframes) - 1))
+    return keyframes[idx]
+
+
 def _curves_from_snapshot(snap: _Snapshot) -> List[BezierCurve]:
     assert snap.endpoints is not None
     assert snap.control_points is not None
@@ -937,6 +1022,44 @@ def _write_frames(frames: Sequence[np.ndarray], output: str, fmt: str, config: A
     )
 
 
+def _write_still_image(frame: np.ndarray, output: str, fmt: str, dpi: int) -> None:
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if fmt in _STILL_RASTER_FORMATS:
+        from PIL import Image
+
+        save_kwargs: Dict[str, Any] = {}
+        if fmt in {"jpg", "jpeg"}:
+            save_kwargs["quality"] = 95
+            save_kwargs["subsampling"] = 0
+            pil_format = "JPEG"
+        elif fmt == "webp":
+            save_kwargs["quality"] = 95
+            save_kwargs["method"] = 6
+            pil_format = "WEBP"
+        else:
+            pil_format = fmt.upper()
+        Image.fromarray(frame).save(path, format=pil_format, **save_kwargs)
+        return
+
+    if fmt in _STILL_VECTOR_FORMATS:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        h, w = frame.shape[:2]
+        fig, ax = plt.subplots(1, 1, figsize=(w / dpi, h / dpi), dpi=dpi)
+        ax.imshow(frame)
+        ax.axis("off")
+        fig.subplots_adjust(0, 0, 1, 1)
+        fig.savefig(path, format=fmt, dpi=dpi, bbox_inches="tight", pad_inches=0.0, facecolor="white")
+        plt.close(fig)
+        return
+
+    raise ValueError(f"Unsupported still format: {fmt!r}.")
+
+
 def animate(
     graph,
     config: Optional[LayoutConfig] = None,
@@ -1134,4 +1257,101 @@ def tour(
         frame_count=len(frames),
         layout_snapshots=0,
         edge_snapshots=0,
+    )
+
+
+def poster(
+    graph,
+    positions: Optional[torch.Tensor] = None,
+    config: Optional[LayoutConfig] = None,
+    output: Optional[str] = None,
+    poster_config: Optional[PosterConfig] = None,
+    **kwargs,
+) -> PosterResult:
+    """Render a single cinematic still, with LOD support for huge graphs."""
+    if config is None:
+        from dagua.defaults import get_default_device, get_default_layout_overrides
+
+        layout_overrides = get_default_layout_overrides()
+        config = LayoutConfig(device=get_default_device(), **layout_overrides)
+
+    poster_cfg = poster_config or PosterConfig()
+    if output is not None:
+        poster_cfg.output = output
+    for key, value in kwargs.items():
+        if hasattr(poster_cfg, key):
+            setattr(poster_cfg, key, value)
+
+    if positions is None:
+        positions = layout(graph, config)
+
+    graph.compute_node_sizes()
+    if poster_cfg.output is None:
+        poster_cfg.output = str(Path("dagua_poster.png").resolve())
+    fmt = _detect_still_format(poster_cfg.output, poster_cfg.format)
+    use_large_lod = graph.num_nodes >= poster_cfg.lod_threshold
+
+    if poster_cfg.figsize is None:
+        poster_cfg.figsize = _default_animation_figsize(graph, [_global_bounds(graph, positions)])
+
+    selected = _poster_keyframe(graph, positions, poster_cfg)
+    bounds = _keyframe_target_bounds(
+        graph,
+        positions,
+        selected,
+        _global_bounds(graph, positions),
+        poster_cfg.follow_padding,
+    )
+
+    base_tour_cfg = TourConfig(
+        dpi=poster_cfg.dpi,
+        figsize=poster_cfg.figsize,
+        format=poster_cfg.format,
+        output=poster_cfg.output,
+        scene=poster_cfg.scene,
+        keyframes=poster_cfg.keyframes,
+        show_titles=poster_cfg.show_titles,
+        follow_padding=poster_cfg.follow_padding,
+        lod_threshold=poster_cfg.lod_threshold,
+        detail_node_limit=poster_cfg.detail_node_limit,
+        label_node_limit=poster_cfg.label_node_limit,
+        edge_sample_limit=poster_cfg.edge_sample_limit,
+        density_bins=poster_cfg.density_bins,
+        density_gamma=poster_cfg.density_gamma,
+    )
+
+    if use_large_lod:
+        frame = _render_large_tour_frame(
+            graph,
+            _prepare_large_tour_state(graph, positions, base_tour_cfg),
+            bounds,
+            base_tour_cfg,
+            title=selected.title if poster_cfg.show_titles else None,
+            subtitle=selected.subtitle if poster_cfg.show_titles else None,
+        )
+    else:
+        curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
+        if getattr(config, "edge_opt_steps", 0) >= 0:
+            from dagua.layout.edge_optimization import optimize_edges
+
+            curves = optimize_edges(curves, positions, graph.edge_index, graph.node_sizes, config, graph)
+        label_positions = place_edge_labels(curves, positions, graph.node_sizes, graph.edge_labels, graph)
+        frame = _render_tour_frame(
+            graph,
+            positions,
+            curves,
+            label_positions,
+            bounds,
+            config,
+            base_tour_cfg,
+            title=selected.title if poster_cfg.show_titles else None,
+            subtitle=selected.subtitle if poster_cfg.show_titles else None,
+        )
+
+    _write_still_image(frame, poster_cfg.output, fmt, poster_cfg.dpi)
+    return PosterResult(
+        output=poster_cfg.output,
+        format=fmt,
+        bounds=bounds,
+        used_large_lod=use_large_lod,
     )

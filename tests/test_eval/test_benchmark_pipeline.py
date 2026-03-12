@@ -8,6 +8,7 @@ from dagua.eval.benchmark import (
     get_rare_suite_graphs,
     get_standard_suite_graphs,
     merge_latest_results,
+    run_rare_suite,
     run_standard_suite,
 )
 from dagua.eval.graphs import TestGraph
@@ -166,6 +167,8 @@ def test_merge_latest_results_and_generate_report(tmp_path):
     artifacts = generate_report(output_dir=str(output_dir), combined_results=combined, compile_pdf=False)
     assert Path(artifacts["tex"]).exists()
     assert Path(artifacts["scaling_curve"]).exists()
+    assert Path(artifacts["benchmark_deltas_json"]).exists()
+    assert Path(artifacts["benchmark_deltas_md"]).exists()
     assert (output_dir / "visuals" / "comparisons" / "residual_block_comparison.png").exists()
     assert (output_dir / "report" / "prose_prompt.md").exists()
     assert (output_dir / "report" / "review_round_1.json").exists()
@@ -304,3 +307,87 @@ def test_standard_suite_can_force_rerun_specific_competitor(tmp_path, monkeypatc
     assert payload["graphs"]["tiny_force"]["competitors"]["graphviz_dot"]["status"] == "OK"
     assert calls["dagua"] == 1
     assert calls["dot"] == 1
+
+
+@pytest.mark.smoke
+def test_rare_suite_resumes_from_partial_results(tmp_path, monkeypatch):
+    output_dir = tmp_path / "eval_output"
+    run_dir = output_dir / "benchmark_db" / "rare" / "2026-03-12T00:00:00+00:00"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    graph = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
+    tg_done = TestGraph(
+        name="tiny_done",
+        graph=graph,
+        tags={"linear"},
+        description="done",
+        source="synthetic",
+        expected_challenges="none",
+    )
+    tg_todo = TestGraph(
+        name="tiny_todo",
+        graph=graph,
+        tags={"linear"},
+        description="todo",
+        source="synthetic",
+        expected_challenges="none",
+    )
+    suite = [
+        BenchmarkGraph(tg_done, "scale", "rare", False, "rare"),
+        BenchmarkGraph(tg_todo, "scale", "rare", False, "rare"),
+    ]
+    partial = {
+        "run_id": run_dir.name,
+        "suite": "rare",
+        "system": {"dagua_git_hash": "new"},
+        "graphs": {
+            "tiny_done": {
+                "n_nodes": 3,
+                "n_edges": 2,
+                "structural_category": "scale",
+                "description": "done",
+                "expected_challenges": "none",
+                "tags": ["linear"],
+                "source": "synthetic",
+                "visualize": False,
+                "scale_tier": "rare",
+                "competitors": {
+                    "dagua": {
+                        "status": "OK",
+                        "runtime_seconds": 0.1,
+                        "metrics": {"overall_quality": 80.0},
+                        "composite_score": 80.0,
+                        "metrics_computed": ["tier1"],
+                        "metrics_skipped": ["tier2", "tier3"],
+                        "positions_path": None,
+                    }
+                },
+            }
+        },
+    }
+    (run_dir / "results.partial.json").write_text(__import__("json").dumps(partial), encoding="utf-8")
+
+    calls = {"dagua": 0}
+    pos = torch.tensor([[0.0, 0.0], [0.0, 50.0], [0.0, 100.0]], dtype=torch.float32)
+
+    class FakeDagua:
+        name = "dagua"
+        max_nodes = 100
+
+        def available(self):
+            return True
+
+        def layout(self, graph, timeout=300.0):
+            calls["dagua"] += 1
+            return type("Result", (), {"pos": pos, "runtime_seconds": 0.02, "error": None})()
+
+    monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
+    monkeypatch.setattr("dagua.eval.benchmark._competitor_map", lambda names=None: [FakeDagua()])
+    monkeypatch.setattr("dagua.eval.benchmark._system_metadata", lambda: {"dagua_git_hash": "new"})
+    monkeypatch.setattr("dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}})
+
+    payload = run_rare_suite(output_dir=str(output_dir), reuse_cached=False, resume_incomplete=True)
+    assert payload["run_id"] == run_dir.name
+    assert calls["dagua"] == 1
+    assert payload["graphs"]["tiny_done"]["competitors"]["dagua"]["status"] == "OK"
+    assert payload["graphs"]["tiny_todo"]["competitors"]["dagua"]["status"] == "OK"
+    assert not (run_dir / "results.partial.json").exists()

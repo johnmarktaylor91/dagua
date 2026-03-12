@@ -177,6 +177,7 @@ def coarsen_once(
     node_sizes: torch.Tensor,
     layer_assignments: Union[List[int], torch.Tensor],
     device: str = "cpu",
+    cluster_ids: Optional[torch.Tensor] = None,
 ) -> CoarseLevel:
     """Single coarsening step via layer-aware heavy-edge matching.
 
@@ -191,6 +192,7 @@ def coarsen_once(
         layers = torch.tensor(layer_assignments, dtype=torch.long, device=device)
     else:
         layers = layer_assignments.to(device)
+    cluster_ids = cluster_ids.to(device) if cluster_ids is not None else None
     num_layers = int(layers.max().item()) + 1 if N > 0 else 0
 
     # Sort nodes by layer for contiguous access
@@ -213,6 +215,7 @@ def coarsen_once(
     min_child = torch.full((N,), N, dtype=torch.long, device=device)
     in_degree = torch.zeros(N, dtype=torch.long, device=device)
     out_degree = torch.zeros(N, dtype=torch.long, device=device)
+    skip_degree = torch.zeros(N, dtype=torch.long, device=device)
     mean_span = torch.zeros(N, dtype=torch.float32, device=device)
     if edge_index.numel() > 0:
         src, tgt = edge_index[0], edge_index[1]
@@ -228,6 +231,11 @@ def coarsen_once(
         mean_span.scatter_add_(0, src, span)
         mean_span.scatter_add_(0, tgt, span)
         mean_span = mean_span / (in_degree + out_degree).clamp_min(1).to(torch.float32)
+        skip_mask = span > 1.0
+        if skip_mask.any():
+            skip_one = torch.ones(skip_mask.sum(), dtype=torch.long, device=device)
+            skip_degree.scatter_add_(0, src[skip_mask], skip_one)
+            skip_degree.scatter_add_(0, tgt[skip_mask], skip_one)
 
     # Smart within-layer ordering:
     # - similar parent/child signatures stay adjacent
@@ -241,7 +249,9 @@ def coarsen_once(
     min_parent_np = min_parent.cpu().numpy()
     min_child_np = min_child.cpu().numpy()
     total_degree_np = total_degree.cpu().numpy()
+    skip_degree_np = skip_degree.cpu().numpy()
     mean_span_np = mean_span.cpu().numpy()
+    cluster_ids_np = None if cluster_ids is None else cluster_ids.cpu().numpy()
     global_order = layers.argsort(stable=True)
 
     coarse_base = 0
@@ -255,8 +265,14 @@ def coarsen_once(
 
         layer_nodes = global_order[start:end]
         layer_nodes_np = layer_nodes.cpu().numpy()
-        layer_degree = total_degree_np[layer_nodes_np]
+        layer_degree = total_degree_np[layer_nodes_np] + 2 * skip_degree_np[layer_nodes_np]
         hub_threshold = max(8, int(np.ceil(np.percentile(layer_degree, 90))))
+
+        cluster_key = (
+            np.where(cluster_ids_np[layer_nodes_np] >= 0, cluster_ids_np[layer_nodes_np], np.iinfo(np.int64).max)
+            if cluster_ids_np is not None
+            else np.full(n_layer, np.iinfo(np.int64).max, dtype=np.int64)
+        )
 
         order = np.lexsort(
             (
@@ -265,6 +281,8 @@ def coarsen_once(
                 min_child_np[layer_nodes_np],
                 min_parent_np[layer_nodes_np],
                 min_neighbor_np[layer_nodes_np],
+                -np.clip(skip_degree_np[layer_nodes_np], 0, 31),
+                cluster_key,
             )
         )
         ordered_nodes = layer_nodes[torch.from_numpy(order).to(layer_nodes.device)]
@@ -276,7 +294,8 @@ def coarsen_once(
         while i < n_layer:
             current = int(ordered_nodes_np[i])
             current_degree = int(total_degree_np[current])
-            if current_degree >= hub_threshold:
+            skip_anchor = skip_degree_np[current] >= 2 and mean_span_np[current] > 1.5
+            if current_degree >= hub_threshold or skip_anchor:
                 local_group_ids.append(local_group)
                 local_group += 1
                 i += 1
@@ -286,6 +305,17 @@ def coarsen_once(
             if i + 1 < n_layer:
                 nxt = int(ordered_nodes_np[i + 1])
                 if total_degree_np[nxt] < hub_threshold:
+                    same_cluster = (
+                        cluster_ids_np is not None
+                        and cluster_ids_np[current] >= 0
+                        and cluster_ids_np[current] == cluster_ids_np[nxt]
+                    )
+                    cluster_compatible = (
+                        cluster_ids_np is None
+                        or cluster_ids_np[current] < 0
+                        or cluster_ids_np[nxt] < 0
+                        or cluster_ids_np[current] == cluster_ids_np[nxt]
+                    )
                     shares_structure = (
                         min_neighbor_np[current] == min_neighbor_np[nxt]
                         or min_parent_np[current] == min_parent_np[nxt]
@@ -294,12 +324,19 @@ def coarsen_once(
                     similar_shape = (
                         abs(total_degree_np[current] - total_degree_np[nxt]) <= 1
                         and abs(mean_span_np[current] - mean_span_np[nxt]) <= 1.0
+                        and abs(skip_degree_np[current] - skip_degree_np[nxt]) <= 1
                     )
-                    if shares_structure or similar_shape:
+                    if cluster_compatible and (same_cluster or shares_structure or similar_shape):
                         group_size = 2
                         if i + 2 < n_layer:
                             nxt2 = int(ordered_nodes_np[i + 2])
                             if total_degree_np[nxt2] < hub_threshold:
+                                third_cluster_compatible = (
+                                    cluster_ids_np is None
+                                    or cluster_ids_np[nxt] < 0
+                                    or cluster_ids_np[nxt2] < 0
+                                    or cluster_ids_np[nxt] == cluster_ids_np[nxt2]
+                                )
                                 third_matches = (
                                     min_parent_np[nxt] == min_parent_np[nxt2]
                                     or min_child_np[nxt] == min_child_np[nxt2]
@@ -308,8 +345,9 @@ def coarsen_once(
                                 third_shape = (
                                     abs(total_degree_np[nxt] - total_degree_np[nxt2]) <= 1
                                     and abs(mean_span_np[nxt] - mean_span_np[nxt2]) <= 1.0
+                                    and abs(skip_degree_np[nxt] - skip_degree_np[nxt2]) <= 1
                                 )
-                                if third_matches or third_shape:
+                                if third_cluster_compatible and (third_matches or third_shape):
                                     group_size = 3
 
             local_group_ids.extend([local_group] * group_size)
@@ -376,6 +414,7 @@ def build_hierarchy(
     max_levels: int = 10,
     device: str = "cpu",
     progress: Optional[Callable[[str], None]] = None,
+    cluster_ids: Optional[torch.Tensor] = None,
 ) -> List[CoarseLevel]:
     """Build coarsening hierarchy until num_nodes <= min_nodes.
 
@@ -385,6 +424,7 @@ def build_hierarchy(
     current_ei = edge_index
     current_sizes = node_sizes
     current_n = num_nodes
+    current_cluster_ids = cluster_ids
 
     # Compute layers once on the original graph — returns tensor for large N
     if progress is not None:
@@ -413,7 +453,7 @@ def build_hierarchy(
 
         level = coarsen_once(
             current_ei, current_n, current_sizes,
-            layer_assignments=current_la, device=device,
+            layer_assignments=current_la, device=device, cluster_ids=current_cluster_ids,
         )
         level.fine_layer_assignments = current_la
         levels.append(level)
@@ -446,6 +486,17 @@ def build_hierarchy(
             0, level.fine_to_coarse, current_la, reduce="amax",
         )
         current_la = coarse_la
+        if current_cluster_ids is not None:
+            shifted = current_cluster_ids + 1
+            coarse_min = torch.full((current_n,), shifted.max().item() + 1, dtype=shifted.dtype)
+            coarse_max = torch.zeros(current_n, dtype=shifted.dtype)
+            coarse_min.scatter_reduce_(0, level.fine_to_coarse, shifted, reduce="amin")
+            coarse_max.scatter_reduce_(0, level.fine_to_coarse, shifted, reduce="amax")
+            current_cluster_ids = torch.where(
+                coarse_min == coarse_max,
+                coarse_min - 1,
+                torch.full_like(coarse_min, -1),
+            )
 
     return levels
 
@@ -525,6 +576,7 @@ def multilevel_layout(graph, config: LayoutConfig, trace=None) -> torch.Tensor:
         min_nodes=min_nodes,
         device="cpu",
         progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
+        cluster_ids=graph.cluster_ids,
     )
     _vlog(f"Phase 1/3: Building hierarchy ({n:,} nodes)... {len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)")
 

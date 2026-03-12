@@ -417,6 +417,40 @@ class TestAdaptiveVectorizedCoarsening:
         group_size = (result.fine_to_coarse == coarse_id).sum().item()
         assert group_size == 1
 
+    def test_cluster_ids_keep_incompatible_nodes_apart(self):
+        edge_index = torch.tensor(
+            [
+                [0, 1, 2, 3],
+                [4, 4, 5, 5],
+            ],
+            dtype=torch.long,
+        )
+        node_sizes = torch.ones(6, 2) * 10.0
+        layers = torch.tensor([0, 0, 0, 0, 1, 1], dtype=torch.long)
+        cluster_ids = torch.tensor([0, 1, 0, 1, -1, -1], dtype=torch.long)
+
+        result = coarsen_once(edge_index, 6, node_sizes, layers, cluster_ids=cluster_ids)
+
+        assert result.fine_to_coarse[0].item() != result.fine_to_coarse[1].item()
+        assert result.fine_to_coarse[2].item() != result.fine_to_coarse[3].item()
+
+    def test_skip_heavy_anchor_can_stay_singleton(self):
+        edge_index = torch.tensor(
+            [
+                [0, 0, 0, 1, 2, 3, 4],
+                [4, 5, 6, 4, 5, 6, 7],
+            ],
+            dtype=torch.long,
+        )
+        node_sizes = torch.ones(8, 2) * 10.0
+        layers = torch.tensor([0, 0, 0, 0, 2, 2, 2, 3], dtype=torch.long)
+
+        result = coarsen_once(edge_index, 8, node_sizes, layers)
+
+        coarse_id = result.fine_to_coarse[0].item()
+        group_size = (result.fine_to_coarse == coarse_id).sum().item()
+        assert group_size == 1
+
 
 @pytest.mark.smoke
 class TestChunkedLayeringMatchesOriginal:

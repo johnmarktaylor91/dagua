@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+from statistics import mean
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -17,6 +18,11 @@ import torch
 
 from dagua.config import LayoutConfig
 from dagua.eval.graphs import TestGraph, get_test_graphs
+
+
+def _load_json(path: Path) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def generate_grid(
@@ -779,6 +785,141 @@ def generate_scaling_curve(
     return str(out_path)
 
 
+def _latest_standard_run_id(combined_results: Dict[str, Any]) -> Optional[str]:
+    return combined_results.get("generated_from", {}).get("standard")
+
+
+def _previous_standard_results(output_dir: str, current_run_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    root = Path(output_dir) / "benchmark_db" / "standard"
+    if not root.exists():
+        return None
+    run_dirs = [path for path in root.iterdir() if path.is_dir() and path.name != "latest"]
+    run_dirs.sort(key=lambda path: path.name)
+    candidates = [path for path in run_dirs if path.name != current_run_id and (path / "results.json").exists()]
+    if not candidates:
+        return None
+    return _load_json(candidates[-1] / "results.json")
+
+
+def generate_benchmark_deltas(
+    output_dir: str = "eval_output",
+    combined_results: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    if combined_results is None:
+        from dagua.eval.benchmark import load_combined_results
+
+        combined_results = load_combined_results(output_dir)
+
+    current_run_id = _latest_standard_run_id(combined_results)
+    current_payload = None
+    if current_run_id is not None:
+        current_path = Path(output_dir) / "benchmark_db" / "standard" / current_run_id / "results.json"
+        if current_path.exists():
+            current_payload = _load_json(current_path)
+    previous_payload = _previous_standard_results(output_dir, current_run_id)
+
+    report_dir = Path(output_dir) / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    json_path = report_dir / "benchmark_deltas.json"
+    md_path = report_dir / "benchmark_deltas.md"
+
+    if current_payload is None or previous_payload is None:
+        payload = {
+            "current_run_id": current_run_id,
+            "baseline_run_id": previous_payload.get("run_id") if previous_payload else None,
+            "status": "insufficient_history",
+            "aggregate": {},
+            "graphs": {},
+        }
+        json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        md_path.write_text("# Benchmark Deltas\n\nNo previous standard run was available for delta reporting.\n", encoding="utf-8")
+        return str(json_path), str(md_path)
+
+    overlapping = sorted(set(current_payload.get("graphs", {})) & set(previous_payload.get("graphs", {})))
+    graph_deltas: Dict[str, Any] = {}
+    runtime_deltas: List[float] = []
+    score_deltas: List[float] = []
+    dag_deltas: List[float] = []
+    win_count = 0
+    loss_count = 0
+
+    for graph_name in overlapping:
+        current_result = current_payload["graphs"][graph_name]["competitors"].get("dagua", {})
+        baseline_result = previous_payload["graphs"][graph_name]["competitors"].get("dagua", {})
+        if current_result.get("status") != "OK" or baseline_result.get("status") != "OK":
+            continue
+        current_metrics = current_result.get("metrics", {})
+        baseline_metrics = baseline_result.get("metrics", {})
+        metric_delta: Dict[str, float] = {}
+        for key in sorted(set(current_metrics) & set(baseline_metrics)):
+            cur = current_metrics.get(key)
+            old = baseline_metrics.get(key)
+            if isinstance(cur, (int, float)) and isinstance(old, (int, float)):
+                metric_delta[key] = float(cur) - float(old)
+        runtime_delta = None
+        if current_result.get("runtime_seconds") is not None and baseline_result.get("runtime_seconds") is not None:
+            runtime_delta = float(current_result["runtime_seconds"]) - float(baseline_result["runtime_seconds"])
+            runtime_deltas.append(runtime_delta)
+        score_delta = None
+        if current_result.get("composite_score") is not None and baseline_result.get("composite_score") is not None:
+            score_delta = float(current_result["composite_score"]) - float(baseline_result["composite_score"])
+            score_deltas.append(score_delta)
+            if score_delta > 0:
+                win_count += 1
+            elif score_delta < 0:
+                loss_count += 1
+        dag_delta = metric_delta.get("dag_consistency")
+        if dag_delta is not None:
+            dag_deltas.append(dag_delta)
+        graph_deltas[graph_name] = {
+            "runtime_delta_seconds": runtime_delta,
+            "composite_score_delta": score_delta,
+            "metric_deltas": metric_delta,
+        }
+
+    aggregate = {
+        "graphs_compared": len(graph_deltas),
+        "mean_runtime_delta_seconds": mean(runtime_deltas) if runtime_deltas else None,
+        "mean_composite_score_delta": mean(score_deltas) if score_deltas else None,
+        "mean_dag_consistency_delta": mean(dag_deltas) if dag_deltas else None,
+        "score_improved_graphs": win_count,
+        "score_regressed_graphs": loss_count,
+    }
+    payload = {
+        "current_run_id": current_payload.get("run_id"),
+        "baseline_run_id": previous_payload.get("run_id"),
+        "status": "ok",
+        "aggregate": aggregate,
+        "graphs": graph_deltas,
+    }
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    lines = [
+        "# Benchmark Deltas",
+        "",
+        f"Current standard run: `{payload['current_run_id']}`",
+        f"Baseline standard run: `{payload['baseline_run_id']}`",
+        "",
+        f"- Graphs compared: {aggregate['graphs_compared']}",
+        f"- Mean composite score delta: {aggregate['mean_composite_score_delta']:.3f}" if aggregate["mean_composite_score_delta"] is not None else "- Mean composite score delta: N/A",
+        f"- Mean runtime delta (s): {aggregate['mean_runtime_delta_seconds']:.3f}" if aggregate["mean_runtime_delta_seconds"] is not None else "- Mean runtime delta (s): N/A",
+        "",
+        "| Graph | Score delta | Runtime delta (s) |",
+        "|---|---:|---:|",
+    ]
+    for graph_name in sorted(graph_deltas):
+        gd = graph_deltas[graph_name]
+        score = gd["composite_score_delta"]
+        runtime = gd["runtime_delta_seconds"]
+        lines.append(
+            f"| {graph_name} | {score:.3f} | {runtime:.3f} |"
+            if score is not None and runtime is not None
+            else f"| {graph_name} | {score if score is not None else 'N/A'} | {runtime if runtime is not None else 'N/A'} |"
+        )
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(json_path), str(md_path)
+
+
 def _summary_statistics(combined_results: Dict[str, Any]) -> Dict[str, Any]:
     aggregate: Dict[str, Any] = {"competitors": {}}
     for graph_name, graph_payload in combined_results.get("graphs", {}).items():
@@ -898,6 +1039,7 @@ def _render_latex_report(
     combined_results: Dict[str, Any],
     scaling_curve_path: str,
     comparison_paths: Sequence[str],
+    delta_markdown_path: Optional[str] = None,
 ) -> str:
     summary = _summary_statistics(combined_results)
     generated_from = combined_results.get("generated_from", {})
@@ -968,6 +1110,8 @@ Competitor & Avg. small-graph score & Avg. DAG consistency & Avg. runtime (s) \\
 \\section{{Appendix}}
 The aesthetic critic prompt used for optional visual evaluation is stored verbatim in \\texttt{{prose\\_prompt.md}} and review placeholders are stored as \\texttt{{review\\_round\\_*.json}}.
 
+\\paragraph{{Benchmark deltas.}} Round-over-round Dagua deltas, when available, are stored in \\texttt{{{_latex_escape(os.path.basename(delta_markdown_path or 'benchmark_deltas.md'))}}}.
+
 \\end{{document}}
 """
     tex_path = report_dir / "benchmark_report.tex"
@@ -1012,16 +1156,19 @@ def generate_report(
 
     scaling_curve_path = generate_scaling_curve(output_dir=output_dir, combined_results=combined_results)
     comparison_paths = generate_comparison_visuals(output_dir=output_dir, combined_results=combined_results)
+    delta_json_path, delta_md_path = generate_benchmark_deltas(output_dir=output_dir, combined_results=combined_results)
     _write_prompt_file(report_dir)
     _write_review_placeholders(report_dir)
     with open(report_dir / "aesthetic_critic_prompt.md", "w", encoding="utf-8") as f:
         f.write(_aesthetic_critic_prompt())
 
-    tex_path = _render_latex_report(report_dir, combined_results, scaling_curve_path, comparison_paths)
+    tex_path = _render_latex_report(report_dir, combined_results, scaling_curve_path, comparison_paths, delta_md_path)
     pdf_path = _compile_pdf(tex_path) if compile_pdf else None
     return {
         "tex": tex_path,
         "pdf": pdf_path or "",
         "scaling_curve": scaling_curve_path,
         "comparisons_dir": str(root / "visuals" / "comparisons"),
+        "benchmark_deltas_json": delta_json_path,
+        "benchmark_deltas_md": delta_md_path,
     }

@@ -17,6 +17,7 @@ from dagua.render import render
 from dagua.animation import (
     animate, AnimationConfig, AnimationResult,
     tour, TourConfig, CameraKeyframe,
+    poster, PosterConfig, PosterResult,
 )
 from dagua.io import graph_from_image as from_image
 from dagua.io import theme_from_image
@@ -73,10 +74,13 @@ __all__ = [
     "draw",
     "animate",
     "tour",
+    "poster",
     "AnimationConfig",
     "AnimationResult",
     "TourConfig",
     "CameraKeyframe",
+    "PosterConfig",
+    "PosterResult",
     # Styles
     "NodeStyle",
     "EdgeStyle",

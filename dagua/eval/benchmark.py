@@ -307,6 +307,10 @@ def _run_dir(output_dir: str, suite: str, run_id: str) -> Path:
     return _benchmark_db_root(output_dir) / suite / run_id
 
 
+def _partial_results_path(run_dir: Path) -> Path:
+    return run_dir / "results.partial.json"
+
+
 def _save_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -364,7 +368,27 @@ def _load_latest_payload_and_metadata(output_dir: str, suite: str) -> Tuple[Opti
         return None, None, None
     payload = _load_json(results_path)
     metadata = _load_json(metadata_path) if metadata_path.exists() else {}
-    return payload, metadata, results_path.parent
+    return payload, metadata, results_path.resolve().parent
+
+
+def _load_resumable_payload_and_metadata(
+    output_dir: str,
+    suite: str,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Path], Optional[str]]:
+    suite_root = _benchmark_db_root(output_dir) / suite
+    if not suite_root.exists():
+        return None, None, None, None
+
+    run_dirs = [path for path in suite_root.iterdir() if path.is_dir() and path.name != "latest"]
+    run_dirs.sort(key=lambda path: path.name, reverse=True)
+    for run_dir in run_dirs:
+        partial_path = _partial_results_path(run_dir)
+        metadata_path = run_dir / "metadata.json"
+        if partial_path.exists():
+            payload = _load_json(partial_path)
+            metadata = _load_json(metadata_path) if metadata_path.exists() else {}
+            return payload, metadata, run_dir, run_dir.name
+    return None, None, None, None
 
 
 def _copy_cached_positions(
@@ -641,6 +665,8 @@ def _build_results_payload(
     graph_signatures: Optional[Dict[str, str]] = None,
     competitor_signatures: Optional[Dict[str, str]] = None,
     rerun_competitors: Optional[Sequence[str]] = None,
+    existing_payload: Optional[Dict[str, Any]] = None,
+    checkpoint_each_graph: bool = False,
 ) -> Dict[str, Any]:
     run_dir = _run_dir(output_dir, suite, run_id)
     _positions_dir(run_dir)
@@ -648,16 +674,25 @@ def _build_results_payload(
     competitor_signatures = competitor_signatures or {}
     rerun_set = set(rerun_competitors or [])
 
-    payload = {
+    payload = copy.deepcopy(existing_payload) if existing_payload is not None else {
         "run_id": run_id,
         "suite": suite,
         "system": _system_metadata(),
         "graphs": {},
     }
+    payload["run_id"] = run_id
+    payload["suite"] = suite
+    payload["system"] = _system_metadata()
 
     for bg in graphs:
-        graph_payload = _graph_summary(bg)
+        existing_graph = payload["graphs"].get(bg.test_graph.name, {})
+        graph_payload = copy.deepcopy(existing_graph) if existing_graph else _graph_summary(bg)
+        graph_payload.update({k: v for k, v in _graph_summary(bg).items() if k != "competitors"})
+        graph_payload.setdefault("competitors", {})
         for competitor in competitors:
+            existing_result = graph_payload["competitors"].get(competitor.name)
+            if existing_result and existing_result.get("status") in {"OK", "FAILED", "SKIPPED"}:
+                continue
             reused = None
             if competitor.name not in rerun_set:
                 reused = _reuse_cached_result(
@@ -677,6 +712,8 @@ def _build_results_payload(
                 run_dir=run_dir,
             )
         payload["graphs"][bg.test_graph.name] = graph_payload
+        if checkpoint_each_graph:
+            _save_json(_partial_results_path(run_dir), payload)
 
     return payload
 
@@ -745,12 +782,11 @@ def run_suite(
     generate_report_artifacts: bool = True,
     reuse_cached: bool = True,
     rerun_competitors: Optional[Sequence[str]] = None,
+    resume_incomplete: bool = True,
+    checkpoint_each_graph: bool = False,
 ) -> Dict[str, Any]:
-    run_id = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     graphs = _suite_graphs(suite)
     competitor_list = _competitor_map(competitors)
-    run_dir = _run_dir(output_dir, suite, run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
     system = _system_metadata()
     graph_signatures = _graph_signature_map(graphs)
     competitor_signatures = _competitor_signature_map(competitor_list, system)
@@ -758,6 +794,34 @@ def run_suite(
     cached_payload = cached_metadata = latest_run_dir = None
     if reuse_cached:
         cached_payload, cached_metadata, latest_run_dir = _load_latest_payload_and_metadata(output_dir, suite)
+
+    existing_payload = existing_metadata = None
+    existing_run_dir = None
+    run_id = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    if resume_incomplete:
+        existing_payload, existing_metadata, existing_run_dir, existing_run_id = _load_resumable_payload_and_metadata(output_dir, suite)
+        if existing_run_dir is not None and existing_run_id is not None:
+            run_id = existing_run_id
+    run_dir = _run_dir(output_dir, suite, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _update_latest_symlink(run_dir.parent, run_id)
+    _save_json(
+        run_dir / "metadata.json",
+        {
+            "run_id": run_id,
+            "suite": suite,
+            "system": system,
+            "graphs": [bg.test_graph.name for bg in graphs],
+            "competitors": [c.name for c in competitor_list],
+            "graph_signatures": graph_signatures,
+            "competitor_signatures": competitor_signatures,
+            "reuse_cached": reuse_cached,
+            "rerun_competitors": rerun_list,
+            "resume_incomplete": resume_incomplete,
+            "checkpoint_each_graph": checkpoint_each_graph,
+            "resumed_from_partial": existing_run_dir is not None,
+        },
+    )
 
     payload = _build_results_payload(
         suite=suite,
@@ -772,23 +836,13 @@ def run_suite(
         graph_signatures=graph_signatures,
         competitor_signatures=competitor_signatures,
         rerun_competitors=rerun_list,
+        existing_payload=existing_payload,
+        checkpoint_each_graph=checkpoint_each_graph,
     )
     _save_json(run_dir / "results.json", payload)
-    _save_json(
-        run_dir / "metadata.json",
-        {
-            "run_id": run_id,
-            "suite": suite,
-            "system": system,
-            "graphs": [bg.test_graph.name for bg in graphs],
-            "competitors": [c.name for c in competitor_list],
-            "graph_signatures": graph_signatures,
-            "competitor_signatures": competitor_signatures,
-            "reuse_cached": reuse_cached,
-            "rerun_competitors": rerun_list,
-        },
-    )
-    _update_latest_symlink(run_dir.parent, run_id)
+    partial_path = _partial_results_path(run_dir)
+    if partial_path.exists():
+        partial_path.unlink()
     combined = merge_latest_results(output_dir=output_dir)
 
     if suite == STANDARD_SUITE and generate_report_artifacts:
@@ -805,6 +859,7 @@ def run_standard_suite(
     timeout: float = DEFAULT_TIMEOUT,
     reuse_cached: bool = True,
     rerun_competitors: Optional[Sequence[str]] = None,
+    resume_incomplete: bool = True,
 ) -> Dict[str, Any]:
     return run_suite(
         suite=STANDARD_SUITE,
@@ -814,6 +869,8 @@ def run_standard_suite(
         generate_report_artifacts=True,
         reuse_cached=reuse_cached,
         rerun_competitors=rerun_competitors,
+        resume_incomplete=resume_incomplete,
+        checkpoint_each_graph=False,
     )
 
 
@@ -823,6 +880,7 @@ def run_rare_suite(
     timeout: float = DEFAULT_TIMEOUT,
     reuse_cached: bool = True,
     rerun_competitors: Optional[Sequence[str]] = None,
+    resume_incomplete: bool = True,
 ) -> Dict[str, Any]:
     if competitors is None:
         competitors = ["dagua", "graphviz_sfdp"]
@@ -834,6 +892,8 @@ def run_rare_suite(
         generate_report_artifacts=False,
         reuse_cached=reuse_cached,
         rerun_competitors=rerun_competitors,
+        resume_incomplete=resume_incomplete,
+        checkpoint_each_graph=True,
     )
 
 
