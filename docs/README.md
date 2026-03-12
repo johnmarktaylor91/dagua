@@ -59,8 +59,10 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
   - `docs/STATUS.md`
   - `docs/OPEN_ISSUES.md`
   - `docs/BENCHMARK_ARTIFACT_GUIDE.md`
+  - `docs/CRITERIA_LEDGER.md`
   - `eval_output/report/placement_summary.md`
   - `eval_output/report/placement_tuning.md`
+  - `eval_output/report/artifact_index.md`
   - `eval_output/report/layout_similarity.md`
 - Visual-reset loop:
   - `docs/VISUAL_RESET_BRIEF.md`
