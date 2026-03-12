@@ -220,7 +220,7 @@ def coarsen_once(
     to streaming path that processes edges in chunks.
     """
     N = num_nodes
-    node_sizes = _ensure_node_sizes_2d(node_sizes)
+    node_sizes = _ensure_node_sizes_2d(node_sizes, N)
     if isinstance(layer_assignments, list):
         layers = torch.tensor(layer_assignments, dtype=torch.long, device=device)
     else:
