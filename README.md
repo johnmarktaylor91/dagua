@@ -250,6 +250,7 @@ For humans:
 - docs index: [docs/README.md](/home/jtaylor/projects/dagua/docs/README.md)
 - developer overview: [docs/DEVELOPER_OVERVIEW.md](/home/jtaylor/projects/dagua/docs/DEVELOPER_OVERVIEW.md)
 - tutorial notebook: [docs/tutorial_walkthrough.ipynb](/home/jtaylor/projects/dagua/docs/tutorial_walkthrough.ipynb)
+- interactive tuning playground: [docs/interactive_playground.ipynb](/home/jtaylor/projects/dagua/docs/interactive_playground.ipynb)
 - glossary/reference: [docs/glossary/dagua_glossary.pdf](/home/jtaylor/projects/dagua/docs/glossary/dagua_glossary.pdf)
 - how Dagua works: [docs/how_dagua_works.md](/home/jtaylor/projects/dagua/docs/how_dagua_works.md)
 - showcase gallery: [docs/gallery/README.md](/home/jtaylor/projects/dagua/docs/gallery/README.md)

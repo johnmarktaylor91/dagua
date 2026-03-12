@@ -94,7 +94,8 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
   - `placement_tuning.md`
   Use `artifact_index.md` as the front door when the report directory gets cluttered.
 - The YouTube/video planning resources live in `docs/video/`.
-- The maintained notebooks are `docs/tutorial_walkthrough.ipynb` for user onboarding
+- The maintained notebooks are `docs/tutorial_walkthrough.ipynb` for user onboarding,
+  `docs/interactive_playground.ipynb` for live layout intuition/tuning,
   and `tests/ui_feature_playground.ipynb` for developer-facing visual QA.
 - The public agent-facing usage guide is `docs/LLM_TUTORIAL.md`. Keep it concise,
   user-facing, and distinct from maintainer instructions.
