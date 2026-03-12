@@ -56,6 +56,9 @@ def test_synthetic_graphs_cover_common_and_niche_motifs():
         "shape_and_routing_matrix",
         "center_port_backedge_hub",
         "cluster_member_style_stress",
+        "edge_label_braid",
+        "nested_cluster_label_stack",
+        "small_label_storm",
     }
     assert expected_names <= names
 
@@ -160,3 +163,23 @@ def test_style_and_routing_stress_graphs_exercise_visual_feature_surface():
     assert core_style.member_node_style.shape == "diamond"
     assert core_style.member_edge_style is not None
     assert core_style.member_edge_style.routing == "ortho"
+
+
+def test_label_stress_graphs_cover_edge_and_cluster_annotation_failures():
+    graphs = {tg.name: tg for tg in _synthetic_graphs()}
+
+    braid = graphs["edge_label_braid"].graph
+    labeled_edges = [label for label in braid.edge_labels if label]
+    assert len(labeled_edges) >= 8
+    assert max(len(label) for label in labeled_edges) >= 12
+
+    nested = graphs["nested_cluster_label_stack"].graph
+    cluster_labels = list(nested.cluster_labels.values())
+    assert len(cluster_labels) >= 3
+    assert max(len(label) for label in cluster_labels) >= 30
+    nested_edge_labels = [label for label in nested.edge_labels if label]
+    assert len(nested_edge_labels) >= 2
+
+    storm = graphs["small_label_storm"].graph
+    assert sum(label is not None for label in storm.edge_labels) == storm.edge_index.shape[1]
+    assert len(storm.cluster_labels) >= 2

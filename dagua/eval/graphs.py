@@ -696,6 +696,102 @@ def _synthetic_graphs() -> List[TestGraph]:
         expected_challenges="Cluster-scoped style cascades combined with cross-cluster skip edges",
     ))
 
+    # 30. Dense edge-label braid converging into a central merge
+    g = DaguaGraph()
+    for node in ["src_a", "src_b", "src_c", "mid_a", "mid_b", "mid_c", "merge", "sink"]:
+        g.add_node(node)
+    labeled_edges = [
+        ("src_a", "mid_a", "token projection"),
+        ("src_a", "mid_b", "residual align"),
+        ("src_b", "mid_b", "attention weights"),
+        ("src_b", "mid_c", "value mixing"),
+        ("src_c", "mid_a", "gating score"),
+        ("src_c", "mid_c", "context route"),
+        ("mid_a", "merge", "left branch"),
+        ("mid_b", "merge", "center branch"),
+        ("mid_c", "merge", "right branch"),
+        ("merge", "sink", "final aggregation output"),
+    ]
+    for src, tgt, label in labeled_edges:
+        g.add_edge(src, tgt, label=label, style=EdgeStyle(label_position=0.45, label_avoidance=True))
+    graphs.append(TestGraph(
+        name="edge_label_braid",
+        graph=g,
+        tags={"wide-parallel", "diamond", "mixed-width"},
+        description="Many competing edge labels packed around a braid of crossings and a central merge",
+        expected_challenges="Edge-label collision avoidance around dense crossing-prone merges",
+    ))
+
+    # 31. Deep nested cluster labels with long titles and central labeled handoffs
+    g = DaguaGraph.from_edge_list([
+        ("input", "encoder.stage0"),
+        ("encoder.stage0", "encoder.stage1.attention"),
+        ("encoder.stage1.attention", "encoder.stage1.mlp"),
+        ("encoder.stage1.mlp", "bridge"),
+        ("bridge", "decoder.stage0.cross_attention"),
+        ("decoder.stage0.cross_attention", "decoder.stage0.ffn"),
+        ("decoder.stage0.ffn", "output"),
+    ])
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.add_cluster(
+        "Very Long Encoder Cluster Title",
+        [idx["encoder.stage0"], idx["encoder.stage1.attention"], idx["encoder.stage1.mlp"]],
+        label="Very Long Encoder Cluster Title",
+        style=ClusterStyle(label_offset=(10.0, 16.0)),
+    )
+    g.add_cluster(
+        "Encoder Inner Block With Lengthy Subtitle",
+        [idx["encoder.stage1.attention"], idx["encoder.stage1.mlp"]],
+        label="Encoder Inner Block With Lengthy Subtitle",
+        parent="Very Long Encoder Cluster Title",
+        style=ClusterStyle(label_offset=(10.0, 14.0)),
+    )
+    g.add_cluster(
+        "Decoder Cluster With Another Long Title",
+        [idx["decoder.stage0.cross_attention"], idx["decoder.stage0.ffn"]],
+        label="Decoder Cluster With Another Long Title",
+        style=ClusterStyle(label_offset=(10.0, 16.0)),
+    )
+    g.add_edge("encoder.stage1.attention", "bridge", label="attention handoff to bridge")
+    g.add_edge("bridge", "decoder.stage0.cross_attention", label="decoder context transfer path")
+    graphs.append(TestGraph(
+        name="nested_cluster_label_stack",
+        graph=g,
+        tags={"nested-deep", "mixed-width", "skip-light"},
+        description="Long nested cluster labels combined with central inter-cluster edge labels",
+        expected_challenges="Cluster title stacking and edge-label placement near cluster boundaries",
+    ))
+
+    # 32. Label storm: edge labels plus cluster labels competing in a small graph
+    g = DaguaGraph.from_edge_list([
+        ("input", "prep"),
+        ("prep", "branch_left"),
+        ("prep", "branch_right"),
+        ("branch_left", "join"),
+        ("branch_right", "join"),
+        ("join", "output"),
+    ])
+    g.edge_labels = [
+        "ingest and normalize",
+        "left expert path",
+        "right expert path with extra context",
+        "left merge contribution",
+        "right merge contribution",
+        "emit prediction",
+    ]
+    g.cluster_styles["Prep Cluster"] = ClusterStyle(label_offset=(8.0, 12.0))
+    g.cluster_styles["Join Cluster"] = ClusterStyle(label_offset=(8.0, 12.0))
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.add_cluster("Prep Cluster", [idx["prep"], idx["branch_left"], idx["branch_right"]], label="Prep Cluster")
+    g.add_cluster("Join Cluster", [idx["join"]], label="Join Cluster")
+    graphs.append(TestGraph(
+        name="small_label_storm",
+        graph=g,
+        tags={"mixed-width", "wide-parallel", "nested-shallow"},
+        description="Compact graph where edge labels and cluster labels all compete for the same area",
+        expected_challenges="Label crowding in a small footprint with both edge and cluster annotations",
+    ))
+
     return graphs
 
 
