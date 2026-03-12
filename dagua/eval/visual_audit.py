@@ -20,7 +20,7 @@ import json
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import torch
@@ -85,6 +85,8 @@ class VisualReviewSessionResult:
 
 CurveList = Sequence[Any]
 LabelPositionList = Sequence[Optional[Tuple[float, float]]]
+ManifestRows = list[dict[str, object]]
+ManifestDict = dict[str, ManifestRows]
 
 
 _LADDER_SPECS: Tuple[AuditSpec, ...] = (
@@ -146,7 +148,7 @@ def build_visual_audit_suite(
     for d in (ladder_dir, decomp_dir, kill_dir, diff_dir, competitor_dir, baseline_diff_dir, sheet_dir, metric_dir, frozen_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    manifest: Dict[str, object] = {
+    manifest: ManifestDict = {
         "ladder": [],
         "decomposition": [],
         "kill_switches": [],
@@ -167,13 +169,13 @@ def build_visual_audit_suite(
             graph.direction = spec.direction
         cfg = LayoutConfig(steps=steps, edge_opt_steps=edge_opt_steps, direction=graph.direction, seed=42)
         pos = layout(graph, cfg)
-        graph.compute_node_sizes()
-        curves = route_edges(pos, graph.edge_index, graph.node_sizes, graph.direction, graph)
-        label_positions = place_edge_labels(curves, pos, graph.node_sizes, graph.edge_labels, graph)
+        node_sizes = _require_node_sizes(graph)
+        curves = route_edges(pos, graph.edge_index, node_sizes, graph.direction, graph)
+        label_positions = place_edge_labels(curves, pos, node_sizes, graph.edge_labels, graph)
         metrics = full(
             pos,
             graph.edge_index,
-            node_sizes=graph.node_sizes,
+            node_sizes=node_sizes,
             curves=curves,
             label_positions=label_positions,
             edge_labels=graph.edge_labels,
@@ -299,10 +301,10 @@ def build_visual_review_session(
         notes_path=str(notes_path),
     )
 
-    manifest = {
+    manifest: dict[str, object] = {
         "kind": "visual_review_session",
         "purpose": "Numbered collaboration workflow for Dagua visual iteration.",
-        "graphs": [],
+        "graphs": cast(list[dict[str, object]], []),
     }
     for idx, spec in enumerate(specs, 1):
         graph = copy.deepcopy(graph_map[spec.graph_name].graph)
@@ -319,7 +321,7 @@ def build_visual_review_session(
             edge_opt_steps=edge_opt_steps,
         )
         result.image_paths.append(str(image_path))
-        manifest["graphs"].append(
+        cast(list[dict[str, object]], manifest["graphs"]).append(
             {
                 "index": idx,
                 "graph_name": spec.graph_name,
@@ -464,9 +466,9 @@ def _render_typography_sheet(graph: DaguaGraph, steps: int, edge_opt_steps: int,
 
     cfg = LayoutConfig(steps=steps, edge_opt_steps=edge_opt_steps, direction=graph.direction, seed=42)
     pos = layout(graph, cfg)
-    graph.compute_node_sizes()
-    curves = route_edges(pos, graph.edge_index, graph.node_sizes, graph.direction, graph)
-    lps = place_edge_labels(curves, pos, graph.node_sizes, graph.edge_labels, graph)
+    node_sizes = _require_node_sizes(graph)
+    curves = route_edges(pos, graph.edge_index, node_sizes, graph.direction, graph)
+    lps = place_edge_labels(curves, pos, node_sizes, graph.edge_labels, graph)
 
     variants = [
         ("Compact", _variant_scale_type(graph, 0.85), curves, lps),
@@ -498,8 +500,9 @@ def _render_edge_language_sheet(graph: DaguaGraph, steps: int, edge_opt_steps: i
     ]
     fig, axes = plt.subplots(2, 2, figsize=(12, 9))
     for ax, (title, vg) in zip(axes.flat, variants):
-        vc = route_edges(pos, vg.edge_index, vg.node_sizes if vg.node_sizes is not None else graph.node_sizes, vg.direction, vg)
-        vl = place_edge_labels(vc, pos, vg.node_sizes if vg.node_sizes is not None else graph.node_sizes, vg.edge_labels, vg)
+        variant_sizes = _require_node_sizes(vg)
+        vc = route_edges(pos, vg.edge_index, variant_sizes, vg.direction, vg)
+        vl = place_edge_labels(vc, pos, variant_sizes, vg.edge_labels, vg)
         _render_layers(ax, vg, pos, vc, vl, ("clusters", "edges", "nodes", "node_labels", "edge_labels"), title)
     fig.suptitle("Edge language sheet", fontsize=12, fontfamily=RESOLVED_FONT)
     fig.tight_layout()
@@ -518,8 +521,7 @@ def _render_layers(
 ) -> None:
     """Render a chosen subset of visual layers onto an existing matplotlib axes."""
     pos = positions.detach().cpu().numpy()
-    graph.compute_node_sizes()
-    sizes = graph.node_sizes.detach().cpu().numpy()
+    sizes = _require_node_sizes(graph).detach().cpu().numpy()
     gs = graph.graph_style
     bg = gs.background_color
     margin = gs.margin
@@ -532,7 +534,7 @@ def _render_layers(
     if "clusters" in layers:
         _draw_clusters(ax, graph, pos, sizes)
     if "edges" in layers:
-        _draw_edges(ax, graph, curves)
+        _draw_edges(ax, graph, list(curves))
     if "nodes" in layers:
         _draw_nodes(ax, graph, pos, sizes)
     if "placement" in layers:
@@ -543,7 +545,7 @@ def _render_layers(
     if "node_labels" in layers:
         _draw_node_labels(ax, graph, pos, sizes)
     if "edge_labels" in layers:
-        _draw_edge_labels(ax, graph, curves, label_positions=label_positions)
+        _draw_edge_labels(ax, graph, list(curves), label_positions=list(label_positions))
 
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
@@ -568,7 +570,7 @@ def _render_to_array(
     _render_layers(ax, graph, positions, curves, label_positions, layers, title)
     fig.tight_layout()
     fig.canvas.draw()
-    arr = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
+    arr = np.asarray(cast(Any, fig.canvas).buffer_rgba())[..., :3].copy()
     plt.close(fig)
     return arr
 
@@ -625,14 +627,16 @@ def _variant_neutral(graph: DaguaGraph) -> DaguaGraph:
 def _variant_scale_type(graph: DaguaGraph, scale: float) -> DaguaGraph:
     g = copy.deepcopy(graph)
     g._theme.graph_style.node_label_secondary_scale *= scale if scale < 1 else min(scale, 1.0)
-    for i, style in enumerate(g.node_styles):
-        if style is not None:
-            g.node_styles[i] = copy.deepcopy(style)
-            g.node_styles[i].font_size *= scale
-    for i, style in enumerate(g.edge_styles):
-        if style is not None:
-            g.edge_styles[i] = copy.deepcopy(style)
-            g.edge_styles[i].label_font_size *= scale
+    for i, node_style in enumerate(g.node_styles):
+        if node_style is not None:
+            scaled_node_style = copy.deepcopy(node_style)
+            scaled_node_style.font_size *= scale
+            g.node_styles[i] = scaled_node_style
+    for i, edge_style in enumerate(g.edge_styles):
+        if edge_style is not None:
+            scaled_edge_style = copy.deepcopy(edge_style)
+            scaled_edge_style.label_font_size *= scale
+            g.edge_styles[i] = scaled_edge_style
     g.node_sizes = None
     return g
 
@@ -647,7 +651,8 @@ def _variant_secondary_scale(graph: DaguaGraph, scale: float) -> DaguaGraph:
 def _variant_edge_language(graph: DaguaGraph, routing: str, curvature: float, opacity: float, width: float) -> DaguaGraph:
     g = copy.deepcopy(graph)
     for i in range(len(g.edge_styles)):
-        style = copy.deepcopy(g.edge_styles[i]) if g.edge_styles[i] is not None else EdgeStyle()
+        existing_style = g.edge_styles[i]
+        style: EdgeStyle = copy.deepcopy(existing_style) if existing_style is not None else EdgeStyle()
         style.routing = routing
         style.curvature = curvature
         style.opacity = opacity
@@ -657,7 +662,7 @@ def _variant_edge_language(graph: DaguaGraph, routing: str, curvature: float, op
 
 
 def _metric_cards_markdown(rows: Sequence[Tuple[AuditSpec, Dict[str, float], Path]]) -> str:
-    lines = ["# Metric Cards", ""]
+    lines: list[str] = ["# Metric Cards", ""]
     for spec, metrics, thumb_rel in rows:
         lines.append(f"## {spec.rung_title}")
         lines.append(f"![{spec.graph_name}]({thumb_rel.as_posix()})")
@@ -790,6 +795,14 @@ def _audit_competitors() -> List[CompetitorBase]:
     return competitors
 
 
+def _require_node_sizes(graph: DaguaGraph) -> torch.Tensor:
+    """Return computed node sizes for graph variants that rely on lazy sizing."""
+    graph.compute_node_sizes()
+    if graph.node_sizes is None:
+        raise ValueError("graph.node_sizes is unavailable after compute_node_sizes()")
+    return graph.node_sizes
+
+
 def _render_competitor_stepwise(
     graph: DaguaGraph,
     spec: AuditSpec,
@@ -832,9 +845,10 @@ def _render_competitor_stepwise(
         if pos is None:
             _status_panel(ax, comp_name, "N/A")
             continue
-        norm_pos = _normalize_positions_for_audit(pos, graph.node_sizes)
-        curves = route_edges(norm_pos, graph.edge_index, graph.node_sizes, graph.direction, graph)
-        label_positions = place_edge_labels(curves, norm_pos, graph.node_sizes, graph.edge_labels, graph)
+        node_sizes = _require_node_sizes(graph)
+        norm_pos = _normalize_positions_for_audit(pos, node_sizes)
+        curves = route_edges(norm_pos, graph.edge_index, node_sizes, graph.direction, graph)
+        label_positions = place_edge_labels(curves, norm_pos, node_sizes, graph.edge_labels, graph)
         _render_layers(
             ax,
             graph,
