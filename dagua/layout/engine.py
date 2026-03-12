@@ -83,9 +83,13 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
 
     n = graph.num_nodes
     if n == 0:
-        return torch.zeros(0, 2, device=device)
+        pos = torch.zeros(0, 2, device=device)
+        graph.cache_layout(pos)
+        return pos
     if n == 1:
-        return torch.zeros(1, 2, device=device)
+        pos = torch.zeros(1, 2, device=device)
+        graph.cache_layout(pos)
+        return pos
 
     # Set seed for determinism
     if config.seed is not None:
@@ -100,7 +104,9 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
         # Don't move data to GPU yet — multilevel manages device transfers lazily
         if n > config.multilevel_threshold:
             from dagua.layout.multilevel import multilevel_layout
-            return multilevel_layout(graph, config, trace=trace)
+            pos = multilevel_layout(graph, config, trace=trace)
+            graph.cache_layout(pos)
+            return pos
 
         # Tier 0-2: Direct layout — move data to device
         edge_index = graph.edge_index.to(device)
@@ -131,7 +137,7 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
         # Apply direction transform
         direction = config.direction if config else graph.direction
         pos = _apply_direction(pos, direction)
-
+        graph.cache_layout(pos)
         return pos
     finally:
         graph._restore_after_layout()
