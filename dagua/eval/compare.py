@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import torch
 
@@ -78,6 +78,7 @@ def _compare_single(
     """Compare a single graph."""
     graph = tg.graph
     graph.compute_node_sizes()
+    assert graph.node_sizes is not None
 
     # Dagua layout
     dagua_pos = layout(graph, config)
@@ -206,6 +207,7 @@ def compare_engines(
             try:
                 result = comp.layout(tg.graph)
                 if result.pos is not None:
+                    assert tg.graph.node_sizes is not None
                     m = compute_all_metrics(
                         result.pos, tg.graph.edge_index, tg.graph.node_sizes
                     )
@@ -244,7 +246,7 @@ def print_multi_comparison_table(results: List[MultiComparisonResult]):
         return
 
     # Collect all engine names
-    all_engines = set()
+    all_engines: Set[str] = set()
     for r in results:
         all_engines.update(r.engine_metrics.keys())
     engine_list = sorted(all_engines)

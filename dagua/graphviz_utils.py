@@ -12,7 +12,7 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, cast
 
 import torch
 
@@ -66,17 +66,17 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
     # Edges
     if graph.edge_index.numel() > 0:
         for e in range(graph.edge_index.shape[1]):
-            s = graph.edge_index[0, e].item()
-            t = graph.edge_index[1, e].item()
-            edge_attrs = []
+            s = int(graph.edge_index[0, e].item())
+            t = int(graph.edge_index[1, e].item())
+            edge_attrs: list[str] = []
             if e < len(graph.edge_labels) and graph.edge_labels[e]:
-                lbl = graph.edge_labels[e].replace('"', '\\"')
+                lbl = str(graph.edge_labels[e]).replace('"', '\\"')
                 edge_attrs.append(f'label="{lbl}"')
-            style = graph.get_style_for_edge(e)
-            edge_attrs.append(f'color="{style.color}"')
-            if style.style == "dashed":
+            edge_style = graph.get_style_for_edge(e)
+            edge_attrs.append(f'color="{edge_style.color}"')
+            if edge_style.style == "dashed":
                 edge_attrs.append('style=dashed')
-            elif style.style == "dotted":
+            elif edge_style.style == "dotted":
                 edge_attrs.append('style=dotted')
             attrs_str = ", ".join(edge_attrs) if edge_attrs else ""
             lines.append(f'  n{s} -> n{t} [{attrs_str}];')
@@ -214,6 +214,7 @@ def render_comparison(
 
     # Compute metrics for subtitle
     graph.compute_node_sizes()
+    assert graph.node_sizes is not None
     dagua_m = compute_all_metrics(dagua_positions, graph.edge_index, graph.node_sizes)
     gv_m = compute_all_metrics(graphviz_positions, graph.edge_index, graph.node_sizes)
 
@@ -304,6 +305,7 @@ def render_multi_comparison(
         axes = [axes]
 
     graph.compute_node_sizes()
+    assert graph.node_sizes is not None
 
     for ax, (engine_name, pos) in zip(axes, positions_dict.items()):
         try:
@@ -345,8 +347,8 @@ def render_comparison_native(
     """
     from PIL import Image
 
-    img1 = Image.open(dagua_output)
-    img2 = Image.open(graphviz_output)
+    img1 = cast(Any, Image.open(dagua_output))
+    img2 = cast(Any, Image.open(graphviz_output))
 
     # Resize to same height
     h = max(img1.height, img2.height)

@@ -256,8 +256,8 @@ def count_overlaps_detailed(pos: torch.Tensor, node_sizes: torch.Tensor) -> Dict
 
     # Vectorized check per cell, capped at 200 nodes per cell
     for i in range(min(int(n_cells), 100000)):
-        s = multi_starts[i].item()
-        e = multi_ends[i].item()
+        s = int(multi_starts[i].item())
+        e = int(multi_ends[i].item())
         cell_nodes = sorted_idx[s:e]
         m = cell_nodes.shape[0]
         if m > 200:
@@ -1216,7 +1216,7 @@ def count_crossings(pos: torch.Tensor, edge_index: torch.Tensor) -> int:
         return crossings
     else:
         result = sampled_crossing_rate(pos, ei, n_samples=125000)
-        return result["crossing_estimated_total"]
+        return int(result["crossing_estimated_total"])
 
 
 def _segments_intersect_scalar(a, b, c, d) -> bool:

@@ -636,7 +636,7 @@ def _overlap_grid_vectorized(
         pair_valid = pair_valid & diag_mask
         masked_overlap = overlap * pair_valid.float()
         total = total + masked_overlap.sum()
-        count += pair_valid.sum().item()
+        count += int(pair_valid.sum().item())
 
     # Process remaining large cells individually
     large_mask = ~small_mask

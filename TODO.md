@@ -42,6 +42,10 @@ while Dagua continues to run. Dagua handles 50K nodes in ~8 min and 100K in ~35 
 - [ ] No `from_dict` constructor yet
 - [ ] No `to_dot` export in public API (only in graphviz_utils)
 - [ ] Graph validation (check for duplicate edges, self-loops)
+- [ ] First-class cluster-edge endpoints
+  - Support edges whose source/target is a cluster boundary rather than only a member node
+  - Likely design: explicit cluster ports / cluster anchor semantics, not implicit magic
+  - Useful for subsystem diagrams, summarized views, and higher-level dataflow
 - [ ] DOT export: special character escaping (backslashes, angle brackets)
 - [ ] compute_node_sizes is not idempotent (no-ops if sizes already set)
 - [ ] No progress callback for long-running layouts

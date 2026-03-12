@@ -13,7 +13,7 @@ from __future__ import annotations
 import io
 import gzip
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -81,10 +81,9 @@ def _save_figure(fig, output: str, bg: str, dpi: int, format: Optional[str] = No
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, **common)
     buf.seek(0)
-    with Image.open(buf) as img:
-        if fmt in {"jpg", "jpeg", "bmp"}:
-            img = img.convert("RGB")
-        save_kwargs = {}
+    with Image.open(buf) as opened_img:
+        img = opened_img.convert("RGB") if fmt in {"jpg", "jpeg", "bmp"} else opened_img
+        save_kwargs: dict[str, Any] = {}
         if fmt in {"jpg", "jpeg"}:
             save_kwargs.update(quality=95, optimize=True, progressive=False, subsampling=0)
         elif fmt == "webp":
@@ -548,7 +547,9 @@ def _draw_edge_labels(
 
         # Use pre-computed position if available
         if label_positions is not None and e_idx < len(label_positions) and label_positions[e_idx] is not None:
-            lx, ly = label_positions[e_idx]
+            label_pos = label_positions[e_idx]
+            assert label_pos is not None
+            lx, ly = label_pos
         else:
             lx, ly = preferred_edge_label_position(
                 curve,

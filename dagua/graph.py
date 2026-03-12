@@ -130,19 +130,25 @@ class DaguaGraph:
 
     @staticmethod
     def _normalize_index_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
+        normalized: Optional[torch.dtype]
         if isinstance(dtype, str):
-            dtype = _DTYPE_NAME_TO_TORCH.get(dtype)
-        if dtype not in (torch.int32, torch.int64):
+            normalized = _DTYPE_NAME_TO_TORCH.get(dtype)
+        else:
+            normalized = dtype
+        if normalized not in (torch.int32, torch.int64):
             raise TypeError("index_dtype must be torch.int32 or torch.int64")
-        return dtype
+        return normalized
 
     @staticmethod
     def _normalize_size_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
+        normalized: Optional[torch.dtype]
         if isinstance(dtype, str):
-            dtype = _DTYPE_NAME_TO_TORCH.get(dtype)
-        if dtype not in (torch.float16, torch.float32, torch.float64):
+            normalized = _DTYPE_NAME_TO_TORCH.get(dtype)
+        else:
+            normalized = dtype
+        if normalized not in (torch.float16, torch.float32, torch.float64):
             raise TypeError("size_dtype must be torch.float16, torch.float32, or torch.float64")
-        return dtype
+        return normalized
 
     def _validate_index_range(self, tensor: torch.Tensor) -> None:
         if tensor.numel() == 0 or self.index_dtype != torch.int32:
@@ -340,7 +346,7 @@ class DaguaGraph:
 
         if parent is not None:
             # Cycle detection: parent can't be a descendant of name
-            cur = parent
+            cur: Optional[str] = parent
             while cur is not None:
                 if cur == name:
                     raise ValueError(
@@ -465,7 +471,7 @@ class DaguaGraph:
         cluster_member_styles = None
         self._finalize_edges()
         if self._edge_index_tensor is not None and self._edge_index_tensor.numel() > 0 and idx < self._edge_index_tensor.shape[1]:
-            src_idx = self._edge_index_tensor[0, idx].item()
+            src_idx = int(self._edge_index_tensor[0, idx].item())
             cluster_member_styles = self._get_cluster_member_edge_styles(src_idx)
 
         # Global defaults
@@ -608,7 +614,7 @@ class DaguaGraph:
     def has_cycles(self) -> bool:
         """Whether this graph contains cycles. Lazy detection, cached."""
         mask = self.back_edge_mask
-        return mask is not None and mask.any().item()
+        return bool(mask is not None and bool(mask.any().item()))
 
     @property
     def back_edge_mask(self) -> Optional[torch.Tensor]:
@@ -649,16 +655,18 @@ class DaguaGraph:
         self._finalize_edges()
         # Use cached mask or auto-detect for reasonably sized graphs
         if self._back_edge_mask is not None:
-            mask = self._back_edge_mask
+            mask: Optional[torch.Tensor] = self._back_edge_mask
         elif self.num_nodes > 1_000_000:
             self._original_edge_index = None
             return
         else:
             mask = self.back_edge_mask
+        assert mask is None or isinstance(mask, torch.Tensor)
         if mask is None or not mask.any():
             self._original_edge_index = None
             return
         from dagua.layout.cycle import make_acyclic
+        assert self._edge_index_tensor is not None
         self._original_edge_index = self._edge_index_tensor.clone()
         self._edge_index_tensor = make_acyclic(self._edge_index_tensor, mask)
 
@@ -678,8 +686,9 @@ class DaguaGraph:
 
     def cluster_depth(self, name: str) -> int:
         """Walk parent chain, return number of hops (0 = root-level cluster)."""
-        d, cur = 0, name
-        while self.cluster_parents.get(cur) is not None:
+        d = 0
+        cur: Optional[str] = name
+        while cur is not None and self.cluster_parents.get(cur) is not None:
             cur = self.cluster_parents[cur]
             d += 1
         return d

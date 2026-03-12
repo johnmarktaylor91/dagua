@@ -24,7 +24,7 @@ Cross-cutting:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Union
 
 import torch
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
@@ -221,7 +221,7 @@ def _layout_inner(
         )
 
     # Pre-compute layer structure (used by repulsion, overlap, projection, crossing)
-    layer_assignments_raw = None  # List[int] or torch.Tensor — avoid forced conversion
+    layer_assignments_raw: Optional[Union[List[int], torch.Tensor]] = None
     layer_index: Optional[LayerIndex] = None
     if layer_assignments is not None:
         # Use pre-computed assignments (from multilevel V-cycle)
@@ -287,18 +287,25 @@ def _layout_inner(
     # batch_edges_ref is a mutable container so lambdas capture the reference
     batch_edges_ref: List[Optional[torch.Tensor]] = [None]
 
+    def _active_edges(p: torch.Tensor) -> torch.Tensor:
+        if batch_edges_ref[0] is not None and p.device == batch_edges_ref[0].device:
+            return batch_edges_ref[0]
+        if cpu_edge_index is not None:
+            return cpu_edge_index
+        return edge_index
+
     # Static loss functions — each returns (base_weight_key, loss_fn, is_heavy, is_annealed)
     # base_weight_key is a string to look up the annealed weight at each step
     loss_fns: List[tuple] = []
 
     if config.w_dag > 0:
         loss_fns.append(("w_dag", lambda p, ns, li: dag_ordering_loss(
-            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
+            p, _active_edges(p),
             ns, rank_sep), False, True))
 
     if config.w_attract > 0:
         loss_fns.append(("w_attract", lambda p, ns, li: edge_attraction_loss(
-            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
+            p, _active_edges(p),
             x_bias=config.w_attract_x_bias), False, False))
 
     if config.w_repel > 0:
@@ -343,7 +350,7 @@ def _layout_inner(
             if crossing_step_ref[0] % crossing_interval != 0:
                 return torch.tensor(0.0, device=p.device, requires_grad=True)
             return crossing_weight_scale * crossing_loss(
-                p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
+                p, _active_edges(p),
                 alpha=crossing_alpha_ref[0], layer_assignments=layer_assignments_raw,
                 max_pairs=500,
             )
@@ -351,11 +358,11 @@ def _layout_inner(
 
     if config.w_straightness > 0:
         loss_fns.append(("w_straightness", lambda p, ns, li: edge_straightness_loss(
-            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index), False, True))
+            p, _active_edges(p)), False, True))
 
     if config.w_length_variance > 0:
         loss_fns.append(("w_length_variance", lambda p, ns, li: edge_length_variance_loss(
-            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index), False, False))
+            p, _active_edges(p)), False, False))
 
     if config.w_spacing > 0 and layer_index is not None:
         loss_fns.append(("w_spacing", lambda p, ns, li: spacing_consistency_loss(
@@ -364,12 +371,12 @@ def _layout_inner(
 
     if config.w_fanout > 0:
         loss_fns.append(("w_fanout", lambda p, ns, li: fanout_distribution_loss(
-            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
+            p, _active_edges(p),
         ), False, False))
 
     if config.w_back_edge > 0:
         loss_fns.append(("w_back_edge", lambda p, ns, li: back_edge_compactness_loss(
-            p, batch_edges_ref[0] if p.device == batch_edges_ref[0].device else cpu_edge_index,
+            p, _active_edges(p),
         ), False, False))
 
     # --- Flex constraints: pins, alignment, flex spacing ---
@@ -809,6 +816,7 @@ def _hybrid_loss(
 
     cpu_loss.backward()
     cpu_grad = pos_cpu.grad  # [N, 2] on CPU
+    assert cpu_grad is not None
 
     # Bridge: return a GPU scalar whose backward() injects the CPU gradient
     return _GradBridge.apply(pos_gpu, cpu_grad.to(pos_gpu.device), cpu_loss.item())
@@ -933,8 +941,8 @@ def _prepare_flex_data(
             wy = fy.weight if fy is not None else 0.0
             has_x = fx is not None
             has_y = fy is not None
-            hard_x = has_x and fx.is_hard
-            hard_y = has_y and fy.is_hard
+            hard_x = bool(has_x and fx is not None and fx.is_hard)
+            hard_y = bool(has_y and fy is not None and fy.is_hard)
             soft_x = has_x and not hard_x
             soft_y = has_y and not hard_y
 
