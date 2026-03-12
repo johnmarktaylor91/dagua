@@ -65,6 +65,19 @@ def _resolve_benchmark_positions(
     return torch.load((latest_link / rel_path).resolve())
 
 
+def _suite_root(output_dir: str, suite: str) -> Path:
+    return Path(output_dir) / "benchmark_db" / suite
+
+
+def _load_run_payload(output_dir: str, suite: str, run_id: Optional[str]) -> dict:
+    suite_root = _suite_root(output_dir, suite)
+    run_dir = suite_root / (run_id or "latest")
+    results_path = run_dir / "results.json"
+    if not results_path.exists():
+        raise FileNotFoundError(f"No benchmark results found at {results_path}")
+    return json.loads(results_path.read_text(encoding="utf-8"))
+
+
 def _load_graph_and_positions(args: argparse.Namespace):
     if getattr(args, "benchmark_graph", None):
         graph = _lookup_benchmark_graph(args.benchmark_graph)
@@ -133,6 +146,43 @@ def _run_benchmark_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_benchmark_list(args: argparse.Namespace) -> int:
+    suite_root = _suite_root(args.output_dir, args.suite)
+    runs = []
+    if suite_root.exists():
+        for path in sorted((p for p in suite_root.iterdir() if p.is_dir() and p.name != "latest"), key=lambda p: p.name):
+            payload_path = path / "results.json"
+            partial_path = path / "results.partial.json"
+            state = "missing"
+            graph_count = 0
+            if payload_path.exists():
+                payload = json.loads(payload_path.read_text(encoding="utf-8"))
+                graph_count = len(payload.get("graphs", {}))
+                state = "complete"
+            elif partial_path.exists():
+                payload = json.loads(partial_path.read_text(encoding="utf-8"))
+                graph_count = len(payload.get("graphs", {}))
+                state = "partial"
+            runs.append({"run_id": path.name, "state": state, "graphs": graph_count})
+    print(json.dumps({"suite": args.suite, "runs": runs}, indent=2))
+    return 0
+
+
+def _run_benchmark_show(args: argparse.Namespace) -> int:
+    payload = _load_run_payload(args.output_dir, args.suite, args.run_id)
+    graph_payload = payload["graphs"][args.graph]
+    if args.competitor:
+        graph_payload = {
+            "graph": args.graph,
+            "competitor": args.competitor,
+            "result": graph_payload["competitors"][args.competitor],
+        }
+    else:
+        graph_payload = {"graph": args.graph, **graph_payload}
+    print(json.dumps(graph_payload, indent=2))
+    return 0
+
+
 def _run_benchmark_watch(args: argparse.Namespace) -> int:
     remaining = args.iterations
     while True:
@@ -168,6 +218,19 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--output-dir", default="eval_output")
     status_parser.add_argument("--suite", choices=["standard", "rare"], default="standard")
     status_parser.set_defaults(func=_run_benchmark_status)
+
+    list_parser = subparsers.add_parser("benchmark-list", help="List stored benchmark runs")
+    list_parser.add_argument("--output-dir", default="eval_output")
+    list_parser.add_argument("--suite", choices=["standard", "rare"], default="standard")
+    list_parser.set_defaults(func=_run_benchmark_list)
+
+    show_parser = subparsers.add_parser("benchmark-show", help="Show stored results for one graph")
+    show_parser.add_argument("graph")
+    show_parser.add_argument("--output-dir", default="eval_output")
+    show_parser.add_argument("--suite", choices=["standard", "rare"], default="standard")
+    show_parser.add_argument("--run-id", default=None, help="Specific run id; defaults to latest")
+    show_parser.add_argument("--competitor", default=None, help="Optional competitor to narrow the output")
+    show_parser.set_defaults(func=_run_benchmark_show)
 
     watch_parser = subparsers.add_parser("benchmark-watch", help="Poll benchmark status repeatedly")
     watch_parser.add_argument("--output-dir", default="eval_output")
