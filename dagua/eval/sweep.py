@@ -74,6 +74,7 @@ def focused_sweep(
             for tg in graphs:
                 try:
                     tg.graph.compute_node_sizes()
+                    assert tg.graph.node_sizes is not None
                     pos = layout(tg.graph, config)
                     metrics = compute_all_metrics(
                         pos, tg.graph.edge_index, tg.graph.node_sizes
@@ -135,6 +136,7 @@ def interaction_sweep(
                 for tg in graphs:
                     try:
                         tg.graph.compute_node_sizes()
+                        assert tg.graph.node_sizes is not None
                         pos = layout(tg.graph, config)
                         metrics = compute_all_metrics(
                             pos, tg.graph.edge_index, tg.graph.node_sizes
@@ -202,7 +204,7 @@ def print_sweep_summary(results: List[SweepResult]):
             by_value[r.param_value].append(r.quality)
 
         avg_quality = {v: sum(qs) / len(qs) for v, qs in by_value.items()}
-        best_val = max(avg_quality, key=avg_quality.get)
-        worst_val = min(avg_quality, key=avg_quality.get)
+        best_val = max(avg_quality, key=lambda value: avg_quality[value])
+        worst_val = min(avg_quality, key=lambda value: avg_quality[value])
 
         print(f"{param:<25} | {str(best_val):>12} | {avg_quality[best_val]:>10.1f} | {str(worst_val):>12} | {avg_quality[worst_val]:>10.1f}")

@@ -25,6 +25,16 @@ For visual iteration:
 - `eval_output/visual_review_session/`
 - `docs/VISUAL_RESET_BRIEF.md`
 
+For placement iteration:
+- `docs/BENCHMARK_ARTIFACT_GUIDE.md`
+- `eval_output/report/placement_summary.md`
+- `eval_output/report/layout_similarity.md`
+
+For scale work:
+- `docs/OPEN_ISSUES.md`
+- `scripts/bench_large.py`
+- `/tmp/dagua-bench-1b.log`
+
 ## Handy Commands
 
 ```bash
@@ -60,3 +70,5 @@ Large generated outputs should usually live under:
 - Standard suite is persistent and resumable.
 - Rare suite is manual and should not be rerun casually.
 - Reuse cached non-Dagua competitors whenever possible during iteration.
+- Treat the latest completed standard run as the active placement baseline unless
+  a newer frozen baseline is explicitly designated.
