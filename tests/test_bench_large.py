@@ -70,3 +70,18 @@ def test_graph_checkpoint_rejects_mismatched_shape(tmp_path: Path):
     torch.save(torch.zeros((n, 2), dtype=torch.float16), paths["node_sizes"])
 
     assert bench_large._load_graph_checkpoint(paths, n, layers) is None
+
+
+def test_layer_checkpoint_round_trip(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    n, layers, _width = bench_large.resolve_size_and_layers("120", 12)
+    layer_assignments = torch.arange(n, dtype=torch.long) % layers
+
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": n, "layers": layers})
+    torch.save(layer_assignments, paths["layer_assignments"])
+
+    restored = bench_large._load_layer_checkpoint(paths, n, layers)
+
+    assert restored is not None
+    assert torch.equal(restored, layer_assignments)

@@ -11,9 +11,11 @@ Usage:
 """
 
 import argparse
+import faulthandler
 import gc
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -56,6 +58,7 @@ def _checkpoint_paths(root: Path) -> dict[str, Path]:
         "meta": root / "meta.json",
         "edge_index": root / "edge_index.pt",
         "node_sizes": root / "node_sizes.pt",
+        "layer_assignments": root / "layer_assignments.pt",
         "positions": root / "positions.pt",
     }
 
@@ -74,6 +77,15 @@ def _load_graph_checkpoint(paths: dict[str, Path], n: int, layers: int) -> tuple
     edge_index = torch.load(paths["edge_index"])
     node_sizes = torch.load(paths["node_sizes"])
     return edge_index, node_sizes
+
+
+def _load_layer_checkpoint(paths: dict[str, Path], n: int, layers: int) -> torch.Tensor | None:
+    if not paths["meta"].exists() or not paths["layer_assignments"].exists():
+        return None
+    meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
+    if meta.get("n") != n or meta.get("layers") != layers:
+        return None
+    return torch.load(paths["layer_assignments"])
 
 
 def parse_node_count(s: str) -> int:
@@ -195,6 +207,9 @@ def _build_edges_chunked(n: int, w: int, e_backbone: int) -> torch.Tensor:
 
 
 def main():
+    faulthandler.enable(all_threads=True)
+    sys.stderr.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description="Large-scale layout benchmark")
     parser.add_argument(
         "size",
@@ -261,11 +276,23 @@ def main():
         )
         print(f"Saved graph checkpoint to {checkpoint_dir}", flush=True)
 
+    layer_assignments = _load_layer_checkpoint(checkpoint_paths, n, layers) if args.resume else None
+    if layer_assignments is not None:
+        print(f"Restored layering checkpoint from {checkpoint_paths['layer_assignments']}", flush=True)
+
     g = dagua.DaguaGraph()
     g.num_nodes = n
     g._edge_index_tensor = edge_index
     # Uniform synthetic nodes don't need float32 precision; keep this compact.
     g.node_sizes = node_sizes
+    if layer_assignments is not None:
+        g._precomputed_layer_assignments = layer_assignments
+    else:
+        def _save_layer_assignments(layer_tensor: torch.Tensor) -> None:
+            torch.save(layer_tensor, checkpoint_paths["layer_assignments"])
+            print(f"Saved layering checkpoint to {checkpoint_paths['layer_assignments']}", flush=True)
+
+        g._layer_assignments_callback = _save_layer_assignments
     mem("graph built")
 
     config = dagua.LayoutConfig(
