@@ -10,6 +10,11 @@ Keep it current. Keep it terse.
 - DAG consistency and overlap avoidance are already competitive; preserve those while improving crossings.
 - Confirm graph-by-graph where crossing losses are structural vs fixable without degrading spacing.
 - Keep expanding the challenge-graph corpus when new structural blind spots appear.
+- Add cluster-aware placement criteria to the numeric optimization loop:
+  - sibling cluster overlap
+  - parent/child containment margin
+  - cluster separation / cluster box pathology
+- Do not treat overlapping cluster boxes as a late styling problem; it starts in node placement.
 
 ## Scale
 
@@ -22,6 +27,7 @@ Keep it current. Keep it terse.
 - Full visual reset still pending.
 - Text hierarchy, edge language, and cluster treatment are currently the weak layer.
 - Use the visual-audit suite and competitor stepwise comparisons rather than ad hoc screenshots.
+- Add a distinct stage-2 numerical workflow for edge/text/cluster geometry before the final aesthetic narrowing pass.
 
 ## Benchmarking
 

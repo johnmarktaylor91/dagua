@@ -8,13 +8,35 @@ The point is to make the loop disciplined, repeatable, and emotionally sane.
 
 Separate:
 
-- placement quality
+- node placement quality
+- downstream geometry quality
 - visual language
 - scale robustness
 
 And be explicit about which loop you are in before changing code.
 
 Do not let a weak visual layer trick you into misreading a strong placement engine.
+
+## Optimization Stages
+
+The default optimization stack now has three explicit stages:
+
+1. **Node placement, numerically**
+   - optimize crossings, DAG consistency, overlap avoidance, spacing, and related
+     position-only metrics
+2. **Downstream geometry, numerically**
+   - optimize edge routing, edge-label placement, cluster geometry, text/edge/cluster
+     collisions, and other measurable downstream layout behaviors
+3. **Remaining aesthetic degrees of freedom**
+   - narrow typography, stroke, color, opacity, and information-density defaults by
+     human review
+
+Important:
+
+- stage 2 is not optional
+- clusters are not a purely downstream styling problem
+- node placement must already be cluster-aware enough that cluster geometry is
+  even solvable downstream
 
 ## Default Loop
 
@@ -132,6 +154,9 @@ Current known placement conclusion:
 - Dagua is already competitive on DAG consistency and overlap avoidance.
 - The clearest placement gap is still edge crossings against the strongest hierarchical competitors.
 - Crossing work should preserve the current wins on DAG order and overlap rather than trading them away casually.
+- Cluster-aware placement also matters here: if cluster boxes overlap badly, that is
+  evidence that the node-placement objective is underweighting cluster separation or
+  cluster compatibility upstream, not merely that cluster drawing is ugly.
 
 Default numerical iteration policy:
 
@@ -139,6 +164,15 @@ Default numerical iteration policy:
 2. inspect `placement_tuning.md` and `placement_tuning.json`
 3. promote only the candidates that still look sane in the visual session
 4. then rerun the standard benchmark with cached competitors
+
+Cluster-specific rule:
+
+- node placement metrics must eventually include cluster-aware criteria:
+  - sibling cluster overlap
+  - parent/child containment margin
+  - foreign-edge intrusion through cluster interiors
+  - cluster box aspect/pathology penalties
+- do not postpone all cluster quality work to the visual pass
 
 ## Visual-Reset Workflow
 
