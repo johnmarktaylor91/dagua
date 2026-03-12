@@ -231,6 +231,20 @@ def _make_layered_dag(n_per_layer: int, n_layers: int):
     return edge_index, N, node_sizes
 
 
+def _make_structural_coarsening_case():
+    """Small layered graph with two matched pairs and one hub in the same layer."""
+    edge_index = torch.tensor(
+        [
+            [0, 0, 1, 1, 0, 1, 2, 3, 4, 5, 8, 8, 2],
+            [6, 7, 6, 7, 8, 8, 8, 8, 8, 8, 10, 11, 9],
+        ],
+        dtype=torch.long,
+    )
+    node_sizes = torch.ones(12, 2) * 10.0
+    layers = torch.tensor([0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2], dtype=torch.long)
+    return edge_index, 12, node_sizes, layers
+
+
 @pytest.mark.smoke
 class TestStreamingCoarsenMatchesVectorized:
     """Streaming coarsening produces structurally equivalent results.
@@ -240,8 +254,8 @@ class TestStreamingCoarsenMatchesVectorized:
     valid coarsenings — we check structural invariants rather than exact equality.
     """
 
-    def test_same_coarse_count(self):
-        """Both paths produce the same number of coarse nodes."""
+    def test_both_paths_reduce_graph(self):
+        """Both paths should materially reduce the graph size."""
         edge_index, N, node_sizes = _make_layered_dag(100, 5)
         layers = longest_path_layering(edge_index, N)
         if isinstance(layers, list):
@@ -256,7 +270,10 @@ class TestStreamingCoarsenMatchesVectorized:
         finally:
             _multilevel_mod._STREAMING_THRESHOLD = old_threshold
 
-        assert result_vec.num_nodes == result_stream.num_nodes
+        assert result_vec.num_nodes < N
+        assert result_stream.num_nodes < N
+        assert result_vec.num_nodes <= int(N * 0.8)
+        assert result_stream.num_nodes <= int(N * 0.5)
 
     def test_layer_awareness_preserved(self):
         """Streaming path never merges nodes from different layers."""
@@ -355,6 +372,26 @@ class TestStreamingCoarsenMatchesVectorized:
 
         assert result.node_sizes.dtype == torch.float16
         assert result.node_sizes.shape == (result.num_nodes, 2)
+
+
+@pytest.mark.smoke
+class TestAdaptiveVectorizedCoarsening:
+    """Vectorized coarsening uses structural signals without touching streaming path."""
+
+    def test_structurally_similar_pairs_merge_together(self):
+        edge_index, N, node_sizes, layers = _make_structural_coarsening_case()
+        result = coarsen_once(edge_index, N, node_sizes, layers)
+
+        fine_to_coarse = result.fine_to_coarse.tolist()
+        assert fine_to_coarse[6] == fine_to_coarse[7]
+
+    def test_hub_node_can_stay_singleton(self):
+        edge_index, N, node_sizes, layers = _make_structural_coarsening_case()
+        result = coarsen_once(edge_index, N, node_sizes, layers)
+
+        coarse_id = result.fine_to_coarse[8].item()
+        group_size = (result.fine_to_coarse == coarse_id).sum().item()
+        assert group_size == 1
 
 
 @pytest.mark.smoke

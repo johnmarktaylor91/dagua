@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 
 from dagua.config import LayoutConfig
@@ -193,50 +194,129 @@ def coarsen_once(
             layer_counts, layer_offsets, device,
         )
 
-    # Build adjacency for matching priority: sort by minimum neighbor index
-    # so nodes sharing a low-index neighbor become consecutive → grouped into
-    # the same coarse node → shared edges collapse during deduplication.
+    # Build adjacency features used for smarter within-layer ordering.
+    # We keep the streaming 1B+ path unchanged and only spend extra work here,
+    # where the goal is better coarsening quality for wide and skip-heavy graphs.
     min_neighbor = torch.full((N,), N, dtype=torch.long, device=device)
+    min_parent = torch.full((N,), N, dtype=torch.long, device=device)
+    min_child = torch.full((N,), N, dtype=torch.long, device=device)
+    in_degree = torch.zeros(N, dtype=torch.long, device=device)
+    out_degree = torch.zeros(N, dtype=torch.long, device=device)
+    mean_span = torch.zeros(N, dtype=torch.float32, device=device)
     if edge_index.numel() > 0:
         src, tgt = edge_index[0], edge_index[1]
         min_neighbor.scatter_reduce_(0, src, tgt, reduce="amin")
         min_neighbor.scatter_reduce_(0, tgt, src, reduce="amin")
+        min_parent.scatter_reduce_(0, tgt, src, reduce="amin")
+        min_child.scatter_reduce_(0, src, tgt, reduce="amin")
+        one_src = torch.ones_like(src)
+        one_tgt = torch.ones_like(tgt)
+        out_degree.scatter_add_(0, src, one_src)
+        in_degree.scatter_add_(0, tgt, one_tgt)
+        span = (layers[tgt] - layers[src]).abs().to(torch.float32)
+        mean_span.scatter_add_(0, src, span)
+        mean_span.scatter_add_(0, tgt, span)
+        mean_span = mean_span / (in_degree + out_degree).clamp_min(1).to(torch.float32)
 
-    # Composite sort key: (layer, min_neighbor) — int64, layer dominates
-    sort_key = layers * N + min_neighbor
-    global_order = sort_key.argsort()
+    # Smart within-layer ordering:
+    # - similar parent/child signatures stay adjacent
+    # - hubs can be kept isolated
+    # - grouping adapts to local compatibility instead of blindly taking triples
+    fine_to_coarse = torch.empty(N, dtype=torch.long, device=device)
+    total_degree = in_degree + out_degree
+    coarse_counts: List[int] = []
 
-    # Within each layer group in global_order, consecutive pairs get same coarse ID.
-    # Compute within-layer position for each node in sorted order.
-    sorted_layers = layers[global_order]  # [N]
+    min_neighbor_np = min_neighbor.cpu().numpy()
+    min_parent_np = min_parent.cpu().numpy()
+    min_child_np = min_child.cpu().numpy()
+    total_degree_np = total_degree.cpu().numpy()
+    mean_span_np = mean_span.cpu().numpy()
+    global_order = layers.argsort(stable=True)
 
-    # Within-layer index: 0, 1, 2, ... for each layer
-    # Use cumsum trick: positions within layer = global_position - layer_start
-    # We can compute this from the sorted layer assignments
-    layer_of_sorted = sorted_layers
-    layer_start_of_sorted = layer_offsets[layer_of_sorted]  # [N]
-    global_pos = torch.arange(N, dtype=torch.long, device=device)
-    within_layer_pos = global_pos - layer_start_of_sorted  # [N]
+    coarse_base = 0
+    for layer_idx in range(num_layers):
+        start = int(layer_offsets[layer_idx].item())
+        end = int(layer_offsets[layer_idx + 1].item())
+        n_layer = end - start
+        if n_layer == 0:
+            coarse_counts.append(0)
+            continue
 
-    # Pair index within layer: pos // 3 gives pair number (merge triples for
-    # ~67% reduction per level instead of 50%, halving hierarchy depth)
-    pair_within_layer = within_layer_pos // 3  # [N]
+        layer_nodes = global_order[start:end]
+        layer_nodes_np = layer_nodes.cpu().numpy()
+        layer_degree = total_degree_np[layer_nodes_np]
+        hub_threshold = max(8, int(np.ceil(np.percentile(layer_degree, 90))))
 
-    # Coarse ID = cumulative pairs up to this layer + pair_within_layer
-    # Number of coarse nodes per layer: ceil(layer_count / 3)
-    coarse_per_layer = (layer_counts + 2) // 3  # [L]
+        order = np.lexsort(
+            (
+                np.rint(mean_span_np[layer_nodes_np]).astype(np.int64),
+                np.clip(total_degree_np[layer_nodes_np], 0, 31),
+                min_child_np[layer_nodes_np],
+                min_parent_np[layer_nodes_np],
+                min_neighbor_np[layer_nodes_np],
+            )
+        )
+        ordered_nodes = layer_nodes[torch.from_numpy(order).to(layer_nodes.device)]
+        ordered_nodes_np = ordered_nodes.cpu().numpy()
+
+        local_group_ids: List[int] = []
+        local_group = 0
+        i = 0
+        while i < n_layer:
+            current = int(ordered_nodes_np[i])
+            current_degree = int(total_degree_np[current])
+            if current_degree >= hub_threshold:
+                local_group_ids.append(local_group)
+                local_group += 1
+                i += 1
+                continue
+
+            group_size = 1
+            if i + 1 < n_layer:
+                nxt = int(ordered_nodes_np[i + 1])
+                if total_degree_np[nxt] < hub_threshold:
+                    shares_structure = (
+                        min_neighbor_np[current] == min_neighbor_np[nxt]
+                        or min_parent_np[current] == min_parent_np[nxt]
+                        or min_child_np[current] == min_child_np[nxt]
+                    )
+                    similar_shape = (
+                        abs(total_degree_np[current] - total_degree_np[nxt]) <= 1
+                        and abs(mean_span_np[current] - mean_span_np[nxt]) <= 1.0
+                    )
+                    if shares_structure or similar_shape:
+                        group_size = 2
+                        if i + 2 < n_layer:
+                            nxt2 = int(ordered_nodes_np[i + 2])
+                            if total_degree_np[nxt2] < hub_threshold:
+                                third_matches = (
+                                    min_parent_np[nxt] == min_parent_np[nxt2]
+                                    or min_child_np[nxt] == min_child_np[nxt2]
+                                    or min_neighbor_np[nxt] == min_neighbor_np[nxt2]
+                                )
+                                third_shape = (
+                                    abs(total_degree_np[nxt] - total_degree_np[nxt2]) <= 1
+                                    and abs(mean_span_np[nxt] - mean_span_np[nxt2]) <= 1.0
+                                )
+                                if third_matches or third_shape:
+                                    group_size = 3
+
+            local_group_ids.extend([local_group] * group_size)
+            local_group += 1
+            i += group_size
+
+        fine_to_coarse[ordered_nodes] = torch.tensor(
+            local_group_ids,
+            dtype=torch.long,
+            device=device,
+        ) + coarse_base
+        coarse_counts.append(local_group)
+        coarse_base += local_group
+
+    coarse_per_layer = torch.tensor(coarse_counts, dtype=torch.long, device=device)
     coarse_offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=device)
     coarse_offsets[1:] = coarse_per_layer.cumsum(0)
-
-    # Each node's coarse ID
-    coarse_base = coarse_offsets[layer_of_sorted]  # [N]
-    coarse_ids_sorted = coarse_base + pair_within_layer  # [N]
-
-    # Map back to original node order
-    fine_to_coarse = torch.empty(N, dtype=torch.long, device=device)
-    fine_to_coarse[global_order] = coarse_ids_sorted
-
-    N_coarse = coarse_offsets[-1].item()
+    N_coarse = coarse_base
 
     # Build coarse node sizes (max of merged pair for each dimension)
     coarse_sizes = torch.zeros(N_coarse, 2, dtype=node_sizes.dtype, device=device)
