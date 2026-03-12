@@ -30,6 +30,7 @@ from dagua.eval.report import (
     generate_placement_summary_artifacts,
     generate_report,
 )
+from dagua.eval.sweep import run_placement_tuning
 from dagua.eval.visual_audit import build_visual_audit_suite, freeze_visual_audit_baseline
 from dagua.eval.visual_audit import build_visual_review_session
 from dagua.io import load
@@ -373,6 +374,34 @@ def _run_placement_sprint(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_placement_tune(args: argparse.Namespace) -> int:
+    """Run the staged placement-only brute-force tuning workflow."""
+    result = run_placement_tuning(
+        output_dir=args.output_dir,
+        base_config=LayoutConfig(
+            device=args.device,
+            steps=args.steps,
+            edge_opt_steps=-1,
+            seed=args.seed,
+        ),
+    )
+    print(
+        json.dumps(
+            {
+                "output_dir": args.output_dir,
+                "search_suite_graphs": result.search_suite_graphs,
+                "validation_suite_graphs": result.validation_suite_graphs,
+                "baseline_score": result.baseline.score,
+                "best_score": result.best.score,
+                "best_params": result.best.tuned_value,
+                "pareto_count": len(result.pareto_frontier),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def _run_visual_audit_build(args: argparse.Namespace) -> int:
     """Build the full or partial visual-audit suite."""
     result = build_visual_audit_suite(
@@ -490,6 +519,13 @@ def build_parser() -> argparse.ArgumentParser:
     sprint_parser.add_argument("--freeze-label", default=None, help="Optional standard benchmark baseline label to freeze")
     sprint_parser.add_argument("--overwrite", action="store_true")
     sprint_parser.set_defaults(func=_run_placement_sprint)
+
+    tune_parser = subparsers.add_parser("placement-tune", help="Run staged brute-force tuning for placement metrics")
+    tune_parser.add_argument("--output-dir", default="eval_output/report")
+    tune_parser.add_argument("--steps", type=int, default=60)
+    tune_parser.add_argument("--seed", type=int, default=42)
+    tune_parser.add_argument("--device", default="cpu")
+    tune_parser.set_defaults(func=_run_placement_tune)
 
     audit_parser = subparsers.add_parser("visual-audit-build", help="Build the visual iteration / audit suite")
     audit_parser.add_argument("--output-dir", default="eval_output/visual_audit")

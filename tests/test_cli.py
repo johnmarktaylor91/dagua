@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import pytest
+from dagua.eval.sweep import PlacementCandidate, PlacementTuningResult
 
 from dagua import DaguaGraph
 from dagua.cli import main
+from dagua.config import LayoutConfig
 
 
 @pytest.mark.smoke
@@ -258,6 +260,38 @@ def test_placement_sprint_cli_writes_artifacts(tmp_path, capsys):
     assert '"placement_dashboard_md"' in captured.out
     assert (output_dir / "report" / "placement_dashboard.json").exists()
     assert (output_dir / "report" / "placement_dashboard.md").exists()
+
+
+@pytest.mark.smoke
+def test_placement_tune_cli_prints_summary(tmp_path, capsys, monkeypatch):
+    candidate = PlacementCandidate(
+        config=LayoutConfig(),
+        score=98.0,
+        mean_runtime_seconds=1.2,
+        aggregate_metrics={"search_dag_consistency": 1.0, "validation_dag_consistency": 1.0},
+        per_graph_metrics={"g": {"dag_consistency": 1.0}},
+        stage="spacing_core",
+        tuned_param="node_sep+rank_sep",
+        tuned_value={"node_sep": 28.0, "rank_sep": 50.0},
+    )
+    result = PlacementTuningResult(
+        search_suite_graphs=["g_small"],
+        validation_suite_graphs=["g_large"],
+        baseline=candidate,
+        best=candidate,
+        pareto_frontier=[candidate],
+        all_candidates=[candidate],
+        stages=[],
+    )
+
+    monkeypatch.setattr("dagua.cli.run_placement_tuning", lambda **_: result)
+
+    rc = main(["placement-tune", "--output-dir", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert '"best_score": 98.0' in captured.out
+    assert '"validation_suite_graphs": [' in captured.out
 
 
 @pytest.mark.smoke
