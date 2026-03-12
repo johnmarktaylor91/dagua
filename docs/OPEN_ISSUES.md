@@ -14,6 +14,10 @@ Keep it current. Keep it terse.
   - sibling cluster overlap
   - parent/child containment margin
   - cluster separation / cluster box pathology
+- Add hierarchical cluster-mediated interactions:
+  - same-level direct interactions
+  - cross-level interactions mediated by cluster envelopes
+  - reduce outside-node vs inside-node all-pairs pressure where cluster geometry can stand in
 - Do not treat overlapping cluster boxes as a late styling problem; it starts in node placement.
 
 ## Scale

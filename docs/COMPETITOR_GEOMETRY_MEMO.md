@@ -121,6 +121,10 @@ pipeline can reason about them more continuously than classic engines do.
 - cluster-overlap penalty at the box level, not just node level
 - cluster interleaving penalty
   - discourage nodes from sibling clusters weaving through one another
+- hierarchical interaction reduction
+  - same-level elements interact directly
+  - cross-level interactions are mediated by cluster envelopes where possible
+  - use clusters as optimization objects, not only as painted boxes
 - backbone readability penalty
   - preserve a strong main flow when one exists
 - skip-edge span readability
@@ -165,6 +169,7 @@ At minimum, the next pass should track:
 - node overlaps
 - cluster sibling overlap
 - parent / child containment margin
+- cluster-mediated outside / inside separation quality
 - edge-label collision count
 - edge-node clearance
 - cluster-edge intrusion count
