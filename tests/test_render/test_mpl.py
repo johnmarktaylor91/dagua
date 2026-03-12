@@ -42,6 +42,24 @@ class TestRenderBasic:
         assert Path(out).exists()
 
     @pytest.mark.slow
+    def test_save_jpeg(self, simple_chain, fast_config, tmp_path):
+        pytest.importorskip("PIL")
+        pos = layout(simple_chain, fast_config)
+        out = str(tmp_path / "test.jpg")
+        render(simple_chain, pos, output=out)
+        assert Path(out).exists()
+        assert Path(out).stat().st_size > 0
+
+    @pytest.mark.slow
+    def test_format_override_uses_requested_format(self, simple_chain, fast_config, tmp_path):
+        pos = layout(simple_chain, fast_config)
+        out = str(tmp_path / "forced.bin")
+        render(simple_chain, pos, output=out, format="png")
+        assert Path(out).exists()
+        with open(out, "rb") as f:
+            assert f.read(8) == b"\x89PNG\r\n\x1a\n"
+
+    @pytest.mark.slow
     def test_custom_figsize(self, simple_chain, fast_config):
         pos = layout(simple_chain, fast_config)
         fig, ax = render(simple_chain, pos, figsize=(10, 8))

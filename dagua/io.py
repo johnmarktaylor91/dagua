@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import io
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,29 @@ from dagua.styles import (
     ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
     DEFAULT_THEME_OBJ,
 )
+
+
+_DIRECT_IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+_PIL_COMPAT_IMAGE_EXTENSIONS = {
+    ".bmp",
+    ".dib",
+    ".gif",
+    ".jfif",
+    ".jpe",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
 
 
 # ─── Style dict converters ────────────────────────────────────────────────
@@ -1152,20 +1176,8 @@ def _send_image_to_llm(
     model: Optional[str] = None,
 ) -> str:
     """Send an image + prompt to an LLM and return the text response."""
-    # Read and base64-encode the image
-    with open(image_path, "rb") as f:
-        image_data = base64.b64encode(f.read()).decode("utf-8")
-
-    # Detect media type from extension
-    ext = Path(image_path).suffix.lower()
-    media_types = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-    }
-    media_type = media_types.get(ext, "image/png")
+    image_bytes, media_type = _prepare_image_for_llm(image_path)
+    image_data = base64.b64encode(image_bytes).decode("utf-8")
 
     if provider == "anthropic":
         model = model or "claude-sonnet-4-20250514"
@@ -1210,6 +1222,39 @@ def _send_image_to_llm(
         return response.choices[0].message.content
 
     raise ValueError(f"Unknown provider: {provider!r}")
+
+
+def _prepare_image_for_llm(image_path: Union[str, Path]) -> Tuple[bytes, str]:
+    """Return image bytes and a provider-safe media type.
+
+    Common web-native formats are passed through directly. Other common raster
+    formats are converted to PNG via Pillow so image-to-graph works across the
+    usual desktop export formats without surfacing backend-specific surprises.
+    """
+    path = Path(image_path)
+    ext = path.suffix.lower()
+    if ext in _DIRECT_IMAGE_MEDIA_TYPES:
+        with open(path, "rb") as f:
+            return f.read(), _DIRECT_IMAGE_MEDIA_TYPES[ext]
+
+    if ext not in _PIL_COMPAT_IMAGE_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported image format: {ext or '<none>'}. "
+            "Supported input formats include PNG, JPEG, GIF, WebP, BMP, and TIFF."
+        )
+
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ImportError(
+            "Pillow is required to load and normalize BMP/TIFF and other non-web-native image formats."
+        ) from exc
+
+    with Image.open(path) as img:
+        normalized = img.convert("RGBA")
+        buf = io.BytesIO()
+        normalized.save(buf, format="PNG")
+        return buf.getvalue(), "image/png"
 
 
 def _extract_json_from_response(text: str) -> Dict[str, Any]:

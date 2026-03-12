@@ -10,6 +10,8 @@ Publication-quality rendering following the Dagua Aesthetic Style Guide:
 
 from __future__ import annotations
 
+import io
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -28,11 +30,73 @@ from dagua.styles import (
 from dagua.utils import collect_cluster_leaves
 
 
+_VECTOR_FORMATS = {"pdf", "ps", "eps", "svg", "svgz"}
+_RASTER_FORMATS = {"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"}
+
+
+def _detect_output_format(output: Optional[str], format: Optional[str]) -> Optional[str]:
+    if format is not None:
+        return format.lower().lstrip(".")
+    if output is None:
+        return None
+    suffix = Path(output).suffix.lower().lstrip(".")
+    return suffix or "png"
+
+
+def _save_figure(fig, output: str, bg: str, dpi: int, format: Optional[str] = None) -> None:
+    """Save figures with consistent defaults across raster formats."""
+    fmt = _detect_output_format(output, format)
+    if fmt is None:
+        fmt = "png"
+
+    common = {
+        "bbox_inches": "tight",
+        "pad_inches": 0.05,
+        "facecolor": bg,
+        "edgecolor": bg,
+        "transparent": False,
+    }
+
+    if fmt in _VECTOR_FORMATS:
+        fig.savefig(output, format=fmt, **common)
+        return
+
+    if fmt not in _RASTER_FORMATS:
+        raise ValueError(
+            f"Unsupported render output format: {fmt!r}. "
+            "Supported formats include PNG, JPEG, WebP, TIFF, BMP, SVG, and PDF."
+        )
+
+    try:
+        from PIL import Image
+    except ImportError:
+        fig.savefig(output, format=fmt, dpi=dpi, **common)
+        return
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, **common)
+    buf.seek(0)
+    with Image.open(buf) as img:
+        if fmt in {"jpg", "jpeg", "bmp"}:
+            img = img.convert("RGB")
+        save_kwargs = {}
+        if fmt in {"jpg", "jpeg"}:
+            save_kwargs.update(quality=95, optimize=True, progressive=False, subsampling=0)
+        elif fmt == "webp":
+            save_kwargs.update(quality=95, method=6)
+        elif fmt in {"png", "tif", "tiff"}:
+            save_kwargs.update(compress_level=6 if fmt == "png" else None)
+        clean_kwargs = {k: v for k, v in save_kwargs.items() if v is not None}
+        target_format = {"jpg": "JPEG", "jpeg": "JPEG", "tif": "TIFF"}.get(fmt, fmt.upper())
+        img.save(output, format=target_format, **clean_kwargs)
+
+
 def render(
     graph,
     positions,
     config=None,
     output: Optional[str] = None,
+    format: Optional[str] = None,
     figsize: Optional[Tuple[float, float]] = None,
     dpi: int = 150,
     show: bool = False,
@@ -46,7 +110,8 @@ def render(
         graph: DaguaGraph instance
         positions: [N, 2] tensor of node positions
         config: LayoutConfig (optional)
-        output: file path to save (PNG, SVG, PDF)
+        output: file path to save
+        format: explicit output format override. If None, inferred from output path.
         figsize: figure size in inches
         dpi: resolution for raster output
         show: whether to call plt.show()
@@ -78,7 +143,7 @@ def render(
         fig, ax = plt.subplots(1, 1, figsize=figsize or (6, 4))
         fig.patch.set_facecolor(bg)
         if output:
-            fig.savefig(output, dpi=dpi, bbox_inches="tight", facecolor=bg)
+            _save_figure(fig, output, bg, dpi=dpi, format=format)
         return fig, ax
 
     # Compute figure bounds
@@ -138,7 +203,7 @@ def render(
     plt.tight_layout()
 
     if output:
-        fig.savefig(output, dpi=dpi, bbox_inches="tight", facecolor=bg)
+        _save_figure(fig, output, bg, dpi=dpi, format=format)
 
     if show:
         plt.show()

@@ -15,6 +15,7 @@ from dagua.io import (
     _dict_to_node_style,
     _extract_json_from_response,
     _get_llm_client,
+    _prepare_image_for_llm,
     graph_from_image,
     graph_from_json,
     graph_from_yaml,
@@ -399,6 +400,27 @@ class TestGraphFromImage:
             finally:
                 if saved is not None:
                     sys.modules["anthropic"] = saved
+
+    def test_prepare_image_normalizes_tiff_to_png(self):
+        Image = pytest.importorskip("PIL.Image")
+        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+            path = f.name
+        try:
+            Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(path, format="TIFF")
+            image_bytes, media_type = _prepare_image_for_llm(path)
+            assert media_type == "image/png"
+            assert image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+        finally:
+            os.unlink(path)
+
+    def test_prepare_image_passes_through_png(self):
+        image_path = self._mock_image_path()
+        try:
+            image_bytes, media_type = _prepare_image_for_llm(image_path)
+            assert media_type == "image/png"
+            assert image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+        finally:
+            os.unlink(image_path)
 
 
 # ─── TestThemeFromImage (mock-based) ──────────────────────────────────────
