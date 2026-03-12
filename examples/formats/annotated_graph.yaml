@@ -1,0 +1,131 @@
+# Dagua annotated YAML example
+#
+# This file is intentionally verbose and heavily commented.
+# Use it as a reference for how to structure a graph spec.
+
+# Graph-level direction:
+# - TB = top-to-bottom
+# - BT = bottom-to-top
+# - LR = left-to-right
+# - RL = right-to-left
+direction: TB
+
+# Nodes are declared explicitly.
+# Every node needs an `id`.
+# `label`, `type`, and `style` are optional.
+nodes:
+  - id: input
+    label: "Incoming Request"
+    type: input
+    style:
+      # shape: rect, roundrect, ellipse, diamond, circle
+      shape: ellipse
+      base_color: "#56B4E9"
+
+  - id: router
+    label: "Router"
+
+  - id: search
+    label: "Search Tool"
+    style:
+      base_color: "#0072B2"
+
+  - id: reason
+    label: "Reasoning Core"
+
+  - id: safety
+    label: "Safety Review"
+    style:
+      base_color: "#E69F00"
+
+  - id: answer
+    label: "Final Answer"
+    type: output
+    style:
+      base_color: "#009E73"
+
+# Edges connect node ids.
+# `label`, `type`, and `style` are optional.
+edges:
+  - source: input
+    target: router
+    label: "intent"
+
+  - source: router
+    target: search
+    label: "tool call"
+    style:
+      routing: ortho
+
+  - source: router
+    target: reason
+    label: "context"
+    style:
+      routing: straight
+      curvature: 0.0
+
+  - source: search
+    target: reason
+    label: "retrieved docs"
+
+  - source: reason
+    target: safety
+    label: "draft"
+
+  - source: safety
+    target: answer
+    label: "approved"
+
+# Clusters visually group related nodes.
+# `members` can be:
+# - node ids
+# - integer node indices
+# - nested cluster dicts in more declarative workflows
+clusters:
+  - name: core_system
+    label: "Core System"
+    members: [router, search, reason, safety]
+    style:
+      fill: "#F5F5F0"
+      stroke: "#D4D4D4"
+      padding: 25.0
+
+# Optional graph-level defaults.
+# These participate in the style cascade for elements that do not override them.
+defaults:
+  node_style:
+    font_size: 9.0
+  edge_style:
+    width: 1.2
+
+# Optional theme block.
+# You can either reference a built-in theme by name elsewhere or inline one like this.
+theme:
+  name: "annotated-demo"
+  node_styles:
+    default:
+      base_color: "#56B4E9"
+    input:
+      base_color: "#009E73"
+    output:
+      base_color: "#D55E00"
+  edge_styles:
+    default:
+      color: "#6B7280"
+      routing: bezier
+  cluster_style:
+    fill: "#F5F5F0"
+    stroke: "#D4D4D4"
+  graph_style:
+    background_color: "#FAFAFA"
+
+# Optional flex section for pins, spacing preferences, and alignments.
+flex:
+  pins:
+    input:
+      x: 0.0
+      y: 0.0
+      weight: .inf
+  align_y:
+    - nodes: [search, reason, safety]
+      weight: 5.0

@@ -659,6 +659,13 @@ edges:
         finally:
             os.unlink(path)
 
+    def test_annotated_yaml_example_file(self):
+        path = "/home/jtaylor/projects/dagua/examples/formats/annotated_graph.yaml"
+        g = load(path)
+        assert g.num_nodes == 6
+        assert "core_system" in g.clusters
+        assert g.direction == "TB"
+
     def test_yaml_with_styles(self):
         yaml_str = """
 nodes:
@@ -810,6 +817,13 @@ class TestUnifiedLoadSave:
             assert g.num_nodes == 2
         finally:
             os.unlink(path)
+
+    def test_annotated_json_example_file(self):
+        path = "/home/jtaylor/projects/dagua/examples/formats/annotated_graph.json"
+        g = load(path)
+        assert g.num_nodes == 6
+        assert "core_system" in g.clusters
+        assert g.direction == "TB"
 
     def test_load_yaml_file(self):
         data = {"nodes": [{"id": "a"}, {"id": "b"}]}
