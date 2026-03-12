@@ -460,7 +460,7 @@ def prolong_positions(
     return fine_pos
 
 
-def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
+def multilevel_layout(graph, config: LayoutConfig, trace=None) -> torch.Tensor:
     """Multilevel V-cycle layout for large graphs.
 
     1. Build coarsening hierarchy
@@ -521,8 +521,10 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
         # Graph is already small enough — use direct layout
         ei = cpu_ei.to(device)
         ns = cpu_ns.to(device)
+        if trace is not None and hasattr(trace, "mark_phase"):
+            trace.mark_phase("Direct Layout", f"{n:,} nodes")
         pos = _layout_inner(ei, n, ns, config, device=device,
-                            progress_context=ProgressContext())
+                            progress_context=ProgressContext(), trace=trace)
         from dagua.layout.engine import _apply_direction
         direction = config.direction if config else graph.direction
         return _apply_direction(pos, direction)
@@ -559,6 +561,9 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
     coarsest = levels[-1]
     _vlog(f"Phase 2/3: Coarsest level ({coarsest.num_nodes:,} nodes, {config.multilevel_coarse_steps} steps)")
     _reset_peak()
+    if trace is not None and hasattr(trace, "mark_phase"):
+        trace.mark_phase("Hierarchy Build", f"{len(levels)} levels")
+        trace.mark_phase("Coarsest Layout", f"{coarsest.num_nodes:,} supernodes")
 
     coarse_config = _make_config(
         steps=config.multilevel_coarse_steps,
@@ -675,6 +680,11 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
         del fine_pos  # pos holds the reference now
 
         refine_config = _make_config(steps=refine_steps, seed=None)
+        level_trace = None
+        if i == 0 and trace is not None:
+            level_trace = trace
+            if hasattr(trace, "mark_phase"):
+                trace.mark_phase("Final Refinement", f"{fine_n:,} nodes")
 
         pos = _layout_inner(
             fine_ei_cpu,  # edges on CPU — engine streams batches to GPU
@@ -684,6 +694,7 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
             init_pos=pos,
             layer_assignments=level.fine_layer_assignments,
             progress_context=ProgressContext(indent="    "),
+            trace=level_trace,
         )
 
         # Free this hierarchy level entirely — never revisited

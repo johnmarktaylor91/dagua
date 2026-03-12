@@ -82,6 +82,7 @@ def optimize_edges(
     node_sizes: torch.Tensor,
     config,
     graph: Optional[object] = None,
+    trace=None,
 ) -> List[BezierCurve]:
     """Optimize bezier control points via gradient descent.
 
@@ -152,6 +153,16 @@ def optimize_edges(
     T = 10
     t_samples = torch.linspace(0.0, 1.0, T).unsqueeze(0)  # [1, T]
 
+    if trace is not None and hasattr(trace, "capture_edge_controls"):
+        trace.capture_edge_controls(
+            phase="heuristic_routing",
+            step=0,
+            total_steps=max(steps, 1),
+            positions=positions.detach(),
+            endpoints=endpoints,
+            control_points=cp.detach(),
+        )
+
     for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
 
@@ -211,6 +222,16 @@ def optimize_edges(
                     cp[:, 0, :] = torch.where(mask, fallback_cp1, cp[:, 0, :])
                     mask = ~torch.isfinite(cp[:, 1, :])
                     cp[:, 1, :] = torch.where(mask, fallback_cp2, cp[:, 1, :])
+
+        if trace is not None and hasattr(trace, "capture_edge_controls"):
+            trace.capture_edge_controls(
+                phase="edge_optimization",
+                step=step + 1,
+                total_steps=steps,
+                positions=positions.detach(),
+                endpoints=endpoints,
+                control_points=cp.detach(),
+            )
 
     # Convert back to BezierCurve list (with final NaN safety check)
     cp_final = cp.detach()

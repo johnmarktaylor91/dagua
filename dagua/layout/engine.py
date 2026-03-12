@@ -61,7 +61,7 @@ class ProgressContext:
     indent: str = "  "
 
 
-def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
+def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Tensor:
     """Compute layout positions for all nodes.
 
     Args:
@@ -100,7 +100,7 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
         # Don't move data to GPU yet — multilevel manages device transfers lazily
         if n > config.multilevel_threshold:
             from dagua.layout.multilevel import multilevel_layout
-            return multilevel_layout(graph, config)
+            return multilevel_layout(graph, config, trace=trace)
 
         # Tier 0-2: Direct layout — move data to device
         edge_index = graph.edge_index.to(device)
@@ -125,6 +125,7 @@ def layout(graph, config: Optional[LayoutConfig] = None) -> torch.Tensor:
             clusters=graph.clusters if hasattr(graph, 'clusters') else None,
             cluster_parents=graph.cluster_parents if hasattr(graph, 'cluster_parents') else None,
             progress_context=ProgressContext(),
+            trace=trace,
         )
 
         # Apply direction transform
@@ -147,6 +148,7 @@ def _layout_inner(
     cluster_parents: Optional[dict] = None,
     layer_assignments: Optional[torch.Tensor] = None,
     progress_context: Optional[ProgressContext] = None,
+    trace=None,
 ) -> torch.Tensor:
     """Headless optimization loop — operates on raw tensors.
 
@@ -202,6 +204,14 @@ def _layout_inner(
             node_sep=node_sep,
             rank_sep=rank_sep,
             device=device,
+        )
+
+    if trace is not None and hasattr(trace, "capture_layout_positions"):
+        trace.capture_layout_positions(
+            phase="initialization",
+            step=0,
+            total_steps=max(config.steps, 1),
+            positions=pos.detach(),
         )
 
     # Pre-compute layer structure (used by repulsion, overlap, projection, crossing)
@@ -552,6 +562,14 @@ def _layout_inner(
                 layer_index=layer_index,
             )
 
+        if trace is not None and hasattr(trace, "capture_layout_positions"):
+            trace.capture_layout_positions(
+                phase="node_optimization",
+                step=step + 1,
+                total_steps=steps,
+                positions=pos.detach(),
+            )
+
         # Early stopping check (use unweighted loss — immune to annealing)
         # Small graphs converge faster — detect convergence sooner
         rel_threshold = 5e-4 if n <= 200 else 1e-4
@@ -588,6 +606,14 @@ def _layout_inner(
         layer_index=layer_index,
     )
     _vlog(f"projection done in {_time.perf_counter() - _t_proj:.1f}s")
+
+    if trace is not None and hasattr(trace, "capture_layout_positions"):
+        trace.capture_layout_positions(
+            phase="final_projection",
+            step=steps,
+            total_steps=steps,
+            positions=pos.detach(),
+        )
 
     if executor is not None:
         executor.shutdown(wait=False)
