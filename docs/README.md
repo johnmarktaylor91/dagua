@@ -9,6 +9,7 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 - Public agent guide: `docs/LLM_TUTORIAL.md`
 - Developer-facing codebase map: `docs/DEVELOPER_OVERVIEW.md`
 - Algorithm explainer: `docs/how_dagua_works.md`
+- Competitor geometry memo: `docs/COMPETITOR_GEOMETRY_MEMO.md`
 
 ## Visuals
 
