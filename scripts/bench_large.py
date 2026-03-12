@@ -131,7 +131,15 @@ def _find_existing_run_pid(size: str) -> int | None:
         pid = int(pid_str)
         if pid == os.getpid():
             continue
-        if "python" not in cmd:
+        cmd = cmd.strip()
+        # Ignore wrapper shells such as `bash -c "... python ..."` and only
+        # treat real Python owners as canonical benchmark processes.
+        if not (
+            cmd.startswith("python ")
+            or cmd.startswith("python3 ")
+            or cmd.startswith("/usr/bin/python ")
+            or cmd.startswith("/usr/bin/python3 ")
+        ):
             continue
         if _pid_alive(pid):
             return pid

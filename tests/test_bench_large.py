@@ -131,3 +131,15 @@ def test_duplicate_run_guard_uses_process_scan_without_active_run(tmp_path: Path
 
     with pytest.raises(SystemExit, match="duplicate large benchmark run"):
         bench_large._guard_duplicate_run(paths, "1b", resume=True, force_duplicate_run=False)
+
+
+def test_find_existing_run_pid_ignores_shell_wrappers(monkeypatch):
+    fake_ps = (
+        "123 bash -c cd /repo && python -u scripts/bench_large.py 1b --device cuda --resume\n"
+        "456 python -u scripts/bench_large.py 1b --device cuda --resume\n"
+    )
+    monkeypatch.setattr(bench_large.subprocess, "check_output", lambda *args, **kwargs: fake_ps)
+    monkeypatch.setattr(bench_large, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(bench_large.os, "getpid", lambda: 999)
+
+    assert bench_large._find_existing_run_pid("1b") == 456
