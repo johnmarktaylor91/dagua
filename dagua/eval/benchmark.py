@@ -774,6 +774,45 @@ def merge_latest_results(output_dir: str = DEFAULT_OUTPUT_DIR) -> Dict[str, Any]
     return combined
 
 
+def benchmark_run_status(
+    output_dir: str = DEFAULT_OUTPUT_DIR,
+    suite: str = STANDARD_SUITE,
+) -> Dict[str, Any]:
+    """Return progress information for the latest complete or partial run."""
+    partial_payload, partial_metadata, partial_run_dir, partial_run_id = _load_resumable_payload_and_metadata(
+        output_dir, suite
+    )
+    latest_payload, latest_metadata, latest_run_dir = _load_latest_payload_and_metadata(output_dir, suite)
+
+    payload = partial_payload or latest_payload or {"graphs": {}}
+    metadata = partial_metadata or latest_metadata or {}
+    run_dir = partial_run_dir or latest_run_dir
+    run_id = partial_run_id or (payload.get("run_id") if payload else None)
+
+    total_graphs = len(metadata.get("graphs", [])) or len(payload.get("graphs", {}))
+    completed_graphs = 0
+    graph_status: Dict[str, str] = {}
+    for graph_name, graph_payload in payload.get("graphs", {}).items():
+        competitors = graph_payload.get("competitors", {})
+        statuses = [result.get("status", "UNKNOWN") for result in competitors.values()]
+        if statuses and all(status in {"OK", "FAILED", "SKIPPED"} for status in statuses):
+            completed_graphs += 1
+            graph_status[graph_name] = "complete"
+        else:
+            graph_status[graph_name] = "incomplete"
+
+    return {
+        "suite": suite,
+        "run_id": run_id,
+        "run_dir": str(run_dir) if run_dir is not None else None,
+        "is_partial": partial_payload is not None,
+        "completed_graphs": completed_graphs,
+        "total_graphs": total_graphs,
+        "remaining_graphs": max(total_graphs - completed_graphs, 0),
+        "graphs": graph_status,
+    }
+
+
 def run_suite(
     suite: str = STANDARD_SUITE,
     output_dir: str = DEFAULT_OUTPUT_DIR,
@@ -926,22 +965,56 @@ def main() -> None:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--competitors", default=None, help="Comma-separated competitor list")
+    parser.add_argument("--rerun-competitors", default=None, help="Comma-separated competitors to force rerun")
     parser.add_argument(
         "--merge-only",
         action="store_true",
         help="Only merge latest standard and rare results into combined_latest.json",
+    )
+    parser.add_argument(
+        "--status-only",
+        action="store_true",
+        help="Print status for the latest complete/partial run of the selected suite",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Do not resume an incomplete run; always start a fresh timestamped run",
+    )
+    parser.add_argument(
+        "--no-reuse-cached",
+        action="store_true",
+        help="Do not reuse cached competitor results from the latest run",
     )
     args = parser.parse_args()
 
     if args.merge_only:
         merge_latest_results(output_dir=args.output_dir)
         return
+    if args.status_only:
+        print(json.dumps(benchmark_run_status(output_dir=args.output_dir, suite=args.suite), indent=2))
+        return
 
     competitors = args.competitors.split(",") if args.competitors else None
+    rerun_competitors = args.rerun_competitors.split(",") if args.rerun_competitors else None
     if args.suite == STANDARD_SUITE:
-        run_standard_suite(output_dir=args.output_dir, competitors=competitors, timeout=args.timeout)
+        run_standard_suite(
+            output_dir=args.output_dir,
+            competitors=competitors,
+            timeout=args.timeout,
+            reuse_cached=not args.no_reuse_cached,
+            rerun_competitors=rerun_competitors,
+            resume_incomplete=not args.no_resume,
+        )
     else:
-        run_rare_suite(output_dir=args.output_dir, competitors=competitors, timeout=args.timeout)
+        run_rare_suite(
+            output_dir=args.output_dir,
+            competitors=competitors,
+            timeout=args.timeout,
+            reuse_cached=not args.no_reuse_cached,
+            rerun_competitors=rerun_competitors,
+            resume_incomplete=not args.no_resume,
+        )
 
 
 if __name__ == "__main__":

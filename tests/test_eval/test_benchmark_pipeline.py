@@ -5,6 +5,7 @@ import torch
 
 from dagua.eval.benchmark import (
     BenchmarkGraph,
+    benchmark_run_status,
     get_rare_suite_graphs,
     get_standard_suite_graphs,
     merge_latest_results,
@@ -391,3 +392,40 @@ def test_rare_suite_resumes_from_partial_results(tmp_path, monkeypatch):
     assert payload["graphs"]["tiny_done"]["competitors"]["dagua"]["status"] == "OK"
     assert payload["graphs"]["tiny_todo"]["competitors"]["dagua"]["status"] == "OK"
     assert not (run_dir / "results.partial.json").exists()
+
+
+@pytest.mark.smoke
+def test_benchmark_run_status_reports_partial_progress(tmp_path):
+    output_dir = tmp_path / "eval_output"
+    run_dir = output_dir / "benchmark_db" / "rare" / "2026-03-12T00:00:00+00:00"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    partial = {
+        "run_id": run_dir.name,
+        "suite": "rare",
+        "graphs": {
+            "done_graph": {
+                "competitors": {
+                    "dagua": {"status": "OK"},
+                    "graphviz_sfdp": {"status": "SKIPPED"},
+                }
+            },
+            "todo_graph": {
+                "competitors": {
+                    "dagua": {"status": "RUNNING"},
+                }
+            },
+        },
+    }
+    metadata = {
+        "graphs": ["done_graph", "todo_graph", "later_graph"],
+    }
+    (run_dir / "results.partial.json").write_text(__import__("json").dumps(partial), encoding="utf-8")
+    (run_dir / "metadata.json").write_text(__import__("json").dumps(metadata), encoding="utf-8")
+
+    status = benchmark_run_status(output_dir=str(output_dir), suite="rare")
+    assert status["is_partial"] is True
+    assert status["completed_graphs"] == 1
+    assert status["total_graphs"] == 3
+    assert status["remaining_graphs"] == 2
+    assert status["graphs"]["done_graph"] == "complete"
+    assert status["graphs"]["todo_graph"] == "incomplete"
