@@ -25,6 +25,10 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
 
     If positions are provided, pins them with pos="x,y!" attributes
     so Graphviz respects the layout (neato -n2 mode).
+
+    This exporter intentionally maps Dagua's richer style space down to a small
+    DOT subset. Use it for placement/comparison workflows, not as a claim of
+    full-fidelity Dagua -> Graphviz round-tripping.
     """
     lines = ["digraph G {"]
     lines.append('  rankdir=TB;')
@@ -194,7 +198,10 @@ def render_comparison(
 ) -> str:
     """Render side-by-side comparison: Dagua layout vs Graphviz layout.
 
-    Both use the same matplotlib renderer for fair visual comparison.
+    Both use the same matplotlib renderer for fair visual comparison. That means
+    this helper isolates node-placement differences and intentionally discards
+    Graphviz-native text/edge/cluster geometry choices.
+
     Returns path to the output file.
     """
     import matplotlib

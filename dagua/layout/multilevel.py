@@ -33,7 +33,13 @@ def _ensure_node_sizes_2d(
     node_sizes: Optional[torch.Tensor],
     num_nodes: Optional[int] = None,
 ) -> torch.Tensor:
-    """Normalize node sizes to [N, 2], synthesizing a safe fallback if absent."""
+    """Normalize node sizes to ``[N, 2]`` for coarsening/refinement code.
+
+    The multilevel path touches node sizes in a few large-graph-specific places,
+    so this helper centralizes the shape contract. For synthetic or partially
+    populated graphs we allow a conservative fallback rather than crashing deep
+    inside a scatter kernel.
+    """
     if node_sizes is None:
         if num_nodes is None:
             raise ValueError("node_sizes cannot be None unless num_nodes is provided")
@@ -122,7 +128,8 @@ def _coarsen_once_streaming(
             min_neighbor.scatter_reduce_(0, src_all[start:end], tgt_all[start:end], reduce="amin")
             min_neighbor.scatter_reduce_(0, tgt_all[start:end], src_all[start:end], reduce="amin")
 
-    # Coarse node counts per layer
+    # Coarse node counts per layer. Grouping is still local-in-layer; the
+    # streaming path just avoids the global sort/materialization cost.
     coarse_per_layer = (layer_counts + 2) // 3
     coarse_offsets = torch.zeros(num_layers + 1, dtype=index_dtype, device=device)
     coarse_offsets[1:] = coarse_per_layer.cumsum(0)
@@ -147,11 +154,15 @@ def _coarsen_once_streaming(
     del layer_mask, min_neighbor
 
     # --- Phase B: Coarse node sizes ---
+    # Every coarse node takes the max width/height of its assigned fine nodes.
+    # This keeps cluster/refinement spacing conservative after coarsening.
     coarse_sizes = torch.zeros(N_coarse, 2, dtype=node_sizes.dtype, device=device)
     coarse_sizes[:, 0].scatter_reduce_(0, fine_to_coarse, node_sizes[:, 0], reduce="amax")
     coarse_sizes[:, 1].scatter_reduce_(0, fine_to_coarse, node_sizes[:, 1], reduce="amax")
 
     # --- Phase C: Chunked edge dedup ---
+    # We hash coarse edges instead of building a giant dense adjacency. Bucketed
+    # dedup keeps the peak memory lower on billion-edge runs.
     if E > 0:
         bucket_count = max(1, (E + _DEDUP_BUCKET_TARGET - 1) // _DEDUP_BUCKET_TARGET)
         bucket_uniques: List[torch.Tensor] = []
