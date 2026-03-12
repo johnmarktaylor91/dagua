@@ -77,8 +77,18 @@ def _load_graph_checkpoint(paths: dict[str, Path], n: int, layers: int) -> tuple
     meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
     if meta.get("n") != n or meta.get("layers") != layers:
         return None
-    edge_index = torch.load(paths["edge_index"])
-    node_sizes = torch.load(paths["node_sizes"])
+    edge_index = torch.load(paths["edge_index"], map_location="cpu")
+    node_sizes = torch.load(paths["node_sizes"], map_location="cpu")
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        return None
+    if node_sizes.ndim == 1:
+        if node_sizes.shape[0] != n:
+            return None
+    elif node_sizes.ndim == 2:
+        if node_sizes.shape[0] != n or node_sizes.shape[1] not in (1, 2):
+            return None
+    else:
+        return None
     return edge_index, node_sizes
 
 
@@ -88,7 +98,10 @@ def _load_layer_checkpoint(paths: dict[str, Path], n: int, layers: int) -> torch
     meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
     if meta.get("n") != n or meta.get("layers") != layers:
         return None
-    return torch.load(paths["layer_assignments"])
+    layer_assignments = torch.load(paths["layer_assignments"], map_location="cpu")
+    if layer_assignments.ndim != 1 or layer_assignments.shape[0] != n:
+        return None
+    return layer_assignments
 
 
 def _pid_alive(pid: int) -> bool:
