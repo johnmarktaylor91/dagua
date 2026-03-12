@@ -805,9 +805,9 @@ def _format_mean(values: Sequence[float]) -> str:
 
 def _aesthetic_critic_prompt() -> str:
     return (
-        "You are an expert in information visualization and graph aesthetics. You are judging\n"
-        "a competition between graph layout algorithms. Below are renderings of the same graph\n"
-        "laid out by different algorithms. Each image is labeled with the algorithm name.\n\n"
+        "Use the following rubric to judge a competition between graph layout algorithms.\n"
+        "Below are renderings of the same graph laid out by different algorithms. Each image\n"
+        "is labeled with the algorithm name.\n\n"
         "Judge which layout is the most aesthetically pleasing and readable. Consider all\n"
         "standard graph drawing aesthetic criteria, including but not limited to:\n"
         "- Edge crossing minimization\n"
@@ -832,9 +832,10 @@ def _aesthetic_critic_prompt() -> str:
 
 def _review_prompt() -> str:
     return (
-        "You are a ruthless, skeptical benchmarking reviewer. You are evaluating a benchmark\n"
-        "report for a new graph layout tool called Dagua. You genuinely want to find the best\n"
-        "tool for the job and you will NOT tolerate:\n\n"
+        "Use the following skeptical benchmarking review rubric when evaluating a benchmark\n"
+        "report for Dagua. The goal is to identify unclear claims, missing context, unfair\n"
+        "comparisons, and any weakness in the evidence presented.\n\n"
+        "Do NOT tolerate:\n\n"
         "- Unclear or ambiguous claims\n"
         "- Cherry-picked results that hide weaknesses\n"
         "- Missing context that would change interpretation\n"
@@ -867,7 +868,7 @@ def _write_review_placeholders(report_dir: Path, rounds: int = 5) -> None:
         payload = {
             "round": idx + 1,
             "status": "skipped",
-            "reason": "Anthropic API unavailable in this environment",
+            "reason": "No separate review pass was executed in this environment",
             "prompt": _review_prompt(),
             "changes_made": "No automated review applied.",
         }
@@ -936,7 +937,7 @@ This report summarizes the latest standard benchmark run {generated_from.get('st
 \\item Dagua remains the only engine in the default roster expected to scale through the rare ladder.
 \\item DAG-aware engines are compared directly on runtime, composite score, and DAG consistency.
 \\item Force-directed baselines are included for contrast, not as DAG-faithful references.
-\\item External API-driven visual judging was not executed in this environment; placeholders were written for transparency.
+\\item A separate visual-critic pass was not executed in this environment; the stored prompt can be reused for either local or external review.
 \\end{{itemize}}
 
 \\section{{Methodology}}
@@ -965,7 +966,7 @@ Competitor & Avg. small-graph score & Avg. DAG consistency & Avg. runtime (s) \\
 {gallery_block}
 
 \\section{{Appendix}}
-The aesthetic critic prompt used for optional API evaluation is stored verbatim in \\texttt{{prose\\_prompt.md}} and review placeholders are stored as \\texttt{{review\\_round\\_*.json}}.
+The aesthetic critic prompt used for optional visual evaluation is stored verbatim in \\texttt{{prose\\_prompt.md}} and review placeholders are stored as \\texttt{{review\\_round\\_*.json}}.
 
 \\end{{document}}
 """
