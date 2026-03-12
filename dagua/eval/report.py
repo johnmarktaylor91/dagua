@@ -18,6 +18,7 @@ import torch
 
 from dagua.config import LayoutConfig
 from dagua.eval.graphs import TestGraph, get_test_graphs
+from dagua.metrics import compare
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -785,6 +786,128 @@ def generate_scaling_curve(
     return str(out_path)
 
 
+def generate_layout_similarity_artifacts(
+    output_dir: str = "eval_output",
+    combined_results: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    """Compute pairwise layout similarity across competitors from stored positions."""
+    from dagua.eval.benchmark import DEFAULT_COMPETITOR_ORDER
+
+    if combined_results is None:
+        from dagua.eval.benchmark import load_combined_results
+
+        combined_results = load_combined_results(output_dir)
+
+    graph_lookup = _benchmark_graph_lookup()
+    report_dir = Path(output_dir) / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    standard_id = combined_results.get("generated_from", {}).get("standard")
+    rare_id = combined_results.get("generated_from", {}).get("rare")
+    standard_root = Path(output_dir) / "benchmark_db" / "standard" / standard_id if standard_id else None
+    rare_root = Path(output_dir) / "benchmark_db" / "rare" / rare_id if rare_id else None
+
+    payload: Dict[str, Any] = {
+        "generated_from": combined_results.get("generated_from", {}),
+        "graphs": {},
+        "aggregate": {
+            "pairwise_mean_disparity": {},
+            "graphs_compared": 0,
+        },
+    }
+    pairwise_buckets: Dict[Tuple[str, str], List[float]] = {}
+
+    for graph_name, graph_payload in combined_results.get("graphs", {}).items():
+        if graph_name not in graph_lookup:
+            continue
+        tg = graph_lookup[graph_name]
+        competitors = graph_payload.get("competitors", {})
+        valid_positions: Dict[str, torch.Tensor] = {}
+        ordered = [name for name in DEFAULT_COMPETITOR_ORDER if name in competitors]
+        for comp_name in ordered:
+            result = competitors[comp_name]
+            if result.get("status") != "OK" or not result.get("positions_path"):
+                continue
+            root = standard_root
+            if graph_payload.get("n_nodes", 0) > 100_000 and rare_root is not None and graph_name.startswith("scale_"):
+                root = rare_root
+            if root is None:
+                continue
+            pos_path = _resolve_positions_path(root, result["positions_path"])
+            if not pos_path.exists():
+                continue
+            valid_positions[comp_name] = torch.load(pos_path)
+
+        if len(valid_positions) < 2:
+            continue
+
+        matrix: Dict[str, Dict[str, Optional[float]]] = {name: {} for name in valid_positions}
+        for a in valid_positions:
+            for b in valid_positions:
+                if a == b:
+                    matrix[a][b] = 0.0
+                    continue
+                pair = tuple(sorted((a, b)))
+                disparity = float(compare(valid_positions[a], valid_positions[b]).get("procrustes_disparity", 1.0))
+                matrix[a][b] = disparity
+                pairwise_buckets.setdefault(pair, []).append(disparity)
+
+        payload["graphs"][graph_name] = {
+            "n_nodes": graph_payload.get("n_nodes", 0),
+            "n_edges": graph_payload.get("n_edges", 0),
+            "competitors": list(valid_positions.keys()),
+            "pairwise_procrustes_disparity": matrix,
+        }
+
+    aggregate_pairs = {
+        f"{a}__vs__{b}": {
+            "mean_procrustes_disparity": mean(values),
+            "graphs_compared": len(values),
+        }
+        for (a, b), values in sorted(pairwise_buckets.items())
+        if values
+    }
+    payload["aggregate"]["pairwise_mean_disparity"] = aggregate_pairs
+    payload["aggregate"]["graphs_compared"] = len(payload["graphs"])
+
+    json_path = report_dir / "layout_similarity.json"
+    md_path = report_dir / "layout_similarity.md"
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    lines = [
+        "# Layout Similarity",
+        "",
+        "Pairwise Procrustes disparity between competitor layouts for the same graph.",
+        "Lower means more structurally similar after translation/rotation/scale alignment.",
+        "",
+        "## Aggregate",
+        "",
+    ]
+    if aggregate_pairs:
+        for pair_name, pair_payload in aggregate_pairs.items():
+            lines.append(
+                f"- `{pair_name}`: mean disparity `{pair_payload['mean_procrustes_disparity']:.4f}` "
+                f"across `{pair_payload['graphs_compared']}` graphs"
+            )
+    else:
+        lines.append("- No pairwise comparisons available.")
+    lines.append("")
+    lines.append("## Per Graph")
+    lines.append("")
+    for graph_name, graph_info in sorted(payload["graphs"].items()):
+        lines.append(f"### {graph_name}")
+        lines.append("")
+        lines.append(f"- nodes: `{graph_info['n_nodes']}`")
+        lines.append(f"- competitors: `{', '.join(graph_info['competitors'])}`")
+        matrix = graph_info["pairwise_procrustes_disparity"]
+        for row_name, row in matrix.items():
+            rendered = ", ".join(f"{col}={val:.4f}" for col, val in row.items() if val is not None)
+            lines.append(f"- `{row_name}`: {rendered}")
+        lines.append("")
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(json_path), str(md_path)
+
+
 def _latest_standard_run_id(combined_results: Dict[str, Any]) -> Optional[str]:
     return combined_results.get("generated_from", {}).get("standard")
 
@@ -1040,6 +1163,7 @@ def _render_latex_report(
     scaling_curve_path: str,
     comparison_paths: Sequence[str],
     delta_markdown_path: Optional[str] = None,
+    similarity_markdown_path: Optional[str] = None,
 ) -> str:
     summary = _summary_statistics(combined_results)
     generated_from = combined_results.get("generated_from", {})
@@ -1104,6 +1228,8 @@ Competitor & Avg. small-graph score & Avg. DAG consistency & Avg. runtime (s) \\
 \\caption{{Aggregate stored results. Pale green/red/yellow cell coloring is reserved for richer future comparisons; the current report keeps the table neutral when not all competitors are installed.}}
 \\end{{table}}
 
+\\paragraph{{Layout similarity.}} Pairwise Procrustes similarity summaries between competitor layouts are stored in \\texttt{{{_latex_escape(os.path.basename(similarity_markdown_path or 'layout_similarity.md'))}}}. This helps distinguish genuinely different geometric solutions from stylistic differences layered on top of similar placements.
+
 \\section{{Visual Gallery}}
 {gallery_block}
 
@@ -1157,12 +1283,20 @@ def generate_report(
     scaling_curve_path = generate_scaling_curve(output_dir=output_dir, combined_results=combined_results)
     comparison_paths = generate_comparison_visuals(output_dir=output_dir, combined_results=combined_results)
     delta_json_path, delta_md_path = generate_benchmark_deltas(output_dir=output_dir, combined_results=combined_results)
+    similarity_json_path, similarity_md_path = generate_layout_similarity_artifacts(output_dir=output_dir, combined_results=combined_results)
     _write_prompt_file(report_dir)
     _write_review_placeholders(report_dir)
     with open(report_dir / "aesthetic_critic_prompt.md", "w", encoding="utf-8") as f:
         f.write(_aesthetic_critic_prompt())
 
-    tex_path = _render_latex_report(report_dir, combined_results, scaling_curve_path, comparison_paths, delta_md_path)
+    tex_path = _render_latex_report(
+        report_dir,
+        combined_results,
+        scaling_curve_path,
+        comparison_paths,
+        delta_md_path,
+        similarity_md_path,
+    )
     pdf_path = _compile_pdf(tex_path) if compile_pdf else None
     return {
         "tex": tex_path,
@@ -1171,4 +1305,6 @@ def generate_report(
         "comparisons_dir": str(root / "visuals" / "comparisons"),
         "benchmark_deltas_json": delta_json_path,
         "benchmark_deltas_md": delta_md_path,
+        "layout_similarity_json": similarity_json_path,
+        "layout_similarity_md": similarity_md_path,
     }
