@@ -88,6 +88,61 @@ def test_benchmark_show_cli_prints_graph_or_competitor(tmp_path, capsys):
     assert '"runtime_seconds": 0.2' in captured.out
 
 
+@pytest.mark.smoke
+def test_benchmark_freeze_cli_copies_run(tmp_path, capsys):
+    output_dir = tmp_path / "eval_output"
+    run_dir = output_dir / "benchmark_db" / "standard" / "2026-03-12T00:00:00+00:00"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "results.json").write_text('{"run_id":"2026-03-12T00:00:00+00:00","graphs":{}}', encoding="utf-8")
+    (run_dir.parent / "latest").symlink_to(run_dir.name)
+
+    rc = main(["benchmark-freeze", "baseline-a", "--output-dir", str(output_dir), "--suite", "standard"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert '"label": "baseline-a"' in captured.out
+    assert (output_dir / "benchmark_db" / "standard" / "frozen" / "baseline-a" / "results.json").exists()
+    assert (output_dir / "benchmark_db" / "standard" / "frozen" / "baseline-a" / "freeze_metadata.json").exists()
+
+
+@pytest.mark.smoke
+def test_benchmark_compare_runs_cli_prints_deltas(tmp_path, capsys):
+    output_dir = tmp_path / "eval_output"
+    run_a = output_dir / "benchmark_db" / "standard" / "2026-03-12T00:00:00+00:00"
+    run_b = output_dir / "benchmark_db" / "standard" / "2026-03-12T01:00:00+00:00"
+    run_a.mkdir(parents=True, exist_ok=True)
+    run_b.mkdir(parents=True, exist_ok=True)
+    payload_a = {
+        "run_id": run_a.name,
+        "graphs": {"g": {"competitors": {"dagua": {"status": "OK", "runtime_seconds": 2.0, "composite_score": 70.0}}}},
+    }
+    payload_b = {
+        "run_id": run_b.name,
+        "graphs": {"g": {"competitors": {"dagua": {"status": "OK", "runtime_seconds": 1.0, "composite_score": 72.5}}}},
+    }
+    (run_a / "results.json").write_text(__import__("json").dumps(payload_a), encoding="utf-8")
+    (run_b / "results.json").write_text(__import__("json").dumps(payload_b), encoding="utf-8")
+
+    rc = main(
+        [
+            "benchmark-compare-runs",
+            "2026-03-12T00:00:00+00:00",
+            "2026-03-12T01:00:00+00:00",
+            "--output-dir",
+            str(output_dir),
+            "--suite",
+            "standard",
+            "--competitor",
+            "dagua",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert '"mean_score_delta": 2.5' in captured.out
+    assert '"runtime_delta_seconds": -1.0' in captured.out
+
+
 @pytest.mark.slow
 def test_poster_cli_exports_png(tmp_path):
     graph = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])

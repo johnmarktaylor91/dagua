@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Optional, Sequence
@@ -76,6 +77,13 @@ def _load_run_payload(output_dir: str, suite: str, run_id: Optional[str]) -> dic
     if not results_path.exists():
         raise FileNotFoundError(f"No benchmark results found at {results_path}")
     return json.loads(results_path.read_text(encoding="utf-8"))
+
+
+def _resolve_run_dir(output_dir: str, suite: str, run_id: Optional[str]) -> Path:
+    run_dir = _suite_root(output_dir, suite) / (run_id or "latest")
+    if not run_dir.exists():
+        raise FileNotFoundError(f"No benchmark run found at {run_dir}")
+    return run_dir.resolve()
 
 
 def _load_graph_and_positions(args: argparse.Namespace):
@@ -183,6 +191,73 @@ def _run_benchmark_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_benchmark_freeze(args: argparse.Namespace) -> int:
+    source_dir = _resolve_run_dir(args.output_dir, args.suite, args.run_id)
+    frozen_root = _suite_root(args.output_dir, args.suite) / "frozen"
+    frozen_root.mkdir(parents=True, exist_ok=True)
+    target_dir = frozen_root / args.label
+    if target_dir.exists():
+        if not args.overwrite:
+            raise FileExistsError(f"Frozen benchmark label already exists: {target_dir}")
+        shutil.rmtree(target_dir)
+    shutil.copytree(source_dir, target_dir)
+    metadata_path = target_dir / "freeze_metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "suite": args.suite,
+                "source_run_id": source_dir.name,
+                "source_dir": str(source_dir),
+                "label": args.label,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(json.dumps({"label": args.label, "source_run_id": source_dir.name, "target_dir": str(target_dir)}, indent=2))
+    return 0
+
+
+def _run_benchmark_compare_runs(args: argparse.Namespace) -> int:
+    payload_a = _load_run_payload(args.output_dir, args.suite, args.run_a)
+    payload_b = _load_run_payload(args.output_dir, args.suite, args.run_b)
+    overlapping = sorted(set(payload_a.get("graphs", {})) & set(payload_b.get("graphs", {})))
+    graph_deltas = {}
+    score_deltas = []
+    runtime_deltas = []
+    for graph_name in overlapping:
+        result_a = payload_a["graphs"][graph_name]["competitors"].get(args.competitor, {})
+        result_b = payload_b["graphs"][graph_name]["competitors"].get(args.competitor, {})
+        if result_a.get("status") != "OK" or result_b.get("status") != "OK":
+            continue
+        score_delta = None
+        runtime_delta = None
+        if result_a.get("composite_score") is not None and result_b.get("composite_score") is not None:
+            score_delta = float(result_b["composite_score"]) - float(result_a["composite_score"])
+            score_deltas.append(score_delta)
+        if result_a.get("runtime_seconds") is not None and result_b.get("runtime_seconds") is not None:
+            runtime_delta = float(result_b["runtime_seconds"]) - float(result_a["runtime_seconds"])
+            runtime_deltas.append(runtime_delta)
+        graph_deltas[graph_name] = {
+            "score_delta": score_delta,
+            "runtime_delta_seconds": runtime_delta,
+        }
+    output = {
+        "suite": args.suite,
+        "competitor": args.competitor,
+        "run_a": payload_a.get("run_id", args.run_a),
+        "run_b": payload_b.get("run_id", args.run_b),
+        "aggregate": {
+            "graphs_compared": len(graph_deltas),
+            "mean_score_delta": sum(score_deltas) / len(score_deltas) if score_deltas else None,
+            "mean_runtime_delta_seconds": sum(runtime_deltas) / len(runtime_deltas) if runtime_deltas else None,
+        },
+        "graphs": graph_deltas,
+    }
+    print(json.dumps(output, indent=2))
+    return 0
+
+
 def _run_benchmark_watch(args: argparse.Namespace) -> int:
     remaining = args.iterations
     while True:
@@ -231,6 +306,22 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser.add_argument("--run-id", default=None, help="Specific run id; defaults to latest")
     show_parser.add_argument("--competitor", default=None, help="Optional competitor to narrow the output")
     show_parser.set_defaults(func=_run_benchmark_show)
+
+    freeze_parser = subparsers.add_parser("benchmark-freeze", help="Copy a run into a frozen named baseline")
+    freeze_parser.add_argument("label")
+    freeze_parser.add_argument("--output-dir", default="eval_output")
+    freeze_parser.add_argument("--suite", choices=["standard", "rare"], default="standard")
+    freeze_parser.add_argument("--run-id", default=None, help="Specific run id; defaults to latest")
+    freeze_parser.add_argument("--overwrite", action="store_true")
+    freeze_parser.set_defaults(func=_run_benchmark_freeze)
+
+    compare_parser = subparsers.add_parser("benchmark-compare-runs", help="Compare two stored runs")
+    compare_parser.add_argument("run_a")
+    compare_parser.add_argument("run_b")
+    compare_parser.add_argument("--output-dir", default="eval_output")
+    compare_parser.add_argument("--suite", choices=["standard", "rare"], default="standard")
+    compare_parser.add_argument("--competitor", default="dagua")
+    compare_parser.set_defaults(func=_run_benchmark_compare_runs)
 
     watch_parser = subparsers.add_parser("benchmark-watch", help="Poll benchmark status repeatedly")
     watch_parser.add_argument("--output-dir", default="eval_output")
