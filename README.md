@@ -106,6 +106,142 @@ The code-return helpers intentionally emit the cleaner Dagua style:
 - default: reusable builder code with explicit `add_node` / `add_edge` / `add_cluster`
 - optional: a polished ready-to-run demo script with layout and export already wired in
 
+## FAQ
+
+### What is Dagua different from?
+
+Dagua is most directly comparable to:
+- Graphviz `dot`
+- ELK layered
+- dagre
+- other hierarchical / Sugiyama-style layout tools
+
+It is less like:
+- force-directed tools such as NetworkX spring layout or Graphviz `sfdp`
+
+### What is different about Dagua vs Graphviz, ELK, or dagre?
+
+The main difference is architectural.
+
+Those tools are largely heuristic rule-based layout engines. Dagua treats layout as continuous optimization:
+- node positions are optimized with PyTorch
+- aesthetics are loss terms
+- GPU acceleration is available naturally
+- constraints like pins, alignment, spacing preferences, and cluster behavior fit into the same framework
+
+So the point of Dagua is not just “another graph drawer.” The point is:
+- hierarchical layout
+- Python-native workflow
+- inspectable optimization behavior
+- composable constraints
+- scaling paths that can exploit modern accelerators
+
+### When should I use Dagua instead of Graphviz?
+
+Use Dagua when you want:
+- a Python-native hierarchical layout tool
+- GPU acceleration
+- cinematic exports, optimization animations, or large-graph tours
+- constraint-style control over layout behavior
+- one library that covers graph creation, optimization, and visualization together
+
+Use Graphviz when you want:
+- a mature external tool with decades of ecosystem history
+- quick static output and you are already happy with its workflow
+
+### Is Dagua a force-directed layout library?
+
+No. It uses optimization internally, but the intended visual language is hierarchical / layered DAG layout, not generic force-directed blob layout.
+
+### Do I have to call `layout()` manually?
+
+No for the basic case.
+
+```python
+fig, ax = dagua.draw(g)
+```
+
+`draw()` is the convenience path and will lay out the graph for you.
+
+Use `layout()` explicitly when you want to:
+- inspect positions
+- render multiple times from the same layout
+- intervene between layout and rendering
+- route edges or place labels manually
+
+### What happens if I change the graph after layout?
+
+Dagua now tracks layout lifecycle state.
+
+If you mutate the graph structure or relevant styles:
+- cached layout-derived artifacts are invalidated
+- `draw()` will naturally relayout
+- explicit stale usage is easier to detect and reason about
+
+This is intentional: the basic path should feel automatic, but not magical in a way you cannot inspect.
+
+### Can I inspect what the optimizer did?
+
+Yes.
+
+Useful surfaces include:
+- `dagua.layout(...)` for direct positions
+- optimization animations via `dagua.animate(...)`
+- cinematic stills and tours via `dagua.poster(...)` and `dagua.tour(...)`
+- graph lifecycle state such as cached layout freshness
+
+### Does Dagua support clusters and nested clusters?
+
+Yes.
+
+Recommended hand-authored pattern:
+- add nodes first
+- then add clusters by node id
+
+Declarative hierarchy is also supported, but for handwritten Python code the bottom-up pattern is usually clearer.
+
+### Can Dagua handle large graphs?
+
+Yes. Large-scale support is a core part of the project.
+
+That said, there are different regimes:
+- small and medium graphs: normal interactive/programmatic usage
+- large graphs: multilevel layout and benchmark/scaling tooling
+- huge graphs: dedicated poster/tour workflows and large-graph rendering strategies
+
+If your goal is “show off a giant graph,” use:
+- `dagua.poster(...)`
+- `dagua.tour(...)`
+
+instead of trying to treat a giant graph like a tiny static diagram.
+
+### Is Dagua only for machine learning graphs?
+
+No.
+
+ML systems are an important use case, but the same API is meant for:
+- workflow graphs
+- business processes
+- dependency graphs
+- architecture diagrams
+- logistics / operations flows
+- any structured directed graph where layered layout is useful
+
+### Is there documentation for humans and agents separately?
+
+Yes.
+
+For humans:
+- tutorial notebook: [docs/tutorial_walkthrough.ipynb](/home/jtaylor/projects/dagua/docs/tutorial_walkthrough.ipynb)
+- glossary/reference: [docs/glossary/dagua_glossary.pdf](/home/jtaylor/projects/dagua/docs/glossary/dagua_glossary.pdf)
+- showcase gallery: [docs/gallery/README.md](/home/jtaylor/projects/dagua/docs/gallery/README.md)
+
+For agents using Dagua:
+- [docs/LLM_TUTORIAL.md](/home/jtaylor/projects/dagua/docs/LLM_TUTORIAL.md)
+
+For agents developing the repo itself:
+- `CLAUDE.md` / `AGENTS.md`
+
 ## License
 
 MIT
