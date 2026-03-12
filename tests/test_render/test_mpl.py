@@ -40,6 +40,8 @@ class TestRenderBasic:
         out = str(tmp_path / "test.svg")
         render(simple_chain, pos, output=out)
         assert Path(out).exists()
+        content = Path(out).read_text(encoding="utf-8")
+        assert "<title>a</title>" in content or "<title>b</title>" in content
 
     @pytest.mark.slow
     def test_save_pdf(self, simple_chain, fast_config, tmp_path):
@@ -83,7 +85,16 @@ class TestRenderBasic:
         assert Path(out).exists()
         with open(out, "rt", encoding="utf-8") as f:
             content = f.read(256)
-        assert "<svg" in content
+        assert "<svg" in content or ":svg" in content
+
+    @pytest.mark.slow
+    def test_svg_hover_text_can_be_disabled(self, simple_chain, fast_config, tmp_path):
+        pos = layout(simple_chain, fast_config)
+        out = str(tmp_path / "no-hover.svg")
+        render(simple_chain, pos, output=out, svg_hover_text=False)
+        content = Path(out).read_text(encoding="utf-8")
+        assert "<title>a</title>" not in content
+        assert "<title>b</title>" not in content
 
     @pytest.mark.slow
     def test_custom_figsize(self, simple_chain, fast_config):
