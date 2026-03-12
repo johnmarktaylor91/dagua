@@ -39,3 +39,34 @@ def test_build_edges_simple_keeps_targets_in_bounds():
     assert edge_index.shape[1] >= n - (n // layers)
     assert int(edge_index.min()) >= 0
     assert int(edge_index.max()) < n
+
+
+def test_graph_checkpoint_round_trip(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    n, layers, _width = bench_large.resolve_size_and_layers("120", 12)
+    edge_index = torch.tensor([[0, 1, 2], [10, 11, 12]], dtype=torch.int32)
+    node_sizes = torch.full((n, 2), 20.0, dtype=torch.float16)
+
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": n, "layers": layers})
+    torch.save(edge_index, paths["edge_index"])
+    torch.save(node_sizes, paths["node_sizes"])
+
+    restored = bench_large._load_graph_checkpoint(paths, n, layers)
+
+    assert restored is not None
+    restored_edge_index, restored_node_sizes = restored
+    assert torch.equal(restored_edge_index, edge_index)
+    assert torch.equal(restored_node_sizes, node_sizes)
+
+
+def test_graph_checkpoint_rejects_mismatched_shape(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    n, layers, _width = bench_large.resolve_size_and_layers("120", 12)
+
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": n + 1, "layers": layers})
+    torch.save(torch.zeros((2, 0), dtype=torch.int32), paths["edge_index"])
+    torch.save(torch.zeros((n, 2), dtype=torch.float16), paths["node_sizes"])
+
+    assert bench_large._load_graph_checkpoint(paths, n, layers) is None
