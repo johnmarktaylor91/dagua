@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import dagua
-from dagua import AnimationConfig, DaguaGraph, LayoutConfig
+from dagua import AnimationConfig, CameraKeyframe, DaguaGraph, LayoutConfig, TourConfig
 
 
 def _animated_graph():
@@ -91,3 +91,91 @@ class TestAnimationExport:
 
         assert out.exists()
         assert not frames_dir.exists()
+
+
+class TestTourExport:
+    @pytest.mark.slow
+    def test_tour_auto_scene_exports_mp4(self, tmp_path):
+        g = _animated_graph()
+        pos = dagua.layout(g, LayoutConfig(steps=12, edge_opt_steps=-1, seed=42))
+        out = tmp_path / "tour.mp4"
+        result = dagua.tour(
+            g,
+            positions=pos,
+            output=str(out),
+            tour_config=TourConfig(
+                fps=12,
+                scene="auto",
+                hold_start_frames=1,
+                hold_end_frames=1,
+            ),
+        )
+
+        assert out.exists()
+        assert out.stat().st_size > 0
+        assert result.output == str(out)
+        assert result.frame_count > 10
+
+    @pytest.mark.slow
+    def test_tour_keyframes_support_custom_sweep(self, tmp_path):
+        g = _animated_graph()
+        pos = dagua.layout(g, LayoutConfig(steps=10, edge_opt_steps=-1, seed=42))
+        out = tmp_path / "tour.gif"
+        result = dagua.tour(
+            g,
+            positions=pos,
+            output=str(out),
+            tour_config=TourConfig(
+                format="gif",
+                scene="keyframes",
+                hold_start_frames=1,
+                hold_end_frames=1,
+                keyframes=[
+                    CameraKeyframe(duration_frames=8, bounds=(-120, 120, -40, 120), title="Start"),
+                    CameraKeyframe(duration_frames=10, center_on="merge", scale=0.7, easing="ease_in", title="Merge"),
+                ],
+            ),
+        )
+
+        assert out.exists()
+        assert result.format == "gif"
+
+    @pytest.mark.slow
+    def test_tour_zoom_pan_scene_exports(self, tmp_path):
+        g = _animated_graph()
+        pos = dagua.layout(g, LayoutConfig(steps=10, edge_opt_steps=-1, seed=42))
+        out = tmp_path / "zoom-pan.webp"
+        result = dagua.tour(
+            g,
+            positions=pos,
+            output=str(out),
+            tour_config=TourConfig(
+                format="webp",
+                scene="zoom_pan",
+                hold_start_frames=1,
+                hold_end_frames=1,
+            ),
+        )
+
+        assert out.exists()
+        assert result.frame_count > 12
+
+    @pytest.mark.slow
+    def test_tour_cathedral_scene_exports(self, tmp_path):
+        g = _animated_graph()
+        pos = dagua.layout(g, LayoutConfig(steps=10, edge_opt_steps=-1, seed=42))
+        out = tmp_path / "cathedral.gif"
+        result = dagua.tour(
+            g,
+            positions=pos,
+            output=str(out),
+            tour_config=TourConfig(
+                format="gif",
+                scene="cathedral",
+                hold_start_frames=1,
+                hold_end_frames=1,
+            ),
+        )
+
+        assert out.exists()
+        assert result.frame_count > 12

@@ -6,7 +6,7 @@ renders the full graph after the fact into GIF/video formats.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -57,6 +57,40 @@ class AnimationResult:
     frame_count: int
     layout_snapshots: int
     edge_snapshots: int
+
+
+@dataclass
+class CameraKeyframe:
+    """One camera waypoint for a tour animation."""
+
+    duration_frames: int = 24
+    easing: str = "ease_in_out"  # linear, ease_in, ease_out, ease_in_out
+    center_on: Optional[Any] = None
+    center: Optional[Tuple[float, float]] = None
+    bounds: Optional[Tuple[float, float, float, float]] = None
+    scale: Optional[float] = None  # relative to the target bounds width/height
+    title: Optional[str] = None
+    subtitle: Optional[str] = None
+
+
+@dataclass
+class TourConfig:
+    """Camera tour controls for final/current graph showcases."""
+
+    fps: int = 24
+    dpi: int = 160
+    figsize: Optional[Tuple[float, float]] = None
+    format: Optional[str] = None
+    output: Optional[str] = None
+    scene: str = "auto"  # auto, powers_of_ten, zoom_pan, panorama, layer_sweep, cathedral, motif_orbit, keyframes
+    keyframes: Optional[List[CameraKeyframe]] = None
+    hold_start_frames: int = 10
+    hold_end_frames: int = 14
+    show_titles: bool = True
+    follow_padding: float = 80.0
+    codec: str = "libx264"
+    bitrate: str = "8M"
+    save_frames_dir: Optional[str] = None
 
 
 @dataclass
@@ -264,6 +298,257 @@ def _default_animation_figsize(
     return (fig_w, fig_h)
 
 
+def _global_bounds(graph, positions: torch.Tensor) -> Tuple[float, float, float, float]:
+    return _snapshot_bounds(graph, positions)
+
+
+def _ease_value(t: float, easing: str) -> float:
+    t = float(np.clip(t, 0.0, 1.0))
+    if easing == "linear":
+        return t
+    if easing == "ease_in":
+        return t * t
+    if easing == "ease_out":
+        return 1 - (1 - t) * (1 - t)
+    return t * t * (3 - 2 * t)
+
+
+def _interesting_node_indices(graph, positions: torch.Tensor, k: int = 4) -> List[int]:
+    n = graph.num_nodes
+    if n == 0:
+        return []
+    pos = positions.detach().cpu()
+    ei = graph.edge_index.detach().cpu() if graph.edge_index.numel() > 0 else torch.zeros(2, 0, dtype=torch.long)
+    degree = torch.zeros(n, dtype=torch.float32)
+    long_span = torch.zeros(n, dtype=torch.float32)
+    cluster_bonus = torch.zeros(n, dtype=torch.float32)
+    if ei.numel() > 0:
+        ones = torch.ones(ei.shape[1], dtype=torch.float32)
+        degree.scatter_add_(0, ei[0], ones)
+        degree.scatter_add_(0, ei[1], ones)
+        edge_lengths = torch.norm(pos[ei[1]] - pos[ei[0]], dim=1)
+        if edge_lengths.numel() > 0:
+            threshold = torch.quantile(edge_lengths, 0.85)
+            mask = edge_lengths >= threshold
+            if mask.any():
+                bonus = edge_lengths[mask] / max(edge_lengths.median().item(), 1.0)
+                long_span.scatter_add_(0, ei[0][mask], bonus)
+                long_span.scatter_add_(0, ei[1][mask], bonus)
+    if graph.clusters:
+        for name, members in graph.clusters.items():
+            depth = graph.cluster_depth(name) + 1
+            member_ids = graph.leaf_cluster_members(name)
+            if member_ids:
+                idx = torch.tensor(member_ids, dtype=torch.long)
+                cluster_bonus[idx] = torch.maximum(cluster_bonus[idx], torch.full_like(cluster_bonus[idx], float(depth)))
+    center = pos.mean(dim=0, keepdim=True)
+    dist = torch.norm(pos - center, dim=1)
+    score = degree + 0.8 * long_span + 1.5 * cluster_bonus + 0.02 * dist
+    top = torch.argsort(score, descending=True)[: max(k * 3, k)].tolist()
+
+    picked: List[int] = []
+    for idx in top:
+        if not picked:
+            picked.append(idx)
+            continue
+        if all(torch.norm(pos[idx] - pos[prev]).item() > 0.12 * max(dist.max().item(), 1.0) for prev in picked):
+            picked.append(idx)
+        if len(picked) >= k:
+            break
+    return picked[:k] if picked else [int(torch.argmax(score).item())]
+
+
+def _focus_bounds_for_node(
+    graph,
+    positions: torch.Tensor,
+    node_idx: int,
+    padding: float,
+    min_fraction: float = 0.14,
+) -> Tuple[float, float, float, float]:
+    global_bounds = _global_bounds(graph, positions)
+    global_w = global_bounds[1] - global_bounds[0]
+    global_h = global_bounds[3] - global_bounds[2]
+    graph.compute_node_sizes()
+    pos = positions.detach().cpu()
+    sizes = graph.node_sizes.detach().cpu()
+    cx = float(pos[node_idx, 0].item())
+    cy = float(pos[node_idx, 1].item())
+    half_w = max(float(sizes[node_idx, 0].item()) * 1.2, global_w * min_fraction, padding)
+    half_h = max(float(sizes[node_idx, 1].item()) * 1.2, global_h * min_fraction, padding)
+    return (cx - half_w, cx + half_w, cy - half_h, cy + half_h)
+
+
+def _interpolate_bounds(
+    start: Tuple[float, float, float, float],
+    end: Tuple[float, float, float, float],
+    duration_frames: int,
+    easing: str,
+) -> List[Tuple[float, float, float, float]]:
+    frames: List[Tuple[float, float, float, float]] = []
+    for i in range(max(duration_frames, 1)):
+        t = 1.0 if duration_frames <= 1 else i / (duration_frames - 1)
+        w = _ease_value(t, easing)
+        frames.append(tuple((1 - w) * start[j] + w * end[j] for j in range(4)))
+    return frames
+
+
+def _scale_bounds(
+    bounds: Tuple[float, float, float, float],
+    scale: float,
+) -> Tuple[float, float, float, float]:
+    cx = (bounds[0] + bounds[1]) / 2
+    cy = (bounds[2] + bounds[3]) / 2
+    half_w = (bounds[1] - bounds[0]) * 0.5 * scale
+    half_h = (bounds[3] - bounds[2]) * 0.5 * scale
+    return (cx - half_w, cx + half_w, cy - half_h, cy + half_h)
+
+
+def _keyframe_target_bounds(
+    graph,
+    positions: torch.Tensor,
+    kf: CameraKeyframe,
+    default_bounds: Tuple[float, float, float, float],
+    padding: float,
+) -> Tuple[float, float, float, float]:
+    if kf.bounds is not None:
+        bounds = kf.bounds
+    elif kf.center is not None:
+        cx, cy = kf.center
+        global_w = default_bounds[1] - default_bounds[0]
+        global_h = default_bounds[3] - default_bounds[2]
+        half_w = max(global_w * 0.18, padding)
+        half_h = max(global_h * 0.18, padding)
+        bounds = (cx - half_w, cx + half_w, cy - half_h, cy + half_h)
+    elif kf.center_on is not None:
+        idx = _resolve_focus_index(graph, kf.center_on)
+        if idx is None:
+            bounds = default_bounds
+        else:
+            bounds = _focus_bounds_for_node(graph, positions, idx, padding)
+    else:
+        bounds = default_bounds
+    if kf.scale is not None:
+        bounds = _scale_bounds(bounds, kf.scale)
+    return bounds
+
+
+def _default_tour_keyframes(graph, positions: torch.Tensor, config: TourConfig) -> List[CameraKeyframe]:
+    global_bounds = _global_bounds(graph, positions)
+    interesting = _interesting_node_indices(graph, positions, k=4)
+    focus_nodes = interesting[: max(1, min(3, len(interesting)))]
+    primary_bounds = _focus_bounds_for_node(graph, positions, focus_nodes[0], config.follow_padding, min_fraction=0.09)
+    if config.scene == "zoom_pan":
+        x0, x1, y0, y1 = primary_bounds
+        w = x1 - x0
+        h = y1 - y0
+        horizontal = (global_bounds[1] - global_bounds[0]) >= (global_bounds[3] - global_bounds[2])
+        if horizontal:
+            pan_a = (x0 - 0.35 * w, x0 + 0.65 * w, y0, y1)
+            pan_b = (x1 - 0.65 * w, x1 + 0.35 * w, y0, y1)
+        else:
+            pan_a = (x0, x1, y0 - 0.35 * h, y0 + 0.65 * h)
+            pan_b = (x0, x1, y1 - 0.65 * h, y1 + 0.35 * h)
+        return [
+            CameraKeyframe(duration_frames=26, bounds=global_bounds, title="Whole Graph", subtitle="Full composition"),
+            CameraKeyframe(duration_frames=28, bounds=_scale_bounds(primary_bounds, 1.35), title="Zoom In", subtitle="Entering an interesting region"),
+            CameraKeyframe(duration_frames=34, bounds=pan_a, title="Pan Across", subtitle="Following visible local structure"),
+            CameraKeyframe(duration_frames=34, bounds=pan_b, title="Pan Across", subtitle="Continuing across the motif"),
+            CameraKeyframe(duration_frames=26, bounds=_scale_bounds(global_bounds, 0.92), title="Back to Context", subtitle="Detail within the whole"),
+        ]
+    if config.scene == "powers_of_ten":
+        return [
+            CameraKeyframe(duration_frames=28, bounds=_scale_bounds(global_bounds, 1.0), title="Whole Graph", subtitle="Starting from the full structure"),
+            CameraKeyframe(duration_frames=24, bounds=_scale_bounds(global_bounds, 0.55), center_on=focus_nodes[0], title="First Zoom", subtitle="Major structure comes forward"),
+            CameraKeyframe(duration_frames=24, bounds=primary_bounds, title="Detail", subtitle="Local neighborhood"),
+            CameraKeyframe(duration_frames=24, bounds=_scale_bounds(global_bounds, 0.8), title="Context Return", subtitle="Detail back into context"),
+        ]
+    if config.scene == "cathedral":
+        x0, x1, y0, y1 = global_bounds
+        if graph.direction in ("TB", "BT"):
+            tall = max((y1 - y0) * 0.55, config.follow_padding * 3)
+            nave = ((x0 + x1) * 0.5 - (x1 - x0) * 0.22, (x0 + x1) * 0.5 + (x1 - x0) * 0.22, y0, y0 + tall)
+            transept = (x0, x1, (y0 + y1) * 0.5 - tall * 0.22, (y0 + y1) * 0.5 + tall * 0.22)
+        else:
+            wide = max((x1 - x0) * 0.55, config.follow_padding * 3)
+            nave = (x0, x0 + wide, (y0 + y1) * 0.5 - (y1 - y0) * 0.22, (y0 + y1) * 0.5 + (y1 - y0) * 0.22)
+            transept = ((x0 + x1) * 0.5 - wide * 0.22, (x0 + x1) * 0.5 + wide * 0.22, y0, y1)
+        return [
+            CameraKeyframe(duration_frames=30, bounds=_scale_bounds(global_bounds, 1.0), title="Cathedral View", subtitle="Large-scale flow and symmetry"),
+            CameraKeyframe(duration_frames=36, bounds=nave, title="Central Spine", subtitle="The main structural axis"),
+            CameraKeyframe(duration_frames=36, bounds=transept, title="Cross Structure", subtitle="Lateral connections and branches"),
+            CameraKeyframe(duration_frames=26, bounds=_scale_bounds(global_bounds, 0.86), title="Whole Graph", subtitle="The full architecture again"),
+        ]
+    if config.scene == "motif_orbit":
+        motifs = focus_nodes[:3] if len(focus_nodes) >= 3 else focus_nodes
+        frames = [CameraKeyframe(duration_frames=24, bounds=global_bounds, title="Motif Orbit", subtitle="A tour of strong local structures")]
+        subtitles = ["Cluster-rich region", "Long-span connection hub", "Branching motif"]
+        for i, node_idx in enumerate(motifs):
+            frames.append(
+                CameraKeyframe(
+                    duration_frames=24,
+                    bounds=_scale_bounds(_focus_bounds_for_node(graph, positions, node_idx, config.follow_padding, min_fraction=0.09), 1.1),
+                    title=f"Motif {i + 1}",
+                    subtitle=subtitles[i] if i < len(subtitles) else "Interesting local structure",
+                )
+            )
+        frames.append(CameraKeyframe(duration_frames=22, bounds=_scale_bounds(global_bounds, 0.95), title="Whole Graph", subtitle="Orbit complete"))
+        return frames
+    if config.scene == "panorama":
+        return [
+            CameraKeyframe(duration_frames=20, bounds=_scale_bounds(global_bounds, 0.85), title="Panorama", subtitle="Broad structural sweep"),
+            CameraKeyframe(duration_frames=36, bounds=(global_bounds[0], (global_bounds[0] + global_bounds[1]) / 2, global_bounds[2], global_bounds[3]), title="Left Half", subtitle="One side of the graph"),
+            CameraKeyframe(duration_frames=36, bounds=((global_bounds[0] + global_bounds[1]) / 2, global_bounds[1], global_bounds[2], global_bounds[3]), title="Right Half", subtitle="Counterpart structures"),
+            CameraKeyframe(duration_frames=24, bounds=_scale_bounds(global_bounds, 1.0), title="Whole Graph", subtitle="Back to the whole composition"),
+        ]
+    if config.scene == "layer_sweep":
+        x0, x1, y0, y1 = global_bounds
+        if graph.direction in ("TB", "BT"):
+            h = max((y1 - y0) * 0.35, config.follow_padding * 2)
+            return [
+                CameraKeyframe(duration_frames=20, bounds=global_bounds, title="Layer Sweep", subtitle="Scanning along the graph flow"),
+                CameraKeyframe(duration_frames=36, bounds=(x0, x1, y0, y0 + h), title="Early Layers", subtitle="Inputs and first branches"),
+                CameraKeyframe(duration_frames=36, bounds=(x0, x1, (y0 + y1 - h) / 2, (y0 + y1 + h) / 2), title="Middle Layers", subtitle="Cross-links and merges"),
+                CameraKeyframe(duration_frames=36, bounds=(x0, x1, y1 - h, y1), title="Late Layers", subtitle="Outputs and terminal structure"),
+            ]
+        w = max((x1 - x0) * 0.35, config.follow_padding * 2)
+        return [
+            CameraKeyframe(duration_frames=20, bounds=global_bounds, title="Layer Sweep", subtitle="Scanning along the graph flow"),
+            CameraKeyframe(duration_frames=36, bounds=(x0, x0 + w, y0, y1), title="Early Layers", subtitle="Inputs and first branches"),
+            CameraKeyframe(duration_frames=36, bounds=((x0 + x1 - w) / 2, (x0 + x1 + w) / 2, y0, y1), title="Middle Layers", subtitle="Cross-links and merges"),
+            CameraKeyframe(duration_frames=36, bounds=(x1 - w, x1, y0, y1), title="Late Layers", subtitle="Outputs and terminal structure"),
+        ]
+
+    # auto and focus_hops default
+    keyframes = [
+        CameraKeyframe(duration_frames=24, bounds=global_bounds, title="Whole Graph", subtitle="Overall topology and balance"),
+    ]
+    subtitles = ["High-degree junction", "Secondary hub", "Tertiary motif"]
+    for idx, node_idx in enumerate(focus_nodes):
+        keyframes.append(
+            CameraKeyframe(
+                duration_frames=28,
+                center_on=node_idx,
+                scale=0.9 if idx == 0 else 1.0,
+                title=f"Focus {idx + 1}",
+                subtitle=subtitles[idx] if idx < len(subtitles) else "Interesting structure",
+            )
+        )
+    keyframes.append(
+        CameraKeyframe(duration_frames=28, bounds=_scale_bounds(global_bounds, 0.92), title="Whole Graph", subtitle="Return to full context")
+    )
+    return keyframes
+
+
+def _tour_keyframes(
+    graph,
+    positions: torch.Tensor,
+    config: TourConfig,
+) -> List[CameraKeyframe]:
+    if config.keyframes:
+        return config.keyframes
+    return _default_tour_keyframes(graph, positions, config)
+
+
 def _curves_from_snapshot(snap: _Snapshot) -> List[BezierCurve]:
     assert snap.endpoints is not None
     assert snap.control_points is not None
@@ -398,6 +683,40 @@ def _render_snapshot_frame(
     ax.set_ylim(camera_bounds[2], camera_bounds[3])
     if anim_cfg.overlay_title:
         title, subtitle = _frame_title(snap)
+        _overlay_text(ax, graph, title, subtitle)
+    fig.canvas.draw()
+    frame = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
+    plt.close(fig)
+    return frame
+
+
+def _render_tour_frame(
+    graph,
+    positions: torch.Tensor,
+    curves: List[BezierCurve],
+    label_positions,
+    camera_bounds: Tuple[float, float, float, float],
+    config: LayoutConfig,
+    tour_cfg: TourConfig,
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None,
+) -> np.ndarray:
+    import matplotlib.pyplot as plt
+
+    fig, ax = render(
+        graph,
+        positions,
+        config=config,
+        curves=curves,
+        label_positions=label_positions,
+        figsize=tour_cfg.figsize,
+        dpi=tour_cfg.dpi,
+    )
+    fig.set_size_inches(*tour_cfg.figsize)
+    fig.set_dpi(tour_cfg.dpi)
+    ax.set_xlim(camera_bounds[0], camera_bounds[1])
+    ax.set_ylim(camera_bounds[2], camera_bounds[3])
+    if tour_cfg.show_titles and title:
         _overlay_text(ax, graph, title, subtitle)
     fig.canvas.draw()
     frame = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
@@ -553,4 +872,94 @@ def animate(
         frame_count=len(frames),
         layout_snapshots=layout_count,
         edge_snapshots=edge_count,
+    )
+
+
+def tour(
+    graph,
+    positions: Optional[torch.Tensor] = None,
+    config: Optional[LayoutConfig] = None,
+    output: Optional[str] = None,
+    tour_config: Optional[TourConfig] = None,
+    **kwargs,
+) -> AnimationResult:
+    """Render a cinematic tour of the final or current graph layout."""
+    if config is None:
+        from dagua.defaults import get_default_device, get_default_layout_overrides
+        layout_overrides = get_default_layout_overrides()
+        config = LayoutConfig(device=get_default_device(), **layout_overrides)
+
+    tour_cfg = tour_config or TourConfig()
+    if output is not None:
+        tour_cfg.output = output
+    for key, value in kwargs.items():
+        if hasattr(tour_cfg, key):
+            setattr(tour_cfg, key, value)
+
+    if positions is None:
+        positions = layout(graph, config)
+
+    graph.compute_node_sizes()
+    curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
+    if getattr(config, "edge_opt_steps", 0) >= 0:
+        from dagua.layout.edge_optimization import optimize_edges
+        curves = optimize_edges(curves, positions, graph.edge_index, graph.node_sizes, config, graph)
+    label_positions = place_edge_labels(curves, positions, graph.node_sizes, graph.edge_labels, graph)
+
+    if tour_cfg.output is None:
+        tour_cfg.output = str(Path("dagua_tour.mp4").resolve())
+    fmt = _detect_animation_format(tour_cfg.output, tour_cfg.format)
+
+    keyframes = _tour_keyframes(graph, positions, tour_cfg)
+    global_bounds = _global_bounds(graph, positions)
+    realized: List[Tuple[CameraKeyframe, Tuple[float, float, float, float]]] = []
+    for kf in keyframes:
+        realized.append((kf, _keyframe_target_bounds(graph, positions, kf, global_bounds, tour_cfg.follow_padding)))
+
+    if tour_cfg.figsize is None:
+        tour_cfg.figsize = _default_animation_figsize(graph, [b for _, b in realized])
+
+    frames: List[np.ndarray] = []
+    for idx, (kf, bounds) in enumerate(realized):
+        start_bounds = bounds if idx == 0 else realized[idx - 1][1]
+        path = _interpolate_bounds(start_bounds, bounds, kf.duration_frames, kf.easing)
+        for frame_idx, camera_bounds in enumerate(path):
+            title = kf.title if frame_idx >= max(len(path) // 4, 1) else None
+            subtitle = kf.subtitle if title else None
+            frames.append(
+                _render_tour_frame(
+                    graph,
+                    positions,
+                    curves,
+                    label_positions,
+                    camera_bounds,
+                    config,
+                    tour_cfg,
+                    title=title,
+                    subtitle=subtitle,
+                )
+            )
+
+    if frames:
+        frames = [frames[0]] * tour_cfg.hold_start_frames + frames + [frames[-1]] * tour_cfg.hold_end_frames
+
+    # Reuse the same writer path by adapting tour config to animation config shape.
+    writer_cfg = AnimationConfig(
+        fps=tour_cfg.fps,
+        dpi=tour_cfg.dpi,
+        figsize=tour_cfg.figsize,
+        format=tour_cfg.format,
+        output=tour_cfg.output,
+        save_frames_dir=tour_cfg.save_frames_dir,
+        codec=tour_cfg.codec,
+        bitrate=tour_cfg.bitrate,
+    )
+    _write_frames(frames, tour_cfg.output, fmt, writer_cfg)
+
+    return AnimationResult(
+        output=tour_cfg.output,
+        format=fmt,
+        frame_count=len(frames),
+        layout_snapshots=0,
+        edge_snapshots=0,
     )
