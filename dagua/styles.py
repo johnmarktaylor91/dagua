@@ -489,6 +489,108 @@ MINIMAL_THEME = Theme(
     ),
 )
 
+TORCHLENS_THEME = Theme(
+    name="torchlens",
+    node_styles={
+        "default": NodeStyle(
+            base_color="#5E6C84",
+            fill="#F4F1EB",
+            stroke="#455468",
+            font_size=8.0,
+            padding=(8.0, 5.0),
+            font_color="#1F2933",
+        ),
+        "input": NodeStyle(
+            base_color="#2F9E75",
+            fill="#DFF4EA",
+            stroke="#23785A",
+            font_size=8.4,
+            padding=(10.0, 6.0),
+            font_weight="bold",
+        ),
+        "output": NodeStyle(
+            base_color="#D9684D",
+            fill="#F8E2DB",
+            stroke="#A94B33",
+            font_size=8.4,
+            padding=(10.0, 6.0),
+            font_weight="bold",
+        ),
+        "buffer": NodeStyle(
+            base_color="#7C8797",
+            fill="#ECEEF2",
+            stroke="#6E7784",
+            font_size=7.8,
+            font_color="#4B5563",
+            padding=(9.0, 5.0),
+        ),
+        "bool": NodeStyle(
+            base_color="#C48A1D",
+            fill="#F8E8BF",
+            stroke="#8E671B",
+            font_size=8.1,
+            font_weight="bold",
+            padding=(9.0, 5.0),
+        ),
+        "trainable_params": NodeStyle(
+            base_color="#3B82A6",
+            fill="#DDEEF5",
+            stroke="#2E637C",
+            font_size=8.0,
+            padding=(9.0, 5.0),
+        ),
+        "frozen_params": NodeStyle(
+            base_color="#7B8594",
+            fill="#E8EBEF",
+            stroke="#687180",
+            font_size=8.0,
+            padding=(9.0, 5.0),
+        ),
+        "mixed_params": NodeStyle(
+            base_color="#8A5D91",
+            fill="#EFE3F1",
+            stroke="#68476E",
+            font_size=8.0,
+            padding=(9.0, 5.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(color="#5F6B78", width=1.1, opacity=0.62, curvature=0.22, label_font_size=6.8),
+        "skip": EdgeStyle(color="#567DA4", width=1.25, opacity=0.52, curvature=0.34, style="solid", label_font_size=6.8),
+        "recurrent": EdgeStyle(color="#A97728", width=1.2, opacity=0.65, curvature=0.55, style="dashed", label_font_size=6.8),
+        "if": EdgeStyle(color="#B6841F", width=1.25, opacity=0.8, style="dashed", label_font_size=7.0),
+        "then": EdgeStyle(color="#2D8A68", width=1.25, opacity=0.8, style="dashed", label_font_size=7.0),
+        "buffer": EdgeStyle(color="#7B8594", width=1.0, opacity=0.45, style="dotted", label_font_size=6.7),
+        "back": EdgeStyle(color="#8C93D6", width=1.0, opacity=0.55, curvature=0.56, style="dotted", label_font_size=6.7),
+    },
+    cluster_style=ClusterStyle(
+        fill="#EDF2F6",
+        stroke="#9FB3C3",
+        stroke_width=0.85,
+        corner_radius=10.0,
+        padding=26.0,
+        font_size=8.4,
+        font_color="#3A4A5A",
+        opacity=0.28,
+        label_offset=(10.0, 24.0),
+        depth_fill_step=0.04,
+        depth_stroke_step=0.06,
+    ),
+    graph_style=GraphStyle(
+        background_color="#FBFAF7",
+        margin=20.0,
+        title_font_size=7.6,
+        title_font_weight="regular",
+        title_font_color="#334155",
+        edge_label_font_size=6.3,
+        edge_label_background="#FBFAF7",
+        edge_label_background_opacity=0.88,
+        node_label_secondary_scale=0.8,
+        max_figsize=(34.0, 44.0),
+        min_figsize=(4.0, 3.0),
+    ),
+)
+
 
 # ─── Theme Registry ──────────────────────────────────────────────────────
 
@@ -496,6 +598,7 @@ THEME_REGISTRY: Dict[str, Theme] = {
     "default": DEFAULT_THEME_OBJ,
     "dark": DARK_THEME,
     "minimal": MINIMAL_THEME,
+    "torchlens": TORCHLENS_THEME,
 }
 
 
