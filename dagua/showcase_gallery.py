@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Set
+from typing import Callable, Dict, List, Optional, Sequence, Set, cast
 
 import dagua
 from dagua import DaguaGraph, LayoutConfig
@@ -611,52 +611,52 @@ def build_showcase_gallery(
     still_manifest: List[Dict[str, object]] = []
     animation_manifest: List[Dict[str, object]] = []
 
-    for entry in entries:
-        graph = entry.build_graph()
+    for still_entry in entries:
+        graph = still_entry.build_graph()
         config = _layout_config(
-            sample_steps or entry.steps,
-            entry.edge_opt_steps,
-            entry.direction,
-            entry.node_sep,
-            entry.rank_sep,
+            sample_steps or still_entry.steps,
+            still_entry.edge_opt_steps,
+            still_entry.direction,
+            still_entry.node_sep,
+            still_entry.rank_sep,
         )
         positions = dagua.layout(graph, config)
-        output_path = stills_dir / f"{entry.slug}.png"
+        output_path = stills_dir / f"{still_entry.slug}.png"
         dagua.poster(
             graph,
             positions=positions,
             config=config,
             output=str(output_path),
             poster_config=PosterConfig(
-                scene=entry.scene,
+                scene=still_entry.scene,
                 dpi=220,
                 show_titles=False,
             ),
         )
         still_manifest.append(
             {
-                "slug": entry.slug,
-                "title": entry.title,
-                "industry": entry.industry,
-                "use_case": entry.use_case,
-                "structure_tags": list(entry.structure_tags),
-                "visual_story": entry.visual_story,
+                "slug": still_entry.slug,
+                "title": still_entry.title,
+                "industry": still_entry.industry,
+                "use_case": still_entry.use_case,
+                "structure_tags": list(still_entry.structure_tags),
+                "visual_story": still_entry.visual_story,
                 "path": str(output_path),
             }
         )
 
     if include_animations:
-        for entry in animations:
-            graph = entry.build_graph()
+        for animation_entry in animations:
+            graph = animation_entry.build_graph()
             config = _layout_config(
-                animation_steps or entry.steps,
-                entry.edge_opt_steps,
-                entry.direction,
+                animation_steps or animation_entry.steps,
+                animation_entry.edge_opt_steps,
+                animation_entry.direction,
                 30.0,
                 54.0,
             )
-            output_path = anim_dir / f"{entry.slug}.gif"
-            if entry.kind == "optimization":
+            output_path = anim_dir / f"{animation_entry.slug}.gif"
+            if animation_entry.kind == "optimization":
                 dagua.animate(
                     graph,
                     config=config,
@@ -676,7 +676,7 @@ def build_showcase_gallery(
                     config=config,
                     output=str(output_path),
                     tour_config=TourConfig(
-                        scene=entry.scene,
+                        scene=animation_entry.scene,
                         fps=18,
                         dpi=120,
                         hold_start_frames=6,
@@ -685,10 +685,10 @@ def build_showcase_gallery(
                 )
             animation_manifest.append(
                 {
-                    "slug": entry.slug,
-                    "title": entry.title,
-                    "kind": entry.kind,
-                    "caption": entry.caption,
+                    "slug": animation_entry.slug,
+                    "title": animation_entry.title,
+                    "kind": animation_entry.kind,
+                    "caption": animation_entry.caption,
                     "path": str(output_path),
                 }
             )
@@ -706,6 +706,6 @@ def build_showcase_gallery(
         output_dir=str(out),
         manifest_path=str(manifest_path),
         readme_path=str(readme_path),
-        still_paths=[entry["path"] for entry in still_manifest],
-        animation_paths=[entry["path"] for entry in animation_manifest],
+        still_paths=[cast(str, entry["path"]) for entry in still_manifest],
+        animation_paths=[cast(str, entry["path"]) for entry in animation_manifest],
     )

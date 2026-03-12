@@ -136,6 +136,10 @@ Special note:
 - standard and rare benchmark artifacts are persistent and may intentionally lag code.
 - if you change metric definitions or report semantics, regenerate benchmark/report artifacts
   that are meant to be presented externally.
+- if the standard suite finishes and materially changes the placement story, update:
+  - `docs/STATUS.md`
+  - `docs/OPEN_ISSUES.md`
+  - any frozen placement baseline labels you rely on during iteration
 
 ## Metrics / Quality Definitions
 
@@ -182,6 +186,12 @@ Update when:
 - visuals used in docs become stale
 - new major features land
 - visual iteration infrastructure changes or new audit panels are added
+
+When in doubt, at least keep these synchronized:
+- `docs/README.md`
+- `docs/COMMAND_CHEATSHEET.md`
+- `docs/ITERATION_WORKFLOW.md`
+- `CLAUDE.md`
 
 ## Notebooks
 

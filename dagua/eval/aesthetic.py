@@ -270,8 +270,8 @@ def mutate_theme_and_config(theme: Theme, config: LayoutConfig, critic: CriticRe
 
     default_node = next_theme.get_node_style("default")
     if default_node.stroke_width > 0.58:
-        for style in next_theme.node_styles.values():
-            style.stroke_width = _clamp(style.stroke_width - 0.03, 0.48, 0.62)
+        for node_style in next_theme.node_styles.values():
+            node_style.stroke_width = _clamp(node_style.stroke_width - 0.03, 0.48, 0.62)
         changes.append("Trimmed node border weight for less visual noise.")
 
     if next_theme.cluster_style.opacity > 0.32:
@@ -280,9 +280,9 @@ def mutate_theme_and_config(theme: Theme, config: LayoutConfig, critic: CriticRe
         changes.append("Lightened cluster treatment to improve figure-ground separation.")
 
     if next_theme.get_edge_style("default").opacity < 0.56:
-        for style in next_theme.edge_styles.values():
-            style.opacity = _clamp(style.opacity + 0.04, 0.54, 0.7)
-            style.width = _clamp(style.width - 0.05, 0.95, 1.25)
+        for edge_style in next_theme.edge_styles.values():
+            edge_style.opacity = _clamp(edge_style.opacity + 0.04, 0.54, 0.7)
+            edge_style.width = _clamp(edge_style.width - 0.05, 0.95, 1.25)
         changes.append("Raised edge opacity while shaving width to keep paths visible but quiet.")
 
     if next_theme.graph_style.margin < 18.0:
@@ -311,6 +311,7 @@ def render_and_evaluate_round(
             graph = clone_graph(tg.graph)
             _apply_theme(graph, theme)
             graph.compute_node_sizes()
+            assert graph.node_sizes is not None
             pos = layout(graph, config)
             image_path = round_dir / f"{tg.name}.png"
             fig, _ = render(graph, pos, config, output=str(image_path), dpi=160, figsize=(6.5, 4.5))

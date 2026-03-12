@@ -109,7 +109,9 @@ def _format_default(field: dataclasses.Field) -> str:
     if field.default is not MISSING:
         return repr(field.default)
     if field.default_factory is not MISSING:  # type: ignore[comparison-overlap]
-        return f"{field.default_factory.__name__}()"  # type: ignore[union-attr]
+        default_factory = field.default_factory
+        factory_name = getattr(default_factory, "__name__", type(default_factory).__name__)
+        return f"{factory_name}()"
     return "<required>"
 
 
@@ -120,12 +122,13 @@ def _public_api_entries() -> List[Dict[str, str]]:
         if obj is None:
             continue
         if inspect.isfunction(obj):
+            module = inspect.getmodule(obj)
             entries.append(
                 {
                     "name": name,
                     "signature": f"{name}{inspect.signature(obj)}",
                     "summary": (inspect.getdoc(obj) or "").splitlines()[0] if inspect.getdoc(obj) else "",
-                    "source": inspect.getmodule(obj).__name__ if inspect.getmodule(obj) else "",
+                    "source": module.__name__ if module is not None else "",
                 }
             )
     return sorted(entries, key=lambda item: item["name"])
@@ -136,7 +139,8 @@ def _graph_method_entries() -> List[Dict[str, str]]:
     for name, obj in inspect.getmembers(DaguaGraph, inspect.isfunction):
         if name.startswith("_"):
             continue
-        if inspect.getmodule(obj) is None or inspect.getmodule(obj).__name__ != "dagua.graph":
+        module = inspect.getmodule(obj)
+        if module is None or module.__name__ != "dagua.graph":
             continue
         doc = inspect.getdoc(obj) or ""
         entries.append(
@@ -437,8 +441,9 @@ def _render_tex(output_dir: Path, visuals: Dict[str, str], sample_steps: int) ->
     sections.append("\\section{Configs and Data Structures}")
     for title, cls in _dataclass_sections():
         sections.append(f"\\subsection{{{_latex_escape(title)}}}")
-        if inspect.getdoc(cls):
-            sections.append(_latex_escape(inspect.getdoc(cls).splitlines()[0]))
+        cls_doc = inspect.getdoc(cls)
+        if cls_doc:
+            sections.append(_latex_escape(cls_doc.splitlines()[0]))
         sections.append("\\begin{longtable}{p{0.24\\linewidth}p{0.24\\linewidth}p{0.18\\linewidth}p{0.26\\linewidth}}")
         sections.append("\\toprule Field & Type & Default & Notes \\\\ \\midrule")
         for entry in _dataclass_field_entries(cls):

@@ -1,11 +1,15 @@
 """Bundled graph definitions for examples and testing."""
 
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dagua.graph import DaguaGraph
 
 _GRAPHS_DIR = Path(__file__).parent
 
 
-def load(name: str) -> "DaguaGraph":  # noqa: F821
+def load(name: str) -> "DaguaGraph":
     """Load a bundled graph by name (e.g. 'diamond').
 
     Args:
@@ -23,6 +27,6 @@ def load(name: str) -> "DaguaGraph":  # noqa: F821
     return io_load(path)
 
 
-def list_graphs() -> list:
+def list_graphs() -> list[str]:
     """List available bundled graph names."""
     return sorted(p.stem for p in _GRAPHS_DIR.glob("*.yaml"))
