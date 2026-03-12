@@ -49,6 +49,10 @@ def test_synthetic_graphs_cover_common_and_niche_motifs():
         "ragged_feature_pyramid",
         "kitchen_sink_hybrid_net",
         "kitchen_sink_platform_graph",
+        "extreme_mixed_width_transformer",
+        "hub_fanout_label_skew",
+        "clustered_longlabel_handoffs",
+        "disconnected_label_cycle_collage",
     }
     assert expected_names <= names
 
@@ -97,3 +101,24 @@ def test_kitchen_sink_graphs_combine_multiple_visual_features():
     platform = graphs["kitchen_sink_platform_graph"]
     assert {"nested-deep", "disconnected", "self-loops", "wide-parallel"} <= platform.tags
     assert _component_count(platform.graph.edge_index, platform.graph.num_nodes) >= 2
+
+
+def test_visual_stress_graphs_cover_label_skew_and_component_extremes():
+    graphs = {tg.name: tg for tg in _synthetic_graphs()}
+
+    extreme = graphs["extreme_mixed_width_transformer"]
+    label_lengths = [len(label) for label in extreme.graph.node_labels]
+    assert max(label_lengths) >= 40
+    assert min(label_lengths) <= 3
+
+    clustered = graphs["clustered_longlabel_handoffs"]
+    edge_pairs = list(zip(clustered.graph.edge_index[0].tolist(), clustered.graph.edge_index[1].tolist()))
+    counts = Counter(edge_pairs)
+    assert max(counts.values()) >= 2
+    assert clustered.graph.max_cluster_depth >= 1
+
+    collage = graphs["disconnected_label_cycle_collage"]
+    assert _component_count(collage.graph.edge_index, collage.graph.num_nodes) >= 2
+    src = collage.graph.edge_index[0].tolist()
+    tgt = collage.graph.edge_index[1].tolist()
+    assert any(s == t for s, t in zip(src, tgt))

@@ -525,6 +525,100 @@ def _synthetic_graphs() -> List[TestGraph]:
         expected_challenges="Disconnected subsystems, long handoff edges, nested service clusters, explicit loops, and varied label widths",
     ))
 
+    # 23. Extreme mixed-width labels with uneven branch depths
+    edges = [
+        ("x", "TokenEmbedding(vocab_size=50257, embedding_dim=4096)"),
+        ("TokenEmbedding(vocab_size=50257, embedding_dim=4096)", "LayerNorm(normalized_shape=(4096,), eps=1e-05)"),
+        ("LayerNorm(normalized_shape=(4096,), eps=1e-05)", "Q"),
+        ("LayerNorm(normalized_shape=(4096,), eps=1e-05)", "K"),
+        ("LayerNorm(normalized_shape=(4096,), eps=1e-05)", "V"),
+        ("Q", "ScaledDotProductAttention(masked=True, causal=True, dropout=0.1)"),
+        ("K", "ScaledDotProductAttention(masked=True, causal=True, dropout=0.1)"),
+        ("V", "ScaledDotProductAttention(masked=True, causal=True, dropout=0.1)"),
+        ("ScaledDotProductAttention(masked=True, causal=True, dropout=0.1)", "+"),
+        ("x", "+"),
+        ("+", "MLP(hidden_dim=16384, activation=SiLU, gated=True)"),
+        ("MLP(hidden_dim=16384, activation=SiLU, gated=True)", "out"),
+    ]
+    g = DaguaGraph.from_edge_list(edges)
+    graphs.append(TestGraph(
+        name="extreme_mixed_width_transformer",
+        graph=g,
+        tags={"mixed-width", "wide-parallel", "skip-light"},
+        description="Extreme short-vs-long labels inside a transformer-style residual block",
+        expected_challenges="Very uneven node widths, branch alignment, and label-driven spacing",
+    ))
+
+    # 24. Hub-and-spoke fanout with uneven fan-in and long labels
+    edges = [
+        ("gateway", "tiny"),
+        ("gateway", "short_branch"),
+        ("gateway", "reasonably_sized_processing_stage"),
+        ("gateway", "ExtremelyVerboseAndOverlyDescriptiveNormalizationSubsystem"),
+        ("gateway", "mid"),
+        ("tiny", "merge"),
+        ("short_branch", "merge"),
+        ("reasonably_sized_processing_stage", "merge"),
+        ("ExtremelyVerboseAndOverlyDescriptiveNormalizationSubsystem", "merge"),
+        ("mid", "late_side_path"),
+        ("late_side_path", "final_merge"),
+        ("merge", "final_merge"),
+        ("final_merge", "output"),
+    ]
+    g = DaguaGraph.from_edge_list(edges)
+    graphs.append(TestGraph(
+        name="hub_fanout_label_skew",
+        graph=g,
+        tags={"mixed-width", "wide-parallel", "diamond"},
+        description="Single hub with strongly uneven branch label widths and an asymmetric late merge",
+        expected_challenges="Fanout distribution, visual balance, and asymmetric merge routing under width skew",
+    ))
+
+    # 25. Nested clusters with long labels and duplicate inter-cluster handoffs
+    edges = [
+        ("input", "preprocess.tokenize"),
+        ("preprocess.tokenize", "encoder.stage_1_attention_projection"),
+        ("encoder.stage_1_attention_projection", "encoder.stage_1_feedforward"),
+        ("encoder.stage_1_feedforward", "handoff"),
+        ("input", "handoff"),
+        ("handoff", "decoder.cross_attention_query"),
+        ("handoff", "decoder.cross_attention_key_value"),
+        ("decoder.cross_attention_query", "decoder.merge"),
+        ("decoder.cross_attention_key_value", "decoder.merge"),
+        ("decoder.merge", "LongOutputProjectionLayerWithAuxiliaryCalibration"),
+        ("LongOutputProjectionLayerWithAuxiliaryCalibration", "output"),
+    ]
+    g = DaguaGraph.from_edge_list(edges)
+    g.add_edge("handoff", "decoder.cross_attention_key_value")
+    idx = {name: i for i, name in enumerate(g.node_labels)}
+    g.add_cluster("encoder", [idx["encoder.stage_1_attention_projection"], idx["encoder.stage_1_feedforward"]], label="Encoder")
+    g.add_cluster("decoder", [idx["decoder.cross_attention_query"], idx["decoder.cross_attention_key_value"], idx["decoder.merge"]], label="Decoder")
+    g.add_cluster("decoder.cross_attention", [idx["decoder.cross_attention_query"], idx["decoder.cross_attention_key_value"]], label="Cross Attention", parent="decoder")
+    graphs.append(TestGraph(
+        name="clustered_longlabel_handoffs",
+        graph=g,
+        tags={"mixed-width", "nested-deep", "multi-edge", "skip-light"},
+        description="Nested clusters with long labels and repeated inter-cluster handoff edges",
+        expected_challenges="Cluster sizing, duplicate inter-cluster routing, and label-width imbalance",
+    ))
+
+    # 26. Stressful disconnected collage of tiny, huge, and cyclic components
+    g = DaguaGraph.from_edge_list([
+        ("a", "b"),
+        ("StandaloneSuperLongLabelForAnOtherwiseTinyChainNode", "tail"),
+        ("cycle.start", "cycle.mid"),
+        ("cycle.mid", "cycle.end"),
+        ("cycle.end", "cycle.start"),
+        ("cycle.end", "cycle.end"),
+    ])
+    graphs.append(TestGraph(
+        name="disconnected_label_cycle_collage",
+        graph=g,
+        tags={"mixed-width", "disconnected", "self-loops"},
+        description="Disconnected collage mixing a tiny chain, a huge label, a directed cycle, and a self-loop",
+        expected_challenges="Component packing under wildly different local scales and cyclic structures",
+    ))
+
     return graphs
 
 
