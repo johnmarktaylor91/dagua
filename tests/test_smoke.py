@@ -245,6 +245,25 @@ def test_streaming_coarsen_once_accepts_1d_node_sizes():
     assert result.node_sizes.shape[0] == result.num_nodes
 
 
+@pytest.mark.smoke
+def test_streaming_coarsen_once_falls_back_from_empty_node_sizes():
+    edge_index, N, _node_sizes = _make_layered_dag(8, 20)
+    node_sizes = torch.empty((0, 2))
+    layers = torch.arange(N) // 8
+
+    old_threshold = _multilevel_mod._STREAMING_THRESHOLD
+    try:
+        _multilevel_mod._STREAMING_THRESHOLD = 100
+        result = coarsen_once(edge_index, N, node_sizes, layers)
+    finally:
+        _multilevel_mod._STREAMING_THRESHOLD = old_threshold
+
+    assert result.node_sizes.ndim == 2
+    assert result.node_sizes.shape[1] == 2
+    assert result.node_sizes.shape[0] == result.num_nodes
+    assert torch.isfinite(result.node_sizes).all()
+
+
 def _make_layered_dag(n_per_layer: int, n_layers: int):
     """Create a layered DAG with edges from each layer to the next."""
     N = n_per_layer * n_layers
