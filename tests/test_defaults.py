@@ -199,7 +199,7 @@ class TestExportConfig:
         path = str(tmp_path / "config.yaml")
         dagua.export_config(path)
 
-        import yaml
+        import yaml  # type: ignore[import-untyped]
         with open(path) as f:
             data = yaml.safe_load(f)
         assert data["node_sep"] == 40

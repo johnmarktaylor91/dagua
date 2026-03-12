@@ -13,7 +13,7 @@ Sprint 3 scaling strategy:
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -145,7 +145,7 @@ def _init_positions_vectorized(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: torch.Tensor,
-    layers: List[int],
+    layers: Union[List[int], torch.Tensor],
     node_sep: float,
     rank_sep: float,
     device: str,
@@ -334,7 +334,7 @@ def _barycenter_order(
     order = torch.zeros(N, device=device)
     num_layers = counts.shape[0]
     for L in range(num_layers):
-        s, e = offsets[L].item(), offsets[L + 1].item()
+        s, e = int(offsets[L].item()), int(offsets[L + 1].item())
         if e > s:
             order[sorted_by_layer[s:e]] = torch.arange(e - s, dtype=torch.float32, device=device)
 

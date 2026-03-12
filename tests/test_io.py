@@ -6,7 +6,7 @@ import tempfile
 from unittest import mock
 
 import pytest
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 from dagua.graph import DaguaGraph
 from dagua.io import (

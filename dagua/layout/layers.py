@@ -30,8 +30,8 @@ class LayerIndex:
 
     def nodes_in_layer(self, layer: int) -> torch.Tensor:
         """Return node indices for a specific layer."""
-        start = self.layer_offsets[layer].item()
-        end = self.layer_offsets[layer + 1].item()
+        start = int(self.layer_offsets[layer].item())
+        end = int(self.layer_offsets[layer + 1].item())
         return self.sorted_nodes[start:end]
 
     def layer_sizes(self) -> torch.Tensor:

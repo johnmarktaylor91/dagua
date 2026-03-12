@@ -10,8 +10,8 @@ import torch
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "bench_large.py"
 _SPEC = importlib.util.spec_from_file_location("bench_large", _SCRIPT_PATH)
-bench_large = importlib.util.module_from_spec(_SPEC)
 assert _SPEC is not None and _SPEC.loader is not None
+bench_large = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bench_large)
 
 

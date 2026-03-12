@@ -25,7 +25,7 @@ def _make_random_dag(n: int, edge_ratio: float = 1.5, seed: int = 42) -> DaguaGr
     rng = random.Random(seed)
     n_edges = int(n * edge_ratio)
 
-    edges = set()
+    edges: set[tuple[int, int]] = set()
     attempts = 0
     while len(edges) < n_edges and attempts < n_edges * 20:
         i = rng.randint(0, n - 2)
