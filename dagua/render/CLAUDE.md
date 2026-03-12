@@ -40,3 +40,13 @@ Renderers never import Graph.
 
 No module in this package imports from dagua except types/dataclasses from `elements.py`
 and `style.py` (pure data, no side effects).
+
+## Maintainability Rules
+
+- Public rendering helpers should have docstrings that explain which geometry they
+  expect: node positions, curves, label positions, or fully routed artifacts.
+- Keep optional-backend behavior explicit and easy to trace.
+- Avoid hiding layout-side assumptions inside renderer code; document them at the
+  top of the relevant function instead.
+- Prefer conservative comments about coordinate systems, units, and fallback logic
+  over decorative comments.

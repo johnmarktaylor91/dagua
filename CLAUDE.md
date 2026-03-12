@@ -32,6 +32,10 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
 - Smoke tests: `pytest tests/ -m smoke`
 - GPU tests: `pytest tests/ -m gpu`
 - Linting: `ruff format` + `ruff check --fix`
+- Type checking:
+  - strict maintained module: `mypy --follow-imports=silent dagua/cli.py`
+  - broader maintainability check: `mypy --follow-imports=silent dagua/eval/visual_audit.py dagua/layout/multilevel.py`
+  - keep the strict CLI module passing; treat the broader check as debt-reduction pressure rather than a release gate
 - Reference glossary: `python scripts/build_glossary.py --output-dir docs/glossary`
 - Algorithm explainer: `python scripts/build_how_dagua_works.py`
 - Visual audit suite: `python scripts/build_visual_audit.py --output-dir eval_output/visual_audit`
@@ -47,6 +51,11 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
   and other generated/public artifacts.
 - The public docs index / front door lives in `docs/README.md`.
 - The comprehensive developer-facing codebase map lives in `docs/DEVELOPER_OVERVIEW.md`.
+- Maintainability rule of thumb:
+  - public or orchestration-heavy functions should have explicit docstrings
+  - module docstrings should explain role and boundaries, not just restate the filename
+  - prefer a few strong section comments over many shallow comments
+  - when touching key orchestration modules, improve type annotations instead of letting `Any` spread
 - The short kitchen-prep docs now include:
   - `docs/ITERATION_WORKFLOW.md`
   - `docs/MONEY_GRAPHS.md`
@@ -115,6 +124,16 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
   - `eval_output/visuals/comparisons/`
 - Use `layout_similarity.md` when asking whether a competitor is finding a genuinely
   different solution or merely a differently styled version of roughly the same layout.
+
+## Maintainer Hygiene
+
+- `AGENTS.md` files are mirrors for agent tooling; keep the canonical instructions current in the paired `CLAUDE.md`.
+- When you add a new recurring workflow, update all three:
+  - `docs/COMMAND_CHEATSHEET.md`
+  - `docs/ITERATION_WORKFLOW.md`
+  - this file
+- Prefer tightening local type guarantees and docstrings in orchestration modules
+  before adding more helper scripts around unclear code.
 
 ## Project Structure
 

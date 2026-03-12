@@ -1,4 +1,9 @@
-"""User-facing CLI for Dagua tooling."""
+"""User-facing CLI for Dagua tooling.
+
+This module is intentionally orchestration-heavy and algorithm-light: it wires
+stable command names to existing library workflows without hiding the underlying
+artifacts. Keep it explicit, typed, and easy to grep.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +12,9 @@ import json
 import shutil
 import time
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
-from dagua import LayoutConfig, poster, tour
+from dagua import DaguaGraph, LayoutConfig, poster, tour
 from dagua.animation import PosterConfig, TourConfig
 import torch
 
@@ -31,6 +36,7 @@ from dagua.io import load
 
 
 def _add_layout_args(parser: argparse.ArgumentParser) -> None:
+    """Attach the common layout-related CLI options to a subparser."""
     parser.add_argument("--steps", type=int, default=120, help="Node optimization steps")
     parser.add_argument("--edge-opt-steps", type=int, default=-1, help="Edge optimization steps (-1 skips)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -38,6 +44,7 @@ def _add_layout_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _layout_config_from_args(args: argparse.Namespace) -> LayoutConfig:
+    """Construct a ``LayoutConfig`` from parsed CLI arguments."""
     return LayoutConfig(
         steps=args.steps,
         edge_opt_steps=args.edge_opt_steps,
@@ -46,7 +53,8 @@ def _layout_config_from_args(args: argparse.Namespace) -> LayoutConfig:
     )
 
 
-def _lookup_benchmark_graph(graph_name: str):
+def _lookup_benchmark_graph(graph_name: str) -> DaguaGraph:
+    """Resolve a named benchmark graph to its concrete ``DaguaGraph``."""
     for bg in list(get_standard_suite_graphs()) + list(get_rare_suite_graphs()):
         if bg.test_graph.name == graph_name:
             return bg.test_graph.graph
@@ -59,6 +67,7 @@ def _resolve_benchmark_positions(
     graph_name: str,
     competitor: str,
 ) -> torch.Tensor:
+    """Load saved positions for one benchmark graph / competitor pair."""
     run_root = Path(output_dir) / "benchmark_db" / suite
     latest_link = run_root / "latest"
     results_path = latest_link / "results.json"
@@ -74,10 +83,12 @@ def _resolve_benchmark_positions(
 
 
 def _suite_root(output_dir: str, suite: str) -> Path:
+    """Return the root directory for one benchmark suite."""
     return Path(output_dir) / "benchmark_db" / suite
 
 
-def _load_run_payload(output_dir: str, suite: str, run_id: Optional[str]) -> dict:
+def _load_run_payload(output_dir: str, suite: str, run_id: Optional[str]) -> dict[str, Any]:
+    """Load one benchmark run payload from ``results.json``."""
     suite_root = _suite_root(output_dir, suite)
     run_dir = suite_root / (run_id or "latest")
     results_path = run_dir / "results.json"
@@ -87,13 +98,15 @@ def _load_run_payload(output_dir: str, suite: str, run_id: Optional[str]) -> dic
 
 
 def _resolve_run_dir(output_dir: str, suite: str, run_id: Optional[str]) -> Path:
+    """Resolve a benchmark run directory, defaulting to ``latest``."""
     run_dir = _suite_root(output_dir, suite) / (run_id or "latest")
     if not run_dir.exists():
         raise FileNotFoundError(f"No benchmark run found at {run_dir}")
     return run_dir.resolve()
 
 
-def _load_graph_and_positions(args: argparse.Namespace):
+def _load_graph_and_positions(args: argparse.Namespace) -> tuple[DaguaGraph, Optional[torch.Tensor]]:
+    """Load a graph plus optional saved positions from files or benchmark storage."""
     if getattr(args, "benchmark_graph", None):
         graph = _lookup_benchmark_graph(args.benchmark_graph)
         positions = _resolve_benchmark_positions(
@@ -110,6 +123,7 @@ def _load_graph_and_positions(args: argparse.Namespace):
 
 
 def _run_poster(args: argparse.Namespace) -> int:
+    """CLI entrypoint for poster export."""
     graph, positions = _load_graph_and_positions(args)
     result = poster(
         graph,
@@ -133,6 +147,7 @@ def _run_poster(args: argparse.Namespace) -> int:
 
 
 def _run_tour(args: argparse.Namespace) -> int:
+    """CLI entrypoint for cinematic tour export."""
     graph, positions = _load_graph_and_positions(args)
     result = tour(
         graph,
@@ -156,12 +171,14 @@ def _run_tour(args: argparse.Namespace) -> int:
 
 
 def _run_benchmark_status(args: argparse.Namespace) -> int:
+    """Print the latest benchmark run status as JSON."""
     payload = benchmark_run_status(output_dir=args.output_dir, suite=args.suite)
     print(json.dumps(payload, indent=2))
     return 0
 
 
 def _run_benchmark_list(args: argparse.Namespace) -> int:
+    """List stored benchmark runs for one suite."""
     suite_root = _suite_root(args.output_dir, args.suite)
     runs = []
     if suite_root.exists():
@@ -184,6 +201,7 @@ def _run_benchmark_list(args: argparse.Namespace) -> int:
 
 
 def _run_benchmark_show(args: argparse.Namespace) -> int:
+    """Show one graph's stored benchmark results, optionally narrowed to one competitor."""
     payload = _load_run_payload(args.output_dir, args.suite, args.run_id)
     graph_payload = payload["graphs"][args.graph]
     if args.competitor:
@@ -199,6 +217,7 @@ def _run_benchmark_show(args: argparse.Namespace) -> int:
 
 
 def _run_benchmark_freeze(args: argparse.Namespace) -> int:
+    """Copy a benchmark run into a named frozen baseline directory."""
     source_dir = _resolve_run_dir(args.output_dir, args.suite, args.run_id)
     frozen_root = _suite_root(args.output_dir, args.suite) / "frozen"
     frozen_root.mkdir(parents=True, exist_ok=True)
@@ -226,6 +245,7 @@ def _run_benchmark_freeze(args: argparse.Namespace) -> int:
 
 
 def _run_benchmark_compare_runs(args: argparse.Namespace) -> int:
+    """Compare two stored benchmark runs for a single competitor."""
     payload_a = _load_run_payload(args.output_dir, args.suite, args.run_a)
     payload_b = _load_run_payload(args.output_dir, args.suite, args.run_b)
     overlapping = sorted(set(payload_a.get("graphs", {})) & set(payload_b.get("graphs", {})))
@@ -266,6 +286,7 @@ def _run_benchmark_compare_runs(args: argparse.Namespace) -> int:
 
 
 def _run_benchmark_watch(args: argparse.Namespace) -> int:
+    """Poll and print benchmark status until told to stop."""
     remaining = args.iterations
     while True:
         payload = benchmark_run_status(output_dir=args.output_dir, suite=args.suite)
@@ -280,12 +301,14 @@ def _run_benchmark_watch(args: argparse.Namespace) -> int:
 
 
 def _run_benchmark_report(args: argparse.Namespace) -> int:
+    """Generate the benchmark report artifacts from stored results."""
     artifacts = generate_report(output_dir=args.output_dir, compile_pdf=not args.no_pdf)
     print(json.dumps(artifacts, indent=2))
     return 0
 
 
 def _run_benchmark_deltas(args: argparse.Namespace) -> int:
+    """Generate round-over-round benchmark delta artifacts."""
     merge_latest_results(output_dir=args.output_dir)
     json_path, md_path = generate_benchmark_deltas(output_dir=args.output_dir)
     print(json.dumps({"benchmark_deltas_json": json_path, "benchmark_deltas_md": md_path}, indent=2))
@@ -293,6 +316,7 @@ def _run_benchmark_deltas(args: argparse.Namespace) -> int:
 
 
 def _run_placement_sprint(args: argparse.Namespace) -> int:
+    """Regenerate placement-facing report artifacts in one shot."""
     combined = merge_latest_results(output_dir=args.output_dir)
     placement_summary_json, placement_summary_md = generate_placement_summary_artifacts(
         output_dir=args.output_dir,
@@ -350,6 +374,7 @@ def _run_placement_sprint(args: argparse.Namespace) -> int:
 
 
 def _run_visual_audit_build(args: argparse.Namespace) -> int:
+    """Build the full or partial visual-audit suite."""
     result = build_visual_audit_suite(
         output_dir=args.output_dir,
         steps=args.steps,
@@ -370,6 +395,7 @@ def _run_visual_audit_build(args: argparse.Namespace) -> int:
 
 
 def _run_visual_audit_freeze(args: argparse.Namespace) -> int:
+    """Freeze the current visual-audit baseline under a stable label."""
     target = freeze_visual_audit_baseline(
         output_dir=args.output_dir,
         label=args.label,
@@ -380,6 +406,7 @@ def _run_visual_audit_freeze(args: argparse.Namespace) -> int:
 
 
 def _run_visual_session_build(args: argparse.Namespace) -> int:
+    """Build the numbered, discussion-friendly visual review session folder."""
     result = build_visual_review_session(
         output_dir=args.output_dir,
         steps=args.steps,
@@ -402,6 +429,7 @@ def _run_visual_session_build(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Construct the top-level Dagua CLI parser."""
     parser = argparse.ArgumentParser(description="Dagua CLI tooling")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -530,6 +558,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run the Dagua CLI and return the process exit code."""
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)
