@@ -37,6 +37,8 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
 - Visual audit suite: `python scripts/build_visual_audit.py --output-dir eval_output/visual_audit`
   - Fast path for iteration: build a single graph/panel subset via
     `dagua visual-audit-build --graphs linear_3layer_mlp --panels ladder competitor_stepwise`
+  - Freeze a named baseline via
+    `dagua visual-audit-freeze reference --output-dir eval_output/visual_audit`
 
 ## Documentation Maintenance
 
@@ -51,6 +53,11 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
   `scripts/build_how_dagua_works.py`.
 - The visual iteration / audit suite lives in `eval_output/visual_audit/` and is generated
   by `scripts/build_visual_audit.py`.
+- The benchmark report now also emits layout-similarity artifacts in `eval_output/report/`:
+  - `layout_similarity.json`
+  - `layout_similarity.md`
+  These summarize pairwise Procrustes disparity between competitor layouts so visual
+  differences can be separated from true geometric differences.
 - The YouTube/video planning resources live in `docs/video/`.
 - The maintained notebooks are `docs/tutorial_walkthrough.ipynb` for user onboarding
   and `tests/ui_feature_playground.ipynb` for developer-facing visual QA.
@@ -73,6 +80,19 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
 - The test suite also includes an algorithm explainer rebuild smoke test; keep it
   passing.
 - The test suite also includes a visual-audit rebuild smoke test; keep it passing.
+
+## Benchmark Iteration Notes
+
+- The benchmark/report workflow is now persistent and reuse-aware:
+  - non-Dagua competitors can be reused between rounds
+  - standard and rare runs checkpoint progress
+  - comparison visuals and report artifacts are regenerated from stored positions
+- The most useful report-side artifacts for placement iteration are:
+  - `eval_output/report/benchmark_deltas.md`
+  - `eval_output/report/layout_similarity.md`
+  - `eval_output/visuals/comparisons/`
+- Use `layout_similarity.md` when asking whether a competitor is finding a genuinely
+  different solution or merely a differently styled version of roughly the same layout.
 
 ## Project Structure
 
