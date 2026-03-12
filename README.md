@@ -54,6 +54,16 @@ dagua poster unused.json /tmp/residual.png \
   --output-dir eval_output
 ```
 
+## Agent Guide
+
+This repo includes a public, user-facing guide for LLMs and coding agents using Dagua:
+
+- [docs/LLM_TUTORIAL.md](/home/jtaylor/projects/dagua/docs/LLM_TUTORIAL.md)
+
+It is separate from `CLAUDE.md` / `AGENTS.md`, which are for developing the repo itself.
+The LLM tutorial is the short, task-oriented entrypoint for agents that want to build,
+layout, render, and export graphs efficiently.
+
 ## License
 
 MIT

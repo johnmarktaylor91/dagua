@@ -42,6 +42,8 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
   `scripts/build_gallery.py`.
 - The maintained notebooks are `docs/tutorial_walkthrough.ipynb` for user onboarding
   and `tests/ui_feature_playground.ipynb` for developer-facing visual QA.
+- The public agent-facing usage guide is `docs/LLM_TUTORIAL.md`. Keep it concise,
+  user-facing, and distinct from maintainer instructions.
 - If you change public API functions, `DaguaGraph` methods, config fields, styles,
   losses, metrics, benchmark/report CLI, or rendering behavior that affects the
   explanatory visuals, rebuild the glossary before pushing.
@@ -49,6 +51,8 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
   would make showcase imagery stale, rebuild the gallery before pushing.
 - If you change user-facing API shape or recommended workflows, update both notebooks so
   the tutorial and developer playground stay representative.
+- If you change user-facing workflows, recommended usage patterns, or the best path for
+  agents using Dagua, update `docs/LLM_TUTORIAL.md` too.
 - The test suite includes a glossary rebuild smoke test; keep it passing.
 - The test suite also includes a showcase gallery rebuild smoke test; keep it passing.
 
