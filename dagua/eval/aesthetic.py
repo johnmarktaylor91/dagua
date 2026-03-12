@@ -313,7 +313,13 @@ def render_and_evaluate_round(
             graph.compute_node_sizes()
             pos = layout(graph, config)
             image_path = round_dir / f"{tg.name}.png"
-            render(graph, pos, config, output=str(image_path), dpi=160, figsize=(6.5, 4.5))
+            fig, _ = render(graph, pos, config, output=str(image_path), dpi=160, figsize=(6.5, 4.5))
+            try:
+                import matplotlib.pyplot as plt
+
+                plt.close(fig)
+            except ImportError:
+                pass
             metrics = compute_all_metrics(
                 pos,
                 graph.edge_index,

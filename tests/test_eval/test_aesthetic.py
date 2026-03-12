@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import pytest
 
 from dagua.eval.aesthetic import run_aesthetic_iteration
@@ -9,6 +10,7 @@ from dagua.eval.aesthetic import run_aesthetic_iteration
 
 @pytest.mark.smoke
 def test_run_aesthetic_iteration_smoke(tmp_path):
+    plt.close("all")
     result = run_aesthetic_iteration(
         rounds=1,
         output_dir=str(tmp_path / "aesthetic_review"),
@@ -24,3 +26,4 @@ def test_run_aesthetic_iteration_smoke(tmp_path):
     assert (out / "final" / "default_aesthetic_theme.yaml").exists()
     assert (out / "final" / "default_layout_config.json").exists()
     assert (out / "final" / "summary.md").exists()
+    assert not plt.get_fignums()

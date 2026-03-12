@@ -132,8 +132,8 @@ def render(
     # Set global font preferences (use resolved font to avoid warnings)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "findfont")
-        matplotlib.rcParams['font.family'] = 'sans-serif'
-        matplotlib.rcParams['font.sans-serif'] = FONT_FAMILY
+        matplotlib.rcParams["font.family"] = "sans-serif"
+        matplotlib.rcParams["font.sans-serif"] = [RESOLVED_FONT, *[f for f in FONT_FAMILY if f != RESOLVED_FONT]]
 
     pos = positions.detach().cpu().numpy()
     n = graph.num_nodes
@@ -196,7 +196,7 @@ def render(
     ax.axis("off")
 
     if title:
-        title_ff = gs.title_font_family or FONT_FAMILY[0]
+        title_ff = gs.title_font_family or RESOLVED_FONT
         ax.set_title(title, fontsize=gs.title_font_size, fontweight=gs.title_font_weight,
                       color=gs.title_font_color, fontfamily=title_ff)
 
@@ -494,7 +494,7 @@ def _draw_edge_labels(
             ha="center", va="center",
             fontsize=font_size,
             fontweight="regular",
-            fontfamily=FONT_FAMILY[0],
+            fontfamily=RESOLVED_FONT,
             color=font_color,
             bbox=dict(
                 boxstyle="round,pad=0.15",
@@ -608,7 +608,7 @@ def _draw_clusters(ax, graph, pos, sizes):
         ax.add_patch(patch)
 
         # Cluster label: position from style (label, label_fontsize already computed above)
-        label_ff = style.font_family or FONT_FAMILY[0]
+        label_ff = style.font_family or RESOLVED_FONT
         label_oy = style.label_offset[1]
 
         if style.label_position == "top-center":
