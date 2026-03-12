@@ -197,6 +197,69 @@ def test_benchmark_deltas_cli_writes_artifacts(tmp_path):
     assert (output_dir / "report" / "benchmark_deltas.md").exists()
 
 
+@pytest.mark.smoke
+def test_placement_sprint_cli_writes_artifacts(tmp_path, capsys):
+    output_dir = tmp_path / "eval_output"
+    run_dir = output_dir / "benchmark_db" / "standard" / "2026-03-12T00:00:00+00:00"
+    positions_dir = run_dir / "positions"
+    positions_dir.mkdir(parents=True, exist_ok=True)
+    pos = __import__("torch").tensor(
+        [
+            [0.0, 0.0],
+            [0.0, 60.0],
+            [0.0, 120.0],
+            [0.0, 180.0],
+            [0.0, 240.0],
+            [-80.0, 240.0],
+            [-80.0, 300.0],
+            [0.0, 300.0],
+            [0.0, 360.0],
+            [0.0, 420.0],
+        ],
+        dtype=__import__("torch").float32,
+    )
+    __import__("torch").save(pos, positions_dir / "residual_block__dagua.pt")
+    payload = {
+        "run_id": run_dir.name,
+        "suite": "standard",
+        "system": {"python": "3.11"},
+        "graphs": {
+            "residual_block": {
+                "n_nodes": 10,
+                "n_edges": 10,
+                "structural_category": "residual",
+                "description": "residual",
+                "expected_challenges": "skip",
+                "tags": ["skip-light"],
+                "source": "synthetic",
+                "visualize": True,
+                "scale_tier": None,
+                "competitors": {
+                    "dagua": {
+                        "status": "OK",
+                        "runtime_seconds": 0.2,
+                        "metrics": {"dag_consistency": 1.0, "edge_crossings": 0, "node_overlaps": 0, "edge_length_cv": 0.1},
+                        "composite_score": 90.0,
+                        "metrics_computed": ["tier1"],
+                        "metrics_skipped": ["tier2", "tier3"],
+                        "positions_path": "positions/residual_block__dagua.pt",
+                    }
+                },
+            }
+        },
+    }
+    (run_dir / "results.json").write_text(__import__("json").dumps(payload), encoding="utf-8")
+    (run_dir.parent / "latest").symlink_to(run_dir.name)
+
+    rc = main(["placement-sprint", "--output-dir", str(output_dir)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert '"placement_dashboard_md"' in captured.out
+    assert (output_dir / "report" / "placement_dashboard.json").exists()
+    assert (output_dir / "report" / "placement_dashboard.md").exists()
+
+
 @pytest.mark.slow
 def test_poster_cli_uses_saved_benchmark_positions(tmp_path):
     output_dir = tmp_path / "eval_output"

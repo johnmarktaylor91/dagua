@@ -47,6 +47,20 @@ dagua benchmark-report --output-dir eval_output --no-pdf
 dagua benchmark-deltas --output-dir eval_output
 ```
 
+Refresh the placement-facing artifacts in one shot:
+
+```bash
+dagua placement-sprint --output-dir eval_output
+```
+
+Refresh and freeze the current standard run as a named placement baseline:
+
+```bash
+dagua placement-sprint \
+  --output-dir eval_output \
+  --freeze-label placement-baseline
+```
+
 ## Visual Audit
 
 Build the full suite:

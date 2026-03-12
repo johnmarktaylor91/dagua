@@ -48,6 +48,9 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
 - The public docs index / front door lives in `docs/README.md`.
 - The comprehensive developer-facing codebase map lives in `docs/DEVELOPER_OVERVIEW.md`.
 - The short kitchen-prep docs now include:
+  - `docs/ITERATION_WORKFLOW.md`
+  - `docs/MONEY_GRAPHS.md`
+  - `docs/BENCHMARK_ARTIFACT_GUIDE.md`
   - `docs/COMMAND_CHEATSHEET.md`
   - `docs/BASELINE_PLAYBOOK.md`
   - `docs/VISUAL_RESET_BRIEF.md`

@@ -19,7 +19,12 @@ from dagua.eval.benchmark import (
     get_standard_suite_graphs,
     merge_latest_results,
 )
-from dagua.eval.report import generate_benchmark_deltas, generate_report
+from dagua.eval.report import (
+    generate_benchmark_deltas,
+    generate_placement_dashboard_artifacts,
+    generate_placement_summary_artifacts,
+    generate_report,
+)
 from dagua.eval.visual_audit import build_visual_audit_suite, freeze_visual_audit_baseline
 from dagua.io import load
 
@@ -286,6 +291,63 @@ def _run_benchmark_deltas(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_placement_sprint(args: argparse.Namespace) -> int:
+    combined = merge_latest_results(output_dir=args.output_dir)
+    placement_summary_json, placement_summary_md = generate_placement_summary_artifacts(
+        output_dir=args.output_dir,
+        combined_results=combined,
+    )
+    placement_dashboard_json, placement_dashboard_md = generate_placement_dashboard_artifacts(
+        output_dir=args.output_dir,
+        combined_results=combined,
+    )
+    benchmark_deltas_json, benchmark_deltas_md = generate_benchmark_deltas(
+        output_dir=args.output_dir,
+        combined_results=combined,
+    )
+
+    frozen_dir = None
+    if args.freeze_label:
+        source_dir = _resolve_run_dir(args.output_dir, "standard", args.run_id)
+        frozen_root = _suite_root(args.output_dir, "standard") / "frozen"
+        frozen_root.mkdir(parents=True, exist_ok=True)
+        target_dir = frozen_root / args.freeze_label
+        if target_dir.exists():
+            if not args.overwrite:
+                raise FileExistsError(f"Frozen benchmark label already exists: {target_dir}")
+            shutil.rmtree(target_dir)
+        shutil.copytree(source_dir, target_dir)
+        (target_dir / "freeze_metadata.json").write_text(
+            json.dumps(
+                {
+                    "suite": "standard",
+                    "source_run_id": source_dir.name,
+                    "source_dir": str(source_dir),
+                    "label": args.freeze_label,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        frozen_dir = str(target_dir)
+
+    print(
+        json.dumps(
+            {
+                "placement_summary_json": placement_summary_json,
+                "placement_summary_md": placement_summary_md,
+                "placement_dashboard_json": placement_dashboard_json,
+                "placement_dashboard_md": placement_dashboard_md,
+                "benchmark_deltas_json": benchmark_deltas_json,
+                "benchmark_deltas_md": benchmark_deltas_md,
+                "frozen_dir": frozen_dir,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def _run_visual_audit_build(args: argparse.Namespace) -> int:
     result = build_visual_audit_suite(
         output_dir=args.output_dir,
@@ -370,6 +432,13 @@ def build_parser() -> argparse.ArgumentParser:
     deltas_parser = subparsers.add_parser("benchmark-deltas", help="Generate round-over-round benchmark deltas")
     deltas_parser.add_argument("--output-dir", default="eval_output")
     deltas_parser.set_defaults(func=_run_benchmark_deltas)
+
+    sprint_parser = subparsers.add_parser("placement-sprint", help="Regenerate placement-facing benchmark artifacts in one shot")
+    sprint_parser.add_argument("--output-dir", default="eval_output")
+    sprint_parser.add_argument("--run-id", default=None, help="Specific standard run id to freeze when using --freeze-label")
+    sprint_parser.add_argument("--freeze-label", default=None, help="Optional standard benchmark baseline label to freeze")
+    sprint_parser.add_argument("--overwrite", action="store_true")
+    sprint_parser.set_defaults(func=_run_placement_sprint)
 
     audit_parser = subparsers.add_parser("visual-audit-build", help="Build the visual iteration / audit suite")
     audit_parser.add_argument("--output-dir", default="eval_output/visual_audit")
