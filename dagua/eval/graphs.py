@@ -22,6 +22,10 @@ from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
 @dataclass
 class TestGraph:
     """A test graph with metadata for evaluation."""
+
+    # Prevent pytest from collecting this dataclass as a test case.
+    __test__ = False
+
     name: str
     graph: DaguaGraph
     tags: Set[str] = field(default_factory=set)
