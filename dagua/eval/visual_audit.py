@@ -20,7 +20,7 @@ import json
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -81,6 +81,10 @@ class VisualReviewSessionResult:
     readme_path: str
     notes_path: str
     image_paths: List[str] = field(default_factory=list)
+
+
+CurveList = Sequence[Any]
+LabelPositionList = Sequence[Optional[Tuple[float, float]]]
 
 
 _LADDER_SPECS: Tuple[AuditSpec, ...] = (
@@ -332,7 +336,15 @@ def build_visual_review_session(
     return result
 
 
-def _render_complexity_ladder(graph, pos, curves, label_positions, spec: AuditSpec, path: Path) -> None:
+def _render_complexity_ladder(
+    graph: DaguaGraph,
+    pos: torch.Tensor,
+    curves: CurveList,
+    label_positions: LabelPositionList,
+    spec: AuditSpec,
+    path: Path,
+) -> None:
+    """Render the stepwise “placement to full render” ladder for one graph."""
     import matplotlib.pyplot as plt
 
     titles = ["Placement", "Nodes+Edges", "Node Labels", "Hierarchy", "Full"]
@@ -354,7 +366,15 @@ def _render_complexity_ladder(graph, pos, curves, label_positions, spec: AuditSp
     plt.close(fig)
 
 
-def _render_decomposition(graph, pos, curves, label_positions, spec: AuditSpec, path: Path) -> None:
+def _render_decomposition(
+    graph: DaguaGraph,
+    pos: torch.Tensor,
+    curves: CurveList,
+    label_positions: LabelPositionList,
+    spec: AuditSpec,
+    path: Path,
+) -> None:
+    """Render one graph as separate visual layers to isolate renderer responsibilities."""
     import matplotlib.pyplot as plt
 
     panels = [
@@ -375,7 +395,15 @@ def _render_decomposition(graph, pos, curves, label_positions, spec: AuditSpec, 
     plt.close(fig)
 
 
-def _render_kill_switch_matrix(graph, pos, curves, label_positions, spec: AuditSpec, path: Path) -> None:
+def _render_kill_switch_matrix(
+    graph: DaguaGraph,
+    pos: torch.Tensor,
+    curves: CurveList,
+    label_positions: LabelPositionList,
+    spec: AuditSpec,
+    path: Path,
+) -> None:
+    """Render a matrix of “turn this subsystem off” variants for diagnosis."""
     import matplotlib.pyplot as plt
 
     variants = [
@@ -399,7 +427,15 @@ def _render_kill_switch_matrix(graph, pos, curves, label_positions, spec: AuditS
     plt.close(fig)
 
 
-def _render_diff_dashboard(graph, pos, curves, label_positions, spec: AuditSpec, path: Path) -> None:
+def _render_diff_dashboard(
+    graph: DaguaGraph,
+    pos: torch.Tensor,
+    curves: CurveList,
+    label_positions: LabelPositionList,
+    spec: AuditSpec,
+    path: Path,
+) -> None:
+    """Render current, neutral, diff, and placement-only views side by side."""
     import matplotlib.pyplot as plt
 
     current = _render_to_array(graph, pos, curves, label_positions, ("clusters", "edges", "nodes", "node_labels", "edge_labels"), "Current")
@@ -471,7 +507,16 @@ def _render_edge_language_sheet(graph: DaguaGraph, steps: int, edge_opt_steps: i
     plt.close(fig)
 
 
-def _render_layers(ax, graph, positions, curves, label_positions, layers: Sequence[str], title: str) -> None:
+def _render_layers(
+    ax: Any,
+    graph: DaguaGraph,
+    positions: torch.Tensor,
+    curves: CurveList,
+    label_positions: LabelPositionList,
+    layers: Sequence[str],
+    title: str,
+) -> None:
+    """Render a chosen subset of visual layers onto an existing matplotlib axes."""
     pos = positions.detach().cpu().numpy()
     graph.compute_node_sizes()
     sizes = graph.node_sizes.detach().cpu().numpy()
@@ -507,7 +552,15 @@ def _render_layers(ax, graph, positions, curves, label_positions, layers: Sequen
     ax.set_title(title, fontsize=10, fontfamily=RESOLVED_FONT)
 
 
-def _render_to_array(graph, positions, curves, label_positions, layers: Sequence[str], title: str) -> np.ndarray:
+def _render_to_array(
+    graph: DaguaGraph,
+    positions: torch.Tensor,
+    curves: CurveList,
+    label_positions: LabelPositionList,
+    layers: Sequence[str],
+    title: str,
+) -> np.ndarray:
+    """Render one layered view to an RGB array for diffing or dashboards."""
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(1, 1, figsize=(5.6, 4.2))
@@ -702,7 +755,8 @@ def _visual_review_session_notes(specs: Sequence[AuditSpec]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _json_safe(value):
+def _json_safe(value: Any) -> Any:
+    """Convert numpy scalar types into plain Python JSON-safe values."""
     if isinstance(value, (np.floating,)):
         return float(value)
     if isinstance(value, (np.integer,)):
@@ -798,13 +852,15 @@ def _render_competitor_stepwise(
     plt.close(fig)
 
 
-def _flatten_axes(axes) -> List:
+def _flatten_axes(axes: Any) -> List[Any]:
+    """Return a flat list of matplotlib axes from scalar or ndarray inputs."""
     if isinstance(axes, np.ndarray):
         return [ax for ax in axes.flat]
     return [axes]
 
 
-def _status_panel(ax, title: str, subtitle: str) -> None:
+def _status_panel(ax: Any, title: str, subtitle: str) -> None:
+    """Render a quiet placeholder panel when a competitor is unavailable."""
     ax.set_facecolor("#F3F4F6")
     ax.text(0.5, 0.58, title, ha="center", va="center", transform=ax.transAxes, fontsize=11, color="#374151")
     ax.text(0.5, 0.42, subtitle, ha="center", va="center", transform=ax.transAxes, fontsize=8, color="#6B7280")

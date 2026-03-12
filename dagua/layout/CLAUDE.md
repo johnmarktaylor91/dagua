@@ -46,3 +46,12 @@ testable and reusable without the Graph abstraction.
 - **__init__.py**: re-exports only
 
 No module in this package imports `graph.py`, `elements.py`, or `style.py`.
+
+## Maintainability Rules
+
+- Keep function signatures explicit and typed. This package is under stricter mypy
+  expectations than the repo baseline.
+- Headless tensor utilities should document input shapes in docstrings.
+- Prefer a small number of strong section comments over line-by-line narration.
+- When touching multilevel / coarsening code, add or update smoke coverage for the
+  exact failure mode you are fixing.
