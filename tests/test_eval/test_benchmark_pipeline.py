@@ -33,7 +33,19 @@ def test_standard_suite_contains_expected_cases():
 def test_rare_suite_sizes_present():
     suite = get_rare_suite_graphs()
     names = {bg.test_graph.name for bg in suite}
-    assert {"scale_500000", "scale_1000000", "scale_5000000", "scale_10000000", "scale_50000000"} <= names
+    assert {
+        "scale_500000",
+        "scale_1000000",
+        "scale_2000000",
+        "scale_5000000",
+        "scale_10000000",
+        "scale_20000000",
+        "scale_50000000",
+        "scale_100000000",
+        "scale_250000000",
+        "scale_500000000",
+        "scale_1000000000",
+    } <= names
 
 
 @pytest.mark.smoke

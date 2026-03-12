@@ -194,7 +194,19 @@ def get_rare_suite_graphs() -> List[BenchmarkGraph]:
     from dagua.graph import DaguaGraph
 
     selected: List[BenchmarkGraph] = []
-    for n in [500_000, 1_000_000, 5_000_000, 10_000_000, 50_000_000]:
+    for n in [
+        500_000,
+        1_000_000,
+        2_000_000,
+        5_000_000,
+        10_000_000,
+        20_000_000,
+        50_000_000,
+        100_000_000,
+        250_000_000,
+        500_000_000,
+        1_000_000_000,
+    ]:
         name = f"scale_{n:,}".replace(",", "")
         tg = TestGraph(
             name=name,
