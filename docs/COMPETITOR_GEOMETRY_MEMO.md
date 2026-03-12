@@ -14,6 +14,165 @@ The goal is not to imitate competitors blindly. The goal is to understand:
 3. what the user actually sees
 4. which parts are worth stealing or improving with Dagua's differentiable pipeline
 
+## Stage 0: Criteria Inventory
+
+This memo now serves a second purpose:
+
+- an explicit inventory of the criteria competitors optimize or encode
+- a starting point for Dagua's own measurable geometry criteria
+
+Important:
+
+- this list is still not “all satisfiable at once”
+- many criteria conflict
+- stage 0 is not to pretend they can all be maxed simultaneously
+- stage 0 is to name them explicitly so we stop missing whole classes of geometry
+
+The practical grouping is:
+
+1. node-placement criteria
+2. downstream geometry criteria
+3. paint / aesthetic-default criteria
+
+### Competitor-Derived Criteria Checklist
+
+The following criteria are clearly present in one or more competitors, either as
+explicit objectives, encoded geometry rules, or public configuration semantics.
+
+#### Node placement
+
+- DAG direction consistency
+- edge crossing reduction
+- edge length regularity
+- same-rank ordering quality
+- rank / layer spacing
+- node-node spacing
+- compound / cluster-aware separation
+- port-aware attachment orientation
+- long-edge / dummy-node handling
+- aspect / compactness pressure
+
+#### Text geometry
+
+- node label participation in sizing
+- edge label participation in routing / ranking
+- edge label side selection
+- edge label source / center / target anchoring
+- edge label distance from edge
+- edge label rotation policy
+- cluster label location policy
+- cluster label alignment policy
+- external label handling
+- text bbox / backing treatment for legibility
+
+#### Edge geometry
+
+- routing mode selection
+  - spline / polyline / orthogonal / curved
+- bend-point count and placement
+- arrowhead size / width
+- edge-edge separation
+- edge-node clearance
+- edge-label clearance
+- head / tail semantic labeling zones
+- port-side attachment consistency
+
+#### Cluster / compound geometry
+
+- sibling cluster separation
+- parent / child containment
+- cluster padding
+- cluster label clearance
+- compound border reconstruction
+- border-anchor stability across ranks
+- foreign-edge intrusion through cluster interiors
+
+#### Aesthetic defaults / restraint
+
+- font family choice
+- font size hierarchy
+- stroke width hierarchy
+- arrow size restraint
+- label density / omission defaults
+- color conservatism vs semantic coloring
+- fill opacity restraint
+- whitespace discipline
+
+### What Competitors Explicitly Cover
+
+| Criterion family | Graphviz | ELK | dagre | NetworkX | igraph |
+| --- | --- | --- | --- | --- | --- |
+| Node placement / ranking | Strong | Strong | Strong | Moderate | Moderate |
+| Label-aware geometry | Strong | Strong | Moderate | Weak | Moderate |
+| Cluster / compound geometry | Strong | Strong | Moderate | None | None |
+| Port-aware routing | Moderate | Strong | Weak-moderate | None | None |
+| Edge-label policy richness | Strong | Strong | Moderate | Weak | Weak-moderate |
+| Conservative visual defaults | Strong | External renderer dependent | External renderer dependent | Weak | Backend dependent |
+
+### Dagua-Specific Criteria We Should Add Beyond Competitors
+
+Competitors tell us a lot, but they do not exhaust what we should care about.
+
+These are the extra criteria Dagua should consider because a differentiable
+pipeline can reason about them more continuously than classic engines do.
+
+#### Node placement additions
+
+- cluster-overlap penalty at the box level, not just node level
+- cluster interleaving penalty
+  - discourage nodes from sibling clusters weaving through one another
+- backbone readability penalty
+  - preserve a strong main flow when one exists
+- skip-edge span readability
+  - long skips should stay legible without crushing local spacing
+
+#### Downstream geometry additions
+
+- text-node, text-edge, and text-cluster collision penalties in one system
+- “stay near preferred anchor” penalties instead of fixed discrete offsets
+- cluster box pathology penalties
+  - too thin
+  - too flat
+  - too bloated
+- label rhythm / offset smoothness
+  - avoid erratic label jumps on nearby edges
+- foreign-edge intrusion through unrelated cluster interiors
+- cluster sibling overlap and parent-child margin as measurable quantities
+
+#### Style / information-density additions
+
+- default-text burden
+  - penalize turning on too much always-visible text by default
+- hierarchy signal-to-noise
+  - color, stroke, and fill should communicate structure without muddying it
+- semantic emphasis discipline
+  - default emphasis should track graph semantics, not arbitrary decoration
+
+### Recommended Stage-0 Output Surfaces
+
+Before pushing stage 1 and stage 2 optimization harder, Dagua should maintain an
+explicit criteria ledger with:
+
+- which criteria are already measured
+- which criteria are partly measured
+- which criteria are currently only judged visually
+- which criteria conflict and therefore need Pareto treatment rather than one scalar
+
+At minimum, the next pass should track:
+
+- crossings
+- DAG consistency
+- node overlaps
+- cluster sibling overlap
+- parent / child containment margin
+- edge-label collision count
+- edge-node clearance
+- cluster-edge intrusion count
+- edge length CV
+- runtime
+
+This is the real starting point for the next optimization stages.
+
 ## Audit Scope
 
 Audited competitors:
