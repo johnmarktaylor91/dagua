@@ -4,11 +4,15 @@ import pytest
 import torch
 
 from dagua.eval.benchmark import (
+    BenchmarkGraph,
     get_rare_suite_graphs,
     get_standard_suite_graphs,
     merge_latest_results,
+    run_standard_suite,
 )
+from dagua.eval.graphs import TestGraph
 from dagua.eval.report import generate_report
+from dagua.graph import DaguaGraph
 
 
 @pytest.mark.smoke
@@ -153,3 +157,138 @@ def test_merge_latest_results_and_generate_report(tmp_path):
     assert (output_dir / "visuals" / "comparisons" / "residual_block_comparison.png").exists()
     assert (output_dir / "report" / "prose_prompt.md").exists()
     assert (output_dir / "report" / "review_round_1.json").exists()
+
+
+@pytest.mark.smoke
+def test_standard_suite_reuses_cached_non_dagua_results(tmp_path, monkeypatch):
+    output_dir = tmp_path / "eval_output"
+    latest_run = output_dir / "benchmark_db" / "standard" / "2026-03-12T00:00:00+00:00"
+    latest_positions = latest_run / "positions"
+    latest_positions.mkdir(parents=True, exist_ok=True)
+
+    graph = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
+    tg = TestGraph(
+        name="tiny_chain",
+        graph=graph,
+        tags={"linear"},
+        description="tiny chain",
+        source="synthetic",
+        expected_challenges="none",
+    )
+    suite = [BenchmarkGraph(tg, "linear", "standard", True, "small")]
+
+    pos = torch.tensor([[0.0, 0.0], [0.0, 50.0], [0.0, 100.0]], dtype=torch.float32)
+    torch.save(pos, latest_positions / "tiny_chain__graphviz_dot.pt")
+
+    latest_payload = {
+        "run_id": "2026-03-12T00:00:00+00:00",
+        "suite": "standard",
+        "system": {"dagua_git_hash": "old", "graphviz": "dot 1.0"},
+        "graphs": {
+            "tiny_chain": {
+                "n_nodes": 3,
+                "n_edges": 2,
+                "structural_category": "linear",
+                "description": "tiny chain",
+                "expected_challenges": "none",
+                "tags": ["linear"],
+                "source": "synthetic",
+                "visualize": True,
+                "scale_tier": "small",
+                "competitors": {
+                    "graphviz_dot": {
+                        "status": "OK",
+                        "runtime_seconds": 0.01,
+                        "metrics": {"overall_quality": 80.0},
+                        "composite_score": 80.0,
+                        "metrics_computed": ["tier1"],
+                        "metrics_skipped": ["tier2", "tier3"],
+                        "positions_path": "positions/tiny_chain__graphviz_dot.pt",
+                    }
+                },
+            }
+        },
+    }
+    latest_metadata = {
+        "graph_signatures": {"tiny_chain": __import__("hashlib").sha256(__import__("json").dumps(graph.to_json(), sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()},
+        "competitor_signatures": {
+            "graphviz_dot": "graphviz_dot:dot 1.0",
+            "dagua": "dagua:new",
+        },
+    }
+    (latest_run / "results.json").write_text(__import__("json").dumps(latest_payload), encoding="utf-8")
+    (latest_run / "metadata.json").write_text(__import__("json").dumps(latest_metadata), encoding="utf-8")
+    (latest_run.parent / "latest").symlink_to(latest_run.name)
+
+    class FakeCompetitor:
+        def __init__(self, name):
+            self.name = name
+            self.max_nodes = 10
+
+        def available(self):
+            return True
+
+        def layout(self, graph, timeout=300.0):
+            raise AssertionError(f"{self.name} should not have been rerun")
+
+    class FakeDagua(FakeCompetitor):
+        def layout(self, graph, timeout=300.0):
+            return type("Result", (), {"pos": pos, "runtime_seconds": 0.02, "error": None})()
+
+    monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
+    monkeypatch.setattr("dagua.eval.benchmark._competitor_map", lambda names=None: [FakeDagua("dagua"), FakeCompetitor("graphviz_dot")])
+    monkeypatch.setattr("dagua.eval.benchmark._system_metadata", lambda: {"dagua_git_hash": "new", "graphviz": "dot 1.0"})
+    monkeypatch.setattr("dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}})
+    monkeypatch.setattr("dagua.eval.report.generate_report", lambda *args, **kwargs: {})
+
+    payload = run_standard_suite(output_dir=str(output_dir), reuse_cached=True)
+    result = payload["graphs"]["tiny_chain"]["competitors"]["graphviz_dot"]
+    assert result["status"] == "OK"
+    assert result["reused_from"] == "2026-03-12T00:00:00+00:00"
+    new_run_dir = output_dir / "benchmark_db" / "standard" / payload["run_id"]
+    assert (new_run_dir / "positions" / "tiny_chain__graphviz_dot.pt").exists()
+
+
+@pytest.mark.smoke
+def test_standard_suite_can_force_rerun_specific_competitor(tmp_path, monkeypatch):
+    output_dir = tmp_path / "eval_output"
+    graph = DaguaGraph.from_edge_list([("a", "b")])
+    tg = TestGraph(
+        name="tiny_force",
+        graph=graph,
+        tags={"linear"},
+        description="tiny force",
+        source="synthetic",
+        expected_challenges="none",
+    )
+    suite = [BenchmarkGraph(tg, "linear", "standard", True, "small")]
+
+    calls = {"dot": 0, "dagua": 0}
+    pos = torch.tensor([[0.0, 0.0], [0.0, 50.0]], dtype=torch.float32)
+
+    class FakeCompetitor:
+        def __init__(self, name):
+            self.name = name
+            self.max_nodes = 10
+
+        def available(self):
+            return True
+
+        def layout(self, graph, timeout=300.0):
+            calls[self.name.split("_")[-1] if self.name != "dagua" else "dagua"] += 1
+            return type("Result", (), {"pos": pos, "runtime_seconds": 0.01, "error": None})()
+
+    monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
+    monkeypatch.setattr("dagua.eval.benchmark._competitor_map", lambda names=None: [FakeCompetitor("dagua"), FakeCompetitor("graphviz_dot")])
+    monkeypatch.setattr("dagua.eval.benchmark._system_metadata", lambda: {"dagua_git_hash": "new", "graphviz": "dot 1.0"})
+    monkeypatch.setattr("dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}})
+    monkeypatch.setattr("dagua.eval.report.generate_report", lambda *args, **kwargs: {})
+
+    payload = run_standard_suite(
+        output_dir=str(output_dir),
+        reuse_cached=True,
+        rerun_competitors=["dagua", "graphviz_dot"],
+    )
+    assert payload["graphs"]["tiny_force"]["competitors"]["graphviz_dot"]["status"] == "OK"
+    assert calls["dagua"] == 1
+    assert calls["dot"] == 1

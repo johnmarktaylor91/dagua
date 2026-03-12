@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import platform
@@ -313,6 +314,96 @@ def _update_latest_symlink(parent: Path, run_id: str) -> None:
     latest.symlink_to(target.name)
 
 
+def _graph_signature(graph) -> str:
+    payload = json.dumps(graph.to_json(), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _graph_signature_map(graphs: Sequence[BenchmarkGraph]) -> Dict[str, str]:
+    return {bg.test_graph.name: _graph_signature(bg.test_graph.graph) for bg in graphs}
+
+
+def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
+    version_keys = {
+        "dagua": "dagua_git_hash",
+        "graphviz_dot": "graphviz",
+        "graphviz_sfdp": "graphviz",
+        "elk_layered": "elk",
+        "dagre": "dagre",
+        "nx_spring": "networkx",
+    }
+    key = version_keys.get(name)
+    value = system.get(key) if key is not None else None
+    return f"{name}:{value}"
+
+
+def _competitor_signature_map(
+    competitors: Sequence[CompetitorBase],
+    system: Dict[str, Any],
+) -> Dict[str, str]:
+    return {competitor.name: _competitor_signature(competitor.name, system) for competitor in competitors}
+
+
+def _load_latest_payload_and_metadata(output_dir: str, suite: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Path]]:
+    latest_dir = _benchmark_db_root(output_dir) / suite / "latest"
+    results_path = latest_dir / "results.json"
+    metadata_path = latest_dir / "metadata.json"
+    if not results_path.exists():
+        return None, None, None
+    payload = _load_json(results_path)
+    metadata = _load_json(metadata_path) if metadata_path.exists() else {}
+    return payload, metadata, results_path.parent
+
+
+def _copy_cached_positions(
+    latest_run_dir: Path,
+    cached_result: Dict[str, Any],
+    run_dir: Path,
+) -> Optional[str]:
+    rel_path = cached_result.get("positions_path")
+    if not rel_path:
+        return None
+    src = latest_run_dir / rel_path
+    if not src.exists():
+        return None
+    dst = run_dir / rel_path
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return rel_path
+
+
+def _reuse_cached_result(
+    graph_name: str,
+    competitor_name: str,
+    run_dir: Path,
+    cached_payload: Optional[Dict[str, Any]],
+    cached_metadata: Optional[Dict[str, Any]],
+    latest_run_dir: Optional[Path],
+    graph_signatures: Dict[str, str],
+    competitor_signatures: Dict[str, str],
+) -> Optional[Dict[str, Any]]:
+    if cached_payload is None or latest_run_dir is None:
+        return None
+    cached_graphs = cached_payload.get("graphs", {})
+    cached_graph = cached_graphs.get(graph_name)
+    if not cached_graph:
+        return None
+    cached_result = cached_graph.get("competitors", {}).get(competitor_name)
+    if not cached_result:
+        return None
+    meta_graph_sigs = (cached_metadata or {}).get("graph_signatures", {})
+    meta_comp_sigs = (cached_metadata or {}).get("competitor_signatures", {})
+    if meta_graph_sigs.get(graph_name) != graph_signatures.get(graph_name):
+        return None
+    if meta_comp_sigs.get(competitor_name) != competitor_signatures.get(competitor_name):
+        return None
+    reused = copy.deepcopy(cached_result)
+    reused_path = _copy_cached_positions(latest_run_dir, cached_result, run_dir)
+    reused["positions_path"] = reused_path
+    reused["reused_from"] = str(cached_payload.get("run_id"))
+    return reused
+
+
 def _metric_payload(
     graph,
     pos: torch.Tensor,
@@ -532,9 +623,18 @@ def _build_results_payload(
     competitors: Sequence[CompetitorBase],
     timeout: float,
     output_dir: str,
+    cached_payload: Optional[Dict[str, Any]] = None,
+    cached_metadata: Optional[Dict[str, Any]] = None,
+    latest_run_dir: Optional[Path] = None,
+    graph_signatures: Optional[Dict[str, str]] = None,
+    competitor_signatures: Optional[Dict[str, str]] = None,
+    rerun_competitors: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     run_dir = _run_dir(output_dir, suite, run_id)
     _positions_dir(run_dir)
+    graph_signatures = graph_signatures or {}
+    competitor_signatures = competitor_signatures or {}
+    rerun_set = set(rerun_competitors or [])
 
     payload = {
         "run_id": run_id,
@@ -546,7 +646,19 @@ def _build_results_payload(
     for bg in graphs:
         graph_payload = _graph_summary(bg)
         for competitor in competitors:
-            graph_payload["competitors"][competitor.name] = _run_one_competitor(
+            reused = None
+            if competitor.name not in rerun_set:
+                reused = _reuse_cached_result(
+                    graph_name=bg.test_graph.name,
+                    competitor_name=competitor.name,
+                    run_dir=run_dir,
+                    cached_payload=cached_payload,
+                    cached_metadata=cached_metadata,
+                    latest_run_dir=latest_run_dir,
+                    graph_signatures=graph_signatures,
+                    competitor_signatures=competitor_signatures,
+                )
+            graph_payload["competitors"][competitor.name] = reused or _run_one_competitor(
                 bg,
                 competitor,
                 timeout=timeout,
@@ -619,12 +731,21 @@ def run_suite(
     competitors: Optional[Sequence[str]] = None,
     timeout: float = DEFAULT_TIMEOUT,
     generate_report_artifacts: bool = True,
+    reuse_cached: bool = True,
+    rerun_competitors: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     run_id = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     graphs = _suite_graphs(suite)
     competitor_list = _competitor_map(competitors)
     run_dir = _run_dir(output_dir, suite, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
+    system = _system_metadata()
+    graph_signatures = _graph_signature_map(graphs)
+    competitor_signatures = _competitor_signature_map(competitor_list, system)
+    rerun_list = list(rerun_competitors) if rerun_competitors is not None else (["dagua"] if reuse_cached else [])
+    cached_payload = cached_metadata = latest_run_dir = None
+    if reuse_cached:
+        cached_payload, cached_metadata, latest_run_dir = _load_latest_payload_and_metadata(output_dir, suite)
 
     payload = _build_results_payload(
         suite=suite,
@@ -633,6 +754,12 @@ def run_suite(
         competitors=competitor_list,
         timeout=timeout,
         output_dir=output_dir,
+        cached_payload=cached_payload,
+        cached_metadata=cached_metadata,
+        latest_run_dir=latest_run_dir,
+        graph_signatures=graph_signatures,
+        competitor_signatures=competitor_signatures,
+        rerun_competitors=rerun_list,
     )
     _save_json(run_dir / "results.json", payload)
     _save_json(
@@ -640,9 +767,13 @@ def run_suite(
         {
             "run_id": run_id,
             "suite": suite,
-            "system": payload["system"],
+            "system": system,
             "graphs": [bg.test_graph.name for bg in graphs],
             "competitors": [c.name for c in competitor_list],
+            "graph_signatures": graph_signatures,
+            "competitor_signatures": competitor_signatures,
+            "reuse_cached": reuse_cached,
+            "rerun_competitors": rerun_list,
         },
     )
     _update_latest_symlink(run_dir.parent, run_id)
@@ -660,6 +791,8 @@ def run_standard_suite(
     output_dir: str = DEFAULT_OUTPUT_DIR,
     competitors: Optional[Sequence[str]] = None,
     timeout: float = DEFAULT_TIMEOUT,
+    reuse_cached: bool = True,
+    rerun_competitors: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     return run_suite(
         suite=STANDARD_SUITE,
@@ -667,6 +800,8 @@ def run_standard_suite(
         competitors=competitors,
         timeout=timeout,
         generate_report_artifacts=True,
+        reuse_cached=reuse_cached,
+        rerun_competitors=rerun_competitors,
     )
 
 
@@ -674,6 +809,8 @@ def run_rare_suite(
     output_dir: str = DEFAULT_OUTPUT_DIR,
     competitors: Optional[Sequence[str]] = None,
     timeout: float = DEFAULT_TIMEOUT,
+    reuse_cached: bool = True,
+    rerun_competitors: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     if competitors is None:
         competitors = ["dagua", "graphviz_sfdp"]
@@ -683,6 +820,8 @@ def run_rare_suite(
         competitors=competitors,
         timeout=timeout,
         generate_report_artifacts=False,
+        reuse_cached=reuse_cached,
+        rerun_competitors=rerun_competitors,
     )
 
 
