@@ -26,6 +26,7 @@ from dagua.eval.report import (
     generate_report,
 )
 from dagua.eval.visual_audit import build_visual_audit_suite, freeze_visual_audit_baseline
+from dagua.eval.visual_audit import build_visual_review_session
 from dagua.io import load
 
 
@@ -378,6 +379,28 @@ def _run_visual_audit_freeze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_visual_session_build(args: argparse.Namespace) -> int:
+    result = build_visual_review_session(
+        output_dir=args.output_dir,
+        steps=args.steps,
+        edge_opt_steps=args.edge_opt_steps,
+        graph_names=args.graphs,
+    )
+    print(
+        json.dumps(
+            {
+                "output_dir": result.output_dir,
+                "manifest_path": result.manifest_path,
+                "readme_path": result.readme_path,
+                "notes_path": result.notes_path,
+                "image_count": len(result.image_paths),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Dagua CLI tooling")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -458,6 +481,12 @@ def build_parser() -> argparse.ArgumentParser:
     audit_freeze_parser.add_argument("--output-dir", default="eval_output/visual_audit")
     audit_freeze_parser.add_argument("--overwrite", action="store_true")
     audit_freeze_parser.set_defaults(func=_run_visual_audit_freeze)
+
+    session_parser = subparsers.add_parser("visual-session-build", help="Build a numbered side-by-side review folder for collaborative visual iteration")
+    session_parser.add_argument("--output-dir", default="eval_output/visual_review_session")
+    session_parser.add_argument("--graphs", nargs="*", default=None)
+    _add_layout_args(session_parser)
+    session_parser.set_defaults(func=_run_visual_session_build)
 
     poster_parser = subparsers.add_parser("poster", help="Export a cinematic still render")
     poster_parser.add_argument("graph", nargs="?", help="Input graph file (JSON/YAML)")

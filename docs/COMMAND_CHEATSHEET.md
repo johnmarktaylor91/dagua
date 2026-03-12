@@ -94,6 +94,20 @@ dagua visual-audit-build \
   --compare-to-baseline reference
 ```
 
+Build the numbered collaboration folder:
+
+```bash
+dagua visual-session-build --output-dir /home/jtaylor/projects/dagua/eval_output/visual_review_session
+```
+
+Fast rebuild for the one graph currently under discussion:
+
+```bash
+dagua visual-session-build \
+  --output-dir /home/jtaylor/projects/dagua/eval_output/visual_review_session \
+  --graphs residual_block
+```
+
 ## Docs
 
 Rebuild glossary:

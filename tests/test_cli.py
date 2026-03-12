@@ -260,6 +260,34 @@ def test_placement_sprint_cli_writes_artifacts(tmp_path, capsys):
     assert (output_dir / "report" / "placement_dashboard.md").exists()
 
 
+@pytest.mark.smoke
+def test_visual_session_build_cli_writes_numbered_review_folder(tmp_path, capsys):
+    output_dir = tmp_path / "visual_review_session"
+
+    rc = main(
+        [
+            "visual-session-build",
+            "--output-dir",
+            str(output_dir),
+            "--graphs",
+            "linear_3layer_mlp",
+            "residual_block",
+            "--steps",
+            "10",
+            "--edge-opt-steps",
+            "-1",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert '"image_count": 2' in captured.out
+    assert (output_dir / "01_linear_3layer_mlp.png").exists()
+    assert (output_dir / "02_residual_block.png").exists()
+    assert (output_dir / "README.md").exists()
+    assert (output_dir / "SESSION_NOTES.md").exists()
+
+
 @pytest.mark.slow
 def test_poster_cli_uses_saved_benchmark_positions(tmp_path):
     output_dir = tmp_path / "eval_output"

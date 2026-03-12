@@ -28,6 +28,7 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 - Visual reset brief: `docs/VISUAL_RESET_BRIEF.md`
 - Open issues ledger: `docs/OPEN_ISSUES.md`
 - Visual-audit workflow output root: `eval_output/visual_audit/`
+- Numbered collaborative visual review root: `eval_output/visual_review_session/`
 - Benchmark report output root: `eval_output/report/`
 
 ## Regeneration Commands

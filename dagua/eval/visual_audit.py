@@ -74,6 +74,15 @@ class VisualAuditResult:
     frozen_paths: List[str] = field(default_factory=list)
 
 
+@dataclass
+class VisualReviewSessionResult:
+    output_dir: str
+    manifest_path: str
+    readme_path: str
+    notes_path: str
+    image_paths: List[str] = field(default_factory=list)
+
+
 _LADDER_SPECS: Tuple[AuditSpec, ...] = (
     AuditSpec("linear_3layer_mlp", "Rung 1: Trivial chain", "Baseline reading order and whitespace.", ("baseline", "reading-order")),
     AuditSpec("deep_chain_20", "Rung 2: Deep chain", "Tests vertical rhythm and depth clarity.", ("depth", "spacing")),
@@ -251,6 +260,75 @@ def build_visual_audit_suite(
         Path(result.manifest_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if "readme" in panel_set:
         Path(result.readme_path).write_text(_suite_readme(result, specs), encoding="utf-8")
+    return result
+
+
+def build_visual_review_session(
+    output_dir: str = "eval_output/visual_review_session",
+    steps: int = 80,
+    edge_opt_steps: int = 12,
+    graph_names: Optional[Sequence[str]] = None,
+) -> VisualReviewSessionResult:
+    """Build a numbered collaboration folder for side-by-side review.
+
+    The session is intentionally linear and discussion-friendly:
+
+    - one numbered image per graph
+    - ordered from simple to complex
+    - same graph rendered side by side across available competitors
+    - a manifest plus note scaffold for live iteration sessions
+    """
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    specs = [spec for spec in _LADDER_SPECS if graph_names is None or spec.graph_name in set(graph_names)]
+    graph_map = {tg.name: tg for tg in get_test_graphs()}
+    competitors = _audit_competitors()
+
+    manifest_path = out / "session_manifest.json"
+    readme_path = out / "README.md"
+    notes_path = out / "SESSION_NOTES.md"
+
+    result = VisualReviewSessionResult(
+        output_dir=str(out),
+        manifest_path=str(manifest_path),
+        readme_path=str(readme_path),
+        notes_path=str(notes_path),
+    )
+
+    manifest = {
+        "kind": "visual_review_session",
+        "purpose": "Numbered collaboration workflow for Dagua visual iteration.",
+        "graphs": [],
+    }
+    for idx, spec in enumerate(specs, 1):
+        graph = copy.deepcopy(graph_map[spec.graph_name].graph)
+        if spec.direction:
+            graph.direction = spec.direction
+        image_name = f"{idx:02d}_{spec.graph_name}.png"
+        image_path = out / image_name
+        _render_competitor_stepwise(
+            graph=graph,
+            spec=spec,
+            competitors=competitors,
+            path=image_path,
+            steps=steps,
+            edge_opt_steps=edge_opt_steps,
+        )
+        result.image_paths.append(str(image_path))
+        manifest["graphs"].append(
+            {
+                "index": idx,
+                "graph_name": spec.graph_name,
+                "title": spec.rung_title,
+                "rationale": spec.rationale,
+                "failure_modes": list(spec.failure_modes),
+                "path": str(image_path),
+            }
+        )
+
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    readme_path.write_text(_visual_review_session_readme(specs), encoding="utf-8")
+    notes_path.write_text(_visual_review_session_notes(specs), encoding="utf-8")
     return result
 
 
@@ -557,6 +635,71 @@ def _suite_readme(result: VisualAuditResult, specs: Sequence[AuditSpec]) -> str:
         "- `frozen_baselines/current/`: current frozen key renders for future comparison\n\n"
         f"Graphs covered: {', '.join(spec.graph_name for spec in specs)}\n"
     )
+
+
+def _visual_review_session_readme(specs: Sequence[AuditSpec]) -> str:
+    lines = [
+        "# Visual Review Session",
+        "",
+        "This folder is the collaboration workflow for visual iteration.",
+        "",
+        "How to use it:",
+        "1. Open the numbered images in order.",
+        "2. Compare Dagua to the competing packages on the same graph.",
+        "3. Discuss only one graph at a time and write notes in `SESSION_NOTES.md`.",
+        "4. After a change, rebuild only the graph(s) you are discussing.",
+        "",
+        "Review order:",
+    ]
+    for idx, spec in enumerate(specs, 1):
+        lines.append(f"- `{idx:02d}` `{spec.graph_name}`: {spec.rationale} Failure modes: {', '.join(spec.failure_modes)}")
+    lines.extend(
+        [
+            "",
+            "Recommended working rhythm:",
+            "- start with the first graph where Dagua feels worse than the best competitor",
+            "- isolate whether the issue is text, edge language, cluster geometry, or information density",
+            "- rebuild a single graph repeatedly until the direction is clearly better",
+            "- only then move to the next numbered graph",
+            "",
+            "Fast rebuild example:",
+            "```bash",
+            "dagua visual-session-build --output-dir eval_output/visual_review_session --graphs residual_block",
+            "```",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _visual_review_session_notes(specs: Sequence[AuditSpec]) -> str:
+    lines = [
+        "# Session Notes",
+        "",
+        "Use one section per graph. Keep the notes brutally concrete.",
+        "",
+        "Per graph, answer:",
+        "- What is Dagua doing worse than the strongest competitor?",
+        "- Is the problem text, edges, clusters, density, or all of the above?",
+        "- What single change should we try next?",
+        "- What must not regress?",
+        "",
+    ]
+    for idx, spec in enumerate(specs, 1):
+        lines.extend(
+            [
+                f"## {idx:02d} — {spec.graph_name}",
+                f"Rationale: {spec.rationale}",
+                f"Failure modes to watch: {', '.join(spec.failure_modes)}",
+                "",
+                "Observations:",
+                "",
+                "Proposed next change:",
+                "",
+                "Do not regress:",
+                "",
+            ]
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _json_safe(value):

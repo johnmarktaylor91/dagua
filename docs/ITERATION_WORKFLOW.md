@@ -81,6 +81,13 @@ dagua visual-audit-build \
   --panels ladder competitor_stepwise run_to_run_diff
 ```
 
+For collaborative visual iteration with numbered graphs:
+
+```bash
+dagua visual-session-build \
+  --output-dir /home/jtaylor/projects/dagua/eval_output/visual_review_session
+```
+
 ### 6. Compare Against Baselines
 
 Use:
@@ -124,6 +131,51 @@ When the question is “does this look good?”:
 Read:
 
 - `docs/VISUAL_RESET_BRIEF.md`
+
+## Collaborative Visual Session Workflow
+
+When we are iterating together on visuals, use the numbered session folder instead of browsing a large artifact tree.
+
+1. Build the session:
+
+```bash
+dagua visual-session-build \
+  --output-dir /home/jtaylor/projects/dagua/eval_output/visual_review_session
+```
+
+2. Open the images in order:
+
+- `01_...png`
+- `02_...png`
+- `03_...png`
+- and so on from simple to complex
+
+3. For each graph:
+
+- compare Dagua with the strongest competitor on that exact graph
+- name the first thing that is clearly worse
+- decide whether the problem is:
+  - text hierarchy
+  - edge language
+  - cluster geometry
+  - information density
+  - something else
+
+4. Write the decision in:
+
+- `eval_output/visual_review_session/SESSION_NOTES.md`
+
+5. Rebuild only the graph currently under discussion:
+
+```bash
+dagua visual-session-build \
+  --output-dir /home/jtaylor/projects/dagua/eval_output/visual_review_session \
+  --graphs residual_block
+```
+
+6. Stay on that graph until the direction is clearly better.
+
+7. Move to the next numbered graph only after the current one is resolved.
 
 ## Scale Workflow
 
