@@ -38,6 +38,11 @@ def mem(label):
     print(f"  [{label}] RSS={rss_gb():.1f} GB", flush=True)
 
 
+def phase(label: str, t0: float):
+    print(f"[phase] {label} @ {time.perf_counter() - t0:.1f}s", flush=True)
+    mem(label)
+
+
 def parse_node_count(s: str) -> int:
     """Parse node count from string: '50m' -> 50_000_000, '1b' -> 1_000_000_000."""
     s = s.strip().lower().replace("_", "").replace(",", "")
@@ -183,6 +188,7 @@ def main():
         flush=True,
     )
     t0 = time.perf_counter()
+    phase("config resolved", t0)
 
     edge_index = build_edges(n, layers)
     print(f"Edge index ready: {edge_index.shape[1]:,} edges in {time.perf_counter() - t0:.1f}s", flush=True)
@@ -205,11 +211,13 @@ def main():
         steps=args.steps,
         seed=args.seed,
     )
+    phase("layout start", t0)
 
     print(f"\nStarting layout (num_workers={config.num_workers})...", flush=True)
     t1 = time.perf_counter()
     pos = dagua.layout(g, config)
     total = time.perf_counter() - t1
+    phase("layout finished", t0)
 
     print(f"\nResult: {pos.shape}", flush=True)
     print(f"Total layout time: {total:.1f}s", flush=True)

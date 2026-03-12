@@ -232,6 +232,7 @@ ML systems are an important use case, but the same API is meant for:
 Yes.
 
 For humans:
+- docs index: [docs/README.md](/home/jtaylor/projects/dagua/docs/README.md)
 - tutorial notebook: [docs/tutorial_walkthrough.ipynb](/home/jtaylor/projects/dagua/docs/tutorial_walkthrough.ipynb)
 - glossary/reference: [docs/glossary/dagua_glossary.pdf](/home/jtaylor/projects/dagua/docs/glossary/dagua_glossary.pdf)
 - how Dagua works: [docs/how_dagua_works.md](/home/jtaylor/projects/dagua/docs/how_dagua_works.md)

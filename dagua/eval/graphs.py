@@ -944,6 +944,57 @@ def _synthetic_graphs() -> List[TestGraph]:
         expected_challenges="Crossing-heavy braid alignment plus a late back-pressure loop near the sink",
     ))
 
+    # 38. Very wide front half collapsing into one asymmetric late merge
+    g = DaguaGraph.from_edge_list([
+        ("input", "w0"), ("input", "w1"), ("input", "w2"), ("input", "w3"), ("input", "w4"),
+        ("w0", "m0"), ("w1", "m1"), ("w2", "m2"), ("w3", "m3"), ("w4", "m4"),
+        ("m0", "join.left"), ("m1", "join.left"), ("m2", "join.center"), ("m3", "join.right"), ("m4", "join.right"),
+        ("w0", "late.merge"), ("w2", "late.merge"), ("w4", "late.merge"),
+        ("join.left", "late.merge"), ("join.center", "late.merge"), ("join.right", "late.merge"),
+        ("late.merge", "head"), ("head", "output"),
+    ])
+    graphs.append(TestGraph(
+        name="width_skew_late_merge",
+        graph=g,
+        tags={"wide-parallel", "skip-heavy", "diamond"},
+        description="Very wide early fan-out that collapses into an asymmetric late merge with long direct skips",
+        expected_challenges="Balancing a wide first half against a compact sink while keeping long skips readable",
+    ))
+
+    # 39. Two nearly symmetric residual trunks with one broken branch
+    g = DaguaGraph.from_edge_list([
+        ("input", "left.0"), ("input", "right.0"),
+        ("left.0", "left.1"), ("left.1", "left.2"), ("left.2", "merge"),
+        ("right.0", "right.1"), ("right.1", "right.2"), ("right.2", "merge"),
+        ("input", "merge"),
+        ("left.0", "left.skip"), ("left.skip", "merge"),
+        ("right.0", "right.skip"), ("right.skip", "right.2"),
+        ("right.1", "breakout"), ("breakout", "merge"),
+        ("merge", "output"),
+    ])
+    graphs.append(TestGraph(
+        name="broken_symmetry_residual_pair",
+        graph=g,
+        tags={"skip-heavy", "diamond", "wide-parallel"},
+        description="Two almost-symmetric residual trunks where one arm breaks pattern just before the merge",
+        expected_challenges="Preserving the repeated pattern while making the broken branch obvious instead of messy",
+    ))
+
+    # 40. Deep spine with a dominant hub spraying long skips across layers
+    g = DaguaGraph.from_edge_list([
+        ("input", "s0"), ("s0", "s1"), ("s1", "s2"), ("s2", "s3"), ("s3", "s4"), ("s4", "s5"), ("s5", "output"),
+        ("s1", "hub"), ("hub", "x0"), ("hub", "x1"), ("hub", "x2"), ("hub", "x3"),
+        ("x0", "s3"), ("x1", "s4"), ("x2", "s5"), ("x3", "output"),
+        ("hub", "output"), ("s0", "x2"), ("s2", "x3"),
+    ])
+    graphs.append(TestGraph(
+        name="hub_skip_superfan",
+        graph=g,
+        tags={"linear-deep", "skip-heavy", "wide-parallel"},
+        description="Deep backbone interrupted by a dominant hub that fans long skips into late layers and the sink",
+        expected_challenges="Avoiding a central skip knot around a high-degree hub while preserving backbone flow",
+    ))
+
     return graphs
 
 
