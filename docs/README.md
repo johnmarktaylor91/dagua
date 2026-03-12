@@ -7,6 +7,7 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 - Tutorial walkthrough: `docs/tutorial_walkthrough.ipynb`
 - Human-facing reference manual: `docs/glossary/dagua_glossary.pdf`
 - Public agent guide: `docs/LLM_TUTORIAL.md`
+- Developer-facing codebase map: `docs/DEVELOPER_OVERVIEW.md`
 - Algorithm explainer: `docs/how_dagua_works.md`
 
 ## Visuals
