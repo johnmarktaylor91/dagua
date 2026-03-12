@@ -16,6 +16,7 @@ This project is still early, so the main goal is disciplined iteration rather th
 
 Read first:
 - `docs/DEVELOPER_OVERVIEW.md`
+- `docs/CRITERIA_LEDGER.md`
 - `docs/ITERATION_WORKFLOW.md`
 - `docs/MAINTENANCE_CHECKLIST.md`
 - `docs/STATUS.md`
@@ -27,6 +28,8 @@ For visual iteration:
 
 For placement iteration:
 - `docs/BENCHMARK_ARTIFACT_GUIDE.md`
+- `eval_output/report/artifact_index.md`
+- `eval_output/report/placement_tuning.md`
 - `eval_output/report/placement_summary.md`
 - `eval_output/report/layout_similarity.md`
 
@@ -40,6 +43,7 @@ For scale work:
 ```bash
 make benchmark-status
 make placement-sprint
+make placement-tune
 make visual-session
 make visual-audit
 make glossary
@@ -72,3 +76,6 @@ Large generated outputs should usually live under:
 - Reuse cached non-Dagua competitors whenever possible during iteration.
 - Treat the latest completed standard run as the active placement baseline unless
   a newer frozen baseline is explicitly designated.
+- For 1B work, do not launch duplicate runs against the same checkpoint root
+  unless you explicitly mean to; `scripts/bench_large.py` now guards against
+  that by default.

@@ -14,6 +14,10 @@ That is the fastest way to answer:
 - on which graphs?
 - on which core metrics?
 
+If you are unsure where to start in the report directory at all, open:
+
+- `eval_output/report/artifact_index.md`
+
 ## Artifact Map
 
 ### `benchmark_deltas.md`
@@ -50,6 +54,19 @@ Best for:
 
 - placement review
 - benchmark reading without aesthetic noise
+
+### `placement_tuning.md`
+
+Use when:
+
+- reviewing the automatic numeric placement search
+- asking which parameter combinations won on the staged brute-force tuning pass
+- deciding whether a candidate is worth promoting into a full benchmark rerun
+
+Best for:
+
+- stage-1 numerical placement iteration
+- understanding what the search actually selected
 
 ### `placement_dashboard.md`
 
@@ -91,11 +108,13 @@ Best for:
 
 For placement iteration:
 
-1. `placement_dashboard.md`
-2. `placement_summary.md`
-3. `benchmark_deltas.md`
-4. `layout_similarity.md`
-5. selected visuals
+1. `artifact_index.md`
+2. `placement_dashboard.md`
+3. `placement_tuning.md`
+4. `placement_summary.md`
+5. `benchmark_deltas.md`
+6. `layout_similarity.md`
+7. selected visuals
 
 For visual redesign:
 
