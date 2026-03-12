@@ -1039,6 +1039,142 @@ def generate_placement_summary_artifacts(
     return str(json_path), str(md_path)
 
 
+def generate_placement_dashboard_artifacts(
+    output_dir: str = "eval_output",
+    combined_results: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    """Generate an iteration-oriented placement dashboard from stored metrics."""
+    from dagua.eval.benchmark import DEFAULT_COMPETITOR_ORDER
+
+    if combined_results is None:
+        from dagua.eval.benchmark import load_combined_results
+
+        combined_results = load_combined_results(output_dir)
+
+    report_dir = Path(output_dir) / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics = {
+        "dag_consistency": ("dag_consistency", True),
+        "edge_crossings": ("edge_crossings", False),
+        "overlap_count": ("overlap_count", False),
+        "edge_length_cv": ("edge_length_cv", False),
+        "depth_correlation": ("depth_correlation", True),
+    }
+
+    payload: Dict[str, Any] = {
+        "generated_from": combined_results.get("generated_from", {}),
+        "aggregate": {
+            "dagua_metric_wins": {metric: 0 for metric in metrics},
+            "graphs_considered": 0,
+            "mean_metric_delta_vs_best_non_dagua": {},
+        },
+        "graphs": {},
+    }
+    delta_buckets: Dict[str, List[float]] = {metric: [] for metric in metrics}
+
+    for graph_name, graph_payload in combined_results.get("graphs", {}).items():
+        competitors = graph_payload.get("competitors", {})
+        if "dagua" not in competitors or competitors["dagua"].get("status") != "OK":
+            continue
+        dagua_result = competitors["dagua"]
+        graph_entry = {
+            "n_nodes": graph_payload.get("n_nodes", 0),
+            "n_edges": graph_payload.get("n_edges", 0),
+            "metrics": {},
+        }
+        any_metric = False
+        for metric_name, (raw_key, higher_is_better) in metrics.items():
+            dagua_value = _metric_from_result(
+                dagua_result,
+                raw_key,
+                "node_overlaps" if raw_key == "overlap_count" else raw_key,
+            )
+            if dagua_value is None:
+                continue
+            best_other_name = None
+            best_other_value = None
+            for comp_name in DEFAULT_COMPETITOR_ORDER:
+                if comp_name == "dagua":
+                    continue
+                result = competitors.get(comp_name)
+                if not result or result.get("status") != "OK":
+                    continue
+                value = _metric_from_result(
+                    result,
+                    raw_key,
+                    "node_overlaps" if raw_key == "overlap_count" else raw_key,
+                )
+                if value is None:
+                    continue
+                if best_other_value is None:
+                    best_other_name, best_other_value = comp_name, value
+                else:
+                    if (higher_is_better and value > best_other_value) or (not higher_is_better and value < best_other_value):
+                        best_other_name, best_other_value = comp_name, value
+            delta = None
+            dagua_wins = None
+            if best_other_value is not None:
+                delta = dagua_value - best_other_value if higher_is_better else best_other_value - dagua_value
+                dagua_wins = delta >= 0
+                delta_buckets[metric_name].append(delta)
+                if dagua_wins:
+                    payload["aggregate"]["dagua_metric_wins"][metric_name] += 1
+            graph_entry["metrics"][metric_name] = {
+                "dagua": dagua_value,
+                "best_non_dagua_competitor": best_other_name,
+                "best_non_dagua_value": best_other_value,
+                "delta_vs_best_non_dagua": delta,
+                "dagua_wins": dagua_wins,
+            }
+            any_metric = True
+        if any_metric:
+            payload["graphs"][graph_name] = graph_entry
+            payload["aggregate"]["graphs_considered"] += 1
+
+    payload["aggregate"]["mean_metric_delta_vs_best_non_dagua"] = {
+        metric: (mean(values) if values else None)
+        for metric, values in delta_buckets.items()
+    }
+
+    json_path = report_dir / "placement_dashboard.json"
+    md_path = report_dir / "placement_dashboard.md"
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    lines = [
+        "# Placement Dashboard",
+        "",
+        "Iteration-oriented placement summary. This is the fastest report to consult when the question is: how is Dagua's node placement doing, before worrying about rendering language?",
+        "",
+        "## Aggregate",
+        "",
+        f"- graphs considered: `{payload['aggregate']['graphs_considered']}`",
+    ]
+    for metric_name, wins in payload["aggregate"]["dagua_metric_wins"].items():
+        total = payload["aggregate"]["graphs_considered"]
+        mean_delta = payload["aggregate"]["mean_metric_delta_vs_best_non_dagua"].get(metric_name)
+        mean_text = f"{mean_delta:.4f}" if mean_delta is not None else "N/A"
+        lines.append(f"- `{metric_name}`: Dagua wins `{wins}/{total}` graphs, mean delta vs best non-Dagua `{mean_text}`")
+    lines.append("")
+    lines.append("## Per Graph")
+    lines.append("")
+    for graph_name, graph_info in sorted(payload["graphs"].items()):
+        lines.append(f"### {graph_name}")
+        lines.append("")
+        lines.append(f"- nodes: `{graph_info['n_nodes']}`")
+        for metric_name, metric_payload in graph_info["metrics"].items():
+            lines.append(
+                f"- `{metric_name}`: dagua=`{metric_payload['dagua']:.4f}`, "
+                f"best_other=`{metric_payload['best_non_dagua_competitor']}` "
+                f"({metric_payload['best_non_dagua_value']:.4f})"
+                if metric_payload["best_non_dagua_value"] is not None
+                else f"- `{metric_name}`: dagua=`{metric_payload['dagua']:.4f}`, best_other=`N/A`"
+            )
+        lines.append("")
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(json_path), str(md_path)
+
+
 def _latest_standard_run_id(combined_results: Dict[str, Any]) -> Optional[str]:
     return combined_results.get("generated_from", {}).get("standard")
 
@@ -1296,6 +1432,7 @@ def _render_latex_report(
     delta_markdown_path: Optional[str] = None,
     similarity_markdown_path: Optional[str] = None,
     placement_markdown_path: Optional[str] = None,
+    placement_dashboard_path: Optional[str] = None,
 ) -> str:
     summary = _summary_statistics(combined_results)
     generated_from = combined_results.get("generated_from", {})
@@ -1364,6 +1501,8 @@ Competitor & Avg. small-graph score & Avg. DAG consistency & Avg. runtime (s) \\
 
 \\paragraph{{Placement-only summary.}} A styling-agnostic placement summary is stored in \\texttt{{{_latex_escape(os.path.basename(placement_markdown_path or 'placement_summary.md'))}}}. This is the right artifact to consult when judging node placement independently of rendering choices.
 
+\\paragraph{{Placement dashboard.}} The trench-view placement dashboard is stored in \\texttt{{{_latex_escape(os.path.basename(placement_dashboard_path or 'placement_dashboard.md'))}}}. Use it during optimization sprints when the only question is whether Dagua's placement is winning or losing on the core metrics.
+
 \\section{{Visual Gallery}}
 {gallery_block}
 
@@ -1419,6 +1558,7 @@ def generate_report(
     delta_json_path, delta_md_path = generate_benchmark_deltas(output_dir=output_dir, combined_results=combined_results)
     similarity_json_path, similarity_md_path = generate_layout_similarity_artifacts(output_dir=output_dir, combined_results=combined_results)
     placement_json_path, placement_md_path = generate_placement_summary_artifacts(output_dir=output_dir, combined_results=combined_results)
+    placement_dashboard_json_path, placement_dashboard_md_path = generate_placement_dashboard_artifacts(output_dir=output_dir, combined_results=combined_results)
     _write_prompt_file(report_dir)
     _write_review_placeholders(report_dir)
     with open(report_dir / "aesthetic_critic_prompt.md", "w", encoding="utf-8") as f:
@@ -1432,6 +1572,7 @@ def generate_report(
         delta_md_path,
         similarity_md_path,
         placement_md_path,
+        placement_dashboard_md_path,
     )
     pdf_path = _compile_pdf(tex_path) if compile_pdf else None
     return {
@@ -1445,4 +1586,6 @@ def generate_report(
         "layout_similarity_md": similarity_md_path,
         "placement_summary_json": placement_json_path,
         "placement_summary_md": placement_md_path,
+        "placement_dashboard_json": placement_dashboard_json_path,
+        "placement_dashboard_md": placement_dashboard_md_path,
     }
