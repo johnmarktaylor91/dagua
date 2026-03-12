@@ -19,6 +19,9 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 ## Iteration And Maintenance
 
 - Maintenance checklist: `docs/MAINTENANCE_CHECKLIST.md`
+- Iteration workflow: `docs/ITERATION_WORKFLOW.md`
+- Money graphs shortlist: `docs/MONEY_GRAPHS.md`
+- Benchmark artifact guide: `docs/BENCHMARK_ARTIFACT_GUIDE.md`
 - Command cheat sheet: `docs/COMMAND_CHEATSHEET.md`
 - Baseline playbook: `docs/BASELINE_PLAYBOOK.md`
 - Visual reset brief: `docs/VISUAL_RESET_BRIEF.md`
