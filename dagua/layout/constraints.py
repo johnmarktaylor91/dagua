@@ -27,6 +27,13 @@ from dagua.utils import longest_path_layering
 # ─── Edge-based losses (O(E), trivially parallelizable) ─────────────────────
 
 
+def _non_self_edges(edge_index: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return source/target indices with self-loops removed."""
+    src, tgt = edge_index[0], edge_index[1]
+    keep = src != tgt
+    return src[keep], tgt[keep]
+
+
 def dag_ordering_loss(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -37,7 +44,9 @@ def dag_ordering_loss(
     if edge_index.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
 
-    src, tgt = edge_index[0], edge_index[1]
+    src, tgt = _non_self_edges(edge_index)
+    if src.numel() == 0:
+        return torch.tensor(0.0, device=pos.device)
     margin = (node_sizes[src, 1] + node_sizes[tgt, 1]) / 2 + rank_sep * 0.5
     violation = F.relu(pos[src, 1] - pos[tgt, 1] + margin)
     return violation.mean()
@@ -55,7 +64,9 @@ def edge_attraction_loss(
     if edge_index.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
 
-    src, tgt = edge_index[0], edge_index[1]
+    src, tgt = _non_self_edges(edge_index)
+    if src.numel() == 0:
+        return torch.tensor(0.0, device=pos.device)
     diff = pos[src] - pos[tgt]  # [E, 2]
     dist_sq = (diff ** 2).sum(dim=1)  # [E]
 
@@ -79,7 +90,9 @@ def edge_straightness_loss(
     if edge_index.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
 
-    src, tgt = edge_index[0], edge_index[1]
+    src, tgt = _non_self_edges(edge_index)
+    if src.numel() == 0:
+        return torch.tensor(0.0, device=pos.device)
     dx = pos[src, 0] - pos[tgt, 0]
     return (dx**2).mean()
 
@@ -92,8 +105,10 @@ def edge_length_variance_loss(
     if edge_index.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
 
-    src, tgt = edge_index[0], edge_index[1]
-    lengths = ((pos[src] - pos[tgt]) ** 2).sum(dim=1).sqrt()
+    src, tgt = _non_self_edges(edge_index)
+    if src.numel() <= 1:
+        return torch.tensor(0.0, device=pos.device)
+    lengths = ((pos[src] - pos[tgt]) ** 2).sum(dim=1).add(1e-8).sqrt()
     if lengths.numel() <= 1:
         return torch.tensor(0.0, device=pos.device)
     return lengths.var()

@@ -3,16 +3,19 @@
 import pytest
 import torch
 
+from dagua.config import LayoutConfig
+from dagua.eval.graphs import get_test_graphs
+from dagua.layout import layout
 from dagua.layout.constraints import (
     back_edge_compactness_loss,
+    crossing_loss,
     dag_ordering_loss,
     edge_attraction_loss,
-    fanout_distribution_loss,
-    repulsion_loss,
-    overlap_avoidance_loss,
-    crossing_loss,
-    edge_straightness_loss,
     edge_length_variance_loss,
+    edge_straightness_loss,
+    fanout_distribution_loss,
+    overlap_avoidance_loss,
+    repulsion_loss,
 )
 
 
@@ -232,3 +235,22 @@ class TestBackEdgeCompactnessLoss:
         ei = torch.zeros(2, 0, dtype=torch.long)
         loss = back_edge_compactness_loss(pos, ei)
         assert loss.item() == 0.0
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("graph_name", ["kitchen_sink_hybrid_net", "disconnected_label_cycle_collage"])
+def test_self_loop_stress_graphs_layout_without_nan(graph_name):
+    graphs = {graph.name: graph.graph for graph in get_test_graphs(max_nodes=120)}
+    graph = graphs[graph_name]
+    graph.compute_node_sizes()
+
+    pos = layout(
+        graph,
+        config=LayoutConfig(
+            steps=20,
+            edge_opt_steps=-1,
+            seed=42,
+        ),
+    )
+
+    assert torch.isfinite(pos).all(), f"{graph_name} produced NaN/Inf positions"
