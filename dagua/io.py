@@ -1554,6 +1554,31 @@ def graph_code_from_dict(graph_dict: Dict[str, Any], function_name: str = "build
     return "\n".join(lines)
 
 
+def graph_script_from_dict(
+    graph_dict: Dict[str, Any],
+    function_name: str = "build_graph",
+    output_path: str = "graph.png",
+) -> str:
+    """Return a ready-to-run Dagua script with layout and export included."""
+    builder = graph_code_from_dict(graph_dict, function_name=function_name)
+    script_lines = [
+        builder,
+        "",
+        "",
+        "if __name__ == '__main__':",
+        "    dagua.configure()",
+        "    config = dagua.LayoutConfig(",
+        "        device='cuda' if __import__('torch').cuda.is_available() else 'cpu',",
+        "        steps=90,",
+        "        edge_opt_steps=10,",
+        "        seed=42,",
+        "    )",
+        f"    fig, ax = dagua.draw(graph, config, output={_python_literal(output_path)})",
+        f"    print('Wrote {output_path}')",
+    ]
+    return "\n".join(script_lines)
+
+
 def theme_code_from_dict(theme_dict: Dict[str, Any], variable_name: str = "theme") -> str:
     """Return canonical Dagua Python code for a theme dict."""
     imports = [
@@ -1632,6 +1657,8 @@ def graph_code_from_image(
     base_url: Optional[str] = None,
     config: Optional[ImageAIConfig] = None,
     function_name: str = "build_graph",
+    include_demo_script: bool = False,
+    output_path: str = "graph.png",
 ) -> str:
     """Return canonical Dagua code reconstructed from an image."""
     graph_dict = graph_dict_from_image(
@@ -1643,6 +1670,12 @@ def graph_code_from_image(
         base_url=base_url,
         config=config,
     )
+    if include_demo_script:
+        return graph_script_from_dict(
+            graph_dict,
+            function_name=function_name,
+            output_path=output_path,
+        )
     return graph_code_from_dict(graph_dict, function_name=function_name)
 
 

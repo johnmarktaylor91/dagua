@@ -149,14 +149,16 @@ dagua.configure_image_ai(provider="openai", api_key_env="OPENAI_API_KEY")
 graph = dagua.from_image("diagram.png")
 graph_dict = dagua.graph_dict_from_image("diagram.png")
 graph_code = dagua.graph_code_from_image("diagram.png")
+graph_script = dagua.graph_code_from_image("diagram.png", include_demo_script=True)
 
 theme = dagua.theme_from_image("reference.png")
 theme_dict = dagua.theme_dict_from_image("reference.png")
 theme_code = dagua.theme_code_from_image("reference.png")
 ```
 
-Use the `*_code_from_image(...)` helpers when the user wants editable source, because
-those helpers emit the cleaner Dagua builder style rather than model-specific freeform code.
+Use the `*_code_from_image(...)` helpers when the user wants editable source:
+- default: reusable builder code
+- `include_demo_script=True`: a more magical ready-to-run script with layout and export included
 
 ### Render explicitly
 

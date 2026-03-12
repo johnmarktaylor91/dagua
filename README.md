@@ -86,6 +86,7 @@ Then use whichever return mode you want:
 graph = dagua.from_image("diagram.png")
 graph_dict = dagua.graph_dict_from_image("diagram.png")
 graph_code = dagua.graph_code_from_image("diagram.png")
+graph_script = dagua.graph_code_from_image("diagram.png", include_demo_script=True)
 
 theme = dagua.theme_from_image("diagram.png")
 theme_dict = dagua.theme_dict_from_image("diagram.png")
@@ -101,8 +102,9 @@ Supported common formats include:
 - TIFF
 - SVG
 
-The code-return helpers intentionally emit the cleaner Dagua style: explicit graph
-construction, clusters, and styles in a reusable builder function instead of ad hoc blobs.
+The code-return helpers intentionally emit the cleaner Dagua style:
+- default: reusable builder code with explicit `add_node` / `add_edge` / `add_cluster`
+- optional: a polished ready-to-run demo script with layout and export already wired in
 
 ## License
 

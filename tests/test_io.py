@@ -21,6 +21,7 @@ from dagua.io import (
     get_image_ai_config,
     graph_code_from_image,
     graph_dict_from_image,
+    graph_script_from_dict,
     graph_from_image,
     graph_from_json,
     graph_from_yaml,
@@ -392,6 +393,42 @@ class TestGraphFromImage:
             assert "graph = build_graph()" in code
         finally:
             os.unlink(image_path)
+
+    def test_graph_code_from_image_can_return_ready_to_run_script(self):
+        image_path = self._mock_image_path()
+        mock_response = json.dumps({
+            "direction": "TB",
+            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            "edges": [{"source": "a", "target": "b"}],
+        })
+        try:
+            with mock.patch("dagua.io._get_llm_client") as mock_get, \
+                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
+                mock_get.return_value = ("anthropic", mock.MagicMock(), ImageAIConfig(provider="anthropic", model="x", api_key="k"))
+                code = graph_code_from_image(
+                    image_path,
+                    provider="anthropic",
+                    include_demo_script=True,
+                    output_path="magic.png",
+                )
+
+            assert "if __name__ == '__main__':" in code
+            assert "dagua.draw(graph, config, output='magic.png')" in code
+            assert "device='cuda' if __import__('torch').cuda.is_available() else 'cpu'" in code
+        finally:
+            os.unlink(image_path)
+
+    def test_graph_script_from_dict(self):
+        code = graph_script_from_dict(
+            {
+                "direction": "LR",
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "edges": [{"source": "a", "target": "b"}],
+            },
+            output_path="demo.png",
+        )
+        assert "def build_graph() -> DaguaGraph:" in code
+        assert "dagua.draw(graph, config, output='demo.png')" in code
 
     def test_provider_auto_detection_anthropic(self):
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
