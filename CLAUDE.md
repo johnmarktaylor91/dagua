@@ -35,6 +35,8 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
 - Reference glossary: `python scripts/build_glossary.py --output-dir docs/glossary`
 - Algorithm explainer: `python scripts/build_how_dagua_works.py`
 - Visual audit suite: `python scripts/build_visual_audit.py --output-dir eval_output/visual_audit`
+  - Fast path for iteration: build a single graph/panel subset via
+    `dagua visual-audit-build --graphs linear_3layer_mlp --panels ladder competitor_stepwise`
 
 ## Documentation Maintenance
 

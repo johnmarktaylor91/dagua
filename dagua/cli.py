@@ -20,6 +20,7 @@ from dagua.eval.benchmark import (
     merge_latest_results,
 )
 from dagua.eval.report import generate_benchmark_deltas, generate_report
+from dagua.eval.visual_audit import build_visual_audit_suite, freeze_visual_audit_baseline
 from dagua.io import load
 
 
@@ -285,6 +286,36 @@ def _run_benchmark_deltas(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_visual_audit_build(args: argparse.Namespace) -> int:
+    result = build_visual_audit_suite(
+        output_dir=args.output_dir,
+        steps=args.steps,
+        edge_opt_steps=args.edge_opt_steps,
+        graph_names=args.graphs,
+        compare_to_baseline=args.compare_to_baseline,
+        panels=args.panels,
+    )
+    print(json.dumps({
+        "output_dir": result.output_dir,
+        "manifest_path": result.manifest_path,
+        "readme_path": result.readme_path,
+        "ladder_count": len(result.ladder_paths),
+        "competitor_count": len(result.competitor_paths),
+        "baseline_diff_count": len(result.baseline_diff_paths),
+    }, indent=2))
+    return 0
+
+
+def _run_visual_audit_freeze(args: argparse.Namespace) -> int:
+    target = freeze_visual_audit_baseline(
+        output_dir=args.output_dir,
+        label=args.label,
+        overwrite=args.overwrite,
+    )
+    print(json.dumps({"baseline_dir": target, "label": args.label}, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Dagua CLI tooling")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -339,6 +370,25 @@ def build_parser() -> argparse.ArgumentParser:
     deltas_parser = subparsers.add_parser("benchmark-deltas", help="Generate round-over-round benchmark deltas")
     deltas_parser.add_argument("--output-dir", default="eval_output")
     deltas_parser.set_defaults(func=_run_benchmark_deltas)
+
+    audit_parser = subparsers.add_parser("visual-audit-build", help="Build the visual iteration / audit suite")
+    audit_parser.add_argument("--output-dir", default="eval_output/visual_audit")
+    audit_parser.add_argument("--graphs", nargs="*", default=None)
+    audit_parser.add_argument(
+        "--panels",
+        nargs="*",
+        default=None,
+        help="Optional subset: ladder decomposition kill_switches diff_dashboard competitor_stepwise metric_cards sheets frozen_baselines run_to_run_diff readme manifest",
+    )
+    audit_parser.add_argument("--compare-to-baseline", default="reference")
+    _add_layout_args(audit_parser)
+    audit_parser.set_defaults(func=_run_visual_audit_build)
+
+    audit_freeze_parser = subparsers.add_parser("visual-audit-freeze", help="Freeze the current visual-audit baseline under a label")
+    audit_freeze_parser.add_argument("label")
+    audit_freeze_parser.add_argument("--output-dir", default="eval_output/visual_audit")
+    audit_freeze_parser.add_argument("--overwrite", action="store_true")
+    audit_freeze_parser.set_defaults(func=_run_visual_audit_freeze)
 
     poster_parser = subparsers.add_parser("poster", help="Export a cinematic still render")
     poster_parser.add_argument("graph", nargs="?", help="Input graph file (JSON/YAML)")
