@@ -6,6 +6,7 @@ import torch
 from dagua.graph import DaguaGraph
 from dagua.config import LayoutConfig
 from dagua.layout import layout
+from dagua.layout.multilevel import build_hierarchy
 from dagua.metrics import compute_all_metrics
 
 
@@ -146,3 +147,25 @@ class TestLayoutCUDA:
         assert pos.shape == (5, 2)
         # Result is on the compute device
         assert pos.device.type in ("cpu", "cuda")
+
+
+def test_build_hierarchy_accepts_precomputed_layer_assignments():
+    graph = DaguaGraph.from_edge_list([("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")])
+    graph.compute_node_sizes()
+    assert graph.node_sizes is not None
+    precomputed = torch.tensor([0, 1, 1, 2], dtype=torch.long)
+    captured: list[torch.Tensor] = []
+
+    levels = build_hierarchy(
+        graph.edge_index,
+        graph.num_nodes,
+        graph.node_sizes,
+        min_nodes=2,
+        max_levels=2,
+        initial_layer_assignments=precomputed,
+        layer_assignments_callback=lambda tensor: captured.append(tensor),
+    )
+
+    assert levels
+    assert not captured
+    assert torch.equal(levels[0].fine_layer_assignments, precomputed)

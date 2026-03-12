@@ -459,6 +459,8 @@ def build_hierarchy(
     device: str = "cpu",
     progress: Optional[Callable[[str], None]] = None,
     cluster_ids: Optional[torch.Tensor] = None,
+    initial_layer_assignments: Optional[torch.Tensor] = None,
+    layer_assignments_callback: Optional[Callable[[torch.Tensor], None]] = None,
 ) -> List[CoarseLevel]:
     """Build coarsening hierarchy until num_nodes <= min_nodes.
 
@@ -470,19 +472,29 @@ def build_hierarchy(
     current_sizes = _ensure_node_sizes_2d(node_sizes, current_n)
     current_cluster_ids = cluster_ids
 
-    # Compute layers once on the original graph — returns tensor for large N
-    if progress is not None:
-        progress(f"Layering full graph ({current_n:,} nodes)...")
-    if current_ei.numel() > 0:
-        current_la = longest_path_layering(current_ei, current_n)
+    # Compute layers once on the original graph — returns tensor for large N.
+    # Allow a precomputed checkpoint for giant runs so retries can skip the
+    # longest-path layering pass entirely.
+    if initial_layer_assignments is not None:
+        current_la = initial_layer_assignments.to(dtype=torch.long, device="cpu")
+        if progress is not None:
+            max_layer = int(current_la.max().item()) if current_la.numel() > 0 else 0
+            progress(f"Restored layering ({max_layer + 1:,} layers)")
     else:
-        current_la = torch.zeros(current_n, dtype=torch.long)
-    # Ensure tensor throughout — no list conversion
-    if isinstance(current_la, list):
-        current_la = torch.tensor(current_la, dtype=torch.long)
-    if progress is not None:
-        max_layer = int(current_la.max().item()) if current_la.numel() > 0 else 0
-        progress(f"Layering done ({max_layer + 1:,} layers)")
+        if progress is not None:
+            progress(f"Layering full graph ({current_n:,} nodes)...")
+        if current_ei.numel() > 0:
+            current_la = longest_path_layering(current_ei, current_n)
+        else:
+            current_la = torch.zeros(current_n, dtype=torch.long)
+        # Ensure tensor throughout — no list conversion
+        if isinstance(current_la, list):
+            current_la = torch.tensor(current_la, dtype=torch.long)
+        if layer_assignments_callback is not None:
+            layer_assignments_callback(current_la.detach().cpu())
+        if progress is not None:
+            max_layer = int(current_la.max().item()) if current_la.numel() > 0 else 0
+            progress(f"Layering done ({max_layer + 1:,} layers)")
 
     for level_idx in range(max_levels):
         if current_n <= min_nodes:
@@ -624,6 +636,8 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
         device="cpu",
         progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
         cluster_ids=graph.cluster_ids,
+        initial_layer_assignments=getattr(graph, "_precomputed_layer_assignments", None),
+        layer_assignments_callback=getattr(graph, "_layer_assignments_callback", None),
     )
     _vlog(f"Phase 1/3: Building hierarchy ({n:,} nodes)... {len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)")
 
