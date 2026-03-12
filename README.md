@@ -34,6 +34,15 @@ dagua poster graph.yaml poster.png --scene powers_of_ten --device cuda
 dagua tour graph.yaml trailer.mp4 --scene zoom_pan --device cuda
 ```
 
+For the exhaustive reference manual:
+
+```bash
+python scripts/build_glossary.py --output-dir docs/glossary
+```
+
+That command regenerates the LaTeX source, explanatory visuals, manifest, and PDF
+when `pdflatex` is available.
+
 You can also render directly from saved benchmark positions, which is useful for
 large graphs where you do not want to relayout just to produce a poster or tour:
 
