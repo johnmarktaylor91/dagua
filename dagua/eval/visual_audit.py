@@ -17,16 +17,18 @@ from __future__ import annotations
 
 import copy
 import json
-import math
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import torch
 
 from dagua import DaguaGraph, LayoutConfig, layout
 from dagua.edges import place_edge_labels, route_edges
+from dagua.eval.competitors import get_available_competitors
+from dagua.eval.competitors.base import CompetitorBase
 from dagua.eval.graphs import get_test_graphs
 from dagua.metrics import full
 from dagua.render.mpl import (
@@ -65,6 +67,7 @@ class VisualAuditResult:
     decomposition_paths: List[str] = field(default_factory=list)
     kill_switch_paths: List[str] = field(default_factory=list)
     diff_paths: List[str] = field(default_factory=list)
+    competitor_paths: List[str] = field(default_factory=list)
     sheet_paths: List[str] = field(default_factory=list)
     metric_paths: List[str] = field(default_factory=list)
     frozen_paths: List[str] = field(default_factory=list)
@@ -106,10 +109,11 @@ def build_visual_audit_suite(
     decomp_dir = out / "decomposition"
     kill_dir = out / "kill_switches"
     diff_dir = out / "diff_dashboard"
+    competitor_dir = out / "competitor_stepwise"
     sheet_dir = out / "sheets"
     metric_dir = out / "metric_cards"
     frozen_dir = out / "frozen_baselines" / "current"
-    for d in (ladder_dir, decomp_dir, kill_dir, diff_dir, sheet_dir, metric_dir, frozen_dir):
+    for d in (ladder_dir, decomp_dir, kill_dir, diff_dir, competitor_dir, sheet_dir, metric_dir, frozen_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     manifest: Dict[str, object] = {
@@ -117,12 +121,14 @@ def build_visual_audit_suite(
         "decomposition": [],
         "kill_switches": [],
         "diff_dashboard": [],
+        "competitor_stepwise": [],
         "sheets": [],
         "metric_cards": [],
         "frozen_baselines": [],
     }
 
     metric_rows = []
+    competitors = _audit_competitors()
     for spec in specs:
         tg = graph_map[spec.graph_name]
         graph = copy.deepcopy(tg.graph)
@@ -163,6 +169,11 @@ def build_visual_audit_suite(
             _render_diff_dashboard(graph, pos, curves, label_positions, spec, diff_path)
             result.diff_paths.append(str(diff_path))
             manifest["diff_dashboard"].append({"graph": spec.graph_name, "path": str(diff_path)})
+
+            competitor_path = competitor_dir / f"{spec.graph_name}_competitors.png"
+            _render_competitor_stepwise(graph, spec, competitors, competitor_path, steps, edge_opt_steps)
+            result.competitor_paths.append(str(competitor_path))
+            manifest["competitor_stepwise"].append({"graph": spec.graph_name, "path": str(competitor_path)})
 
         thumb_rel = Path("..") / "complexity_ladder" / ladder_path.name
         metric_path = metric_dir / f"{spec.graph_name}.json"
@@ -498,6 +509,7 @@ def _suite_readme(result: VisualAuditResult, specs: Sequence[AuditSpec]) -> str:
         "- `decomposition/`: renderer layer breakdowns\n"
         "- `kill_switches/`: quick isolation of labels/clusters/theme effects\n"
         "- `diff_dashboard/`: current vs neutral vs placement-only views\n"
+        "- `competitor_stepwise/`: the same stepwise graphs shown side by side with competing engines\n"
         "- `sheets/`: typography and edge-language stress sheets\n"
         "- `metric_cards/`: metrics paired with thumbnails and failure-mode tags\n"
         "- `frozen_baselines/current/`: current frozen key renders for future comparison\n\n"
@@ -511,3 +523,107 @@ def _json_safe(value):
     if isinstance(value, (np.integer,)):
         return int(value)
     return value
+
+
+def _audit_competitors() -> List[CompetitorBase]:
+    preferred = {"dagua", "graphviz_dot", "elk_layered", "dagre", "graphviz_sfdp", "nx_spring"}
+    competitors = [c for c in get_available_competitors() if c.name in preferred]
+    order = ["dagua", "graphviz_dot", "elk_layered", "dagre", "graphviz_sfdp", "nx_spring"]
+    competitors.sort(key=lambda c: order.index(c.name) if c.name in order else 999)
+    return competitors
+
+
+def _render_competitor_stepwise(
+    graph: DaguaGraph,
+    spec: AuditSpec,
+    competitors: Sequence[CompetitorBase],
+    path: Path,
+    steps: int,
+    edge_opt_steps: int,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    if not competitors:
+        return
+
+    positions: Dict[str, Optional[torch.Tensor]] = {}
+    graph.compute_node_sizes()
+    dagua_cfg = LayoutConfig(steps=steps, edge_opt_steps=edge_opt_steps, direction=graph.direction, seed=42)
+    positions["dagua"] = layout(copy.deepcopy(graph), dagua_cfg)
+
+    for competitor in competitors:
+        if competitor.name == "dagua":
+            continue
+        if graph.num_nodes > competitor.max_nodes:
+            positions[competitor.name] = None
+            continue
+        try:
+            result = competitor.layout(copy.deepcopy(graph), timeout=120.0)
+            positions[competitor.name] = result.pos
+        except Exception:
+            positions[competitor.name] = None
+
+    ordered_names = [c.name for c in competitors if c.name in positions]
+    cols = min(3, max(1, len(ordered_names)))
+    rows = (len(ordered_names) + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4.8, rows * 4.0))
+    axes_list = _flatten_axes(axes)
+    fig.patch.set_facecolor(graph.graph_style.background_color)
+
+    for ax, comp_name in zip(axes_list, ordered_names):
+        pos = positions.get(comp_name)
+        if pos is None:
+            _status_panel(ax, comp_name, "N/A")
+            continue
+        norm_pos = _normalize_positions_for_audit(pos, graph.node_sizes)
+        curves = route_edges(norm_pos, graph.edge_index, graph.node_sizes, graph.direction, graph)
+        label_positions = place_edge_labels(curves, norm_pos, graph.node_sizes, graph.edge_labels, graph)
+        _render_layers(
+            ax,
+            graph,
+            norm_pos,
+            curves,
+            label_positions,
+            ("clusters", "edges", "nodes", "node_labels", "edge_labels"),
+            comp_name,
+        )
+    for ax in axes_list[len(ordered_names):]:
+        ax.axis("off")
+    fig.suptitle(f"Competitor stepwise — {spec.graph_name}", fontsize=12, fontfamily=RESOLVED_FONT)
+    fig.tight_layout()
+    fig.savefig(path, dpi=170, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _flatten_axes(axes) -> List:
+    if isinstance(axes, np.ndarray):
+        return [ax for ax in axes.flat]
+    return [axes]
+
+
+def _status_panel(ax, title: str, subtitle: str) -> None:
+    ax.set_facecolor("#F3F4F6")
+    ax.text(0.5, 0.58, title, ha="center", va="center", transform=ax.transAxes, fontsize=11, color="#374151")
+    ax.text(0.5, 0.42, subtitle, ha="center", va="center", transform=ax.transAxes, fontsize=8, color="#6B7280")
+    ax.axis("off")
+
+
+def _normalize_positions_for_audit(
+    positions: torch.Tensor,
+    node_sizes: torch.Tensor,
+    target_width: float = 600.0,
+    target_height: float = 420.0,
+    padding: float = 30.0,
+) -> torch.Tensor:
+    pos = positions.detach().cpu().clone()
+    sizes = node_sizes.detach().cpu()
+    x_min = (pos[:, 0] - sizes[:, 0] / 2).min()
+    x_max = (pos[:, 0] + sizes[:, 0] / 2).max()
+    y_min = (pos[:, 1] - sizes[:, 1] / 2).min()
+    y_max = (pos[:, 1] + sizes[:, 1] / 2).max()
+    width = max((x_max - x_min).item(), 1.0)
+    height = max((y_max - y_min).item(), 1.0)
+    scale = min((target_width - 2 * padding) / width, (target_height - 2 * padding) / height)
+    pos[:, 0] = (pos[:, 0] - x_min) * scale + padding
+    pos[:, 1] = (pos[:, 1] - y_min) * scale + padding
+    return pos
