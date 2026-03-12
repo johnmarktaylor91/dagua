@@ -117,10 +117,14 @@ Generated / persistent outputs:
 Important report-side artifacts:
 - `eval_output/report/layout_similarity.json`
 - `eval_output/report/layout_similarity.md`
+- `eval_output/report/artifact_index.json`
+- `eval_output/report/artifact_index.md`
 - `eval_output/report/placement_summary.json`
 - `eval_output/report/placement_summary.md`
 - `eval_output/report/placement_dashboard.json`
 - `eval_output/report/placement_dashboard.md`
+- `eval_output/report/placement_tuning.json`
+- `eval_output/report/placement_tuning.md`
 - benchmark-run `progress.json` files alongside partial results
 
 Update when:
@@ -128,6 +132,7 @@ Update when:
 - competitor wrappers change
 - metric payload changes
 - report structure changes
+- stage-0 criteria / stage-1 / stage-2 workflow boundaries change
 - caching/reuse/resume logic changes
 - scaling ladders change
 - rare-suite policy changes
@@ -144,6 +149,7 @@ Special note:
 ## Metrics / Quality Definitions
 
 - `dagua/metrics.py`
+- `docs/CRITERIA_LEDGER.md`
 - `docs/glossary/`
 - benchmark report tables and deltas
 - quality-oriented tests
@@ -154,6 +160,8 @@ Update when:
 - composite score changes
 - new metrics are added
 - label/routing metrics change meaning
+- cluster-aware criteria change
+- the boundary between measured vs visual-only criteria changes
 
 ## Generated Public Docs
 
@@ -191,6 +199,7 @@ When in doubt, at least keep these synchronized:
 - `docs/README.md`
 - `docs/COMMAND_CHEATSHEET.md`
 - `docs/ITERATION_WORKFLOW.md`
+- `docs/CRITERIA_LEDGER.md`
 - `CLAUDE.md`
 
 ## Notebooks
@@ -218,6 +227,7 @@ The playground should remain a broad manual regression surface for the UX.
 
 Current command families include:
 - benchmark status / watch / list / show / compare / freeze / report / deltas
+- placement sprint / placement tune
 - poster
 - tour
 

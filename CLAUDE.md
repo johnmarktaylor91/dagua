@@ -58,6 +58,7 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
   - when touching key orchestration modules, improve type annotations instead of letting `Any` spread
 - The short kitchen-prep docs now include:
   - `docs/ITERATION_WORKFLOW.md`
+  - `docs/CRITERIA_LEDGER.md`
   - `docs/MONEY_GRAPHS.md`
   - `docs/BENCHMARK_ARTIFACT_GUIDE.md`
   - `docs/COMMAND_CHEATSHEET.md`
@@ -86,6 +87,12 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
   - `placement_dashboard.md`
   Use this when the working question is simply whether Dagua's placement is winning
   or losing on core metrics.
+- The benchmark/report workflow now also emits:
+  - `artifact_index.json`
+  - `artifact_index.md`
+  - `placement_tuning.json`
+  - `placement_tuning.md`
+  Use `artifact_index.md` as the front door when the report directory gets cluttered.
 - The YouTube/video planning resources live in `docs/video/`.
 - The maintained notebooks are `docs/tutorial_walkthrough.ipynb` for user onboarding
   and `tests/ui_feature_playground.ipynb` for developer-facing visual QA.
@@ -130,6 +137,16 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
   2. inspect `placement_tuning.md`
   3. validate the winner visually in `visual_review_session`
   4. rerun the standard benchmark with cached competitors if the candidate still looks sane
+- The staged optimization story is now explicit:
+  - stage 0: keep `docs/CRITERIA_LEDGER.md` current
+  - stage 1: node placement metrics
+  - stage 2: downstream geometry metrics
+  - stage 3: remaining aesthetic/default decisions
+- Cluster quality begins in stage 1, not only stage 2. Keep the hierarchical
+  interaction principle in mind: same-level elements interact directly, while
+  cross-level interactions should often be mediated through container geometry.
+- `scripts/bench_large.py` now guards against duplicate concurrent runs against
+  the same checkpoint root unless explicitly forced.
 
 ## Maintainer Hygiene
 
@@ -137,6 +154,7 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
 - When you add a new recurring workflow, update all three:
   - `docs/COMMAND_CHEATSHEET.md`
   - `docs/ITERATION_WORKFLOW.md`
+  - `docs/CRITERIA_LEDGER.md` when criteria or stage boundaries are involved
   - this file
 - Prefer tightening local type guarantees and docstrings in orchestration modules
   before adding more helper scripts around unclear code.
