@@ -12,6 +12,7 @@ from dagua.eval.benchmark import (
     run_rare_suite,
     run_standard_suite,
 )
+from dagua.eval.competitors.dagua_competitor import DaguaCompetitor
 from dagua.eval.graphs import TestGraph
 from dagua.eval.report import generate_report
 from dagua.graph import DaguaGraph
@@ -492,3 +493,28 @@ def test_standard_suite_writes_partial_checkpoints(tmp_path, monkeypatch):
     assert not (run_dir / "results.partial.json").exists()
     assert (run_dir / "results.json").exists()
     assert (run_dir / "progress.json").exists()
+
+
+@pytest.mark.smoke
+def test_dagua_competitor_handles_multilevel_path(monkeypatch):
+    graph = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
+    competitor = DaguaCompetitor()
+
+    real_layout_config = __import__("dagua.config", fromlist=["LayoutConfig"]).LayoutConfig
+
+    def tiny_multilevel_config(*args, **kwargs):
+        kwargs.setdefault("device", "cpu")
+        kwargs.setdefault("verbose", False)
+        kwargs.setdefault("steps", 2)
+        kwargs.setdefault("multilevel_threshold", 1)
+        kwargs.setdefault("multilevel_coarse_steps", 1)
+        kwargs.setdefault("multilevel_refine_steps", 1)
+        kwargs.setdefault("multilevel_min_nodes", 10)
+        return real_layout_config(*args, **kwargs)
+
+    monkeypatch.setattr("dagua.config.LayoutConfig", tiny_multilevel_config)
+    result = competitor.layout(graph)
+
+    assert result.error is None
+    assert result.pos is not None
+    assert result.pos.shape == (graph.num_nodes, 2)
