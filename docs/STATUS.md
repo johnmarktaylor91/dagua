@@ -22,6 +22,13 @@ Current high-level project state, meant as a fast handoff note between sessions.
   - resumable
   - cached competitor reuse
   - report + delta artifacts
+- Current placement read from the finished standard run:
+  - Dagua is strong on DAG consistency and overlap avoidance.
+  - Dagua is not yet winning on edge crossings against `dot`, `ELK`, and `dagre`.
+  - Edge-length uniformity is mixed:
+    - often better than `dot`
+    - mixed vs `ELK` / `dagre`
+    - usually worse than force-directed baselines on that specific metric
 - Rare suite:
   - explicit/manual
   - scaling ladder through `1b`
@@ -49,7 +56,7 @@ Read first:
 
 ## Current Priorities
 
-1. Finish and trust the standard benchmark baseline on current code.
+1. Reduce the placement gap on edge crossings against the best hierarchical competitors.
 2. Keep hardening the 1B path.
 3. Iterate on default visual settings using the numbered session workflow.
 4. Expand strict typing and maintainability incrementally, not performatively.

@@ -6,8 +6,9 @@ Keep it current. Keep it terse.
 
 ## Placement
 
-- Finish the placement-first benchmark loop against competitor baselines.
-- Confirm where Dagua genuinely loses on placement metrics vs where the visual layer is only making it look worse.
+- Edge crossings are the main placement gap against `graphviz_dot`, `ELK`, and `dagre`.
+- DAG consistency and overlap avoidance are already competitive; preserve those while improving crossings.
+- Confirm graph-by-graph where crossing losses are structural vs fixable without degrading spacing.
 - Keep expanding the challenge-graph corpus when new structural blind spots appear.
 
 ## Scale
@@ -25,6 +26,7 @@ Keep it current. Keep it terse.
 ## Benchmarking
 
 - The first full standard baseline is still expensive; future rounds should mostly reuse non-Dagua competitors.
+- The latest standard run is complete and should now be treated as the active placement baseline.
 - Keep the report surfaces aligned:
   - `benchmark_deltas.md`
   - `layout_similarity.md`
