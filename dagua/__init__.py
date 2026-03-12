@@ -16,6 +16,7 @@ from dagua.config import LayoutConfig
 from dagua.edges import place_edge_labels, route_edges
 from dagua.layout import layout
 from dagua.render import render
+from dagua.playground import launch_playground
 from dagua.animation import (
     animate, AnimationConfig, AnimationResult,
     tour, TourConfig, CameraKeyframe,
@@ -166,6 +167,7 @@ __all__ = [
     "graph_to_json",
     "graph_from_yaml",
     "graph_to_yaml",
+    "launch_playground",
     # Interop exports
     "to_networkx",
     "to_igraph",

@@ -206,6 +206,8 @@ When in doubt, at least keep these synchronized:
 
 - user tutorial:
   - `docs/tutorial_walkthrough.ipynb`
+- interactive tuning playground:
+  - `docs/interactive_playground.ipynb`
 - developer / QA playground:
   - `tests/ui_feature_playground.ipynb`
 

@@ -107,6 +107,21 @@ dagua visual-audit-build \
   --panels ladder competitor_stepwise run_to_run_diff
 ```
 
+## Interactive Intuition
+
+Open the notebook playground:
+
+```bash
+jupyter notebook docs/interactive_playground.ipynb
+```
+
+Or launch the widget directly inside an existing notebook:
+
+```python
+import dagua
+dagua.launch_playground()
+```
+
 Freeze a named visual baseline:
 
 ```bash

@@ -23,6 +23,7 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 ## Start Here
 
 - Tutorial walkthrough: `docs/tutorial_walkthrough.ipynb`
+- Interactive tuning playground: `docs/interactive_playground.ipynb`
 - Human-facing reference manual: `docs/glossary/dagua_glossary.pdf`
 - Public agent guide: `docs/LLM_TUTORIAL.md`
 - Developer-facing codebase map: `docs/DEVELOPER_OVERVIEW.md`
@@ -48,6 +49,7 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 - Command cheat sheet: `docs/COMMAND_CHEATSHEET.md`
 - Baseline playbook: `docs/BASELINE_PLAYBOOK.md`
 - Visual reset brief: `docs/VISUAL_RESET_BRIEF.md`
+- Interactive playground: `docs/INTERACTIVE_PLAYGROUND.md`
 - Open issues ledger: `docs/OPEN_ISSUES.md`
 - Contributing guide: `CONTRIBUTING.md`
 - Visual-audit workflow output root: `eval_output/visual_audit/`
