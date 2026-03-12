@@ -28,6 +28,19 @@ _STREAMING_THRESHOLD = 100_000_000
 _DEDUP_BUCKET_TARGET = 150_000_000
 
 
+def _ensure_node_sizes_2d(node_sizes: torch.Tensor) -> torch.Tensor:
+    """Normalize node sizes to [N, 2], treating 1D inputs as square nodes."""
+    if node_sizes.ndim == 1:
+        return torch.stack([node_sizes, node_sizes], dim=1)
+    if node_sizes.ndim == 2 and node_sizes.shape[1] == 1:
+        return node_sizes.expand(-1, 2)
+    if node_sizes.ndim != 2 or node_sizes.shape[1] != 2:
+        raise ValueError(
+            f"node_sizes must have shape [N], [N, 1], or [N, 2]; got {tuple(node_sizes.shape)}"
+        )
+    return node_sizes
+
+
 @dataclass
 class CoarseLevel:
     """One level of the coarsening hierarchy."""
@@ -72,6 +85,7 @@ def _coarsen_once_streaming(
     materializing full [N]- or [E]-sized temporaries. Peak memory ~60 GB
     at 1B nodes (vs ~100 GB for the vectorized path).
     """
+    node_sizes = _ensure_node_sizes_2d(node_sizes)
     E = edge_index.shape[1] if edge_index.numel() > 0 else 0
     index_dtype = torch.int32 if N <= torch.iinfo(torch.int32).max else torch.long
 
@@ -186,6 +200,7 @@ def coarsen_once(
     to streaming path that processes edges in chunks.
     """
     N = num_nodes
+    node_sizes = _ensure_node_sizes_2d(node_sizes)
     if isinstance(layer_assignments, list):
         layers = torch.tensor(layer_assignments, dtype=torch.long, device=device)
     else:
@@ -420,7 +435,7 @@ def build_hierarchy(
     """
     levels: List[CoarseLevel] = []
     current_ei = edge_index
-    current_sizes = node_sizes
+    current_sizes = _ensure_node_sizes_2d(node_sizes)
     current_n = num_nodes
     current_cluster_ids = cluster_ids
 
