@@ -25,6 +25,7 @@ from dagua.config import LayoutConfig
 from dagua.utils import _EDGE_CHUNK, _vram_fits, longest_path_layering
 
 _STREAMING_THRESHOLD = 100_000_000
+_DEDUP_BUCKET_TARGET = 150_000_000
 
 
 @dataclass
@@ -120,30 +121,40 @@ def _coarsen_once_streaming(
 
     # --- Phase C: Chunked edge dedup ---
     if E > 0:
-        running_unique: Optional[torch.Tensor] = None
-        for start in range(0, E, _EDGE_CHUNK):
-            end = min(start + _EDGE_CHUNK, E)
-            chunk_src = fine_to_coarse[edge_index[0, start:end]].long()
-            chunk_tgt = fine_to_coarse[edge_index[1, start:end]].long()
-            not_self = chunk_src != chunk_tgt
-            chunk_src = chunk_src[not_self]
-            chunk_tgt = chunk_tgt[not_self]
-            if chunk_src.numel() > 0:
-                chunk_hash = chunk_src * N_coarse + chunk_tgt
-                chunk_unique = chunk_hash.unique()
-                if running_unique is None:
-                    running_unique = chunk_unique
-                else:
-                    # Incremental merge avoids holding all per-chunk uniques plus
-                    # a final concatenation at once, which spikes memory at 1B+ scale.
-                    running_unique = torch.cat([running_unique, chunk_unique]).unique()
-                del chunk_hash
-            del chunk_src, chunk_tgt
+        bucket_count = max(1, (E + _DEDUP_BUCKET_TARGET - 1) // _DEDUP_BUCKET_TARGET)
+        bucket_uniques: List[torch.Tensor] = []
+        for bucket_idx in range(bucket_count):
+            running_unique: Optional[torch.Tensor] = None
+            for start in range(0, E, _EDGE_CHUNK):
+                end = min(start + _EDGE_CHUNK, E)
+                chunk_src = fine_to_coarse[edge_index[0, start:end]].long()
+                chunk_tgt = fine_to_coarse[edge_index[1, start:end]].long()
+                not_self = chunk_src != chunk_tgt
+                chunk_src = chunk_src[not_self]
+                chunk_tgt = chunk_tgt[not_self]
+                if chunk_src.numel() > 0:
+                    chunk_hash = chunk_src * N_coarse + chunk_tgt
+                    if bucket_count > 1:
+                        bucket_mask = torch.remainder(chunk_hash, bucket_count) == bucket_idx
+                        chunk_hash = chunk_hash[bucket_mask]
+                    if chunk_hash.numel() > 0:
+                        chunk_unique = chunk_hash.unique()
+                        if running_unique is None:
+                            running_unique = chunk_unique
+                        else:
+                            merged = torch.cat([running_unique, chunk_unique]).sort().values
+                            running_unique = torch.unique_consecutive(merged)
+                            del merged
+                    del chunk_hash
+                del chunk_src, chunk_tgt
+            if running_unique is not None and running_unique.numel() > 0:
+                bucket_uniques.append(running_unique)
 
-        if running_unique is not None:
-            unique_src = running_unique // N_coarse
-            unique_tgt = running_unique % N_coarse
-            del running_unique
+        if bucket_uniques:
+            all_unique = torch.cat(bucket_uniques) if len(bucket_uniques) > 1 else bucket_uniques[0]
+            unique_src = all_unique // N_coarse
+            unique_tgt = all_unique % N_coarse
+            del bucket_uniques, all_unique
             coarse_edge_index = torch.stack([unique_src, unique_tgt])
             del unique_src, unique_tgt
         else:

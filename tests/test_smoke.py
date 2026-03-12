@@ -21,6 +21,7 @@ from dagua.layout.multilevel import (
     _can_prolong_on_gpu,
     coarsen_once,
     _coarsen_once_streaming,
+    _DEDUP_BUCKET_TARGET,
     _STREAMING_THRESHOLD,
 )
 from dagua.utils import (
@@ -372,6 +373,29 @@ class TestStreamingCoarsenMatchesVectorized:
 
         assert result.node_sizes.dtype == torch.float16
         assert result.node_sizes.shape == (result.num_nodes, 2)
+
+    def test_streaming_bucketed_dedup_matches_default(self):
+        """Forced multi-bucket dedup should preserve the same coarse edges."""
+        edge_index, N, node_sizes = _make_layered_dag(100, 5)
+        layers = longest_path_layering(edge_index, N)
+        if isinstance(layers, list):
+            layers = torch.tensor(layers, dtype=torch.long)
+
+        old_threshold = _multilevel_mod._STREAMING_THRESHOLD
+        old_bucket_target = _multilevel_mod._DEDUP_BUCKET_TARGET
+        try:
+            _multilevel_mod._STREAMING_THRESHOLD = 100
+            baseline = coarsen_once(edge_index, N, node_sizes, layers)
+            _multilevel_mod._DEDUP_BUCKET_TARGET = 50
+            bucketed = coarsen_once(edge_index, N, node_sizes, layers)
+        finally:
+            _multilevel_mod._STREAMING_THRESHOLD = old_threshold
+            _multilevel_mod._DEDUP_BUCKET_TARGET = old_bucket_target
+
+        assert baseline.num_nodes == bucketed.num_nodes
+        baseline_edges = set(map(tuple, baseline.edge_index.t().tolist()))
+        bucketed_edges = set(map(tuple, bucketed.edge_index.t().tolist()))
+        assert baseline_edges == bucketed_edges
 
 
 @pytest.mark.smoke
