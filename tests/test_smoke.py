@@ -17,7 +17,12 @@ from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout.engine import ProgressContext, layout
 from dagua.layout import multilevel as _multilevel_mod
-from dagua.layout.multilevel import coarsen_once, _coarsen_once_streaming, _STREAMING_THRESHOLD
+from dagua.layout.multilevel import (
+    _can_prolong_on_gpu,
+    coarsen_once,
+    _coarsen_once_streaming,
+    _STREAMING_THRESHOLD,
+)
 from dagua.utils import (
     _longest_path_layering_vectorized,
     _STREAMING_NODE_THRESHOLD,
@@ -356,3 +361,17 @@ class TestChunkedLayeringMatchesOriginal:
         assert torch.equal(layers_full, layers_chunked), (
             f"Layer assignments differ: max diff = {(layers_full - layers_chunked).abs().max().item()}"
         )
+
+
+@pytest.mark.smoke
+class TestGpuProlongationGuard:
+    def test_disabled_for_cpu_device(self):
+        pos = torch.zeros(4, 2)
+        fine_to_coarse = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+        assert not _can_prolong_on_gpu(pos, fine_to_coarse, 4, "cpu")
+
+    def test_disabled_for_cpu_position_tensor(self, monkeypatch):
+        pos = torch.zeros(4, 2)
+        fine_to_coarse = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+
+        assert not _can_prolong_on_gpu(pos.to("cpu"), fine_to_coarse, 4, "cuda")

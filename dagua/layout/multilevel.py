@@ -37,6 +37,23 @@ class CoarseLevel:
     fine_layer_assignments: Optional[torch.Tensor] = None  # [N_fine] layer assignments for fine level
 
 
+def _can_prolong_on_gpu(
+    pos: torch.Tensor,
+    fine_to_coarse: torch.Tensor,
+    fine_n: int,
+    device: str,
+) -> bool:
+    """Return whether prolongation can stay on GPU with conservative headroom."""
+    if device != "cuda" or pos.device.type != "cuda":
+        return False
+    if not torch.cuda.is_available():
+        return False
+    needed_bytes = fine_to_coarse.numel() * fine_to_coarse.element_size()
+    needed_bytes += fine_n * pos.shape[1] * pos.element_size()
+    needed_bytes += fine_n * pos.shape[1] * pos.element_size()
+    return _vram_fits(needed_bytes, safety=0.65)
+
+
 def _coarsen_once_streaming(
     edge_index: torch.Tensor,
     N: int,
@@ -62,7 +79,8 @@ def _coarsen_once_streaming(
     # grouped into the same coarse node → shared edges collapse.
     min_neighbor = torch.full((N,), N, dtype=index_dtype, device=device)
     if E > 0:
-        src_all, tgt_all = edge_index[0], edge_index[1]
+        src_all = edge_index[0].to(dtype=index_dtype)
+        tgt_all = edge_index[1].to(dtype=index_dtype)
         for start in range(0, E, _EDGE_CHUNK):
             end = min(start + _EDGE_CHUNK, E)
             min_neighbor.scatter_reduce_(0, src_all[start:end], tgt_all[start:end], reduce="amin")
@@ -519,25 +537,34 @@ def multilevel_layout(graph, config: LayoutConfig) -> torch.Tensor:
                 pos = pos.cpu()
                 torch.cuda.empty_cache()
 
-        # Prolong: map coarse positions to fine level (on CPU)
-        # Use in-place ops to avoid 16 GB peak at 1B nodes
-        # (gather already creates a new tensor — clone is redundant)
         fine_to_coarse = level.fine_to_coarse
-        pos_cpu = pos.cpu() if pos.device.type != "cpu" else pos
-        fine_pos = pos_cpu[fine_to_coarse]  # gather creates new tensor
-        fine_pos.add_(torch.randn(level.num_fine, 2).mul_(5.0))  # in-place jitter
+        use_gpu_prolong = _can_prolong_on_gpu(pos, fine_to_coarse, level.num_fine, device)
+
+        if use_gpu_prolong:
+            fine_to_coarse_dev = fine_to_coarse.to(device)
+            fine_pos = pos[fine_to_coarse_dev]
+            fine_pos.add_(torch.randn(level.num_fine, 2, device=device).mul_(5.0))
+            del fine_to_coarse_dev
+            pos_cpu = None
+        else:
+            # Prolong on CPU when GPU headroom is uncertain.
+            # Use in-place ops to avoid a second fine-position allocation.
+            pos_cpu = pos.cpu() if pos.device.type != "cpu" else pos
+            fine_pos = pos_cpu[fine_to_coarse]
+            fine_pos.add_(torch.randn(level.num_fine, 2).mul_(5.0))
 
         # Free fine_to_coarse — consumed above, never needed again
         del fine_to_coarse
         level.fine_to_coarse = None
 
         # Free old pos and pos_cpu — consumed by prolongation above
-        del pos_cpu
+        if pos_cpu is not None:
+            del pos_cpu
         pos = None
 
         # Positions + node_sizes to GPU; edges stay on CPU (streamed in batches)
         fine_sizes = fine_sizes_cpu.to(device)
-        pos = fine_pos.to(device)
+        pos = fine_pos if fine_pos.device.type == device else fine_pos.to(device)
         del fine_pos  # pos holds the reference now
 
         refine_config = _make_config(steps=refine_steps, seed=None)
