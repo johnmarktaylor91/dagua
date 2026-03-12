@@ -179,3 +179,27 @@ class TestTourExport:
 
         assert out.exists()
         assert result.frame_count > 12
+
+    @pytest.mark.slow
+    def test_tour_large_lod_mode_exports(self, tmp_path):
+        edges = [(f"n{i}", f"n{i+1}") for i in range(799)]
+        g = DaguaGraph.from_edge_list(edges)
+        pos = dagua.layout(g, LayoutConfig(steps=12, edge_opt_steps=-1, seed=42))
+        out = tmp_path / "lod-tour.gif"
+        result = dagua.tour(
+            g,
+            positions=pos,
+            output=str(out),
+            tour_config=TourConfig(
+                format="gif",
+                scene="zoom_pan",
+                lod_threshold=100,
+                detail_node_limit=120,
+                edge_sample_limit=500,
+                hold_start_frames=1,
+                hold_end_frames=1,
+            ),
+        )
+
+        assert out.exists()
+        assert result.frame_count > 12

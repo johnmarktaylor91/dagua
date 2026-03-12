@@ -91,6 +91,19 @@ class TourConfig:
     codec: str = "libx264"
     bitrate: str = "8M"
     save_frames_dir: Optional[str] = None
+    lod_threshold: int = 100_000
+    detail_node_limit: int = 8_000
+    label_node_limit: int = 120
+    edge_sample_limit: int = 40_000
+    density_bins: int = 220
+    density_gamma: float = 0.55
+
+
+@dataclass
+class _LargeTourState:
+    pos: np.ndarray
+    sizes: np.ndarray
+    sampled_edges: Optional[np.ndarray]
 
 
 @dataclass
@@ -296,6 +309,24 @@ def _default_animation_figsize(
     fig_w = min(max(scale, min_w), max_w)
     fig_h = min(max(fig_w * aspect, min_h), max_h)
     return (fig_w, fig_h)
+
+
+def _prepare_large_tour_state(
+    graph,
+    positions: torch.Tensor,
+    config: TourConfig,
+) -> _LargeTourState:
+    pos = positions.detach().cpu().numpy()
+    graph.compute_node_sizes()
+    sizes = graph.node_sizes.detach().cpu().numpy()
+    sampled_edges = None
+    if graph.edge_index.numel() > 0 and config.edge_sample_limit > 0:
+        ei = graph.edge_index.detach().cpu()
+        edge_count = ei.shape[1]
+        sample_n = min(edge_count, config.edge_sample_limit)
+        sample_idx = torch.randint(0, edge_count, (sample_n,), dtype=torch.long)
+        sampled_edges = ei[:, sample_idx].numpy().T
+    return _LargeTourState(pos=pos, sizes=sizes, sampled_edges=sampled_edges)
 
 
 def _global_bounds(graph, positions: torch.Tensor) -> Tuple[float, float, float, float]:
@@ -724,6 +755,128 @@ def _render_tour_frame(
     return frame
 
 
+def _render_large_tour_frame(
+    graph,
+    large_state: _LargeTourState,
+    camera_bounds: Tuple[float, float, float, float],
+    tour_cfg: TourConfig,
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None,
+) -> np.ndarray:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+    from matplotlib.colors import LinearSegmentedColormap
+
+    x_min, x_max, y_min, y_max = camera_bounds
+    pos = large_state.pos
+    visible = (
+        (pos[:, 0] >= x_min) & (pos[:, 0] <= x_max) &
+        (pos[:, 1] >= y_min) & (pos[:, 1] <= y_max)
+    )
+    visible_count = int(visible.sum())
+
+    fig, ax = plt.subplots(1, 1, figsize=tour_cfg.figsize, dpi=tour_cfg.dpi)
+    bg = graph.graph_style.background_color
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
+
+    view_x = pos[visible, 0] if visible_count > 0 else np.array([], dtype=np.float32)
+    view_y = pos[visible, 1] if visible_count > 0 else np.array([], dtype=np.float32)
+
+    if visible_count > 0:
+        bins = int(np.clip(np.sqrt(max(visible_count, 1)) * 1.25, 48, tour_cfg.density_bins))
+        hist, xedges, yedges = np.histogram2d(
+            view_x, view_y,
+            bins=[bins, bins],
+            range=[[x_min, x_max], [y_min, y_max]],
+        )
+        if hist.max() > 0:
+            hist = np.power(hist / hist.max(), tour_cfg.density_gamma)
+            cmap = LinearSegmentedColormap.from_list(
+                "dagua_density",
+                [bg, "#d6ecf7", "#77b9da", "#2f7ea8", "#16516e"],
+            )
+            ax.imshow(
+                hist.T,
+                origin="lower",
+                extent=(xedges[0], xedges[-1], yedges[0], yedges[-1]),
+                cmap=cmap,
+                interpolation="bilinear",
+                aspect="auto",
+                alpha=0.95,
+                zorder=1,
+            )
+
+    if large_state.sampled_edges is not None:
+        sampled = large_state.sampled_edges
+        src = sampled[:, 0]
+        tgt = sampled[:, 1]
+        src_xy = pos[src]
+        tgt_xy = pos[tgt]
+        edge_mask = (
+            (src_xy[:, 0] >= x_min) & (src_xy[:, 0] <= x_max) &
+            (src_xy[:, 1] >= y_min) & (src_xy[:, 1] <= y_max) &
+            (tgt_xy[:, 0] >= x_min) & (tgt_xy[:, 0] <= x_max) &
+            (tgt_xy[:, 1] >= y_min) & (tgt_xy[:, 1] <= y_max)
+        )
+        if edge_mask.any():
+            segs = np.stack([src_xy[edge_mask], tgt_xy[edge_mask]], axis=1)
+            if len(segs) > 6000:
+                step = max(len(segs) // 6000, 1)
+                segs = segs[::step]
+            lc = LineCollection(segs, colors="#266b8ccc", linewidths=0.35, alpha=0.16, zorder=2)
+            ax.add_collection(lc)
+
+    if 0 < visible_count <= tour_cfg.detail_node_limit:
+        visible_idx = np.nonzero(visible)[0]
+        sizes = np.clip(600.0 / np.sqrt(max(visible_count, 1)), 2.0, 18.0)
+        ax.scatter(
+            pos[visible_idx, 0],
+            pos[visible_idx, 1],
+            s=sizes,
+            c="#1d6a8a",
+            alpha=0.7,
+            linewidths=0.0,
+            zorder=3,
+        )
+        if visible_count <= tour_cfg.label_node_limit:
+            for idx in visible_idx[: tour_cfg.label_node_limit]:
+                ax.text(
+                    pos[idx, 0],
+                    pos[idx, 1],
+                    graph.node_labels[idx],
+                    fontsize=7.0,
+                    color="#243238",
+                    ha="center",
+                    va="center",
+                    zorder=4,
+                )
+    elif visible_count > 0:
+        sample_n = min(2500, visible_count)
+        sampled_idx = np.linspace(0, visible_count - 1, sample_n, dtype=int)
+        vx = view_x[sampled_idx]
+        vy = view_y[sampled_idx]
+        ax.scatter(vx, vy, s=1.0, c="#114b65", alpha=0.18, linewidths=0.0, zorder=3)
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    if tour_cfg.show_titles and title:
+        sub = subtitle
+        if visible_count > tour_cfg.detail_node_limit:
+            trailer = f"{visible_count:,} visible nodes"
+            sub = f"{subtitle} · {trailer}" if subtitle else trailer
+        _overlay_text(ax, graph, title, sub)
+
+    fig.canvas.draw()
+    frame = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
+    plt.close(fig)
+    return frame
+
+
 def _blend_frames(a: np.ndarray, b: np.ndarray, n: int) -> List[np.ndarray]:
     if n <= 0:
         return []
@@ -900,11 +1053,18 @@ def tour(
         positions = layout(graph, config)
 
     graph.compute_node_sizes()
-    curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
-    if getattr(config, "edge_opt_steps", 0) >= 0:
-        from dagua.layout.edge_optimization import optimize_edges
-        curves = optimize_edges(curves, positions, graph.edge_index, graph.node_sizes, config, graph)
-    label_positions = place_edge_labels(curves, positions, graph.node_sizes, graph.edge_labels, graph)
+    use_large_lod = graph.num_nodes >= tour_cfg.lod_threshold
+    curves = None
+    label_positions = None
+    large_state = None
+    if use_large_lod:
+        large_state = _prepare_large_tour_state(graph, positions, tour_cfg)
+    else:
+        curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
+        if getattr(config, "edge_opt_steps", 0) >= 0:
+            from dagua.layout.edge_optimization import optimize_edges
+            curves = optimize_edges(curves, positions, graph.edge_index, graph.node_sizes, config, graph)
+        label_positions = place_edge_labels(curves, positions, graph.node_sizes, graph.edge_labels, graph)
 
     if tour_cfg.output is None:
         tour_cfg.output = str(Path("dagua_tour.mp4").resolve())
@@ -926,19 +1086,31 @@ def tour(
         for frame_idx, camera_bounds in enumerate(path):
             title = kf.title if frame_idx >= max(len(path) // 4, 1) else None
             subtitle = kf.subtitle if title else None
-            frames.append(
-                _render_tour_frame(
-                    graph,
-                    positions,
-                    curves,
-                    label_positions,
-                    camera_bounds,
-                    config,
-                    tour_cfg,
-                    title=title,
-                    subtitle=subtitle,
+            if use_large_lod:
+                frames.append(
+                    _render_large_tour_frame(
+                        graph,
+                        large_state,
+                        camera_bounds,
+                        tour_cfg,
+                        title=title,
+                        subtitle=subtitle,
+                    )
                 )
-            )
+            else:
+                frames.append(
+                    _render_tour_frame(
+                        graph,
+                        positions,
+                        curves,
+                        label_positions,
+                        camera_bounds,
+                        config,
+                        tour_cfg,
+                        title=title,
+                        subtitle=subtitle,
+                    )
+                )
 
     if frames:
         frames = [frames[0]] * tour_cfg.hold_start_frames + frames + [frames[-1]] * tour_cfg.hold_end_frames
