@@ -92,7 +92,19 @@ def test_duplicate_run_guard_raises_for_live_pid(tmp_path: Path, monkeypatch):
     paths = bench_large._checkpoint_paths(checkpoint_dir)
     paths["active_run"].parent.mkdir(parents=True, exist_ok=True)
     paths["active_run"].write_text('{"pid": 999999, "size": "1b"}', encoding="utf-8")
+    monkeypatch.setattr(bench_large, "_find_existing_run_pid", lambda size: None)
     monkeypatch.setattr(bench_large, "_pid_alive", lambda pid: pid == 999999)
+
+    import pytest
+
+    with pytest.raises(SystemExit, match="duplicate large benchmark run"):
+        bench_large._guard_duplicate_run(paths, "1b", resume=True, force_duplicate_run=False)
+
+
+def test_duplicate_run_guard_uses_process_scan_without_active_run(tmp_path: Path, monkeypatch):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    monkeypatch.setattr(bench_large, "_find_existing_run_pid", lambda size: 424242)
 
     import pytest
 

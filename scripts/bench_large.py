@@ -16,6 +16,7 @@ import faulthandler
 import gc
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -98,9 +99,44 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _find_existing_run_pid(size: str) -> int | None:
+    """Best-effort process table scan for another large benchmark owner."""
+    try:
+        output = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+    except Exception:
+        return None
+
+    needle = f"scripts/bench_large.py {size}"
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or needle not in line:
+            continue
+        try:
+            pid_str, cmd = line.split(None, 1)
+        except ValueError:
+            continue
+        pid = int(pid_str)
+        if pid == os.getpid():
+            continue
+        if "python" not in cmd:
+            continue
+        if _pid_alive(pid):
+            return pid
+    return None
+
+
 def _guard_duplicate_run(paths: dict[str, Path], size: str, resume: bool, force_duplicate_run: bool) -> None:
     """Refuse to start a duplicate large run against the same checkpoint root."""
-    if force_duplicate_run or not paths["active_run"].exists():
+    if force_duplicate_run:
+        return
+    existing_pid = _find_existing_run_pid(size)
+    if existing_pid is not None:
+        raise SystemExit(
+            "Refusing to start a duplicate large benchmark run for "
+            f"{size!r} at {paths['root']}. Existing pid={existing_pid}. "
+            "Use --force-duplicate-run only if you really want concurrent runs."
+        )
+    if not paths["active_run"].exists():
         return
     try:
         payload = json.loads(paths["active_run"].read_text(encoding="utf-8"))
