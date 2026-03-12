@@ -311,6 +311,10 @@ def _partial_results_path(run_dir: Path) -> Path:
     return run_dir / "results.partial.json"
 
 
+def _progress_path(run_dir: Path) -> Path:
+    return run_dir / "progress.json"
+
+
 def _save_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -574,6 +578,63 @@ def _graph_summary(bg: BenchmarkGraph) -> Dict[str, Any]:
     }
 
 
+def _write_progress(
+    run_dir: Path,
+    suite: str,
+    run_id: str,
+    graphs: Sequence[BenchmarkGraph],
+    competitors: Sequence[CompetitorBase],
+    payload: Dict[str, Any],
+    *,
+    current_graph: Optional[str] = None,
+    current_competitor: Optional[str] = None,
+    step: str = "running",
+    last_artifact: Optional[str] = None,
+) -> None:
+    total_graphs = len(graphs)
+    total_competitors = len(competitors)
+    total_pairs = total_graphs * total_competitors
+    completed_graphs = 0
+    completed_pairs = 0
+    graph_status: Dict[str, Dict[str, Any]] = {}
+
+    for bg in graphs:
+        graph_payload = payload.get("graphs", {}).get(bg.test_graph.name, {})
+        comp_payload = graph_payload.get("competitors", {})
+        statuses = {}
+        for competitor in competitors:
+            status = comp_payload.get(competitor.name, {}).get("status", "PENDING")
+            statuses[competitor.name] = status
+            if status in {"OK", "FAILED", "SKIPPED"}:
+                completed_pairs += 1
+        if statuses and all(status in {"OK", "FAILED", "SKIPPED"} for status in statuses.values()):
+            completed_graphs += 1
+            graph_step = "complete"
+        elif bg.test_graph.name == current_graph and current_competitor:
+            graph_step = f"running:{current_competitor}"
+        else:
+            graph_step = "pending"
+        graph_status[bg.test_graph.name] = {
+            "status": graph_step,
+            "competitors": statuses,
+        }
+
+    progress = {
+        "suite": suite,
+        "run_id": run_id,
+        "step": step,
+        "current_graph": current_graph,
+        "current_competitor": current_competitor,
+        "completed_graphs": completed_graphs,
+        "total_graphs": total_graphs,
+        "completed_pairs": completed_pairs,
+        "total_pairs": total_pairs,
+        "last_artifact": last_artifact,
+        "graphs": graph_status,
+    }
+    _save_json(_progress_path(run_dir), progress)
+
+
 def _run_one_competitor(
     bg: BenchmarkGraph,
     competitor: CompetitorBase,
@@ -683,6 +744,15 @@ def _build_results_payload(
     payload["run_id"] = run_id
     payload["suite"] = suite
     payload["system"] = _system_metadata()
+    _write_progress(
+        run_dir,
+        suite,
+        run_id,
+        graphs,
+        competitors,
+        payload,
+        step="starting",
+    )
 
     for bg in graphs:
         existing_graph = payload["graphs"].get(bg.test_graph.name, {})
@@ -693,6 +763,18 @@ def _build_results_payload(
             existing_result = graph_payload["competitors"].get(competitor.name)
             if existing_result and existing_result.get("status") in {"OK", "FAILED", "SKIPPED"}:
                 continue
+            _write_progress(
+                run_dir,
+                suite,
+                run_id,
+                graphs,
+                competitors,
+                payload,
+                current_graph=bg.test_graph.name,
+                current_competitor=competitor.name,
+                step="running",
+                last_artifact=str(_partial_results_path(run_dir)) if checkpoint_each_graph else None,
+            )
             reused = None
             if competitor.name not in rerun_set:
                 reused = _reuse_cached_result(
@@ -711,9 +793,43 @@ def _build_results_payload(
                 timeout=timeout,
                 run_dir=run_dir,
             )
+            _write_progress(
+                run_dir,
+                suite,
+                run_id,
+                graphs,
+                competitors,
+                payload | {"graphs": payload.get("graphs", {}) | {bg.test_graph.name: graph_payload}},
+                current_graph=bg.test_graph.name,
+                current_competitor=competitor.name,
+                step="running",
+                last_artifact=graph_payload["competitors"][competitor.name].get("positions_path"),
+            )
         payload["graphs"][bg.test_graph.name] = graph_payload
         if checkpoint_each_graph:
             _save_json(_partial_results_path(run_dir), payload)
+            _write_progress(
+                run_dir,
+                suite,
+                run_id,
+                graphs,
+                competitors,
+                payload,
+                current_graph=bg.test_graph.name,
+                step="checkpointed",
+                last_artifact=str(_partial_results_path(run_dir)),
+            )
+
+    _write_progress(
+        run_dir,
+        suite,
+        run_id,
+        graphs,
+        competitors,
+        payload,
+        step="complete",
+        last_artifact=str(run_dir / "results.json"),
+    )
 
     return payload
 
@@ -788,18 +904,19 @@ def benchmark_run_status(
     metadata = partial_metadata or latest_metadata or {}
     run_dir = partial_run_dir or latest_run_dir
     run_id = partial_run_id or (payload.get("run_id") if payload else None)
+    progress = _load_json(_progress_path(run_dir)) if run_dir is not None and _progress_path(run_dir).exists() else {}
 
     total_graphs = len(metadata.get("graphs", [])) or len(payload.get("graphs", {}))
     completed_graphs = 0
-    graph_status: Dict[str, str] = {}
+    graph_status: Dict[str, Any] = {}
     for graph_name, graph_payload in payload.get("graphs", {}).items():
         competitors = graph_payload.get("competitors", {})
         statuses = [result.get("status", "UNKNOWN") for result in competitors.values()]
         if statuses and all(status in {"OK", "FAILED", "SKIPPED"} for status in statuses):
             completed_graphs += 1
-            graph_status[graph_name] = "complete"
+            graph_status[graph_name] = {"status": "complete", "competitors": {name: res.get("status", "UNKNOWN") for name, res in competitors.items()}}
         else:
-            graph_status[graph_name] = "incomplete"
+            graph_status[graph_name] = {"status": "incomplete", "competitors": {name: res.get("status", "UNKNOWN") for name, res in competitors.items()}}
 
     return {
         "suite": suite,
@@ -809,7 +926,14 @@ def benchmark_run_status(
         "completed_graphs": completed_graphs,
         "total_graphs": total_graphs,
         "remaining_graphs": max(total_graphs - completed_graphs, 0),
+        "completed_pairs": progress.get("completed_pairs"),
+        "total_pairs": progress.get("total_pairs"),
+        "step": progress.get("step"),
+        "current_graph": progress.get("current_graph"),
+        "current_competitor": progress.get("current_competitor"),
+        "last_artifact": progress.get("last_artifact"),
         "graphs": graph_status,
+        "progress": progress or None,
     }
 
 
@@ -861,6 +985,16 @@ def run_suite(
             "resumed_from_partial": existing_run_dir is not None,
         },
     )
+    _write_progress(
+        run_dir,
+        suite,
+        run_id,
+        graphs,
+        competitor_list,
+        existing_payload or {"graphs": {}},
+        step="initialized",
+        last_artifact=str(run_dir / "metadata.json"),
+    )
 
     payload = _build_results_payload(
         suite=suite,
@@ -879,6 +1013,16 @@ def run_suite(
         checkpoint_each_graph=checkpoint_each_graph,
     )
     _save_json(run_dir / "results.json", payload)
+    _write_progress(
+        run_dir,
+        suite,
+        run_id,
+        graphs,
+        competitor_list,
+        payload,
+        step="results_saved",
+        last_artifact=str(run_dir / "results.json"),
+    )
     partial_path = _partial_results_path(run_dir)
     if partial_path.exists():
         partial_path.unlink()

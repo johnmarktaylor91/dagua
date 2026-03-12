@@ -64,6 +64,9 @@ def test_synthetic_graphs_cover_common_and_niche_motifs():
         "asymmetric_hourglass_hub",
         "multiscale_skip_cascade",
         "braided_feedback_tails",
+        "width_skew_late_merge",
+        "broken_symmetry_residual_pair",
+        "hub_skip_superfan",
     }
     assert expected_names <= names
 
@@ -159,6 +162,20 @@ def test_challenge_graphs_cover_long_skips_cluster_crosstalk_and_feedback():
     braid_src = braid.graph.edge_index[0].tolist()
     braid_tgt = braid.graph.edge_index[1].tolist()
     assert any(t < s for s, t in zip(braid_src, braid_tgt))
+
+    width_skew = graphs["width_skew_late_merge"]
+    assert {"wide-parallel", "skip-heavy", "diamond"} <= width_skew.tags
+    assert width_skew.graph.num_nodes >= 10
+
+    broken = graphs["broken_symmetry_residual_pair"]
+    assert {"skip-heavy", "diamond", "wide-parallel"} <= broken.tags
+    assert any("breakout" in label for label in broken.graph.node_labels)
+
+    superfan = graphs["hub_skip_superfan"]
+    assert {"linear-deep", "skip-heavy", "wide-parallel"} <= superfan.tags
+    hub_idx = superfan.graph._id_to_index["hub"]
+    src = superfan.graph.edge_index[0].tolist()
+    assert sum(s == hub_idx for s in src) >= 4
 
 
 def test_style_and_routing_stress_graphs_exercise_visual_feature_surface():

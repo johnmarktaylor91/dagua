@@ -641,6 +641,18 @@ def _status_panel(ax, title: str, subtitle: str) -> None:
     ax.axis("off")
 
 
+def _metric_from_result(result: Dict[str, Any], *keys: str) -> Optional[float]:
+    metrics = result.get("metrics", {})
+    for key in keys:
+        value = metrics.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def generate_comparison_visuals(
     output_dir: str = "eval_output",
     combined_results: Optional[Dict[str, Any]] = None,
@@ -908,6 +920,125 @@ def generate_layout_similarity_artifacts(
     return str(json_path), str(md_path)
 
 
+def generate_placement_summary_artifacts(
+    output_dir: str = "eval_output",
+    combined_results: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    """Summarize placement-only quality across competitors from stored metrics."""
+    from dagua.eval.benchmark import DEFAULT_COMPETITOR_ORDER
+
+    if combined_results is None:
+        from dagua.eval.benchmark import load_combined_results
+
+        combined_results = load_combined_results(output_dir)
+
+    report_dir = Path(output_dir) / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    placement_metrics = {
+        "dag_consistency": ("dag_consistency",),
+        "edge_crossings": ("edge_crossings",),
+        "overlap_count": ("overlap_count", "node_overlaps"),
+        "edge_length_cv": ("edge_length_cv",),
+        "depth_correlation": ("depth_correlation",),
+    }
+    aggregate: Dict[str, Dict[str, Any]] = {}
+    per_graph: Dict[str, Any] = {}
+
+    for comp_name in DEFAULT_COMPETITOR_ORDER:
+        aggregate[comp_name] = {
+            "graphs_compared": 0,
+            "mean_metrics": {},
+        }
+
+    buckets: Dict[str, Dict[str, List[float]]] = {
+        comp_name: {metric_name: [] for metric_name in placement_metrics}
+        for comp_name in DEFAULT_COMPETITOR_ORDER
+    }
+
+    for graph_name, graph_payload in combined_results.get("graphs", {}).items():
+        graph_result = {
+            "n_nodes": graph_payload.get("n_nodes", 0),
+            "n_edges": graph_payload.get("n_edges", 0),
+            "competitors": {},
+        }
+        for comp_name in DEFAULT_COMPETITOR_ORDER:
+            result = graph_payload.get("competitors", {}).get(comp_name)
+            if not result or result.get("status") != "OK":
+                continue
+            metrics_payload: Dict[str, Optional[float]] = {}
+            for metric_name, keys in placement_metrics.items():
+                value = _metric_from_result(result, *keys)
+                metrics_payload[metric_name] = value
+                if value is not None:
+                    buckets[comp_name][metric_name].append(value)
+            graph_result["competitors"][comp_name] = metrics_payload
+        if graph_result["competitors"]:
+            per_graph[graph_name] = graph_result
+
+    for comp_name, metric_buckets in buckets.items():
+        compared = 0
+        for values in metric_buckets.values():
+            compared = max(compared, len(values))
+        aggregate[comp_name]["graphs_compared"] = compared
+        aggregate[comp_name]["mean_metrics"] = {
+            metric_name: (mean(values) if values else None)
+            for metric_name, values in metric_buckets.items()
+        }
+
+    payload = {
+        "generated_from": combined_results.get("generated_from", {}),
+        "metric_definitions": {
+            "dag_consistency": "Higher is better; ideal 1.0 for DAG-respecting layouts.",
+            "edge_crossings": "Lower is better.",
+            "overlap_count": "Lower is better.",
+            "edge_length_cv": "Lower is better.",
+            "depth_correlation": "Higher is better.",
+        },
+        "aggregate": aggregate,
+        "graphs": per_graph,
+    }
+
+    json_path = report_dir / "placement_summary.json"
+    md_path = report_dir / "placement_summary.md"
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    lines = [
+        "# Placement Summary",
+        "",
+        "Placement-only benchmark view. This report intentionally ignores styling and focuses on node-placement metrics stored by the benchmark pipeline.",
+        "",
+        "## Aggregate",
+        "",
+    ]
+    for comp_name in DEFAULT_COMPETITOR_ORDER:
+        comp_payload = aggregate.get(comp_name, {})
+        lines.append(f"### {comp_name}")
+        lines.append("")
+        lines.append(f"- graphs compared: `{comp_payload.get('graphs_compared', 0)}`")
+        for metric_name, value in comp_payload.get("mean_metrics", {}).items():
+            rendered = f"{value:.4f}" if value is not None else "N/A"
+            lines.append(f"- mean {metric_name}: `{rendered}`")
+        lines.append("")
+
+    lines.append("## Per Graph")
+    lines.append("")
+    for graph_name, graph_info in sorted(per_graph.items()):
+        lines.append(f"### {graph_name}")
+        lines.append("")
+        lines.append(f"- nodes: `{graph_info['n_nodes']}`")
+        for comp_name, metric_payload in graph_info["competitors"].items():
+            rendered = ", ".join(
+                f"{metric}={value:.4f}" if value is not None else f"{metric}=N/A"
+                for metric, value in metric_payload.items()
+            )
+            lines.append(f"- `{comp_name}`: {rendered}")
+        lines.append("")
+
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(json_path), str(md_path)
+
+
 def _latest_standard_run_id(combined_results: Dict[str, Any]) -> Optional[str]:
     return combined_results.get("generated_from", {}).get("standard")
 
@@ -1164,6 +1295,7 @@ def _render_latex_report(
     comparison_paths: Sequence[str],
     delta_markdown_path: Optional[str] = None,
     similarity_markdown_path: Optional[str] = None,
+    placement_markdown_path: Optional[str] = None,
 ) -> str:
     summary = _summary_statistics(combined_results)
     generated_from = combined_results.get("generated_from", {})
@@ -1230,6 +1362,8 @@ Competitor & Avg. small-graph score & Avg. DAG consistency & Avg. runtime (s) \\
 
 \\paragraph{{Layout similarity.}} Pairwise Procrustes similarity summaries between competitor layouts are stored in \\texttt{{{_latex_escape(os.path.basename(similarity_markdown_path or 'layout_similarity.md'))}}}. This helps distinguish genuinely different geometric solutions from stylistic differences layered on top of similar placements.
 
+\\paragraph{{Placement-only summary.}} A styling-agnostic placement summary is stored in \\texttt{{{_latex_escape(os.path.basename(placement_markdown_path or 'placement_summary.md'))}}}. This is the right artifact to consult when judging node placement independently of rendering choices.
+
 \\section{{Visual Gallery}}
 {gallery_block}
 
@@ -1284,6 +1418,7 @@ def generate_report(
     comparison_paths = generate_comparison_visuals(output_dir=output_dir, combined_results=combined_results)
     delta_json_path, delta_md_path = generate_benchmark_deltas(output_dir=output_dir, combined_results=combined_results)
     similarity_json_path, similarity_md_path = generate_layout_similarity_artifacts(output_dir=output_dir, combined_results=combined_results)
+    placement_json_path, placement_md_path = generate_placement_summary_artifacts(output_dir=output_dir, combined_results=combined_results)
     _write_prompt_file(report_dir)
     _write_review_placeholders(report_dir)
     with open(report_dir / "aesthetic_critic_prompt.md", "w", encoding="utf-8") as f:
@@ -1296,6 +1431,7 @@ def generate_report(
         comparison_paths,
         delta_md_path,
         similarity_md_path,
+        placement_md_path,
     )
     pdf_path = _compile_pdf(tex_path) if compile_pdf else None
     return {
@@ -1307,4 +1443,6 @@ def generate_report(
         "benchmark_deltas_md": delta_md_path,
         "layout_similarity_json": similarity_json_path,
         "layout_similarity_md": similarity_md_path,
+        "placement_summary_json": placement_json_path,
+        "placement_summary_md": placement_md_path,
     }

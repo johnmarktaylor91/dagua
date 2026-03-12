@@ -170,6 +170,10 @@ def test_merge_latest_results_and_generate_report(tmp_path):
     assert Path(artifacts["scaling_curve"]).exists()
     assert Path(artifacts["benchmark_deltas_json"]).exists()
     assert Path(artifacts["benchmark_deltas_md"]).exists()
+    assert Path(artifacts["layout_similarity_json"]).exists()
+    assert Path(artifacts["layout_similarity_md"]).exists()
+    assert Path(artifacts["placement_summary_json"]).exists()
+    assert Path(artifacts["placement_summary_md"]).exists()
     assert (output_dir / "visuals" / "comparisons" / "residual_block_comparison.png").exists()
     assert (output_dir / "report" / "prose_prompt.md").exists()
     assert (output_dir / "report" / "review_round_1.json").exists()
@@ -419,16 +423,34 @@ def test_benchmark_run_status_reports_partial_progress(tmp_path):
     metadata = {
         "graphs": ["done_graph", "todo_graph", "later_graph"],
     }
+    progress = {
+        "suite": "rare",
+        "run_id": run_dir.name,
+        "step": "running",
+        "current_graph": "todo_graph",
+        "current_competitor": "dagua",
+        "completed_graphs": 1,
+        "total_graphs": 3,
+        "completed_pairs": 2,
+        "total_pairs": 6,
+        "last_artifact": "positions/done_graph__dagua.pt",
+        "graphs": {},
+    }
     (run_dir / "results.partial.json").write_text(__import__("json").dumps(partial), encoding="utf-8")
     (run_dir / "metadata.json").write_text(__import__("json").dumps(metadata), encoding="utf-8")
+    (run_dir / "progress.json").write_text(__import__("json").dumps(progress), encoding="utf-8")
 
     status = benchmark_run_status(output_dir=str(output_dir), suite="rare")
     assert status["is_partial"] is True
     assert status["completed_graphs"] == 1
     assert status["total_graphs"] == 3
     assert status["remaining_graphs"] == 2
-    assert status["graphs"]["done_graph"] == "complete"
-    assert status["graphs"]["todo_graph"] == "incomplete"
+    assert status["completed_pairs"] == 2
+    assert status["total_pairs"] == 6
+    assert status["current_graph"] == "todo_graph"
+    assert status["current_competitor"] == "dagua"
+    assert status["graphs"]["done_graph"]["status"] == "complete"
+    assert status["graphs"]["todo_graph"]["status"] == "incomplete"
 
 
 @pytest.mark.smoke
@@ -467,3 +489,4 @@ def test_standard_suite_writes_partial_checkpoints(tmp_path, monkeypatch):
     run_dir = output_dir / "benchmark_db" / "standard" / payload["run_id"]
     assert not (run_dir / "results.partial.json").exists()
     assert (run_dir / "results.json").exists()
+    assert (run_dir / "progress.json").exists()
