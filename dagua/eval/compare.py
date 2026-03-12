@@ -47,6 +47,10 @@ def compare_with_graphviz(
 
     Returns:
         List of ComparisonResult objects.
+
+    This is a placement-oriented comparison entrypoint. The downstream render
+    step uses Dagua's matplotlib renderer on both position sets so we can study
+    geometry differences without conflating them with renderer defaults.
     """
     if graphs is None:
         graphs = get_test_graphs(max_nodes=max_nodes)
@@ -175,6 +179,10 @@ def compare_engines(
 
     Returns:
         List of MultiComparisonResult objects.
+
+    Like ``compare_with_graphviz``, this function is meant for placement and
+    metric comparison first. It is not a full-fidelity reproduction of every
+    engine's native rendering semantics.
     """
     from dagua.eval.competitors import get_available_competitors
     from dagua.graphviz_utils import render_multi_comparison
