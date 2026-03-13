@@ -70,8 +70,23 @@ def _checkpoint_paths(root: Path) -> dict[str, Path]:
 
 
 def _save_checkpoint_meta(path: Path, payload: dict) -> None:
+    _atomic_write_text(path, json.dumps(payload, indent=2))
+
+
+def _atomic_write_text(path: Path, payload: str) -> None:
+    """Write text atomically to avoid half-written checkpoint metadata."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp_path.write_text(payload, encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _atomic_torch_save(path: Path, payload: object) -> None:
+    """Write torch checkpoint payloads atomically via temp file + rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, path)
 
 
 def _load_graph_checkpoint(paths: dict[str, Path], n: int, layers: int) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -111,22 +126,25 @@ def _save_hierarchy_checkpoint(paths: dict[str, Path], levels: list) -> None:
     hierarchy_dir = paths["hierarchy_dir"]
     hierarchy_dir.mkdir(parents=True, exist_ok=True)
     manifest = {"num_levels": len(levels), "levels": []}
-    for idx, level in enumerate(levels):
-        level_path = hierarchy_dir / f"level_{idx:02d}.pt"
-        torch.save(
+    if levels:
+        newest_idx = len(levels) - 1
+        newest = levels[newest_idx]
+        newest_path = hierarchy_dir / f"level_{newest_idx:02d}.pt"
+        _atomic_torch_save(
+            newest_path,
             {
-                "edge_index": level.edge_index,
-                "node_sizes": level.node_sizes,
-                "num_nodes": level.num_nodes,
-                "fine_to_coarse": level.fine_to_coarse,
-                "num_fine": level.num_fine,
-                "fine_layer_assignments": level.fine_layer_assignments,
-                "coarse_layer_assignments": level.coarse_layer_assignments,
+                "edge_index": newest.edge_index,
+                "node_sizes": newest.node_sizes,
+                "num_nodes": newest.num_nodes,
+                "fine_to_coarse": newest.fine_to_coarse,
+                "num_fine": newest.num_fine,
+                "fine_layer_assignments": newest.fine_layer_assignments,
+                "coarse_layer_assignments": newest.coarse_layer_assignments,
             },
-            level_path,
         )
-        manifest["levels"].append(level_path.name)
-    paths["hierarchy_meta"].write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    for idx in range(len(levels)):
+        manifest["levels"].append(f"level_{idx:02d}.pt")
+    _atomic_write_text(paths["hierarchy_meta"], json.dumps(manifest, indent=2))
 
 
 def _load_hierarchy_checkpoint(paths: dict[str, Path], n: int, layers: int):
@@ -474,8 +492,8 @@ def main():
         node_sizes = torch.full((n, 2), 20.0, dtype=torch.float16)
         print(f"Edge index ready: {edge_index.shape[1]:,} edges in {time.perf_counter() - t0:.1f}s", flush=True)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(edge_index, checkpoint_paths["edge_index"])
-        torch.save(node_sizes, checkpoint_paths["node_sizes"])
+        _atomic_torch_save(checkpoint_paths["edge_index"], edge_index)
+        _atomic_torch_save(checkpoint_paths["node_sizes"], node_sizes)
         _save_checkpoint_meta(
             checkpoint_paths["meta"],
             {
@@ -523,7 +541,7 @@ def main():
         g._precomputed_layer_assignments = layer_assignments
     else:
         def _save_layer_assignments(layer_tensor: torch.Tensor) -> None:
-            torch.save(layer_tensor, checkpoint_paths["layer_assignments"])
+            _atomic_torch_save(checkpoint_paths["layer_assignments"], layer_tensor)
             print(f"Saved layering checkpoint to {checkpoint_paths['layer_assignments']}", flush=True)
 
         g._layer_assignments_callback = _save_layer_assignments
@@ -535,7 +553,7 @@ def main():
         g._hierarchy_levels_callback = _save_hierarchy
     if coarsest_positions is None:
         def _save_coarsest_positions(pos_tensor: torch.Tensor) -> None:
-            torch.save(pos_tensor, checkpoint_paths["coarsest_positions"])
+            _atomic_torch_save(checkpoint_paths["coarsest_positions"], pos_tensor)
             print(f"Saved coarsest positions checkpoint to {checkpoint_paths['coarsest_positions']}", flush=True)
 
         g._coarsest_positions_callback = _save_coarsest_positions
@@ -559,7 +577,7 @@ def main():
     pos = dagua.layout(g, config)
     total = time.perf_counter() - t1
     phase("layout finished", t0)
-    torch.save(pos, checkpoint_paths["positions"])
+    _atomic_torch_save(checkpoint_paths["positions"], pos)
     print(f"Saved positions checkpoint to {checkpoint_paths['positions']}", flush=True)
 
     print(f"\nResult: {pos.shape}", flush=True)

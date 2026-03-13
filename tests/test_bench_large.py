@@ -140,6 +140,63 @@ def test_hierarchy_checkpoint_round_trip(tmp_path: Path):
     assert torch.equal(restored[0].coarse_layer_assignments, levels[0].coarse_layer_assignments)
 
 
+def test_hierarchy_checkpoint_saves_only_newest_level_each_time(tmp_path: Path, monkeypatch):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths: list[str] = []
+    written_manifests: list[dict] = []
+
+    def _fake_atomic_torch_save(path: Path, payload: object) -> None:
+        saved_paths.append(path.name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+
+    def _fake_atomic_write_text(path: Path, payload: str) -> None:
+        written_manifests.append(__import__("json").loads(payload))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload, encoding="utf-8")
+
+    monkeypatch.setattr(bench_large, "_atomic_torch_save", _fake_atomic_torch_save)
+    monkeypatch.setattr(bench_large, "_atomic_write_text", _fake_atomic_write_text)
+
+    level0 = CoarseLevel(
+        edge_index=torch.tensor([[0], [1]], dtype=torch.int32),
+        node_sizes=torch.full((4, 2), 20.0, dtype=torch.float16),
+        num_nodes=4,
+        fine_to_coarse=torch.tensor([0, 0, 1, 1, 2, 3], dtype=torch.int32),
+        num_fine=6,
+        fine_layer_assignments=torch.tensor([0, 0, 1, 1, 2, 2], dtype=torch.int32),
+        coarse_layer_assignments=torch.tensor([0, 1, 2, 2], dtype=torch.int32),
+    )
+    level1 = CoarseLevel(
+        edge_index=torch.tensor([[0], [1]], dtype=torch.int32),
+        node_sizes=torch.full((2, 2), 20.0, dtype=torch.float16),
+        num_nodes=2,
+        fine_to_coarse=torch.tensor([0, 0, 1, 1], dtype=torch.int32),
+        num_fine=4,
+        fine_layer_assignments=torch.tensor([0, 1, 2, 2], dtype=torch.int32),
+        coarse_layer_assignments=torch.tensor([0, 1], dtype=torch.int32),
+    )
+
+    bench_large._save_hierarchy_checkpoint(paths, [level0])
+    bench_large._save_hierarchy_checkpoint(paths, [level0, level1])
+
+    assert saved_paths == ["level_00.pt", "level_01.pt"]
+    assert written_manifests[0]["levels"] == ["level_00.pt"]
+    assert written_manifests[1]["levels"] == ["level_00.pt", "level_01.pt"]
+
+
+def test_atomic_torch_save_leaves_only_final_file(tmp_path: Path):
+    target = tmp_path / "payload.pt"
+    bench_large._atomic_torch_save(target, torch.tensor([1, 2, 3]))
+
+    assert target.exists()
+    assert torch.equal(torch.load(target), torch.tensor([1, 2, 3]))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["payload.pt"]
+
+
 def test_positions_checkpoint_round_trip(tmp_path: Path):
     checkpoint_dir = tmp_path / "bench_ckpt"
     paths = bench_large._checkpoint_paths(checkpoint_dir)
