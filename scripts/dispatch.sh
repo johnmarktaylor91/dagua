@@ -20,10 +20,8 @@ EOF
 
 (
   SECONDS=0
-  if OUTPUT=$("$@" 2>&1); then EXIT_CODE=0; else EXIT_CODE=$?; fi
+  "$@" > "$TASK_DIR/$TASK_ID.log" 2>&1 && EXIT_CODE=0 || EXIT_CODE=$?
   DURATION=$SECONDS
-
-  echo "$OUTPUT" > "$TASK_DIR/$TASK_ID.log"
   if [ $EXIT_CODE -eq 0 ]; then
     echo "done" > "$TASK_DIR/$TASK_ID.status"
     MSG="✓ $TASK_ID done (${DURATION}s)"
