@@ -462,6 +462,7 @@ def build_hierarchy(
     cluster_ids: Optional[torch.Tensor] = None,
     initial_layer_assignments: Optional[torch.Tensor] = None,
     layer_assignments_callback: Optional[Callable[[torch.Tensor], None]] = None,
+    level_callback: Optional[Callable[[List[CoarseLevel]], None]] = None,
 ) -> List[CoarseLevel]:
     """Build coarsening hierarchy until num_nodes <= min_nodes.
 
@@ -516,7 +517,6 @@ def build_hierarchy(
             layer_assignments=current_la, device=device, cluster_ids=current_cluster_ids,
         )
         level.fine_layer_assignments = current_la
-        levels.append(level)
 
         # Move to coarser level
         assert level.edge_index is not None
@@ -539,6 +539,9 @@ def build_hierarchy(
             0, level.fine_to_coarse, current_la, reduce="amax",
         )
         level.coarse_layer_assignments = coarse_la
+        levels.append(level)
+        if level_callback is not None:
+            level_callback(levels)
 
         # Safety: stop if coarsening didn't reduce nodes or edges enough
         if current_n > level.num_fine * 0.7:
@@ -649,10 +652,8 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
             cluster_ids=graph.cluster_ids,
             initial_layer_assignments=getattr(graph, "_precomputed_layer_assignments", None),
             layer_assignments_callback=getattr(graph, "_layer_assignments_callback", None),
+            level_callback=getattr(graph, "_hierarchy_levels_callback", None),
         )
-        hierarchy_callback = getattr(graph, "_hierarchy_levels_callback", None)
-        if hierarchy_callback is not None:
-            hierarchy_callback(levels)
         _vlog(f"Phase 1/3: Building hierarchy ({n:,} nodes)... {len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)")
 
     if not levels:

@@ -144,14 +144,31 @@ def _load_hierarchy_checkpoint(paths: dict[str, Path], n: int, layers: int):
         if not level_path.exists():
             return None
         item = torch.load(level_path, map_location="cpu")
+        edge_index = item["edge_index"]
+        node_sizes = item["node_sizes"]
+        fine_to_coarse = item["fine_to_coarse"]
+        fine_layer_assignments = item.get("fine_layer_assignments")
+        coarse_layer_assignments = item.get("coarse_layer_assignments")
+        num_nodes = int(item["num_nodes"])
+        num_fine = int(item["num_fine"])
+        if edge_index is not None and (edge_index.ndim != 2 or edge_index.shape[0] != 2):
+            return None
+        if node_sizes is None or node_sizes.ndim != 2 or node_sizes.shape[0] != num_nodes or node_sizes.shape[1] != 2:
+            return None
+        if fine_to_coarse is None or fine_to_coarse.ndim != 1 or fine_to_coarse.shape[0] != num_fine:
+            return None
+        if fine_layer_assignments is None or fine_layer_assignments.ndim != 1 or fine_layer_assignments.shape[0] != num_fine:
+            return None
+        if coarse_layer_assignments is None or coarse_layer_assignments.ndim != 1 or coarse_layer_assignments.shape[0] != num_nodes:
+            return None
         level = CoarseLevel(
-            edge_index=item["edge_index"],
-            node_sizes=item["node_sizes"],
-            num_nodes=int(item["num_nodes"]),
-            fine_to_coarse=item["fine_to_coarse"],
-            num_fine=int(item["num_fine"]),
-            fine_layer_assignments=item.get("fine_layer_assignments"),
-            coarse_layer_assignments=item.get("coarse_layer_assignments"),
+            edge_index=edge_index,
+            node_sizes=node_sizes,
+            num_nodes=num_nodes,
+            fine_to_coarse=fine_to_coarse,
+            num_fine=num_fine,
+            fine_layer_assignments=fine_layer_assignments,
+            coarse_layer_assignments=coarse_layer_assignments,
         )
         levels.append(level)
     return levels
@@ -166,6 +183,11 @@ def _load_coarsest_positions_checkpoint(paths: dict[str, Path], n: int, layers: 
     pos = torch.load(paths["coarsest_positions"], map_location="cpu")
     if pos.ndim != 2 or pos.shape[1] != 2:
         return None
+    hierarchy = _load_hierarchy_checkpoint(paths, n, layers)
+    if hierarchy:
+        expected_rows = hierarchy[-1].num_nodes
+        if pos.shape[0] != expected_rows:
+            return None
     return pos
 
 
