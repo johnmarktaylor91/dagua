@@ -61,7 +61,8 @@ def _checkpoint_paths(root: Path) -> dict[str, Path]:
         "edge_index": root / "edge_index.pt",
         "node_sizes": root / "node_sizes.pt",
         "layer_assignments": root / "layer_assignments.pt",
-        "hierarchy": root / "hierarchy.pt",
+        "hierarchy_dir": root / "hierarchy",
+        "hierarchy_meta": root / "hierarchy" / "meta.json",
         "coarsest_positions": root / "coarsest_positions.pt",
         "positions": root / "positions.pt",
         "active_run": root / "active_run.json",
@@ -106,10 +107,13 @@ def _load_layer_checkpoint(paths: dict[str, Path], n: int, layers: int) -> torch
     return layer_assignments
 
 
-def _serialize_hierarchy(levels: list) -> list[dict]:
-    payload: list[dict] = []
-    for level in levels:
-        payload.append(
+def _save_hierarchy_checkpoint(paths: dict[str, Path], levels: list) -> None:
+    hierarchy_dir = paths["hierarchy_dir"]
+    hierarchy_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {"num_levels": len(levels), "levels": []}
+    for idx, level in enumerate(levels):
+        level_path = hierarchy_dir / f"level_{idx:02d}.pt"
+        torch.save(
             {
                 "edge_index": level.edge_index,
                 "node_sizes": level.node_sizes,
@@ -118,22 +122,28 @@ def _serialize_hierarchy(levels: list) -> list[dict]:
                 "num_fine": level.num_fine,
                 "fine_layer_assignments": level.fine_layer_assignments,
                 "coarse_layer_assignments": level.coarse_layer_assignments,
-            }
+            },
+            level_path,
         )
-    return payload
+        manifest["levels"].append(level_path.name)
+    paths["hierarchy_meta"].write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 def _load_hierarchy_checkpoint(paths: dict[str, Path], n: int, layers: int):
-    if not paths["meta"].exists() or not paths["hierarchy"].exists():
+    if not paths["meta"].exists() or not paths["hierarchy_meta"].exists():
         return None
     meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
     if meta.get("n") != n or meta.get("layers") != layers:
         return None
     from dagua.layout.multilevel import CoarseLevel
 
-    raw_levels = torch.load(paths["hierarchy"], map_location="cpu")
+    manifest = json.loads(paths["hierarchy_meta"].read_text(encoding="utf-8"))
     levels = []
-    for item in raw_levels:
+    for filename in manifest.get("levels", []):
+        level_path = paths["hierarchy_dir"] / filename
+        if not level_path.exists():
+            return None
+        item = torch.load(level_path, map_location="cpu")
         level = CoarseLevel(
             edge_index=item["edge_index"],
             node_sizes=item["node_sizes"],
@@ -468,7 +478,7 @@ def main():
 
     hierarchy_levels = _load_hierarchy_checkpoint(checkpoint_paths, n, layers) if args.resume else None
     if hierarchy_levels is not None:
-        print(f"Restored hierarchy checkpoint from {checkpoint_paths['hierarchy']}", flush=True)
+        print(f"Restored hierarchy checkpoint from {checkpoint_paths['hierarchy_dir']}", flush=True)
 
     coarsest_positions = _load_coarsest_positions_checkpoint(checkpoint_paths, n, layers) if args.resume else None
     if coarsest_positions is not None:
@@ -497,8 +507,8 @@ def main():
         g._layer_assignments_callback = _save_layer_assignments
     if hierarchy_levels is None:
         def _save_hierarchy(levels) -> None:
-            torch.save(_serialize_hierarchy(levels), checkpoint_paths["hierarchy"])
-            print(f"Saved hierarchy checkpoint to {checkpoint_paths['hierarchy']}", flush=True)
+            _save_hierarchy_checkpoint(checkpoint_paths, levels)
+            print(f"Saved hierarchy checkpoint to {checkpoint_paths['hierarchy_dir']}", flush=True)
 
         g._hierarchy_levels_callback = _save_hierarchy
     if coarsest_positions is None:

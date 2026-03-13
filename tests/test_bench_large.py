@@ -127,7 +127,7 @@ def test_hierarchy_checkpoint_round_trip(tmp_path: Path):
         )
     ]
 
-    torch.save(bench_large._serialize_hierarchy(levels), paths["hierarchy"])
+    bench_large._save_hierarchy_checkpoint(paths, levels)
     restored = bench_large._load_hierarchy_checkpoint(paths, n=12, layers=3)
 
     assert restored is not None
