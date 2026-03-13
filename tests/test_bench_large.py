@@ -168,6 +168,51 @@ def test_coarsest_positions_checkpoint_round_trip(tmp_path: Path):
     assert torch.equal(restored, pos)
 
 
+def test_coarsest_positions_checkpoint_rejects_wrong_row_count(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": 8, "layers": 2})
+    levels = [
+        CoarseLevel(
+            edge_index=torch.tensor([[0], [1]], dtype=torch.int32),
+            node_sizes=torch.full((4, 2), 20.0, dtype=torch.float16),
+            num_nodes=4,
+            fine_to_coarse=torch.tensor([0, 1, 2, 3, 0, 1, 2, 3], dtype=torch.int32),
+            num_fine=8,
+            fine_layer_assignments=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.int32),
+            coarse_layer_assignments=torch.tensor([0, 0, 1, 1], dtype=torch.int32),
+        )
+    ]
+    bench_large._save_hierarchy_checkpoint(paths, levels)
+    torch.save(torch.randn(5, 2), paths["coarsest_positions"])
+
+    assert bench_large._load_coarsest_positions_checkpoint(paths, n=8, layers=2) is None
+
+
+def test_hierarchy_checkpoint_rejects_bad_level_shape(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": 12, "layers": 3})
+    paths["hierarchy_dir"].mkdir(parents=True, exist_ok=True)
+    paths["hierarchy_meta"].write_text('{"num_levels": 1, "levels": ["level_00.pt"]}', encoding="utf-8")
+    torch.save(
+        {
+            "edge_index": torch.tensor([0, 1], dtype=torch.int32),
+            "node_sizes": torch.full((4, 2), 20.0, dtype=torch.float16),
+            "num_nodes": 4,
+            "fine_to_coarse": torch.tensor([0, 0, 1, 1, 2, 3], dtype=torch.int32),
+            "num_fine": 6,
+            "fine_layer_assignments": torch.tensor([0, 0, 1, 1, 2, 2], dtype=torch.int32),
+            "coarse_layer_assignments": torch.tensor([0, 1, 2, 2], dtype=torch.int32),
+        },
+        paths["hierarchy_dir"] / "level_00.pt",
+    )
+
+    assert bench_large._load_hierarchy_checkpoint(paths, n=12, layers=3) is None
+
+
 def test_duplicate_run_guard_raises_for_live_pid(tmp_path: Path, monkeypatch):
     checkpoint_dir = tmp_path / "bench_ckpt"
     paths = bench_large._checkpoint_paths(checkpoint_dir)
