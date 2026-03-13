@@ -1,0 +1,92 @@
+[
+  {
+    "num_nodes": 100,
+    "num_edges": 150,
+    "graph_type": "random",
+    "dagua_steps": 50,
+    "device": "cpu",
+    "dagua_seconds": 0.23,
+    "graphviz_seconds": 0.04,
+    "speedup_dagua_over_gv": 0.17
+  },
+  {
+    "num_nodes": 500,
+    "num_edges": 750,
+    "graph_type": "random",
+    "dagua_steps": 50,
+    "device": "cpu",
+    "dagua_seconds": 0.57,
+    "graphviz_seconds": 0.18,
+    "speedup_dagua_over_gv": 0.32
+  },
+  {
+    "num_nodes": 1000,
+    "num_edges": 1500,
+    "graph_type": "random",
+    "dagua_steps": 50,
+    "device": "cpu",
+    "dagua_seconds": 1.78,
+    "graphviz_seconds": 0.63,
+    "speedup_dagua_over_gv": 0.35
+  },
+  {
+    "num_nodes": 2000,
+    "num_edges": 3000,
+    "graph_type": "random",
+    "dagua_steps": 50,
+    "device": "cpu",
+    "dagua_seconds": 5.18,
+    "graphviz_seconds": 1.88,
+    "speedup_dagua_over_gv": 0.36
+  },
+  {
+    "num_nodes": 5000,
+    "num_edges": 7500,
+    "graph_type": "random",
+    "dagua_steps": 50,
+    "device": "cpu",
+    "dagua_seconds": 8.36,
+    "graphviz_seconds": 14.13,
+    "speedup_dagua_over_gv": 1.69
+  },
+  {
+    "num_nodes": 10000,
+    "num_edges": 15000,
+    "graph_type": "random",
+    "dagua_steps": 50,
+    "device": "cpu",
+    "dagua_seconds": 24.81,
+    "graphviz_seconds": 82.88,
+    "speedup_dagua_over_gv": 3.34
+  },
+  {
+    "num_nodes": 20000,
+    "num_edges": 30000,
+    "graph_type": "random",
+    "dagua_steps": 50,
+    "device": "cpu",
+    "dagua_seconds": 86.02,
+    "graphviz_seconds": null,
+    "speedup_dagua_over_gv": null
+  },
+  {
+    "num_nodes": 50000,
+    "num_edges": 75000,
+    "graph_type": "random",
+    "dagua_steps": 50,
+    "device": "cpu",
+    "dagua_seconds": 502.98,
+    "graphviz_seconds": null,
+    "speedup_dagua_over_gv": null
+  },
+  {
+    "num_nodes": 100000,
+    "num_edges": 150000,
+    "graph_type": "random",
+    "dagua_steps": 50,
+    "device": "cpu",
+    "dagua_seconds": 2096.06,
+    "graphviz_seconds": null,
+    "speedup_dagua_over_gv": null
+  }
+]

@@ -1,0 +1,81 @@
+# 6-level deep cluster nesting (12 nodes, 11 edges).
+# Tests: max nesting depth, concentric rectangles, numerical stability of containment forces.
+
+direction: TB
+
+nodes:
+  - id: src
+    label: "Source"
+    type: input
+  - id: l1a
+    label: "L1-A"
+  - id: l1b
+    label: "L1-B"
+  - id: l2a
+    label: "L2-A"
+  - id: l2b
+    label: "L2-B"
+  - id: l3a
+    label: "L3-A"
+  - id: l3b
+    label: "L3-B"
+  - id: l4a
+    label: "L4-A"
+  - id: l5a
+    label: "L5-A"
+  - id: l6a
+    label: "L6-Core"
+  - id: out_path
+    label: "Exit"
+  - id: sink
+    label: "Sink"
+    type: output
+
+edges:
+  - source: src
+    target: l1a
+  - source: l1a
+    target: l1b
+  - source: l1b
+    target: l2a
+  - source: l2a
+    target: l2b
+  - source: l2b
+    target: l3a
+  - source: l3a
+    target: l3b
+  - source: l3b
+    target: l4a
+  - source: l4a
+    target: l5a
+  - source: l5a
+    target: l6a
+  - source: l6a
+    target: out_path
+  - source: out_path
+    target: sink
+
+clusters:
+  - name: nest1
+    members: [l1a, l1b, l2a, l2b, l3a, l3b, l4a, l5a, l6a, out_path]
+    label: "Nest 1"
+  - name: nest2
+    members: [l2a, l2b, l3a, l3b, l4a, l5a, l6a, out_path]
+    label: "Nest 2"
+    parent: nest1
+  - name: nest3
+    members: [l3a, l3b, l4a, l5a, l6a]
+    label: "Nest 3"
+    parent: nest2
+  - name: nest4
+    members: [l4a, l5a, l6a]
+    label: "Nest 4"
+    parent: nest3
+  - name: nest5
+    members: [l5a, l6a]
+    label: "Nest 5"
+    parent: nest4
+  - name: nest6
+    members: [l6a]
+    label: "Nest 6 (Core)"
+    parent: nest5

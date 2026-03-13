@@ -1,0 +1,90 @@
+# Regular 4x4 grid DAG (16 nodes, 24 edges).
+# Tests: ordering for grid regularity, barycenter init quality.
+
+direction: TB
+
+nodes:
+  - id: r0c0
+    label: "0,0"
+  - id: r0c1
+    label: "0,1"
+  - id: r0c2
+    label: "0,2"
+  - id: r0c3
+    label: "0,3"
+  - id: r1c0
+    label: "1,0"
+  - id: r1c1
+    label: "1,1"
+  - id: r1c2
+    label: "1,2"
+  - id: r1c3
+    label: "1,3"
+  - id: r2c0
+    label: "2,0"
+  - id: r2c1
+    label: "2,1"
+  - id: r2c2
+    label: "2,2"
+  - id: r2c3
+    label: "2,3"
+  - id: r3c0
+    label: "3,0"
+  - id: r3c1
+    label: "3,1"
+  - id: r3c2
+    label: "3,2"
+  - id: r3c3
+    label: "3,3"
+
+edges:
+  # Vertical edges (row → row+1)
+  - source: r0c0
+    target: r1c0
+  - source: r0c1
+    target: r1c1
+  - source: r0c2
+    target: r1c2
+  - source: r0c3
+    target: r1c3
+  - source: r1c0
+    target: r2c0
+  - source: r1c1
+    target: r2c1
+  - source: r1c2
+    target: r2c2
+  - source: r1c3
+    target: r2c3
+  - source: r2c0
+    target: r3c0
+  - source: r2c1
+    target: r3c1
+  - source: r2c2
+    target: r3c2
+  - source: r2c3
+    target: r3c3
+  # Horizontal edges (col → col+1, same row)
+  - source: r0c0
+    target: r0c1
+  - source: r0c1
+    target: r0c2
+  - source: r0c2
+    target: r0c3
+  - source: r1c0
+    target: r1c1
+  - source: r1c1
+    target: r1c2
+  - source: r1c2
+    target: r1c3
+  - source: r2c0
+    target: r2c1
+  - source: r2c1
+    target: r2c2
+  - source: r2c2
+    target: r2c3
+  - source: r3c0
+    target: r3c1
+  - source: r3c1
+    target: r3c2
+  - source: r3c2
+    target: r3c3

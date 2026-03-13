@@ -1,0 +1,43 @@
+# Pure fan-out hub — star topology (9 nodes, 8 edges).
+# Tests: all children in same layer, hub placement, radial balance.
+
+direction: TB
+
+nodes:
+  - id: hub
+    label: "Hub"
+    type: input
+  - id: s1
+    label: "Spoke 1"
+  - id: s2
+    label: "Spoke 2"
+  - id: s3
+    label: "Spoke 3"
+  - id: s4
+    label: "Spoke 4"
+  - id: s5
+    label: "Spoke 5"
+  - id: s6
+    label: "Spoke 6"
+  - id: s7
+    label: "Spoke 7"
+  - id: s8
+    label: "Spoke 8"
+
+edges:
+  - source: hub
+    target: s1
+  - source: hub
+    target: s2
+  - source: hub
+    target: s3
+  - source: hub
+    target: s4
+  - source: hub
+    target: s5
+  - source: hub
+    target: s6
+  - source: hub
+    target: s7
+  - source: hub
+    target: s8

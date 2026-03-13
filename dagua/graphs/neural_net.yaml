@@ -1,0 +1,45 @@
+direction: BT
+
+nodes:
+  - id: x
+    label: "Input\n28x28"
+    type: input
+  - id: conv1
+    label: "Conv2d\n3x3"
+  - id: relu1
+    label: "ReLU"
+  - id: conv2
+    label: "Conv2d\n3x3"
+  - id: relu2
+    label: "ReLU"
+  - id: pool
+    label: "MaxPool2d"
+  - id: fc
+    label: "Linear\n10"
+  - id: out
+    label: "Output\n10"
+    type: output
+
+edges:
+  - source: x
+    target: conv1
+  - source: conv1
+    target: relu1
+  - source: relu1
+    target: conv2
+  - source: conv2
+    target: relu2
+  - source: relu2
+    target: pool
+  - source: pool
+    target: fc
+  - source: fc
+    target: out
+
+clusters:
+  - name: feature_extractor
+    members: [conv1, relu1, conv2, relu2, pool]
+    label: "Feature Extractor"
+  - name: classifier
+    members: [fc]
+    label: "Classifier"

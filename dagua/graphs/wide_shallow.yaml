@@ -1,0 +1,86 @@
+# 1 source → 10 fan-out → 2 merges → 1 sink (14 nodes, 22 edges).
+# Tests: wide-layer overlap avoidance, fan-out/fan-in balance.
+
+direction: TB
+
+nodes:
+  - id: src
+    label: "Source"
+    type: input
+  - id: w1
+    label: "W1"
+  - id: w2
+    label: "W2"
+  - id: w3
+    label: "W3"
+  - id: w4
+    label: "W4"
+  - id: w5
+    label: "W5"
+  - id: w6
+    label: "W6"
+  - id: w7
+    label: "W7"
+  - id: w8
+    label: "W8"
+  - id: w9
+    label: "W9"
+  - id: w10
+    label: "W10"
+  - id: merge_l
+    label: "Merge L"
+  - id: merge_r
+    label: "Merge R"
+  - id: sink
+    label: "Sink"
+    type: output
+
+edges:
+  # Fan-out from source
+  - source: src
+    target: w1
+  - source: src
+    target: w2
+  - source: src
+    target: w3
+  - source: src
+    target: w4
+  - source: src
+    target: w5
+  - source: src
+    target: w6
+  - source: src
+    target: w7
+  - source: src
+    target: w8
+  - source: src
+    target: w9
+  - source: src
+    target: w10
+  # Left half merges
+  - source: w1
+    target: merge_l
+  - source: w2
+    target: merge_l
+  - source: w3
+    target: merge_l
+  - source: w4
+    target: merge_l
+  - source: w5
+    target: merge_l
+  # Right half merges
+  - source: w6
+    target: merge_r
+  - source: w7
+    target: merge_r
+  - source: w8
+    target: merge_r
+  - source: w9
+    target: merge_r
+  - source: w10
+    target: merge_r
+  # Final merge
+  - source: merge_l
+    target: sink
+  - source: merge_r
+    target: sink

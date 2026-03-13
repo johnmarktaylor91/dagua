@@ -94,4 +94,11 @@ dmypy.json
 
 # Project-specific
 /tests/test_outputs/
+/tests/test_output.log
 /benchmarks/results/
+/eval_output/
+node_modules/
+aesthetic_review/
+
+# Architect-Worker system: ephemeral task state
+.project-context/tasks/
