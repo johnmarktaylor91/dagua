@@ -76,6 +76,7 @@ class CoarseLevel:
     fine_to_coarse: Optional[torch.Tensor]   # [N_fine] maps fine node → coarse node
     num_fine: int                  # N at the finer level
     fine_layer_assignments: Optional[torch.Tensor] = None  # [N_fine] layer assignments for fine level
+    coarse_layer_assignments: Optional[torch.Tensor] = None  # [N_coarse] propagated layer assignments
 
 
 def _can_prolong_on_gpu(
@@ -547,6 +548,7 @@ def build_hierarchy(
         coarse_la.scatter_reduce_(
             0, level.fine_to_coarse, current_la, reduce="amax",
         )
+        level.coarse_layer_assignments = coarse_la
         current_la = coarse_la
         if current_cluster_ids is not None:
             shifted = current_cluster_ids + 1
@@ -705,6 +707,7 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
         coarsest.node_sizes.to(device),
         coarse_config,
         device=device,
+        layer_assignments=coarsest.coarse_layer_assignments,
         progress_context=ProgressContext(),
     )
 
