@@ -1,0 +1,67 @@
+# Perfect depth-4 binary tree (15 nodes, 14 edges).
+# Tests: symmetry preservation, barycenter init quality.
+
+direction: TB
+
+nodes:
+  - id: root
+    label: "Root"
+    type: input
+  - id: l
+    label: "L"
+  - id: r
+    label: "R"
+  - id: ll
+    label: "LL"
+  - id: lr
+    label: "LR"
+  - id: rl
+    label: "RL"
+  - id: rr
+    label: "RR"
+  - id: lll
+    label: "LLL"
+  - id: llr
+    label: "LLR"
+  - id: lrl
+    label: "LRL"
+  - id: lrr
+    label: "LRR"
+  - id: rll
+    label: "RLL"
+  - id: rlr
+    label: "RLR"
+  - id: rrl
+    label: "RRL"
+  - id: rrr
+    label: "RRR"
+
+edges:
+  - source: root
+    target: l
+  - source: root
+    target: r
+  - source: l
+    target: ll
+  - source: l
+    target: lr
+  - source: r
+    target: rl
+  - source: r
+    target: rr
+  - source: ll
+    target: lll
+  - source: ll
+    target: llr
+  - source: lr
+    target: lrl
+  - source: lr
+    target: lrr
+  - source: rl
+    target: rll
+  - source: rl
+    target: rlr
+  - source: rr
+    target: rrl
+  - source: rr
+    target: rrr

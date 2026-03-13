@@ -1,0 +1,80 @@
+# U-Net encoder-decoder with lateral skip connections (13 nodes, 14 edges, 2 clusters).
+# Tests: symmetric layout, lateral skip routing, encoder-decoder aesthetics.
+
+direction: TB
+
+nodes:
+  - id: input
+    label: "Input"
+    type: input
+  # Encoder
+  - id: enc1
+    label: "Enc 1"
+  - id: enc2
+    label: "Enc 2"
+  - id: enc3
+    label: "Enc 3"
+  # Bottleneck
+  - id: bottleneck
+    label: "Bottleneck"
+  # Decoder
+  - id: dec3
+    label: "Dec 3"
+  - id: dec2
+    label: "Dec 2"
+  - id: dec1
+    label: "Dec 1"
+  # Concat nodes (where skips merge)
+  - id: cat3
+    label: "Cat 3"
+  - id: cat2
+    label: "Cat 2"
+  - id: cat1
+    label: "Cat 1"
+  # Output
+  - id: conv_final
+    label: "Conv 1x1"
+  - id: output
+    label: "Output"
+    type: output
+
+edges:
+  # Encoder path
+  - source: input
+    target: enc1
+  - source: enc1
+    target: enc2
+  - source: enc2
+    target: enc3
+  - source: enc3
+    target: bottleneck
+  # Decoder path
+  - source: bottleneck
+    target: cat3
+  - source: cat3
+    target: dec3
+  - source: dec3
+    target: cat2
+  - source: cat2
+    target: dec2
+  - source: dec2
+    target: cat1
+  - source: cat1
+    target: dec1
+  - source: dec1
+    target: conv_final
+  - source: conv_final
+    target: output
+  # Lateral skip connections
+  - source: enc3
+    target: cat3
+  - source: enc2
+    target: cat2
+
+clusters:
+  - name: encoder
+    members: [enc1, enc2, enc3]
+    label: "Encoder"
+  - name: decoder
+    members: [dec3, dec2, dec1, cat3, cat2, cat1]
+    label: "Decoder"

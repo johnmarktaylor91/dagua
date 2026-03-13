@@ -32,8 +32,10 @@ dependencies = [
 [project.optional-dependencies]
 render = ["matplotlib>=3.5"]
 graphviz = ["graphviz>=0.20"]
+yaml = ["pyyaml>=6.0"]
 dev = [
     "matplotlib>=3.5",
+    "pyyaml>=6.0",
     "pytest>=7.0",
     "pytest-cov",
     "ruff>=0.4",
@@ -44,6 +46,15 @@ dev = [
 test = [
     "pytest>=7.0",
     "matplotlib>=3.5",
+    "pyyaml>=6.0",
+]
+igraph = ["igraph>=0.10"]
+scipy = ["scipy>=1.7"]
+pydot = ["pydot>=1.4"]
+interop = ["igraph>=0.10", "scipy>=1.7", "pydot>=1.4"]
+ai = [
+    "anthropic>=0.40",
+    "openai>=1.0",
 ]
 
 [project.urls]
@@ -51,15 +62,23 @@ Homepage = "https://github.com/johnmarktaylor91/dagua"
 Repository = "https://github.com/johnmarktaylor91/dagua"
 Issues = "https://github.com/johnmarktaylor91/dagua/issues"
 
+[project.scripts]
+dagua = "dagua.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["dagua*"]
+
+[tool.setuptools.package-data]
+"dagua.graphs" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
     "smoke: quick sanity checks",
     "slow: tests that take >10s",
+    "benchmark: benchmark suite tests and artifact generation",
     "gpu: tests requiring CUDA",
+    "rare: extreme scale tests (5M+ nodes) — never run routinely",
 ]
 
 [tool.coverage.run]
@@ -83,6 +102,25 @@ warn_unused_configs = true
 ignore_missing_imports = true
 check_untyped_defs = false
 disallow_untyped_defs = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "dagua.cli",
+]
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "dagua.eval.visual_audit",
+    "dagua.layout.multilevel",
+]
+check_untyped_defs = true
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,40 @@
+# 3 separate disconnected components (8 nodes, 5 edges).
+# Tests: repulsion-only separation, no inter-component edges.
+
+direction: TB
+
+nodes:
+  # Component 1: triangle
+  - id: t1
+    label: "T1"
+  - id: t2
+    label: "T2"
+  - id: t3
+    label: "T3"
+  # Component 2: single edge
+  - id: p1
+    label: "P1"
+  - id: p2
+    label: "P2"
+  # Component 3: chain of 3
+  - id: c1
+    label: "C1"
+  - id: c2
+    label: "C2"
+  - id: c3
+    label: "C3"
+
+edges:
+  # Component 1
+  - source: t1
+    target: t2
+  - source: t1
+    target: t3
+  # Component 2
+  - source: p1
+    target: p2
+  # Component 3
+  - source: c1
+    target: c2
+  - source: c2
+    target: c3

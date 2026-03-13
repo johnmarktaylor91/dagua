@@ -44,3 +44,11 @@ pytest tests/ -m gpu             # GPU-only tests (requires CUDA)
   rather than exact coordinate values (optimization is stochastic)
 - Render tests should check structural output (SVG element count, figure created)
   rather than pixel-perfect comparison
+
+## Maintainability Rules
+
+- When fixing a regression, add the narrowest possible test that would have caught it.
+- Smoke tests are the preferred place to pin billion-scale and workflow regressions in
+  miniature.
+- If you tighten type guarantees or docstring contracts in core modules, add tests that
+  exercise the intended typed path rather than relying on static checking alone.

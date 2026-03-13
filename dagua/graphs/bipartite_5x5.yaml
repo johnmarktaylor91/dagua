@@ -1,0 +1,73 @@
+# Dense bipartite graph — 5 sources fully connected to 5 sinks (10 nodes, 15 edges).
+# Tests: crossing minimization, LR bipartite layout.
+
+direction: LR
+
+nodes:
+  - id: l1
+    label: "L1"
+    type: input
+  - id: l2
+    label: "L2"
+    type: input
+  - id: l3
+    label: "L3"
+    type: input
+  - id: l4
+    label: "L4"
+    type: input
+  - id: l5
+    label: "L5"
+    type: input
+  - id: r1
+    label: "R1"
+    type: output
+  - id: r2
+    label: "R2"
+    type: output
+  - id: r3
+    label: "R3"
+    type: output
+  - id: r4
+    label: "R4"
+    type: output
+  - id: r5
+    label: "R5"
+    type: output
+
+edges:
+  # l1 → all
+  - source: l1
+    target: r1
+  - source: l1
+    target: r3
+  - source: l1
+    target: r5
+  # l2 → all
+  - source: l2
+    target: r2
+  - source: l2
+    target: r4
+  - source: l2
+    target: r1
+  # l3 → all
+  - source: l3
+    target: r3
+  - source: l3
+    target: r5
+  - source: l3
+    target: r2
+  # l4 → all
+  - source: l4
+    target: r4
+  - source: l4
+    target: r1
+  - source: l4
+    target: r3
+  # l5 → all
+  - source: l5
+    target: r5
+  - source: l5
+    target: r2
+  - source: l5
+    target: r4

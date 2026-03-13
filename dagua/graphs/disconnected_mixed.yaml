@@ -1,0 +1,69 @@
+# Mixed disconnected components: diamond + chain + pair + isolated node (15 nodes, 11 edges).
+# Tests: varied component sizes and depths, isolated node handling.
+
+direction: TB
+
+nodes:
+  # Component 1: diamond (4 nodes)
+  - id: d1
+    label: "D-top"
+  - id: d2
+    label: "D-left"
+  - id: d3
+    label: "D-right"
+  - id: d4
+    label: "D-bottom"
+  # Component 2: chain (5 nodes)
+  - id: ch1
+    label: "Chain 1"
+  - id: ch2
+    label: "Chain 2"
+  - id: ch3
+    label: "Chain 3"
+  - id: ch4
+    label: "Chain 4"
+  - id: ch5
+    label: "Chain 5"
+  # Component 3: pair (2 nodes)
+  - id: e1
+    label: "Edge 1"
+  - id: e2
+    label: "Edge 2"
+  # Component 4: triangle (3 nodes)
+  - id: tri1
+    label: "Tri 1"
+  - id: tri2
+    label: "Tri 2"
+  - id: tri3
+    label: "Tri 3"
+  # Component 5: isolated
+  - id: solo
+    label: "Isolated"
+
+edges:
+  # Diamond
+  - source: d1
+    target: d2
+  - source: d1
+    target: d3
+  - source: d2
+    target: d4
+  - source: d3
+    target: d4
+  # Chain
+  - source: ch1
+    target: ch2
+  - source: ch2
+    target: ch3
+  - source: ch3
+    target: ch4
+  - source: ch4
+    target: ch5
+  # Pair
+  - source: e1
+    target: e2
+  # Triangle
+  - source: tri1
+    target: tri2
+  - source: tri1
+    target: tri3
