@@ -92,7 +92,7 @@ Canonical setup:
 ```python
 import dagua
 
-dagua.configure_image_ai(provider="openai", api_key_env="OPENAI_API_KEY")
+dagua.configure_image_ai(provider="openai", api_key_env="OPENAI_API_KEY")  # pragma: allowlist secret
 ```
 
 Then use whichever return mode you want:
