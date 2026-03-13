@@ -64,6 +64,38 @@ def test_benchmark_list_cli_lists_runs(tmp_path, capsys):
 
 
 @pytest.mark.smoke
+def test_large_benchmark_status_cli_prints_checkpoint_state(tmp_path, capsys):
+    checkpoint_dir = tmp_path / "dagua_bench_large" / "1b"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoint_dir / "meta.json").write_text('{"n": 10, "layers": 2}', encoding="utf-8")
+    (checkpoint_dir / "active_run.json").write_text(
+        '{"pid": -1, "size": "1b", "resume": true, "checkpoint_root": "/tmp/x"}',
+        encoding="utf-8",
+    )
+    log_path = tmp_path / "bench.log"
+    log_path.write_text("line1\nline2\nline3\n", encoding="utf-8")
+
+    rc = main(
+        [
+            "large-benchmark-status",
+            "--checkpoint-dir",
+            str(checkpoint_dir),
+            "--log-path",
+            str(log_path),
+            "--tail-lines",
+            "2",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert '"checkpoint_dir"' in captured.out
+    assert '"active_run"' in captured.out
+    assert '"line2"' in captured.out
+    assert '"line3"' in captured.out
+
+
+@pytest.mark.smoke
 def test_benchmark_show_cli_prints_graph_or_competitor(tmp_path, capsys):
     output_dir = tmp_path / "eval_output"
     run_dir = output_dir / "benchmark_db" / "standard" / "2026-03-12T00:00:00+00:00"

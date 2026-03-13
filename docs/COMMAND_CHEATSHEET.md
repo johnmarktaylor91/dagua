@@ -201,6 +201,12 @@ cd /home/jtaylor/projects/dagua
 python -u scripts/bench_large.py 1b --device cuda
 ```
 
+Inspect checkpoint ownership/state in one shot:
+
+```bash
+dagua large-benchmark-status
+```
+
 Tail the log used in tmux/nohup workflows:
 
 ```bash
