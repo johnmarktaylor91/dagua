@@ -102,3 +102,6 @@ aesthetic_review/
 
 # Architect-Worker system: ephemeral task state
 .project-context/tasks/
+
+# Claude Code: local settings are personal, commands + settings.json are shared
+.claude/settings.local.json

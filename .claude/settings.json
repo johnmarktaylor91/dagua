@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./scripts/*)",
+      "Bash(ruff *)",
+      "Bash(mypy *)",
+      "Bash(pytest *)",
+      "Bash(gh *)",
+      "Read",
+      "Write(.project-context/*)"
+    ]
+  },
+  "attribution": {
+    "commits": false,
+    "pullRequests": false
+  }
+}
