@@ -1,0 +1,116 @@
+# Moderate baseline (20 nodes, ~25 edges).
+# Tests: multiple layers, varying widths, skip edges, 3 flat clusters.
+
+direction: TB
+
+nodes:
+  - id: src1
+    label: "Source 1"
+    type: input
+  - id: src2
+    label: "Source 2"
+    type: input
+  - id: a1
+    label: "A1"
+  - id: a2
+    label: "A2"
+  - id: a3
+    label: "A3"
+  - id: b1
+    label: "B1"
+  - id: b2
+    label: "B2"
+  - id: b3
+    label: "B3"
+  - id: b4
+    label: "B4"
+  - id: b5
+    label: "B5"
+  - id: c1
+    label: "C1"
+  - id: c2
+    label: "C2"
+  - id: c3
+    label: "C3"
+  - id: c4
+    label: "C4"
+  - id: d1
+    label: "D1"
+  - id: d2
+    label: "D2"
+  - id: d3
+    label: "D3"
+  - id: e1
+    label: "E1"
+  - id: sink1
+    label: "Sink 1"
+    type: output
+  - id: sink2
+    label: "Sink 2"
+    type: output
+
+edges:
+  - source: src1
+    target: a1
+  - source: src1
+    target: a2
+  - source: src2
+    target: a2
+  - source: src2
+    target: a3
+  - source: a1
+    target: b1
+  - source: a1
+    target: b2
+  - source: a2
+    target: b3
+  - source: a3
+    target: b4
+  - source: a3
+    target: b5
+  - source: b1
+    target: c1
+  - source: b2
+    target: c1
+  - source: b3
+    target: c2
+  - source: b3
+    target: c3
+  - source: b4
+    target: c3
+  - source: b5
+    target: c4
+  - source: c1
+    target: d1
+  - source: c2
+    target: d2
+  - source: c3
+    target: d2
+  - source: c4
+    target: d3
+  - source: d1
+    target: e1
+  - source: d2
+    target: e1
+  - source: d3
+    target: e1
+  - source: e1
+    target: sink1
+  - source: e1
+    target: sink2
+  # Skip edges
+  - source: src1
+    target: b3
+  - source: a2
+    target: c2
+
+clusters:
+  - name: group_a
+    members: [a1, a2, a3]
+    label: "Layer A"
+  - name: group_b
+    members: [b1, b2, b3, b4, b5]
+    label: "Layer B"
+  - name: group_c
+    members: [c1, c2, c3, c4]
+    label: "Layer C"

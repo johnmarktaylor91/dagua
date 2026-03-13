@@ -1,0 +1,83 @@
+# ETL data pipeline: 3 sources, parallel transforms, 2 sinks, 3 clusters (12 nodes, 14 edges).
+# Tests: LR direction, multiple sources/sinks, parallel processing lanes.
+
+direction: LR
+
+nodes:
+  # Sources
+  - id: csv_src
+    label: "CSV\nSource"
+    type: input
+  - id: api_src
+    label: "API\nSource"
+    type: input
+  - id: db_src
+    label: "DB\nSource"
+    type: input
+  # Extract/Transform
+  - id: parse_csv
+    label: "Parse CSV"
+  - id: fetch_api
+    label: "Fetch API"
+  - id: query_db
+    label: "Query DB"
+  - id: validate
+    label: "Validate"
+  - id: normalize
+    label: "Normalize"
+  - id: dedupe
+    label: "Deduplicate"
+  - id: enrich
+    label: "Enrich"
+  # Load
+  - id: warehouse
+    label: "Data\nWarehouse"
+    type: output
+  - id: dashboard
+    label: "Dashboard"
+    type: output
+
+edges:
+  # Extract
+  - source: csv_src
+    target: parse_csv
+  - source: api_src
+    target: fetch_api
+  - source: db_src
+    target: query_db
+  # Transform
+  - source: parse_csv
+    target: validate
+  - source: fetch_api
+    target: validate
+  - source: query_db
+    target: normalize
+  - source: validate
+    target: normalize
+  - source: normalize
+    target: dedupe
+  - source: dedupe
+    target: enrich
+  # Load
+  - source: enrich
+    target: warehouse
+  - source: enrich
+    target: dashboard
+  # Cross-connections
+  - source: parse_csv
+    target: normalize
+  - source: fetch_api
+    target: dedupe
+  - source: query_db
+    target: enrich
+
+clusters:
+  - name: extract
+    members: [parse_csv, fetch_api, query_db]
+    label: "Extract"
+  - name: transform
+    members: [validate, normalize, dedupe, enrich]
+    label: "Transform"
+  - name: load
+    members: [warehouse, dashboard]
+    label: "Load"

@@ -1,0 +1,65 @@
+# 4-level deep cluster nesting (10 nodes, 9 edges).
+# Tests: containment loss with 3 parent-child cluster pairs, concentric rectangles.
+
+direction: TB
+
+nodes:
+  - id: src
+    label: "Source"
+    type: input
+  - id: outer1
+    label: "Outer 1"
+  - id: outer2
+    label: "Outer 2"
+  - id: mid1
+    label: "Mid 1"
+  - id: mid2
+    label: "Mid 2"
+  - id: inner1
+    label: "Inner 1"
+  - id: inner2
+    label: "Inner 2"
+  - id: core
+    label: "Core"
+  - id: exit
+    label: "Exit"
+  - id: sink
+    label: "Sink"
+    type: output
+
+edges:
+  - source: src
+    target: outer1
+  - source: outer1
+    target: outer2
+  - source: outer2
+    target: mid1
+  - source: mid1
+    target: mid2
+  - source: mid2
+    target: inner1
+  - source: inner1
+    target: inner2
+  - source: inner2
+    target: core
+  - source: core
+    target: exit
+  - source: exit
+    target: sink
+
+clusters:
+  - name: level1
+    members: [outer1, outer2, mid1, mid2, inner1, inner2, core, exit]
+    label: "Level 1"
+  - name: level2
+    members: [mid1, mid2, inner1, inner2, core, exit]
+    label: "Level 2"
+    parent: level1
+  - name: level3
+    members: [inner1, inner2, core]
+    label: "Level 3"
+    parent: level2
+  - name: level4
+    members: [core]
+    label: "Level 4 (Core)"
+    parent: level3

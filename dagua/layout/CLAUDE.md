@@ -18,7 +18,6 @@ testable and reusable without the Graph abstraction.
 - Runs optimization: composite loss from constraints, `loss.backward()`, `optimizer.step()`
 - Optional projected gradient descent (calls projection.py after each step)
 - Returns detached position tensor
-- Target size: ~200 lines
 
 ### constraints.py — Composable loss callables
 - Each constraint is a callable: `(pos, graph_data) -> scalar loss`
@@ -37,12 +36,18 @@ testable and reusable without the Graph abstraction.
 - Example: start with strong DAG ordering, gradually increase repulsion
 - Enables curriculum-style layout optimization
 
-## Dependency Rules
+### init_placement.py — Initialization
+- Topological sort for y-axis, barycenter heuristic for x-axis
+- Deterministic from topology (seed doesn't add randomness here)
 
-- **constraints.py**: pure torch, no imports from dagua
-- **projection.py**: pure torch, no imports from dagua
-- **schedule.py**: pure torch, no imports from dagua
-- **engine.py**: imports constraints, projection, schedule — nothing else from dagua
-- **__init__.py**: re-exports only
+### layers.py — Layer assignment
+- Algorithms for assigning nodes to discrete layers in hierarchical layout
 
-No module in this package imports `graph.py`, `elements.py`, or `style.py`.
+### multilevel.py — Coarsening + refinement
+- Multilevel layout for large graphs. Most fragile path in the layout code.
+
+### cycle.py — Cycle handling
+- Detection and temporary edge reversal so DAG constraints work on cyclic graphs
+
+### edge_optimization.py — Post-layout refinement
+- Edge-aware position adjustment after main optimization

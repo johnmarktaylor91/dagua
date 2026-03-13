@@ -1,0 +1,94 @@
+# Service mesh: 4 clusters representing API/service/data/worker layers (15 nodes, 16 edges).
+# Tests: cluster-layered architecture, inter-cluster routing, realistic service topology.
+
+direction: TB
+
+nodes:
+  # API Gateway layer
+  - id: gateway
+    label: "API Gateway"
+    type: input
+  - id: auth
+    label: "Auth Service"
+  - id: rate_limit
+    label: "Rate Limiter"
+  # Service layer
+  - id: user_svc
+    label: "User Service"
+  - id: order_svc
+    label: "Order Service"
+  - id: notify_svc
+    label: "Notification\nService"
+  - id: search_svc
+    label: "Search Service"
+  # Data layer
+  - id: user_db
+    label: "User DB"
+  - id: order_db
+    label: "Order DB"
+  - id: cache
+    label: "Redis Cache"
+  - id: search_idx
+    label: "Search Index"
+  # Worker layer
+  - id: email_worker
+    label: "Email Worker"
+  - id: index_worker
+    label: "Index Worker"
+  - id: analytics
+    label: "Analytics"
+  - id: logs
+    label: "Log Sink"
+    type: output
+
+edges:
+  # API → Services
+  - source: gateway
+    target: auth
+  - source: gateway
+    target: rate_limit
+  - source: auth
+    target: user_svc
+  - source: rate_limit
+    target: order_svc
+  - source: rate_limit
+    target: search_svc
+  # Service → Data
+  - source: user_svc
+    target: user_db
+  - source: user_svc
+    target: cache
+  - source: order_svc
+    target: order_db
+  - source: order_svc
+    target: notify_svc
+  - source: search_svc
+    target: search_idx
+  - source: search_svc
+    target: cache
+  # Service → Workers
+  - source: notify_svc
+    target: email_worker
+  - source: search_idx
+    target: index_worker
+  # Workers/Data → Logs
+  - source: email_worker
+    target: logs
+  - source: index_worker
+    target: analytics
+  - source: analytics
+    target: logs
+
+clusters:
+  - name: api_layer
+    members: [gateway, auth, rate_limit]
+    label: "API Layer"
+  - name: service_layer
+    members: [user_svc, order_svc, notify_svc, search_svc]
+    label: "Service Layer"
+  - name: data_layer
+    members: [user_db, order_db, cache, search_idx]
+    label: "Data Layer"
+  - name: worker_layer
+    members: [email_worker, index_worker, analytics]
+    label: "Worker Layer"

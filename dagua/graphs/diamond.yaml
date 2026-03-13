@@ -1,0 +1,23 @@
+direction: TB
+
+nodes:
+  - id: a
+    label: "Start"
+    type: input
+  - id: b
+    label: "Left"
+  - id: c
+    label: "Right"
+  - id: d
+    label: "End"
+    type: output
+
+edges:
+  - source: a
+    target: b
+  - source: a
+    target: c
+  - source: b
+    target: d
+  - source: c
+    target: d

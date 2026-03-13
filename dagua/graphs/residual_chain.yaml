@@ -1,0 +1,74 @@
+# 3 ResNet-style residual blocks + long-range skip (12 nodes, 16 edges).
+# Tests: bezier routing across many layers, skip connection aesthetics.
+
+direction: TB
+
+nodes:
+  - id: input
+    label: "Input"
+    type: input
+  # Block 1
+  - id: conv1a
+    label: "Conv 1a"
+  - id: conv1b
+    label: "Conv 1b"
+  - id: add1
+    label: "Add 1"
+  # Block 2
+  - id: conv2a
+    label: "Conv 2a"
+  - id: conv2b
+    label: "Conv 2b"
+  - id: add2
+    label: "Add 2"
+  # Block 3
+  - id: conv3a
+    label: "Conv 3a"
+  - id: conv3b
+    label: "Conv 3b"
+  - id: add3
+    label: "Add 3"
+  # Output
+  - id: pool
+    label: "Pool"
+  - id: output
+    label: "Output"
+    type: output
+
+edges:
+  # Sequential path
+  - source: input
+    target: conv1a
+  - source: conv1a
+    target: conv1b
+  - source: conv1b
+    target: add1
+  - source: add1
+    target: conv2a
+  - source: conv2a
+    target: conv2b
+  - source: conv2b
+    target: add2
+  - source: add2
+    target: conv3a
+  - source: conv3a
+    target: conv3b
+  - source: conv3b
+    target: add3
+  - source: add3
+    target: pool
+  - source: pool
+    target: output
+  # Residual skip connections
+  - source: input
+    target: add1
+  - source: add1
+    target: add2
+  - source: add2
+    target: add3
+  # Long-range skip
+  - source: input
+    target: add3
+    label: "long skip"
+  - source: input
+    target: pool

@@ -1,0 +1,84 @@
+# Dense inter-cluster connectivity (12 nodes, 15 edges, 3 clusters + 1 back edge).
+# Tests: cluster-crossing penalty, edge routing across cluster boundaries.
+
+direction: TB
+
+nodes:
+  # Cluster X
+  - id: x1
+    label: "X1"
+    type: input
+  - id: x2
+    label: "X2"
+  - id: x3
+    label: "X3"
+  - id: x4
+    label: "X4"
+  # Cluster Y
+  - id: y1
+    label: "Y1"
+  - id: y2
+    label: "Y2"
+  - id: y3
+    label: "Y3"
+  - id: y4
+    label: "Y4"
+  # Cluster Z
+  - id: z1
+    label: "Z1"
+  - id: z2
+    label: "Z2"
+  - id: z3
+    label: "Z3"
+  - id: z4
+    label: "Z4"
+    type: output
+
+edges:
+  # Intra-cluster
+  - source: x1
+    target: x2
+  - source: x2
+    target: x3
+  - source: x3
+    target: x4
+  - source: y1
+    target: y2
+  - source: y2
+    target: y3
+  - source: y3
+    target: y4
+  - source: z1
+    target: z2
+  - source: z2
+    target: z3
+  - source: z3
+    target: z4
+  # Cross-cluster
+  - source: x2
+    target: y1
+  - source: x3
+    target: y2
+  - source: y2
+    target: z1
+  - source: y4
+    target: z2
+  - source: x4
+    target: z1
+  # Back edge
+  - source: z3
+    target: x1
+    type: back
+
+back_edges: [14]
+
+clusters:
+  - name: cluster_x
+    members: [x1, x2, x3, x4]
+    label: "Cluster X"
+  - name: cluster_y
+    members: [y1, y2, y3, y4]
+    label: "Cluster Y"
+  - name: cluster_z
+    members: [z1, z2, z3, z4]
+    label: "Cluster Z"

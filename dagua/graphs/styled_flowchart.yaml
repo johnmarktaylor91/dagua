@@ -1,0 +1,57 @@
+# Per-node style overrides: diamond shape, custom colors, dashed edges (6 nodes, 5 edges).
+# Tests: mixed shapes in same graph, per-node base_color, per-edge style overrides.
+
+direction: TB
+
+nodes:
+  - id: start
+    label: "Start"
+    type: input
+    style:
+      shape: ellipse
+      base_color: "#009E73"
+  - id: process
+    label: "Process\nData"
+    style:
+      shape: roundrect
+      base_color: "#56B4E9"
+      min_width: 80.0
+  - id: decision
+    label: "Valid?"
+    style:
+      shape: diamond
+      base_color: "#E69F00"
+      font_weight: bold
+  - id: success
+    label: "Success"
+    style:
+      shape: roundrect
+      base_color: "#009E73"
+  - id: failure
+    label: "Failure"
+    style:
+      shape: roundrect
+      base_color: "#D55E00"
+  - id: end
+    label: "End"
+    type: output
+    style:
+      shape: ellipse
+      base_color: "#CC79A7"
+
+edges:
+  - source: start
+    target: process
+  - source: process
+    target: decision
+  - source: decision
+    target: success
+    label: "yes"
+  - source: decision
+    target: failure
+    label: "no"
+    style:
+      style: dashed
+      color: "#D55E00"
+  - source: success
+    target: end
