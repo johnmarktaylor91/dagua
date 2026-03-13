@@ -58,6 +58,7 @@ def _checkpoint_paths(root: Path) -> dict[str, Path]:
     return {
         "root": root,
         "meta": root / "meta.json",
+        "layout_meta": root / "layout_meta.json",
         "edge_index": root / "edge_index.pt",
         "node_sizes": root / "node_sizes.pt",
         "layer_assignments": root / "layer_assignments.pt",
@@ -67,6 +68,35 @@ def _checkpoint_paths(root: Path) -> dict[str, Path]:
         "positions": root / "positions.pt",
         "active_run": root / "active_run.json",
     }
+
+
+_LAYOUT_CHECKPOINT_SCHEMA = 1
+
+
+def _layout_resume_signature(args: argparse.Namespace) -> dict[str, object]:
+    """Fields that make derived layout checkpoints semantically reusable."""
+    return {
+        "schema": _LAYOUT_CHECKPOINT_SCHEMA,
+        "device": args.device,
+        "workers": args.workers,
+        "steps": args.steps,
+        "seed": args.seed,
+        "multilevel_threshold": 50_000,
+        "multilevel_min_nodes": 2_000,
+        "multilevel_coarse_steps": 50,
+        "multilevel_refine_steps": 15,
+    }
+
+
+def _layout_signature_matches(paths: dict[str, Path], signature: dict[str, object]) -> bool:
+    """Return whether derived layout artifacts match the current run signature."""
+    if not paths["layout_meta"].exists():
+        return False
+    try:
+        payload = json.loads(paths["layout_meta"].read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return payload == signature
 
 
 def _save_checkpoint_meta(path: Path, payload: dict) -> None:
@@ -147,8 +177,10 @@ def _save_hierarchy_checkpoint(paths: dict[str, Path], levels: list) -> None:
     _atomic_write_text(paths["hierarchy_meta"], json.dumps(manifest, indent=2))
 
 
-def _load_hierarchy_checkpoint(paths: dict[str, Path], n: int, layers: int):
+def _load_hierarchy_checkpoint(paths: dict[str, Path], n: int, layers: int, layout_signature: dict[str, object] | None = None):
     if not paths["meta"].exists() or not paths["hierarchy_meta"].exists():
+        return None
+    if layout_signature is not None and not _layout_signature_matches(paths, layout_signature):
         return None
     meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
     if meta.get("n") != n or meta.get("layers") != layers:
@@ -197,8 +229,15 @@ def _load_hierarchy_checkpoint(paths: dict[str, Path], n: int, layers: int):
     return levels
 
 
-def _load_coarsest_positions_checkpoint(paths: dict[str, Path], n: int, layers: int) -> torch.Tensor | None:
+def _load_coarsest_positions_checkpoint(
+    paths: dict[str, Path],
+    n: int,
+    layers: int,
+    layout_signature: dict[str, object] | None = None,
+) -> torch.Tensor | None:
     if not paths["meta"].exists() or not paths["coarsest_positions"].exists():
+        return None
+    if layout_signature is not None and not _layout_signature_matches(paths, layout_signature):
         return None
     meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
     if meta.get("n") != n or meta.get("layers") != layers:
@@ -206,7 +245,7 @@ def _load_coarsest_positions_checkpoint(paths: dict[str, Path], n: int, layers: 
     pos = torch.load(paths["coarsest_positions"], map_location="cpu")
     if pos.ndim != 2 or pos.shape[1] != 2:
         return None
-    hierarchy = _load_hierarchy_checkpoint(paths, n, layers)
+    hierarchy = _load_hierarchy_checkpoint(paths, n, layers, layout_signature=layout_signature)
     if hierarchy:
         expected_rows = hierarchy[-1].num_nodes
         if pos.shape[0] != expected_rows:
@@ -214,8 +253,15 @@ def _load_coarsest_positions_checkpoint(paths: dict[str, Path], n: int, layers: 
     return pos
 
 
-def _load_positions_checkpoint(paths: dict[str, Path], n: int, layers: int) -> torch.Tensor | None:
+def _load_positions_checkpoint(
+    paths: dict[str, Path],
+    n: int,
+    layers: int,
+    layout_signature: dict[str, object] | None = None,
+) -> torch.Tensor | None:
     if not paths["meta"].exists() or not paths["positions"].exists():
+        return None
+    if layout_signature is not None and not _layout_signature_matches(paths, layout_signature):
         return None
     meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
     if meta.get("n") != n or meta.get("layers") != layers:
@@ -511,7 +557,12 @@ def main():
         )
         print(f"Saved graph checkpoint to {checkpoint_dir}", flush=True)
 
-    final_positions = _load_positions_checkpoint(checkpoint_paths, n, layers) if args.resume else None
+    layout_signature = _layout_resume_signature(args)
+    final_positions = (
+        _load_positions_checkpoint(checkpoint_paths, n, layers, layout_signature=layout_signature)
+        if args.resume
+        else None
+    )
     if final_positions is not None:
         print(f"Restored final positions checkpoint from {checkpoint_paths['positions']}", flush=True)
         print(f"\nResult: {final_positions.shape}", flush=True)
@@ -520,11 +571,19 @@ def main():
         mem("done")
         return
 
-    hierarchy_levels = _load_hierarchy_checkpoint(checkpoint_paths, n, layers) if args.resume else None
+    hierarchy_levels = (
+        _load_hierarchy_checkpoint(checkpoint_paths, n, layers, layout_signature=layout_signature)
+        if args.resume
+        else None
+    )
     if hierarchy_levels is not None:
         print(f"Restored hierarchy checkpoint from {checkpoint_paths['hierarchy_dir']}", flush=True)
 
-    coarsest_positions = _load_coarsest_positions_checkpoint(checkpoint_paths, n, layers) if args.resume else None
+    coarsest_positions = (
+        _load_coarsest_positions_checkpoint(checkpoint_paths, n, layers, layout_signature=layout_signature)
+        if args.resume
+        else None
+    )
     if coarsest_positions is not None:
         print(f"Restored coarsest positions checkpoint from {checkpoint_paths['coarsest_positions']}", flush=True)
 
@@ -551,12 +610,14 @@ def main():
         g._layer_assignments_callback = _save_layer_assignments
     if hierarchy_levels is None:
         def _save_hierarchy(levels) -> None:
+            _save_checkpoint_meta(checkpoint_paths["layout_meta"], layout_signature)
             _save_hierarchy_checkpoint(checkpoint_paths, levels)
             print(f"Saved hierarchy checkpoint to {checkpoint_paths['hierarchy_dir']}", flush=True)
 
         g._hierarchy_levels_callback = _save_hierarchy
     if coarsest_positions is None:
         def _save_coarsest_positions(pos_tensor: torch.Tensor) -> None:
+            _save_checkpoint_meta(checkpoint_paths["layout_meta"], layout_signature)
             _atomic_torch_save(checkpoint_paths["coarsest_positions"], pos_tensor)
             print(f"Saved coarsest positions checkpoint to {checkpoint_paths['coarsest_positions']}", flush=True)
 
@@ -581,6 +642,7 @@ def main():
     pos = dagua.layout(g, config)
     total = time.perf_counter() - t1
     phase("layout finished", t0)
+    _save_checkpoint_meta(checkpoint_paths["layout_meta"], layout_signature)
     _atomic_torch_save(checkpoint_paths["positions"], pos)
     print(f"Saved positions checkpoint to {checkpoint_paths['positions']}", flush=True)
 
