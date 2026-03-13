@@ -1,0 +1,72 @@
+# Two parallel chains with rungs — ladder topology (12 nodes, 16 edges).
+# Tests: parallel chain placement, rung alignment.
+
+direction: TB
+
+nodes:
+  - id: a1
+    label: "A1"
+    type: input
+  - id: a2
+    label: "A2"
+  - id: a3
+    label: "A3"
+  - id: a4
+    label: "A4"
+  - id: a5
+    label: "A5"
+  - id: a6
+    label: "A6"
+    type: output
+  - id: b1
+    label: "B1"
+    type: input
+  - id: b2
+    label: "B2"
+  - id: b3
+    label: "B3"
+  - id: b4
+    label: "B4"
+  - id: b5
+    label: "B5"
+  - id: b6
+    label: "B6"
+    type: output
+
+edges:
+  # Chain A
+  - source: a1
+    target: a2
+  - source: a2
+    target: a3
+  - source: a3
+    target: a4
+  - source: a4
+    target: a5
+  - source: a5
+    target: a6
+  # Chain B
+  - source: b1
+    target: b2
+  - source: b2
+    target: b3
+  - source: b3
+    target: b4
+  - source: b4
+    target: b5
+  - source: b5
+    target: b6
+  # Rungs (A → B)
+  - source: a1
+    target: b2
+  - source: a2
+    target: b3
+  - source: a3
+    target: b4
+  - source: a4
+    target: b5
+  - source: a5
+    target: b6
+  # Rung (B → A)
+  - source: b3
+    target: a4

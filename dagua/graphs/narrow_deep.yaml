@@ -1,0 +1,68 @@
+# Chain of 15 nodes — depth extreme.
+# Tests: single-column layout, long vertical/horizontal span.
+
+direction: TB
+
+nodes:
+  - id: n1
+    label: "Layer 1"
+    type: input
+  - id: n2
+    label: "Layer 2"
+  - id: n3
+    label: "Layer 3"
+  - id: n4
+    label: "Layer 4"
+  - id: n5
+    label: "Layer 5"
+  - id: n6
+    label: "Layer 6"
+  - id: n7
+    label: "Layer 7"
+  - id: n8
+    label: "Layer 8"
+  - id: n9
+    label: "Layer 9"
+  - id: n10
+    label: "Layer 10"
+  - id: n11
+    label: "Layer 11"
+  - id: n12
+    label: "Layer 12"
+  - id: n13
+    label: "Layer 13"
+  - id: n14
+    label: "Layer 14"
+  - id: n15
+    label: "Layer 15"
+    type: output
+
+edges:
+  - source: n1
+    target: n2
+  - source: n2
+    target: n3
+  - source: n3
+    target: n4
+  - source: n4
+    target: n5
+  - source: n5
+    target: n6
+  - source: n6
+    target: n7
+  - source: n7
+    target: n8
+  - source: n8
+    target: n9
+  - source: n9
+    target: n10
+  - source: n10
+    target: n11
+  - source: n11
+    target: n12
+  - source: n12
+    target: n13
+  - source: n13
+    target: n14
+  - source: n14
+    target: n15

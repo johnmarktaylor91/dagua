@@ -1,0 +1,32 @@
+# Self-loop edge case (4 nodes, 5 edges, 1 back edge).
+# Tests: self-loop in cycle detection, back-edge rendering on same node.
+
+direction: TB
+
+nodes:
+  - id: a
+    label: "Start"
+    type: input
+  - id: b
+    label: "Process"
+  - id: c
+    label: "Validate"
+  - id: d
+    label: "End"
+    type: output
+
+edges:
+  - source: a
+    target: b
+  - source: b
+    target: c
+  - source: c
+    target: d
+  - source: b
+    target: b
+    label: "retry"
+    type: back
+  - source: a
+    target: c
+
+back_edges: [3]

@@ -1,0 +1,31 @@
+# Single directed cycle — 5-node ring (5 nodes, 5 edges, 1 back edge).
+# Tests: DFS GRAY→GRAY cycle detection, single back-edge reversal.
+
+direction: TB
+
+nodes:
+  - id: a
+    label: "A"
+  - id: b
+    label: "B"
+  - id: c
+    label: "C"
+  - id: d
+    label: "D"
+  - id: e
+    label: "E"
+
+edges:
+  - source: a
+    target: b
+  - source: b
+    target: c
+  - source: c
+    target: d
+  - source: d
+    target: e
+  - source: e
+    target: a
+    type: back
+
+back_edges: [4]
