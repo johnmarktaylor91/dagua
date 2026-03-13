@@ -99,3 +99,6 @@ dmypy.json
 /eval_output/
 node_modules/
 aesthetic_review/
+
+# Architect-Worker system: ephemeral task state
+.project-context/tasks/
