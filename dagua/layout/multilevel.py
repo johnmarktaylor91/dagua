@@ -531,6 +531,15 @@ def build_hierarchy(
                 f"{current_n:,} nodes, {coarse_edge_count:,} edges"
             )
 
+        # Propagate layers: coarse node inherits layer from its fine nodes
+        # (all fine nodes in a pair share the same layer by construction)
+        assert level.fine_to_coarse is not None
+        coarse_la = torch.zeros(current_n, dtype=current_la.dtype)
+        coarse_la.scatter_reduce_(
+            0, level.fine_to_coarse, current_la, reduce="amax",
+        )
+        level.coarse_layer_assignments = coarse_la
+
         # Safety: stop if coarsening didn't reduce nodes or edges enough
         if current_n > level.num_fine * 0.7:
             if progress is not None:
@@ -541,14 +550,6 @@ def build_hierarchy(
                 progress("Stopping hierarchy build: edge reduction below threshold")
             break  # edges barely reduced — hierarchy won't help
 
-        # Propagate layers: coarse node inherits layer from its fine nodes
-        # (all fine nodes in a pair share the same layer by construction)
-        assert level.fine_to_coarse is not None
-        coarse_la = torch.zeros(current_n, dtype=current_la.dtype)
-        coarse_la.scatter_reduce_(
-            0, level.fine_to_coarse, current_la, reduce="amax",
-        )
-        level.coarse_layer_assignments = coarse_la
         current_la = coarse_la
         if current_cluster_ids is not None:
             shifted = current_cluster_ids + 1
