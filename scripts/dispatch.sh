@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dispatch.sh — Run command in background, write status files, send ntfy
+# dispatch.sh — Run command in background, write status files, send Pushover
 # Usage: ./scripts/dispatch.sh <task-id> <command> [args...]
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)" 2>/dev/null || true
@@ -7,8 +7,6 @@ cd "$(git rev-parse --show-toplevel)" 2>/dev/null || true
 TASK_ID="${1:?Usage: dispatch.sh <task-id> <command> [args...]}"
 shift
 TASK_DIR=".project-context/tasks"
-NTFY_TOPIC="${NTFY_TOPIC:-dev-notify}"
-NTFY_SERVER="${NTFY_SERVER:-https://ntfy.sh}"
 
 mkdir -p "$TASK_DIR"
 rm -f "$TASK_DIR/$TASK_ID".{status,result,log,diff}
@@ -41,10 +39,17 @@ EOF
   git diff --stat > "$TASK_DIR/$TASK_ID.diff" 2>/dev/null || true
 
   # Notify on failures always; successes only for test/lint/check/build tasks
-  if [ $EXIT_CODE -ne 0 ]; then
-    curl -s -H "Title: $TASK_ID" -d "$MSG" "$NTFY_SERVER/$NTFY_TOPIC" >/dev/null 2>&1 || true
-  elif [[ "$TASK_ID" =~ (test|lint|check|build|review) ]]; then
-    curl -s -H "Title: $TASK_ID" -d "$MSG" "$NTFY_SERVER/$NTFY_TOPIC" >/dev/null 2>&1 || true
+  SEND=false
+  if [ $EXIT_CODE -ne 0 ]; then SEND=true; fi
+  if [[ "$TASK_ID" =~ (test|lint|check|build|review) ]]; then SEND=true; fi
+
+  if [ "$SEND" = true ] && [ -n "${PUSHOVER_TOKEN:-}" ] && [ -n "${PUSHOVER_USER:-}" ]; then
+    curl -s \
+      -F "token=$PUSHOVER_TOKEN" \
+      -F "user=$PUSHOVER_USER" \
+      -F "title=$TASK_ID" \
+      -F "message=$MSG" \
+      https://api.pushover.net/1/messages.json > /dev/null 2>&1 || true
   fi
 ) &
 
