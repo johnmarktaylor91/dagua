@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import time
 from pathlib import Path
@@ -461,6 +462,53 @@ def _run_visual_session_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pid_alive(pid: int) -> bool:
+    """Return whether a process id appears to still be alive."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _run_large_benchmark_status(args: argparse.Namespace) -> int:
+    """Show the current state of a checkpointed large benchmark run."""
+    checkpoint_dir = Path(args.checkpoint_dir)
+    active_run_path = checkpoint_dir / "active_run.json"
+    payload: dict[str, Any] = {
+        "size": args.size,
+        "checkpoint_dir": str(checkpoint_dir),
+        "log_path": args.log_path,
+        "checkpoints": {
+            "meta": (checkpoint_dir / "meta.json").exists(),
+            "edge_index": (checkpoint_dir / "edge_index.pt").exists(),
+            "node_sizes": (checkpoint_dir / "node_sizes.pt").exists(),
+            "layer_assignments": (checkpoint_dir / "layer_assignments.pt").exists(),
+            "positions": (checkpoint_dir / "positions.pt").exists(),
+        },
+    }
+
+    if active_run_path.exists():
+        active_payload = json.loads(active_run_path.read_text(encoding="utf-8"))
+        pid = int(active_payload.get("pid", -1))
+        payload["active_run"] = {
+            **active_payload,
+            "alive": pid > 0 and _pid_alive(pid),
+        }
+    else:
+        payload["active_run"] = None
+
+    log_path = Path(args.log_path)
+    if log_path.exists():
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        payload["log_tail"] = lines[-args.tail_lines :]
+    else:
+        payload["log_tail"] = []
+
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the top-level Dagua CLI parser."""
     parser = argparse.ArgumentParser(description="Dagua CLI tooling")
@@ -470,6 +518,16 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--output-dir", default="eval_output")
     status_parser.add_argument("--suite", choices=["standard", "rare"], default="standard")
     status_parser.set_defaults(func=_run_benchmark_status)
+
+    large_status_parser = subparsers.add_parser(
+        "large-benchmark-status",
+        help="Show checkpoint/log status for a checkpointed large benchmark run",
+    )
+    large_status_parser.add_argument("--size", default="1b")
+    large_status_parser.add_argument("--checkpoint-dir", default="/tmp/dagua_bench_large/1b")
+    large_status_parser.add_argument("--log-path", default="/tmp/dagua-bench-1b.log")
+    large_status_parser.add_argument("--tail-lines", type=int, default=12)
+    large_status_parser.set_defaults(func=_run_large_benchmark_status)
 
     list_parser = subparsers.add_parser("benchmark-list", help="List stored benchmark runs")
     list_parser.add_argument("--output-dir", default="eval_output")

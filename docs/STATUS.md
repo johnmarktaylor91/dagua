@@ -64,3 +64,11 @@ Read first:
 3. Keep hardening the 1B path.
 4. Iterate on default visual settings using the numbered session workflow.
 5. Expand strict typing and maintainability incrementally, not performatively.
+
+## Recent 1B Hardening
+
+- graph checkpointing is in place
+- layering checkpointing is in place
+- duplicate-run ownership is now guarded even if metadata is missing
+- shell-wrapper false positives in the duplicate-run guard were fixed
+- checkpoint tensors are shape-validated before restore
