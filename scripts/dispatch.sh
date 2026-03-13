@@ -41,7 +41,7 @@ EOF
   # Notify on failures always; successes only for test/lint/check/build tasks
   SEND=false
   if [ $EXIT_CODE -ne 0 ]; then SEND=true; fi
-  if [[ "$TASK_ID" =~ (test|lint|check|build|review) ]]; then SEND=true; fi
+  if [[ "$TASK_ID" =~ (test|lint|check|build|review|bench) ]]; then SEND=true; fi
 
   if [ "$SEND" = true ] && [ -n "${PUSHOVER_TOKEN:-}" ] && [ -n "${PUSHOVER_USER:-}" ]; then
     curl -s \
