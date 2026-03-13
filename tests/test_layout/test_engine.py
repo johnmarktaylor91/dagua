@@ -169,3 +169,4 @@ def test_build_hierarchy_accepts_precomputed_layer_assignments():
     assert levels
     assert not captured
     assert torch.equal(levels[0].fine_layer_assignments, precomputed)
+    assert levels[0].coarse_layer_assignments is not None
