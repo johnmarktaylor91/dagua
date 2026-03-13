@@ -216,10 +216,23 @@ def test_coarsest_positions_checkpoint_round_trip(tmp_path: Path):
     paths = bench_large._checkpoint_paths(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     bench_large._save_checkpoint_meta(paths["meta"], {"n": 8, "layers": 2})
+    bench_large._save_checkpoint_meta(
+        paths["layout_meta"],
+        {"schema": 1, "device": "cpu", "workers": 4, "steps": 10, "seed": 42,
+         "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
+         "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
+    )
     pos = torch.randn(4, 2)
     torch.save(pos, paths["coarsest_positions"])
 
-    restored = bench_large._load_coarsest_positions_checkpoint(paths, n=8, layers=2)
+    restored = bench_large._load_coarsest_positions_checkpoint(
+        paths,
+        n=8,
+        layers=2,
+        layout_signature={"schema": 1, "device": "cpu", "workers": 4, "steps": 10, "seed": 42,
+                          "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
+                          "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
+    )
 
     assert restored is not None
     assert torch.equal(restored, pos)
@@ -244,7 +257,14 @@ def test_coarsest_positions_checkpoint_rejects_wrong_row_count(tmp_path: Path):
     bench_large._save_hierarchy_checkpoint(paths, levels)
     torch.save(torch.randn(5, 2), paths["coarsest_positions"])
 
-    assert bench_large._load_coarsest_positions_checkpoint(paths, n=8, layers=2) is None
+    assert bench_large._load_coarsest_positions_checkpoint(
+        paths,
+        n=8,
+        layers=2,
+        layout_signature={"schema": 1, "device": "cpu", "workers": 4, "steps": 10, "seed": 42,
+                          "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
+                          "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
+    ) is None
 
 
 def test_hierarchy_checkpoint_rejects_bad_level_shape(tmp_path: Path):
@@ -291,6 +311,29 @@ def test_hierarchy_checkpoint_rejects_bad_manifest_count(tmp_path: Path):
     )
 
     assert bench_large._load_hierarchy_checkpoint(paths, n=12, layers=3) is None
+
+
+def test_positions_checkpoint_rejects_stale_layout_signature(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": 8, "layers": 2})
+    bench_large._save_checkpoint_meta(
+        paths["layout_meta"],
+        {"schema": 1, "device": "cpu", "workers": 4, "steps": 20, "seed": 42,
+         "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
+         "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
+    )
+    torch.save(torch.randn(8, 2), paths["positions"])
+
+    assert bench_large._load_positions_checkpoint(
+        paths,
+        n=8,
+        layers=2,
+        layout_signature={"schema": 1, "device": "cpu", "workers": 4, "steps": 10, "seed": 42,
+                          "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
+                          "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
+    ) is None
 
 
 def test_duplicate_run_guard_raises_for_live_pid(tmp_path: Path, monkeypatch):
