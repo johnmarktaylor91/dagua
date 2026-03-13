@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -38,13 +39,7 @@ def measure_text(
         except ImportError:
             font_family = "sans-serif"
     try:
-        from matplotlib.font_manager import FontProperties
-        from matplotlib.textpath import TextPath
-
-        fp = FontProperties(family=font_family, size=font_size, weight=font_weight)
-        tp = TextPath((0, 0), text, prop=fp)
-        bbox = tp.get_extents()
-        return max(bbox.width, 1.0), max(bbox.height, font_size)
+        return _measure_text_exact_cached(text, font_family, font_size, font_weight)
     except Exception:
         return measure_text_fallback(text, font_size, font_weight)
 
@@ -67,6 +62,23 @@ def measure_text_fallback(
     width = max_chars * char_width
     height = len(lines) * font_size * 1.2
     return max(width, 1.0), max(height, font_size)
+
+
+@lru_cache(maxsize=16384)
+def _measure_text_exact_cached(
+    text: str,
+    font_family: str,
+    font_size: float,
+    font_weight: str,
+) -> Tuple[float, float]:
+    """Cached exact text measurement via matplotlib TextPath."""
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextPath
+
+    fp = FontProperties(family=font_family, size=font_size, weight=font_weight)
+    tp = TextPath((0, 0), text, prop=fp)
+    bbox = tp.get_extents()
+    return max(bbox.width, 1.0), max(bbox.height, font_size)
 
 
 # Node sizing constants
@@ -99,6 +111,30 @@ def compute_node_size(
     - "expand_node": no max-width capping, aspect ratio relaxed to 10.0
     - "overflow": standard sizing, text may exceed node bounds
     """
+    return _compute_node_size_cached(
+        label,
+        font_family,
+        font_size,
+        padding,
+        shape,
+        font_weight,
+        overflow_policy,
+        min_font_size,
+    )
+
+
+@lru_cache(maxsize=16384)
+def _compute_node_size_cached(
+    label: str,
+    font_family: str,
+    font_size: float,
+    padding: Tuple[float, float],
+    shape: str,
+    font_weight: str,
+    overflow_policy: str,
+    min_font_size: float,
+) -> Tuple[float, float, float]:
+    """Cached implementation for compute_node_size."""
     effective_font_size = font_size
 
     if overflow_policy == "shrink_text":
@@ -112,19 +148,16 @@ def compute_node_size(
     w = text_w + padding[0] * 2
     h = text_h + padding[1] * 2
 
-    # Enforce minimums
     w = max(w, MIN_NODE_WIDTH)
     h = max(h, MIN_NODE_HEIGHT)
 
-    # Shape adjustments AFTER text+padding sizing
     if shape == "diamond":
         max_dim = max(w, h)
-        w = h = max_dim * 1.42  # sqrt(2) — text must fit inside rotated square
+        w = h = max_dim * 1.42
     elif shape == "circle":
         r = max(w, h)
-        w = h = r  # square bounding box
+        w = h = r
 
-    # Enforce max aspect ratio
     max_ratio = 10.0 if overflow_policy == "expand_node" else MAX_NODE_ASPECT_RATIO
     if w / h > max_ratio:
         w = h * max_ratio

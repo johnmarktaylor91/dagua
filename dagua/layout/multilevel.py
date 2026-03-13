@@ -633,19 +633,27 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
     cpu_ei = graph.edge_index
     cpu_ns = graph.node_sizes
     min_nodes = config.multilevel_min_nodes
-    _t_hier = _time.perf_counter()
-    levels = build_hierarchy(
-        cpu_ei,
-        n,
-        cpu_ns,
-        min_nodes=min_nodes,
-        device="cpu",
-        progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
-        cluster_ids=graph.cluster_ids,
-        initial_layer_assignments=getattr(graph, "_precomputed_layer_assignments", None),
-        layer_assignments_callback=getattr(graph, "_layer_assignments_callback", None),
-    )
-    _vlog(f"Phase 1/3: Building hierarchy ({n:,} nodes)... {len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)")
+    precomputed_levels = getattr(graph, "_precomputed_hierarchy_levels", None)
+    if precomputed_levels is not None:
+        levels = precomputed_levels
+        _vlog(f"Phase 1/3: Restored hierarchy ({n:,} nodes)... {len(levels)} levels")
+    else:
+        _t_hier = _time.perf_counter()
+        levels = build_hierarchy(
+            cpu_ei,
+            n,
+            cpu_ns,
+            min_nodes=min_nodes,
+            device="cpu",
+            progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
+            cluster_ids=graph.cluster_ids,
+            initial_layer_assignments=getattr(graph, "_precomputed_layer_assignments", None),
+            layer_assignments_callback=getattr(graph, "_layer_assignments_callback", None),
+        )
+        hierarchy_callback = getattr(graph, "_hierarchy_levels_callback", None)
+        if hierarchy_callback is not None:
+            hierarchy_callback(levels)
+        _vlog(f"Phase 1/3: Building hierarchy ({n:,} nodes)... {len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)")
 
     if not levels:
         # Graph is already small enough — use direct layout
@@ -702,15 +710,23 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
 
     assert coarsest.edge_index is not None
     assert coarsest.node_sizes is not None
-    pos: Optional[torch.Tensor] = _layout_inner(
-        coarsest.edge_index,  # stays on CPU
-        coarsest.num_nodes,
-        coarsest.node_sizes.to(device),
-        coarse_config,
-        device=device,
-        layer_assignments=coarsest.coarse_layer_assignments,
-        progress_context=ProgressContext(),
-    )
+    precomputed_coarsest_pos = getattr(graph, "_precomputed_coarsest_positions", None)
+    if precomputed_coarsest_pos is not None:
+        pos = precomputed_coarsest_pos.to(device)
+        _vlog(f"Restored coarsest positions ({coarsest.num_nodes:,} nodes)", indent="  ")
+    else:
+        pos = _layout_inner(
+            coarsest.edge_index,  # stays on CPU
+            coarsest.num_nodes,
+            coarsest.node_sizes.to(device),
+            coarse_config,
+            device=device,
+            layer_assignments=coarsest.coarse_layer_assignments,
+            progress_context=ProgressContext(),
+        )
+        coarsest_pos_callback = getattr(graph, "_coarsest_positions_callback", None)
+        if coarsest_pos_callback is not None:
+            coarsest_pos_callback(pos.detach().cpu())
 
     # Prolong + refine through hierarchy (coarsest → finest)
     num_refine_levels = len(levels)

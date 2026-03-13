@@ -21,6 +21,7 @@ import torch
 
 from dagua.config import LayoutConfig, PARAM_REGISTRY_DICT as PARAM_REGISTRY
 from dagua.eval.graphs import TestGraph, get_scale_suite, get_test_graphs
+from dagua.eval.runtime_env import suspend_torchlens_decoration
 from dagua.layout import layout
 from dagua.metrics import compute_all_metrics
 
@@ -169,7 +170,8 @@ def _evaluate_config(
         else:
             cpu_t0 = time.perf_counter()
 
-        pos = layout(tg.graph, config)
+        with suspend_torchlens_decoration():
+            pos = layout(tg.graph, config)
 
         if start is not None and end is not None:
             end.record()
@@ -408,7 +410,8 @@ def focused_sweep(
                 try:
                     tg.graph.compute_node_sizes()
                     assert tg.graph.node_sizes is not None
-                    pos = layout(tg.graph, config)
+                    with suspend_torchlens_decoration():
+                        pos = layout(tg.graph, config)
                     metrics = compute_all_metrics(
                         pos, tg.graph.edge_index, tg.graph.node_sizes
                     )
@@ -470,7 +473,8 @@ def interaction_sweep(
                     try:
                         tg.graph.compute_node_sizes()
                         assert tg.graph.node_sizes is not None
-                        pos = layout(tg.graph, config)
+                        with suspend_torchlens_decoration():
+                            pos = layout(tg.graph, config)
                         metrics = compute_all_metrics(
                             pos, tg.graph.edge_index, tg.graph.node_sizes
                         )
