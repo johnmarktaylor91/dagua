@@ -654,6 +654,9 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
             layer_assignments_callback=getattr(graph, "_layer_assignments_callback", None),
             level_callback=getattr(graph, "_hierarchy_levels_callback", None),
         )
+        hierarchy_complete_callback = getattr(graph, "_hierarchy_levels_complete_callback", None)
+        if hierarchy_complete_callback is not None:
+            hierarchy_complete_callback(levels)
         _vlog(f"Phase 1/3: Building hierarchy ({n:,} nodes)... {len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)")
 
     if not levels:

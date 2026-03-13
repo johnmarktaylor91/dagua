@@ -127,7 +127,7 @@ def test_hierarchy_checkpoint_round_trip(tmp_path: Path):
         )
     ]
 
-    bench_large._save_hierarchy_checkpoint(paths, levels)
+    bench_large._save_hierarchy_checkpoint(paths, levels, complete=True)
     restored = bench_large._load_hierarchy_checkpoint(paths, n=12, layers=3)
 
     assert restored is not None
@@ -180,12 +180,14 @@ def test_hierarchy_checkpoint_saves_only_newest_level_each_time(tmp_path: Path, 
         coarse_layer_assignments=torch.tensor([0, 1], dtype=torch.int32),
     )
 
-    bench_large._save_hierarchy_checkpoint(paths, [level0])
-    bench_large._save_hierarchy_checkpoint(paths, [level0, level1])
+    bench_large._save_hierarchy_checkpoint(paths, [level0], complete=False)
+    bench_large._save_hierarchy_checkpoint(paths, [level0, level1], complete=False)
 
     assert saved_paths == ["level_00.pt", "level_01.pt"]
     assert written_manifests[0]["levels"] == ["level_00.pt"]
     assert written_manifests[1]["levels"] == ["level_00.pt", "level_01.pt"]
+    assert written_manifests[0]["complete"] is False
+    assert written_manifests[1]["complete"] is False
 
 
 def test_atomic_torch_save_leaves_only_final_file(tmp_path: Path):
@@ -254,7 +256,7 @@ def test_coarsest_positions_checkpoint_rejects_wrong_row_count(tmp_path: Path):
             coarse_layer_assignments=torch.tensor([0, 0, 1, 1], dtype=torch.int32),
         )
     ]
-    bench_large._save_hierarchy_checkpoint(paths, levels)
+    bench_large._save_hierarchy_checkpoint(paths, levels, complete=True)
     torch.save(torch.randn(5, 2), paths["coarsest_positions"])
 
     assert bench_large._load_coarsest_positions_checkpoint(
@@ -273,7 +275,7 @@ def test_hierarchy_checkpoint_rejects_bad_level_shape(tmp_path: Path):
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     bench_large._save_checkpoint_meta(paths["meta"], {"n": 12, "layers": 3})
     paths["hierarchy_dir"].mkdir(parents=True, exist_ok=True)
-    paths["hierarchy_meta"].write_text('{"num_levels": 1, "levels": ["level_00.pt"]}', encoding="utf-8")
+    paths["hierarchy_meta"].write_text('{"num_levels": 1, "levels": ["level_00.pt"], "complete": true}', encoding="utf-8")
     torch.save(
         {
             "edge_index": torch.tensor([0, 1], dtype=torch.int32),
@@ -296,7 +298,7 @@ def test_hierarchy_checkpoint_rejects_bad_manifest_count(tmp_path: Path):
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     bench_large._save_checkpoint_meta(paths["meta"], {"n": 12, "layers": 3})
     paths["hierarchy_dir"].mkdir(parents=True, exist_ok=True)
-    paths["hierarchy_meta"].write_text('{"num_levels": 2, "levels": ["level_00.pt"]}', encoding="utf-8")
+    paths["hierarchy_meta"].write_text('{"num_levels": 2, "levels": ["level_00.pt"], "complete": true}', encoding="utf-8")
     torch.save(
         {
             "edge_index": torch.tensor([[0], [1]], dtype=torch.int32),
@@ -309,6 +311,25 @@ def test_hierarchy_checkpoint_rejects_bad_manifest_count(tmp_path: Path):
         },
         paths["hierarchy_dir"] / "level_00.pt",
     )
+
+    assert bench_large._load_hierarchy_checkpoint(paths, n=12, layers=3) is None
+
+
+def test_hierarchy_checkpoint_rejects_incomplete_manifest(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": 12, "layers": 3})
+    level = CoarseLevel(
+        edge_index=torch.tensor([[0], [1]], dtype=torch.int32),
+        node_sizes=torch.full((4, 2), 20.0, dtype=torch.float16),
+        num_nodes=4,
+        fine_to_coarse=torch.tensor([0, 0, 1, 1, 2, 3], dtype=torch.int32),
+        num_fine=6,
+        fine_layer_assignments=torch.tensor([0, 0, 1, 1, 2, 2], dtype=torch.int32),
+        coarse_layer_assignments=torch.tensor([0, 1, 2, 2], dtype=torch.int32),
+    )
+    bench_large._save_hierarchy_checkpoint(paths, [level], complete=False)
 
     assert bench_large._load_hierarchy_checkpoint(paths, n=12, layers=3) is None
 

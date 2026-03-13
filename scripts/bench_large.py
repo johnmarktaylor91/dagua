@@ -152,10 +152,10 @@ def _load_layer_checkpoint(paths: dict[str, Path], n: int, layers: int) -> torch
     return layer_assignments
 
 
-def _save_hierarchy_checkpoint(paths: dict[str, Path], levels: list) -> None:
+def _save_hierarchy_checkpoint(paths: dict[str, Path], levels: list, *, complete: bool) -> None:
     hierarchy_dir = paths["hierarchy_dir"]
     hierarchy_dir.mkdir(parents=True, exist_ok=True)
-    manifest = {"num_levels": len(levels), "levels": []}
+    manifest = {"num_levels": len(levels), "levels": [], "complete": complete}
     if levels:
         newest_idx = len(levels) - 1
         newest = levels[newest_idx]
@@ -188,6 +188,8 @@ def _load_hierarchy_checkpoint(paths: dict[str, Path], n: int, layers: int, layo
     from dagua.layout.multilevel import CoarseLevel
 
     manifest = json.loads(paths["hierarchy_meta"].read_text(encoding="utf-8"))
+    if manifest.get("complete") is not True:
+        return None
     level_names = manifest.get("levels", [])
     if not isinstance(level_names, list):
         return None
@@ -611,10 +613,16 @@ def main():
     if hierarchy_levels is None:
         def _save_hierarchy(levels) -> None:
             _save_checkpoint_meta(checkpoint_paths["layout_meta"], layout_signature)
-            _save_hierarchy_checkpoint(checkpoint_paths, levels)
+            _save_hierarchy_checkpoint(checkpoint_paths, levels, complete=False)
             print(f"Saved hierarchy checkpoint to {checkpoint_paths['hierarchy_dir']}", flush=True)
 
         g._hierarchy_levels_callback = _save_hierarchy
+        def _finalize_hierarchy(levels) -> None:
+            _save_checkpoint_meta(checkpoint_paths["layout_meta"], layout_signature)
+            _save_hierarchy_checkpoint(checkpoint_paths, levels, complete=True)
+            print(f"Finalized hierarchy checkpoint at {checkpoint_paths['hierarchy_dir']}", flush=True)
+
+        g._hierarchy_levels_complete_callback = _finalize_hierarchy
     if coarsest_positions is None:
         def _save_coarsest_positions(pos_tensor: torch.Tensor) -> None:
             _save_checkpoint_meta(checkpoint_paths["layout_meta"], layout_signature)
