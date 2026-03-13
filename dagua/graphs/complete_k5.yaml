@@ -1,0 +1,38 @@
+# K5 complete DAG — every i→j where i<j (5 nodes, 10 edges).
+# Tests: inevitable crossings (non-planar), dense edge routing on tiny graph.
+
+direction: TB
+
+nodes:
+  - id: v1
+    label: "V1"
+  - id: v2
+    label: "V2"
+  - id: v3
+    label: "V3"
+  - id: v4
+    label: "V4"
+  - id: v5
+    label: "V5"
+
+edges:
+  - source: v1
+    target: v2
+  - source: v1
+    target: v3
+  - source: v1
+    target: v4
+  - source: v1
+    target: v5
+  - source: v2
+    target: v3
+  - source: v2
+    target: v4
+  - source: v2
+    target: v5
+  - source: v3
+    target: v4
+  - source: v3
+    target: v5
+  - source: v4
+    target: v5

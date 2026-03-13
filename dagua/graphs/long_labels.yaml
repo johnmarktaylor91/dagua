@@ -1,0 +1,40 @@
+# Extreme label width variation: 1-char to multi-line 5-line labels (8 nodes, 7 edges).
+# Tests: node size variation, text overflow handling, shrink_text vs expand_node.
+
+direction: TB
+
+nodes:
+  - id: tiny
+    label: "X"
+    type: input
+  - id: short
+    label: "ReLU"
+  - id: medium
+    label: "Conv2d\n3x3, stride=1"
+  - id: long_single
+    label: "BatchNormalization2d(128, eps=1e-05, momentum=0.1)"
+  - id: multiline3
+    label: "MultiHeadAttention\nheads=8, d_model=512\ndropout=0.1"
+  - id: multiline5
+    label: "TransformerEncoderLayer\nd_model=512, nhead=8\ndim_feedforward=2048\ndropout=0.1\nactivation=gelu"
+  - id: unicode
+    label: "Softmax (σ)\n∑ exp(xᵢ)"
+  - id: output
+    label: "Out"
+    type: output
+
+edges:
+  - source: tiny
+    target: short
+  - source: short
+    target: medium
+  - source: medium
+    target: long_single
+  - source: long_single
+    target: multiline3
+  - source: multiline3
+    target: multiline5
+  - source: multiline5
+    target: unicode
+  - source: unicode
+    target: output

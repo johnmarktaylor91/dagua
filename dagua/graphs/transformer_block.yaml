@@ -1,0 +1,104 @@
+# Full transformer block: Q/K/V fan-out, attention, 2 residuals, 2 clusters (18 nodes, 22 edges).
+# Tests: complex fan-out/merge, residual routing, node size variation from labels.
+
+direction: TB
+
+nodes:
+  - id: input
+    label: "Input\nEmbedding"
+    type: input
+  # Multi-Head Attention
+  - id: ln1
+    label: "LayerNorm"
+  - id: q_proj
+    label: "Q Projection"
+  - id: k_proj
+    label: "K Projection"
+  - id: v_proj
+    label: "V Projection"
+  - id: attn
+    label: "Scaled Dot-Product\nAttention"
+  - id: attn_out
+    label: "Attn Output\nProjection"
+  - id: add1
+    label: "Add"
+  # FFN
+  - id: ln2
+    label: "LayerNorm"
+  - id: ffn_up
+    label: "FFN Up\nProjection"
+  - id: gelu
+    label: "GELU"
+  - id: ffn_down
+    label: "FFN Down\nProjection"
+  - id: dropout
+    label: "Dropout"
+  - id: add2
+    label: "Add"
+  # Output
+  - id: ln_final
+    label: "Final\nLayerNorm"
+  - id: logits
+    label: "Logits"
+  - id: softmax
+    label: "Softmax"
+  - id: output
+    label: "Output"
+    type: output
+
+edges:
+  # Input → Attention
+  - source: input
+    target: ln1
+  - source: ln1
+    target: q_proj
+  - source: ln1
+    target: k_proj
+  - source: ln1
+    target: v_proj
+  - source: q_proj
+    target: attn
+  - source: k_proj
+    target: attn
+  - source: v_proj
+    target: attn
+  - source: attn
+    target: attn_out
+  - source: attn_out
+    target: add1
+  # Residual 1
+  - source: input
+    target: add1
+  # FFN
+  - source: add1
+    target: ln2
+  - source: ln2
+    target: ffn_up
+  - source: ffn_up
+    target: gelu
+  - source: gelu
+    target: ffn_down
+  - source: ffn_down
+    target: dropout
+  - source: dropout
+    target: add2
+  # Residual 2
+  - source: add1
+    target: add2
+  # Output head
+  - source: add2
+    target: ln_final
+  - source: ln_final
+    target: logits
+  - source: logits
+    target: softmax
+  - source: softmax
+    target: output
+
+clusters:
+  - name: mha
+    members: [ln1, q_proj, k_proj, v_proj, attn, attn_out]
+    label: "Multi-Head Attention"
+  - name: ffn
+    members: [ln2, ffn_up, gelu, ffn_down, dropout]
+    label: "Feed-Forward Network"

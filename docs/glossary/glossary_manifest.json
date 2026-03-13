@@ -1,0 +1,43 @@
+{
+  "output_dir": "/home/jtaylor/projects/dagua/docs/glossary",
+  "figures": {
+    "pipeline_stages": "/home/jtaylor/projects/dagua/docs/glossary/figures/pipeline_stages.png",
+    "direction_modes": "/home/jtaylor/projects/dagua/docs/glossary/figures/direction_modes.png",
+    "spacing_sweep": "/home/jtaylor/projects/dagua/docs/glossary/figures/spacing_sweep.png",
+    "crossing_sweep": "/home/jtaylor/projects/dagua/docs/glossary/figures/crossing_sweep.png",
+    "routing_styles": "/home/jtaylor/projects/dagua/docs/glossary/figures/routing_styles.png",
+    "flex_constraints": "/home/jtaylor/projects/dagua/docs/glossary/figures/flex_constraints.png"
+  },
+  "public_api_count": 35,
+  "graph_method_count": 22,
+  "loss_count": 24,
+  "hyperparameter_count": 13,
+  "glossary_terms": [
+    "DAG",
+    "Rank",
+    "Cluster",
+    "Port",
+    "Routing",
+    "Projection",
+    "Coarsening",
+    "Prolongation",
+    "Refinement",
+    "Flex",
+    "Pin",
+    "Tier-1 metric",
+    "Tier-2 metric",
+    "Tier-3 metric"
+  ],
+  "stages": [
+    "Graph Construction",
+    "Node Sizing",
+    "Layering",
+    "Coarsening",
+    "Coarse Optimization",
+    "Prolongation + Refinement",
+    "Edge Routing",
+    "Edge Optimization",
+    "Label Placement",
+    "Rendering"
+  ]
+}

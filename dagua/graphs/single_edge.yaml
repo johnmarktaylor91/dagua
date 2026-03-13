@@ -1,0 +1,16 @@
+# Minimum connected graph (2 nodes, 1 edge).
+# Tests: no div-by-zero, trivial layering, degenerate case handling.
+
+direction: TB
+
+nodes:
+  - id: a
+    label: "Source"
+    type: input
+  - id: b
+    label: "Sink"
+    type: output
+
+edges:
+  - source: a
+    target: b

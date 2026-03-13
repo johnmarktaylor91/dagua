@@ -1,0 +1,51 @@
+# Right-to-left layout — rarest direction (9 nodes, 11 edges).
+# Tests: RL code path, reverse horizontal flow, edge arrow direction.
+
+direction: RL
+
+nodes:
+  - id: result
+    label: "Result"
+    type: output
+  - id: aggregate
+    label: "Aggregate"
+  - id: filter_a
+    label: "Filter A"
+  - id: filter_b
+    label: "Filter B"
+  - id: map_a
+    label: "Map A"
+  - id: map_b
+    label: "Map B"
+  - id: map_c
+    label: "Map C"
+  - id: source_a
+    label: "Source A"
+    type: input
+  - id: source_b
+    label: "Source B"
+    type: input
+
+edges:
+  - source: source_a
+    target: map_a
+  - source: source_a
+    target: map_b
+  - source: source_b
+    target: map_b
+  - source: source_b
+    target: map_c
+  - source: map_a
+    target: filter_a
+  - source: map_b
+    target: filter_a
+  - source: map_b
+    target: filter_b
+  - source: map_c
+    target: filter_b
+  - source: filter_a
+    target: aggregate
+  - source: filter_b
+    target: aggregate
+  - source: aggregate
+    target: result

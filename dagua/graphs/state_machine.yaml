@@ -1,0 +1,61 @@
+# Finite state machine with 4 back edges (7 nodes, 12 edges).
+# Tests: ~1/3 edges are backwards, dense cycle structure, LR direction.
+
+direction: LR
+
+nodes:
+  - id: idle
+    label: "Idle"
+    type: input
+  - id: init
+    label: "Initialize"
+  - id: ready
+    label: "Ready"
+  - id: running
+    label: "Running"
+  - id: paused
+    label: "Paused"
+  - id: error
+    label: "Error"
+  - id: done
+    label: "Done"
+    type: output
+
+edges:
+  # Forward transitions
+  - source: idle
+    target: init
+  - source: init
+    target: ready
+  - source: ready
+    target: running
+  - source: running
+    target: done
+  - source: running
+    target: paused
+  - source: running
+    target: error
+  - source: paused
+    target: running
+    type: back
+    label: "resume"
+  - source: error
+    target: ready
+    type: back
+    label: "retry"
+  # Back transitions
+  - source: error
+    target: idle
+    type: back
+    label: "reset"
+  - source: done
+    target: idle
+    type: back
+    label: "restart"
+  # Cross-transitions
+  - source: paused
+    target: error
+  - source: init
+    target: error
+
+back_edges: [6, 7, 8, 9]

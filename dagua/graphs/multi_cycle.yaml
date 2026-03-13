@@ -1,0 +1,53 @@
+# Figure-8 overlapping cycles (8 nodes, 11 edges, 2 back edges).
+# Tests: multiple cycle detection, LR direction layout with back edges.
+
+direction: LR
+
+nodes:
+  - id: a
+    label: "A"
+  - id: b
+    label: "B"
+  - id: c
+    label: "C"
+  - id: d
+    label: "D (hub)"
+  - id: e
+    label: "E"
+  - id: f
+    label: "F"
+  - id: g
+    label: "G"
+  - id: h
+    label: "H"
+
+edges:
+  # First cycle: a → b → c → d → (back to a)
+  - source: a
+    target: b
+  - source: b
+    target: c
+  - source: c
+    target: d
+  - source: d
+    target: a
+    type: back
+  # Second cycle: d → e → f → g → (back to d)
+  - source: d
+    target: e
+  - source: e
+    target: f
+  - source: f
+    target: g
+  - source: g
+    target: d
+    type: back
+  # Cross-connections
+  - source: b
+    target: e
+  - source: c
+    target: f
+  - source: d
+    target: h
+
+back_edges: [3, 7]

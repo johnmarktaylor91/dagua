@@ -1,0 +1,46 @@
+# Bottom-to-top data-flows-upward layout (8 nodes, 10 edges).
+# Tests: BT direction, natural "building up" visual metaphor.
+
+direction: BT
+
+nodes:
+  - id: foundation
+    label: "Foundation"
+    type: input
+  - id: layer1a
+    label: "Base A"
+  - id: layer1b
+    label: "Base B"
+  - id: layer2a
+    label: "Mid A"
+  - id: layer2b
+    label: "Mid B"
+  - id: layer2c
+    label: "Mid C"
+  - id: combine
+    label: "Combine"
+  - id: peak
+    label: "Peak"
+    type: output
+
+edges:
+  - source: foundation
+    target: layer1a
+  - source: foundation
+    target: layer1b
+  - source: layer1a
+    target: layer2a
+  - source: layer1a
+    target: layer2b
+  - source: layer1b
+    target: layer2b
+  - source: layer1b
+    target: layer2c
+  - source: layer2a
+    target: combine
+  - source: layer2b
+    target: combine
+  - source: layer2c
+    target: combine
+  - source: combine
+    target: peak

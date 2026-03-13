@@ -1,0 +1,25 @@
+direction: LR
+
+nodes:
+  - id: input
+    label: "Input"
+    type: input
+  - id: preprocess
+    label: "Preprocess"
+  - id: transform
+    label: "Transform"
+  - id: postprocess
+    label: "Postprocess"
+  - id: output
+    label: "Output"
+    type: output
+
+edges:
+  - source: input
+    target: preprocess
+  - source: preprocess
+    target: transform
+  - source: transform
+    target: postprocess
+  - source: postprocess
+    target: output

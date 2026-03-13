@@ -1,0 +1,124 @@
+{
+  "stills": [
+    {
+      "slug": "hospital_care_pathway",
+      "title": "Hospital Care Pathway",
+      "industry": "Healthcare",
+      "use_case": "Show a care team how intake, diagnostics, diagnosis, and follow-up fit together.",
+      "structure_tags": [
+        "parallel diagnostics",
+        "clusters",
+        "decision funnel"
+      ],
+      "visual_story": "Parallel diagnostic branches stay legible while treatment remains the visual destination.",
+      "path": "/home/jtaylor/projects/dagua/docs/gallery/stills/hospital_care_pathway.png"
+    },
+    {
+      "slug": "fraud_decision_engine",
+      "title": "Fraud Decision Engine",
+      "industry": "Finance",
+      "use_case": "Explain real-time risk scoring and manual review paths to operations or compliance teams.",
+      "structure_tags": [
+        "fan-in",
+        "branching outcomes",
+        "signal cluster"
+      ],
+      "visual_story": "A dense signal fan-in resolves into three crisp operational outcomes.",
+      "path": "/home/jtaylor/projects/dagua/docs/gallery/stills/fraud_decision_engine.png"
+    },
+    {
+      "slug": "supply_chain_control_tower",
+      "title": "Supply Chain Control Tower",
+      "industry": "Operations",
+      "use_case": "Visualize how demand, plants, ports, warehouses, and reroute decisions interact.",
+      "structure_tags": [
+        "wide logistics network",
+        "clusters",
+        "long-span reroute edges"
+      ],
+      "visual_story": "The wide physical network stays readable while exception paths remain obvious.",
+      "path": "/home/jtaylor/projects/dagua/docs/gallery/stills/supply_chain_control_tower.png"
+    },
+    {
+      "slug": "ml_platform_release",
+      "title": "ML Platform Release Loop",
+      "industry": "Software / MLOps",
+      "use_case": "Show the path from data to gated release, canary deployment, monitoring, and rollback.",
+      "structure_tags": [
+        "release gates",
+        "feedback loop",
+        "nested subsystems"
+      ],
+      "visual_story": "Evaluation gates read as a real release barrier rather than a tangle of side tasks.",
+      "path": "/home/jtaylor/projects/dagua/docs/gallery/stills/ml_platform_release.png"
+    },
+    {
+      "slug": "robotics_autonomy_stack",
+      "title": "Robotics Autonomy Stack",
+      "industry": "Robotics",
+      "use_case": "Communicate the handoff from sensing through planning to control, with telemetry feedback.",
+      "structure_tags": [
+        "sensor fan-in",
+        "control loop",
+        "clustered sources"
+      ],
+      "visual_story": "Parallel sensing feels coherent and the feedback edge reads as a control loop, not noise.",
+      "path": "/home/jtaylor/projects/dagua/docs/gallery/stills/robotics_autonomy_stack.png"
+    },
+    {
+      "slug": "drug_discovery_program",
+      "title": "Drug Discovery Program",
+      "industry": "Biotech / Pharma",
+      "use_case": "Present screening, assay filters, and preclinical gates in one clean view.",
+      "structure_tags": [
+        "funnel",
+        "parallel assays",
+        "gated progression"
+      ],
+      "visual_story": "The figure reads like a program funnel, with side assays supporting a single decision spine.",
+      "path": "/home/jtaylor/projects/dagua/docs/gallery/stills/drug_discovery_program.png"
+    },
+    {
+      "slug": "customer_support_escalation",
+      "title": "Customer Support Escalation",
+      "industry": "Customer Operations",
+      "use_case": "Show routing, specialist queues, escalations, and knowledge capture for service teams.",
+      "structure_tags": [
+        "branching queues",
+        "feedback",
+        "operational loop"
+      ],
+      "visual_story": "Escalation and learning loops are visible without overpowering the main service flow.",
+      "path": "/home/jtaylor/projects/dagua/docs/gallery/stills/customer_support_escalation.png"
+    },
+    {
+      "slug": "multimodal_assistant_system",
+      "title": "Multimodal Assistant System",
+      "industry": "AI Systems",
+      "use_case": "Explain how modalities, planning, memory, reasoning, and safety compose into a product.",
+      "structure_tags": [
+        "parallel modalities",
+        "skip path",
+        "clustered core"
+      ],
+      "visual_story": "Modern model architecture motifs feel polished rather than diagrammatically clich\u00e9d.",
+      "path": "/home/jtaylor/projects/dagua/docs/gallery/stills/multimodal_assistant_system.png"
+    }
+  ],
+  "animations": [
+    {
+      "slug": "optimize_multimodal_assistant",
+      "title": "Optimization Story: Multimodal Assistant",
+      "kind": "optimization",
+      "caption": "A faithful post-hoc optimization film showing the graph settle into a readable hierarchy.",
+      "path": "/home/jtaylor/projects/dagua/docs/gallery/animations/optimize_multimodal_assistant.gif"
+    },
+    {
+      "slug": "tour_supply_chain_control_tower",
+      "title": "Tour: Supply Chain Control Tower",
+      "kind": "tour",
+      "caption": "A cinematic sweep from network context into the most operationally interesting logistics regions.",
+      "path": "/home/jtaylor/projects/dagua/docs/gallery/animations/tour_supply_chain_control_tower.gif"
+    }
+  ]
+}

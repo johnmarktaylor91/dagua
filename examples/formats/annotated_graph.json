@@ -1,0 +1,151 @@
+{
+  "_comment": "Dagua annotated JSON example. JSON has no real comments, so this file uses _comment fields intentionally.",
+  "_comment_direction": "direction controls global flow: TB, BT, LR, RL.",
+  "direction": "TB",
+  "nodes": [
+    {
+      "id": "input",
+      "label": "Incoming Request",
+      "type": "input",
+      "_comment": "Node styles are optional and only need to include the fields you care about.",
+      "style": {
+        "shape": "ellipse",
+        "base_color": "#56B4E9"
+      }
+    },
+    {
+      "id": "router",
+      "label": "Router"
+    },
+    {
+      "id": "search",
+      "label": "Search Tool",
+      "style": {
+        "base_color": "#0072B2"
+      }
+    },
+    {
+      "id": "reason",
+      "label": "Reasoning Core"
+    },
+    {
+      "id": "safety",
+      "label": "Safety Review",
+      "style": {
+        "base_color": "#E69F00"
+      }
+    },
+    {
+      "id": "answer",
+      "label": "Final Answer",
+      "type": "output",
+      "style": {
+        "base_color": "#009E73"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "input",
+      "target": "router",
+      "label": "intent"
+    },
+    {
+      "source": "router",
+      "target": "search",
+      "label": "tool call",
+      "style": {
+        "routing": "ortho"
+      }
+    },
+    {
+      "source": "router",
+      "target": "reason",
+      "label": "context",
+      "style": {
+        "routing": "straight",
+        "curvature": 0.0
+      }
+    },
+    {
+      "source": "search",
+      "target": "reason",
+      "label": "retrieved docs"
+    },
+    {
+      "source": "reason",
+      "target": "safety",
+      "label": "draft"
+    },
+    {
+      "source": "safety",
+      "target": "answer",
+      "label": "approved"
+    }
+  ],
+  "_comment_clusters": "Clusters group related nodes visually. Members are usually node ids in hand-authored files.",
+  "clusters": [
+    {
+      "name": "core_system",
+      "label": "Core System",
+      "members": ["router", "search", "reason", "safety"],
+      "style": {
+        "fill": "#F5F5F0",
+        "stroke": "#D4D4D4",
+        "padding": 25.0
+      }
+    }
+  ],
+  "_comment_defaults": "defaults participate in the style cascade and are useful for mild graph-wide overrides.",
+  "defaults": {
+    "node_style": {
+      "font_size": 9.0
+    },
+    "edge_style": {
+      "width": 1.2
+    }
+  },
+  "theme": {
+    "name": "annotated-demo",
+    "node_styles": {
+      "default": {
+        "base_color": "#56B4E9"
+      },
+      "input": {
+        "base_color": "#009E73"
+      },
+      "output": {
+        "base_color": "#D55E00"
+      }
+    },
+    "edge_styles": {
+      "default": {
+        "color": "#6B7280",
+        "routing": "bezier"
+      }
+    },
+    "cluster_style": {
+      "fill": "#F5F5F0",
+      "stroke": "#D4D4D4"
+    },
+    "graph_style": {
+      "background_color": "#FAFAFA"
+    }
+  },
+  "_comment_flex": "Flex is optional. It lets you pin nodes and add soft alignment/spacing preferences.",
+  "flex": {
+    "pins": {
+      "input": {
+        "x": 0.0,
+        "y": 0.0,
+        "weight": 1e999
+      }
+    },
+    "align_y": [
+      {
+        "nodes": ["search", "reason", "safety"],
+        "weight": 5.0
+      }
+    ]
+  }
+}

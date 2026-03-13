@@ -1,0 +1,60 @@
+# Cycle with entry/exit tails (10 nodes, 12 edges, 1 back edge).
+# Tests: cycle with 2 inputs feeding in, 2 outputs leaving, long-range back edge routing.
+
+direction: TB
+
+nodes:
+  - id: in1
+    label: "Input 1"
+    type: input
+  - id: in2
+    label: "Input 2"
+    type: input
+  - id: pre
+    label: "Pre-process"
+  - id: loop_a
+    label: "Loop A"
+  - id: loop_b
+    label: "Loop B"
+  - id: loop_c
+    label: "Loop C"
+  - id: loop_d
+    label: "Loop D"
+  - id: post
+    label: "Post-process"
+  - id: out1
+    label: "Output 1"
+    type: output
+  - id: out2
+    label: "Output 2"
+    type: output
+
+edges:
+  - source: in1
+    target: pre
+  - source: in2
+    target: pre
+  - source: pre
+    target: loop_a
+  - source: loop_a
+    target: loop_b
+  - source: loop_b
+    target: loop_c
+  - source: loop_c
+    target: loop_d
+  - source: loop_d
+    target: loop_a
+    label: "feedback"
+    type: back
+  - source: loop_c
+    target: post
+  - source: loop_d
+    target: post
+  - source: post
+    target: out1
+  - source: post
+    target: out2
+  - source: in1
+    target: loop_b
+
+back_edges: [6]
