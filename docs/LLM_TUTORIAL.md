@@ -157,7 +157,7 @@ g2 = dagua.load("graph.yaml")
 ### Turn an image into a graph, dict, code, or theme
 
 ```python
-dagua.configure_image_ai(provider="openai", api_key_env="OPENAI_API_KEY")
+dagua.configure_image_ai(provider="openai", api_key_env="OPENAI_API_KEY")  # pragma: allowlist secret
 
 graph = dagua.from_image("diagram.png")
 graph_dict = dagua.graph_dict_from_image("diagram.png")
