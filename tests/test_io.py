@@ -1,4 +1,4 @@
-"""Tests for io.py — graph_from_json, graph_to_json, YAML, unified load/save, LLM-based construction."""
+"""Tests for io.py — JSON, YAML, unified load/save, LLM-based construction."""
 
 import json
 import os
@@ -21,10 +21,10 @@ from dagua.io import (
     get_image_ai_config,
     graph_code_from_image,
     graph_dict_from_image,
-    graph_script_from_dict,
     graph_from_image,
     graph_from_json,
     graph_from_yaml,
+    graph_script_from_dict,
     graph_to_json,
     graph_to_yaml,
     load,
@@ -34,10 +34,12 @@ from dagua.io import (
     theme_from_image,
 )
 from dagua.styles import (
-    ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
-    DARK_THEME, DEFAULT_THEME_OBJ, get_theme,
+    DARK_THEME,
+    ClusterStyle,
+    NodeStyle,
+    Theme,
+    get_theme,
 )
-
 
 # ─── TestGraphFromJson ─────────────────────────────────────────────────────
 
@@ -136,11 +138,7 @@ class TestGraphFromJson:
         assert g.num_nodes == 0
 
     def test_unknown_style_keys_ignored(self):
-        data = {
-            "nodes": [
-                {"id": "a", "style": {"shape": "rect", "bogus_key": 42, "another": "x"}}
-            ]
-        }
+        data = {"nodes": [{"id": "a", "style": {"shape": "rect", "bogus_key": 42, "another": "x"}}]}
         g = graph_from_json(data)
         assert g.node_styles[0].shape == "rect"
 
@@ -180,9 +178,7 @@ class TestGraphFromJson:
         assert g.edge_labels == ["flow"]
 
     def test_padding_list_to_tuple(self):
-        data = {
-            "nodes": [{"id": "a", "style": {"padding": [10, 5]}}]
-        }
+        data = {"nodes": [{"id": "a", "style": {"padding": [10, 5]}}]}
         g = graph_from_json(data)
         assert g.node_styles[0].padding == (10, 5)
 
@@ -233,9 +229,7 @@ class TestGraphToJson:
         original = {
             "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
             "edges": [{"source": "a", "target": "b"}],
-            "clusters": [
-                {"name": "grp", "members": ["a", "b"], "label": "Group"}
-            ],
+            "clusters": [{"name": "grp", "members": ["a", "b"], "label": "Group"}],
         }
         g = graph_from_json(original)
         result = graph_to_json(g)
@@ -339,14 +333,18 @@ class TestGraphFromImage:
 
     def test_returns_dagua_graph(self):
         image_path = self._mock_image_path()
-        mock_response = json.dumps({
-            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
-            "edges": [{"source": "a", "target": "b"}],
-        })
+        mock_response = json.dumps(
+            {
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "edges": [{"source": "a", "target": "b"}],
+            }
+        )
 
         try:
-            with mock.patch("dagua.io._get_llm_client") as mock_get, \
-                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
+            with (
+                mock.patch("dagua.io._get_llm_client") as mock_get,
+                mock.patch("dagua.io._send_image_to_llm", return_value=mock_response),
+            ):
                 mock_get.return_value = ("anthropic", mock.MagicMock())
                 g = graph_from_image(image_path, provider="anthropic")
 
@@ -358,15 +356,23 @@ class TestGraphFromImage:
 
     def test_graph_dict_from_image(self):
         image_path = self._mock_image_path()
-        mock_response = json.dumps({
-            "direction": "LR",
-            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
-            "edges": [{"source": "a", "target": "b", "label": "flows to"}],
-        })
+        mock_response = json.dumps(
+            {
+                "direction": "LR",
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "edges": [{"source": "a", "target": "b", "label": "flows to"}],
+            }
+        )
         try:
-            with mock.patch("dagua.io._get_llm_client") as mock_get, \
-                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
-                mock_get.return_value = ("anthropic", mock.MagicMock(), ImageAIConfig(provider="anthropic", model="x", api_key="k"))
+            with (
+                mock.patch("dagua.io._get_llm_client") as mock_get,
+                mock.patch("dagua.io._send_image_to_llm", return_value=mock_response),
+            ):
+                mock_get.return_value = (
+                    "anthropic",
+                    mock.MagicMock(),
+                    ImageAIConfig(provider="anthropic", model="x", api_key="k"),
+                )
                 result = graph_dict_from_image(image_path, provider="anthropic")
 
             assert result["direction"] == "LR"
@@ -376,15 +382,23 @@ class TestGraphFromImage:
 
     def test_graph_code_from_image_returns_best_practice_builder(self):
         image_path = self._mock_image_path()
-        mock_response = json.dumps({
-            "direction": "TB",
-            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
-            "edges": [{"source": "a", "target": "b"}],
-        })
+        mock_response = json.dumps(
+            {
+                "direction": "TB",
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "edges": [{"source": "a", "target": "b"}],
+            }
+        )
         try:
-            with mock.patch("dagua.io._get_llm_client") as mock_get, \
-                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
-                mock_get.return_value = ("anthropic", mock.MagicMock(), ImageAIConfig(provider="anthropic", model="x", api_key="k"))
+            with (
+                mock.patch("dagua.io._get_llm_client") as mock_get,
+                mock.patch("dagua.io._send_image_to_llm", return_value=mock_response),
+            ):
+                mock_get.return_value = (
+                    "anthropic",
+                    mock.MagicMock(),
+                    ImageAIConfig(provider="anthropic", model="x", api_key="k"),
+                )
                 code = graph_code_from_image(image_path, provider="anthropic")
 
             assert "def build_graph() -> DaguaGraph:" in code
@@ -396,15 +410,23 @@ class TestGraphFromImage:
 
     def test_graph_code_from_image_can_return_ready_to_run_script(self):
         image_path = self._mock_image_path()
-        mock_response = json.dumps({
-            "direction": "TB",
-            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
-            "edges": [{"source": "a", "target": "b"}],
-        })
+        mock_response = json.dumps(
+            {
+                "direction": "TB",
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "edges": [{"source": "a", "target": "b"}],
+            }
+        )
         try:
-            with mock.patch("dagua.io._get_llm_client") as mock_get, \
-                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
-                mock_get.return_value = ("anthropic", mock.MagicMock(), ImageAIConfig(provider="anthropic", model="x", api_key="k"))
+            with (
+                mock.patch("dagua.io._get_llm_client") as mock_get,
+                mock.patch("dagua.io._send_image_to_llm", return_value=mock_response),
+            ):
+                mock_get.return_value = (
+                    "anthropic",
+                    mock.MagicMock(),
+                    ImageAIConfig(provider="anthropic", model="x", api_key="k"),
+                )
                 code = graph_code_from_image(
                     image_path,
                     provider="anthropic",
@@ -431,25 +453,30 @@ class TestGraphFromImage:
         assert "dagua.draw(graph, config, output='demo.png')" in code
 
     def test_provider_auto_detection_anthropic(self):
-        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {"ANTHROPIC_API_KEY": "test-key"},
+            clear=False,  # pragma: allowlist secret
+        ):
             with mock.patch("dagua.io.anthropic", create=True) as mock_anthropic:
                 mock_client = mock.MagicMock()
                 mock_anthropic.Anthropic.return_value = mock_client
                 # Need to mock the import
                 import sys
+
                 sys.modules["anthropic"] = mock_anthropic
 
                 try:
                     provider, client, resolved = _get_llm_client()
                     assert provider == "anthropic"
-                    assert resolved.api_key == "test-key"
+                    assert resolved.api_key == "test-key"  # pragma: allowlist secret
                 finally:
                     del sys.modules["anthropic"]
 
     def test_provider_auto_detection_openai(self):
         with mock.patch.dict(
             os.environ,
-            {"OPENAI_API_KEY": "test-key"},
+            {"OPENAI_API_KEY": "test-key"},  # pragma: allowlist secret
             clear=False,
         ):
             # Remove ANTHROPIC_API_KEY if present
@@ -457,13 +484,14 @@ class TestGraphFromImage:
             env.pop("ANTHROPIC_API_KEY", None)
             with mock.patch.dict(os.environ, env, clear=True):
                 import sys
+
                 mock_openai = mock.MagicMock()
                 sys.modules["openai"] = mock_openai
 
                 try:
                     provider, client, resolved = _get_llm_client()
                     assert provider == "openai"
-                    assert resolved.api_key == "test-key"
+                    assert resolved.api_key == "test-key"  # pragma: allowlist secret
                 finally:
                     del sys.modules["openai"]
 
@@ -473,9 +501,14 @@ class TestGraphFromImage:
                 _get_llm_client()
 
     def test_missing_sdk_raises(self):
-        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {"ANTHROPIC_API_KEY": "key"},
+            clear=False,  # pragma: allowlist secret
+        ):
             # Ensure anthropic is not importable
             import sys
+
             saved = sys.modules.pop("anthropic", None)
             try:
                 with mock.patch.dict(sys.modules, {"anthropic": None}):
@@ -486,24 +519,38 @@ class TestGraphFromImage:
                     sys.modules["anthropic"] = saved
 
     def test_explicit_api_key_beats_environment(self):
-        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "env-key"}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "env-key"},
+            clear=False,  # pragma: allowlist secret
+        ):
             import sys
+
             mock_openai = mock.MagicMock()
             sys.modules["openai"] = mock_openai
             try:
-                _, _, resolved = _get_llm_client("openai", api_key="passed-key")
-                assert resolved.api_key == "passed-key"
+                _, _, resolved = _get_llm_client(
+                    "openai",
+                    api_key="passed-key",  # pragma: allowlist secret
+                )
+                assert resolved.api_key == "passed-key"  # pragma: allowlist secret
             finally:
                 del sys.modules["openai"]
 
     def test_api_key_env_override(self):
-        with mock.patch.dict(os.environ, {"MY_CUSTOM_KEY": "custom-key"}, clear=False):
+        with mock.patch.dict(
+            os.environ, {"MY_CUSTOM_KEY": "custom-key"}, clear=False
+        ):  # pragma: allowlist secret
             import sys
+
             mock_openai = mock.MagicMock()
             sys.modules["openai"] = mock_openai
             try:
-                _, _, resolved = _get_llm_client("openai", api_key_env="MY_CUSTOM_KEY")
-                assert resolved.api_key == "custom-key"
+                _, _, resolved = _get_llm_client(
+                    "openai",
+                    api_key_env="MY_CUSTOM_KEY",  # pragma: allowlist secret
+                )
+                assert resolved.api_key == "custom-key"  # pragma: allowlist secret
             finally:
                 del sys.modules["openai"]
 
@@ -557,21 +604,25 @@ class TestThemeFromImage:
         image_path.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
         image_path.close()
 
-        mock_response = json.dumps({
-            "node_styles": {
-                "default": {"shape": "roundrect", "base_color": "#56B4E9"},
-                "input": {"base_color": "#009E73"},
-            },
-            "edge_styles": {
-                "default": {"color": "#666666", "width": 1.5},
-            },
-            "cluster_style": {"fill": "#F0F0F0"},
-            "graph_style": {"background_color": "#FFFFFF"},
-        })
+        mock_response = json.dumps(
+            {
+                "node_styles": {
+                    "default": {"shape": "roundrect", "base_color": "#56B4E9"},
+                    "input": {"base_color": "#009E73"},
+                },
+                "edge_styles": {
+                    "default": {"color": "#666666", "width": 1.5},
+                },
+                "cluster_style": {"fill": "#F0F0F0"},
+                "graph_style": {"background_color": "#FFFFFF"},
+            }
+        )
 
         try:
-            with mock.patch("dagua.io._get_llm_client") as mock_get, \
-                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
+            with (
+                mock.patch("dagua.io._get_llm_client") as mock_get,
+                mock.patch("dagua.io._send_image_to_llm", return_value=mock_response),
+            ):
                 mock_get.return_value = ("anthropic", mock.MagicMock())
                 result = theme_from_image(image_path.name, provider="anthropic")
 
@@ -598,9 +649,15 @@ class TestThemeFromImage:
         image_path.close()
         mock_response = json.dumps({"node_styles": {"default": {"base_color": "#56B4E9"}}})
         try:
-            with mock.patch("dagua.io._get_llm_client") as mock_get, \
-                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
-                mock_get.return_value = ("anthropic", mock.MagicMock(), ImageAIConfig(provider="anthropic", model="x", api_key="k"))
+            with (
+                mock.patch("dagua.io._get_llm_client") as mock_get,
+                mock.patch("dagua.io._send_image_to_llm", return_value=mock_response),
+            ):
+                mock_get.return_value = (
+                    "anthropic",
+                    mock.MagicMock(),
+                    ImageAIConfig(provider="anthropic", model="x", api_key="k"),
+                )
                 result = theme_dict_from_image(image_path.name, provider="anthropic")
             assert result["node_styles"]["default"]["base_color"] == "#56B4E9"
         finally:
@@ -610,11 +667,19 @@ class TestThemeFromImage:
         image_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         image_path.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
         image_path.close()
-        mock_response = json.dumps({"name": "magical", "node_styles": {"default": {"base_color": "#56B4E9"}}})
+        mock_response = json.dumps(
+            {"name": "magical", "node_styles": {"default": {"base_color": "#56B4E9"}}}
+        )
         try:
-            with mock.patch("dagua.io._get_llm_client") as mock_get, \
-                 mock.patch("dagua.io._send_image_to_llm", return_value=mock_response):
-                mock_get.return_value = ("anthropic", mock.MagicMock(), ImageAIConfig(provider="anthropic", model="x", api_key="k"))
+            with (
+                mock.patch("dagua.io._get_llm_client") as mock_get,
+                mock.patch("dagua.io._send_image_to_llm", return_value=mock_response),
+            ):
+                mock_get.return_value = (
+                    "anthropic",
+                    mock.MagicMock(),
+                    ImageAIConfig(provider="anthropic", model="x", api_key="k"),
+                )
                 code = theme_code_from_image(image_path.name, provider="anthropic")
             assert "theme = Theme(" in code
             assert "'default': NodeStyle(base_color='#56B4E9')" in code
@@ -880,7 +945,10 @@ class TestUnifiedLoadSave:
             os.unlink(path)
 
     def test_save_roundtrip(self):
-        original = {"nodes": [{"id": "a", "label": "X"}, {"id": "b"}], "edges": [{"source": "a", "target": "b"}]}
+        original = {
+            "nodes": [{"id": "a", "label": "X"}, {"id": "b"}],
+            "edges": [{"source": "a", "target": "b"}],
+        }
         g = graph_from_json(original)
         with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as f:
             path = f.name
@@ -932,6 +1000,7 @@ class TestBundledGraphs:
 
     def test_load_diamond(self):
         import dagua.graphs
+
         g = dagua.graphs.load("diamond")
         assert isinstance(g, DaguaGraph)
         assert g.num_nodes == 4
@@ -939,24 +1008,28 @@ class TestBundledGraphs:
 
     def test_load_pipeline(self):
         import dagua.graphs
+
         g = dagua.graphs.load("pipeline")
         assert g.num_nodes == 5
         assert g.direction == "LR"
 
     def test_load_neural_net(self):
         import dagua.graphs
+
         g = dagua.graphs.load("neural_net")
         assert g.num_nodes == 8
         assert "feature_extractor" in g.clusters
 
     def test_load_nested_clusters(self):
         import dagua.graphs
+
         g = dagua.graphs.load("nested_clusters")
         assert g.cluster_parents["left"] == "outer"
         assert g.cluster_parents["right"] == "outer"
 
     def test_list_graphs(self):
         import dagua.graphs
+
         names = dagua.graphs.list_graphs()
         assert isinstance(names, list)
         assert "diamond" in names
@@ -966,6 +1039,7 @@ class TestBundledGraphs:
 
     def test_unknown_graph_raises(self):
         import dagua.graphs
+
         with pytest.raises(ValueError, match="Unknown graph.*Available"):
             dagua.graphs.load("nonexistent_graph")
 
@@ -998,9 +1072,7 @@ class TestBundledGraphs:
                 assert g.edge_index.max().item() < g.num_nodes, (
                     f"{name}: edge references node >= num_nodes"
                 )
-                assert g.edge_index.min().item() >= 0, (
-                    f"{name}: negative node index in edge_index"
-                )
+                assert g.edge_index.min().item() >= 0, f"{name}: negative node index in edge_index"
 
             # Direction is valid
             assert g.direction in ("TB", "BT", "LR", "RL"), (
@@ -1031,7 +1103,9 @@ class TestGraphClassmethods:
         assert "nodes" in result
 
     def test_classmethod_save_and_load(self):
-        g = graph_from_json({"nodes": [{"id": "a"}, {"id": "b"}], "edges": [{"source": "a", "target": "b"}]})
+        g = graph_from_json(
+            {"nodes": [{"id": "a"}, {"id": "b"}], "edges": [{"source": "a", "target": "b"}]}
+        )
         with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as f:
             path = f.name
         try:
@@ -1053,10 +1127,12 @@ class TestToNetworkx:
         nx = pytest.importorskip("networkx")
         from dagua.io import to_networkx
 
-        g = graph_from_json({
-            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
-            "edges": [{"source": "a", "target": "b"}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "edges": [{"source": "a", "target": "b"}],
+            }
+        )
         G = to_networkx(g)
         assert isinstance(G, nx.DiGraph)
         assert G.number_of_nodes() == 2
@@ -1067,10 +1143,12 @@ class TestToNetworkx:
         pytest.importorskip("networkx")
         from dagua.io import to_networkx
 
-        g = graph_from_json({
-            "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
-            "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "c"}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+                "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "c"}],
+            }
+        )
         G = to_networkx(g)
         g2 = DaguaGraph.from_networkx(G)
         assert g2.num_nodes == 3
@@ -1080,11 +1158,13 @@ class TestToNetworkx:
         pytest.importorskip("networkx")
         from dagua.io import to_networkx
 
-        g = graph_from_json({
-            "nodes": [{"id": "a"}, {"id": "b"}],
-            "edges": [{"source": "a", "target": "b"}],
-            "clusters": [{"name": "grp", "members": ["a", "b"]}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "a"}, {"id": "b"}],
+                "edges": [{"source": "a", "target": "b"}],
+                "clusters": [{"name": "grp", "members": ["a", "b"]}],
+            }
+        )
         G = to_networkx(g)
         assert G.nodes["a"]["cluster"] == "grp"
 
@@ -1107,10 +1187,12 @@ class TestToIgraph:
         igraph = pytest.importorskip("igraph")
         from dagua.io import to_igraph
 
-        g = graph_from_json({
-            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
-            "edges": [{"source": "a", "target": "b"}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "edges": [{"source": "a", "target": "b"}],
+            }
+        )
         ig = to_igraph(g)
         assert isinstance(ig, igraph.Graph)
         assert ig.vcount() == 2
@@ -1119,12 +1201,14 @@ class TestToIgraph:
 
     def test_roundtrip(self):
         pytest.importorskip("igraph")
-        from dagua.io import to_igraph, from_igraph
+        from dagua.io import from_igraph, to_igraph
 
-        g = graph_from_json({
-            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
-            "edges": [{"source": "a", "target": "b"}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "edges": [{"source": "a", "target": "b"}],
+            }
+        )
         ig = to_igraph(g)
         g2 = from_igraph(ig)
         assert g2.num_nodes == 2
@@ -1132,12 +1216,14 @@ class TestToIgraph:
         assert g2.node_labels[0] == "A"
 
     def test_classmethod_wrappers(self):
-        igraph = pytest.importorskip("igraph")
+        pytest.importorskip("igraph")
 
-        g = graph_from_json({
-            "nodes": [{"id": "x"}, {"id": "y"}],
-            "edges": [{"source": "x", "target": "y"}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "x"}, {"id": "y"}],
+                "edges": [{"source": "x", "target": "y"}],
+            }
+        )
         ig = g.to_igraph()
         assert ig.vcount() == 2
 
@@ -1153,25 +1239,29 @@ class TestToScipy:
     """to_scipy export and roundtrip."""
 
     def test_basic_export(self):
-        scipy_sparse = pytest.importorskip("scipy.sparse")
+        pytest.importorskip("scipy.sparse")
         from dagua.io import to_scipy
 
-        g = graph_from_json({
-            "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
-            "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "c"}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+                "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "c"}],
+            }
+        )
         adj = to_scipy(g)
         assert adj.shape == (3, 3)
         assert adj.nnz == 2
 
     def test_roundtrip(self):
         pytest.importorskip("scipy.sparse")
-        from dagua.io import to_scipy, from_scipy
+        from dagua.io import from_scipy, to_scipy
 
-        g = graph_from_json({
-            "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
-            "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "c"}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+                "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "c"}],
+            }
+        )
         adj = to_scipy(g)
         g2 = from_scipy(adj, labels=["a", "b", "c"])
         assert g2.num_nodes == 3
@@ -1187,12 +1277,14 @@ class TestToScipy:
         assert adj.nnz == 0
 
     def test_classmethod_wrappers(self):
-        scipy_sparse = pytest.importorskip("scipy.sparse")
+        pytest.importorskip("scipy.sparse")
 
-        g = graph_from_json({
-            "nodes": [{"id": "a"}, {"id": "b"}],
-            "edges": [{"source": "a", "target": "b"}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "a"}, {"id": "b"}],
+                "edges": [{"source": "a", "target": "b"}],
+            }
+        )
         adj = g.to_scipy()
         assert adj.shape == (2, 2)
 
@@ -1207,13 +1299,15 @@ class TestToPyg:
     """to_pyg export."""
 
     def test_basic_export(self):
-        torch_geometric = pytest.importorskip("torch_geometric")
+        pytest.importorskip("torch_geometric")
         from dagua.io import to_pyg
 
-        g = graph_from_json({
-            "nodes": [{"id": "a"}, {"id": "b"}],
-            "edges": [{"source": "a", "target": "b"}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "a"}, {"id": "b"}],
+                "edges": [{"source": "a", "target": "b"}],
+            }
+        )
         data = to_pyg(g)
         assert data.num_nodes == 2
         assert data.edge_index.shape == (2, 1)
@@ -1221,10 +1315,12 @@ class TestToPyg:
     def test_classmethod_wrapper(self):
         pytest.importorskip("torch_geometric")
 
-        g = graph_from_json({
-            "nodes": [{"id": "a"}, {"id": "b"}],
-            "edges": [{"source": "a", "target": "b"}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "a"}, {"id": "b"}],
+                "edges": [{"source": "a", "target": "b"}],
+            }
+        )
         data = g.to_pyg()
         assert data.num_nodes == 2
 
@@ -1240,12 +1336,12 @@ class TestFromDot:
         pytest.importorskip("pydot")
         from dagua.io import from_dot
 
-        dot = '''digraph G {
+        dot = """digraph G {
             rankdir=LR;
             a [label="Node A"];
             b [label="Node B"];
             a -> b;
-        }'''
+        }"""
         g = from_dot(dot)
         assert g.num_nodes == 2
         assert g.edge_index.shape[1] == 1
@@ -1255,7 +1351,7 @@ class TestFromDot:
         pytest.importorskip("pydot")
         from dagua.io import from_dot
 
-        dot = '''digraph G {
+        dot = """digraph G {
             a; b; c;
             a -> b;
             b -> c;
@@ -1263,7 +1359,7 @@ class TestFromDot:
                 label="Group";
                 a; b;
             }
-        }'''
+        }"""
         g = from_dot(dot)
         assert g.num_nodes == 3
         assert "grp" in g.clusters
@@ -1271,20 +1367,22 @@ class TestFromDot:
     def test_classmethod_wrapper(self):
         pytest.importorskip("pydot")
 
-        dot = 'digraph G { a -> b; }'
+        dot = "digraph G { a -> b; }"
         g = DaguaGraph.from_dot(dot)
         assert g.num_nodes == 2
 
     def test_roundtrip_dot_export_import(self):
         """Export to DOT via graphviz_utils.to_dot, re-import via from_dot."""
         pytest.importorskip("pydot")
-        from dagua.io import from_dot
         from dagua.graphviz_utils import to_dot
+        from dagua.io import from_dot
 
-        g = graph_from_json({
-            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
-            "edges": [{"source": "a", "target": "b"}],
-        })
+        g = graph_from_json(
+            {
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "edges": [{"source": "a", "target": "b"}],
+            }
+        )
         g.compute_node_sizes()
         dot_str = to_dot(g)
         g2 = from_dot(dot_str)
