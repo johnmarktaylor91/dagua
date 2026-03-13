@@ -46,6 +46,10 @@ while Dagua continues to run. Dagua handles 50K nodes in ~8 min and 100K in ~35 
   - Support edges whose source/target is a cluster boundary rather than only a member node
   - Likely design: explicit cluster ports / cluster anchor semantics, not implicit magic
   - Useful for subsystem diagrams, summarized views, and higher-level dataflow
+- [ ] Small-graph runtime reality check
+  - Simple heuristic engines may remain faster on easy graphs
+  - Treat this as a strategic tradeoff, not automatically a failure
+  - Still keep reducing obvious overhead on the small-graph path
 - [ ] DOT export: special character escaping (backslashes, angle brackets)
 - [ ] compute_node_sizes is not idempotent (no-ops if sizes already set)
 - [ ] No progress callback for long-running layouts
