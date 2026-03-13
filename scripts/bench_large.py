@@ -156,8 +156,13 @@ def _load_hierarchy_checkpoint(paths: dict[str, Path], n: int, layers: int):
     from dagua.layout.multilevel import CoarseLevel
 
     manifest = json.loads(paths["hierarchy_meta"].read_text(encoding="utf-8"))
+    level_names = manifest.get("levels", [])
+    if not isinstance(level_names, list):
+        return None
+    if manifest.get("num_levels") is not None and int(manifest["num_levels"]) != len(level_names):
+        return None
     levels = []
-    for filename in manifest.get("levels", []):
+    for filename in level_names:
         level_path = paths["hierarchy_dir"] / filename
         if not level_path.exists():
             return None
@@ -297,8 +302,7 @@ def _register_active_run(paths: dict[str, Path], size: str, resume: bool) -> Non
         "resume": resume,
         "checkpoint_root": str(paths["root"]),
     }
-    paths["active_run"].parent.mkdir(parents=True, exist_ok=True)
-    paths["active_run"].write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _atomic_write_text(paths["active_run"], json.dumps(payload, indent=2))
 
     def _cleanup() -> None:
         try:
