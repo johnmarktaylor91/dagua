@@ -14,6 +14,7 @@ import argparse
 import atexit
 import faulthandler
 import gc
+import hashlib
 import json
 import os
 import subprocess
@@ -73,10 +74,26 @@ def _checkpoint_paths(root: Path) -> dict[str, Path]:
 _LAYOUT_CHECKPOINT_SCHEMA = 1
 
 
+def _source_fingerprint() -> str:
+    """Hash the critical large-layout code paths that shape derived checkpoints."""
+    hasher = hashlib.sha256()
+    source_paths = [
+        Path(__file__),
+        Path(dagua.__file__).resolve().parent / "layout" / "multilevel.py",
+        Path(dagua.__file__).resolve().parent / "layout" / "engine.py",
+        Path(dagua.__file__).resolve().parent / "layout" / "init_placement.py",
+    ]
+    for source_path in source_paths:
+        hasher.update(source_path.resolve().as_posix().encode("utf-8"))
+        hasher.update(source_path.read_bytes())
+    return hasher.hexdigest()[:16]
+
+
 def _layout_resume_signature(args: argparse.Namespace) -> dict[str, object]:
     """Fields that make derived layout checkpoints semantically reusable."""
     return {
         "schema": _LAYOUT_CHECKPOINT_SCHEMA,
+        "source_fingerprint": _source_fingerprint(),
         "device": args.device,
         "workers": args.workers,
         "steps": args.steps,
@@ -248,10 +265,11 @@ def _load_coarsest_positions_checkpoint(
     if pos.ndim != 2 or pos.shape[1] != 2:
         return None
     hierarchy = _load_hierarchy_checkpoint(paths, n, layers, layout_signature=layout_signature)
-    if hierarchy:
-        expected_rows = hierarchy[-1].num_nodes
-        if pos.shape[0] != expected_rows:
-            return None
+    if hierarchy is None:
+        return None
+    expected_rows = hierarchy[-1].num_nodes
+    if pos.shape[0] != expected_rows:
+        return None
     return pos
 
 
