@@ -1243,16 +1243,21 @@ def fanout_distribution_loss(
     if hub_nodes.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
 
+    edge_order = src.argsort()
+    sorted_src = src[edge_order]
+    sorted_tgt = tgt[edge_order]
+    hub_starts = torch.searchsorted(sorted_src, hub_nodes)
+    hub_degrees = out_degree[hub_nodes]
+
     total_loss = torch.tensor(0.0, device=device)
     count = 0
 
-    for hub in hub_nodes.tolist():
-        # Get children of this hub
-        child_mask = src == hub
-        children = tgt[child_mask]
-        k = children.shape[0]
+    for hub_idx, hub in enumerate(hub_nodes.tolist()):
+        start = int(hub_starts[hub_idx].item())
+        k = int(hub_degrees[hub_idx].item())
         if k < 2:
             continue
+        children = sorted_tgt[start : start + k]
 
         # Compute angles from hub to each child
         dx = pos[children, 0] - pos[hub, 0]

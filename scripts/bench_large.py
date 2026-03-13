@@ -61,6 +61,8 @@ def _checkpoint_paths(root: Path) -> dict[str, Path]:
         "edge_index": root / "edge_index.pt",
         "node_sizes": root / "node_sizes.pt",
         "layer_assignments": root / "layer_assignments.pt",
+        "hierarchy": root / "hierarchy.pt",
+        "coarsest_positions": root / "coarsest_positions.pt",
         "positions": root / "positions.pt",
         "active_run": root / "active_run.json",
     }
@@ -102,6 +104,71 @@ def _load_layer_checkpoint(paths: dict[str, Path], n: int, layers: int) -> torch
     if layer_assignments.ndim != 1 or layer_assignments.shape[0] != n:
         return None
     return layer_assignments
+
+
+def _serialize_hierarchy(levels: list) -> list[dict]:
+    payload: list[dict] = []
+    for level in levels:
+        payload.append(
+            {
+                "edge_index": level.edge_index,
+                "node_sizes": level.node_sizes,
+                "num_nodes": level.num_nodes,
+                "fine_to_coarse": level.fine_to_coarse,
+                "num_fine": level.num_fine,
+                "fine_layer_assignments": level.fine_layer_assignments,
+                "coarse_layer_assignments": level.coarse_layer_assignments,
+            }
+        )
+    return payload
+
+
+def _load_hierarchy_checkpoint(paths: dict[str, Path], n: int, layers: int):
+    if not paths["meta"].exists() or not paths["hierarchy"].exists():
+        return None
+    meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
+    if meta.get("n") != n or meta.get("layers") != layers:
+        return None
+    from dagua.layout.multilevel import CoarseLevel
+
+    raw_levels = torch.load(paths["hierarchy"], map_location="cpu")
+    levels = []
+    for item in raw_levels:
+        level = CoarseLevel(
+            edge_index=item["edge_index"],
+            node_sizes=item["node_sizes"],
+            num_nodes=int(item["num_nodes"]),
+            fine_to_coarse=item["fine_to_coarse"],
+            num_fine=int(item["num_fine"]),
+            fine_layer_assignments=item.get("fine_layer_assignments"),
+            coarse_layer_assignments=item.get("coarse_layer_assignments"),
+        )
+        levels.append(level)
+    return levels
+
+
+def _load_coarsest_positions_checkpoint(paths: dict[str, Path], n: int, layers: int) -> torch.Tensor | None:
+    if not paths["meta"].exists() or not paths["coarsest_positions"].exists():
+        return None
+    meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
+    if meta.get("n") != n or meta.get("layers") != layers:
+        return None
+    pos = torch.load(paths["coarsest_positions"], map_location="cpu")
+    if pos.ndim != 2 or pos.shape[1] != 2:
+        return None
+    return pos
+
+
+def _load_positions_checkpoint(paths: dict[str, Path], n: int, layers: int) -> torch.Tensor | None:
+    if not paths["meta"].exists() or not paths["positions"].exists():
+        return None
+    meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
+    if meta.get("n") != n or meta.get("layers") != layers:
+        return None
+    pos = torch.load(paths["positions"], map_location="cpu")
+    if pos.ndim != 2 or pos.shape[1] != 2 or pos.shape[0] != n:
+        return None
+    return pos
 
 
 def _pid_alive(pid: int) -> bool:
@@ -390,6 +457,23 @@ def main():
         )
         print(f"Saved graph checkpoint to {checkpoint_dir}", flush=True)
 
+    final_positions = _load_positions_checkpoint(checkpoint_paths, n, layers) if args.resume else None
+    if final_positions is not None:
+        print(f"Restored final positions checkpoint from {checkpoint_paths['positions']}", flush=True)
+        print(f"\nResult: {final_positions.shape}", flush=True)
+        print(f"  x range: [{final_positions[:, 0].min():.0f}, {final_positions[:, 0].max():.0f}]", flush=True)
+        print(f"  y range: [{final_positions[:, 1].min():.0f}, {final_positions[:, 1].max():.0f}]", flush=True)
+        mem("done")
+        return
+
+    hierarchy_levels = _load_hierarchy_checkpoint(checkpoint_paths, n, layers) if args.resume else None
+    if hierarchy_levels is not None:
+        print(f"Restored hierarchy checkpoint from {checkpoint_paths['hierarchy']}", flush=True)
+
+    coarsest_positions = _load_coarsest_positions_checkpoint(checkpoint_paths, n, layers) if args.resume else None
+    if coarsest_positions is not None:
+        print(f"Restored coarsest positions checkpoint from {checkpoint_paths['coarsest_positions']}", flush=True)
+
     layer_assignments = _load_layer_checkpoint(checkpoint_paths, n, layers) if args.resume else None
     if layer_assignments is not None:
         print(f"Restored layering checkpoint from {checkpoint_paths['layer_assignments']}", flush=True)
@@ -399,6 +483,10 @@ def main():
     g._edge_index_tensor = edge_index
     # Uniform synthetic nodes don't need float32 precision; keep this compact.
     g.node_sizes = node_sizes
+    if hierarchy_levels is not None:
+        g._precomputed_hierarchy_levels = hierarchy_levels
+    if coarsest_positions is not None:
+        g._precomputed_coarsest_positions = coarsest_positions
     if layer_assignments is not None:
         g._precomputed_layer_assignments = layer_assignments
     else:
@@ -407,6 +495,18 @@ def main():
             print(f"Saved layering checkpoint to {checkpoint_paths['layer_assignments']}", flush=True)
 
         g._layer_assignments_callback = _save_layer_assignments
+    if hierarchy_levels is None:
+        def _save_hierarchy(levels) -> None:
+            torch.save(_serialize_hierarchy(levels), checkpoint_paths["hierarchy"])
+            print(f"Saved hierarchy checkpoint to {checkpoint_paths['hierarchy']}", flush=True)
+
+        g._hierarchy_levels_callback = _save_hierarchy
+    if coarsest_positions is None:
+        def _save_coarsest_positions(pos_tensor: torch.Tensor) -> None:
+            torch.save(pos_tensor, checkpoint_paths["coarsest_positions"])
+            print(f"Saved coarsest positions checkpoint to {checkpoint_paths['coarsest_positions']}", flush=True)
+
+        g._coarsest_positions_callback = _save_coarsest_positions
     mem("graph built")
 
     config = dagua.LayoutConfig(

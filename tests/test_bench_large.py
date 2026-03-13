@@ -6,6 +6,7 @@ import importlib.util
 from pathlib import Path
 
 import torch
+from dagua.layout.multilevel import CoarseLevel
 
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "bench_large.py"
@@ -106,6 +107,65 @@ def test_load_layer_checkpoint_rejects_bad_shape(tmp_path: Path):
     torch.save(torch.zeros((8, 1), dtype=torch.int32), paths["layer_assignments"])
 
     assert bench_large._load_layer_checkpoint(paths, n=8, layers=2) is None
+
+
+def test_hierarchy_checkpoint_round_trip(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": 12, "layers": 3})
+
+    levels = [
+        CoarseLevel(
+            edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.int32),
+            node_sizes=torch.full((4, 2), 20.0, dtype=torch.float16),
+            num_nodes=4,
+            fine_to_coarse=torch.tensor([0, 0, 1, 1, 2, 3], dtype=torch.int32),
+            num_fine=6,
+            fine_layer_assignments=torch.tensor([0, 0, 1, 1, 2, 2], dtype=torch.int32),
+            coarse_layer_assignments=torch.tensor([0, 1, 2, 2], dtype=torch.int32),
+        )
+    ]
+
+    torch.save(bench_large._serialize_hierarchy(levels), paths["hierarchy"])
+    restored = bench_large._load_hierarchy_checkpoint(paths, n=12, layers=3)
+
+    assert restored is not None
+    assert len(restored) == 1
+    assert restored[0].num_nodes == 4
+    assert torch.equal(restored[0].edge_index, levels[0].edge_index)
+    assert torch.equal(restored[0].node_sizes, levels[0].node_sizes)
+    assert torch.equal(restored[0].fine_to_coarse, levels[0].fine_to_coarse)
+    assert torch.equal(restored[0].fine_layer_assignments, levels[0].fine_layer_assignments)
+    assert torch.equal(restored[0].coarse_layer_assignments, levels[0].coarse_layer_assignments)
+
+
+def test_positions_checkpoint_round_trip(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": 8, "layers": 2})
+    pos = torch.randn(8, 2)
+    torch.save(pos, paths["positions"])
+
+    restored = bench_large._load_positions_checkpoint(paths, n=8, layers=2)
+
+    assert restored is not None
+    assert torch.equal(restored, pos)
+
+
+def test_coarsest_positions_checkpoint_round_trip(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bench_ckpt"
+    paths = bench_large._checkpoint_paths(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    bench_large._save_checkpoint_meta(paths["meta"], {"n": 8, "layers": 2})
+    pos = torch.randn(4, 2)
+    torch.save(pos, paths["coarsest_positions"])
+
+    restored = bench_large._load_coarsest_positions_checkpoint(paths, n=8, layers=2)
+
+    assert restored is not None
+    assert torch.equal(restored, pos)
 
 
 def test_duplicate_run_guard_raises_for_live_pid(tmp_path: Path, monkeypatch):

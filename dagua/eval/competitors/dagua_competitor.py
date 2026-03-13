@@ -6,6 +6,7 @@ import time
 from typing import TYPE_CHECKING
 
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
+from dagua.eval.runtime_env import suspend_torchlens_decoration
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
@@ -24,7 +25,8 @@ class DaguaCompetitor(CompetitorBase):
 
         start = time.perf_counter()
         try:
-            pos = layout(graph, config)
+            with suspend_torchlens_decoration():
+                pos = layout(graph, config)
             elapsed = time.perf_counter() - start
             return CompetitorResult(
                 name=self.name, pos=pos, runtime_seconds=elapsed
