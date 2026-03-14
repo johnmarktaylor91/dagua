@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -19,6 +19,7 @@ from dagua.metrics import compute_all_metrics, graphviz_delta
 @dataclass
 class ComparisonResult:
     """Result of comparing Dagua vs Graphviz on a single graph."""
+
     graph_name: str
     dagua_metrics: Dict[str, float]
     graphviz_metrics: Dict[str, float]
@@ -133,7 +134,10 @@ def print_comparison_table(results: List[ComparisonResult]):
             gv = r.graphviz_metrics.get(metric, 0)
             delta = r.delta.get(metric, 0)
             indicator = "+" if delta > 0 else ("-" if delta < 0 else "=")
-            print(f"{name:<30} | {metric:<20} | {dv:>10.2f} | {gv:>10.2f} | {indicator}{abs(delta):>9.2f}")
+            print(
+                f"{name:<30} | {metric:<20} | {dv:>10.2f} | "
+                f"{gv:>10.2f} | {indicator}{abs(delta):>9.2f}"
+            )
         print("-" * 90)
 
     # Summary
@@ -144,6 +148,7 @@ def print_comparison_table(results: List[ComparisonResult]):
 @dataclass
 class MultiComparisonResult:
     """Result of comparing N engines on a single graph."""
+
     graph_name: str
     engine_metrics: Dict[str, Dict[str, float]]
     engine_positions: Dict[str, Optional[torch.Tensor]]
@@ -216,9 +221,7 @@ def compare_engines(
                 result = comp.layout(tg.graph)
                 if result.pos is not None:
                     assert tg.graph.node_sizes is not None
-                    m = compute_all_metrics(
-                        result.pos, tg.graph.edge_index, tg.graph.node_sizes
-                    )
+                    m = compute_all_metrics(result.pos, tg.graph.edge_index, tg.graph.node_sizes)
                     engine_metrics[comp.name] = m
                     engine_positions[comp.name] = result.pos
             except Exception as e:
@@ -287,13 +290,15 @@ def save_comparison_json(results: List[ComparisonResult], path: str):
     """Save comparison results as JSON."""
     data = []
     for r in results:
-        data.append({
-            "graph_name": r.graph_name,
-            "dagua_metrics": r.dagua_metrics,
-            "graphviz_metrics": r.graphviz_metrics,
-            "delta": r.delta,
-            "dagua_better": r.dagua_better,
-        })
+        data.append(
+            {
+                "graph_name": r.graph_name,
+                "dagua_metrics": r.dagua_metrics,
+                "graphviz_metrics": r.graphviz_metrics,
+                "delta": r.delta,
+                "dagua_better": r.dagua_better,
+            }
+        )
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)

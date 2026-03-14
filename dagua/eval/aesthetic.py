@@ -27,14 +27,9 @@ from dagua.layout import layout
 from dagua.metrics import compute_all_metrics
 from dagua.render import render
 from dagua.styles import (
-    ClusterStyle,
     DEFAULT_THEME_OBJ,
-    EdgeStyle,
-    GraphStyle,
-    NodeStyle,
     Theme,
 )
-
 
 REPRESENTATIVE_GRAPH_NAMES = [
     "linear_3layer_mlp",
@@ -112,7 +107,9 @@ def _aggregate_metrics(graph_evals: Sequence[GraphEval]) -> Dict[str, float]:
     return {name: _mean([ge.metrics.get(name, 0.0) for ge in graph_evals]) for name in metric_names}
 
 
-def _score_theme_and_layout(theme: Theme, config: LayoutConfig, aggregate: Dict[str, float]) -> float:
+def _score_theme_and_layout(
+    theme: Theme, config: LayoutConfig, aggregate: Dict[str, float]
+) -> float:
     score = 10.0
     score -= min(4.0, aggregate.get("edge_crossings", 0.0) * 0.25)
     score -= min(3.0, aggregate.get("node_overlaps", 0.0) * 1.0)
@@ -120,7 +117,10 @@ def _score_theme_and_layout(theme: Theme, config: LayoutConfig, aggregate: Dict[
     score -= min(1.0, aggregate.get("edge_straightness", 0.0) / 45.0)
     score -= min(0.8, abs(aggregate.get("aspect_ratio", 1.3) - 1.6) * 0.25)
     score -= min(0.8, aggregate.get("edge_length_cv", 0.0) * 0.5)
-    score -= min(0.8, (aggregate.get("label_overlaps", 0.0) + aggregate.get("label_node_overlaps", 0.0)) * 0.5)
+    score -= min(
+        0.8,
+        (aggregate.get("label_overlaps", 0.0) + aggregate.get("label_node_overlaps", 0.0)) * 0.5,
+    )
 
     default_node = theme.get_node_style("default")
     default_edge = theme.get_edge_style("default")
@@ -149,7 +149,9 @@ def _score_theme_and_layout(theme: Theme, config: LayoutConfig, aggregate: Dict[
     return max(1.0, min(10.0, score))
 
 
-def critique_round(theme: Theme, config: LayoutConfig, graph_evals: Sequence[GraphEval]) -> CriticResponse:
+def critique_round(
+    theme: Theme, config: LayoutConfig, graph_evals: Sequence[GraphEval]
+) -> CriticResponse:
     aggregate = _aggregate_metrics(graph_evals)
     rating = _score_theme_and_layout(theme, config, aggregate)
 
@@ -158,44 +160,68 @@ def critique_round(theme: Theme, config: LayoutConfig, graph_evals: Sequence[Gra
     fixes: List[str] = []
 
     if aggregate.get("dag_fraction", 1.0) >= 0.98:
-        what_works.append("Flow direction is legible; the layered read survives across the representative set.")
+        what_works.append(
+            "Flow direction is legible; the layered read survives across the representative set."
+        )
     else:
-        what_fails.append("Hierarchy is leaking. Too many edges still read as lateral detours instead of disciplined flow.")
-        fixes.append("Increase DAG and straightness pressure while giving layers a touch more separation.")
+        what_fails.append(
+            "Hierarchy is leaking. Too many edges still read as lateral detours "
+            "instead of disciplined flow."
+        )
+        fixes.append(
+            "Increase DAG and straightness pressure while giving layers a touch more separation."
+        )
 
     if aggregate.get("edge_crossings", 0.0) <= 2.0:
         what_works.append("Crossing pressure is under control on the medium-complexity cases.")
     else:
-        what_fails.append("Crossing density is still too high. The eye has to negotiate clutter instead of following structure.")
+        what_fails.append(
+            "Crossing density is still too high. The eye has to negotiate "
+            "clutter instead of following structure."
+        )
         fixes.append("Push crossing minimization and open the horizontal spacing slightly.")
 
     if aggregate.get("edge_straightness", 45.0) <= 18.0:
         what_works.append("Edges mostly hold a clean vertical cadence instead of meandering.")
     else:
-        what_fails.append("Edges are too wavy for a default. Curves should solve exceptions, not narrate the whole graph.")
+        what_fails.append(
+            "Edges are too wavy for a default. Curves should solve exceptions, "
+            "not narrate the whole graph."
+        )
         fixes.append("Lower default curvature and reinforce vertical edge preference.")
 
     if theme.cluster_style.opacity > 0.35:
         what_fails.append("Cluster fills are muddying figure-ground separation.")
         fixes.append("Reduce cluster fill opacity and lighten cluster framing.")
     else:
-        what_works.append("Cluster framing stays subordinate to the nodes instead of competing with them.")
+        what_works.append(
+            "Cluster framing stays subordinate to the nodes instead of competing with them."
+        )
 
     if theme.get_edge_style("default").opacity < 0.52:
         what_fails.append("Edges recede a bit too much; some long paths are under-articulated.")
         fixes.append("Give the default edge tone slightly more authority without thickening it.")
 
     if not what_works:
-        what_works.append("Nothing is catastrophically broken; the system has a coherent baseline to refine.")
+        what_works.append(
+            "Nothing is catastrophically broken; the system has a coherent baseline to refine."
+        )
     if not what_fails:
-        what_fails.append("The remaining issues are mostly about refinement: rhythm, whitespace balance, and edge authority.")
+        what_fails.append(
+            "The remaining issues are mostly about refinement: rhythm, "
+            "whitespace balance, and edge authority."
+        )
     if not fixes:
-        fixes.append("Tighten spacing and edge emphasis together; the defaults are close but still too neutral.")
+        fixes.append(
+            "Tighten spacing and edge emphasis together; the defaults are close "
+            "but still too neutral."
+        )
 
     details = {
         "nodes": (
             f"Node boxes are using font_size={theme.get_node_style('default').font_size:.1f}, "
-            f"padding={theme.get_node_style('default').padding}, stroke_width={theme.get_node_style('default').stroke_width:.2f}."
+            f"padding={theme.get_node_style('default').padding}, "
+            f"stroke_width={theme.get_node_style('default').stroke_width:.2f}."
         ),
         "edges": (
             f"Mean crossings={aggregate.get('edge_crossings', 0.0):.2f}, "
@@ -214,7 +240,8 @@ def critique_round(theme: Theme, config: LayoutConfig, graph_evals: Sequence[Gra
             f"aspect_ratio={aggregate.get('aspect_ratio', 0.0):.2f}."
         ),
         "clusters": (
-            f"padding={theme.cluster_style.padding:.1f}, opacity={theme.cluster_style.opacity:.2f}, "
+            f"padding={theme.cluster_style.padding:.1f}, "
+            f"opacity={theme.cluster_style.opacity:.2f}, "
             f"depth_fill_step={theme.cluster_style.depth_fill_step:.2f}."
         ),
         "color": (
@@ -234,7 +261,10 @@ def critique_round(theme: Theme, config: LayoutConfig, graph_evals: Sequence[Gra
         what_fails=what_fails[:3],
         priority_fixes=fixes[:3],
         detailed_notes=details,
-        inspiration="Graphviz for restraint, Netron for module legibility, but with softer contemporary spacing.",
+        inspiration=(
+            "Graphviz for restraint, Netron for module legibility, but with "
+            "softer contemporary spacing."
+        ),
     )
 
 
@@ -242,7 +272,9 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
-def mutate_theme_and_config(theme: Theme, config: LayoutConfig, critic: CriticResponse, aggregate: Dict[str, float]) -> Tuple[Theme, LayoutConfig, List[str]]:
+def mutate_theme_and_config(
+    theme: Theme, config: LayoutConfig, critic: CriticResponse, aggregate: Dict[str, float]
+) -> Tuple[Theme, LayoutConfig, List[str]]:
     next_theme = theme.copy()
     next_config = copy.deepcopy(config)
     changes: List[str] = []
@@ -257,7 +289,9 @@ def mutate_theme_and_config(theme: Theme, config: LayoutConfig, critic: CriticRe
         next_config.w_attract_x_bias = _clamp(next_config.w_attract_x_bias + 0.3, 1.5, 4.0)
         for style in next_theme.edge_styles.values():
             style.curvature = _clamp(style.curvature - 0.05, 0.18, 0.55)
-        changes.append("Reinforced vertical edge discipline and reduced default curvature slightly.")
+        changes.append(
+            "Reinforced vertical edge discipline and reduced default curvature slightly."
+        )
 
     if aggregate.get("edge_length_cv", 0.0) > 0.55:
         next_config.w_length_variance = _clamp(next_config.w_length_variance + 0.1, 0.4, 1.5)
@@ -275,8 +309,12 @@ def mutate_theme_and_config(theme: Theme, config: LayoutConfig, critic: CriticRe
         changes.append("Trimmed node border weight for less visual noise.")
 
     if next_theme.cluster_style.opacity > 0.32:
-        next_theme.cluster_style.opacity = _clamp(next_theme.cluster_style.opacity - 0.04, 0.18, 0.32)
-        next_theme.cluster_style.stroke_width = _clamp(next_theme.cluster_style.stroke_width - 0.05, 0.55, 0.85)
+        next_theme.cluster_style.opacity = _clamp(
+            next_theme.cluster_style.opacity - 0.04, 0.18, 0.32
+        )
+        next_theme.cluster_style.stroke_width = _clamp(
+            next_theme.cluster_style.stroke_width - 0.05, 0.55, 0.85
+        )
         changes.append("Lightened cluster treatment to improve figure-ground separation.")
 
     if next_theme.get_edge_style("default").opacity < 0.56:
@@ -387,23 +425,33 @@ def _write_final_outputs(
         "# Dagua Default Aesthetic Summary",
         "",
         "## Final Position",
-        f"- Overall local critic rating: {round_logs[-1]['critic_response']['overall_rating']:.2f}/10",
+        "- Overall local critic rating: "
+        f"{round_logs[-1]['critic_response']['overall_rating']:.2f}/10",
         f"- Mean overall quality metric: {aggregate.get('overall_quality', 0.0):.2f}",
         "",
         "## Key Choices",
-        f"- Node style: rounded rectangles, stroke_width={theme.get_node_style('default').stroke_width:.2f}, font_size={theme.get_node_style('default').font_size:.1f}",
-        f"- Edge style: width={theme.get_edge_style('default').width:.2f}, opacity={theme.get_edge_style('default').opacity:.2f}, curvature={theme.get_edge_style('default').curvature:.2f}",
-        f"- Cluster style: padding={theme.cluster_style.padding:.1f}, opacity={theme.cluster_style.opacity:.2f}, stroke_width={theme.cluster_style.stroke_width:.2f}",
-        f"- Layout spacing: node_sep={config.node_sep:.1f}, rank_sep={config.rank_sep:.1f}, w_crossing={config.w_crossing:.2f}, w_straightness={config.w_straightness:.2f}",
+        "- Node style: rounded rectangles, "
+        f"stroke_width={theme.get_node_style('default').stroke_width:.2f}, "
+        f"font_size={theme.get_node_style('default').font_size:.1f}",
+        f"- Edge style: width={theme.get_edge_style('default').width:.2f}, "
+        f"opacity={theme.get_edge_style('default').opacity:.2f}, "
+        f"curvature={theme.get_edge_style('default').curvature:.2f}",
+        f"- Cluster style: padding={theme.cluster_style.padding:.1f}, "
+        f"opacity={theme.cluster_style.opacity:.2f}, "
+        f"stroke_width={theme.cluster_style.stroke_width:.2f}",
+        f"- Layout spacing: node_sep={config.node_sep:.1f}, rank_sep={config.rank_sep:.1f}, "
+        f"w_crossing={config.w_crossing:.2f}, w_straightness={config.w_straightness:.2f}",
         "",
         "## Critic Pressure Points",
     ]
     for item in round_logs[-1]["critic_response"]["what_fails"]:
         lines.append(f"- {item}")
-    lines.extend([
-        "",
-        "## Representative Graphs",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Representative Graphs",
+        ]
+    )
     for ge in graph_evals:
         lines.append(f"- `{ge.name}`: {ge.description} | tags={', '.join(ge.tags)}")
 
@@ -445,12 +493,14 @@ def run_aesthetic_iteration(
         aggregate = _aggregate_metrics(graph_evals)
         next_theme, next_config, changes = mutate_theme_and_config(theme, config, critic, aggregate)
         _write_round_artifacts(round_dir, round_idx, theme, config, graph_evals, critic, changes)
-        round_logs.append({
-            "round": round_idx,
-            "critic_response": asdict(critic),
-            "aggregate_metrics": aggregate,
-            "changes_for_next_round": changes,
-        })
+        round_logs.append(
+            {
+                "round": round_idx,
+                "critic_response": asdict(critic),
+                "aggregate_metrics": aggregate,
+                "changes_for_next_round": changes,
+            }
+        )
         theme, config = next_theme, next_config
         final_graph_evals = graph_evals
 

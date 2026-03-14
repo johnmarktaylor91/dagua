@@ -8,7 +8,9 @@ from dagua.eval.visual_audit import build_visual_audit_suite
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build Dagua visual iteration and audit artifacts.")
+    parser = argparse.ArgumentParser(
+        description="Build Dagua visual iteration and audit artifacts."
+    )
     parser.add_argument("--output-dir", default="eval_output/visual_audit")
     parser.add_argument("--steps", type=int, default=80)
     parser.add_argument("--edge-opt-steps", type=int, default=12)

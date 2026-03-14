@@ -15,10 +15,10 @@ import time
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from dagua import DaguaGraph, LayoutConfig, poster, tour
-from dagua.animation import PosterConfig, TourConfig
 import torch
 
+from dagua import DaguaGraph, LayoutConfig, poster, tour
+from dagua.animation import PosterConfig, TourConfig
 from dagua.eval.benchmark import (
     benchmark_run_status,
     get_rare_suite_graphs,
@@ -27,21 +27,26 @@ from dagua.eval.benchmark import (
 )
 from dagua.eval.report import (
     generate_benchmark_deltas,
-    generate_report_artifact_index,
     generate_placement_dashboard_artifacts,
     generate_placement_summary_artifacts,
     generate_report,
+    generate_report_artifact_index,
 )
 from dagua.eval.sweep import run_placement_tuning
-from dagua.eval.visual_audit import build_visual_audit_suite, freeze_visual_audit_baseline
-from dagua.eval.visual_audit import build_visual_review_session
+from dagua.eval.visual_audit import (
+    build_visual_audit_suite,
+    build_visual_review_session,
+    freeze_visual_audit_baseline,
+)
 from dagua.io import load
 
 
 def _add_layout_args(parser: argparse.ArgumentParser) -> None:
     """Attach the common layout-related CLI options to a subparser."""
     parser.add_argument("--steps", type=int, default=120, help="Node optimization steps")
-    parser.add_argument("--edge-opt-steps", type=int, default=-1, help="Edge optimization steps (-1 skips)")
+    parser.add_argument(
+        "--edge-opt-steps", type=int, default=-1, help="Edge optimization steps (-1 skips)"
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", default="cpu", help="Layout device, e.g. cpu or cuda")
 
@@ -108,7 +113,9 @@ def _resolve_run_dir(output_dir: str, suite: str, run_id: Optional[str]) -> Path
     return run_dir.resolve()
 
 
-def _load_graph_and_positions(args: argparse.Namespace) -> tuple[DaguaGraph, Optional[torch.Tensor]]:
+def _load_graph_and_positions(
+    args: argparse.Namespace,
+) -> tuple[DaguaGraph, Optional[torch.Tensor]]:
     """Load a graph plus optional saved positions from files or benchmark storage."""
     if getattr(args, "benchmark_graph", None):
         graph = _lookup_benchmark_graph(args.benchmark_graph)
@@ -145,7 +152,15 @@ def _run_poster(args: argparse.Namespace) -> int:
             show_titles=not args.no_titles,
         ),
     )
-    print(json.dumps({"output": result.output, "format": result.format, "used_large_lod": result.used_large_lod}))
+    print(
+        json.dumps(
+            {
+                "output": result.output,
+                "format": result.format,
+                "used_large_lod": result.used_large_lod,
+            }
+        )
+    )
     return 0
 
 
@@ -169,7 +184,11 @@ def _run_tour(args: argparse.Namespace) -> int:
             show_titles=not args.no_titles,
         ),
     )
-    print(json.dumps({"output": result.output, "format": result.format, "frame_count": result.frame_count}))
+    print(
+        json.dumps(
+            {"output": result.output, "format": result.format, "frame_count": result.frame_count}
+        )
+    )
     return 0
 
 
@@ -185,7 +204,10 @@ def _run_benchmark_list(args: argparse.Namespace) -> int:
     suite_root = _suite_root(args.output_dir, args.suite)
     runs = []
     if suite_root.exists():
-        for path in sorted((p for p in suite_root.iterdir() if p.is_dir() and p.name != "latest"), key=lambda p: p.name):
+        for path in sorted(
+            (p for p in suite_root.iterdir() if p.is_dir() and p.name != "latest"),
+            key=lambda p: p.name,
+        ):
             payload_path = path / "results.json"
             partial_path = path / "results.partial.json"
             state = "missing"
@@ -243,7 +265,12 @@ def _run_benchmark_freeze(args: argparse.Namespace) -> int:
         ),
         encoding="utf-8",
     )
-    print(json.dumps({"label": args.label, "source_run_id": source_dir.name, "target_dir": str(target_dir)}, indent=2))
+    print(
+        json.dumps(
+            {"label": args.label, "source_run_id": source_dir.name, "target_dir": str(target_dir)},
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -262,10 +289,16 @@ def _run_benchmark_compare_runs(args: argparse.Namespace) -> int:
             continue
         score_delta = None
         runtime_delta = None
-        if result_a.get("composite_score") is not None and result_b.get("composite_score") is not None:
+        if (
+            result_a.get("composite_score") is not None
+            and result_b.get("composite_score") is not None
+        ):
             score_delta = float(result_b["composite_score"]) - float(result_a["composite_score"])
             score_deltas.append(score_delta)
-        if result_a.get("runtime_seconds") is not None and result_b.get("runtime_seconds") is not None:
+        if (
+            result_a.get("runtime_seconds") is not None
+            and result_b.get("runtime_seconds") is not None
+        ):
             runtime_delta = float(result_b["runtime_seconds"]) - float(result_a["runtime_seconds"])
             runtime_deltas.append(runtime_delta)
         graph_deltas[graph_name] = {
@@ -280,7 +313,9 @@ def _run_benchmark_compare_runs(args: argparse.Namespace) -> int:
         "aggregate": {
             "graphs_compared": len(graph_deltas),
             "mean_score_delta": sum(score_deltas) / len(score_deltas) if score_deltas else None,
-            "mean_runtime_delta_seconds": sum(runtime_deltas) / len(runtime_deltas) if runtime_deltas else None,
+            "mean_runtime_delta_seconds": sum(runtime_deltas) / len(runtime_deltas)
+            if runtime_deltas
+            else None,
         },
         "graphs": graph_deltas,
     }
@@ -314,7 +349,9 @@ def _run_benchmark_deltas(args: argparse.Namespace) -> int:
     """Generate round-over-round benchmark delta artifacts."""
     merge_latest_results(output_dir=args.output_dir)
     json_path, md_path = generate_benchmark_deltas(output_dir=args.output_dir)
-    print(json.dumps({"benchmark_deltas_json": json_path, "benchmark_deltas_md": md_path}, indent=2))
+    print(
+        json.dumps({"benchmark_deltas_json": json_path, "benchmark_deltas_md": md_path}, indent=2)
+    )
     return 0
 
 
@@ -333,7 +370,9 @@ def _run_placement_sprint(args: argparse.Namespace) -> int:
         output_dir=args.output_dir,
         combined_results=combined,
     )
-    artifact_index_json, artifact_index_md = generate_report_artifact_index(output_dir=args.output_dir)
+    artifact_index_json, artifact_index_md = generate_report_artifact_index(
+        output_dir=args.output_dir
+    )
 
     frozen_dir = None
     if args.freeze_label:
@@ -417,14 +456,19 @@ def _run_visual_audit_build(args: argparse.Namespace) -> int:
         compare_to_baseline=args.compare_to_baseline,
         panels=args.panels,
     )
-    print(json.dumps({
-        "output_dir": result.output_dir,
-        "manifest_path": result.manifest_path,
-        "readme_path": result.readme_path,
-        "ladder_count": len(result.ladder_paths),
-        "competitor_count": len(result.competitor_paths),
-        "baseline_diff_count": len(result.baseline_diff_paths),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "output_dir": result.output_dir,
+                "manifest_path": result.manifest_path,
+                "readme_path": result.readme_path,
+                "ladder_count": len(result.ladder_paths),
+                "competitor_count": len(result.competitor_paths),
+                "baseline_diff_count": len(result.baseline_diff_paths),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -514,7 +558,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Dagua CLI tooling")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    status_parser = subparsers.add_parser("benchmark-status", help="Show latest benchmark run status")
+    status_parser = subparsers.add_parser(
+        "benchmark-status", help="Show latest benchmark run status"
+    )
     status_parser.add_argument("--output-dir", default="eval_output")
     status_parser.add_argument("--suite", choices=["standard", "rare"], default="standard")
     status_parser.set_defaults(func=_run_benchmark_status)
@@ -539,10 +585,14 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser.add_argument("--output-dir", default="eval_output")
     show_parser.add_argument("--suite", choices=["standard", "rare"], default="standard")
     show_parser.add_argument("--run-id", default=None, help="Specific run id; defaults to latest")
-    show_parser.add_argument("--competitor", default=None, help="Optional competitor to narrow the output")
+    show_parser.add_argument(
+        "--competitor", default=None, help="Optional competitor to narrow the output"
+    )
     show_parser.set_defaults(func=_run_benchmark_show)
 
-    freeze_parser = subparsers.add_parser("benchmark-freeze", help="Copy a run into a frozen named baseline")
+    freeze_parser = subparsers.add_parser(
+        "benchmark-freeze", help="Copy a run into a frozen named baseline"
+    )
     freeze_parser.add_argument("label")
     freeze_parser.add_argument("--output-dir", default="eval_output")
     freeze_parser.add_argument("--suite", choices=["standard", "rare"], default="standard")
@@ -566,49 +616,74 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument("--iterations", type=int, default=None)
     watch_parser.set_defaults(func=_run_benchmark_watch)
 
-    report_parser = subparsers.add_parser("benchmark-report", help="Generate report artifacts from stored benchmark results")
+    report_parser = subparsers.add_parser(
+        "benchmark-report", help="Generate report artifacts from stored benchmark results"
+    )
     report_parser.add_argument("--output-dir", default="eval_output")
     report_parser.add_argument("--no-pdf", action="store_true")
     report_parser.set_defaults(func=_run_benchmark_report)
 
-    deltas_parser = subparsers.add_parser("benchmark-deltas", help="Generate round-over-round benchmark deltas")
+    deltas_parser = subparsers.add_parser(
+        "benchmark-deltas", help="Generate round-over-round benchmark deltas"
+    )
     deltas_parser.add_argument("--output-dir", default="eval_output")
     deltas_parser.set_defaults(func=_run_benchmark_deltas)
 
-    sprint_parser = subparsers.add_parser("placement-sprint", help="Regenerate placement-facing benchmark artifacts in one shot")
+    sprint_parser = subparsers.add_parser(
+        "placement-sprint", help="Regenerate placement-facing benchmark artifacts in one shot"
+    )
     sprint_parser.add_argument("--output-dir", default="eval_output")
-    sprint_parser.add_argument("--run-id", default=None, help="Specific standard run id to freeze when using --freeze-label")
-    sprint_parser.add_argument("--freeze-label", default=None, help="Optional standard benchmark baseline label to freeze")
+    sprint_parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Specific standard run id to freeze when using --freeze-label",
+    )
+    sprint_parser.add_argument(
+        "--freeze-label", default=None, help="Optional standard benchmark baseline label to freeze"
+    )
     sprint_parser.add_argument("--overwrite", action="store_true")
     sprint_parser.set_defaults(func=_run_placement_sprint)
 
-    tune_parser = subparsers.add_parser("placement-tune", help="Run staged brute-force tuning for placement metrics")
+    tune_parser = subparsers.add_parser(
+        "placement-tune", help="Run staged brute-force tuning for placement metrics"
+    )
     tune_parser.add_argument("--output-dir", default="eval_output/report")
     tune_parser.add_argument("--steps", type=int, default=60)
     tune_parser.add_argument("--seed", type=int, default=42)
     tune_parser.add_argument("--device", default="cpu")
     tune_parser.set_defaults(func=_run_placement_tune)
 
-    audit_parser = subparsers.add_parser("visual-audit-build", help="Build the visual iteration / audit suite")
+    audit_parser = subparsers.add_parser(
+        "visual-audit-build", help="Build the visual iteration / audit suite"
+    )
     audit_parser.add_argument("--output-dir", default="eval_output/visual_audit")
     audit_parser.add_argument("--graphs", nargs="*", default=None)
     audit_parser.add_argument(
         "--panels",
         nargs="*",
         default=None,
-        help="Optional subset: ladder decomposition kill_switches diff_dashboard competitor_stepwise metric_cards sheets frozen_baselines run_to_run_diff readme manifest",
+        help=(
+            "Optional subset: ladder decomposition kill_switches diff_dashboard "
+            "competitor_stepwise metric_cards sheets frozen_baselines "
+            "run_to_run_diff readme manifest"
+        ),
     )
     audit_parser.add_argument("--compare-to-baseline", default="reference")
     _add_layout_args(audit_parser)
     audit_parser.set_defaults(func=_run_visual_audit_build)
 
-    audit_freeze_parser = subparsers.add_parser("visual-audit-freeze", help="Freeze the current visual-audit baseline under a label")
+    audit_freeze_parser = subparsers.add_parser(
+        "visual-audit-freeze", help="Freeze the current visual-audit baseline under a label"
+    )
     audit_freeze_parser.add_argument("label")
     audit_freeze_parser.add_argument("--output-dir", default="eval_output/visual_audit")
     audit_freeze_parser.add_argument("--overwrite", action="store_true")
     audit_freeze_parser.set_defaults(func=_run_visual_audit_freeze)
 
-    session_parser = subparsers.add_parser("visual-session-build", help="Build a numbered side-by-side review folder for collaborative visual iteration")
+    session_parser = subparsers.add_parser(
+        "visual-session-build",
+        help="Build a numbered side-by-side review folder for collaborative visual iteration",
+    )
     session_parser.add_argument("--output-dir", default="eval_output/visual_review_session")
     session_parser.add_argument("--graphs", nargs="*", default=None)
     _add_layout_args(session_parser)
@@ -617,10 +692,20 @@ def build_parser() -> argparse.ArgumentParser:
     poster_parser = subparsers.add_parser("poster", help="Export a cinematic still render")
     poster_parser.add_argument("graph", nargs="?", help="Input graph file (JSON/YAML)")
     poster_parser.add_argument("output", help="Output still path")
-    poster_parser.add_argument("--benchmark-graph", default=None, help="Graph name from the benchmark DB")
-    poster_parser.add_argument("--benchmark-suite", choices=["standard", "rare"], default="standard")
-    poster_parser.add_argument("--competitor", default="dagua", help="Competitor name for saved benchmark positions")
-    poster_parser.add_argument("--output-dir", default="eval_output", help="Benchmark output dir when using --benchmark-graph")
+    poster_parser.add_argument(
+        "--benchmark-graph", default=None, help="Graph name from the benchmark DB"
+    )
+    poster_parser.add_argument(
+        "--benchmark-suite", choices=["standard", "rare"], default="standard"
+    )
+    poster_parser.add_argument(
+        "--competitor", default="dagua", help="Competitor name for saved benchmark positions"
+    )
+    poster_parser.add_argument(
+        "--output-dir",
+        default="eval_output",
+        help="Benchmark output dir when using --benchmark-graph",
+    )
     poster_parser.add_argument("--scene", default="auto")
     poster_parser.add_argument("--format", default=None)
     poster_parser.add_argument("--keyframe-index", type=int, default=None)
@@ -636,10 +721,18 @@ def build_parser() -> argparse.ArgumentParser:
     tour_parser = subparsers.add_parser("tour", help="Export a cinematic graph tour")
     tour_parser.add_argument("graph", nargs="?", help="Input graph file (JSON/YAML)")
     tour_parser.add_argument("output", help="Output animation path")
-    tour_parser.add_argument("--benchmark-graph", default=None, help="Graph name from the benchmark DB")
+    tour_parser.add_argument(
+        "--benchmark-graph", default=None, help="Graph name from the benchmark DB"
+    )
     tour_parser.add_argument("--benchmark-suite", choices=["standard", "rare"], default="standard")
-    tour_parser.add_argument("--competitor", default="dagua", help="Competitor name for saved benchmark positions")
-    tour_parser.add_argument("--output-dir", default="eval_output", help="Benchmark output dir when using --benchmark-graph")
+    tour_parser.add_argument(
+        "--competitor", default="dagua", help="Competitor name for saved benchmark positions"
+    )
+    tour_parser.add_argument(
+        "--output-dir",
+        default="eval_output",
+        help="Benchmark output dir when using --benchmark-graph",
+    )
     tour_parser.add_argument("--scene", default="auto")
     tour_parser.add_argument("--format", default=None)
     tour_parser.add_argument("--fps", type=int, default=24)
