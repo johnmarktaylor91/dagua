@@ -126,6 +126,26 @@ class TestNodeSizes:
         assert simple_chain.node_sizes.shape == (5, 2)
         assert (simple_chain.node_sizes > 0).all()
 
+    def test_compute_node_sizes_no_labels(self):
+        """Regression: compute_node_sizes must not produce 1D tensor for labelless graphs."""
+        g = dagua.DaguaGraph()
+        g.num_nodes = 100
+        g._edge_index_tensor = torch.zeros(2, 0, dtype=torch.long)
+        g.node_sizes = torch.full((100, 2), 20.0)
+        g.compute_node_sizes()
+        assert g.node_sizes.ndim == 2
+        assert g.node_sizes.shape == (100, 2)
+
+    def test_compute_node_sizes_partial_labels(self):
+        """compute_node_sizes handles graphs with fewer labels than nodes."""
+        g = dagua.DaguaGraph()
+        g.add_node("a", label="hello")
+        g.add_node("b", label="world")
+        g.num_nodes = 5
+        g.compute_node_sizes()
+        assert g.node_sizes.ndim == 2
+        assert g.node_sizes.shape == (5, 2)
+
     def test_sizes_reflect_label_width(self):
         g = DaguaGraph.from_edge_list([("short", "a_very_long_label_here")])
         g.compute_node_sizes()
