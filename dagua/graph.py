@@ -386,6 +386,17 @@ class DaguaGraph:
         """
         if (
             self.node_sizes is not None
+            and self.node_sizes.ndim == 2
+            and self.node_sizes.shape[0] == self.num_nodes
+            and self.node_sizes.shape[1] == 2
+            and self._node_sizes_revision != self.revision
+            and len(self.node_labels) < self.num_nodes
+        ):
+            self._node_sizes_revision = self.revision
+            return
+
+        if (
+            self.node_sizes is not None
             and self.node_sizes.shape[0] == self.num_nodes
             and self._node_sizes_revision == self.revision
         ):
@@ -393,7 +404,8 @@ class DaguaGraph:
 
         sizes = []
         font_sizes = []
-        for i, label in enumerate(self.node_labels):
+        for i in range(self.num_nodes):
+            label = self.node_labels[i] if i < len(self.node_labels) else ""
             style = self.get_style_for_node(i)
             padding = style.padding
             ff = font_family if style.font_family in ("", font_family) else style.font_family
