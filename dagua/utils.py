@@ -4,21 +4,91 @@ from __future__ import annotations
 
 from collections import deque
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
+
+
+class VRAMBudget:
+    """Unified VRAM budget tracker with fragmentation-aware safety margins.
+
+    Replaces scattered ``_vram_fits()`` calls with measurement-based decisions.
+    Queries ``torch.cuda.mem_get_info()`` and adjusts the safety factor based on
+    allocator fragmentation (allocated/reserved ratio).
+
+    Parameters
+    ----------
+    None
+        Queries GPU state at construction time.
+    """
+
+    def __init__(self) -> None:
+        """Capture the current CUDA memory state."""
+        if not torch.cuda.is_available():
+            self._free = 0
+            self._total = 0
+            self._frag_ratio = 1.0
+            return
+        self._free, self._total = torch.cuda.mem_get_info()
+        allocated = torch.cuda.memory_allocated()
+        reserved = torch.cuda.memory_reserved()
+        self._frag_ratio = allocated / max(reserved, 1)
+
+    @staticmethod
+    def available() -> bool:
+        """Return whether CUDA is available."""
+        return torch.cuda.is_available()
+
+    @property
+    def dynamic_safety(self) -> float:
+        """Return a safety factor based on allocator fragmentation.
+
+        Clean state (``frag_ratio > 0.9``): aggressive ``0.85``.
+        Moderate state (``0.5-0.9``): linear interpolation.
+        Fragmented state (``frag_ratio < 0.5``): conservative ``0.60``.
+        """
+        clamped = max(0.5, min(self._frag_ratio, 1.0))
+        return 0.60 + (clamped - 0.5) * (0.85 - 0.60) / 0.5
+
+    def fits(self, needed_bytes: int) -> bool:
+        """Return whether ``needed_bytes`` fit in free VRAM with headroom.
+
+        Parameters
+        ----------
+        needed_bytes : int
+            Estimated allocation size in bytes.
+
+        Returns
+        -------
+        bool
+            ``True`` when the request fits in the measured free VRAM budget.
+        """
+        if not torch.cuda.is_available():
+            return False
+        return needed_bytes < int(self._free * self.dynamic_safety)
+
+    def remaining(self) -> int:
+        """Return the estimated usable VRAM in bytes.
+
+        Returns
+        -------
+        int
+            ``free_vram * dynamic_safety`` for the captured CUDA state.
+        """
+        if not torch.cuda.is_available():
+            return 0
+        return int(self._free * self.dynamic_safety)
 
 
 def _vram_fits(needed_bytes: int, safety: float = 0.8) -> bool:
     """Check whether *needed_bytes* fit in free GPU VRAM (with headroom).
 
     Returns False when CUDA is unavailable, so CPU paths are unchanged.
-    *safety* (default 0.8) reserves 20% headroom for allocator fragmentation.
+    *safety* is ignored — VRAMBudget.dynamic_safety is used instead.
+    Kept for backward compatibility; new code should use VRAMBudget directly.
     """
-    if not torch.cuda.is_available():
-        return False
-    free, _total = torch.cuda.mem_get_info()
-    return needed_bytes < int(free * safety)
+    _ = safety
+    return VRAMBudget().fits(needed_bytes)
 
 
 def measure_text(
@@ -35,6 +105,7 @@ def measure_text(
     if not font_family:
         try:
             from dagua.styles import RESOLVED_FONT
+
             font_family = RESOLVED_FONT
         except ImportError:
             font_family = "sans-serif"
@@ -204,7 +275,11 @@ def topological_sort(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
     return order
 
 
-def longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> "List[int] | torch.Tensor":
+def longest_path_layering(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    device: str = "cpu",
+) -> "List[int] | torch.Tensor":
     """Assign layer indices via longest-path from sources. O(V+E).
 
     For large graphs (>10K nodes), uses a vectorized wave-based approach
@@ -217,7 +292,7 @@ def longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> "List[int
         return [0] * num_nodes
 
     if num_nodes > 10000:
-        return _longest_path_layering_vectorized(edge_index, num_nodes)
+        return _longest_path_layering_vectorized(edge_index, num_nodes, device)
 
     src = edge_index[0].tolist()
     tgt = edge_index[1].tolist()
@@ -266,15 +341,19 @@ def _process_wave_edges_chunked(
         chunk_src = src[start:end]
         chunk_tgt = tgt[start:end]
         chunk_mask = wave_set[chunk_src]
-        if chunk_mask.any():
-            children = chunk_tgt[chunk_mask]
+        children = chunk_tgt[chunk_mask]
+        if children.numel() > 0:
             candidate = layers[chunk_src[chunk_mask]] + 1
             layers.scatter_reduce_(0, children, candidate, reduce="amax")
-            ones = torch.ones(children.shape[0], dtype=val_dtype)
+            ones = torch.ones(children.shape[0], dtype=val_dtype, device=remaining.device)
             remaining.scatter_add_(0, children, -ones)
 
 
-def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+def _longest_path_layering_vectorized(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    device: str = "cpu",
+) -> torch.Tensor:
     """Longest-path layering using hybrid wave/BFS strategy.
 
     Wide graphs (many nodes per wave): use vectorized wave approach — each
@@ -289,70 +368,56 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
 
     Returns a tensor directly (callers that need a list can convert).
     """
-    import numpy as np
     from collections import deque
+
+    import numpy as np
 
     N = num_nodes
     E = edge_index.shape[1]
-    src, tgt = edge_index[0], edge_index[1]
-    chunked = N > _STREAMING_NODE_THRESHOLD
 
-    # Use int32 for working arrays when chunked (saves 12 GB at 1B nodes).
-    # Max in-degree and layer index both fit comfortably in int32.
-    val_dtype = torch.int32 if chunked else torch.long
+    compute_device = "cpu"
+    if device == "cuda" and VRAMBudget.available():
+        estimated_bytes = N * 25 + E * 16
+        if VRAMBudget().fits(estimated_bytes):
+            compute_device = "cuda"
 
-    # Compute in-degree — chunked for large graphs to avoid [E]-sized ones tensor
-    in_degree = torch.zeros(N, dtype=val_dtype)
-    if chunked:
-        for start in range(0, E, _EDGE_CHUNK):
-            end = min(start + _EDGE_CHUNK, E)
-            in_degree.scatter_add_(0, tgt[start:end], torch.ones(end - start, dtype=val_dtype))
-    else:
-        ones_E = torch.ones(E, dtype=torch.long)
-        in_degree.scatter_add_(0, tgt, ones_E)
+    try:
+        src, tgt = edge_index[0], edge_index[1]
+        if compute_device == "cuda":
+            src = src.to("cuda")
+            tgt = tgt.to("cuda")
+        chunked = N > _STREAMING_NODE_THRESHOLD
 
-    # Probe: run a few waves to decide strategy
-    layers = torch.zeros(N, dtype=val_dtype)
-    remaining = in_degree.clone()
-    total_processed = 0
-    current_layer = 0
-    probe_waves = 10
+        # Use int32 for working arrays when chunked (saves 12 GB at 1B nodes).
+        # Max in-degree and layer index both fit comfortably in int32.
+        val_dtype = torch.int32 if chunked else torch.long
 
-    # Pre-allocate wave_set once — reuse via .zero_() each wave
-    wave_set = torch.zeros(N, dtype=torch.bool)
-
-    for _ in range(probe_waves):
-        wave = (remaining == 0).nonzero(as_tuple=True)[0]
-        if wave.numel() == 0:
-            break
-        total_processed += wave.numel()
-        layers[wave] = current_layer
-        remaining[wave] = -1
-
-        wave_set.zero_()
-        wave_set[wave] = True
-
+        # Compute in-degree — chunked for large graphs to avoid [E]-sized ones tensor
+        in_degree = torch.zeros(N, dtype=val_dtype, device=compute_device)
         if chunked:
-            _process_wave_edges_chunked(src, tgt, wave_set, layers, remaining, E)
+            for start in range(0, E, _EDGE_CHUNK):
+                end = min(start + _EDGE_CHUNK, E)
+                chunk_ones = torch.ones(end - start, dtype=val_dtype, device=compute_device)
+                in_degree.scatter_add_(0, tgt[start:end], chunk_ones)
         else:
-            edge_mask = wave_set[src]
-            if edge_mask.any():
-                children = tgt[edge_mask]
-                candidate = layers[src[edge_mask]] + 1
-                layers.scatter_reduce_(0, children, candidate, reduce="amax")
-                ones = torch.ones(children.shape[0], dtype=val_dtype)
-                remaining.scatter_add_(0, children, -ones)
+            ones_E = torch.ones(E, dtype=val_dtype, device=compute_device)
+            in_degree.scatter_add_(0, tgt, ones_E)
 
-        current_layer += 1
+        # Probe: run a few waves to decide strategy
+        layers = torch.zeros(N, dtype=val_dtype, device=compute_device)
+        remaining = in_degree.clone()
+        total_processed = 0
+        current_layer = 0
+        probe_waves = 10
 
-    avg_wave = total_processed / max(current_layer, 1)
+        # Pre-allocate wave_set once — reuse via .zero_() each wave
+        wave_set = torch.zeros(N, dtype=torch.bool, device=compute_device)
 
-    # Wide graph: continue with waves (fast when few iterations needed)
-    if avg_wave > 1000:
-        for _ in range(N):
+        for _ in range(probe_waves):
             wave = (remaining == 0).nonzero(as_tuple=True)[0]
             if wave.numel() == 0:
                 break
+            total_processed += wave.numel()
             layers[wave] = current_layer
             remaining[wave] = -1
 
@@ -363,59 +428,97 @@ def _longest_path_layering_vectorized(edge_index: torch.Tensor, num_nodes: int) 
                 _process_wave_edges_chunked(src, tgt, wave_set, layers, remaining, E)
             else:
                 edge_mask = wave_set[src]
-                if edge_mask.any():
-                    children = tgt[edge_mask]
+                children = tgt[edge_mask]
+                if children.numel() > 0:
                     candidate = layers[src[edge_mask]] + 1
                     layers.scatter_reduce_(0, children, candidate, reduce="amax")
-                    ones = torch.ones(children.shape[0], dtype=torch.long)
+                    ones = torch.ones(children.shape[0], dtype=val_dtype, device=compute_device)
                     remaining.scatter_add_(0, children, -ones)
 
             current_layer += 1
 
-        if chunked:
-            del remaining, wave_set, in_degree
+        avg_wave = total_processed / max(current_layer, 1)
+
+        # Wide graph: continue with waves (fast when few iterations needed)
+        if avg_wave > 1000:
+            for _ in range(N):
+                wave = (remaining == 0).nonzero(as_tuple=True)[0]
+                if wave.numel() == 0:
+                    break
+                layers[wave] = current_layer
+                remaining[wave] = -1
+
+                wave_set.zero_()
+                wave_set[wave] = True
+
+                if chunked:
+                    _process_wave_edges_chunked(src, tgt, wave_set, layers, remaining, E)
+                else:
+                    edge_mask = wave_set[src]
+                    children = tgt[edge_mask]
+                    if children.numel() > 0:
+                        candidate = layers[src[edge_mask]] + 1
+                        layers.scatter_reduce_(0, children, candidate, reduce="amax")
+                        ones = torch.ones(children.shape[0], dtype=val_dtype, device=compute_device)
+                        remaining.scatter_add_(0, children, -ones)
+
+                current_layer += 1
+
+            if chunked:
+                del remaining, wave_set, in_degree
+                return layers
+            if layers.dtype != torch.long:
+                del remaining, wave_set, in_degree
+                layers = layers.long()
             return layers
-        if layers.dtype != torch.long:
-            del remaining, wave_set, in_degree
-            layers = layers.long()
-        return layers
 
-    # Deep graph: switch to CSR + numpy BFS (true O(V+E))
-    # Reset — recompute from scratch with numpy (zero-copy from torch)
-    in_deg = in_degree.numpy().copy()
+        # Deep graph: switch to CSR + numpy BFS (true O(V+E))
+        # Reset — recompute from scratch with numpy (zero-copy from torch)
+        if compute_device == "cuda":
+            in_degree = in_degree.cpu()
+            src = src.cpu()
+            tgt = tgt.cpu()
+        in_deg = in_degree.numpy().copy()
 
-    # Build CSR adjacency via sort
-    order = src.argsort()
-    csr_tgt = tgt[order].numpy()
+        # Build CSR adjacency via sort
+        order = src.argsort()
+        csr_tgt = tgt[order].numpy()
 
-    # Chunked out-degree for large graphs
-    out_degree = torch.zeros(N, dtype=val_dtype)
-    if chunked:
-        for start in range(0, E, _EDGE_CHUNK):
-            end = min(start + _EDGE_CHUNK, E)
-            out_degree.scatter_add_(0, src[start:end], torch.ones(end - start, dtype=val_dtype))
-    else:
-        out_degree.scatter_add_(0, src, ones_E)
-    offsets = torch.zeros(N + 1, dtype=torch.long)
-    offsets[1:] = out_degree.cumsum(0)
-    csr_off = offsets.numpy()
+        # Chunked out-degree for large graphs
+        out_degree = torch.zeros(N, dtype=val_dtype)
+        if chunked:
+            for start in range(0, E, _EDGE_CHUNK):
+                end = min(start + _EDGE_CHUNK, E)
+                chunk_ones = torch.ones(end - start, dtype=val_dtype)
+                out_degree.scatter_add_(0, src[start:end], chunk_ones)
+        else:
+            ones_out = torch.ones(E, dtype=val_dtype)
+            out_degree.scatter_add_(0, src, ones_out)
+        offsets = torch.zeros(N + 1, dtype=torch.long)
+        offsets[1:] = out_degree.cumsum(0)
+        csr_off = offsets.numpy()
 
-    # BFS from sources — true O(V+E)
-    layer_arr = np.zeros(N, dtype=np.int64)
-    queue = deque(int(i) for i in range(N) if in_deg[i] == 0)
+        # BFS from sources — true O(V+E)
+        layer_arr = np.zeros(N, dtype=np.int64)
+        queue = deque(int(i) for i in range(N) if in_deg[i] == 0)
 
-    while queue:
-        node = queue.popleft()
-        child_layer = layer_arr[node] + 1
-        for j in range(csr_off[node], csr_off[node + 1]):
-            child = int(csr_tgt[j])
-            if child_layer > layer_arr[child]:
-                layer_arr[child] = child_layer
-            in_deg[child] -= 1
-            if in_deg[child] == 0:
-                queue.append(child)
+        while queue:
+            node = queue.popleft()
+            child_layer = layer_arr[node] + 1
+            for j in range(csr_off[node], csr_off[node + 1]):
+                child = int(csr_tgt[j])
+                if child_layer > layer_arr[child]:
+                    layer_arr[child] = child_layer
+                in_deg[child] -= 1
+                if in_deg[child] == 0:
+                    queue.append(child)
 
-    return torch.from_numpy(layer_arr)
+        return torch.from_numpy(layer_arr)
+    except RuntimeError:
+        if compute_device != "cuda":
+            raise
+        torch.cuda.empty_cache()
+        return _longest_path_layering_vectorized(edge_index, num_nodes, device="cpu")
 
 
 def collect_cluster_leaves(cluster_dict) -> List[int]:

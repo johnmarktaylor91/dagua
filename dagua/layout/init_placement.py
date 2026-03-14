@@ -12,13 +12,12 @@ Sprint 3 scaling strategy:
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
-from typing import Dict, List, Optional, Tuple, Union
+from collections import defaultdict
+from typing import Dict, List, Optional, Union
 
 import torch
 
-from dagua.utils import longest_path_layering
-from dagua.utils import _vram_fits
+from dagua.utils import VRAMBudget, longest_path_layering
 
 
 def init_positions(
@@ -34,13 +33,18 @@ def init_positions(
     Returns: [N, 2] tensor of (x, y) positions.
     """
     # Step 1: Assign layers (y-coordinates) via longest-path
-    layers = longest_path_layering(edge_index, num_nodes)
+    layers = longest_path_layering(edge_index, num_nodes, device=device)
 
     # Vectorized path is faster even at N=100 due to tensor ops vs Python loops
     if num_nodes > 100:
         return _init_positions_vectorized(
-            edge_index, num_nodes, node_sizes, layers,
-            node_sep, rank_sep, device,
+            edge_index,
+            num_nodes,
+            node_sizes,
+            layers,
+            node_sep,
+            rank_sep,
+            device,
         )
 
     # Step 2: Group nodes by layer
@@ -67,7 +71,7 @@ def init_positions(
 
         for _pass in range(num_passes):
             # Alternate mean and median heuristics (median is more robust)
-            use_median = (_pass % 2 == 1)
+            use_median = _pass % 2 == 1
 
             # Forward pass: order by center of parents
             for layer_idx in sorted_layers[1:]:
@@ -79,7 +83,9 @@ def init_positions(
                         vals = sorted(node_order[p] for p in parents)
                         if use_median:
                             mid = len(vals) // 2
-                            center = vals[mid] if len(vals) % 2 == 1 else (vals[mid - 1] + vals[mid]) / 2
+                            center = (
+                                vals[mid] if len(vals) % 2 == 1 else (vals[mid - 1] + vals[mid]) / 2
+                            )
                         else:
                             center = sum(vals) / len(vals)
                     else:
@@ -100,7 +106,9 @@ def init_positions(
                         vals = sorted(node_order[k] for k in kids)
                         if use_median:
                             mid = len(vals) // 2
-                            center = vals[mid] if len(vals) % 2 == 1 else (vals[mid - 1] + vals[mid]) / 2
+                            center = (
+                                vals[mid] if len(vals) % 2 == 1 else (vals[mid - 1] + vals[mid]) / 2
+                            )
                         else:
                             center = sum(vals) / len(vals)
                     else:
@@ -124,7 +132,9 @@ def init_positions(
     for layer_idx, nodes in layer_groups.items():
         y = layer_idx * rank_sep
 
-        total_width = sum(node_sizes_cpu[n, 0].item() for n in nodes) + node_sep * max(len(nodes) - 1, 0)
+        total_width = sum(node_sizes_cpu[n, 0].item() for n in nodes) + node_sep * max(
+            len(nodes) - 1, 0
+        )
         x_start = -total_width / 2
 
         x_cursor = x_start
@@ -161,7 +171,11 @@ def _init_positions_vectorized(
     """
     N = num_nodes
     compute_device = _choose_init_device(edge_index, num_nodes, node_sizes, device)
-    layer_t = layers.to(dtype=torch.long, device=compute_device) if isinstance(layers, torch.Tensor) else torch.tensor(layers, dtype=torch.long, device=compute_device)
+    layer_t = (
+        layers.to(dtype=torch.long, device=compute_device)
+        if isinstance(layers, torch.Tensor)
+        else torch.tensor(layers, dtype=torch.long, device=compute_device)
+    )
     num_layers = int(layer_t.max().item()) + 1 if N > 0 else 0
 
     # Build layer structure
@@ -176,15 +190,24 @@ def _init_positions_vectorized(
     # Skip if edge count is extreme (dense coarsened graphs from multilevel).
     spectral_order = None
     n_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
-    if N > 10000 and N <= 2_000_000 and n_edges > 0 and n_edges < N * 10:
+    spectral_cap = 50_000_000
+    if VRAMBudget.available():
+        spectral_bytes = N * 24 + n_edges * 32 + N * 16
+        if not VRAMBudget().fits(spectral_bytes):
+            spectral_cap = 2_000_000
+    if N > 10000 and N <= spectral_cap and n_edges > 0 and n_edges < N * 10:
         spectral_order = _spectral_order(edge_index, N, compute_device)
 
     if spectral_order is not None:
         # Use spectral ordering within each layer
-        order = _spectral_to_layer_order(spectral_order, layer_t, counts, offsets, sorted_by_layer, N, compute_device)
+        order = _spectral_to_layer_order(
+            spectral_order, layer_t, counts, offsets, sorted_by_layer, N, compute_device
+        )
     else:
         # Fallback: barycenter ordering
-        order = _barycenter_order(edge_index, N, layer_t, counts, offsets, sorted_by_layer, compute_device)
+        order = _barycenter_order(
+            edge_index, N, layer_t, counts, offsets, sorted_by_layer, compute_device
+        )
 
     # Assign coordinates based on final ordering
     positions = torch.zeros(N, 2, device=compute_device)
@@ -232,7 +255,7 @@ def _choose_init_device(
     # Conservative estimate for layer/order/degree/work buffers plus the copied
     # src/tgt edge arrays and output positions.
     needed_bytes = edge_bytes * 3 + num_nodes * 64 + node_bytes + num_nodes * 8
-    return device if _vram_fits(needed_bytes, safety=0.65) else "cpu"
+    return device if VRAMBudget().fits(needed_bytes) else "cpu"
 
 
 def _spectral_order(
@@ -273,7 +296,8 @@ def _spectral_order(
     try:
         # Random initial vectors
         X0 = torch.randn(N, 2, device=device)
-        eigenvalues, eigenvectors = torch.lobpcg(L, k=2, X=X0, largest=False, niter=30)
+        niter = min(30, max(10, 60 - N // 1_000_000))
+        eigenvalues, eigenvectors = torch.lobpcg(L, k=2, X=X0, largest=False, niter=niter)
         # Fiedler vector is the 2nd eigenvector (1st is constant)
         fiedler = eigenvectors[:, 1]
         return fiedler
@@ -401,11 +425,13 @@ def _transpose_heuristic(
             for i in range(len(nodes) - 1):
                 u, v = nodes[i], nodes[i + 1]
 
-                cross_before = _count_local_crossings(u, v, nodes, layer_groups, sorted_layers,
-                                                       children_of, parents_of, layer_idx)
+                cross_before = _count_local_crossings(
+                    u, v, nodes, layer_groups, sorted_layers, children_of, parents_of, layer_idx
+                )
                 nodes[i], nodes[i + 1] = v, u
-                cross_after = _count_local_crossings(v, u, nodes, layer_groups, sorted_layers,
-                                                      children_of, parents_of, layer_idx)
+                cross_after = _count_local_crossings(
+                    v, u, nodes, layer_groups, sorted_layers, children_of, parents_of, layer_idx
+                )
                 if cross_after >= cross_before:
                     nodes[i], nodes[i + 1] = u, v
                 else:
@@ -416,7 +442,8 @@ def _transpose_heuristic(
 
 
 def _count_local_crossings(
-    u: int, v: int,
+    u: int,
+    v: int,
     nodes: List[int],
     layer_groups: Dict[int, List[int]],
     sorted_layers: List[int],
@@ -485,7 +512,6 @@ def _spread_fanout_children(
 
     src = edge_index[0].tolist()
     tgt = edge_index[1].tolist()
-    N = positions.shape[0]
 
     # Compute out-degree
     out_degree: Dict[int, int] = defaultdict(int)
