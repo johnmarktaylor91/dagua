@@ -31,17 +31,17 @@ from typing import Any, Dict, Iterator, Optional
 import torch
 
 from dagua.styles import (
+    DEFAULT_THEME_OBJ,
     ClusterStyle,
     EdgeStyle,
     GraphStyle,
     NodeStyle,
     Theme,
     get_theme,
-    DEFAULT_THEME_OBJ,
 )
 
-
 # ─── Valid field names per target (for routing and did-you-mean) ──────────
+
 
 def _field_names(cls) -> set:
     return {f.name for f in dataclasses.fields(cls)}
@@ -61,6 +61,7 @@ def _get_layout_config_fields() -> set:
     global _LAYOUT_CONFIG_FIELDS
     if _LAYOUT_CONFIG_FIELDS is None:
         from dagua.config import LayoutConfig
+
         _LAYOUT_CONFIG_FIELDS = _field_names(LayoutConfig)
     return _LAYOUT_CONFIG_FIELDS
 
@@ -103,6 +104,7 @@ def _normalize_size_dtype(value: Any) -> torch.dtype:
         )
     return value
 
+
 # All valid kwarg names (union across all targets)
 def _all_valid_names() -> set:
     names = set(_META_FIELDS)
@@ -116,6 +118,7 @@ def _all_valid_names() -> set:
 def _did_you_mean(name: str) -> str:
     """Suggest the closest valid kwarg name using Levenshtein distance."""
     valid = _all_valid_names()
+
     # Simple edit distance (good enough for typo detection)
     def _dist(a: str, b: str) -> int:
         if len(a) > len(b):
@@ -137,6 +140,7 @@ def _did_you_mean(name: str) -> str:
 
 
 # ─── Thread-local state ──────────────────────────────────────────────────
+
 
 class _Defaults:
     """Container for one level of defaults."""
@@ -229,8 +233,8 @@ def configure(**kwargs: Any) -> None:
             cur.layout_overrides[key] = value
         elif key in _NODE_STYLE_FIELDS:
             cur.node_style_overrides[key] = value
-        elif key.startswith(_EDGE_PREFIX) and key[len(_EDGE_PREFIX):] in _EDGE_STYLE_FIELDS:
-            cur.edge_style_overrides[key[len(_EDGE_PREFIX):]] = value
+        elif key.startswith(_EDGE_PREFIX) and key[len(_EDGE_PREFIX) :] in _EDGE_STYLE_FIELDS:
+            cur.edge_style_overrides[key[len(_EDGE_PREFIX) :]] = value
         elif key in _GRAPH_STYLE_FIELDS:
             cur.graph_style_overrides[key] = value
         else:

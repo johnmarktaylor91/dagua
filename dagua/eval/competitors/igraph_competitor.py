@@ -52,18 +52,15 @@ class _IgraphBase(CompetitorBase):
             ig_layout = ig.layout(self.layout_algo, **self.layout_kwargs)
             elapsed = time.perf_counter() - start
             pos = _igraph_pos_to_tensor(ig_layout, graph.num_nodes)
-            return CompetitorResult(
-                name=self.name, pos=pos, runtime_seconds=elapsed
-            )
+            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
         except Exception as e:
             elapsed = time.perf_counter() - start
-            return CompetitorResult(
-                name=self.name, pos=None, runtime_seconds=elapsed, error=str(e)
-            )
+            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=str(e))
 
     def available(self) -> bool:
         try:
             import igraph  # noqa: F401
+
             return True
         except ImportError:
             return False

@@ -2,10 +2,10 @@
 
 import pytest
 import torch
-import dagua
 
+import dagua
 from dagua.graph import DaguaGraph
-from dagua.styles import NodeStyle, EdgeStyle
+from dagua.styles import NodeStyle
 
 
 class TestGraphConstruction:
@@ -74,7 +74,7 @@ class TestGraphConstruction:
 
     def test_mutation_invalidates_cached_layout(self, fast_config):
         g = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
-        pos = dagua.layout(g, fast_config)
+        _pos = dagua.layout(g, fast_config)
         assert g.has_fresh_layout
         assert g.layout_status == "fresh"
         assert g.last_positions is not None
@@ -163,6 +163,7 @@ class TestStyles:
         style = g.get_style_for_node(0)
         # Input type uses bluish green from Wong palette (muted fill)
         from dagua.styles import PALETTE, make_fill
+
         expected_fill = make_fill(PALETTE["bluish_green"])
         assert style.fill == expected_fill
 

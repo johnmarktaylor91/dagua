@@ -15,12 +15,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import torch
 
-from dagua.config import LayoutConfig, PARAM_REGISTRY_DICT
+from dagua.config import PARAM_REGISTRY_DICT, LayoutConfig
 from dagua.eval.graphs import TestGraph, get_test_graphs
 from dagua.layout import layout
 from dagua.metrics import composite, quick
 from dagua.render import render
-
 
 PLAYGROUND_PARAM_NAMES: Tuple[str, ...] = (
     "node_sep",
@@ -160,13 +159,17 @@ def _metrics_html(
     """Render a compact HTML summary for a single graph's live metrics."""
     delta = _metrics_delta(current, baseline)
     rows = []
-    for key in ("composite", "edge_crossings", "overlap_count", "dag_consistency", "edge_length_cv"):
+    for key in (
+        "composite",
+        "edge_crossings",
+        "overlap_count",
+        "dag_consistency",
+        "edge_length_cv",
+    ):
         cur = current[key]
         d = delta[key]
         sign = "+" if d >= 0 else ""
-        rows.append(
-            f"<tr><td><code>{key}</code></td><td>{cur:.3f}</td><td>{sign}{d:.3f}</td></tr>"
-        )
+        rows.append(f"<tr><td><code>{key}</code></td><td>{cur:.3f}</td><td>{sign}{d:.3f}</td></tr>")
     return (
         f"<h4 style='margin:0 0 6px 0'>{graph_name}</h4>"
         "<table style='border-collapse:collapse;width:100%'>"
@@ -198,9 +201,7 @@ def _panel_metrics_html(
         base = baseline_summary[key] / count
         d = cur - base
         sign = "+" if d >= 0 else ""
-        rows.append(
-            f"<tr><td><code>{key}</code></td><td>{cur:.3f}</td><td>{sign}{d:.3f}</td></tr>"
-        )
+        rows.append(f"<tr><td><code>{key}</code></td><td>{cur:.3f}</td><td>{sign}{d:.3f}</td></tr>")
     return (
         "<h4 style='margin:0 0 6px 0'>Panel summary</h4>"
         f"<p style='margin:0 0 6px 0'>{', '.join(graph_names)}</p>"
@@ -211,7 +212,9 @@ def _panel_metrics_html(
     )
 
 
-def _transition_positions(old: Optional[torch.Tensor], new: torch.Tensor, frames: int) -> Iterable[torch.Tensor]:
+def _transition_positions(
+    old: Optional[torch.Tensor], new: torch.Tensor, frames: int
+) -> Iterable[torch.Tensor]:
     """Yield interpolated positions for smooth notebook transitions."""
     if old is None or old.shape != new.shape or frames <= 1:
         yield new
@@ -252,14 +255,21 @@ def launch_playground(
         value="single",
         description="View",
     )
-    graph_select = widgets.Dropdown(options=graph_options, value=graph_options[0][1], description="Graph")
+    graph_select = widgets.Dropdown(
+        options=graph_options, value=graph_options[0][1], description="Graph"
+    )
     panel_select = widgets.Dropdown(
         options=[(name.replace("_", " "), name) for name in PLAYGROUND_PANEL_PRESETS],
         value="money",
         description="Panel",
     )
     direction = widgets.Dropdown(
-        options=[("Top to bottom", "TB"), ("Left to right", "LR"), ("Bottom to top", "BT"), ("Right to left", "RL")],
+        options=[
+            ("Top to bottom", "TB"),
+            ("Left to right", "LR"),
+            ("Bottom to top", "BT"),
+            ("Right to left", "RL"),
+        ],
         value=base_config.direction,
         description="Direction",
     )
@@ -310,7 +320,9 @@ def launch_playground(
         cfg = _apply_overrides(base_config, overrides)
         return replace(cfg, direction=direction.value)
 
-    def baseline_payload(graph_name: str, direction_value: str) -> Tuple[torch.Tensor, Dict[str, float]]:
+    def baseline_payload(
+        graph_name: str, direction_value: str
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
         key = (graph_name, direction_value)
         if key in baseline_cache:
             return baseline_cache[key]
@@ -363,10 +375,16 @@ def launch_playground(
                 grid = widgets.GridspecLayout(2, 2, width="100%")
                 for idx, (graph_name, graph, pos, old_pos) in enumerate(graph_payload[:4]):
                     alpha = 1.0 if frames <= 1 else float(frame_idx) / float(max(frames - 1, 1))
-                    interp = pos if old_pos is None or old_pos.shape != pos.shape else old_pos * (1.0 - alpha) + pos * alpha
+                    interp = (
+                        pos
+                        if old_pos is None or old_pos.shape != pos.shape
+                        else old_pos * (1.0 - alpha) + pos * alpha
+                    )
                     out = widgets.Output()
                     with out:
-                        fig, _ = render(graph, interp, cfg, title=graph_name.replace("_", " "), figsize=(5, 3.8))
+                        fig, _ = render(
+                            graph, interp, cfg, title=graph_name.replace("_", " "), figsize=(5, 3.8)
+                        )
                         display(fig)
                         plt.close(fig)
                     grid[idx // 2, idx % 2] = out
@@ -384,20 +402,29 @@ def launch_playground(
 
     def reset_defaults(_: Any) -> None:
         for name, slider in slider_widgets.items():
-            slider.value = int(PARAM_REGISTRY_DICT[name].default) if name == "steps" else float(PARAM_REGISTRY_DICT[name].default)
+            slider.value = (
+                int(PARAM_REGISTRY_DICT[name].default)
+                if name == "steps"
+                else float(PARAM_REGISTRY_DICT[name].default)
+            )
         direction.value = base_config.direction
 
     reset.on_click(reset_defaults)
     for control in [mode, graph_select, panel_select, direction, animate, *slider_widgets.values()]:
         control.observe(refresh, names="value")
 
-    accordion = widgets.Accordion(children=[widgets.VBox(list(slider_widgets.values()))], selected_index=0)
+    accordion = widgets.Accordion(
+        children=[widgets.VBox(list(slider_widgets.values()))], selected_index=0
+    )
     accordion.set_title(0, "Layout dials")
 
     controls = widgets.VBox(
         [
-            widgets.HTML("<h3 style='margin:0'>Dagua Interactive Tuning Playground</h3>"
-                         "<p style='margin:4px 0 10px 0'>Turn the dials, watch layouts move, and see the main placement metrics update live.</p>"),
+            widgets.HTML(
+                "<h3 style='margin:0'>Dagua Interactive Tuning Playground</h3>"
+                "<p style='margin:4px 0 10px 0'>Turn the dials, watch layouts "
+                "move, and see the main placement metrics update live.</p>"
+            ),
             widgets.HBox([mode, graph_select, panel_select]),
             widgets.HBox([direction, animate, reset]),
             accordion,

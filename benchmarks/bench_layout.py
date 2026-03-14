@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 
@@ -35,9 +35,7 @@ def _random_dag(n_nodes: int, edge_ratio: float = 1.5, seed: int = 42) -> DaguaG
     rng = random.Random(seed)
     n_edges = int(n_nodes * edge_ratio)
 
-    g = DaguaGraph.from_edge_index(
-        torch.zeros(2, 0, dtype=torch.long), num_nodes=n_nodes
-    )
+    g = DaguaGraph.from_edge_index(torch.zeros(2, 0, dtype=torch.long), num_nodes=n_nodes)
 
     edges = set()
     attempts = 0
@@ -98,9 +96,7 @@ def _layered_dag(n_nodes: int, width: int = 10, seed: int = 42) -> DaguaGraph:
             for t in targets:
                 edges.add((node, t))
 
-    g = DaguaGraph.from_edge_index(
-        torch.zeros(2, 0, dtype=torch.long), num_nodes=n_nodes
-    )
+    g = DaguaGraph.from_edge_index(torch.zeros(2, 0, dtype=torch.long), num_nodes=n_nodes)
 
     if edges:
         edge_list = list(edges)
@@ -185,6 +181,7 @@ def time_elk(graph: DaguaGraph, timeout: float = 300.0) -> Optional[float]:
     }
 
     import json
+
     graph_json = json.dumps(elk_graph)
     graph_kb = len(graph_json) // 1024
     heap_mb = min(65536, max(16384, graph_kb * 48))
@@ -267,9 +264,9 @@ def run_benchmark(
             time_elk(g_warmup, timeout=10)
 
     for n in sizes:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Benchmarking N={n:,} nodes ({graph_type})")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         # Generate graph
         gen_start = time.perf_counter()
@@ -292,24 +289,24 @@ def run_benchmark(
         # Graphviz
         gv_time = None
         if n <= 50000:
-            print(f"  Graphviz (dot)...", end="", flush=True)
+            print("  Graphviz (dot)...", end="", flush=True)
             gv_time = time_graphviz(g, timeout=graphviz_timeout)
             if gv_time is not None:
                 print(f" {gv_time:.2f}s")
             else:
-                print(f" TIMEOUT/FAILED")
+                print(" TIMEOUT/FAILED")
         else:
             print(f"  Graphviz: skipped (N>{50000:,})")
 
         # ELK
         elk_time = None
         if elk_ok and n <= 100000:
-            print(f"  ELK (layered)...", end="", flush=True)
+            print("  ELK (layered)...", end="", flush=True)
             elk_time = time_elk(g, timeout=graphviz_timeout)
             if elk_time is not None:
                 print(f" {elk_time:.2f}s")
             else:
-                print(f" TIMEOUT/FAILED")
+                print(" TIMEOUT/FAILED")
 
         # Speedup vs Graphviz
         speedup_gv = None
@@ -349,16 +346,24 @@ def print_summary(results: List[Dict]) -> None:
     """Print a formatted summary table."""
     has_elk = any(r.get("elk_seconds") is not None for r in results)
 
-    print(f"\n{'='*100}")
+    print(f"\n{'=' * 100}")
     print("RUNTIME SCALING BENCHMARK SUMMARY")
-    print(f"{'='*100}")
+    print(f"{'=' * 100}")
 
     if has_elk:
-        print(f"{'Nodes':>8} {'Edges':>8} {'Dagua(s)':>10} {'GV(s)':>10} {'ELK(s)':>10} {'vs GV':>12} {'vs ELK':>12}")
-        print(f"{'-'*8} {'-'*8} {'-'*10} {'-'*10} {'-'*10} {'-'*12} {'-'*12}")
+        header = (
+            f"{'Nodes':>8} {'Edges':>8} {'Dagua(s)':>10} {'GV(s)':>10} "
+            f"{'ELK(s)':>10} {'vs GV':>12} {'vs ELK':>12}"
+        )
+        print(header)
+        print(f"{'-' * 8} {'-' * 8} {'-' * 10} {'-' * 10} {'-' * 10} {'-' * 12} {'-' * 12}")
     else:
-        print(f"{'Nodes':>8} {'Edges':>8} {'Dagua(s)':>10} {'GV(s)':>10} {'Speedup':>10} {'Winner':>10}")
-        print(f"{'-'*8} {'-'*8} {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
+        header = (
+            f"{'Nodes':>8} {'Edges':>8} {'Dagua(s)':>10} {'GV(s)':>10} "
+            f"{'Speedup':>10} {'Winner':>10}"
+        )
+        print(header)
+        print(f"{'-' * 8} {'-' * 8} {'-' * 10} {'-' * 10} {'-' * 10} {'-' * 10}")
 
     for r in results:
         n = r["num_nodes"]
@@ -373,22 +378,30 @@ def print_summary(results: List[Dict]) -> None:
         elk_str = f"{et:.2f}" if et is not None else "N/A"
 
         if sp_gv is not None:
-            gv_sp_str = f"{sp_gv:.1f}x dagua" if sp_gv > 1 else f"{1/sp_gv:.1f}x gv"
+            gv_sp_str = f"{sp_gv:.1f}x dagua" if sp_gv > 1 else f"{1 / sp_gv:.1f}x gv"
         else:
             gv_sp_str = "N/A"
 
         if sp_elk is not None:
-            elk_sp_str = f"{sp_elk:.1f}x dagua" if sp_elk > 1 else f"{1/sp_elk:.1f}x elk"
+            elk_sp_str = f"{sp_elk:.1f}x dagua" if sp_elk > 1 else f"{1 / sp_elk:.1f}x elk"
         else:
             elk_sp_str = "N/A"
 
         if has_elk:
-            print(f"{n:>8,} {e:>8,} {dt:>10.2f} {gv_str:>10} {elk_str:>10} {gv_sp_str:>12} {elk_sp_str:>12}")
+            row = (
+                f"{n:>8,} {e:>8,} {dt:>10.2f} {gv_str:>10} "
+                f"{elk_str:>10} {gv_sp_str:>12} {elk_sp_str:>12}"
+            )
+            print(row)
         else:
-            winner = "dagua" if sp_gv is not None and sp_gv > 1 else ("graphviz" if sp_gv is not None else "dagua*")
+            winner = (
+                "dagua"
+                if sp_gv is not None and sp_gv > 1
+                else ("graphviz" if sp_gv is not None else "dagua*")
+            )
             print(f"{n:>8,} {e:>8,} {dt:>10.2f} {gv_str:>10} {gv_sp_str:>10} {winner:>10}")
 
-    print(f"\n* dagua wins by default (competitor timed out or unavailable)")
+    print("\n* dagua wins by default (competitor timed out or unavailable)")
 
 
 def plot_results(results: List[Dict], output: str) -> None:
@@ -417,9 +430,25 @@ def plot_results(results: List[Dict], output: str) -> None:
     # Left: absolute runtime
     ax1.plot(nodes, dagua_times, "o-", color="#2196F3", linewidth=2, label="Dagua", markersize=6)
     if gv_valid:
-        ax1.plot(gv_nodes, gv_valid, "s--", color="#FF5722", linewidth=2, label="Graphviz (dot)", markersize=6)
+        ax1.plot(
+            gv_nodes,
+            gv_valid,
+            "s--",
+            color="#FF5722",
+            linewidth=2,
+            label="Graphviz (dot)",
+            markersize=6,
+        )
     if elk_valid:
-        ax1.plot(elk_nodes, elk_valid, "^--", color="#4CAF50", linewidth=2, label="ELK (layered)", markersize=6)
+        ax1.plot(
+            elk_nodes,
+            elk_valid,
+            "^--",
+            color="#4CAF50",
+            linewidth=2,
+            label="ELK (layered)",
+            markersize=6,
+        )
     ax1.set_xlabel("Number of Nodes")
     ax1.set_ylabel("Runtime (seconds)")
     ax1.set_title("Runtime Scaling: Dagua vs Graphviz")
@@ -429,7 +458,11 @@ def plot_results(results: List[Dict], output: str) -> None:
     ax1.grid(True, alpha=0.3)
 
     # Right: speedup ratio
-    speedups = [(r["num_nodes"], r["speedup_dagua_over_gv"]) for r in results if r["speedup_dagua_over_gv"] is not None]
+    speedups = [
+        (r["num_nodes"], r["speedup_dagua_over_gv"])
+        for r in results
+        if r["speedup_dagua_over_gv"] is not None
+    ]
     if speedups:
         sp_nodes, sp_vals = zip(*speedups)
         colors = ["#4CAF50" if s > 1 else "#FF5722" for s in sp_vals]
@@ -444,7 +477,7 @@ def plot_results(results: List[Dict], output: str) -> None:
 
         # Annotate bars
         for i, (n, s) in enumerate(zip(sp_nodes, sp_vals)):
-            label = f"{s:.1f}x" if s > 1 else f"{1/s:.1f}x GV"
+            label = f"{s:.1f}x" if s > 1 else f"{1 / s:.1f}x GV"
             ax2.text(i, s + 0.05 * max(sp_vals), label, ha="center", fontsize=8)
 
     plt.tight_layout()
@@ -462,7 +495,9 @@ def main():
         default=[100, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000],
         help="Node counts to benchmark",
     )
-    parser.add_argument("--type", choices=["random", "layered"], default="random", help="Graph type")
+    parser.add_argument(
+        "--type", choices=["random", "layered"], default="random", help="Graph type"
+    )
     parser.add_argument("--steps", type=int, default=50, help="Dagua optimization steps")
     parser.add_argument("--device", default="cpu", help="Dagua device (cpu/cuda)")
     parser.add_argument("--timeout", type=float, default=300.0, help="Graphviz timeout (seconds)")

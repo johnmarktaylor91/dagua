@@ -14,7 +14,11 @@ def _make_chain(n: int) -> DaguaGraph:
     """Simple chain graph: 0→1→2→...→n-1."""
     if n == 0:
         return DaguaGraph()
-    ei = torch.stack([torch.arange(n - 1), torch.arange(1, n)]) if n > 1 else torch.zeros(2, 0, dtype=torch.long)
+    ei = (
+        torch.stack([torch.arange(n - 1), torch.arange(1, n)])
+        if n > 1
+        else torch.zeros(2, 0, dtype=torch.long)
+    )
     return DaguaGraph.from_edge_index(ei, num_nodes=n)
 
 
@@ -109,18 +113,23 @@ class TestGraphvizComparison:
     @pytest.fixture
     def graphviz_available(self):
         import shutil
+
         if not shutil.which("dot"):
             pytest.skip("Graphviz not installed")
 
     def _time_graphviz(self, graph: DaguaGraph) -> float:
         import subprocess
+
         from dagua.graphviz_utils import to_dot
 
         dot_str = to_dot(graph)
         start = time.perf_counter()
         result = subprocess.run(
             ["dot", "-Tjson"],
-            input=dot_str, capture_output=True, text=True, timeout=120,
+            input=dot_str,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         elapsed = time.perf_counter() - start
         assert result.returncode == 0, f"Graphviz failed: {result.stderr[:200]}"
@@ -135,7 +144,10 @@ class TestGraphvizComparison:
         dagua.layout(g, config)
         dagua_time = time.perf_counter() - dagua_time
         gv_time = self._time_graphviz(g)
-        print(f"\n  N=100: dagua={dagua_time:.2f}s, graphviz={gv_time:.2f}s, ratio={dagua_time/gv_time:.1f}x")
+        print(
+            f"\n  N=100: dagua={dagua_time:.2f}s, graphviz={gv_time:.2f}s, "
+            f"ratio={dagua_time / gv_time:.1f}x"
+        )
 
     @pytest.mark.slow
     def test_scaling_comparison_500(self, graphviz_available):
@@ -146,7 +158,10 @@ class TestGraphvizComparison:
         dagua.layout(g, config)
         dagua_time = time.perf_counter() - dagua_time
         gv_time = self._time_graphviz(g)
-        print(f"\n  N=500: dagua={dagua_time:.2f}s, graphviz={gv_time:.2f}s, ratio={dagua_time/gv_time:.1f}x")
+        print(
+            f"\n  N=500: dagua={dagua_time:.2f}s, graphviz={gv_time:.2f}s, "
+            f"ratio={dagua_time / gv_time:.1f}x"
+        )
 
     @pytest.mark.slow
     def test_scaling_comparison_1000(self, graphviz_available):
@@ -157,7 +172,10 @@ class TestGraphvizComparison:
         dagua.layout(g, config)
         dagua_time = time.perf_counter() - dagua_time
         gv_time = self._time_graphviz(g)
-        print(f"\n  N=1000: dagua={dagua_time:.2f}s, graphviz={gv_time:.2f}s, ratio={dagua_time/gv_time:.1f}x")
+        print(
+            f"\n  N=1000: dagua={dagua_time:.2f}s, graphviz={gv_time:.2f}s, "
+            f"ratio={dagua_time / gv_time:.1f}x"
+        )
 
     @pytest.mark.slow
     def test_scaling_comparison_5000(self, graphviz_available):
@@ -169,7 +187,10 @@ class TestGraphvizComparison:
         dagua.layout(g, config)
         dagua_time = time.perf_counter() - dagua_time
         gv_time = self._time_graphviz(g)
-        print(f"\n  N=5000: dagua={dagua_time:.2f}s, graphviz={gv_time:.2f}s, ratio={dagua_time/gv_time:.1f}x")
+        print(
+            f"\n  N=5000: dagua={dagua_time:.2f}s, graphviz={gv_time:.2f}s, "
+            f"ratio={dagua_time / gv_time:.1f}x"
+        )
 
 
 def _make_random_dag_vectorized(n: int, edge_ratio: float = 1.3, seed: int = 42) -> DaguaGraph:
@@ -267,7 +288,6 @@ class TestExtremeScale:
         assert pos.shape == (n, 2)
         print(f"\n  5M nodes (GPU): {elapsed:.1f}s")
 
-
     @pytest.mark.rare
     def test_20m_nodes_gpu(self):
         """20M nodes on GPU with VRAM-aware auto-escalation."""
@@ -309,7 +329,6 @@ class TestExtremeScale:
         assert not torch.isnan(pos).any(), "NaN in positions"
         assert not torch.isinf(pos).any(), "Inf in positions"
         print(f"\n  20M nodes: {elapsed:.1f}s")
-
 
     @pytest.mark.rare
     def test_50m_nodes(self):

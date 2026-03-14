@@ -4,14 +4,14 @@ import pytest
 
 igraph = pytest.importorskip("igraph")
 
-from dagua.graph import DaguaGraph
-from dagua.eval.competitors.igraph_competitor import (
-    IgraphSugiyama,
+from dagua.eval.competitors.igraph_competitor import (  # noqa: E402
     IgraphFR,
     IgraphRT,
+    IgraphSugiyama,
     _graph_to_igraph,
     _igraph_pos_to_tensor,
 )
+from dagua.graph import DaguaGraph  # noqa: E402
 
 
 def _make_simple_graph():

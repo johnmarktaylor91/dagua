@@ -14,9 +14,7 @@ from dagua.playground import (
     _panel_graph_names,
 )
 
-pytestmark = pytest.mark.filterwarnings(
-    "ignore:enable_nested_tensor is True.*:UserWarning"
-)
+pytestmark = pytest.mark.filterwarnings("ignore:enable_nested_tensor is True.*:UserWarning")
 
 
 def test_playground_catalog_contains_curated_graphs() -> None:

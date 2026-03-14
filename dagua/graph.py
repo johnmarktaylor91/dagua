@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import copy as _copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
 from dagua.styles import (
-    ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
-    DEFAULT_THEME, DEFAULT_NODE_STYLES, DEFAULT_THEME_OBJ,
-    resolve_node_style, resolve_edge_style,
+    DEFAULT_THEME_OBJ,
+    ClusterStyle,
+    EdgeStyle,
+    GraphStyle,
+    NodeStyle,
+    Theme,
+    resolve_edge_style,
+    resolve_node_style,
 )
-import copy as _copy
 from dagua.utils import compute_node_size
 
 _DTYPE_NAME_TO_TORCH = {
@@ -73,7 +78,9 @@ class DaguaGraph:
 
     # ID mapping
     _id_to_index: Dict[Any, int] = field(default_factory=dict, repr=False)
-    _theme: Any = field(default_factory=lambda: _copy.deepcopy(DEFAULT_THEME_OBJ), repr=False)  # Theme or Dict[str, NodeStyle]
+    _theme: Any = field(
+        default_factory=lambda: _copy.deepcopy(DEFAULT_THEME_OBJ), repr=False
+    )  # Theme or Dict[str, NodeStyle]
 
     # Internal edge storage — not part of the public API
     _pending_edges: List[Tuple[int, int]] = field(default_factory=list, repr=False)
@@ -90,7 +97,9 @@ class DaguaGraph:
     _layout_revision: int = field(default=-1, repr=False)
     _layout_curves: Optional[Any] = field(default=None, repr=False)
     _routing_revision: int = field(default=-1, repr=False)
-    _layout_label_positions: Optional[List[Optional[Tuple[float, float]]]] = field(default=None, repr=False)
+    _layout_label_positions: Optional[List[Optional[Tuple[float, float]]]] = field(
+        default=None, repr=False
+    )
     _label_revision: int = field(default=-1, repr=False)
 
     @property
@@ -169,9 +178,7 @@ class DaguaGraph:
         if self._edge_index_tensor is None or self._edge_index_tensor.numel() == 0:
             self._edge_index_tensor = new_edges
         else:
-            self._edge_index_tensor = torch.cat(
-                [self._edge_index_tensor, new_edges], dim=1
-            )
+            self._edge_index_tensor = torch.cat([self._edge_index_tensor, new_edges], dim=1)
         self._pending_edges.clear()
         self._back_edge_mask = None  # invalidate cycle cache
 
@@ -234,7 +241,9 @@ class DaguaGraph:
         self._invalidate_routing()
         return positions
 
-    def cache_routing(self, curves, label_positions: Optional[List[Optional[Tuple[float, float]]]] = None) -> None:
+    def cache_routing(
+        self, curves, label_positions: Optional[List[Optional[Tuple[float, float]]]] = None
+    ) -> None:
         """Cache routed edges and optional label positions for the current revision."""
         self._layout_curves = curves
         self._routing_revision = self.revision
@@ -309,6 +318,7 @@ class DaguaGraph:
             # Dict-of-dicts: keys are child cluster names, values are member lists or nested dicts.
             # Recursively flatten to get leaf indices, and auto-populate cluster_parents.
             from dagua.utils import collect_cluster_leaves
+
             all_indices = collect_cluster_leaves(members)
             self.clusters[name] = all_indices
             # Auto-create child clusters from dict keys
@@ -389,8 +399,12 @@ class DaguaGraph:
             ff = font_family if style.font_family in ("", font_family) else style.font_family
             fs = style.font_size if style.font_size != 8.5 else font_size
             w, h, efs = compute_node_size(
-                label, ff, fs, padding,
-                shape=style.shape, font_weight=style.font_weight,
+                label,
+                ff,
+                fs,
+                padding,
+                shape=style.shape,
+                font_weight=style.font_weight,
                 overflow_policy=style.overflow_policy,
                 min_font_size=style.min_font_size,
             )
@@ -425,6 +439,7 @@ class DaguaGraph:
         global_default = None
         try:
             from dagua.defaults import get_default_node_style_overrides
+
             overrides = get_default_node_style_overrides()
             if overrides:
                 global_default = NodeStyle(**overrides)
@@ -432,8 +447,12 @@ class DaguaGraph:
             pass
 
         # Fast path: no cascade needed if only theme matters
-        if (per_element is None and not cluster_member_styles
-                and self.default_node_style is None and global_default is None):
+        if (
+            per_element is None
+            and not cluster_member_styles
+            and self.default_node_style is None
+            and global_default is None
+        ):
             return theme_style
 
         return resolve_node_style(
@@ -470,7 +489,11 @@ class DaguaGraph:
         # Collect cluster member edge styles for the source node
         cluster_member_styles = None
         self._finalize_edges()
-        if self._edge_index_tensor is not None and self._edge_index_tensor.numel() > 0 and idx < self._edge_index_tensor.shape[1]:
+        if (
+            self._edge_index_tensor is not None
+            and self._edge_index_tensor.numel() > 0
+            and idx < self._edge_index_tensor.shape[1]
+        ):
             src_idx = int(self._edge_index_tensor[0, idx].item())
             cluster_member_styles = self._get_cluster_member_edge_styles(src_idx)
 
@@ -478,6 +501,7 @@ class DaguaGraph:
         global_default = None
         try:
             from dagua.defaults import get_default_edge_style_overrides
+
             overrides = get_default_edge_style_overrides()
             if overrides:
                 global_default = EdgeStyle(**overrides)
@@ -485,8 +509,12 @@ class DaguaGraph:
             pass
 
         # Fast path
-        if (per_element is None and not cluster_member_styles
-                and self.default_edge_style is None and global_default is None):
+        if (
+            per_element is None
+            and not cluster_member_styles
+            and self.default_edge_style is None
+            and global_default is None
+        ):
             return theme_style
 
         return resolve_edge_style(
@@ -507,7 +535,7 @@ class DaguaGraph:
         for name, members in self.clusters.items():
             if isinstance(members, list) and node_idx in members:
                 style = self.cluster_styles.get(name)
-                if style is not None and hasattr(style, 'member_node_style'):
+                if style is not None and hasattr(style, "member_node_style"):
                     result.append((self.cluster_depth(name), style.member_node_style))
         if not result:
             return None
@@ -523,7 +551,7 @@ class DaguaGraph:
         for name, members in self.clusters.items():
             if isinstance(members, list) and node_idx in members:
                 style = self.cluster_styles.get(name)
-                if style is not None and hasattr(style, 'member_edge_style'):
+                if style is not None and hasattr(style, "member_edge_style"):
                     result.append((self.cluster_depth(name), style.member_edge_style))
         if not result:
             return None
@@ -532,8 +560,13 @@ class DaguaGraph:
 
     # --- Pin, align, export helpers ---
 
-    def pin(self, node_id: Any, x: Optional[float] = None, y: Optional[float] = None,
-            weight: float = float("inf")) -> None:
+    def pin(
+        self,
+        node_id: Any,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        weight: float = float("inf"),
+    ) -> None:
         """Pin a node's position (soft or hard).
 
         Args:
@@ -591,9 +624,11 @@ class DaguaGraph:
 
         if self.default_node_style is not None:
             import dataclasses as _dc
+
             data["default_node_style"] = _dc.asdict(self.default_node_style)
         if self.default_edge_style is not None:
             import dataclasses as _dc
+
             data["default_edge_style"] = _dc.asdict(self.default_edge_style)
 
         p = Path(path)
@@ -628,6 +663,7 @@ class DaguaGraph:
         if self._edge_index_tensor is None or self._edge_index_tensor.numel() == 0:
             return None
         from dagua.layout.cycle import detect_back_edges
+
         mask = detect_back_edges(self._edge_index_tensor, self.num_nodes)
         if mask.any():
             self._back_edge_mask = mask
@@ -666,6 +702,7 @@ class DaguaGraph:
             self._original_edge_index = None
             return
         from dagua.layout.cycle import make_acyclic
+
         assert self._edge_index_tensor is not None
         self._original_edge_index = self._edge_index_tensor.clone()
         self._edge_index_tensor = make_acyclic(self._edge_index_tensor, mask)
@@ -700,6 +737,7 @@ class DaguaGraph:
     def leaf_cluster_members(self, name: str) -> List[int]:
         """Recursively collect all leaf node indices (own members + children's members)."""
         from dagua.utils import collect_cluster_leaves
+
         members = self.clusters.get(name, [])
         if isinstance(members, dict):
             result = set(collect_cluster_leaves(members))
@@ -725,6 +763,7 @@ class DaguaGraph:
         if not self.clusters or self.num_nodes == 0:
             return None
         from dagua.utils import collect_cluster_leaves
+
         ids = torch.full((self.num_nodes,), -1, dtype=torch.long)
         node_depth = [-1] * self.num_nodes  # track deepest assignment per node
         cluster_name_list = sorted(self.clusters.keys())
@@ -798,6 +837,7 @@ class DaguaGraph:
         requested_dtype = kwargs.get("index_dtype")
         if requested_dtype is None:
             from dagua.defaults import get_default_index_dtype
+
             requested_dtype = get_default_index_dtype()
         requested_dtype = cls._normalize_index_dtype(requested_dtype)
         ei = edge_index.to(dtype=requested_dtype)
@@ -811,8 +851,7 @@ class DaguaGraph:
             min_idx = ei.min().item()
             if min_idx < 0:
                 raise ValueError(
-                    f"edge_index contains negative index {min_idx}. "
-                    f"All indices must be >= 0."
+                    f"edge_index contains negative index {min_idx}. All indices must be >= 0."
                 )
 
         g = cls(**kwargs)
@@ -853,6 +892,7 @@ class DaguaGraph:
         See ``dagua.io.load`` for full documentation.
         """
         from dagua.io import load
+
         return load(source)
 
     def save(self, path, format=None):
@@ -861,6 +901,7 @@ class DaguaGraph:
         See ``dagua.io.save`` for full documentation.
         """
         from dagua.io import save
+
         save(self, path, format=format)
 
     @classmethod
@@ -870,6 +911,7 @@ class DaguaGraph:
         See ``dagua.io.graph_from_yaml`` for full documentation.
         """
         from dagua.io import graph_from_yaml
+
         return graph_from_yaml(data)
 
     def to_yaml(self, path=None) -> str:
@@ -878,44 +920,52 @@ class DaguaGraph:
         See ``dagua.io.graph_to_yaml`` for full documentation.
         """
         from dagua.io import graph_to_yaml
+
         return graph_to_yaml(self, path)
 
     def to_networkx(self):
         """Export to NetworkX DiGraph. See ``dagua.io.to_networkx``."""
         from dagua.io import to_networkx
+
         return to_networkx(self)
 
     def to_igraph(self):
         """Export to igraph.Graph. See ``dagua.io.to_igraph``."""
         from dagua.io import to_igraph
+
         return to_igraph(self)
 
     def to_pyg(self):
         """Export to torch_geometric.data.Data. See ``dagua.io.to_pyg``."""
         from dagua.io import to_pyg
+
         return to_pyg(self)
 
     def to_scipy(self):
         """Export to scipy.sparse.csr_matrix. See ``dagua.io.to_scipy``."""
         from dagua.io import to_scipy
+
         return to_scipy(self)
 
     @classmethod
     def from_igraph(cls, ig_graph, **kwargs) -> DaguaGraph:
         """Create graph from igraph.Graph. See ``dagua.io.from_igraph``."""
         from dagua.io import from_igraph
+
         return from_igraph(ig_graph, **kwargs)
 
     @classmethod
     def from_scipy(cls, adj_matrix, labels=None, **kwargs) -> DaguaGraph:
         """Create graph from scipy sparse adjacency. See ``dagua.io.from_scipy``."""
         from dagua.io import from_scipy
+
         return from_scipy(adj_matrix, labels=labels, **kwargs)
 
     @classmethod
     def from_dot(cls, dot_string: str, **kwargs) -> DaguaGraph:
         """Create graph from DOT string. See ``dagua.io.from_dot``."""
         from dagua.io import from_dot
+
         return from_dot(dot_string, **kwargs)
 
     @classmethod
@@ -968,7 +1018,7 @@ class DaguaGraph:
             if parent_id not in node_ids:
                 continue
 
-            for child_label in (getattr(entry, "child_layers", None) or []):
+            for child_label in getattr(entry, "child_layers", None) or []:
                 if child_label not in node_ids:
                     continue
 
@@ -983,7 +1033,9 @@ class DaguaGraph:
                 if not getattr(entry, "has_input_ancestor", True):
                     edge_style = EdgeStyle(style="dashed")
 
-                g.add_edge(parent_id, child_label, label=edge_label, type=edge_type, style=edge_style)
+                g.add_edge(
+                    parent_id, child_label, label=edge_label, type=edge_type, style=edge_style
+                )
 
         # Build clusters from module nesting
         _build_torchlens_clusters(g, entries, model_log)
@@ -1066,7 +1118,9 @@ def _build_torchlens_clusters(g: DaguaGraph, entries, model_log) -> None:
         node_idx = g._id_to_index[node_id]
 
         for module_addr in containing:
-            cluster_name = module_addr.split(":")[0] if ":" in str(module_addr) else str(module_addr)
+            cluster_name = (
+                module_addr.split(":")[0] if ":" in str(module_addr) else str(module_addr)
+            )
             if cluster_name == "self":
                 continue
 

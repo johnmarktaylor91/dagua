@@ -54,14 +54,10 @@ class _NetworkXBase(CompetitorBase):
             nx_pos = func(G, **self.layout_kwargs)
             elapsed = time.perf_counter() - start
             pos = _nx_pos_to_tensor(nx_pos, graph.num_nodes)
-            return CompetitorResult(
-                name=self.name, pos=pos, runtime_seconds=elapsed
-            )
+            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
         except Exception as e:
             elapsed = time.perf_counter() - start
-            return CompetitorResult(
-                name=self.name, pos=None, runtime_seconds=elapsed, error=str(e)
-            )
+            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=str(e))
 
     def available(self) -> bool:
         try:

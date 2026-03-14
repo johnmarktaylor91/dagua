@@ -12,7 +12,7 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Dict, Optional, cast
 
 import torch
 
@@ -31,7 +31,7 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
     full-fidelity Dagua -> Graphviz round-tripping.
     """
     lines = ["digraph G {"]
-    lines.append('  rankdir=TB;')
+    lines.append("  rankdir=TB;")
     lines.append('  node [shape=box, style=filled, fontname="Helvetica"];')
     lines.append('  edge [fontname="Helvetica", fontsize=9];')
 
@@ -45,16 +45,16 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
             f'label="{label}"',
             f'fillcolor="{style.fill}"',
             f'fontcolor="{style.font_color}"',
-            f'fontsize={style.font_size}',
+            f"fontsize={style.font_size}",
         ]
         if style.shape == "ellipse":
-            attrs.append('shape=ellipse')
+            attrs.append("shape=ellipse")
         elif style.shape == "circle":
-            attrs.append('shape=circle')
+            attrs.append("shape=circle")
         elif style.shape == "diamond":
-            attrs.append('shape=diamond')
+            attrs.append("shape=diamond")
         else:
-            attrs.append('shape=box')
+            attrs.append("shape=box")
             if style.shape == "roundrect":
                 attrs.append('style="filled,rounded"')
 
@@ -65,7 +65,7 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
             attrs.append(f'pos="{x_inch},{y_inch}!"')
 
         attrs_str = ", ".join(attrs)
-        lines.append(f'  n{i} [{attrs_str}];')
+        lines.append(f"  n{i} [{attrs_str}];")
 
     # Edges
     if graph.edge_index.numel() > 0:
@@ -79,11 +79,11 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
             edge_style = graph.get_style_for_edge(e)
             edge_attrs.append(f'color="{edge_style.color}"')
             if edge_style.style == "dashed":
-                edge_attrs.append('style=dashed')
+                edge_attrs.append("style=dashed")
             elif edge_style.style == "dotted":
-                edge_attrs.append('style=dotted')
+                edge_attrs.append("style=dotted")
             attrs_str = ", ".join(edge_attrs) if edge_attrs else ""
-            lines.append(f'  n{s} -> n{t} [{attrs_str}];')
+            lines.append(f"  n{s} -> n{t} [{attrs_str}];")
 
     # Clusters (subgraphs)
     if graph.clusters:
@@ -91,18 +91,19 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
             if isinstance(members, dict):
                 # Nested clusters — flatten for DOT
                 from dagua.utils import collect_cluster_leaves
+
                 indices = collect_cluster_leaves(members)
             else:
                 indices = members
             if not indices:
                 continue
             cluster_label = graph.cluster_labels.get(name, name)
-            lines.append(f'  subgraph cluster_{name.replace(".", "_")} {{')
+            lines.append(f"  subgraph cluster_{name.replace('.', '_')} {{")
             lines.append(f'    label="{cluster_label}";')
             lines.append('    style=filled; color=lightgrey; fillcolor="#f0f0f0";')
             for idx in indices:
-                lines.append(f'    n{idx};')
-            lines.append('  }')
+                lines.append(f"    n{idx};")
+            lines.append("  }")
 
     lines.append("}")
     return "\n".join(lines)
@@ -126,7 +127,9 @@ def layout_with_graphviz(
     try:
         result = subprocess.run(
             [engine, "-Tjson", dot_path],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode != 0:
             raise RuntimeError(f"Graphviz failed: {result.stderr}")
@@ -178,7 +181,9 @@ def render_graphviz_native(
     try:
         result = subprocess.run(
             [engine, f"-T{fmt}", "-o", output, dot_path],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode != 0:
             raise RuntimeError(f"Graphviz render failed: {result.stderr}")
@@ -205,10 +210,10 @@ def render_comparison(
     Returns path to the output file.
     """
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from dagua.render.mpl import render as mpl_render
     from dagua.metrics import compute_all_metrics
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
@@ -250,7 +255,7 @@ def render_comparison(
 def _render_on_axes(ax, graph, positions, title: str):
     """Render a graph layout onto a specific matplotlib axes."""
     from dagua.edges import route_edges
-    from dagua.render.mpl import _draw_clusters, _draw_edges, _draw_nodes, _draw_node_labels
+    from dagua.render.mpl import _draw_clusters, _draw_edges, _draw_node_labels, _draw_nodes
 
     pos = positions.detach().cpu().numpy()
     graph.compute_node_sizes()
@@ -298,6 +303,7 @@ def render_multi_comparison(
         Path to the output file.
     """
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -327,8 +333,13 @@ def render_multi_comparison(
             )
         except Exception as e:
             ax.text(
-                0.5, 0.5, f"{engine_name}\nError: {e}",
-                ha="center", va="center", transform=ax.transAxes, fontsize=10,
+                0.5,
+                0.5,
+                f"{engine_name}\nError: {e}",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=10,
             )
             ax.axis("off")
 

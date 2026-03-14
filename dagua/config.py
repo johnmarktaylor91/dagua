@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
@@ -169,7 +169,9 @@ PARAM_REGISTRY: List[TunableParam] = [
         name="w_crossing",
         display_name="Crossing Minimization",
         description="Penalty for edge crossings (differentiable proxy).",
-        visual_effect="Increasing: fewer crossings, may distort layout. Decreasing: ignore crossings.",
+        visual_effect=(
+            "Increasing: fewer crossings, may distort layout. Decreasing: ignore crossings."
+        ),
         default=1.8,
         sweep_range=(0.5, 5.0),
         sweep_values=[0.5, 1.0, 1.8, 3.0, 5.0],

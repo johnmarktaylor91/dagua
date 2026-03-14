@@ -12,12 +12,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Set, cast
+from typing import Callable, Dict, List, Optional, Sequence, cast
 
 import dagua
 from dagua import DaguaGraph, LayoutConfig
 from dagua.animation import AnimationConfig, PosterConfig, TourConfig
-from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle, PALETTE, make_fill, border_from_fill
+from dagua.styles import PALETTE, ClusterStyle, EdgeStyle, NodeStyle, border_from_fill, make_fill
 
 
 @dataclass
@@ -61,7 +61,9 @@ class GalleryBuildResult:
 
 def _node(base: str, shape: str = "roundrect") -> NodeStyle:
     fill = make_fill(base, blend=0.24)
-    return NodeStyle(base_color=base, fill=fill, stroke=border_from_fill(base, darken=0.35), shape=shape)
+    return NodeStyle(
+        base_color=base, fill=fill, stroke=border_from_fill(base, darken=0.35), shape=shape
+    )
 
 
 def _edge(base: str = "#64748B", routing: str = "bezier") -> EdgeStyle:
@@ -73,12 +75,16 @@ def _cluster(base: str) -> ClusterStyle:
     return ClusterStyle(fill=fill, stroke=border_from_fill(base, darken=0.28))
 
 
-def _add_nodes(graph: DaguaGraph, items: Sequence[tuple[str, str, str, Optional[NodeStyle]]]) -> None:
+def _add_nodes(
+    graph: DaguaGraph, items: Sequence[tuple[str, str, str, Optional[NodeStyle]]]
+) -> None:
     for node_id, label, node_type, style in items:
         graph.add_node(node_id, label=label, type=node_type, style=style)
 
 
-def _add_edges(graph: DaguaGraph, items: Sequence[tuple[str, str, Optional[str], Optional[EdgeStyle]]]) -> None:
+def _add_edges(
+    graph: DaguaGraph, items: Sequence[tuple[str, str, Optional[str], Optional[EdgeStyle]]]
+) -> None:
     for src, dst, label, style in items:
         graph.add_edge(src, dst, label=label, style=style)
 
@@ -116,8 +122,18 @@ def _hospital_care_pathway() -> DaguaGraph:
         ],
     )
     idx = g._id_to_index
-    g.add_cluster("diagnostics", [idx["labs"], idx["imaging"]], label="Diagnostics", style=_cluster(PALETTE["amber"]))
-    g.add_cluster("treatment", [idx["diagnosis"], idx["careplan"], idx["followup"]], label="Treatment", style=_cluster(PALETTE["blue"]))
+    g.add_cluster(
+        "diagnostics",
+        [idx["labs"], idx["imaging"]],
+        label="Diagnostics",
+        style=_cluster(PALETTE["amber"]),
+    )
+    g.add_cluster(
+        "treatment",
+        [idx["diagnosis"], idx["careplan"], idx["followup"]],
+        label="Treatment",
+        style=_cluster(PALETTE["blue"]),
+    )
     return g
 
 
@@ -158,7 +174,12 @@ def _fraud_decision_engine() -> DaguaGraph:
         ],
     )
     idx = g._id_to_index
-    g.add_cluster("signals", [idx["geo"], idx["device"], idx["merchant"]], label="Real-time signals", style=_cluster(PALETTE["reddish_purple"]))
+    g.add_cluster(
+        "signals",
+        [idx["geo"], idx["device"], idx["merchant"]],
+        label="Real-time signals",
+        style=_cluster(PALETTE["reddish_purple"]),
+    )
     return g
 
 
@@ -205,8 +226,18 @@ def _supply_chain_control_tower() -> DaguaGraph:
         ],
     )
     idx = g._id_to_index
-    g.add_cluster("manufacturing", [idx["plant_w"], idx["plant_e"]], label="Manufacturing", style=_cluster(PALETTE["blue"]))
-    g.add_cluster("distribution", [idx["dc_w"], idx["dc_c"], idx["dc_e"]], label="Distribution", style=_cluster(PALETTE["amber"]))
+    g.add_cluster(
+        "manufacturing",
+        [idx["plant_w"], idx["plant_e"]],
+        label="Manufacturing",
+        style=_cluster(PALETTE["blue"]),
+    )
+    g.add_cluster(
+        "distribution",
+        [idx["dc_w"], idx["dc_c"], idx["dc_e"]],
+        label="Distribution",
+        style=_cluster(PALETTE["amber"]),
+    )
     return g
 
 
@@ -249,8 +280,18 @@ def _ml_platform_release() -> DaguaGraph:
         ],
     )
     idx = g._id_to_index
-    g.add_cluster("evaluation", [idx["validate"], idx["bias"], idx["latency"]], label="Release gates", style=_cluster(PALETTE["amber"]))
-    g.add_cluster("production", [idx["deploy"], idx["monitor"], idx["rollback"]], label="Production loop", style=_cluster(PALETTE["bluish_green"]))
+    g.add_cluster(
+        "evaluation",
+        [idx["validate"], idx["bias"], idx["latency"]],
+        label="Release gates",
+        style=_cluster(PALETTE["amber"]),
+    )
+    g.add_cluster(
+        "production",
+        [idx["deploy"], idx["monitor"], idx["rollback"]],
+        label="Production loop",
+        style=_cluster(PALETTE["bluish_green"]),
+    )
     return g
 
 
@@ -289,7 +330,12 @@ def _robotics_autonomy_stack() -> DaguaGraph:
         ],
     )
     idx = g._id_to_index
-    g.add_cluster("sensors", [idx["camera"], idx["lidar"], idx["imu"]], label="Sensors", style=_cluster(PALETTE["sky"]))
+    g.add_cluster(
+        "sensors",
+        [idx["camera"], idx["lidar"], idx["imu"]],
+        label="Sensors",
+        style=_cluster(PALETTE["sky"]),
+    )
     return g
 
 
@@ -329,8 +375,18 @@ def _drug_discovery_program() -> DaguaGraph:
         ],
     )
     idx = g._id_to_index
-    g.add_cluster("screening", [idx["potency"], idx["selectivity"], idx["adme"]], label="Screening filters", style=_cluster(PALETTE["amber"]))
-    g.add_cluster("preclinical", [idx["tox"], idx["pk"]], label="Preclinical package", style=_cluster(PALETTE["blue"]))
+    g.add_cluster(
+        "screening",
+        [idx["potency"], idx["selectivity"], idx["adme"]],
+        label="Screening filters",
+        style=_cluster(PALETTE["amber"]),
+    )
+    g.add_cluster(
+        "preclinical",
+        [idx["tox"], idx["pk"]],
+        label="Preclinical package",
+        style=_cluster(PALETTE["blue"]),
+    )
     return g
 
 
@@ -412,8 +468,18 @@ def _multimodal_assistant_system() -> DaguaGraph:
         ],
     )
     idx = g._id_to_index
-    g.add_cluster("modalities", [idx["text"], idx["image"], idx["tools"]], label="Input modalities", style=_cluster(PALETTE["sky"]))
-    g.add_cluster("core", [idx["planner"], idx["memory"], idx["reason"]], label="Core reasoning", style=_cluster(PALETTE["amber"]))
+    g.add_cluster(
+        "modalities",
+        [idx["text"], idx["image"], idx["tools"]],
+        label="Input modalities",
+        style=_cluster(PALETTE["sky"]),
+    )
+    g.add_cluster(
+        "core",
+        [idx["planner"], idx["memory"], idx["reason"]],
+        label="Core reasoning",
+        style=_cluster(PALETTE["amber"]),
+    )
     return g
 
 
@@ -423,9 +489,14 @@ def _gallery_entries() -> List[GalleryEntry]:
             slug="hospital_care_pathway",
             title="Hospital Care Pathway",
             industry="Healthcare",
-            use_case="Show a care team how intake, diagnostics, diagnosis, and follow-up fit together.",
+            use_case=(
+                "Show a care team how intake, diagnostics, diagnosis, and follow-up fit together."
+            ),
             structure_tags=["parallel diagnostics", "clusters", "decision funnel"],
-            visual_story="Parallel diagnostic branches stay legible while treatment remains the visual destination.",
+            visual_story=(
+                "Parallel diagnostic branches stay legible while treatment "
+                "remains the visual destination."
+            ),
             build_graph=_hospital_care_pathway,
             direction="LR",
             scene="zoom_pan",
@@ -434,7 +505,10 @@ def _gallery_entries() -> List[GalleryEntry]:
             slug="fraud_decision_engine",
             title="Fraud Decision Engine",
             industry="Finance",
-            use_case="Explain real-time risk scoring and manual review paths to operations or compliance teams.",
+            use_case=(
+                "Explain real-time risk scoring and manual review paths to "
+                "operations or compliance teams."
+            ),
             structure_tags=["fan-in", "branching outcomes", "signal cluster"],
             visual_story="A dense signal fan-in resolves into three crisp operational outcomes.",
             build_graph=_fraud_decision_engine,
@@ -445,9 +519,13 @@ def _gallery_entries() -> List[GalleryEntry]:
             slug="supply_chain_control_tower",
             title="Supply Chain Control Tower",
             industry="Operations",
-            use_case="Visualize how demand, plants, ports, warehouses, and reroute decisions interact.",
+            use_case=(
+                "Visualize how demand, plants, ports, warehouses, and reroute decisions interact."
+            ),
             structure_tags=["wide logistics network", "clusters", "long-span reroute edges"],
-            visual_story="The wide physical network stays readable while exception paths remain obvious.",
+            visual_story=(
+                "The wide physical network stays readable while exception paths remain obvious."
+            ),
             build_graph=_supply_chain_control_tower,
             direction="LR",
             scene="panorama",
@@ -458,9 +536,15 @@ def _gallery_entries() -> List[GalleryEntry]:
             slug="ml_platform_release",
             title="ML Platform Release Loop",
             industry="Software / MLOps",
-            use_case="Show the path from data to gated release, canary deployment, monitoring, and rollback.",
+            use_case=(
+                "Show the path from data to gated release, canary deployment, "
+                "monitoring, and rollback."
+            ),
             structure_tags=["release gates", "feedback loop", "nested subsystems"],
-            visual_story="Evaluation gates read as a real release barrier rather than a tangle of side tasks.",
+            visual_story=(
+                "Evaluation gates read as a real release barrier rather than a "
+                "tangle of side tasks."
+            ),
             build_graph=_ml_platform_release,
             direction="TB",
             scene="layer_sweep",
@@ -469,9 +553,15 @@ def _gallery_entries() -> List[GalleryEntry]:
             slug="robotics_autonomy_stack",
             title="Robotics Autonomy Stack",
             industry="Robotics",
-            use_case="Communicate the handoff from sensing through planning to control, with telemetry feedback.",
+            use_case=(
+                "Communicate the handoff from sensing through planning to "
+                "control, with telemetry feedback."
+            ),
             structure_tags=["sensor fan-in", "control loop", "clustered sources"],
-            visual_story="Parallel sensing feels coherent and the feedback edge reads as a control loop, not noise.",
+            visual_story=(
+                "Parallel sensing feels coherent and the feedback edge reads as "
+                "a control loop, not noise."
+            ),
             build_graph=_robotics_autonomy_stack,
             direction="LR",
             scene="zoom_pan",
@@ -482,7 +572,10 @@ def _gallery_entries() -> List[GalleryEntry]:
             industry="Biotech / Pharma",
             use_case="Present screening, assay filters, and preclinical gates in one clean view.",
             structure_tags=["funnel", "parallel assays", "gated progression"],
-            visual_story="The figure reads like a program funnel, with side assays supporting a single decision spine.",
+            visual_story=(
+                "The figure reads like a program funnel, with side assays "
+                "supporting a single decision spine."
+            ),
             build_graph=_drug_discovery_program,
             direction="TB",
             scene="auto",
@@ -491,9 +584,15 @@ def _gallery_entries() -> List[GalleryEntry]:
             slug="customer_support_escalation",
             title="Customer Support Escalation",
             industry="Customer Operations",
-            use_case="Show routing, specialist queues, escalations, and knowledge capture for service teams.",
+            use_case=(
+                "Show routing, specialist queues, escalations, and knowledge "
+                "capture for service teams."
+            ),
             structure_tags=["branching queues", "feedback", "operational loop"],
-            visual_story="Escalation and learning loops are visible without overpowering the main service flow.",
+            visual_story=(
+                "Escalation and learning loops are visible without overpowering "
+                "the main service flow."
+            ),
             build_graph=_customer_support_escalation,
             direction="LR",
             scene="cathedral",
@@ -502,9 +601,15 @@ def _gallery_entries() -> List[GalleryEntry]:
             slug="multimodal_assistant_system",
             title="Multimodal Assistant System",
             industry="AI Systems",
-            use_case="Explain how modalities, planning, memory, reasoning, and safety compose into a product.",
+            use_case=(
+                "Explain how modalities, planning, memory, reasoning, and "
+                "safety compose into a product."
+            ),
             structure_tags=["parallel modalities", "skip path", "clustered core"],
-            visual_story="Modern model architecture motifs feel polished rather than diagrammatically clichéd.",
+            visual_story=(
+                "Modern model architecture motifs feel polished rather than "
+                "diagrammatically clichéd."
+            ),
             build_graph=_multimodal_assistant_system,
             direction="TB",
             scene="motif_orbit",
@@ -518,7 +623,10 @@ def _gallery_animations() -> List[GalleryAnimation]:
             slug="optimize_multimodal_assistant",
             title="Optimization Story: Multimodal Assistant",
             kind="optimization",
-            caption="A faithful post-hoc optimization film showing the graph settle into a readable hierarchy.",
+            caption=(
+                "A faithful post-hoc optimization film showing the graph settle "
+                "into a readable hierarchy."
+            ),
             build_graph=_multimodal_assistant_system,
             direction="TB",
             steps=60,
@@ -528,7 +636,10 @@ def _gallery_animations() -> List[GalleryAnimation]:
             slug="tour_supply_chain_control_tower",
             title="Tour: Supply Chain Control Tower",
             kind="tour",
-            caption="A cinematic sweep from network context into the most operationally interesting logistics regions.",
+            caption=(
+                "A cinematic sweep from network context into the most "
+                "operationally interesting logistics regions."
+            ),
             build_graph=_supply_chain_control_tower,
             direction="LR",
             scene="zoom_pan",
@@ -538,7 +649,9 @@ def _gallery_animations() -> List[GalleryAnimation]:
     ]
 
 
-def _layout_config(entry_steps: int, entry_edge_steps: int, direction: str, node_sep: float, rank_sep: float) -> LayoutConfig:
+def _layout_config(
+    entry_steps: int, entry_edge_steps: int, direction: str, node_sep: float, rank_sep: float
+) -> LayoutConfig:
     return LayoutConfig(
         steps=entry_steps,
         edge_opt_steps=entry_edge_steps,

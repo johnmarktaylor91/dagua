@@ -21,7 +21,9 @@ def test_get_placement_tuning_suites_include_scale_validation() -> None:
 
 
 @pytest.mark.smoke
-def test_run_placement_tuning_writes_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_placement_tuning_writes_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     graph_small = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
     graph_large = DaguaGraph.from_edge_list([("a", "b"), ("b", "c"), ("c", "d")])
     graph_large.add_node("e")
@@ -37,7 +39,9 @@ def test_run_placement_tuning_writes_artifacts(tmp_path: Path, monkeypatch: pyte
         x = torch.arange(n, dtype=torch.float32)
         return torch.stack([x * float(config.node_sep), x * float(config.rank_sep)], dim=1)
 
-    def fake_metrics(pos: torch.Tensor, edge_index: torch.Tensor, node_sizes: torch.Tensor | None) -> dict[str, float]:
+    def fake_metrics(
+        pos: torch.Tensor, edge_index: torch.Tensor, node_sizes: torch.Tensor | None
+    ) -> dict[str, float]:
         return {
             "dag_consistency": 1.0,
             "edge_crossings": float(pos.shape[0] % 3),
@@ -56,4 +60,3 @@ def test_run_placement_tuning_writes_artifacts(tmp_path: Path, monkeypatch: pyte
     assert result.pareto_frontier
     assert (tmp_path / "placement_tuning.json").exists()
     assert (tmp_path / "placement_tuning.md").exists()
-

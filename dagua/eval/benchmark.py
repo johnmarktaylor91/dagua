@@ -27,15 +27,13 @@ import argparse
 import copy
 import hashlib
 import json
-import os
 import platform
 import shutil
 import subprocess
-import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -51,9 +49,8 @@ from dagua.eval.graphs import (
     make_tree,
     make_wide_dag,
 )
-from dagua.metrics import compute_all_metrics, composite, full, quick
+from dagua.metrics import composite, compute_all_metrics, full, quick
 from dagua.utils import longest_path_layering
-
 
 DEFAULT_OUTPUT_DIR = "eval_output"
 DEFAULT_TIMEOUT = 300.0
@@ -272,7 +269,9 @@ def _system_metadata() -> Dict[str, Any]:
         gpu_name = torch.cuda.get_device_name(0)
         cuda_version = torch.version.cuda
 
-    git_hash = _tool_version(["git", "-C", str(Path(__file__).resolve().parents[2]), "rev-parse", "HEAD"])
+    git_hash = _tool_version(
+        ["git", "-C", str(Path(__file__).resolve().parents[2]), "rev-parse", "HEAD"]
+    )
 
     return {
         "cpu": platform.processor() or platform.machine(),
@@ -361,10 +360,15 @@ def _competitor_signature_map(
     competitors: Sequence[CompetitorBase],
     system: Dict[str, Any],
 ) -> Dict[str, str]:
-    return {competitor.name: _competitor_signature(competitor.name, system) for competitor in competitors}
+    return {
+        competitor.name: _competitor_signature(competitor.name, system)
+        for competitor in competitors
+    }
 
 
-def _load_latest_payload_and_metadata(output_dir: str, suite: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Path]]:
+def _load_latest_payload_and_metadata(
+    output_dir: str, suite: str
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Path]]:
     latest_dir = _benchmark_db_root(output_dir) / suite / "latest"
     results_path = latest_dir / "results.json"
     metadata_path = latest_dir / "metadata.json"
@@ -450,7 +454,9 @@ def _metric_payload(
     compute_level: str,
 ) -> Tuple[Dict[str, Any], float, List[str], List[str]]:
     edge_index = graph.edge_index
-    topo_depth = longest_path_layering(edge_index, graph.num_nodes) if edge_index.numel() > 0 else None
+    topo_depth = (
+        longest_path_layering(edge_index, graph.num_nodes) if edge_index.numel() > 0 else None
+    )
     node_sizes = graph.node_sizes if graph.node_sizes is not None else None
 
     metrics: Dict[str, Any]
@@ -557,7 +563,9 @@ def _suite_graphs(suite: str) -> List[BenchmarkGraph]:
             tg = make_sparse_layered(n, seed=42)
             tg.name = bg.test_graph.name
             tg.description = bg.test_graph.description
-            selected.append(BenchmarkGraph(tg, bg.structural_category, bg.suite, bg.visualize, bg.scale_tier))
+            selected.append(
+                BenchmarkGraph(tg, bg.structural_category, bg.suite, bg.visualize, bg.scale_tier)
+            )
         return selected
     raise ValueError(f"Unknown suite {suite!r}")
 
@@ -735,12 +743,16 @@ def _build_results_payload(
     competitor_signatures = competitor_signatures or {}
     rerun_set = set(rerun_competitors or [])
 
-    payload = copy.deepcopy(existing_payload) if existing_payload is not None else {
-        "run_id": run_id,
-        "suite": suite,
-        "system": _system_metadata(),
-        "graphs": {},
-    }
+    payload = (
+        copy.deepcopy(existing_payload)
+        if existing_payload is not None
+        else {
+            "run_id": run_id,
+            "suite": suite,
+            "system": _system_metadata(),
+            "graphs": {},
+        }
+    )
     payload["run_id"] = run_id
     payload["suite"] = suite
     payload["system"] = _system_metadata()
@@ -773,7 +785,9 @@ def _build_results_payload(
                 current_graph=bg.test_graph.name,
                 current_competitor=competitor.name,
                 step="running",
-                last_artifact=str(_partial_results_path(run_dir)) if checkpoint_each_graph else None,
+                last_artifact=str(_partial_results_path(run_dir))
+                if checkpoint_each_graph
+                else None,
             )
             reused = None
             if competitor.name not in rerun_set:
@@ -799,7 +813,8 @@ def _build_results_payload(
                 run_id,
                 graphs,
                 competitors,
-                payload | {"graphs": payload.get("graphs", {}) | {bg.test_graph.name: graph_payload}},
+                payload
+                | {"graphs": payload.get("graphs", {}) | {bg.test_graph.name: graph_payload}},
                 current_graph=bg.test_graph.name,
                 current_competitor=competitor.name,
                 step="running",
@@ -895,16 +910,22 @@ def benchmark_run_status(
     suite: str = STANDARD_SUITE,
 ) -> Dict[str, Any]:
     """Return progress information for the latest complete or partial run."""
-    partial_payload, partial_metadata, partial_run_dir, partial_run_id = _load_resumable_payload_and_metadata(
+    partial_payload, partial_metadata, partial_run_dir, partial_run_id = (
+        _load_resumable_payload_and_metadata(output_dir, suite)
+    )
+    latest_payload, latest_metadata, latest_run_dir = _load_latest_payload_and_metadata(
         output_dir, suite
     )
-    latest_payload, latest_metadata, latest_run_dir = _load_latest_payload_and_metadata(output_dir, suite)
 
     payload = partial_payload or latest_payload or {"graphs": {}}
     metadata = partial_metadata or latest_metadata or {}
     run_dir = partial_run_dir or latest_run_dir
     run_id = partial_run_id or (payload.get("run_id") if payload else None)
-    progress = _load_json(_progress_path(run_dir)) if run_dir is not None and _progress_path(run_dir).exists() else {}
+    progress = (
+        _load_json(_progress_path(run_dir))
+        if run_dir is not None and _progress_path(run_dir).exists()
+        else {}
+    )
 
     total_graphs = len(metadata.get("graphs", [])) or len(payload.get("graphs", {}))
     completed_graphs = 0
@@ -914,9 +935,19 @@ def benchmark_run_status(
         statuses = [result.get("status", "UNKNOWN") for result in competitors.values()]
         if statuses and all(status in {"OK", "FAILED", "SKIPPED"} for status in statuses):
             completed_graphs += 1
-            graph_status[graph_name] = {"status": "complete", "competitors": {name: res.get("status", "UNKNOWN") for name, res in competitors.items()}}
+            graph_status[graph_name] = {
+                "status": "complete",
+                "competitors": {
+                    name: res.get("status", "UNKNOWN") for name, res in competitors.items()
+                },
+            }
         else:
-            graph_status[graph_name] = {"status": "incomplete", "competitors": {name: res.get("status", "UNKNOWN") for name, res in competitors.items()}}
+            graph_status[graph_name] = {
+                "status": "incomplete",
+                "competitors": {
+                    name: res.get("status", "UNKNOWN") for name, res in competitors.items()
+                },
+            }
 
     return {
         "suite": suite,
@@ -953,16 +984,24 @@ def run_suite(
     system = _system_metadata()
     graph_signatures = _graph_signature_map(graphs)
     competitor_signatures = _competitor_signature_map(competitor_list, system)
-    rerun_list = list(rerun_competitors) if rerun_competitors is not None else (["dagua"] if reuse_cached else [])
+    rerun_list = (
+        list(rerun_competitors)
+        if rerun_competitors is not None
+        else (["dagua"] if reuse_cached else [])
+    )
     cached_payload = cached_metadata = latest_run_dir = None
     if reuse_cached:
-        cached_payload, cached_metadata, latest_run_dir = _load_latest_payload_and_metadata(output_dir, suite)
+        cached_payload, cached_metadata, latest_run_dir = _load_latest_payload_and_metadata(
+            output_dir, suite
+        )
 
     existing_payload = existing_metadata = None
     existing_run_dir = None
     run_id = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     if resume_incomplete:
-        existing_payload, existing_metadata, existing_run_dir, existing_run_id = _load_resumable_payload_and_metadata(output_dir, suite)
+        existing_payload, existing_metadata, existing_run_dir, existing_run_id = (
+            _load_resumable_payload_and_metadata(output_dir, suite)
+        )
         if existing_run_dir is not None and existing_run_id is not None:
             run_id = existing_run_id
     run_dir = _run_dir(output_dir, suite, run_id)
@@ -1096,7 +1135,9 @@ def run_benchmark(
     """Compatibility wrapper returning flattened results."""
     del metrics_level  # tiered metrics are chosen automatically by graph size
     if tier in {"standard", "small", "medium", "large", "full"}:
-        payload = run_standard_suite(output_dir=output_dir, competitors=competitors, timeout=timeout)
+        payload = run_standard_suite(
+            output_dir=output_dir, competitors=competitors, timeout=timeout
+        )
     elif tier in {"rare", "huge"}:
         payload = run_rare_suite(output_dir=output_dir, competitors=competitors, timeout=timeout)
     else:
@@ -1110,7 +1151,9 @@ def main() -> None:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--competitors", default=None, help="Comma-separated competitor list")
-    parser.add_argument("--rerun-competitors", default=None, help="Comma-separated competitors to force rerun")
+    parser.add_argument(
+        "--rerun-competitors", default=None, help="Comma-separated competitors to force rerun"
+    )
     parser.add_argument(
         "--merge-only",
         action="store_true",
@@ -1137,7 +1180,9 @@ def main() -> None:
         merge_latest_results(output_dir=args.output_dir)
         return
     if args.status_only:
-        print(json.dumps(benchmark_run_status(output_dir=args.output_dir, suite=args.suite), indent=2))
+        print(
+            json.dumps(benchmark_run_status(output_dir=args.output_dir, suite=args.suite), indent=2)
+        )
         return
 
     competitors = args.competitors.split(",") if args.competitors else None
