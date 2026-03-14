@@ -552,6 +552,12 @@ def main():
         help="Reuse edge_index/node_sizes from the checkpoint dir when available",
     )
     parser.add_argument(
+        "--no-hierarchy-checkpoint",
+        action="store_true",
+        default=False,
+        help="Skip saving hierarchy checkpoints (saves disk at large scale).",
+    )
+    parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
         choices=("cpu", "cuda"),
@@ -679,7 +685,7 @@ def main():
             )
 
         g._layer_assignments_callback = _save_layer_assignments
-    if hierarchy_levels is None:
+    if hierarchy_levels is None and not args.no_hierarchy_checkpoint:
 
         def _save_hierarchy(levels) -> None:
             _save_checkpoint_meta(checkpoint_paths["layout_meta"], layout_signature)
