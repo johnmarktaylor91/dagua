@@ -6,8 +6,8 @@ import importlib.util
 from pathlib import Path
 
 import torch
-from dagua.layout.multilevel import CoarseLevel
 
+from dagua.layout.multilevel import CoarseLevel
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "bench_large.py"
 _SPEC = importlib.util.spec_from_file_location("bench_large", _SCRIPT_PATH)
@@ -220,9 +220,18 @@ def test_coarsest_positions_checkpoint_round_trip(tmp_path: Path):
     bench_large._save_checkpoint_meta(paths["meta"], {"n": 8, "layers": 2})
     bench_large._save_checkpoint_meta(
         paths["layout_meta"],
-        {"schema": 1, "source_fingerprint": "fp", "device": "cpu", "workers": 4, "steps": 10, "seed": 42,
-         "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
-         "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
+        {
+            "schema": 1,
+            "source_fingerprint": "fp",
+            "device": "cpu",
+            "workers": 4,
+            "steps": 10,
+            "seed": 42,
+            "multilevel_threshold": 50_000,
+            "multilevel_min_nodes": 2_000,
+            "multilevel_coarse_steps": 50,
+            "multilevel_refine_steps": 15,
+        },
     )
     levels = [
         CoarseLevel(
@@ -243,9 +252,18 @@ def test_coarsest_positions_checkpoint_round_trip(tmp_path: Path):
         paths,
         n=8,
         layers=2,
-        layout_signature={"schema": 1, "source_fingerprint": "fp", "device": "cpu", "workers": 4, "steps": 10, "seed": 42,
-                          "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
-                          "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
+        layout_signature={
+            "schema": 1,
+            "source_fingerprint": "fp",
+            "device": "cpu",
+            "workers": 4,
+            "steps": 10,
+            "seed": 42,
+            "multilevel_threshold": 50_000,
+            "multilevel_min_nodes": 2_000,
+            "multilevel_coarse_steps": 50,
+            "multilevel_refine_steps": 15,
+        },
     )
 
     assert restored is not None
@@ -271,14 +289,26 @@ def test_coarsest_positions_checkpoint_rejects_wrong_row_count(tmp_path: Path):
     bench_large._save_hierarchy_checkpoint(paths, levels, complete=True)
     torch.save(torch.randn(5, 2), paths["coarsest_positions"])
 
-    assert bench_large._load_coarsest_positions_checkpoint(
-        paths,
-        n=8,
-        layers=2,
-        layout_signature={"schema": 1, "source_fingerprint": "fp", "device": "cpu", "workers": 4, "steps": 10, "seed": 42,
-                          "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
-                          "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
-    ) is None
+    assert (
+        bench_large._load_coarsest_positions_checkpoint(
+            paths,
+            n=8,
+            layers=2,
+            layout_signature={
+                "schema": 1,
+                "source_fingerprint": "fp",
+                "device": "cpu",
+                "workers": 4,
+                "steps": 10,
+                "seed": 42,
+                "multilevel_threshold": 50_000,
+                "multilevel_min_nodes": 2_000,
+                "multilevel_coarse_steps": 50,
+                "multilevel_refine_steps": 15,
+            },
+        )
+        is None
+    )
 
 
 def test_hierarchy_checkpoint_rejects_bad_level_shape(tmp_path: Path):
@@ -287,7 +317,9 @@ def test_hierarchy_checkpoint_rejects_bad_level_shape(tmp_path: Path):
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     bench_large._save_checkpoint_meta(paths["meta"], {"n": 12, "layers": 3})
     paths["hierarchy_dir"].mkdir(parents=True, exist_ok=True)
-    paths["hierarchy_meta"].write_text('{"num_levels": 1, "levels": ["level_00.pt"], "complete": true}', encoding="utf-8")
+    paths["hierarchy_meta"].write_text(
+        '{"num_levels": 1, "levels": ["level_00.pt"], "complete": true}', encoding="utf-8"
+    )
     torch.save(
         {
             "edge_index": torch.tensor([0, 1], dtype=torch.int32),
@@ -310,7 +342,9 @@ def test_hierarchy_checkpoint_rejects_bad_manifest_count(tmp_path: Path):
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     bench_large._save_checkpoint_meta(paths["meta"], {"n": 12, "layers": 3})
     paths["hierarchy_dir"].mkdir(parents=True, exist_ok=True)
-    paths["hierarchy_meta"].write_text('{"num_levels": 2, "levels": ["level_00.pt"], "complete": true}', encoding="utf-8")
+    paths["hierarchy_meta"].write_text(
+        '{"num_levels": 2, "levels": ["level_00.pt"], "complete": true}', encoding="utf-8"
+    )
     torch.save(
         {
             "edge_index": torch.tensor([[0], [1]], dtype=torch.int32),
@@ -353,20 +387,41 @@ def test_positions_checkpoint_rejects_stale_layout_signature(tmp_path: Path):
     bench_large._save_checkpoint_meta(paths["meta"], {"n": 8, "layers": 2})
     bench_large._save_checkpoint_meta(
         paths["layout_meta"],
-        {"schema": 1, "source_fingerprint": "oldfp", "device": "cpu", "workers": 4, "steps": 20, "seed": 42,
-         "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
-         "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
+        {
+            "schema": 1,
+            "source_fingerprint": "oldfp",
+            "device": "cpu",
+            "workers": 4,
+            "steps": 20,
+            "seed": 42,
+            "multilevel_threshold": 50_000,
+            "multilevel_min_nodes": 2_000,
+            "multilevel_coarse_steps": 50,
+            "multilevel_refine_steps": 15,
+        },
     )
     torch.save(torch.randn(8, 2), paths["positions"])
 
-    assert bench_large._load_positions_checkpoint(
-        paths,
-        n=8,
-        layers=2,
-        layout_signature={"schema": 1, "source_fingerprint": "newfp", "device": "cpu", "workers": 4, "steps": 10, "seed": 42,
-                          "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
-                          "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
-    ) is None
+    assert (
+        bench_large._load_positions_checkpoint(
+            paths,
+            n=8,
+            layers=2,
+            layout_signature={
+                "schema": 1,
+                "source_fingerprint": "newfp",
+                "device": "cpu",
+                "workers": 4,
+                "steps": 10,
+                "seed": 42,
+                "multilevel_threshold": 50_000,
+                "multilevel_min_nodes": 2_000,
+                "multilevel_coarse_steps": 50,
+                "multilevel_refine_steps": 15,
+            },
+        )
+        is None
+    )
 
 
 def test_coarsest_positions_checkpoint_requires_complete_hierarchy(tmp_path: Path):
@@ -376,20 +431,41 @@ def test_coarsest_positions_checkpoint_requires_complete_hierarchy(tmp_path: Pat
     bench_large._save_checkpoint_meta(paths["meta"], {"n": 8, "layers": 2})
     bench_large._save_checkpoint_meta(
         paths["layout_meta"],
-        {"schema": 1, "source_fingerprint": "fp", "device": "cpu", "workers": 4, "steps": 10, "seed": 42,
-         "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
-         "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
+        {
+            "schema": 1,
+            "source_fingerprint": "fp",
+            "device": "cpu",
+            "workers": 4,
+            "steps": 10,
+            "seed": 42,
+            "multilevel_threshold": 50_000,
+            "multilevel_min_nodes": 2_000,
+            "multilevel_coarse_steps": 50,
+            "multilevel_refine_steps": 15,
+        },
     )
     torch.save(torch.randn(4, 2), paths["coarsest_positions"])
 
-    assert bench_large._load_coarsest_positions_checkpoint(
-        paths,
-        n=8,
-        layers=2,
-        layout_signature={"schema": 1, "source_fingerprint": "fp", "device": "cpu", "workers": 4, "steps": 10, "seed": 42,
-                          "multilevel_threshold": 50_000, "multilevel_min_nodes": 2_000,
-                          "multilevel_coarse_steps": 50, "multilevel_refine_steps": 15},
-    ) is None
+    assert (
+        bench_large._load_coarsest_positions_checkpoint(
+            paths,
+            n=8,
+            layers=2,
+            layout_signature={
+                "schema": 1,
+                "source_fingerprint": "fp",
+                "device": "cpu",
+                "workers": 4,
+                "steps": 10,
+                "seed": 42,
+                "multilevel_threshold": 50_000,
+                "multilevel_min_nodes": 2_000,
+                "multilevel_coarse_steps": 50,
+                "multilevel_refine_steps": 15,
+            },
+        )
+        is None
+    )
 
 
 def test_duplicate_run_guard_raises_for_live_pid(tmp_path: Path, monkeypatch):

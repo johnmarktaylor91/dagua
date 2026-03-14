@@ -61,9 +61,7 @@ class TestCompareEngines:
         if not graphs:
             pytest.skip("No small test graphs available")
         with tempfile.TemporaryDirectory() as tmpdir:
-            results = compare_engines(
-                graphs=graphs, output_dir=tmpdir, max_nodes=30
-            )
+            results = compare_engines(graphs=graphs, output_dir=tmpdir, max_nodes=30)
             # Check that image files were created (if >1 engine available)
             if results and len(results[0].engine_positions) > 1:
                 img_files = list(Path(tmpdir).glob("multi_*.png"))
@@ -73,22 +71,16 @@ class TestCompareEngines:
         graphs = get_test_graphs(max_nodes=30)[:1]
         if not graphs:
             pytest.skip("No small test graphs available")
-        results = compare_engines(
-            graphs=graphs, engines=["dagua"], max_nodes=30
-        )
+        results = compare_engines(graphs=graphs, engines=["dagua"], max_nodes=30)
         if results:
-            assert all(
-                "dagua" in r.engine_metrics
-                for r in results
-                if r.engine_metrics
-            )
+            assert all("dagua" in r.engine_metrics for r in results if r.engine_metrics)
 
 
 class TestRenderMultiComparison:
     def test_render_two_engines(self):
         pytest.importorskip("matplotlib")
-        from dagua.graphviz_utils import render_multi_comparison
         from dagua.graph import DaguaGraph
+        from dagua.graphviz_utils import render_multi_comparison
 
         g = DaguaGraph()
         g.add_edge("a", "b")
@@ -102,9 +94,7 @@ class TestRenderMultiComparison:
             path = f.name
 
         try:
-            result = render_multi_comparison(
-                g, {"Engine A": pos1, "Engine B": pos2}, path
-            )
+            result = render_multi_comparison(g, {"Engine A": pos1, "Engine B": pos2}, path)
             assert Path(result).exists()
             assert Path(result).stat().st_size > 0
         finally:

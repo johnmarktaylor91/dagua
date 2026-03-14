@@ -1,14 +1,12 @@
 """Tests for matplotlib renderer."""
 
-import pytest
-import tempfile
 from pathlib import Path
 
-import torch
-import dagua
+import pytest
 
-from dagua.graph import DaguaGraph
+import dagua
 from dagua.config import LayoutConfig
+from dagua.graph import DaguaGraph
 from dagua.layout import layout
 from dagua.render import render
 
@@ -79,7 +77,9 @@ class TestRenderBasic:
             assert f.read(8) == b"\x89PNG\r\n\x1a\n"
 
     @pytest.mark.slow
-    def test_vector_format_override_uses_requested_format(self, simple_chain, fast_config, tmp_path):
+    def test_vector_format_override_uses_requested_format(
+        self, simple_chain, fast_config, tmp_path
+    ):
         pos = layout(simple_chain, fast_config)
         out = str(tmp_path / "forced-vector.bin")
         render(simple_chain, pos, output=out, format="svg")

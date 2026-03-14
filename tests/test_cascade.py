@@ -1,7 +1,5 @@
 """Tests for 5-level style cascade resolution."""
 
-import pytest
-
 from dagua.styles import (
     ClusterStyle,
     EdgeStyle,
@@ -65,15 +63,17 @@ class TestResolveNodeStyle:
         global_default = NodeStyle(font_weight="bold")
 
         result = resolve_node_style(
-            per_el, [cluster], theme,
+            per_el,
+            [cluster],
+            theme,
             graph_default=graph_default,
             global_default=global_default,
         )
-        assert result.font_size == 20.0      # from per_el
-        assert result.opacity == 0.8          # from cluster
-        assert result.corner_radius == 6.0    # from theme
-        assert result.stroke_width == 2.0     # from graph_default
-        assert result.font_weight == "bold"   # from global_default
+        assert result.font_size == 20.0  # from per_el
+        assert result.opacity == 0.8  # from cluster
+        assert result.corner_radius == 6.0  # from theme
+        assert result.stroke_width == 2.0  # from graph_default
+        assert result.font_weight == "bold"  # from global_default
 
     def test_none_sources_skipped(self):
         """None sources in cascade are safely skipped."""
@@ -175,8 +175,7 @@ class TestClusterMemberStyleIntegration:
         g.add_edge("a", "b")
 
         member_style = NodeStyle(font_size=10.0)
-        g.add_cluster("grp", members=["a", "b"],
-                       style=ClusterStyle(member_node_style=member_style))
+        g.add_cluster("grp", members=["a", "b"], style=ClusterStyle(member_node_style=member_style))
 
         style = g.get_style_for_node(g._id_to_index["a"])
         assert style.font_size == 20.0  # per-element wins
@@ -231,7 +230,8 @@ class TestIOCascade:
         g.add_node("b")
         g.add_edge("a", "b")
         g.add_cluster(
-            "grp", members=["a", "b"],
+            "grp",
+            members=["a", "b"],
             style=ClusterStyle(
                 member_node_style=NodeStyle(base_color="#D55E00"),
             ),
