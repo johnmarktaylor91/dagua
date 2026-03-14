@@ -3,13 +3,13 @@
 import pytest
 import torch
 
-from dagua.edges import BezierCurve, route_edges, place_edge_labels, evaluate_bezier, bezier_tangent
-from dagua.graph import DaguaGraph
 from dagua.config import LayoutConfig
+from dagua.edges import BezierCurve, place_edge_labels, route_edges
+from dagua.graph import DaguaGraph
 from dagua.styles import EdgeStyle, NodeStyle
 
-
 # --- Fixtures ---
+
 
 @pytest.fixture
 def simple_graph():
@@ -27,15 +27,18 @@ def simple_graph():
 
 @pytest.fixture
 def simple_positions():
-    return torch.tensor([
-        [0.0, 0.0],
-        [-30.0, 60.0],
-        [30.0, 60.0],
-        [0.0, 120.0],
-    ])
+    return torch.tensor(
+        [
+            [0.0, 0.0],
+            [-30.0, 60.0],
+            [30.0, 60.0],
+            [0.0, 120.0],
+        ]
+    )
 
 
 # --- Phase 1: Style fields ---
+
 
 @pytest.mark.smoke
 def test_edge_style_new_fields():
@@ -61,16 +64,19 @@ def test_node_style_overflow_fields():
 def test_minimal_theme_straight_edges():
     """MINIMAL_THEME uses curvature=0.0."""
     from dagua.styles import MINIMAL_THEME
+
     es = MINIMAL_THEME.get_edge_style("default")
     assert es.curvature == 0.0
 
 
 # --- Phase 2: Node sizing ---
 
+
 @pytest.mark.smoke
 def test_compute_node_size_returns_3tuple():
     """compute_node_size returns (w, h, font_size)."""
     from dagua.utils import compute_node_size
+
     result = compute_node_size("hello")
     assert len(result) == 3
     w, h, fs = result
@@ -81,6 +87,7 @@ def test_compute_node_size_returns_3tuple():
 def test_shrink_text_policy():
     """shrink_text policy reduces font size for long labels."""
     from dagua.utils import compute_node_size
+
     long_label = "a" * 200
     w, h, fs = compute_node_size(long_label, overflow_policy="shrink_text", min_font_size=5.0)
     assert fs <= 8.5  # should have shrunk from default
@@ -90,6 +97,7 @@ def test_shrink_text_policy():
 def test_expand_node_policy():
     """expand_node policy allows wider aspect ratio."""
     from dagua.utils import compute_node_size
+
     long_label = "a" * 100
     w_expand, _, _ = compute_node_size(long_label, overflow_policy="expand_node")
     w_overflow, _, _ = compute_node_size(long_label, overflow_policy="overflow")
@@ -106,6 +114,7 @@ def test_node_font_sizes_tensor(simple_graph):
 
 # --- Phase 3: Curvature threading ---
 
+
 @pytest.mark.smoke
 def test_curvature_zero_gives_straight(simple_graph, simple_positions):
     """Curvature=0 produces straight-line edges (cp == endpoints)."""
@@ -113,8 +122,9 @@ def test_curvature_zero_gives_straight(simple_graph, simple_positions):
     for i in range(len(simple_graph.edge_styles)):
         simple_graph.edge_styles[i] = EdgeStyle(curvature=0.0)
 
-    curves = route_edges(simple_positions, simple_graph.edge_index,
-                         simple_graph.node_sizes, "TB", simple_graph)
+    curves = route_edges(
+        simple_positions, simple_graph.edge_index, simple_graph.node_sizes, "TB", simple_graph
+    )
     for c in curves:
         # Control points should equal endpoints (degenerate bezier)
         assert c.cp1 == c.p0 or (abs(c.cp1[0] - c.p0[0]) < 1e-6 and abs(c.cp1[1] - c.p0[1]) < 1e-6)
@@ -126,8 +136,9 @@ def test_center_port_style(simple_graph, simple_positions):
     for i in range(len(simple_graph.edge_styles)):
         simple_graph.edge_styles[i] = EdgeStyle(port_style="center")
 
-    curves = route_edges(simple_positions, simple_graph.edge_index,
-                         simple_graph.node_sizes, "TB", simple_graph)
+    curves = route_edges(
+        simple_positions, simple_graph.edge_index, simple_graph.node_sizes, "TB", simple_graph
+    )
     # All source ports should be at node center x
     src_indices = simple_graph.edge_index[0].tolist()
     for e_idx, c in enumerate(curves):
@@ -137,19 +148,27 @@ def test_center_port_style(simple_graph, simple_positions):
 
 # --- Phase 4: Edge optimization ---
 
+
 @pytest.mark.smoke
 def test_optimize_edges_runs(simple_graph, simple_positions):
     """optimize_edges runs without error and returns same number of curves."""
     from dagua.layout.edge_optimization import optimize_edges
 
-    curves = route_edges(simple_positions, simple_graph.edge_index,
-                         simple_graph.node_sizes, "TB", simple_graph)
+    curves = route_edges(
+        simple_positions, simple_graph.edge_index, simple_graph.node_sizes, "TB", simple_graph
+    )
     config = LayoutConfig()
     config.edge_opt_steps = 10  # fast
     config.edge_opt_lr = 0.1
 
-    optimized = optimize_edges(curves, simple_positions, simple_graph.edge_index,
-                               simple_graph.node_sizes, config, simple_graph)
+    optimized = optimize_edges(
+        curves,
+        simple_positions,
+        simple_graph.edge_index,
+        simple_graph.node_sizes,
+        config,
+        simple_graph,
+    )
     assert len(optimized) == len(curves)
     # Each curve should still be a BezierCurve
     for c in optimized:
@@ -161,25 +180,35 @@ def test_optimize_edges_skip(simple_graph, simple_positions):
     """edge_opt_steps=-1 returns original curves unchanged (explicit skip)."""
     from dagua.layout.edge_optimization import optimize_edges
 
-    curves = route_edges(simple_positions, simple_graph.edge_index,
-                         simple_graph.node_sizes, "TB", simple_graph)
+    curves = route_edges(
+        simple_positions, simple_graph.edge_index, simple_graph.node_sizes, "TB", simple_graph
+    )
     config = LayoutConfig()
     config.edge_opt_steps = -1
 
-    result = optimize_edges(curves, simple_positions, simple_graph.edge_index,
-                            simple_graph.node_sizes, config, simple_graph)
+    result = optimize_edges(
+        curves,
+        simple_positions,
+        simple_graph.edge_index,
+        simple_graph.node_sizes,
+        config,
+        simple_graph,
+    )
     assert result is curves
 
 
 # --- Phase 5: Edge label placement ---
 
+
 @pytest.mark.smoke
 def test_place_edge_labels(simple_graph, simple_positions):
     """place_edge_labels returns positions for labeled edges, None for unlabeled."""
-    curves = route_edges(simple_positions, simple_graph.edge_index,
-                         simple_graph.node_sizes, "TB", simple_graph)
-    positions = place_edge_labels(curves, simple_positions, simple_graph.node_sizes,
-                                  simple_graph.edge_labels, simple_graph)
+    curves = route_edges(
+        simple_positions, simple_graph.edge_index, simple_graph.node_sizes, "TB", simple_graph
+    )
+    positions = place_edge_labels(
+        curves, simple_positions, simple_graph.node_sizes, simple_graph.edge_labels, simple_graph
+    )
     assert len(positions) == len(curves)
     for i, p in enumerate(positions):
         if simple_graph.edge_labels[i]:
@@ -210,7 +239,12 @@ def test_place_edge_labels_respects_side_and_offset():
     g = DaguaGraph()
     g.add_node(0, label="a")
     g.add_node(1, label="b")
-    g.add_edge(0, 1, label="edge", style=EdgeStyle(label_side="left", label_offset=12.0, label_avoidance=False))
+    g.add_edge(
+        0,
+        1,
+        label="edge",
+        style=EdgeStyle(label_side="left", label_offset=12.0, label_avoidance=False),
+    )
     g.compute_node_sizes()
     pos = torch.tensor([[0.0, 0.0], [0.0, 60.0]])
     curves = route_edges(pos, g.edge_index, g.node_sizes, "TB", g)
@@ -231,12 +265,15 @@ def test_place_edge_labels_respects_side_and_offset():
 
 # --- Phase 6: New metrics ---
 
+
 @pytest.mark.smoke
 def test_edge_curvature_consistency_metric(simple_graph, simple_positions):
     """edge_curvature_consistency returns cv and mean."""
     from dagua.metrics import edge_curvature_consistency
-    curves = route_edges(simple_positions, simple_graph.edge_index,
-                         simple_graph.node_sizes, "TB", simple_graph)
+
+    curves = route_edges(
+        simple_positions, simple_graph.edge_index, simple_graph.node_sizes, "TB", simple_graph
+    )
     result = edge_curvature_consistency(curves)
     assert "edge_curvature_cv" in result
     assert "edge_curvature_mean" in result
@@ -246,8 +283,10 @@ def test_edge_curvature_consistency_metric(simple_graph, simple_positions):
 def test_port_angular_resolution_metric(simple_graph, simple_positions):
     """port_angular_resolution returns mean angle in degrees."""
     from dagua.metrics import port_angular_resolution
-    curves = route_edges(simple_positions, simple_graph.edge_index,
-                         simple_graph.node_sizes, "TB", simple_graph)
+
+    curves = route_edges(
+        simple_positions, simple_graph.edge_index, simple_graph.node_sizes, "TB", simple_graph
+    )
     result = port_angular_resolution(curves, simple_graph.edge_index)
     assert "port_angular_res_mean_deg" in result
 
@@ -256,10 +295,13 @@ def test_port_angular_resolution_metric(simple_graph, simple_positions):
 def test_edge_node_crossing_count_metric(simple_graph, simple_positions):
     """edge_node_crossing_count returns count and rate."""
     from dagua.metrics import edge_node_crossing_count
-    curves = route_edges(simple_positions, simple_graph.edge_index,
-                         simple_graph.node_sizes, "TB", simple_graph)
-    result = edge_node_crossing_count(curves, simple_positions,
-                                      simple_graph.node_sizes, simple_graph.edge_index)
+
+    curves = route_edges(
+        simple_positions, simple_graph.edge_index, simple_graph.node_sizes, "TB", simple_graph
+    )
+    result = edge_node_crossing_count(
+        curves, simple_positions, simple_graph.node_sizes, simple_graph.edge_index
+    )
     assert "edge_node_crossings" in result
     assert "edge_node_crossing_rate" in result
 
@@ -268,22 +310,28 @@ def test_edge_node_crossing_count_metric(simple_graph, simple_positions):
 def test_label_overlap_count_metric(simple_graph, simple_positions):
     """label_overlap_count returns overlap counts."""
     from dagua.metrics import label_overlap_count
-    curves = route_edges(simple_positions, simple_graph.edge_index,
-                         simple_graph.node_sizes, "TB", simple_graph)
-    lps = place_edge_labels(curves, simple_positions, simple_graph.node_sizes,
-                            simple_graph.edge_labels, simple_graph)
-    result = label_overlap_count(lps, simple_graph.edge_labels,
-                                 simple_positions, simple_graph.node_sizes)
+
+    curves = route_edges(
+        simple_positions, simple_graph.edge_index, simple_graph.node_sizes, "TB", simple_graph
+    )
+    lps = place_edge_labels(
+        curves, simple_positions, simple_graph.node_sizes, simple_graph.edge_labels, simple_graph
+    )
+    result = label_overlap_count(
+        lps, simple_graph.edge_labels, simple_positions, simple_graph.node_sizes
+    )
     assert "label_overlaps" in result
     assert "label_node_overlaps" in result
 
 
 # --- Phase 7: Pipeline integration ---
 
+
 @pytest.mark.smoke
 def test_draw_full_pipeline(simple_graph, simple_positions):
     """draw() runs the full pipeline with edge optimization."""
     import dagua
+
     config = LayoutConfig()
     config.edge_opt_steps = 5  # fast
     fig, ax = dagua.draw(simple_graph, config=config)
@@ -294,6 +342,7 @@ def test_draw_full_pipeline(simple_graph, simple_positions):
 def test_draw_no_edge_opt(simple_graph, simple_positions):
     """draw() works with edge_opt_steps=-1 (skip edge optimization)."""
     import dagua
+
     config = LayoutConfig()
     config.edge_opt_steps = -1
     fig, ax = dagua.draw(simple_graph, config=config)
@@ -304,10 +353,13 @@ def test_draw_no_edge_opt(simple_graph, simple_positions):
 def test_render_accepts_precomputed(simple_graph, simple_positions):
     """render() accepts pre-computed curves and label_positions."""
     from dagua.render import render
-    curves = route_edges(simple_positions, simple_graph.edge_index,
-                         simple_graph.node_sizes, "TB", simple_graph)
-    lps = place_edge_labels(curves, simple_positions, simple_graph.node_sizes,
-                            simple_graph.edge_labels, simple_graph)
+
+    curves = route_edges(
+        simple_positions, simple_graph.edge_index, simple_graph.node_sizes, "TB", simple_graph
+    )
+    lps = place_edge_labels(
+        curves, simple_positions, simple_graph.node_sizes, simple_graph.edge_labels, simple_graph
+    )
     fig, ax = render(simple_graph, simple_positions, curves=curves, label_positions=lps)
     assert fig is not None
 
@@ -315,16 +367,23 @@ def test_render_accepts_precomputed(simple_graph, simple_positions):
 @pytest.mark.smoke
 def test_full_metrics_with_curves(simple_graph, simple_positions):
     """full() includes new edge-aware metrics when curves are provided."""
-    from dagua.metrics import full
     from dagua.layout import layout
+    from dagua.metrics import full
+
     config = LayoutConfig()
     pos = layout(simple_graph, config)
-    curves = route_edges(pos, simple_graph.edge_index,
-                         simple_graph.node_sizes, "TB", simple_graph)
-    lps = place_edge_labels(curves, pos, simple_graph.node_sizes,
-                            simple_graph.edge_labels, simple_graph)
-    result = full(pos, simple_graph.edge_index, node_sizes=simple_graph.node_sizes,
-                  curves=curves, label_positions=lps, edge_labels=simple_graph.edge_labels)
+    curves = route_edges(pos, simple_graph.edge_index, simple_graph.node_sizes, "TB", simple_graph)
+    lps = place_edge_labels(
+        curves, pos, simple_graph.node_sizes, simple_graph.edge_labels, simple_graph
+    )
+    result = full(
+        pos,
+        simple_graph.edge_index,
+        node_sizes=simple_graph.node_sizes,
+        curves=curves,
+        label_positions=lps,
+        edge_labels=simple_graph.edge_labels,
+    )
     assert "edge_curvature_cv" in result
     assert "port_angular_res_mean_deg" in result
     assert "edge_node_crossings" in result

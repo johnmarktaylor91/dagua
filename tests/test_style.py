@@ -3,12 +3,21 @@
 import pytest
 
 from dagua.styles import (
-    ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
-    DEFAULT_THEME_OBJ, DARK_THEME, MINIMAL_THEME,
-    DEFAULT_THEME, DEFAULT_NODE_STYLES,
-    GRAPHVIZ_MATCH_THEME, GRAPHVIZ_MATCH_NODE_STYLES,
-    darken_hex, make_fill, border_from_fill,
-    PALETTE, WARM_WHITE, NEAR_BLACK, MEDIUM_GRAY,
+    DARK_THEME,
+    DEFAULT_NODE_STYLES,
+    DEFAULT_THEME,
+    DEFAULT_THEME_OBJ,
+    GRAPHVIZ_MATCH_NODE_STYLES,
+    GRAPHVIZ_MATCH_THEME,
+    MINIMAL_THEME,
+    NEAR_BLACK,
+    WARM_WHITE,
+    ClusterStyle,
+    EdgeStyle,
+    GraphStyle,
+    NodeStyle,
+    Theme,
+    darken_hex,
 )
 
 

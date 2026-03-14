@@ -5,13 +5,11 @@ import torch
 
 from dagua.metrics import (
     compute_all_metrics,
-    count_crossings,
     compute_dag_fraction,
     compute_edge_straightness,
     compute_x_alignment,
+    count_crossings,
     count_overlaps,
-    compute_mean_edge_length,
-    overall_quality,
 )
 
 
