@@ -628,6 +628,7 @@ def build_hierarchy(
     initial_layer_assignments: Optional[torch.Tensor] = None,
     layer_assignments_callback: Optional[Callable[[torch.Tensor], None]] = None,
     level_callback: Optional[Callable[[List[CoarseLevel]], None]] = None,
+    offload_to_disk: bool = True,
 ) -> List[CoarseLevel]:
     """Build coarsening hierarchy until num_nodes <= min_nodes.
 
@@ -642,7 +643,7 @@ def build_hierarchy(
     current_sizes = _ensure_node_sizes_2d(node_sizes, current_n)
     current_cluster_ids = cluster_ids
     offload_dir: Optional[Path] = None
-    if current_n > 10_000_000:
+    if offload_to_disk and current_n > 10_000_000:
         offload_dir = Path(tempfile.mkdtemp(prefix="dagua_hierarchy_"))
 
     # Compute layers once on the original graph — returns tensor for large N.
@@ -846,6 +847,7 @@ def multilevel_layout(
                 initial_layer_assignments=getattr(graph, "_precomputed_layer_assignments", None),
                 layer_assignments_callback=getattr(graph, "_layer_assignments_callback", None),
                 level_callback=getattr(graph, "_hierarchy_levels_callback", None),
+                offload_to_disk=config.offload_to_disk,
             )
             hierarchy_complete_callback = getattr(
                 graph, "_hierarchy_levels_complete_callback", None
@@ -901,7 +903,7 @@ def multilevel_layout(
 
         # Offload original graph to disk during Phase 2 — not needed until
         # refinement level i=0. Saves ~32GB at 1B scale.
-        if n > 10_000_000:
+        if config.offload_to_disk and n > 10_000_000:
             import tempfile as _tmpfile
 
             _orig_dir = _tmpfile.mkdtemp(prefix="dagua_orig_graph_")
