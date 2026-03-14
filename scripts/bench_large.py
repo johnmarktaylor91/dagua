@@ -51,6 +51,9 @@ def phase(label: str, t0: float):
 
 def _default_checkpoint_dir(size: str) -> Path:
     slug = size.strip().lower().replace("/", "_").replace(" ", "_")
+    locker = Path("/mnt/locker/jt3295/dagua_bench_large")
+    if locker.is_dir():
+        return locker / slug
     return Path("/tmp") / "dagua_bench_large" / slug
 
 
@@ -558,6 +561,13 @@ def main():
         help="Skip saving hierarchy checkpoints (saves disk at large scale).",
     )
     parser.add_argument(
+        "--no-offload",
+        action="store_true",
+        default=False,
+        help="Keep all hierarchy levels in RAM (skip disk offloading). "
+        "Only use on machines with sufficient RAM for the full hierarchy.",
+    )
+    parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
         choices=("cpu", "cuda"),
@@ -725,7 +735,7 @@ def main():
         multilevel_refine_steps=15,
         steps=args.steps,
         seed=args.seed,
-        offload_to_disk=not args.no_hierarchy_checkpoint,
+        offload_to_disk=not args.no_offload,
     )
     phase("layout start", t0)
 
