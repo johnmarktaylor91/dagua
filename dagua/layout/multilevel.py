@@ -828,6 +828,7 @@ def multilevel_layout(
     min_nodes = config.multilevel_min_nodes
     precomputed_levels = getattr(graph, "_precomputed_hierarchy_levels", None)
     levels: List[CoarseLevel] = []
+    _original_graph_path: Optional[Path] = None
     try:
         if precomputed_levels is not None:
             levels = precomputed_levels
@@ -898,6 +899,25 @@ def multilevel_layout(
                 num_workers=config.num_workers,
             )
 
+        # Offload original graph to disk during Phase 2 — not needed until
+        # refinement level i=0. Saves ~32GB at 1B scale.
+        if n > 10_000_000:
+            import tempfile as _tmpfile
+
+            _orig_dir = _tmpfile.mkdtemp(prefix="dagua_orig_graph_")
+            _original_graph_path = Path(_orig_dir) / "original_graph.pt"
+            torch.save({"edge_index": cpu_ei, "node_sizes": cpu_ns}, _original_graph_path)
+            del cpu_ei, cpu_ns
+            import gc as _gc
+
+            _gc.collect()
+            try:
+                import ctypes
+
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except OSError:
+                pass
+
         # Layout coarsest graph with many steps.
         # Pass edges on CPU — _layout_inner will stream batches to GPU.
         # Only node_sizes go to GPU (small: [N_coarse, 2]).
@@ -956,6 +976,14 @@ def multilevel_layout(
                     pass
 
             if i == 0:
+                if _original_graph_path is not None and _original_graph_path.exists():
+                    _orig_data = torch.load(_original_graph_path, map_location="cpu")
+                    cpu_ei = _orig_data["edge_index"]
+                    cpu_ns = _orig_data["node_sizes"]
+                    _original_graph_path.unlink(missing_ok=True)
+                    _original_graph_path.parent.rmdir()
+                    _original_graph_path = None
+                    del _orig_data
                 fine_ei_cpu = cpu_ei
                 fine_sizes_cpu = cpu_ns
                 fine_n = n
@@ -1074,4 +1102,10 @@ def multilevel_layout(
 
         return pos
     finally:
+        if _original_graph_path is not None:
+            _original_graph_path.unlink(missing_ok=True)
+            if _original_graph_path.parent.exists():
+                import shutil
+
+                shutil.rmtree(_original_graph_path.parent, ignore_errors=True)
         _cleanup_offloaded_hierarchy(levels)
