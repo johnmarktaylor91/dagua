@@ -52,12 +52,13 @@ from dagua.layout.constraints import (
 from dagua.layout.init_placement import init_positions
 from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.projection import project_overlaps
-from dagua.utils import _vram_fits, longest_path_layering
+from dagua.utils import VRAMBudget, longest_path_layering
 
 
 @dataclass
 class ProgressContext:
     """Context for formatting engine progress messages."""
+
     indent: str = "  "
 
 
@@ -104,6 +105,7 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
         # Don't move data to GPU yet — multilevel manages device transfers lazily
         if n > config.multilevel_threshold:
             from dagua.layout.multilevel import multilevel_layout
+
             pos = multilevel_layout(graph, config, trace=trace)
             graph.cache_layout(pos)
             return pos
@@ -120,16 +122,20 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
         effective_config = _resolve_flex_ids(config, graph)
 
         # Also pick up flex from graph.flex if config doesn't have one
-        if effective_config.flex is None and getattr(graph, 'flex', None) is not None:
+        if effective_config.flex is None and getattr(graph, "flex", None) is not None:
             import copy as _c
+
             effective_config = _c.copy(effective_config)
             effective_config.flex = _resolve_graph_flex(graph.flex, graph._id_to_index)
 
         pos = _layout_inner(
-            edge_index, n, node_sizes, effective_config,
+            edge_index,
+            n,
+            node_sizes,
+            effective_config,
             device=device,
-            clusters=graph.clusters if hasattr(graph, 'clusters') else None,
-            cluster_parents=graph.cluster_parents if hasattr(graph, 'cluster_parents') else None,
+            clusters=graph.clusters if hasattr(graph, "clusters") else None,
+            cluster_parents=graph.cluster_parents if hasattr(graph, "cluster_parents") else None,
             progress_context=ProgressContext(),
             trace=trace,
         )
@@ -181,13 +187,14 @@ def _layout_inner(
     n = num_nodes
     verbose = getattr(config, "verbose", False)
     _indent = progress_context.indent if progress_context else "  "
+
     def _vlog(msg):
         if verbose:
             vram = ""
             if device == "cuda" and torch.cuda.is_available():
                 used = torch.cuda.memory_allocated() / 1024**2
                 free, total = torch.cuda.mem_get_info()
-                vram = f" [VRAM {used:.0f}MB / {total/1024**2:.0f}MB]"
+                vram = f" [VRAM {used:.0f}MB / {total / 1024**2:.0f}MB]"
             print(f"[dagua] {_indent}{msg}{vram}", flush=True)
 
     if n == 0:
@@ -206,7 +213,9 @@ def _layout_inner(
         pos = init_pos.to(device)
     else:
         pos = init_positions(
-            edge_index, n, node_sizes,
+            edge_index,
+            n,
+            node_sizes,
             node_sep=node_sep,
             rank_sep=rank_sep,
             device=device,
@@ -228,7 +237,7 @@ def _layout_inner(
         layer_index = build_layer_index(layer_assignments, device=device)
         layer_assignments_raw = layer_assignments
     elif edge_index.numel() > 0:
-        layer_assignments_raw = longest_path_layering(edge_index, n)
+        layer_assignments_raw = longest_path_layering(edge_index, n, device=device)
         layer_index = build_layer_index(layer_assignments_raw, device=device)
 
     # Determine adaptive parameters based on graph size
@@ -242,29 +251,40 @@ def _layout_inner(
     edges_on_cpu = edge_index.device.type == "cpu" and device == "cuda"
     if not edges_on_cpu and device == "cuda" and edge_index.numel() > 0:
         edge_bytes = edge_index.numel() * edge_index.element_size()
-        if not _vram_fits(edge_bytes):
+        if not VRAMBudget().fits(edge_bytes):
             edge_index = edge_index.cpu()
             edges_on_cpu = True
 
     # Resolve memory optimization flags (VRAM-aware when on CUDA)
     use_per_loss_bw, use_checkpointing, use_hybrid = _resolve_memory_strategy(
-        n, num_edges, device, config,
+        n,
+        num_edges,
+        device,
+        config,
     )
     # Create thread pool for parallel hybrid losses
     executor = None
-    if use_hybrid and use_per_loss_bw and getattr(config, 'num_workers', 0) > 0:
+    if use_hybrid and use_per_loss_bw and getattr(config, "num_workers", 0) > 0:
         from concurrent.futures import ThreadPoolExecutor
+
         executor = ThreadPoolExecutor(max_workers=config.num_workers)
 
     flags = []
-    if use_per_loss_bw: flags.append("per_loss_bw")
-    if use_checkpointing: flags.append("checkpoint")
-    if use_hybrid: flags.append("hybrid")
-    if edges_on_cpu: flags.append("edge_stream")
-    if executor is not None: flags.append(f"workers={config.num_workers}")
-    _vlog(f"init done, {num_edges:,} edges, batch={edge_batch}, strategy=[{', '.join(flags) or 'standard'}]")
-    # Keep a reference to CPU edges for batching; full edge_index may be CPU
-    cpu_edges_ref = edge_index if edges_on_cpu else None
+    if use_per_loss_bw:
+        flags.append("per_loss_bw")
+    if use_checkpointing:
+        flags.append("checkpoint")
+    if use_hybrid:
+        flags.append("hybrid")
+    if edges_on_cpu:
+        flags.append("edge_stream")
+    if executor is not None:
+        flags.append(f"workers={config.num_workers}")
+    _vlog(
+        "init done, "
+        f"{num_edges:,} edges, batch={edge_batch}, "
+        f"strategy=[{', '.join(flags) or 'standard'}]"
+    )
 
     # Hybrid device: keep positions on GPU, create CPU mirror for heavy losses
     cpu_node_sizes = None
@@ -274,7 +294,11 @@ def _layout_inner(
         cpu_node_sizes = node_sizes.cpu()
         if cpu_edge_index is None:
             cpu_edge_index = edge_index.cpu()
-        cpu_layer_index = build_layer_index(layer_assignments_raw, device="cpu") if layer_assignments_raw is not None else None
+        cpu_layer_index = (
+            build_layer_index(layer_assignments_raw, device="cpu")
+            if layer_assignments_raw is not None
+            else None
+        )
     elif edges_on_cpu:
         cpu_edge_index = edge_index
 
@@ -299,42 +323,92 @@ def _layout_inner(
     loss_fns: List[tuple] = []
 
     if config.w_dag > 0:
-        loss_fns.append(("w_dag", lambda p, ns, li: dag_ordering_loss(
-            p, _active_edges(p),
-            ns, rank_sep), False, True))
+        loss_fns.append(
+            (
+                "w_dag",
+                lambda p, ns, li: dag_ordering_loss(p, _active_edges(p), ns, rank_sep),
+                False,
+                True,
+            )
+        )
 
     if config.w_attract > 0:
-        loss_fns.append(("w_attract", lambda p, ns, li: edge_attraction_loss(
-            p, _active_edges(p),
-            x_bias=config.w_attract_x_bias), False, False))
+        loss_fns.append(
+            (
+                "w_attract",
+                lambda p, ns, li: edge_attraction_loss(
+                    p, _active_edges(p), x_bias=config.w_attract_x_bias
+                ),
+                False,
+                False,
+            )
+        )
 
     if config.w_repel > 0:
-        loss_fns.append(("w_repel", lambda p, ns, li: repulsion_loss(
-            p, n,
-            threshold=config.exact_repulsion_threshold,
-            sample_k=config.negative_sample_k,
-            layer_index=li,
-            node_sizes=ns,
-            rvs_threshold=config.rvs_threshold,
-            rvs_nn_k=config.rvs_nn_k,
-        ), True, True))
+        loss_fns.append(
+            (
+                "w_repel",
+                lambda p, ns, li: repulsion_loss(
+                    p,
+                    n,
+                    threshold=config.exact_repulsion_threshold,
+                    sample_k=config.negative_sample_k,
+                    layer_index=li,
+                    node_sizes=ns,
+                    rvs_threshold=config.rvs_threshold,
+                    rvs_nn_k=config.rvs_nn_k,
+                ),
+                True,
+                True,
+            )
+        )
 
     if config.w_overlap > 0:
-        loss_fns.append(("w_overlap", lambda p, ns, li: overlap_avoidance_loss(
-            p, ns, layer_index=li,
-            rvs_threshold=config.rvs_threshold,
-        ), True, True))
+        loss_fns.append(
+            (
+                "w_overlap",
+                lambda p, ns, li: overlap_avoidance_loss(
+                    p,
+                    ns,
+                    layer_index=li,
+                    rvs_threshold=config.rvs_threshold,
+                ),
+                True,
+                True,
+            )
+        )
 
     if config.w_cluster > 0 and clusters:
-        loss_fns.append(("w_cluster", lambda p, ns, li: cluster_compactness_loss(
-            p, clusters, device=p.device), False, False))
-        loss_fns.append(("w_cluster_sep", lambda p, ns, li: cluster_separation_loss(
-            p, ns, clusters, device=p.device,
-            cluster_parents=cluster_parents), False, False))
+        loss_fns.append(
+            (
+                "w_cluster",
+                lambda p, ns, li: cluster_compactness_loss(p, clusters, device=p.device),
+                False,
+                False,
+            )
+        )
+        loss_fns.append(
+            (
+                "w_cluster_sep",
+                lambda p, ns, li: cluster_separation_loss(
+                    p, ns, clusters, device=p.device, cluster_parents=cluster_parents
+                ),
+                False,
+                False,
+            )
+        )
 
     if config.w_cluster_contain > 0 and clusters and cluster_parents:
-        loss_fns.append(("w_cluster_contain", lambda p, ns, li: cluster_containment_loss(
-            p, ns, clusters, cluster_parents, device=p.device), False, False))
+        loss_fns.append(
+            (
+                "w_cluster_contain",
+                lambda p, ns, li: cluster_containment_loss(
+                    p, ns, clusters, cluster_parents, device=p.device
+                ),
+                False,
+                False,
+            )
+        )
 
     if config.w_crossing > 0 and num_edges >= 4:
         # alpha is annealed per-step, captured via mutable ref
@@ -345,39 +419,81 @@ def _layout_inner(
         crossing_step_ref: List[int] = [0]
         # Scale weight up to compensate for skipped steps
         crossing_weight_scale = float(crossing_interval)
+
         def _crossing_fn(p, ns, li):
             crossing_step_ref[0] += 1
             if crossing_step_ref[0] % crossing_interval != 0:
                 return torch.tensor(0.0, device=p.device, requires_grad=True)
             return crossing_weight_scale * crossing_loss(
-                p, _active_edges(p),
-                alpha=crossing_alpha_ref[0], layer_assignments=layer_assignments_raw,
+                p,
+                _active_edges(p),
+                alpha=crossing_alpha_ref[0],
+                layer_assignments=layer_assignments_raw,
                 max_pairs=500,
             )
+
         loss_fns.append(("w_crossing", _crossing_fn, False, True))
 
     if config.w_straightness > 0:
-        loss_fns.append(("w_straightness", lambda p, ns, li: edge_straightness_loss(
-            p, _active_edges(p)), False, True))
+        loss_fns.append(
+            (
+                "w_straightness",
+                lambda p, ns, li: edge_straightness_loss(p, _active_edges(p)),
+                False,
+                True,
+            )
+        )
 
     if config.w_length_variance > 0:
-        loss_fns.append(("w_length_variance", lambda p, ns, li: edge_length_variance_loss(
-            p, _active_edges(p)), False, False))
+        loss_fns.append(
+            (
+                "w_length_variance",
+                lambda p, ns, li: edge_length_variance_loss(p, _active_edges(p)),
+                False,
+                False,
+            )
+        )
 
     if config.w_spacing > 0 and layer_index is not None:
-        loss_fns.append(("w_spacing", lambda p, ns, li: spacing_consistency_loss(
-            p, ns, li, target_gap=node_sep,
-        ), False, False))
+        loss_fns.append(
+            (
+                "w_spacing",
+                lambda p, ns, li: spacing_consistency_loss(
+                    p,
+                    ns,
+                    li,
+                    target_gap=node_sep,
+                ),
+                False,
+                False,
+            )
+        )
 
     if config.w_fanout > 0:
-        loss_fns.append(("w_fanout", lambda p, ns, li: fanout_distribution_loss(
-            p, _active_edges(p),
-        ), False, False))
+        loss_fns.append(
+            (
+                "w_fanout",
+                lambda p, ns, li: fanout_distribution_loss(
+                    p,
+                    _active_edges(p),
+                ),
+                False,
+                False,
+            )
+        )
 
     if config.w_back_edge > 0:
-        loss_fns.append(("w_back_edge", lambda p, ns, li: back_edge_compactness_loss(
-            p, _active_edges(p),
-        ), False, False))
+        loss_fns.append(
+            (
+                "w_back_edge",
+                lambda p, ns, li: back_edge_compactness_loss(
+                    p,
+                    _active_edges(p),
+                ),
+                False,
+                False,
+            )
+        )
 
     # --- Flex constraints: pins, alignment, flex spacing ---
     flex_data = _prepare_flex_data(config, n, device)
@@ -387,8 +503,14 @@ def _layout_inner(
         _pin_tgt = flex_data["pin_targets"]
         _pin_wt = flex_data["pin_weights"]
         _pin_mask = flex_data["soft_pin_mask"]
-        loss_fns.append(("w_pin", lambda p, ns, li: position_pin_loss(
-            p, _pin_idx, _pin_tgt, _pin_wt, _pin_mask), False, False))
+        loss_fns.append(
+            (
+                "w_pin",
+                lambda p, ns, li: position_pin_loss(p, _pin_idx, _pin_tgt, _pin_wt, _pin_mask),
+                False,
+                False,
+            )
+        )
 
     if flex_data["align_groups"]:
         _ag = flex_data["align_groups"]
@@ -397,11 +519,21 @@ def _layout_inner(
     if flex_data["flex_node_sep"] is not None:
         _fsep = flex_data["flex_node_sep"]
         _fwt = flex_data["flex_node_sep_weight"]
-        loss_fns.append(("w_flex_spacing", lambda p, ns, li: flex_spacing_loss(
-            p, ns, li, _fsep, _fwt), False, False))
+        loss_fns.append(
+            (
+                "w_flex_spacing",
+                lambda p, ns, li: flex_spacing_loss(p, ns, li, _fsep, _fwt),
+                False,
+                False,
+            )
+        )
 
     # Pre-allocate edge batch buffer (avoids per-step tensor allocation)
-    batch_buf = torch.empty(2, edge_batch, dtype=torch.long, device=device) if edge_batch > 0 and num_edges > edge_batch else None
+    batch_buf = (
+        torch.empty(2, edge_batch, dtype=torch.long, device=device)
+        if edge_batch > 0 and num_edges > edge_batch
+        else None
+    )
 
     # Optimization loop with annealing
     steps = config.steps
@@ -427,7 +559,11 @@ def _layout_inner(
         t = step / max(steps - 1, 1)  # 0 → 1
 
         if verbose and step > 0 and step % _log_interval == 0:
-            _vlog(f"step {step}/{steps} ({100*step//steps}%) loss={prev_unweighted:.2f} [{_time.perf_counter() - _t_loop:.1f}s]")
+            _vlog(
+                f"step {step}/{steps} ({100 * step // steps}%) "
+                f"loss={prev_unweighted:.2f} "
+                f"[{_time.perf_counter() - _t_loop:.1f}s]"
+            )
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -493,8 +629,12 @@ def _layout_inner(
                 for weight, loss_fn, is_heavy in loss_terms:
                     if is_heavy:
                         future = executor.submit(
-                            _hybrid_loss, pos, weight, loss_fn,
-                            cpu_node_sizes, cpu_layer_index,
+                            _hybrid_loss,
+                            pos,
+                            weight,
+                            loss_fn,
+                            cpu_node_sizes,
+                            cpu_layer_index,
                         )
                         heavy_futures.append((weight, future))
                     else:
@@ -521,7 +661,10 @@ def _layout_inner(
                 # Sequential per-loss backward
                 for weight, loss_fn, is_heavy in loss_terms:
                     term = _compute_loss_term(
-                        pos, weight, loss_fn, is_heavy,
+                        pos,
+                        weight,
+                        loss_fn,
+                        is_heavy,
                         use_hybrid=use_hybrid,
                         use_checkpointing=use_checkpointing,
                         node_sizes=node_sizes,
@@ -539,7 +682,10 @@ def _layout_inner(
             loss = torch.tensor(0.0, device=device)
             for weight, loss_fn, is_heavy in loss_terms:
                 term = _compute_loss_term(
-                    pos, weight, loss_fn, is_heavy,
+                    pos,
+                    weight,
+                    loss_fn,
+                    is_heavy,
                     use_hybrid=use_hybrid,
                     use_checkpointing=use_checkpointing,
                     node_sizes=node_sizes,
@@ -571,7 +717,10 @@ def _layout_inner(
         if step % overlap_interval == 0 or step == steps - 1:
             proj_iters = 5 if n <= 500_000 else 3 if n <= 5_000_000 else 2
             project_overlaps(
-                pos, node_sizes, padding=2.0, iterations=proj_iters,
+                pos,
+                node_sizes,
+                padding=2.0,
+                iterations=proj_iters,
                 layer_index=layer_index,
             )
 
@@ -587,7 +736,10 @@ def _layout_inner(
         # Small graphs converge faster — detect convergence sooner
         rel_threshold = 5e-4 if n <= 200 else 1e-4
         stall_limit = 3 if n <= 200 else 5
-        if step > 10 and abs(prev_unweighted - unweighted_loss_val) < prev_unweighted * rel_threshold:
+        if (
+            step > 10
+            and abs(prev_unweighted - unweighted_loss_val) < prev_unweighted * rel_threshold
+        ):
             stall_count += 1
             if stall_count >= stall_limit:
                 break
@@ -615,7 +767,10 @@ def _layout_inner(
     _vlog(f"final projection ({final_proj_iters} iters)...")
     _t_proj = _time.perf_counter()
     project_overlaps(
-        pos, node_sizes, padding=2.0, iterations=final_proj_iters,
+        pos,
+        node_sizes,
+        padding=2.0,
+        iterations=final_proj_iters,
         layer_index=layer_index,
     )
     _vlog(f"projection done in {_time.perf_counter() - _t_proj:.1f}s")
@@ -662,14 +817,13 @@ def _resolve_memory_strategy(
         return use_plb, False, False
 
     # CUDA mode: query available VRAM
-    free_vram, total_vram = torch.cuda.mem_get_info()
-    usable = int(free_vram * 0.80)  # 20% headroom for fragmentation
+    budget = VRAMBudget()
+    usable = budget.remaining()
 
     # Estimate peak GPU memory for different strategies
     mem_full = _estimate_gpu_memory(n, num_edges, per_loss_bw=False)
     mem_plb = _estimate_gpu_memory(n, num_edges, per_loss_bw=True)
     mem_plb_ckpt = mem_plb // 2  # checkpointing halves intermediate storage
-    mem_hybrid = _estimate_hybrid_gpu_memory(n, num_edges)
 
     # Pick lightest strategy that fits (escalating memory savings)
     if plb == "off" and gcp == "off" and hyb == "off":
@@ -713,7 +867,7 @@ def _estimate_gpu_memory(n: int, num_edges: int, per_loss_bw: bool = False) -> i
     base += num_edges * 2 * 8
 
     # Per-step intermediate tensors (autograd retains for backward)
-    n_active = max(int(n ** 0.75), min(n, 256))
+    n_active = max(int(n**0.75), min(n, 256))
 
     # RVS repulsion: [A, K_total, 2] diffs + [A, K_total] dist + size factors
     k_repul = 70  # n_random + k_nn
@@ -788,8 +942,10 @@ def _compute_loss_term(
         return _hybrid_loss(pos, weight, loss_fn, cpu_node_sizes, cpu_layer_index)
 
     if use_checkpointing and is_heavy:
+
         def _checkpointed_fn(p):
             return weight * loss_fn(p, node_sizes, layer_index)
+
         return torch_checkpoint(_checkpointed_fn, pos, use_reentrant=False)
 
     # Standard
@@ -832,7 +988,7 @@ class _GradBridge(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        cpu_grad_on_gpu, = ctx.saved_tensors
+        (cpu_grad_on_gpu,) = ctx.saved_tensors
         return cpu_grad_on_gpu * grad_output, None, None
 
 
@@ -972,11 +1128,13 @@ def _prepare_flex_data(
                 if isinstance(node_id, int) and 0 <= node_id < num_nodes:
                     idx_list.append(node_id)
             if len(idx_list) >= 2:
-                align_groups.append((
-                    torch.tensor(idx_list, dtype=torch.long, device=device),
-                    group.weight,
-                    axis,
-                ))
+                align_groups.append(
+                    (
+                        torch.tensor(idx_list, dtype=torch.long, device=device),
+                        group.weight,
+                        axis,
+                    )
+                )
     result["align_groups"] = align_groups
 
     # --- Flex spacing ---
@@ -1021,6 +1179,7 @@ def _resolve_flex_ids(config: LayoutConfig, graph) -> LayoutConfig:
 def _resolve_config_flex(config: LayoutConfig, id_to_index: dict) -> LayoutConfig:
     """Create a config copy with flex node IDs resolved to indices."""
     import copy as _c
+
     resolved_flex = _resolve_graph_flex(config.flex, id_to_index)
     if resolved_flex is config.flex:
         return config
