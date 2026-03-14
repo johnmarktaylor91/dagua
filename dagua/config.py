@@ -97,6 +97,12 @@ class LayoutConfig:
     # Only used when hybrid_device mode is active with per_loss_backward.
     num_workers: int = 0
 
+    # Disk offloading: when True, large intermediate tensors are saved to
+    # temporary files during multilevel layout to reduce peak RSS.
+    # Disable for machines with sufficient RAM to keep the full hierarchy
+    # resident (avoids large torch.save calls that can fail on low disk).
+    offload_to_disk: bool = True
+
     # Flex layout constraints (soft targets for spacing, pins, alignment)
     # When present, flex values override the corresponding fixed values.
     flex: Optional["LayoutFlex"] = None
