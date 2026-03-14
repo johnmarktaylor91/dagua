@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import os
 import signal
 import subprocess
 import sys
@@ -39,17 +38,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "torchlens" / "test
 import dagua
 from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
-from dagua.graphviz_utils import layout_with_graphviz, to_dot
+from dagua.graphviz_utils import to_dot
 from dagua.metrics import compute_all_metrics
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 TIMEOUT_SECONDS = 300  # 5 min timeout for graphviz/elk
-DAGUA_TIMEOUT = 600    # 10 min timeout for dagua on very large graphs
+DAGUA_TIMEOUT = 600  # 10 min timeout for dagua on very large graphs
 DAGUA_STEPS_QUALITY = 200  # steps for quality benchmarks (real models)
-DAGUA_STEPS_SCALING = 50   # steps for scaling benchmarks (large synthetic)
-GPU_MIN_NODES = 1000       # skip GPU for graphs smaller than this
+DAGUA_STEPS_SCALING = 50  # steps for scaling benchmarks (large synthetic)
+GPU_MIN_NODES = 1000  # skip GPU for graphs smaller than this
 
 RESULTS_DIR = Path(__file__).parent / "results"
 FIGURES_DIR = RESULTS_DIR / "figures"
@@ -83,6 +82,7 @@ REAL_MODELS = [
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 class TimeoutError(Exception):
     pass
 
@@ -90,8 +90,10 @@ class TimeoutError(Exception):
 @contextmanager
 def time_limit(seconds):
     """Context manager that raises TimeoutError after `seconds`."""
+
     def handler(signum, frame):
         raise TimeoutError(f"Timed out after {seconds}s")
+
     old = signal.signal(signal.SIGALRM, handler)
     signal.alarm(seconds)
     try:
@@ -104,9 +106,11 @@ def time_limit(seconds):
 def log_model(model_class_name: str, input_shape: tuple) -> Optional[Any]:
     """Log a TorchLens model forward pass, return ModelLog or None on failure."""
     try:
-        import torchlens as tl
         # Load example_models from torchlens tests directory
         import importlib.util
+
+        import torchlens as tl
+
         models_path = Path.home() / "projects" / "torchlens" / "tests" / "example_models.py"
         spec = importlib.util.spec_from_file_location("example_models", models_path)
         example_models = importlib.util.module_from_spec(spec)
@@ -126,8 +130,10 @@ def log_model(model_class_name: str, input_shape: tuple) -> Optional[Any]:
 def log_random_graph(target_nodes: int, seed: int = 42) -> Optional[Any]:
     """Generate a RandomGraphModel and log it."""
     try:
-        import torchlens as tl
         import importlib.util
+
+        import torchlens as tl
+
         models_path = Path.home() / "projects" / "torchlens" / "tests" / "example_models.py"
         spec = importlib.util.spec_from_file_location("example_models", models_path)
         example_models = importlib.util.module_from_spec(spec)
@@ -166,6 +172,7 @@ def random_dag_graph(n_nodes: int, seed: int = 42) -> DaguaGraph:
         return _random_dag_graph_vectorized(n_nodes, seed)
 
     import random
+
     rng = random.Random(seed)
 
     src_list = []
@@ -223,7 +230,10 @@ def _random_dag_graph_vectorized(n_nodes: int, seed: int = 42) -> DaguaGraph:
 # Layout engines
 # ---------------------------------------------------------------------------
 
-def run_dagua_layout(graph: DaguaGraph, steps: int, device: str = "cpu") -> Tuple[Optional[torch.Tensor], float]:
+
+def run_dagua_layout(
+    graph: DaguaGraph, steps: int, device: str = "cpu"
+) -> Tuple[Optional[torch.Tensor], float]:
     """Run dagua layout, return (positions, time_seconds)."""
     n = graph.num_nodes
     config = LayoutConfig(steps=steps, device=device, direction="TB")
@@ -251,7 +261,9 @@ def run_dagua_layout(graph: DaguaGraph, steps: int, device: str = "cpu") -> Tupl
         return None, elapsed
 
 
-def run_graphviz_layout(graph: DaguaGraph, timeout: int = TIMEOUT_SECONDS) -> Tuple[Optional[torch.Tensor], float]:
+def run_graphviz_layout(
+    graph: DaguaGraph, timeout: int = TIMEOUT_SECONDS
+) -> Tuple[Optional[torch.Tensor], float]:
     """Run graphviz dot layout, return (positions, time_seconds)."""
     dot_str = to_dot(graph)
 
@@ -263,7 +275,9 @@ def run_graphviz_layout(graph: DaguaGraph, timeout: int = TIMEOUT_SECONDS) -> Tu
     try:
         result = subprocess.run(
             ["dot", "-Tjson", dot_path],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         elapsed = time.perf_counter() - start
 
@@ -316,7 +330,9 @@ process.stdin.on('end', () => {
 """
 
 
-def run_elk_layout(graph: DaguaGraph, timeout: int = TIMEOUT_SECONDS) -> Tuple[Optional[torch.Tensor], float]:
+def run_elk_layout(
+    graph: DaguaGraph, timeout: int = TIMEOUT_SECONDS
+) -> Tuple[Optional[torch.Tensor], float]:
     """Run ELK layered layout, return (positions, time_seconds)."""
     # Build ELK JSON
     n = graph.num_nodes
@@ -349,7 +365,9 @@ def run_elk_layout(graph: DaguaGraph, timeout: int = TIMEOUT_SECONDS) -> Tuple[O
         result = subprocess.run(
             ["node", f"--max-old-space-size={heap_mb}", "-e", _ELK_SCRIPT],
             input=graph_json,
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         elapsed = time.perf_counter() - start
 
@@ -383,6 +401,7 @@ def run_elk_layout(graph: DaguaGraph, timeout: int = TIMEOUT_SECONDS) -> Tuple[O
 # Metric computation
 # ---------------------------------------------------------------------------
 
+
 def compute_metrics_safe(
     positions: Optional[torch.Tensor],
     edge_index: torch.Tensor,
@@ -403,6 +422,7 @@ def compute_metrics_safe(
 # Benchmark runner
 # ---------------------------------------------------------------------------
 
+
 def benchmark_single_graph(
     graph: DaguaGraph,
     name: str,
@@ -414,9 +434,9 @@ def benchmark_single_graph(
     """Benchmark a single graph across all engines."""
     n = graph.num_nodes
     e = graph.edge_index.shape[1] if graph.edge_index.numel() > 0 else 0
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  {name}: {n:,} nodes, {e:,} edges")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     result = {
         "name": name,
@@ -430,7 +450,9 @@ def benchmark_single_graph(
     dagua_pos_cpu, dagua_time_cpu = run_dagua_layout(graph, dagua_steps, device="cpu")
     print(f" {dagua_time_cpu:.2f}s")
     result["dagua_cpu_time"] = round(dagua_time_cpu, 4)
-    result["dagua_cpu_metrics"] = compute_metrics_safe(dagua_pos_cpu, graph.edge_index, graph.node_sizes)
+    result["dagua_cpu_metrics"] = compute_metrics_safe(
+        dagua_pos_cpu, graph.edge_index, graph.node_sizes
+    )
 
     # --- Dagua GPU ---
     if run_gpu and torch.cuda.is_available() and n >= GPU_MIN_NODES:
@@ -438,19 +460,23 @@ def benchmark_single_graph(
         dagua_pos_gpu, dagua_time_gpu = run_dagua_layout(graph, dagua_steps, device="cuda")
         print(f" {dagua_time_gpu:.2f}s")
         result["dagua_gpu_time"] = round(dagua_time_gpu, 4)
-        result["dagua_gpu_metrics"] = compute_metrics_safe(dagua_pos_gpu, graph.edge_index, graph.node_sizes)
+        result["dagua_gpu_metrics"] = compute_metrics_safe(
+            dagua_pos_gpu, graph.edge_index, graph.node_sizes
+        )
     else:
         result["dagua_gpu_time"] = None
         result["dagua_gpu_metrics"] = None
 
     # --- Graphviz ---
     if run_graphviz and n <= 20_000:
-        print(f"  Graphviz (dot)...", end="", flush=True)
+        print("  Graphviz (dot)...", end="", flush=True)
         gv_pos, gv_time = run_graphviz_layout(graph)
         if gv_pos is not None:
             print(f" {gv_time:.2f}s")
         result["graphviz_time"] = round(gv_time, 4) if gv_pos is not None else None
-        result["graphviz_metrics"] = compute_metrics_safe(gv_pos, graph.edge_index, graph.node_sizes)
+        result["graphviz_metrics"] = compute_metrics_safe(
+            gv_pos, graph.edge_index, graph.node_sizes
+        )
     else:
         result["graphviz_time"] = None
         result["graphviz_metrics"] = None
@@ -459,7 +485,7 @@ def benchmark_single_graph(
 
     # --- ELK ---
     if run_elk and n <= 100_000:
-        print(f"  ELK (layered)...", end="", flush=True)
+        print("  ELK (layered)...", end="", flush=True)
         elk_pos, elk_time = run_elk_layout(graph)
         if elk_pos is not None:
             print(f" {elk_time:.2f}s")
@@ -492,15 +518,21 @@ def _print_comparison(result: Dict):
     if len(engines) < 2:
         return
 
-    key_metrics = ["edge_crossings", "node_overlaps", "dag_fraction", "edge_straightness", "overall_quality"]
+    key_metrics = [
+        "edge_crossings",
+        "node_overlaps",
+        "dag_fraction",
+        "edge_straightness",
+        "overall_quality",
+    ]
 
     print(f"\n  {'Metric':<22}", end="")
     for name, _, _ in engines:
         print(f" {name:>14}", end="")
     print()
-    print(f"  {'-'*22}", end="")
+    print(f"  {'-' * 22}", end="")
     for _ in engines:
-        print(f" {'-'*14}", end="")
+        print(f" {'-' * 14}", end="")
     print()
 
     print(f"  {'Runtime (s)':<22}", end="")
@@ -541,7 +573,8 @@ def run_real_model_benchmarks(run_gpu: bool = True, dagua_steps: int = 300) -> L
             continue
 
         result = benchmark_single_graph(
-            graph, display_name,
+            graph,
+            display_name,
             dagua_steps=dagua_steps,
             run_graphviz=True,
             run_elk=True,
@@ -574,7 +607,9 @@ def run_scaling_benchmarks(
     sizes = [s for s in SCALING_SIZES if s <= max_scale]
 
     for target_nodes in sizes:
-        name = f"Random_{target_nodes // 1000}K" if target_nodes >= 1000 else f"Random_{target_nodes}"
+        name = (
+            f"Random_{target_nodes // 1000}K" if target_nodes >= 1000 else f"Random_{target_nodes}"
+        )
 
         if use_torchlens and target_nodes <= 1_000:
             # Use TorchLens for smaller graphs (full model structure)
@@ -609,7 +644,8 @@ def run_scaling_benchmarks(
             dagua_steps = dagua_steps_quality
 
         result = benchmark_single_graph(
-            graph, name,
+            graph,
+            name,
             dagua_steps=dagua_steps,
             run_graphviz=(target_nodes <= 10_000),
             run_elk=(target_nodes <= 50_000),
@@ -631,6 +667,7 @@ def run_scaling_benchmarks(
 # Results analysis
 # ---------------------------------------------------------------------------
 
+
 def analyze_results(results: List[Dict]) -> Dict:
     """Analyze benchmark results and identify dagua weaknesses."""
     analysis = {
@@ -641,11 +678,22 @@ def analyze_results(results: List[Dict]) -> Dict:
         "quality_comparison": [],
     }
 
-    key_metrics = ["edge_crossings", "node_overlaps", "dag_fraction", "edge_straightness",
-                   "edge_length_variance", "x_alignment"]
+    key_metrics = [
+        "edge_crossings",
+        "node_overlaps",
+        "dag_fraction",
+        "edge_straightness",
+        "edge_length_variance",
+        "x_alignment",
+    ]
     # For these metrics, lower is better (except dag_fraction where higher is better)
-    lower_better = {"edge_crossings", "node_overlaps", "edge_straightness",
-                    "edge_length_variance", "x_alignment"}
+    lower_better = {
+        "edge_crossings",
+        "node_overlaps",
+        "edge_straightness",
+        "edge_length_variance",
+        "x_alignment",
+    }
 
     for r in results:
         name = r["name"]
@@ -662,8 +710,14 @@ def analyze_results(results: List[Dict]) -> Dict:
                 else:
                     winner = "dagua" if dv >= gvv else "graphviz"
 
-                entry = {"graph": name, "metric": metric, "dagua": dv, "graphviz": gvv,
-                         "winner": winner, "opponent": "graphviz"}
+                entry = {
+                    "graph": name,
+                    "metric": metric,
+                    "dagua": dv,
+                    "graphviz": gvv,
+                    "winner": winner,
+                    "opponent": "graphviz",
+                }
                 if winner == "dagua":
                     analysis["dagua_wins"].append(entry)
                 else:
@@ -678,8 +732,14 @@ def analyze_results(results: List[Dict]) -> Dict:
                 else:
                     winner = "dagua" if dv >= ev else "elk"
 
-                entry = {"graph": name, "metric": metric, "dagua": dv, "elk": ev,
-                         "winner": winner, "opponent": "elk"}
+                entry = {
+                    "graph": name,
+                    "metric": metric,
+                    "dagua": dv,
+                    "elk": ev,
+                    "winner": winner,
+                    "opponent": "elk",
+                }
                 if winner == "dagua":
                     analysis["dagua_wins"].append(entry)
                 else:
@@ -691,8 +751,13 @@ def analyze_results(results: List[Dict]) -> Dict:
         gvt = r.get("graphviz_time")
         elkt = r.get("elk_time")
 
-        speed_entry = {"graph": name, "dagua_cpu": dt_cpu, "dagua_gpu": dt_gpu,
-                       "graphviz": gvt, "elk": elkt}
+        speed_entry = {
+            "graph": name,
+            "dagua_cpu": dt_cpu,
+            "dagua_gpu": dt_gpu,
+            "graphviz": gvt,
+            "elk": elkt,
+        }
         analysis["speed_comparison"].append(speed_entry)
 
     # Summary
@@ -719,9 +784,11 @@ def analyze_results(results: List[Dict]) -> Dict:
 # Figure generation
 # ---------------------------------------------------------------------------
 
+
 def generate_figures(results: List[Dict], output_dir: Path):
     """Generate all benchmark figures."""
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
@@ -736,27 +803,53 @@ def generate_figures(results: List[Dict], output_dir: Path):
     if scaling_results:
         fig, ax = plt.subplots(figsize=(10, 6))
 
-        nodes = [r["num_nodes"] for r in scaling_results]
-
         # Dagua CPU
-        dagua_cpu = [(r["num_nodes"], r["dagua_cpu_time"]) for r in scaling_results if r.get("dagua_cpu_time")]
+        dagua_cpu = [
+            (r["num_nodes"], r["dagua_cpu_time"])
+            for r in scaling_results
+            if r.get("dagua_cpu_time")
+        ]
         if dagua_cpu:
-            ax.plot(*zip(*dagua_cpu), "o-", color="#2196F3", linewidth=2, markersize=6, label="Dagua (CPU)")
+            ax.plot(
+                *zip(*dagua_cpu),
+                "o-",
+                color="#2196F3",
+                linewidth=2,
+                markersize=6,
+                label="Dagua (CPU)",
+            )
 
         # Dagua GPU
-        dagua_gpu = [(r["num_nodes"], r["dagua_gpu_time"]) for r in scaling_results if r.get("dagua_gpu_time")]
+        dagua_gpu = [
+            (r["num_nodes"], r["dagua_gpu_time"])
+            for r in scaling_results
+            if r.get("dagua_gpu_time")
+        ]
         if dagua_gpu:
-            ax.plot(*zip(*dagua_gpu), "s-", color="#9C27B0", linewidth=2, markersize=6, label="Dagua (GPU)")
+            ax.plot(
+                *zip(*dagua_gpu),
+                "s-",
+                color="#9C27B0",
+                linewidth=2,
+                markersize=6,
+                label="Dagua (GPU)",
+            )
 
         # Graphviz
-        gv = [(r["num_nodes"], r["graphviz_time"]) for r in scaling_results if r.get("graphviz_time")]
+        gv = [
+            (r["num_nodes"], r["graphviz_time"]) for r in scaling_results if r.get("graphviz_time")
+        ]
         if gv:
-            ax.plot(*zip(*gv), "^--", color="#FF5722", linewidth=2, markersize=6, label="Graphviz (dot)")
+            ax.plot(
+                *zip(*gv), "^--", color="#FF5722", linewidth=2, markersize=6, label="Graphviz (dot)"
+            )
 
         # ELK
         elk = [(r["num_nodes"], r["elk_time"]) for r in scaling_results if r.get("elk_time")]
         if elk:
-            ax.plot(*zip(*elk), "D--", color="#4CAF50", linewidth=2, markersize=6, label="ELK (layered)")
+            ax.plot(
+                *zip(*elk), "D--", color="#4CAF50", linewidth=2, markersize=6, label="ELK (layered)"
+            )
 
         ax.set_xlabel("Number of Nodes", fontsize=12)
         ax.set_ylabel("Runtime (seconds)", fontsize=12)
@@ -771,7 +864,7 @@ def generate_figures(results: List[Dict], output_dir: Path):
         fig.savefig(output_dir / "runtime_scaling.png", dpi=200, bbox_inches="tight")
         fig.savefig(output_dir / "runtime_scaling.pdf", bbox_inches="tight")
         plt.close(fig)
-        print(f"  Saved runtime_scaling.png/pdf")
+        print("  Saved runtime_scaling.png/pdf")
 
     # --- Figure 2: Quality comparison on real models (grouped bar) ---
     if real_results:
@@ -809,7 +902,7 @@ def generate_figures(results: List[Dict], output_dir: Path):
             e_valid = [elk_vals[i] for i in valid]
             names_valid = [model_names[i] for i in valid]
 
-            bars_d = ax.bar(x_valid - width, d_valid, width, label="Dagua", color="#2196F3", alpha=0.8)
+            ax.bar(x_valid - width, d_valid, width, label="Dagua", color="#2196F3", alpha=0.8)
 
             # Only plot graphviz/elk where they have values
             g_plot = [v if v is not None else 0 for v in g_valid]
@@ -833,7 +926,7 @@ def generate_figures(results: List[Dict], output_dir: Path):
         fig.savefig(output_dir / "quality_real_models.png", dpi=200, bbox_inches="tight")
         fig.savefig(output_dir / "quality_real_models.pdf", bbox_inches="tight")
         plt.close(fig)
-        print(f"  Saved quality_real_models.png/pdf")
+        print("  Saved quality_real_models.png/pdf")
 
     # --- Figure 3: Runtime comparison bar chart (real models) ---
     if real_results:
@@ -847,10 +940,10 @@ def generate_figures(results: List[Dict], output_dir: Path):
         gv_times = [r.get("graphviz_time") or 0 for r in real_results]
         elk_times = [r.get("elk_time") or 0 for r in real_results]
 
-        ax.bar(x - 1.5*width, cpu_times, width, label="Dagua CPU", color="#2196F3", alpha=0.8)
-        ax.bar(x - 0.5*width, gpu_times, width, label="Dagua GPU", color="#9C27B0", alpha=0.8)
-        ax.bar(x + 0.5*width, gv_times, width, label="Graphviz", color="#FF5722", alpha=0.8)
-        ax.bar(x + 1.5*width, elk_times, width, label="ELK", color="#4CAF50", alpha=0.8)
+        ax.bar(x - 1.5 * width, cpu_times, width, label="Dagua CPU", color="#2196F3", alpha=0.8)
+        ax.bar(x - 0.5 * width, gpu_times, width, label="Dagua GPU", color="#9C27B0", alpha=0.8)
+        ax.bar(x + 0.5 * width, gv_times, width, label="Graphviz", color="#FF5722", alpha=0.8)
+        ax.bar(x + 1.5 * width, elk_times, width, label="ELK", color="#4CAF50", alpha=0.8)
 
         ax.set_xlabel("Model", fontsize=12)
         ax.set_ylabel("Runtime (seconds)", fontsize=12)
@@ -864,14 +957,25 @@ def generate_figures(results: List[Dict], output_dir: Path):
         fig.savefig(output_dir / "runtime_real_models.png", dpi=200, bbox_inches="tight")
         fig.savefig(output_dir / "runtime_real_models.pdf", bbox_inches="tight")
         plt.close(fig)
-        print(f"  Saved runtime_real_models.png/pdf")
+        print("  Saved runtime_real_models.png/pdf")
 
     # --- Figure 4: Dagua win/loss heatmap ---
     if real_results:
-        metrics_list = ["edge_crossings", "node_overlaps", "dag_fraction",
-                        "edge_straightness", "edge_length_variance", "x_alignment"]
-        lower_better = {"edge_crossings", "node_overlaps", "edge_straightness",
-                        "edge_length_variance", "x_alignment"}
+        metrics_list = [
+            "edge_crossings",
+            "node_overlaps",
+            "dag_fraction",
+            "edge_straightness",
+            "edge_length_variance",
+            "x_alignment",
+        ]
+        lower_better = {
+            "edge_crossings",
+            "node_overlaps",
+            "edge_straightness",
+            "edge_length_variance",
+            "x_alignment",
+        }
 
         # vs Graphviz
         models_with_gv = [r for r in real_results if r.get("graphviz_metrics")]
@@ -917,15 +1021,14 @@ def generate_figures(results: List[Dict], output_dir: Path):
                 for j in range(len(metrics_list)):
                     val = matrix[i, j]
                     color = "white" if abs(val) > 60 else "black"
-                    ax.text(j, i, f"{val:.0f}%", ha="center", va="center",
-                            fontsize=8, color=color)
+                    ax.text(j, i, f"{val:.0f}%", ha="center", va="center", fontsize=8, color=color)
 
             plt.colorbar(im, ax=ax, label="% improvement (positive = dagua better)")
             plt.tight_layout()
             fig.savefig(output_dir / "dagua_vs_graphviz_heatmap.png", dpi=200, bbox_inches="tight")
             fig.savefig(output_dir / "dagua_vs_graphviz_heatmap.pdf", bbox_inches="tight")
             plt.close(fig)
-            print(f"  Saved dagua_vs_graphviz_heatmap.png/pdf")
+            print("  Saved dagua_vs_graphviz_heatmap.png/pdf")
 
         # vs ELK
         models_with_elk = [r for r in real_results if r.get("elk_metrics")]
@@ -968,15 +1071,14 @@ def generate_figures(results: List[Dict], output_dir: Path):
                 for j in range(len(metrics_list)):
                     val = matrix[i, j]
                     color = "white" if abs(val) > 60 else "black"
-                    ax.text(j, i, f"{val:.0f}%", ha="center", va="center",
-                            fontsize=8, color=color)
+                    ax.text(j, i, f"{val:.0f}%", ha="center", va="center", fontsize=8, color=color)
 
             plt.colorbar(im, ax=ax, label="% improvement (positive = dagua better)")
             plt.tight_layout()
             fig.savefig(output_dir / "dagua_vs_elk_heatmap.png", dpi=200, bbox_inches="tight")
             fig.savefig(output_dir / "dagua_vs_elk_heatmap.pdf", bbox_inches="tight")
             plt.close(fig)
-            print(f"  Saved dagua_vs_elk_heatmap.png/pdf")
+            print("  Saved dagua_vs_elk_heatmap.png/pdf")
 
     # --- Figure 5: Scaling quality metrics ---
     if scaling_results:
@@ -988,22 +1090,47 @@ def generate_figures(results: List[Dict], output_dir: Path):
             ax = axes[idx]
 
             # Dagua CPU
-            dagua_data = [(r["num_nodes"], r["dagua_cpu_metrics"][metric])
-                          for r in scaling_results if r.get("dagua_cpu_metrics") and metric in r["dagua_cpu_metrics"]]
+            dagua_data = [
+                (r["num_nodes"], r["dagua_cpu_metrics"][metric])
+                for r in scaling_results
+                if r.get("dagua_cpu_metrics") and metric in r["dagua_cpu_metrics"]
+            ]
             if dagua_data:
-                ax.plot(*zip(*dagua_data), "o-", color="#2196F3", label="Dagua", linewidth=2, markersize=5)
+                ax.plot(
+                    *zip(*dagua_data),
+                    "o-",
+                    color="#2196F3",
+                    label="Dagua",
+                    linewidth=2,
+                    markersize=5,
+                )
 
             # Graphviz
-            gv_data = [(r["num_nodes"], r["graphviz_metrics"][metric])
-                       for r in scaling_results if r.get("graphviz_metrics") and metric in r["graphviz_metrics"]]
+            gv_data = [
+                (r["num_nodes"], r["graphviz_metrics"][metric])
+                for r in scaling_results
+                if r.get("graphviz_metrics") and metric in r["graphviz_metrics"]
+            ]
             if gv_data:
-                ax.plot(*zip(*gv_data), "^--", color="#FF5722", label="Graphviz", linewidth=2, markersize=5)
+                ax.plot(
+                    *zip(*gv_data),
+                    "^--",
+                    color="#FF5722",
+                    label="Graphviz",
+                    linewidth=2,
+                    markersize=5,
+                )
 
             # ELK
-            elk_data = [(r["num_nodes"], r["elk_metrics"][metric])
-                        for r in scaling_results if r.get("elk_metrics") and metric in r["elk_metrics"]]
+            elk_data = [
+                (r["num_nodes"], r["elk_metrics"][metric])
+                for r in scaling_results
+                if r.get("elk_metrics") and metric in r["elk_metrics"]
+            ]
             if elk_data:
-                ax.plot(*zip(*elk_data), "D--", color="#4CAF50", label="ELK", linewidth=2, markersize=5)
+                ax.plot(
+                    *zip(*elk_data), "D--", color="#4CAF50", label="ELK", linewidth=2, markersize=5
+                )
 
             ax.set_title(metric.replace("_", " ").title(), fontsize=12)
             ax.set_xlabel("Nodes")
@@ -1016,12 +1143,13 @@ def generate_figures(results: List[Dict], output_dir: Path):
         fig.savefig(output_dir / "quality_scaling.png", dpi=200, bbox_inches="tight")
         fig.savefig(output_dir / "quality_scaling.pdf", bbox_inches="tight")
         plt.close(fig)
-        print(f"  Saved quality_scaling.png/pdf")
+        print("  Saved quality_scaling.png/pdf")
 
 
 # ---------------------------------------------------------------------------
 # LaTeX report
 # ---------------------------------------------------------------------------
+
 
 def generate_latex_report(results: List[Dict], analysis: Dict, output_dir: Path):
     """Generate a LaTeX report with figures and tables."""
@@ -1029,7 +1157,8 @@ def generate_latex_report(results: List[Dict], analysis: Dict, output_dir: Path)
     real_results = [r for r in results if r.get("category") == "real_model"]
     scaling_results = [r for r in results if r.get("category") == "scaling"]
 
-    tex = r"""\documentclass[11pt, a4paper]{article}
+    tex = (
+        r"""\documentclass[11pt, a4paper]{article}
 \usepackage[margin=1in]{geometry}
 \usepackage{booktabs}
 \usepackage{graphicx}
@@ -1048,13 +1177,27 @@ def generate_latex_report(results: List[Dict], analysis: Dict, output_dir: Path)
 
 \title{\textbf{Dagua vs.\ Graphviz vs.\ ELK:\\Comprehensive Layout Engine Benchmark Report}}
 \author{Automated Benchmark Suite}
-\date{""" + time.strftime("%B %d, %Y") + r"""}
+\date{"""
+        + time.strftime("%B %d, %Y")
+        + r"""}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-This report presents a comprehensive comparison of three graph layout engines---\textcolor{daguablue}{\textbf{Dagua}} (GPU-accelerated differentiable layout), \textcolor{gvred}{\textbf{Graphviz}} (dot hierarchical layout), and \textcolor{elkgreen}{\textbf{ELK}} (Eclipse Layout Kernel, layered algorithm)---across """ + str(len(real_results)) + r""" real neural network architectures and """ + str(len(scaling_results)) + r""" synthetic graph scales (up to """ + f"{max([r['num_nodes'] for r in scaling_results], default=0):,}" + r""" nodes). We compare both \emph{runtime performance} (CPU and GPU) and \emph{aesthetic quality metrics} (edge crossings, node overlaps, DAG fraction, edge straightness, and more).
+This report presents a comprehensive comparison of three graph layout engines---"""
+        + r"""\textcolor{daguablue}{\textbf{Dagua}} (GPU-accelerated differentiable layout), """
+        + r"""\textcolor{gvred}{\textbf{Graphviz}} (dot hierarchical layout), and """
+        + r"""\textcolor{elkgreen}{\textbf{ELK}} """
+        + r"""(Eclipse Layout Kernel, layered algorithm)---across """
+        + str(len(real_results))
+        + r""" real neural network architectures and """
+        + str(len(scaling_results))
+        + r""" synthetic graph scales (up to """
+        + f"{max([r['num_nodes'] for r in scaling_results], default=0):,}"
+        + r""" nodes). We compare both \emph{runtime performance} (CPU and GPU) """
+        + r"""and \emph{aesthetic quality metrics} (edge crossings, node overlaps, """
+        + r"""DAG fraction, edge straightness, and more).
 \end{abstract}
 
 \tableofcontents
@@ -1066,14 +1209,25 @@ This report presents a comprehensive comparison of three graph layout engines---
 
 \subsection{Layout Engines}
 \begin{itemize}
-    \item \textbf{Dagua} (v0.0.2): PyTorch-based differentiable graph layout engine. Layout as continuous optimization with composable loss functions. Supports CPU and CUDA. """ + f"Steps: {DAGUA_STEPS_QUALITY} (quality), {DAGUA_STEPS_SCALING} (scaling)." + r"""
-    \item \textbf{Graphviz} (dot): Classic hierarchical layout algorithm. Gold standard for small-to-medium DAGs. Timeout: """ + str(TIMEOUT_SECONDS) + r"""s.
-    \item \textbf{ELK} (elkjs, layered): Eclipse Layout Kernel via Node.js. Hierarchical layered algorithm. Timeout: """ + str(TIMEOUT_SECONDS) + r"""s.
+    \item \textbf{Dagua} (v0.0.2): PyTorch-based differentiable graph layout engine. """
+        + r"""Layout as continuous optimization with composable loss functions. """
+        + r"""Supports CPU and CUDA. """
+        + f"Steps: {DAGUA_STEPS_QUALITY} (quality), {DAGUA_STEPS_SCALING} (scaling)."
+        + r"""
+    \item \textbf{Graphviz} (dot): Classic hierarchical layout algorithm. Gold standard """
+        + r"""for small-to-medium DAGs. Timeout: """
+        + str(TIMEOUT_SECONDS)
+        + r"""s.
+    \item \textbf{ELK} (elkjs, layered): Eclipse Layout Kernel via Node.js. """
+        + r"""Hierarchical layered algorithm. Timeout: """
+        + str(TIMEOUT_SECONDS)
+        + r"""s.
 \end{itemize}
 
 \subsection{Hardware}
 \begin{itemize}
 """
+    )
 
     tex += r"    \item \textbf{CPU}: " + _get_cpu_info() + "\n"
     if torch.cuda.is_available():
@@ -1087,9 +1241,11 @@ All metrics computed via Dagua's \texttt{compute\_all\_metrics()} on the [N, 2] 
     \item \textbf{Edge Crossings}: Count of intersecting edge pairs (lower is better)
     \item \textbf{Node Overlaps}: Count of overlapping bounding box pairs (lower is better)
     \item \textbf{DAG Fraction}: Fraction of edges pointing in layout direction (higher is better)
-    \item \textbf{Edge Straightness}: Mean angular deviation from primary axis in degrees (lower is better)
+    \item \textbf{Edge Straightness}: Mean angular deviation from primary axis in degrees
+    (lower is better)
     \item \textbf{Edge Length Variance}: Variance of Euclidean edge lengths (lower is better)
-    \item \textbf{X-Alignment}: Mean cross-axis displacement between connected nodes (lower is better)
+    \item \textbf{X-Alignment}: Mean cross-axis displacement between connected nodes
+    (lower is better)
     \item \textbf{Overall Quality}: Composite score (higher is better)
 \end{itemize}
 
@@ -1113,14 +1269,18 @@ All metrics computed via Dagua's \texttt{compute\_all\_metrics()} on the [N, 2] 
 \caption{Layout runtime (seconds) for real neural network architectures.}
 \begin{tabular}{l r r r r r r}
 \toprule
-\textbf{Model} & \textbf{Nodes} & \textbf{Edges} & \textbf{Dagua CPU} & \textbf{Dagua GPU} & \textbf{Graphviz} & \textbf{ELK} \\
+\textbf{Model} & \textbf{Nodes} & \textbf{Edges} & \textbf{Dagua CPU} &
+\textbf{Dagua GPU} & \textbf{Graphviz} & \textbf{ELK} \\
 \midrule
 """
         for r in real_results:
-            gpu_t = f"{r['dagua_gpu_time']:.2f}" if r.get('dagua_gpu_time') else "---"
-            gv_t = f"{r['graphviz_time']:.2f}" if r.get('graphviz_time') else "---"
-            elk_t = f"{r['elk_time']:.2f}" if r.get('elk_time') else "---"
-            tex += f"{r['name']} & {r['num_nodes']:,} & {r['num_edges']:,} & {r['dagua_cpu_time']:.2f} & {gpu_t} & {gv_t} & {elk_t} \\\\\n"
+            gpu_t = f"{r['dagua_gpu_time']:.2f}" if r.get("dagua_gpu_time") else "---"
+            gv_t = f"{r['graphviz_time']:.2f}" if r.get("graphviz_time") else "---"
+            elk_t = f"{r['elk_time']:.2f}" if r.get("elk_time") else "---"
+            tex += (
+                f"{r['name']} & {r['num_nodes']:,} & {r['num_edges']:,} & "
+                f"{r['dagua_cpu_time']:.2f} & {gpu_t} & {gv_t} & {elk_t} \\\\\n"
+            )
 
         tex += r"""
 \bottomrule
@@ -1133,22 +1293,33 @@ All metrics computed via Dagua's \texttt{compute\_all\_metrics()} on the [N, 2] 
 \subsection{Quality Metrics}
 \begin{table}[H]
 \centering
-\caption{Aesthetic quality metrics for real neural network architectures. Best value per model bolded.}
+\caption{Aesthetic quality metrics for real neural network architectures.
+Best value per model bolded.}
 \resizebox{\textwidth}{!}{
 \begin{tabular}{l l r r r r r r r}
 \toprule
-\textbf{Model} & \textbf{Engine} & \textbf{Crossings} & \textbf{Overlaps} & \textbf{DAG \%} & \textbf{Straightness} & \textbf{Len.\ Var.} & \textbf{X-Align} & \textbf{Quality} \\
+\textbf{Model} & \textbf{Engine} & \textbf{Crossings} & \textbf{Overlaps} &
+\textbf{DAG \%} & \textbf{Straightness} & \textbf{Len.\ Var.} &
+\textbf{X-Align} & \textbf{Quality} \\
 \midrule
 """
         for r in real_results:
-            engines = [("Dagua", r.get("dagua_cpu_metrics")),
-                       ("Graphviz", r.get("graphviz_metrics")),
-                       ("ELK", r.get("elk_metrics"))]
+            engines = [
+                ("Dagua", r.get("dagua_cpu_metrics")),
+                ("Graphviz", r.get("graphviz_metrics")),
+                ("ELK", r.get("elk_metrics")),
+            ]
             engines = [(n, m) for n, m in engines if m]
 
             for i, (ename, m) in enumerate(engines):
                 model_col = r["name"] if i == 0 else ""
-                tex += f"{model_col} & {ename} & {m.get('edge_crossings', 0)} & {m.get('node_overlaps', 0)} & {m.get('dag_fraction', 0):.3f} & {m.get('edge_straightness', 0):.1f} & {m.get('edge_length_variance', 0):.1f} & {m.get('x_alignment', 0):.1f} & {m.get('overall_quality', 0):.1f} \\\\\n"
+                tex += (
+                    f"{model_col} & {ename} & {m.get('edge_crossings', 0)} & "
+                    f"{m.get('node_overlaps', 0)} & {m.get('dag_fraction', 0):.3f} & "
+                    f"{m.get('edge_straightness', 0):.1f} & "
+                    f"{m.get('edge_length_variance', 0):.1f} & "
+                    f"{m.get('x_alignment', 0):.1f} & {m.get('overall_quality', 0):.1f} \\\\\n"
+                )
 
             tex += r"\midrule" + "\n"
 
@@ -1197,7 +1368,8 @@ All metrics computed via Dagua's \texttt{compute\_all\_metrics()} on the [N, 2] 
     # Section 3: Scaling results
     # ===================================================================
     if scaling_results:
-        tex += r"""
+        tex += (
+            r"""
 % ===================================================================
 \section{Scaling Benchmarks}
 % ===================================================================
@@ -1205,17 +1377,24 @@ All metrics computed via Dagua's \texttt{compute\_all\_metrics()} on the [N, 2] 
 \subsection{Runtime Scaling}
 \begin{table}[H]
 \centering
-\caption{Runtime scaling from 500 to """ + f"{max(r['num_nodes'] for r in scaling_results):,}" + r""" nodes.}
+\caption{Runtime scaling from 500 to """
+            + f"{max(r['num_nodes'] for r in scaling_results):,}"
+            + r""" nodes.}
 \begin{tabular}{r r r r r r}
 \toprule
-\textbf{Nodes} & \textbf{Edges} & \textbf{Dagua CPU (s)} & \textbf{Dagua GPU (s)} & \textbf{Graphviz (s)} & \textbf{ELK (s)} \\
+\textbf{Nodes} & \textbf{Edges} & \textbf{Dagua CPU (s)} & \textbf{Dagua GPU (s)} &
+\textbf{Graphviz (s)} & \textbf{ELK (s)} \\
 \midrule
 """
+        )
         for r in scaling_results:
-            gpu_t = f"{r['dagua_gpu_time']:.2f}" if r.get('dagua_gpu_time') else "---"
-            gv_t = f"{r['graphviz_time']:.2f}" if r.get('graphviz_time') else "---"
-            elk_t = f"{r['elk_time']:.2f}" if r.get('elk_time') else "---"
-            tex += f"{r['num_nodes']:,} & {r['num_edges']:,} & {r['dagua_cpu_time']:.2f} & {gpu_t} & {gv_t} & {elk_t} \\\\\n"
+            gpu_t = f"{r['dagua_gpu_time']:.2f}" if r.get("dagua_gpu_time") else "---"
+            gv_t = f"{r['graphviz_time']:.2f}" if r.get("graphviz_time") else "---"
+            elk_t = f"{r['elk_time']:.2f}" if r.get("elk_time") else "---"
+            tex += (
+                f"{r['num_nodes']:,} & {r['num_edges']:,} & {r['dagua_cpu_time']:.2f} & "
+                f"{gpu_t} & {gv_t} & {elk_t} \\\\\n"
+            )
 
         tex += r"""
 \bottomrule
@@ -1225,7 +1404,8 @@ All metrics computed via Dagua's \texttt{compute\_all\_metrics()} on the [N, 2] 
 \begin{figure}[H]
     \centering
     \includegraphics[width=\textwidth]{figures/runtime_scaling.pdf}
-    \caption{Log-log runtime scaling comparison. Dagua maintains sub-quadratic scaling via multilevel coarsening.}
+    \caption{Log-log runtime scaling comparison. Dagua maintains sub-quadratic
+    scaling via multilevel coarsening.}
 \end{figure}
 
 \begin{figure}[H]
@@ -1247,12 +1427,13 @@ All metrics computed via Dagua's \texttt{compute\_all\_metrics()} on the [N, 2] 
 """
 
     if "win_rate" in analysis:
+        loss_rate = (1 - analysis["win_rate"]) * 100
         tex += f"""
 Across all pairwise metric comparisons:
 \\begin{{itemize}}
-    \\item \\textbf{{Total comparisons}}: {analysis['total_wins'] + analysis['total_losses']}
-    \\item \\textbf{{Dagua wins}}: {analysis['total_wins']} ({analysis['win_rate']*100:.1f}\\%)
-    \\item \\textbf{{Dagua losses}}: {analysis['total_losses']} ({(1-analysis['win_rate'])*100:.1f}\\%)
+    \\item \\textbf{{Total comparisons}}: {analysis["total_wins"] + analysis["total_losses"]}
+    \\item \\textbf{{Dagua wins}}: {analysis["total_wins"]} ({analysis["win_rate"] * 100:.1f}\\%)
+    \\item \\textbf{{Dagua losses}}: {analysis["total_losses"]} ({loss_rate:.1f}\\%)
 \\end{{itemize}}
 """
 
@@ -1282,7 +1463,8 @@ Across all pairwise metric comparisons:
 \section{Improvements Made During Benchmarking}
 % ===================================================================
 
-\textit{This section documents any improvements made to Dagua during the benchmarking session to address identified weaknesses. See below for details.}
+\textit{This section documents any improvements made to Dagua during the
+benchmarking session to address identified weaknesses. See below for details.}
 
 """
 
@@ -1335,9 +1517,16 @@ Across all pairwise metric comparisons:
     try:
         for _ in range(2):  # Run twice for TOC
             subprocess.run(
-                ["pdflatex", "-interaction=nonstopmode", "-output-directory", str(output_dir),
-                 str(tex_path)],
-                capture_output=True, text=True, timeout=60,
+                [
+                    "pdflatex",
+                    "-interaction=nonstopmode",
+                    "-output-directory",
+                    str(output_dir),
+                    str(tex_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
                 cwd=str(output_dir),
             )
         pdf_path = output_dir / "benchmark_report.pdf"
@@ -1352,9 +1541,15 @@ Across all pairwise metric comparisons:
 def _latex_escape(text: str) -> str:
     """Escape special LaTeX characters."""
     replacements = {
-        '&': r'\&', '%': r'\%', '$': r'\$', '#': r'\#',
-        '_': r'\_', '{': r'\{', '}': r'\}', '~': r'\textasciitilde{}',
-        '^': r'\textasciicircum{}',
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
@@ -1385,7 +1580,10 @@ def _generate_lessons(results: List[Dict], analysis: Dict) -> List[str]:
     for r in scaling_results:
         if r.get("graphviz_time") and r.get("dagua_cpu_time"):
             if r["dagua_cpu_time"] < r["graphviz_time"]:
-                lessons.append(f"Dagua becomes faster than Graphviz at approximately {r['num_nodes']:,} nodes on CPU.")
+                lessons.append(
+                    "Dagua becomes faster than Graphviz at approximately "
+                    f"{r['num_nodes']:,} nodes on CPU."
+                )
                 break
 
     # GPU speedup
@@ -1397,15 +1595,24 @@ def _generate_lessons(results: List[Dict], analysis: Dict) -> List[str]:
     if gpu_speedups:
         avg_speedup = np.mean([s for _, s in gpu_speedups])
         best_name, best_speedup = max(gpu_speedups, key=lambda x: x[1])
-        lessons.append(f"GPU acceleration provides an average {avg_speedup:.1f}x speedup over CPU (best: {best_speedup:.1f}x on {best_name}).")
+        lessons.append(
+            f"GPU acceleration provides an average {avg_speedup:.1f}x speedup "
+            f"over CPU (best: {best_speedup:.1f}x on {best_name})."
+        )
 
     # Quality lessons
     if analysis.get("loss_by_metric"):
         worst_metric = max(analysis["loss_by_metric"].items(), key=lambda x: x[1])
-        lessons.append(f"Dagua's weakest metric relative to competitors is {worst_metric[0].replace('_', ' ')} ({worst_metric[1]} losses).")
+        lessons.append(
+            "Dagua's weakest metric relative to competitors is "
+            f"{worst_metric[0].replace('_', ' ')} ({worst_metric[1]} losses)."
+        )
 
     if analysis.get("win_rate"):
-        lessons.append(f"Overall, Dagua wins {analysis['win_rate']*100:.0f}% of quality metric comparisons against Graphviz and ELK.")
+        lessons.append(
+            f"Overall, Dagua wins {analysis['win_rate'] * 100:.0f}% of quality "
+            "metric comparisons against Graphviz and ELK."
+        )
 
     # Scalability
     max_dagua = max([r["num_nodes"] for r in results if r.get("dagua_cpu_time")], default=0)
@@ -1413,9 +1620,15 @@ def _generate_lessons(results: List[Dict], analysis: Dict) -> List[str]:
     max_elk = max([r["num_nodes"] for r in results if r.get("elk_time")], default=0)
 
     if max_dagua > max_gv:
-        lessons.append(f"Dagua handles graphs up to {max_dagua:,} nodes, while Graphviz maxes out at {max_gv:,} nodes.")
+        lessons.append(
+            f"Dagua handles graphs up to {max_dagua:,} nodes, while Graphviz "
+            f"maxes out at {max_gv:,} nodes."
+        )
     if max_dagua > max_elk:
-        lessons.append(f"Dagua handles graphs up to {max_dagua:,} nodes, while ELK maxes out at {max_elk:,} nodes.")
+        lessons.append(
+            f"Dagua handles graphs up to {max_dagua:,} nodes, while ELK maxes "
+            f"out at {max_elk:,} nodes."
+        )
 
     # Edge crossings insight
     crossing_ratios = []
@@ -1427,12 +1640,21 @@ def _generate_lessons(results: List[Dict], analysis: Dict) -> List[str]:
     if crossing_ratios:
         avg_ratio = np.mean(crossing_ratios)
         if avg_ratio > 1.5:
-            lessons.append(f"Edge crossing reduction remains a key improvement area: Dagua averages {avg_ratio:.1f}x more crossings than Graphviz on real models.")
+            lessons.append(
+                "Edge crossing reduction remains a key improvement area: "
+                f"Dagua averages {avg_ratio:.1f}x more crossings than "
+                "Graphviz on real models."
+            )
         elif avg_ratio < 0.8:
-            lessons.append(f"Dagua achieves fewer edge crossings than Graphviz on average ({avg_ratio:.1f}x ratio).")
+            lessons.append(
+                "Dagua achieves fewer edge crossings than Graphviz on average "
+                f"({avg_ratio:.1f}x ratio)."
+            )
 
     if not lessons:
-        lessons.append("Benchmarking completed successfully. See tables and figures for detailed results.")
+        lessons.append(
+            "Benchmarking completed successfully. See tables and figures for detailed results."
+        )
 
     return lessons
 
@@ -1443,14 +1665,24 @@ def _generate_conclusion(results: List[Dict], analysis: Dict) -> str:
     scaling_results = [r for r in results if r.get("category") == "scaling"]
 
     parts = []
-    parts.append(f"This benchmark evaluated {len(real_results)} real neural network architectures and {len(scaling_results)} synthetic graph scales.")
+    parts.append(
+        f"This benchmark evaluated {len(real_results)} real neural network "
+        f"architectures and {len(scaling_results)} synthetic graph scales."
+    )
 
     if analysis.get("win_rate") is not None:
-        parts.append(f"Dagua achieved a {analysis['win_rate']*100:.0f}% win rate across all quality metric comparisons.")
+        parts.append(
+            f"Dagua achieved a {analysis['win_rate'] * 100:.0f}% win rate "
+            "across all quality metric comparisons."
+        )
 
     max_nodes = max([r["num_nodes"] for r in results if r.get("dagua_cpu_time")], default=0)
     if max_nodes >= 1_000_000:
-        parts.append(f"Dagua successfully laid out graphs up to {max_nodes:,} nodes, demonstrating strong scalability beyond what Graphviz or ELK can handle.")
+        parts.append(
+            f"Dagua successfully laid out graphs up to {max_nodes:,} nodes, "
+            "demonstrating strong scalability beyond what Graphviz or ELK "
+            "can handle."
+        )
 
     return " ".join(parts)
 
@@ -1459,10 +1691,15 @@ def _generate_conclusion(results: List[Dict], analysis: Dict) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="Comprehensive Dagua vs Graphviz vs ELK benchmark")
-    parser.add_argument("--max-scale", type=int, default=2_000_000, help="Maximum node count for scaling tests")
-    parser.add_argument("--skip-real-models", action="store_true", help="Skip real model benchmarks")
+    parser.add_argument(
+        "--max-scale", type=int, default=2_000_000, help="Maximum node count for scaling tests"
+    )
+    parser.add_argument(
+        "--skip-real-models", action="store_true", help="Skip real model benchmarks"
+    )
     parser.add_argument("--skip-scaling", action="store_true", help="Skip scaling benchmarks")
     parser.add_argument("--dagua-only", action="store_true", help="Only benchmark Dagua")
     parser.add_argument("--no-gpu", action="store_true", help="Skip GPU benchmarks")
@@ -1478,7 +1715,7 @@ def main():
 
     print("=" * 70)
     print("COMPREHENSIVE LAYOUT ENGINE BENCHMARK")
-    print(f"Dagua vs Graphviz (dot) vs ELK (layered)")
+    print("Dagua vs Graphviz (dot) vs ELK (layered)")
     print(f"Date: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
     print(f"Max scale: {args.max_scale:,} nodes")

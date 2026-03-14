@@ -157,7 +157,9 @@ def test_merge_latest_results_and_generate_report(tmp_path):
         },
     }
 
-    (standard_run / "results.json").write_text(__import__("json").dumps(standard_payload), encoding="utf-8")
+    (standard_run / "results.json").write_text(
+        __import__("json").dumps(standard_payload), encoding="utf-8"
+    )
     (rare_run / "results.json").write_text(__import__("json").dumps(rare_payload), encoding="utf-8")
     (standard_run.parent / "latest").symlink_to(standard_run.name)
     (rare_run.parent / "latest").symlink_to(rare_run.name)
@@ -166,7 +168,9 @@ def test_merge_latest_results_and_generate_report(tmp_path):
     assert "residual_block" in combined["graphs"]
     assert "scale_500000" in combined["graphs"]
 
-    artifacts = generate_report(output_dir=str(output_dir), combined_results=combined, compile_pdf=False)
+    artifacts = generate_report(
+        output_dir=str(output_dir), combined_results=combined, compile_pdf=False
+    )
     assert Path(artifacts["tex"]).exists()
     assert Path(artifacts["scaling_curve"]).exists()
     assert Path(artifacts["benchmark_deltas_json"]).exists()
@@ -235,14 +239,26 @@ def test_standard_suite_reuses_cached_non_dagua_results(tmp_path, monkeypatch):
         },
     }
     latest_metadata = {
-        "graph_signatures": {"tiny_chain": __import__("hashlib").sha256(__import__("json").dumps(graph.to_json(), sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()},
+        "graph_signatures": {
+            "tiny_chain": __import__("hashlib")
+            .sha256(
+                __import__("json")
+                .dumps(graph.to_json(), sort_keys=True, separators=(",", ":"))
+                .encode("utf-8")
+            )
+            .hexdigest()
+        },
         "competitor_signatures": {
             "graphviz_dot": "graphviz_dot:dot 1.0",
             "dagua": "dagua:new",
         },
     }
-    (latest_run / "results.json").write_text(__import__("json").dumps(latest_payload), encoding="utf-8")
-    (latest_run / "metadata.json").write_text(__import__("json").dumps(latest_metadata), encoding="utf-8")
+    (latest_run / "results.json").write_text(
+        __import__("json").dumps(latest_payload), encoding="utf-8"
+    )
+    (latest_run / "metadata.json").write_text(
+        __import__("json").dumps(latest_metadata), encoding="utf-8"
+    )
     (latest_run.parent / "latest").symlink_to(latest_run.name)
 
     class FakeCompetitor:
@@ -261,9 +277,17 @@ def test_standard_suite_reuses_cached_non_dagua_results(tmp_path, monkeypatch):
             return type("Result", (), {"pos": pos, "runtime_seconds": 0.02, "error": None})()
 
     monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
-    monkeypatch.setattr("dagua.eval.benchmark._competitor_map", lambda names=None: [FakeDagua("dagua"), FakeCompetitor("graphviz_dot")])
-    monkeypatch.setattr("dagua.eval.benchmark._system_metadata", lambda: {"dagua_git_hash": "new", "graphviz": "dot 1.0"})
-    monkeypatch.setattr("dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}})
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._competitor_map",
+        lambda names=None: [FakeDagua("dagua"), FakeCompetitor("graphviz_dot")],
+    )
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._system_metadata",
+        lambda: {"dagua_git_hash": "new", "graphviz": "dot 1.0"},
+    )
+    monkeypatch.setattr(
+        "dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}}
+    )
     monkeypatch.setattr("dagua.eval.report.generate_report", lambda *args, **kwargs: {})
 
     payload = run_standard_suite(output_dir=str(output_dir), reuse_cached=True)
@@ -304,9 +328,17 @@ def test_standard_suite_can_force_rerun_specific_competitor(tmp_path, monkeypatc
             return type("Result", (), {"pos": pos, "runtime_seconds": 0.01, "error": None})()
 
     monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
-    monkeypatch.setattr("dagua.eval.benchmark._competitor_map", lambda names=None: [FakeCompetitor("dagua"), FakeCompetitor("graphviz_dot")])
-    monkeypatch.setattr("dagua.eval.benchmark._system_metadata", lambda: {"dagua_git_hash": "new", "graphviz": "dot 1.0"})
-    monkeypatch.setattr("dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}})
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._competitor_map",
+        lambda names=None: [FakeCompetitor("dagua"), FakeCompetitor("graphviz_dot")],
+    )
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._system_metadata",
+        lambda: {"dagua_git_hash": "new", "graphviz": "dot 1.0"},
+    )
+    monkeypatch.setattr(
+        "dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}}
+    )
     monkeypatch.setattr("dagua.eval.report.generate_report", lambda *args, **kwargs: {})
 
     payload = run_standard_suite(
@@ -374,7 +406,9 @@ def test_rare_suite_resumes_from_partial_results(tmp_path, monkeypatch):
             }
         },
     }
-    (run_dir / "results.partial.json").write_text(__import__("json").dumps(partial), encoding="utf-8")
+    (run_dir / "results.partial.json").write_text(
+        __import__("json").dumps(partial), encoding="utf-8"
+    )
 
     calls = {"dagua": 0}
     pos = torch.tensor([[0.0, 0.0], [0.0, 50.0], [0.0, 100.0]], dtype=torch.float32)
@@ -393,7 +427,9 @@ def test_rare_suite_resumes_from_partial_results(tmp_path, monkeypatch):
     monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
     monkeypatch.setattr("dagua.eval.benchmark._competitor_map", lambda names=None: [FakeDagua()])
     monkeypatch.setattr("dagua.eval.benchmark._system_metadata", lambda: {"dagua_git_hash": "new"})
-    monkeypatch.setattr("dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}})
+    monkeypatch.setattr(
+        "dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}}
+    )
 
     payload = run_rare_suite(output_dir=str(output_dir), reuse_cached=False, resume_incomplete=True)
     assert payload["run_id"] == run_dir.name
@@ -441,7 +477,9 @@ def test_benchmark_run_status_reports_partial_progress(tmp_path):
         "last_artifact": "positions/done_graph__dagua.pt",
         "graphs": {},
     }
-    (run_dir / "results.partial.json").write_text(__import__("json").dumps(partial), encoding="utf-8")
+    (run_dir / "results.partial.json").write_text(
+        __import__("json").dumps(partial), encoding="utf-8"
+    )
     (run_dir / "metadata.json").write_text(__import__("json").dumps(metadata), encoding="utf-8")
     (run_dir / "progress.json").write_text(__import__("json").dumps(progress), encoding="utf-8")
 
@@ -485,9 +523,13 @@ def test_standard_suite_writes_partial_checkpoints(tmp_path, monkeypatch):
             return type("Result", (), {"pos": pos, "runtime_seconds": 0.01, "error": None})()
 
     monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
-    monkeypatch.setattr("dagua.eval.benchmark._competitor_map", lambda names=None: [FakeCompetitor("dagua")])
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._competitor_map", lambda names=None: [FakeCompetitor("dagua")]
+    )
     monkeypatch.setattr("dagua.eval.benchmark._system_metadata", lambda: {"dagua_git_hash": "new"})
-    monkeypatch.setattr("dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}})
+    monkeypatch.setattr(
+        "dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}}
+    )
     monkeypatch.setattr("dagua.eval.report.generate_report", lambda *args, **kwargs: {})
 
     payload = run_standard_suite(output_dir=str(output_dir), reuse_cached=False)

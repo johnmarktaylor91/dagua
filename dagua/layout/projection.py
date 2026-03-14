@@ -152,8 +152,6 @@ def _project_sweep(
     device = pos.device
     layers = layer_index.node_to_layer  # [N]
     half_w = node_sizes[:, 0] / 2
-    half_h = node_sizes[:, 1] / 2
-
     for _ in range(iterations):
         # Sort all nodes by (layer, x_position) using composite key
         # This groups same-layer nodes together, sorted by x within each layer
@@ -177,7 +175,7 @@ def _project_sweep(
 
         # Get the actual node indices for consecutive pairs
         idx_a = sorted_indices[:-1]  # [N-1]
-        idx_b = sorted_indices[1:]   # [N-1]
+        idx_b = sorted_indices[1:]  # [N-1]
 
         # Compute overlap for same-layer consecutive pairs
         # (These are already sorted by x, so idx_a is always left of idx_b)
@@ -217,7 +215,9 @@ def _project_sweep(
             needs_push2 = same_layer_2 & (overlap_x2 > 0)
 
             if needs_push2.any():
-                push_amount2 = torch.where(needs_push2, overlap_x2 * 0.125, torch.zeros_like(overlap_x2))
+                push_amount2 = torch.where(
+                    needs_push2, overlap_x2 * 0.125, torch.zeros_like(overlap_x2)
+                )
                 push_a2 = torch.zeros(N, device=device)
                 push_b2 = torch.zeros(N, device=device)
                 push_a2.scatter_add_(0, idx_a2, -push_amount2)
@@ -262,7 +262,7 @@ def _project_sweep_streaming(
 
             # Check consecutive pairs (already x-sorted)
             a = ordered[:-1]  # [W-1]
-            b = ordered[1:]   # [W-1]
+            b = ordered[1:]  # [W-1]
 
             dx = pos[b, 0] - pos[a, 0]  # [W-1]
             min_sep = half_w[a] + half_w[b] + padding  # [W-1]

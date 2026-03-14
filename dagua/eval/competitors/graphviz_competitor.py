@@ -28,14 +28,10 @@ class _GraphvizBase(CompetitorBase):
         try:
             pos = layout_with_graphviz(graph, engine=self.engine)
             elapsed = time.perf_counter() - start
-            return CompetitorResult(
-                name=self.name, pos=pos, runtime_seconds=elapsed
-            )
+            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
         except Exception as e:
             elapsed = time.perf_counter() - start
-            return CompetitorResult(
-                name=self.name, pos=None, runtime_seconds=elapsed, error=str(e)
-            )
+            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=str(e))
 
     def available(self) -> bool:
         return _graphviz_available()

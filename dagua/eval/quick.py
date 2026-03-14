@@ -6,7 +6,6 @@ Usage: python -m dagua.eval.quick [--output-dir eval_output]
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 
@@ -17,9 +16,9 @@ def main():
     args = parser.parse_args()
 
     from dagua.config import LayoutConfig
-    from dagua.eval.graphs import get_test_graphs
     from dagua.eval.compare import compare_with_graphviz, print_comparison_table
-    from dagua.eval.report import generate_grid, generate_comparison_grid
+    from dagua.eval.graphs import get_test_graphs
+    from dagua.eval.report import generate_comparison_grid, generate_grid
 
     output_dir = args.output_dir
     config = LayoutConfig()

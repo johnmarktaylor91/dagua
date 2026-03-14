@@ -45,9 +45,7 @@ class ElkLayered(CompetitorBase):
             for e_idx in range(graph.edge_index.shape[1]):
                 s = graph.edge_index[0, e_idx].item()
                 t = graph.edge_index[1, e_idx].item()
-                edges.append(
-                    {"id": f"e{e_idx}", "sources": [str(s)], "targets": [str(t)]}
-                )
+                edges.append({"id": f"e{e_idx}", "sources": [str(s)], "targets": [str(t)]})
 
         elk_graph = {
             "id": "root",
@@ -93,9 +91,7 @@ class ElkLayered(CompetitorBase):
                     pos[idx, 0] = child.get("x", 0)
                     pos[idx, 1] = child.get("y", 0)
 
-            return CompetitorResult(
-                name=self.name, pos=pos, runtime_seconds=elapsed
-            )
+            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
         except subprocess.TimeoutExpired:
             elapsed = time.perf_counter() - start
             return CompetitorResult(
@@ -103,9 +99,7 @@ class ElkLayered(CompetitorBase):
             )
         except (FileNotFoundError, json.JSONDecodeError) as e:
             elapsed = time.perf_counter() - start
-            return CompetitorResult(
-                name=self.name, pos=None, runtime_seconds=elapsed, error=str(e)
-            )
+            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=str(e))
 
     def available(self) -> bool:
         try:

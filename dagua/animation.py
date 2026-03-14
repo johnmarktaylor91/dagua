@@ -6,7 +6,7 @@ renders the full graph after the fact into GIF/video formats.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
@@ -17,7 +17,6 @@ from dagua.config import LayoutConfig
 from dagua.edges import BezierCurve, place_edge_labels, route_edges
 from dagua.layout import layout
 from dagua.render import render
-
 
 _ANIM_RASTER_FORMATS = {"gif", "webp"}
 _ANIM_VIDEO_FORMATS = {"mp4", "m4v", "mov", "avi"}
@@ -115,7 +114,9 @@ class TourConfig:
     figsize: Optional[Tuple[float, float]] = None
     format: Optional[str] = None
     output: Optional[str] = None
-    scene: str = "auto"  # auto, powers_of_ten, zoom_pan, panorama, layer_sweep, cathedral, motif_orbit, keyframes
+    # Scenes: auto, powers_of_ten, zoom_pan, panorama, layer_sweep, cathedral,
+    # motif_orbit, keyframes.
+    scene: str = "auto"
     keyframes: Optional[List[CameraKeyframe]] = None
     hold_start_frames: int = 10
     hold_end_frames: int = 14
@@ -190,7 +191,9 @@ class _TraceRecorder:
         if not self.config.show_phase_cards:
             return
         self.snapshots.append(
-            _Snapshot(kind="card", phase="card", step=0, total_steps=0, title=title, subtitle=subtitle)
+            _Snapshot(
+                kind="card", phase="card", step=0, total_steps=0, title=title, subtitle=subtitle
+            )
         )
 
     def capture_layout_positions(
@@ -279,7 +282,9 @@ def _compute_camera_bounds(
     if not real_snaps:
         return bounds_per_frame
 
-    raw_bounds = [_snapshot_bounds(graph, cast(torch.Tensor, snap.positions)) for snap in real_snaps]
+    raw_bounds = [
+        _snapshot_bounds(graph, cast(torch.Tensor, snap.positions)) for snap in real_snaps
+    ]
     global_bounds = (
         min(b[0] for b in raw_bounds),
         max(b[1] for b in raw_bounds),
@@ -311,7 +316,12 @@ def _compute_camera_bounds(
             pos = snap.positions[focus_idx].detach().cpu().numpy()
             half_w = max(min_w * 0.5, config.follow_padding)
             half_h = max(min_h * 0.5, config.follow_padding)
-            target = (float(pos[0] - half_w), float(pos[0] + half_w), float(pos[1] - half_h), float(pos[1] + half_h))
+            target = (
+                float(pos[0] - half_w),
+                float(pos[0] + half_w),
+                float(pos[1] - half_h),
+                float(pos[1] + half_h),
+            )
         else:
             target = current_raw
 
@@ -394,7 +404,11 @@ def _interesting_node_indices(graph, positions: torch.Tensor, k: int = 4) -> Lis
     if n == 0:
         return []
     pos = positions.detach().cpu()
-    ei = graph.edge_index.detach().cpu() if graph.edge_index.numel() > 0 else torch.zeros(2, 0, dtype=torch.long)
+    ei = (
+        graph.edge_index.detach().cpu()
+        if graph.edge_index.numel() > 0
+        else torch.zeros(2, 0, dtype=torch.long)
+    )
     degree = torch.zeros(n, dtype=torch.float32)
     long_span = torch.zeros(n, dtype=torch.float32)
     cluster_bonus = torch.zeros(n, dtype=torch.float32)
@@ -416,7 +430,9 @@ def _interesting_node_indices(graph, positions: torch.Tensor, k: int = 4) -> Lis
             member_ids = graph.leaf_cluster_members(name)
             if member_ids:
                 idx = torch.tensor(member_ids, dtype=torch.long)
-                cluster_bonus[idx] = torch.maximum(cluster_bonus[idx], torch.full_like(cluster_bonus[idx], float(depth)))
+                cluster_bonus[idx] = torch.maximum(
+                    cluster_bonus[idx], torch.full_like(cluster_bonus[idx], float(depth))
+                )
     center = pos.mean(dim=0, keepdim=True)
     dist = torch.norm(pos - center, dim=1)
     score = degree + 0.8 * long_span + 1.5 * cluster_bonus + 0.02 * dist
@@ -427,7 +443,10 @@ def _interesting_node_indices(graph, positions: torch.Tensor, k: int = 4) -> Lis
         if not picked:
             picked.append(idx)
             continue
-        if all(torch.norm(pos[idx] - pos[prev]).item() > 0.12 * max(dist.max().item(), 1.0) for prev in picked):
+        if all(
+            torch.norm(pos[idx] - pos[prev]).item() > 0.12 * max(dist.max().item(), 1.0)
+            for prev in picked
+        ):
             picked.append(idx)
         if len(picked) >= k:
             break
@@ -513,11 +532,15 @@ def _keyframe_target_bounds(
     return bounds
 
 
-def _default_tour_keyframes(graph, positions: torch.Tensor, config: TourConfig) -> List[CameraKeyframe]:
+def _default_tour_keyframes(
+    graph, positions: torch.Tensor, config: TourConfig
+) -> List[CameraKeyframe]:
     global_bounds = _global_bounds(graph, positions)
     interesting = _interesting_node_indices(graph, positions, k=4)
     focus_nodes = interesting[: max(1, min(3, len(interesting)))]
-    primary_bounds = _focus_bounds_for_node(graph, positions, focus_nodes[0], config.follow_padding, min_fraction=0.09)
+    primary_bounds = _focus_bounds_for_node(
+        graph, positions, focus_nodes[0], config.follow_padding, min_fraction=0.09
+    )
     if config.scene == "zoom_pan":
         x0, x1, y0, y1 = primary_bounds
         w = x1 - x0
@@ -530,78 +553,248 @@ def _default_tour_keyframes(graph, positions: torch.Tensor, config: TourConfig) 
             pan_a = (x0, x1, y0 - 0.35 * h, y0 + 0.65 * h)
             pan_b = (x0, x1, y1 - 0.65 * h, y1 + 0.35 * h)
         return [
-            CameraKeyframe(duration_frames=26, bounds=global_bounds, title="Whole Graph", subtitle="Full composition"),
-            CameraKeyframe(duration_frames=28, bounds=_scale_bounds(primary_bounds, 1.35), title="Zoom In", subtitle="Entering an interesting region"),
-            CameraKeyframe(duration_frames=34, bounds=pan_a, title="Pan Across", subtitle="Following visible local structure"),
-            CameraKeyframe(duration_frames=34, bounds=pan_b, title="Pan Across", subtitle="Continuing across the motif"),
-            CameraKeyframe(duration_frames=26, bounds=_scale_bounds(global_bounds, 0.92), title="Back to Context", subtitle="Detail within the whole"),
+            CameraKeyframe(
+                duration_frames=26,
+                bounds=global_bounds,
+                title="Whole Graph",
+                subtitle="Full composition",
+            ),
+            CameraKeyframe(
+                duration_frames=28,
+                bounds=_scale_bounds(primary_bounds, 1.35),
+                title="Zoom In",
+                subtitle="Entering an interesting region",
+            ),
+            CameraKeyframe(
+                duration_frames=34,
+                bounds=pan_a,
+                title="Pan Across",
+                subtitle="Following visible local structure",
+            ),
+            CameraKeyframe(
+                duration_frames=34,
+                bounds=pan_b,
+                title="Pan Across",
+                subtitle="Continuing across the motif",
+            ),
+            CameraKeyframe(
+                duration_frames=26,
+                bounds=_scale_bounds(global_bounds, 0.92),
+                title="Back to Context",
+                subtitle="Detail within the whole",
+            ),
         ]
     if config.scene == "powers_of_ten":
         return [
-            CameraKeyframe(duration_frames=28, bounds=_scale_bounds(global_bounds, 1.0), title="Whole Graph", subtitle="Starting from the full structure"),
-            CameraKeyframe(duration_frames=24, bounds=_scale_bounds(global_bounds, 0.55), center_on=focus_nodes[0], title="First Zoom", subtitle="Major structure comes forward"),
-            CameraKeyframe(duration_frames=24, bounds=primary_bounds, title="Detail", subtitle="Local neighborhood"),
-            CameraKeyframe(duration_frames=24, bounds=_scale_bounds(global_bounds, 0.8), title="Context Return", subtitle="Detail back into context"),
+            CameraKeyframe(
+                duration_frames=28,
+                bounds=_scale_bounds(global_bounds, 1.0),
+                title="Whole Graph",
+                subtitle="Starting from the full structure",
+            ),
+            CameraKeyframe(
+                duration_frames=24,
+                bounds=_scale_bounds(global_bounds, 0.55),
+                center_on=focus_nodes[0],
+                title="First Zoom",
+                subtitle="Major structure comes forward",
+            ),
+            CameraKeyframe(
+                duration_frames=24,
+                bounds=primary_bounds,
+                title="Detail",
+                subtitle="Local neighborhood",
+            ),
+            CameraKeyframe(
+                duration_frames=24,
+                bounds=_scale_bounds(global_bounds, 0.8),
+                title="Context Return",
+                subtitle="Detail back into context",
+            ),
         ]
     if config.scene == "cathedral":
         x0, x1, y0, y1 = global_bounds
         if graph.direction in ("TB", "BT"):
             tall = max((y1 - y0) * 0.55, config.follow_padding * 3)
-            nave = ((x0 + x1) * 0.5 - (x1 - x0) * 0.22, (x0 + x1) * 0.5 + (x1 - x0) * 0.22, y0, y0 + tall)
+            nave = (
+                (x0 + x1) * 0.5 - (x1 - x0) * 0.22,
+                (x0 + x1) * 0.5 + (x1 - x0) * 0.22,
+                y0,
+                y0 + tall,
+            )
             transept = (x0, x1, (y0 + y1) * 0.5 - tall * 0.22, (y0 + y1) * 0.5 + tall * 0.22)
         else:
             wide = max((x1 - x0) * 0.55, config.follow_padding * 3)
-            nave = (x0, x0 + wide, (y0 + y1) * 0.5 - (y1 - y0) * 0.22, (y0 + y1) * 0.5 + (y1 - y0) * 0.22)
+            nave = (
+                x0,
+                x0 + wide,
+                (y0 + y1) * 0.5 - (y1 - y0) * 0.22,
+                (y0 + y1) * 0.5 + (y1 - y0) * 0.22,
+            )
             transept = ((x0 + x1) * 0.5 - wide * 0.22, (x0 + x1) * 0.5 + wide * 0.22, y0, y1)
         return [
-            CameraKeyframe(duration_frames=30, bounds=_scale_bounds(global_bounds, 1.0), title="Cathedral View", subtitle="Large-scale flow and symmetry"),
-            CameraKeyframe(duration_frames=36, bounds=nave, title="Central Spine", subtitle="The main structural axis"),
-            CameraKeyframe(duration_frames=36, bounds=transept, title="Cross Structure", subtitle="Lateral connections and branches"),
-            CameraKeyframe(duration_frames=26, bounds=_scale_bounds(global_bounds, 0.86), title="Whole Graph", subtitle="The full architecture again"),
+            CameraKeyframe(
+                duration_frames=30,
+                bounds=_scale_bounds(global_bounds, 1.0),
+                title="Cathedral View",
+                subtitle="Large-scale flow and symmetry",
+            ),
+            CameraKeyframe(
+                duration_frames=36,
+                bounds=nave,
+                title="Central Spine",
+                subtitle="The main structural axis",
+            ),
+            CameraKeyframe(
+                duration_frames=36,
+                bounds=transept,
+                title="Cross Structure",
+                subtitle="Lateral connections and branches",
+            ),
+            CameraKeyframe(
+                duration_frames=26,
+                bounds=_scale_bounds(global_bounds, 0.86),
+                title="Whole Graph",
+                subtitle="The full architecture again",
+            ),
         ]
     if config.scene == "motif_orbit":
         motifs = focus_nodes[:3] if len(focus_nodes) >= 3 else focus_nodes
-        frames = [CameraKeyframe(duration_frames=24, bounds=global_bounds, title="Motif Orbit", subtitle="A tour of strong local structures")]
+        frames = [
+            CameraKeyframe(
+                duration_frames=24,
+                bounds=global_bounds,
+                title="Motif Orbit",
+                subtitle="A tour of strong local structures",
+            )
+        ]
         subtitles = ["Cluster-rich region", "Long-span connection hub", "Branching motif"]
         for i, node_idx in enumerate(motifs):
             frames.append(
                 CameraKeyframe(
                     duration_frames=24,
-                    bounds=_scale_bounds(_focus_bounds_for_node(graph, positions, node_idx, config.follow_padding, min_fraction=0.09), 1.1),
+                    bounds=_scale_bounds(
+                        _focus_bounds_for_node(
+                            graph, positions, node_idx, config.follow_padding, min_fraction=0.09
+                        ),
+                        1.1,
+                    ),
                     title=f"Motif {i + 1}",
                     subtitle=subtitles[i] if i < len(subtitles) else "Interesting local structure",
                 )
             )
-        frames.append(CameraKeyframe(duration_frames=22, bounds=_scale_bounds(global_bounds, 0.95), title="Whole Graph", subtitle="Orbit complete"))
+        frames.append(
+            CameraKeyframe(
+                duration_frames=22,
+                bounds=_scale_bounds(global_bounds, 0.95),
+                title="Whole Graph",
+                subtitle="Orbit complete",
+            )
+        )
         return frames
     if config.scene == "panorama":
         return [
-            CameraKeyframe(duration_frames=20, bounds=_scale_bounds(global_bounds, 0.85), title="Panorama", subtitle="Broad structural sweep"),
-            CameraKeyframe(duration_frames=36, bounds=(global_bounds[0], (global_bounds[0] + global_bounds[1]) / 2, global_bounds[2], global_bounds[3]), title="Left Half", subtitle="One side of the graph"),
-            CameraKeyframe(duration_frames=36, bounds=((global_bounds[0] + global_bounds[1]) / 2, global_bounds[1], global_bounds[2], global_bounds[3]), title="Right Half", subtitle="Counterpart structures"),
-            CameraKeyframe(duration_frames=24, bounds=_scale_bounds(global_bounds, 1.0), title="Whole Graph", subtitle="Back to the whole composition"),
+            CameraKeyframe(
+                duration_frames=20,
+                bounds=_scale_bounds(global_bounds, 0.85),
+                title="Panorama",
+                subtitle="Broad structural sweep",
+            ),
+            CameraKeyframe(
+                duration_frames=36,
+                bounds=(
+                    global_bounds[0],
+                    (global_bounds[0] + global_bounds[1]) / 2,
+                    global_bounds[2],
+                    global_bounds[3],
+                ),
+                title="Left Half",
+                subtitle="One side of the graph",
+            ),
+            CameraKeyframe(
+                duration_frames=36,
+                bounds=(
+                    (global_bounds[0] + global_bounds[1]) / 2,
+                    global_bounds[1],
+                    global_bounds[2],
+                    global_bounds[3],
+                ),
+                title="Right Half",
+                subtitle="Counterpart structures",
+            ),
+            CameraKeyframe(
+                duration_frames=24,
+                bounds=_scale_bounds(global_bounds, 1.0),
+                title="Whole Graph",
+                subtitle="Back to the whole composition",
+            ),
         ]
     if config.scene == "layer_sweep":
         x0, x1, y0, y1 = global_bounds
         if graph.direction in ("TB", "BT"):
             h = max((y1 - y0) * 0.35, config.follow_padding * 2)
             return [
-                CameraKeyframe(duration_frames=20, bounds=global_bounds, title="Layer Sweep", subtitle="Scanning along the graph flow"),
-                CameraKeyframe(duration_frames=36, bounds=(x0, x1, y0, y0 + h), title="Early Layers", subtitle="Inputs and first branches"),
-                CameraKeyframe(duration_frames=36, bounds=(x0, x1, (y0 + y1 - h) / 2, (y0 + y1 + h) / 2), title="Middle Layers", subtitle="Cross-links and merges"),
-                CameraKeyframe(duration_frames=36, bounds=(x0, x1, y1 - h, y1), title="Late Layers", subtitle="Outputs and terminal structure"),
+                CameraKeyframe(
+                    duration_frames=20,
+                    bounds=global_bounds,
+                    title="Layer Sweep",
+                    subtitle="Scanning along the graph flow",
+                ),
+                CameraKeyframe(
+                    duration_frames=36,
+                    bounds=(x0, x1, y0, y0 + h),
+                    title="Early Layers",
+                    subtitle="Inputs and first branches",
+                ),
+                CameraKeyframe(
+                    duration_frames=36,
+                    bounds=(x0, x1, (y0 + y1 - h) / 2, (y0 + y1 + h) / 2),
+                    title="Middle Layers",
+                    subtitle="Cross-links and merges",
+                ),
+                CameraKeyframe(
+                    duration_frames=36,
+                    bounds=(x0, x1, y1 - h, y1),
+                    title="Late Layers",
+                    subtitle="Outputs and terminal structure",
+                ),
             ]
         w = max((x1 - x0) * 0.35, config.follow_padding * 2)
         return [
-            CameraKeyframe(duration_frames=20, bounds=global_bounds, title="Layer Sweep", subtitle="Scanning along the graph flow"),
-            CameraKeyframe(duration_frames=36, bounds=(x0, x0 + w, y0, y1), title="Early Layers", subtitle="Inputs and first branches"),
-            CameraKeyframe(duration_frames=36, bounds=((x0 + x1 - w) / 2, (x0 + x1 + w) / 2, y0, y1), title="Middle Layers", subtitle="Cross-links and merges"),
-            CameraKeyframe(duration_frames=36, bounds=(x1 - w, x1, y0, y1), title="Late Layers", subtitle="Outputs and terminal structure"),
+            CameraKeyframe(
+                duration_frames=20,
+                bounds=global_bounds,
+                title="Layer Sweep",
+                subtitle="Scanning along the graph flow",
+            ),
+            CameraKeyframe(
+                duration_frames=36,
+                bounds=(x0, x0 + w, y0, y1),
+                title="Early Layers",
+                subtitle="Inputs and first branches",
+            ),
+            CameraKeyframe(
+                duration_frames=36,
+                bounds=((x0 + x1 - w) / 2, (x0 + x1 + w) / 2, y0, y1),
+                title="Middle Layers",
+                subtitle="Cross-links and merges",
+            ),
+            CameraKeyframe(
+                duration_frames=36,
+                bounds=(x1 - w, x1, y0, y1),
+                title="Late Layers",
+                subtitle="Outputs and terminal structure",
+            ),
         ]
 
     # auto and focus_hops default
     keyframes = [
-        CameraKeyframe(duration_frames=24, bounds=global_bounds, title="Whole Graph", subtitle="Overall topology and balance"),
+        CameraKeyframe(
+            duration_frames=24,
+            bounds=global_bounds,
+            title="Whole Graph",
+            subtitle="Overall topology and balance",
+        ),
     ]
     subtitles = ["High-degree junction", "Secondary hub", "Tertiary motif"]
     for idx, node_idx in enumerate(focus_nodes):
@@ -615,7 +808,12 @@ def _default_tour_keyframes(graph, positions: torch.Tensor, config: TourConfig) 
             )
         )
     keyframes.append(
-        CameraKeyframe(duration_frames=28, bounds=_scale_bounds(global_bounds, 0.92), title="Whole Graph", subtitle="Return to full context")
+        CameraKeyframe(
+            duration_frames=28,
+            bounds=_scale_bounds(global_bounds, 0.92),
+            title="Whole Graph",
+            subtitle="Return to full context",
+        )
     )
     return keyframes
 
@@ -696,9 +894,12 @@ def _overlay_text(ax, graph, title: str, subtitle: Optional[str]) -> None:
     x = 0.015
     y = 0.985
     ax.text(
-        x, y, title,
+        x,
+        y,
+        title,
         transform=ax.transAxes,
-        ha="left", va="top",
+        ha="left",
+        va="top",
         fontsize=gs.title_font_size + 1,
         fontweight="bold",
         color=gs.title_font_color,
@@ -713,9 +914,12 @@ def _overlay_text(ax, graph, title: str, subtitle: Optional[str]) -> None:
     )
     if subtitle:
         ax.text(
-            x, y - 0.055, subtitle,
+            x,
+            y - 0.055,
+            subtitle,
             transform=ax.transAxes,
-            ha="left", va="top",
+            ha="left",
+            va="top",
             fontsize=max(gs.title_font_size - 1, 8),
             color="#5F6368",
             fontfamily=gs.title_font_family or "sans-serif",
@@ -743,6 +947,7 @@ def _frame_title(snap: _Snapshot) -> Tuple[str, Optional[str]]:
 
 def _card_frame(graph, title: str, subtitle: Optional[str], figsize, dpi: int) -> np.ndarray:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -752,8 +957,11 @@ def _card_frame(graph, title: str, subtitle: Optional[str], figsize, dpi: int) -
     ax.set_facecolor(gs.background_color)
     ax.axis("off")
     ax.text(
-        0.5, 0.58, title,
-        ha="center", va="center",
+        0.5,
+        0.58,
+        title,
+        ha="center",
+        va="center",
         transform=ax.transAxes,
         fontsize=22,
         fontweight="bold",
@@ -762,8 +970,11 @@ def _card_frame(graph, title: str, subtitle: Optional[str], figsize, dpi: int) -
     )
     if subtitle:
         ax.text(
-            0.5, 0.42, subtitle,
-            ha="center", va="center",
+            0.5,
+            0.42,
+            subtitle,
+            ha="center",
+            va="center",
             transform=ax.transAxes,
             fontsize=11,
             color="#6B7280",
@@ -791,7 +1002,9 @@ def _render_snapshot_frame(
         curves = _curves_from_snapshot(snap)
     else:
         curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
-    label_positions = place_edge_labels(curves, positions, graph.node_sizes, graph.edge_labels, graph)
+    label_positions = place_edge_labels(
+        curves, positions, graph.node_sizes, graph.edge_labels, graph
+    )
 
     fig, ax = render(
         graph,
@@ -860,6 +1073,7 @@ def _render_large_tour_frame(
     subtitle: Optional[str] = None,
 ) -> np.ndarray:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.collections import LineCollection
@@ -868,8 +1082,7 @@ def _render_large_tour_frame(
     x_min, x_max, y_min, y_max = camera_bounds
     pos = large_state.pos
     visible = (
-        (pos[:, 0] >= x_min) & (pos[:, 0] <= x_max) &
-        (pos[:, 1] >= y_min) & (pos[:, 1] <= y_max)
+        (pos[:, 0] >= x_min) & (pos[:, 0] <= x_max) & (pos[:, 1] >= y_min) & (pos[:, 1] <= y_max)
     )
     visible_count = int(visible.sum())
 
@@ -884,7 +1097,8 @@ def _render_large_tour_frame(
     if visible_count > 0:
         bins = int(np.clip(np.sqrt(max(visible_count, 1)) * 1.25, 48, tour_cfg.density_bins))
         hist, xedges, yedges = np.histogram2d(
-            view_x, view_y,
+            view_x,
+            view_y,
             bins=[bins, bins],
             range=[[x_min, x_max], [y_min, y_max]],
         )
@@ -912,17 +1126,23 @@ def _render_large_tour_frame(
         src_xy = pos[src]
         tgt_xy = pos[tgt]
         edge_mask = (
-            (src_xy[:, 0] >= x_min) & (src_xy[:, 0] <= x_max) &
-            (src_xy[:, 1] >= y_min) & (src_xy[:, 1] <= y_max) &
-            (tgt_xy[:, 0] >= x_min) & (tgt_xy[:, 0] <= x_max) &
-            (tgt_xy[:, 1] >= y_min) & (tgt_xy[:, 1] <= y_max)
+            (src_xy[:, 0] >= x_min)
+            & (src_xy[:, 0] <= x_max)
+            & (src_xy[:, 1] >= y_min)
+            & (src_xy[:, 1] <= y_max)
+            & (tgt_xy[:, 0] >= x_min)
+            & (tgt_xy[:, 0] <= x_max)
+            & (tgt_xy[:, 1] >= y_min)
+            & (tgt_xy[:, 1] <= y_max)
         )
         if edge_mask.any():
             segs = np.stack([src_xy[edge_mask], tgt_xy[edge_mask]], axis=1)
             if len(segs) > 6000:
                 step = max(len(segs) // 6000, 1)
                 segs = segs[::step]
-            lc = LineCollection(cast(Any, segs), colors="#266b8ccc", linewidths=0.35, alpha=0.16, zorder=2)
+            lc = LineCollection(
+                cast(Any, segs), colors="#266b8ccc", linewidths=0.35, alpha=0.16, zorder=2
+            )
             ax.add_collection(lc)
 
     if 0 < visible_count <= tour_cfg.detail_node_limit:
@@ -985,7 +1205,9 @@ def _blend_frames(a: np.ndarray, b: np.ndarray, n: int) -> List[np.ndarray]:
     return blended
 
 
-def _write_frames(frames: Sequence[np.ndarray], output: str, fmt: str, config: AnimationConfig) -> None:
+def _write_frames(
+    frames: Sequence[np.ndarray], output: str, fmt: str, config: AnimationConfig
+) -> None:
     path = Path(output)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -994,10 +1216,12 @@ def _write_frames(frames: Sequence[np.ndarray], output: str, fmt: str, config: A
         frames_dir.mkdir(parents=True, exist_ok=True)
         for i, frame in enumerate(frames):
             from PIL import Image
+
             Image.fromarray(frame).save(frames_dir / f"frame_{i:04d}.png")
 
     if fmt in _ANIM_RASTER_FORMATS:
         from PIL import Image
+
         images = [Image.fromarray(frame) for frame in frames]
         duration = max(int(1000 / max(config.fps, 1)), 1)
         save_kwargs: Dict[str, Any] = {
@@ -1014,6 +1238,7 @@ def _write_frames(frames: Sequence[np.ndarray], output: str, fmt: str, config: A
 
     if fmt in _ANIM_VIDEO_FORMATS:
         import imageio.v2 as imageio
+
         writer = imageio.get_writer(
             path,
             fps=config.fps,
@@ -1057,6 +1282,7 @@ def _write_still_image(frame: np.ndarray, output: str, fmt: str, dpi: int) -> No
 
     if fmt in _STILL_VECTOR_FORMATS:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -1065,7 +1291,9 @@ def _write_still_image(frame: np.ndarray, output: str, fmt: str, dpi: int) -> No
         ax.imshow(frame)
         ax.axis("off")
         fig.subplots_adjust(0, 0, 1, 1)
-        fig.savefig(path, format=fmt, dpi=dpi, bbox_inches="tight", pad_inches=0.0, facecolor="white")
+        fig.savefig(
+            path, format=fmt, dpi=dpi, bbox_inches="tight", pad_inches=0.0, facecolor="white"
+        )
         plt.close(fig)
         return
 
@@ -1082,6 +1310,7 @@ def animate(
     """Render a faithful optimization animation after layout completes."""
     if config is None:
         from dagua.defaults import get_default_device, get_default_layout_overrides
+
         layout_overrides = get_default_layout_overrides()
         config = LayoutConfig(device=get_default_device(), **layout_overrides)
 
@@ -1097,9 +1326,12 @@ def animate(
     final_positions = layout(graph, config, trace=recorder)
 
     graph.compute_node_sizes()
-    curves = route_edges(final_positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
+    curves = route_edges(
+        final_positions, graph.edge_index, graph.node_sizes, graph.direction, graph
+    )
     if getattr(config, "edge_opt_steps", 0) >= 0:
         from dagua.layout.edge_optimization import optimize_edges
+
         curves = optimize_edges(
             curves,
             final_positions,
@@ -1139,7 +1371,9 @@ def animate(
 
     for snap in recorder.snapshots:
         if snap.kind == "card":
-            frame = _card_frame(graph, snap.title or "Optimization", snap.subtitle, anim_cfg.figsize, anim_cfg.dpi)
+            frame = _card_frame(
+                graph, snap.title or "Optimization", snap.subtitle, anim_cfg.figsize, anim_cfg.dpi
+            )
         else:
             frame = _render_snapshot_frame(graph, snap, next(bounds_iter), config, anim_cfg)
 
@@ -1149,7 +1383,11 @@ def animate(
         last_visual = frame
 
     if frames:
-        frames = [frames[0]] * anim_cfg.hold_start_frames + frames + [frames[-1]] * anim_cfg.hold_end_frames
+        frames = (
+            [frames[0]] * anim_cfg.hold_start_frames
+            + frames
+            + [frames[-1]] * anim_cfg.hold_end_frames
+        )
     _write_frames(frames, anim_cfg.output, fmt, anim_cfg)
 
     layout_count = sum(1 for snap in recorder.snapshots if snap.kind == "layout")
@@ -1174,6 +1412,7 @@ def tour(
     """Render a cinematic tour of the final or current graph layout."""
     if config is None:
         from dagua.defaults import get_default_device, get_default_layout_overrides
+
         layout_overrides = get_default_layout_overrides()
         config = LayoutConfig(device=get_default_device(), **layout_overrides)
 
@@ -1198,8 +1437,13 @@ def tour(
         curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
         if getattr(config, "edge_opt_steps", 0) >= 0:
             from dagua.layout.edge_optimization import optimize_edges
-            curves = optimize_edges(curves, positions, graph.edge_index, graph.node_sizes, config, graph)
-        label_positions = place_edge_labels(curves, positions, graph.node_sizes, graph.edge_labels, graph)
+
+            curves = optimize_edges(
+                curves, positions, graph.edge_index, graph.node_sizes, config, graph
+            )
+        label_positions = place_edge_labels(
+            curves, positions, graph.node_sizes, graph.edge_labels, graph
+        )
 
     if tour_cfg.output is None:
         tour_cfg.output = str(Path("dagua_tour.mp4").resolve())
@@ -1209,7 +1453,14 @@ def tour(
     global_bounds = _global_bounds(graph, positions)
     realized: List[Tuple[CameraKeyframe, Tuple[float, float, float, float]]] = []
     for kf in keyframes:
-        realized.append((kf, _keyframe_target_bounds(graph, positions, kf, global_bounds, tour_cfg.follow_padding)))
+        realized.append(
+            (
+                kf,
+                _keyframe_target_bounds(
+                    graph, positions, kf, global_bounds, tour_cfg.follow_padding
+                ),
+            )
+        )
 
     if tour_cfg.figsize is None:
         tour_cfg.figsize = _default_animation_figsize(graph, [b for _, b in realized])
@@ -1250,7 +1501,11 @@ def tour(
                 )
 
     if frames:
-        frames = [frames[0]] * tour_cfg.hold_start_frames + frames + [frames[-1]] * tour_cfg.hold_end_frames
+        frames = (
+            [frames[0]] * tour_cfg.hold_start_frames
+            + frames
+            + [frames[-1]] * tour_cfg.hold_end_frames
+        )
 
     # Reuse the same writer path by adapting tour config to animation config shape.
     writer_cfg = AnimationConfig(
@@ -1348,8 +1603,12 @@ def poster(
         if getattr(config, "edge_opt_steps", 0) >= 0:
             from dagua.layout.edge_optimization import optimize_edges
 
-            curves = optimize_edges(curves, positions, graph.edge_index, graph.node_sizes, config, graph)
-        label_positions = place_edge_labels(curves, positions, graph.node_sizes, graph.edge_labels, graph)
+            curves = optimize_edges(
+                curves, positions, graph.edge_index, graph.node_sizes, config, graph
+            )
+        label_positions = place_edge_labels(
+            curves, positions, graph.node_sizes, graph.edge_labels, graph
+        )
         frame = _render_tour_frame(
             graph,
             positions,
