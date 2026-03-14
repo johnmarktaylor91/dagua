@@ -735,10 +735,14 @@ def build_hierarchy(
             if progress is not None:
                 progress("Stopping hierarchy build: node reduction below threshold")
             break
-        if prev_edge_count > 0 and coarse_edge_count > prev_edge_count * 0.9:
+        if (
+            prev_edge_count > 0
+            and coarse_edge_count > prev_edge_count * 0.9
+            and current_n > level.num_fine * 0.5
+        ):
             if progress is not None:
                 progress("Stopping hierarchy build: edge reduction below threshold")
-            break  # edges barely reduced — hierarchy won't help
+            break  # edges barely reduced AND node reduction is weak
 
         current_la = coarse_la
         if current_cluster_ids is not None:

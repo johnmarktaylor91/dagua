@@ -6,22 +6,53 @@ Produces:
   - aesthetic_review/clusters.png — cluster-specific graphs at larger size
 """
 
-import sys
 import os
+import sys
+import warnings
+from pathlib import Path
+
+import matplotlib
+import matplotlib.pyplot as plt
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pathlib import Path
-import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import warnings
 warnings.filterwarnings("ignore", "findfont")
 
-from dagua.graphs import list_graphs, load
-from dagua.config import LayoutConfig
-from dagua.layout import layout
-from dagua.edges import route_edges
-from dagua.render.mpl import render, _draw_clusters, _draw_edges, _draw_nodes, _draw_node_labels
+
+def _load_dagua_symbols() -> None:
+    """Load local dagua imports after bootstrapping the repo path.
+
+    Returns
+    -------
+    None
+        Populates module globals used throughout this script.
+    """
+    global LayoutConfig
+    global _draw_clusters
+    global _draw_edges
+    global _draw_node_labels
+    global _draw_nodes
+    global layout
+    global list_graphs
+    global load
+    global render
+    global route_edges
+
+    from dagua.config import LayoutConfig
+    from dagua.edges import route_edges
+    from dagua.graphs import list_graphs, load
+    from dagua.layout import layout
+    from dagua.render.mpl import (
+        _draw_clusters,
+        _draw_edges,
+        _draw_node_labels,
+        _draw_nodes,
+        render,
+    )
+
+
+_load_dagua_symbols()
 
 OUTPUT_DIR = Path("aesthetic_review")
 
@@ -30,8 +61,11 @@ SKIP = {"medium_mixed"}  # can add more if needed
 
 # Graphs that showcase clusters (render larger)
 CLUSTER_GRAPHS = {
-    "nested_clusters", "deep_nesting_4", "deep_nesting_6",
-    "flat_many_clusters", "cross_cluster_edges",
+    "nested_clusters",
+    "deep_nesting_4",
+    "deep_nesting_6",
+    "flat_many_clusters",
+    "cross_cluster_edges",
 }
 
 
@@ -43,12 +77,23 @@ def render_individual(name, graph, config, output_dir):
 
     # Optimize edges (skip if result contains NaN control points)
     try:
-        from dagua.layout.edge_optimization import optimize_edges
         import math
-        curves_opt = optimize_edges(curves, pos, graph.edge_index, graph.node_sizes, config, graph)
+
+        from dagua.layout.edge_optimization import optimize_edges
+
+        curves_opt = optimize_edges(
+            curves,
+            pos,
+            graph.edge_index,
+            graph.node_sizes,
+            config,
+            graph,
+        )
         has_nan = any(
-            math.isnan(c.cp1[0]) or math.isnan(c.cp1[1]) or
-            math.isnan(c.cp2[0]) or math.isnan(c.cp2[1])
+            math.isnan(c.cp1[0])
+            or math.isnan(c.cp1[1])
+            or math.isnan(c.cp2[0])
+            or math.isnan(c.cp2[1])
             for c in curves_opt
         )
         if not has_nan:
@@ -58,11 +103,19 @@ def render_individual(name, graph, config, output_dir):
 
     # Place edge labels
     from dagua.edges import place_edge_labels
+
     label_positions = place_edge_labels(curves, pos, graph.node_sizes, graph.edge_labels, graph)
 
     outpath = output_dir / f"{name}.png"
-    fig, ax = render(graph, pos, config, output=str(outpath), dpi=200,
-                     curves=curves, label_positions=label_positions)
+    fig, ax = render(
+        graph,
+        pos,
+        config,
+        output=str(outpath),
+        dpi=200,
+        curves=curves,
+        label_positions=label_positions,
+    )
     plt.close(fig)
     return outpath
 
@@ -113,12 +166,26 @@ def render_gallery(graphs_dict, config, output_path, cols=5, cell_size=(4, 3.5))
             ax.set_ylim(y_min, y_max)
             ax.set_aspect("equal")
         except Exception as e:
-            ax.text(0.5, 0.5, f"Error:\n{str(e)[:60]}", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=7, color="red")
+            ax.text(
+                0.5,
+                0.5,
+                f"Error:\n{str(e)[:60]}",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=7,
+                color="red",
+            )
 
         # Clean title
         display_name = name.replace("_", " ").title()
-        ax.set_title(display_name, fontsize=8, fontweight="medium", color="#4A4A4A", pad=4)
+        ax.set_title(
+            display_name,
+            fontsize=8,
+            fontweight="medium",
+            color="#4A4A4A",
+            pad=4,
+        )
         ax.axis("off")
 
     # Hide empty axes
@@ -170,8 +237,9 @@ def main():
     cluster_graphs = {k: v for k, v in graphs.items() if k in CLUSTER_GRAPHS}
     if cluster_graphs:
         print("\n--- Rendering cluster showcase ---")
-        render_gallery(cluster_graphs, config, OUTPUT_DIR / "clusters.png",
-                       cols=3, cell_size=(6, 5))
+        render_gallery(
+            cluster_graphs, config, OUTPUT_DIR / "clusters.png", cols=3, cell_size=(6, 5)
+        )
 
     print(f"\nDone! Review images in {OUTPUT_DIR}/")
 
