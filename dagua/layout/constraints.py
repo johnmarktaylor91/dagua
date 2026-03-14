@@ -14,15 +14,12 @@ Scaling strategy (Sprint 3 — fully vectorized):
 from __future__ import annotations
 
 import random
-from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 
 from dagua.layout.layers import LayerIndex
-from dagua.utils import longest_path_layering
-
 
 # ─── Edge-based losses (O(E), trivially parallelizable) ─────────────────────
 
@@ -68,7 +65,7 @@ def edge_attraction_loss(
     if src.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
     diff = pos[src] - pos[tgt]  # [E, 2]
-    dist_sq = (diff ** 2).sum(dim=1)  # [E]
+    dist_sq = (diff**2).sum(dim=1)  # [E]
 
     # Cap: attraction force proportional to dist_sq, but capped at 1/3 of distance
     # This prevents nodes from overshooting past their targets
@@ -79,7 +76,7 @@ def edge_attraction_loss(
 
     dx = diff[:, 0]
     dy = diff[:, 1]
-    return x_bias * (dx ** 2 * cap).mean() + (dy ** 2 * cap).mean()
+    return x_bias * (dx**2 * cap).mean() + (dy**2 * cap).mean()
 
 
 def edge_straightness_loss(
@@ -232,7 +229,7 @@ def _repulsion_scatter(
 
     # Compute repulsion
     diff = pos.unsqueeze(1) - pos[sampled]  # [N, K, 2]
-    dist_sq = (diff ** 2).sum(dim=2) + 1e-4  # [N, K]
+    dist_sq = (diff**2).sum(dim=2) + 1e-4  # [N, K]
 
     if node_sizes is not None:
         # Size-aware repulsion (AMD pattern): scale by combined size
@@ -281,11 +278,9 @@ def _repulsion_rvs(
 
     # Determine active set size and random sample count
     # Cap at 1M for N > 100M to avoid multi-GB intermediate tensors
-    n_active = min(max(int(N ** 0.75), min(N, 256)), 1_000_000)
-    n_random = max(int(N ** 0.25), 4)
+    n_active = min(max(int(N**0.75), min(N, 256)), 1_000_000)
+    n_random = max(int(N**0.25), 4)
     K_nn = min(nn_k, N - 1)
-    K_total = n_random + K_nn
-
     layers = layer_index.node_to_layer
     offsets = layer_index.layer_offsets
     sorted_nodes = layer_index.sorted_nodes
@@ -321,7 +316,9 @@ def _repulsion_rvs(
         # than the offset-based "nearest" approach, with equivalent quality
         # at large N where random samples are dense enough.
         rand_nn = torch.rand(A, K_nn, device=device)
-        nn_indices = (same_start.unsqueeze(1) + (rand_nn * same_range.unsqueeze(1)).long()).clamp(min=0, max=N - 1)
+        nn_indices = (same_start.unsqueeze(1) + (rand_nn * same_range.unsqueeze(1)).long()).clamp(
+            min=0, max=N - 1
+        )
         nn_sampled = sorted_nodes[nn_indices]  # [A, K_nn]
     else:
         nn_sampled = torch.zeros(A, 0, dtype=torch.long, device=device)
@@ -338,7 +335,7 @@ def _repulsion_rvs(
     active_pos = pos[active_idx]  # [A, 2]
     sample_pos = pos[all_sampled]  # [A, K, 2]
     diff = active_pos.unsqueeze(1) - sample_pos  # [A, K, 2]
-    dist_sq = (diff ** 2).sum(dim=2) + 1e-4  # [A, K]
+    dist_sq = (diff**2).sum(dim=2) + 1e-4  # [A, K]
 
     if node_sizes is not None:
         src_w = node_sizes[active_idx, 0].unsqueeze(1).expand(-1, K)
@@ -485,7 +482,7 @@ def _overlap_active_subset(
     N = pos.shape[0]
 
     # Cap at 1M for N > 100M to avoid multi-GB intermediate tensors
-    n_active = min(max(int(N ** 0.75), min(N, 256)), 1_000_000)
+    n_active = min(max(int(N**0.75), min(N, 256)), 1_000_000)
     K = min(64, N - 1)
     if K <= 0:
         return torch.tensor(0.0, device=device)
@@ -789,9 +786,7 @@ def _crossing_loss_layered(
         span_v = span_v[perm]
         span_f = span_v.float()
 
-    seg_edge_idx = torch.repeat_interleave(
-        torch.arange(span_v.shape[0], device=device), span_v
-    )
+    seg_edge_idx = torch.repeat_interleave(torch.arange(span_v.shape[0], device=device), span_v)
 
     offsets = torch.arange(seg_edge_idx.shape[0], device=device)
     cum_spans = torch.zeros(span_v.shape[0] + 1, dtype=torch.long, device=device)
@@ -827,50 +822,60 @@ def _crossing_loss_layered(
     offsets_arr[1:] = counts.cumsum(0)
     multi_offsets = offsets_arr[:-1][multi_mask]
 
-    pair_i_list = []
-    pair_j_list = []
-
     total_possible_pairs = ((multi_counts * (multi_counts - 1)) // 2).sum().item()
-
-    # Pre-fetch to CPU to avoid GPU sync stalls in the loop (.item() on GPU tensors)
-    multi_offsets_cpu = multi_offsets.tolist()
-    multi_counts_cpu = multi_counts.tolist()
+    pairs_per_layer = (multi_counts * (multi_counts - 1)) // 2
 
     if total_possible_pairs <= max_pairs:
-        for k in range(len(multi_counts_cpu)):
-            off = multi_offsets_cpu[k]
-            cnt = multi_counts_cpu[k]
-            idx_i, idx_j = torch.triu_indices(cnt, cnt, offset=1, device=device)
-            pair_i_list.append(idx_i + off)
-            pair_j_list.append(idx_j + off)
+        total_pairs = int(pairs_per_layer.sum().item())
+        if total_pairs == 0:
+            return torch.tensor(0.0, device=device)
+
+        rows_per_group = (multi_counts - 1).clamp(min=0)
+        group_for_row = torch.repeat_interleave(
+            torch.arange(multi_counts.shape[0], device=device), rows_per_group
+        )
+        count_for_row = multi_counts[group_for_row]
+        row_in_group = torch.arange(group_for_row.shape[0], device=device)
+        group_row_offsets = torch.zeros(multi_counts.shape[0] + 1, dtype=torch.long, device=device)
+        group_row_offsets[1:] = rows_per_group.cumsum(0)
+        row_in_group = row_in_group - group_row_offsets[group_for_row]
+
+        pairs_this_row = count_for_row - 1 - row_in_group
+        pair_row_idx = torch.repeat_interleave(
+            torch.arange(group_for_row.shape[0], device=device), pairs_this_row
+        )
+        pair_row_in_group = row_in_group[pair_row_idx]
+        pair_group = group_for_row[pair_row_idx]
+
+        pair_seq = torch.arange(total_pairs, device=device)
+        row_pair_offsets = torch.zeros(group_for_row.shape[0] + 1, dtype=torch.long, device=device)
+        row_pair_offsets[1:] = pairs_this_row.cumsum(0)
+        col_in_row = pair_seq - row_pair_offsets[pair_row_idx]
+
+        local_i = pair_row_in_group
+        local_j = pair_row_in_group + 1 + col_in_row
+        all_i = local_i + multi_offsets[pair_group]
+        all_j = local_j + multi_offsets[pair_group]
     else:
-        pairs_per_layer = (multi_counts * (multi_counts - 1)) // 2
         total_possible = pairs_per_layer.sum().float()
-        samples_per_layer = (pairs_per_layer.float() / total_possible * max_pairs).long()
-        samples_per_layer = samples_per_layer.clamp(min=1)
-        samples_per_layer_cpu = samples_per_layer.tolist()
+        samples_per_layer = (
+            (pairs_per_layer.float() / total_possible * max_pairs).long().clamp(min=1)
+        )
+        total_samples = int(samples_per_layer.sum().item())
+        if total_samples == 0:
+            return torch.tensor(0.0, device=device)
 
-        for k in range(len(multi_counts_cpu)):
-            off = multi_offsets_cpu[k]
-            cnt = multi_counts_cpu[k]
-            n_samp = min(samples_per_layer_cpu[k], cnt * (cnt - 1) // 2)
+        group_id = torch.repeat_interleave(
+            torch.arange(multi_counts.shape[0], device=device), samples_per_layer
+        )
+        c_expanded = multi_counts[group_id]
+        off_expanded = multi_offsets[group_id]
 
-            if cnt <= 200 and cnt * (cnt - 1) // 2 <= n_samp:
-                idx_i, idx_j = torch.triu_indices(cnt, cnt, offset=1, device=device)
-            else:
-                idx_i = torch.randint(0, cnt, (n_samp,), device=device)
-                idx_j = torch.randint(0, cnt, (n_samp,), device=device)
-                valid_mask = idx_i != idx_j
-                idx_i, idx_j = idx_i[valid_mask], idx_j[valid_mask]
-
-            pair_i_list.append(idx_i + off)
-            pair_j_list.append(idx_j + off)
-
-    if not pair_i_list:
-        return torch.tensor(0.0, device=device)
-
-    all_i = torch.cat(pair_i_list)
-    all_j = torch.cat(pair_j_list)
+        rand_i = (torch.rand(total_samples, device=device) * c_expanded.float()).long()
+        rand_j = (torch.rand(total_samples, device=device) * c_expanded.float()).long()
+        valid = rand_i != rand_j
+        all_i = rand_i[valid] + off_expanded[valid]
+        all_j = rand_j[valid] + off_expanded[valid]
 
     if all_i.numel() == 0:
         return torch.tensor(0.0, device=device)
@@ -888,6 +893,7 @@ def _crossing_loss_layered(
 def _resolve_cluster_members(members, device):
     """Resolve cluster members to a flat list of indices, handling nested dicts."""
     from dagua.utils import collect_cluster_leaves
+
     if isinstance(members, dict):
         members = collect_cluster_leaves(members)
     if isinstance(members, list) and len(members) > 0:
@@ -962,11 +968,7 @@ def cluster_separation_loss(
             attempts += 1
         all_pairs = list(sampled)
     else:
-        all_pairs = [
-            (i, j)
-            for i in range(num_clusters)
-            for j in range(i + 1, num_clusters)
-        ]
+        all_pairs = [(i, j) for i in range(num_clusters) for j in range(i + 1, num_clusters)]
 
     if not all_pairs:
         return torch.tensor(0.0, device=device)
@@ -976,13 +978,25 @@ def cluster_separation_loss(
         idx_i = cluster_list[i][1]
         idx_j = cluster_list[j][1]
 
-        bbox_i_min = pos[idx_i].min(dim=0).values - node_sizes[idx_i].max(dim=0).values / 2 - padding
-        bbox_i_max = pos[idx_i].max(dim=0).values + node_sizes[idx_i].max(dim=0).values / 2 + padding
-        bbox_j_min = pos[idx_j].min(dim=0).values - node_sizes[idx_j].max(dim=0).values / 2 - padding
-        bbox_j_max = pos[idx_j].max(dim=0).values + node_sizes[idx_j].max(dim=0).values / 2 + padding
+        bbox_i_min = (
+            pos[idx_i].min(dim=0).values - node_sizes[idx_i].max(dim=0).values / 2 - padding
+        )
+        bbox_i_max = (
+            pos[idx_i].max(dim=0).values + node_sizes[idx_i].max(dim=0).values / 2 + padding
+        )
+        bbox_j_min = (
+            pos[idx_j].min(dim=0).values - node_sizes[idx_j].max(dim=0).values / 2 - padding
+        )
+        bbox_j_max = (
+            pos[idx_j].max(dim=0).values + node_sizes[idx_j].max(dim=0).values / 2 + padding
+        )
 
-        overlap_x = F.relu(torch.min(bbox_i_max[0], bbox_j_max[0]) - torch.max(bbox_i_min[0], bbox_j_min[0]))
-        overlap_y = F.relu(torch.min(bbox_i_max[1], bbox_j_max[1]) - torch.max(bbox_i_min[1], bbox_j_min[1]))
+        overlap_x = F.relu(
+            torch.min(bbox_i_max[0], bbox_j_max[0]) - torch.max(bbox_i_min[0], bbox_j_min[0])
+        )
+        overlap_y = F.relu(
+            torch.min(bbox_i_max[1], bbox_j_max[1]) - torch.max(bbox_i_min[1], bbox_j_min[1])
+        )
         total = total + overlap_x * overlap_y
 
     return total
@@ -1026,13 +1040,20 @@ def cluster_containment_loss(
         child_max = pos[child_idx].max(dim=0).values + node_sizes[child_idx].max(dim=0).values / 2
 
         # Parent bbox (with padding — parent should be larger)
-        parent_min = pos[parent_idx].min(dim=0).values - node_sizes[parent_idx].max(dim=0).values / 2 - padding
-        parent_max = pos[parent_idx].max(dim=0).values + node_sizes[parent_idx].max(dim=0).values / 2 + padding
+        parent_min = (
+            pos[parent_idx].min(dim=0).values
+            - node_sizes[parent_idx].max(dim=0).values / 2
+            - padding
+        )
+        parent_max = (
+            pos[parent_idx].max(dim=0).values
+            + node_sizes[parent_idx].max(dim=0).values / 2
+            + padding
+        )
 
         # Penalize child extending outside parent
         violation = (
-            F.relu(parent_min - child_min) ** 2 +
-            F.relu(child_max - parent_max) ** 2
+            F.relu(parent_min - child_min) ** 2 + F.relu(child_max - parent_max) ** 2
         ).sum()
         total = total + violation
         count += 1
@@ -1149,6 +1170,79 @@ def project_hard_pins(
         pos.data[pin_indices] = projected
 
 
+def _spacing_consistency_loss_layerlocal(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    layers: torch.Tensor,
+    offsets: torch.Tensor,
+    num_layers: int,
+    target_gap: float,
+    device: torch.device,
+) -> torch.Tensor:
+    """Layer-local spacing consistency for very large graphs (N > 100M).
+
+    Iterates over layers and sorts within each, avoiding an O(N)-sized
+    global argsort. Peak memory is O(max_layer_width) instead of O(N).
+
+    Mathematically equivalent to the global sort path since the composite
+    key already groups by layer.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        [N, 2] node positions.
+    node_sizes : torch.Tensor
+        [N, 2] node widths and heights.
+    layers : torch.Tensor
+        [N] layer assignment per node.
+    offsets : torch.Tensor
+        [L+1] cumulative layer offsets.
+    num_layers : int
+        Number of layers.
+    target_gap : float
+        Target horizontal gap between adjacent nodes.
+    device : torch.device
+        Compute device.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss value.
+    """
+    total_deviation_sq = torch.tensor(0.0, device=device)
+    total_pairs = 0
+
+    sorted_by_layer = layers.argsort()
+
+    for layer_idx in range(num_layers):
+        start = int(offsets[layer_idx].item())
+        end = int(offsets[layer_idx + 1].item())
+        n_layer = end - start
+        if n_layer < 2:
+            continue
+
+        layer_nodes = sorted_by_layer[start:end]
+        layer_x = pos[layer_nodes, 0]
+        local_order = layer_x.detach().argsort()
+        sorted_nodes = layer_nodes[local_order]
+
+        sorted_x = pos[sorted_nodes, 0]
+        sorted_w = node_sizes[sorted_nodes, 0]
+
+        dx = sorted_x[1:] - sorted_x[:-1]
+        half_w = (sorted_w[:-1] + sorted_w[1:]) / 2.0
+        gap = dx - half_w
+
+        deviation = gap - target_gap
+        total_deviation_sq = total_deviation_sq + (deviation**2).sum()
+        total_pairs += n_layer - 1
+
+    if total_pairs == 0:
+        return torch.tensor(0.0, device=device)
+
+    return total_deviation_sq / total_pairs
+
+
 def spacing_consistency_loss(
     pos: torch.Tensor,
     node_sizes: torch.Tensor,
@@ -1170,16 +1264,19 @@ def spacing_consistency_loss(
     if N < 2:
         return torch.tensor(0.0, device=device)
 
-    # Skip for very large graphs — global argsort on N nodes creates ~50 GB
-    # of intermediates at 1B nodes. Repulsion/overlap already handle spacing
-    # at this scale via RVS sampling.
-    if N > 100_000_000:
-        return torch.tensor(0.0, device=device)
-
     layers = layer_index.node_to_layer
     offsets = layer_index.layer_offsets
     num_layers = layer_index.num_layers
 
+    # For very large graphs, use layer-local sorting to avoid O(N)-sized intermediates.
+    # Peak memory: O(max_layer_width) instead of O(N).
+    # Results are mathematically identical since the composite key groups by layer.
+    if N > 100_000_000:
+        return _spacing_consistency_loss_layerlocal(
+            pos, node_sizes, layers, offsets, num_layers, target_gap, device
+        )
+
+    # Standard path: global sort (one kernel launch, fast for moderate N)
     # Sort all nodes by (layer, x_position) — one global sort, O(N log N)
     sort_key = layers.float() * 1e8 + pos[:, 0].detach()
     sorted_idx = sort_key.argsort()
@@ -1206,7 +1303,7 @@ def spacing_consistency_loss(
 
     # Penalize deviation from target gap (squared)
     deviation = gap_in_layer - target_gap
-    return (deviation ** 2).mean()
+    return (deviation**2).mean()
 
 
 # ─── Fan-out distribution loss ────────────────────────────────────────────────
@@ -1249,37 +1346,59 @@ def fanout_distribution_loss(
     hub_starts = torch.searchsorted(sorted_src, hub_nodes)
     hub_degrees = out_degree[hub_nodes]
 
-    total_loss = torch.tensor(0.0, device=device)
-    count = 0
-
-    for hub_idx, hub in enumerate(hub_nodes.tolist()):
-        start = int(hub_starts[hub_idx].item())
-        k = int(hub_degrees[hub_idx].item())
-        if k < 2:
-            continue
-        children = sorted_tgt[start : start + k]
-
-        # Compute angles from hub to each child
-        dx = pos[children, 0] - pos[hub, 0]
-        dy = pos[children, 1] - pos[hub, 1]
-        angles = torch.atan2(dy, dx)  # [-pi, pi]
-
-        # Sort angles and compute gaps
-        sorted_angles, _ = angles.sort()
-        gaps = sorted_angles[1:] - sorted_angles[:-1]
-        # Wrap-around gap
-        wrap_gap = (2 * 3.141592653589793) - (sorted_angles[-1] - sorted_angles[0])
-        all_gaps = torch.cat([gaps, wrap_gap.unsqueeze(0)])
-
-        # Ideal gap = 2*pi / k
-        ideal_gap = (2 * 3.141592653589793) / k
-        # Penalize variance from ideal
-        total_loss = total_loss + ((all_gaps - ideal_gap) ** 2).mean()
-        count += 1
-
-    if count == 0:
+    valid_hub_mask = hub_degrees >= 2
+    if not valid_hub_mask.any():
         return torch.tensor(0.0, device=device)
-    return total_loss / count
+
+    hub_nodes_v = hub_nodes[valid_hub_mask]
+    hub_starts_v = hub_starts[valid_hub_mask]
+    hub_degrees_v = hub_degrees[valid_hub_mask]
+    num_hubs = hub_nodes_v.shape[0]
+
+    child_flat_idx = torch.repeat_interleave(torch.arange(num_hubs, device=device), hub_degrees_v)
+    total_children = int(hub_degrees_v.sum().item())
+    child_seq = torch.arange(total_children, device=device)
+    hub_child_offsets = torch.zeros(num_hubs + 1, dtype=torch.long, device=device)
+    hub_child_offsets[1:] = hub_degrees_v.cumsum(0)
+    local_offset = child_seq - hub_child_offsets[child_flat_idx]
+
+    global_child_pos = hub_starts_v[child_flat_idx] + local_offset
+    children_all = sorted_tgt[global_child_pos]
+
+    hub_expanded = hub_nodes_v[child_flat_idx]
+    dx = pos[children_all, 0] - pos[hub_expanded, 0]
+    dy = pos[children_all, 1] - pos[hub_expanded, 1]
+    angles = torch.atan2(dy, dx)
+
+    two_pi = 2.0 * 3.141592653589793
+    angles_positive = angles % two_pi
+    big = two_pi + 1.0
+    sort_key = child_flat_idx.float() * big + angles_positive
+    sorted_order = sort_key.argsort()
+    sorted_angles = angles_positive[sorted_order]
+    sorted_hub_id = child_flat_idx[sorted_order]
+
+    same_hub = sorted_hub_id[:-1] == sorted_hub_id[1:]
+    consecutive_gaps = sorted_angles[1:] - sorted_angles[:-1]
+
+    _, boundary_counts = sorted_hub_id.unique_consecutive(return_counts=True)
+    boundary_offsets = torch.zeros(boundary_counts.shape[0] + 1, dtype=torch.long, device=device)
+    boundary_offsets[1:] = boundary_counts.cumsum(0)
+
+    first_angles = sorted_angles[boundary_offsets[:-1]]
+    last_angles = sorted_angles[boundary_offsets[1:] - 1]
+    wrap_gaps = two_pi - (last_angles - first_angles)
+
+    ideal_gaps = two_pi / hub_degrees_v.float()
+    ideal_expanded_consecutive = ideal_gaps[sorted_hub_id[:-1][same_hub]]
+    gap_deviation_consecutive = (consecutive_gaps[same_hub] - ideal_expanded_consecutive) ** 2
+    gap_deviation_wrap = (wrap_gaps - ideal_gaps) ** 2
+
+    per_hub_gap_loss = torch.zeros(num_hubs, device=device)
+    per_hub_gap_loss.scatter_add_(0, sorted_hub_id[:-1][same_hub], gap_deviation_consecutive)
+    per_hub_gap_loss = per_hub_gap_loss + gap_deviation_wrap
+    per_hub_mean = per_hub_gap_loss / hub_degrees_v.float()
+    return per_hub_mean.mean()
 
 
 # ─── Back-edge compactness loss ───────────────────────────────────────────────
@@ -1312,4 +1431,4 @@ def back_edge_compactness_loss(
 
     # Horizontal distance for back edges
     dx = pos[src[back_mask], 0] - pos[tgt[back_mask], 0]
-    return (dx ** 2).mean()
+    return (dx**2).mean()

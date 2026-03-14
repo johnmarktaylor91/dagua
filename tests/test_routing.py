@@ -1,9 +1,8 @@
 """Tests for bezier edge routing."""
 
-import pytest
 import torch
 
-from dagua.edges import route_edges, evaluate_bezier, BezierCurve
+from dagua.edges import BezierCurve, evaluate_bezier, route_edges
 from dagua.graph import DaguaGraph
 from dagua.styles import NodeStyle
 
@@ -42,7 +41,6 @@ class TestRouteEdges:
         # End should be near top of target node
         assert abs(c.p1[1] - 90.0) < 1.0  # ty - th/2
 
-
     def test_self_loop_routing(self):
         """Self-loop (s == t) should produce a valid teardrop curve with no NaN."""
         pos = torch.tensor([[50.0, 50.0]])
@@ -76,8 +74,8 @@ class TestRouteEdges:
         g = DaguaGraph.from_edge_list([(0, 1)])
         g.node_styles[0] = NodeStyle(shape="ellipse")
         g.node_styles[1] = NodeStyle(shape="diamond")
+        g.add_cluster("mixed", [0, 99], label="mixed", strict=False)
         g.compute_node_sizes()
-        g.add_cluster("mixed", [0, 99], label="mixed")
 
         pos = torch.tensor([[0.0, 0.0], [40.0, 100.0]])
         curves = route_edges(pos, g.edge_index, g.node_sizes, graph=g)

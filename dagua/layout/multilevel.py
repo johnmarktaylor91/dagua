@@ -16,13 +16,13 @@ Coarsening strategy: layer-aware heavy-edge matching.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Union
 
 import numpy as np
 import torch
 
 from dagua.config import LayoutConfig
-from dagua.utils import _EDGE_CHUNK, _vram_fits, longest_path_layering
+from dagua.utils import _EDGE_CHUNK, VRAMBudget, _vram_fits, longest_path_layering
 
 _STREAMING_THRESHOLD = 100_000_000
 _DEDUP_BUCKET_TARGET = 150_000_000
@@ -48,7 +48,9 @@ def _ensure_node_sizes_2d(
     if node_sizes.numel() == 0:
         if num_nodes is None:
             raise ValueError("empty node_sizes requires num_nodes for fallback sizing")
-        return torch.full((num_nodes, 2), _DEFAULT_NODE_SIZE, dtype=node_sizes.dtype, device=node_sizes.device)
+        return torch.full(
+            (num_nodes, 2), _DEFAULT_NODE_SIZE, dtype=node_sizes.dtype, device=node_sizes.device
+        )
 
     if node_sizes.ndim == 1:
         return torch.stack([node_sizes, node_sizes], dim=1)
@@ -70,13 +72,18 @@ def _ensure_node_sizes_2d(
 @dataclass
 class CoarseLevel:
     """One level of the coarsening hierarchy."""
-    edge_index: Optional[torch.Tensor]       # [2, E_c] coarsened edges
-    node_sizes: Optional[torch.Tensor]       # [N_c, 2]
+
+    edge_index: Optional[torch.Tensor]  # [2, E_c] coarsened edges
+    node_sizes: Optional[torch.Tensor]  # [N_c, 2]
     num_nodes: int
-    fine_to_coarse: Optional[torch.Tensor]   # [N_fine] maps fine node → coarse node
-    num_fine: int                  # N at the finer level
-    fine_layer_assignments: Optional[torch.Tensor] = None  # [N_fine] layer assignments for fine level
-    coarse_layer_assignments: Optional[torch.Tensor] = None  # [N_coarse] propagated layer assignments
+    fine_to_coarse: Optional[torch.Tensor]  # [N_fine] maps fine node → coarse node
+    num_fine: int  # N at the finer level
+    fine_layer_assignments: Optional[torch.Tensor] = (
+        None  # [N_fine] layer assignments for fine level
+    )
+    coarse_layer_assignments: Optional[torch.Tensor] = (
+        None  # [N_coarse] propagated layer assignments
+    )
 
 
 def _can_prolong_on_gpu(
@@ -93,7 +100,7 @@ def _can_prolong_on_gpu(
     needed_bytes = fine_to_coarse.numel() * fine_to_coarse.element_size()
     needed_bytes += fine_n * pos.shape[1] * pos.element_size()
     needed_bytes += fine_n * pos.shape[1] * pos.element_size()
-    return _vram_fits(needed_bytes, safety=0.65)
+    return VRAMBudget().fits(needed_bytes)
 
 
 def _coarsen_once_streaming(
@@ -248,39 +255,80 @@ def coarsen_once(
     # Dispatch to streaming path for very large graphs
     if N > _STREAMING_THRESHOLD:
         return _coarsen_once_streaming(
-            edge_index, N, node_sizes, layers, num_layers,
-            layer_counts, layer_offsets, device,
+            edge_index,
+            N,
+            node_sizes,
+            layers,
+            num_layers,
+            layer_counts,
+            layer_offsets,
+            device,
         )
 
     # Build adjacency features used for smarter within-layer ordering.
     # We keep the streaming 1B+ path unchanged and only spend extra work here,
     # where the goal is better coarsening quality for wide and skip-heavy graphs.
-    min_neighbor = torch.full((N,), N, dtype=torch.long, device=device)
-    min_parent = torch.full((N,), N, dtype=torch.long, device=device)
-    min_child = torch.full((N,), N, dtype=torch.long, device=device)
-    in_degree = torch.zeros(N, dtype=torch.long, device=device)
-    out_degree = torch.zeros(N, dtype=torch.long, device=device)
-    skip_degree = torch.zeros(N, dtype=torch.long, device=device)
-    mean_span = torch.zeros(N, dtype=torch.float32, device=device)
-    if edge_index.numel() > 0:
-        src, tgt = edge_index[0], edge_index[1]
-        min_neighbor.scatter_reduce_(0, src, tgt, reduce="amin")
-        min_neighbor.scatter_reduce_(0, tgt, src, reduce="amin")
-        min_parent.scatter_reduce_(0, tgt, src, reduce="amin")
-        min_child.scatter_reduce_(0, src, tgt, reduce="amin")
-        one_src = torch.ones_like(src)
-        one_tgt = torch.ones_like(tgt)
-        out_degree.scatter_add_(0, src, one_src)
-        in_degree.scatter_add_(0, tgt, one_tgt)
-        span = (layers[tgt] - layers[src]).abs().to(torch.float32)
-        mean_span.scatter_add_(0, src, span)
-        mean_span.scatter_add_(0, tgt, span)
-        mean_span = mean_span / (in_degree + out_degree).clamp_min(1).to(torch.float32)
-        skip_mask = span > 1.0
-        if skip_mask.any():
-            skip_one = torch.ones((int(skip_mask.sum().item()),), dtype=torch.long, device=device)
-            skip_degree.scatter_add_(0, src[skip_mask], skip_one)
-            skip_degree.scatter_add_(0, tgt[skip_mask], skip_one)
+    scatter_device = device
+    if device == "cpu" and VRAMBudget.available():
+        E = edge_index.shape[1] if edge_index.numel() > 0 else 0
+        scatter_bytes = N * 64 + E * 16
+        if VRAMBudget().fits(scatter_bytes):
+            scatter_device = "cuda"
+
+    scatter_candidates = [scatter_device]
+    if scatter_device == "cuda":
+        scatter_candidates.append("cpu")
+
+    for scatter_candidate in scatter_candidates:
+        try:
+            min_neighbor = torch.full((N,), N, dtype=torch.long, device=scatter_candidate)
+            min_parent = torch.full((N,), N, dtype=torch.long, device=scatter_candidate)
+            min_child = torch.full((N,), N, dtype=torch.long, device=scatter_candidate)
+            in_degree = torch.zeros(N, dtype=torch.long, device=scatter_candidate)
+            out_degree = torch.zeros(N, dtype=torch.long, device=scatter_candidate)
+            skip_degree = torch.zeros(N, dtype=torch.long, device=scatter_candidate)
+            mean_span = torch.zeros(N, dtype=torch.float32, device=scatter_candidate)
+            if edge_index.numel() > 0:
+                src = edge_index[0].to(device=scatter_candidate, dtype=torch.long)
+                tgt = edge_index[1].to(device=scatter_candidate, dtype=torch.long)
+                layers_sd = layers.to(scatter_candidate)
+                min_neighbor.scatter_reduce_(0, src, tgt, reduce="amin")
+                min_neighbor.scatter_reduce_(0, tgt, src, reduce="amin")
+                min_parent.scatter_reduce_(0, tgt, src, reduce="amin")
+                min_child.scatter_reduce_(0, src, tgt, reduce="amin")
+                one_src = torch.ones_like(src)
+                one_tgt = torch.ones_like(tgt)
+                out_degree.scatter_add_(0, src, one_src)
+                in_degree.scatter_add_(0, tgt, one_tgt)
+                span = (layers_sd[tgt] - layers_sd[src]).abs().to(torch.float32)
+                mean_span.scatter_add_(0, src, span)
+                mean_span.scatter_add_(0, tgt, span)
+                mean_span = mean_span / (in_degree + out_degree).clamp_min(1).to(torch.float32)
+                skip_mask = span > 1.0
+                skip_src = src[skip_mask]
+                skip_tgt = tgt[skip_mask]
+                if skip_src.numel() > 0:
+                    skip_one = torch.ones(
+                        skip_src.shape[0], dtype=torch.long, device=scatter_candidate
+                    )
+                    skip_degree.scatter_add_(0, skip_src, skip_one)
+                    skip_degree.scatter_add_(0, skip_tgt, skip_one)
+
+            if scatter_candidate != device:
+                min_neighbor = min_neighbor.to(device)
+                min_parent = min_parent.to(device)
+                min_child = min_child.to(device)
+                in_degree = in_degree.to(device)
+                out_degree = out_degree.to(device)
+                skip_degree = skip_degree.to(device)
+                mean_span = mean_span.to(device)
+            break
+        except RuntimeError:
+            if scatter_candidate != "cuda":
+                raise
+            torch.cuda.empty_cache()
+    else:
+        raise RuntimeError("Failed to compute coarsening adjacency features")
 
     # Smart within-layer ordering:
     # - similar parent/child signatures stay adjacent
@@ -314,7 +362,11 @@ def coarsen_once(
         hub_threshold = max(8, int(np.ceil(np.percentile(layer_degree, 90))))
 
         cluster_key = (
-            np.where(cluster_ids_np[layer_nodes_np] >= 0, cluster_ids_np[layer_nodes_np], np.iinfo(np.int64).max)
+            np.where(
+                cluster_ids_np[layer_nodes_np] >= 0,
+                cluster_ids_np[layer_nodes_np],
+                np.iinfo(np.int64).max,
+            )
             if cluster_ids_np is not None
             else np.full(n_layer, np.iinfo(np.int64).max, dtype=np.int64)
         )
@@ -399,11 +451,14 @@ def coarsen_once(
             local_group += 1
             i += group_size
 
-        fine_to_coarse[ordered_nodes] = torch.tensor(
-            local_group_ids,
-            dtype=torch.long,
-            device=device,
-        ) + coarse_base
+        fine_to_coarse[ordered_nodes] = (
+            torch.tensor(
+                local_group_ids,
+                dtype=torch.long,
+                device=device,
+            )
+            + coarse_base
+        )
         coarse_counts.append(local_group)
         coarse_base += local_group
 
@@ -415,30 +470,60 @@ def coarsen_once(
     # Build coarse node sizes (max of merged pair for each dimension)
     coarse_sizes = torch.zeros(N_coarse, 2, dtype=node_sizes.dtype, device=device)
     coarse_sizes.scatter_reduce_(
-        0, fine_to_coarse.unsqueeze(1).expand(-1, 2),
-        node_sizes, reduce="amax",
+        0,
+        fine_to_coarse.unsqueeze(1).expand(-1, 2),
+        node_sizes,
+        reduce="amax",
     )
 
     # Build coarse edges (remap and deduplicate)
     if edge_index.numel() > 0:
-        coarse_src = fine_to_coarse[edge_index[0]]
-        coarse_tgt = fine_to_coarse[edge_index[1]]
+        edge_E = edge_index.shape[1]
+        dedup_device = device
+        if device == "cpu" and VRAMBudget.available():
+            dedup_bytes = edge_E * 3 * 8
+            if VRAMBudget().fits(dedup_bytes):
+                dedup_device = "cuda"
 
-        # Remove self-loops (merged nodes)
-        not_self = coarse_src != coarse_tgt
-        coarse_src = coarse_src[not_self]
-        coarse_tgt = coarse_tgt[not_self]
+        dedup_candidates = [dedup_device]
+        if dedup_device == "cuda":
+            dedup_candidates.append("cpu")
 
-        if coarse_src.numel() > 0:
-            # Deduplicate edges using hash (no inverse — saves a large allocation)
-            edge_hash = coarse_src * N_coarse + coarse_tgt
-            unique_hash = edge_hash.unique()
-            # Recover src, tgt from hash
-            unique_src = unique_hash // N_coarse
-            unique_tgt = unique_hash % N_coarse
-            coarse_edge_index = torch.stack([unique_src, unique_tgt])
+        for dedup_candidate in dedup_candidates:
+            try:
+                ei_dd = (
+                    edge_index.to(dedup_candidate)
+                    if dedup_candidate != edge_index.device.type
+                    else edge_index
+                )
+                ftc_dd = (
+                    fine_to_coarse.to(dedup_candidate)
+                    if dedup_candidate != fine_to_coarse.device.type
+                    else fine_to_coarse
+                )
+
+                coarse_src = ftc_dd[ei_dd[0]]
+                coarse_tgt = ftc_dd[ei_dd[1]]
+
+                not_self = coarse_src != coarse_tgt
+                coarse_src = coarse_src[not_self]
+                coarse_tgt = coarse_tgt[not_self]
+
+                if coarse_src.numel() > 0:
+                    edge_hash = coarse_src * N_coarse + coarse_tgt
+                    unique_hash = edge_hash.unique()
+                    unique_src = unique_hash // N_coarse
+                    unique_tgt = unique_hash % N_coarse
+                    coarse_edge_index = torch.stack([unique_src, unique_tgt]).to(device)
+                else:
+                    coarse_edge_index = torch.zeros(2, 0, dtype=torch.long, device=device)
+                break
+            except RuntimeError:
+                if dedup_candidate != "cuda":
+                    raise
+                torch.cuda.empty_cache()
         else:
-            coarse_edge_index = torch.zeros(2, 0, dtype=torch.long, device=device)
+            raise RuntimeError("Failed to deduplicate coarse edges")
     else:
         coarse_edge_index = torch.zeros(2, 0, dtype=torch.long, device=device)
 
@@ -489,7 +574,7 @@ def build_hierarchy(
         if progress is not None:
             progress(f"Layering full graph ({current_n:,} nodes)...")
         if current_ei.numel() > 0:
-            current_la = longest_path_layering(current_ei, current_n)
+            current_la = longest_path_layering(current_ei, current_n, device="cpu")
         else:
             current_la = torch.zeros(current_n, dtype=torch.long)
         # Ensure tensor throughout — no list conversion
@@ -508,13 +593,16 @@ def build_hierarchy(
         prev_edge_count = current_ei.shape[1] if current_ei.numel() > 0 else 0
         if progress is not None:
             progress(
-                f"Coarsen level {level_idx + 1}: "
-                f"{current_n:,} nodes, {prev_edge_count:,} edges"
+                f"Coarsen level {level_idx + 1}: {current_n:,} nodes, {prev_edge_count:,} edges"
             )
 
         level = coarsen_once(
-            current_ei, current_n, current_sizes,
-            layer_assignments=current_la, device=device, cluster_ids=current_cluster_ids,
+            current_ei,
+            current_n,
+            current_sizes,
+            layer_assignments=current_la,
+            device=device,
+            cluster_ids=current_cluster_ids,
         )
         level.fine_layer_assignments = current_la
 
@@ -536,7 +624,10 @@ def build_hierarchy(
         assert level.fine_to_coarse is not None
         coarse_la = torch.zeros(current_n, dtype=current_la.dtype)
         coarse_la.scatter_reduce_(
-            0, level.fine_to_coarse, current_la, reduce="amax",
+            0,
+            level.fine_to_coarse,
+            current_la,
+            reduce="amax",
         )
         level.coarse_layer_assignments = coarse_la
         levels.append(level)
@@ -590,7 +681,9 @@ def prolong_positions(
     return fine_pos
 
 
-def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = None) -> torch.Tensor:
+def multilevel_layout(
+    graph: Any, config: LayoutConfig, trace: Optional[Any] = None
+) -> torch.Tensor:
     """Multilevel V-cycle layout for large graphs.
 
     1. Build coarsening hierarchy
@@ -598,9 +691,11 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
     3. Prolong + refine at each level (few steps)
     """
     import time as _time
+
     from dagua.layout.engine import ProgressContext, _layout_inner
 
     verbose = config.verbose
+
     def _vlog(msg: str, indent: str = "") -> None:
         if verbose:
             vram = ""
@@ -657,7 +752,10 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
         hierarchy_complete_callback = getattr(graph, "_hierarchy_levels_complete_callback", None)
         if hierarchy_complete_callback is not None:
             hierarchy_complete_callback(levels)
-        _vlog(f"Phase 1/3: Building hierarchy ({n:,} nodes)... {len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)")
+        _vlog(
+            f"Phase 1/3: Building hierarchy ({n:,} nodes)... "
+            f"{len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)"
+        )
 
     if not levels:
         # Graph is already small enough — use direct layout
@@ -665,14 +763,18 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
         ns = cpu_ns.to(device)
         if trace is not None and hasattr(trace, "mark_phase"):
             trace.mark_phase("Direct Layout", f"{n:,} nodes")
-        direct_pos = _layout_inner(ei, n, ns, config, device=device,
-                                   progress_context=ProgressContext(), trace=trace)
+        direct_pos = _layout_inner(
+            ei, n, ns, config, device=device, progress_context=ProgressContext(), trace=trace
+        )
         from dagua.layout.engine import _apply_direction
+
         direction = config.direction if config else graph.direction
         return _apply_direction(direct_pos, direction)
 
     # Helper to build a config for a given level
-    def _make_config(steps: int, lr: float = config.lr, seed: Optional[int] = config.seed) -> LayoutConfig:
+    def _make_config(
+        steps: int, lr: float = config.lr, seed: Optional[int] = config.seed
+    ) -> LayoutConfig:
         return LayoutConfig(
             steps=steps,
             lr=lr,
@@ -701,7 +803,10 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
     # Pass edges on CPU — _layout_inner will stream batches to GPU.
     # Only node_sizes go to GPU (small: [N_coarse, 2]).
     coarsest = levels[-1]
-    _vlog(f"Phase 2/3: Coarsest level ({coarsest.num_nodes:,} nodes, {config.multilevel_coarse_steps} steps)")
+    _vlog(
+        f"Phase 2/3: Coarsest level ({coarsest.num_nodes:,} nodes, "
+        f"{config.multilevel_coarse_steps} steps)"
+    )
     _reset_peak()
     if trace is not None and hasattr(trace, "mark_phase"):
         trace.mark_phase("Hierarchy Build", f"{len(levels)} levels")
@@ -750,6 +855,7 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
         if level.num_fine > 100_000_000:
             import ctypes
             import gc as _gc
+
             _gc.collect()
             try:
                 ctypes.CDLL("libc.so.6").malloc_trim(0)
@@ -783,10 +889,14 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
             refine_steps = max(base_refine // 2, 5)
 
         level_num = len(levels) - i
-        _vlog(f"Level {level_num}/{num_refine_levels}: {fine_n:,} nodes ({refine_steps} steps)", indent="  ")
+        _vlog(
+            f"Level {level_num}/{num_refine_levels}: {fine_n:,} nodes ({refine_steps} steps)",
+            indent="  ",
+        )
         if verbose and fine_n > 100_000_000:
             import gc as _gc
             import os as _os
+
             _gc.collect()
             try:
                 with open("/proc/self/statm") as _f:
@@ -801,6 +911,7 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
         # but only when the next level won't fit alongside current allocations.
         if device == "cuda":
             from dagua.layout.engine import _estimate_gpu_memory
+
             next_level_mem = _estimate_gpu_memory(fine_n, n_fine_edges, per_loss_bw=True)
             if not _vram_fits(next_level_mem):
                 assert pos is not None
@@ -849,7 +960,8 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
 
         pos = _layout_inner(
             fine_ei_cpu,  # edges on CPU — engine streams batches to GPU
-            fine_n, fine_sizes,
+            fine_n,
+            fine_sizes,
             refine_config,
             device=device,
             init_pos=pos,
@@ -872,6 +984,7 @@ def multilevel_layout(graph: Any, config: LayoutConfig, trace: Optional[Any] = N
 
     # Apply direction transform
     from dagua.layout.engine import _apply_direction
+
     direction = config.direction if config else graph.direction
     assert pos is not None
     pos = _apply_direction(pos, direction)
