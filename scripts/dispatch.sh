@@ -22,12 +22,16 @@ EOF
   SECONDS=0
   "$@" > "$TASK_DIR/$TASK_ID.log" 2>&1 && EXIT_CODE=0 || EXIT_CODE=$?
   DURATION=$SECONDS
+  # Grab last meaningful log lines for the notification (Pushover limit ~1024 chars)
+  LOG_TAIL="$(tail -8 "$TASK_DIR/$TASK_ID.log" 2>/dev/null | head -c 600 || true)"
   if [ $EXIT_CODE -eq 0 ]; then
     echo "done" > "$TASK_DIR/$TASK_ID.status"
-    MSG="✓ $TASK_ID done (${DURATION}s)"
+    MSG="✓ $TASK_ID done (${DURATION}s)
+${LOG_TAIL}"
   else
     echo "failed" > "$TASK_DIR/$TASK_ID.status"
-    MSG="✗ $TASK_ID FAILED (exit $EXIT_CODE, ${DURATION}s)"
+    MSG="✗ $TASK_ID FAILED (exit $EXIT_CODE, ${DURATION}s)
+${LOG_TAIL}"
   fi
   cat >> "$TASK_DIR/$TASK_ID.result" <<EOF
 Exit:     $EXIT_CODE

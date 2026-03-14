@@ -141,6 +141,22 @@ No hand-curated "golden" layouts yet.
 - N > 2000: sampled repulsion (k=128), grid-based everything
 - Crossover vs Graphviz at ~3-4K nodes on CPU
 
+## Fun / Research
+
+- [ ] **Classic algorithm reimplementation + animation comparison**
+  - Reimplement FR, Kamada-Kawai, ForceAtlas2, stress-SGD as alternative loss presets
+  - Record position traces during optimization, render side-by-side MP4s
+  - Show how different paradigms move nodes: FR oscillating, KK smooth stress reduction,
+    dagua's composite multi-loss finding a different equilibrium
+  - FR and spring-electrical are trivial (just loss weight configs, hours each)
+  - KK/stress-SGD are a day each (need graph-distance computation)
+  - Full Sugiyama (discrete pipeline) is a week+ but educational
+  - Great for demos, papers, and understanding where dagua's approach wins/loses
+- [ ] **Skip-connection stress test graph generator**
+  - Parameterized: skip probability, skip distance (5/50/500 layers)
+  - Tests crossing minimization, edge straightness, DAG loss tradeoffs
+  - Closer to real-world graphs (ResNet, transformers, dependency graphs)
+
 ## Choice Points (deferred decisions)
 1. Should `layout()` return CPU tensors always, or match input device?
    - Currently: returns on compute device

@@ -17,6 +17,9 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, cast
 import torch
 
 if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+
+    from dagua.config import LayoutConfig
     from dagua.graph import DaguaGraph
 
 
@@ -198,7 +201,7 @@ def render_comparison(
     dagua_positions: torch.Tensor,
     graphviz_positions: torch.Tensor,
     output: str,
-    config=None,
+    config: Optional[LayoutConfig] = None,
     dpi: int = 150,
 ) -> str:
     """Render side-by-side comparison: Dagua layout vs Graphviz layout.
@@ -252,7 +255,12 @@ def render_comparison(
     return output
 
 
-def _render_on_axes(ax, graph, positions, title: str):
+def _render_on_axes(
+    ax: Axes,
+    graph: DaguaGraph,
+    positions: torch.Tensor,
+    title: str,
+) -> None:
     """Render a graph layout onto a specific matplotlib axes."""
     from dagua.edges import route_edges
     from dagua.render.mpl import _draw_clusters, _draw_edges, _draw_node_labels, _draw_nodes
@@ -287,7 +295,7 @@ def render_multi_comparison(
     graph: DaguaGraph,
     positions_dict: Dict[str, torch.Tensor],
     output: str,
-    config=None,
+    config: Optional[LayoutConfig] = None,
     dpi: int = 150,
 ) -> str:
     """Render N engine layouts side-by-side for the same graph.
