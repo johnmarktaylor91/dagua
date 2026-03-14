@@ -2,6 +2,8 @@ import importlib
 
 import torch
 
+from dagua.utils import VRAMBudget
+
 init_placement = importlib.import_module("dagua.layout.init_placement")
 
 
@@ -16,6 +18,7 @@ def test_choose_init_device_falls_back_when_cuda_headroom_is_insufficient(monkey
     node_sizes = torch.ones((8, 2), dtype=torch.float16)
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(init_placement, "_vram_fits", lambda needed_bytes, safety=0.65: False)
+    monkeypatch.setattr(VRAMBudget, "__init__", lambda self: None)
+    monkeypatch.setattr(VRAMBudget, "fits", lambda self, needed_bytes: False)
 
     assert init_placement._choose_init_device(edge_index, 8, node_sizes, "cuda") == "cpu"
