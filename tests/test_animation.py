@@ -5,7 +5,14 @@ from pathlib import Path
 import pytest
 
 import dagua
-from dagua import AnimationConfig, CameraKeyframe, DaguaGraph, LayoutConfig, PosterConfig, TourConfig
+from dagua import (
+    AnimationConfig,
+    CameraKeyframe,
+    DaguaGraph,
+    LayoutConfig,
+    PosterConfig,
+    TourConfig,
+)
 
 
 def _animated_graph():
@@ -132,7 +139,13 @@ class TestTourExport:
                 hold_end_frames=1,
                 keyframes=[
                     CameraKeyframe(duration_frames=8, bounds=(-120, 120, -40, 120), title="Start"),
-                    CameraKeyframe(duration_frames=10, center_on="merge", scale=0.7, easing="ease_in", title="Merge"),
+                    CameraKeyframe(
+                        duration_frames=10,
+                        center_on="merge",
+                        scale=0.7,
+                        easing="ease_in",
+                        title="Merge",
+                    ),
                 ],
             ),
         )
@@ -182,7 +195,7 @@ class TestTourExport:
 
     @pytest.mark.slow
     def test_tour_large_lod_mode_exports(self, tmp_path):
-        edges = [(f"n{i}", f"n{i+1}") for i in range(799)]
+        edges = [(f"n{i}", f"n{i + 1}") for i in range(799)]
         g = DaguaGraph.from_edge_list(edges)
         pos = dagua.layout(g, LayoutConfig(steps=12, edge_opt_steps=-1, seed=42))
         out = tmp_path / "lod-tour.gif"
@@ -224,7 +237,7 @@ class TestPosterExport:
 
     @pytest.mark.slow
     def test_poster_exports_large_lod_still(self, tmp_path):
-        edges = [(f"n{i}", f"n{i+1}") for i in range(799)]
+        edges = [(f"n{i}", f"n{i + 1}") for i in range(799)]
         g = DaguaGraph.from_edge_list(edges)
         pos = dagua.layout(g, LayoutConfig(steps=12, edge_opt_steps=-1, seed=42))
         out = tmp_path / "poster.webp"

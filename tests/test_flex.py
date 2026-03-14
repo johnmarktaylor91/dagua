@@ -6,7 +6,6 @@ import torch
 from dagua.flex import AlignGroup, Flex, LayoutFlex
 from dagua.layout.constraints import (
     alignment_loss,
-    flex_spacing_loss,
     position_pin_loss,
     project_hard_pins,
 )
@@ -215,6 +214,7 @@ class TestFlexIntegration:
         config.flex = g.flex
 
         from dagua.layout import layout
+
         pos = layout(g, config)
 
         # Node "a" should be near (0, 0) — hard pin
@@ -240,6 +240,7 @@ class TestFlexIntegration:
         config.flex = g.flex
 
         from dagua.layout import layout
+
         pos = layout(g, config)
 
         # Nodes 1, 2, 3 should have more similar x coordinates than without alignment.

@@ -7,7 +7,6 @@ projection, and overlap detection. Eliminates repeated Python dict-building.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
 
 import torch
 
@@ -23,9 +22,10 @@ class LayerIndex:
         sorted_nodes: [N] tensor. Nodes sorted by layer.
         num_layers: Number of distinct layers.
     """
-    node_to_layer: torch.Tensor   # [N] long
-    layer_offsets: torch.Tensor   # [L+1] long
-    sorted_nodes: torch.Tensor    # [N] long
+
+    node_to_layer: torch.Tensor  # [N] long
+    layer_offsets: torch.Tensor  # [L+1] long
+    sorted_nodes: torch.Tensor  # [N] long
     num_layers: int
 
     def nodes_in_layer(self, layer: int) -> torch.Tensor:

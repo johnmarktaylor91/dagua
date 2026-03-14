@@ -1,6 +1,5 @@
 """Tests for hard overlap projection."""
 
-import pytest
 import torch
 
 from dagua.layout.projection import project_overlaps

@@ -13,8 +13,6 @@ from dagua.layout.constraints import (
     cluster_containment_loss,
     cluster_separation_loss,
 )
-from dagua.utils import collect_cluster_leaves
-
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -165,11 +163,16 @@ class TestLayoutConstraints:
 
     def test_separation_sibling_only(self):
         """With cluster_parents, only same-level clusters repel."""
-        pos = torch.tensor([
-            [0.0, 0.0], [1.0, 0.0],  # left cluster
-            [5.0, 0.0], [6.0, 0.0],  # right cluster
-            [0.0, 0.0], [6.0, 0.0],  # parent cluster (covers all)
-        ])
+        pos = torch.tensor(
+            [
+                [0.0, 0.0],
+                [1.0, 0.0],  # left cluster
+                [5.0, 0.0],
+                [6.0, 0.0],  # right cluster
+                [0.0, 0.0],
+                [6.0, 0.0],  # parent cluster (covers all)
+            ]
+        )
         node_sizes = torch.ones(6, 2) * 2.0
         clusters = {
             "parent": [0, 1, 2, 3, 4, 5],
@@ -181,12 +184,18 @@ class TestLayoutConstraints:
         # With parents: only left vs right repel (they share parent "parent")
         # parent is NOT repelled against its children
         loss_with = cluster_separation_loss(
-            pos, node_sizes, clusters, device=pos.device,
+            pos,
+            node_sizes,
+            clusters,
+            device=pos.device,
             cluster_parents=cluster_parents,
         )
         # Without parents: all pairs repel
         loss_without = cluster_separation_loss(
-            pos, node_sizes, clusters, device=pos.device,
+            pos,
+            node_sizes,
+            clusters,
+            device=pos.device,
         )
         # With hierarchy awareness, parent-child pairs are excluded,
         # so loss should differ (fewer pairs considered)
@@ -196,31 +205,49 @@ class TestLayoutConstraints:
     def test_containment_loss_inside(self):
         """Child inside parent → low/zero loss."""
         # Parent covers [0, 0] to [10, 10], child fits inside
-        pos = torch.tensor([
-            [2.0, 2.0], [8.0, 8.0],   # parent members
-            [4.0, 4.0], [6.0, 6.0],   # child members (inside parent)
-        ])
+        pos = torch.tensor(
+            [
+                [2.0, 2.0],
+                [8.0, 8.0],  # parent members
+                [4.0, 4.0],
+                [6.0, 6.0],  # child members (inside parent)
+            ]
+        )
         node_sizes = torch.ones(4, 2) * 2.0
         clusters = {"parent": [0, 1], "child": [2, 3]}
         cluster_parents = {"child": "parent"}
 
         loss = cluster_containment_loss(
-            pos, node_sizes, clusters, cluster_parents, padding=1.0, device=pos.device,
+            pos,
+            node_sizes,
+            clusters,
+            cluster_parents,
+            padding=1.0,
+            device=pos.device,
         )
         assert loss.item() < 1.0  # should be very small
 
     def test_containment_loss_outside(self):
         """Child outside parent → high loss."""
-        pos = torch.tensor([
-            [0.0, 0.0], [5.0, 5.0],    # parent members
-            [50.0, 50.0], [60.0, 60.0],  # child members (far outside!)
-        ])
+        pos = torch.tensor(
+            [
+                [0.0, 0.0],
+                [5.0, 5.0],  # parent members
+                [50.0, 50.0],
+                [60.0, 60.0],  # child members (far outside!)
+            ]
+        )
         node_sizes = torch.ones(4, 2) * 2.0
         clusters = {"parent": [0, 1], "child": [2, 3]}
         cluster_parents = {"child": "parent"}
 
         loss = cluster_containment_loss(
-            pos, node_sizes, clusters, cluster_parents, padding=1.0, device=pos.device,
+            pos,
+            node_sizes,
+            clusters,
+            cluster_parents,
+            padding=1.0,
+            device=pos.device,
         )
         assert loss.item() > 10.0
 
@@ -232,7 +259,11 @@ class TestLayoutConstraints:
         cluster_parents = {}  # no hierarchy
 
         loss = cluster_containment_loss(
-            pos, node_sizes, clusters, cluster_parents, device=pos.device,
+            pos,
+            node_sizes,
+            clusters,
+            cluster_parents,
+            device=pos.device,
         )
         assert loss.item() == 0.0
 
@@ -342,12 +373,14 @@ class TestEdgeRouting:
 
         g.compute_node_sizes()
         # Place src far left, tgt far right, cluster members in the middle
-        pos = torch.tensor([
-            [-100.0, 0.0],  # src
-            [100.0, 0.0],   # tgt
-            [0.0, 0.0],     # c1
-            [0.0, 20.0],    # c2
-        ])
+        pos = torch.tensor(
+            [
+                [-100.0, 0.0],  # src
+                [100.0, 0.0],  # tgt
+                [0.0, 0.0],  # c1
+                [0.0, 20.0],  # c2
+            ]
+        )
 
         curves = route_edges(pos, g.edge_index, g.node_sizes, "TB", g)
         assert len(curves) == 1
