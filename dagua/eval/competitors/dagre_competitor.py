@@ -85,9 +85,7 @@ class DagreCompetitor(CompetitorBase):
                 pos[i, 0] = node_data.get("x", 0)
                 pos[i, 1] = node_data.get("y", 0)
 
-            return CompetitorResult(
-                name=self.name, pos=pos, runtime_seconds=elapsed
-            )
+            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
         except subprocess.TimeoutExpired:
             elapsed = time.perf_counter() - start
             return CompetitorResult(
@@ -95,9 +93,7 @@ class DagreCompetitor(CompetitorBase):
             )
         except (FileNotFoundError, json.JSONDecodeError) as e:
             elapsed = time.perf_counter() - start
-            return CompetitorResult(
-                name=self.name, pos=None, runtime_seconds=elapsed, error=str(e)
-            )
+            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=str(e))
 
     def available(self) -> bool:
         try:

@@ -84,8 +84,9 @@ def route_edges(
     node_cluster_set: Dict[int, Set[str]] = {}
     node_shapes = None
     edge_styles = None
-    if graph is not None and hasattr(graph, 'clusters') and graph.clusters:
+    if graph is not None and hasattr(graph, "clusters") and graph.clusters:
         from dagua.utils import collect_cluster_leaves
+
         for cname, cmembers in graph.clusters.items():
             if isinstance(cmembers, dict):
                 cmembers = collect_cluster_leaves(cmembers)
@@ -171,13 +172,26 @@ def route_edges(
         routing = edge_style.routing if edge_style is not None else "bezier"
         curvature = edge_style.curvature if edge_style is not None else 0.4
 
-        curve = _compute_curve(src_port_x, src_port_y, tgt_port_x, tgt_port_y, direction, routing, curvature)
+        curve = _compute_curve(
+            src_port_x,
+            src_port_y,
+            tgt_port_x,
+            tgt_port_y,
+            direction,
+            routing,
+            curvature,
+        )
 
         # Cluster-aware deflection: if the curve crosses a foreign cluster bbox,
         # push control points to route around it
         if graph is not None and cluster_bboxes:
             curve = _deflect_around_clusters(
-                curve, s, t, node_cluster_set, cluster_bboxes, direction,
+                curve,
+                s,
+                t,
+                node_cluster_set,
+                cluster_bboxes,
+                direction,
             )
 
         curves.append(curve)
@@ -187,8 +201,12 @@ def route_edges(
 
 def _adjust_port_for_shape(
     shape: str,
-    cx: float, cy: float, w: float, h: float,
-    port_x: float, port_y: float,
+    cx: float,
+    cy: float,
+    w: float,
+    h: float,
+    port_x: float,
+    port_y: float,
     is_source: bool,
 ) -> Tuple[float, float]:
     """Adjust port position to lie on the shape boundary.
@@ -241,8 +259,10 @@ def _adjust_port_for_shape(
 
 
 def _compute_curve(
-    sx: float, sy: float,
-    tx: float, ty: float,
+    sx: float,
+    sy: float,
+    tx: float,
+    ty: float,
     direction: str = "TB",
     routing: str = "bezier",
     curvature: float = 0.4,
@@ -257,16 +277,20 @@ def _compute_curve(
 
 
 def _compute_straight(
-    sx: float, sy: float,
-    tx: float, ty: float,
+    sx: float,
+    sy: float,
+    tx: float,
+    ty: float,
 ) -> BezierCurve:
     """Straight line: control points = endpoints (degenerate bezier)."""
     return BezierCurve((sx, sy), (sx, sy), (tx, ty), (tx, ty))
 
 
 def _compute_ortho(
-    sx: float, sy: float,
-    tx: float, ty: float,
+    sx: float,
+    sy: float,
+    tx: float,
+    ty: float,
     direction: str = "TB",
 ) -> BezierCurve:
     """Right-angle routing via midpoint control points."""
@@ -279,8 +303,10 @@ def _compute_ortho(
 
 
 def _compute_bezier(
-    sx: float, sy: float,
-    tx: float, ty: float,
+    sx: float,
+    sy: float,
+    tx: float,
+    ty: float,
     direction: str = "TB",
     curvature: float = 0.4,
 ) -> BezierCurve:
@@ -393,9 +419,6 @@ def _deflect_around_clusters(
         cy_mid = (by_min + by_max) / 2
 
         # Calculate distance to each side from the line connecting src to tgt
-        line_dx = p1[0] - p0[0]
-        line_dy = p1[1] - p0[1]
-
         if direction in ("TB", "BT"):
             # Prefer routing around left or right side
             if mid[0] < cx_mid:

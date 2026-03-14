@@ -24,10 +24,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _ensure_cpu(t: torch.Tensor) -> torch.Tensor:
     return t.detach().cpu() if t.device.type != "cpu" else t.detach()
@@ -92,6 +92,7 @@ def _bfs_distances(csr_offsets, csr_targets, source: int, max_dist: int = 20):
 # Tier 1: Always compute — O(N) or O(|E|)
 # ---------------------------------------------------------------------------
 
+
 def edge_length_cv(pos: torch.Tensor, edge_index: torch.Tensor) -> Dict[str, float]:
     """Edge length coefficient of variation + distribution stats.
 
@@ -99,9 +100,15 @@ def edge_length_cv(pos: torch.Tensor, edge_index: torch.Tensor) -> Dict[str, flo
     Target: CV < 0.5 good, < 0.3 excellent, > 1.0 problem.
     """
     if edge_index.numel() == 0:
-        return {"edge_length_cv": 0.0, "edge_length_mean": 0.0, "edge_length_std": 0.0,
-                "edge_length_min": 0.0, "edge_length_max": 0.0,
-                "edge_length_p01": 0.0, "edge_length_p99": 0.0}
+        return {
+            "edge_length_cv": 0.0,
+            "edge_length_mean": 0.0,
+            "edge_length_std": 0.0,
+            "edge_length_min": 0.0,
+            "edge_length_max": 0.0,
+            "edge_length_p01": 0.0,
+            "edge_length_p99": 0.0,
+        }
 
     src, tgt = edge_index[0], edge_index[1]
     lengths = torch.norm(pos[src] - pos[tgt], dim=1)
@@ -120,9 +127,12 @@ def edge_length_cv(pos: torch.Tensor, edge_index: torch.Tensor) -> Dict[str, flo
     }
 
 
-def dag_consistency(pos: torch.Tensor, edge_index: torch.Tensor,
-                    direction: str = "TB",
-                    back_edge_mask: Optional[torch.Tensor] = None) -> Dict[str, float]:
+def dag_consistency(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    direction: str = "TB",
+    back_edge_mask: Optional[torch.Tensor] = None,
+) -> Dict[str, float]:
     """Fraction of edges pointing in the correct DAG direction + violation details.
 
     Complexity: O(|E|).
@@ -133,9 +143,14 @@ def dag_consistency(pos: torch.Tensor, edge_index: torch.Tensor,
             checks and reported separately as back_edge_count / back_edge_fraction.
     """
     if edge_index.numel() == 0:
-        return {"dag_consistency": 1.0, "dag_num_violations": 0,
-                "dag_mean_violation_mag": 0.0, "dag_max_violation_mag": 0.0,
-                "back_edge_count": 0, "back_edge_fraction": 0.0}
+        return {
+            "dag_consistency": 1.0,
+            "dag_num_violations": 0,
+            "dag_mean_violation_mag": 0.0,
+            "dag_max_violation_mag": 0.0,
+            "back_edge_count": 0,
+            "back_edge_fraction": 0.0,
+        }
 
     total_edges = edge_index.shape[1]
 
@@ -151,10 +166,14 @@ def dag_consistency(pos: torch.Tensor, edge_index: torch.Tensor,
     result: Dict[str, float] = {}
 
     if forward_ei.numel() == 0:
-        result.update({
-            "dag_consistency": 1.0, "dag_num_violations": 0,
-            "dag_mean_violation_mag": 0.0, "dag_max_violation_mag": 0.0,
-        })
+        result.update(
+            {
+                "dag_consistency": 1.0,
+                "dag_num_violations": 0,
+                "dag_mean_violation_mag": 0.0,
+                "dag_max_violation_mag": 0.0,
+            }
+        )
     else:
         src, tgt = forward_ei[0], forward_ei[1]
         if direction == "TB":
@@ -179,12 +198,14 @@ def dag_consistency(pos: torch.Tensor, edge_index: torch.Tensor,
             violation_mag = torch.clamp(y_src[~correct] - y_tgt[~correct], min=0)
 
         n_violations = (~correct).sum().item()
-        result.update({
-            "dag_consistency": correct.float().mean().item(),
-            "dag_num_violations": int(n_violations),
-            "dag_mean_violation_mag": violation_mag.mean().item() if n_violations > 0 else 0.0,
-            "dag_max_violation_mag": violation_mag.max().item() if n_violations > 0 else 0.0,
-        })
+        result.update(
+            {
+                "dag_consistency": correct.float().mean().item(),
+                "dag_num_violations": int(n_violations),
+                "dag_mean_violation_mag": violation_mag.mean().item() if n_violations > 0 else 0.0,
+                "dag_max_violation_mag": violation_mag.max().item() if n_violations > 0 else 0.0,
+            }
+        )
 
     result["back_edge_count"] = int(n_back)
     result["back_edge_fraction"] = n_back / total_edges if total_edges > 0 else 0.0
@@ -199,7 +220,9 @@ def depth_position_correlation(pos: torch.Tensor, topo_depth: torch.Tensor) -> D
     """
     from scipy.stats import spearmanr
 
-    depth_np = topo_depth.cpu().numpy() if isinstance(topo_depth, torch.Tensor) else np.array(topo_depth)
+    depth_np = (
+        topo_depth.cpu().numpy() if isinstance(topo_depth, torch.Tensor) else np.array(topo_depth)
+    )
     y_np = pos[:, 1].cpu().numpy()
     rho, pval = spearmanr(depth_np, y_np)
     return {"depth_spearman_rho": float(rho), "depth_spearman_pval": float(pval)}
@@ -305,8 +328,9 @@ def aspect_ratio(pos: torch.Tensor, node_sizes: Optional[torch.Tensor] = None) -
     }
 
 
-def edge_direction_straightness(pos: torch.Tensor, edge_index: torch.Tensor,
-                                direction: str = "TB") -> Dict[str, float]:
+def edge_direction_straightness(
+    pos: torch.Tensor, edge_index: torch.Tensor, direction: str = "TB"
+) -> Dict[str, float]:
     """Mean angular deviation from primary axis (degrees).
 
     For straight-line edges (no bezier).  For TB/BT: deviation from vertical.
@@ -338,9 +362,15 @@ def edge_direction_straightness(pos: torch.Tensor, edge_index: torch.Tensor,
 # Tier 2: Sampled metrics
 # ---------------------------------------------------------------------------
 
-def sampled_stress(pos: torch.Tensor, edge_index: torch.Tensor, num_nodes: int,
-                   n_sources: int = 200, n_targets: int = 1000,
-                   max_dist: int = 20) -> Dict[str, float]:
+
+def sampled_stress(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    n_sources: int = 200,
+    n_targets: int = 1000,
+    max_dist: int = 20,
+) -> Dict[str, float]:
     """Sampled graph-theoretic stress.
 
     Measures how well Euclidean distances preserve graph distances.
@@ -351,11 +381,15 @@ def sampled_stress(pos: torch.Tensor, edge_index: torch.Tensor, num_nodes: int,
     N = num_nodes
 
     if ei.numel() == 0 or N < 2:
-        return {"sampled_stress": 0.0, "stress_n_pairs": 0,
-                "stress_n_sources": 0, "stress_n_targets": 0}
+        return {
+            "sampled_stress": 0.0,
+            "stress_n_pairs": 0,
+            "stress_n_sources": 0,
+            "stress_n_targets": 0,
+        }
 
     csr_off, csr_tgt = _build_csr(ei, N)
-    sources = torch.randperm(N)[:min(n_sources, N)].numpy()
+    sources = torch.randperm(N)[: min(n_sources, N)].numpy()
 
     total_stress = 0.0
     count = 0
@@ -371,7 +405,7 @@ def sampled_stress(pos: torch.Tensor, edge_index: torch.Tensor, num_nodes: int,
         d_graph = dist[targets].astype(np.float64)
         d_euclidean = np.linalg.norm(pos_np[targets] - pos_np[src_node], axis=1)
 
-        w = 1.0 / (d_graph ** 2)
+        w = 1.0 / (d_graph**2)
         stress = (w * (d_graph - d_euclidean) ** 2).sum()
         total_stress += stress
         count += len(targets)
@@ -384,15 +418,20 @@ def sampled_stress(pos: torch.Tensor, edge_index: torch.Tensor, num_nodes: int,
     }
 
 
-def sampled_crossing_rate(pos: torch.Tensor, edge_index: torch.Tensor,
-                          n_samples: int = 1_000_000) -> Dict[str, float]:
+def sampled_crossing_rate(
+    pos: torch.Tensor, edge_index: torch.Tensor, n_samples: int = 1_000_000
+) -> Dict[str, float]:
     """Estimated crossing rate via random edge-pair sampling.
 
     Complexity: O(n_samples).
     """
     if edge_index.numel() == 0 or edge_index.shape[1] < 2:
-        return {"crossing_rate": 0.0, "crossing_se": 0.0,
-                "crossing_estimated_total": 0, "crossing_n_samples": 0}
+        return {
+            "crossing_rate": 0.0,
+            "crossing_se": 0.0,
+            "crossing_estimated_total": 0,
+            "crossing_n_samples": 0,
+        }
 
     E = edge_index.shape[1]
     src, tgt = edge_index[0], edge_index[1]
@@ -409,8 +448,12 @@ def sampled_crossing_rate(pos: torch.Tensor, edge_index: torch.Tensor,
     valid = ~shares_node & ~same_edge
 
     if valid.sum() == 0:
-        return {"crossing_rate": 0.0, "crossing_se": 0.0,
-                "crossing_estimated_total": 0, "crossing_n_samples": 0}
+        return {
+            "crossing_rate": 0.0,
+            "crossing_se": 0.0,
+            "crossing_estimated_total": 0,
+            "crossing_n_samples": 0,
+        }
 
     p1 = pos[e1s[valid]]
     p2 = pos[e1t[valid]]
@@ -430,9 +473,9 @@ def sampled_crossing_rate(pos: torch.Tensor, edge_index: torch.Tensor,
     }
 
 
-def neighborhood_preservation(pos: torch.Tensor, edge_index: torch.Tensor,
-                              num_nodes: int, n_samples: int = 5000,
-                              k: int = 10) -> Dict[str, float]:
+def neighborhood_preservation(
+    pos: torch.Tensor, edge_index: torch.Tensor, num_nodes: int, n_samples: int = 5000, k: int = 10
+) -> Dict[str, float]:
     """Fraction of k-nearest graph neighbors that are also k-nearest Euclidean neighbors.
 
     Complexity: O(n_samples * (BFS_cost + N)) — use spatial index for large N.
@@ -443,11 +486,10 @@ def neighborhood_preservation(pos: torch.Tensor, edge_index: torch.Tensor,
     N = num_nodes
 
     if ei.numel() == 0 or N < k + 1:
-        return {"neighborhood_mean": 0.0, "neighborhood_median": 0.0,
-                "neighborhood_std": 0.0}
+        return {"neighborhood_mean": 0.0, "neighborhood_median": 0.0, "neighborhood_std": 0.0}
 
     csr_off, csr_tgt = _build_csr(ei, N)
-    samples = torch.randperm(N)[:min(n_samples, N)].numpy()
+    samples = torch.randperm(N)[: min(n_samples, N)].numpy()
 
     scores = []
     for node in samples:
@@ -473,8 +515,7 @@ def neighborhood_preservation(pos: torch.Tensor, edge_index: torch.Tensor,
         scores.append(overlap / min(k, len(graph_neighbors)))
 
     if not scores:
-        return {"neighborhood_mean": 0.0, "neighborhood_median": 0.0,
-                "neighborhood_std": 0.0}
+        return {"neighborhood_mean": 0.0, "neighborhood_median": 0.0, "neighborhood_std": 0.0}
 
     scores_arr = np.array(scores)
     return {
@@ -484,16 +525,20 @@ def neighborhood_preservation(pos: torch.Tensor, edge_index: torch.Tensor,
     }
 
 
-def angular_resolution(pos: torch.Tensor, edge_index: torch.Tensor,
-                       n_samples: int = 10000) -> Dict[str, float]:
+def angular_resolution(
+    pos: torch.Tensor, edge_index: torch.Tensor, n_samples: int = 10000
+) -> Dict[str, float]:
     """Minimum angle between incident edges at each node (sampled).
 
     Complexity: O(n_samples * avg_degree * log(avg_degree)).
     Target: mean > 20° decent, < 10% below 10°.
     """
     if edge_index.numel() == 0:
-        return {"angular_res_mean_deg": 360.0, "angular_res_median_deg": 360.0,
-                "angular_res_below_10deg": 0.0}
+        return {
+            "angular_res_mean_deg": 360.0,
+            "angular_res_median_deg": 360.0,
+            "angular_res_below_10deg": 0.0,
+        }
 
     src, tgt = edge_index[0], edge_index[1]
     N = pos.shape[0]
@@ -513,10 +558,13 @@ def angular_resolution(pos: torch.Tensor, edge_index: torch.Tensor,
     # Only sample nodes with degree >= 2
     candidates = torch.where(degree >= 2)[0]
     if candidates.numel() == 0:
-        return {"angular_res_mean_deg": 360.0, "angular_res_median_deg": 360.0,
-                "angular_res_below_10deg": 0.0}
+        return {
+            "angular_res_mean_deg": 360.0,
+            "angular_res_median_deg": 360.0,
+            "angular_res_below_10deg": 0.0,
+        }
 
-    sample = candidates[torch.randperm(candidates.numel())[:min(n_samples, candidates.numel())]]
+    sample = candidates[torch.randperm(candidates.numel())[: min(n_samples, candidates.numel())]]
 
     min_angles = []
     for node in sample:
@@ -530,8 +578,11 @@ def angular_resolution(pos: torch.Tensor, edge_index: torch.Tensor,
         min_angles.append(all_diffs.min().item())
 
     if not min_angles:
-        return {"angular_res_mean_deg": 360.0, "angular_res_median_deg": 360.0,
-                "angular_res_below_10deg": 0.0}
+        return {
+            "angular_res_mean_deg": 360.0,
+            "angular_res_median_deg": 360.0,
+            "angular_res_below_10deg": 0.0,
+        }
 
     min_angles_t = torch.tensor(min_angles)
     deg = min_angles_t * 180 / PI
@@ -547,6 +598,7 @@ def angular_resolution(pos: torch.Tensor, edge_index: torch.Tensor,
 # Tier 3: DAG/hierarchy-specific
 # ---------------------------------------------------------------------------
 
+
 def cluster_separation(pos: torch.Tensor, cluster_ids: torch.Tensor) -> Dict[str, float]:
     """Ratio of inter-cluster distance to intra-cluster spread.
 
@@ -557,8 +609,11 @@ def cluster_separation(pos: torch.Tensor, cluster_ids: torch.Tensor) -> Dict[str
     n_clusters = unique_clusters.numel()
 
     if n_clusters <= 1:
-        return {"cluster_mean_sep_ratio": 0.0, "cluster_min_sep_ratio": 0.0,
-                "cluster_frac_overlapping": 0.0}
+        return {
+            "cluster_mean_sep_ratio": 0.0,
+            "cluster_min_sep_ratio": 0.0,
+            "cluster_frac_overlapping": 0.0,
+        }
 
     centroids = {}
     spreads = {}
@@ -577,8 +632,11 @@ def cluster_separation(pos: torch.Tensor, cluster_ids: torch.Tensor) -> Dict[str
         j_idx = np.random.randint(0, n_clusters, n_pairs)
         pairs = [(cluster_list[i], cluster_list[j]) for i, j in zip(i_idx, j_idx) if i < j]
     else:
-        pairs = [(cluster_list[i], cluster_list[j])
-                 for i in range(n_clusters) for j in range(i + 1, n_clusters)]
+        pairs = [
+            (cluster_list[i], cluster_list[j])
+            for i in range(n_clusters)
+            for j in range(i + 1, n_clusters)
+        ]
 
     separations = []
     for ci, cj in pairs:
@@ -588,8 +646,11 @@ def cluster_separation(pos: torch.Tensor, cluster_ids: torch.Tensor) -> Dict[str
             separations.append(dist / avg_spread)
 
     if not separations:
-        return {"cluster_mean_sep_ratio": 0.0, "cluster_min_sep_ratio": 0.0,
-                "cluster_frac_overlapping": 0.0}
+        return {
+            "cluster_mean_sep_ratio": 0.0,
+            "cluster_min_sep_ratio": 0.0,
+            "cluster_frac_overlapping": 0.0,
+        }
 
     sep = torch.tensor(separations)
     return {
@@ -612,8 +673,13 @@ def layer_uniformity(pos: torch.Tensor, topo_depth) -> Dict[str, float]:
 
     unique_depths = depth_t.unique().sort().values
     if unique_depths.numel() < 2:
-        return {"layer_spacing_cv": 0.0, "layer_spacing_mean": 0.0,
-                "layer_spacing_min": 0.0, "layer_spacing_max": 0.0, "n_layers": 1}
+        return {
+            "layer_spacing_cv": 0.0,
+            "layer_spacing_mean": 0.0,
+            "layer_spacing_min": 0.0,
+            "layer_spacing_max": 0.0,
+            "n_layers": 1,
+        }
 
     medians = []
     for d in unique_depths:
@@ -624,9 +690,13 @@ def layer_uniformity(pos: torch.Tensor, topo_depth) -> Dict[str, float]:
     spacings = (medians_t[1:] - medians_t[:-1]).abs()
 
     if spacings.numel() < 2 or spacings.mean() < 1e-8:
-        return {"layer_spacing_cv": 0.0, "layer_spacing_mean": spacings.mean().item(),
-                "layer_spacing_min": spacings.min().item(), "layer_spacing_max": spacings.max().item(),
-                "n_layers": int(unique_depths.numel())}
+        return {
+            "layer_spacing_cv": 0.0,
+            "layer_spacing_mean": spacings.mean().item(),
+            "layer_spacing_min": spacings.min().item(),
+            "layer_spacing_max": spacings.max().item(),
+            "n_layers": int(unique_depths.numel()),
+        }
 
     return {
         "layer_spacing_cv": (spacings.std() / spacings.mean()).item(),
@@ -743,12 +813,10 @@ def edge_curvature_consistency(curves) -> Dict[str, float]:
     κ at 5 sample points per edge.
     Tier 1 metric.
     """
-    from dagua.edges import evaluate_bezier, bezier_tangent
+    from dagua.edges import bezier_tangent
 
     if not curves:
         return {"edge_curvature_cv": 0.0, "edge_curvature_mean": 0.0}
-
-    import math
 
     mean_curvatures = []
     for curve in curves:
@@ -778,7 +846,7 @@ def edge_curvature_consistency(curves) -> Dict[str, float]:
     mean_k = sum(mean_curvatures) / len(mean_curvatures)
     if len(mean_curvatures) > 1 and mean_k > 1e-8:
         var_k = sum((k - mean_k) ** 2 for k in mean_curvatures) / (len(mean_curvatures) - 1)
-        cv = var_k ** 0.5 / mean_k
+        cv = var_k**0.5 / mean_k
     else:
         cv = 0.0
 
@@ -799,7 +867,6 @@ def port_angular_resolution(
         return {"port_angular_res_mean_deg": 360.0}
 
     ei = _ensure_cpu(edge_index)
-    E = len(curves)
     src_list = ei[0].tolist()
     tgt_list = ei[1].tolist()
 
@@ -886,6 +953,7 @@ def within_layer_compactness(pos: torch.Tensor, topo_depth) -> Dict[str, float]:
 # Composite score
 # ---------------------------------------------------------------------------
 
+
 def composite(metrics: Dict[str, float]) -> float:
     """Weighted combination of normalized metrics.  Higher = better.  Range 0-100.
 
@@ -939,7 +1007,9 @@ def composite(metrics: Dict[str, float]) -> float:
 
     # Label overlap (2) — fewer is better
     if "label_overlaps" in metrics or "label_node_overlaps" in metrics:
-        total_label_overlaps = metrics.get("label_overlaps", 0) + metrics.get("label_node_overlaps", 0)
+        total_label_overlaps = metrics.get("label_overlaps", 0) + metrics.get(
+            "label_node_overlaps", 0
+        )
         lo_score = 1.0 if total_label_overlaps == 0 else max(0.0, 1.0 - total_label_overlaps * 0.1)
         score += 2 * lo_score
 
@@ -949,6 +1019,7 @@ def composite(metrics: Dict[str, float]) -> float:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def quick(
     pos: torch.Tensor,
@@ -995,6 +1066,7 @@ def quick(
     # Depth-position correlation
     if topo_depth is None and ei.numel() > 0:
         from dagua.utils import longest_path_layering
+
         topo_depth = longest_path_layering(ei, N)
 
     if topo_depth is not None:
@@ -1059,23 +1131,27 @@ def full(
     pos = _ensure_cpu(pos)
     ei = _ensure_cpu(edge_index)
     N = pos.shape[0]
-    E = ei.shape[1] if ei.numel() > 0 else 0
-
     # Compute topo_depth if needed
     if topo_depth is None and ei.numel() > 0:
         from dagua.utils import longest_path_layering
+
         topo_depth = longest_path_layering(ei, N)
 
     if topo_depth is not None and not isinstance(topo_depth, torch.Tensor):
         topo_depth = torch.tensor(topo_depth, dtype=torch.long)
 
     # Tier 1
-    result = quick(pos, ei, topo_depth=topo_depth, node_sizes=node_sizes,
-                   direction=direction, back_edge_mask=back_edge_mask)
+    result = quick(
+        pos,
+        ei,
+        topo_depth=topo_depth,
+        node_sizes=node_sizes,
+        direction=direction,
+        back_edge_mask=back_edge_mask,
+    )
 
     # Tier 2: Sampled metrics
-    result.update(sampled_stress(pos, ei, N,
-                                 n_sources=stress_sources, n_targets=stress_targets))
+    result.update(sampled_stress(pos, ei, N, n_sources=stress_sources, n_targets=stress_targets))
     result.update(sampled_crossing_rate(pos, ei, n_samples=crossing_samples))
     result.update(neighborhood_preservation(pos, ei, N, n_samples=neighborhood_samples))
     result.update(angular_resolution(pos, ei))
@@ -1136,6 +1212,7 @@ def compare(pos_dagua: torch.Tensor, pos_reference: torch.Tensor) -> Dict[str, f
 # Backward compatibility
 # ---------------------------------------------------------------------------
 
+
 def compute_all_metrics(
     positions: torch.Tensor,
     edge_index: torch.Tensor,
@@ -1195,6 +1272,7 @@ def graphviz_delta(dagua_metrics: Dict, graphviz_metrics: Dict) -> Dict[str, flo
 
 # Legacy function-name aliases (old API returned scalars)
 
+
 def count_crossings(pos: torch.Tensor, edge_index: torch.Tensor) -> int:
     """Legacy: count edge crossings.  Exact for E<=500, sampled for larger."""
     pos = _ensure_cpu(pos)
@@ -1223,29 +1301,34 @@ def _segments_intersect_scalar(a, b, c, d) -> bool:
     """Scalar segment intersection test for legacy count_crossings."""
     if np.allclose(a, c) or np.allclose(a, d) or np.allclose(b, c) or np.allclose(b, d):
         return False
+
     def cross(o, a, b):
         return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
     d1, d2 = cross(c, d, a), cross(c, d, b)
     d3, d4 = cross(a, b, c), cross(a, b, d)
     return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
 
 
-def compute_dag_fraction(pos: torch.Tensor, edge_index: torch.Tensor,
-                         direction: str = "TB") -> float:
+def compute_dag_fraction(
+    pos: torch.Tensor, edge_index: torch.Tensor, direction: str = "TB"
+) -> float:
     """Legacy: fraction of edges in correct DAG direction."""
     return dag_consistency(_ensure_cpu(pos), _ensure_cpu(edge_index), direction)["dag_consistency"]
 
 
-def compute_edge_straightness(pos: torch.Tensor, edge_index: torch.Tensor,
-                              direction: str = "TB") -> float:
+def compute_edge_straightness(
+    pos: torch.Tensor, edge_index: torch.Tensor, direction: str = "TB"
+) -> float:
     """Legacy: mean angular deviation from primary axis (degrees)."""
-    return edge_direction_straightness(
-        _ensure_cpu(pos), _ensure_cpu(edge_index), direction
-    )["edge_straightness_mean_deg"]
+    return edge_direction_straightness(_ensure_cpu(pos), _ensure_cpu(edge_index), direction)[
+        "edge_straightness_mean_deg"
+    ]
 
 
-def compute_x_alignment(pos: torch.Tensor, edge_index: torch.Tensor,
-                        direction: str = "TB") -> float:
+def compute_x_alignment(
+    pos: torch.Tensor, edge_index: torch.Tensor, direction: str = "TB"
+) -> float:
     """Legacy: mean cross-axis displacement between connected nodes."""
     pos = _ensure_cpu(pos)
     ei = _ensure_cpu(edge_index)

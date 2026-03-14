@@ -40,12 +40,11 @@ from dagua.render.mpl import (
     _draw_nodes,
 )
 from dagua.styles import (
+    MINIMAL_THEME,
     ClusterStyle,
     EdgeStyle,
     GraphStyle,
-    MINIMAL_THEME,
     NodeStyle,
-    Theme,
 )
 
 
@@ -90,16 +89,66 @@ ManifestDict = dict[str, ManifestRows]
 
 
 _LADDER_SPECS: Tuple[AuditSpec, ...] = (
-    AuditSpec("linear_3layer_mlp", "Rung 1: Trivial chain", "Baseline reading order and whitespace.", ("baseline", "reading-order")),
-    AuditSpec("deep_chain_20", "Rung 2: Deep chain", "Tests vertical rhythm and depth clarity.", ("depth", "spacing")),
-    AuditSpec("residual_block", "Rung 3: Single skip", "The first non-trivial skip connection.", ("skip-routing", "symmetry")),
-    AuditSpec("inception_block", "Rung 4: Wide parallel", "Checks branch alignment and merge balance.", ("branch-alignment", "merge-balance")),
-    AuditSpec("nested_shallow_enc_dec", "Rung 5: Shallow clusters", "First hierarchy test with simple containment.", ("cluster-clarity", "containment")),
-    AuditSpec("hierarchical_residual_stage", "Rung 6: Deep hierarchy", "Residuals crossing hierarchy boundaries.", ("cluster-crosstalk", "long-skips")),
-    AuditSpec("transformer_layer", "Rung 7: Transformer block", "Parallel attention branches plus residuals.", ("motif-recognition", "mixed-density")),
-    AuditSpec("recurrent_feedback_cell", "Rung 8: Feedback", "Late cycles and recurrent arcs.", ("feedback", "loop-clarity")),
-    AuditSpec("interleaved_cluster_crosstalk", "Rung 9: Sibling crosstalk", "Interleaved cluster edges that can turn to mud.", ("cluster-crosstalk", "sibling-separation")),
-    AuditSpec("kitchen_sink_hybrid_net", "Rung 10: Kitchen sink", "Everything at once for adversarial visual pressure.", ("all-of-the-above", "stress")),
+    AuditSpec(
+        "linear_3layer_mlp",
+        "Rung 1: Trivial chain",
+        "Baseline reading order and whitespace.",
+        ("baseline", "reading-order"),
+    ),
+    AuditSpec(
+        "deep_chain_20",
+        "Rung 2: Deep chain",
+        "Tests vertical rhythm and depth clarity.",
+        ("depth", "spacing"),
+    ),
+    AuditSpec(
+        "residual_block",
+        "Rung 3: Single skip",
+        "The first non-trivial skip connection.",
+        ("skip-routing", "symmetry"),
+    ),
+    AuditSpec(
+        "inception_block",
+        "Rung 4: Wide parallel",
+        "Checks branch alignment and merge balance.",
+        ("branch-alignment", "merge-balance"),
+    ),
+    AuditSpec(
+        "nested_shallow_enc_dec",
+        "Rung 5: Shallow clusters",
+        "First hierarchy test with simple containment.",
+        ("cluster-clarity", "containment"),
+    ),
+    AuditSpec(
+        "hierarchical_residual_stage",
+        "Rung 6: Deep hierarchy",
+        "Residuals crossing hierarchy boundaries.",
+        ("cluster-crosstalk", "long-skips"),
+    ),
+    AuditSpec(
+        "transformer_layer",
+        "Rung 7: Transformer block",
+        "Parallel attention branches plus residuals.",
+        ("motif-recognition", "mixed-density"),
+    ),
+    AuditSpec(
+        "recurrent_feedback_cell",
+        "Rung 8: Feedback",
+        "Late cycles and recurrent arcs.",
+        ("feedback", "loop-clarity"),
+    ),
+    AuditSpec(
+        "interleaved_cluster_crosstalk",
+        "Rung 9: Sibling crosstalk",
+        "Interleaved cluster edges that can turn to mud.",
+        ("cluster-crosstalk", "sibling-separation"),
+    ),
+    AuditSpec(
+        "kitchen_sink_hybrid_net",
+        "Rung 10: Kitchen sink",
+        "Everything at once for adversarial visual pressure.",
+        ("all-of-the-above", "stress"),
+    ),
 )
 
 
@@ -115,20 +164,26 @@ def build_visual_audit_suite(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    specs = [spec for spec in _LADDER_SPECS if graph_names is None or spec.graph_name in set(graph_names)]
-    panel_set = set(panels) if panels is not None else {
-        "ladder",
-        "decomposition",
-        "kill_switches",
-        "diff_dashboard",
-        "competitor_stepwise",
-        "metric_cards",
-        "sheets",
-        "frozen_baselines",
-        "run_to_run_diff",
-        "readme",
-        "manifest",
-    }
+    specs = [
+        spec for spec in _LADDER_SPECS if graph_names is None or spec.graph_name in set(graph_names)
+    ]
+    panel_set = (
+        set(panels)
+        if panels is not None
+        else {
+            "ladder",
+            "decomposition",
+            "kill_switches",
+            "diff_dashboard",
+            "competitor_stepwise",
+            "metric_cards",
+            "sheets",
+            "frozen_baselines",
+            "run_to_run_diff",
+            "readme",
+            "manifest",
+        }
+    )
     graph_map = {tg.name: tg for tg in get_test_graphs()}
     result = VisualAuditResult(
         output_dir=str(out),
@@ -145,7 +200,17 @@ def build_visual_audit_suite(
     sheet_dir = out / "sheets"
     metric_dir = out / "metric_cards"
     frozen_dir = out / "frozen_baselines" / "current"
-    for d in (ladder_dir, decomp_dir, kill_dir, diff_dir, competitor_dir, baseline_diff_dir, sheet_dir, metric_dir, frozen_dir):
+    for d in (
+        ladder_dir,
+        decomp_dir,
+        kill_dir,
+        diff_dir,
+        competitor_dir,
+        baseline_diff_dir,
+        sheet_dir,
+        metric_dir,
+        frozen_dir,
+    ):
         d.mkdir(parents=True, exist_ok=True)
 
     manifest: ManifestDict = {
@@ -167,7 +232,9 @@ def build_visual_audit_suite(
         graph = copy.deepcopy(tg.graph)
         if spec.direction:
             graph.direction = spec.direction
-        cfg = LayoutConfig(steps=steps, edge_opt_steps=edge_opt_steps, direction=graph.direction, seed=42)
+        cfg = LayoutConfig(
+            steps=steps, edge_opt_steps=edge_opt_steps, direction=graph.direction, seed=42
+        )
         pos = layout(graph, cfg)
         node_sizes = _require_node_sizes(graph)
         curves = route_edges(pos, graph.edge_index, node_sizes, graph.direction, graph)
@@ -186,7 +253,13 @@ def build_visual_audit_suite(
         if "ladder" in panel_set:
             _render_complexity_ladder(graph, pos, curves, label_positions, spec, ladder_path)
             result.ladder_paths.append(str(ladder_path))
-            manifest["ladder"].append({"graph": spec.graph_name, "path": str(ladder_path), "failure_modes": list(spec.failure_modes)})
+            manifest["ladder"].append(
+                {
+                    "graph": spec.graph_name,
+                    "path": str(ladder_path),
+                    "failure_modes": list(spec.failure_modes),
+                }
+            )
 
         if "decomposition" in panel_set and len(result.decomposition_paths) < 4:
             decomp_path = decomp_dir / f"{spec.graph_name}_decomposition.png"
@@ -208,21 +281,31 @@ def build_visual_audit_suite(
 
         if "competitor_stepwise" in panel_set and len(result.competitor_paths) < 4:
             competitor_path = competitor_dir / f"{spec.graph_name}_competitors.png"
-            _render_competitor_stepwise(graph, spec, competitors, competitor_path, steps, edge_opt_steps)
+            _render_competitor_stepwise(
+                graph, spec, competitors, competitor_path, steps, edge_opt_steps
+            )
             result.competitor_paths.append(str(competitor_path))
-            manifest["competitor_stepwise"].append({"graph": spec.graph_name, "path": str(competitor_path)})
+            manifest["competitor_stepwise"].append(
+                {"graph": spec.graph_name, "path": str(competitor_path)}
+            )
 
         thumb_rel = Path("..") / "complexity_ladder" / ladder_path.name
         metric_path = metric_dir / f"{spec.graph_name}.json"
         if "metric_cards" in panel_set:
-            metric_path.write_text(json.dumps({
-                "graph": spec.graph_name,
-                "rung_title": spec.rung_title,
-                "rationale": spec.rationale,
-                "failure_modes": list(spec.failure_modes),
-                "metrics": {k: _json_safe(v) for k, v in metrics.items()},
-                "thumbnail": str(thumb_rel),
-            }, indent=2), encoding="utf-8")
+            metric_path.write_text(
+                json.dumps(
+                    {
+                        "graph": spec.graph_name,
+                        "rung_title": spec.rung_title,
+                        "rationale": spec.rationale,
+                        "failure_modes": list(spec.failure_modes),
+                        "metrics": {k: _json_safe(v) for k, v in metrics.items()},
+                        "thumbnail": str(thumb_rel),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
             result.metric_paths.append(str(metric_path))
             manifest["metric_cards"].append({"graph": spec.graph_name, "path": str(metric_path)})
         metric_rows.append((spec, metrics, thumb_rel))
@@ -231,29 +314,47 @@ def build_visual_audit_suite(
         if "frozen_baselines" in panel_set and ladder_path.exists():
             shutil.copy2(ladder_path, frozen_target)
             result.frozen_paths.append(str(frozen_target))
-            manifest["frozen_baselines"].append({"graph": spec.graph_name, "path": str(frozen_target)})
+            manifest["frozen_baselines"].append(
+                {"graph": spec.graph_name, "path": str(frozen_target)}
+            )
 
         if "run_to_run_diff" in panel_set and compare_to_baseline:
             baseline_root = out / "frozen_baselines" / compare_to_baseline
             baseline_source = baseline_root / ladder_path.name
             if baseline_source.exists():
-                baseline_diff_path = baseline_diff_dir / f"{spec.graph_name}_vs_{compare_to_baseline}.png"
-                _render_run_to_run_diff(ladder_path, baseline_source, baseline_diff_path, spec, compare_to_baseline)
+                baseline_diff_path = (
+                    baseline_diff_dir / f"{spec.graph_name}_vs_{compare_to_baseline}.png"
+                )
+                _render_run_to_run_diff(
+                    ladder_path, baseline_source, baseline_diff_path, spec, compare_to_baseline
+                )
                 result.baseline_diff_paths.append(str(baseline_diff_path))
-                manifest["run_to_run_diff"].append({
-                    "graph": spec.graph_name,
-                    "baseline": compare_to_baseline,
-                    "path": str(baseline_diff_path),
-                })
+                manifest["run_to_run_diff"].append(
+                    {
+                        "graph": spec.graph_name,
+                        "baseline": compare_to_baseline,
+                        "path": str(baseline_diff_path),
+                    }
+                )
 
     if "sheets" in panel_set:
         typography_path = sheet_dir / "typography_stress.png"
-        _render_typography_sheet(copy.deepcopy(graph_map["extreme_mixed_width_transformer"].graph), steps, edge_opt_steps, typography_path)
+        _render_typography_sheet(
+            copy.deepcopy(graph_map["extreme_mixed_width_transformer"].graph),
+            steps,
+            edge_opt_steps,
+            typography_path,
+        )
         result.sheet_paths.append(str(typography_path))
         manifest["sheets"].append({"kind": "typography", "path": str(typography_path)})
 
         edge_sheet_path = sheet_dir / "edge_language_sheet.png"
-        _render_edge_language_sheet(copy.deepcopy(graph_map["edge_label_braid"].graph), steps, edge_opt_steps, edge_sheet_path)
+        _render_edge_language_sheet(
+            copy.deepcopy(graph_map["edge_label_braid"].graph),
+            steps,
+            edge_opt_steps,
+            edge_sheet_path,
+        )
         result.sheet_paths.append(str(edge_sheet_path))
         manifest["sheets"].append({"kind": "edge_language", "path": str(edge_sheet_path)})
 
@@ -286,7 +387,9 @@ def build_visual_review_session(
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    specs = [spec for spec in _LADDER_SPECS if graph_names is None or spec.graph_name in set(graph_names)]
+    specs = [
+        spec for spec in _LADDER_SPECS if graph_names is None or spec.graph_name in set(graph_names)
+    ]
     graph_map = {tg.name: tg for tg in get_test_graphs()}
     competitors = _audit_competitors()
 
@@ -362,7 +465,13 @@ def _render_complexity_ladder(
     for ax, title, layer_set in zip(axes, titles, layers):
         _render_layers(ax, graph, pos, curves, label_positions, layer_set, title)
     fig.suptitle(spec.rung_title, fontsize=12, fontfamily=RESOLVED_FONT, y=1.02)
-    fig.text(0.01, -0.01, f"{spec.rationale}  Failure modes: {', '.join(spec.failure_modes)}", fontsize=9, fontfamily=RESOLVED_FONT)
+    fig.text(
+        0.01,
+        -0.01,
+        f"{spec.rationale}  Failure modes: {', '.join(spec.failure_modes)}",
+        fontsize=9,
+        fontfamily=RESOLVED_FONT,
+    )
     fig.tight_layout()
     fig.savefig(path, dpi=170, bbox_inches="tight")
     plt.close(fig)
@@ -391,7 +500,9 @@ def _render_decomposition(
     fig.patch.set_facecolor(graph.graph_style.background_color)
     for ax, (title, layer_set) in zip(axes.flat, panels):
         _render_layers(ax, graph, pos, curves, label_positions, layer_set, title)
-    fig.suptitle(f"Renderer decomposition — {spec.graph_name}", fontsize=12, fontfamily=RESOLVED_FONT)
+    fig.suptitle(
+        f"Renderer decomposition — {spec.graph_name}", fontsize=12, fontfamily=RESOLVED_FONT
+    )
     fig.tight_layout()
     fig.savefig(path, dpi=170, bbox_inches="tight")
     plt.close(fig)
@@ -420,9 +531,19 @@ def _render_kill_switch_matrix(
     fig.patch.set_facecolor(graph.graph_style.background_color)
     for ax, (title, variant_graph, variant_curves, variant_lps) in zip(axes.flat, variants):
         if title == "Placement Only":
-            _render_layers(ax, variant_graph, pos, variant_curves, variant_lps, ("placement",), title)
+            _render_layers(
+                ax, variant_graph, pos, variant_curves, variant_lps, ("placement",), title
+            )
         else:
-            _render_layers(ax, variant_graph, pos, variant_curves, variant_lps, ("clusters", "edges", "nodes", "node_labels", "edge_labels"), title)
+            _render_layers(
+                ax,
+                variant_graph,
+                pos,
+                variant_curves,
+                variant_lps,
+                ("clusters", "edges", "nodes", "node_labels", "edge_labels"),
+                title,
+            )
     fig.suptitle(f"Kill switches — {spec.graph_name}", fontsize=12, fontfamily=RESOLVED_FONT)
     fig.tight_layout()
     fig.savefig(path, dpi=170, bbox_inches="tight")
@@ -440,9 +561,23 @@ def _render_diff_dashboard(
     """Render current, neutral, diff, and placement-only views side by side."""
     import matplotlib.pyplot as plt
 
-    current = _render_to_array(graph, pos, curves, label_positions, ("clusters", "edges", "nodes", "node_labels", "edge_labels"), "Current")
+    current = _render_to_array(
+        graph,
+        pos,
+        curves,
+        label_positions,
+        ("clusters", "edges", "nodes", "node_labels", "edge_labels"),
+        "Current",
+    )
     neutral_graph = _variant_neutral(graph)
-    neutral = _render_to_array(neutral_graph, pos, curves, label_positions, ("clusters", "edges", "nodes", "node_labels", "edge_labels"), "Neutral")
+    neutral = _render_to_array(
+        neutral_graph,
+        pos,
+        curves,
+        label_positions,
+        ("clusters", "edges", "nodes", "node_labels", "edge_labels"),
+        "Neutral",
+    )
     placement = _render_to_array(graph, pos, curves, label_positions, ("placement",), "Placement")
     diff = np.abs(current.astype(np.int16) - neutral.astype(np.int16)).astype(np.uint8)
 
@@ -461,10 +596,14 @@ def _render_diff_dashboard(
     plt.close(fig)
 
 
-def _render_typography_sheet(graph: DaguaGraph, steps: int, edge_opt_steps: int, path: Path) -> None:
+def _render_typography_sheet(
+    graph: DaguaGraph, steps: int, edge_opt_steps: int, path: Path
+) -> None:
     import matplotlib.pyplot as plt
 
-    cfg = LayoutConfig(steps=steps, edge_opt_steps=edge_opt_steps, direction=graph.direction, seed=42)
+    cfg = LayoutConfig(
+        steps=steps, edge_opt_steps=edge_opt_steps, direction=graph.direction, seed=42
+    )
     pos = layout(graph, cfg)
     node_sizes = _require_node_sizes(graph)
     curves = route_edges(pos, graph.edge_index, node_sizes, graph.direction, graph)
@@ -478,32 +617,58 @@ def _render_typography_sheet(graph: DaguaGraph, steps: int, edge_opt_steps: int,
     ]
     fig, axes = plt.subplots(2, 2, figsize=(12, 9))
     for ax, (title, vg, vc, vl) in zip(axes.flat, variants):
-        _render_layers(ax, vg, pos, vc, vl, ("clusters", "edges", "nodes", "node_labels", "edge_labels"), title)
+        _render_layers(
+            ax, vg, pos, vc, vl, ("clusters", "edges", "nodes", "node_labels", "edge_labels"), title
+        )
     fig.suptitle("Typography stress sheet", fontsize=12, fontfamily=RESOLVED_FONT)
     fig.tight_layout()
     fig.savefig(path, dpi=170, bbox_inches="tight")
     plt.close(fig)
 
 
-def _render_edge_language_sheet(graph: DaguaGraph, steps: int, edge_opt_steps: int, path: Path) -> None:
+def _render_edge_language_sheet(
+    graph: DaguaGraph, steps: int, edge_opt_steps: int, path: Path
+) -> None:
     import matplotlib.pyplot as plt
 
-    cfg = LayoutConfig(steps=steps, edge_opt_steps=edge_opt_steps, direction=graph.direction, seed=42)
+    cfg = LayoutConfig(
+        steps=steps, edge_opt_steps=edge_opt_steps, direction=graph.direction, seed=42
+    )
     pos = layout(graph, cfg)
     graph.compute_node_sizes()
 
     variants = [
-        ("Straight / quiet", _variant_edge_language(graph, routing="straight", curvature=0.0, opacity=0.45, width=0.9)),
-        ("Bezier / baseline", _variant_edge_language(graph, routing="bezier", curvature=0.35, opacity=0.68, width=1.15)),
-        ("Ortho / crisp", _variant_edge_language(graph, routing="ortho", curvature=0.1, opacity=0.62, width=1.05)),
-        ("Bezier / expressive", _variant_edge_language(graph, routing="bezier", curvature=0.6, opacity=0.78, width=1.35)),
+        (
+            "Straight / quiet",
+            _variant_edge_language(
+                graph, routing="straight", curvature=0.0, opacity=0.45, width=0.9
+            ),
+        ),
+        (
+            "Bezier / baseline",
+            _variant_edge_language(
+                graph, routing="bezier", curvature=0.35, opacity=0.68, width=1.15
+            ),
+        ),
+        (
+            "Ortho / crisp",
+            _variant_edge_language(graph, routing="ortho", curvature=0.1, opacity=0.62, width=1.05),
+        ),
+        (
+            "Bezier / expressive",
+            _variant_edge_language(
+                graph, routing="bezier", curvature=0.6, opacity=0.78, width=1.35
+            ),
+        ),
     ]
     fig, axes = plt.subplots(2, 2, figsize=(12, 9))
     for ax, (title, vg) in zip(axes.flat, variants):
         variant_sizes = _require_node_sizes(vg)
         vc = route_edges(pos, vg.edge_index, variant_sizes, vg.direction, vg)
         vl = place_edge_labels(vc, pos, variant_sizes, vg.edge_labels, vg)
-        _render_layers(ax, vg, pos, vc, vl, ("clusters", "edges", "nodes", "node_labels", "edge_labels"), title)
+        _render_layers(
+            ax, vg, pos, vc, vl, ("clusters", "edges", "nodes", "node_labels", "edge_labels"), title
+        )
     fig.suptitle("Edge language sheet", fontsize=12, fontfamily=RESOLVED_FONT)
     fig.tight_layout()
     fig.savefig(path, dpi=170, bbox_inches="tight")
@@ -541,7 +706,15 @@ def _render_layers(
         ax.scatter(pos[:, 0], pos[:, 1], s=32, c="#2563EB", alpha=0.9, zorder=3)
         if graph.num_nodes <= 24:
             for i, (x, y) in enumerate(pos):
-                ax.text(x, y - 6, str(graph.node_labels[i]), ha="center", va="top", fontsize=7, fontfamily=RESOLVED_FONT)
+                ax.text(
+                    x,
+                    y - 6,
+                    str(graph.node_labels[i]),
+                    ha="center",
+                    va="top",
+                    fontsize=7,
+                    fontfamily=RESOLVED_FONT,
+                )
     if "node_labels" in layers:
         _draw_node_labels(ax, graph, pos, sizes)
     if "edge_labels" in layers:
@@ -578,7 +751,9 @@ def _render_to_array(
 def _variant_no_labels(graph: DaguaGraph) -> DaguaGraph:
     g = copy.deepcopy(graph)
     g.edge_labels = [None] * len(g.edge_labels)
-    g.node_labels = [label.split("\n")[0] if isinstance(label, str) else label for label in g.node_labels]
+    g.node_labels = [
+        label.split("\n")[0] if isinstance(label, str) else label for label in g.node_labels
+    ]
     return g
 
 
@@ -610,7 +785,9 @@ def _variant_neutral(graph: DaguaGraph) -> DaguaGraph:
         edge_label_background_opacity=0.8,
         node_label_secondary_scale=0.74,
     )
-    neutral.cluster_style = ClusterStyle(fill="#F1F3F5", stroke="#C7CDD5", opacity=0.18, stroke_width=0.7)
+    neutral.cluster_style = ClusterStyle(
+        fill="#F1F3F5", stroke="#C7CDD5", opacity=0.18, stroke_width=0.7
+    )
     neutral.node_styles["default"] = NodeStyle(
         fill="#FCFCFB",
         stroke="#374151",
@@ -619,7 +796,9 @@ def _variant_neutral(graph: DaguaGraph) -> DaguaGraph:
         shape="roundrect",
         padding=(7.0, 4.5),
     )
-    neutral.edge_styles["default"] = EdgeStyle(color="#6B7280", width=1.0, opacity=0.58, curvature=0.22)
+    neutral.edge_styles["default"] = EdgeStyle(
+        color="#6B7280", width=1.0, opacity=0.58, curvature=0.22
+    )
     g._theme = neutral
     return g
 
@@ -648,11 +827,15 @@ def _variant_secondary_scale(graph: DaguaGraph, scale: float) -> DaguaGraph:
     return g
 
 
-def _variant_edge_language(graph: DaguaGraph, routing: str, curvature: float, opacity: float, width: float) -> DaguaGraph:
+def _variant_edge_language(
+    graph: DaguaGraph, routing: str, curvature: float, opacity: float, width: float
+) -> DaguaGraph:
     g = copy.deepcopy(graph)
     for i in range(len(g.edge_styles)):
         existing_style = g.edge_styles[i]
-        style: EdgeStyle = copy.deepcopy(existing_style) if existing_style is not None else EdgeStyle()
+        style: EdgeStyle = (
+            copy.deepcopy(existing_style) if existing_style is not None else EdgeStyle()
+        )
         style.routing = routing
         style.curvature = curvature
         style.opacity = opacity
@@ -670,9 +853,21 @@ def _metric_cards_markdown(rows: Sequence[Tuple[AuditSpec, Dict[str, float], Pat
         lines.append(f"- Graph: `{spec.graph_name}`")
         lines.append(f"- Rationale: {spec.rationale}")
         lines.append(f"- Failure modes: {', '.join(spec.failure_modes)}")
-        for key in ("overall_quality", "dag_consistency", "edge_length_cv", "overlap_count", "edge_crossings", "edge_node_crossings", "label_overlaps"):
+        for key in (
+            "overall_quality",
+            "dag_consistency",
+            "edge_length_cv",
+            "overlap_count",
+            "edge_crossings",
+            "edge_node_crossings",
+            "label_overlaps",
+        ):
             if key in metrics:
-                lines.append(f"- `{key}`: {metrics[key]:.4f}" if isinstance(metrics[key], float) else f"- `{key}`: {metrics[key]}")
+                lines.append(
+                    f"- `{key}`: {metrics[key]:.4f}"
+                    if isinstance(metrics[key], float)
+                    else f"- `{key}`: {metrics[key]}"
+                )
         lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -680,13 +875,15 @@ def _metric_cards_markdown(rows: Sequence[Tuple[AuditSpec, Dict[str, float], Pat
 def _suite_readme(result: VisualAuditResult, specs: Sequence[AuditSpec]) -> str:
     return (
         "# Visual Audit Suite\n\n"
-        "This directory is the visual iteration toolkit for Dagua. It is meant to be used like a visual unit-test surface.\n\n"
+        "This directory is the visual iteration toolkit for Dagua. It is meant "
+        "to be used like a visual unit-test surface.\n\n"
         "Contents:\n"
         "- `complexity_ladder/`: simple-to-complex progression with staged render passes\n"
         "- `decomposition/`: renderer layer breakdowns\n"
         "- `kill_switches/`: quick isolation of labels/clusters/theme effects\n"
         "- `diff_dashboard/`: current vs neutral vs placement-only views\n"
-        "- `competitor_stepwise/`: the same stepwise graphs shown side by side with competing engines\n"
+        "- `competitor_stepwise/`: the same stepwise graphs shown side by side "
+        "with competing engines\n"
         "- `run_to_run_diff/`: current ladder renders compared to a frozen named baseline\n"
         "- `sheets/`: typography and edge-language stress sheets\n"
         "- `metric_cards/`: metrics paired with thumbnails and failure-mode tags\n"
@@ -710,19 +907,24 @@ def _visual_review_session_readme(specs: Sequence[AuditSpec]) -> str:
         "Review order:",
     ]
     for idx, spec in enumerate(specs, 1):
-        lines.append(f"- `{idx:02d}` `{spec.graph_name}`: {spec.rationale} Failure modes: {', '.join(spec.failure_modes)}")
+        lines.append(
+            f"- `{idx:02d}` `{spec.graph_name}`: {spec.rationale} "
+            f"Failure modes: {', '.join(spec.failure_modes)}"
+        )
     lines.extend(
         [
             "",
             "Recommended working rhythm:",
             "- start with the first graph where Dagua feels worse than the best competitor",
-            "- isolate whether the issue is text, edge language, cluster geometry, or information density",
+            "- isolate whether the issue is text, edge language, cluster geometry, "
+            "or information density",
             "- rebuild a single graph repeatedly until the direction is clearly better",
             "- only then move to the next numbered graph",
             "",
             "Fast rebuild example:",
             "```bash",
-            "dagua visual-session-build --output-dir eval_output/visual_review_session --graphs residual_block",
+            "dagua visual-session-build --output-dir "
+            "eval_output/visual_review_session --graphs residual_block",
             "```",
         ]
     )
@@ -818,7 +1020,9 @@ def _render_competitor_stepwise(
 
     positions: Dict[str, Optional[torch.Tensor]] = {}
     graph.compute_node_sizes()
-    dagua_cfg = LayoutConfig(steps=steps, edge_opt_steps=edge_opt_steps, direction=graph.direction, seed=42)
+    dagua_cfg = LayoutConfig(
+        steps=steps, edge_opt_steps=edge_opt_steps, direction=graph.direction, seed=42
+    )
     positions["dagua"] = layout(copy.deepcopy(graph), dagua_cfg)
 
     for competitor in competitors:
@@ -858,7 +1062,7 @@ def _render_competitor_stepwise(
             ("clusters", "edges", "nodes", "node_labels", "edge_labels"),
             comp_name,
         )
-    for ax in axes_list[len(ordered_names):]:
+    for ax in axes_list[len(ordered_names) :]:
         ax.axis("off")
     fig.suptitle(f"Competitor stepwise — {spec.graph_name}", fontsize=12, fontfamily=RESOLVED_FONT)
     fig.tight_layout()
@@ -876,8 +1080,26 @@ def _flatten_axes(axes: Any) -> List[Any]:
 def _status_panel(ax: Any, title: str, subtitle: str) -> None:
     """Render a quiet placeholder panel when a competitor is unavailable."""
     ax.set_facecolor("#F3F4F6")
-    ax.text(0.5, 0.58, title, ha="center", va="center", transform=ax.transAxes, fontsize=11, color="#374151")
-    ax.text(0.5, 0.42, subtitle, ha="center", va="center", transform=ax.transAxes, fontsize=8, color="#6B7280")
+    ax.text(
+        0.5,
+        0.58,
+        title,
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+        fontsize=11,
+        color="#374151",
+    )
+    ax.text(
+        0.5,
+        0.42,
+        subtitle,
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+        fontsize=8,
+        color="#6B7280",
+    )
     ax.axis("off")
 
 
@@ -902,13 +1124,17 @@ def _normalize_positions_for_audit(
     return pos
 
 
-def _render_run_to_run_diff(current_path: Path, baseline_path: Path, out_path: Path, spec: AuditSpec, baseline_label: str) -> None:
+def _render_run_to_run_diff(
+    current_path: Path, baseline_path: Path, out_path: Path, spec: AuditSpec, baseline_label: str
+) -> None:
     import matplotlib.pyplot as plt
     from PIL import Image
 
     with Image.open(current_path) as current_img, Image.open(baseline_path) as baseline_img:
         current = np.asarray(current_img.convert("RGB"))
-        baseline = np.asarray(baseline_img.convert("RGB").resize((current.shape[1], current.shape[0])))
+        baseline = np.asarray(
+            baseline_img.convert("RGB").resize((current.shape[1], current.shape[0]))
+        )
     diff = np.abs(current.astype(np.int16) - baseline.astype(np.int16)).astype(np.uint8)
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.8))

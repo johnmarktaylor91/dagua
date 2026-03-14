@@ -10,27 +10,21 @@ Publication-quality rendering following the Dagua Aesthetic Style Guide:
 
 from __future__ import annotations
 
-import io
 import gzip
+import io
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
-import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from dagua.edges import BezierCurve, evaluate_bezier, preferred_edge_label_position, route_edges
+from dagua.edges import BezierCurve, preferred_edge_label_position, route_edges
 from dagua.styles import (
-    ClusterStyle,
-    EdgeStyle,
     FONT_FAMILY,
-    MEDIUM_GRAY,
-    NEAR_BLACK,
     RESOLVED_FONT,
-    WARM_WHITE,
     darken_hex,
 )
 from dagua.utils import collect_cluster_leaves
-
 
 _VECTOR_FORMATS = {"pdf", "ps", "eps", "svg", "svgz"}
 _RASTER_FORMATS = {"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"}
@@ -128,7 +122,9 @@ def render(
         (fig, ax) matplotlib objects
     """
     import warnings
+
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -147,7 +143,10 @@ def render(
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "findfont")
         matplotlib.rcParams["font.family"] = "sans-serif"
-        matplotlib.rcParams["font.sans-serif"] = [RESOLVED_FONT, *[f for f in FONT_FAMILY if f != RESOLVED_FONT]]
+        matplotlib.rcParams["font.sans-serif"] = [
+            RESOLVED_FONT,
+            *[f for f in FONT_FAMILY if f != RESOLVED_FONT],
+        ]
 
     pos = positions.detach().cpu().numpy()
     n = graph.num_nodes
@@ -203,7 +202,9 @@ def render(
     _draw_node_labels(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
 
     # --- Layer 4: Edge labels ---
-    _draw_edge_labels(ax, graph, curves, label_positions=label_positions, svg_hover_map=svg_hover_map)
+    _draw_edge_labels(
+        ax, graph, curves, label_positions=label_positions, svg_hover_map=svg_hover_map
+    )
 
     # Configure axes
     ax.set_xlim(x_min, x_max)
@@ -213,8 +214,13 @@ def render(
 
     if title:
         title_ff = gs.title_font_family or RESOLVED_FONT
-        ax.set_title(title, fontsize=gs.title_font_size, fontweight=gs.title_font_weight,
-                      color=gs.title_font_color, fontfamily=title_ff)
+        ax.set_title(
+            title,
+            fontsize=gs.title_font_size,
+            fontweight=gs.title_font_weight,
+            color=gs.title_font_color,
+            fontfamily=title_ff,
+        )
 
     plt.tight_layout()
 
@@ -276,7 +282,7 @@ def _inject_svg_hover_text(output: str, svg_hover_map, compressed: bool = False)
 
 def _draw_nodes(ax, graph, pos, sizes, svg_hover_map=None):
     """Draw node shapes with muted fills and strong borders."""
-    from matplotlib.patches import FancyBboxPatch, Ellipse, Circle
+    from matplotlib.patches import Circle, Ellipse, FancyBboxPatch
 
     for i in range(graph.num_nodes):
         x, y = pos[i, 0], pos[i, 1]
@@ -297,7 +303,9 @@ def _draw_nodes(ax, graph, pos, sizes, svg_hover_map=None):
             pad = cr * 0.01 if style.shape == "roundrect" else 0
             boxstyle = f"round,pad={pad}" if style.shape == "roundrect" else "square,pad=0"
             patch = FancyBboxPatch(
-                (x - w / 2, y - h / 2), w, h,
+                (x - w / 2, y - h / 2),
+                w,
+                h,
                 boxstyle=boxstyle,
                 facecolor=style.fill,
                 edgecolor=style.stroke,
@@ -308,7 +316,9 @@ def _draw_nodes(ax, graph, pos, sizes, svg_hover_map=None):
             )
         elif style.shape == "ellipse":
             patch = Ellipse(
-                (x, y), w, h,
+                (x, y),
+                w,
+                h,
                 facecolor=style.fill,
                 edgecolor=style.stroke,
                 linewidth=style.stroke_width,
@@ -319,7 +329,8 @@ def _draw_nodes(ax, graph, pos, sizes, svg_hover_map=None):
         elif style.shape == "circle":
             r = max(w, h) / 2
             patch = Circle(
-                (x, y), r,
+                (x, y),
+                r,
                 facecolor=style.fill,
                 edgecolor=style.stroke,
                 linewidth=style.stroke_width,
@@ -329,14 +340,18 @@ def _draw_nodes(ax, graph, pos, sizes, svg_hover_map=None):
             )
         elif style.shape == "diamond":
             from matplotlib.patches import Polygon
-            pts = np.array([
-                [x, y + h / 2],
-                [x + w / 2, y],
-                [x, y - h / 2],
-                [x - w / 2, y],
-            ])
+
+            pts = np.array(
+                [
+                    [x, y + h / 2],
+                    [x + w / 2, y],
+                    [x, y - h / 2],
+                    [x - w / 2, y],
+                ]
+            )
             patch = Polygon(
-                pts, closed=True,
+                pts,
+                closed=True,
                 facecolor=style.fill,
                 edgecolor=style.stroke,
                 linewidth=style.stroke_width,
@@ -346,7 +361,9 @@ def _draw_nodes(ax, graph, pos, sizes, svg_hover_map=None):
             )
         else:
             patch = FancyBboxPatch(
-                (x - w / 2, y - h / 2), w, h,
+                (x - w / 2, y - h / 2),
+                w,
+                h,
                 boxstyle="round,pad=0.02",
                 facecolor=style.fill,
                 edgecolor=style.stroke,
@@ -362,7 +379,7 @@ def _draw_nodes(ax, graph, pos, sizes, svg_hover_map=None):
 
 def _draw_shadow(ax, x, y, w, h, style):
     """Draw a shadow offset duplicate patch behind the node."""
-    from matplotlib.patches import FancyBboxPatch, Ellipse, Circle
+    from matplotlib.patches import Circle, Ellipse, FancyBboxPatch
 
     ox, oy = style.shadow_offset
     shadow_color = style.shadow_color
@@ -372,7 +389,9 @@ def _draw_shadow(ax, x, y, w, h, style):
         pad = cr * 0.01 if style.shape == "roundrect" else 0
         boxstyle = f"round,pad={pad}" if style.shape == "roundrect" else "square,pad=0"
         shadow = FancyBboxPatch(
-            (x - w / 2 + ox, y - h / 2 + oy), w, h,
+            (x - w / 2 + ox, y - h / 2 + oy),
+            w,
+            h,
             boxstyle=boxstyle,
             facecolor=shadow_color,
             edgecolor="none",
@@ -380,7 +399,9 @@ def _draw_shadow(ax, x, y, w, h, style):
         )
     elif style.shape == "ellipse":
         shadow = Ellipse(
-            (x + ox, y + oy), w, h,
+            (x + ox, y + oy),
+            w,
+            h,
             facecolor=shadow_color,
             edgecolor="none",
             zorder=1.5,
@@ -388,23 +409,29 @@ def _draw_shadow(ax, x, y, w, h, style):
     elif style.shape == "circle":
         r = max(w, h) / 2
         shadow = Circle(
-            (x + ox, y + oy), r,
+            (x + ox, y + oy),
+            r,
             facecolor=shadow_color,
             edgecolor="none",
             zorder=1.5,
         )
     elif style.shape == "diamond":
         from matplotlib.patches import Polygon
-        pts = np.array([
-            [x + ox, y + h / 2 + oy],
-            [x + w / 2 + ox, y + oy],
-            [x + ox, y - h / 2 + oy],
-            [x - w / 2 + ox, y + oy],
-        ])
+
+        pts = np.array(
+            [
+                [x + ox, y + h / 2 + oy],
+                [x + w / 2 + ox, y + oy],
+                [x + ox, y - h / 2 + oy],
+                [x - w / 2 + ox, y + oy],
+            ]
+        )
         shadow = Polygon(pts, closed=True, facecolor=shadow_color, edgecolor="none", zorder=1.5)
     else:
         shadow = FancyBboxPatch(
-            (x - w / 2 + ox, y - h / 2 + oy), w, h,
+            (x - w / 2 + ox, y - h / 2 + oy),
+            w,
+            h,
             boxstyle="round,pad=0.02",
             facecolor=shadow_color,
             edgecolor="none",
@@ -435,8 +462,11 @@ def _draw_node_labels(ax, graph, pos, sizes, svg_hover_map=None):
 
         if len(lines) == 1:
             text_artist = ax.text(
-                x, y, label,
-                ha="center", va="center",
+                x,
+                y,
+                label,
+                ha="center",
+                va="center",
                 fontsize=fontsize,
                 fontfamily=font_family[0],
                 color=style.font_color,
@@ -456,8 +486,11 @@ def _draw_node_labels(ax, graph, pos, sizes, svg_hover_map=None):
                 # Secondary lines slightly smaller
                 fs = fontsize if j == 0 else fontsize * gs.node_label_secondary_scale
                 text_artist = ax.text(
-                    x, ly, line,
-                    ha="center", va="center",
+                    x,
+                    ly,
+                    line,
+                    ha="center",
+                    va="center",
                     fontsize=fs,
                     fontfamily=font_family[0],
                     color=style.font_color,
@@ -475,8 +508,8 @@ def _draw_edges(ax, graph, curves: List[BezierCurve], svg_hover_map=None):
     Edges are quiet: medium gray at 70% opacity, 0.75pt width.
     Arrowheads: small filled triangles (5pt x 3.5pt).
     """
-    from matplotlib.path import Path
     from matplotlib.patches import FancyArrowPatch
+    from matplotlib.path import Path
 
     for e_idx, curve in enumerate(curves):
         style = graph.get_style_for_edge(e_idx)
@@ -525,7 +558,9 @@ def _draw_edges(ax, graph, curves: List[BezierCurve], svg_hover_map=None):
 
 
 def _draw_edge_labels(
-    ax, graph, curves: List[BezierCurve],
+    ax,
+    graph,
+    curves: List[BezierCurve],
     label_positions: Optional[List[Optional[Tuple[float, float]]]] = None,
     svg_hover_map=None,
 ):
@@ -546,7 +581,11 @@ def _draw_edge_labels(
         style = graph.get_style_for_edge(e_idx)
 
         # Use pre-computed position if available
-        if label_positions is not None and e_idx < len(label_positions) and label_positions[e_idx] is not None:
+        if (
+            label_positions is not None
+            and e_idx < len(label_positions)
+            and label_positions[e_idx] is not None
+        ):
             label_pos = label_positions[e_idx]
             assert label_pos is not None
             lx, ly = label_pos
@@ -564,8 +603,11 @@ def _draw_edge_labels(
         bg_opacity = gs.edge_label_background_opacity
 
         text_artist = ax.text(
-            lx, ly, label,
-            ha="center", va="center",
+            lx,
+            ly,
+            label,
+            ha="center",
+            va="center",
             fontsize=font_size,
             fontweight="regular",
             fontfamily=RESOLVED_FONT,
@@ -578,7 +620,9 @@ def _draw_edge_labels(
             ),
             zorder=4,
         )
-        _set_svg_hover(text_artist, f"dagua-edge-label-{e_idx}", _edge_hover_text(graph, e_idx), svg_hover_map)
+        _set_svg_hover(
+            text_artist, f"dagua-edge-label-{e_idx}", _edge_hover_text(graph, e_idx), svg_hover_map
+        )
 
 
 def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
@@ -593,7 +637,7 @@ def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
         return
 
     # Compute true hierarchy depth per cluster via parent chain
-    cluster_parents = getattr(graph, 'cluster_parents', {})
+    cluster_parents = getattr(graph, "cluster_parents", {})
     if cluster_parents:
         cluster_depths = {}
         for name in graph.clusters:
@@ -661,7 +705,7 @@ def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
 
         # Corner radius
         cr = style.corner_radius
-        boxstyle = f"round,pad=0" if cr > 0 else "square,pad=0"
+        boxstyle = "round,pad=0" if cr > 0 else "square,pad=0"
 
         # Stroke dash
         linestyle = "-"
@@ -671,7 +715,9 @@ def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
             linestyle = "-."
 
         patch = FancyBboxPatch(
-            (x_min, y_min), x_max - x_min, y_max - y_min,
+            (x_min, y_min),
+            x_max - x_min,
+            y_max - y_min,
             boxstyle=boxstyle,
             facecolor=fill_color,
             edgecolor=stroke_color,
@@ -681,7 +727,9 @@ def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
             zorder=0,
         )
         ax.add_patch(patch)
-        _set_svg_hover(patch, f"dagua-cluster-{name}", _cluster_hover_text(name, graph, indices), svg_hover_map)
+        _set_svg_hover(
+            patch, f"dagua-cluster-{name}", _cluster_hover_text(name, graph, indices), svg_hover_map
+        )
 
         # Cluster label: position from style (label, label_fontsize already computed above)
         label_ff = style.font_family or RESOLVED_FONT
@@ -702,12 +750,20 @@ def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
         ly = y_max - label_oy - depth_label_offset
 
         text_artist = ax.text(
-            lx, ly, label,
+            lx,
+            ly,
+            label,
             fontsize=label_fontsize,
             fontweight=style.font_weight,
             fontfamily=label_ff,
             color=style.font_color,
-            va="top", ha=ha,
+            va="top",
+            ha=ha,
             zorder=0.5,
         )
-        _set_svg_hover(text_artist, f"dagua-cluster-label-{name}", _cluster_hover_text(name, graph, indices), svg_hover_map)
+        _set_svg_hover(
+            text_artist,
+            f"dagua-cluster-label-{name}",
+            _cluster_hover_text(name, graph, indices),
+            svg_hover_map,
+        )

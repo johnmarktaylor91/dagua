@@ -16,4 +16,3 @@ def test_standard_benchmark_suite():
 
     artifacts = generate_report(output_dir="eval_output")
     assert artifacts["tex"]
-
