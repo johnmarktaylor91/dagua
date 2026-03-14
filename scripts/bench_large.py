@@ -725,6 +725,7 @@ def main():
         multilevel_refine_steps=15,
         steps=args.steps,
         seed=args.seed,
+        offload_to_disk=not args.no_hierarchy_checkpoint,
     )
     phase("layout start", t0)
 
