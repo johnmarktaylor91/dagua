@@ -7,7 +7,6 @@ from dagua import DaguaGraph, LayoutConfig, draw
 from dagua.layout.cycle import detect_back_edges, make_acyclic
 from dagua.metrics import dag_consistency
 
-
 # ---------------------------------------------------------------------------
 # detect_back_edges
 # ---------------------------------------------------------------------------
@@ -78,7 +77,7 @@ class TestDetectBackEdges:
         ei = torch.tensor([[0, 2, 3], [1, 3, 2]], dtype=torch.long)
         mask = detect_back_edges(ei, 4)
         assert mask[0].item() is False  # A→B forward
-        assert mask.sum().item() == 1   # one back edge in C→D→C
+        assert mask.sum().item() == 1  # one back edge in C→D→C
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +186,7 @@ class TestLayoutWithCycles:
     def test_layout_simple_cycle(self):
         g = DaguaGraph.from_edge_list([(0, 1), (1, 2), (2, 0)], num_nodes=3)
         from dagua import layout
+
         pos = layout(g, LayoutConfig(steps=20, seed=42))
         assert pos.shape == (3, 2)
         assert torch.isfinite(pos).all()
@@ -197,6 +197,7 @@ class TestLayoutWithCycles:
         g = DaguaGraph.from_edge_index(ei, num_nodes=3)
         original_ei = g.edge_index.clone()
         from dagua import layout
+
         layout(g, LayoutConfig(steps=10, seed=42))
         assert torch.equal(g.edge_index, original_ei)
 
@@ -210,12 +211,14 @@ class TestLayoutWithCycles:
             @property
             def steps(self):
                 raise RuntimeError("boom")
+
             @steps.setter
             def steps(self, _):
                 pass
 
         try:
             from dagua.layout.engine import layout as engine_layout
+
             engine_layout(g, BadConfig(seed=42))
         except (RuntimeError, Exception):
             pass
@@ -225,6 +228,7 @@ class TestLayoutWithCycles:
         """DAG layout: _original_edge_index stays None (no reversal happened)."""
         g = DaguaGraph.from_edge_list([(0, 1), (1, 2)], num_nodes=3)
         from dagua import layout
+
         layout(g, LayoutConfig(steps=10, seed=42))
         assert g._original_edge_index is None
 
@@ -267,6 +271,7 @@ class TestBackEdgeStyle:
     def test_per_edge_override_beats_back(self):
         """Per-edge style override takes priority over back edge styling."""
         from dagua import EdgeStyle
+
         g = DaguaGraph.from_edge_list([(0, 1), (1, 0)], num_nodes=2)
         _ = g.back_edge_mask
         # Override edge 1 (the back edge) with a custom style

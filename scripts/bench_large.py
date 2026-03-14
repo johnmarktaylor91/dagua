@@ -26,7 +26,6 @@ import torch
 
 import dagua
 
-
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -136,8 +135,14 @@ def _atomic_torch_save(path: Path, payload: object) -> None:
     os.replace(tmp_path, path)
 
 
-def _load_graph_checkpoint(paths: dict[str, Path], n: int, layers: int) -> tuple[torch.Tensor, torch.Tensor] | None:
-    if not paths["meta"].exists() or not paths["edge_index"].exists() or not paths["node_sizes"].exists():
+def _load_graph_checkpoint(
+    paths: dict[str, Path], n: int, layers: int
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if (
+        not paths["meta"].exists()
+        or not paths["edge_index"].exists()
+        or not paths["node_sizes"].exists()
+    ):
         return None
     meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
     if meta.get("n") != n or meta.get("layers") != layers:
@@ -194,7 +199,9 @@ def _save_hierarchy_checkpoint(paths: dict[str, Path], levels: list, *, complete
     _atomic_write_text(paths["hierarchy_meta"], json.dumps(manifest, indent=2))
 
 
-def _load_hierarchy_checkpoint(paths: dict[str, Path], n: int, layers: int, layout_signature: dict[str, object] | None = None):
+def _load_hierarchy_checkpoint(
+    paths: dict[str, Path], n: int, layers: int, layout_signature: dict[str, object] | None = None
+):
     if not paths["meta"].exists() or not paths["hierarchy_meta"].exists():
         return None
     if layout_signature is not None and not _layout_signature_matches(paths, layout_signature):
@@ -227,13 +234,30 @@ def _load_hierarchy_checkpoint(paths: dict[str, Path], n: int, layers: int, layo
         num_fine = int(item["num_fine"])
         if edge_index is not None and (edge_index.ndim != 2 or edge_index.shape[0] != 2):
             return None
-        if node_sizes is None or node_sizes.ndim != 2 or node_sizes.shape[0] != num_nodes or node_sizes.shape[1] != 2:
+        if (
+            node_sizes is None
+            or node_sizes.ndim != 2
+            or node_sizes.shape[0] != num_nodes
+            or node_sizes.shape[1] != 2
+        ):
             return None
-        if fine_to_coarse is None or fine_to_coarse.ndim != 1 or fine_to_coarse.shape[0] != num_fine:
+        if (
+            fine_to_coarse is None
+            or fine_to_coarse.ndim != 1
+            or fine_to_coarse.shape[0] != num_fine
+        ):
             return None
-        if fine_layer_assignments is None or fine_layer_assignments.ndim != 1 or fine_layer_assignments.shape[0] != num_fine:
+        if (
+            fine_layer_assignments is None
+            or fine_layer_assignments.ndim != 1
+            or fine_layer_assignments.shape[0] != num_fine
+        ):
             return None
-        if coarse_layer_assignments is None or coarse_layer_assignments.ndim != 1 or coarse_layer_assignments.shape[0] != num_nodes:
+        if (
+            coarse_layer_assignments is None
+            or coarse_layer_assignments.ndim != 1
+            or coarse_layer_assignments.shape[0] != num_nodes
+        ):
             return None
         level = CoarseLevel(
             edge_index=edge_index,
@@ -334,7 +358,9 @@ def _find_existing_run_pid(size: str) -> int | None:
     return None
 
 
-def _guard_duplicate_run(paths: dict[str, Path], size: str, resume: bool, force_duplicate_run: bool) -> None:
+def _guard_duplicate_run(
+    paths: dict[str, Path], size: str, resume: bool, force_duplicate_run: bool
+) -> None:
     """Refuse to start a duplicate large run against the same checkpoint root."""
     if force_duplicate_run:
         return
@@ -450,10 +476,12 @@ def _build_edges_simple(n: int, w: int, e_backbone: int) -> torch.Tensor:
     cross_tgt_layer = cross_src // w + 1
     cross_tgt = cross_tgt_layer * w + cross_offset
 
-    edge_index = torch.stack([
-        torch.cat([src_backbone, cross_src]),
-        torch.cat([tgt_backbone, cross_tgt]),
-    ])
+    edge_index = torch.stack(
+        [
+            torch.cat([src_backbone, cross_src]),
+            torch.cat([tgt_backbone, cross_tgt]),
+        ]
+    )
     del src_backbone, tgt_backbone, cross_src, cross_offset, cross_tgt_layer, cross_tgt, cross_mask
     return edge_index
 
@@ -487,8 +515,8 @@ def _build_edges_chunked(n: int, w: int, e_backbone: int) -> torch.Tensor:
         cross_offset = torch.randint(0, w, (n_cross,), dtype=idx_dtype)
         cross_tgt_layer = cross_src // w + 1
         cross_tgt = cross_tgt_layer * w + cross_offset
-        edge_src[write_pos:write_pos + n_cross] = cross_src
-        edge_tgt[write_pos:write_pos + n_cross] = cross_tgt
+        edge_src[write_pos : write_pos + n_cross] = cross_src
+        edge_tgt[write_pos : write_pos + n_cross] = cross_tgt
         write_pos += n_cross
 
     edge_index = torch.stack([edge_src[:write_pos], edge_tgt[:write_pos]])
@@ -538,7 +566,9 @@ def main():
 
     # Resolve size
     n, layers, w = resolve_size_and_layers(args.size, args.layers)
-    checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else _default_checkpoint_dir(args.size)
+    checkpoint_dir = (
+        Path(args.checkpoint_dir) if args.checkpoint_dir else _default_checkpoint_dir(args.size)
+    )
     checkpoint_paths = _checkpoint_paths(checkpoint_dir)
     _guard_duplicate_run(checkpoint_paths, args.size, args.resume, args.force_duplicate_run)
     _register_active_run(checkpoint_paths, args.size, args.resume)
@@ -560,7 +590,10 @@ def main():
     else:
         edge_index = build_edges(n, layers)
         node_sizes = torch.full((n, 2), 20.0, dtype=torch.float16)
-        print(f"Edge index ready: {edge_index.shape[1]:,} edges in {time.perf_counter() - t0:.1f}s", flush=True)
+        print(
+            f"Edge index ready: {edge_index.shape[1]:,} edges in {time.perf_counter() - t0:.1f}s",
+            flush=True,
+        )
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         _atomic_torch_save(checkpoint_paths["edge_index"], edge_index)
         _atomic_torch_save(checkpoint_paths["node_sizes"], node_sizes)
@@ -584,10 +617,18 @@ def main():
         else None
     )
     if final_positions is not None:
-        print(f"Restored final positions checkpoint from {checkpoint_paths['positions']}", flush=True)
+        print(
+            f"Restored final positions checkpoint from {checkpoint_paths['positions']}", flush=True
+        )
         print(f"\nResult: {final_positions.shape}", flush=True)
-        print(f"  x range: [{final_positions[:, 0].min():.0f}, {final_positions[:, 0].max():.0f}]", flush=True)
-        print(f"  y range: [{final_positions[:, 1].min():.0f}, {final_positions[:, 1].max():.0f}]", flush=True)
+        print(
+            f"  x range: [{final_positions[:, 0].min():.0f}, {final_positions[:, 0].max():.0f}]",
+            flush=True,
+        )
+        print(
+            f"  y range: [{final_positions[:, 1].min():.0f}, {final_positions[:, 1].max():.0f}]",
+            flush=True,
+        )
         mem("done")
         return
 
@@ -600,16 +641,23 @@ def main():
         print(f"Restored hierarchy checkpoint from {checkpoint_paths['hierarchy_dir']}", flush=True)
 
     coarsest_positions = (
-        _load_coarsest_positions_checkpoint(checkpoint_paths, n, layers, layout_signature=layout_signature)
+        _load_coarsest_positions_checkpoint(
+            checkpoint_paths, n, layers, layout_signature=layout_signature
+        )
         if args.resume
         else None
     )
     if coarsest_positions is not None:
-        print(f"Restored coarsest positions checkpoint from {checkpoint_paths['coarsest_positions']}", flush=True)
+        print(
+            f"Restored coarsest positions checkpoint from {checkpoint_paths['coarsest_positions']}",
+            flush=True,
+        )
 
     layer_assignments = _load_layer_checkpoint(checkpoint_paths, n, layers) if args.resume else None
     if layer_assignments is not None:
-        print(f"Restored layering checkpoint from {checkpoint_paths['layer_assignments']}", flush=True)
+        print(
+            f"Restored layering checkpoint from {checkpoint_paths['layer_assignments']}", flush=True
+        )
 
     g = dagua.DaguaGraph()
     g.num_nodes = n
@@ -623,29 +671,40 @@ def main():
     if layer_assignments is not None:
         g._precomputed_layer_assignments = layer_assignments
     else:
+
         def _save_layer_assignments(layer_tensor: torch.Tensor) -> None:
             _atomic_torch_save(checkpoint_paths["layer_assignments"], layer_tensor)
-            print(f"Saved layering checkpoint to {checkpoint_paths['layer_assignments']}", flush=True)
+            print(
+                f"Saved layering checkpoint to {checkpoint_paths['layer_assignments']}", flush=True
+            )
 
         g._layer_assignments_callback = _save_layer_assignments
     if hierarchy_levels is None:
+
         def _save_hierarchy(levels) -> None:
             _save_checkpoint_meta(checkpoint_paths["layout_meta"], layout_signature)
             _save_hierarchy_checkpoint(checkpoint_paths, levels, complete=False)
             print(f"Saved hierarchy checkpoint to {checkpoint_paths['hierarchy_dir']}", flush=True)
 
         g._hierarchy_levels_callback = _save_hierarchy
+
         def _finalize_hierarchy(levels) -> None:
             _save_checkpoint_meta(checkpoint_paths["layout_meta"], layout_signature)
             _save_hierarchy_checkpoint(checkpoint_paths, levels, complete=True)
-            print(f"Finalized hierarchy checkpoint at {checkpoint_paths['hierarchy_dir']}", flush=True)
+            print(
+                f"Finalized hierarchy checkpoint at {checkpoint_paths['hierarchy_dir']}", flush=True
+            )
 
         g._hierarchy_levels_complete_callback = _finalize_hierarchy
     if coarsest_positions is None:
+
         def _save_coarsest_positions(pos_tensor: torch.Tensor) -> None:
             _save_checkpoint_meta(checkpoint_paths["layout_meta"], layout_signature)
             _atomic_torch_save(checkpoint_paths["coarsest_positions"], pos_tensor)
-            print(f"Saved coarsest positions checkpoint to {checkpoint_paths['coarsest_positions']}", flush=True)
+            print(
+                f"Saved coarsest positions checkpoint to {checkpoint_paths['coarsest_positions']}",
+                flush=True,
+            )
 
         g._coarsest_positions_callback = _save_coarsest_positions
     mem("graph built")

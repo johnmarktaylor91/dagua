@@ -18,7 +18,6 @@ from dagua.defaults import (
     set_device,
     set_theme,
 )
-from dagua.styles import NodeStyle, Theme
 
 
 @pytest.fixture(autouse=True)
@@ -147,7 +146,9 @@ class TestContextManager:
 
 class TestReset:
     def test_reset(self):
-        configure(theme="dark", device="cuda", node_sep=99, index_dtype="int32", size_dtype="float16")
+        configure(
+            theme="dark", device="cuda", node_sep=99, index_dtype="int32", size_dtype="float16"
+        )
         reset()
         d = get_defaults()
         assert d["theme"] == "default"
@@ -165,6 +166,7 @@ class TestThreadSafety:
         def worker(name, sep):
             configure(node_sep=sep)
             import time
+
             time.sleep(0.01)  # Let threads interleave
             results[name] = get_defaults().get("node_sep")
 
@@ -186,6 +188,7 @@ class TestExportConfig:
         dagua.export_config(path)
 
         import json
+
         with open(path) as f:
             data = json.load(f)
         assert data["node_sep"] == 40
@@ -200,6 +203,7 @@ class TestExportConfig:
         dagua.export_config(path)
 
         import yaml  # type: ignore[import-untyped]
+
         with open(path) as f:
             data = yaml.safe_load(f)
         assert data["node_sep"] == 40
