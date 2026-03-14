@@ -15,7 +15,10 @@ Coarsening strategy: layer-aware heavy-edge matching.
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Union
 
 import numpy as np
@@ -27,6 +30,81 @@ from dagua.utils import _EDGE_CHUNK, VRAMBudget, _vram_fits, longest_path_layeri
 _STREAMING_THRESHOLD = 100_000_000
 _DEDUP_BUCKET_TARGET = 150_000_000
 _DEFAULT_NODE_SIZE = 20.0
+
+
+def _offload_level_to_disk(level: CoarseLevel, level_idx: int, tmpdir: Path) -> Path:
+    """Save a hierarchy level's large tensors to disk and free them from memory.
+
+    Parameters
+    ----------
+    level : CoarseLevel
+        The hierarchy level to offload.
+    level_idx : int
+        Level index used for the filename.
+    tmpdir : Path
+        Temporary directory that stores offloaded hierarchy data.
+
+    Returns
+    -------
+    Path
+        Path to the serialized level payload.
+    """
+    assert level.edge_index is not None
+    assert level.node_sizes is not None
+
+    path = tmpdir / f"level_{level_idx:02d}.pt"
+    torch.save(
+        {
+            "edge_index": level.edge_index,
+            "node_sizes": level.node_sizes,
+        },
+        path,
+    )
+    level.edge_index = None
+    level.node_sizes = None
+    level.offload_path = path
+    level.offload_dir = tmpdir
+    return path
+
+
+def _reload_level_from_disk(level: CoarseLevel, path: Path) -> None:
+    """Reload a hierarchy level's large tensors from disk.
+
+    Parameters
+    ----------
+    level : CoarseLevel
+        The hierarchy level to restore.
+    path : Path
+        Path to the serialized level payload.
+    """
+    data = torch.load(path, map_location="cpu")
+    level.edge_index = data["edge_index"]
+    level.node_sizes = data["node_sizes"]
+    path.unlink(missing_ok=True)
+    level.offload_path = None
+
+
+def _cleanup_offloaded_hierarchy(levels: List[CoarseLevel]) -> None:
+    """Remove temporary files and directories created for hierarchy offload.
+
+    Parameters
+    ----------
+    levels : list[CoarseLevel]
+        Hierarchy levels that may own offload metadata.
+    """
+    offload_dirs: set[Path] = set()
+    for level in levels:
+        if level.offload_path is not None:
+            level.offload_path.unlink(missing_ok=True)
+            offload_dirs.add(level.offload_path.parent)
+            level.offload_path = None
+        if level.offload_dir is not None:
+            offload_dirs.add(level.offload_dir)
+            level.offload_dir = None
+
+    for offload_dir in offload_dirs:
+        if offload_dir.name.startswith("dagua_hierarchy_"):
+            shutil.rmtree(offload_dir, ignore_errors=True)
 
 
 def _ensure_node_sizes_2d(
@@ -84,6 +162,8 @@ class CoarseLevel:
     coarse_layer_assignments: Optional[torch.Tensor] = (
         None  # [N_coarse] propagated layer assignments
     )
+    offload_path: Optional[Path] = None
+    offload_dir: Optional[Path] = None
 
 
 def _can_prolong_on_gpu(
@@ -552,12 +632,18 @@ def build_hierarchy(
     """Build coarsening hierarchy until num_nodes <= min_nodes.
 
     Returns list of CoarseLevels from finest to coarsest.
+
+    For very large graphs, completed finer levels can have their large tensor
+    payloads offloaded to temporary files during the build phase.
     """
     levels: List[CoarseLevel] = []
     current_ei = edge_index
     current_n = num_nodes
     current_sizes = _ensure_node_sizes_2d(node_sizes, current_n)
     current_cluster_ids = cluster_ids
+    offload_dir: Optional[Path] = None
+    if current_n > 10_000_000:
+        offload_dir = Path(tempfile.mkdtemp(prefix="dagua_hierarchy_"))
 
     # Compute layers once on the original graph — returns tensor for large N.
     # Allow a precomputed checkpoint for giant runs so retries can skip the
@@ -574,12 +660,13 @@ def build_hierarchy(
         if progress is not None:
             progress(f"Layering full graph ({current_n:,} nodes)...")
         if current_ei.numel() > 0:
-            current_la = longest_path_layering(current_ei, current_n, device="cpu")
+            raw_current_la = longest_path_layering(current_ei, current_n, device="cpu")
         else:
-            current_la = torch.zeros(current_n, dtype=torch.long)
-        # Ensure tensor throughout — no list conversion
-        if isinstance(current_la, list):
-            current_la = torch.tensor(current_la, dtype=torch.long)
+            raw_current_la = torch.zeros(current_n, dtype=torch.long)
+        if isinstance(raw_current_la, list):
+            current_la = torch.tensor(raw_current_la, dtype=torch.long)
+        else:
+            current_la = raw_current_la
         if layer_assignments_callback is not None:
             layer_assignments_callback(current_la.detach().cpu())
         if progress is not None:
@@ -630,9 +717,17 @@ def build_hierarchy(
             reduce="amax",
         )
         level.coarse_layer_assignments = coarse_la
+        level.offload_dir = offload_dir
         levels.append(level)
         if level_callback is not None:
             level_callback(levels)
+
+        # Keep only one level's large tensors resident once the next coarse
+        # level exists. Small graphs stay entirely in memory.
+        if offload_dir is not None and len(levels) >= 2:
+            prev_level = levels[-2]
+            if prev_level.edge_index is not None:
+                _offload_level_to_disk(prev_level, len(levels) - 2, offload_dir)
 
         # Safety: stop if coarsening didn't reduce nodes or edges enough
         if current_n > level.num_fine * 0.7:
@@ -732,261 +827,251 @@ def multilevel_layout(
     cpu_ns = graph.node_sizes
     min_nodes = config.multilevel_min_nodes
     precomputed_levels = getattr(graph, "_precomputed_hierarchy_levels", None)
-    if precomputed_levels is not None:
-        levels = precomputed_levels
-        _vlog(f"Phase 1/3: Restored hierarchy ({n:,} nodes)... {len(levels)} levels")
-    else:
-        _t_hier = _time.perf_counter()
-        levels = build_hierarchy(
-            cpu_ei,
-            n,
-            cpu_ns,
-            min_nodes=min_nodes,
-            device="cpu",
-            progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
-            cluster_ids=graph.cluster_ids,
-            initial_layer_assignments=getattr(graph, "_precomputed_layer_assignments", None),
-            layer_assignments_callback=getattr(graph, "_layer_assignments_callback", None),
-            level_callback=getattr(graph, "_hierarchy_levels_callback", None),
-        )
-        hierarchy_complete_callback = getattr(graph, "_hierarchy_levels_complete_callback", None)
-        if hierarchy_complete_callback is not None:
-            hierarchy_complete_callback(levels)
+    levels: List[CoarseLevel] = []
+    try:
+        if precomputed_levels is not None:
+            levels = precomputed_levels
+            _vlog(f"Phase 1/3: Restored hierarchy ({n:,} nodes)... {len(levels)} levels")
+        else:
+            _t_hier = _time.perf_counter()
+            levels = build_hierarchy(
+                cpu_ei,
+                n,
+                cpu_ns,
+                min_nodes=min_nodes,
+                device="cpu",
+                progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
+                cluster_ids=graph.cluster_ids,
+                initial_layer_assignments=getattr(graph, "_precomputed_layer_assignments", None),
+                layer_assignments_callback=getattr(graph, "_layer_assignments_callback", None),
+                level_callback=getattr(graph, "_hierarchy_levels_callback", None),
+            )
+            hierarchy_complete_callback = getattr(
+                graph, "_hierarchy_levels_complete_callback", None
+            )
+            if hierarchy_complete_callback is not None:
+                hierarchy_complete_callback(levels)
+            _vlog(
+                f"Phase 1/3: Building hierarchy ({n:,} nodes)... "
+                f"{len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)"
+            )
+
+        if not levels:
+            # Graph is already small enough — use direct layout
+            ei = cpu_ei.to(device)
+            ns = cpu_ns.to(device)
+            if trace is not None and hasattr(trace, "mark_phase"):
+                trace.mark_phase("Direct Layout", f"{n:,} nodes")
+            direct_pos = _layout_inner(
+                ei, n, ns, config, device=device, progress_context=ProgressContext(), trace=trace
+            )
+            from dagua.layout.engine import _apply_direction
+
+            direction = config.direction if config else graph.direction
+            return _apply_direction(direct_pos, direction)
+
+        def _make_config(
+            steps: int, lr: float = config.lr, seed: Optional[int] = config.seed
+        ) -> LayoutConfig:
+            """Build a level-specific layout config."""
+            return LayoutConfig(
+                steps=steps,
+                lr=lr,
+                device=device,
+                seed=seed,
+                verbose=config.verbose,
+                node_sep=config.node_sep,
+                rank_sep=config.rank_sep,
+                w_dag=config.w_dag,
+                w_attract=config.w_attract,
+                w_attract_x_bias=config.w_attract_x_bias,
+                w_repel=config.w_repel,
+                w_overlap=config.w_overlap,
+                w_crossing=config.w_crossing,
+                w_straightness=config.w_straightness,
+                w_length_variance=config.w_length_variance,
+                exact_repulsion_threshold=config.exact_repulsion_threshold,
+                negative_sample_k=config.negative_sample_k,
+                per_loss_backward=config.per_loss_backward,
+                gradient_checkpointing=config.gradient_checkpointing,
+                hybrid_device=config.hybrid_device,
+                num_workers=config.num_workers,
+            )
+
+        # Layout coarsest graph with many steps.
+        # Pass edges on CPU — _layout_inner will stream batches to GPU.
+        # Only node_sizes go to GPU (small: [N_coarse, 2]).
+        coarsest = levels[-1]
         _vlog(
-            f"Phase 1/3: Building hierarchy ({n:,} nodes)... "
-            f"{len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)"
+            f"Phase 2/3: Coarsest level ({coarsest.num_nodes:,} nodes, "
+            f"{config.multilevel_coarse_steps} steps)"
+        )
+        _reset_peak()
+        if trace is not None and hasattr(trace, "mark_phase"):
+            trace.mark_phase("Hierarchy Build", f"{len(levels)} levels")
+            trace.mark_phase("Coarsest Layout", f"{coarsest.num_nodes:,} supernodes")
+
+        coarse_config = _make_config(
+            steps=config.multilevel_coarse_steps,
+            lr=config.lr * 2,
         )
 
-    if not levels:
-        # Graph is already small enough — use direct layout
-        ei = cpu_ei.to(device)
-        ns = cpu_ns.to(device)
-        if trace is not None and hasattr(trace, "mark_phase"):
-            trace.mark_phase("Direct Layout", f"{n:,} nodes")
-        direct_pos = _layout_inner(
-            ei, n, ns, config, device=device, progress_context=ProgressContext(), trace=trace
-        )
+        assert coarsest.edge_index is not None
+        assert coarsest.node_sizes is not None
+        precomputed_coarsest_pos = getattr(graph, "_precomputed_coarsest_positions", None)
+        if precomputed_coarsest_pos is not None:
+            pos = precomputed_coarsest_pos.to(device)
+            _vlog(f"Restored coarsest positions ({coarsest.num_nodes:,} nodes)", indent="  ")
+        else:
+            pos = _layout_inner(
+                coarsest.edge_index,
+                coarsest.num_nodes,
+                coarsest.node_sizes.to(device),
+                coarse_config,
+                device=device,
+                layer_assignments=coarsest.coarse_layer_assignments,
+                progress_context=ProgressContext(),
+            )
+            coarsest_pos_callback = getattr(graph, "_coarsest_positions_callback", None)
+            if coarsest_pos_callback is not None:
+                coarsest_pos_callback(pos.detach().cpu())
+
+        num_refine_levels = len(levels)
+        _vlog(f"Phase 3/3: Refining ({num_refine_levels} levels)")
+        for i in range(len(levels) - 1, -1, -1):
+            level = levels[i]
+            assert level is not None
+
+            level.edge_index = None
+            level.node_sizes = None
+
+            if level.num_fine > 100_000_000:
+                import ctypes
+                import gc as _gc
+
+                _gc.collect()
+                try:
+                    ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except OSError:
+                    pass
+
+            if i == 0:
+                fine_ei_cpu = cpu_ei
+                fine_sizes_cpu = cpu_ns
+                fine_n = n
+            else:
+                prev_level = levels[i - 1]
+                assert prev_level is not None
+                if prev_level.edge_index is None and prev_level.offload_path is not None:
+                    _reload_level_from_disk(prev_level, prev_level.offload_path)
+                assert prev_level.edge_index is not None
+                assert prev_level.node_sizes is not None
+                fine_ei_cpu = prev_level.edge_index
+                fine_sizes_cpu = prev_level.node_sizes
+                fine_n = prev_level.num_nodes
+
+            n_fine_edges = fine_ei_cpu.shape[1] if fine_ei_cpu.numel() > 0 else 0
+            base_refine = config.multilevel_refine_steps
+            if i == 0:
+                refine_steps = base_refine * 2
+            elif i <= 2:
+                refine_steps = base_refine
+            else:
+                refine_steps = max(base_refine // 2, 5)
+
+            level_num = len(levels) - i
+            _vlog(
+                f"Level {level_num}/{num_refine_levels}: {fine_n:,} nodes ({refine_steps} steps)",
+                indent="  ",
+            )
+            if verbose and fine_n > 100_000_000:
+                import gc as _gc
+                import os as _os
+
+                _gc.collect()
+                try:
+                    with open("/proc/self/statm") as _f:
+                        _rss_pages = int(_f.read().split()[1])
+                    _rss_gb = _rss_pages * _os.sysconf("SC_PAGE_SIZE") / 1024**3
+                    print(f"[dagua]     RSS={_rss_gb:.1f} GB before prolongation", flush=True)
+                except Exception:
+                    pass
+            _reset_peak()
+
+            if device == "cuda":
+                from dagua.layout.engine import _estimate_gpu_memory
+
+                next_level_mem = _estimate_gpu_memory(fine_n, n_fine_edges, per_loss_bw=True)
+                if not _vram_fits(next_level_mem):
+                    assert pos is not None
+                    pos = pos.cpu()
+                    torch.cuda.empty_cache()
+
+            assert pos is not None
+            assert level.fine_to_coarse is not None
+            fine_to_coarse = level.fine_to_coarse
+            use_gpu_prolong = _can_prolong_on_gpu(pos, fine_to_coarse, level.num_fine, device)
+
+            pos_cpu: Optional[torch.Tensor]
+            if use_gpu_prolong:
+                fine_to_coarse_dev = fine_to_coarse.to(device)
+                fine_pos = pos[fine_to_coarse_dev]
+                fine_pos.add_(torch.randn(level.num_fine, 2, device=device).mul_(5.0))
+                del fine_to_coarse_dev
+                pos_cpu = None
+            else:
+                pos_cpu = pos.cpu() if pos.device.type != "cpu" else pos
+                fine_pos = pos_cpu[fine_to_coarse]
+                fine_pos.add_(torch.randn(level.num_fine, 2).mul_(5.0))
+
+            del fine_to_coarse
+            level.fine_to_coarse = None
+
+            if pos_cpu is not None:
+                del pos_cpu
+            pos = None
+
+            fine_sizes = fine_sizes_cpu.to(device)
+            pos = fine_pos if fine_pos.device.type == device else fine_pos.to(device)
+            del fine_pos
+
+            refine_config = _make_config(steps=refine_steps, seed=None)
+            level_trace = None
+            if i == 0 and trace is not None:
+                level_trace = trace
+                if hasattr(trace, "mark_phase"):
+                    trace.mark_phase("Final Refinement", f"{fine_n:,} nodes")
+
+            pos = _layout_inner(
+                fine_ei_cpu,
+                fine_n,
+                fine_sizes,
+                refine_config,
+                device=device,
+                init_pos=pos,
+                layer_assignments=level.fine_layer_assignments,
+                progress_context=ProgressContext(indent="    "),
+                trace=level_trace,
+            )
+
+            levels[i] = CoarseLevel(
+                edge_index=None,
+                node_sizes=None,
+                num_nodes=level.num_nodes,
+                fine_to_coarse=None,
+                num_fine=level.num_fine,
+                fine_layer_assignments=None,
+                offload_dir=level.offload_dir,
+            )
+
+        _vlog(f"Done — {n:,} nodes in {_time.perf_counter() - _t0:.1f}s")
+
         from dagua.layout.engine import _apply_direction
 
         direction = config.direction if config else graph.direction
-        return _apply_direction(direct_pos, direction)
-
-    # Helper to build a config for a given level
-    def _make_config(
-        steps: int, lr: float = config.lr, seed: Optional[int] = config.seed
-    ) -> LayoutConfig:
-        return LayoutConfig(
-            steps=steps,
-            lr=lr,
-            device=device,
-            seed=seed,
-            verbose=config.verbose,
-            node_sep=config.node_sep,
-            rank_sep=config.rank_sep,
-            w_dag=config.w_dag,
-            w_attract=config.w_attract,
-            w_attract_x_bias=config.w_attract_x_bias,
-            w_repel=config.w_repel,
-            w_overlap=config.w_overlap,
-            w_crossing=config.w_crossing,
-            w_straightness=config.w_straightness,
-            w_length_variance=config.w_length_variance,
-            exact_repulsion_threshold=config.exact_repulsion_threshold,
-            negative_sample_k=config.negative_sample_k,
-            per_loss_backward=config.per_loss_backward,
-            gradient_checkpointing=config.gradient_checkpointing,
-            hybrid_device=config.hybrid_device,
-            num_workers=config.num_workers,
-        )
-
-    # Layout coarsest graph with many steps.
-    # Pass edges on CPU — _layout_inner will stream batches to GPU.
-    # Only node_sizes go to GPU (small: [N_coarse, 2]).
-    coarsest = levels[-1]
-    _vlog(
-        f"Phase 2/3: Coarsest level ({coarsest.num_nodes:,} nodes, "
-        f"{config.multilevel_coarse_steps} steps)"
-    )
-    _reset_peak()
-    if trace is not None and hasattr(trace, "mark_phase"):
-        trace.mark_phase("Hierarchy Build", f"{len(levels)} levels")
-        trace.mark_phase("Coarsest Layout", f"{coarsest.num_nodes:,} supernodes")
-
-    coarse_config = _make_config(
-        steps=config.multilevel_coarse_steps,
-        lr=config.lr * 2,
-    )
-
-    assert coarsest.edge_index is not None
-    assert coarsest.node_sizes is not None
-    precomputed_coarsest_pos = getattr(graph, "_precomputed_coarsest_positions", None)
-    if precomputed_coarsest_pos is not None:
-        pos = precomputed_coarsest_pos.to(device)
-        _vlog(f"Restored coarsest positions ({coarsest.num_nodes:,} nodes)", indent="  ")
-    else:
-        pos = _layout_inner(
-            coarsest.edge_index,  # stays on CPU
-            coarsest.num_nodes,
-            coarsest.node_sizes.to(device),
-            coarse_config,
-            device=device,
-            layer_assignments=coarsest.coarse_layer_assignments,
-            progress_context=ProgressContext(),
-        )
-        coarsest_pos_callback = getattr(graph, "_coarsest_positions_callback", None)
-        if coarsest_pos_callback is not None:
-            coarsest_pos_callback(pos.detach().cpu())
-
-    # Prolong + refine through hierarchy (coarsest → finest)
-    num_refine_levels = len(levels)
-    _vlog(f"Phase 3/3: Refining ({num_refine_levels} levels)")
-    for i in range(len(levels) - 1, -1, -1):
-        level = levels[i]
-        assert level is not None
-
-        # Free this level's own edge_index and node_sizes — they've been consumed.
-        # levels[-1]: consumed by coarsest layout (Phase 2).
-        # levels[j<-1]: consumed at iteration j+1 as fine_ei_cpu/fine_sizes_cpu.
-        # (levels[i-1].edge_index is still alive — consumed THIS iteration below.)
-        level.edge_index = None
-        level.node_sizes = None
-
-        # Force memory return to OS — glibc holds freed pages otherwise
-        if level.num_fine > 100_000_000:
-            import ctypes
-            import gc as _gc
-
-            _gc.collect()
-            try:
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
-            except OSError:
-                pass
-
-        # Determine this level's graph data
-        if i == 0:
-            fine_ei_cpu = cpu_ei
-            fine_sizes_cpu = cpu_ns
-            fine_n = n
-        else:
-            prev_level = levels[i - 1]
-            assert prev_level is not None
-            assert prev_level.edge_index is not None
-            assert prev_level.node_sizes is not None
-            fine_ei_cpu = prev_level.edge_index
-            fine_sizes_cpu = prev_level.node_sizes
-            fine_n = prev_level.num_nodes
-
-        n_fine_edges = fine_ei_cpu.shape[1] if fine_ei_cpu.numel() > 0 else 0
-        base_refine = config.multilevel_refine_steps
-        if i == 0:
-            # Finest level: double steps for final quality
-            refine_steps = base_refine * 2
-        elif i <= 2:
-            # Near-finest levels: full steps
-            refine_steps = base_refine
-        else:
-            # Coarser levels: half steps (positions refined further at finer levels)
-            refine_steps = max(base_refine // 2, 5)
-
-        level_num = len(levels) - i
-        _vlog(
-            f"Level {level_num}/{num_refine_levels}: {fine_n:,} nodes ({refine_steps} steps)",
-            indent="  ",
-        )
-        if verbose and fine_n > 100_000_000:
-            import gc as _gc
-            import os as _os
-
-            _gc.collect()
-            try:
-                with open("/proc/self/statm") as _f:
-                    _rss_pages = int(_f.read().split()[1])
-                _rss_gb = _rss_pages * _os.sysconf("SC_PAGE_SIZE") / 1024**3
-                print(f"[dagua]     RSS={_rss_gb:.1f} GB before prolongation", flush=True)
-            except Exception:
-                pass
-        _reset_peak()
-
-        # Free previous level's GPU memory before allocating new tensors —
-        # but only when the next level won't fit alongside current allocations.
-        if device == "cuda":
-            from dagua.layout.engine import _estimate_gpu_memory
-
-            next_level_mem = _estimate_gpu_memory(fine_n, n_fine_edges, per_loss_bw=True)
-            if not _vram_fits(next_level_mem):
-                assert pos is not None
-                pos = pos.cpu()
-                torch.cuda.empty_cache()
-
         assert pos is not None
-        assert level.fine_to_coarse is not None
-        fine_to_coarse = level.fine_to_coarse
-        use_gpu_prolong = _can_prolong_on_gpu(pos, fine_to_coarse, level.num_fine, device)
+        pos = _apply_direction(pos, direction)
 
-        pos_cpu: Optional[torch.Tensor]
-        if use_gpu_prolong:
-            fine_to_coarse_dev = fine_to_coarse.to(device)
-            fine_pos = pos[fine_to_coarse_dev]
-            fine_pos.add_(torch.randn(level.num_fine, 2, device=device).mul_(5.0))
-            del fine_to_coarse_dev
-            pos_cpu = None
-        else:
-            # Prolong on CPU when GPU headroom is uncertain.
-            # Use in-place ops to avoid a second fine-position allocation.
-            pos_cpu = pos.cpu() if pos.device.type != "cpu" else pos
-            fine_pos = pos_cpu[fine_to_coarse]
-            fine_pos.add_(torch.randn(level.num_fine, 2).mul_(5.0))
-
-        # Free fine_to_coarse — consumed above, never needed again
-        del fine_to_coarse
-        level.fine_to_coarse = None
-
-        # Free old pos and pos_cpu — consumed by prolongation above
-        if pos_cpu is not None:
-            del pos_cpu
-        pos = None
-
-        # Positions + node_sizes to GPU; edges stay on CPU (streamed in batches)
-        fine_sizes = fine_sizes_cpu.to(device)
-        pos = fine_pos if fine_pos.device.type == device else fine_pos.to(device)
-        del fine_pos  # pos holds the reference now
-
-        refine_config = _make_config(steps=refine_steps, seed=None)
-        level_trace = None
-        if i == 0 and trace is not None:
-            level_trace = trace
-            if hasattr(trace, "mark_phase"):
-                trace.mark_phase("Final Refinement", f"{fine_n:,} nodes")
-
-        pos = _layout_inner(
-            fine_ei_cpu,  # edges on CPU — engine streams batches to GPU
-            fine_n,
-            fine_sizes,
-            refine_config,
-            device=device,
-            init_pos=pos,
-            layer_assignments=level.fine_layer_assignments,
-            progress_context=ProgressContext(indent="    "),
-            trace=level_trace,
-        )
-
-        # Free this hierarchy level entirely — never revisited
-        levels[i] = CoarseLevel(
-            edge_index=None,
-            node_sizes=None,
-            num_nodes=level.num_nodes,
-            fine_to_coarse=None,
-            num_fine=level.num_fine,
-            fine_layer_assignments=None,
-        )
-
-    _vlog(f"Done \u2014 {n:,} nodes in {_time.perf_counter() - _t0:.1f}s")
-
-    # Apply direction transform
-    from dagua.layout.engine import _apply_direction
-
-    direction = config.direction if config else graph.direction
-    assert pos is not None
-    pos = _apply_direction(pos, direction)
-
-    return pos
+        return pos
+    finally:
+        _cleanup_offloaded_hierarchy(levels)
