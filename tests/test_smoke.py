@@ -15,18 +15,14 @@ import torch
 import dagua
 from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
-from dagua.layout.engine import ProgressContext, layout
 from dagua.layout import multilevel as _multilevel_mod
+from dagua.layout.engine import ProgressContext
 from dagua.layout.multilevel import (
     _can_prolong_on_gpu,
     coarsen_once,
-    _coarsen_once_streaming,
-    _DEDUP_BUCKET_TARGET,
-    _STREAMING_THRESHOLD,
 )
 from dagua.utils import (
     _longest_path_layering_vectorized,
-    _STREAMING_NODE_THRESHOLD,
     longest_path_layering,
 )
 
@@ -137,8 +133,12 @@ class TestLongestPathLayeringVectorized:
         edge_index = torch.tensor([src, tgt], dtype=torch.long)
         scalar_result = longest_path_layering(edge_index, n)
         vector_result = _longest_path_layering_vectorized(edge_index, n)
-        scalar_list = scalar_result.tolist() if isinstance(scalar_result, torch.Tensor) else scalar_result
-        vector_list = vector_result.tolist() if isinstance(vector_result, torch.Tensor) else vector_result
+        scalar_list = (
+            scalar_result.tolist() if isinstance(scalar_result, torch.Tensor) else scalar_result
+        )
+        vector_list = (
+            vector_result.tolist() if isinstance(vector_result, torch.Tensor) else vector_result
+        )
         assert scalar_list == vector_list
 
     @pytest.mark.slow
@@ -176,7 +176,7 @@ class TestMultilevelVerbose:
         """A graph above multilevel_threshold triggers multilevel path and verbose output."""
         # Use a small threshold to force multilevel without creating a huge graph
         n = 200
-        edges = [(f"n{i}", f"n{i+1}") for i in range(n - 1)]
+        edges = [(f"n{i}", f"n{i + 1}") for i in range(n - 1)]
         g = DaguaGraph.from_edge_list(edges)
         config = LayoutConfig(
             steps=10,
@@ -199,7 +199,7 @@ class TestMultilevelVerbose:
     def test_multilevel_produces_valid_positions(self):
         """Multilevel layout should produce finite, non-NaN positions."""
         n = 150
-        edges = [(f"n{i}", f"n{i+1}") for i in range(n - 1)]
+        edges = [(f"n{i}", f"n{i + 1}") for i in range(n - 1)]
         g = DaguaGraph.from_edge_list(edges)
         config = LayoutConfig(
             steps=10,
@@ -366,6 +366,7 @@ class TestStreamingCoarsenMatchesVectorized:
 
         ftc = result.fine_to_coarse.tolist()
         from collections import Counter
+
         group_sizes = Counter(ftc)
         max_size = max(group_sizes.values())
         assert max_size <= 3, f"Largest coarse group has {max_size} nodes, expected <= 3"
@@ -525,7 +526,8 @@ class TestChunkedLayeringMatchesOriginal:
             _utils_mod._STREAMING_NODE_THRESHOLD = original_threshold
 
         assert torch.equal(layers_full, layers_chunked), (
-            f"Layer assignments differ: max diff = {(layers_full - layers_chunked).abs().max().item()}"
+            "Layer assignments differ: max diff = "
+            f"{(layers_full - layers_chunked).abs().max().item()}"
         )
 
 

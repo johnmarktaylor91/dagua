@@ -5,6 +5,15 @@ NetworkX) behind a common interface so the benchmark harness can run them
 uniformly.
 """
 
+# Import all competitor modules to trigger registration
+from dagua.eval.competitors import (
+    dagre_competitor,  # noqa: F401
+    dagua_competitor,  # noqa: F401
+    elk_competitor,  # noqa: F401
+    graphviz_competitor,  # noqa: F401
+    igraph_competitor,  # noqa: F401
+    networkx_competitor,  # noqa: F401
+)
 from dagua.eval.competitors.base import (
     CompetitorBase,
     CompetitorResult,
@@ -12,14 +21,6 @@ from dagua.eval.competitors.base import (
     get_competitors,
     register,
 )
-
-# Import all competitor modules to trigger registration
-from dagua.eval.competitors import dagua_competitor  # noqa: F401
-from dagua.eval.competitors import graphviz_competitor  # noqa: F401
-from dagua.eval.competitors import elk_competitor  # noqa: F401
-from dagua.eval.competitors import dagre_competitor  # noqa: F401
-from dagua.eval.competitors import networkx_competitor  # noqa: F401
-from dagua.eval.competitors import igraph_competitor  # noqa: F401
 
 __all__ = [
     "CompetitorBase",

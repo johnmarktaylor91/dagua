@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-from dataclasses import dataclass, field, fields as dataclass_fields
+from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields
 from typing import Any, Dict, List, Optional, Tuple
-
 
 # ─── Wong/Okabe-Ito Colorblind-Safe Palette ────────────────────────────────
 
@@ -54,7 +54,8 @@ FONT_FAMILY_MONO = ["SF Mono", "Menlo", "Consolas", "DejaVu Sans Mono"]
 def _resolve_font() -> str:
     """Find the best available font from the preference stack."""
     try:
-        from matplotlib.font_manager import findfont, FontProperties
+        from matplotlib.font_manager import FontProperties, findfont
+
         for name in FONT_FAMILY:
             try:
                 findfont(FontProperties(family=name), fallback_to_default=False)
@@ -85,12 +86,12 @@ def _rgb_to_hex(r: int, g: int, b: int) -> str:
 def _hex_to_hsl(hex_color: str) -> Tuple[float, float, float]:
     r, g, b = [x / 255.0 for x in _hex_to_rgb(hex_color)]
     mx, mn = max(r, g, b), min(r, g, b)
-    l = (mx + mn) / 2.0
+    lightness = (mx + mn) / 2.0
     if mx == mn:
         h = s = 0.0
     else:
         d = mx - mn
-        s = d / (2.0 - mx - mn) if l > 0.5 else d / (mx + mn)
+        s = d / (2.0 - mx - mn) if lightness > 0.5 else d / (mx + mn)
         if mx == r:
             h = (g - b) / d + (6.0 if g < b else 0.0)
         elif mx == g:
@@ -98,27 +99,32 @@ def _hex_to_hsl(hex_color: str) -> Tuple[float, float, float]:
         else:
             h = (r - g) / d + 4.0
         h /= 6.0
-    return h, s, l
+    return h, s, lightness
 
 
-def _hsl_to_hex(h: float, s: float, l: float) -> str:
+def _hsl_to_hex(h: float, s: float, lightness: float) -> str:
     if s == 0:
-        v = int(round(l * 255))
+        v = int(round(lightness * 255))
         return _rgb_to_hex(v, v, v)
 
     def hue_to_rgb(p, q, t):
-        if t < 0: t += 1
-        if t > 1: t -= 1
-        if t < 1/6: return p + (q - p) * 6 * t
-        if t < 1/2: return q
-        if t < 2/3: return p + (q - p) * (2/3 - t) * 6
+        if t < 0:
+            t += 1
+        if t > 1:
+            t -= 1
+        if t < 1 / 6:
+            return p + (q - p) * 6 * t
+        if t < 1 / 2:
+            return q
+        if t < 2 / 3:
+            return p + (q - p) * (2 / 3 - t) * 6
         return p
 
-    q = l * (1 + s) if l < 0.5 else l + s - l * s
-    p = 2 * l - q
-    r = int(round(hue_to_rgb(p, q, h + 1/3) * 255))
+    q = lightness * (1 + s) if lightness < 0.5 else lightness + s - lightness * s
+    p = 2 * lightness - q
+    r = int(round(hue_to_rgb(p, q, h + 1 / 3) * 255))
     g = int(round(hue_to_rgb(p, q, h) * 255))
-    b = int(round(hue_to_rgb(p, q, h - 1/3) * 255))
+    b = int(round(hue_to_rgb(p, q, h - 1 / 3) * 255))
     return _rgb_to_hex(r, g, b)
 
 
@@ -137,14 +143,14 @@ def make_fill(base_hex: str, bg_hex: str = WARM_WHITE, blend: float = 0.25) -> s
 
 def border_from_fill(fill_hex: str, darken: float = 0.5) -> str:
     """Derive border color by darkening the fill in HSL lightness space."""
-    h, s, l = _hex_to_hsl(fill_hex)
-    return _hsl_to_hex(h, min(s * 1.2, 1.0), l * (1 - darken))
+    h, s, lightness = _hex_to_hsl(fill_hex)
+    return _hsl_to_hex(h, min(s * 1.2, 1.0), lightness * (1 - darken))
 
 
 def darken_hex(hex_color: str, amount: float) -> str:
     """Darken a hex color by reducing HSL lightness by `amount` (0-1 scale)."""
-    h, s, l = _hex_to_hsl(hex_color)
-    return _hsl_to_hex(h, s, max(l - amount, 0.0))
+    h, s, lightness = _hex_to_hsl(hex_color)
+    return _hsl_to_hex(h, s, max(lightness - amount, 0.0))
 
 
 def make_node_colors(base_hex: str) -> Tuple[str, str]:
@@ -246,7 +252,10 @@ class ClusterStyle:
     opacity: float = 0.32
     # New fields (Part 2)
     font_family: str = ""  # empty = use FONT_FAMILY default, render-only
-    label_offset: Tuple[float, float] = (8.0, 20.0)  # render-only (y-offset prevents nested label overlap)
+    label_offset: Tuple[float, float] = (
+        8.0,
+        20.0,
+    )  # render-only (y-offset prevents nested label overlap)
     depth_fill_step: float = 0.03  # HSL lightness step per depth level
     depth_stroke_step: float = 0.05  # HSL lightness step per depth level
     # Member style overrides — applied to all nodes/edges within this cluster
@@ -557,13 +566,42 @@ TORCHLENS_THEME = Theme(
         ),
     },
     edge_styles={
-        "default": EdgeStyle(color="#5F6B78", width=1.1, opacity=0.62, curvature=0.22, label_font_size=6.8),
-        "skip": EdgeStyle(color="#567DA4", width=1.25, opacity=0.52, curvature=0.34, style="solid", label_font_size=6.8),
-        "recurrent": EdgeStyle(color="#A97728", width=1.2, opacity=0.65, curvature=0.55, style="dashed", label_font_size=6.8),
-        "if": EdgeStyle(color="#B6841F", width=1.25, opacity=0.8, style="dashed", label_font_size=7.0),
-        "then": EdgeStyle(color="#2D8A68", width=1.25, opacity=0.8, style="dashed", label_font_size=7.0),
-        "buffer": EdgeStyle(color="#7B8594", width=1.0, opacity=0.45, style="dotted", label_font_size=6.7),
-        "back": EdgeStyle(color="#8C93D6", width=1.0, opacity=0.55, curvature=0.56, style="dotted", label_font_size=6.7),
+        "default": EdgeStyle(
+            color="#5F6B78", width=1.1, opacity=0.62, curvature=0.22, label_font_size=6.8
+        ),
+        "skip": EdgeStyle(
+            color="#567DA4",
+            width=1.25,
+            opacity=0.52,
+            curvature=0.34,
+            style="solid",
+            label_font_size=6.8,
+        ),
+        "recurrent": EdgeStyle(
+            color="#A97728",
+            width=1.2,
+            opacity=0.65,
+            curvature=0.55,
+            style="dashed",
+            label_font_size=6.8,
+        ),
+        "if": EdgeStyle(
+            color="#B6841F", width=1.25, opacity=0.8, style="dashed", label_font_size=7.0
+        ),
+        "then": EdgeStyle(
+            color="#2D8A68", width=1.25, opacity=0.8, style="dashed", label_font_size=7.0
+        ),
+        "buffer": EdgeStyle(
+            color="#7B8594", width=1.0, opacity=0.45, style="dotted", label_font_size=6.7
+        ),
+        "back": EdgeStyle(
+            color="#8C93D6",
+            width=1.0,
+            opacity=0.55,
+            curvature=0.56,
+            style="dotted",
+            label_font_size=6.7,
+        ),
     },
     cluster_style=ClusterStyle(
         fill="#EDF2F6",
@@ -607,9 +645,7 @@ THEME_REGISTRY: Dict[str, Theme] = {
 def get_theme(name: str) -> Theme:
     """Look up a built-in theme by name. Returns a deep copy."""
     if name not in THEME_REGISTRY:
-        raise ValueError(
-            f"Unknown theme: {name!r}. Available: {list(THEME_REGISTRY.keys())}"
-        )
+        raise ValueError(f"Unknown theme: {name!r}. Available: {list(THEME_REGISTRY.keys())}")
     return copy.deepcopy(THEME_REGISTRY[name])
 
 

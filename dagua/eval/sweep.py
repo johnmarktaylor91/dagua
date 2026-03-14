@@ -19,7 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from dagua.config import LayoutConfig, PARAM_REGISTRY_DICT as PARAM_REGISTRY
+from dagua.config import PARAM_REGISTRY_DICT as PARAM_REGISTRY
+from dagua.config import LayoutConfig
 from dagua.eval.graphs import TestGraph, get_scale_suite, get_test_graphs
 from dagua.eval.runtime_env import suspend_torchlens_decoration
 from dagua.layout import layout
@@ -29,6 +30,7 @@ from dagua.metrics import compute_all_metrics
 @dataclass
 class SweepResult:
     """Result of a single sweep evaluation."""
+
     graph_name: str
     param_name: str
     param_value: Any
@@ -68,7 +70,10 @@ class PlacementTuningResult:
 
 PLACEMENT_STAGE_GROUPS: List[Tuple[str, List[str]]] = [
     ("spacing_core", ["node_sep", "rank_sep", "w_crossing", "w_dag", "w_overlap"]),
-    ("structure_refine", ["w_straightness", "w_length_variance", "w_attract", "w_attract_x_bias", "w_repel"]),
+    (
+        "structure_refine",
+        ["w_straightness", "w_length_variance", "w_attract", "w_attract_x_bias", "w_repel"],
+    ),
     ("runtime_schedule", ["steps"]),
 ]
 
@@ -163,7 +168,11 @@ def _evaluate_config(
     for tg in graphs:
         tg.graph.compute_node_sizes()
         assert tg.graph.node_sizes is not None
-        start = torch.cuda.Event(enable_timing=True) if config.device == "cuda" and torch.cuda.is_available() else None
+        start = (
+            torch.cuda.Event(enable_timing=True)
+            if config.device == "cuda" and torch.cuda.is_available()
+            else None
+        )
         end = torch.cuda.Event(enable_timing=True) if start is not None else None
         if start is not None and end is not None:
             start.record()
@@ -204,6 +213,7 @@ def _evaluate_config(
 
 def _dominates(a: PlacementCandidate, b: PlacementCandidate) -> bool:
     """Return whether candidate ``a`` Pareto-dominates candidate ``b``."""
+
     def _metric(candidate: PlacementCandidate, key: str) -> float:
         if key in candidate.aggregate_metrics:
             return float(candidate.aggregate_metrics[key])
@@ -247,7 +257,9 @@ def _candidate_for_stage(
     if not validation_graphs:
         return search_candidate
 
-    validation_candidate = _evaluate_config(validation_graphs, config, f"{stage}_validation", tuned_param, tuned_value)
+    validation_candidate = _evaluate_config(
+        validation_graphs, config, f"{stage}_validation", tuned_param, tuned_value
+    )
     combined_metrics = {
         "search_score": search_candidate.score,
         "validation_score": validation_candidate.score,
@@ -257,7 +269,8 @@ def _candidate_for_stage(
     return PlacementCandidate(
         config=_clone_config(config),
         score=combined_placement_score(search_candidate.score, validation_candidate.score),
-        mean_runtime_seconds=search_candidate.mean_runtime_seconds + validation_candidate.mean_runtime_seconds,
+        mean_runtime_seconds=search_candidate.mean_runtime_seconds
+        + validation_candidate.mean_runtime_seconds,
         aggregate_metrics=combined_metrics,
         per_graph_metrics={
             **search_candidate.per_graph_metrics,
@@ -393,7 +406,6 @@ def focused_sweep(
         params = list(PARAM_REGISTRY.keys())
 
     results = []
-    total = sum(len(PARAM_REGISTRY[p].sweep_values) for p in params if p in PARAM_REGISTRY)
     done = 0
 
     for param_name in params:
@@ -412,15 +424,15 @@ def focused_sweep(
                     assert tg.graph.node_sizes is not None
                     with suspend_torchlens_decoration():
                         pos = layout(tg.graph, config)
-                    metrics = compute_all_metrics(
-                        pos, tg.graph.edge_index, tg.graph.node_sizes
+                    metrics = compute_all_metrics(pos, tg.graph.edge_index, tg.graph.node_sizes)
+                    results.append(
+                        SweepResult(
+                            graph_name=tg.name,
+                            param_name=param_name,
+                            param_value=value,
+                            metrics=metrics,
+                        )
                     )
-                    results.append(SweepResult(
-                        graph_name=tg.name,
-                        param_name=param_name,
-                        param_value=value,
-                        metrics=metrics,
-                    ))
                 except Exception as e:
                     print(f"  [ERROR] {tg.name} @ {param_name}={value}: {e}")
 
@@ -475,16 +487,16 @@ def interaction_sweep(
                         assert tg.graph.node_sizes is not None
                         with suspend_torchlens_decoration():
                             pos = layout(tg.graph, config)
-                        metrics = compute_all_metrics(
-                            pos, tg.graph.edge_index, tg.graph.node_sizes
+                        metrics = compute_all_metrics(pos, tg.graph.edge_index, tg.graph.node_sizes)
+                        results.append(
+                            SweepResult(
+                                graph_name=tg.name,
+                                param_name=f"{param_a}×{param_b}",
+                                param_value=f"{va},{vb}",
+                                metrics=metrics,
+                            )
                         )
-                        results.append(SweepResult(
-                            graph_name=tg.name,
-                            param_name=f"{param_a}×{param_b}",
-                            param_value=f"{va},{vb}",
-                            metrics=metrics,
-                        ))
-                    except Exception as e:
+                    except Exception:
                         pass
 
     if output_dir:
@@ -510,13 +522,15 @@ def _save_sweep_results(results: List[SweepResult], output_dir: str, mode: str):
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     data = []
     for r in results:
-        data.append({
-            "graph_name": r.graph_name,
-            "param_name": r.param_name,
-            "param_value": r.param_value,
-            "quality": r.quality,
-            "metrics": r.metrics,
-        })
+        data.append(
+            {
+                "graph_name": r.graph_name,
+                "param_name": r.param_name,
+                "param_value": r.param_value,
+                "quality": r.quality,
+                "metrics": r.metrics,
+            }
+        )
     path = Path(output_dir) / f"sweep_{mode}.json"
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
@@ -604,7 +618,10 @@ def print_sweep_summary(results: List[SweepResult]):
     for r in results:
         by_param[r.param_name].append(r)
 
-    print(f"\n{'Parameter':<25} | {'Best Value':>12} | {'Quality':>10} | {'Worst Value':>12} | {'Quality':>10}")
+    print(
+        f"\n{'Parameter':<25} | {'Best Value':>12} | {'Quality':>10} | "
+        f"{'Worst Value':>12} | {'Quality':>10}"
+    )
     print("-" * 80)
 
     for param, rs in sorted(by_param.items()):
@@ -617,4 +634,7 @@ def print_sweep_summary(results: List[SweepResult]):
         best_val = max(avg_quality, key=lambda value: avg_quality[value])
         worst_val = min(avg_quality, key=lambda value: avg_quality[value])
 
-        print(f"{param:<25} | {str(best_val):>12} | {avg_quality[best_val]:>10.1f} | {str(worst_val):>12} | {avg_quality[worst_val]:>10.1f}")
+        print(
+            f"{param:<25} | {str(best_val):>12} | {avg_quality[best_val]:>10.1f} | "
+            f"{str(worst_val):>12} | {avg_quality[worst_val]:>10.1f}"
+        )

@@ -22,8 +22,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
 
 from dagua.styles import (
-    ClusterStyle, EdgeStyle, GraphStyle, NodeStyle, Theme,
-    DEFAULT_THEME_OBJ,
+    ClusterStyle,
+    EdgeStyle,
+    GraphStyle,
+    NodeStyle,
+    Theme,
 )
 
 if TYPE_CHECKING:
@@ -170,6 +173,7 @@ def _dict_to_theme(d: Dict[str, Any]) -> Theme:
 def _dict_to_flex(d: Dict[str, Any]) -> "Flex":
     """Convert a dict to a Flex value."""
     from dagua.flex import Flex
+
     if isinstance(d, (int, float)):
         return Flex(target=float(d))
     target = float(d.get("target", 0.0))
@@ -189,8 +193,22 @@ def _dict_to_layout_flex(d: Dict[str, Any]) -> "LayoutFlex":
         pins = {}
         for node_id, pin_data in d["pins"].items():
             if isinstance(pin_data, dict):
-                fx = Flex(target=float(pin_data["x"]), weight=float(pin_data.get("weight", float("inf")))) if "x" in pin_data else None
-                fy = Flex(target=float(pin_data["y"]), weight=float(pin_data.get("weight", float("inf")))) if "y" in pin_data else None
+                fx = (
+                    Flex(
+                        target=float(pin_data["x"]),
+                        weight=float(pin_data.get("weight", float("inf"))),
+                    )
+                    if "x" in pin_data
+                    else None
+                )
+                fy = (
+                    Flex(
+                        target=float(pin_data["y"]),
+                        weight=float(pin_data.get("weight", float("inf"))),
+                    )
+                    if "y" in pin_data
+                    else None
+                )
                 pins[node_id] = (fx, fy)
 
     align_x = None
@@ -295,6 +313,7 @@ def _graph_from_dict(data: Dict[str, Any]) -> "DaguaGraph":
     theme_val = data.get("theme")
     if isinstance(theme_val, str):
         from dagua.styles import get_theme
+
         theme = get_theme(theme_val)
     elif isinstance(theme_val, dict):
         theme = _dict_to_theme(theme_val)
@@ -306,6 +325,7 @@ def _graph_from_dict(data: Dict[str, Any]) -> "DaguaGraph":
     # If no custom theme was provided, use the default
     if not isinstance(g._theme, Theme):
         from dagua.styles import DEFAULT_THEME
+
         g._theme = Theme(node_styles=dict(DEFAULT_THEME))
 
     # 1. Add nodes
@@ -330,12 +350,15 @@ def _graph_from_dict(data: Dict[str, Any]) -> "DaguaGraph":
         members = cluster_data.get("members", [])
         label = cluster_data.get("label")
         parent = cluster_data.get("parent")
-        cluster_style = _dict_to_cluster_style(cluster_data["style"]) if "style" in cluster_data else None
+        cluster_style = (
+            _dict_to_cluster_style(cluster_data["style"]) if "style" in cluster_data else None
+        )
         g.add_cluster(name, members, label=label, style=cluster_style, parent=parent)
 
     # 4. Restore back edge mask (cycle support)
     if "back_edges" in data:
         import torch
+
         g._finalize_edges()
         E = g._edge_index_tensor.shape[1] if g._edge_index_tensor is not None else 0
         if E > 0:
@@ -459,7 +482,11 @@ def graph_to_json(graph: "DaguaGraph") -> Dict[str, Any]:
             cluster["members"] = [index_to_id.get(m, str(m)) for m in members]
         else:
             cluster["members"] = members
-        if hasattr(graph, 'cluster_parents') and name in graph.cluster_parents and graph.cluster_parents[name] is not None:
+        if (
+            hasattr(graph, "cluster_parents")
+            and name in graph.cluster_parents
+            and graph.cluster_parents[name] is not None
+        ):
             cluster["parent"] = graph.cluster_parents[name]
         if name in graph.cluster_labels:
             cluster["label"] = graph.cluster_labels[name]
@@ -571,11 +598,11 @@ def _ensure_yaml():
     """Import and return the yaml module, with a clear error if missing."""
     try:
         import yaml  # type: ignore[import-untyped]
+
         return yaml
     except ImportError:
         raise ImportError(
-            "PyYAML is required for YAML support. Install it with: "
-            "pip install 'dagua[yaml]'"
+            "PyYAML is required for YAML support. Install it with: pip install 'dagua[yaml]'"
         )
 
 
@@ -591,9 +618,7 @@ def graph_from_yaml(data: Union[str, Path]) -> "DaguaGraph":
     yaml = _ensure_yaml()
 
     s = str(data)
-    if s.endswith((".yaml", ".yml")) or (
-        os.path.exists(s) and not s.strip().startswith("{")
-    ):
+    if s.endswith((".yaml", ".yml")) or (os.path.exists(s) and not s.strip().startswith("{")):
         with open(s) as f:
             parsed = yaml.safe_load(f)
     else:
@@ -848,8 +873,7 @@ def to_networkx(graph: "DaguaGraph") -> Any:
         import networkx as nx
     except ImportError:
         raise ImportError(
-            "NetworkX is required for to_networkx(). Install it with: "
-            "pip install networkx"
+            "NetworkX is required for to_networkx(). Install it with: pip install networkx"
         )
 
     G = nx.DiGraph()
@@ -907,10 +931,7 @@ def to_igraph(graph: "DaguaGraph") -> Any:
     try:
         import igraph
     except ImportError:
-        raise ImportError(
-            "igraph is required for to_igraph(). Install it with: "
-            "pip install igraph"
-        )
+        raise ImportError("igraph is required for to_igraph(). Install it with: pip install igraph")
 
     index_to_id = {v: k for k, v in graph._id_to_index.items()}
 
@@ -938,12 +959,8 @@ def to_igraph(graph: "DaguaGraph") -> Any:
         labels = []
         types = []
         for e in range(ei.shape[1]):
-            labels.append(
-                graph.edge_labels[e] if e < len(graph.edge_labels) else None
-            )
-            types.append(
-                graph.edge_types[e] if e < len(graph.edge_types) else "normal"
-            )
+            labels.append(graph.edge_labels[e] if e < len(graph.edge_labels) else None)
+            types.append(graph.edge_types[e] if e < len(graph.edge_types) else "normal")
         g.es["label"] = labels
         g.es["type"] = types
 
@@ -961,8 +978,7 @@ def to_pyg(graph: "DaguaGraph") -> Any:
         from torch_geometric.data import Data
     except ImportError:
         raise ImportError(
-            "torch_geometric is required for to_pyg(). Install it with: "
-            "pip install torch-geometric"
+            "torch_geometric is required for to_pyg(). Install it with: pip install torch-geometric"
         )
 
     import torch
@@ -985,10 +1001,7 @@ def to_scipy(graph: "DaguaGraph") -> Any:
     try:
         import scipy.sparse
     except ImportError:
-        raise ImportError(
-            "scipy is required for to_scipy(). Install it with: "
-            "pip install scipy"
-        )
+        raise ImportError("scipy is required for to_scipy(). Install it with: pip install scipy")
 
     import numpy as np
 
@@ -1053,17 +1066,13 @@ def from_scipy(adj_matrix, labels=None, **kwargs) -> "DaguaGraph":
     Returns:
         A DaguaGraph.
     """
-    import torch
 
     from dagua.graph import DaguaGraph
 
     try:
         import scipy.sparse
     except ImportError:
-        raise ImportError(
-            "scipy is required for from_scipy(). Install it with: "
-            "pip install scipy"
-        )
+        raise ImportError("scipy is required for from_scipy(). Install it with: pip install scipy")
 
     coo = scipy.sparse.coo_matrix(adj_matrix)
     N = coo.shape[0]
@@ -1094,10 +1103,7 @@ def from_dot(dot_string: str, **kwargs) -> "DaguaGraph":
     try:
         import pydot
     except ImportError:
-        raise ImportError(
-            "pydot is required for from_dot(). Install it with: "
-            "pip install pydot"
-        )
+        raise ImportError("pydot is required for from_dot(). Install it with: pip install pydot")
 
     from dagua.graph import DaguaGraph
 
@@ -1141,7 +1147,7 @@ def from_dot(dot_string: str, **kwargs) -> "DaguaGraph":
         sg_obj = cast(Any, sg)
         sg_name = cast(str, sg_obj.get_name())
         if sg_name.startswith("cluster_"):
-            cluster_name = sg_name[len("cluster_"):]
+            cluster_name = sg_name[len("cluster_") :]
         else:
             cluster_name = sg_name
         cluster_name = cluster_name.strip('"')
@@ -1199,9 +1205,7 @@ def _normalize_provider_name(provider: Optional[str]) -> Optional[str]:
         "gpt": "openai",
     }
     if normalized not in aliases:
-        raise ValueError(
-            f"Unknown provider: {provider!r}. Use 'anthropic' or 'openai'."
-        )
+        raise ValueError(f"Unknown provider: {provider!r}. Use 'anthropic' or 'openai'.")
     return aliases[normalized]
 
 
@@ -1216,9 +1220,7 @@ def _resolve_image_ai_config(
     """Resolve explicit args, configured defaults, and env variables into one config."""
     base = config or _IMAGE_AI_CONFIG
     provider_name = _normalize_provider_name(
-        provider
-        or base.provider
-        or os.environ.get("DAGUA_IMAGE_AI_PROVIDER")
+        provider or base.provider or os.environ.get("DAGUA_IMAGE_AI_PROVIDER")
     )
 
     if provider_name is None:
@@ -1286,9 +1288,7 @@ def _get_llm_client(
         try:
             import anthropic
         except ImportError:
-            raise ImportError(
-                "anthropic SDK not installed. Run: pip install 'dagua[ai]'"
-            )
+            raise ImportError("anthropic SDK not installed. Run: pip install 'dagua[ai]'")
         kwargs = {"api_key": resolved.api_key}
         if resolved.base_url:
             kwargs["base_url"] = resolved.base_url
@@ -1298,9 +1298,7 @@ def _get_llm_client(
         try:
             import openai
         except ImportError:
-            raise ImportError(
-                "openai SDK not installed. Run: pip install 'dagua[ai]'"
-            )
+            raise ImportError("openai SDK not installed. Run: pip install 'dagua[ai]'")
         kwargs = {"api_key": resolved.api_key}
         if resolved.base_url:
             kwargs["base_url"] = resolved.base_url
@@ -1309,7 +1307,16 @@ def _get_llm_client(
     raise ValueError(f"Unknown provider: {resolved.provider!r}. Use 'anthropic' or 'openai'.")
 
 
-def _unpack_llm_client_result(result, *, provider: Optional[str], model: Optional[str], config: Optional[ImageAIConfig], api_key: Optional[str], api_key_env: Optional[str], base_url: Optional[str]) -> Tuple[str, Any, ImageAIConfig]:
+def _unpack_llm_client_result(
+    result,
+    *,
+    provider: Optional[str],
+    model: Optional[str],
+    config: Optional[ImageAIConfig],
+    api_key: Optional[str],
+    api_key_env: Optional[str],
+    base_url: Optional[str],
+) -> Tuple[str, Any, ImageAIConfig]:
     """Accept both legacy 2-tuples and new 3-tuples from _get_llm_client mocks."""
     if len(result) == 3:
         return result
@@ -1352,20 +1359,22 @@ def _send_image_to_llm(
         response = client.messages.create(
             model=model,
             max_tokens=4096,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": image_data,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": image_data,
+                            },
                         },
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }],
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
         )
         return response.content[0].text
 
@@ -1373,18 +1382,20 @@ def _send_image_to_llm(
         response = client.chat.completions.create(
             model=model,
             max_tokens=4096,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{media_type};base64,{image_data}",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{media_type};base64,{image_data}",
+                            },
                         },
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }],
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
         )
         return response.choices[0].message.content
 
@@ -1424,7 +1435,8 @@ def _prepare_image_for_llm(image_path: Union[str, Path]) -> Tuple[bytes, str]:
         from PIL import Image
     except ImportError as exc:
         raise ImportError(
-            "Pillow is required to load and normalize BMP/TIFF and other non-web-native image formats."
+            "Pillow is required to load and normalize BMP/TIFF and other "
+            "non-web-native image formats."
         ) from exc
 
     with Image.open(path) as img:
@@ -1449,6 +1461,7 @@ def _extract_json_from_response(text: str) -> Dict[str, Any]:
 
     # Try extracting from code fences
     import re
+
     fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
     if fence_match:
         try:
@@ -1468,7 +1481,7 @@ def _extract_json_from_response(text: str) -> Dict[str, Any]:
                 depth -= 1
                 if depth == 0:
                     try:
-                        return json.loads(text[brace_start:i + 1])
+                        return json.loads(text[brace_start : i + 1])
                     except json.JSONDecodeError:
                         break
 
@@ -1484,7 +1497,12 @@ def _python_literal(value: Any) -> str:
     if isinstance(value, list):
         return "[" + ", ".join(_python_literal(v) for v in value) + "]"
     if isinstance(value, tuple):
-        return "(" + ", ".join(_python_literal(v) for v in value) + ("," if len(value) == 1 else "") + ")"
+        return (
+            "("
+            + ", ".join(_python_literal(v) for v in value)
+            + ("," if len(value) == 1 else "")
+            + ")"
+        )
     if isinstance(value, dict):
         items = ", ".join(f"{_python_literal(k)}: {_python_literal(v)}" for k, v in value.items())
         return "{" + items + "}"
@@ -1518,7 +1536,11 @@ def graph_code_from_dict(graph_dict: Dict[str, Any], function_name: str = "build
     if style_imports:
         imports.append("from dagua import " + ", ".join(style_imports))
 
-    lines = imports + ["", f"def {function_name}() -> DaguaGraph:", f"    g = DaguaGraph(direction={_python_literal(graph_dict.get('direction', 'TB'))})"]
+    lines = imports + [
+        "",
+        f"def {function_name}() -> DaguaGraph:",
+        f"    g = DaguaGraph(direction={_python_literal(graph_dict.get('direction', 'TB'))})",
+    ]
 
     for node in nodes:
         parts = [f"    g.add_node({_python_literal(node['id'])}"]
@@ -1561,7 +1583,9 @@ def graph_code_from_dict(graph_dict: Dict[str, Any], function_name: str = "build
             parts.append(f"style={_constructor_expr('ClusterStyle', cluster['style'])}")
         lines.append(", ".join(parts) + ")")
 
-    lines.extend(["", "    g.compute_node_sizes()", "    return g", "", f"graph = {function_name}()"])
+    lines.extend(
+        ["", "    g.compute_node_sizes()", "    return g", "", f"graph = {function_name}()"]
+    )
     return "\n".join(lines)
 
 
@@ -1606,12 +1630,16 @@ def theme_code_from_dict(theme_dict: Dict[str, Any], variable_name: str = "theme
     if node_styles:
         lines.append("    node_styles={")
         for key, value in node_styles.items():
-            lines.append(f"        {_python_literal(key)}: {_constructor_expr('NodeStyle', value)},")
+            lines.append(
+                f"        {_python_literal(key)}: {_constructor_expr('NodeStyle', value)},"
+            )
         lines.append("    },")
     if edge_styles:
         lines.append("    edge_styles={")
         for key, value in edge_styles.items():
-            lines.append(f"        {_python_literal(key)}: {_constructor_expr('EdgeStyle', value)},")
+            lines.append(
+                f"        {_python_literal(key)}: {_constructor_expr('EdgeStyle', value)},"
+            )
         lines.append("    },")
     if cluster_style:
         lines.append(f"    cluster_style={_constructor_expr('ClusterStyle', cluster_style)},")

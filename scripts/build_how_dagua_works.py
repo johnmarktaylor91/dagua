@@ -29,10 +29,24 @@ def _pipeline_overview(path: Path) -> None:
     ]
     xs = [0.07, 0.2, 0.33, 0.46, 0.59, 0.72, 0.85]
     for x, (label, fill) in zip(xs, stages):
-        ax.add_patch(plt.Rectangle((x - 0.055, 0.36), 0.11, 0.28, facecolor=fill, edgecolor="#3A556A", linewidth=1.2))
+        ax.add_patch(
+            plt.Rectangle(
+                (x - 0.055, 0.36),
+                0.11,
+                0.28,
+                facecolor=fill,
+                edgecolor="#3A556A",
+                linewidth=1.2,
+            )
+        )
         ax.text(x, 0.5, label, ha="center", va="center", fontsize=10)
     for left, right in zip(xs[:-1], xs[1:]):
-        ax.annotate("", xy=(right - 0.06, 0.5), xytext=(left + 0.06, 0.5), arrowprops=dict(arrowstyle="->", color="#5F6368"))
+        ax.annotate(
+            "",
+            xy=(right - 0.06, 0.5),
+            xytext=(left + 0.06, 0.5),
+            arrowprops=dict(arrowstyle="->", color="#5F6368"),
+        )
     fig.savefig(path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
@@ -48,26 +62,46 @@ def _multilevel_hierarchy(path: Path) -> None:
     for label, count, y, fill in levels:
         xs = [0.1 + i * (0.8 / max(count - 1, 1)) for i in range(count)]
         for x in xs:
-            ax.add_patch(plt.Circle((x, y), 0.03, facecolor=fill, edgecolor="#3A556A", linewidth=1.0))
+            ax.add_patch(
+                plt.Circle((x, y), 0.03, facecolor=fill, edgecolor="#3A556A", linewidth=1.0)
+            )
         ax.text(0.5, y + 0.08, label, ha="center", va="bottom", fontsize=11)
     for x in [0.14, 0.3, 0.46, 0.62, 0.78]:
-        ax.annotate("", xy=(x, 0.61), xytext=(x, 0.74), arrowprops=dict(arrowstyle="->", color="#70757A"))
+        ax.annotate(
+            "",
+            xy=(x, 0.61),
+            xytext=(x, 0.74),
+            arrowprops=dict(arrowstyle="->", color="#70757A"),
+        )
     for x in [0.22, 0.5, 0.78]:
-        ax.annotate("", xy=(x, 0.34), xytext=(x, 0.47), arrowprops=dict(arrowstyle="->", color="#70757A"))
-    ax.text(0.5, 0.05, "Optimize small first, then prolong and refine back upward", ha="center", fontsize=10)
+        ax.annotate(
+            "",
+            xy=(x, 0.34),
+            xytext=(x, 0.47),
+            arrowprops=dict(arrowstyle="->", color="#70757A"),
+        )
+    ax.text(
+        0.5,
+        0.05,
+        "Optimize small first, then prolong and refine back upward",
+        ha="center",
+        fontsize=10,
+    )
     fig.savefig(path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
 def _routing_comparison(path: Path) -> None:
-    g = DaguaGraph.from_edge_list([
-        ("input", "fork"),
-        ("fork", "a"),
-        ("fork", "b"),
-        ("a", "merge"),
-        ("b", "merge"),
-        ("merge", "out"),
-    ])
+    g = DaguaGraph.from_edge_list(
+        [
+            ("input", "fork"),
+            ("fork", "a"),
+            ("fork", "b"),
+            ("a", "merge"),
+            ("b", "merge"),
+            ("merge", "out"),
+        ]
+    )
     configs = [
         ("Straight", EdgeStyle(routing="straight", curvature=0.0)),
         ("Bezier", EdgeStyle(routing="bezier", curvature=0.4)),
@@ -84,13 +118,15 @@ def _routing_comparison(path: Path) -> None:
 
 
 def _loss_constraint_story(path: Path) -> None:
-    g = DaguaGraph.from_edge_list([
-        ("input", "a"),
-        ("input", "b"),
-        ("a", "merge"),
-        ("b", "merge"),
-        ("merge", "output"),
-    ])
+    g = DaguaGraph.from_edge_list(
+        [
+            ("input", "a"),
+            ("input", "b"),
+            ("a", "merge"),
+            ("b", "merge"),
+            ("merge", "output"),
+        ]
+    )
     g.pin("input", x=0.0, y=0.0)
     g.pin("output", x=240.0, y=120.0)
     result = dagua.animate(

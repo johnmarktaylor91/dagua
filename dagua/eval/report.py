@@ -10,8 +10,8 @@ import json
 import os
 import shutil
 import subprocess
-from statistics import mean
 from pathlib import Path
+from statistics import mean
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import torch
@@ -46,12 +46,13 @@ def generate_grid(
     Returns path to the grid image.
     """
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from dagua.layout import layout
-    from dagua.render.mpl import _draw_clusters, _draw_edges, _draw_nodes, _draw_node_labels
     from dagua.edges import route_edges
+    from dagua.layout import layout
+    from dagua.render.mpl import _draw_clusters, _draw_edges, _draw_node_labels, _draw_nodes
 
     if graphs is None:
         graphs = get_test_graphs(max_nodes=200)
@@ -90,8 +91,15 @@ def generate_grid(
             ax.set_ylim(y_min, y_max)
             ax.set_aspect("equal")
         except Exception as e:
-            ax.text(0.5, 0.5, f"Error:\n{e}", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=8)
+            ax.text(
+                0.5,
+                0.5,
+                f"Error:\n{e}",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=8,
+            )
 
         ax.set_title(f"{tg.name}\n({', '.join(sorted(tg.tags)[:2])})", fontsize=8)
         ax.axis("off")
@@ -121,13 +129,12 @@ def generate_comparison_grid(
     Returns path to the grid image.
     """
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from dagua.layout import layout
     from dagua.graphviz_utils import layout_with_graphviz
-    from dagua.render.mpl import _draw_clusters, _draw_edges, _draw_nodes, _draw_node_labels
-    from dagua.edges import route_edges
+    from dagua.layout import layout
     from dagua.metrics import compute_all_metrics
 
     if graphs is None:
@@ -157,8 +164,9 @@ def generate_comparison_grid(
                 fontsize=8,
             )
         except Exception as e:
-            ax_dagua.text(0.5, 0.5, str(e), ha="center", va="center",
-                         transform=ax_dagua.transAxes, fontsize=8)
+            ax_dagua.text(
+                0.5, 0.5, str(e), ha="center", va="center", transform=ax_dagua.transAxes, fontsize=8
+            )
             ax_dagua.set_title(f"Dagua: {tg.name} (error)", fontsize=8)
 
         # Graphviz
@@ -172,8 +180,9 @@ def generate_comparison_grid(
                 fontsize=8,
             )
         except Exception as e:
-            ax_gv.text(0.5, 0.5, str(e), ha="center", va="center",
-                       transform=ax_gv.transAxes, fontsize=8)
+            ax_gv.text(
+                0.5, 0.5, str(e), ha="center", va="center", transform=ax_gv.transAxes, fontsize=8
+            )
             ax_gv.set_title(f"Graphviz: {tg.name} (error)", fontsize=8)
 
         ax_dagua.axis("off")
@@ -190,8 +199,8 @@ def generate_comparison_grid(
 
 def _render_on_ax(ax, graph, positions):
     """Helper to render a graph on a matplotlib axes."""
-    from dagua.render.mpl import _draw_clusters, _draw_edges, _draw_nodes, _draw_node_labels
     from dagua.edges import route_edges
+    from dagua.render.mpl import _draw_clusters, _draw_edges, _draw_node_labels, _draw_nodes
 
     pos_np = positions.detach().cpu().numpy()
     sizes_t = _require_node_sizes(graph)
@@ -236,6 +245,7 @@ def generate_multi_comparison_grid(
         Path to the grid image.
     """
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -273,8 +283,15 @@ def generate_multi_comparison_grid(
             ax = axes[i][j]
             try:
                 if tg.graph.num_nodes > comp.max_nodes:
-                    ax.text(0.5, 0.5, "Too large", ha="center", va="center",
-                            transform=ax.transAxes, fontsize=8)
+                    ax.text(
+                        0.5,
+                        0.5,
+                        "Too large",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                        fontsize=8,
+                    )
                     ax.set_title(f"{comp.name}: {tg.name}", fontsize=7)
                 else:
                     result = comp.layout(tg.graph)
@@ -291,12 +308,26 @@ def generate_multi_comparison_grid(
                             fontsize=7,
                         )
                     else:
-                        ax.text(0.5, 0.5, f"Error:\n{result.error}", ha="center",
-                                va="center", transform=ax.transAxes, fontsize=7)
+                        ax.text(
+                            0.5,
+                            0.5,
+                            f"Error:\n{result.error}",
+                            ha="center",
+                            va="center",
+                            transform=ax.transAxes,
+                            fontsize=7,
+                        )
                         ax.set_title(f"{comp.name}: {tg.name}", fontsize=7)
             except Exception as e:
-                ax.text(0.5, 0.5, f"Error:\n{e}", ha="center", va="center",
-                        transform=ax.transAxes, fontsize=7)
+                ax.text(
+                    0.5,
+                    0.5,
+                    f"Error:\n{e}",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                    fontsize=7,
+                )
                 ax.set_title(f"{comp.name}: {tg.name}", fontsize=7)
             ax.axis("off")
 
@@ -321,29 +352,29 @@ def generate_html_dashboard(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     path = str(Path(output_dir) / "dashboard.html")
 
-    html = ['<!DOCTYPE html><html><head>']
+    html = ["<!DOCTYPE html><html><head>"]
     html.append('<meta charset="utf-8">')
-    html.append('<title>Dagua Evaluation Dashboard</title>')
-    html.append('<style>')
-    html.append('body { font-family: -apple-system, sans-serif; margin: 20px; }')
-    html.append('table { border-collapse: collapse; margin: 10px 0; }')
-    html.append('th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: right; }')
-    html.append('th { background: #f5f5f5; }')
-    html.append('.better { color: green; font-weight: bold; }')
-    html.append('.worse { color: red; }')
-    html.append('h1,h2,h3 { color: #333; }')
-    html.append('</style></head><body>')
+    html.append("<title>Dagua Evaluation Dashboard</title>")
+    html.append("<style>")
+    html.append("body { font-family: -apple-system, sans-serif; margin: 20px; }")
+    html.append("table { border-collapse: collapse; margin: 10px 0; }")
+    html.append("th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: right; }")
+    html.append("th { background: #f5f5f5; }")
+    html.append(".better { color: green; font-weight: bold; }")
+    html.append(".worse { color: red; }")
+    html.append("h1,h2,h3 { color: #333; }")
+    html.append("</style></head><body>")
 
-    html.append('<h1>Dagua Evaluation Dashboard</h1>')
+    html.append("<h1>Dagua Evaluation Dashboard</h1>")
 
     # Comparison table
     if comparison_results:
-        html.append('<h2>Dagua vs Graphviz</h2>')
-        html.append('<table><tr><th>Graph</th><th>Nodes</th>')
-        html.append('<th>Dagua Quality</th><th>Graphviz Quality</th>')
-        html.append('<th>Dagua Crossings</th><th>GV Crossings</th>')
-        html.append('<th>Dagua Overlaps</th><th>GV Overlaps</th>')
-        html.append('<th>Winner</th></tr>')
+        html.append("<h2>Dagua vs Graphviz</h2>")
+        html.append("<table><tr><th>Graph</th><th>Nodes</th>")
+        html.append("<th>Dagua Quality</th><th>Graphviz Quality</th>")
+        html.append("<th>Dagua Crossings</th><th>GV Crossings</th>")
+        html.append("<th>Dagua Overlaps</th><th>GV Overlaps</th>")
+        html.append("<th>Winner</th></tr>")
 
         for r in comparison_results:
             dq = r.dagua_metrics.get("overall_quality", 0)
@@ -357,25 +388,26 @@ def generate_html_dashboard(
             wclass = "better" if r.dagua_better else "worse"
 
             html.append(f'<tr><td style="text-align:left">{r.graph_name}</td>')
-            html.append(f'<td>{nn}</td>')
-            html.append(f'<td>{dq:.1f}</td><td>{gq:.1f}</td>')
-            html.append(f'<td>{dc}</td><td>{gc}</td>')
-            html.append(f'<td>{do_}</td><td>{go}</td>')
+            html.append(f"<td>{nn}</td>")
+            html.append(f"<td>{dq:.1f}</td><td>{gq:.1f}</td>")
+            html.append(f"<td>{dc}</td><td>{gc}</td>")
+            html.append(f"<td>{do_}</td><td>{go}</td>")
             html.append(f'<td class="{wclass}">{winner}</td></tr>')
 
         wins = sum(1 for r in comparison_results if r.dagua_better)
-        html.append(f'</table><p><b>Dagua wins: {wins}/{len(comparison_results)}</b></p>')
+        html.append(f"</table><p><b>Dagua wins: {wins}/{len(comparison_results)}</b></p>")
 
     # Sweep summary
     if sweep_results:
-        html.append('<h2>Parameter Sweep Summary</h2>')
+        html.append("<h2>Parameter Sweep Summary</h2>")
         from collections import defaultdict
+
         by_param = defaultdict(list)
         for r in sweep_results:
             by_param[r.param_name].append(r)
 
-        html.append('<table><tr><th>Parameter</th><th>Best Value</th>')
-        html.append('<th>Best Quality</th><th>Worst Value</th><th>Worst Quality</th></tr>')
+        html.append("<table><tr><th>Parameter</th><th>Best Value</th>")
+        html.append("<th>Best Quality</th><th>Worst Value</th><th>Worst Quality</th></tr>")
 
         for param, rs in sorted(by_param.items()):
             by_value = defaultdict(list)
@@ -385,21 +417,21 @@ def generate_html_dashboard(
             best_val = max(avg_quality, key=lambda value: avg_quality[value])
             worst_val = min(avg_quality, key=lambda value: avg_quality[value])
             html.append(f'<tr><td style="text-align:left">{param}</td>')
-            html.append(f'<td>{best_val}</td><td>{avg_quality[best_val]:.1f}</td>')
-            html.append(f'<td>{worst_val}</td><td>{avg_quality[worst_val]:.1f}</td></tr>')
+            html.append(f"<td>{best_val}</td><td>{avg_quality[best_val]:.1f}</td>")
+            html.append(f"<td>{worst_val}</td><td>{avg_quality[worst_val]:.1f}</td></tr>")
 
-        html.append('</table>')
+        html.append("</table>")
 
     # Images
-    html.append('<h2>Visual Comparisons</h2>')
+    html.append("<h2>Visual Comparisons</h2>")
     grid_path = Path(output_dir) / "grids" / "comparison_grid.png"
     if grid_path.exists():
-        html.append(f'<img src="grids/comparison_grid.png" style="max-width:100%">')
+        html.append('<img src="grids/comparison_grid.png" style="max-width:100%">')
     test_grid = Path(output_dir) / "grids" / "test_graph_grid.png"
     if test_grid.exists():
-        html.append(f'<img src="grids/test_graph_grid.png" style="max-width:100%">')
+        html.append('<img src="grids/test_graph_grid.png" style="max-width:100%">')
 
-    html.append('</body></html>')
+    html.append("</body></html>")
 
     with open(path, "w") as f:
         f.write("\n".join(html))
@@ -498,9 +530,7 @@ def generate_benchmark_markdown(results: list, output_path: str) -> str:
 
     # Summary table
     lines.append("## Summary\n")
-    lines.append(
-        "| Competitor | Avg Score | Avg Runtime | Max Nodes | Wins | Graphs Run |"
-    )
+    lines.append("| Competitor | Avg Score | Avg Runtime | Max Nodes | Wins | Graphs Run |")
     lines.append("|---|---|---|---|---|---|")
     for comp in competitor_order:
         s = comp_stats[comp]
@@ -562,9 +592,7 @@ def generate_benchmark_markdown(results: list, output_path: str) -> str:
         lines.append("")
 
     # Key metrics breakdown (only if results have metrics data)
-    has_metrics = any(
-        r.metrics for r in results if r.metrics and "_metrics_error" not in r.metrics
-    )
+    has_metrics = any(r.metrics for r in results if r.metrics and "_metrics_error" not in r.metrics)
     if has_metrics:
         lines.append("## Key Metrics Breakdown\n")
 
@@ -578,9 +606,7 @@ def generate_benchmark_markdown(results: list, output_path: str) -> str:
 
         for mk, label in metric_keys:
             lines.append(f"### {label}\n")
-            lines.append(
-                "| Graph |" + "".join(f" {c} |" for c in competitor_order)
-            )
+            lines.append("| Graph |" + "".join(f" {c} |" for c in competitor_order))
             lines.append("|---|" + "".join("---|" for _ in competitor_order))
 
             for gname in sorted(by_graph.keys()):
@@ -646,8 +672,26 @@ def _normalize_positions(
 
 def _status_panel(ax, title: str, subtitle: str) -> None:
     ax.set_facecolor("#F3F4F6")
-    ax.text(0.5, 0.58, title, ha="center", va="center", transform=ax.transAxes, fontsize=11, color="#374151")
-    ax.text(0.5, 0.42, subtitle, ha="center", va="center", transform=ax.transAxes, fontsize=8, color="#6B7280")
+    ax.text(
+        0.5,
+        0.58,
+        title,
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+        fontsize=11,
+        color="#374151",
+    )
+    ax.text(
+        0.5,
+        0.42,
+        subtitle,
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+        fontsize=8,
+        color="#6B7280",
+    )
     ax.axis("off")
 
 
@@ -718,8 +762,16 @@ def generate_comparison_visuals(
 
             standard_id = combined_results.get("generated_from", {}).get("standard")
             rare_id = combined_results.get("generated_from", {}).get("rare")
-            positions_root = Path(output_dir) / "benchmark_db" / "standard" / standard_id if standard_id else None
-            if graph_name.startswith("scale_") and graph_payload.get("n_nodes", 0) > 100_000 and rare_id is not None:
+            positions_root = (
+                Path(output_dir) / "benchmark_db" / "standard" / standard_id
+                if standard_id
+                else None
+            )
+            if (
+                graph_name.startswith("scale_")
+                and graph_payload.get("n_nodes", 0) > 100_000
+                and rare_id is not None
+            ):
                 positions_root = Path(output_dir) / "benchmark_db" / "rare" / rare_id
             if positions_root is None:
                 _status_panel(ax, comp_name, "missing positions root")
@@ -731,12 +783,14 @@ def generate_comparison_visuals(
             runtime = result.get("runtime_seconds")
             score = result.get("composite_score")
             ax.set_title(
-                f"{comp_name}\n{runtime:.2f}s, score={score:.1f}" if runtime is not None and score is not None else comp_name,
+                f"{comp_name}\n{runtime:.2f}s, score={score:.1f}"
+                if runtime is not None and score is not None
+                else comp_name,
                 fontsize=8,
             )
             ax.axis("off")
 
-        for ax in axes[len(ordered):]:
+        for ax in axes[len(ordered) :]:
             ax.axis("off")
 
         fig.suptitle(f"{graph_name} ({graph_payload.get('n_nodes', 0):,} nodes)", fontsize=12)
@@ -788,9 +842,23 @@ def generate_scaling_curve(
         series = sorted(points[comp_name])
         xs = [x for x, _ in series]
         ys = [y for _, y in series]
-        ax.plot(xs, ys, marker="o", linewidth=2.0, markersize=5, label=comp_name, color=palette.get(comp_name))
+        ax.plot(
+            xs,
+            ys,
+            marker="o",
+            linewidth=2.0,
+            markersize=5,
+            label=comp_name,
+            color=palette.get(comp_name),
+        )
         if comp_name == "dagua":
-            ax.annotate(f"{xs[-1]:,}", (xs[-1], ys[-1]), textcoords="offset points", xytext=(6, -4), fontsize=8)
+            ax.annotate(
+                f"{xs[-1]:,}",
+                (xs[-1], ys[-1]),
+                textcoords="offset points",
+                xytext=(6, -4),
+                fontsize=8,
+            )
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -826,7 +894,9 @@ def generate_layout_similarity_artifacts(
 
     standard_id = combined_results.get("generated_from", {}).get("standard")
     rare_id = combined_results.get("generated_from", {}).get("rare")
-    standard_root = Path(output_dir) / "benchmark_db" / "standard" / standard_id if standard_id else None
+    standard_root = (
+        Path(output_dir) / "benchmark_db" / "standard" / standard_id if standard_id else None
+    )
     rare_root = Path(output_dir) / "benchmark_db" / "rare" / rare_id if rare_id else None
 
     payload: Dict[str, Any] = {
@@ -842,7 +912,6 @@ def generate_layout_similarity_artifacts(
     for graph_name, graph_payload in combined_results.get("graphs", {}).items():
         if graph_name not in graph_lookup:
             continue
-        tg = graph_lookup[graph_name]
         competitors = graph_payload.get("competitors", {})
         valid_positions: Dict[str, torch.Tensor] = {}
         ordered = [name for name in DEFAULT_COMPETITOR_ORDER if name in competitors]
@@ -851,7 +920,11 @@ def generate_layout_similarity_artifacts(
             if result.get("status") != "OK" or not result.get("positions_path"):
                 continue
             root = standard_root
-            if graph_payload.get("n_nodes", 0) > 100_000 and rare_root is not None and graph_name.startswith("scale_"):
+            if (
+                graph_payload.get("n_nodes", 0) > 100_000
+                and rare_root is not None
+                and graph_name.startswith("scale_")
+            ):
                 root = rare_root
             if root is None:
                 continue
@@ -870,7 +943,9 @@ def generate_layout_similarity_artifacts(
                     matrix[a][b] = 0.0
                     continue
                 pair = cast(Tuple[str, str], tuple(sorted((a, b))))
-                disparity = float(compare(valid_positions[a], valid_positions[b]).get("procrustes_disparity", 1.0))
+                disparity = float(
+                    compare(valid_positions[a], valid_positions[b]).get("procrustes_disparity", 1.0)
+                )
                 matrix[a][b] = disparity
                 pairwise_buckets.setdefault(pair, []).append(disparity)
 
@@ -908,8 +983,9 @@ def generate_layout_similarity_artifacts(
     if aggregate_pairs:
         for pair_name, pair_payload in aggregate_pairs.items():
             lines.append(
-                f"- `{pair_name}`: mean disparity `{pair_payload['mean_procrustes_disparity']:.4f}` "
-                f"across `{pair_payload['graphs_compared']}` graphs"
+                f"- `{pair_name}`: mean disparity "
+                f"`{pair_payload['mean_procrustes_disparity']:.4f}` across "
+                f"`{pair_payload['graphs_compared']}` graphs"
             )
     else:
         lines.append("- No pairwise comparisons available.")
@@ -1016,7 +1092,9 @@ def generate_placement_summary_artifacts(
     lines = [
         "# Placement Summary",
         "",
-        "Placement-only benchmark view. This report intentionally ignores styling and focuses on node-placement metrics stored by the benchmark pipeline.",
+        "Placement-only benchmark view. This report intentionally ignores "
+        "styling and focuses on node-placement metrics stored by the "
+        "benchmark pipeline.",
         "",
         "## Aggregate",
         "",
@@ -1120,12 +1198,18 @@ def generate_placement_dashboard_artifacts(
                 if best_other_value is None:
                     best_other_name, best_other_value = comp_name, value
                 else:
-                    if (higher_is_better and value > best_other_value) or (not higher_is_better and value < best_other_value):
+                    if (higher_is_better and value > best_other_value) or (
+                        not higher_is_better and value < best_other_value
+                    ):
                         best_other_name, best_other_value = comp_name, value
             delta = None
             dagua_wins = None
             if best_other_value is not None:
-                delta = dagua_value - best_other_value if higher_is_better else best_other_value - dagua_value
+                delta = (
+                    dagua_value - best_other_value
+                    if higher_is_better
+                    else best_other_value - dagua_value
+                )
                 dagua_wins = delta >= 0
                 delta_buckets[metric_name].append(delta)
                 if dagua_wins:
@@ -1143,8 +1227,7 @@ def generate_placement_dashboard_artifacts(
             payload["aggregate"]["graphs_considered"] += 1
 
     payload["aggregate"]["mean_metric_delta_vs_best_non_dagua"] = {
-        metric: (mean(values) if values else None)
-        for metric, values in delta_buckets.items()
+        metric: (mean(values) if values else None) for metric, values in delta_buckets.items()
     }
 
     json_path = report_dir / "placement_dashboard.json"
@@ -1154,7 +1237,9 @@ def generate_placement_dashboard_artifacts(
     lines = [
         "# Placement Dashboard",
         "",
-        "Iteration-oriented placement summary. This is the fastest report to consult when the question is: how is Dagua's node placement doing, before worrying about rendering language?",
+        "Iteration-oriented placement summary. This is the fastest report to "
+        "consult when the question is: how is Dagua's node placement doing, "
+        "before worrying about rendering language?",
         "",
         "## Aggregate",
         "",
@@ -1164,7 +1249,10 @@ def generate_placement_dashboard_artifacts(
         total = payload["aggregate"]["graphs_considered"]
         mean_delta = payload["aggregate"]["mean_metric_delta_vs_best_non_dagua"].get(metric_name)
         mean_text = f"{mean_delta:.4f}" if mean_delta is not None else "N/A"
-        lines.append(f"- `{metric_name}`: Dagua wins `{wins}/{total}` graphs, mean delta vs best non-Dagua `{mean_text}`")
+        lines.append(
+            f"- `{metric_name}`: Dagua wins `{wins}/{total}` graphs, mean "
+            f"delta vs best non-Dagua `{mean_text}`"
+        )
     lines.append("")
     lines.append("## Per Graph")
     lines.append("")
@@ -1189,13 +1277,19 @@ def _latest_standard_run_id(combined_results: Dict[str, Any]) -> Optional[str]:
     return combined_results.get("generated_from", {}).get("standard")
 
 
-def _previous_standard_results(output_dir: str, current_run_id: Optional[str]) -> Optional[Dict[str, Any]]:
+def _previous_standard_results(
+    output_dir: str, current_run_id: Optional[str]
+) -> Optional[Dict[str, Any]]:
     root = Path(output_dir) / "benchmark_db" / "standard"
     if not root.exists():
         return None
     run_dirs = [path for path in root.iterdir() if path.is_dir() and path.name != "latest"]
     run_dirs.sort(key=lambda path: path.name)
-    candidates = [path for path in run_dirs if path.name != current_run_id and (path / "results.json").exists()]
+    candidates = [
+        path
+        for path in run_dirs
+        if path.name != current_run_id and (path / "results.json").exists()
+    ]
     if not candidates:
         return None
     return _load_json(candidates[-1] / "results.json")
@@ -1213,7 +1307,9 @@ def generate_benchmark_deltas(
     current_run_id = _latest_standard_run_id(combined_results)
     current_payload = None
     if current_run_id is not None:
-        current_path = Path(output_dir) / "benchmark_db" / "standard" / current_run_id / "results.json"
+        current_path = (
+            Path(output_dir) / "benchmark_db" / "standard" / current_run_id / "results.json"
+        )
         if current_path.exists():
             current_payload = _load_json(current_path)
     previous_payload = _previous_standard_results(output_dir, current_run_id)
@@ -1232,10 +1328,15 @@ def generate_benchmark_deltas(
             "graphs": {},
         }
         json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        md_path.write_text("# Benchmark Deltas\n\nNo previous standard run was available for delta reporting.\n", encoding="utf-8")
+        md_path.write_text(
+            "# Benchmark Deltas\n\nNo previous standard run was available for delta reporting.\n",
+            encoding="utf-8",
+        )
         return str(json_path), str(md_path)
 
-    overlapping = sorted(set(current_payload.get("graphs", {})) & set(previous_payload.get("graphs", {})))
+    overlapping = sorted(
+        set(current_payload.get("graphs", {})) & set(previous_payload.get("graphs", {}))
+    )
     graph_deltas: Dict[str, Any] = {}
     runtime_deltas: List[float] = []
     score_deltas: List[float] = []
@@ -1257,12 +1358,22 @@ def generate_benchmark_deltas(
             if isinstance(cur, (int, float)) and isinstance(old, (int, float)):
                 metric_delta[key] = float(cur) - float(old)
         runtime_delta = None
-        if current_result.get("runtime_seconds") is not None and baseline_result.get("runtime_seconds") is not None:
-            runtime_delta = float(current_result["runtime_seconds"]) - float(baseline_result["runtime_seconds"])
+        if (
+            current_result.get("runtime_seconds") is not None
+            and baseline_result.get("runtime_seconds") is not None
+        ):
+            runtime_delta = float(current_result["runtime_seconds"]) - float(
+                baseline_result["runtime_seconds"]
+            )
             runtime_deltas.append(runtime_delta)
         score_delta = None
-        if current_result.get("composite_score") is not None and baseline_result.get("composite_score") is not None:
-            score_delta = float(current_result["composite_score"]) - float(baseline_result["composite_score"])
+        if (
+            current_result.get("composite_score") is not None
+            and baseline_result.get("composite_score") is not None
+        ):
+            score_delta = float(current_result["composite_score"]) - float(
+                baseline_result["composite_score"]
+            )
             score_deltas.append(score_delta)
             if score_delta > 0:
                 win_count += 1
@@ -1301,8 +1412,12 @@ def generate_benchmark_deltas(
         f"Baseline standard run: `{payload['baseline_run_id']}`",
         "",
         f"- Graphs compared: {aggregate['graphs_compared']}",
-        f"- Mean composite score delta: {aggregate['mean_composite_score_delta']:.3f}" if aggregate["mean_composite_score_delta"] is not None else "- Mean composite score delta: N/A",
-        f"- Mean runtime delta (s): {aggregate['mean_runtime_delta_seconds']:.3f}" if aggregate["mean_runtime_delta_seconds"] is not None else "- Mean runtime delta (s): N/A",
+        f"- Mean composite score delta: {aggregate['mean_composite_score_delta']:.3f}"
+        if aggregate["mean_composite_score_delta"] is not None
+        else "- Mean composite score delta: N/A",
+        f"- Mean runtime delta (s): {aggregate['mean_runtime_delta_seconds']:.3f}"
+        if aggregate["mean_runtime_delta_seconds"] is not None
+        else "- Mean runtime delta (s): N/A",
         "",
         "| Graph | Score delta | Runtime delta (s) |",
         "|---|---:|---:|",
@@ -1314,7 +1429,10 @@ def generate_benchmark_deltas(
         lines.append(
             f"| {graph_name} | {score:.3f} | {runtime:.3f} |"
             if score is not None and runtime is not None
-            else f"| {graph_name} | {score if score is not None else 'N/A'} | {runtime if runtime is not None else 'N/A'} |"
+            else (
+                f"| {graph_name} | {score if score is not None else 'N/A'} | "
+                f"{runtime if runtime is not None else 'N/A'} |"
+            )
         )
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(json_path), str(md_path)
@@ -1388,7 +1506,9 @@ def _summary_statistics(combined_results: Dict[str, Any]) -> Dict[str, Any]:
     for graph_name, graph_payload in combined_results.get("graphs", {}).items():
         n_nodes = graph_payload.get("n_nodes", 0)
         for comp_name, result in graph_payload.get("competitors", {}).items():
-            stats = aggregate["competitors"].setdefault(comp_name, {"scores": [], "runtimes": [], "small_scores": [], "dag_consistency": []})
+            stats = aggregate["competitors"].setdefault(
+                comp_name, {"scores": [], "runtimes": [], "small_scores": [], "dag_consistency": []}
+            )
             if result.get("status") != "OK":
                 continue
             if result.get("composite_score") is not None:
@@ -1453,7 +1573,8 @@ def _review_prompt() -> str:
         "- Vague appeals to quality or aesthetics without grounding in specific criteria\n\n"
         "Rate the report on: Organization, Writing Clarity, Visual Quality, Convincingness,\n"
         "Statistical Rigor, Honesty/Balance. For each criterion below 8, provide specific\n"
-        "revision instructions. For each criterion at 8+, note what works well and one improvement.\n"
+        "revision instructions. For each criterion at 8+, note what works well "
+        "and one improvement.\n"
     )
 
 
@@ -1512,15 +1633,84 @@ def _render_latex_report(
     comp_lines = []
     for comp_name, stats in summary["competitors"].items():
         comp_lines.append(
-            f"{_latex_escape(comp_name)} & {_format_mean(stats['small_scores'])} & {_format_mean(stats['dag_consistency'])} & {_format_mean(stats['runtimes'])} \\\\"
+            f"{_latex_escape(comp_name)} & {_format_mean(stats['small_scores'])} & "
+            f"{_format_mean(stats['dag_consistency'])} & "
+            f"{_format_mean(stats['runtimes'])} \\\\"
         )
 
     gallery_items = []
     for path in list(comparison_paths)[:4]:
         gallery_items.append(
-            "\\includegraphics[width=0.48\\linewidth]{" + _latex_path(os.path.relpath(path, report_dir)) + "}"
+            "\\includegraphics[width=0.48\\linewidth]{"
+            + _latex_path(os.path.relpath(path, report_dir))
+            + "}"
         )
-    gallery_block = "\\\\[6pt]".join(gallery_items) if gallery_items else "No comparison images available for this run."
+    gallery_block = (
+        "\\\\[6pt]".join(gallery_items)
+        if gallery_items
+        else "No comparison images available for this run."
+    )
+    standard_run_id = generated_from.get("standard", "N/A")
+    rare_run_id = generated_from.get("rare", "N/A")
+    scaling_curve_rel = _latex_path(os.path.relpath(scaling_curve_path, report_dir))
+    executive_summary = (
+        f"This report summarizes the latest standard benchmark run {standard_run_id} "
+        f"and the latest rare run {rare_run_id}. Results are stored in "
+        "\\texttt{eval\\_output/benchmark\\_db} and merged through "
+        "\\texttt{combined\\_latest.json}."
+    )
+    methodology_text = (
+        "The suite mixes small structural motifs, real architecture traces, and a "
+        "scale ladder. Metric computation uses the existing Dagua metric stack: "
+        "full metrics for smaller graphs, quick metrics for larger graphs. "
+        "Anti-pattern flags are derived from the stored quality metrics rather "
+        "than subjective post-hoc inspection."
+    )
+    aggregate_caption = (
+        "Aggregate stored results. Pale green/red/yellow cell coloring is reserved "
+        "for richer future comparisons; the current report keeps the table "
+        "neutral when not all competitors are installed."
+    )
+    similarity_filename = _latex_escape(
+        os.path.basename(similarity_markdown_path or "layout_similarity.md")
+    )
+    placement_filename = _latex_escape(
+        os.path.basename(placement_markdown_path or "placement_summary.md")
+    )
+    placement_dashboard_filename = _latex_escape(
+        os.path.basename(placement_dashboard_path or "placement_dashboard.md")
+    )
+    delta_filename = _latex_escape(os.path.basename(delta_markdown_path or "benchmark_deltas.md"))
+    similarity_text = (
+        "\\paragraph{Layout similarity.} Pairwise Procrustes similarity summaries "
+        "between competitor layouts are stored in "
+        f"\\texttt{{{similarity_filename}}}. This helps distinguish genuinely "
+        "different geometric solutions from stylistic differences layered on top "
+        "of similar placements."
+    )
+    placement_text = (
+        "\\paragraph{Placement-only summary.} A styling-agnostic placement summary "
+        "is stored in "
+        f"\\texttt{{{placement_filename}}}. This is the right artifact to consult "
+        "when judging node placement independently of rendering choices."
+    )
+    placement_dashboard_text = (
+        "\\paragraph{Placement dashboard.} The trench-view placement dashboard is "
+        "stored in "
+        f"\\texttt{{{placement_dashboard_filename}}}. Use it during optimization "
+        "sprints when the only question is whether Dagua's placement is winning "
+        "or losing on the core metrics."
+    )
+    critic_prompt_text = (
+        "The aesthetic critic prompt used for optional visual evaluation is stored "
+        "verbatim in \\texttt{prose\\_prompt.md} and review placeholders are "
+        "stored as \\texttt{review\\_round\\_*.json}."
+    )
+    benchmark_delta_text = (
+        "\\paragraph{Benchmark deltas.} Round-over-round Dagua deltas, when "
+        "available, are stored in "
+        f"\\texttt{{{delta_filename}}}."
+    )
 
     tex = f"""
 \\documentclass[11pt]{{article}}
@@ -1539,22 +1729,24 @@ def _render_latex_report(
 \\maketitle
 
 \\section{{Executive Summary}}
-This report summarizes the latest standard benchmark run {generated_from.get('standard', 'N/A')} and the latest rare run {generated_from.get('rare', 'N/A')}. Results are stored in \\texttt{{eval\\_output/benchmark\\_db}} and merged through \\texttt{{combined\\_latest.json}}.
+{executive_summary}
 
 \\begin{{itemize}}
-\\item Dagua remains the only engine in the default roster expected to scale through the rare ladder.
+\\item Dagua remains the only engine in the default roster expected to scale
+through the rare ladder.
 \\item DAG-aware engines are compared directly on runtime, composite score, and DAG consistency.
 \\item Force-directed baselines are included for contrast, not as DAG-faithful references.
-\\item A separate visual-critic pass was not executed in this environment; the stored prompt can be reused for either local or external review.
+\\item A separate visual-critic pass was not executed in this environment; the
+stored prompt can be reused for either local or external review.
 \\end{{itemize}}
 
 \\section{{Methodology}}
-The suite mixes small structural motifs, real architecture traces, and a scale ladder. Metric computation uses the existing Dagua metric stack: full metrics for smaller graphs, quick metrics for larger graphs. Anti-pattern flags are derived from the stored quality metrics rather than subjective post-hoc inspection.
+{methodology_text}
 
 \\section{{Aggregate Results}}
 \\begin{{figure}}[h]
 \\centering
-\\includegraphics[width=0.9\\linewidth]{{{_latex_path(os.path.relpath(scaling_curve_path, report_dir))}}}
+\\includegraphics[width=0.9\\linewidth]{{{scaling_curve_rel}}}
 \\caption{{Scaling curve across all stored benchmark runs.}}
 \\end{{figure}}
 
@@ -1564,25 +1756,25 @@ The suite mixes small structural motifs, real architecture traces, and a scale l
 \\toprule
 Competitor & Avg. small-graph score & Avg. DAG consistency & Avg. runtime (s) \\\\
 \\midrule
-{' '.join(comp_lines)}
+{" ".join(comp_lines)}
 \\bottomrule
 \\end{{tabular}}
-\\caption{{Aggregate stored results. Pale green/red/yellow cell coloring is reserved for richer future comparisons; the current report keeps the table neutral when not all competitors are installed.}}
+\\caption{{{aggregate_caption}}}
 \\end{{table}}
 
-\\paragraph{{Layout similarity.}} Pairwise Procrustes similarity summaries between competitor layouts are stored in \\texttt{{{_latex_escape(os.path.basename(similarity_markdown_path or 'layout_similarity.md'))}}}. This helps distinguish genuinely different geometric solutions from stylistic differences layered on top of similar placements.
+{similarity_text}
 
-\\paragraph{{Placement-only summary.}} A styling-agnostic placement summary is stored in \\texttt{{{_latex_escape(os.path.basename(placement_markdown_path or 'placement_summary.md'))}}}. This is the right artifact to consult when judging node placement independently of rendering choices.
+{placement_text}
 
-\\paragraph{{Placement dashboard.}} The trench-view placement dashboard is stored in \\texttt{{{_latex_escape(os.path.basename(placement_dashboard_path or 'placement_dashboard.md'))}}}. Use it during optimization sprints when the only question is whether Dagua's placement is winning or losing on the core metrics.
+{placement_dashboard_text}
 
 \\section{{Visual Gallery}}
 {gallery_block}
 
 \\section{{Appendix}}
-The aesthetic critic prompt used for optional visual evaluation is stored verbatim in \\texttt{{prose\\_prompt.md}} and review placeholders are stored as \\texttt{{review\\_round\\_*.json}}.
+{critic_prompt_text}
 
-\\paragraph{{Benchmark deltas.}} Round-over-round Dagua deltas, when available, are stored in \\texttt{{{_latex_escape(os.path.basename(delta_markdown_path or 'benchmark_deltas.md'))}}}.
+{benchmark_delta_text}
 
 \\end{{document}}
 """
@@ -1626,12 +1818,26 @@ def generate_report(
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "figures").mkdir(parents=True, exist_ok=True)
 
-    scaling_curve_path = generate_scaling_curve(output_dir=output_dir, combined_results=combined_results)
-    comparison_paths = generate_comparison_visuals(output_dir=output_dir, combined_results=combined_results)
-    delta_json_path, delta_md_path = generate_benchmark_deltas(output_dir=output_dir, combined_results=combined_results)
-    similarity_json_path, similarity_md_path = generate_layout_similarity_artifacts(output_dir=output_dir, combined_results=combined_results)
-    placement_json_path, placement_md_path = generate_placement_summary_artifacts(output_dir=output_dir, combined_results=combined_results)
-    placement_dashboard_json_path, placement_dashboard_md_path = generate_placement_dashboard_artifacts(output_dir=output_dir, combined_results=combined_results)
+    scaling_curve_path = generate_scaling_curve(
+        output_dir=output_dir, combined_results=combined_results
+    )
+    comparison_paths = generate_comparison_visuals(
+        output_dir=output_dir, combined_results=combined_results
+    )
+    delta_json_path, delta_md_path = generate_benchmark_deltas(
+        output_dir=output_dir, combined_results=combined_results
+    )
+    similarity_json_path, similarity_md_path = generate_layout_similarity_artifacts(
+        output_dir=output_dir, combined_results=combined_results
+    )
+    placement_json_path, placement_md_path = generate_placement_summary_artifacts(
+        output_dir=output_dir, combined_results=combined_results
+    )
+    placement_dashboard_json_path, placement_dashboard_md_path = (
+        generate_placement_dashboard_artifacts(
+            output_dir=output_dir, combined_results=combined_results
+        )
+    )
     _write_prompt_file(report_dir)
     _write_review_placeholders(report_dir)
     with open(report_dir / "aesthetic_critic_prompt.md", "w", encoding="utf-8") as f:

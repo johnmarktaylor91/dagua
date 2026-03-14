@@ -71,9 +71,21 @@ def test_synthetic_graphs_cover_common_and_niche_motifs():
     assert expected_names <= names
 
     expected_tags = {
-        "linear-shallow", "linear-deep", "wide-parallel", "skip-light", "skip-heavy",
-        "tree", "diamond", "nested-shallow", "nested-deep", "mixed-width",
-        "self-loops", "multi-edge", "disconnected", "large-sparse", "large-dense",
+        "linear-shallow",
+        "linear-deep",
+        "wide-parallel",
+        "skip-light",
+        "skip-heavy",
+        "tree",
+        "diamond",
+        "nested-shallow",
+        "nested-deep",
+        "mixed-width",
+        "self-loops",
+        "multi-edge",
+        "disconnected",
+        "large-sparse",
+        "large-dense",
     }
     assert expected_tags <= tags
 
@@ -126,7 +138,9 @@ def test_visual_stress_graphs_cover_label_skew_and_component_extremes():
     assert min(label_lengths) <= 3
 
     clustered = graphs["clustered_longlabel_handoffs"]
-    edge_pairs = list(zip(clustered.graph.edge_index[0].tolist(), clustered.graph.edge_index[1].tolist()))
+    edge_pairs = list(
+        zip(clustered.graph.edge_index[0].tolist(), clustered.graph.edge_index[1].tolist())
+    )
     counts = Counter(edge_pairs)
     assert max(counts.values()) >= 2
     assert clustered.graph.max_cluster_depth >= 1
@@ -182,23 +196,14 @@ def test_style_and_routing_stress_graphs_exercise_visual_feature_surface():
     graphs = {tg.name: tg for tg in _synthetic_graphs()}
 
     shape_graph = graphs["shape_and_routing_matrix"].graph
-    shape_set = {
-        style.shape
-        for style in shape_graph.node_styles
-        if style is not None
-    }
+    shape_set = {style.shape for style in shape_graph.node_styles if style is not None}
     assert {"rect", "ellipse", "diamond", "roundrect", "circle"} <= shape_set
-    routing_modes = {
-        style.routing
-        for style in shape_graph.edge_styles
-        if style is not None
-    }
+    routing_modes = {style.routing for style in shape_graph.edge_styles if style is not None}
     assert {"straight", "ortho", "bezier"} <= routing_modes
 
     center_port = graphs["center_port_backedge_hub"].graph
     assert all(
-        style is not None and style.port_style == "center"
-        for style in center_port.edge_styles
+        style is not None and style.port_style == "center" for style in center_port.edge_styles
     )
     src = center_port.edge_index[0].tolist()
     tgt = center_port.edge_index[1].tolist()

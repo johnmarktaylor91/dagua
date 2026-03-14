@@ -17,7 +17,7 @@ import inspect
 import json
 import shutil
 import subprocess
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -59,11 +59,17 @@ class GlossaryBuildResult:
 
 _BASICS = [
     ("DAG", "Directed acyclic graph. Edges encode direction, and there are no directed cycles."),
-    ("Rank", "A layer index assigned during hierarchical layout. Nodes in the same rank are peers."),
+    (
+        "Rank",
+        "A layer index assigned during hierarchical layout. Nodes in the same rank are peers.",
+    ),
     ("Cluster", "A visual grouping box around related nodes, optionally nested."),
     ("Port", "The attachment location where an edge exits or enters a node."),
     ("Routing", "The post-layout step that turns node positions into edge curves."),
-    ("Projection", "A hard corrective step used to enforce constraints like overlap removal or pins."),
+    (
+        "Projection",
+        "A hard corrective step used to enforce constraints like overlap removal or pins.",
+    ),
     ("Coarsening", "Compression of the graph into a smaller hierarchy level before layout."),
     ("Prolongation", "Expansion of a coarse solution back to a finer graph level."),
     ("Refinement", "Short optimization passes applied after prolongation."),
@@ -75,11 +81,20 @@ _BASICS = [
 ]
 
 _STAGES = [
-    ("Graph Construction", "Nodes, edges, labels, clusters, and styles are assembled into a DaguaGraph."),
+    (
+        "Graph Construction",
+        "Nodes, edges, labels, clusters, and styles are assembled into a DaguaGraph.",
+    ),
     ("Node Sizing", "Text measurement and padding determine node bounding boxes before layout."),
-    ("Layering", "Topological depth is converted into ordered ranks consistent with graph direction."),
+    (
+        "Layering",
+        "Topological depth is converted into ordered ranks consistent with graph direction.",
+    ),
     ("Coarsening", "Large graphs are compressed into smaller layer-aware hierarchy levels."),
-    ("Coarse Optimization", "The smallest hierarchy level is optimized first to establish global structure."),
+    (
+        "Coarse Optimization",
+        "The smallest hierarchy level is optimized first to establish global structure.",
+    ),
     ("Prolongation + Refinement", "The coarse layout is expanded and refined level by level."),
     ("Edge Routing", "Node positions are converted into routed edge curves and ports."),
     ("Edge Optimization", "Bezier control points are refined to improve crossings and curvature."),
@@ -89,10 +104,14 @@ _STAGES = [
 
 _VISUAL_CAPTIONS = {
     "pipeline_stages": "Pipeline schematic from graph construction through rendering.",
-    "direction_modes": "Direction modes change the global flow convention while preserving structure.",
+    "direction_modes": (
+        "Direction modes change the global flow convention while preserving structure."
+    ),
     "spacing_sweep": "Node and rank separation alter whitespace and breathing room.",
     "crossing_sweep": "Crossing weight trades local compactness for reduced edge tangles.",
-    "routing_styles": "Edge routing style and curvature change the visual character of the same topology.",
+    "routing_styles": (
+        "Edge routing style and curvature change the visual character of the same topology."
+    ),
     "flex_constraints": "Pins and alignment constraints visibly reshape the same graph.",
 }
 
@@ -127,7 +146,9 @@ def _public_api_entries() -> List[Dict[str, str]]:
                 {
                     "name": name,
                     "signature": f"{name}{inspect.signature(obj)}",
-                    "summary": (inspect.getdoc(obj) or "").splitlines()[0] if inspect.getdoc(obj) else "",
+                    "summary": (inspect.getdoc(obj) or "").splitlines()[0]
+                    if inspect.getdoc(obj)
+                    else "",
                     "source": module.__name__ if module is not None else "",
                 }
             )
@@ -221,7 +242,9 @@ def _metric_entries() -> Tuple[List[Dict[str, str]], List[str], List[str]]:
     sample_graph = DaguaGraph.from_edge_list([("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")])
     sample_graph.compute_node_sizes()
     pos = layout(sample_graph, LayoutConfig(steps=12, edge_opt_steps=-1, seed=42))
-    quick_keys = sorted(quick(pos, sample_graph.edge_index, node_sizes=sample_graph.node_sizes).keys())
+    quick_keys = sorted(
+        quick(pos, sample_graph.edge_index, node_sizes=sample_graph.node_sizes).keys()
+    )
     full_keys = sorted(
         full(
             pos,
@@ -275,7 +298,9 @@ def _sample_graphs() -> Dict[str, DaguaGraph]:
     return {
         "residual": lookup["residual_block"],
         "clustered": lookup["nested_shallow_enc_dec"],
-        "skip": lookup["dense_skip_200"] if "dense_skip_200" in lookup else DaguaGraph.from_edge_list([("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]),
+        "skip": lookup["dense_skip_200"]
+        if "dense_skip_200" in lookup
+        else DaguaGraph.from_edge_list([("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]),
     }
 
 
@@ -285,16 +310,39 @@ def _visual_pipeline(path: Path) -> None:
     stages = ["Graph", "Layering", "Coarsen", "Optimize", "Refine", "Route", "Render"]
     x_positions = [0.05, 0.19, 0.33, 0.47, 0.61, 0.75, 0.89]
     for x, stage in zip(x_positions, stages):
-        ax.add_patch(plt.Rectangle((x - 0.055, 0.35), 0.11, 0.28, facecolor="#EAF4F8", edgecolor="#2F7EA8", linewidth=1.2))
+        ax.add_patch(
+            plt.Rectangle(
+                (x - 0.055, 0.35),
+                0.11,
+                0.28,
+                facecolor="#EAF4F8",
+                edgecolor="#2F7EA8",
+                linewidth=1.2,
+            )
+        )
         ax.text(x, 0.49, stage, ha="center", va="center", fontsize=10)
     for left, right in zip(x_positions[:-1], x_positions[1:]):
-        ax.annotate("", xy=(right - 0.06, 0.49), xytext=(left + 0.06, 0.49), arrowprops=dict(arrowstyle="->", color="#5F6368"))
+        ax.annotate(
+            "",
+            xy=(right - 0.06, 0.49),
+            xytext=(left + 0.06, 0.49),
+            arrowprops=dict(arrowstyle="->", color="#5F6368"),
+        )
     fig.savefig(path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
 def _visual_direction(path: Path, steps: int) -> None:
-    g = DaguaGraph.from_edge_list([("input", "stem"), ("stem", "left"), ("stem", "right"), ("left", "merge"), ("right", "merge"), ("merge", "head")])
+    g = DaguaGraph.from_edge_list(
+        [
+            ("input", "stem"),
+            ("stem", "left"),
+            ("stem", "right"),
+            ("left", "merge"),
+            ("right", "merge"),
+            ("merge", "head"),
+        ]
+    )
     directions = ["TB", "BT", "LR", "RL"]
     fig, axes = plt.subplots(2, 2, figsize=(8, 6), dpi=180)
     for ax, direction in zip(axes.flat, directions):
@@ -305,11 +353,18 @@ def _visual_direction(path: Path, steps: int) -> None:
 
 
 def _visual_spacing(path: Path, steps: int) -> None:
-    g = DaguaGraph.from_edge_list([("a", "c"), ("b", "c"), ("c", "d"), ("c", "e"), ("d", "f"), ("e", "f")])
+    g = DaguaGraph.from_edge_list(
+        [("a", "c"), ("b", "c"), ("c", "d"), ("c", "e"), ("d", "f"), ("e", "f")]
+    )
     configs = [("Tight", 14, 28), ("Default", 28, 50), ("Wide", 50, 90)]
     fig, axes = plt.subplots(1, 3, figsize=(11, 3.6), dpi=180)
     for ax, (title, node_sep, rank_sep) in zip(axes.flat, configs):
-        pos = layout(g, LayoutConfig(steps=steps, edge_opt_steps=-1, node_sep=node_sep, rank_sep=rank_sep, seed=42))
+        pos = layout(
+            g,
+            LayoutConfig(
+                steps=steps, edge_opt_steps=-1, node_sep=node_sep, rank_sep=rank_sep, seed=42
+            ),
+        )
         _render_graph_on_ax(ax, g, pos, title)
     fig.savefig(path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -336,7 +391,16 @@ def _visual_crossing(path: Path, steps: int) -> None:
 
 
 def _visual_routing(path: Path, steps: int) -> None:
-    base = DaguaGraph.from_edge_list([("input", "fork"), ("fork", "a"), ("fork", "b"), ("a", "merge"), ("b", "merge"), ("merge", "out")])
+    base = DaguaGraph.from_edge_list(
+        [
+            ("input", "fork"),
+            ("fork", "a"),
+            ("fork", "b"),
+            ("a", "merge"),
+            ("b", "merge"),
+            ("merge", "out"),
+        ]
+    )
     configs = [
         ("Bezier", EdgeStyle(routing="bezier", curvature=0.4)),
         ("Straight", EdgeStyle(routing="straight", curvature=0.0)),
@@ -421,10 +485,14 @@ def _render_tex(output_dir: Path, visuals: Dict[str, str], sample_steps: int) ->
         sections.append(f"\\item[{_latex_escape(name)}] {_latex_escape(desc)}")
     sections.append("\\end{description}")
 
-    sections.append("\\section{Public API Functions}\n\\begin{longtable}{p{0.22\\linewidth}p{0.73\\linewidth}}")
+    sections.append(
+        "\\section{Public API Functions}\n\\begin{longtable}{p{0.22\\linewidth}p{0.73\\linewidth}}"
+    )
     sections.append("\\toprule Name & Signature and summary \\\\ \\midrule")
     for entry in api_entries:
-        rhs = f"\\texttt{{{_latex_escape(entry['signature'])}}}\\\\{_latex_escape(entry['summary'])}"
+        rhs = (
+            f"\\texttt{{{_latex_escape(entry['signature'])}}}\\\\{_latex_escape(entry['summary'])}"
+        )
         sections.append(f"{_latex_escape(entry['name'])} & {rhs} \\\\")
     sections.append("\\bottomrule\\end{longtable}")
 
@@ -434,7 +502,9 @@ def _render_tex(output_dir: Path, visuals: Dict[str, str], sample_steps: int) ->
     sections.append("\\begin{longtable}{p{0.24\\linewidth}p{0.71\\linewidth}}")
     sections.append("\\toprule Method & Signature and summary \\\\ \\midrule")
     for entry in graph_methods:
-        rhs = f"\\texttt{{{_latex_escape(entry['signature'])}}}\\\\{_latex_escape(entry['summary'])}"
+        rhs = (
+            f"\\texttt{{{_latex_escape(entry['signature'])}}}\\\\{_latex_escape(entry['summary'])}"
+        )
         sections.append(f"{_latex_escape(entry['name'])} & {rhs} \\\\")
     sections.append("\\bottomrule\\end{longtable}")
 
@@ -444,7 +514,9 @@ def _render_tex(output_dir: Path, visuals: Dict[str, str], sample_steps: int) ->
         cls_doc = inspect.getdoc(cls)
         if cls_doc:
             sections.append(_latex_escape(cls_doc.splitlines()[0]))
-        sections.append("\\begin{longtable}{p{0.24\\linewidth}p{0.24\\linewidth}p{0.18\\linewidth}p{0.26\\linewidth}}")
+        sections.append(
+            "\\begin{longtable}{p{0.24\\linewidth}p{0.24\\linewidth}p{0.18\\linewidth}p{0.26\\linewidth}}"
+        )
         sections.append("\\toprule Field & Type & Default & Notes \\\\ \\midrule")
         for entry in _dataclass_field_entries(cls):
             sections.append(
@@ -453,17 +525,25 @@ def _render_tex(output_dir: Path, visuals: Dict[str, str], sample_steps: int) ->
             )
         sections.append("\\bottomrule\\end{longtable}")
 
-    sections.append("\\section{Loss Functions}\\begin{longtable}{p{0.28\\linewidth}p{0.67\\linewidth}}")
+    sections.append(
+        "\\section{Loss Functions}\\begin{longtable}{p{0.28\\linewidth}p{0.67\\linewidth}}"
+    )
     sections.append("\\toprule Loss & Signature and summary \\\\ \\midrule")
     for entry in loss_entries:
-        rhs = f"\\texttt{{{_latex_escape(entry['signature'])}}}\\\\{_latex_escape(entry['summary'])}"
+        rhs = (
+            f"\\texttt{{{_latex_escape(entry['signature'])}}}\\\\{_latex_escape(entry['summary'])}"
+        )
         sections.append(f"{_latex_escape(entry['name'])} & {rhs} \\\\")
     sections.append("\\bottomrule\\end{longtable}")
 
-    sections.append("\\section{Metric Functions}\\begin{longtable}{p{0.24\\linewidth}p{0.71\\linewidth}}")
+    sections.append(
+        "\\section{Metric Functions}\\begin{longtable}{p{0.24\\linewidth}p{0.71\\linewidth}}"
+    )
     sections.append("\\toprule Metric & Signature and summary \\\\ \\midrule")
     for entry in metric_entries:
-        rhs = f"\\texttt{{{_latex_escape(entry['signature'])}}}\\\\{_latex_escape(entry['summary'])}"
+        rhs = (
+            f"\\texttt{{{_latex_escape(entry['signature'])}}}\\\\{_latex_escape(entry['summary'])}"
+        )
         sections.append(f"{_latex_escape(entry['name'])} & {rhs} \\\\")
     sections.append("\\bottomrule\\end{longtable}")
     sections.append("\\subsection{Metric Keys from quick()}")
@@ -471,7 +551,11 @@ def _render_tex(output_dir: Path, visuals: Dict[str, str], sample_steps: int) ->
     sections.append("\\subsection{Metric Keys from full()}")
     sections.append("\\texttt{" + _latex_escape(", ".join(full_keys)) + "}")
 
-    sections.append("\\section{Optimization Hyperparameters}\\begin{longtable}{p{0.2\\linewidth}p{0.2\\linewidth}p{0.12\\linewidth}p{0.4\\linewidth}}")
+    sections.append(
+        "\\section{Optimization Hyperparameters}"
+        "\\begin{longtable}"
+        "{p{0.2\\linewidth}p{0.2\\linewidth}p{0.12\\linewidth}p{0.4\\linewidth}}"
+    )
     sections.append("\\toprule Name & Display name & Category & Description \\\\ \\midrule")
     for entry in hyper_entries:
         sections.append(
@@ -500,8 +584,10 @@ def _render_tex(output_dir: Path, visuals: Dict[str, str], sample_steps: int) ->
 \\begin{{document}}
 \\maketitle
 \\tableofcontents
-\\paragraph{{Generation note.}} This reference was generated from the codebase, curated glossary metadata, and scripted visuals. Sample visuals use {sample_steps} layout steps to keep rebuilds practical.
-{''.join(sections)}
+\\paragraph{{Generation note.}} This reference was generated from the codebase,
+curated glossary metadata, and scripted visuals. Sample visuals use
+{sample_steps} layout steps to keep rebuilds practical.
+{"".join(sections)}
 \\end{{document}}
 """
     tex_path = output_dir / "dagua_glossary.tex"

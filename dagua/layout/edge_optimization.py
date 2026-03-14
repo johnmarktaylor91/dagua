@@ -31,7 +31,7 @@ def _build_cluster_data_for_edge_opt(graph, positions, node_sizes):
         node_cluster_mask: [N, C] bool tensor — True if node i is in cluster c
         None, None if no clusters
     """
-    if graph is None or not hasattr(graph, 'clusters') or not graph.clusters:
+    if graph is None or not hasattr(graph, "clusters") or not graph.clusters:
         return None, None
 
     from dagua.utils import collect_cluster_leaves
@@ -241,12 +241,14 @@ def optimize_edges(
 
     result = []
     for i in range(E):
-        result.append(BezierCurve(
-            p0=(endpoints[i, 0, 0].item(), endpoints[i, 0, 1].item()),
-            cp1=(cp_final[i, 0, 0].item(), cp_final[i, 0, 1].item()),
-            cp2=(cp_final[i, 1, 0].item(), cp_final[i, 1, 1].item()),
-            p1=(endpoints[i, 1, 0].item(), endpoints[i, 1, 1].item()),
-        ))
+        result.append(
+            BezierCurve(
+                p0=(endpoints[i, 0, 0].item(), endpoints[i, 0, 1].item()),
+                cp1=(cp_final[i, 0, 0].item(), cp_final[i, 0, 1].item()),
+                cp2=(cp_final[i, 1, 0].item(), cp_final[i, 1, 1].item()),
+                p1=(endpoints[i, 1, 0].item(), endpoints[i, 1, 1].item()),
+            )
+        )
 
     return result
 
@@ -276,12 +278,7 @@ def _evaluate_bezier_batch(
     p1 = cp[:, 0:1, :]  # [E, 1, 2]
     p2 = cp[:, 1:2, :]  # [E, 1, 2]
 
-    points = (
-        u**3 * p0 +
-        3 * u**2 * t * p1 +
-        3 * u * t**2 * p2 +
-        t**3 * p3
-    )
+    points = u**3 * p0 + 3 * u**2 * t * p1 + 3 * u * t**2 * p2 + t**3 * p3
     return points  # [E, T, 2]
 
 
@@ -405,8 +402,8 @@ def _edge_node_crossing_loss(
     edge_tgt = tgt_nodes[edge_of_point]
 
     # Check if each node in sample is the src/tgt of each point's edge
-    is_own_src = (edge_src.unsqueeze(1) == node_idx.unsqueeze(0))  # [E*T, sample_n]
-    is_own_tgt = (edge_tgt.unsqueeze(1) == node_idx.unsqueeze(0))
+    is_own_src = edge_src.unsqueeze(1) == node_idx.unsqueeze(0)  # [E*T, sample_n]
+    is_own_tgt = edge_tgt.unsqueeze(1) == node_idx.unsqueeze(0)
     is_own = is_own_src | is_own_tgt
 
     # Penalty: relu(safety - dist)^2, zeroed for own nodes
@@ -523,7 +520,7 @@ def _curvature_consistency_loss(
     cross = d1[:, :, 0] * d2[:, :, 1] - d1[:, :, 1] * d2[:, :, 0]  # [E, T]
     d1_norm = d1.norm(dim=2).clamp(min=1e-6)  # [E, T]
 
-    kappa = cross.abs() / d1_norm.clamp(min=1.0)**3  # [E, T]  clamp avoids blowup on short edges
+    kappa = cross.abs() / d1_norm.clamp(min=1.0) ** 3  # [E, T]  clamp avoids blowup on short edges
 
     # Mean curvature per edge, then variance across edges
     mean_kappa = kappa.mean(dim=1)  # [E]
@@ -547,7 +544,7 @@ def _curvature_penalty_loss(
     cross = d1[:, :, 0] * d2[:, :, 1] - d1[:, :, 1] * d2[:, :, 0]
     d1_norm = d1.norm(dim=2).clamp(min=1e-6)
 
-    kappa = cross.abs() / d1_norm.clamp(min=1.0)**3  # clamp avoids blowup on short edges
+    kappa = cross.abs() / d1_norm.clamp(min=1.0) ** 3  # clamp avoids blowup on short edges
     return (kappa**2).mean()
 
 
@@ -572,7 +569,6 @@ def _edge_cluster_crossing_loss(
         tgt_list: target node indices per edge
         E: number of edges
     """
-    C = cluster_bboxes.shape[0]
     T = points.shape[1]
 
     # Build foreign mask: [E, C] — True if neither src nor tgt belongs to cluster c

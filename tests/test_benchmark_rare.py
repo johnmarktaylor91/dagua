@@ -12,4 +12,3 @@ def test_rare_benchmark_suite():
 
     merged = merge_latest_results(output_dir="eval_output")
     assert merged is not None
-
