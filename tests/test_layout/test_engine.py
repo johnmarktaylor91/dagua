@@ -24,6 +24,19 @@ class TestLayoutBasic:
         pos = layout(single_node_graph, fast_config)
         assert pos.shape == (1, 2)
 
+    def test_layout_no_labels_large(self):
+        """Regression: layout must work on graphs with num_nodes set but no labels."""
+        g = DaguaGraph()
+        n = 10_000
+        g.num_nodes = n
+        src = torch.arange(0, n - 100, dtype=torch.long)
+        tgt = src + 100
+        g._edge_index_tensor = torch.stack([src, tgt])
+        g.node_sizes = torch.full((n, 2), 20.0)
+        config = LayoutConfig(steps=5, verbose=False, seed=42)
+        pos = layout(g, config)
+        assert pos.shape == (n, 2)
+
 
 class TestLayoutQuality:
     @pytest.mark.slow

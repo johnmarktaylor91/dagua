@@ -185,6 +185,11 @@ def _layout_inner(
     import time as _time
 
     n = num_nodes
+    if node_sizes.ndim == 1:
+        node_sizes = node_sizes.unsqueeze(1).expand(-1, 2).contiguous()
+    elif node_sizes.ndim == 2 and node_sizes.shape[1] == 1:
+        node_sizes = node_sizes.expand(-1, 2).contiguous()
+
     verbose = getattr(config, "verbose", False)
     _indent = progress_context.indent if progress_context else "  "
 
