@@ -1,14 +1,13 @@
 """End-to-end integration tests."""
 
-import pytest
-import tempfile
 from pathlib import Path
 
+import pytest
 import torch
 
 import dagua
-from dagua.graph import DaguaGraph
 from dagua.config import LayoutConfig
+from dagua.graph import DaguaGraph
 from dagua.metrics import compute_all_metrics
 
 
@@ -23,10 +22,14 @@ class TestEndToEnd:
         assert fig is not None
 
     def test_full_pipeline(self, tmp_path):
-        g = DaguaGraph.from_edge_list([
-            ("input", "conv1"), ("conv1", "relu"),
-            ("relu", "fc"), ("fc", "output"),
-        ])
+        g = DaguaGraph.from_edge_list(
+            [
+                ("input", "conv1"),
+                ("conv1", "relu"),
+                ("relu", "fc"),
+                ("fc", "output"),
+            ]
+        )
         config = LayoutConfig(steps=100)
         pos = dagua.layout(g, config)
         g.compute_node_sizes()
@@ -62,6 +65,7 @@ class TestLargerGraphs:
     @pytest.mark.slow
     def test_50_node_dag(self):
         import random
+
         random.seed(42)
         edges = []
         for i in range(49):
@@ -100,8 +104,8 @@ class TestFromTorchlens:
     def test_from_torchlens_simple(self):
         """from_torchlens should produce a valid graph from a simple MLP."""
         try:
-            import torchlens as tl
             import torch.nn as nn
+            import torchlens as tl
         except ImportError:
             pytest.skip("TorchLens not installed")
 
@@ -120,8 +124,8 @@ class TestFromTorchlens:
     def test_from_torchlens_with_skip(self):
         """from_torchlens should handle skip connections (residual block)."""
         try:
-            import torchlens as tl
             import torch.nn as nn
+            import torchlens as tl
         except ImportError:
             pytest.skip("TorchLens not installed")
 
@@ -152,12 +156,14 @@ class TestGraphvizComparison:
 
     def test_layout_with_graphviz(self):
         from dagua.graphviz_utils import layout_with_graphviz
+
         g = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
         pos = layout_with_graphviz(g)
         assert pos.shape == (3, 2)
 
     def test_render_comparison(self, tmp_path):
         from dagua.graphviz_utils import layout_with_graphviz, render_comparison
+
         g = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
         dagua_pos = dagua.layout(g)
         gv_pos = layout_with_graphviz(g)

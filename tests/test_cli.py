@@ -1,11 +1,9 @@
-from pathlib import Path
-
 import pytest
-from dagua.eval.sweep import PlacementCandidate, PlacementTuningResult
 
 from dagua import DaguaGraph
 from dagua.cli import main
 from dagua.config import LayoutConfig
+from dagua.eval.sweep import PlacementCandidate, PlacementTuningResult
 
 
 @pytest.mark.smoke
@@ -114,7 +112,18 @@ def test_benchmark_show_cli_prints_graph_or_competitor(tmp_path, capsys):
     (run_dir / "results.json").write_text(__import__("json").dumps(payload), encoding="utf-8")
     (run_dir.parent / "latest").symlink_to(run_dir.name)
 
-    rc = main(["benchmark-show", "g", "--output-dir", str(output_dir), "--suite", "standard", "--competitor", "dagua"])
+    rc = main(
+        [
+            "benchmark-show",
+            "g",
+            "--output-dir",
+            str(output_dir),
+            "--suite",
+            "standard",
+            "--competitor",
+            "dagua",
+        ]
+    )
     captured = capsys.readouterr()
 
     assert rc == 0
@@ -127,16 +136,24 @@ def test_benchmark_freeze_cli_copies_run(tmp_path, capsys):
     output_dir = tmp_path / "eval_output"
     run_dir = output_dir / "benchmark_db" / "standard" / "2026-03-12T00:00:00+00:00"
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "results.json").write_text('{"run_id":"2026-03-12T00:00:00+00:00","graphs":{}}', encoding="utf-8")
+    (run_dir / "results.json").write_text(
+        '{"run_id":"2026-03-12T00:00:00+00:00","graphs":{}}', encoding="utf-8"
+    )
     (run_dir.parent / "latest").symlink_to(run_dir.name)
 
-    rc = main(["benchmark-freeze", "baseline-a", "--output-dir", str(output_dir), "--suite", "standard"])
+    rc = main(
+        ["benchmark-freeze", "baseline-a", "--output-dir", str(output_dir), "--suite", "standard"]
+    )
     captured = capsys.readouterr()
 
     assert rc == 0
     assert '"label": "baseline-a"' in captured.out
-    assert (output_dir / "benchmark_db" / "standard" / "frozen" / "baseline-a" / "results.json").exists()
-    assert (output_dir / "benchmark_db" / "standard" / "frozen" / "baseline-a" / "freeze_metadata.json").exists()
+    assert (
+        output_dir / "benchmark_db" / "standard" / "frozen" / "baseline-a" / "results.json"
+    ).exists()
+    assert (
+        output_dir / "benchmark_db" / "standard" / "frozen" / "baseline-a" / "freeze_metadata.json"
+    ).exists()
 
 
 @pytest.mark.smoke
@@ -148,11 +165,23 @@ def test_benchmark_compare_runs_cli_prints_deltas(tmp_path, capsys):
     run_b.mkdir(parents=True, exist_ok=True)
     payload_a = {
         "run_id": run_a.name,
-        "graphs": {"g": {"competitors": {"dagua": {"status": "OK", "runtime_seconds": 2.0, "composite_score": 70.0}}}},
+        "graphs": {
+            "g": {
+                "competitors": {
+                    "dagua": {"status": "OK", "runtime_seconds": 2.0, "composite_score": 70.0}
+                }
+            }
+        },
     }
     payload_b = {
         "run_id": run_b.name,
-        "graphs": {"g": {"competitors": {"dagua": {"status": "OK", "runtime_seconds": 1.0, "composite_score": 72.5}}}},
+        "graphs": {
+            "g": {
+                "competitors": {
+                    "dagua": {"status": "OK", "runtime_seconds": 1.0, "composite_score": 72.5}
+                }
+            }
+        },
     }
     (run_a / "results.json").write_text(__import__("json").dumps(payload_a), encoding="utf-8")
     (run_b / "results.json").write_text(__import__("json").dumps(payload_b), encoding="utf-8")
@@ -213,12 +242,34 @@ def test_benchmark_deltas_cli_writes_artifacts(tmp_path):
     payload_a = {
         "run_id": run_a.name,
         "suite": "standard",
-        "graphs": {"g": {"competitors": {"dagua": {"status": "OK", "runtime_seconds": 2.0, "metrics": {"dag_consistency": 1.0}, "composite_score": 70.0}}}},
+        "graphs": {
+            "g": {
+                "competitors": {
+                    "dagua": {
+                        "status": "OK",
+                        "runtime_seconds": 2.0,
+                        "metrics": {"dag_consistency": 1.0},
+                        "composite_score": 70.0,
+                    }
+                }
+            }
+        },
     }
     payload_b = {
         "run_id": run_b.name,
         "suite": "standard",
-        "graphs": {"g": {"competitors": {"dagua": {"status": "OK", "runtime_seconds": 1.5, "metrics": {"dag_consistency": 1.0}, "composite_score": 72.0}}}},
+        "graphs": {
+            "g": {
+                "competitors": {
+                    "dagua": {
+                        "status": "OK",
+                        "runtime_seconds": 1.5,
+                        "metrics": {"dag_consistency": 1.0},
+                        "composite_score": 72.0,
+                    }
+                }
+            }
+        },
     }
     (run_a / "results.json").write_text(__import__("json").dumps(payload_a), encoding="utf-8")
     (run_b / "results.json").write_text(__import__("json").dumps(payload_b), encoding="utf-8")
@@ -272,7 +323,12 @@ def test_placement_sprint_cli_writes_artifacts(tmp_path, capsys):
                     "dagua": {
                         "status": "OK",
                         "runtime_seconds": 0.2,
-                        "metrics": {"dag_consistency": 1.0, "edge_crossings": 0, "node_overlaps": 0, "edge_length_cv": 0.1},
+                        "metrics": {
+                            "dag_consistency": 1.0,
+                            "edge_crossings": 0,
+                            "node_overlaps": 0,
+                            "edge_length_cv": 0.1,
+                        },
                         "composite_score": 90.0,
                         "metrics_computed": ["tier1"],
                         "metrics_skipped": ["tier2", "tier3"],
@@ -396,13 +452,13 @@ def test_poster_cli_uses_saved_benchmark_positions(tmp_path):
 
     rc = main(
         [
-                "poster",
-                "unused.json",
-                str(out),
-                "--benchmark-graph",
-                "residual_block",
-                "--benchmark-suite",
-                "standard",
+            "poster",
+            "unused.json",
+            str(out),
+            "--benchmark-graph",
+            "residual_block",
+            "--benchmark-suite",
+            "standard",
             "--output-dir",
             str(output_dir),
             "--scene",
