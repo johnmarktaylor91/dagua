@@ -381,7 +381,30 @@ def _build_csr(
     Tuple[torch.Tensor, torch.Tensor]
         ``(csr_offsets, csr_targets)`` describing outgoing adjacency.
     """
+    if str(device) != "cpu" or (torch.cuda.is_available() and src.shape[0] > 10_000_000):
+        try:
+            from dagua.layout.cuda_kernels import build_csr_cuda, is_available
+
+            if is_available():
+                cuda_device = device if str(device) != "cpu" else "cuda"
+                offsets, targets = build_csr_cuda(
+                    src.to(cuda_device),
+                    tgt.to(cuda_device),
+                    num_nodes,
+                )
+                if str(device) == "cpu":
+                    return offsets.cpu(), targets.cpu()
+                return offsets, targets
+        except Exception:
+            pass
+
     edge_count = src.shape[0]
+    if str(device) == "cpu" and edge_count > 1_000_000:
+        try:
+            return _build_csr_numpy(src, tgt, num_nodes)
+        except Exception:
+            pass
+
     chunked = num_nodes > _STREAMING_NODE_THRESHOLD
     val_dtype = torch.int32 if chunked else torch.long
 
@@ -398,8 +421,45 @@ def _build_csr(
     csr_offsets = torch.zeros(num_nodes + 1, dtype=torch.long, device=device)
     csr_offsets[1:] = out_degree.to(torch.long).cumsum(0)
 
-    order = src.argsort()
+    order = src.argsort(stable=True)
     csr_targets = tgt[order]
+    del order
+    return csr_offsets, csr_targets
+
+
+def _build_csr_numpy(
+    src: torch.Tensor,
+    tgt: torch.Tensor,
+    num_nodes: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Build CSR via NumPy sorting for large CPU tensors.
+
+    Parameters
+    ----------
+    src : torch.Tensor
+        Source node indices on CPU with shape ``(E,)``.
+    tgt : torch.Tensor
+        Target node indices on CPU with shape ``(E,)``.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor]
+        ``(csr_offsets, csr_targets)`` on CPU.
+    """
+    import numpy as np
+
+    src_np = src.detach().cpu().numpy()
+    tgt_np = tgt.detach().cpu().numpy()
+
+    order = np.argsort(src_np, kind="stable")
+    csr_targets = torch.from_numpy(tgt_np[order].copy())
+
+    out_degree = torch.bincount(src.to(torch.long), minlength=num_nodes)
+    csr_offsets = torch.zeros(num_nodes + 1, dtype=torch.long)
+    csr_offsets[1:] = out_degree.cumsum(0)
+
     del order
     return csr_offsets, csr_targets
 
