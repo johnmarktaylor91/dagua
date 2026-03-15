@@ -320,10 +320,9 @@ def coarsen_once(
     to streaming path that processes edges in chunks.
     """
     N = num_nodes
-    index_dtype = torch.int32 if N <= torch.iinfo(torch.int32).max else torch.long
     node_sizes = _ensure_node_sizes_2d(node_sizes, N)
     if isinstance(layer_assignments, list):
-        layers = torch.tensor(layer_assignments, dtype=index_dtype, device=device)
+        layers = torch.tensor(layer_assignments, dtype=torch.long, device=device)
     else:
         layers = layer_assignments.to(device)
     cluster_ids = cluster_ids.to(device) if cluster_ids is not None else None
@@ -416,7 +415,7 @@ def coarsen_once(
     # - similar parent/child signatures stay adjacent
     # - hubs can be kept isolated
     # - grouping adapts to local compatibility instead of blindly taking triples
-    fine_to_coarse = torch.empty(N, dtype=index_dtype, device=device)
+    fine_to_coarse = torch.empty(N, dtype=torch.long, device=device)
     total_degree = in_degree + out_degree
     coarse_counts: List[int] = []
 
@@ -536,7 +535,7 @@ def coarsen_once(
         fine_to_coarse[ordered_nodes] = (
             torch.tensor(
                 local_group_ids,
-                dtype=index_dtype,
+                dtype=torch.long,
                 device=device,
             )
             + coarse_base
@@ -670,9 +669,6 @@ def build_hierarchy(
             current_la = torch.tensor(raw_current_la, dtype=torch.long)
         else:
             current_la = raw_current_la
-        index_dtype = torch.int32 if current_n <= torch.iinfo(torch.int32).max else torch.long
-        if current_la.dtype == torch.long and index_dtype == torch.int32:
-            current_la = current_la.to(dtype=index_dtype)
         if layer_assignments_callback is not None:
             layer_assignments_callback(current_la.detach().cpu())
         if progress is not None:
