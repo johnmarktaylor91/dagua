@@ -6,7 +6,12 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
-from dagua.layout.engine import _edge_batch_size, _make_amortized_loss, _resolve_memory_strategy
+from dagua.layout.engine import (
+    _edge_batch_size,
+    _make_amortized_loss,
+    _overlap_interval,
+    _resolve_memory_strategy,
+)
 from dagua.layout.multilevel import build_hierarchy
 from dagua.metrics import compute_all_metrics
 
@@ -196,6 +201,33 @@ def test_edge_batch_size_scaling() -> None:
     assert _edge_batch_size(300_000_000, config) == 5_000_000
 
 
+def test_config_amortize_defaults() -> None:
+    """Default performance knobs should preserve the existing engine behavior."""
+    config = LayoutConfig()
+
+    assert config.repel_amortize_interval == 2
+    assert config.repel_amortize_threshold == 10_000_000
+    assert config.fanout_amortize_interval == 3
+    assert config.fanout_amortize_threshold == 10_000_000
+    assert config.edge_random_fraction == 0.2
+    assert config.edge_batch_size == 0
+    assert config.overlap_check_interval == 0
+
+
+def test_edge_batch_size_respects_fixed_override() -> None:
+    """Explicit edge batch size overrides should bypass auto-scaling."""
+    config = LayoutConfig(edge_batch_size=1_234)
+
+    assert _edge_batch_size(300_000_000, config) == 1_234
+
+
+def test_overlap_interval_respects_fixed_override() -> None:
+    """Explicit overlap interval overrides should bypass auto-scaling."""
+    config = LayoutConfig(overlap_check_interval=7)
+
+    assert _overlap_interval(1_000_000, config) == 7
+
+
 def test_resolve_memory_strategy_cpu_defaults_to_single_backward() -> None:
     """CPU auto mode should keep a single backward pass."""
     config = LayoutConfig(device="cpu")
@@ -218,6 +250,47 @@ def test_layout_cpu_with_per_loss_backward_on() -> None:
 
     assert pos.shape == (n, 2)
     assert torch.isfinite(pos).all()
+
+
+def test_config_disable_amortization() -> None:
+    """Setting interval=1 should disable amortization while preserving layout."""
+    g = DaguaGraph()
+    g.num_nodes = 100
+    g._edge_index_tensor = torch.stack(
+        [
+            torch.arange(0, 90, dtype=torch.long),
+            torch.arange(10, 100, dtype=torch.long),
+        ]
+    )
+    g.node_sizes = torch.full((100, 2), 20.0)
+
+    config = LayoutConfig(
+        steps=5,
+        seed=42,
+        repel_amortize_interval=1,
+        fanout_amortize_interval=1,
+    )
+    pos = layout(g, config)
+
+    assert pos.shape == (100, 2)
+
+
+def test_config_all_random_edges() -> None:
+    """edge_random_fraction=1.0 should keep random edge sampling active every step."""
+    g = DaguaGraph()
+    g.num_nodes = 100
+    g._edge_index_tensor = torch.stack(
+        [
+            torch.arange(0, 90, dtype=torch.long),
+            torch.arange(10, 100, dtype=torch.long),
+        ]
+    )
+    g.node_sizes = torch.full((100, 2), 20.0)
+
+    config = LayoutConfig(edge_random_fraction=1.0, steps=5, seed=42)
+    pos = layout(g, config)
+
+    assert pos.shape == (100, 2)
 
 
 def test_amortized_loss_wrapper_produces_finite_non_zero_total() -> None:

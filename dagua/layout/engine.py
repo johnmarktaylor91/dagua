@@ -370,8 +370,11 @@ def _layout_inner(
                 rvs_nn_k=config.rvs_nn_k,
             )
 
-        if n > 10_000_000:
-            repel_fn = _make_amortized_loss(repel_fn, skip_every=2)
+        if n > config.repel_amortize_threshold and config.repel_amortize_interval > 1:
+            repel_fn = _make_amortized_loss(
+                repel_fn,
+                skip_every=config.repel_amortize_interval,
+            )
         loss_fns.append(("w_repel", repel_fn, True, True))
 
     if config.w_overlap > 0:
@@ -494,8 +497,11 @@ def _layout_inner(
                 _active_edges(p),
             )
 
-        if n > 10_000_000:
-            fanout_fn = _make_amortized_loss(fanout_fn, skip_every=3)
+        if n > config.fanout_amortize_threshold and config.fanout_amortize_interval > 1:
+            fanout_fn = _make_amortized_loss(
+                fanout_fn,
+                skip_every=config.fanout_amortize_interval,
+            )
         loss_fns.append(("w_fanout", fanout_fn, False, False))
 
     if config.w_back_edge > 0:
@@ -570,6 +576,11 @@ def _layout_inner(
     stall_count = 0
     _t_loop = _time.perf_counter()
     _log_interval = max(steps // 4, 1)  # log at 25%, 50%, 75%, 100%
+    random_interval = (
+        max(int(1.0 / config.edge_random_fraction), 1)
+        if 0.0 < config.edge_random_fraction < 1.0
+        else 0
+    )
 
     for step in range(steps):
         t = step / max(steps - 1, 1)  # 0 → 1
@@ -586,7 +597,10 @@ def _layout_inner(
         # Sample edge batch for this step — reuse pre-allocated buffer
         if batch_buf is not None:
             # Contiguous chunks are cache-friendly; random sampling re-mixes periodically.
-            if step % 5 == 0:
+            use_random_sampling = config.edge_random_fraction >= 1.0 or (
+                random_interval > 0 and step % random_interval == 0
+            )
+            if use_random_sampling:
                 perm = torch.randint(0, num_edges, (edge_batch,), device="cpu")
                 batch_buf.copy_(edge_index[:, perm])
             else:
@@ -1030,7 +1044,7 @@ def _edge_batch_size(num_edges: int, config: LayoutConfig) -> int:
 
     Returns 0 for "use all edges" (no batching).
     """
-    if hasattr(config, "edge_batch_size") and config.edge_batch_size > 0:
+    if config.edge_batch_size > 0:
         return config.edge_batch_size
 
     batch: int
@@ -1089,7 +1103,7 @@ def _make_amortized_loss(loss_fn: LossFn, skip_every: int) -> LossFn:
 
 def _overlap_interval(num_nodes: int, config: LayoutConfig) -> int:
     """How often to run overlap projection (every N steps)."""
-    if hasattr(config, "overlap_check_interval") and config.overlap_check_interval > 0:
+    if config.overlap_check_interval > 0:
         return config.overlap_check_interval
 
     if num_nodes <= 5000:
