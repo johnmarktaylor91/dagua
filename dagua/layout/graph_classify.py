@@ -105,6 +105,13 @@ def _count_components_and_acyclic(edge_index: torch.Tensor, num_nodes: int) -> t
     if num_nodes == 0:
         return 0, True
 
+    num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    # Trees and forests require E <= N - 1. Once that bound is exceeded, the
+    # caller only needs a conservative "not acyclic" result, so we skip the
+    # Python union-find entirely on dense graphs.
+    if num_edges > num_nodes - 1:
+        return 1, False
+
     parents = list(range(num_nodes))
     ranks = [0] * num_nodes
     is_acyclic = True

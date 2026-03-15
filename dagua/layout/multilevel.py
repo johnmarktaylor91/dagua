@@ -26,6 +26,7 @@ import torch
 
 from dagua.config import LayoutConfig
 from dagua.layout.graph_classify import GraphFamily, classify_graph
+from dagua.layout.layers import build_layer_index
 from dagua.utils import _EDGE_CHUNK, VRAMBudget, _vram_fits, longest_path_layering
 
 _STREAMING_THRESHOLD = 100_000_000
@@ -321,6 +322,7 @@ def coarsen_once(
     """
     N = num_nodes
     node_sizes = _ensure_node_sizes_2d(node_sizes, N)
+    index_dtype = torch.int32 if N <= torch.iinfo(torch.int32).max else torch.long
     if isinstance(layer_assignments, list):
         layers = torch.tensor(layer_assignments, dtype=torch.long, device=device)
     else:
@@ -415,7 +417,7 @@ def coarsen_once(
     # - similar parent/child signatures stay adjacent
     # - hubs can be kept isolated
     # - grouping adapts to local compatibility instead of blindly taking triples
-    fine_to_coarse = torch.empty(N, dtype=torch.long, device=device)
+    fine_to_coarse = torch.empty(N, dtype=index_dtype, device=device)
     total_degree = in_degree + out_degree
     coarse_counts: List[int] = []
 
@@ -535,7 +537,7 @@ def coarsen_once(
         fine_to_coarse[ordered_nodes] = (
             torch.tensor(
                 local_group_ids,
-                dtype=torch.long,
+                dtype=index_dtype,
                 device=device,
             )
             + coarse_base
@@ -591,7 +593,9 @@ def coarsen_once(
                 coarse_tgt = coarse_tgt[not_self]
 
                 if coarse_src.numel() > 0:
-                    edge_hash = coarse_src * N_coarse + coarse_tgt
+                    coarse_src_long = coarse_src.to(dtype=torch.long)
+                    coarse_tgt_long = coarse_tgt.to(dtype=torch.long)
+                    edge_hash = coarse_src_long * N_coarse + coarse_tgt_long
                     unique_hash = edge_hash.unique()
                     unique_src = unique_hash // N_coarse
                     unique_tgt = unique_hash % N_coarse
@@ -643,6 +647,7 @@ def build_hierarchy(
     current_n = num_nodes
     current_sizes = _ensure_node_sizes_2d(node_sizes, current_n)
     current_cluster_ids = cluster_ids
+    layer_dtype = torch.int32 if current_n <= torch.iinfo(torch.int32).max else torch.long
     offload_dir: Optional[Path] = None
     if offload_to_disk and current_n > 10_000_000:
         offload_dir = Path(tempfile.mkdtemp(prefix="dagua_hierarchy_"))
@@ -664,11 +669,11 @@ def build_hierarchy(
         if current_ei.numel() > 0:
             raw_current_la = longest_path_layering(current_ei, current_n, device="cpu")
         else:
-            raw_current_la = torch.zeros(current_n, dtype=torch.long)
+            raw_current_la = torch.zeros(current_n, dtype=layer_dtype)
         if isinstance(raw_current_la, list):
-            current_la = torch.tensor(raw_current_la, dtype=torch.long)
+            current_la = torch.tensor(raw_current_la, dtype=layer_dtype)
         else:
-            current_la = raw_current_la
+            current_la = raw_current_la.to(device="cpu", dtype=layer_dtype)
         if layer_assignments_callback is not None:
             layer_assignments_callback(current_la.detach().cpu())
         if progress is not None:
@@ -837,6 +842,11 @@ def multilevel_layout(
             _vlog(f"Phase 1/3: Tree fast path ({n:,} nodes, {structure.family.name.lower()})...")
             ei = cpu_ei.to(device)
             ns = cpu_ns.to(device)
+            direct_layer_index = (
+                build_layer_index(precomputed_layers, device=device)
+                if precomputed_layers is not None
+                else None
+            )
             if trace is not None and hasattr(trace, "mark_phase"):
                 trace.mark_phase("Direct Layout", f"{n:,} nodes")
             direct_pos = _layout_inner(
@@ -848,6 +858,8 @@ def multilevel_layout(
                 layer_assignments=precomputed_layers,
                 progress_context=ProgressContext(),
                 trace=trace,
+                graph_structure=structure,
+                prebuilt_layer_index=direct_layer_index,
             )
             from dagua.layout.engine import _apply_direction
 
@@ -886,6 +898,11 @@ def multilevel_layout(
             # Graph is already small enough — use direct layout
             ei = cpu_ei.to(device)
             ns = cpu_ns.to(device)
+            direct_layer_index = (
+                build_layer_index(precomputed_layers, device=device)
+                if precomputed_layers is not None
+                else None
+            )
             if trace is not None and hasattr(trace, "mark_phase"):
                 trace.mark_phase("Direct Layout", f"{n:,} nodes")
             direct_pos = _layout_inner(
@@ -897,6 +914,8 @@ def multilevel_layout(
                 layer_assignments=precomputed_layers,
                 progress_context=ProgressContext(),
                 trace=trace,
+                graph_structure=structure,
+                prebuilt_layer_index=direct_layer_index,
             )
             from dagua.layout.engine import _apply_direction
 
@@ -977,6 +996,11 @@ def multilevel_layout(
             pos = precomputed_coarsest_pos.to(device)
             _vlog(f"Restored coarsest positions ({coarsest.num_nodes:,} nodes)", indent="  ")
         else:
+            coarsest_layer_index = (
+                build_layer_index(coarsest.coarse_layer_assignments, device="cpu")
+                if coarsest.coarse_layer_assignments is not None
+                else None
+            )
             pos = _layout_inner(
                 coarsest.edge_index,
                 coarsest.num_nodes,
@@ -985,6 +1009,8 @@ def multilevel_layout(
                 device=device,
                 layer_assignments=coarsest.coarse_layer_assignments,
                 progress_context=ProgressContext(),
+                prebuilt_layer_index=coarsest_layer_index,
+                skip_classification=True,
             )
             coarsest_pos_callback = getattr(graph, "_coarsest_positions_callback", None)
             if coarsest_pos_callback is not None:
@@ -1098,6 +1124,11 @@ def multilevel_layout(
             del fine_pos
 
             refine_config = _make_config(steps=refine_steps, seed=None)
+            level_layer_index = (
+                build_layer_index(level.fine_layer_assignments, device="cpu")
+                if level.fine_layer_assignments is not None
+                else None
+            )
             level_trace = None
             if i == 0 and trace is not None:
                 level_trace = trace
@@ -1114,6 +1145,8 @@ def multilevel_layout(
                 layer_assignments=level.fine_layer_assignments,
                 progress_context=ProgressContext(indent="    "),
                 trace=level_trace,
+                prebuilt_layer_index=level_layer_index,
+                skip_classification=True,
             )
 
             levels[i] = CoarseLevel(
