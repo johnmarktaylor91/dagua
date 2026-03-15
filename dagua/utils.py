@@ -520,24 +520,8 @@ def _longest_path_layering_vectorized(
 
         avg_wave = total_processed / max(current_layer, 1)
 
-        # Fast-path detection for clean layered DAGs. This only influences the
-        # strategy choice confidence; the actual layering still runs normally.
-        if current_layer >= 3 and total_processed > 0:
-            processed_mask = remaining == -1
-            sample_size = min(E, 1_000_000)
-            if E > sample_size:
-                sample_idx = torch.randint(0, E, (sample_size,), device=compute_device)
-                sample_src = src[sample_idx]
-                sample_tgt = tgt[sample_idx]
-            else:
-                sample_src = src
-                sample_tgt = tgt
-            both_processed = processed_mask[sample_src] & processed_mask[sample_tgt]
-            if both_processed.any():
-                spans = layers[sample_tgt[both_processed]] - layers[sample_src[both_processed]]
-                if (spans == 1).all():
-                    pass
-
+        # Build CSR for efficient wave processing — O(E log E) from argsort,
+        # then O(V+E) total for all remaining waves.
         csr_offsets, csr_targets = _build_csr(src, tgt, N, compute_device)
 
         # Wide graph: continue with waves (fast when few iterations needed)
