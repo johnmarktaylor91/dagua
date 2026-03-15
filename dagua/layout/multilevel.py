@@ -1007,10 +1007,7 @@ def multilevel_layout(
             n_fine_edges = fine_ei_cpu.shape[1] if fine_ei_cpu.numel() > 0 else 0
             base_refine = config.multilevel_refine_steps
             if i == 0:
-                if fine_n > 10_000_000:
-                    refine_steps = max(base_refine, 20)
-                else:
-                    refine_steps = base_refine * 2
+                refine_steps = base_refine * 2
             elif i <= 2:
                 refine_steps = base_refine
             else:
