@@ -476,7 +476,6 @@ def _process_wave_edges_chunked(
 
     Mutates `layers` and `remaining` in place.
     """
-    val_dtype = remaining.dtype
     for start in range(0, E, _EDGE_CHUNK):
         end = min(start + _EDGE_CHUNK, E)
         chunk_src = src[start:end]
@@ -486,7 +485,7 @@ def _process_wave_edges_chunked(
         if children.numel() > 0:
             candidate = layers[chunk_src[chunk_mask]] + 1
             layers.scatter_reduce_(0, children, candidate, reduce="amax")
-            ones = torch.ones(children.shape[0], dtype=val_dtype, device=remaining.device)
+            ones = torch.ones(children.shape[0], dtype=remaining.dtype, device=remaining.device)
             remaining.scatter_add_(0, children, -ones)
 
 
