@@ -12,7 +12,7 @@ SIZES=(10 20 50 100 200 500 1000 2000 5000 10000 20000 50000 100000 200000 50000
 for SIZE in "${SIZES[@]}"; do
     echo "=== $SIZE nodes ==="
     START=$(date +%s.%N)
-    if stdbuf -oL python scripts/bench_large.py "$SIZE" --device cpu --steps 500 2>&1 | tee /tmp/dagua_ladder_${SIZE}.log; then
+    if stdbuf -oL python scripts/bench_large.py "$SIZE" 2>&1 | tee /tmp/dagua_ladder_${SIZE}.log; then
         END=$(date +%s.%N)
         ELAPSED=$(echo "$END - $START" | bc)
         echo "$SIZE,$ELAPSED,ok" >> "$RESULTS"

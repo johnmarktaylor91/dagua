@@ -5,8 +5,8 @@ Headless: operates on tensors extracted from the graph.
 
 Scaling strategy (tiered):
 - Tier 0 (N < 500): exact O(N^2) repulsion, full overlap check
-- Tier 1 (500-5K): scatter sampling repulsion, layer-local overlap
-- Tier 2 (N > 5K by default): multilevel coarsening V-cycle
+- Tier 1 (500-20K): scatter sampling repulsion, layer-local overlap
+- Tier 2 (N > 20K by default): multilevel coarsening V-cycle
 
 Memory optimization (composable, auto-enabled for large graphs):
 - Per-loss backward: backward each loss term separately (3-4x memory reduction)
@@ -81,10 +81,14 @@ def _auto_layout_steps(num_nodes: int) -> int:
     if num_nodes <= 50:
         return 100
     if num_nodes <= 200:
+        return 150
+    if num_nodes <= 500:
         return 200
-    if num_nodes <= 1000:
-        return 300
+    if num_nodes <= 2000:
+        return 250
     if num_nodes <= 5000:
+        return 300
+    if num_nodes <= 10000:
         return 400
     return 500
 
@@ -128,7 +132,7 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
     # Handle cycles: reverse back edges so the engine sees a DAG
     graph._prepare_for_layout()
     try:
-        # Tier 2: Multilevel coarsening for medium-to-large graphs (N > 5K default)
+        # Tier 2: Multilevel coarsening for large graphs (N > 20K default)
         # Coarsening is faster than direct optimization at this scale.
         # Don't move data to GPU yet — multilevel manages device transfers lazily
         if n > config.multilevel_threshold:
@@ -586,10 +590,11 @@ def _layout_inner(
     # Optimization loop with annealing
     steps = config.steps
     if steps == 0:
-        # Auto-scale: smooth curve based on graph size.
-        # Small graphs converge fast, large graphs need more steps,
-        # but mid-range graphs (1K-50K) don't need 500 because
-        # multilevel handles larger graphs by default.
+        # Auto-scale: fewer steps for small graphs, more for large.
+        # Direct layout (below multilevel threshold) needs enough steps
+        # to converge but not more. Multilevel graphs use their own
+        # step counts (coarse_steps + refine_steps), so this mainly
+        # affects direct layout.
         steps = _auto_layout_steps(n)
 
     prev_unweighted = float("inf")
@@ -802,12 +807,13 @@ def _layout_inner(
         # Small graphs converge faster — detect convergence sooner
         rel_threshold = 5e-4 if n <= 200 else 1e-4
         stall_limit = 3 if n <= 200 else 5
-        if (
-            step > 10
-            and abs(prev_unweighted - unweighted_loss_val) < prev_unweighted * rel_threshold
-        ):
+        effective_stall_limit = stall_limit
+        if n <= 5000:
+            effective_stall_limit = max(stall_limit - 2, 3)
+        rel_change = abs(prev_unweighted - unweighted_loss_val) / max(abs(prev_unweighted), 1e-8)
+        if step > 10 and rel_change < rel_threshold:
             stall_count += 1
-            if stall_count >= stall_limit:
+            if stall_count >= effective_stall_limit:
                 break
         else:
             stall_count = 0
