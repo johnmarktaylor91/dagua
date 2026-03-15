@@ -14,7 +14,7 @@ Scaling strategy (Sprint 3 — fully vectorized):
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Protocol, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -22,6 +22,23 @@ import torch.nn.functional as F
 from dagua.layout.layers import LayerIndex
 
 # ─── Edge-based losses (O(E), trivially parallelizable) ─────────────────────
+
+
+class EdgeBatchLike(Protocol):
+    """Protocol for pre-computed edge batch tensors."""
+
+    src: torch.Tensor
+    tgt: torch.Tensor
+    dx: torch.Tensor
+    dy: torch.Tensor
+    dist_sq: torch.Tensor
+
+
+class SampledNodeLike(Protocol):
+    """Protocol for shared sampled-node state."""
+
+    active_idx: torch.Tensor
+    sampled: torch.Tensor
 
 
 def _non_self_edges(edge_index: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -36,12 +53,34 @@ def dag_ordering_loss(
     edge_index: torch.Tensor,
     node_sizes: torch.Tensor,
     rank_sep: float = 50.0,
+    edge_ctx: Optional[EdgeBatchLike] = None,
 ) -> torch.Tensor:
-    """Targets must be below sources in y-coordinate."""
-    if edge_index.numel() == 0:
-        return torch.tensor(0.0, device=pos.device)
+    """Penalize edges whose targets drift above their sources.
 
-    src, tgt = _non_self_edges(edge_index)
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge indices with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    rank_sep : float, default=50.0
+        Desired vertical separation between successive layers.
+    edge_ctx : EdgeBatchLike | None, default=None
+        Optional shared edge batch context with self-loops already removed.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss value.
+    """
+    if edge_ctx is not None:
+        src, tgt = edge_ctx.src, edge_ctx.tgt
+    elif edge_index.numel() == 0:
+        return torch.tensor(0.0, device=pos.device)
+    else:
+        src, tgt = _non_self_edges(edge_index)
     if src.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
     margin = (node_sizes[src, 1] + node_sizes[tgt, 1]) / 2 + rank_sep * 0.5
@@ -53,59 +92,113 @@ def edge_attraction_loss(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
     x_bias: float = 4.0,
+    edge_ctx: Optional[EdgeBatchLike] = None,
 ) -> torch.Tensor:
     """Connected nodes pull together. x-bias encourages vertical edges.
 
     AMD insight: cap attraction at 1/3 distance to prevent overshoot.
     """
-    if edge_index.numel() == 0:
+    if edge_ctx is not None:
+        dx = edge_ctx.dx
+        dy = edge_ctx.dy
+        dist_sq = edge_ctx.dist_sq
+    elif edge_index.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
-
-    src, tgt = _non_self_edges(edge_index)
-    if src.numel() == 0:
+    else:
+        src, tgt = _non_self_edges(edge_index)
+        if src.numel() == 0:
+            return torch.tensor(0.0, device=pos.device)
+        dx = pos[src, 0] - pos[tgt, 0]
+        dy = pos[src, 1] - pos[tgt, 1]
+        dist_sq = dx.square() + dy.square()
+    if dist_sq.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
-    diff = pos[src] - pos[tgt]  # [E, 2]
-    dist_sq = (diff**2).sum(dim=1)  # [E]
 
     # Cap: attraction force proportional to dist_sq, but capped at 1/3 of distance
     # This prevents nodes from overshooting past their targets
-    dist = dist_sq.sqrt()
-    max_force = dist / 3.0  # 1/3 of distance
-    force = dist.clamp(max=1.0)  # normalized force magnitude
-    cap = torch.where(force > max_force, max_force / (force + 1e-8), torch.ones_like(force))
+    cap = torch.ones_like(dist_sq)
+    near_mask = dist_sq < 9.0
+    if near_mask.any():
+        dist = dist_sq[near_mask].sqrt()
+        max_force = dist / 3.0
+        force = dist.clamp(max=1.0)
+        cap[near_mask] = torch.where(
+            force > max_force,
+            max_force / (force + 1e-8),
+            torch.ones_like(force),
+        )
 
-    dx = diff[:, 0]
-    dy = diff[:, 1]
-    return x_bias * (dx**2 * cap).mean() + (dy**2 * cap).mean()
+    return x_bias * (dx.square() * cap).mean() + (dy.square() * cap).mean()
 
 
 def edge_straightness_loss(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
+    edge_ctx: Optional[EdgeBatchLike] = None,
 ) -> torch.Tensor:
-    """Penalize horizontal displacement between connected nodes."""
-    if edge_index.numel() == 0:
-        return torch.tensor(0.0, device=pos.device)
+    """Penalize horizontal displacement between connected nodes.
 
-    src, tgt = _non_self_edges(edge_index)
-    if src.numel() == 0:
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge indices with shape ``[2, E]``.
+    edge_ctx : EdgeBatchLike | None, default=None
+        Optional shared edge batch context with pre-computed horizontal deltas.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss value.
+    """
+    if edge_ctx is not None:
+        dx = edge_ctx.dx
+    elif edge_index.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
-    dx = pos[src, 0] - pos[tgt, 0]
-    return (dx**2).mean()
+    else:
+        src, tgt = _non_self_edges(edge_index)
+        if src.numel() == 0:
+            return torch.tensor(0.0, device=pos.device)
+        dx = pos[src, 0] - pos[tgt, 0]
+    if dx.numel() == 0:
+        return torch.tensor(0.0, device=pos.device)
+    return dx.square().mean()
 
 
 def edge_length_variance_loss(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
+    edge_ctx: Optional[EdgeBatchLike] = None,
 ) -> torch.Tensor:
-    """Penalize variance of edge lengths."""
-    if edge_index.numel() == 0:
-        return torch.tensor(0.0, device=pos.device)
+    """Penalize variance of edge lengths.
 
-    src, tgt = _non_self_edges(edge_index)
-    if src.numel() <= 1:
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge indices with shape ``[2, E]``.
+    edge_ctx : EdgeBatchLike | None, default=None
+        Optional shared edge batch context with pre-computed squared distances.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss value.
+    """
+    if edge_ctx is not None:
+        dist_sq = edge_ctx.dist_sq
+    elif edge_index.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
-    lengths = ((pos[src] - pos[tgt]) ** 2).sum(dim=1).add(1e-8).sqrt()
+    else:
+        src, tgt = _non_self_edges(edge_index)
+        if src.numel() <= 1:
+            return torch.tensor(0.0, device=pos.device)
+        dist_sq = (pos[src] - pos[tgt]).square().sum(dim=1)
+    if dist_sq.numel() <= 1:
+        return torch.tensor(0.0, device=pos.device)
+    lengths = dist_sq.add(1e-8).sqrt()
     if lengths.numel() <= 1:
         return torch.tensor(0.0, device=pos.device)
     return lengths.var()
@@ -123,6 +216,7 @@ def repulsion_loss(
     node_sizes: Optional[torch.Tensor] = None,
     rvs_threshold: int = 5000,
     rvs_nn_k: int = 20,
+    sampled_ctx: Optional[SampledNodeLike] = None,
 ) -> torch.Tensor:
     """All nodes repel each other.
 
@@ -137,6 +231,9 @@ def repulsion_loss(
 
     if num_nodes <= threshold:
         return _repulsion_exact(pos, num_nodes, node_sizes)
+
+    if sampled_ctx is not None:
+        return _repulsion_rvs_from_context(pos, sampled_ctx, rvs_nn_k, node_sizes)
 
     # RVS for large graphs (>5K nodes)
     if num_nodes > rvs_threshold and layer_index is not None:
@@ -203,13 +300,14 @@ def _repulsion_scatter(
         return torch.tensor(0.0, device=device)
 
     layers = layer_index.node_to_layer  # [N]
+    layers_long = layers if layers.dtype == torch.long else layers.to(dtype=torch.long)
     offsets = layer_index.layer_offsets  # [L+1]
     sorted_nodes = layer_index.sorted_nodes  # [N]
     num_layers = layer_index.num_layers
 
     # For each node, compute the sampling range: nodes in [layer-1, layer+1]
-    adj_layer_lo = (layers - 1).clamp(min=0)  # [N]
-    adj_layer_hi = (layers + 2).clamp(max=num_layers)  # [N]
+    adj_layer_lo = (layers_long - 1).clamp(min=0)  # [N]
+    adj_layer_hi = (layers_long + 2).clamp(max=num_layers)  # [N]
 
     adj_start = offsets[adj_layer_lo]  # [N] — start index in sorted_nodes
     adj_end = offsets[adj_layer_hi]  # [N] — end index in sorted_nodes
@@ -282,6 +380,7 @@ def _repulsion_rvs(
     n_random = max(int(N**0.25), 4)
     K_nn = min(nn_k, N - 1)
     layers = layer_index.node_to_layer
+    layers_long = layers if layers.dtype == torch.long else layers.to(dtype=torch.long)
     offsets = layer_index.layer_offsets
     sorted_nodes = layer_index.sorted_nodes
     num_layers = layer_index.num_layers
@@ -291,7 +390,7 @@ def _repulsion_rvs(
     A = active_idx.shape[0]
 
     # For each active node, compute its adjacent-layer range
-    active_layers = layers[active_idx]  # [A]
+    active_layers = layers_long[active_idx]  # [A]
     adj_lo = (active_layers - 1).clamp(min=0)
     adj_hi = (active_layers + 2).clamp(max=num_layers)
     adj_start = offsets[adj_lo]  # [A]
@@ -359,6 +458,66 @@ def _repulsion_rvs(
     )
 
 
+def _repulsion_rvs_from_context(
+    pos: torch.Tensor,
+    sampled_ctx: SampledNodeLike,
+    nn_k: int,
+    node_sizes: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Evaluate RVS repulsion from a shared sampled-node context."""
+    device = pos.device
+    N = pos.shape[0]
+    active_idx = sampled_ctx.active_idx
+    sampled = sampled_ctx.sampled
+    if active_idx.numel() == 0 or sampled.numel() == 0:
+        return torch.tensor(0.0, device=device)
+
+    k_nn = min(nn_k, N - 1)
+    n_random = max(int(N**0.25), 4)
+    k_same = min(max(64, k_nn), sampled.shape[1])
+    same_sampled = sampled[:, :k_same]
+    same_for_repel = same_sampled[:, : min(k_nn, same_sampled.shape[1])]
+    random_start = min(k_same, sampled.shape[1])
+    random_end = min(random_start + n_random, sampled.shape[1])
+    random_sampled = sampled[:, random_start:random_end]
+
+    if same_for_repel.shape[1] > 0 and random_sampled.shape[1] > 0:
+        all_sampled = torch.cat([same_for_repel, random_sampled], dim=1)
+    elif same_for_repel.shape[1] > 0:
+        all_sampled = same_for_repel
+    else:
+        all_sampled = random_sampled
+    if all_sampled.shape[1] == 0:
+        return torch.tensor(0.0, device=device)
+
+    self_idx = active_idx.unsqueeze(1)
+    not_self = all_sampled != self_idx
+
+    active_pos = pos[active_idx]
+    sample_pos = pos[all_sampled]
+    diff = active_pos.unsqueeze(1) - sample_pos
+    dist_sq = diff.square().sum(dim=2) + 1e-4
+
+    if node_sizes is not None:
+        src_w = node_sizes[active_idx, 0].unsqueeze(1).expand(-1, all_sampled.shape[1])
+        src_h = node_sizes[active_idx, 1].unsqueeze(1).expand(-1, all_sampled.shape[1])
+        tgt_w = node_sizes[all_sampled, 0]
+        tgt_h = node_sizes[all_sampled, 1]
+        combined_size = (src_w + tgt_w) * (src_h + tgt_h)
+        mean_size = combined_size.mean()
+        repulsion = (combined_size / (mean_size + 1e-8)) / dist_sq
+    else:
+        repulsion = 1.0 / dist_sq
+
+    repulsion = torch.where(not_self, repulsion, torch.zeros_like(repulsion))
+    valid_count = not_self.sum().float()
+    return torch.where(
+        valid_count > 0,
+        repulsion.sum() / valid_count,
+        torch.tensor(0.0, device=device),
+    )
+
+
 # ─── Overlap avoidance (fully vectorized — no per-layer Python loops) ────────
 
 
@@ -368,6 +527,7 @@ def overlap_avoidance_loss(
     padding: float = 2.0,
     layer_index: Optional[LayerIndex] = None,
     rvs_threshold: int = 100000,
+    sampled_ctx: Optional[SampledNodeLike] = None,
 ) -> torch.Tensor:
     """Soft penalty on bounding box intersection.
 
@@ -381,6 +541,9 @@ def overlap_avoidance_loss(
 
     if n <= 500:
         return _overlap_exact(pos, node_sizes, padding)
+
+    if sampled_ctx is not None:
+        return _overlap_active_subset_from_context(pos, node_sizes, padding, sampled_ctx)
 
     if n > rvs_threshold and layer_index is not None:
         return _overlap_active_subset(pos, node_sizes, padding, layer_index)
@@ -421,12 +584,13 @@ def _overlap_scatter(
         return torch.tensor(0.0, device=device)
 
     layers = layer_index.node_to_layer  # [N]
+    layers_long = layers if layers.dtype == torch.long else layers.to(dtype=torch.long)
     offsets = layer_index.layer_offsets  # [L+1]
     sorted_nodes = layer_index.sorted_nodes  # [N]
 
     # For each node, sample from same layer only (cross-layer separated by rank_sep)
-    layer_start = offsets[layers]  # [N]
-    layer_end = offsets[layers + 1]  # [N]
+    layer_start = offsets[layers_long]  # [N]
+    layer_end = offsets[layers_long + 1]  # [N]
     range_size = (layer_end - layer_start).float()  # [N]
 
     # Sample K indices within same layer
@@ -491,11 +655,12 @@ def _overlap_active_subset(
     A = active_idx.shape[0]
 
     layers = layer_index.node_to_layer
+    layers_long = layers if layers.dtype == torch.long else layers.to(dtype=torch.long)
     offsets = layer_index.layer_offsets
     sorted_nodes = layer_index.sorted_nodes
 
     # Sample K neighbors from same layer for each active node
-    active_layers = layers[active_idx]
+    active_layers = layers_long[active_idx]
     layer_start = offsets[active_layers]
     layer_end = offsets[active_layers + 1]
     range_size = (layer_end - layer_start).float()
@@ -523,6 +688,43 @@ def _overlap_active_subset(
 
     overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)
 
+    overlap = torch.where(not_self, overlap, torch.zeros_like(overlap))
+
+    valid_count = not_self.sum().float()
+    return torch.where(
+        valid_count > 0,
+        overlap.sum() / valid_count,
+        torch.tensor(0.0, device=device),
+    )
+
+
+def _overlap_active_subset_from_context(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float,
+    sampled_ctx: SampledNodeLike,
+) -> torch.Tensor:
+    """Evaluate sampled overlap avoidance from a shared sampled-node context."""
+    device = pos.device
+    active_idx = sampled_ctx.active_idx
+    sampled = sampled_ctx.sampled[:, : min(64, sampled_ctx.sampled.shape[1])]
+    if active_idx.numel() == 0 or sampled.numel() == 0:
+        return torch.tensor(0.0, device=device)
+
+    self_idx = active_idx.unsqueeze(1)
+    not_self = sampled != self_idx
+
+    half_w_src = node_sizes[active_idx, 0].unsqueeze(1).expand(-1, sampled.shape[1]) / 2
+    half_h_src = node_sizes[active_idx, 1].unsqueeze(1).expand(-1, sampled.shape[1]) / 2
+    half_w_tgt = node_sizes[sampled, 0] / 2
+    half_h_tgt = node_sizes[sampled, 1] / 2
+
+    dx_abs = torch.abs(pos[active_idx, 0].unsqueeze(1) - pos[sampled, 0])
+    dy_abs = torch.abs(pos[active_idx, 1].unsqueeze(1) - pos[sampled, 1])
+
+    min_dx = half_w_src + half_w_tgt + padding
+    min_dy = half_h_src + half_h_tgt + padding
+    overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)
     overlap = torch.where(not_self, overlap, torch.zeros_like(overlap))
 
     valid_count = not_self.sum().float()
@@ -1407,6 +1609,7 @@ def fanout_distribution_loss(
 def back_edge_compactness_loss(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
+    edge_ctx: Optional[EdgeBatchLike] = None,
 ) -> torch.Tensor:
     """Penalize horizontal distance in back-edge pairs (target above source).
 
@@ -1416,19 +1619,24 @@ def back_edge_compactness_loss(
 
     O(E), trivially vectorized.
     """
-    if edge_index.numel() == 0:
+    if edge_ctx is not None:
+        src = edge_ctx.src
+        tgt = edge_ctx.tgt
+        dx = edge_ctx.dx
+        dy = edge_ctx.dy
+    elif edge_index.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
-
-    src, tgt = edge_index[0], edge_index[1]
-    src_y = pos[src, 1]
-    tgt_y = pos[tgt, 1]
+    else:
+        src, tgt = edge_index[0], edge_index[1]
+        dx = pos[src, 0] - pos[tgt, 0]
+        dy = pos[src, 1] - pos[tgt, 1]
 
     # Back edges: target is above source (lower y = higher on screen)
-    back_mask = tgt_y < src_y
+    back_mask = dy > 0
 
     if not back_mask.any():
         return torch.tensor(0.0, device=pos.device)
 
     # Horizontal distance for back edges
-    dx = pos[src[back_mask], 0] - pos[tgt[back_mask], 0]
-    return (dx**2).mean()
+    del src, tgt
+    return dx[back_mask].square().mean()

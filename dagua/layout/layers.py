@@ -23,7 +23,7 @@ class LayerIndex:
         num_layers: Number of distinct layers.
     """
 
-    node_to_layer: torch.Tensor  # [N] long
+    node_to_layer: torch.Tensor  # [N] int32/long
     layer_offsets: torch.Tensor  # [L+1] long
     sorted_nodes: torch.Tensor  # [N] long
     num_layers: int
@@ -51,12 +51,20 @@ def build_layer_index(
 
     O(N log N) from the sort. All subsequent per-layer operations are O(1) indexed.
     """
+    index_dtype = (
+        torch.int32 if len(layer_assignments) <= torch.iinfo(torch.int32).max else torch.long
+    )
     if isinstance(layer_assignments, torch.Tensor):
-        node_to_layer = layer_assignments.to(dtype=torch.long, device=device)
+        index_dtype = (
+            torch.int32
+            if layer_assignments.shape[0] <= torch.iinfo(torch.int32).max
+            else torch.long
+        )
+        node_to_layer = layer_assignments.to(dtype=index_dtype, device=device)
         n = node_to_layer.shape[0]
     else:
         n = len(layer_assignments)
-        node_to_layer = torch.tensor(layer_assignments, dtype=torch.long, device=device)
+        node_to_layer = torch.tensor(layer_assignments, dtype=index_dtype, device=device)
     num_layers = int(node_to_layer.max().item()) + 1 if n > 0 else 0
 
     # Sort nodes by layer
