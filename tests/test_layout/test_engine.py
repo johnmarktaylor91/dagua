@@ -210,7 +210,7 @@ def test_edge_batch_size_scaling() -> None:
 def test_auto_steps_scaling() -> None:
     """Auto-step count should scale monotonically with graph size."""
     sizes = [5, 20, 100, 300, 1000, 3000, 10_000]
-    expected = [50, 100, 200, 300, 300, 400, 500]
+    expected = [50, 100, 150, 200, 250, 300, 400]
 
     actual = [_auto_layout_steps(size) for size in sizes]
 
@@ -218,13 +218,13 @@ def test_auto_steps_scaling() -> None:
     assert actual == sorted(actual)
 
 
-def test_multilevel_kicks_in_at_5k(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_multilevel_kicks_in_at_20k(monkeypatch: pytest.MonkeyPatch) -> None:
     """Graphs above the default threshold should use multilevel layout."""
     engine_module = importlib.import_module("dagua.layout.engine")
     multilevel_module = importlib.import_module("dagua.layout.multilevel")
 
     g = DaguaGraph()
-    n = 6_000
+    n = 21_000
     g.num_nodes = n
     src = torch.arange(0, n - 60, dtype=torch.long)
     tgt = src + 60
