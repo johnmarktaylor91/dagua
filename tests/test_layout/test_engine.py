@@ -6,6 +6,7 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
+from dagua.layout.engine import _edge_batch_size, _make_amortized_loss, _resolve_memory_strategy
 from dagua.layout.multilevel import build_hierarchy
 from dagua.metrics import compute_all_metrics
 
@@ -36,6 +37,7 @@ class TestLayoutBasic:
         config = LayoutConfig(steps=5, verbose=False, seed=42)
         pos = layout(g, config)
         assert pos.shape == (n, 2)
+        assert torch.isfinite(pos).all()
 
 
 class TestLayoutQuality:
@@ -183,3 +185,59 @@ def test_build_hierarchy_accepts_precomputed_layer_assignments():
     assert not captured
     assert torch.equal(levels[0].fine_layer_assignments, precomputed)
     assert levels[0].coarse_layer_assignments is not None
+
+
+def test_edge_batch_size_scaling() -> None:
+    """Edge batch sizes should scale up with large edge counts."""
+    config = LayoutConfig()
+
+    assert _edge_batch_size(500_000, config) == 500_000
+    assert _edge_batch_size(5_000_000, config) == 2_000_000
+    assert _edge_batch_size(300_000_000, config) == 5_000_000
+
+
+def test_resolve_memory_strategy_cpu_defaults_to_single_backward() -> None:
+    """CPU auto mode should keep a single backward pass."""
+    config = LayoutConfig(device="cpu")
+
+    assert _resolve_memory_strategy(1_000_000, 2_000_000, "cpu", config) == (False, False, False)
+
+
+def test_layout_cpu_with_per_loss_backward_on() -> None:
+    """CPU layout should still converge when per-loss backward is forced on."""
+    g = DaguaGraph()
+    n = 1_000
+    src = torch.arange(0, n - 10, dtype=torch.long)
+    tgt = src + 10
+    g.num_nodes = n
+    g._edge_index_tensor = torch.stack([src, tgt])
+    g.node_sizes = torch.full((n, 2), 20.0)
+
+    config = LayoutConfig(steps=10, verbose=False, seed=42, per_loss_backward="on")
+    pos = layout(g, config)
+
+    assert pos.shape == (n, 2)
+    assert torch.isfinite(pos).all()
+
+
+def test_amortized_loss_wrapper_produces_finite_non_zero_total() -> None:
+    """Amortized loss wrappers should skip work without collapsing total loss."""
+
+    def _base_loss(
+        pos: torch.Tensor,
+        node_sizes: torch.Tensor,
+        layer_index: object | None,
+    ) -> torch.Tensor:
+        del node_sizes, layer_index
+        return pos.square().sum() + 1.0
+
+    pos = torch.ones((4, 2), dtype=torch.float32)
+    node_sizes = torch.ones((4, 2), dtype=torch.float32)
+    loss_fn = _make_amortized_loss(_base_loss, skip_every=2)
+
+    values = [loss_fn(pos, node_sizes, None).item() for _ in range(4)]
+
+    assert torch.isfinite(torch.tensor(values)).all()
+    assert values[0] > 0.0
+    assert values[1] == 0.0
+    assert sum(values) > 0.0
