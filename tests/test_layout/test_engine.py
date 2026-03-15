@@ -1,6 +1,7 @@
 """Tests for the core layout optimization loop."""
 
 import importlib
+import time
 
 import pytest
 import torch
@@ -11,12 +12,14 @@ from dagua.layout import layout
 from dagua.layout.engine import (
     _auto_layout_steps,
     _edge_batch_size,
+    _layout_inner,
     _make_amortized_loss,
     _overlap_interval,
     _override_for_tree,
     _resolve_memory_strategy,
 )
-from dagua.layout.graph_classify import GraphFamily, classify_graph
+from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
+from dagua.layout.layers import build_layer_index
 from dagua.layout.multilevel import build_hierarchy
 from dagua.metrics import compute_all_metrics
 
@@ -281,6 +284,19 @@ def test_classify_general() -> None:
     assert result.family == GraphFamily.GENERAL
 
 
+def test_early_exit_forest() -> None:
+    """Forest graphs with ``E < N - 1`` should still classify as forests."""
+    edges = torch.tensor(
+        [[0, 1, 3], [1, 2, 4]],
+        dtype=torch.long,
+    )
+
+    result = classify_graph(edges, 6)
+
+    assert result.family == GraphFamily.FOREST
+    assert result.num_components == 3
+
+
 def test_classify_wide_layered() -> None:
     """Wide shallow layerings should classify as wide-layered."""
     layers = torch.arange(1000, dtype=torch.long) // 100
@@ -296,6 +312,238 @@ def test_classify_wide_layered() -> None:
     assert result.family == GraphFamily.WIDE_LAYERED
     assert result.num_layers == 10
     assert result.avg_layer_width == pytest.approx(100.0)
+
+
+def test_layout_inner_with_prebuilt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_layout_inner should accept prebuilt structure and layer metadata."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+
+    edges = torch.tensor([[0, 0, 1, 2], [1, 2, 3, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 20.0)
+    layers = torch.tensor([0, 1, 1, 2], dtype=torch.long)
+    structure = classify_graph(edges, 4, layer_assignments=layers)
+    layer_index = build_layer_index(layers)
+
+    monkeypatch.setattr(
+        engine_module,
+        "classify_graph",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected classify_graph")),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "build_layer_index",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unexpected build_layer_index")
+        ),
+    )
+
+    pos = _layout_inner(
+        edges,
+        4,
+        node_sizes,
+        LayoutConfig(steps=5, seed=42),
+        device="cpu",
+        layer_assignments=layers,
+        graph_structure=structure,
+        prebuilt_layer_index=layer_index,
+    )
+
+    assert pos.shape == (4, 2)
+    assert torch.isfinite(pos).all()
+
+
+def test_classify_early_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dense non-tree graphs should bypass the Python union-find."""
+    graph_classify_module = importlib.import_module("dagua.layout.graph_classify")
+
+    n = 100_000
+    src = torch.cat(
+        [torch.arange(0, n - 1, dtype=torch.long), torch.arange(1, n, dtype=torch.long)]
+    )
+    tgt = torch.cat(
+        [torch.arange(1, n, dtype=torch.long), torch.arange(0, n - 1, dtype=torch.long)]
+    )
+    edges = torch.stack([src, tgt])
+    layers = torch.arange(n, dtype=torch.long)
+
+    def _unexpected_find_root(*args: object, **kwargs: object) -> int:
+        """Fail if the dense-graph early exit falls back to union-find."""
+        del args, kwargs
+        raise AssertionError("union-find should be skipped")
+
+    monkeypatch.setattr(
+        graph_classify_module,
+        "_find_root",
+        _unexpected_find_root,
+    )
+
+    start = time.perf_counter()
+    result = classify_graph(edges, n, layer_assignments=layers)
+    elapsed = time.perf_counter() - start
+
+    assert result.family == GraphFamily.GENERAL
+    assert elapsed < 0.1
+
+
+def test_sampled_context_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sampled-node context should refresh on the configured cadence."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+
+    n = 64
+    edges = torch.stack(
+        [
+            torch.arange(0, n - 8, dtype=torch.long),
+            torch.arange(8, n, dtype=torch.long),
+        ]
+    )
+    node_sizes = torch.full((n, 2), 20.0)
+    build_calls = 0
+    original_builder = engine_module._build_sampled_node_context
+
+    def _counting_builder(
+        num_nodes: int,
+        layer_index: object,
+        device: str | torch.device,
+        rvs_nn_k: int,
+    ) -> object:
+        """Count sampled-context rebuilds while delegating to the real helper."""
+        nonlocal build_calls
+        build_calls += 1
+        return original_builder(num_nodes, layer_index, device, rvs_nn_k)
+
+    monkeypatch.setattr(engine_module, "_build_sampled_node_context", _counting_builder)
+
+    pos = _layout_inner(
+        edges,
+        n,
+        node_sizes,
+        LayoutConfig(
+            steps=20,
+            seed=42,
+            exact_repulsion_threshold=8,
+            repel_amortize_threshold=0,
+            repel_amortize_interval=4,
+        ),
+        device="cpu",
+    )
+
+    assert pos.shape == (n, 2)
+    assert torch.isfinite(pos).all()
+    assert build_calls == 5
+
+
+def test_edge_ctx_skipped_under_plb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-loss backward should skip the shared edge-batch context build."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+
+    edges = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 20.0)
+
+    def _unexpected_edge_ctx(*args: object, **kwargs: object) -> object:
+        """Fail if the dead edge context is still built under per-loss backward."""
+        del args, kwargs
+        raise AssertionError("EdgeBatchContext should not be constructed")
+
+    def _edge_attract_without_ctx(
+        pos: torch.Tensor,
+        edge_index: torch.Tensor,
+        x_bias: float = 1.0,
+        edge_ctx: object | None = None,
+    ) -> torch.Tensor:
+        """Assert per-loss backward keeps edge-based losses on the fallback path."""
+        del edge_index, x_bias
+        assert edge_ctx is None
+        return pos.sum() * 0.0
+
+    monkeypatch.setattr(engine_module, "EdgeBatchContext", _unexpected_edge_ctx)
+    monkeypatch.setattr(engine_module, "edge_attraction_loss", _edge_attract_without_ctx)
+
+    pos = _layout_inner(
+        edges,
+        4,
+        node_sizes,
+        LayoutConfig(
+            steps=3,
+            seed=42,
+            w_dag=0.0,
+            w_attract=2.0,
+            w_repel=0.0,
+            w_overlap=0.0,
+            w_cluster=0.0,
+            w_cluster_contain=0.0,
+            w_crossing=0.0,
+            w_straightness=0.0,
+            w_length_variance=0.0,
+            w_spacing=0.0,
+            w_fanout=0.0,
+            w_back_edge=0.0,
+            per_loss_backward="on",
+        ),
+        device="cpu",
+    )
+
+    assert pos.shape == (4, 2)
+    assert torch.isfinite(pos).all()
+
+
+def test_refinement_skips_classification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Multilevel refinement should not re-run graph classification per level."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+
+    n = 2_500
+    width = 50
+    src_primary = torch.arange(0, n - width, dtype=torch.long)
+    tgt_primary = src_primary + width
+    src_secondary = torch.arange(0, n - width - 1, dtype=torch.long)
+    tgt_secondary = src_secondary + width + 1
+
+    g = DaguaGraph()
+    g.num_nodes = n
+    g._edge_index_tensor = torch.cat(
+        [
+            torch.stack([src_primary, tgt_primary]),
+            torch.stack([src_secondary, tgt_secondary]),
+        ],
+        dim=1,
+    )
+    g.node_sizes = torch.full((n, 2), 20.0)
+
+    classify_calls = 0
+    classify_impl = classify_graph
+
+    def _counting_classify(*args: object, **kwargs: object) -> GraphStructure:
+        """Count structural classification calls while delegating to the real helper."""
+        nonlocal classify_calls
+        classify_calls += 1
+        return classify_impl(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "classify_graph", _counting_classify)
+    monkeypatch.setattr(multilevel_module, "classify_graph", _counting_classify)
+
+    pos = layout(
+        g,
+        LayoutConfig(
+            steps=1,
+            seed=42,
+            verbose=False,
+            multilevel_threshold=100,
+            multilevel_min_nodes=100,
+            multilevel_coarse_steps=1,
+            multilevel_refine_steps=1,
+            w_repel=0.0,
+            w_overlap=0.0,
+            w_crossing=0.0,
+            w_straightness=0.0,
+            w_length_variance=0.0,
+            w_fanout=0.0,
+            w_back_edge=0.0,
+        ),
+    )
+
+    assert pos.shape == (n, 2)
+    assert torch.isfinite(pos).all()
+    assert classify_calls <= 2
 
 
 def test_override_for_tree_disables_tree_irrelevant_losses() -> None:
@@ -349,6 +597,10 @@ def test_multilevel_kicks_in_at_20k(monkeypatch: pytest.MonkeyPatch) -> None:
         layer_assignments: torch.Tensor | None = None,
         progress_context: object | None = None,
         trace: object | None = None,
+        *,
+        graph_structure: object | None = None,
+        prebuilt_layer_index: object | None = None,
+        skip_classification: bool = False,
     ) -> torch.Tensor:
         """Fail the test if the direct path is selected unexpectedly."""
         del (
@@ -363,6 +615,9 @@ def test_multilevel_kicks_in_at_20k(monkeypatch: pytest.MonkeyPatch) -> None:
             layer_assignments,
             progress_context,
             trace,
+            graph_structure,
+            prebuilt_layer_index,
+            skip_classification,
         )
         called["direct"] = True
         return torch.zeros((n, 2), dtype=torch.float32)
@@ -413,6 +668,10 @@ def test_direct_layout_below_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
         layer_assignments: torch.Tensor | None = None,
         progress_context: object | None = None,
         trace: object | None = None,
+        *,
+        graph_structure: object | None = None,
+        prebuilt_layer_index: object | None = None,
+        skip_classification: bool = False,
     ) -> torch.Tensor:
         """Return a deterministic tensor while recording direct-path usage."""
         del (
@@ -426,6 +685,9 @@ def test_direct_layout_below_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
             layer_assignments,
             progress_context,
             trace,
+            graph_structure,
+            prebuilt_layer_index,
+            skip_classification,
         )
         called["direct"] = True
         return torch.zeros((num_nodes, 2), dtype=torch.float32)

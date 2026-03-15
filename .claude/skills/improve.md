@@ -100,17 +100,98 @@ When all 4 subagents return, combine their findings with your own:
 3. Rank by severity and cross-agent agreement
 4. Group by module (for non-overlapping parallel execution)
 5. Discard noise (known issues, trivial style nits)
-6. Present unified execution plan to user
-7. Surface controversial or high-stakes changes for discussion
-8. Send Pushover: "Phase 2 complete. {N} findings across {M} modules. Ready for review."
+6. Write a DRAFT execution plan (not final yet — goes to adversary first)
 
-### Phase 4: Execution
-After user approval:
-1. Decompose into independent task specs grouped by module (non-overlapping files)
-2. Dispatch each to Codex in parallel
-3. Each spec includes quality gates: `ruff check . --fix && pytest tests/ -x --tb=short -q`
-4. Monitor completion, commit passing changes
-5. Send Pushover: "Phase 4 complete. {N} changes committed."
+### Phase 3.5: Adversarial Review
+Dispatch a Codex agent in read-only mode to attack the draft plan:
+
+```
+dispatch.sh review-adversary codex exec --full-auto --ephemeral "
+You are the ADVERSARIAL REVIEWER. Your job is to ATTACK this plan and
+find problems. Be harsh, skeptical, and thorough. You are not here to
+be agreeable.
+
+DRAFT EXECUTION PLAN:
+{draft_plan}
+
+ORIGINAL REVIEW REPORTS (check the plan against these):
+{all_four_reports}
+
+Your tasks:
+1. OVERLOOKED FINDINGS: Identify findings from the four reports that the
+   plan overlooked or underweighted. Why were they dropped? Were they
+   actually important?
+2. HIDDEN DEPENDENCIES: Find dependencies between changes the plan treats
+   as independent. Will change A break if change B isn't done first?
+   Will parallel execution cause merge conflicts?
+3. RISK ASSESSMENT: For each proposed change, what could go wrong? What
+   hasn't been considered? What's the blast radius if it fails?
+4. IS IT WORTH IT: Question whether each change justifies its risk and
+   complexity. Some 'optimizations' make code harder to maintain for
+   marginal gains.
+5. 80/20 PLAN: Propose the simplest subset of the plan that captures
+   80% of the total value. What can be cut without losing much?
+
+Be specific. Cite findings by number. Name files and line numbers.
+Don't just say 'this seems risky' — say WHY and WHAT could happen.
+
+Write your critique to .project-context/tasks/review-adversary.report.md
+DO NOT edit any source files.
+"
+```
+
+After the adversary reports back:
+1. Read the critique carefully
+2. Accept valid critiques — update the plan
+3. Reject invalid critiques — note WHY in the final plan
+4. Document: "Adversary raised X. Accepted/rejected because Y."
+5. The adversary's 80/20 plan is especially valuable — seriously consider it
+
+### Phase 4: Final Plan + Execution
+After incorporating adversary feedback:
+1. If there are genuinely controversial tradeoffs (reasonable people would
+   disagree), surface them to the user. Otherwise, proceed autonomously.
+2. Decompose into independent task specs grouped by module (non-overlapping files)
+3. Dispatch each to Codex in parallel
+4. Each spec includes quality gates: `ruff check . --fix && pytest tests/ -x --tb=short -q`
+5. Monitor completion, commit passing changes
+
+### Phase 5: Post-Execution Quality Review
+After all execution Codexes finish, before considering the work done:
+
+1. **Prime Claude (you) reviews all diffs holistically:**
+   - Do the changes work together coherently?
+   - Did anything get missed?
+   - Any regressions introduced?
+   - Read the actual code changes, not just the diff stats
+
+2. **Dispatch a Codex quality reviewer in parallel (read-only):**
+   ```
+   dispatch.sh review-quality codex exec --full-auto --ephemeral "
+   Review the recent changes (git diff HEAD~N..HEAD) for bugs, edge cases,
+   missed tests, style issues, anything the implementers got wrong.
+   Read AGENTS.md for quality standards. Check type hints, docstrings,
+   error handling. Write findings to .project-context/tasks/review-quality.report.md
+   DO NOT edit any source files.
+   "
+   ```
+
+3. **Run full quality gates:**
+   ```
+   ruff check . --fix
+   mypy --follow-imports=silent dagua/cli.py
+   pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"
+   ```
+
+4. **Compare findings from both reviews.** If either catches real issues,
+   dispatch fixes. If both are clean, the work is done.
+
+5. **Notify user with summary:**
+   - What was built (high-level)
+   - What the reviewers caught
+   - What was fixed
+   - Final test results
+   - Only surface controversial issues — everything else, just report
 
 ## Key Rules
 - All review agents get the same planning memo + gotchas.md context
