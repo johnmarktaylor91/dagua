@@ -22,6 +22,7 @@ Cross-cutting:
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Union
 
@@ -106,14 +107,16 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
     if config is None:
         config = LayoutConfig()
 
-    device = config.device
-    if device == "cuda" and not torch.cuda.is_available():
-        device = "cpu"
-
     # Ensure node sizes are computed
     graph.compute_node_sizes()
 
     n = graph.num_nodes
+    device = config.device
+    if device == "cuda" and n < 1000:
+        device = "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        device = "cpu"
+
     if n == 0:
         pos = torch.zeros(0, 2, device=device)
         graph.cache_layout(pos)
@@ -152,6 +155,9 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
 
         # Resolve flex node IDs to integer indices before headless engine
         effective_config = _resolve_flex_ids(config, graph)
+        if effective_config.device != device:
+            effective_config = copy.copy(effective_config)
+            effective_config.device = device
 
         # Also pick up flex from graph.flex if config doesn't have one
         if effective_config.flex is None and getattr(graph, "flex", None) is not None:
@@ -1074,28 +1080,28 @@ def _edge_batch_size(num_edges: int, config: LayoutConfig) -> int:
     if config.edge_batch_size > 0:
         return config.edge_batch_size
 
-    batch: int
     if num_edges <= 10000:
-        batch = 0
-    elif num_edges <= 100000:
-        batch = 50000
-    elif num_edges <= 500000:
-        batch = 200000
-    elif num_edges <= 2_000_000:
-        batch = 500_000
-    elif num_edges <= 20_000_000:
-        batch = 2_000_000
-    else:
-        batch = 5_000_000
+        return 0
 
-    if getattr(config, "device", "cpu") == "cuda" and batch > 0:
+    if config.device == "cuda":
         try:
             free, _ = torch.cuda.mem_get_info()
-            max_batch = int(free * 0.3 / 64)
-            return min(batch, max_batch)
+            max_safe = int(free * 0.3 / 128)
+            if num_edges <= max_safe:
+                return 0
+            return min(max_safe, num_edges)
         except Exception:
             pass
-    return batch
+
+    if num_edges <= 100000:
+        return 50000
+    if num_edges <= 500000:
+        return 200000
+    if num_edges <= 2_000_000:
+        return 500_000
+    if num_edges <= 20_000_000:
+        return 2_000_000
+    return 5_000_000
 
 
 def _make_amortized_loss(loss_fn: LossFn, skip_every: int) -> LossFn:
