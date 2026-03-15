@@ -621,7 +621,7 @@ def build_hierarchy(
     num_nodes: int,
     node_sizes: torch.Tensor,
     min_nodes: int = 2000,
-    max_levels: int = 10,
+    max_levels: int = 20,
     device: str = "cpu",
     progress: Optional[Callable[[str], None]] = None,
     cluster_ids: Optional[torch.Tensor] = None,
@@ -730,19 +730,14 @@ def build_hierarchy(
             if prev_level.edge_index is not None:
                 _offload_level_to_disk(prev_level, len(levels) - 2, offload_dir)
 
-        # Safety: stop if coarsening didn't reduce nodes or edges enough
+        # Safety: stop if coarsening didn't reduce nodes enough.
+        # Edge count alone is not a reliable stopping signal for wide DAGs:
+        # cross-layer edges can survive merging while node count still drops
+        # enough for coarsening to remain beneficial.
         if current_n > level.num_fine * 0.7:
             if progress is not None:
                 progress("Stopping hierarchy build: node reduction below threshold")
             break
-        if (
-            prev_edge_count > 0
-            and coarse_edge_count > prev_edge_count * 0.9
-            and current_n > level.num_fine * 0.5
-        ):
-            if progress is not None:
-                progress("Stopping hierarchy build: edge reduction below threshold")
-            break  # edges barely reduced AND node reduction is weak
 
         current_la = coarse_la
         if current_cluster_ids is not None:
@@ -928,17 +923,19 @@ def multilevel_layout(
         # Pass edges on CPU — _layout_inner will stream batches to GPU.
         # Only node_sizes go to GPU (small: [N_coarse, 2]).
         coarsest = levels[-1]
-        _vlog(
-            f"Phase 2/3: Coarsest level ({coarsest.num_nodes:,} nodes, "
-            f"{config.multilevel_coarse_steps} steps)"
-        )
+        coarse_steps = config.multilevel_coarse_steps
+        if coarsest.num_nodes > 50_000:
+            coarse_steps = min(coarse_steps, 20)
+        elif coarsest.num_nodes > 10_000:
+            coarse_steps = min(coarse_steps, 30)
+        _vlog(f"Phase 2/3: Coarsest level ({coarsest.num_nodes:,} nodes, {coarse_steps} steps)")
         _reset_peak()
         if trace is not None and hasattr(trace, "mark_phase"):
             trace.mark_phase("Hierarchy Build", f"{len(levels)} levels")
             trace.mark_phase("Coarsest Layout", f"{coarsest.num_nodes:,} supernodes")
 
         coarse_config = _make_config(
-            steps=config.multilevel_coarse_steps,
+            steps=coarse_steps,
             lr=config.lr * 2,
         )
 
