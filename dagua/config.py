@@ -97,6 +97,34 @@ class LayoutConfig:
     # Only used when hybrid_device mode is active with per_loss_backward.
     num_workers: int = 0
 
+    # Edge batch size for sampling during optimization.
+    # 0 = auto-scale based on edge count (default). >0 = fixed batch size.
+    # Larger batches = fewer iterations per step but more memory.
+    edge_batch_size: int = 0
+
+    # Overlap check interval: how often to run overlap projection (every N steps).
+    # 0 = auto-scale based on graph size (default). >0 = fixed interval.
+    overlap_check_interval: int = 0
+
+    # Repulsion amortization: run repulsion loss every N steps for large graphs.
+    # 1 = every step (default/no amortization). 2+ = skip steps.
+    # Only applies when N > repel_amortize_threshold. Set threshold to 0 to
+    # apply at all scales (not recommended for small graphs).
+    repel_amortize_interval: int = 2
+    repel_amortize_threshold: int = 10_000_000
+
+    # Fanout amortization: run fanout_distribution loss every N steps for large graphs.
+    # 1 = every step (default/no amortization). 3 = run every 3rd step.
+    # Only applies when N > fanout_amortize_threshold.
+    fanout_amortize_interval: int = 3
+    fanout_amortize_threshold: int = 10_000_000
+
+    # Edge sampling strategy: fraction of steps that use random sampling vs
+    # contiguous chunks. 0.0 = all contiguous, 1.0 = all random.
+    # Default 0.2 = random every 5th step, contiguous otherwise.
+    # Contiguous is more cache-friendly; random ensures coverage.
+    edge_random_fraction: float = 0.2
+
     # Disk offloading: when True, large intermediate tensors are saved to
     # temporary files during multilevel layout to reduce peak RSS.
     # Disable for machines with sufficient RAM to keep the full hierarchy
