@@ -195,6 +195,29 @@ def test_build_hierarchy_accepts_precomputed_layer_assignments():
     assert levels[0].coarse_layer_assignments is not None
 
 
+def test_coarsening_reaches_min_nodes() -> None:
+    """Hierarchy should coarsen close to min_nodes rather than stopping early."""
+    n = 100_000
+    width = 100
+    src = torch.arange(0, n - width, dtype=torch.long)
+    tgt = src + width
+    edge_index = torch.stack([src, tgt])
+    node_sizes = torch.full((n, 2), 20.0)
+    layers = torch.arange(n, dtype=torch.long) // width
+
+    levels = build_hierarchy(
+        edge_index,
+        n,
+        node_sizes,
+        min_nodes=2000,
+        device="cpu",
+        initial_layer_assignments=layers,
+    )
+
+    coarsest_n = levels[-1].num_nodes
+    assert coarsest_n < 10000, f"Coarsest has {coarsest_n} nodes, expected < 10K"
+
+
 def test_edge_batch_size_scaling() -> None:
     """Edge batch sizes should scale up with large edge counts."""
     config = LayoutConfig()
@@ -205,6 +228,18 @@ def test_edge_batch_size_scaling() -> None:
     assert _edge_batch_size(1_000_000, config) == 500_000
     assert _edge_batch_size(5_000_000, config) == 2_000_000
     assert _edge_batch_size(300_000_000, config) == 5_000_000
+
+
+def test_edge_batch_size_cuda_uses_available_vram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CUDA auto-batching should use the largest safe batch or all edges if they fit."""
+    config = LayoutConfig(device="cuda")
+
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (128_000_000, 256_000_000))
+
+    assert _edge_batch_size(100_000, config) == 0
+    assert _edge_batch_size(500_000, config) == 300_000
 
 
 def test_auto_steps_scaling() -> None:
@@ -343,6 +378,18 @@ def test_direct_layout_below_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pos.shape == (n, 2)
     assert called["direct"] is True
     assert called["multilevel"] is False
+
+
+def test_auto_cpu_for_tiny_graphs() -> None:
+    """Tiny graphs should complete even when config prefers CUDA."""
+    g = DaguaGraph()
+    g.add_node("a")
+    g.add_node("b")
+    g.add_edge("a", "b")
+
+    pos = layout(g, LayoutConfig(device="cuda", steps=10, seed=42))
+
+    assert pos.shape == (2, 2)
 
 
 def test_config_amortize_defaults() -> None:
