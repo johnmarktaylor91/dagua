@@ -1,5 +1,7 @@
 """Tests for the core layout optimization loop."""
 
+import importlib
+
 import pytest
 import torch
 
@@ -7,6 +9,7 @@ from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
 from dagua.layout.engine import (
+    _auto_layout_steps,
     _edge_batch_size,
     _make_amortized_loss,
     _overlap_interval,
@@ -199,6 +202,144 @@ def test_edge_batch_size_scaling() -> None:
     assert _edge_batch_size(500_000, config) == 500_000
     assert _edge_batch_size(5_000_000, config) == 2_000_000
     assert _edge_batch_size(300_000_000, config) == 5_000_000
+
+
+def test_auto_steps_scaling() -> None:
+    """Auto-step count should scale monotonically with graph size."""
+    sizes = [5, 20, 100, 300, 1000, 3000, 10_000]
+    expected = [50, 100, 200, 300, 300, 400, 500]
+
+    actual = [_auto_layout_steps(size) for size in sizes]
+
+    assert actual == expected
+    assert actual == sorted(actual)
+
+
+def test_multilevel_kicks_in_at_5k(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Graphs above the default threshold should use multilevel layout."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+
+    g = DaguaGraph()
+    n = 6_000
+    g.num_nodes = n
+    src = torch.arange(0, n - 60, dtype=torch.long)
+    tgt = src + 60
+    g._edge_index_tensor = torch.stack([src, tgt])
+    g.node_sizes = torch.full((n, 2), 20.0)
+    called = {"multilevel": False, "direct": False}
+
+    def _fake_multilevel_layout(
+        graph: DaguaGraph,
+        config: LayoutConfig,
+        trace: object | None = None,
+    ) -> torch.Tensor:
+        """Return a deterministic tensor while recording multilevel usage."""
+        del config, trace
+        called["multilevel"] = True
+        return torch.zeros((graph.num_nodes, 2), dtype=torch.float32)
+
+    def _fake_layout_inner(
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        node_sizes: torch.Tensor,
+        config: LayoutConfig,
+        device: str = "cpu",
+        init_pos: torch.Tensor | None = None,
+        clusters: dict | None = None,
+        cluster_parents: dict | None = None,
+        layer_assignments: torch.Tensor | None = None,
+        progress_context: object | None = None,
+        trace: object | None = None,
+    ) -> torch.Tensor:
+        """Fail the test if the direct path is selected unexpectedly."""
+        del (
+            edge_index,
+            num_nodes,
+            node_sizes,
+            config,
+            device,
+            init_pos,
+            clusters,
+            cluster_parents,
+            layer_assignments,
+            progress_context,
+            trace,
+        )
+        called["direct"] = True
+        return torch.zeros((n, 2), dtype=torch.float32)
+
+    monkeypatch.setattr(multilevel_module, "multilevel_layout", _fake_multilevel_layout)
+    monkeypatch.setattr(engine_module, "_layout_inner", _fake_layout_inner)
+
+    pos = layout(g, LayoutConfig(steps=50, verbose=False, seed=42))
+
+    assert pos.shape == (n, 2)
+    assert called["multilevel"] is True
+    assert called["direct"] is False
+
+
+def test_direct_layout_below_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Graphs below the default threshold should stay on the direct path."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+
+    g = DaguaGraph()
+    n = 1_000
+    g.num_nodes = n
+    src = torch.arange(0, n - 10, dtype=torch.long)
+    tgt = src + 10
+    g._edge_index_tensor = torch.stack([src, tgt])
+    g.node_sizes = torch.full((n, 2), 20.0)
+    called = {"multilevel": False, "direct": False}
+
+    def _fake_multilevel_layout(
+        graph: DaguaGraph,
+        config: LayoutConfig,
+        trace: object | None = None,
+    ) -> torch.Tensor:
+        """Fail the test if the multilevel path is selected unexpectedly."""
+        del graph, config, trace
+        called["multilevel"] = True
+        return torch.zeros((n, 2), dtype=torch.float32)
+
+    def _fake_layout_inner(
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        node_sizes: torch.Tensor,
+        config: LayoutConfig,
+        device: str = "cpu",
+        init_pos: torch.Tensor | None = None,
+        clusters: dict | None = None,
+        cluster_parents: dict | None = None,
+        layer_assignments: torch.Tensor | None = None,
+        progress_context: object | None = None,
+        trace: object | None = None,
+    ) -> torch.Tensor:
+        """Return a deterministic tensor while recording direct-path usage."""
+        del (
+            edge_index,
+            node_sizes,
+            config,
+            device,
+            init_pos,
+            clusters,
+            cluster_parents,
+            layer_assignments,
+            progress_context,
+            trace,
+        )
+        called["direct"] = True
+        return torch.zeros((num_nodes, 2), dtype=torch.float32)
+
+    monkeypatch.setattr(multilevel_module, "multilevel_layout", _fake_multilevel_layout)
+    monkeypatch.setattr(engine_module, "_layout_inner", _fake_layout_inner)
+
+    pos = layout(g, LayoutConfig(steps=20, verbose=False, seed=42))
+
+    assert pos.shape == (n, 2)
+    assert called["direct"] is True
+    assert called["multilevel"] is False
 
 
 def test_config_amortize_defaults() -> None:
