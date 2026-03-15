@@ -199,7 +199,10 @@ def test_edge_batch_size_scaling() -> None:
     """Edge batch sizes should scale up with large edge counts."""
     config = LayoutConfig()
 
-    assert _edge_batch_size(500_000, config) == 500_000
+    assert _edge_batch_size(100_000, config) == 50000
+    assert _edge_batch_size(200_000, config) == 200000
+    assert _edge_batch_size(500_000, config) == 200000
+    assert _edge_batch_size(1_000_000, config) == 500_000
     assert _edge_batch_size(5_000_000, config) == 2_000_000
     assert _edge_batch_size(300_000_000, config) == 5_000_000
 
@@ -369,11 +372,13 @@ def test_overlap_interval_respects_fixed_override() -> None:
     assert _overlap_interval(1_000_000, config) == 7
 
 
-def test_resolve_memory_strategy_cpu_defaults_to_single_backward() -> None:
-    """CPU auto mode should keep a single backward pass."""
+def test_resolve_memory_strategy_cpu_auto_enables_per_loss_for_large_graphs() -> None:
+    """CPU auto mode should enable per-loss backward only above the large-graph threshold."""
     config = LayoutConfig(device="cpu")
 
-    assert _resolve_memory_strategy(1_000_000, 2_000_000, "cpu", config) == (False, False, False)
+    assert _resolve_memory_strategy(50_000, 100_000, "cpu", config) == (False, False, False)
+    assert _resolve_memory_strategy(50_001, 100_000, "cpu", config) == (True, False, False)
+    assert _resolve_memory_strategy(1_000_000, 2_000_000, "cpu", config) == (True, False, False)
 
 
 def test_layout_cpu_with_per_loss_backward_on() -> None:
