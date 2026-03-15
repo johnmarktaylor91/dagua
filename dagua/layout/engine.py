@@ -49,7 +49,7 @@ from dagua.layout.constraints import (
     repulsion_loss,
     spacing_consistency_loss,
 )
-from dagua.layout.graph_classify import GraphFamily, classify_graph
+from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
 from dagua.layout.init_placement import init_positions
 from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.projection import project_overlaps
@@ -298,31 +298,57 @@ def _layout_inner(
     cluster_parents: Optional[dict] = None,
     layer_assignments: Optional[torch.Tensor] = None,
     progress_context: Optional[ProgressContext] = None,
-    trace=None,
+    trace: Optional[object] = None,
+    *,
+    graph_structure: Optional[GraphStructure] = None,
+    prebuilt_layer_index: Optional[LayerIndex] = None,
+    skip_classification: bool = False,
 ) -> torch.Tensor:
-    """Headless optimization loop — operates on raw tensors.
+    """Optimize node positions for a tensor-only layout problem.
 
-    This is the core engine, usable by both direct layout and multilevel V-cycle.
-    No Graph object dependency.
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the current layout problem.
+    node_sizes : torch.Tensor
+        Node size tensor shaped ``[N, 2]`` or broadcastable from ``[N]`` /
+        ``[N, 1]``.
+    config : LayoutConfig
+        Layout configuration for the current solve.
+    device : str, default="cpu"
+        Target device for optimization.
+    init_pos : torch.Tensor, optional
+        Warm-start positions shaped ``[N, 2]``.
+    clusters : dict, optional
+        Cluster membership data for cluster losses.
+    cluster_parents : dict, optional
+        Parent-cluster mapping used by containment/separation losses.
+    layer_assignments : torch.Tensor, optional
+        Raw layer assignments shaped ``[N]``.
+    progress_context : ProgressContext, optional
+        Prefix context for verbose logging.
+    trace : object, optional
+        Trace collector used by debugging and benchmarking flows.
+    graph_structure : GraphStructure, optional
+        Pre-classified structure metadata for the current graph.
+    prebuilt_layer_index : LayerIndex, optional
+        Pre-computed layer index for the current graph.
+    skip_classification : bool, default=False
+        When ``True``, skip structural classification and use the general layout
+        path. This is used during multilevel refinement where the optimization
+        strategy is already fixed by the V-cycle.
 
-    Args:
-        edge_index: [2, E] edge tensor
-        num_nodes: number of nodes
-        node_sizes: [N, 2] width/height tensor
-        config: LayoutConfig with steps, weights, etc.
-        device: target device
-        init_pos: optional [N, 2] initial positions (for multilevel warm start)
-        clusters: optional cluster dict for cluster losses
-        cluster_parents: optional parent mapping for cluster hierarchy
-        layer_assignments: optional pre-computed layer assignments tensor (skips recomputation)
-        progress_context: optional context for formatting progress messages
-
-    Returns:
-        [N, 2] position tensor (detached)
+    Returns
+    -------
+    torch.Tensor
+        Detached position tensor shaped ``[N, 2]``.
     """
     import time as _time
 
     n = num_nodes
+    device_type = torch.device(device).type
     if node_sizes.ndim == 1:
         node_sizes = node_sizes.unsqueeze(1).expand(-1, 2).contiguous()
     elif node_sizes.ndim == 2 and node_sizes.shape[1] == 1:
@@ -375,8 +401,12 @@ def _layout_inner(
     # Pre-compute layer structure (used by repulsion, overlap, projection, crossing)
     layer_assignments_raw: Optional[Union[List[int], torch.Tensor]] = None
     layer_index: Optional[LayerIndex] = None
-    if layer_assignments is not None:
-        # Use pre-computed assignments (from multilevel V-cycle)
+    if prebuilt_layer_index is not None:
+        layer_index = prebuilt_layer_index
+        if layer_index.node_to_layer.device.type != device_type:
+            layer_index = build_layer_index(layer_index.node_to_layer, device=device)
+        layer_assignments_raw = layer_index.node_to_layer
+    elif layer_assignments is not None:
         layer_index = build_layer_index(layer_assignments, device=device)
         layer_assignments_raw = layer_assignments
     elif edge_index.numel() > 0:
@@ -389,14 +419,25 @@ def _layout_inner(
     overlap_interval = _overlap_interval(n, config)
     steps = config.steps if config.steps > 0 else _auto_layout_steps(n)
 
-    classification_layers: Optional[torch.Tensor]
+    classification_layers: Optional[torch.Tensor] = None
     if isinstance(layer_assignments_raw, torch.Tensor):
         classification_layers = layer_assignments_raw
     elif layer_assignments_raw is not None:
         classification_layers = torch.tensor(layer_assignments_raw, dtype=torch.long)
+
+    if skip_classification:
+        structure = GraphStructure(
+            family=GraphFamily.GENERAL,
+            num_components=1,
+            max_degree=0,
+            num_layers=0,
+            avg_layer_width=0.0,
+            is_planar_hint=False,
+        )
+    elif graph_structure is not None:
+        structure = graph_structure
     else:
-        classification_layers = None
-    structure = classify_graph(edge_index, n, layer_assignments=classification_layers)
+        structure = classify_graph(edge_index, n, layer_assignments=classification_layers)
 
     if structure.family in {GraphFamily.TREE, GraphFamily.CHAIN}:
         config = _override_for_tree(config)
@@ -460,11 +501,16 @@ def _layout_inner(
         cpu_node_sizes = node_sizes.cpu()
         if cpu_edge_index is None:
             cpu_edge_index = edge_index.cpu()
-        cpu_layer_index = (
-            build_layer_index(layer_assignments_raw, device="cpu")
-            if layer_assignments_raw is not None
-            else None
-        )
+        if prebuilt_layer_index is not None:
+            if prebuilt_layer_index.node_to_layer.device.type == "cpu":
+                cpu_layer_index = prebuilt_layer_index
+            else:
+                cpu_layer_index = build_layer_index(
+                    prebuilt_layer_index.node_to_layer,
+                    device="cpu",
+                )
+        elif layer_assignments_raw is not None:
+            cpu_layer_index = build_layer_index(layer_assignments_raw, device="cpu")
     elif edges_on_cpu:
         cpu_edge_index = edge_index
 
@@ -760,6 +806,13 @@ def _layout_inner(
     stall_count = 0
     _t_loop = _time.perf_counter()
     _log_interval = max(steps // 4, 1)  # log at 25%, 50%, 75%, 100%
+    use_sampled_context = layer_index is not None and (config.w_repel > 0 or config.w_overlap > 0)
+    sample_refresh_interval = (
+        config.repel_amortize_interval
+        if n > config.repel_amortize_threshold and config.repel_amortize_interval > 1
+        else 1
+    )
+    sampled_ctx: Optional[SampledNodeContext] = None
     random_interval = (
         max(int(1.0 / config.edge_random_fraction), 1)
         if 0.0 < config.edge_random_fraction < 1.0
@@ -778,7 +831,6 @@ def _layout_inner(
 
         optimizer.zero_grad(set_to_none=True)
         edge_ctx_ref[0] = None
-        sampled_ctx_ref[0] = None
 
         # Sample edge batch for this step — reuse pre-allocated buffer
         if batch_buf is not None:
@@ -811,29 +863,35 @@ def _layout_inner(
                 batch_edges_ref[0] = be[:, keep]
         be = batch_edges_ref[0]
         if be is not None:
-            src, tgt = be[0], be[1]
-            src_pos = pos[src]
-            tgt_pos = pos[tgt]
-            dx = src_pos[:, 0] - tgt_pos[:, 0]
-            dy = src_pos[:, 1] - tgt_pos[:, 1]
-            dist_sq = dx * dx + dy * dy
-            edge_ctx_ref[0] = EdgeBatchContext(src=src, tgt=tgt, dx=dx, dy=dy, dist_sq=dist_sq)
+            if not use_per_loss_bw:
+                src, tgt = be[0], be[1]
+                src_pos = pos[src]
+                tgt_pos = pos[tgt]
+                dx = src_pos[:, 0] - tgt_pos[:, 0]
+                dy = src_pos[:, 1] - tgt_pos[:, 1]
+                dist_sq = dx * dx + dy * dy
+                edge_ctx_ref[0] = EdgeBatchContext(
+                    src=src,
+                    tgt=tgt,
+                    dx=dx,
+                    dy=dy,
+                    dist_sq=dist_sq,
+                )
 
-        if (
-            n > config.repel_amortize_threshold
-            and layer_index is not None
-            and (config.w_repel > 0 or config.w_overlap > 0)
-        ):
+        if use_sampled_context and (step == 0 or step % sample_refresh_interval == 0):
             sampled_layer_index = (
                 cpu_layer_index if use_hybrid and cpu_layer_index is not None else layer_index
             )
             sampled_device: Union[str, torch.device] = "cpu" if use_hybrid else pos.device
-            sampled_ctx_ref[0] = _build_sampled_node_context(
+            sampled_ctx = _build_sampled_node_context(
                 n,
                 sampled_layer_index,
                 sampled_device,
                 config.rvs_nn_k,
             )
+        elif not use_sampled_context:
+            sampled_ctx = None
+        sampled_ctx_ref[0] = sampled_ctx
 
         # Compute annealed weights for this step
         w_dag = config.w_dag * (1 - 0.5 * t)
