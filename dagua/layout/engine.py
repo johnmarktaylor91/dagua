@@ -6,8 +6,7 @@ Headless: operates on tensors extracted from the graph.
 Scaling strategy (tiered):
 - Tier 0 (N < 500): exact O(N^2) repulsion, full overlap check
 - Tier 1 (500-5K): scatter sampling repulsion, layer-local overlap
-- Tier 2 (5K-50K): RVS repulsion, reduced passes, adaptive batching
-- Tier 3 (N > 50K): multilevel coarsening V-cycle
+- Tier 2 (N > 5K by default): multilevel coarsening V-cycle
 
 Memory optimization (composable, auto-enabled for large graphs):
 - Per-loss backward: backward each loss term separately (3-4x memory reduction)
@@ -64,6 +63,32 @@ class ProgressContext:
     indent: str = "  "
 
 
+def _auto_layout_steps(num_nodes: int) -> int:
+    """Return the automatic optimization step count for a graph size.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    int
+        Auto-selected number of optimization steps.
+    """
+    if num_nodes <= 10:
+        return 50
+    if num_nodes <= 50:
+        return 100
+    if num_nodes <= 200:
+        return 200
+    if num_nodes <= 1000:
+        return 300
+    if num_nodes <= 5000:
+        return 400
+    return 500
+
+
 def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Tensor:
     """Compute layout positions for all nodes.
 
@@ -103,7 +128,8 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
     # Handle cycles: reverse back edges so the engine sees a DAG
     graph._prepare_for_layout()
     try:
-        # Tier 3: Multilevel coarsening for very large graphs
+        # Tier 2: Multilevel coarsening for medium-to-large graphs (N > 5K default)
+        # Coarsening is faster than direct optimization at this scale.
         # Don't move data to GPU yet — multilevel manages device transfers lazily
         if n > config.multilevel_threshold:
             from dagua.layout.multilevel import multilevel_layout
@@ -560,17 +586,11 @@ def _layout_inner(
     # Optimization loop with annealing
     steps = config.steps
     if steps == 0:
-        # Auto-scale: small graphs converge fast, large graphs need more steps
-        if n <= 10:
-            steps = 50
-        elif n <= 50:
-            steps = 100
-        elif n <= 200:
-            steps = 200
-        elif n <= 500:
-            steps = 300
-        else:
-            steps = 500
+        # Auto-scale: smooth curve based on graph size.
+        # Small graphs converge fast, large graphs need more steps,
+        # but mid-range graphs (1K-50K) don't need 500 because
+        # multilevel handles larger graphs by default.
+        steps = _auto_layout_steps(n)
 
     prev_unweighted = float("inf")
     stall_count = 0
