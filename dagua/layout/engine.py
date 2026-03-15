@@ -877,10 +877,11 @@ def _resolve_memory_strategy(
     if plb != "auto" and gcp != "auto" and hyb != "auto":
         return plb == "on", gcp == "on", hyb == "on"
 
-    # CPU mode: per_loss_bw was designed for VRAM savings on GPU.
-    # On CPU, single backward is faster because autograd traverses once.
+    # CPU mode: per_loss_bw frees each loss's forward graph after backward,
+    # reducing cache pressure at scale. This is faster than single backward
+    # for large graphs despite multiple backward() calls.
     if device != "cuda":
-        use_plb = plb == "on"
+        use_plb = (plb == "on") or (plb == "auto" and n > 50000)
         return use_plb, False, False
 
     # CUDA mode: query available VRAM
@@ -1072,9 +1073,11 @@ def _edge_batch_size(num_edges: int, config: LayoutConfig) -> int:
         batch = 0
     elif num_edges <= 100000:
         batch = 50000
-    elif num_edges <= 1_000_000:
+    elif num_edges <= 500000:
+        batch = 200000
+    elif num_edges <= 2_000_000:
         batch = 500_000
-    elif num_edges <= 10_000_000:
+    elif num_edges <= 20_000_000:
         batch = 2_000_000
     else:
         batch = 5_000_000
