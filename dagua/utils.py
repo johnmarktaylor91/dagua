@@ -323,6 +323,87 @@ _EDGE_CHUNK = 10_000_000  # edges per chunk for streaming ops
 _STREAMING_NODE_THRESHOLD = 100_000_000  # switch to chunked ops above this
 
 
+def _build_flat_indices(
+    starts: torch.Tensor,
+    counts: torch.Tensor,
+    total: int,
+    device: torch.device | str,
+) -> torch.Tensor:
+    """Build flattened CSR offsets for repeated adjacency expansion.
+
+    Parameters
+    ----------
+    starts : torch.Tensor
+        CSR start offsets for each selected source node.
+    counts : torch.Tensor
+        Number of outgoing edges for each selected source node.
+    total : int
+        Total number of flattened offsets to build.
+    device : torch.device | str
+        Target device for the output tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Flattened offsets shaped ``[total]`` with per-source ranges reset to
+        zero at each CSR segment boundary.
+    """
+    del starts
+    result = torch.ones(total, dtype=torch.long, device=device)
+    boundaries = counts.cumsum(0)[:-1]
+    if boundaries.numel() > 0:
+        result[boundaries] -= counts[:-1]
+    result[0] = 0
+    return result.cumsum(0)
+
+
+def _build_csr(
+    src: torch.Tensor,
+    tgt: torch.Tensor,
+    num_nodes: int,
+    device: torch.device | str,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Build CSR adjacency for the graph.
+
+    Parameters
+    ----------
+    src : torch.Tensor
+        Source node indices for each edge.
+    tgt : torch.Tensor
+        Target node indices for each edge.
+    num_nodes : int
+        Number of nodes in the graph.
+    device : torch.device | str
+        Device where CSR tensors should be constructed.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor]
+        ``(csr_offsets, csr_targets)`` describing outgoing adjacency.
+    """
+    edge_count = src.shape[0]
+    chunked = num_nodes > _STREAMING_NODE_THRESHOLD
+    val_dtype = torch.int32 if chunked else torch.long
+
+    out_degree = torch.zeros(num_nodes, dtype=val_dtype, device=device)
+    if chunked:
+        for start in range(0, edge_count, _EDGE_CHUNK):
+            end = min(start + _EDGE_CHUNK, edge_count)
+            ones = torch.ones(end - start, dtype=val_dtype, device=device)
+            out_degree.scatter_add_(0, src[start:end], ones)
+    else:
+        ones = torch.ones(edge_count, dtype=val_dtype, device=device)
+        out_degree.scatter_add_(0, src, ones)
+
+    csr_offsets = torch.zeros(num_nodes + 1, dtype=torch.long, device=device)
+    csr_offsets[1:] = out_degree.to(torch.long).cumsum(0)
+
+    order = src.argsort()
+    csr_targets = tgt[order]
+    del order
+    return csr_offsets, csr_targets
+
+
 def _process_wave_edges_chunked(
     src: torch.Tensor,
     tgt: torch.Tensor,
@@ -439,6 +520,26 @@ def _longest_path_layering_vectorized(
 
         avg_wave = total_processed / max(current_layer, 1)
 
+        # Fast-path detection for clean layered DAGs. This only influences the
+        # strategy choice confidence; the actual layering still runs normally.
+        if current_layer >= 3 and total_processed > 0:
+            processed_mask = remaining == -1
+            sample_size = min(E, 1_000_000)
+            if E > sample_size:
+                sample_idx = torch.randint(0, E, (sample_size,), device=compute_device)
+                sample_src = src[sample_idx]
+                sample_tgt = tgt[sample_idx]
+            else:
+                sample_src = src
+                sample_tgt = tgt
+            both_processed = processed_mask[sample_src] & processed_mask[sample_tgt]
+            if both_processed.any():
+                spans = layers[sample_tgt[both_processed]] - layers[sample_src[both_processed]]
+                if (spans == 1).all():
+                    pass
+
+        csr_offsets, csr_targets = _build_csr(src, tgt, N, compute_device)
+
         # Wide graph: continue with waves (fast when few iterations needed)
         if avg_wave > 1000:
             for _ in range(N):
@@ -448,22 +549,41 @@ def _longest_path_layering_vectorized(
                 layers[wave] = current_layer
                 remaining[wave] = -1
 
-                wave_set.zero_()
-                wave_set[wave] = True
+                wave_starts = csr_offsets[wave]
+                wave_ends = csr_offsets[wave + 1]
+                edge_counts = wave_ends - wave_starts
+                total_children = int(edge_counts.sum().item())
 
-                if chunked:
-                    _process_wave_edges_chunked(src, tgt, wave_set, layers, remaining, E)
-                else:
-                    edge_mask = wave_set[src]
-                    children = tgt[edge_mask]
-                    if children.numel() > 0:
-                        candidate = layers[src[edge_mask]] + 1
-                        layers.scatter_reduce_(0, children, candidate, reduce="amax")
-                        ones = torch.ones(children.shape[0], dtype=val_dtype, device=compute_device)
-                        remaining.scatter_add_(0, children, -ones)
+                if total_children > 0:
+                    wave_expanded = torch.repeat_interleave(wave, edge_counts)
+                    if total_children < 10_000_000:
+                        offsets_within = torch.cat(
+                            [
+                                torch.arange(
+                                    int(count.item()),
+                                    dtype=torch.long,
+                                    device=compute_device,
+                                )
+                                for count in edge_counts
+                            ]
+                        )
+                    else:
+                        offsets_within = _build_flat_indices(
+                            wave_starts,
+                            edge_counts,
+                            total_children,
+                            compute_device,
+                        )
+                    flat_idx = torch.repeat_interleave(wave_starts, edge_counts) + offsets_within
+                    children = csr_targets[flat_idx]
+                    candidate = layers[wave_expanded] + 1
+                    layers.scatter_reduce_(0, children, candidate, reduce="amax")
+                    ones = torch.ones(total_children, dtype=val_dtype, device=compute_device)
+                    remaining.scatter_add_(0, children, -ones)
 
                 current_layer += 1
 
+            del csr_offsets, csr_targets
             if chunked:
                 del remaining, wave_set, in_degree
                 return layers
@@ -476,27 +596,11 @@ def _longest_path_layering_vectorized(
         # Reset — recompute from scratch with numpy (zero-copy from torch)
         if compute_device == "cuda":
             in_degree = in_degree.cpu()
-            src = src.cpu()
-            tgt = tgt.cpu()
+            csr_offsets = csr_offsets.cpu()
+            csr_targets = csr_targets.cpu()
         in_deg = in_degree.numpy().copy()
-
-        # Build CSR adjacency via sort
-        order = src.argsort()
-        csr_tgt = tgt[order].numpy()
-
-        # Chunked out-degree for large graphs
-        out_degree = torch.zeros(N, dtype=val_dtype)
-        if chunked:
-            for start in range(0, E, _EDGE_CHUNK):
-                end = min(start + _EDGE_CHUNK, E)
-                chunk_ones = torch.ones(end - start, dtype=val_dtype)
-                out_degree.scatter_add_(0, src[start:end], chunk_ones)
-        else:
-            ones_out = torch.ones(E, dtype=val_dtype)
-            out_degree.scatter_add_(0, src, ones_out)
-        offsets = torch.zeros(N + 1, dtype=torch.long)
-        offsets[1:] = out_degree.cumsum(0)
-        csr_off = offsets.numpy()
+        csr_tgt = csr_targets.numpy()
+        csr_off = csr_offsets.numpy()
 
         # BFS from sources — true O(V+E)
         layer_arr = np.zeros(N, dtype=np.int64)
