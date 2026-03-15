@@ -49,6 +49,7 @@ from dagua.layout.constraints import (
     repulsion_loss,
     spacing_consistency_loss,
 )
+from dagua.layout.graph_classify import GraphFamily, classify_graph
 from dagua.layout.init_placement import init_positions
 from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.projection import project_overlaps
@@ -62,6 +63,85 @@ class ProgressContext:
     """Context for formatting engine progress messages."""
 
     indent: str = "  "
+
+
+@dataclass
+class EdgeBatchContext:
+    """Pre-computed edge batch data shared across all edge-based losses."""
+
+    src: torch.Tensor
+    tgt: torch.Tensor
+    dx: torch.Tensor
+    dy: torch.Tensor
+    dist_sq: torch.Tensor
+
+
+@dataclass
+class SampledNodeContext:
+    """Shared sampling state for repulsion and overlap losses."""
+
+    active_idx: torch.Tensor
+    sampled: torch.Tensor
+
+
+def _build_sampled_node_context(
+    num_nodes: int,
+    layer_index: LayerIndex,
+    device: Union[str, torch.device],
+    rvs_nn_k: int,
+) -> SampledNodeContext:
+    """Build shared sampled-node state for large-node repulsion and overlap terms.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Total number of nodes in the current layout problem.
+    layer_index : LayerIndex
+        Pre-computed layer structure for the graph.
+    device : str | torch.device
+        Device where the sampled tensors should be allocated.
+    rvs_nn_k : int
+        Same-layer sample count used by the repulsion RVS path.
+
+    Returns
+    -------
+    SampledNodeContext
+        Shared active-node indices and structured neighbor samples. The sampled
+        tensor stores same-layer samples first, followed by adjacent-layer
+        random samples.
+    """
+    n_active = min(max(int(num_nodes**0.75), min(num_nodes, 256)), 1_000_000)
+    n_random = max(int(num_nodes**0.25), 4)
+    k_same = max(64, min(rvs_nn_k, num_nodes - 1))
+
+    active_idx = torch.randint(0, num_nodes, (n_active,), device=device)
+    layers = layer_index.node_to_layer
+    layers_long = layers if layers.dtype == torch.long else layers.to(dtype=torch.long)
+    offsets = layer_index.layer_offsets
+    sorted_nodes = layer_index.sorted_nodes
+
+    active_layers = layers_long[active_idx]
+
+    same_start = offsets[active_layers]
+    same_end = offsets[active_layers + 1]
+    same_range = (same_end - same_start).to(dtype=torch.float32)
+    same_rand = torch.rand(n_active, k_same, device=device)
+    same_indices = same_start.unsqueeze(1) + (same_rand * same_range.unsqueeze(1)).long()
+    same_indices = same_indices.clamp(min=0, max=num_nodes - 1)
+    same_sampled = sorted_nodes[same_indices]
+
+    adj_lo = (active_layers - 1).clamp(min=0)
+    adj_hi = (active_layers + 2).clamp(max=layer_index.num_layers)
+    adj_start = offsets[adj_lo]
+    adj_end = offsets[adj_hi]
+    adj_range = (adj_end - adj_start).to(dtype=torch.float32)
+    adj_rand = torch.rand(n_active, n_random, device=device)
+    adj_indices = adj_start.unsqueeze(1) + (adj_rand * adj_range.unsqueeze(1)).long()
+    adj_indices = adj_indices.clamp(min=0, max=num_nodes - 1)
+    random_sampled = sorted_nodes[adj_indices]
+
+    sampled = torch.cat([same_sampled, random_sampled], dim=1)
+    return SampledNodeContext(active_idx=active_idx, sampled=sampled)
 
 
 def _auto_layout_steps(num_nodes: int) -> int:
@@ -92,6 +172,26 @@ def _auto_layout_steps(num_nodes: int) -> int:
     if num_nodes <= 10000:
         return 400
     return 500
+
+
+def _override_for_tree(config: LayoutConfig) -> LayoutConfig:
+    """Return a config copy with tree-appropriate weights.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Base layout configuration.
+
+    Returns
+    -------
+    LayoutConfig
+        Shallow copy with tree-specific loss weights disabled.
+    """
+    tree_config = copy.copy(config)
+    tree_config.w_crossing = 0.0
+    tree_config.w_straightness = 0.0
+    tree_config.w_length_variance = 0.0
+    return tree_config
 
 
 def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Tensor:
@@ -287,6 +387,29 @@ def _layout_inner(
     num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
     edge_batch = _edge_batch_size(num_edges, config)
     overlap_interval = _overlap_interval(n, config)
+    steps = config.steps if config.steps > 0 else _auto_layout_steps(n)
+
+    classification_layers: Optional[torch.Tensor]
+    if isinstance(layer_assignments_raw, torch.Tensor):
+        classification_layers = layer_assignments_raw
+    elif layer_assignments_raw is not None:
+        classification_layers = torch.tensor(layer_assignments_raw, dtype=torch.long)
+    else:
+        classification_layers = None
+    structure = classify_graph(edge_index, n, layer_assignments=classification_layers)
+
+    if structure.family in {GraphFamily.TREE, GraphFamily.CHAIN}:
+        config = _override_for_tree(config)
+    if structure.family == GraphFamily.CHAIN:
+        steps = min(steps, 50)
+
+    _vlog(
+        "structure="
+        f"{structure.family.name.lower()} "
+        f"(components={structure.num_components}, "
+        f"max_degree={structure.max_degree}, "
+        f"layers={structure.num_layers})"
+    )
 
     # Edge streaming: if edges are too large for GPU, keep them on CPU
     # and stream batches to GPU each step.  This lets positions stay on GPU
@@ -353,6 +476,8 @@ def _layout_inner(
     # Step 3: Build loss functions ONCE (reuse across steps via mutable refs)
     # batch_edges_ref is a mutable container so lambdas capture the reference
     batch_edges_ref: List[Optional[torch.Tensor]] = [None]
+    edge_ctx_ref: List[Optional[EdgeBatchContext]] = [None]
+    sampled_ctx_ref: List[Optional[SampledNodeContext]] = [None]
 
     def _active_edges(p: torch.Tensor) -> torch.Tensor:
         if batch_edges_ref[0] is not None and p.device == batch_edges_ref[0].device:
@@ -360,6 +485,18 @@ def _layout_inner(
         if cpu_edge_index is not None:
             return cpu_edge_index
         return edge_index
+
+    def _active_edge_ctx(p: torch.Tensor) -> Optional[EdgeBatchContext]:
+        if use_per_loss_bw:
+            return None
+        if edge_ctx_ref[0] is not None and p.device == edge_ctx_ref[0].src.device:
+            return edge_ctx_ref[0]
+        return None
+
+    def _active_sampled_ctx(p: torch.Tensor) -> Optional[SampledNodeContext]:
+        if sampled_ctx_ref[0] is not None and p.device == sampled_ctx_ref[0].active_idx.device:
+            return sampled_ctx_ref[0]
+        return None
 
     # Static loss functions — each returns (base_weight_key, loss_fn, is_heavy, is_annealed)
     # base_weight_key is a string to look up the annealed weight at each step
@@ -369,7 +506,13 @@ def _layout_inner(
         loss_fns.append(
             (
                 "w_dag",
-                lambda p, ns, li: dag_ordering_loss(p, _active_edges(p), ns, rank_sep),
+                lambda p, ns, li: dag_ordering_loss(
+                    p,
+                    _active_edges(p),
+                    ns,
+                    rank_sep,
+                    edge_ctx=_active_edge_ctx(p),
+                ),
                 False,
                 True,
             )
@@ -380,7 +523,10 @@ def _layout_inner(
             (
                 "w_attract",
                 lambda p, ns, li: edge_attraction_loss(
-                    p, _active_edges(p), x_bias=config.w_attract_x_bias
+                    p,
+                    _active_edges(p),
+                    x_bias=config.w_attract_x_bias,
+                    edge_ctx=_active_edge_ctx(p),
                 ),
                 False,
                 False,
@@ -404,6 +550,7 @@ def _layout_inner(
                 node_sizes=ns,
                 rvs_threshold=config.rvs_threshold,
                 rvs_nn_k=config.rvs_nn_k,
+                sampled_ctx=_active_sampled_ctx(p),
             )
 
         repel_is_heavy = True
@@ -426,6 +573,7 @@ def _layout_inner(
                     ns,
                     layer_index=li,
                     rvs_threshold=config.rvs_threshold,
+                    sampled_ctx=_active_sampled_ctx(p),
                 ),
                 True,
                 True,
@@ -492,7 +640,11 @@ def _layout_inner(
         loss_fns.append(
             (
                 "w_straightness",
-                lambda p, ns, li: edge_straightness_loss(p, _active_edges(p)),
+                lambda p, ns, li: edge_straightness_loss(
+                    p,
+                    _active_edges(p),
+                    edge_ctx=_active_edge_ctx(p),
+                ),
                 False,
                 True,
             )
@@ -502,7 +654,11 @@ def _layout_inner(
         loss_fns.append(
             (
                 "w_length_variance",
-                lambda p, ns, li: edge_length_variance_loss(p, _active_edges(p)),
+                lambda p, ns, li: edge_length_variance_loss(
+                    p,
+                    _active_edges(p),
+                    edge_ctx=_active_edge_ctx(p),
+                ),
                 False,
                 False,
             )
@@ -551,6 +707,7 @@ def _layout_inner(
                 lambda p, ns, li: back_edge_compactness_loss(
                     p,
                     _active_edges(p),
+                    edge_ctx=_active_edge_ctx(p),
                 ),
                 False,
                 False,
@@ -596,17 +753,9 @@ def _layout_inner(
         if edge_batch > 0 and num_edges > edge_batch
         else None
     )
+    perm_buf = torch.empty(edge_batch, dtype=torch.long, device="cpu") if edge_batch > 0 else None
 
     # Optimization loop with annealing
-    steps = config.steps
-    if steps == 0:
-        # Auto-scale: fewer steps for small graphs, more for large.
-        # Direct layout (below multilevel threshold) needs enough steps
-        # to converge but not more. Multilevel graphs use their own
-        # step counts (coarse_steps + refine_steps), so this mainly
-        # affects direct layout.
-        steps = _auto_layout_steps(n)
-
     prev_unweighted = float("inf")
     stall_count = 0
     _t_loop = _time.perf_counter()
@@ -628,6 +777,8 @@ def _layout_inner(
             )
 
         optimizer.zero_grad(set_to_none=True)
+        edge_ctx_ref[0] = None
+        sampled_ctx_ref[0] = None
 
         # Sample edge batch for this step — reuse pre-allocated buffer
         if batch_buf is not None:
@@ -636,8 +787,9 @@ def _layout_inner(
                 random_interval > 0 and step % random_interval == 0
             )
             if use_random_sampling:
-                perm = torch.randint(0, num_edges, (edge_batch,), device="cpu")
-                batch_buf.copy_(edge_index[:, perm])
+                assert perm_buf is not None
+                torch.randint(0, num_edges, (edge_batch,), out=perm_buf)
+                batch_buf.copy_(edge_index[:, perm_buf])
             else:
                 start = (step * edge_batch) % num_edges
                 end = min(start + edge_batch, num_edges)
@@ -657,6 +809,31 @@ def _layout_inner(
             keep = be[0] != be[1]
             if not keep.all():
                 batch_edges_ref[0] = be[:, keep]
+        be = batch_edges_ref[0]
+        if be is not None:
+            src, tgt = be[0], be[1]
+            src_pos = pos[src]
+            tgt_pos = pos[tgt]
+            dx = src_pos[:, 0] - tgt_pos[:, 0]
+            dy = src_pos[:, 1] - tgt_pos[:, 1]
+            dist_sq = dx * dx + dy * dy
+            edge_ctx_ref[0] = EdgeBatchContext(src=src, tgt=tgt, dx=dx, dy=dy, dist_sq=dist_sq)
+
+        if (
+            n > config.repel_amortize_threshold
+            and layer_index is not None
+            and (config.w_repel > 0 or config.w_overlap > 0)
+        ):
+            sampled_layer_index = (
+                cpu_layer_index if use_hybrid and cpu_layer_index is not None else layer_index
+            )
+            sampled_device: Union[str, torch.device] = "cpu" if use_hybrid else pos.device
+            sampled_ctx_ref[0] = _build_sampled_node_context(
+                n,
+                sampled_layer_index,
+                sampled_device,
+                config.rvs_nn_k,
+            )
 
         # Compute annealed weights for this step
         w_dag = config.w_dag * (1 - 0.5 * t)
