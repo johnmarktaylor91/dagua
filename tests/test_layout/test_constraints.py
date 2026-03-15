@@ -17,6 +17,21 @@ from dagua.layout.constraints import (
     overlap_avoidance_loss,
     repulsion_loss,
 )
+from dagua.layout.engine import EdgeBatchContext
+
+
+def _build_edge_batch_context(pos: torch.Tensor, edge_index: torch.Tensor) -> EdgeBatchContext:
+    """Build an edge batch context with self-loops removed."""
+    keep = edge_index[0] != edge_index[1]
+    filtered = edge_index[:, keep]
+    src = filtered[0]
+    tgt = filtered[1]
+    src_pos = pos[src]
+    tgt_pos = pos[tgt]
+    dx = src_pos[:, 0] - tgt_pos[:, 0]
+    dy = src_pos[:, 1] - tgt_pos[:, 1]
+    dist_sq = dx.square() + dy.square()
+    return EdgeBatchContext(src=src, tgt=tgt, dx=dx, dy=dy, dist_sq=dist_sq)
 
 
 @pytest.fixture
@@ -54,6 +69,74 @@ class TestDagOrderingLoss:
         ns = torch.ones(5, 2) * 20
         loss = dag_ordering_loss(pos, ei, ns)
         assert loss.item() == 0.0
+
+
+def test_edge_batch_context_matches_manual() -> None:
+    """EdgeBatchContext should produce same values as manual computation."""
+    pos = torch.tensor(
+        [
+            [0.0, 0.0],
+            [3.0, 4.0],
+            [8.0, 1.0],
+            [2.0, -2.0],
+        ]
+    )
+    edge_index = torch.tensor([[0, 1, 2, 3], [1, 1, 0, 0]])
+
+    ctx = _build_edge_batch_context(pos, edge_index)
+
+    expected_src = torch.tensor([0, 2, 3])
+    expected_tgt = torch.tensor([1, 0, 0])
+    expected_dx = torch.tensor([-3.0, 8.0, 2.0])
+    expected_dy = torch.tensor([-4.0, 1.0, -2.0])
+    expected_dist_sq = torch.tensor([25.0, 65.0, 8.0])
+
+    torch.testing.assert_close(ctx.src, expected_src)
+    torch.testing.assert_close(ctx.tgt, expected_tgt)
+    torch.testing.assert_close(ctx.dx, expected_dx)
+    torch.testing.assert_close(ctx.dy, expected_dy)
+    torch.testing.assert_close(ctx.dist_sq, expected_dist_sq)
+
+
+def test_losses_with_and_without_context() -> None:
+    """Loss values should be identical with and without EdgeBatchContext."""
+    pos = torch.tensor(
+        [
+            [0.0, 0.0],
+            [20.0, 40.0],
+            [10.0, 90.0],
+            [60.0, 30.0],
+        ]
+    )
+    edge_index = torch.tensor([[0, 1, 2, 3, 2], [1, 2, 3, 0, 2]])
+    node_sizes = torch.tensor([[30.0, 20.0], [40.0, 25.0], [35.0, 30.0], [25.0, 15.0]])
+    edge_ctx = _build_edge_batch_context(pos, edge_index)
+
+    pairs = [
+        (
+            dag_ordering_loss(pos, edge_index, node_sizes, edge_ctx=None),
+            dag_ordering_loss(pos, edge_index, node_sizes, edge_ctx=edge_ctx),
+        ),
+        (
+            edge_attraction_loss(pos, edge_index, x_bias=1.5, edge_ctx=None),
+            edge_attraction_loss(pos, edge_index, x_bias=1.5, edge_ctx=edge_ctx),
+        ),
+        (
+            edge_straightness_loss(pos, edge_index, edge_ctx=None),
+            edge_straightness_loss(pos, edge_index, edge_ctx=edge_ctx),
+        ),
+        (
+            edge_length_variance_loss(pos, edge_index, edge_ctx=None),
+            edge_length_variance_loss(pos, edge_index, edge_ctx=edge_ctx),
+        ),
+        (
+            back_edge_compactness_loss(pos, edge_index, edge_ctx=None),
+            back_edge_compactness_loss(pos, edge_index, edge_ctx=edge_ctx),
+        ),
+    ]
+
+    for without_ctx, with_ctx in pairs:
+        torch.testing.assert_close(without_ctx, with_ctx)
 
 
 class TestEdgeAttractionLoss:

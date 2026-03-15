@@ -13,8 +13,10 @@ from dagua.layout.engine import (
     _edge_batch_size,
     _make_amortized_loss,
     _overlap_interval,
+    _override_for_tree,
     _resolve_memory_strategy,
 )
+from dagua.layout.graph_classify import GraphFamily, classify_graph
 from dagua.layout.multilevel import build_hierarchy
 from dagua.metrics import compute_all_metrics
 
@@ -251,6 +253,64 @@ def test_auto_steps_scaling() -> None:
 
     assert actual == expected
     assert actual == sorted(actual)
+
+
+def test_classify_tree() -> None:
+    """Linear trees should classify as chains."""
+    edges = torch.tensor(
+        [[0, 1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8, 9]],
+        dtype=torch.long,
+    )
+
+    result = classify_graph(edges, 10)
+
+    assert result.family == GraphFamily.CHAIN
+    assert result.num_components == 1
+    assert result.max_degree == 2
+
+
+def test_classify_general() -> None:
+    """Dense cyclic graphs should remain on the general path."""
+    edges = torch.tensor(
+        [[0, 0, 1, 1, 2, 2, 3], [1, 2, 2, 3, 3, 0, 0]],
+        dtype=torch.long,
+    )
+
+    result = classify_graph(edges, 4)
+
+    assert result.family == GraphFamily.GENERAL
+
+
+def test_classify_wide_layered() -> None:
+    """Wide shallow layerings should classify as wide-layered."""
+    layers = torch.arange(1000, dtype=torch.long) // 100
+    edges_src = torch.arange(0, 900, dtype=torch.long)
+    edges_tgt = edges_src + 100
+
+    result = classify_graph(
+        torch.stack([edges_src, edges_tgt]),
+        1000,
+        layer_assignments=layers,
+    )
+
+    assert result.family == GraphFamily.WIDE_LAYERED
+    assert result.num_layers == 10
+    assert result.avg_layer_width == pytest.approx(100.0)
+
+
+def test_override_for_tree_disables_tree_irrelevant_losses() -> None:
+    """Tree overrides should only zero the tree-irrelevant loss terms."""
+    config = LayoutConfig(w_crossing=1.8, w_straightness=2.2, w_length_variance=0.7)
+
+    updated = _override_for_tree(config)
+
+    assert updated is not config
+    assert updated.w_crossing == 0.0
+    assert updated.w_straightness == 0.0
+    assert updated.w_length_variance == 0.0
+    assert config.w_crossing == 1.8
+    assert config.w_straightness == 2.2
+    assert config.w_length_variance == 0.7
 
 
 def test_multilevel_kicks_in_at_20k(monkeypatch: pytest.MonkeyPatch) -> None:

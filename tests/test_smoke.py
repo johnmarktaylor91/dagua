@@ -215,10 +215,11 @@ class TestMultilevelVerbose:
 
     def test_multilevel_verbose_output(self, capsys):
         """A graph above multilevel_threshold triggers multilevel path and verbose output."""
-        # Use a small threshold to force multilevel without creating a huge graph
-        n = 200
-        edges = [(f"n{i}", f"n{i + 1}") for i in range(n - 1)]
-        g = DaguaGraph.from_edge_list(edges)
+        edge_index, n, node_sizes = _make_layered_dag(10, 20)
+        g = DaguaGraph()
+        g.num_nodes = n
+        g._edge_index_tensor = edge_index
+        g.node_sizes = node_sizes
         config = LayoutConfig(
             steps=10,
             verbose=True,
@@ -239,9 +240,11 @@ class TestMultilevelVerbose:
 
     def test_multilevel_produces_valid_positions(self):
         """Multilevel layout should produce finite, non-NaN positions."""
-        n = 150
-        edges = [(f"n{i}", f"n{i + 1}") for i in range(n - 1)]
-        g = DaguaGraph.from_edge_list(edges)
+        edge_index, n, node_sizes = _make_layered_dag(10, 15)
+        g = DaguaGraph()
+        g.num_nodes = n
+        g._edge_index_tensor = edge_index
+        g.node_sizes = node_sizes
         config = LayoutConfig(
             steps=10,
             multilevel_threshold=100,
@@ -253,6 +256,33 @@ class TestMultilevelVerbose:
 
         assert pos.shape == (n, 2)
         assert torch.isfinite(pos).all(), "Positions contain NaN or Inf"
+
+
+@pytest.mark.smoke
+def test_multilevel_tree_fast_path_skips_hierarchy(monkeypatch: pytest.MonkeyPatch):
+    """Tree-like graphs above the threshold should bypass hierarchy building."""
+    n = 200
+    edges = [(f"n{i}", f"n{i + 1}") for i in range(n - 1)]
+    g = DaguaGraph.from_edge_list(edges)
+    config = LayoutConfig(
+        steps=10,
+        multilevel_threshold=100,
+        multilevel_min_nodes=50,
+        multilevel_coarse_steps=10,
+        multilevel_refine_steps=5,
+    )
+
+    def _fail_build_hierarchy(*args, **kwargs):
+        """Fail if the hierarchy builder runs for a tree fast path."""
+        del args, kwargs
+        raise AssertionError("build_hierarchy should not run for tree fast path")
+
+    monkeypatch.setattr(_multilevel_mod, "build_hierarchy", _fail_build_hierarchy)
+
+    pos = dagua.layout(g, config)
+
+    assert pos.shape == (n, 2)
+    assert torch.isfinite(pos).all()
 
 
 @pytest.mark.smoke
@@ -303,6 +333,29 @@ def test_streaming_coarsen_once_falls_back_from_empty_node_sizes():
     assert result.node_sizes.shape[1] == 2
     assert result.node_sizes.shape[0] == result.num_nodes
     assert torch.isfinite(result.node_sizes).all()
+
+
+@pytest.mark.smoke
+def test_int32_coarsening() -> None:
+    """Coarsening should keep large index tensors in int32 when safe."""
+    edge_index, n_nodes, node_sizes = _make_layered_dag(100, 101)
+
+    levels = _multilevel_mod.build_hierarchy(
+        edge_index,
+        n_nodes,
+        node_sizes,
+        min_nodes=2_000,
+        max_levels=2,
+        device="cpu",
+        offload_to_disk=False,
+    )
+
+    assert levels
+    first_level = levels[0]
+    assert first_level.fine_to_coarse is not None
+    assert first_level.fine_layer_assignments is not None
+    assert first_level.fine_to_coarse.dtype == torch.int32
+    assert first_level.fine_layer_assignments.dtype == torch.int32
 
 
 def _make_layered_dag(n_per_layer: int, n_layers: int):
