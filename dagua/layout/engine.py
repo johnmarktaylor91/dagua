@@ -54,6 +54,8 @@ from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.projection import project_overlaps
 from dagua.utils import VRAMBudget, longest_path_layering
 
+LossFn = Callable[[torch.Tensor, torch.Tensor, Optional[LayerIndex]], torch.Tensor]
+
 
 @dataclass
 class ProgressContext:
@@ -325,7 +327,7 @@ def _layout_inner(
 
     # Static loss functions — each returns (base_weight_key, loss_fn, is_heavy, is_annealed)
     # base_weight_key is a string to look up the annealed weight at each step
-    loss_fns: List[tuple] = []
+    loss_fns: List[tuple[str, LossFn, bool, bool]] = []
 
     if config.w_dag > 0:
         loss_fns.append(
@@ -350,23 +352,27 @@ def _layout_inner(
         )
 
     if config.w_repel > 0:
-        loss_fns.append(
-            (
-                "w_repel",
-                lambda p, ns, li: repulsion_loss(
-                    p,
-                    n,
-                    threshold=config.exact_repulsion_threshold,
-                    sample_k=config.negative_sample_k,
-                    layer_index=li,
-                    node_sizes=ns,
-                    rvs_threshold=config.rvs_threshold,
-                    rvs_nn_k=config.rvs_nn_k,
-                ),
-                True,
-                True,
+
+        def repel_fn(
+            p: torch.Tensor,
+            ns: torch.Tensor,
+            li: Optional[LayerIndex],
+        ) -> torch.Tensor:
+            """Compute the repulsion term for the current node positions."""
+            return repulsion_loss(
+                p,
+                n,
+                threshold=config.exact_repulsion_threshold,
+                sample_k=config.negative_sample_k,
+                layer_index=li,
+                node_sizes=ns,
+                rvs_threshold=config.rvs_threshold,
+                rvs_nn_k=config.rvs_nn_k,
             )
-        )
+
+        if n > 10_000_000:
+            repel_fn = _make_amortized_loss(repel_fn, skip_every=2)
+        loss_fns.append(("w_repel", repel_fn, True, True))
 
     if config.w_overlap > 0:
         loss_fns.append(
@@ -475,17 +481,22 @@ def _layout_inner(
         )
 
     if config.w_fanout > 0:
-        loss_fns.append(
-            (
-                "w_fanout",
-                lambda p, ns, li: fanout_distribution_loss(
-                    p,
-                    _active_edges(p),
-                ),
-                False,
-                False,
+
+        def fanout_fn(
+            p: torch.Tensor,
+            ns: torch.Tensor,
+            li: Optional[LayerIndex],
+        ) -> torch.Tensor:
+            """Compute the fanout-distribution regularizer for active edges."""
+            del ns, li
+            return fanout_distribution_loss(
+                p,
+                _active_edges(p),
             )
-        )
+
+        if n > 10_000_000:
+            fanout_fn = _make_amortized_loss(fanout_fn, skip_every=3)
+        loss_fns.append(("w_fanout", fanout_fn, False, False))
 
     if config.w_back_edge > 0:
         loss_fns.append(
@@ -574,13 +585,29 @@ def _layout_inner(
 
         # Sample edge batch for this step — reuse pre-allocated buffer
         if batch_buf is not None:
-            perm = torch.randint(0, num_edges, (edge_batch,), device="cpu")
-            batch_buf.copy_(edge_index[:, perm])
+            # Contiguous chunks are cache-friendly; random sampling re-mixes periodically.
+            if step % 5 == 0:
+                perm = torch.randint(0, num_edges, (edge_batch,), device="cpu")
+                batch_buf.copy_(edge_index[:, perm])
+            else:
+                start = (step * edge_batch) % num_edges
+                end = min(start + edge_batch, num_edges)
+                actual = end - start
+                batch_buf[:, :actual].copy_(edge_index[:, start:end])
+                if actual < edge_batch:
+                    remaining = edge_batch - actual
+                    batch_buf[:, actual:].copy_(edge_index[:, :remaining])
             batch_edges_ref[0] = batch_buf
         elif edges_on_cpu:
             batch_edges_ref[0] = edge_index.to(device)
         else:
             batch_edges_ref[0] = edge_index
+
+        be = batch_edges_ref[0]
+        if be is not None and be.numel() > 0:
+            keep = be[0] != be[1]
+            if not keep.all():
+                batch_edges_ref[0] = be[:, keep]
 
         # Compute annealed weights for this step
         w_dag = config.w_dag * (1 - 0.5 * t)
@@ -816,9 +843,10 @@ def _resolve_memory_strategy(
     if plb != "auto" and gcp != "auto" and hyb != "auto":
         return plb == "on", gcp == "on", hyb == "on"
 
-    # CPU mode: per_loss_bw helps with RAM at scale, others don't apply
+    # CPU mode: per_loss_bw was designed for VRAM savings on GPU.
+    # On CPU, single backward is faster because autograd traverses once.
     if device != "cuda":
-        use_plb = (plb == "on") or (plb == "auto" and n > 50000)
+        use_plb = plb == "on"
         return use_plb, False, False
 
     # CUDA mode: query available VRAM
@@ -927,7 +955,7 @@ def _estimate_hybrid_gpu_memory(n: int, num_edges: int) -> int:
 def _compute_loss_term(
     pos: torch.Tensor,
     weight: float,
-    loss_fn: Callable,
+    loss_fn: LossFn,
     is_heavy: bool,
     use_hybrid: bool,
     use_checkpointing: bool,
@@ -960,7 +988,7 @@ def _compute_loss_term(
 def _hybrid_loss(
     pos_gpu: torch.Tensor,
     weight: float,
-    loss_fn: Callable,
+    loss_fn: LossFn,
     cpu_node_sizes: Optional[torch.Tensor],
     cpu_layer_index: Optional[LayerIndex],
 ) -> torch.Tensor:
@@ -1005,15 +1033,58 @@ def _edge_batch_size(num_edges: int, config: LayoutConfig) -> int:
     if hasattr(config, "edge_batch_size") and config.edge_batch_size > 0:
         return config.edge_batch_size
 
-    # Auto-scale: batch at 10K+ edges
+    batch: int
     if num_edges <= 10000:
-        return 0  # use all edges
+        batch = 0
     elif num_edges <= 100000:
-        return 50000
-    elif num_edges <= 1000000:
-        return 100000
+        batch = 50000
+    elif num_edges <= 1_000_000:
+        batch = 500_000
+    elif num_edges <= 10_000_000:
+        batch = 2_000_000
     else:
-        return 200000
+        batch = 5_000_000
+
+    if getattr(config, "device", "cpu") == "cuda" and batch > 0:
+        try:
+            free, _ = torch.cuda.mem_get_info()
+            max_batch = int(free * 0.3 / 64)
+            return min(batch, max_batch)
+        except Exception:
+            pass
+    return batch
+
+
+def _make_amortized_loss(loss_fn: LossFn, skip_every: int) -> LossFn:
+    """Return a wrapper that skips every ``skip_every`` call.
+
+    Parameters
+    ----------
+    loss_fn : LossFn
+        Base loss function to evaluate on non-skipped calls.
+    skip_every : int
+        Call interval to skip. ``2`` skips every other call, ``3`` skips every
+        third call, and so on.
+
+    Returns
+    -------
+    LossFn
+        Wrapped loss function with internal call-count state.
+    """
+    step_ref: List[int] = [0]
+
+    def _amortized_loss(
+        pos: torch.Tensor,
+        node_sizes: torch.Tensor,
+        layer_index: Optional[LayerIndex],
+    ) -> torch.Tensor:
+        """Evaluate the wrapped loss except on periodic skipped steps."""
+        step_ref[0] += 1
+        if step_ref[0] % skip_every == 0:
+            return pos.sum() * 0.0
+        return loss_fn(pos, node_sizes, layer_index)
+
+    return _amortized_loss
 
 
 def _overlap_interval(num_nodes: int, config: LayoutConfig) -> int:
