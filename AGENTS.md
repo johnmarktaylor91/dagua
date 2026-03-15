@@ -35,6 +35,47 @@ mypy --follow-imports=silent dagua/cli.py
 pytest tests/ -x --tb=short -m "not slow and not benchmark and not rare"
 ```
 
+## Code Quality Standards (mandatory for ALL tasks)
+
+Every function you create or modify MUST have:
+- **Type hints** on all parameters and return values. Use `Optional`, `Union`,
+  `Tuple`, `List`, `Dict` from typing. For torch tensors, annotate as
+  `torch.Tensor` with shape/dtype documented in the docstring.
+- **Docstring** in NumPy format: short summary, Parameters, Returns, and
+  optionally Notes/Examples. Include tensor shapes like `[N, 2]` in parameter
+  descriptions.
+- **Meaningful comments** for non-obvious logic. Don't comment `x += 1` but DO
+  comment algorithmic choices, magic numbers, and performance tradeoffs. If you
+  know WHY something is done a certain way, say so.
+
+Leave every file you touch BETTER than you found it:
+- If a function you're calling lacks type hints, add them.
+- If a function you're modifying lacks a docstring, add one.
+- If you see a magic number in code you're editing, name it as a constant.
+- If you see a stale comment that contradicts the code, fix it.
+
+Scope: improve what you TOUCH. Don't rewrite unrelated functions or go on
+cleanup crusades through files you weren't asked to modify.
+
+**Tests are ALWAYS in scope.** When a spec says "do not modify other files,"
+test files are exempt — you MUST create or update tests for your changes.
+`tests/` is never out of scope. If the spec includes a Testing section,
+implement those tests. If it doesn't, write your own regression tests for
+the functionality you added or changed.
+
+Context for smart comments: the spec should include enough project knowledge
+for you to write comments that explain WHY, not just WHAT. If you don't know
+why something is done, say so in the comment rather than guessing.
+
+Key project facts for comment context:
+- dagua is a GPU-accelerated graph layout engine using PyTorch
+- Positions are learnable parameters, layout aesthetics are loss functions
+- The engine is headless: takes tensors, not Graph objects
+- Multilevel coarsening handles N > 20K; direct layout for smaller
+- Constraints are composable: `(pos, graph_data) -> scalar loss`
+- GPU acceleration is automatic via `device=` parameter
+- Memory management matters: OOM at 1B nodes is unacceptable
+
 ## Linting & Type Checking
 
 - `ruff format` + `ruff check --fix` (line-length 100, target py39)
