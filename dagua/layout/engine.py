@@ -406,12 +406,16 @@ def _layout_inner(
                 rvs_nn_k=config.rvs_nn_k,
             )
 
+        repel_is_heavy = True
         if n > config.repel_amortize_threshold and config.repel_amortize_interval > 1:
             repel_fn = _make_amortized_loss(
                 repel_fn,
                 skip_every=config.repel_amortize_interval,
             )
-        loss_fns.append(("w_repel", repel_fn, True, True))
+            # Amortized losses must not go through gradient checkpointing —
+            # skip steps return torch.tensor(0.0) which changes saved tensor count.
+            repel_is_heavy = False
+        loss_fns.append(("w_repel", repel_fn, repel_is_heavy, True))
 
     if config.w_overlap > 0:
         loss_fns.append(
