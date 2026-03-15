@@ -167,6 +167,47 @@ class TestLongestPathLayeringVectorized:
         assert layers[2] == 1
         assert layers[3] == 2
 
+    def test_wide_dag_matches_expected_layers(self):
+        """Wide layered DAG nodes should map to their expected wave index."""
+        n = 10_100
+        width = 100
+        src = torch.arange(0, n - width, dtype=torch.long)
+        tgt = src + width
+        edge_index = torch.stack([src, tgt])
+
+        result = longest_path_layering(edge_index, n)
+        result_list = result.tolist() if isinstance(result, torch.Tensor) else result
+
+        for node in range(n):
+            assert result_list[node] == node // width
+
+    def test_layering_with_skip_edges(self):
+        """Skip edges must still honor the longest-path layer assignment."""
+        edge_index = torch.tensor([[0, 1, 0], [1, 2, 2]], dtype=torch.long)
+
+        result = longest_path_layering(edge_index, 3)
+        result_list = result.tolist() if isinstance(result, torch.Tensor) else result
+
+        assert result_list[0] == 0
+        assert result_list[1] == 1
+        assert result_list[2] == 2
+
+    def test_large_wide_dag_completes_in_time(self):
+        """A 100K-node wide DAG should complete quickly on the fast path."""
+        n = 100_000
+        width = 1_000
+        src = torch.arange(0, n - width, dtype=torch.long)
+        tgt = src + width
+        edge_index = torch.stack([src, tgt])
+
+        t0 = time.perf_counter()
+        result = longest_path_layering(edge_index, n)
+        elapsed = time.perf_counter() - t0
+
+        assert elapsed < 5.0, f"Layering took {elapsed:.2f}s, expected <5s"
+        if isinstance(result, torch.Tensor):
+            assert result.max().item() == (n // width) - 1
+
 
 @pytest.mark.smoke
 class TestMultilevelVerbose:
