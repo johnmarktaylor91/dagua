@@ -1,0 +1,335 @@
+"""Davidson-Harel simulated annealing layout.
+
+This module implements a small simulated-annealing graph drawing routine with
+five energy terms: node distribution, border repulsion, edge lengths, edge
+crossings, and node-edge proximity.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+import torch
+
+_MIN_DISTANCE = 1.0e-3
+
+
+def _layout_device(
+    edge_index: torch.Tensor,
+    node_sizes: Optional[torch.Tensor],
+) -> torch.device:
+    """Choose the output device for the layout.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor.
+
+    Returns
+    -------
+    torch.device
+        Output device.
+    """
+    if edge_index.numel() > 0:
+        return edge_index.device
+    if node_sizes is not None:
+        return node_sizes.device
+    return torch.device("cpu")
+
+
+def _layout_extent(num_nodes: int, node_sizes: Optional[torch.Tensor]) -> float:
+    """Estimate a stable drawing extent.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    node_sizes : torch.Tensor, optional
+        Optional node sizes.
+
+    Returns
+    -------
+    float
+        Bounding-box half-width.
+    """
+    if node_sizes is None or node_sizes.numel() == 0:
+        return max(float(max(num_nodes, 1)) ** 0.5 * 5.0, 1.0)
+
+    max_size = float(node_sizes.to(dtype=torch.float32, device="cpu").max().item())
+    return max(max_size * max(float(max(num_nodes, 1)) ** 0.5, 1.0) * 2.0, 1.0)
+
+
+def _unique_edges(edge_index: torch.Tensor, num_nodes: int) -> list[tuple[int, int]]:
+    """Convert an edge tensor into unique undirected edges.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Unique undirected edges.
+    """
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+
+    seen: set[tuple[int, int]] = set()
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+        if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
+            raise ValueError("edge_index contains a node index outside [0, num_nodes).")
+        if source == target:
+            continue
+        seen.add((min(source, target), max(source, target)))
+    return sorted(seen)
+
+
+def _initialize_positions(
+    num_nodes: int,
+    extent: float,
+    device: torch.device,
+    seed: int,
+) -> torch.Tensor:
+    """Create deterministic random coordinates inside the drawing box.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    extent : float
+        Half-width of the drawing box.
+    device : torch.device
+        Device for the result.
+    seed : int
+        Random seed.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial coordinates with shape ``[N, 2]``.
+    """
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    return ((torch.rand((num_nodes, 2), generator=generator) * 2.0) - 1.0).to(device) * extent
+
+
+def _orientation(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> float:
+    """Compute the signed triangle area used by segment intersection tests.
+
+    Parameters
+    ----------
+    a : torch.Tensor
+        First point with shape ``[2]``.
+    b : torch.Tensor
+        Second point with shape ``[2]``.
+    c : torch.Tensor
+        Third point with shape ``[2]``.
+
+    Returns
+    -------
+    float
+        Signed cross product value.
+    """
+    return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+
+
+def _segments_intersect(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, d: torch.Tensor) -> bool:
+    """Test whether two line segments intersect.
+
+    Parameters
+    ----------
+    a : torch.Tensor
+        First endpoint of the first segment.
+    b : torch.Tensor
+        Second endpoint of the first segment.
+    c : torch.Tensor
+        First endpoint of the second segment.
+    d : torch.Tensor
+        Second endpoint of the second segment.
+
+    Returns
+    -------
+    bool
+        ``True`` if the segments intersect.
+    """
+    o1 = _orientation(a, b, c)
+    o2 = _orientation(a, b, d)
+    o3 = _orientation(c, d, a)
+    o4 = _orientation(c, d, b)
+    return (o1 == 0.0 or o2 == 0.0 or o1 * o2 < 0.0) and (o3 == 0.0 or o4 == 0.0 or o3 * o4 < 0.0)
+
+
+def _point_segment_distance(
+    point: torch.Tensor, start: torch.Tensor, end: torch.Tensor
+) -> torch.Tensor:
+    """Compute the Euclidean distance from a point to a segment.
+
+    Parameters
+    ----------
+    point : torch.Tensor
+        Point with shape ``[2]``.
+    start : torch.Tensor
+        Segment start point.
+    end : torch.Tensor
+        Segment end point.
+
+    Returns
+    -------
+    torch.Tensor
+        Distance scalar.
+    """
+    segment = end - start
+    denom = segment.dot(segment).clamp(min=_MIN_DISTANCE)
+    projection = ((point - start).dot(segment) / denom).clamp(0.0, 1.0)
+    nearest = start + projection * segment
+    return torch.linalg.norm(point - nearest)
+
+
+def _energy(positions: torch.Tensor, edges: list[tuple[int, int]], extent: float) -> torch.Tensor:
+    """Evaluate the Davidson-Harel layout energy.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edges : list[tuple[int, int]]
+        Unique undirected edges.
+    extent : float
+        Half-width of the drawing box.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar energy value.
+    """
+    num_nodes = int(positions.shape[0])
+    distribution = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
+    if num_nodes > 1:
+        delta = positions.unsqueeze(1) - positions.unsqueeze(0)
+        squared_distances = delta.square().sum(dim=2).clamp(min=_MIN_DISTANCE)
+        mask = ~torch.eye(num_nodes, dtype=torch.bool, device=positions.device)
+        distribution = squared_distances[mask].reciprocal().mean()
+
+    border_distances = torch.minimum(
+        torch.minimum(positions[:, 0] + extent, extent - positions[:, 0]),
+        torch.minimum(positions[:, 1] + extent, extent - positions[:, 1]),
+    ).clamp(min=_MIN_DISTANCE)
+    border = border_distances.reciprocal().square().mean()
+
+    edge_length = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
+    if edges:
+        edge_lengths = [
+            torch.linalg.norm(positions[source] - positions[target]).square()
+            for source, target in edges
+        ]
+        edge_length = torch.stack(edge_lengths).mean()
+
+    crossings = 0.0
+    for index, (a, b) in enumerate(edges):
+        for c, d in edges[index + 1 :]:
+            if len({a, b, c, d}) < 4:
+                continue
+            if _segments_intersect(positions[a], positions[b], positions[c], positions[d]):
+                crossings += 1.0
+    crossing_energy = torch.tensor(crossings, dtype=positions.dtype, device=positions.device)
+
+    node_edge = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
+    penalties: list[torch.Tensor] = []
+    for node in range(num_nodes):
+        for source, target in edges:
+            if node in (source, target):
+                continue
+            distance = _point_segment_distance(
+                positions[node], positions[source], positions[target]
+            )
+            penalties.append(distance.clamp(min=_MIN_DISTANCE).reciprocal().square())
+    if penalties:
+        node_edge = torch.stack(penalties).mean()
+
+    return distribution + 0.1 * border + 0.2 * edge_length + 2.0 * crossing_energy + 0.5 * node_edge
+
+
+def layout_davidson_harel(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor] = None,
+    rounds: int = 100,
+    seed: int = 42,
+) -> torch.Tensor:
+    """Lay out a graph with Davidson-Harel simulated annealing.
+
+    Reference
+    ---------
+    Davidson and Harel, "Drawing Graphs Nicely Using Simulated Annealing" (1996).
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    node_sizes : torch.Tensor, optional
+        Optional node sizes used only for drawing scale.
+    rounds : int, default=100
+        Number of annealing rounds.
+    seed : int, default=42
+        Random seed.
+
+    Returns
+    -------
+    torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    """
+    if num_nodes < 0:
+        raise ValueError("num_nodes must be non-negative.")
+    if rounds < 0:
+        raise ValueError("rounds must be non-negative.")
+
+    device = _layout_device(edge_index, node_sizes)
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float32, device=device)
+    if num_nodes == 1:
+        return torch.zeros((1, 2), dtype=torch.float32, device=device)
+
+    extent = _layout_extent(num_nodes, node_sizes)
+    positions = _initialize_positions(num_nodes, extent, device, seed)
+    edges = _unique_edges(edge_index, num_nodes)
+    temperature = extent
+    current_energy = _energy(positions, edges, extent)
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    moves_per_round = max(num_nodes * 4, 1)
+
+    for _ in range(rounds):
+        for _ in range(moves_per_round):
+            node = int(torch.randint(0, num_nodes, (1,), generator=generator).item())
+            delta = ((torch.rand((2,), generator=generator) * 2.0) - 1.0).to(device) * (
+                0.25 * temperature
+            )
+            candidate = positions.clone()
+            candidate[node] = (candidate[node] + delta).clamp(min=-extent, max=extent)
+            candidate_energy = _energy(candidate, edges, extent)
+            delta_energy = candidate_energy - current_energy
+            if delta_energy <= 0:
+                positions = candidate
+                current_energy = candidate_energy
+                continue
+
+            acceptance = torch.exp(-delta_energy / max(temperature, _MIN_DISTANCE)).clamp(max=1.0)
+            threshold = float(torch.rand((1,), generator=generator).item())
+            if threshold < float(acceptance.item()):
+                positions = candidate
+                current_energy = candidate_energy
+
+        temperature *= 0.92
+
+    centered = positions - positions.mean(dim=0, keepdim=True)
+    span = centered.abs().max().clamp(min=1.0)
+    return (centered * (extent / span)).to(dtype=torch.float32, device=device)
