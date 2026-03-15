@@ -30,10 +30,25 @@ ruff check . --fix && mypy --follow-imports=silent dagua/cli.py && pytest tests/
 
 ## Quality Gates (every Codex task must pass)
 ```
+# Tier 1: Run FIRST during iteration (fast, targeted)
 ruff check . --fix
 mypy --follow-imports=silent dagua/cli.py
-pytest tests/ -x --tb=short -m "not slow and not benchmark and not rare"
+pytest tests/test_layout/ tests/test_graph.py -x --tb=short -q  # targeted
+
+# Tier 2: Run ONCE at the end as final verification
+pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"
 ```
+
+During development iteration, ONLY run Tier 1 (targeted tests for the modules
+you changed). Run Tier 2 ONCE as the final check before reporting done. Do NOT
+run the full suite on every iteration — it takes 5+ minutes and wastes time.
+Match test files to changed modules:
+- Changed `engine.py` → run `tests/test_layout/`
+- Changed `constraints.py` → run `tests/test_layout/test_constraints.py`
+- Changed `multilevel.py` → run `tests/test_layout/`
+- Changed `graph.py` → run `tests/test_graph.py`
+- Changed `utils.py` → run `tests/test_smoke.py tests/test_layout/`
+- Changed `config.py` → run `tests/test_layout/test_engine.py`
 
 ## Code Quality Standards (mandatory for ALL tasks)
 
