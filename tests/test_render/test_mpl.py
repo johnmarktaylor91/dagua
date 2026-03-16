@@ -336,7 +336,9 @@ def test_dot_arrow_marker_uses_larger_graphviz_like_radius() -> None:
 
 
 def test_tee_arrow_marker_uses_visible_bar_offset_and_width() -> None:
-    """Tee markers should sit back from the tip and use a heavier stroke."""
+    """Tee markers should render as a wide, thin bar set back from the tip."""
+
+    from matplotlib.patches import Polygon
 
     fig, ax = plt.subplots()
     style = EdgeStyle(arrow="tee", width=1.2, arrow_width=10.0, arrow_length=14.0)
@@ -348,12 +350,17 @@ def test_tee_arrow_marker_uses_visible_bar_offset_and_width() -> None:
         style=style,
     )
 
-    assert len(ax.lines) == 1
-    x_data = ax.lines[0].get_xdata()
-    y_data = ax.lines[0].get_ydata()
-    assert float(np.mean(y_data)) == pytest.approx(style.arrow_length / 3.0)
-    assert float(abs(x_data[0] - x_data[1])) == pytest.approx(style.arrow_width * 2.4)
-    assert ax.lines[0].get_linewidth() == pytest.approx(max(style.width * 4.0, 5.0))
+    assert len(ax.lines) == 0
+    assert len(ax.patches) == 1
+    assert isinstance(ax.patches[0], Polygon)
+    vertices = ax.patches[0].get_xy()[:-1]
+    x_span = float(vertices[:, 0].max() - vertices[:, 0].min())
+    y_span = float(vertices[:, 1].max() - vertices[:, 1].min())
+
+    assert float(np.mean(vertices[:, 1])) == pytest.approx(style.arrow_length / 4.0)
+    assert x_span == pytest.approx(style.arrow_width * 2.6)
+    assert y_span == pytest.approx((style.arrow_length / 6.0) * 2.0)
+    assert ax.patches[0].get_linewidth() == pytest.approx(0.5)
     plt.close(fig)
 
 
@@ -431,7 +438,7 @@ def test_crow_arrow_marker_uses_wider_graphviz_spread() -> None:
 
     assert len(ax.lines) == 3
     outer_x_offsets = sorted(abs(float(line.get_xdata()[1])) for line in ax.lines[1:])
-    assert outer_x_offsets == pytest.approx([style.arrow_width * 0.7, style.arrow_width * 0.7])
+    assert outer_x_offsets == pytest.approx([style.arrow_width * 0.85, style.arrow_width * 0.85])
     for line in ax.lines:
         assert line.get_linewidth() == pytest.approx(max(style.width * 1.8, 2.0))
     plt.close(fig)
@@ -674,7 +681,7 @@ def test_parallelogram_patch_uses_stronger_graphviz_skew() -> None:
 
 
 def test_trapezoid_patch_uses_stronger_graphviz_taper() -> None:
-    """Trapezoids should use the increased top-edge inset."""
+    """Trapezoids should match Graphviz's wider-top, narrower-bottom shape."""
 
     patch = _build_node_patch(
         x=0.0,
@@ -690,8 +697,10 @@ def test_trapezoid_patch_uses_stronger_graphviz_taper() -> None:
     )
     vertices = patch.get_xy()[:-1]
 
-    assert float(vertices[0][0]) == pytest.approx(-22.0)
-    assert float(vertices[1][0]) == pytest.approx(22.0)
+    assert float(vertices[0][0]) == pytest.approx(-50.0)
+    assert float(vertices[1][0]) == pytest.approx(50.0)
+    assert float(vertices[2][0]) == pytest.approx(22.0)
+    assert float(vertices[3][0]) == pytest.approx(-22.0)
 
 
 def test_cluster_labels_expand_bbox_using_measured_width(
