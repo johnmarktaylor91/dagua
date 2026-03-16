@@ -927,24 +927,50 @@ def _points_to_data_units(ax: Any, points: float, axis: str) -> float:
     return pixels / scale
 
 
+def _compute_display_scale(ax: Any) -> float:
+    """Compute the point-to-data conversion factor for display-sized geometry.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes with established data limits.
+
+    Returns
+    -------
+    float
+        Multiplicative factor such that ``data_units = points * scale``.
+
+    Notes
+    -----
+    Use this only for geometry constructed in data coordinates whose intended
+    visual size is specified in points, such as arrowhead polygons, cluster
+    corner radii, and cluster label offsets. Matplotlib already interprets
+    ``linewidth``, ``fontsize``, and dash patterns in points natively.
+    """
+    scale_x = _points_to_data_units(ax, 1.0, "x")
+    scale_y = _points_to_data_units(ax, 1.0, "y")
+    scale = min(scale_x, scale_y)
+    return scale if scale > 1e-9 else 1.0
+
+
 def _marker_data_size(
     ax: Any,
     style: Any,
     length: float,
     width: float,
 ) -> Tuple[float, float]:
-    """Resolve manual marker dimensions in data units.
+    """Convert point-based marker dimensions to data units.
 
     Parameters
     ----------
     ax : Any
         Matplotlib axes receiving the marker patch.
     style : Any
-        Edge style object that may expose ``arrow_scale``.
+        Edge style object. ``arrow_scale`` is intentionally ignored.
     length : float
-        Legacy marker length in data units.
+        Marker length in typographic points.
     width : float
-        Legacy marker width in data units.
+        Marker width in typographic points.
 
     Returns
     -------
@@ -953,20 +979,13 @@ def _marker_data_size(
 
     Notes
     -----
-    All markers use Polygon or Circle patches in data coordinates. When
-    ``arrow_scale`` is provided, this function converts display-point sizes to
-    data units so album renders stay visually comparable after composition
-    scaling, while ``arrow_scale=None`` preserves the legacy data-space sizing.
+    Arrowhead polygons are drawn in data coordinates, but their visual size
+    should stay stable in display space. Converting once here keeps marker
+    geometry consistent across different graph extents and figure sizes.
     """
-
-    arrow_scale = getattr(style, "arrow_scale", None)
-    if arrow_scale is None:
-        return length, width
-
-    data_per_point_x = _points_to_data_units(ax, 1.0, "x")
-    data_per_point_y = _points_to_data_units(ax, 1.0, "y")
-    data_per_point = (data_per_point_x + data_per_point_y) / 2.0
-    return float(arrow_scale) * data_per_point, width * data_per_point
+    _ = style
+    scale = _compute_display_scale(ax)
+    return length * scale, width * scale
 
 
 def _label_anchor_x(align: str, x: float, w: float, pad_x: float, line_width: float) -> float:
@@ -1823,8 +1842,9 @@ def _draw_clusters(
         label = graph.cluster_labels.get(name, name)
         label_fontsize = max(style.font_size - depth * 1.0, 7.0)
         label_ff = style.font_family or RESOLVED_FONT
-        label_ox = style.label_offset[0]
-        label_oy = style.label_offset[1]
+        display_scale = _compute_display_scale(ax)
+        label_ox = style.label_offset[0] * display_scale
+        label_oy = style.label_offset[1] * display_scale
         label_width, label_height = measure_text(
             label,
             font_family=label_ff,
@@ -1856,8 +1876,11 @@ def _draw_clusters(
         opacity = max(opacity, 0.08)
 
         # Corner radius
-        cr = style.corner_radius
-        boxstyle = "round,pad=0" if cr > 0 else "square,pad=0"
+        corner_radius = style.corner_radius * display_scale
+        if corner_radius > 0:
+            boxstyle = f"round,pad=0,rounding_size={corner_radius}"
+        else:
+            boxstyle = "square,pad=0"
 
         # Stroke dash
         patch = FancyBboxPatch(

@@ -243,7 +243,7 @@ class EdgeStyle:
     arrow_color: str = ""  # empty = use edge color
     arrow_length: float = 10.0
     arrow_width: float = 7.0
-    arrow_scale: Optional[float] = None  # mutation_scale override; None = use arrow_width
+    arrow_scale: Optional[float] = None  # Legacy field; matplotlib renderer ignores it
     style: str = "solid"  # solid, dashed, dotted
     opacity: float = 0.65
     # New fields (Part 2)
@@ -699,9 +699,9 @@ GRAPHVIZ_STRICT_THEME = Theme(
             width=1.3,
             arrow="normal",
             arrow_fill="filled",
-            arrow_length=12.0,
-            arrow_width=7.0,
-            arrow_scale=18.0,
+            arrow_length=22.0,  # points — calibrated to match Graphviz visual weight
+            arrow_width=15.0,  # points — stocky triangle like Graphviz
+            arrow_scale=None,  # ignored; unified display scaling handles conversion
             style="solid",
             opacity=1.0,
             label_font_size=14.0,
@@ -783,9 +783,9 @@ GRAPHVIZ_THEME = Theme(
             width=1.1,  # DEPARTURE: slightly thicker
             arrow="normal",
             arrow_fill="filled",
-            arrow_length=11.0,
-            arrow_width=7.0,
-            arrow_scale=16.0,
+            arrow_length=20.0,  # points — slightly smaller than strict
+            arrow_width=14.0,  # points — stocky triangle
+            arrow_scale=None,  # ignored; unified display scaling handles conversion
             arrow_color="#333333",  # DEPARTURE: darker arrowheads for Graphviz-like contrast
             style="solid",
             opacity=0.92,  # DEPARTURE: edges recede slightly behind nodes
