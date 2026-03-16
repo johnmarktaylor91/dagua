@@ -636,10 +636,10 @@ def _build_node_patch(
         return Polygon(
             np.array(
                 [
-                    [x - w / 2, y + h / 2],
-                    [x + w / 2, y + h / 2],
-                    [x + w / 2 - inset, y - h / 2],
-                    [x - w / 2 + inset, y - h / 2],
+                    [x - w / 2 + inset, y + h / 2],  # top-left (narrower)
+                    [x + w / 2 - inset, y + h / 2],  # top-right (narrower)
+                    [x + w / 2, y - h / 2],  # bottom-right (wider)
+                    [x - w / 2, y - h / 2],  # bottom-left (wider)
                 ]
             ),
             closed=True,

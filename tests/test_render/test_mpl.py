@@ -681,7 +681,7 @@ def test_parallelogram_patch_uses_stronger_graphviz_skew() -> None:
 
 
 def test_trapezoid_patch_uses_stronger_graphviz_taper() -> None:
-    """Trapezoids should match Graphviz's wider-top, narrower-bottom shape."""
+    """Trapezoids should match Graphviz's narrower-top, wider-bottom shape."""
 
     patch = _build_node_patch(
         x=0.0,
@@ -697,10 +697,10 @@ def test_trapezoid_patch_uses_stronger_graphviz_taper() -> None:
     )
     vertices = patch.get_xy()[:-1]
 
-    assert float(vertices[0][0]) == pytest.approx(-50.0)
-    assert float(vertices[1][0]) == pytest.approx(50.0)
-    assert float(vertices[2][0]) == pytest.approx(22.0)
-    assert float(vertices[3][0]) == pytest.approx(-22.0)
+    assert float(vertices[0][0]) == pytest.approx(-22.0)
+    assert float(vertices[1][0]) == pytest.approx(22.0)
+    assert float(vertices[2][0]) == pytest.approx(50.0)
+    assert float(vertices[3][0]) == pytest.approx(-50.0)
 
 
 def test_cluster_labels_expand_bbox_using_measured_width(
