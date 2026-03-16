@@ -1424,19 +1424,39 @@ def _draw_edge_marker(
     filled = style.arrow_fill == "filled" and marker not in {"open", "vee", "tee", "crow"}
     tip_x, tip_y = point
 
-    if marker in {"normal", "vee"}:
+    if marker == "normal":
+        # Filled triangle with tip at the edge endpoint (node boundary)
+        # and body extending into the gap between nodes.
+        base_x = tip_x - ux * manual_length
+        base_y = tip_y - uy * manual_length
+        polygon = Polygon(
+            [
+                (tip_x, tip_y),
+                (base_x + px * manual_width / 2, base_y + py * manual_width / 2),
+                (base_x - px * manual_width / 2, base_y - py * manual_width / 2),
+            ],
+            closed=True,
+            facecolor=color if filled else "none",
+            edgecolor=color,
+            linewidth=style.width,
+            joinstyle="round",
+            zorder=1.2,
+        )
+        ax.add_patch(polygon)
+        return
+
+    if marker == "vee":
         base_x = tip_x - ux * length
         base_y = tip_y - uy * length
-        arrowstyle = "->" if marker == "vee" else "-|>"
         head_length = length / max(width, 1e-6)
         arrow = FancyArrowPatch(
             (base_x, base_y),
             (tip_x, tip_y),
-            arrowstyle=f"{arrowstyle},head_length={head_length:.3f},head_width=1.0",
+            arrowstyle=f"->,head_length={head_length:.3f},head_width=1.0",
             mutation_scale=float(display_scale) if display_scale is not None else width,
             linewidth=style.width,
             edgecolor=color,
-            facecolor=color if filled else "none",
+            facecolor="none",
             shrinkA=0.0,
             shrinkB=0.0,
             capstyle="round",
@@ -1576,17 +1596,20 @@ def _draw_edges(
         _set_svg_hover(
             path_patch, f"dagua-edge-{e_idx}", _edge_hover_text(graph, e_idx), svg_hover_map
         )
+        # Target arrow: direction points BACK along curve (into the gap)
+        # so the arrow body extends away from the node into visible space.
         _draw_edge_marker(
             ax,
             curve.p1,
-            (curve.p1[0] - curve.cp2[0], curve.p1[1] - curve.cp2[1]),
+            (curve.cp2[0] - curve.p1[0], curve.cp2[1] - curve.p1[1]),
             style.arrow,
             style,
         )
+        # Source tail arrow: direction also points back along curve
         _draw_edge_marker(
             ax,
             curve.p0,
-            (curve.p0[0] - curve.cp1[0], curve.p0[1] - curve.cp1[1]),
+            (curve.cp1[0] - curve.p0[0], curve.cp1[1] - curve.p0[1]),
             style.tail_arrow,
             style,
         )
