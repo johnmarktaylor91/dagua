@@ -67,6 +67,7 @@ CHECKPOINT_MEMORY_REDUCTION = 2
 CUDA_ACTIVE_SET_HEADROOM = 0.85
 DEFAULT_HYBRID_EDGE_BATCH = 5_000_000
 CUDA_CONTEXT_OVERHEAD_BYTES = 500 * 1024 * 1024
+TILED_GPU_MIN_NODES = 50_000_000
 HYBRID_OPTIMIZER_LR_MULTIPLIERS = {
     "adam": 1.0,
     "sgd_nesterov": 3.0,
@@ -589,6 +590,48 @@ def _create_optimizer(
     return torch.optim.Adam([pos], lr=lr)
 
 
+def _should_use_tiled_gpu(
+    requested_device: str,
+    execution_device: str,
+    num_nodes: int,
+    num_edges: int,
+) -> bool:
+    """Return whether CPU execution should switch to tiled GPU loss evaluation.
+
+    Parameters
+    ----------
+    requested_device : str
+        Device requested by the user configuration.
+    execution_device : str
+        Device selected for the current engine call.
+    num_nodes : int
+        Number of nodes in the current layout problem.
+    num_edges : int
+        Number of edges in the current layout problem.
+
+    Returns
+    -------
+    bool
+        ``True`` when CUDA was requested, the current solve is running on CPU,
+        the graph is large enough to justify tiling, CUDA is available, and a
+        full resident GPU layout estimate does not fit the active VRAM budget.
+    """
+    if requested_device != "cuda" or execution_device != "cpu":
+        return False
+    if num_nodes < TILED_GPU_MIN_NODES:
+        return False
+    if not torch.cuda.is_available():
+        return False
+    full_gpu_memory = _estimate_gpu_memory(
+        num_nodes,
+        num_edges,
+        per_loss_bw=False,
+        edges_on_cpu=False,
+        edge_batch=0,
+    )
+    return not VRAMBudget().fits(full_gpu_memory)
+
+
 def _layout_inner(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -822,6 +865,26 @@ def _layout_inner(
     elif edges_on_cpu:
         cpu_edge_index = edge_index
 
+    tiled_compute = None
+    if _should_use_tiled_gpu(config.device, device, n, num_edges):
+        from dagua.layout.tiled_compute import TiledGPUCompute
+
+        tiled_compute = TiledGPUCompute(
+            num_nodes=n,
+            edge_index=edge_index if edge_index.device.type == "cpu" else edge_index.cpu(),
+            node_sizes=node_sizes if node_sizes.device.type == "cpu" else node_sizes.cpu(),
+            device="cuda",
+            vram_budget=VRAMBudget().remaining(),
+        )
+        if layer_assignments_raw is not None:
+            if isinstance(layer_assignments_raw, torch.Tensor):
+                tiled_compute.layer_assignments = layer_assignments_raw.to(device="cpu")
+            else:
+                tiled_compute.layer_assignments = torch.tensor(
+                    layer_assignments_raw,
+                    dtype=torch.long,
+                )
+
     # Step 2: Set up optimization
     pos = pos.clone().detach().requires_grad_(True)
     del init_pos  # Free pre-clone positions (8 GB at 1B nodes)
@@ -834,6 +897,12 @@ def _layout_inner(
     sampled_ctx_ref: List[Optional[SampledNodeContext]] = [None]
 
     def _active_edges(p: torch.Tensor) -> torch.Tensor:
+        if (
+            tiled_compute is not None
+            and tiled_compute.current_edge_index is not None
+            and p.device == tiled_compute.current_edge_index.device
+        ):
+            return tiled_compute.current_edge_index
         if batch_edges_ref[0] is not None and p.device == batch_edges_ref[0].device:
             return batch_edges_ref[0]
         if cpu_edge_index is not None:
@@ -841,6 +910,12 @@ def _layout_inner(
         return edge_index
 
     def _active_edge_ctx(p: torch.Tensor) -> Optional[EdgeBatchContext]:
+        if (
+            tiled_compute is not None
+            and tiled_compute.current_edge_ctx is not None
+            and p.device == tiled_compute.current_edge_ctx.src.device
+        ):
+            return tiled_compute.current_edge_ctx
         if use_per_loss_bw:
             return None
         if edge_ctx_ref[0] is not None and p.device == edge_ctx_ref[0].src.device:
@@ -852,9 +927,10 @@ def _layout_inner(
             return sampled_ctx_ref[0]
         return None
 
-    # Static loss functions — each returns (base_weight_key, loss_fn, is_heavy, is_annealed)
+    # Static loss functions — each returns
+    # (base_weight_key, loss_fn, is_heavy, is_annealed, tiled_ok, cross_tile_ok)
     # base_weight_key is a string to look up the annealed weight at each step
-    loss_fns: List[tuple[str, LossFn, bool, bool]] = []
+    loss_fns: List[tuple[str, LossFn, bool, bool, bool, bool]] = []
 
     if config.w_dag > 0:
         loss_fns.append(
@@ -868,6 +944,8 @@ def _layout_inner(
                     edge_ctx=_active_edge_ctx(p),
                 ),
                 False,
+                True,
+                True,
                 True,
             )
         )
@@ -884,6 +962,8 @@ def _layout_inner(
                 ),
                 False,
                 False,
+                True,
+                True,
             )
         )
 
@@ -916,7 +996,7 @@ def _layout_inner(
         # Amortized skip steps return 0.0 which is safe for hybrid but NOT
         # for checkpointing (variable saved tensor count). Checkpointing is
         # handled in _compute_loss_term by checking the actual loss value.
-        loss_fns.append(("w_repel", repel_fn, True, True))
+        loss_fns.append(("w_repel", repel_fn, True, True, True, False))
 
     if config.w_overlap > 0:
         loss_fns.append(
@@ -931,6 +1011,8 @@ def _layout_inner(
                 ),
                 True,
                 True,
+                True,
+                False,
             )
         )
 
@@ -941,6 +1023,8 @@ def _layout_inner(
                 lambda p, ns, li: cluster_compactness_loss(p, clusters, device=p.device),
                 False,
                 False,
+                False,
+                False,
             )
         )
         loss_fns.append(
@@ -949,6 +1033,8 @@ def _layout_inner(
                 lambda p, ns, li: cluster_separation_loss(
                     p, ns, clusters, device=p.device, cluster_parents=cluster_parents
                 ),
+                False,
+                False,
                 False,
                 False,
             )
@@ -963,6 +1049,8 @@ def _layout_inner(
                 ),
                 False,
                 False,
+                False,
+                False,
             )
         )
 
@@ -971,7 +1059,7 @@ def _layout_inner(
         crossing_alpha_ref: List[float] = [3.0]
         # Crossing loss is O(E²) — amortize by computing every N steps.
         # Positions change slowly enough that every-step is wasteful.
-        crossing_interval = 3 if n > 500 else 5 if n > 50 else 10
+        crossing_interval = _crossing_interval(n, config)
         crossing_step_ref: List[int] = [0]
         # Scale weight up to compensate for skipped steps
         crossing_weight_scale = float(crossing_interval)
@@ -988,7 +1076,7 @@ def _layout_inner(
                 max_pairs=500,
             )
 
-        loss_fns.append(("w_crossing", _crossing_fn, False, True))
+        loss_fns.append(("w_crossing", _crossing_fn, False, True, False, False))
 
     if config.w_straightness > 0:
         loss_fns.append(
@@ -1000,6 +1088,8 @@ def _layout_inner(
                     edge_ctx=_active_edge_ctx(p),
                 ),
                 False,
+                True,
+                True,
                 True,
             )
         )
@@ -1015,6 +1105,8 @@ def _layout_inner(
                 ),
                 False,
                 False,
+                True,
+                True,
             )
         )
 
@@ -1032,6 +1124,8 @@ def _layout_inner(
                     target_gap=node_sep,
                 ),
                 spacing_is_heavy,
+                False,
+                False,
                 False,
             )
         )
@@ -1055,7 +1149,7 @@ def _layout_inner(
                 fanout_fn,
                 skip_every=config.fanout_amortize_interval,
             )
-        loss_fns.append(("w_fanout", fanout_fn, False, False))
+        loss_fns.append(("w_fanout", fanout_fn, False, False, True, True))
 
     if config.w_back_edge > 0:
         loss_fns.append(
@@ -1068,6 +1162,8 @@ def _layout_inner(
                 ),
                 False,
                 False,
+                True,
+                True,
             )
         )
 
@@ -1085,12 +1181,16 @@ def _layout_inner(
                 lambda p, ns, li: position_pin_loss(p, _pin_idx, _pin_tgt, _pin_wt, _pin_mask),
                 False,
                 False,
+                False,
+                False,
             )
         )
 
     if flex_data["align_groups"]:
         _ag = flex_data["align_groups"]
-        loss_fns.append(("w_align_flex", lambda p, ns, li: alignment_loss(p, _ag), False, False))
+        loss_fns.append(
+            ("w_align_flex", lambda p, ns, li: alignment_loss(p, _ag), False, False, False, False)
+        )
 
     if flex_data["flex_node_sep"] is not None:
         _fsep = flex_data["flex_node_sep"]
@@ -1101,23 +1201,33 @@ def _layout_inner(
                 lambda p, ns, li: flex_spacing_loss(p, ns, li, _fsep, _fwt),
                 False,
                 False,
+                False,
+                False,
             )
         )
 
     # Pre-allocate edge batch buffer (avoids per-step tensor allocation)
     batch_buf = (
         torch.empty(2, edge_batch, dtype=torch.long, device=device)
-        if edge_batch > 0 and num_edges > edge_batch
+        if tiled_compute is None and edge_batch > 0 and num_edges > edge_batch
         else None
     )
-    perm_buf = torch.empty(edge_batch, dtype=torch.long, device="cpu") if edge_batch > 0 else None
+    perm_buf = (
+        torch.empty(edge_batch, dtype=torch.long, device="cpu")
+        if tiled_compute is None and edge_batch > 0
+        else None
+    )
 
     # Optimization loop with annealing
     prev_unweighted = float("inf")
     stall_count = 0
     _t_loop = _time.perf_counter()
     _log_interval = max(steps // 4, 1)  # log at 25%, 50%, 75%, 100%
-    use_sampled_context = layer_index is not None and (config.w_repel > 0 or config.w_overlap > 0)
+    use_sampled_context = (
+        tiled_compute is None
+        and layer_index is not None
+        and (config.w_repel > 0 or config.w_overlap > 0)
+    )
     sample_refresh_interval = (
         config.repel_amortize_interval
         if n > config.repel_amortize_threshold and config.repel_amortize_interval > 1
@@ -1144,7 +1254,9 @@ def _layout_inner(
         edge_ctx_ref[0] = None
 
         # Sample edge batch for this step — reuse pre-allocated buffer
-        if batch_buf is not None:
+        if tiled_compute is not None:
+            batch_edges_ref[0] = None
+        elif batch_buf is not None:
             # Contiguous chunks are cache-friendly; random sampling re-mixes periodically.
             use_random_sampling = config.edge_random_fraction >= 1.0 or (
                 random_interval > 0 and step % random_interval == 0
@@ -1277,21 +1389,60 @@ def _layout_inner(
 
         # Build loss_terms from static functions + current weights
         loss_terms: List[tuple] = []
-        for key, loss_fn, is_heavy, _is_annealed in loss_fns:
+        for key, loss_fn, is_heavy, _is_annealed, tiled_ok, cross_tile_ok in loss_fns:
             w = weight_map[key]
             if w > 0:
-                loss_terms.append((w, loss_fn, is_heavy))
+                loss_terms.append((w, loss_fn, is_heavy, tiled_ok, cross_tile_ok))
 
         # Execute loss terms with selected memory strategy
         total_loss_val = 0.0
         unweighted_loss_val = 0.0
 
-        if use_per_loss_bw:
+        if tiled_compute is not None:
+            tiled_loss_fns: List[LossFn] = []
+            tiled_loss_weights: List[float] = []
+            tiled_cross_mask: List[bool] = []
+            fallback_terms: List[tuple[float, LossFn, bool]] = []
+
+            for weight, loss_fn, is_heavy, tiled_ok, cross_tile_ok in loss_terms:
+                if tiled_ok:
+                    tiled_loss_fns.append(loss_fn)
+                    tiled_loss_weights.append(weight)
+                    tiled_cross_mask.append(cross_tile_ok)
+                else:
+                    fallback_terms.append((weight, loss_fn, is_heavy))
+
+            if tiled_loss_fns:
+                tiled_compute.cross_tile_loss_mask = tiled_cross_mask
+                total_loss_val += tiled_compute.compute_step(
+                    pos,
+                    tiled_loss_fns,
+                    tiled_loss_weights,
+                )
+                unweighted_loss_val += tiled_compute.last_unweighted_loss
+
+            for weight, loss_fn, is_heavy in fallback_terms:
+                term = _compute_loss_term(
+                    pos,
+                    weight,
+                    loss_fn,
+                    is_heavy,
+                    use_hybrid=False,
+                    use_checkpointing=False,
+                    node_sizes=node_sizes,
+                    layer_index=layer_index,
+                )
+                if term is not None and term.requires_grad:
+                    term.backward()
+                    val = term.item()
+                    total_loss_val += val
+                    unweighted_loss_val += val / weight if weight else 0.0
+        elif use_per_loss_bw:
             if executor is not None:
                 # Parallel: heavy losses on CPU threads, light losses on GPU
                 heavy_futures = []
                 light_terms_list = []
-                for weight, loss_fn, is_heavy in loss_terms:
+                for weight, loss_fn, is_heavy, _tiled_ok, _cross_tile_ok in loss_terms:
                     if is_heavy:
                         future = executor.submit(
                             _hybrid_loss,
@@ -1324,7 +1475,7 @@ def _layout_inner(
                         unweighted_loss_val += val / weight if weight else 0.0
             else:
                 # Sequential per-loss backward
-                for weight, loss_fn, is_heavy in loss_terms:
+                for weight, loss_fn, is_heavy, _tiled_ok, _cross_tile_ok in loss_terms:
                     term = _compute_loss_term(
                         pos,
                         weight,
@@ -1345,7 +1496,7 @@ def _layout_inner(
         else:
             # Standard: accumulate all losses, single backward
             loss = torch.tensor(0.0, device=device)
-            for weight, loss_fn, is_heavy in loss_terms:
+            for weight, loss_fn, is_heavy, _tiled_ok, _cross_tile_ok in loss_terms:
                 term = _compute_loss_term(
                     pos,
                     weight,
@@ -1781,6 +1932,33 @@ def _make_amortized_loss(loss_fn: LossFn, skip_every: int) -> LossFn:
         return loss_fn(pos, node_sizes, layer_index)
 
     return _amortized_loss
+
+
+def _crossing_interval(num_nodes: int, config: LayoutConfig) -> int:
+    """Return how often to evaluate crossing loss for the current solve.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the current layout problem.
+    config : LayoutConfig
+        Layout configuration for the current solve. Multilevel refinement may
+        attach a private override for huge final-level runs.
+
+    Returns
+    -------
+    int
+        Crossing-loss evaluation interval in optimizer steps.
+    """
+    override = getattr(config, "_dagua_crossing_interval_override", None)
+    if override is not None and int(override) > 0:
+        return int(override)
+
+    if num_nodes > 500:
+        return 3
+    if num_nodes > 50:
+        return 5
+    return 10
 
 
 def _overlap_interval(num_nodes: int, config: LayoutConfig) -> int:
