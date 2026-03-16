@@ -489,9 +489,13 @@ def _compute_node_size_cached(
         r = max(w, h)
         w = h = r
     elif shape == "ellipse":
-        # Graphviz sizes ellipses so the text bounding box is inscribed within
-        # the ellipse. This makes the ellipse noticeably wider than the text.
-        w = max(w * 1.35, w + 16.0)
+        # Graphviz inscribes the text bbox inside the ellipse, making it sqrt(2)
+        # wider. We approximate this with a multiplicative factor that scales
+        # down for short labels (where the minimum width already provides adequate
+        # padding) and up for long labels (where the text drives the width).
+        # The factor blends from 1.15 (short text, w < 40) to 1.35 (long text, w > 80).
+        factor = 1.15 + 0.20 * min(max((w - 40.0) / 40.0, 0.0), 1.0)
+        w = w * factor
     elif shape == "hexagon":
         # Graphviz hexagons are wider than their text box to keep the side
         # facets from crowding labels.
