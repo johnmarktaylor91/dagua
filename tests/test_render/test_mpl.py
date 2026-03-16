@@ -20,6 +20,7 @@ from dagua.render.mpl import (
     _draw_edge_marker,
     _edge_linestyle,
     _node_linestyle,
+    _points_to_data_units,
 )
 from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
 
@@ -329,6 +330,77 @@ def test_filled_arrow_marker_uses_opaque_edge_color() -> None:
 
     assert facecolor == pytest.approx(to_rgba(style.color, 1.0))
     assert edgecolor == pytest.approx(to_rgba(style.color, 1.0))
+
+
+def test_fancy_arrow_marker_uses_arrow_scale_override() -> None:
+    """FancyArrowPatch markers should decouple display scale from arrow width."""
+
+    fig, ax = plt.subplots()
+    style = EdgeStyle(arrow="normal", arrow_width=12.0, arrow_length=18.0, arrow_scale=40.0)
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="normal",
+        style=style,
+    )
+
+    assert len(ax.patches) == 1
+    mutation_scale = ax.patches[0].get_mutation_scale()
+    plt.close(fig)
+
+    assert mutation_scale == pytest.approx(40.0)
+
+
+def test_open_marker_preserves_legacy_data_sizing_without_arrow_scale() -> None:
+    """Manual markers should keep legacy data-space sizing when arrow_scale is absent."""
+
+    fig, ax = plt.subplots()
+    style = EdgeStyle(arrow="open", arrow_width=12.0, arrow_length=18.0)
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="open",
+        style=style,
+    )
+
+    assert len(ax.patches) == 1
+    vertices = ax.patches[0].get_xy()
+    base_center = vertices[1:3].mean(axis=0)
+    plt.close(fig)
+
+    assert float(base_center[1]) == pytest.approx(style.arrow_length)
+    assert abs(float(vertices[1][0] - vertices[2][0])) == pytest.approx(style.arrow_width)
+
+
+def test_open_marker_uses_display_scaled_dimensions_with_arrow_scale() -> None:
+    """Manual polygon markers should convert display sizing back into data units."""
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-50.0, 50.0)
+    ax.set_ylim(-50.0, 50.0)
+    style = EdgeStyle(arrow="open", arrow_width=12.0, arrow_length=18.0, arrow_scale=40.0)
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="open",
+        style=style,
+    )
+
+    assert len(ax.patches) == 1
+    vertices = ax.patches[0].get_xy()
+    base_center = vertices[1:3].mean(axis=0)
+    expected_scale = (
+        _points_to_data_units(ax, 1.0, "x") + _points_to_data_units(ax, 1.0, "y")
+    ) / 2.0
+    plt.close(fig)
+
+    assert float(base_center[1]) == pytest.approx(style.arrow_scale * expected_scale)
+    assert abs(float(vertices[1][0] - vertices[2][0])) == pytest.approx(
+        style.arrow_width * expected_scale
+    )
 
 
 def test_cluster_labels_expand_bbox_using_measured_width(
