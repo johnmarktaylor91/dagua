@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import pytest
 
 import dagua
@@ -9,6 +10,7 @@ from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
 from dagua.render import render
+from dagua.render.mpl import _build_node_patch, _draw_edge_marker, _edge_linestyle, _node_linestyle
 from dagua.styles import EdgeStyle, NodeStyle
 
 
@@ -241,3 +243,54 @@ class TestRenderStyleFlexibility:
         render(g, pos, output=out)
         assert Path(out).exists()
         assert Path(out).stat().st_size > 0
+
+
+def test_graphviz_dash_patterns_are_explicit() -> None:
+    """Renderer dash mappings should use Graphviz-like stroke lengths."""
+
+    assert _node_linestyle(NodeStyle(stroke_dash="dashed")) == (0, (6.0, 4.0))
+    assert _node_linestyle(NodeStyle(stroke_dash="dotted")) == ":"
+    assert _edge_linestyle(EdgeStyle(style="dashed")) == (0, (6.0, 4.0))
+    assert _edge_linestyle(EdgeStyle(style="dotted")) == ":"
+
+
+def test_triangle_patch_uses_equilateral_proportions() -> None:
+    """Triangle nodes should be close to equilateral instead of flat and wide."""
+
+    patch = _build_node_patch(
+        x=0.0,
+        y=0.0,
+        w=120.0,
+        h=80.0,
+        style=NodeStyle(shape="triangle"),
+        facecolor="#ffffff",
+        edgecolor="#000000",
+        linewidth=1.0,
+        linestyle="-",
+        zorder=1.0,
+    )
+    vertices = patch.get_xy()
+    content = vertices[:-1]
+    width = float(content[:, 0].max() - content[:, 0].min())
+    height = float(content[:, 1].max() - content[:, 1].min())
+
+    assert height / width == pytest.approx(3**0.5 / 2.0, rel=0.05)
+
+
+def test_vee_arrow_marker_is_unfilled() -> None:
+    """Vee arrowheads should render as an open marker, not a filled triangle."""
+
+    fig, ax = plt.subplots()
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="vee",
+        style=EdgeStyle(arrow="vee", arrow_width=10.0, arrow_length=14.0),
+    )
+
+    assert len(ax.patches) == 1
+    facecolor = ax.patches[0].get_facecolor()
+    plt.close(fig)
+
+    assert facecolor[-1] == pytest.approx(0.0)
