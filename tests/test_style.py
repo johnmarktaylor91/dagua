@@ -1,5 +1,7 @@
 """Tests for NodeStyle, EdgeStyle, ClusterStyle, GraphStyle, Theme."""
 
+import dataclasses
+
 import pytest
 
 from dagua.styles import (
@@ -244,6 +246,7 @@ def test_graphviz_strict_theme_loads() -> None:
     assert node_style.font_family == "Times New Roman"
     assert node_style.padding == (12.0, 5.0)
     assert node_style.min_width == 48.0
+    assert node_style.overflow_policy == "expand_node"
 
     edge_style = theme.get_edge_style("default")
     assert edge_style.width == 1.3
@@ -252,9 +255,26 @@ def test_graphviz_strict_theme_loads() -> None:
     assert edge_style.arrow_length == 12.0
     assert edge_style.label_font_family == "Times New Roman"
 
-    assert theme.cluster_style.fill == "#F0F0F0"
+    assert theme.cluster_style.fill == "#F8F8F8"
+    assert theme.cluster_style.font_size == 12.0
+    assert theme.cluster_style.font_weight == "regular"
     assert theme.cluster_style.font_family == "Times New Roman"
+    assert theme.cluster_style.opacity == 0.85
     assert theme.graph_style.edge_label_background_opacity == 1.0
+
+
+def test_graphviz_strict_theme_io_nodes_match_default() -> None:
+    """graphviz_strict input and output nodes should exactly match the default node style."""
+
+    from dagua.styles import get_theme
+
+    theme = get_theme("graphviz_strict")
+    default_style = dataclasses.asdict(theme.get_node_style("default"))
+    input_style = dataclasses.asdict(theme.get_node_style("input"))
+    output_style = dataclasses.asdict(theme.get_node_style("output"))
+
+    assert input_style == default_style
+    assert output_style == default_style
 
 
 def test_graphviz_improved_theme_loads() -> None:
