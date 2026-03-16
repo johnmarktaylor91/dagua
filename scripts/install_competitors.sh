@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Install all dependencies for dagua's competitor layout engines.
+# Run with: sudo bash scripts/install_competitors.sh
+# (sudo only needed for apt packages; pip/npm run as current user)
+set -euo pipefail
+
+echo "=== Installing dagua competitor dependencies ==="
+
+# ─── System packages (apt) ───────────────────────────────────────────────────
+echo ""
+echo "--- System packages (requires sudo) ---"
+
+# Graphviz: dot, neato, fdp, sfdp
+apt-get install -y graphviz
+
+# Node.js: needed for dagre + ELK (via subprocess)
+if ! command -v node &>/dev/null; then
+    echo "Installing Node.js..."
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y nodejs
+else
+    echo "Node.js already installed: $(node --version)"
+fi
+
+# Build tools for native Python packages (igraph, scipy)
+apt-get install -y build-essential cmake pkg-config
+
+echo ""
+echo "--- System packages done ---"
+
+# ─── Python packages (pip) ───────────────────────────────────────────────────
+echo ""
+echo "--- Python packages (current user/env) ---"
+
+# Core competitor dependencies
+pip install --quiet networkx          # NetworkX spring + kamada_kawai layouts
+pip install --quiet python-igraph     # igraph FR, sugiyama, DrL, GEM, Davidson-Harel
+pip install --quiet pydot             # DOT file parsing for Graphviz interop
+pip install --quiet scipy             # Sparse matrix ops, MDS, eigensolvers
+pip install --quiet scikit-learn      # t-SNE, MDS for reference comparison tests
+
+# Optional accelerators
+pip install --quiet numba             # JIT for coarsening matching loop (~50x faster)
+
+echo ""
+echo "--- Python packages done ---"
+
+# ─── Node.js packages (npm) ──────────────────────────────────────────────────
+echo ""
+echo "--- Node.js packages (global) ---"
+
+# dagre: JavaScript DAG layout (used via subprocess)
+npm install -g dagre 2>/dev/null || npm install -g dagre
+
+# elkjs: Eclipse Layout Kernel for JavaScript (used via subprocess)
+npm install -g elkjs 2>/dev/null || npm install -g elkjs
+
+echo ""
+echo "--- Node.js packages done ---"
+
+# ─── Verify installations ───────────────────────────────────────────────────
+echo ""
+echo "=== Verification ==="
+
+echo -n "Graphviz (dot):    " && (dot -V 2>&1 | head -1) || echo "MISSING"
+echo -n "Node.js:           " && (node --version) || echo "MISSING"
+echo -n "dagre:             " && (node -e "require('dagre'); console.log('OK')" 2>/dev/null) || echo "MISSING"
+echo -n "elkjs:             " && (node -e "require('elkjs'); console.log('OK')" 2>/dev/null) || echo "MISSING"
+
+echo ""
+python3 -c "
+deps = {
+    'networkx': 'networkx',
+    'igraph': 'igraph',
+    'pydot': 'pydot',
+    'scipy': 'scipy',
+    'sklearn': 'sklearn',
+    'numba': 'numba',
+}
+for name, module in deps.items():
+    try:
+        __import__(module)
+        print(f'{name:18s} OK')
+    except ImportError:
+        print(f'{name:18s} MISSING')
+"
+
+echo ""
+echo "=== Done. All competitor engines should now be available. ==="
+echo ""
+echo "To verify: python -c 'from dagua.eval.competitors import get_available_competitors; print([c.name for c in get_available_competitors()])'"
