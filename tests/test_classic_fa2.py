@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from dagua.layout.classic import layout_fa2
+from dagua.layout.classic.fa2 import _node_speed
 
 
 def _edge_index(edges: list[tuple[int, int]]) -> torch.Tensor:
@@ -83,6 +84,32 @@ def _path_graph(num_nodes: int) -> tuple[torch.Tensor, int]:
     """
     edges = [(index, index + 1) for index in range(num_nodes - 1)]
     return _edge_index(edges), num_nodes
+
+
+def _stability_graph() -> tuple[torch.Tensor, int]:
+    """Create the small regression graph used for FA2 stability checks.
+
+    Parameters
+    ----------
+    None
+        No parameters.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int]
+        Edge tensor and node count.
+    """
+    edges = [
+        (0, 1),
+        (1, 2),
+        (2, 0),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 3),
+        (1, 4),
+    ]
+    return _edge_index(edges), 6
 
 
 def test_layout_fa2_returns_positions_with_expected_shape() -> None:
@@ -198,3 +225,30 @@ def test_layout_fa2_gives_hubs_more_space_than_a_path() -> None:
     path_distance = (path_pos[1:] - path_pos[:-1]).norm(dim=1).mean().item()
 
     assert hub_distance > path_distance * 1.1
+
+
+def test_node_speed_handles_zero_traction_without_nan() -> None:
+    """Return finite zero speeds when both traction and swing are zero."""
+    force = torch.zeros((4, 2), dtype=torch.float32)
+    previous_force = torch.zeros((4, 2), dtype=torch.float32)
+    node_traction = torch.zeros(4, dtype=torch.float32)
+
+    node_speed = _node_speed(
+        speed=1.0,
+        node_traction=node_traction,
+        force=force,
+        previous_force=previous_force,
+    )
+
+    assert torch.isfinite(node_speed).all()
+    assert torch.equal(node_speed, torch.zeros_like(node_speed))
+
+
+def test_layout_fa2_remains_finite_for_longer_run() -> None:
+    """Keep a representative clustered graph finite during a longer run."""
+    edge_index, num_nodes = _stability_graph()
+
+    pos = layout_fa2(edge_index=edge_index, num_nodes=num_nodes, steps=200)
+
+    assert torch.isfinite(pos).all()
+    assert pos.abs().max().item() < 1_000.0
