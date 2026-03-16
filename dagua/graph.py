@@ -381,8 +381,8 @@ class DaguaGraph:
         """Compute node sizes from labels if not already set.
 
         Uses per-node style for padding, shape, font_weight, min_width,
-        overflow_policy, and min_font_size. Populates both node_sizes
-        and node_font_sizes tensors.
+        min_height, overflow_policy, and min_font_size. Populates both
+        node_sizes and node_font_sizes tensors.
         """
         if (
             self.node_sizes is not None
@@ -421,9 +421,12 @@ class DaguaGraph:
                 min_font_size=style.min_font_size,
                 label_format=style.label_format,
             )
-            # Apply min_width if set
+            # Graphviz parity cases need optional width/height floors without
+            # changing Dagua's default automatic sizing behavior.
             if style.min_width is not None:
                 w = max(w, style.min_width)
+            if style.min_height is not None:
+                h = max(h, style.min_height)
             sizes.append([w, h])
             font_sizes.append(efs)
 

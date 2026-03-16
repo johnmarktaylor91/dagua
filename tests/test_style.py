@@ -24,7 +24,7 @@ from dagua.styles import (
 
 @pytest.mark.smoke
 class TestNodeStyleNewFields:
-    """New fields on NodeStyle (font_weight, font_style, shadow, min_width)."""
+    """New fields on NodeStyle (font_weight, font_style, shadow, min_*)."""
 
     def test_defaults(self):
         s = NodeStyle()
@@ -34,13 +34,21 @@ class TestNodeStyleNewFields:
         assert s.shadow_offset == (1.5, -1.5)
         assert s.shadow_color == "#00000020"
         assert s.min_width is None
+        assert s.min_height is None
 
     def test_custom_values(self):
-        s = NodeStyle(font_weight="bold", font_style="italic", shadow=True, min_width=100.0)
+        s = NodeStyle(
+            font_weight="bold",
+            font_style="italic",
+            shadow=True,
+            min_width=100.0,
+            min_height=48.0,
+        )
         assert s.font_weight == "bold"
         assert s.font_style == "italic"
         assert s.shadow is True
         assert s.min_width == 100.0
+        assert s.min_height == 48.0
 
 
 @pytest.mark.smoke
@@ -197,6 +205,7 @@ class TestBuiltInThemes:
             "arrow_width": 10.0,
             "edge_width": 1.5,
             "edge_opacity": 0.85,
+            "min_height": 36.0,
         }
 
 

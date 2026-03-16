@@ -172,6 +172,7 @@ def _graphviz_match_node_style_defaults() -> Dict[str, Any]:
         "padding": GRAPHVIZ_MATCH_DEFAULTS["padding"],
         "font_size": GRAPHVIZ_MATCH_DEFAULTS["font_size"],
         "min_width": GRAPHVIZ_MIN_NODE_WIDTH,
+        "min_height": GRAPHVIZ_MATCH_DEFAULTS.get("min_height", 36.0),
     }
 
 
