@@ -194,15 +194,15 @@ class TestBuiltInThemes:
         assert isinstance(DEFAULT_THEME, dict)
         assert "default" in DEFAULT_THEME
 
-    def test_graphviz_match_defaults_are_album_scoped(self):
+    def test_graphviz_match_defaults_are_album_scoped(self) -> None:
         """Graphviz-match defaults should expose the album override values."""
 
         assert GRAPHVIZ_MATCH_DEFAULTS == {
             "stroke_width": 1.5,
             "padding": (14.0, 10.0),
             "font_size": 12.0,
-            "arrow_length": 14.0,
-            "arrow_width": 10.0,
+            "arrow_length": 18.0,
+            "arrow_width": 12.0,
             "edge_width": 1.5,
             "edge_opacity": 0.85,
             "min_height": 36.0,
