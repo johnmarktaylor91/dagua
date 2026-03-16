@@ -958,8 +958,9 @@ def _marker_data_size(
     style: Any,
     length: float,
     width: float,
+    node_height: float = 0.0,
 ) -> Tuple[float, float]:
-    """Convert point-based marker dimensions to data units.
+    """Convert marker dimensions to data units.
 
     Parameters
     ----------
@@ -971,6 +972,9 @@ def _marker_data_size(
         Marker length in typographic points.
     width : float
         Marker width in typographic points.
+    node_height : float, default=0.0
+        Target node height in data units. When ``style.arrow_node_fraction`` is
+        positive, marker sizing becomes proportional to this height.
 
     Returns
     -------
@@ -979,11 +983,17 @@ def _marker_data_size(
 
     Notes
     -----
-    Arrowhead polygons are drawn in data coordinates, but their visual size
-    should stay stable in display space. Converting once here keeps marker
-    geometry consistent across different graph extents and figure sizes.
+    When ``arrow_node_fraction > 0`` on the style, arrowheads scale with the
+    connected node height. Otherwise the renderer falls back to converting fixed
+    point dimensions into data units so marker size stays stable in display space.
     """
-    _ = style
+    fraction = float(getattr(style, "arrow_node_fraction", 0.0))
+    if fraction > 0.0 and node_height > 0.0:
+        width_ratio = float(getattr(style, "arrow_width_ratio", 0.7))
+        data_length = node_height * fraction
+        data_width = data_length * width_ratio
+        return data_length, data_width
+
     scale = _compute_display_scale(ax)
     return length * scale, width * scale
 
@@ -1425,6 +1435,7 @@ def _draw_edge_marker(
     direction: Tuple[float, float],
     marker: str,
     style: Any,
+    node_height: float = 0.0,
 ) -> None:
     """Draw a custom edge endpoint marker.
 
@@ -1440,6 +1451,9 @@ def _draw_edge_marker(
         Marker name such as ``"normal"`` or ``"diamond"``.
     style : Any
         Edge style object providing arrow geometry and color settings.
+    node_height : float, default=0.0
+        Height of the connected node in data units. Used only when the style
+        enables node-relative arrow sizing.
 
     Returns
     -------
@@ -1459,7 +1473,13 @@ def _draw_edge_marker(
     px, py = -uy, ux
     length = float(style.arrow_length)
     width = float(style.arrow_width)
-    manual_length, manual_width = _marker_data_size(ax, style, length, width)
+    manual_length, manual_width = _marker_data_size(
+        ax,
+        style,
+        length,
+        width,
+        node_height=node_height,
+    )
     # Graphviz-style calibration expects arrowheads to read slightly heavier
     # than the edge stroke, so keep marker fill/outline fully opaque.
     color = to_rgba(style.arrow_color or style.color, 1.0)
@@ -1644,6 +1664,8 @@ def _draw_edges(
 
     for e_idx, curve in enumerate(curves):
         style = graph.get_style_for_edge(e_idx)
+        tgt_idx = int(graph.edge_index[1, e_idx])
+        tgt_node_height = float(graph.node_sizes[tgt_idx, 1])
         verts = [curve.p0, curve.cp1, curve.cp2, curve.p1]
         codes = [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4]
         path_patch = PathPatch(
@@ -1675,6 +1697,7 @@ def _draw_edges(
             (head_dx, head_dy),
             style.arrow,
             style,
+            node_height=tgt_node_height,
         )
         # Source tail arrow: same tangent logic — cp1-p0 continues past the
         # source; fallback to p0-p1 for straight routing where cp1==p0.
@@ -1683,12 +1706,15 @@ def _draw_edges(
         if tail_dx * tail_dx + tail_dy * tail_dy < 1e-12:
             tail_dx = curve.p0[0] - curve.p1[0]
             tail_dy = curve.p0[1] - curve.p1[1]
+        src_idx = int(graph.edge_index[0, e_idx])
+        src_node_height = float(graph.node_sizes[src_idx, 1])
         _draw_edge_marker(
             ax,
             curve.p0,
             (tail_dx, tail_dy),
             style.tail_arrow,
             style,
+            node_height=src_node_height,
         )
 
 

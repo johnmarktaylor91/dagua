@@ -599,6 +599,23 @@ def test_arrowhead_size_scales_with_graph_range() -> None:
     assert wid2 / wid1 == pytest.approx(ratio)
 
 
+def test_arrowhead_scales_with_node_height() -> None:
+    """Node-relative arrowheads should be proportional to target node height."""
+
+    style = EdgeStyle(arrow_node_fraction=0.4, arrow_width_ratio=0.7)
+
+    length, width = _marker_data_size(None, style, 10.0, 7.0, node_height=50.0)
+    assert length == pytest.approx(20.0)
+    assert width == pytest.approx(14.0)
+
+    length2, width2 = _marker_data_size(None, style, 10.0, 7.0, node_height=100.0)
+    assert length2 == pytest.approx(40.0)
+    assert width2 == pytest.approx(28.0)
+
+    style_fixed = EdgeStyle(arrow_node_fraction=0.0)
+    assert style_fixed.arrow_node_fraction == 0.0
+
+
 def test_open_marker_uses_unified_display_scaled_dimensions() -> None:
     """Manual polygon markers should always convert point sizing into data units."""
 
