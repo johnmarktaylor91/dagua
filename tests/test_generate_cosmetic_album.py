@@ -145,7 +145,7 @@ def test_cluster_cases_use_vertical_chain_positions() -> None:
 
     cases = {case.case_id: case for case in build_case_catalog()}
     expected_positions = torch.tensor(
-        [[0.0, 120.0], [0.0, 0.0], [0.0, -120.0]],
+        [[0.0, 80.0], [0.0, 0.0], [0.0, -80.0]],
         dtype=torch.float32,
     )
 
@@ -159,11 +159,11 @@ def test_base_cluster_style_uses_visible_graphviz_matched_defaults() -> None:
     style = _base_cluster_style()
 
     assert style.stroke_width == 2.0
-    assert style.padding == 30.0
-    assert style.font_size == 12.0
-    assert style.opacity == 0.85
+    assert style.padding == 50.0
+    assert style.font_size == 13.0
+    assert style.opacity == 0.9
     assert style.label_position == "top-left"
-    assert style.label_offset == (10.0, 8.0)
+    assert style.label_offset == (12.0, 10.0)
 
 
 def test_cluster_border_case_keeps_heavier_base_border_defaults() -> None:
@@ -175,9 +175,9 @@ def test_cluster_border_case_keeps_heavier_base_border_defaults() -> None:
     assert style.fill == "#FFFFFF"
     assert style.stroke_dash == "dashed"
     assert style.stroke_width == 2.0
-    assert style.opacity == 0.85
+    assert style.opacity == 0.9
     assert style.label_position == "top-left"
-    assert style.label_offset == (10.0, 8.0)
+    assert style.label_offset == (12.0, 10.0)
 
 
 def test_ortho_routing_case_uses_offset_positions() -> None:

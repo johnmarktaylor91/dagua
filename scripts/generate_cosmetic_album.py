@@ -311,13 +311,13 @@ def _base_cluster_style(**overrides: Any) -> ClusterStyle:
         stroke_width=2.0,
         stroke_dash="solid",
         corner_radius=10.0,
-        padding=30.0,
+        padding=50.0,
         label_position="top-left",
-        font_size=12.0,
+        font_size=13.0,
         font_weight="bold",
         font_color="#374151",
-        opacity=0.85,
-        label_offset=(10.0, 8.0),
+        opacity=0.9,
+        label_offset=(12.0, 10.0),
     )
     for field_name, value in overrides.items():
         setattr(style, field_name, value)
@@ -488,7 +488,7 @@ def _basic_cluster_graph() -> Tuple[DaguaGraph, torch.Tensor]:
     graph.add_edge("B", "C")
     graph.add_cluster("group", ["A", "B"], label="Cluster")
     positions = torch.tensor(
-        [[0.0, 120.0], [0.0, 0.0], [0.0, -120.0]],
+        [[0.0, 80.0], [0.0, 0.0], [0.0, -80.0]],
         dtype=torch.float32,
     )
     return graph, positions
