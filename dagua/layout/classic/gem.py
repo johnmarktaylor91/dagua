@@ -14,6 +14,11 @@ import torch
 _MIN_DISTANCE = 1.0e-3
 _FULL_REPULSION_LIMIT = 2_000
 _SAMPLED_REPULSION_NEIGHBORS = 96
+_PERTURBATION_MAX_ANGLE = 0.05
+_TEMPERATURE_GROWTH_FACTOR = 1.5
+_TEMPERATURE_SHRINK_FACTOR = 0.33
+_TEMPERATURE_DAMPING_FACTOR = 0.92
+_TEMPERATURE_DECAY = 0.995
 
 
 def _layout_device(
@@ -108,13 +113,33 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
     return centered * (extent / span)
 
 
-def _repulsive_force_full(positions: torch.Tensor) -> torch.Tensor:
+def _ideal_distance(num_nodes: int, extent: float) -> float:
+    """Estimate the FR-style ideal distance used by GEM repulsion.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the graph.
+    extent : float
+        Target half-width of the final drawing box.
+
+    Returns
+    -------
+    float
+        Ideal pairwise spacing constant ``k``.
+    """
+    return max(extent / max(float(max(num_nodes, 1)) ** 0.5, 1.0), _MIN_DISTANCE)
+
+
+def _repulsive_force_full(positions: torch.Tensor, ideal_distance: float) -> torch.Tensor:
     """Compute exact all-pairs repulsion.
 
     Parameters
     ----------
     positions : torch.Tensor
         Position tensor with shape ``[N, 2]``.
+    ideal_distance : float
+        FR-style ideal distance constant ``k``.
 
     Returns
     -------
@@ -123,11 +148,16 @@ def _repulsive_force_full(positions: torch.Tensor) -> torch.Tensor:
     """
     delta = positions.unsqueeze(1) - positions.unsqueeze(0)
     distances = torch.linalg.norm(delta, dim=2).clamp(min=_MIN_DISTANCE)
-    weights = distances.reciprocal().square()
-    return (delta * weights.unsqueeze(2)).sum(dim=1)
+    force = (ideal_distance * ideal_distance) / distances
+    return (delta / distances.unsqueeze(2) * force.unsqueeze(2)).sum(dim=1)
 
 
-def _repulsive_force_sampled(positions: torch.Tensor, seed: int, step: int) -> torch.Tensor:
+def _repulsive_force_sampled(
+    positions: torch.Tensor,
+    seed: int,
+    step: int,
+    ideal_distance: float,
+) -> torch.Tensor:
     """Approximate repulsion by sampled random neighbors.
 
     Parameters
@@ -138,6 +168,8 @@ def _repulsive_force_sampled(positions: torch.Tensor, seed: int, step: int) -> t
         Base random seed.
     step : int
         Iteration index.
+    ideal_distance : float
+        FR-style ideal distance constant ``k``.
 
     Returns
     -------
@@ -158,11 +190,16 @@ def _repulsive_force_sampled(positions: torch.Tensor, seed: int, step: int) -> t
     neighbors = positions[sampled]
     delta = positions.unsqueeze(1) - neighbors
     distances = torch.linalg.norm(delta, dim=2).clamp(min=_MIN_DISTANCE)
-    weights = distances.reciprocal().square()
-    return (delta * weights.unsqueeze(2)).sum(dim=1)
+    force = (ideal_distance * ideal_distance) / distances
+    return (delta / distances.unsqueeze(2) * force.unsqueeze(2)).sum(dim=1)
 
 
-def _repulsive_force(positions: torch.Tensor, seed: int, step: int) -> torch.Tensor:
+def _repulsive_force(
+    positions: torch.Tensor,
+    seed: int,
+    step: int,
+    ideal_distance: float,
+) -> torch.Tensor:
     """Dispatch between exact and sampled repulsion.
 
     Parameters
@@ -173,6 +210,8 @@ def _repulsive_force(positions: torch.Tensor, seed: int, step: int) -> torch.Ten
         Base random seed.
     step : int
         Iteration index.
+    ideal_distance : float
+        FR-style ideal distance constant ``k``.
 
     Returns
     -------
@@ -180,8 +219,8 @@ def _repulsive_force(positions: torch.Tensor, seed: int, step: int) -> torch.Ten
         Repulsive force per node.
     """
     if positions.shape[0] > _FULL_REPULSION_LIMIT:
-        return _repulsive_force_sampled(positions, seed, step)
-    return _repulsive_force_full(positions)
+        return _repulsive_force_sampled(positions, seed, step, ideal_distance)
+    return _repulsive_force_full(positions, ideal_distance)
 
 
 def _attractive_force(positions: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
@@ -213,6 +252,94 @@ def _attractive_force(positions: torch.Tensor, edge_index: torch.Tensor) -> torc
     return forces
 
 
+def _rotate_impulse(
+    impulse: torch.Tensor,
+    generator: torch.Generator,
+    device: torch.device,
+) -> torch.Tensor:
+    """Apply GEM's symmetry-breaking random rotation to each impulse vector.
+
+    Parameters
+    ----------
+    impulse : torch.Tensor
+        Raw impulse tensor with shape ``[N, 2]``.
+    generator : torch.Generator
+        Deterministic generator seeded from the public layout seed.
+    device : torch.device
+        Target device for the rotated tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Rotated impulse tensor with shape ``[N, 2]``.
+    """
+    angles = (
+        torch.rand((impulse.shape[0],), generator=generator, dtype=torch.float32) * 2.0 - 1.0
+    ) * _PERTURBATION_MAX_ANGLE
+    angles = angles.to(device=device)
+    cos_angle = torch.cos(angles)
+    sin_angle = torch.sin(angles)
+    x_coord = impulse[:, 0]
+    y_coord = impulse[:, 1]
+    return torch.stack(
+        [
+            x_coord * cos_angle - y_coord * sin_angle,
+            x_coord * sin_angle + y_coord * cos_angle,
+        ],
+        dim=1,
+    )
+
+
+def _update_temperatures(
+    temperatures: torch.Tensor,
+    direction: torch.Tensor,
+    previous_impulse: torch.Tensor,
+    extent: float,
+) -> torch.Tensor:
+    """Adjust per-node temperatures from impulse alignment.
+
+    Parameters
+    ----------
+    temperatures : torch.Tensor
+        Per-node temperature tensor with shape ``[N]``.
+    direction : torch.Tensor
+        Current normalized impulse directions, shape ``[N, 2]``.
+    previous_impulse : torch.Tensor
+        Previous unnormalized impulses, shape ``[N, 2]``.
+    extent : float
+        Drawing half-width used to cap temperature growth.
+
+    Returns
+    -------
+    torch.Tensor
+        Updated temperature tensor with shape ``[N]``.
+    """
+    previous_norm = torch.linalg.norm(previous_impulse, dim=1, keepdim=True).clamp(
+        min=_MIN_DISTANCE
+    )
+    cosine = (direction * (previous_impulse / previous_norm)).sum(dim=1)
+
+    same_direction = cosine > 0.5
+    opposite_direction = cosine < -0.2
+    temperatures = torch.where(
+        same_direction,
+        temperatures * _TEMPERATURE_GROWTH_FACTOR,
+        temperatures,
+    )
+    temperatures = torch.where(
+        opposite_direction,
+        temperatures * _TEMPERATURE_SHRINK_FACTOR,
+        temperatures,
+    )
+    temperatures = torch.where(
+        ~(same_direction | opposite_direction),
+        temperatures * _TEMPERATURE_DAMPING_FACTOR,
+        temperatures,
+    )
+    temperatures = temperatures.clamp(min=0.01, max=extent * 0.25)
+    return temperatures * _TEMPERATURE_DECAY
+
+
 def layout_gem(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -225,7 +352,7 @@ def layout_gem(
     Reference
     ---------
     Frick, Ludwig, and Mehldau, "A Fast Adaptive Layout Algorithm for
-    Undirected Graphs" (1994).
+    Undirected Graphs" (1995).
 
     Parameters
     ----------
@@ -257,6 +384,7 @@ def layout_gem(
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
 
     extent = _layout_extent(num_nodes, node_sizes)
+    ideal_distance = _ideal_distance(num_nodes, extent)
     positions = _initialize_positions(num_nodes, device, seed)
     temperatures = torch.full(
         (num_nodes,),
@@ -269,38 +397,26 @@ def layout_gem(
     generator.manual_seed(seed)
 
     for step in range(max_iters):
-        repulsive = 0.08 * _repulsive_force(positions, seed, step)
+        repulsive = 0.08 * _repulsive_force(positions, seed, step, ideal_distance)
         attractive = -0.02 * _attractive_force(positions, edge_index)
         barycenter = positions.mean(dim=0, keepdim=True)
         gravity = -0.01 * (positions - barycenter)
-        noise = 0.005 * torch.randn(
-            positions.shape,
+        impulse = _rotate_impulse(
+            repulsive + attractive + gravity,
             generator=generator,
-            dtype=torch.float32,
-        ).to(device)
-
-        impulse = repulsive + attractive + gravity + noise
+            device=device,
+        )
         norm = torch.linalg.norm(impulse, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
         direction = impulse / norm
 
-        previous_norm = torch.linalg.norm(previous_impulse, dim=1, keepdim=True).clamp(
-            min=_MIN_DISTANCE
+        temperatures = _update_temperatures(
+            temperatures=temperatures,
+            direction=direction,
+            previous_impulse=previous_impulse,
+            extent=extent,
         )
-        cosine = (direction * (previous_impulse / previous_norm)).sum(dim=1)
-
-        same_direction = cosine > 0.5
-        opposite_direction = cosine < -0.2
-        temperatures = torch.where(same_direction, temperatures * 1.04, temperatures)
-        temperatures = torch.where(opposite_direction, temperatures * 0.55, temperatures)
-        temperatures = torch.where(
-            ~(same_direction | opposite_direction),
-            temperatures * 0.92,
-            temperatures,
-        )
-        temperatures = temperatures.clamp(min=0.01, max=extent * 0.25)
-        temperatures = temperatures * 0.995
 
         positions = positions + direction * temperatures.unsqueeze(1)
-        previous_impulse = direction
+        previous_impulse = impulse
 
     return _normalize_positions(positions, extent).to(dtype=torch.float32, device=device)

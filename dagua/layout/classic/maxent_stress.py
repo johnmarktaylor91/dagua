@@ -1,18 +1,22 @@
 """Maxent-stress graph layout.
 
-The implementation combines sparse stress terms over short graph distances with
-sampled logarithmic repulsion over non-edge pairs, optimized with Adam.
+The implementation combines a stress term based on graph-theoretic distances
+with the logarithmic entropy repulsion from Gansner et al. For small graphs it
+uses full BFS shortest paths; for larger graphs it falls back to a KK-style
+pivot approximation for the stress term.
 """
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from typing import Optional
 
 import torch
 
 _MIN_DISTANCE = 1.0e-3
-_TWO_HOP_LIMIT = 2_000
+_FULL_STRESS_LIMIT = 1_000
+_PIVOT_COUNT = 50
 _SAMPLED_REPULSION_NEIGHBORS = 96
 
 
@@ -139,70 +143,229 @@ def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> lis
     return [sorted(neighbors) for neighbors in adjacency_sets]
 
 
-def _stress_pairs(
-    adjacency: list[list[int]],
-    include_two_hop: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Collect sparse stress pairs and their graph distances.
+def _connected_components(adjacency: list[list[int]]) -> torch.Tensor:
+    """Label connected components in the undirected graph.
 
     Parameters
     ----------
     adjacency : list[list[int]]
         Undirected adjacency list.
-    include_two_hop : bool
-        Whether to include pairs at graph distance two.
+
+    Returns
+    -------
+    torch.Tensor
+        Component labels with shape ``[N]``.
+    """
+    num_nodes = len(adjacency)
+    component_ids = torch.full((num_nodes,), -1, dtype=torch.long)
+    component_index = 0
+
+    for start in range(num_nodes):
+        if int(component_ids[start].item()) >= 0:
+            continue
+
+        frontier: deque[int] = deque([start])
+        component_ids[start] = component_index
+        while frontier:
+            node = frontier.popleft()
+            for neighbor in adjacency[node]:
+                if int(component_ids[neighbor].item()) >= 0:
+                    continue
+                component_ids[neighbor] = component_index
+                frontier.append(neighbor)
+
+        component_index += 1
+
+    return component_ids
+
+
+def _bfs_distances(adjacency: list[list[int]], source: int) -> torch.Tensor:
+    """Compute full shortest-path distances from one source node.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Undirected adjacency list.
+    source : int
+        BFS root node index.
+
+    Returns
+    -------
+    torch.Tensor
+        Integer distances with shape ``[N]`` and ``-1`` for unreachable nodes.
+    """
+    num_nodes = len(adjacency)
+    distances = torch.full((num_nodes,), -1, dtype=torch.long)
+    distances[source] = 0
+    frontier: deque[int] = deque([source])
+
+    while frontier:
+        node = frontier.popleft()
+        next_distance = int(distances[node].item()) + 1
+        for neighbor in adjacency[node]:
+            if int(distances[neighbor].item()) >= 0:
+                continue
+            distances[neighbor] = next_distance
+            frontier.append(neighbor)
+
+    return distances
+
+
+def _all_pairs_shortest_paths(adjacency: list[list[int]]) -> torch.Tensor:
+    """Compute the full BFS shortest-path matrix for a small graph.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Undirected adjacency list.
+
+    Returns
+    -------
+    torch.Tensor
+        Integer shortest-path matrix with shape ``[N, N]``.
+    """
+    num_nodes = len(adjacency)
+    rows = [_bfs_distances(adjacency, node) for node in range(num_nodes)]
+    if not rows:
+        return torch.empty((0, 0), dtype=torch.long)
+    return torch.stack(rows, dim=0)
+
+
+def _full_stress_terms(
+    adjacency: list[list[int]],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build exact stress pairs from the all-pairs shortest-path matrix.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Undirected adjacency list.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        Source indices, target indices, and target graph distances.
+        Unique reachable node pairs and their graph distances.
     """
-    sources: list[int] = []
-    targets: list[int] = []
-    lengths: list[float] = []
-    seen: set[tuple[int, int]] = set()
-
-    for source, neighbors in enumerate(adjacency):
-        for target in neighbors:
-            key = (min(source, target), max(source, target))
-            if key not in seen:
-                seen.add(key)
-                sources.append(key[0])
-                targets.append(key[1])
-                lengths.append(1.0)
-
-        if not include_two_hop:
-            continue
-
-        queue: deque[tuple[int, int]] = deque([(source, 0)])
-        visited = {source}
-        while queue:
-            node, depth = queue.popleft()
-            if depth >= 2:
-                continue
-            for neighbor in adjacency[node]:
-                if neighbor in visited:
-                    continue
-                visited.add(neighbor)
-                next_depth = depth + 1
-                if next_depth == 2:
-                    key = (min(source, neighbor), max(source, neighbor))
-                    if key[0] != key[1] and key not in seen:
-                        seen.add(key)
-                        sources.append(key[0])
-                        targets.append(key[1])
-                        lengths.append(2.0)
-                queue.append((neighbor, next_depth))
-
-    if not sources:
+    distances = _all_pairs_shortest_paths(adjacency)
+    if distances.numel() == 0:
         empty = torch.empty((0,), dtype=torch.long)
         return empty, empty, torch.empty((0,), dtype=torch.float32)
 
+    upper = torch.triu_indices(distances.shape[0], distances.shape[1], offset=1)
+    pair_distances = distances[upper[0], upper[1]]
+    reachable = pair_distances > 0
     return (
-        torch.tensor(sources, dtype=torch.long),
-        torch.tensor(targets, dtype=torch.long),
-        torch.tensor(lengths, dtype=torch.float32),
+        upper[0][reachable],
+        upper[1][reachable],
+        pair_distances[reachable].to(dtype=torch.float32),
     )
+
+
+def _choose_pivots(
+    component_ids: torch.Tensor,
+    max_pivots: int,
+    seed: int,
+) -> torch.Tensor:
+    """Choose pivot nodes while covering every connected component.
+
+    Parameters
+    ----------
+    component_ids : torch.Tensor
+        Component labels with shape ``[N]``.
+    max_pivots : int
+        Maximum number of pivots to select.
+    seed : int
+        Random seed for the remaining pivot slots.
+
+    Returns
+    -------
+    torch.Tensor
+        Pivot indices with shape ``[P]``.
+    """
+    num_nodes = int(component_ids.shape[0])
+    if num_nodes == 0:
+        return torch.empty((0,), dtype=torch.long)
+    if num_nodes <= max_pivots:
+        return torch.arange(num_nodes, dtype=torch.long)
+
+    pivots: list[int] = []
+    seen_components: set[int] = set()
+    for node, component in enumerate(component_ids.tolist()):
+        if component in seen_components:
+            continue
+        pivots.append(node)
+        seen_components.add(component)
+        if len(pivots) == max_pivots:
+            return torch.tensor(pivots, dtype=torch.long)
+
+    remaining = max_pivots - len(pivots)
+    if remaining <= 0:
+        return torch.tensor(pivots, dtype=torch.long)
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    pivot_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    pivot_mask[torch.tensor(pivots, dtype=torch.long)] = True
+    candidates = torch.arange(num_nodes, dtype=torch.long)[~pivot_mask]
+    permutation = torch.randperm(int(candidates.shape[0]), generator=generator)
+    extra = candidates[permutation[:remaining]]
+    return torch.cat([torch.tensor(pivots, dtype=torch.long), extra], dim=0)
+
+
+def _pivot_stress_terms(
+    adjacency: list[list[int]],
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build a KK-style pivot approximation for large-graph stress.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Undirected adjacency list.
+    seed : int
+        Random seed for pivot selection.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Pivot indices with shape ``[P]`` and node-to-pivot distances with shape
+        ``[N, P]``. Unreachable entries remain ``-1``.
+    """
+    component_ids = _connected_components(adjacency)
+    pivots = _choose_pivots(component_ids, min(_PIVOT_COUNT, len(adjacency)), seed)
+    if int(pivots.numel()) == 0:
+        return pivots, torch.empty((len(adjacency), 0), dtype=torch.float32)
+
+    rows = [_bfs_distances(adjacency, int(pivot.item())) for pivot in pivots]
+    return pivots, torch.stack(rows, dim=0).transpose(0, 1).to(dtype=torch.float32)
+
+
+def _full_non_edge_pairs(adjacency: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Enumerate all unique non-edge pairs for exact entropy repulsion.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Undirected adjacency list.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Unique non-edge pairs ``(i, j)`` with ``i < j``.
+    """
+    num_nodes = len(adjacency)
+    if num_nodes <= 1:
+        empty = torch.empty((0,), dtype=torch.long)
+        return empty, empty
+
+    adjacency_mask = torch.zeros((num_nodes, num_nodes), dtype=torch.bool)
+    for source, neighbors in enumerate(adjacency):
+        if neighbors:
+            adjacency_mask[source, torch.tensor(neighbors, dtype=torch.long)] = True
+
+    upper = torch.triu_indices(num_nodes, num_nodes, offset=1)
+    mask = ~adjacency_mask[upper[0], upper[1]]
+    return upper[0][mask], upper[1][mask]
 
 
 def _sample_non_edges(
@@ -210,7 +373,7 @@ def _sample_non_edges(
     step: int,
     seed: int,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Sample random non-edge pairs for entropy repulsion.
 
     Parameters
@@ -226,79 +389,89 @@ def _sample_non_edges(
 
     Returns
     -------
-    tuple[torch.Tensor, torch.Tensor]
-        Source and target index tensors of equal length.
+    tuple[torch.Tensor, torch.Tensor, int]
+        Sampled source indices, sampled target indices, and the total number of
+        unique non-edge pairs in the graph.
     """
     num_nodes = len(adjacency)
+    total_pairs = num_nodes * (num_nodes - 1) // 2
+    edge_count = sum(len(neighbors) for neighbors in adjacency) // 2
+    total_non_edges = max(total_pairs - edge_count, 0)
+    if total_non_edges == 0:
+        empty = torch.empty((0,), dtype=torch.long, device=device)
+        return empty, empty, 0
+
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed + step + 1)
-    sample_size = max(1, min(num_nodes, _SAMPLED_REPULSION_NEIGHBORS))
+    sample_size = min(
+        total_non_edges,
+        max(num_nodes, num_nodes * _SAMPLED_REPULSION_NEIGHBORS // 2),
+    )
 
     adjacency_sets = [set(neighbors) | {node} for node, neighbors in enumerate(adjacency)]
     sources: list[int] = []
     targets: list[int] = []
-
-    for source in range(num_nodes):
-        candidates = torch.randint(
+    while len(sources) < sample_size:
+        remaining = sample_size - len(sources)
+        batch_size = max(remaining * 3, 16)
+        candidate_sources = torch.randint(
             0,
             num_nodes,
-            (sample_size * 3,),
+            (batch_size,),
             generator=generator,
             dtype=torch.long,
         ).tolist()
-        accepted = 0
-        for target in candidates:
+        candidate_targets = torch.randint(
+            0,
+            num_nodes,
+            (batch_size,),
+            generator=generator,
+            dtype=torch.long,
+        ).tolist()
+        for source, target in zip(candidate_sources, candidate_targets):
             if target not in adjacency_sets[source]:
-                sources.append(source)
-                targets.append(target)
-                accepted += 1
-                if accepted >= sample_size:
+                sources.append(min(source, target))
+                targets.append(max(source, target))
+                if len(sources) >= sample_size:
                     break
 
-    return torch.tensor(sources, dtype=torch.long, device=device), torch.tensor(
-        targets,
-        dtype=torch.long,
-        device=device,
+    return (
+        torch.tensor(sources, dtype=torch.long, device=device),
+        torch.tensor(targets, dtype=torch.long, device=device),
+        total_non_edges,
     )
 
 
-def _maxent_stress_loss(
+def _stress_term(
     positions: torch.Tensor,
     stress_src: torch.Tensor,
     stress_dst: torch.Tensor,
     stress_lengths: torch.Tensor,
-    adjacency: list[list[int]],
-    alpha: float,
-    seed: int,
-    step: int,
+    pivot_indices: torch.Tensor,
+    pivot_distances: torch.Tensor,
 ) -> torch.Tensor:
-    """Evaluate the sampled maxent-stress objective.
+    """Evaluate either exact or pivot-approximated stress.
 
     Parameters
     ----------
     positions : torch.Tensor
         Current coordinates with shape ``[N, 2]``.
     stress_src : torch.Tensor
-        Stress-pair source indices.
+        Exact stress-pair source indices.
     stress_dst : torch.Tensor
-        Stress-pair target indices.
+        Exact stress-pair target indices.
     stress_lengths : torch.Tensor
-        Graph distances for stress pairs.
-    adjacency : list[list[int]]
-        Undirected adjacency list.
-    alpha : float
-        Repulsion weight.
-    seed : int
-        Base random seed.
-    step : int
-        Optimization step.
+        Graph distances for exact stress pairs.
+    pivot_indices : torch.Tensor
+        Pivot node indices with shape ``[P]``.
+    pivot_distances : torch.Tensor
+        Node-to-pivot graph distances with shape ``[N, P]``.
 
     Returns
     -------
     torch.Tensor
-        Scalar loss value.
+        Scalar stress term.
     """
-    stress = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
     if stress_src.numel() > 0:
         src = stress_src.to(device=positions.device)
         dst = stress_dst.to(device=positions.device)
@@ -307,19 +480,101 @@ def _maxent_stress_loss(
             min=_MIN_DISTANCE
         )
         weights = targets.reciprocal().square()
-        stress = (weights * (distances - targets).square()).mean()
+        return (weights * (distances - targets).square()).sum()
 
-    repulsion = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
-    sampled_src, sampled_dst = _sample_non_edges(adjacency, step, seed, positions.device)
-    if sampled_src.numel() > 0:
-        nonedge_distances = torch.linalg.norm(
-            positions[sampled_src] - positions[sampled_dst],
-            dim=1,
-        ).clamp(min=_MIN_DISTANCE)
-        repulsion = -torch.log(nonedge_distances).mean()
+    if pivot_indices.numel() == 0:
+        return torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
 
-    gravity = 0.01 * positions.square().mean()
-    return stress + alpha * repulsion + gravity
+    pivot_positions = positions[pivot_indices.to(device=positions.device)]
+    geometric = torch.cdist(positions, pivot_positions).clamp(min=_MIN_DISTANCE)
+    targets = pivot_distances.to(device=positions.device)
+    reachable = targets > 0
+    safe_targets = torch.where(reachable, targets, torch.ones_like(targets))
+    weights = torch.where(reachable, safe_targets.reciprocal().square(), torch.zeros_like(targets))
+    return (weights * (geometric - safe_targets).square()).sum()
+
+
+def _entropy_term(
+    positions: torch.Tensor,
+    non_edge_src: torch.Tensor,
+    non_edge_dst: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    """Evaluate the non-edge logarithmic entropy term.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current coordinates with shape ``[N, 2]``.
+    non_edge_src : torch.Tensor
+        Non-edge source indices.
+    non_edge_dst : torch.Tensor
+        Non-edge target indices.
+    scale : float
+        Scaling factor for Monte Carlo estimates. Use ``1.0`` for exact sums.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar entropy term ``-sum(log ||p_i - p_j||)``.
+    """
+    if non_edge_src.numel() == 0:
+        return torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
+
+    nonedge_distances = torch.linalg.norm(
+        positions[non_edge_src] - positions[non_edge_dst],
+        dim=1,
+    ).clamp(min=_MIN_DISTANCE)
+    return -torch.log(nonedge_distances).sum() * scale
+
+
+def _maxent_stress_loss(
+    positions: torch.Tensor,
+    stress_src: torch.Tensor,
+    stress_dst: torch.Tensor,
+    stress_lengths: torch.Tensor,
+    pivot_indices: torch.Tensor,
+    pivot_distances: torch.Tensor,
+    non_edge_src: torch.Tensor,
+    non_edge_dst: torch.Tensor,
+    alpha: float,
+) -> torch.Tensor:
+    """Evaluate the prepared maxent-stress objective.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current coordinates with shape ``[N, 2]``.
+    stress_src : torch.Tensor
+        Exact stress-pair source indices.
+    stress_dst : torch.Tensor
+        Exact stress-pair target indices.
+    stress_lengths : torch.Tensor
+        Exact graph distances for the stress pairs.
+    pivot_indices : torch.Tensor
+        Pivot node indices for large-graph approximation.
+    pivot_distances : torch.Tensor
+        Node-to-pivot graph distances with shape ``[N, P]``.
+    non_edge_src : torch.Tensor
+        Non-edge source indices.
+    non_edge_dst : torch.Tensor
+        Non-edge target indices.
+    alpha : float
+        Entropy repulsion weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss value.
+    """
+    return _stress_term(
+        positions,
+        stress_src,
+        stress_dst,
+        stress_lengths,
+        pivot_indices,
+        pivot_distances,
+    ) + alpha * _entropy_term(positions, non_edge_src, non_edge_dst, scale=1.0)
 
 
 def layout_maxent_stress(
@@ -370,31 +625,63 @@ def layout_maxent_stress(
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
 
     adjacency = _build_undirected_adjacency(edge_index, num_nodes)
-    stress_src, stress_dst, stress_lengths = _stress_pairs(
-        adjacency,
-        include_two_hop=num_nodes <= _TWO_HOP_LIMIT,
-    )
+    if num_nodes <= _FULL_STRESS_LIMIT:
+        stress_src, stress_dst, stress_lengths = _full_stress_terms(adjacency)
+        pivot_indices = torch.empty((0,), dtype=torch.long)
+        pivot_distances = torch.empty((num_nodes, 0), dtype=torch.float32)
+        full_non_edge_src, full_non_edge_dst = _full_non_edge_pairs(adjacency)
+    else:
+        stress_src = torch.empty((0,), dtype=torch.long)
+        stress_dst = torch.empty((0,), dtype=torch.long)
+        stress_lengths = torch.empty((0,), dtype=torch.float32)
+        pivot_indices, pivot_distances = _pivot_stress_terms(adjacency, seed)
+        full_non_edge_src = torch.empty((0,), dtype=torch.long)
+        full_non_edge_dst = torch.empty((0,), dtype=torch.long)
 
     positions = _initialize_positions(num_nodes, device, seed).requires_grad_(True)
-    optimizer = torch.optim.Adam([positions], lr=0.08)
+    initial_lr = min(0.04, 0.8 / float(max(num_nodes, 1)))
+    final_lr = max(initial_lr * 0.1, initial_lr / math.sqrt(float(max(steps, 1))))
+    optimizer = torch.optim.Adam([positions], lr=initial_lr)
 
     for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        loss = _maxent_stress_loss(
-            positions,
-            stress_src,
-            stress_dst,
-            stress_lengths,
-            adjacency,
-            alpha,
-            seed,
-            step,
-        )
+        if num_nodes <= _FULL_STRESS_LIMIT:
+            loss = _maxent_stress_loss(
+                positions,
+                stress_src,
+                stress_dst,
+                stress_lengths,
+                pivot_indices,
+                pivot_distances,
+                full_non_edge_src.to(device=positions.device),
+                full_non_edge_dst.to(device=positions.device),
+                alpha,
+            )
+        else:
+            sampled_src, sampled_dst, total_non_edges = _sample_non_edges(
+                adjacency,
+                step,
+                seed,
+                positions.device,
+            )
+            sample_count = max(int(sampled_src.numel()), 1)
+            loss = _stress_term(
+                positions,
+                stress_src,
+                stress_dst,
+                stress_lengths,
+                pivot_indices,
+                pivot_distances,
+            ) + alpha * _entropy_term(
+                positions,
+                sampled_src,
+                sampled_dst,
+                scale=float(total_non_edges) / float(sample_count) if total_non_edges > 0 else 1.0,
+            )
         loss.backward()
         optimizer.step()
-        optimizer.param_groups[0]["lr"] = (
-            0.08 * (1.0 - float(step + 1) / float(max(steps, 1))) + 0.01
-        )
+        fraction = float(step + 1) / float(max(steps, 1))
+        optimizer.param_groups[0]["lr"] = initial_lr + (final_lr - initial_lr) * fraction
 
     extent = _layout_extent(num_nodes, node_sizes)
     return _normalize_positions(positions.detach(), extent).to(dtype=torch.float32, device=device)

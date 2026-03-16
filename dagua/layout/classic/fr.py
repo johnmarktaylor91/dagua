@@ -209,7 +209,7 @@ def layout_fr(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
-    steps: int = 500,
+    steps: int = 50,
     seed: int = 42,
     area: Optional[float] = None,
     trace_every: int = 0,
@@ -258,12 +258,13 @@ def layout_fr(
     if layout_area <= 0.0:
         raise ValueError("area must be positive")
 
+    side = layout_area**0.5
     pos = _initialize_positions(num_nodes, layout_area, device, seed)
     if steps == 0:
         return (pos, traces) if trace_every > 0 else pos
 
     k = (layout_area / num_nodes) ** 0.5
-    temp = (layout_area**0.5) / 10.0
+    temp = side / 10.0
     cooling = temp / steps
 
     for step in range(steps):
@@ -273,6 +274,7 @@ def layout_fr(
         disp_norm = torch.linalg.norm(disp, dim=1, keepdim=True).clamp(min=MIN_DISTANCE)
         temp_tensor = torch.full_like(disp_norm, temp)
         pos = pos + (disp / disp_norm) * torch.minimum(disp_norm, temp_tensor)
+        pos = pos.clamp(min=0.0, max=side)
 
         temp -= cooling
 
