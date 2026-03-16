@@ -614,7 +614,7 @@ def _build_node_patch(
             zorder=zorder,
         )
     if shape == "parallelogram":
-        skew = w * 0.18
+        skew = w * 0.28
         return Polygon(
             np.array(
                 [
@@ -632,7 +632,7 @@ def _build_node_patch(
             zorder=zorder,
         )
     if shape == "trapezoid":
-        inset = w * 0.18
+        inset = w * 0.28
         return Polygon(
             np.array(
                 [
@@ -1025,6 +1025,30 @@ def _label_anchor_y(valign: str, y: float, h: float, pad_y: float, block_height:
     return y + block_height / 2
 
 
+def _label_reference_y(y: float, h: float, shape: str) -> float:
+    """Adjust the vertical label anchor for shapes with off-center centroids.
+
+    Parameters
+    ----------
+    y : float
+        Node center y-coordinate.
+    h : float
+        Node height.
+    shape : str
+        Node shape name.
+
+    Returns
+    -------
+    float
+        Shape-adjusted y-coordinate used as the label anchor reference.
+    """
+    if shape == "triangle":
+        # Upright triangles read visually lower than their bounding-box center,
+        # so shift labels toward the centroid to match Graphviz.
+        return y - h / 6
+    return y
+
+
 def _segment_font_properties(
     segment_style: Dict[str, Any], style: Any
 ) -> Tuple[str, str, str, str]:
@@ -1182,7 +1206,8 @@ def _render_rich_label(
     pad_y = _points_to_data_units(ax, style.padding[1], "y")
     line_height = _points_to_data_units(ax, font_size * 1.2, "y")
     total_height = max(line_height * len(lines), line_height)
-    block_top = _label_anchor_y(style.text_valign, y, h, pad_y, total_height)
+    label_y = _label_reference_y(y, h, style.shape)
+    block_top = _label_anchor_y(style.text_valign, label_y, h, pad_y, total_height)
 
     for line_index, line_segments in enumerate(lines):
         segment_widths: List[float] = []
@@ -1280,6 +1305,7 @@ def _draw_node_labels(
         style = graph.get_style_for_node(i)
         label = graph.node_labels[i]
         clip_patch = clip_patch_seq[i] if i < len(clip_patch_seq) else None
+        label_y = _label_reference_y(y, h, style.shape)
 
         if graph.node_font_sizes is not None and i < graph.node_font_sizes.shape[0]:
             fontsize = float(graph.node_font_sizes[i].item())
@@ -1313,11 +1339,11 @@ def _draw_node_labels(
                 text_x = x + w / 2 - pad_x
 
             if style.text_valign == "top":
-                text_y = y + h / 2 - pad_y
+                text_y = label_y + h / 2 - pad_y
             elif style.text_valign == "bottom":
-                text_y = y - h / 2 + pad_y
+                text_y = label_y - h / 2 + pad_y
             else:
-                text_y = y
+                text_y = label_y
 
             text_artist = ax.text(
                 text_x,
@@ -1342,7 +1368,7 @@ def _draw_node_labels(
         lines = label.split("\n")
         line_height = _points_to_data_units(ax, fontsize * 1.2, "y")
         total_height = line_height * len(lines)
-        block_top = _label_anchor_y(style.text_valign, y, h, pad_y, total_height)
+        block_top = _label_anchor_y(style.text_valign, label_y, h, pad_y, total_height)
         text_x = (
             x
             if style.text_align == "center"
@@ -1429,8 +1455,8 @@ def _draw_edge_marker(
         polygon = Polygon(
             [
                 (tip_x, tip_y),
-                (base_x + px * manual_width / 2, base_y + py * manual_width / 2),
-                (base_x - px * manual_width / 2, base_y - py * manual_width / 2),
+                (base_x + px * manual_width * 0.6, base_y + py * manual_width * 0.6),
+                (base_x - px * manual_width * 0.6, base_y - py * manual_width * 0.6),
             ],
             closed=True,
             facecolor=color if filled else "none",
@@ -1454,7 +1480,7 @@ def _draw_edge_marker(
             closed=False,
             facecolor="none",
             edgecolor=color,
-            linewidth=style.width,
+            linewidth=max(style.width * 1.8, 2.0),
             joinstyle="round",
             capstyle="round",
             zorder=1.2,
@@ -1468,8 +1494,8 @@ def _draw_edge_marker(
         polygon = Polygon(
             [
                 (tip_x, tip_y),
-                (base_x + px * manual_width / 2, base_y + py * manual_width / 2),
-                (base_x - px * manual_width / 2, base_y - py * manual_width / 2),
+                (base_x + px * manual_width * 0.6, base_y + py * manual_width * 0.6),
+                (base_x - px * manual_width * 0.6, base_y - py * manual_width * 0.6),
             ],
             closed=True,
             facecolor="none",
@@ -1525,11 +1551,11 @@ def _draw_edge_marker(
         # does not collapse into the line ending.
         bar_x = tip_x - ux * (manual_length / 3)
         bar_y = tip_y - uy * (manual_length / 3)
-        bar_linewidth = max(style.width * 3.5, 4.0)
+        bar_linewidth = max(style.width * 4.0, 5.0)
         ax.add_line(
             Line2D(
-                [bar_x + px * manual_width * 0.7, bar_x - px * manual_width * 0.7],
-                [bar_y + py * manual_width * 0.7, bar_y - py * manual_width * 0.7],
+                [bar_x + px * manual_width * 1.2, bar_x - px * manual_width * 1.2],
+                [bar_y + py * manual_width * 1.2, bar_y - py * manual_width * 1.2],
                 color=color,
                 linewidth=bar_linewidth,
                 solid_capstyle="butt",
@@ -1551,7 +1577,7 @@ def _draw_edge_marker(
                     [tip_x, end_x],
                     [tip_y, end_y],
                     color=color,
-                    linewidth=style.width,
+                    linewidth=max(style.width * 1.8, 2.0),
                     zorder=1.2,
                 )
             )

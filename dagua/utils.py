@@ -477,7 +477,7 @@ def _compute_node_size_cached(
     elif shape == "triangle":
         # Graphviz triangles are wide and flat, so reserve enough width for
         # labels in the lower body.
-        min_ratio = 2.7
+        min_ratio = 3.2
         if w < h * min_ratio:
             w = h * min_ratio
     elif shape == "star":
