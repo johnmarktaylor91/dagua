@@ -3,6 +3,7 @@
 import importlib
 import time
 
+import numpy as np
 import pytest
 import torch
 
@@ -21,7 +22,7 @@ from dagua.layout.engine import (
 )
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
 from dagua.layout.layers import build_layer_index
-from dagua.layout.multilevel import build_hierarchy
+from dagua.layout.multilevel import build_hierarchy, coarsen_once
 from dagua.metrics import compute_all_metrics
 
 
@@ -878,3 +879,251 @@ def test_amortized_loss_wrapper_produces_finite_non_zero_total() -> None:
     assert values[0] > 0.0
     assert values[1] == 0.0
     assert sum(values) > 0.0
+
+
+def _make_matching_reference_case() -> tuple[
+    torch.Tensor,
+    int,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Build a deterministic layered DAG that exercises pair and triple matching.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int, torch.Tensor, torch.Tensor, torch.Tensor]
+        Edge index, node count, node sizes, layer assignments, and cluster IDs.
+    """
+    num_layers = 10
+    layer_width = 100
+    num_nodes = num_layers * layer_width
+    src: list[int] = []
+    tgt: list[int] = []
+    for layer_idx in range(num_layers - 1):
+        base = layer_idx * layer_width
+        next_base = (layer_idx + 1) * layer_width
+        skip_base = (layer_idx + 2) * layer_width if layer_idx + 2 < num_layers else -1
+        for offset in range(layer_width):
+            node = base + offset
+            bucket = (offset // 4) * 4
+            src.append(node)
+            tgt.append(next_base + (bucket % layer_width))
+            src.append(node)
+            tgt.append(next_base + ((bucket + 1 + (offset % 2)) % layer_width))
+            if skip_base >= 0 and offset % 7 == 0:
+                src.append(node)
+                tgt.append(skip_base + ((offset * 3) % layer_width))
+        hub_node = base
+        for fanout in range(16):
+            src.append(hub_node)
+            tgt.append(next_base + fanout)
+
+    edge_index = torch.tensor([src, tgt], dtype=torch.long)
+    node_sizes = torch.full((num_nodes, 2), 10.0)
+    layers = torch.arange(num_nodes, dtype=torch.long) // layer_width
+    cluster_ids = torch.full((num_nodes,), -1, dtype=torch.long)
+    for layer_idx in range(num_layers):
+        base = layer_idx * layer_width
+        cluster_ids[base : base + 20] = 0
+        cluster_ids[base + 20 : base + 40] = 1
+        cluster_ids[base + 40 : base + 60] = 2
+        cluster_ids[base + 80 : base + 100] = 3 + (layer_idx % 2)
+    return edge_index, num_nodes, node_sizes, layers, cluster_ids
+
+
+def _reference_fine_to_coarse(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    layers: torch.Tensor,
+    cluster_ids: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Reproduce the original Python matching loop for regression comparison.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edges with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    layers : torch.Tensor
+        Layer assignment tensor with shape ``[N]``.
+    cluster_ids : torch.Tensor | None, optional
+        Optional cluster IDs with shape ``[N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Fine-to-coarse assignment tensor with shape ``[N]``.
+    """
+    layers_np = layers.cpu().numpy()
+    cluster_ids_np = None if cluster_ids is None else cluster_ids.cpu().numpy()
+    min_neighbor = np.full(num_nodes, num_nodes, dtype=np.int64)
+    min_parent = np.full(num_nodes, num_nodes, dtype=np.int64)
+    min_child = np.full(num_nodes, num_nodes, dtype=np.int64)
+    in_degree = np.zeros(num_nodes, dtype=np.int64)
+    out_degree = np.zeros(num_nodes, dtype=np.int64)
+    skip_degree = np.zeros(num_nodes, dtype=np.int64)
+    span_sum = np.zeros(num_nodes, dtype=np.float32)
+
+    for src, tgt in edge_index.t().cpu().tolist():
+        min_neighbor[src] = min(min_neighbor[src], tgt)
+        min_neighbor[tgt] = min(min_neighbor[tgt], src)
+        min_parent[tgt] = min(min_parent[tgt], src)
+        min_child[src] = min(min_child[src], tgt)
+        out_degree[src] += 1
+        in_degree[tgt] += 1
+        span = abs(int(layers_np[tgt]) - int(layers_np[src]))
+        span_sum[src] += span
+        span_sum[tgt] += span
+        if span > 1:
+            skip_degree[src] += 1
+            skip_degree[tgt] += 1
+
+    total_degree = in_degree + out_degree
+    mean_span = span_sum / np.maximum(total_degree, 1)
+    num_layers = int(layers.max().item()) + 1 if num_nodes > 0 else 0
+    layer_counts = np.bincount(layers_np, minlength=num_layers)
+    layer_offsets = np.zeros(num_layers + 1, dtype=np.int64)
+    layer_offsets[1:] = np.cumsum(layer_counts)
+    global_order = np.argsort(layers_np, kind="stable")
+    fine_to_coarse = np.empty(num_nodes, dtype=np.int64)
+    coarse_base = 0
+
+    for layer_idx in range(num_layers):
+        start = int(layer_offsets[layer_idx])
+        end = int(layer_offsets[layer_idx + 1])
+        n_layer = end - start
+        if n_layer == 0:
+            continue
+
+        layer_nodes = global_order[start:end]
+        layer_degree = total_degree[layer_nodes] + 2 * skip_degree[layer_nodes]
+        hub_threshold = max(8, int(np.ceil(np.percentile(layer_degree, 90))))
+        if cluster_ids_np is not None:
+            cluster_key = np.where(
+                cluster_ids_np[layer_nodes] >= 0,
+                cluster_ids_np[layer_nodes],
+                np.iinfo(np.int64).max,
+            )
+        else:
+            cluster_key = np.full(n_layer, np.iinfo(np.int64).max, dtype=np.int64)
+
+        order = np.lexsort(
+            (
+                np.rint(mean_span[layer_nodes]).astype(np.int64),
+                np.clip(total_degree[layer_nodes], 0, 31),
+                min_child[layer_nodes],
+                min_parent[layer_nodes],
+                min_neighbor[layer_nodes],
+                -np.clip(skip_degree[layer_nodes], 0, 31),
+                cluster_key,
+            )
+        )
+        ordered_nodes = layer_nodes[order]
+
+        local_group_ids: list[int] = []
+        local_group = 0
+        i = 0
+        while i < n_layer:
+            current = int(ordered_nodes[i])
+            skip_anchor = skip_degree[current] >= 2 and mean_span[current] > 1.5
+            if int(total_degree[current]) >= hub_threshold or skip_anchor:
+                local_group_ids.append(local_group)
+                local_group += 1
+                i += 1
+                continue
+
+            group_size = 1
+            if i + 1 < n_layer:
+                nxt = int(ordered_nodes[i + 1])
+                if total_degree[nxt] < hub_threshold:
+                    same_cluster = (
+                        cluster_ids_np is not None
+                        and cluster_ids_np[current] >= 0
+                        and cluster_ids_np[current] == cluster_ids_np[nxt]
+                    )
+                    cluster_compatible = (
+                        cluster_ids_np is None
+                        or cluster_ids_np[current] < 0
+                        or cluster_ids_np[nxt] < 0
+                        or cluster_ids_np[current] == cluster_ids_np[nxt]
+                    )
+                    shares_structure = (
+                        min_neighbor[current] == min_neighbor[nxt]
+                        or min_parent[current] == min_parent[nxt]
+                        or min_child[current] == min_child[nxt]
+                    )
+                    similar_shape = (
+                        abs(int(total_degree[current]) - int(total_degree[nxt])) <= 1
+                        and abs(float(mean_span[current]) - float(mean_span[nxt])) <= 1.0
+                        and abs(int(skip_degree[current]) - int(skip_degree[nxt])) <= 1
+                    )
+                    if cluster_compatible and (same_cluster or shares_structure or similar_shape):
+                        group_size = 2
+                        if i + 2 < n_layer:
+                            nxt2 = int(ordered_nodes[i + 2])
+                            if total_degree[nxt2] < hub_threshold:
+                                third_cluster_compatible = (
+                                    cluster_ids_np is None
+                                    or cluster_ids_np[nxt] < 0
+                                    or cluster_ids_np[nxt2] < 0
+                                    or cluster_ids_np[nxt] == cluster_ids_np[nxt2]
+                                )
+                                third_matches = (
+                                    min_parent[nxt] == min_parent[nxt2]
+                                    or min_child[nxt] == min_child[nxt2]
+                                    or min_neighbor[nxt] == min_neighbor[nxt2]
+                                )
+                                third_shape = (
+                                    abs(int(total_degree[nxt]) - int(total_degree[nxt2])) <= 1
+                                    and abs(float(mean_span[nxt]) - float(mean_span[nxt2])) <= 1.0
+                                    and abs(int(skip_degree[nxt]) - int(skip_degree[nxt2])) <= 1
+                                )
+                                if third_cluster_compatible and (third_matches or third_shape):
+                                    group_size = 3
+
+            local_group_ids.extend([local_group] * group_size)
+            local_group += 1
+            i += group_size
+
+        fine_to_coarse[ordered_nodes] = np.asarray(local_group_ids, dtype=np.int64) + coarse_base
+        coarse_base += local_group
+
+    return torch.from_numpy(fine_to_coarse)
+
+
+def test_vectorized_matching_matches_original() -> None:
+    """Vectorized matching should produce identical groupings to the old loop."""
+    edge_index, num_nodes, node_sizes, layers, cluster_ids = _make_matching_reference_case()
+
+    expected = _reference_fine_to_coarse(edge_index, num_nodes, layers, cluster_ids)
+    result = coarsen_once(edge_index, num_nodes, node_sizes, layers, cluster_ids=cluster_ids)
+
+    assert torch.equal(result.fine_to_coarse.cpu(), expected)
+
+
+def test_cluster_sentinel_handling() -> None:
+    """Cluster ``-1`` should remain compatible with positive cluster IDs."""
+    edge_index = torch.tensor([[0, 1], [2, 2]], dtype=torch.long)
+    node_sizes = torch.full((3, 2), 10.0)
+    layers = torch.tensor([0, 0, 1], dtype=torch.long)
+    cluster_ids = torch.tensor([5, -1, -1], dtype=torch.long)
+
+    result = coarsen_once(edge_index, 3, node_sizes, layers, cluster_ids=cluster_ids)
+
+    assert result.fine_to_coarse[0].item() == result.fine_to_coarse[1].item()
+
+
+def test_hub_isolation() -> None:
+    """High-degree hubs should always remain singleton coarse groups."""
+    src = [0] * 12 + [1, 2]
+    tgt = list(range(4, 16)) + [16, 17]
+    edge_index = torch.tensor([src, tgt], dtype=torch.long)
+    node_sizes = torch.full((18, 2), 10.0)
+    layers = torch.tensor([0, 0, 0, 0] + [1] * 14, dtype=torch.long)
+
+    result = coarsen_once(edge_index, 18, node_sizes, layers)
+
+    hub_group = result.fine_to_coarse[0].item()
+    assert int((result.fine_to_coarse == hub_group).sum().item()) == 1
