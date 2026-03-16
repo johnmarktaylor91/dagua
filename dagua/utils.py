@@ -350,8 +350,8 @@ def measure_rich_text(
 
 
 # Node sizing constants
-MIN_NODE_WIDTH = 40.0
-MIN_NODE_HEIGHT = 22.0
+MIN_NODE_WIDTH = 32.0
+MIN_NODE_HEIGHT = 18.0
 MAX_NODE_ASPECT_RATIO = 6.0
 MAX_LABEL_WIDTH = 200.0
 
@@ -472,12 +472,12 @@ def _compute_node_size_cached(
 
     if shape == "diamond":
         max_dim = max(w, h) * 1.42
-        w = max_dim * 1.15
+        w = max_dim * 1.4
         h = max_dim
     elif shape == "triangle":
         # Graphviz triangles are wide and flat, so reserve enough width for
         # labels in the lower body.
-        min_ratio = 2.2
+        min_ratio = 2.7
         if w < h * min_ratio:
             w = h * min_ratio
     elif shape == "star":
@@ -488,6 +488,21 @@ def _compute_node_size_cached(
     elif shape == "circle":
         r = max(w, h)
         w = h = r
+    elif shape == "hexagon":
+        # Graphviz hexagons are wider than their text box to keep the side
+        # facets from crowding labels.
+        if w < h * 1.3:
+            w = h * 1.3
+    elif shape == "pentagon":
+        # Graphviz pentagons read squatter than a regular pentagon, so widen
+        # the box before drawing the shoulders.
+        if w < h * 1.2:
+            w = h * 1.2
+    elif shape == "octagon":
+        # Graphviz octagons are slightly wider than tall once the clipped
+        # corners are accounted for.
+        if w < h * 1.15:
+            w = h * 1.15
 
     max_ratio = 10.0 if overflow_policy == "expand_node" else MAX_NODE_ASPECT_RATIO
     if w / h > max_ratio:
