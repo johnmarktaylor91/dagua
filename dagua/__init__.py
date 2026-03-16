@@ -34,6 +34,7 @@ from dagua.defaults import (
     set_theme,
 )
 from dagua.edges import place_edge_labels, route_edges
+from dagua.eval.compare import layout_all
 from dagua.flex import AlignGroup, Flex, LayoutFlex
 from dagua.graph import DaguaGraph
 from dagua.io import (
@@ -64,6 +65,7 @@ from dagua.io import (
 )
 from dagua.io import graph_from_image as from_image
 from dagua.layout import layout
+from dagua.metrics import evaluate, layout_similarity
 from dagua.playground import launch_playground
 from dagua.render import render
 from dagua.styles import (
@@ -193,6 +195,9 @@ __all__ = [
     "Flex",
     "LayoutFlex",
     "AlignGroup",
+    "layout_all",
+    "layout_similarity",
+    "evaluate",
     # Global defaults
     "set_theme",
     "set_device",

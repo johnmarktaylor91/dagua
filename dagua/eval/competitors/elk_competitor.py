@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 import torch
 
@@ -32,14 +32,178 @@ process.stdin.on('end', () => {
 """
 
 
+def _cluster_members(graph: DaguaGraph, cluster_name: str) -> List[int]:
+    """Return a cluster's flattened member indices.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph.
+    cluster_name : str
+        Cluster to inspect.
+
+    Returns
+    -------
+    list[int]
+        Flattened node indices for the cluster.
+    """
+    members = graph.clusters.get(cluster_name, [])
+    if isinstance(members, dict):
+        from dagua.utils import collect_cluster_leaves
+
+        return [int(index) for index in collect_cluster_leaves(members)]
+    return [int(index) for index in members]
+
+
+def _cluster_children(graph: DaguaGraph) -> Dict[Optional[str], List[str]]:
+    """Build the cluster hierarchy indexed by parent name.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph.
+
+    Returns
+    -------
+    dict[Optional[str], list[str]]
+        Mapping from parent cluster name to sorted child cluster names. Root
+        clusters are stored under ``None``.
+    """
+    children_by_parent: Dict[Optional[str], List[str]] = {}
+    for cluster_name in sorted(graph.clusters):
+        parent = graph.cluster_parents.get(cluster_name)
+        if parent not in graph.clusters:
+            parent = None
+        children_by_parent.setdefault(parent, []).append(cluster_name)
+    return children_by_parent
+
+
+def _build_elk_children(
+    graph: DaguaGraph,
+    parent_name: Optional[str],
+    children_by_parent: Dict[Optional[str], List[str]],
+    emitted_nodes: Set[int],
+) -> List[Dict[str, object]]:
+    """Build nested ELK children for a cluster subtree.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph.
+    parent_name : str or None
+        Parent cluster whose children should be emitted. ``None`` refers to
+        the root graph.
+    children_by_parent : dict[Optional[str], list[str]]
+        Parent-to-children cluster hierarchy.
+    emitted_nodes : set[int]
+        Nodes already assigned to a cluster container.
+
+    Returns
+    -------
+    list[dict[str, object]]
+        ELK child objects for the requested subtree.
+    """
+    children: List[Dict[str, object]] = []
+    for cluster_name in children_by_parent.get(parent_name, []):
+        nested_children = _build_elk_children(
+            graph,
+            cluster_name,
+            children_by_parent,
+            emitted_nodes,
+        )
+        descendant_members: Set[int] = set()
+        for child_name in children_by_parent.get(cluster_name, []):
+            descendant_members.update(_cluster_members(graph, child_name))
+
+        direct_members: List[Dict[str, object]] = []
+        for node_index in _cluster_members(graph, cluster_name):
+            if node_index in descendant_members or node_index in emitted_nodes:
+                continue
+            direct_members.append({"id": str(node_index), "width": 120, "height": 40})
+            emitted_nodes.add(node_index)
+
+        cluster_entry: Dict[str, object] = {
+            "id": f"cluster_{cluster_name}",
+            "children": [*nested_children, *direct_members],
+        }
+        cluster_label = graph.cluster_labels.get(cluster_name)
+        if cluster_label is not None:
+            cluster_entry["labels"] = [{"text": cluster_label}]
+        children.append(cluster_entry)
+
+    if parent_name is None:
+        for node_index in range(graph.num_nodes):
+            if node_index not in emitted_nodes:
+                children.append({"id": str(node_index), "width": 120, "height": 40})
+
+    return children
+
+
+def _collect_elk_positions(
+    children: object,
+    positions: torch.Tensor,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
+) -> None:
+    """Collect node positions from nested ELK output.
+
+    Parameters
+    ----------
+    children : object
+        ELK ``children`` field for the current container.
+    positions : torch.Tensor
+        Output tensor with shape ``[N, 2]``.
+    offset_x : float, default=0.0
+        X offset accumulated from parent containers.
+    offset_y : float, default=0.0
+        Y offset accumulated from parent containers.
+
+    Returns
+    -------
+    None
+        The function mutates ``positions`` in place.
+    """
+    if not isinstance(children, list):
+        return
+
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        child_x = offset_x + float(child.get("x", 0.0))
+        child_y = offset_y + float(child.get("y", 0.0))
+        child_id = str(child.get("id", ""))
+        if child_id.isdigit():
+            node_index = int(child_id)
+            if node_index < positions.shape[0]:
+                positions[node_index, 0] = child_x
+                positions[node_index, 1] = child_y
+        _collect_elk_positions(child.get("children", []), positions, child_x, child_y)
+
+
 @register
 class ElkLayered(CompetitorBase):
     name = "elk_layered"
     max_nodes = 50_000
+    supports_clusters = True
 
     def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+        """Run ELK layered layout with nested clusters mapped to group nodes.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime in seconds.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and timing information.
+        """
         n = graph.num_nodes
-        children = [{"id": str(i), "width": 120, "height": 40} for i in range(n)]
+        emitted_nodes: Set[int] = set()
+        children = _build_elk_children(graph, None, _cluster_children(graph), emitted_nodes)
         edges = []
         if graph.edge_index.numel() > 0:
             for e_idx in range(graph.edge_index.shape[1]):
@@ -85,11 +249,7 @@ class ElkLayered(CompetitorBase):
             # Parse positions from ELK output
             data = json.loads(result.stdout)
             pos = torch.zeros(n, 2)
-            for child in data.get("children", []):
-                idx = int(child["id"])
-                if idx < n:
-                    pos[idx, 0] = child.get("x", 0)
-                    pos[idx, 1] = child.get("y", 0)
+            _collect_elk_positions(data.get("children", []), pos)
 
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
         except subprocess.TimeoutExpired:

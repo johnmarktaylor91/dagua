@@ -27,6 +27,7 @@ class CompetitorBase(ABC):
 
     name: str = ""
     max_nodes: int = 0
+    supports_clusters: bool = False
 
     @abstractmethod
     def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:

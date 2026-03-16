@@ -19,10 +19,13 @@ from __future__ import annotations
 import math
 import time as _time
 from collections import deque
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+
+if TYPE_CHECKING:
+    from dagua.graph import DaguaGraph
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -31,6 +34,113 @@ import torch
 
 def _ensure_cpu(t: torch.Tensor) -> torch.Tensor:
     return t.detach().cpu() if t.device.type != "cpu" else t.detach()
+
+
+def _deterministic_sample_indices(num_items: int, max_samples: int) -> np.ndarray:
+    """Select evenly spaced indices without randomness.
+
+    Parameters
+    ----------
+    num_items : int
+        Total number of items available for sampling.
+    max_samples : int
+        Maximum number of indices to return.
+
+    Returns
+    -------
+    numpy.ndarray
+        Sorted ``int64`` indices with length ``<= max_samples``.
+    """
+    if num_items <= 0 or max_samples <= 0:
+        return np.empty(0, dtype=np.int64)
+    if num_items <= max_samples:
+        return np.arange(num_items, dtype=np.int64)
+    return (np.arange(max_samples, dtype=np.int64) * num_items) // max_samples
+
+
+def _pairwise_distance_correlation(pos_a: torch.Tensor, pos_b: torch.Tensor) -> float:
+    """Compute rank correlation between sampled pairwise distances.
+
+    Parameters
+    ----------
+    pos_a : torch.Tensor
+        First position tensor with shape ``[N, 2]``.
+    pos_b : torch.Tensor
+        Second position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Spearman correlation between pairwise distance vectors.
+    """
+    from scipy.stats import spearmanr
+
+    pairwise_a = torch.pdist(pos_a.to(dtype=torch.float32)).numpy()
+    pairwise_b = torch.pdist(pos_b.to(dtype=torch.float32)).numpy()
+
+    if pairwise_a.size == 0:
+        return 1.0
+
+    rho = spearmanr(pairwise_a, pairwise_b).statistic
+    if rho is None or not np.isfinite(rho):
+        return 1.0 if np.allclose(pairwise_a, pairwise_b) else 0.0
+    return float(rho)
+
+
+def _sampled_knn_preservation(pos_a: torch.Tensor, pos_b: torch.Tensor, k: int) -> float:
+    """Estimate how well k-nearest-neighbor sets are preserved.
+
+    Parameters
+    ----------
+    pos_a : torch.Tensor
+        First position tensor with shape ``[N, 2]``.
+    pos_b : torch.Tensor
+        Second position tensor with shape ``[N, 2]``.
+    k : int
+        Number of nearest neighbors to compare per sampled query node.
+
+    Returns
+    -------
+    float
+        Mean Jaccard similarity across sampled query nodes.
+    """
+    num_nodes = int(pos_a.shape[0])
+    if num_nodes <= 1 or k <= 0:
+        return 1.0
+
+    query_indices_np = _deterministic_sample_indices(num_nodes, min(num_nodes, 1000))
+    query_indices = torch.from_numpy(query_indices_np).to(dtype=torch.long)
+    effective_k = min(k, num_nodes - 1)
+    if effective_k <= 0:
+        return 1.0
+
+    query_pos_a = pos_a[query_indices].to(dtype=torch.float32)
+    query_pos_b = pos_b[query_indices].to(dtype=torch.float32)
+    all_pos_a = pos_a.to(dtype=torch.float32)
+    all_pos_b = pos_b.to(dtype=torch.float32)
+
+    distances_a = torch.cdist(query_pos_a, all_pos_a)
+    distances_b = torch.cdist(query_pos_b, all_pos_b)
+
+    row_indices = torch.arange(query_indices.shape[0], dtype=torch.long)
+    distances_a[row_indices, query_indices] = float("inf")
+    distances_b[row_indices, query_indices] = float("inf")
+
+    knn_a = torch.topk(distances_a, k=effective_k, largest=False).indices.numpy()
+    knn_b = torch.topk(distances_b, k=effective_k, largest=False).indices.numpy()
+
+    jaccard_scores: List[float] = []
+    for neighbors_a, neighbors_b in zip(knn_a, knn_b):
+        neighbor_set_a = set(int(index) for index in neighbors_a.tolist())
+        neighbor_set_b = set(int(index) for index in neighbors_b.tolist())
+        union = neighbor_set_a | neighbor_set_b
+        if not union:
+            jaccard_scores.append(1.0)
+            continue
+        intersection = neighbor_set_a & neighbor_set_b
+        jaccard_scores.append(len(intersection) / len(union))
+
+    return float(np.mean(jaccard_scores)) if jaccard_scores else 1.0
 
 
 def segments_intersect(p1, p2, p3, p4):
@@ -371,15 +481,37 @@ def sampled_stress(
     n_targets: int = 1000,
     max_dist: int = 20,
 ) -> Dict[str, float]:
-    """Sampled graph-theoretic stress.
+    """Estimate graph-theoretic stress from deterministic source samples.
 
-    Measures how well Euclidean distances preserve graph distances.
-    Complexity: O(n_sources * (V + E)).
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+    n_sources : int, optional
+        Maximum number of BFS source nodes to sample.
+    n_targets : int, optional
+        Maximum number of reachable targets to evaluate per source.
+    max_dist : int, optional
+        Maximum graph distance to explore during BFS.
+
+    Returns
+    -------
+    Dict[str, float]
+        Sampled stress value and sampling metadata.
+
+    Notes
+    -----
+    Positions are normalized to the unit square before computing Euclidean
+    distances so stress values are comparable across different output scales.
+    Sampling is deterministic to keep comparisons reproducible.
     """
-    pos_np = pos.cpu().numpy()
-    ei = _ensure_cpu(edge_index)
     N = num_nodes
 
+    ei = _ensure_cpu(edge_index)
     if ei.numel() == 0 or N < 2:
         return {
             "sampled_stress": 0.0,
@@ -388,8 +520,15 @@ def sampled_stress(
             "stress_n_targets": 0,
         }
 
+    pos_cpu = _ensure_cpu(pos).to(dtype=torch.float32)
+    mins = pos_cpu.min(dim=0).values
+    maxs = pos_cpu.max(dim=0).values
+    span = (maxs - mins).clamp(min=1e-6)
+    pos_norm = (pos_cpu - mins) / span
+    pos_np = pos_norm.numpy()
+
     csr_off, csr_tgt = _build_csr(ei, N)
-    sources = torch.randperm(N)[: min(n_sources, N)].numpy()
+    sources = _deterministic_sample_indices(N, min(n_sources, N))
 
     total_stress = 0.0
     count = 0
@@ -401,7 +540,10 @@ def sampled_stress(
         if len(reachable) == 0:
             continue
 
-        targets = reachable[np.random.permutation(len(reachable))[:n_targets]]
+        target_indices = _deterministic_sample_indices(
+            len(reachable), min(n_targets, len(reachable))
+        )
+        targets = reachable[target_indices]
         d_graph = dist[targets].astype(np.float64)
         d_euclidean = np.linalg.norm(pos_np[targets] - pos_np[src_node], axis=1)
 
@@ -1191,10 +1333,19 @@ def full(
 
 
 def compare(pos_dagua: torch.Tensor, pos_reference: torch.Tensor) -> Dict[str, float]:
-    """Procrustes comparison of two layouts of the same graph.
+    """Compare two layouts using Procrustes disparity.
 
-    Complexity: O(N).
-    Target: disparity < 0.3 = structurally similar.
+    Parameters
+    ----------
+    pos_dagua : torch.Tensor
+        First position tensor with shape ``[N, 2]``.
+    pos_reference : torch.Tensor
+        Second position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    Dict[str, float]
+        Dictionary containing ``procrustes_disparity``.
     """
     from scipy.spatial import procrustes
 
@@ -1206,6 +1357,133 @@ def compare(pos_dagua: torch.Tensor, pos_reference: torch.Tensor) -> Dict[str, f
         return {"procrustes_disparity": float(disparity)}
     except Exception:
         return {"procrustes_disparity": 1.0}
+
+
+def layout_similarity(
+    pos_a: torch.Tensor,
+    pos_b: torch.Tensor,
+    edge_index: Optional[torch.Tensor] = None,
+    k: int = 5,
+) -> Dict[str, float]:
+    """Compare two layouts of the same graph up to rigid transforms.
+
+    Parameters
+    ----------
+    pos_a : torch.Tensor
+        First position tensor with shape ``[N, 2]``.
+    pos_b : torch.Tensor
+        Second position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor, optional
+        Edge tensor with shape ``[2, E]``. Accepted for API compatibility with
+        topology-aware comparisons.
+    k : int, optional
+        Number of neighbors used in the k-NN preservation score.
+
+    Returns
+    -------
+    Dict[str, float]
+        Dictionary with Procrustes, pairwise-distance, and k-NN similarity
+        metrics.
+    """
+    del edge_index
+
+    pos_a_cpu = _ensure_cpu(pos_a)
+    pos_b_cpu = _ensure_cpu(pos_b)
+    if pos_a_cpu.shape != pos_b_cpu.shape:
+        raise ValueError(
+            "layout_similarity requires tensors with matching shapes; "
+            f"got {tuple(pos_a_cpu.shape)} and {tuple(pos_b_cpu.shape)}."
+        )
+    if pos_a_cpu.ndim != 2 or pos_a_cpu.shape[1] != 2:
+        raise ValueError(
+            "layout_similarity expects position tensors with shape [N, 2]; "
+            f"got {tuple(pos_a_cpu.shape)}."
+        )
+    if pos_a_cpu.shape[0] <= 1:
+        return {
+            "procrustes_disparity": 0.0,
+            "procrustes_similarity": 1.0,
+            "pairwise_distance_correlation": 1.0,
+            "knn_preservation": 1.0,
+        }
+
+    sampled_indices = torch.from_numpy(
+        _deterministic_sample_indices(int(pos_a_cpu.shape[0]), min(int(pos_a_cpu.shape[0]), 1000))
+    ).to(dtype=torch.long)
+    sampled_pos_a = pos_a_cpu[sampled_indices]
+    sampled_pos_b = pos_b_cpu[sampled_indices]
+
+    procrustes_result = compare(sampled_pos_a, sampled_pos_b)
+    disparity = procrustes_result.get("procrustes_disparity", 1.0)
+    similarity = max(0.0, min(1.0, 1.0 - disparity))
+
+    result = dict(procrustes_result)
+    result["procrustes_similarity"] = similarity
+    result["pairwise_distance_correlation"] = _pairwise_distance_correlation(
+        sampled_pos_a, sampled_pos_b
+    )
+    result["knn_preservation"] = _sampled_knn_preservation(pos_a_cpu, pos_b_cpu, k=k)
+    return result
+
+
+def evaluate(
+    graph: "DaguaGraph",
+    positions: torch.Tensor,
+    tier: str = "auto",
+) -> Dict[str, float]:
+    """Compute layout quality metrics for a graph and position tensor.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph providing topology, node sizes, cluster assignments, and layout
+        direction metadata.
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    tier : str, optional
+        ``"quick"``, ``"full"``, or ``"auto"``. Automatic mode selects the
+        full metric set for graphs with fewer than 5000 nodes.
+
+    Returns
+    -------
+    Dict[str, float]
+        Computed metric dictionary.
+    """
+    edge_index = graph.edge_index
+    node_sizes = (
+        graph.node_sizes
+        if graph.node_sizes is not None
+        else torch.full((graph.num_nodes, 2), 20.0, dtype=positions.dtype)
+    )
+    direction = graph.direction if hasattr(graph, "direction") else "TB"
+    cluster_ids = graph.cluster_ids if hasattr(graph, "cluster_ids") else None
+
+    effective_tier = tier
+    if effective_tier == "auto":
+        effective_tier = "full" if graph.num_nodes < 5000 else "quick"
+
+    if effective_tier == "full":
+        result_any = full(
+            positions,
+            edge_index,
+            node_sizes=node_sizes,
+            cluster_ids=cluster_ids,
+            direction=direction,
+        )
+    elif effective_tier == "quick":
+        result_any = quick(positions, edge_index, node_sizes=node_sizes, direction=direction)
+    else:
+        raise ValueError(f"Unsupported evaluation tier: {tier!r}")
+
+    result = dict(result_any)
+    if "composite_score" not in result:
+        result["composite_score"] = composite(result)
+
+    numeric_result: Dict[str, float] = {}
+    for key, value in result.items():
+        if isinstance(value, (int, float)):
+            numeric_result[key] = float(value)
+    return numeric_result
 
 
 # ---------------------------------------------------------------------------
