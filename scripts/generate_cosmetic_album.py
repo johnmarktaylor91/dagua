@@ -224,7 +224,7 @@ def _base_graph_style() -> GraphStyle:
 
     return GraphStyle(
         background_color=WHITE,
-        margin=26.0,
+        margin=12.0,
         min_figsize=(4.0, 3.2),
         max_figsize=(8.0, 6.0),
     )
