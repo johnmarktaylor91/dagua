@@ -1223,7 +1223,7 @@ def multilevel_layout(
                     pass
             _reset_peak()
 
-            level_device = device
+            force_hybrid = False
             if device == "cuda":
                 from dagua.layout.engine import _estimate_gpu_memory
 
@@ -1235,11 +1235,9 @@ def multilevel_layout(
                     edge_batch=config.edge_batch_size or 5_000_000,
                 )
                 if not _vram_fits(next_level_mem):
-                    # This level is too large for GPU — run on CPU
-                    level_device = "cpu"
-                    if pos is not None and pos.device.type == "cuda":
-                        pos = pos.cpu()
-                    torch.cuda.empty_cache()
+                    # This level's heavy losses don't fit on GPU — use hybrid
+                    # (positions + edge losses on GPU, heavy losses on CPU)
+                    force_hybrid = True
 
             assert pos is not None
             assert level.fine_to_coarse is not None
@@ -1265,11 +1263,16 @@ def multilevel_layout(
                 del pos_cpu
             pos = None
 
-            fine_sizes = fine_sizes_cpu.to(level_device)
-            pos = fine_pos if fine_pos.device.type == level_device else fine_pos.to(level_device)
+            fine_sizes = fine_sizes_cpu.to(device)
+            pos = fine_pos if fine_pos.device.type == device else fine_pos.to(device)
             del fine_pos
 
             refine_config = _make_config(steps=refine_steps, seed=None)
+            if force_hybrid:
+                import copy as _copy
+
+                refine_config = _copy.copy(refine_config)
+                refine_config.hybrid_device = "on"
             level_layer_index = (
                 build_layer_index(level.fine_layer_assignments, device="cpu")
                 if level.fine_layer_assignments is not None
@@ -1286,7 +1289,7 @@ def multilevel_layout(
                 fine_n,
                 fine_sizes,
                 refine_config,
-                device=level_device,
+                device=device,
                 init_pos=pos,
                 layer_assignments=level.fine_layer_assignments,
                 progress_context=ProgressContext(indent="    "),
