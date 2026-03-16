@@ -297,12 +297,13 @@ def test_circle_arrow_marker_is_hollow() -> None:
     """Circle arrowheads should render as outline-only markers."""
 
     fig, ax = plt.subplots()
+    style = EdgeStyle(arrow="circle", arrow_fill="filled")
     _draw_edge_marker(
         ax=ax,
         point=(0.0, 0.0),
         direction=(0.0, -1.0),
         marker="circle",
-        style=EdgeStyle(arrow="circle", arrow_fill="filled"),
+        style=style,
     )
 
     assert len(ax.patches) == 1
@@ -312,6 +313,26 @@ def test_circle_arrow_marker_is_hollow() -> None:
 
     assert facecolor[-1] == pytest.approx(0.0)
     assert edgecolor[-1] == pytest.approx(1.0)
+    assert ax.patches[0].radius == pytest.approx(0.85 * style.arrow_width)
+
+
+def test_dot_arrow_marker_uses_larger_graphviz_like_radius() -> None:
+    """Dot markers should use the calibrated radius multiplier."""
+
+    fig, ax = plt.subplots()
+    style = EdgeStyle(arrow="dot", arrow_fill="filled", arrow_width=10.0)
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="dot",
+        style=style,
+    )
+
+    assert len(ax.patches) == 1
+    plt.close(fig)
+
+    assert ax.patches[0].radius == pytest.approx(0.55 * style.arrow_width)
 
 
 def test_tee_arrow_marker_uses_visible_bar_offset_and_width() -> None:
@@ -332,9 +353,9 @@ def test_tee_arrow_marker_uses_visible_bar_offset_and_width() -> None:
     y_data = ax.lines[0].get_ydata()
     plt.close(fig)
 
-    assert float(np.mean(y_data)) == pytest.approx(style.arrow_length / 4.0)
-    assert float(abs(x_data[0] - x_data[1])) == pytest.approx(style.arrow_width)
-    assert ax.lines[0].get_linewidth() == pytest.approx(max(style.width * 2.5, 3.0))
+    assert float(np.mean(y_data)) == pytest.approx(style.arrow_length / 3.0)
+    assert float(abs(x_data[0] - x_data[1])) == pytest.approx(style.arrow_width * 1.4)
+    assert ax.lines[0].get_linewidth() == pytest.approx(max(style.width * 3.5, 4.0))
 
 
 def test_star_vertices_use_deeper_concavities() -> None:
@@ -354,10 +375,66 @@ def test_shape_size_adjustments_match_graphviz_calibration() -> None:
     triangle_w, triangle_h, _ = compute_node_size("A", shape="triangle")
     star_w, star_h, _ = compute_node_size("A", shape="star")
     diamond_w, diamond_h, _ = compute_node_size("A", shape="diamond")
+    # Use taller padding so the shape-specific width floors, not the global
+    # minimum width, determine the final aspect ratio.
+    hexagon_w, hexagon_h, _ = compute_node_size("", padding=(0.0, 10.0), shape="hexagon")
+    pentagon_w, pentagon_h, _ = compute_node_size("", padding=(0.0, 10.0), shape="pentagon")
+    octagon_w, octagon_h, _ = compute_node_size("", padding=(0.0, 10.0), shape="octagon")
 
-    assert triangle_w / triangle_h == pytest.approx(2.2)
+    assert triangle_w / triangle_h == pytest.approx(2.7)
     assert star_w == pytest.approx(star_h)
-    assert diamond_w / diamond_h == pytest.approx(1.15)
+    assert diamond_w / diamond_h == pytest.approx(1.4)
+    assert hexagon_w / hexagon_h == pytest.approx(1.3)
+    assert pentagon_w / pentagon_h == pytest.approx(1.2)
+    assert octagon_w / octagon_h == pytest.approx(1.15)
+
+
+def test_compute_node_size_uses_reduced_graphviz_minimums() -> None:
+    """Small labels should still respect the updated Graphviz-match minima."""
+
+    width, height, _ = compute_node_size("", padding=(0.0, 0.0))
+
+    assert width == pytest.approx(32.0)
+    assert height == pytest.approx(18.0)
+
+
+def test_vee_arrow_marker_uses_wider_graphviz_spread() -> None:
+    """Vee markers should use the widened wing span."""
+
+    fig, ax = plt.subplots()
+    style = EdgeStyle(arrow="vee", arrow_width=10.0, arrow_length=14.0)
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="vee",
+        style=style,
+    )
+
+    vertices = ax.patches[0].get_xy()
+    plt.close(fig)
+
+    assert abs(float(vertices[0][0] - vertices[2][0])) == pytest.approx(style.arrow_width * 1.4)
+
+
+def test_crow_arrow_marker_uses_wider_graphviz_spread() -> None:
+    """Crow markers should widen their outer tines to match Graphviz."""
+
+    fig, ax = plt.subplots()
+    style = EdgeStyle(arrow="crow", arrow_width=10.0, arrow_length=14.0)
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="crow",
+        style=style,
+    )
+
+    assert len(ax.lines) == 3
+    outer_x_offsets = sorted(abs(float(line.get_xdata()[1])) for line in ax.lines[1:])
+    plt.close(fig)
+
+    assert outer_x_offsets == pytest.approx([style.arrow_width * 0.7, style.arrow_width * 0.7])
 
 
 def test_vee_arrow_marker_is_unfilled() -> None:
