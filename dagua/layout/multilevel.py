@@ -1224,8 +1224,12 @@ def multilevel_layout(
             _reset_peak()
 
             force_hybrid = False
+            force_cpu = False
             if device == "cuda":
-                from dagua.layout.engine import _estimate_gpu_memory
+                from dagua.layout.engine import (
+                    _estimate_gpu_memory,
+                    _estimate_hybrid_gpu_memory,
+                )
 
                 next_level_mem = _estimate_gpu_memory(
                     fine_n,
@@ -1235,9 +1239,13 @@ def multilevel_layout(
                     edge_batch=config.edge_batch_size or 5_000_000,
                 )
                 if not _vram_fits(next_level_mem):
-                    # This level's heavy losses don't fit on GPU — use hybrid
-                    # (positions + edge losses on GPU, heavy losses on CPU)
-                    force_hybrid = True
+                    # Check if hybrid fits (pos + optimizer + edge losses only)
+                    hybrid_mem = _estimate_hybrid_gpu_memory(fine_n, n_fine_edges)
+                    if _vram_fits(hybrid_mem):
+                        force_hybrid = True
+                    else:
+                        # Even hybrid doesn't fit — fall back to full CPU
+                        force_cpu = True
 
             assert pos is not None
             assert level.fine_to_coarse is not None
@@ -1263,8 +1271,11 @@ def multilevel_layout(
                 del pos_cpu
             pos = None
 
-            fine_sizes = fine_sizes_cpu.to(device)
-            pos = fine_pos if fine_pos.device.type == device else fine_pos.to(device)
+            level_device = "cpu" if force_cpu else device
+            fine_sizes = fine_sizes_cpu.to(level_device)
+            pos = fine_pos if fine_pos.device.type == level_device else fine_pos.to(level_device)
+            if force_cpu and torch.cuda.is_available():
+                torch.cuda.empty_cache()
             del fine_pos
 
             refine_config = _make_config(steps=refine_steps, seed=None)
@@ -1289,7 +1300,7 @@ def multilevel_layout(
                 fine_n,
                 fine_sizes,
                 refine_config,
-                device=device,
+                device=level_device,
                 init_pos=pos,
                 layer_assignments=level.fine_layer_assignments,
                 progress_context=ProgressContext(indent="    "),
