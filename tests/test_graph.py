@@ -162,6 +162,12 @@ class TestNodeSizes:
         g.compute_node_sizes()
         assert g.node_sizes[0, 0].item() > width_before
 
+    def test_min_height_style_floors_computed_height(self):
+        g = DaguaGraph.from_edge_list([("a", "b")])
+        g.node_styles[0] = NodeStyle(min_height=48.0)
+        g.compute_node_sizes()
+        assert g.node_sizes[0, 1].item() >= 48.0
+
 
 class TestStyles:
     def test_default_style(self, simple_chain):

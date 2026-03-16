@@ -209,6 +209,7 @@ class NodeStyle:
     shadow_color: str = "#00000020"  # render-only
     shadow_blur: float = 0.0
     min_width: Optional[float] = None  # Layout-affecting: floor on node width
+    min_height: Optional[float] = None  # Layout-affecting: floor on node height
     # New fields (Part 3) — overflow policy
     overflow_policy: str = "shrink_text"  # "shrink_text", "expand_node", "overflow"
     min_font_size: float = 5.0  # Floor for shrink_text policy
@@ -409,6 +410,7 @@ GRAPHVIZ_MATCH_DEFAULTS: Dict[str, Any] = {
     "arrow_width": 10.0,
     "edge_width": 1.5,
     "edge_opacity": 0.85,
+    "min_height": 36.0,
 }
 
 # ─── Full Theme Objects ────────────────────────────────────────────────────
