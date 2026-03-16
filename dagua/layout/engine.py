@@ -973,6 +973,9 @@ def _layout_inner(
         )
 
     if config.w_spacing > 0 and layer_index is not None:
+        # Spacing creates O(N) sort + gap tensors; mark heavy at scale
+        # so hybrid mode routes it to CPU when VRAM is tight.
+        spacing_is_heavy = n > 1_000_000
         loss_fns.append(
             (
                 "w_spacing",
@@ -982,7 +985,7 @@ def _layout_inner(
                     li,
                     target_gap=node_sep,
                 ),
-                False,
+                spacing_is_heavy,
                 False,
             )
         )
