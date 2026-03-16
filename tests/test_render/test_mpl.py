@@ -381,6 +381,7 @@ def test_shape_size_adjustments_match_graphviz_calibration() -> None:
     triangle_w, triangle_h, _ = compute_node_size("A", shape="triangle")
     star_w, star_h, _ = compute_node_size("A", shape="star")
     diamond_w, diamond_h, _ = compute_node_size("A", shape="diamond")
+    ellipse_w, ellipse_h, _ = compute_node_size("", padding=(0.0, 0.0), shape="ellipse")
     # Use taller padding so the shape-specific width floors, not the global
     # minimum width, determine the final aspect ratio.
     hexagon_w, hexagon_h, _ = compute_node_size("", padding=(0.0, 10.0), shape="hexagon")
@@ -390,6 +391,8 @@ def test_shape_size_adjustments_match_graphviz_calibration() -> None:
     assert triangle_w / triangle_h == pytest.approx(3.2)
     assert star_w == pytest.approx(star_h)
     assert diamond_w / diamond_h == pytest.approx(1.4)
+    assert ellipse_w == pytest.approx(48.0)
+    assert ellipse_h == pytest.approx(18.0)
     assert hexagon_w / hexagon_h == pytest.approx(1.3)
     assert pentagon_w / pentagon_h == pytest.approx(1.2)
     assert octagon_w / octagon_h == pytest.approx(1.15)
