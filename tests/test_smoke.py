@@ -181,6 +181,32 @@ class TestLongestPathLayeringVectorized:
         for node in range(n):
             assert result_list[node] == node // width
 
+    def test_frontier_layering_wide_dag(self) -> None:
+        """Wide DAG layering should produce correct layers with frontier tracking."""
+        n, width = 100_000, 1_000
+        src = torch.arange(0, n - width, dtype=torch.long)
+        tgt = src + width
+        edge_index = torch.stack([src, tgt])
+
+        result = longest_path_layering(edge_index, n)
+        result_list = result.tolist() if isinstance(result, torch.Tensor) else result
+
+        for node in range(n):
+            assert result_list[node] == node // width
+
+    def test_frontier_layering_deep_dag(self) -> None:
+        """Deep DAG should still produce correct layers with frontier tracking."""
+        n = 50_000
+        src = torch.arange(0, n - 1, dtype=torch.long)
+        tgt = src + 1
+        edge_index = torch.stack([src, tgt])
+
+        result = longest_path_layering(edge_index, n)
+        result_list = result.tolist() if isinstance(result, torch.Tensor) else result
+
+        for node in range(n):
+            assert result_list[node] == node
+
     def test_layering_with_skip_edges(self):
         """Skip edges must still honor the longest-path layer assignment."""
         edge_index = torch.tensor([[0, 1, 0], [1, 2, 2]], dtype=torch.long)
