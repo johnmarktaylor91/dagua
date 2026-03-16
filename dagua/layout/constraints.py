@@ -1549,6 +1549,14 @@ def fanout_distribution_loss(
     hub_degrees = out_degree[hub_nodes]
 
     valid_hub_mask = hub_degrees >= 2
+    # Verify searchsorted found the right position: sorted_src[start] must
+    # equal the hub node. With edge batching, some hubs' edges may not be
+    # in this batch, causing searchsorted to land at the wrong position.
+    E_batch = sorted_src.shape[0]
+    in_bounds = hub_starts < E_batch
+    correct_start = in_bounds & (sorted_src[hub_starts.clamp(max=E_batch - 1)] == hub_nodes)
+    valid_hub_mask = valid_hub_mask & correct_start
+
     if not valid_hub_mask.any():
         return torch.tensor(0.0, device=device)
 
@@ -1594,10 +1602,7 @@ def fanout_distribution_loss(
     ideal_gaps = two_pi / hub_degrees_v.float()
     ideal_expanded_consecutive = ideal_gaps[sorted_hub_id[:-1][same_hub]]
     gap_deviation_consecutive = (consecutive_gaps[same_hub] - ideal_expanded_consecutive) ** 2
-    # Guard against size mismatch at very large scale (boundary_offsets
-    # and hub_degrees_v may differ if some hubs have zero children in the batch)
-    min_len = min(wrap_gaps.shape[0], ideal_gaps.shape[0])
-    gap_deviation_wrap = (wrap_gaps[:min_len] - ideal_gaps[:min_len]) ** 2
+    gap_deviation_wrap = (wrap_gaps - ideal_gaps) ** 2
 
     per_hub_gap_loss = torch.zeros(num_hubs, device=device)
     per_hub_gap_loss.scatter_add_(0, sorted_hub_id[:-1][same_hub], gap_deviation_consecutive)
