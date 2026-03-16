@@ -12,6 +12,11 @@ from typing import Optional
 import torch
 
 _MIN_DISTANCE = 1.0e-3
+_BORDER_WEIGHT = 0.1
+_EDGE_LENGTH_WEIGHT = 0.2
+_CROSSING_WEIGHT = 2.0
+_NODE_EDGE_WEIGHT = 0.5
+_COOLING_FACTOR = 0.75
 
 
 def _layout_device(
@@ -207,6 +212,13 @@ def _energy(positions: torch.Tensor, edges: list[tuple[int, int]], extent: float
     -------
     torch.Tensor
         Scalar energy value.
+
+    Notes
+    -----
+    The energy-term weights remain the local approximation used by this
+    reimplementation. The requested faithfulness fixes for this task target
+    the annealing schedule rather than re-tuning those weights without a
+    clearer reference mapping.
     """
     num_nodes = int(positions.shape[0])
     distribution = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
@@ -252,7 +264,13 @@ def _energy(positions: torch.Tensor, edges: list[tuple[int, int]], extent: float
     if penalties:
         node_edge = torch.stack(penalties).mean()
 
-    return distribution + 0.1 * border + 0.2 * edge_length + 2.0 * crossing_energy + 0.5 * node_edge
+    return (
+        distribution
+        + _BORDER_WEIGHT * border
+        + _EDGE_LENGTH_WEIGHT * edge_length
+        + _CROSSING_WEIGHT * crossing_energy
+        + _NODE_EDGE_WEIGHT * node_edge
+    )
 
 
 def layout_davidson_harel(
@@ -285,6 +303,12 @@ def layout_davidson_harel(
     -------
     torch.Tensor
         Node positions with shape ``[N, 2]``.
+
+    Notes
+    -----
+    This routine follows igraph's more aggressive annealing schedule by using
+    one move attempt per node per round and a ``0.75`` cooling factor. The
+    energy weights remain the current conservative approximation.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
@@ -305,7 +329,7 @@ def layout_davidson_harel(
 
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
-    moves_per_round = max(num_nodes * 4, 1)
+    moves_per_round = num_nodes
 
     for _ in range(rounds):
         for _ in range(moves_per_round):
@@ -328,7 +352,7 @@ def layout_davidson_harel(
                 positions = candidate
                 current_energy = candidate_energy
 
-        temperature *= 0.92
+        temperature *= _COOLING_FACTOR
 
     centered = positions - positions.mean(dim=0, keepdim=True)
     span = centered.abs().max().clamp(min=1.0)

@@ -97,6 +97,28 @@ def test_layout_sugiyama_trace_mode_returns_snapshots() -> None:
     torch.testing.assert_close(positions, traces[-1])
 
 
+def test_layout_sugiyama_routes_long_edges_through_intermediate_layers() -> None:
+    edge_index = torch.tensor([[0, 1, 2, 0], [1, 2, 3, 3]], dtype=torch.long)
+
+    positions, edge_routes = layout_sugiyama(
+        edge_index=edge_index,
+        num_nodes=4,
+        return_edge_routes=True,
+    )
+
+    long_edge_route = edge_routes[-1]
+
+    assert positions.shape == (4, 2)
+    assert len(edge_routes) == edge_index.shape[1]
+    assert long_edge_route.shape == (4, 2)
+    torch.testing.assert_close(long_edge_route[0], positions[0])
+    torch.testing.assert_close(long_edge_route[-1], positions[3])
+    torch.testing.assert_close(
+        long_edge_route[:, 1],
+        torch.tensor([0.0, 50.0, 100.0, 150.0]),
+    )
+
+
 def test_layout_sugiyama_handles_isolated_nodes() -> None:
     edge_index = torch.zeros((2, 0), dtype=torch.long)
 
