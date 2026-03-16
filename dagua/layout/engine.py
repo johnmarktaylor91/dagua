@@ -61,7 +61,7 @@ SAMPLED_NODE_CONTEXT_CAP = 1_000_000
 MIN_SAMPLED_ACTIVE_SET = 10_000
 SAMPLED_SAME_LAYER_K = 64
 REPULSION_ESTIMATE_NN_K = 20
-AUTOGRAD_INTERMEDIATE_FACTOR = 1.3
+AUTOGRAD_INTERMEDIATE_FACTOR = 2.0
 INTERMEDIATE_SAFETY_FACTOR = 1.5
 CHECKPOINT_MEMORY_REDUCTION = 2
 CUDA_ACTIVE_SET_HEADROOM = 0.85
@@ -1154,9 +1154,12 @@ def _layout_inner(
                 and torch.cuda.is_available()
             ):
                 free, _ = torch.cuda.mem_get_info()
-                total_budget = int(
-                    (free + torch.cuda.memory_allocated()) * CUDA_ACTIVE_SET_HEADROOM
+                # Include PyTorch's cached-but-unallocated pool as available
+                cached_free = max(
+                    0,
+                    torch.cuda.memory_reserved() - torch.cuda.memory_allocated(),
                 )
+                total_budget = int((free + cached_free) * CUDA_ACTIVE_SET_HEADROOM)
                 capped_n_active = _cap_sampled_active_nodes_for_budget(
                     n,
                     num_edges,
