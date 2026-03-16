@@ -53,8 +53,8 @@ NODE_STROKE = "#4C77A3"
 EDGE_COLOR = "#5F6C7B"
 CLUSTER_FILL = "#EAF1F8"
 CLUSTER_STROKE = "#A9B8C7"
-GRAPHVIZ_MIN_NODE_WIDTH = 54.0
-GRAPHVIZ_PAIR_VERTICAL_GAP = 90.0
+GRAPHVIZ_MIN_NODE_WIDTH = 40.0
+GRAPHVIZ_PAIR_VERTICAL_GAP = 110.0
 PANEL_CONTENT_MARGIN = 36
 CONTENT_CROP_PADDING = 12
 
@@ -172,7 +172,7 @@ def _graphviz_match_node_style_defaults() -> Dict[str, Any]:
         "padding": GRAPHVIZ_MATCH_DEFAULTS["padding"],
         "font_size": GRAPHVIZ_MATCH_DEFAULTS["font_size"],
         "min_width": GRAPHVIZ_MIN_NODE_WIDTH,
-        "min_height": GRAPHVIZ_MATCH_DEFAULTS.get("min_height", 36.0),
+        "min_height": GRAPHVIZ_MATCH_DEFAULTS.get("min_height", 28.0),
     }
 
 
@@ -190,7 +190,7 @@ def _graphviz_match_edge_style_defaults() -> Dict[str, Any]:
         "opacity": GRAPHVIZ_MATCH_DEFAULTS["edge_opacity"],
         "arrow_length": GRAPHVIZ_MATCH_DEFAULTS["arrow_length"],
         "arrow_width": GRAPHVIZ_MATCH_DEFAULTS["arrow_width"],
-        "arrow_scale": GRAPHVIZ_MATCH_DEFAULTS.get("arrow_scale", 40.0),
+        "arrow_scale": GRAPHVIZ_MATCH_DEFAULTS.get("arrow_scale", 22.0),
     }
 
 
@@ -513,7 +513,7 @@ def _nested_cluster_graph() -> Tuple[DaguaGraph, torch.Tensor]:
     graph.add_cluster("outer", ["A", "B", "C", "D"], label="Outer")
     graph.add_cluster("inner", ["B", "C"], label="Inner", parent="outer")
     positions = torch.tensor(
-        [[-110.0, 25.0], [-35.0, -25.0], [35.0, -25.0], [110.0, 25.0]],
+        [[0.0, 120.0], [0.0, 40.0], [0.0, -40.0], [0.0, -120.0]],
         dtype=torch.float32,
     )
     return graph, positions
@@ -1601,7 +1601,7 @@ def _shadow_cases() -> List[AlbumCase]:
             _base_node_style(
                 shadow=enabled,
                 shadow_offset=(3.0, -3.0),
-                shadow_color="#00000025",
+                shadow_color="#00000040",
                 shadow_blur=3.0,
                 min_width=160.0,
             ),
@@ -1820,7 +1820,7 @@ def _rich_label_cases() -> List[AlbumCase]:
     graph, positions = _single_node_graph("**Bold** mixed with normal")
     _set_all_node_styles(
         graph,
-        _base_node_style(label_format="rich", min_width=220.0, text_align="left"),
+        _base_node_style(label_format="rich", min_width=260.0, text_align="left"),
     )
     cases.append(
         AlbumCase(
