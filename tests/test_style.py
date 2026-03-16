@@ -202,14 +202,14 @@ class TestBuiltInThemes:
 
         assert GRAPHVIZ_MATCH_DEFAULTS == {
             "stroke_width": 1.4,
-            "padding": (10.0, 6.0),
+            "padding": (7.0, 4.0),
             "font_size": 12.0,
             "arrow_length": 10.0,
             "arrow_width": 7.0,
             "arrow_scale": 16.0,
             "edge_width": 1.4,
             "edge_opacity": 1.0,
-            "min_height": 28.0,
+            "min_height": 22.0,
         }
 
 

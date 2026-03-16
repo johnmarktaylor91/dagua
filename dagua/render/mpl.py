@@ -1447,9 +1447,9 @@ def _draw_edge_marker(
         base_y = tip_y - uy * manual_length
         polygon = Polygon(
             [
-                (base_x + px * manual_width / 2, base_y + py * manual_width / 2),
+                (base_x + px * manual_width * 0.7, base_y + py * manual_width * 0.7),
                 (tip_x, tip_y),
-                (base_x - px * manual_width / 2, base_y - py * manual_width / 2),
+                (base_x - px * manual_width * 0.7, base_y - py * manual_width * 0.7),
             ],
             closed=False,
             facecolor="none",
@@ -1482,7 +1482,7 @@ def _draw_edge_marker(
         return
 
     if marker in {"dot", "circle"}:
-        radius = manual_width * (0.32 if marker == "dot" else 0.5)
+        radius = manual_width * (0.55 if marker == "dot" else 0.85)
         center_x = tip_x - ux * radius
         center_y = tip_y - uy * radius
         # Graphviz uses a filled dot marker but a hollow circle marker.
@@ -1523,13 +1523,13 @@ def _draw_edge_marker(
     if marker == "tee":
         # Keep the tee close to the endpoint, but far enough back that the bar
         # does not collapse into the line ending.
-        bar_x = tip_x - ux * (manual_length / 4)
-        bar_y = tip_y - uy * (manual_length / 4)
-        bar_linewidth = max(style.width * 2.5, 3.0)
+        bar_x = tip_x - ux * (manual_length / 3)
+        bar_y = tip_y - uy * (manual_length / 3)
+        bar_linewidth = max(style.width * 3.5, 4.0)
         ax.add_line(
             Line2D(
-                [bar_x + px * manual_width / 2, bar_x - px * manual_width / 2],
-                [bar_y + py * manual_width / 2, bar_y - py * manual_width / 2],
+                [bar_x + px * manual_width * 0.7, bar_x - px * manual_width * 0.7],
+                [bar_y + py * manual_width * 0.7, bar_y - py * manual_width * 0.7],
                 color=color,
                 linewidth=bar_linewidth,
                 solid_capstyle="butt",
@@ -1543,8 +1543,8 @@ def _draw_edge_marker(
         back_y = tip_y - uy * manual_length
         for end_x, end_y in (
             (back_x, back_y),
-            (back_x + px * manual_width / 2, back_y + py * manual_width / 2),
-            (back_x - px * manual_width / 2, back_y - py * manual_width / 2),
+            (back_x + px * manual_width * 0.7, back_y + py * manual_width * 0.7),
+            (back_x - px * manual_width * 0.7, back_y - py * manual_width * 0.7),
         ):
             ax.add_line(
                 Line2D(
