@@ -1,9 +1,12 @@
 """Tests for matplotlib renderer."""
 
+import importlib
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pytest
+from matplotlib.colors import to_rgba
 
 import dagua
 from dagua.config import LayoutConfig
@@ -13,11 +16,14 @@ from dagua.render import render
 from dagua.render.mpl import (
     _build_node_patch,
     _cluster_linestyle,
+    _draw_clusters,
     _draw_edge_marker,
     _edge_linestyle,
     _node_linestyle,
 )
-from dagua.styles import EdgeStyle, NodeStyle
+from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
+
+mpl_renderer = importlib.import_module("dagua.render.mpl")
 
 
 class TestRenderBasic:
@@ -301,3 +307,60 @@ def test_vee_arrow_marker_is_unfilled() -> None:
     plt.close(fig)
 
     assert facecolor[-1] == pytest.approx(0.0)
+
+
+def test_filled_arrow_marker_uses_opaque_edge_color() -> None:
+    """Filled arrowheads should use the edge color at full opacity."""
+
+    fig, ax = plt.subplots()
+    style = EdgeStyle(color="#445566", opacity=0.35, arrow_width=12.0, arrow_length=18.0)
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="normal",
+        style=style,
+    )
+
+    assert len(ax.patches) == 1
+    facecolor = ax.patches[0].get_facecolor()
+    edgecolor = ax.patches[0].get_edgecolor()
+    plt.close(fig)
+
+    assert facecolor == pytest.approx(to_rgba(style.color, 1.0))
+    assert edgecolor == pytest.approx(to_rgba(style.color, 1.0))
+
+
+def test_cluster_labels_expand_bbox_using_measured_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cluster boxes should widen to fit measured label text."""
+
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_cluster(
+        "outer",
+        ["a"],
+        label="Wide",
+        style=ClusterStyle(
+            padding=0.0,
+            font_size=20.0,
+            label_offset=(0.0, 20.0),
+        ),
+    )
+
+    monkeypatch.setattr(mpl_renderer, "measure_text", lambda *args, **kwargs: (80.0, 20.0))
+
+    fig, ax = plt.subplots()
+    _draw_clusters(
+        ax=ax,
+        graph=graph,
+        pos=np.array([[0.0, 0.0]], dtype=float),
+        sizes=np.array([[70.0, 20.0]], dtype=float),
+    )
+
+    assert len(ax.patches) == 1
+    assert ax.patches[0].get_width() == pytest.approx(80.0)
+    assert len(ax.texts) == 1
+    assert ax.texts[0].get_clip_on() is False
+    plt.close(fig)

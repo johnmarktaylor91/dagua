@@ -1345,15 +1345,20 @@ def _draw_edge_marker(
     Parameters
     ----------
     ax : Any
-        Matplotlib axes.
+        Matplotlib axes receiving the marker patch.
     point : tuple[float, float]
-        Marker tip position.
+        Marker tip position in data coordinates.
     direction : tuple[float, float]
         Direction vector pointing out of the endpoint.
     marker : str
-        Marker name.
+        Marker name such as ``"normal"`` or ``"diamond"``.
     style : Any
-        Edge style object.
+        Edge style object providing arrow geometry and color settings.
+
+    Returns
+    -------
+    None
+        Mutates ``ax`` in place by adding the marker artist when applicable.
     """
     from matplotlib.colors import to_rgba
     from matplotlib.lines import Line2D
@@ -1368,7 +1373,9 @@ def _draw_edge_marker(
     px, py = -uy, ux
     length = float(style.arrow_length)
     width = float(style.arrow_width)
-    color = to_rgba(style.arrow_color or style.color, style.opacity)
+    # Graphviz-style calibration expects arrowheads to read slightly heavier
+    # than the edge stroke, so keep marker fill/outline fully opaque.
+    color = to_rgba(style.arrow_color or style.color, 1.0)
     filled = style.arrow_fill == "filled" and marker not in {"open", "vee", "tee", "crow"}
     tip_x, tip_y = point
 
@@ -1612,11 +1619,32 @@ def _draw_edge_labels(
         )
 
 
-def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
-    """Draw cluster background boxes.
+def _draw_clusters(
+    ax: Any,
+    graph: Any,
+    pos: np.ndarray,
+    sizes: np.ndarray,
+    svg_hover_map: Optional[Dict[str, str]] = None,
+) -> None:
+    """Draw cluster background boxes and labels.
 
-    Barely-there fills, thin borders, progressive darkening for nesting.
-    Labels: configurable position via label_position.
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes receiving cluster artists.
+    graph : Any
+        Graph object exposing cluster membership, labels, and styles.
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]`` in render coordinates.
+    sizes : numpy.ndarray
+        Node box sizes with shape ``[N, 2]`` in points.
+    svg_hover_map : dict[str, str] | None, default=None
+        Optional SVG hover-text map populated with cluster metadata.
+
+    Returns
+    -------
+    None
+        Mutates ``ax`` in place by adding cluster patches and labels.
     """
     from matplotlib.patches import FancyBboxPatch
 
@@ -1666,15 +1694,26 @@ def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
 
         x_min = (member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding
         x_max = (member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding
-        y_min = (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding
-        y_max = (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding + 14  # space for label
-
-        # Ensure cluster bbox is wide enough to fit the label text
         label = graph.cluster_labels.get(name, name)
         label_fontsize = max(style.font_size - depth * 1.0, 7.0)
+        label_ff = style.font_family or RESOLVED_FONT
         label_ox = style.label_offset[0]
-        # Rough estimate: ~0.55 * font_size per character
-        est_label_width = len(label) * label_fontsize * 0.55 + label_ox * 2
+        label_oy = style.label_offset[1]
+        label_width, label_height = measure_text(
+            label,
+            font_family=label_ff,
+            font_size=label_fontsize,
+            font_weight=style.font_weight,
+        )
+
+        y_min = (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding
+        y_max = (
+            (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding + max(14.0, label_height)
+        )
+
+        # Cluster labels are few and measure_text is cached, so use the actual
+        # measured width instead of a character-count heuristic.
+        est_label_width = label_width + label_ox * 2
         content_width = x_max - x_min
         if est_label_width > content_width:
             expand = (est_label_width - content_width) / 2
@@ -1713,9 +1752,6 @@ def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
         )
 
         # Cluster label: position from style (label, label_fontsize already computed above)
-        label_ff = style.font_family or RESOLVED_FONT
-        label_oy = style.label_offset[1]
-
         if style.label_position == "top-center":
             lx = (x_min + x_max) / 2
             ha = "center"
@@ -1741,6 +1777,7 @@ def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
             va="top",
             ha=ha,
             zorder=0.5,
+            clip_on=False,
         )
         _set_svg_hover(
             text_artist,

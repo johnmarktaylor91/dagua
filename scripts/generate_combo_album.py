@@ -1706,7 +1706,7 @@ def _dark_mode_graph_style() -> GraphStyle:
 
     return GraphStyle(
         background_color="#1A1E24",
-        margin=26.0,
+        margin=12.0,
         edge_label_background="#1A1E24",
         edge_label_background_opacity=0.95,
     )
@@ -3270,7 +3270,7 @@ def _dark_mode_graph_style() -> GraphStyle:
 
     return GraphStyle(
         background_color="#1A1E24",
-        margin=26.0,
+        margin=12.0,
         edge_label_background="#1A1E24",
         edge_label_background_opacity=0.95,
     )
