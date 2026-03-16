@@ -1594,7 +1594,10 @@ def fanout_distribution_loss(
     ideal_gaps = two_pi / hub_degrees_v.float()
     ideal_expanded_consecutive = ideal_gaps[sorted_hub_id[:-1][same_hub]]
     gap_deviation_consecutive = (consecutive_gaps[same_hub] - ideal_expanded_consecutive) ** 2
-    gap_deviation_wrap = (wrap_gaps - ideal_gaps) ** 2
+    # Guard against size mismatch at very large scale (boundary_offsets
+    # and hub_degrees_v may differ if some hubs have zero children in the batch)
+    min_len = min(wrap_gaps.shape[0], ideal_gaps.shape[0])
+    gap_deviation_wrap = (wrap_gaps[:min_len] - ideal_gaps[:min_len]) ** 2
 
     per_hub_gap_loss = torch.zeros(num_hubs, device=device)
     per_hub_gap_loss.scatter_add_(0, sorted_hub_id[:-1][same_hub], gap_deviation_consecutive)
