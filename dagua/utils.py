@@ -471,8 +471,20 @@ def _compute_node_size_cached(
     h = max(h, MIN_NODE_HEIGHT)
 
     if shape == "diamond":
-        max_dim = max(w, h)
-        w = h = max_dim * 1.42
+        max_dim = max(w, h) * 1.42
+        w = max_dim * 1.15
+        h = max_dim
+    elif shape == "triangle":
+        # Graphviz triangles are wide and flat, so reserve enough width for
+        # labels in the lower body.
+        min_ratio = 2.2
+        if w < h * min_ratio:
+            w = h * min_ratio
+    elif shape == "star":
+        # Star points consume much of the bounds, so enlarge the square body
+        # to keep the label readable in the center.
+        w = max(w, h) * 1.8
+        h = w
     elif shape == "circle":
         r = max(w, h)
         w = h = r
