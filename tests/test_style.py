@@ -243,6 +243,7 @@ def test_graphviz_strict_theme_loads() -> None:
     assert node_style.stroke_width == 1.4
     assert node_style.font_family == "Times New Roman"
     assert node_style.padding == (12.0, 5.0)
+    assert node_style.min_width == 48.0
 
     edge_style = theme.get_edge_style("default")
     assert edge_style.width == 1.3
@@ -264,6 +265,7 @@ def test_graphviz_improved_theme_loads() -> None:
     assert node_style.font_size == 12.0
     assert node_style.stroke != "#000000"
     assert node_style.fill != "#FFFFFF"
+    assert node_style.min_width == 44.0
     edge_style = theme.get_edge_style("default")
     assert edge_style.opacity == 0.92
     assert theme.get_edge_style("if").opacity == 0.92
