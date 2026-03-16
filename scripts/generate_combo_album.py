@@ -51,6 +51,17 @@ from scripts.generate_cosmetic_album import (
 DEFAULT_OUTPUT_DIR = "eval_output/cosmetic_combos"
 GRAPHVIZ_LABEL = "Graphviz"
 RAW_RENDER_DPI = 200
+PAIR_GAP = 90.0
+CHAIN_SPACING = 90.0
+SHORT_GAP = 40.0
+DIAMOND_VERTICAL_GAP = 90.0
+DIAMOND_HORIZONTAL_GAP = 80.0
+FAN_CENTER_OFFSET = 90.0
+FAN_LEAF_SPACING = 80.0
+CLUSTER_X_SCALE = 2.0 / 3.0
+CLUSTER_Y_SCALE = 90.0 / 170.0
+REAL_WORLD_X_SCALE = 2.0 / 3.0
+REAL_WORLD_Y_SCALE = 90.0 / 170.0
 
 CATEGORY_DESCRIPTIONS: Dict[str, str] = {
     "01_shape_x_border": "Tests dashed and dotted borders on complex node shapes.",
@@ -108,14 +119,14 @@ CategoryBuilder = Callable[[], List[AlbumCase]]
 
 
 def _pair_positions(
-    gap: float = 170.0,
+    gap: float = PAIR_GAP,
     direction: str = "TB",
 ) -> List[Tuple[float, float]]:
     """Return fixed two-node positions for a directional pair.
 
     Parameters
     ----------
-    gap : float, default=170.0
+    gap : float, default=PAIR_GAP
         Distance between the two nodes.
     direction : str, default="TB"
         One of ``TB``, ``BT``, ``LR``, or ``RL``.
@@ -142,7 +153,7 @@ def _chain_graph(
     n: int,
     labels: Sequence[str],
     direction: str = "TB",
-    spacing: float = 170.0,
+    spacing: float = CHAIN_SPACING,
 ) -> Tuple[DaguaGraph, torch.Tensor]:
     """Build an ``n``-node chain with fixed directional positions.
 
@@ -154,7 +165,7 @@ def _chain_graph(
         Node labels in order.
     direction : str, default="TB"
         One of ``TB``, ``BT``, ``LR``, or ``RL``.
-    spacing : float, default=170.0
+    spacing : float, default=CHAIN_SPACING
         Distance between consecutive nodes.
 
     Returns
@@ -203,7 +214,12 @@ def _diamond_dag(
     graph.add_edge("n0", "n2")
     graph.add_edge("n1", "n3")
     graph.add_edge("n2", "n3")
-    positions = [(0.0, 170.0), (-120.0, 0.0), (120.0, 0.0), (0.0, -170.0)]
+    positions = [
+        (0.0, DIAMOND_VERTICAL_GAP),
+        (-DIAMOND_HORIZONTAL_GAP, 0.0),
+        (DIAMOND_HORIZONTAL_GAP, 0.0),
+        (0.0, -DIAMOND_VERTICAL_GAP),
+    ]
     return graph, torch.tensor(positions, dtype=torch.float32)
 
 
@@ -241,20 +257,98 @@ def _fan_graph(
     midpoint = (count - 1) / 2.0
     positions: List[Tuple[float, float]] = []
     if direction == "TB":
-        positions.append((0.0, 120.0))
-        positions.extend(((index - midpoint) * 120.0, -40.0) for index in range(count))
+        positions.append((0.0, FAN_CENTER_OFFSET))
+        positions.extend(((index - midpoint) * FAN_LEAF_SPACING, 0.0) for index in range(count))
     elif direction == "BT":
-        positions.append((0.0, -120.0))
-        positions.extend(((index - midpoint) * 120.0, 40.0) for index in range(count))
+        positions.append((0.0, -FAN_CENTER_OFFSET))
+        positions.extend(((index - midpoint) * FAN_LEAF_SPACING, 0.0) for index in range(count))
     elif direction == "LR":
-        positions.append((-150.0, 0.0))
-        positions.extend((60.0, (midpoint - index) * 120.0) for index in range(count))
+        positions.append((-FAN_CENTER_OFFSET, 0.0))
+        positions.extend((0.0, (midpoint - index) * FAN_LEAF_SPACING) for index in range(count))
     elif direction == "RL":
-        positions.append((150.0, 0.0))
-        positions.extend((-60.0, (midpoint - index) * 120.0) for index in range(count))
+        positions.append((FAN_CENTER_OFFSET, 0.0))
+        positions.extend((0.0, (midpoint - index) * FAN_LEAF_SPACING) for index in range(count))
     else:
         raise ValueError(f"Unsupported fan direction: {direction}")
     return graph, torch.tensor(positions, dtype=torch.float32)
+
+
+def _scale_point(
+    point: Tuple[float, float],
+    x_scale: float,
+    y_scale: float,
+) -> Tuple[float, float]:
+    """Scale a 2D point by independent horizontal and vertical factors.
+
+    Parameters
+    ----------
+    point : tuple[float, float]
+        Source ``(x, y)`` point in points.
+    x_scale : float
+        Horizontal scale factor.
+    y_scale : float
+        Vertical scale factor.
+
+    Returns
+    -------
+    tuple[float, float]
+        Scaled ``(x, y)`` point.
+    """
+
+    return (point[0] * x_scale, point[1] * y_scale)
+
+
+def _scale_position_tensor(
+    points: Sequence[Tuple[float, float]],
+    x_scale: float,
+    y_scale: float,
+) -> torch.Tensor:
+    """Return a position tensor after scaling each point.
+
+    Parameters
+    ----------
+    points : sequence[tuple[float, float]]
+        Source positions.
+    x_scale : float
+        Horizontal scale factor.
+    y_scale : float
+        Vertical scale factor.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    """
+
+    return torch.tensor(
+        [_scale_point(point, x_scale, y_scale) for point in points],
+        dtype=torch.float32,
+    )
+
+
+def _scale_position_dict(
+    positions: Mapping[str, Tuple[float, float]],
+    x_scale: float,
+    y_scale: float,
+) -> Dict[str, Tuple[float, float]]:
+    """Return a scaled copy of a node-position mapping.
+
+    Parameters
+    ----------
+    positions : Mapping[str, tuple[float, float]]
+        Node positions keyed by node identifier.
+    x_scale : float
+        Horizontal scale factor.
+    y_scale : float
+        Vertical scale factor.
+
+    Returns
+    -------
+    dict[str, tuple[float, float]]
+        Scaled node-position mapping.
+    """
+
+    return {node_id: _scale_point(point, x_scale, y_scale) for node_id, point in positions.items()}
 
 
 def _grid_graph(rows: int, cols: int) -> Tuple[DaguaGraph, torch.Tensor]:
@@ -881,12 +975,12 @@ def _edge_label_cases() -> List[AlbumCase]:
     """
 
     specs = [
-        ("label_bezier", "flow", "bezier", "solid", "normal", "pair", 170.0, None),
-        ("label_ortho", "flow", "ortho", "solid", "normal", "pair", 170.0, None),
-        ("label_straight", "flow", "straight", "solid", "normal", "pair", 170.0, None),
-        ("label_dashed", "flow", "bezier", "dashed", "normal", "pair", 170.0, None),
-        ("label_dotted", "flow", "bezier", "dotted", "normal", "pair", 170.0, None),
-        ("label_vee", "flow", "bezier", "solid", "vee", "pair", 170.0, None),
+        ("label_bezier", "flow", "bezier", "solid", "normal", "pair", PAIR_GAP, None),
+        ("label_ortho", "flow", "ortho", "solid", "normal", "pair", PAIR_GAP, None),
+        ("label_straight", "flow", "straight", "solid", "normal", "pair", PAIR_GAP, None),
+        ("label_dashed", "flow", "bezier", "dashed", "normal", "pair", PAIR_GAP, None),
+        ("label_dotted", "flow", "bezier", "dotted", "normal", "pair", PAIR_GAP, None),
+        ("label_vee", "flow", "bezier", "solid", "vee", "pair", PAIR_GAP, None),
         ("label_short", "flow", "bezier", "solid", "normal", "pair", 60.0, None),
         (
             "label_long",
@@ -895,11 +989,11 @@ def _edge_label_cases() -> List[AlbumCase]:
             "solid",
             "normal",
             "pair",
-            170.0,
+            PAIR_GAP,
             None,
         ),
-        ("label_multi", "", "bezier", "solid", "normal", "diamond", 170.0, ["a", "b", "c", "d"]),
-        ("label_thick", "flow", "bezier", "solid", "normal", "pair", 170.0, None),
+        ("label_multi", "", "bezier", "solid", "normal", "diamond", PAIR_GAP, ["a", "b", "c", "d"]),
+        ("label_thick", "flow", "bezier", "solid", "normal", "pair", PAIR_GAP, None),
     ]
 
     cases: List[AlbumCase] = []
@@ -989,7 +1083,7 @@ def _short_edge_cases() -> List[AlbumCase]:
 
     cases: List[AlbumCase] = []
     for case_id, edge_overrides, gv_overrides in specs:
-        graph, positions = _pair_graph(_pair_positions(gap=50.0), ["A", "B"])
+        graph, positions = _pair_graph(_pair_positions(gap=SHORT_GAP), ["A", "B"])
         _set_all_edge_styles(graph, _base_edge_style(**edge_overrides))
         if case_id == "short_label":
             _set_all_edge_labels(graph, ["x"])
@@ -1365,7 +1459,11 @@ def _cluster_combos_cases() -> List[AlbumCase]:
 
     cases: List[AlbumCase] = []
 
-    base_positions = torch.tensor([[-80.0, 0.0], [80.0, 0.0], [0.0, -150.0]], dtype=torch.float32)
+    base_positions = _scale_position_tensor(
+        [(-80.0, 0.0), (80.0, 0.0), (0.0, -150.0)],
+        CLUSTER_X_SCALE,
+        CLUSTER_Y_SCALE,
+    )
 
     graph = DaguaGraph()
     _apply_graph_style(graph)
@@ -1575,8 +1673,10 @@ def _cluster_combos_cases() -> List[AlbumCase]:
     graph.add_edge("C", "D")
     graph.add_cluster("left", ["A", "B"], label="Blue")
     graph.add_cluster("right", ["C", "D"], label="Green")
-    side_positions = torch.tensor(
-        [[-220.0, 20.0], [-80.0, 20.0], [80.0, 20.0], [220.0, 20.0]], dtype=torch.float32
+    side_positions = _scale_position_tensor(
+        [(-220.0, 20.0), (-80.0, 20.0), (80.0, 20.0), (220.0, 20.0)],
+        CLUSTER_X_SCALE,
+        CLUSTER_Y_SCALE,
     )
     _set_all_node_styles(graph, _base_node_style())
     _set_all_edge_styles(graph, _base_edge_style())
@@ -1610,8 +1710,10 @@ def _cluster_combos_cases() -> List[AlbumCase]:
     graph.add_cluster("outer", ["A", "B", "C", "D"], label="Outer")
     graph.add_cluster("middle", ["B", "C", "D"], label="Middle", parent="outer")
     graph.add_cluster("inner", ["C", "D"], label="Inner", parent="middle")
-    stack_positions = torch.tensor(
-        [[0.0, 180.0], [0.0, 60.0], [0.0, -50.0], [0.0, -160.0]], dtype=torch.float32
+    stack_positions = _scale_position_tensor(
+        [(0.0, 180.0), (0.0, 60.0), (0.0, -50.0), (0.0, -160.0)],
+        CLUSTER_X_SCALE,
+        CLUSTER_Y_SCALE,
     )
     _set_all_node_styles(graph, _base_node_style())
     _set_all_edge_styles(graph, _base_edge_style())
@@ -2057,7 +2159,10 @@ def _real_world_pattern_cases() -> List[AlbumCase]:
     cases: List[AlbumCase] = []
 
     graph, positions = _chain_graph(
-        5, ["Input", "Parse", "Transform", "Validate", "Output"], direction="LR", spacing=130.0
+        5,
+        ["Input", "Parse", "Transform", "Validate", "Output"],
+        direction="LR",
+        spacing=130.0 * REAL_WORLD_X_SCALE,
     )
     _set_all_node_styles(graph, _base_node_style(shape="roundrect"))
     graph.edge_styles = [
@@ -2102,8 +2207,10 @@ def _real_world_pattern_cases() -> List[AlbumCase]:
         ("processing", "done", "finish"),
     ]:
         graph.add_edge(source, target, label=label)
-    positions = torch.tensor(
-        [[-300.0, 0.0], [-150.0, 0.0], [0.0, 0.0], [160.0, 0.0], [320.0, 0.0]], dtype=torch.float32
+    positions = _scale_position_tensor(
+        [(-300.0, 0.0), (-150.0, 0.0), (0.0, 0.0), (160.0, 0.0), (320.0, 0.0)],
+        REAL_WORLD_X_SCALE,
+        REAL_WORLD_Y_SCALE,
     )
     graph.node_styles = [
         _base_node_style(
@@ -2150,9 +2257,10 @@ def _real_world_pattern_cases() -> List[AlbumCase]:
         ("error", "end", "error"),
     ]:
         graph.add_edge(source, target, label=label)
-    positions = torch.tensor(
-        [[0.0, 220.0], [0.0, 80.0], [-140.0, -40.0], [140.0, -40.0], [0.0, -180.0]],
-        dtype=torch.float32,
+    positions = _scale_position_tensor(
+        [(0.0, 220.0), (0.0, 80.0), (-140.0, -40.0), (140.0, -40.0), (0.0, -180.0)],
+        REAL_WORLD_X_SCALE,
+        REAL_WORLD_Y_SCALE,
     )
     graph.node_styles = [
         _base_node_style(shape="roundrect"),
@@ -2188,18 +2296,19 @@ def _real_world_pattern_cases() -> List[AlbumCase]:
         graph.add_node(f"n{index}", label=label)
     for edge in [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (0, 3), (2, 5), (1, 7), (7, 5)]:
         graph.add_edge(f"n{edge[0]}", f"n{edge[1]}")
-    positions = torch.tensor(
+    positions = _scale_position_tensor(
         [
-            [0.0, 300.0],
-            [0.0, 210.0],
-            [0.0, 120.0],
-            [0.0, 20.0],
-            [0.0, -80.0],
-            [0.0, -170.0],
-            [0.0, -260.0],
-            [180.0, -40.0],
+            (0.0, 300.0),
+            (0.0, 210.0),
+            (0.0, 120.0),
+            (0.0, 20.0),
+            (0.0, -80.0),
+            (0.0, -170.0),
+            (0.0, -260.0),
+            (180.0, -40.0),
         ],
-        dtype=torch.float32,
+        REAL_WORLD_X_SCALE,
+        REAL_WORLD_Y_SCALE,
     )
     graph.node_styles = [_base_node_style(font_size=10.0) for _ in range(8)]
     graph.edge_styles = [_base_edge_style() for _ in range(10)]
@@ -2227,17 +2336,18 @@ def _real_world_pattern_cases() -> List[AlbumCase]:
         graph.add_node(f"n{index}", label=label)
     for edge in [(0, 1), (0, 2), (0, 3), (1, 4), (2, 5), (3, 6), (4, 2)]:
         graph.add_edge(f"n{edge[0]}", f"n{edge[1]}")
-    positions = torch.tensor(
+    positions = _scale_position_tensor(
         [
-            [0.0, 240.0],
-            [-220.0, 80.0],
-            [0.0, 80.0],
-            [220.0, 80.0],
-            [-220.0, -100.0],
-            [0.0, -100.0],
-            [220.0, -100.0],
+            (0.0, 240.0),
+            (-220.0, 80.0),
+            (0.0, 80.0),
+            (220.0, 80.0),
+            (-220.0, -100.0),
+            (0.0, -100.0),
+            (220.0, -100.0),
         ],
-        dtype=torch.float32,
+        REAL_WORLD_X_SCALE,
+        REAL_WORLD_Y_SCALE,
     )
     graph.node_styles = [_base_node_style(shape="roundrect") for _ in range(7)]
     graph.edge_styles = [
@@ -2275,9 +2385,10 @@ def _real_world_pattern_cases() -> List[AlbumCase]:
         graph.add_node(f"n{index}", label=label)
     for edge in [(0, 1), (1, 2), (1, 3), (4, 0), (2, 5), (5, 3)]:
         graph.add_edge(f"n{edge[0]}", f"n{edge[1]}")
-    positions = torch.tensor(
-        [[-250.0, 0.0], [-90.0, 0.0], [90.0, 80.0], [90.0, -80.0], [-410.0, 0.0], [250.0, 0.0]],
-        dtype=torch.float32,
+    positions = _scale_position_tensor(
+        [(-250.0, 0.0), (-90.0, 0.0), (90.0, 80.0), (90.0, -80.0), (-410.0, 0.0), (250.0, 0.0)],
+        REAL_WORLD_X_SCALE,
+        REAL_WORLD_Y_SCALE,
     )
     graph.node_styles = [_base_node_style(shape=shape) for shape in shapes]
     graph.edge_styles = [_base_edge_style(routing="ortho") for _ in range(6)]
@@ -2448,7 +2559,7 @@ def _kitchen_sink_cases() -> List[AlbumCase]:
         )
     )
 
-    graph, positions = _pair_graph(_pair_positions(gap=50.0), ["Near", "Nearer"])
+    graph, positions = _pair_graph(_pair_positions(gap=SHORT_GAP), ["Near", "Nearer"])
     graph.edge_styles = [_base_edge_style(style="dashed", tail_arrow="dot")]
     _set_all_edge_labels(graph, ["flow"])
     cases.append(
@@ -2472,8 +2583,10 @@ def _kitchen_sink_cases() -> List[AlbumCase]:
     graph.add_edge("C", "D", label="ship")
     graph.add_cluster("outer", ["A", "B", "C", "D"], label="Outer")
     graph.add_cluster("inner", ["B", "C"], label="Inner", parent="outer")
-    stack_positions = torch.tensor(
-        [[0.0, 180.0], [0.0, 60.0], [0.0, -50.0], [0.0, -160.0]], dtype=torch.float32
+    stack_positions = _scale_position_tensor(
+        [(0.0, 180.0), (0.0, 60.0), (0.0, -50.0), (0.0, -160.0)],
+        CLUSTER_X_SCALE,
+        CLUSTER_Y_SCALE,
     )
     graph.node_styles = [
         _base_node_style(shape="roundrect"),
@@ -2885,7 +2998,11 @@ def _cat14_cluster_combos_cases() -> List[AlbumCase]:
 
     cases: List[AlbumCase] = []
 
-    base_positions = {"a": (-140.0, 30.0), "b": (0.0, 30.0), "c": (140.0, -120.0)}
+    base_positions = _scale_position_dict(
+        {"a": (-140.0, 30.0), "b": (0.0, 30.0), "c": (140.0, -120.0)},
+        CLUSTER_X_SCALE,
+        CLUSTER_Y_SCALE,
+    )
     graph, positions = _cluster_graph_custom(
         [
             ("a", "One", {"stroke_dash": "dashed"}),
@@ -2955,12 +3072,16 @@ def _cat14_cluster_combos_cases() -> List[AlbumCase]:
         )
     )
 
-    nested_positions = {
-        "entry": (0.0, 170.0),
-        "left": (-120.0, 20.0),
-        "right": (120.0, 20.0),
-        "exit": (0.0, -140.0),
-    }
+    nested_positions = _scale_position_dict(
+        {
+            "entry": (0.0, 170.0),
+            "left": (-120.0, 20.0),
+            "right": (120.0, 20.0),
+            "exit": (0.0, -140.0),
+        },
+        CLUSTER_X_SCALE,
+        CLUSTER_Y_SCALE,
+    )
     graph, positions = _cluster_graph_custom(
         [
             ("entry", "Entry", {"shape": "roundrect"}),
@@ -2997,12 +3118,16 @@ def _cat14_cluster_combos_cases() -> List[AlbumCase]:
         )
     )
 
-    thick_positions = {
-        "inlet": (-180.0, 110.0),
-        "alpha": (-60.0, 0.0),
-        "beta": (60.0, 0.0),
-        "outlet": (180.0, -110.0),
-    }
+    thick_positions = _scale_position_dict(
+        {
+            "inlet": (-180.0, 110.0),
+            "alpha": (-60.0, 0.0),
+            "beta": (60.0, 0.0),
+            "outlet": (180.0, -110.0),
+        },
+        CLUSTER_X_SCALE,
+        CLUSTER_Y_SCALE,
+    )
     graph, positions = _cluster_graph_custom(
         [
             ("inlet", "In", {}),
@@ -3041,12 +3166,16 @@ def _cat14_cluster_combos_cases() -> List[AlbumCase]:
         ],
         [("top", "left"), ("top", "right"), ("left", "bottom"), ("right", "bottom")],
         [("middle", "Middle", ["left", "right"], {})],
-        positions={
-            "top": (0.0, 170.0),
-            "left": (-120.0, 20.0),
-            "right": (120.0, 20.0),
-            "bottom": (0.0, -140.0),
-        },
+        positions=_scale_position_dict(
+            {
+                "top": (0.0, 170.0),
+                "left": (-120.0, 20.0),
+                "right": (120.0, 20.0),
+                "bottom": (0.0, -140.0),
+            },
+            CLUSTER_X_SCALE,
+            CLUSTER_Y_SCALE,
+        ),
     )
     _set_all_edge_styles(graph, _base_edge_style(routing="ortho"))
     cases.append(
@@ -3061,7 +3190,11 @@ def _cat14_cluster_combos_cases() -> List[AlbumCase]:
         )
     )
 
-    long_positions = {"a": (-150.0, 40.0), "b": (10.0, 40.0), "c": (160.0, -120.0)}
+    long_positions = _scale_position_dict(
+        {"a": (-150.0, 40.0), "b": (10.0, 40.0), "c": (160.0, -120.0)},
+        0.75,
+        CLUSTER_Y_SCALE,
+    )
     graph, positions = _cluster_graph_custom(
         [
             ("a", "Very Long Ingest Step", {}),
@@ -3106,12 +3239,16 @@ def _cat14_cluster_combos_cases() -> List[AlbumCase]:
         )
     )
 
-    twin_positions = {
-        "a1": (-260.0, 20.0),
-        "a2": (-120.0, 20.0),
-        "b1": (120.0, 20.0),
-        "b2": (260.0, 20.0),
-    }
+    twin_positions = _scale_position_dict(
+        {
+            "a1": (-260.0, 20.0),
+            "a2": (-120.0, 20.0),
+            "b1": (120.0, 20.0),
+            "b2": (260.0, 20.0),
+        },
+        CLUSTER_X_SCALE,
+        CLUSTER_Y_SCALE,
+    )
     graph, positions = _cluster_graph_custom(
         [("a1", "A1", {}), ("a2", "A2", {}), ("b1", "B1", {}), ("b2", "B2", {})],
         [("a1", "a2"), ("b1", "b2")],
@@ -3140,12 +3277,16 @@ def _cat14_cluster_combos_cases() -> List[AlbumCase]:
         )
     )
 
-    stack_positions = {
-        "outer": (0.0, 180.0),
-        "middle": (0.0, 70.0),
-        "inner": (0.0, -40.0),
-        "leaf": (0.0, -150.0),
-    }
+    stack_positions = _scale_position_dict(
+        {
+            "outer": (0.0, 180.0),
+            "middle": (0.0, 70.0),
+            "inner": (0.0, -40.0),
+            "leaf": (0.0, -150.0),
+        },
+        CLUSTER_X_SCALE,
+        CLUSTER_Y_SCALE,
+    )
     graph, positions = _cluster_graph_custom(
         [
             ("outer", "Outer", {}),
@@ -3723,7 +3864,7 @@ def _cat19_real_world_patterns_cases() -> List[AlbumCase]:
         5,
         ["Input", "Parse", "Transform", "Validate", "Output"],
         direction="LR",
-        spacing=150.0,
+        spacing=150.0 * REAL_WORLD_X_SCALE,
     )
     _set_all_node_styles(graph, _base_node_style(shape="roundrect"))
     graph.edge_styles = [
@@ -3757,9 +3898,10 @@ def _cat19_real_world_patterns_cases() -> List[AlbumCase]:
         )
     )
 
-    state_positions = torch.tensor(
-        [[-340.0, 0.0], [-180.0, 0.0], [-20.0, 0.0], [160.0, 0.0], [340.0, 0.0]],
-        dtype=torch.float32,
+    state_positions = _scale_position_tensor(
+        [(-340.0, 0.0), (-180.0, 0.0), (-20.0, 0.0), (160.0, 0.0), (340.0, 0.0)],
+        REAL_WORLD_X_SCALE,
+        REAL_WORLD_Y_SCALE,
     )
     graph = DaguaGraph(direction="LR")
     _apply_graph_style(graph)
@@ -3811,9 +3953,10 @@ def _cat19_real_world_patterns_cases() -> List[AlbumCase]:
         )
     )
 
-    flow_positions = torch.tensor(
-        [[0.0, 240.0], [0.0, 100.0], [-150.0, -40.0], [150.0, -40.0], [0.0, -210.0]],
-        dtype=torch.float32,
+    flow_positions = _scale_position_tensor(
+        [(0.0, 240.0), (0.0, 100.0), (-150.0, -40.0), (150.0, -40.0), (0.0, -210.0)],
+        REAL_WORLD_X_SCALE,
+        REAL_WORLD_Y_SCALE,
     )
     graph = DaguaGraph(direction="TB")
     _apply_graph_style(graph)
@@ -3870,18 +4013,19 @@ def _cat19_real_world_patterns_cases() -> List[AlbumCase]:
         )
     )
 
-    neural_positions = torch.tensor(
+    neural_positions = _scale_position_tensor(
         [
-            [0.0, 320.0],
-            [0.0, 230.0],
-            [0.0, 140.0],
-            [0.0, 50.0],
-            [0.0, -40.0],
-            [0.0, -130.0],
-            [0.0, -220.0],
-            [0.0, -310.0],
+            (0.0, 320.0),
+            (0.0, 230.0),
+            (0.0, 140.0),
+            (0.0, 50.0),
+            (0.0, -40.0),
+            (0.0, -130.0),
+            (0.0, -220.0),
+            (0.0, -310.0),
         ],
-        dtype=torch.float32,
+        REAL_WORLD_X_SCALE,
+        REAL_WORLD_Y_SCALE,
     )
     graph = DaguaGraph(direction="TB")
     _apply_graph_style(graph)
@@ -3915,17 +4059,18 @@ def _cat19_real_world_patterns_cases() -> List[AlbumCase]:
         )
     )
 
-    org_positions = torch.tensor(
+    org_positions = _scale_position_tensor(
         [
-            [0.0, 250.0],
-            [-240.0, 80.0],
-            [0.0, 80.0],
-            [240.0, 80.0],
-            [-240.0, -100.0],
-            [0.0, -100.0],
-            [240.0, -100.0],
+            (0.0, 250.0),
+            (-240.0, 80.0),
+            (0.0, 80.0),
+            (240.0, 80.0),
+            (-240.0, -100.0),
+            (0.0, -100.0),
+            (240.0, -100.0),
         ],
-        dtype=torch.float32,
+        REAL_WORLD_X_SCALE,
+        REAL_WORLD_Y_SCALE,
     )
     graph = DaguaGraph(direction="TB")
     _apply_graph_style(graph)
@@ -3983,16 +4128,17 @@ def _cat19_real_world_patterns_cases() -> List[AlbumCase]:
         )
     )
 
-    data_positions = torch.tensor(
+    data_positions = _scale_position_tensor(
         [
-            [-320.0, 40.0],
-            [-130.0, 40.0],
-            [40.0, 120.0],
-            [40.0, -40.0],
-            [220.0, 40.0],
-            [390.0, 40.0],
+            (-320.0, 40.0),
+            (-130.0, 40.0),
+            (40.0, 120.0),
+            (40.0, -40.0),
+            (220.0, 40.0),
+            (390.0, 40.0),
         ],
-        dtype=torch.float32,
+        REAL_WORLD_X_SCALE,
+        REAL_WORLD_Y_SCALE,
     )
     graph = DaguaGraph(direction="LR")
     _apply_graph_style(graph)
@@ -4236,7 +4382,7 @@ def _cat20_kitchen_sink_cases() -> List[AlbumCase]:
         )
     )
 
-    graph, positions = _pair_graph(_pair_positions(gap=55.0), ["Near", "Nearer"])
+    graph, positions = _pair_graph(_pair_positions(gap=SHORT_GAP), ["Near", "Nearer"])
     graph.edge_styles = [_base_edge_style(style="dashed", tail_arrow="dot")]
     _set_all_edge_labels(graph, ["flow"])
     cases.append(
@@ -4254,12 +4400,16 @@ def _cat20_kitchen_sink_cases() -> List[AlbumCase]:
         )
     )
 
-    nested_positions = {
-        "a": (0.0, 180.0),
-        "b": (-100.0, 50.0),
-        "c": (100.0, 50.0),
-        "d": (0.0, -120.0),
-    }
+    nested_positions = _scale_position_dict(
+        {
+            "a": (0.0, 180.0),
+            "b": (-100.0, 50.0),
+            "c": (100.0, 50.0),
+            "d": (0.0, -120.0),
+        },
+        CLUSTER_X_SCALE,
+        CLUSTER_Y_SCALE,
+    )
     graph, positions = _cluster_graph_custom(
         [
             ("a", "Outer", {"shape": "roundrect"}),
