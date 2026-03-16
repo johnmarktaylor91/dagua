@@ -12,6 +12,7 @@ from dagua.layout import layout
 from dagua.layout.engine import (
     _auto_layout_steps,
     _edge_batch_size,
+    _estimate_gpu_memory,
     _layout_inner,
     _make_amortized_loss,
     _overlap_interval,
@@ -245,6 +246,54 @@ def test_edge_batch_size_cuda_uses_available_vram(
 
     assert _edge_batch_size(100_000, config) == 0
     assert _edge_batch_size(500_000, config) == 300_000
+
+
+def test_gpu_memory_estimate_no_phantom_edges() -> None:
+    """Streamed edges should not be counted as a full resident GPU edge tensor."""
+    num_nodes = 50_000_000
+    num_edges = 75_000_000
+
+    resident = _estimate_gpu_memory(num_nodes, num_edges, per_loss_bw=True, edges_on_cpu=False)
+    streamed = _estimate_gpu_memory(
+        num_nodes,
+        num_edges,
+        per_loss_bw=True,
+        edges_on_cpu=True,
+        edge_batch=5_000_000,
+    )
+
+    assert streamed < resident - 500_000_000
+
+
+def test_memory_strategy_selects_plb_not_hybrid_at_50m(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto strategy should keep large streamed-edge layouts on GPU via per-loss backward."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+
+    class _FakeBudget:
+        """Minimal VRAM budget stub for deterministic strategy selection tests."""
+
+        def remaining(self) -> int:
+            """Return the mocked usable VRAM budget in bytes."""
+            return 11 * 1024**3
+
+    config = LayoutConfig(device="cuda")
+
+    monkeypatch.setattr(engine_module, "VRAMBudget", _FakeBudget)
+
+    use_plb, use_checkpointing, use_hybrid = _resolve_memory_strategy(
+        50_000_000,
+        75_000_000,
+        "cuda",
+        config,
+        edges_on_cpu=True,
+        edge_batch=5_000_000,
+    )
+
+    assert use_plb is True
+    assert use_checkpointing is False
+    assert use_hybrid is False
 
 
 def test_auto_steps_scaling() -> None:
