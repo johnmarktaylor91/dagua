@@ -16,11 +16,12 @@ from dagua.render import render
 from dagua.render.mpl import (
     _build_node_patch,
     _cluster_linestyle,
+    _compute_display_scale,
     _draw_clusters,
     _draw_edge_marker,
     _edge_linestyle,
+    _marker_data_size,
     _node_linestyle,
-    _points_to_data_units,
     _star_vertices,
 )
 from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
@@ -298,6 +299,7 @@ def test_circle_arrow_marker_is_hollow() -> None:
 
     fig, ax = plt.subplots()
     style = EdgeStyle(arrow="circle", arrow_fill="filled")
+    fig.canvas.draw()
     _draw_edge_marker(
         ax=ax,
         point=(0.0, 0.0),
@@ -309,11 +311,12 @@ def test_circle_arrow_marker_is_hollow() -> None:
     assert len(ax.patches) == 1
     facecolor = ax.patches[0].get_facecolor()
     edgecolor = ax.patches[0].get_edgecolor()
+    expected_scale = _compute_display_scale(ax)
     plt.close(fig)
 
     assert facecolor[-1] == pytest.approx(0.0)
     assert edgecolor[-1] == pytest.approx(1.0)
-    assert ax.patches[0].radius == pytest.approx(0.85 * style.arrow_width)
+    assert ax.patches[0].radius == pytest.approx(0.85 * style.arrow_width * expected_scale)
 
 
 def test_dot_arrow_marker_uses_larger_graphviz_like_radius() -> None:
@@ -321,6 +324,7 @@ def test_dot_arrow_marker_uses_larger_graphviz_like_radius() -> None:
 
     fig, ax = plt.subplots()
     style = EdgeStyle(arrow="dot", arrow_fill="filled", arrow_width=10.0)
+    fig.canvas.draw()
     _draw_edge_marker(
         ax=ax,
         point=(0.0, 0.0),
@@ -330,9 +334,10 @@ def test_dot_arrow_marker_uses_larger_graphviz_like_radius() -> None:
     )
 
     assert len(ax.patches) == 1
+    expected_scale = _compute_display_scale(ax)
     plt.close(fig)
 
-    assert ax.patches[0].radius == pytest.approx(0.55 * style.arrow_width)
+    assert ax.patches[0].radius == pytest.approx(0.55 * style.arrow_width * expected_scale)
 
 
 def test_tee_arrow_marker_uses_visible_bar_offset_and_width() -> None:
@@ -342,6 +347,7 @@ def test_tee_arrow_marker_uses_visible_bar_offset_and_width() -> None:
 
     fig, ax = plt.subplots()
     style = EdgeStyle(arrow="tee", width=1.2, arrow_width=10.0, arrow_length=14.0)
+    fig.canvas.draw()
     _draw_edge_marker(
         ax=ax,
         point=(0.0, 0.0),
@@ -356,10 +362,13 @@ def test_tee_arrow_marker_uses_visible_bar_offset_and_width() -> None:
     vertices = ax.patches[0].get_xy()[:-1]
     x_span = float(vertices[:, 0].max() - vertices[:, 0].min())
     y_span = float(vertices[:, 1].max() - vertices[:, 1].min())
+    expected_scale = _compute_display_scale(ax)
 
-    assert float(np.mean(vertices[:, 1])) == pytest.approx(style.arrow_length / 4.0)
-    assert x_span == pytest.approx(style.arrow_width * 2.6)
-    assert y_span == pytest.approx((style.arrow_length / 6.0) * 2.0)
+    assert float(np.mean(vertices[:, 1])) == pytest.approx(
+        (style.arrow_length / 4.0) * expected_scale
+    )
+    assert x_span == pytest.approx(style.arrow_width * 2.6 * expected_scale)
+    assert y_span == pytest.approx((style.arrow_length / 6.0) * 2.0 * expected_scale)
     assert ax.patches[0].get_linewidth() == pytest.approx(0.5)
     plt.close(fig)
 
@@ -391,7 +400,7 @@ def test_shape_size_adjustments_match_graphviz_calibration() -> None:
     assert triangle_w / triangle_h == pytest.approx(3.2)
     assert star_w == pytest.approx(star_h)
     assert diamond_w / diamond_h == pytest.approx(1.4)
-    assert ellipse_w == pytest.approx(48.0)
+    assert ellipse_w == pytest.approx(36.8)
     assert ellipse_h == pytest.approx(18.0)
     assert hexagon_w / hexagon_h == pytest.approx(1.3)
     assert pentagon_w / pentagon_h == pytest.approx(1.2)
@@ -412,6 +421,7 @@ def test_vee_arrow_marker_uses_wider_graphviz_spread() -> None:
 
     fig, ax = plt.subplots()
     style = EdgeStyle(arrow="vee", width=1.1, arrow_width=10.0, arrow_length=14.0)
+    fig.canvas.draw()
     _draw_edge_marker(
         ax=ax,
         point=(0.0, 0.0),
@@ -421,7 +431,10 @@ def test_vee_arrow_marker_uses_wider_graphviz_spread() -> None:
     )
 
     vertices = ax.patches[0].get_xy()
-    assert abs(float(vertices[0][0] - vertices[2][0])) == pytest.approx(style.arrow_width * 1.4)
+    expected_scale = _compute_display_scale(ax)
+    assert abs(float(vertices[0][0] - vertices[2][0])) == pytest.approx(
+        style.arrow_width * 1.4 * expected_scale
+    )
     assert ax.patches[0].get_linewidth() == pytest.approx(max(style.width * 1.8, 2.0))
     plt.close(fig)
 
@@ -431,6 +444,7 @@ def test_crow_arrow_marker_uses_wider_graphviz_spread() -> None:
 
     fig, ax = plt.subplots()
     style = EdgeStyle(arrow="crow", width=1.1, arrow_width=10.0, arrow_length=14.0)
+    fig.canvas.draw()
     _draw_edge_marker(
         ax=ax,
         point=(0.0, 0.0),
@@ -440,8 +454,11 @@ def test_crow_arrow_marker_uses_wider_graphviz_spread() -> None:
     )
 
     assert len(ax.lines) == 3
+    expected_scale = _compute_display_scale(ax)
     outer_x_offsets = sorted(abs(float(line.get_xdata()[1])) for line in ax.lines[1:])
-    assert outer_x_offsets == pytest.approx([style.arrow_width * 0.85, style.arrow_width * 0.85])
+    assert outer_x_offsets == pytest.approx(
+        [style.arrow_width * 0.85 * expected_scale, style.arrow_width * 0.85 * expected_scale]
+    )
     for line in ax.lines:
         assert line.get_linewidth() == pytest.approx(max(style.width * 1.8, 2.0))
     plt.close(fig)
@@ -489,7 +506,7 @@ def test_filled_arrow_marker_uses_opaque_edge_color() -> None:
 
 
 def test_normal_arrow_renders_polygon_with_arrow_scale() -> None:
-    """Normal arrow markers should render as a filled Polygon, not FancyArrowPatch."""
+    """Normal arrow markers should render as a filled Polygon."""
 
     fig, ax = plt.subplots()
     style = EdgeStyle(arrow="normal", arrow_width=12.0, arrow_length=18.0, arrow_scale=32.0)
@@ -556,10 +573,38 @@ def test_straight_routing_has_arrowhead() -> None:
     plt.close(fig)
 
 
-def test_open_marker_preserves_legacy_data_sizing_without_arrow_scale() -> None:
-    """Manual markers should keep legacy data-space sizing when arrow_scale is absent."""
+def test_arrowhead_size_scales_with_graph_range() -> None:
+    """Arrowheads should be the same visual size regardless of data range."""
 
-    fig, ax = plt.subplots()
+    style = EdgeStyle(arrow_length=10.0, arrow_width=7.0)
+
+    fig1, ax1 = plt.subplots(figsize=(6.0, 6.0))
+    ax1.set_xlim(0.0, 100.0)
+    ax1.set_ylim(0.0, 100.0)
+    ax1.set_aspect("equal")
+    fig1.canvas.draw()
+    len1, wid1 = _marker_data_size(ax1, style, style.arrow_length, style.arrow_width)
+    plt.close(fig1)
+
+    fig2, ax2 = plt.subplots(figsize=(6.0, 6.0))
+    ax2.set_xlim(0.0, 10000.0)
+    ax2.set_ylim(0.0, 10000.0)
+    ax2.set_aspect("equal")
+    fig2.canvas.draw()
+    len2, wid2 = _marker_data_size(ax2, style, style.arrow_length, style.arrow_width)
+    plt.close(fig2)
+
+    ratio = len2 / len1
+    assert 90.0 < ratio < 110.0, f"Expected ~100x ratio, got {ratio:.1f}x"
+    assert wid2 / wid1 == pytest.approx(ratio)
+
+
+def test_open_marker_uses_unified_display_scaled_dimensions() -> None:
+    """Manual polygon markers should always convert point sizing into data units."""
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-50.0, 50.0)
+    ax.set_ylim(-50.0, 50.0)
     style = EdgeStyle(arrow="open", arrow_width=12.0, arrow_length=18.0)
     _draw_edge_marker(
         ax=ax,
@@ -572,36 +617,10 @@ def test_open_marker_preserves_legacy_data_sizing_without_arrow_scale() -> None:
     assert len(ax.patches) == 1
     vertices = ax.patches[0].get_xy()
     base_center = vertices[1:3].mean(axis=0)
+    expected_scale = _compute_display_scale(ax)
     plt.close(fig)
 
-    assert float(base_center[1]) == pytest.approx(style.arrow_length)
-    assert abs(float(vertices[1][0] - vertices[2][0])) == pytest.approx(style.arrow_width * 1.2)
-
-
-def test_open_marker_uses_display_scaled_dimensions_with_arrow_scale() -> None:
-    """Manual polygon markers should convert display sizing back into data units."""
-
-    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
-    ax.set_xlim(-50.0, 50.0)
-    ax.set_ylim(-50.0, 50.0)
-    style = EdgeStyle(arrow="open", arrow_width=12.0, arrow_length=18.0, arrow_scale=24.0)
-    _draw_edge_marker(
-        ax=ax,
-        point=(0.0, 0.0),
-        direction=(0.0, -1.0),
-        marker="open",
-        style=style,
-    )
-
-    assert len(ax.patches) == 1
-    vertices = ax.patches[0].get_xy()
-    base_center = vertices[1:3].mean(axis=0)
-    expected_scale = (
-        _points_to_data_units(ax, 1.0, "x") + _points_to_data_units(ax, 1.0, "y")
-    ) / 2.0
-    plt.close(fig)
-
-    assert float(base_center[1]) == pytest.approx(style.arrow_scale * expected_scale)
+    assert float(base_center[1]) == pytest.approx(style.arrow_length * expected_scale)
     assert abs(float(vertices[1][0] - vertices[2][0])) == pytest.approx(
         style.arrow_width * expected_scale * 1.2
     )
@@ -612,6 +631,7 @@ def test_normal_arrow_marker_uses_wider_graphviz_base() -> None:
 
     fig, ax = plt.subplots()
     style = EdgeStyle(arrow="normal", arrow_width=10.0, arrow_length=14.0)
+    fig.canvas.draw()
     _draw_edge_marker(
         ax=ax,
         point=(0.0, 0.0),
@@ -622,7 +642,10 @@ def test_normal_arrow_marker_uses_wider_graphviz_base() -> None:
 
     assert len(ax.patches) == 1
     vertices = ax.patches[0].get_xy()
-    assert abs(float(vertices[1][0] - vertices[2][0])) == pytest.approx(style.arrow_width * 1.2)
+    expected_scale = _compute_display_scale(ax)
+    assert abs(float(vertices[1][0] - vertices[2][0])) == pytest.approx(
+        style.arrow_width * 1.2 * expected_scale
+    )
     plt.close(fig)
 
 
@@ -738,4 +761,53 @@ def test_cluster_labels_expand_bbox_using_measured_width(
     assert ax.patches[0].get_width() == pytest.approx(80.0)
     assert len(ax.texts) == 1
     assert ax.texts[0].get_clip_on() is False
+    plt.close(fig)
+
+
+def test_cluster_offsets_and_corner_radius_use_display_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cluster label offsets and corner radius should be converted from points."""
+
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_cluster(
+        "outer",
+        ["a"],
+        label="Cluster",
+        style=ClusterStyle(
+            padding=0.0,
+            corner_radius=6.0,
+            label_offset=(8.0, 20.0),
+        ),
+    )
+
+    monkeypatch.setattr(mpl_renderer, "measure_text", lambda *args, **kwargs: (40.0, 12.0))
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-50.0, 50.0)
+    ax.set_ylim(-50.0, 50.0)
+    fig.canvas.draw()
+
+    _draw_clusters(
+        ax=ax,
+        graph=graph,
+        pos=np.array([[0.0, 0.0]], dtype=float),
+        sizes=np.array([[20.0, 20.0]], dtype=float),
+    )
+
+    assert len(ax.patches) == 1
+    assert len(ax.texts) == 1
+    display_scale = _compute_display_scale(ax)
+    label_width = 40.0
+    label_height = 12.0
+    initial_x_min = -10.0
+    initial_x_max = 10.0
+    expanded_width = max(label_width + (8.0 * display_scale * 2.0), initial_x_max - initial_x_min)
+    x_min = -expanded_width / 2.0
+    y_max = 10.0 + max(14.0, label_height)
+
+    assert ax.texts[0].get_position()[0] == pytest.approx(x_min + (8.0 * display_scale))
+    assert ax.texts[0].get_position()[1] == pytest.approx(y_max - (20.0 * display_scale))
+    assert ax.patches[0].get_boxstyle().rounding_size == pytest.approx(6.0 * display_scale)
     plt.close(fig)
