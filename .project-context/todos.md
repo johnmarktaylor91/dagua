@@ -15,6 +15,7 @@
 - [ ] Fused edge loss CUDA kernel: compute all 5 edge losses in one pass (one pos gather, one backward). Eliminates 4x redundant memory reads per step.
 - [ ] V-cycle pipeline parallelism: overlap disk reload + CPU prep with GPU optimization using double-buffering and CUDA streams.
 - [ ] GPU-accelerated coarsening: vectorize the Python matching loop in coarsen_once with segmented radix sort.
+- [ ] Fix fanout_distribution_loss hub count mismatch properly. At 200M+ scale, boundary_offsets and hub_degrees_v have different lengths due to edge batching filtering. Current fix truncates to min_len (band-aid). Root cause: edge batch may not include all edges for every hub, causing inconsistent hub filtering between the angle computation and the degree computation paths.
 - [ ] Investigate 325s unexplained overhead in Phase 1 at 50M. Coarsening only took 65s but Phase 1 total was 390s. The ~325s gap is likely CSR argsort (75M edges) + frontier BFS (7070 waves) + layer propagation + offload logic. Add fine-grained timing to isolate. Could the CUDA CSR kernel help here? Is the frontier BFS still doing unnecessary work?
 
 ## Completed (recent)
