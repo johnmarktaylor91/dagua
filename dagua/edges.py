@@ -25,6 +25,231 @@ class BezierCurve:
     p1: Tuple[float, float]
 
 
+def _compute_self_loop_curve(
+    sx: float,
+    sy: float,
+    sw: float,
+    sh: float,
+    direction: str,
+) -> BezierCurve:
+    """Compute a direction-aware self-loop curve.
+
+    Parameters
+    ----------
+    sx : float
+        X coordinate of the node center.
+    sy : float
+        Y coordinate of the node center.
+    sw : float
+        Node width.
+    sh : float
+        Node height.
+    direction : str
+        Layout direction. Supported values are ``"TB"``, ``"BT"``, ``"LR"``,
+        and ``"RL"``.
+
+    Returns
+    -------
+    BezierCurve
+        Closed teardrop loop placed on the outward-facing side for the
+        requested layout direction.
+    """
+    loop_r = max(sw, sh) * 0.6
+
+    if direction == "BT":
+        anchor_y = sy - sh / 2
+        return BezierCurve(
+            p0=(sx, anchor_y),
+            cp1=(sx - loop_r, anchor_y - loop_r),
+            cp2=(sx + loop_r, anchor_y - loop_r),
+            p1=(sx, anchor_y),
+        )
+
+    if direction == "LR":
+        anchor_x = sx - sw / 2
+        return BezierCurve(
+            p0=(anchor_x, sy),
+            cp1=(anchor_x - loop_r, sy + loop_r),
+            cp2=(anchor_x - loop_r, sy - loop_r),
+            p1=(anchor_x, sy),
+        )
+
+    if direction == "RL":
+        anchor_x = sx + sw / 2
+        return BezierCurve(
+            p0=(anchor_x, sy),
+            cp1=(anchor_x + loop_r, sy + loop_r),
+            cp2=(anchor_x + loop_r, sy - loop_r),
+            p1=(anchor_x, sy),
+        )
+
+    anchor_y = sy + sh / 2
+    return BezierCurve(
+        p0=(sx, anchor_y),
+        cp1=(sx - loop_r, anchor_y + loop_r),
+        cp2=(sx + loop_r, anchor_y + loop_r),
+        p1=(sx, anchor_y),
+    )
+
+
+def _compute_directional_ports(
+    sx: float,
+    sy: float,
+    sw: float,
+    sh: float,
+    tx: float,
+    ty: float,
+    tw: float,
+    th: float,
+    direction: str,
+    port_style: str,
+    out_rank: int,
+    out_total: int,
+    in_rank: int,
+    in_total: int,
+) -> Tuple[float, float, float, float]:
+    """Compute direction-aware source and target port positions.
+
+    Parameters
+    ----------
+    sx : float
+        Source center X coordinate.
+    sy : float
+        Source center Y coordinate.
+    sw : float
+        Source node width.
+    sh : float
+        Source node height.
+    tx : float
+        Target center X coordinate.
+    ty : float
+        Target center Y coordinate.
+    tw : float
+        Target node width.
+    th : float
+        Target node height.
+    direction : str
+        Layout direction.
+    port_style : str
+        Either ``"distributed"`` or ``"center"``.
+    out_rank : int
+        Source-side port rank for this edge.
+    out_total : int
+        Total number of outgoing ports on the source.
+    in_rank : int
+        Target-side port rank for this edge.
+    in_total : int
+        Total number of incoming ports on the target.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Source port X/Y followed by target port X/Y.
+    """
+    if direction in ("TB", "BT"):
+        if direction == "TB":
+            src_port_y = sy - sh / 2
+            tgt_port_y = ty + th / 2
+        else:
+            src_port_y = sy + sh / 2
+            tgt_port_y = ty - th / 2
+
+        if port_style == "center":
+            src_port_x = sx
+            tgt_port_x = tx
+        else:
+            src_port_x = sx - sw / 2 + sw * (out_rank + 0.5) / out_total
+            tgt_port_x = tx - tw / 2 + tw * (in_rank + 0.5) / in_total
+
+        return src_port_x, src_port_y, tgt_port_x, tgt_port_y
+
+    if direction in ("LR", "RL"):
+        if direction == "LR":
+            src_port_x = sx + sw / 2
+            tgt_port_x = tx - tw / 2
+        else:
+            src_port_x = sx - sw / 2
+            tgt_port_x = tx + tw / 2
+
+        if port_style == "center":
+            src_port_y = sy
+            tgt_port_y = ty
+        else:
+            src_port_y = sy - sh / 2 + sh * (out_rank + 0.5) / out_total
+            tgt_port_y = ty - th / 2 + th * (in_rank + 0.5) / in_total
+
+        return src_port_x, src_port_y, tgt_port_x, tgt_port_y
+
+    src_port_x = sx
+    src_port_y = sy - sh / 2 if ty < sy else sy + sh / 2
+    tgt_port_x = tx
+    tgt_port_y = ty + th / 2 if sy > ty else ty - th / 2
+    return src_port_x, src_port_y, tgt_port_x, tgt_port_y
+
+
+def _reverse_back_edge_ports(
+    sx: float,
+    sy: float,
+    sw: float,
+    sh: float,
+    tx: float,
+    ty: float,
+    tw: float,
+    th: float,
+    direction: str,
+    src_port_x: float,
+    src_port_y: float,
+    tgt_port_x: float,
+    tgt_port_y: float,
+) -> Tuple[float, float, float, float]:
+    """Reverse port sides when an edge runs against the layout direction.
+
+    Parameters
+    ----------
+    sx : float
+        Source center X coordinate.
+    sy : float
+        Source center Y coordinate.
+    sw : float
+        Source node width.
+    sh : float
+        Source node height.
+    tx : float
+        Target center X coordinate.
+    ty : float
+        Target center Y coordinate.
+    tw : float
+        Target node width.
+    th : float
+        Target node height.
+    direction : str
+        Layout direction.
+    src_port_x : float
+        Current source port X coordinate.
+    src_port_y : float
+        Current source port Y coordinate.
+    tgt_port_x : float
+        Current target port X coordinate.
+    tgt_port_y : float
+        Current target port Y coordinate.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Possibly adjusted source and target port coordinates.
+    """
+    if direction == "TB" and tgt_port_y > src_port_y:
+        return src_port_x, sy + sh / 2, tgt_port_x, ty - th / 2
+    if direction == "BT" and tgt_port_y < src_port_y:
+        return src_port_x, sy - sh / 2, tgt_port_x, ty + th / 2
+    if direction == "LR" and tgt_port_x < src_port_x:
+        return sx - sw / 2, src_port_y, tx + tw / 2, tgt_port_y
+    if direction == "RL" and tgt_port_x > src_port_x:
+        return sx + sw / 2, src_port_y, tx - tw / 2, tgt_port_y
+
+    return src_port_x, src_port_y, tgt_port_x, tgt_port_y
+
+
 def route_edges(
     positions: torch.Tensor,
     edge_index: torch.Tensor,
@@ -32,17 +257,25 @@ def route_edges(
     direction: str = "TB",
     graph: Optional[Any] = None,
 ) -> List[BezierCurve]:
-    """Compute bezier control points for all edges.
+    """Compute routed edge curves for a laid-out graph.
 
-    Args:
-        positions: [N, 2] node positions
-        edge_index: [2, E] source-target pairs
-        node_sizes: [N, 2] node widths and heights
-        direction: layout direction for port placement
-        graph: optional DaguaGraph for per-edge routing and per-node shape
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node centers with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Source and target indices with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node widths and heights with shape ``[N, 2]``.
+    direction : str, default="TB"
+        Layout direction used to choose the node side for edge ports.
+    graph : Any | None, default=None
+        Optional graph object providing per-edge styles and per-node shapes.
 
-    Returns:
-        List of BezierCurve objects, one per edge.
+    Returns
+    -------
+    list[BezierCurve]
+        One routed curve per edge.
     """
     if edge_index.numel() == 0:
         return []
@@ -123,17 +356,9 @@ def route_edges(
         sw, sh = widths[s], heights[s]
         tw, th = widths[t], heights[t]
 
-        # Self-loop: teardrop curve above the node
+        # Self-loops stay on the outward-facing side for the layout direction.
         if s == t:
-            loop_r = max(sw, sh) * 0.6
-            top_y = sy - sh / 2
-            curve = BezierCurve(
-                p0=(sx, top_y),
-                cp1=(sx - loop_r, top_y - loop_r),
-                cp2=(sx + loop_r, top_y - loop_r),
-                p1=(sx, top_y),
-            )
-            curves.append(curve)
+            curves.append(_compute_self_loop_curve(sx, sy, sw, sh, direction))
             continue
 
         # Per-edge style
@@ -145,19 +370,38 @@ def route_edges(
         out_rank, out_total = out_order.get(e_idx, (0, 1))
         in_rank, in_total = in_order.get(e_idx, (0, 1))
 
-        # Port style: "center" puts all ports at node center
         port_style = edge_style.port_style if edge_style is not None else "distributed"
-        if port_style == "center":
-            src_port_x = sx
-            src_port_y = sy + sh / 2
-            tgt_port_x = tx
-            tgt_port_y = ty - th / 2
-        else:
-            # Distributed: spread across node edge
-            src_port_x = sx - sw / 2 + sw * (out_rank + 0.5) / out_total
-            src_port_y = sy + sh / 2  # bottom
-            tgt_port_x = tx - tw / 2 + tw * (in_rank + 0.5) / in_total
-            tgt_port_y = ty - th / 2  # top
+        src_port_x, src_port_y, tgt_port_x, tgt_port_y = _compute_directional_ports(
+            sx,
+            sy,
+            sw,
+            sh,
+            tx,
+            ty,
+            tw,
+            th,
+            direction,
+            port_style,
+            out_rank,
+            out_total,
+            in_rank,
+            in_total,
+        )
+        src_port_x, src_port_y, tgt_port_x, tgt_port_y = _reverse_back_edge_ports(
+            sx,
+            sy,
+            sw,
+            sh,
+            tx,
+            ty,
+            tw,
+            th,
+            direction,
+            src_port_x,
+            src_port_y,
+            tgt_port_x,
+            tgt_port_y,
+        )
 
         # Shape-aware port adjustment
         if node_shapes is not None:
