@@ -1582,8 +1582,11 @@ def fanout_distribution_loss(
 
     two_pi = 2.0 * 3.141592653589793
     angles_positive = angles % two_pi
+    # Use float64 for the sort key to avoid precision loss at large hub counts.
+    # float32 loses integer precision above 2^24 = 16M, causing hub ID
+    # collisions in the sort key and interleaved hub IDs after sorting.
     big = two_pi + 1.0
-    sort_key = child_flat_idx.float() * big + angles_positive
+    sort_key = child_flat_idx.double() * big + angles_positive.double()
     sorted_order = sort_key.argsort()
     sorted_angles = angles_positive[sorted_order]
     sorted_hub_id = child_flat_idx[sorted_order]
@@ -1602,10 +1605,23 @@ def fanout_distribution_loss(
     ideal_gaps = two_pi / hub_degrees_v.float()
     ideal_expanded_consecutive = ideal_gaps[sorted_hub_id[:-1][same_hub]]
     gap_deviation_consecutive = (consecutive_gaps[same_hub] - ideal_expanded_consecutive) ** 2
+    # Defensive: if unique_consecutive found fewer groups than expected
+    # (rare edge case from float precision or degenerate angles), align sizes
+    if wrap_gaps.shape[0] != ideal_gaps.shape[0]:
+        min_len = min(wrap_gaps.shape[0], ideal_gaps.shape[0])
+        wrap_gaps = wrap_gaps[:min_len]
+        ideal_gaps = ideal_gaps[:min_len]
     gap_deviation_wrap = (wrap_gaps - ideal_gaps) ** 2
 
     per_hub_gap_loss = torch.zeros(num_hubs, device=device)
     per_hub_gap_loss.scatter_add_(0, sorted_hub_id[:-1][same_hub], gap_deviation_consecutive)
+    # Align gap_deviation_wrap with per_hub_gap_loss if sizes differ
+    if gap_deviation_wrap.shape[0] < num_hubs:
+        padded = torch.zeros(num_hubs, device=device)
+        padded[: gap_deviation_wrap.shape[0]] = gap_deviation_wrap
+        gap_deviation_wrap = padded
+    elif gap_deviation_wrap.shape[0] > num_hubs:
+        gap_deviation_wrap = gap_deviation_wrap[:num_hubs]
     per_hub_gap_loss = per_hub_gap_loss + gap_deviation_wrap
     per_hub_mean = per_hub_gap_loss / hub_degrees_v.float()
     return per_hub_mean.mean()
