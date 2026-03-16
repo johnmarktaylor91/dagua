@@ -54,7 +54,7 @@ EDGE_COLOR = "#5F6C7B"
 CLUSTER_FILL = "#EAF1F8"
 CLUSTER_STROKE = "#A9B8C7"
 GRAPHVIZ_MIN_NODE_WIDTH = 40.0
-GRAPHVIZ_PAIR_VERTICAL_GAP = 110.0
+GRAPHVIZ_PAIR_VERTICAL_GAP = 80.0
 PANEL_CONTENT_MARGIN = 36
 CONTENT_CROP_PADDING = 12
 
@@ -308,14 +308,16 @@ def _base_cluster_style(**overrides: Any) -> ClusterStyle:
     style = ClusterStyle(
         fill=CLUSTER_FILL,
         stroke=CLUSTER_STROKE,
-        stroke_width=float(GRAPHVIZ_MATCH_DEFAULTS["stroke_width"]),
+        stroke_width=2.0,
         stroke_dash="solid",
         corner_radius=10.0,
-        padding=24.0,
-        font_size=11.0,
+        padding=30.0,
+        label_position="top-left",
+        font_size=12.0,
         font_weight="bold",
         font_color="#374151",
-        opacity=0.5,
+        opacity=0.85,
+        label_offset=(10.0, 8.0),
     )
     for field_name, value in overrides.items():
         setattr(style, field_name, value)
@@ -1716,7 +1718,6 @@ def _cluster_cases() -> List[AlbumCase]:
     graph.cluster_styles["group"] = _base_cluster_style(
         fill=WHITE,
         stroke_dash="dashed",
-        opacity=0.1,
     )
     cases.append(
         AlbumCase(
