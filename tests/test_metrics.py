@@ -1,8 +1,12 @@
 """Tests for aesthetic quality metrics."""
 
+from __future__ import annotations
+
 import pytest
 import torch
 
+from dagua import layout
+from dagua.graph import DaguaGraph
 from dagua.metrics import (
     compute_all_metrics,
     compute_dag_fraction,
@@ -10,7 +14,32 @@ from dagua.metrics import (
     compute_x_alignment,
     count_crossings,
     count_overlaps,
+    evaluate,
+    layout_similarity,
+    sampled_stress,
 )
+
+
+def _make_small_graph() -> DaguaGraph:
+    """Create a small connected graph for metric tests.
+
+    Returns
+    -------
+    DaguaGraph
+        Graph with four nodes and precomputed node sizes.
+    """
+    graph = DaguaGraph.from_edge_list(
+        [
+            ("a", "b"),
+            ("b", "c"),
+            ("a", "d"),
+            ("d", "c"),
+        ]
+    )
+    graph.compute_node_sizes()
+    if graph.node_sizes is None:
+        raise AssertionError("node sizes should be available after compute_node_sizes()")
+    return graph
 
 
 class TestCountCrossings:
@@ -137,3 +166,62 @@ class TestDirectionAwareMetrics:
         m_tb = compute_all_metrics(pos, ei, ns, direction="TB")
         assert m_bt["dag_fraction"] == 1.0
         assert m_tb["dag_fraction"] == 0.0
+
+
+class TestLayoutSimilarityAndEvaluate:
+    def test_layout_similarity_identical(self) -> None:
+        """Identical layouts should have near-perfect similarity.
+
+        Returns
+        -------
+        None
+            This test asserts on the returned similarity metrics.
+        """
+        torch.manual_seed(0)
+        pos = torch.randn(20, 2)
+        sim = layout_similarity(pos, pos)
+        assert sim["procrustes_similarity"] > 0.99
+
+    def test_layout_similarity_different(self) -> None:
+        """Independent random layouts should have low Procrustes similarity.
+
+        Returns
+        -------
+        None
+            This test asserts on the returned similarity metrics.
+        """
+        torch.manual_seed(0)
+        pos_a = torch.randn(20, 2)
+        torch.manual_seed(1)
+        pos_b = torch.randn(20, 2)
+        sim = layout_similarity(pos_a, pos_b)
+        assert sim["procrustes_similarity"] < 0.5
+
+    def test_evaluate_convenience(self) -> None:
+        """The graph-level evaluate helper should return standard metric keys.
+
+        Returns
+        -------
+        None
+            This test asserts on the convenience wrapper output.
+        """
+        graph = _make_small_graph()
+        pos = layout(graph)
+        metrics = evaluate(graph, pos)
+        assert "dag_consistency" in metrics
+        assert "composite_score" in metrics
+
+    def test_stress_is_scale_invariant(self) -> None:
+        """Sampled stress should be unchanged by uniform scaling.
+
+        Returns
+        -------
+        None
+            This test asserts on normalized sampled stress values.
+        """
+        torch.manual_seed(0)
+        pos = torch.randn(50, 2)
+        edge_index = torch.randint(0, 50, (2, 100))
+        stress_a = sampled_stress(pos, edge_index, 50)["sampled_stress"]
+        stress_b = sampled_stress(pos * 100.0, edge_index, 50)["sampled_stress"]
+        assert abs(stress_a - stress_b) < 0.01 * max(stress_a, stress_b, 1e-6)
