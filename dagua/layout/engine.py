@@ -861,16 +861,16 @@ def _layout_inner(
                 sampled_ctx=_active_sampled_ctx(p),
             )
 
-        repel_is_heavy = True
         if n > config.repel_amortize_threshold and config.repel_amortize_interval > 1:
             repel_fn = _make_amortized_loss(
                 repel_fn,
                 skip_every=config.repel_amortize_interval,
             )
-            # Amortized losses must not go through gradient checkpointing —
-            # skip steps return torch.tensor(0.0) which changes saved tensor count.
-            repel_is_heavy = False
-        loss_fns.append(("w_repel", repel_fn, repel_is_heavy, True))
+        # Repulsion is always heavy (needs hybrid routing for large graphs).
+        # Amortized skip steps return 0.0 which is safe for hybrid but NOT
+        # for checkpointing (variable saved tensor count). Checkpointing is
+        # handled in _compute_loss_term by checking the actual loss value.
+        loss_fns.append(("w_repel", repel_fn, True, True))
 
     if config.w_overlap > 0:
         loss_fns.append(
@@ -1618,11 +1618,17 @@ def _compute_loss_term(
         return _hybrid_loss(pos, weight, loss_fn, cpu_node_sizes, cpu_layer_index)
 
     if use_checkpointing and is_heavy:
+        try:
 
-        def _checkpointed_fn(p):
-            return weight * loss_fn(p, node_sizes, layer_index)
+            def _checkpointed_fn(p):
+                return weight * loss_fn(p, node_sizes, layer_index)
 
-        return torch_checkpoint(_checkpointed_fn, pos, use_reentrant=False)
+            return torch_checkpoint(_checkpointed_fn, pos, use_reentrant=False)
+        except Exception:
+            # Amortized losses return 0.0 on skip steps, which changes
+            # saved tensor count and breaks checkpointing. Fall through
+            # to standard path.
+            pass
 
     # Standard
     return weight * loss_fn(pos, node_sizes, layer_index)
