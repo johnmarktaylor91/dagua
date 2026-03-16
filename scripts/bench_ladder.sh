@@ -12,7 +12,12 @@ SIZES=(10 20 50 100 200 500 1000 2000 5000 10000 20000 50000 100000 200000 50000
 for SIZE in "${SIZES[@]}"; do
     echo "=== $SIZE nodes ==="
     START=$(date +%s.%N)
-    if stdbuf -oL python scripts/bench_large.py "$SIZE" 2>&1 | stdbuf -oL tee /tmp/dagua_ladder_${SIZE}.log; then
+    # Clean layout artifacts but keep graph inputs for fast resume
+    CKPT="/mnt/locker/jt3295/dagua_bench_large/$SIZE"
+    rm -f "$CKPT/positions.pt" "$CKPT/coarsest_positions.pt" "$CKPT/layout_meta.json" 2>/dev/null
+    rm -rf "$CKPT/hierarchy" 2>/dev/null
+    rm -f "$CKPT/layer_assignments.pt" 2>/dev/null
+    if stdbuf -oL python scripts/bench_large.py "$SIZE" --resume 2>&1 | stdbuf -oL tee /tmp/dagua_ladder_${SIZE}.log; then
         END=$(date +%s.%N)
         ELAPSED=$(echo "$END - $START" | bc)
         echo "$SIZE,$ELAPSED,ok" >> "$RESULTS"
