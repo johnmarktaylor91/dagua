@@ -172,7 +172,7 @@ def _graphviz_match_node_style_defaults() -> Dict[str, Any]:
         "padding": GRAPHVIZ_MATCH_DEFAULTS["padding"],
         "font_size": GRAPHVIZ_MATCH_DEFAULTS["font_size"],
         "min_width": GRAPHVIZ_MIN_NODE_WIDTH,
-        "min_height": GRAPHVIZ_MATCH_DEFAULTS.get("min_height", 28.0),
+        "min_height": GRAPHVIZ_MATCH_DEFAULTS["min_height"],
     }
 
 
@@ -190,7 +190,7 @@ def _graphviz_match_edge_style_defaults() -> Dict[str, Any]:
         "opacity": GRAPHVIZ_MATCH_DEFAULTS["edge_opacity"],
         "arrow_length": GRAPHVIZ_MATCH_DEFAULTS["arrow_length"],
         "arrow_width": GRAPHVIZ_MATCH_DEFAULTS["arrow_width"],
-        "arrow_scale": GRAPHVIZ_MATCH_DEFAULTS.get("arrow_scale", 22.0),
+        "arrow_scale": GRAPHVIZ_MATCH_DEFAULTS["arrow_scale"],
     }
 
 
