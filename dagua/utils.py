@@ -488,6 +488,10 @@ def _compute_node_size_cached(
     elif shape == "circle":
         r = max(w, h)
         w = h = r
+    elif shape == "ellipse":
+        # Graphviz sizes ellipses so the text bounding box is inscribed within
+        # the ellipse. This makes the ellipse noticeably wider than the text.
+        w = max(w * 1.35, w + 16.0)
     elif shape == "hexagon":
         # Graphviz hexagons are wider than their text box to keep the side
         # facets from crowding labels.

@@ -684,7 +684,7 @@ GRAPHVIZ_STRICT_THEME = Theme(
             corner_radius=0.0,
             opacity=1.0,
             base_color="#000000",
-            min_width=54.0,
+            min_width=48.0,  # ellipse width factor now provides the extra width
             min_height=36.0,
         ),
         "input": NodeStyle(
@@ -766,7 +766,7 @@ GRAPHVIZ_THEME = Theme(
             corner_radius=0.0,
             opacity=1.0,
             base_color="#333333",
-            min_width=50.0,  # DEPARTURE: slightly smaller minimum for denser screens
+            min_width=44.0,  # DEPARTURE: ellipse width factor now provides extra width
             min_height=34.0,  # DEPARTURE: scaled down with the reduced minimum width
         ),
         "input": NodeStyle(
