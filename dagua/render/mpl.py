@@ -1463,7 +1463,7 @@ def _draw_edge_marker(
             edgecolor=color,
             linewidth=style.width,
             joinstyle="round",
-            zorder=1.2,
+            zorder=3,
         )
         ax.add_patch(polygon)
         return
@@ -1483,7 +1483,7 @@ def _draw_edge_marker(
             linewidth=max(style.width * 1.8, 2.0),
             joinstyle="round",
             capstyle="round",
-            zorder=1.2,
+            zorder=3,
         )
         ax.add_patch(polygon)
         return
@@ -1502,7 +1502,7 @@ def _draw_edge_marker(
             edgecolor=color,
             linewidth=style.width,
             joinstyle="round",
-            zorder=1.2,
+            zorder=3,
         )
         ax.add_patch(polygon)
         return
@@ -1519,7 +1519,7 @@ def _draw_edge_marker(
             facecolor=color if is_filled else "none",
             edgecolor=color,
             linewidth=style.width,
-            zorder=1.2,
+            zorder=3,
         )
         ax.add_patch(circle_patch)
         return
@@ -1541,7 +1541,7 @@ def _draw_edge_marker(
             edgecolor=color,
             linewidth=style.width,
             joinstyle="round",
-            zorder=1.2,
+            zorder=3,
         )
         ax.add_patch(diamond)
         return
@@ -1576,7 +1576,7 @@ def _draw_edge_marker(
             facecolor=color,
             edgecolor=color,
             linewidth=0.5,
-            zorder=1.2,
+            zorder=3,
         )
         ax.add_patch(polygon)
         return
@@ -1595,7 +1595,7 @@ def _draw_edge_marker(
                     [tip_y, end_y],
                     color=color,
                     linewidth=max(style.width * 1.8, 2.0),
-                    zorder=1.2,
+                    zorder=3,
                 )
             )
 
