@@ -928,6 +928,49 @@ def _points_to_data_units(ax: Any, points: float, axis: str) -> float:
     return pixels / scale
 
 
+def _marker_data_size(
+    ax: Any,
+    style: Any,
+    length: float,
+    width: float,
+) -> Tuple[float, float]:
+    """Resolve manual marker dimensions in data units.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes receiving the marker patch.
+    style : Any
+        Edge style object that may expose ``arrow_scale``.
+    length : float
+        Legacy marker length in data units.
+    width : float
+        Legacy marker width in data units.
+
+    Returns
+    -------
+    tuple[float, float]
+        Marker ``(length, width)`` in data units.
+
+    Notes
+    -----
+    FancyArrowPatch markers already size themselves in display space via
+    ``mutation_scale``. Polygon and circle markers need an explicit conversion
+    when ``arrow_scale`` is provided so album renders stay visually comparable
+    after composition scaling, while ``arrow_scale=None`` preserves the legacy
+    data-space sizing.
+    """
+
+    arrow_scale = getattr(style, "arrow_scale", None)
+    if arrow_scale is None:
+        return length, width
+
+    data_per_point_x = _points_to_data_units(ax, 1.0, "x")
+    data_per_point_y = _points_to_data_units(ax, 1.0, "y")
+    data_per_point = (data_per_point_x + data_per_point_y) / 2.0
+    return float(arrow_scale) * data_per_point, width * data_per_point
+
+
 def _label_anchor_x(align: str, x: float, w: float, pad_x: float, line_width: float) -> float:
     """Resolve the x anchor for a label line.
 
@@ -1373,6 +1416,8 @@ def _draw_edge_marker(
     px, py = -uy, ux
     length = float(style.arrow_length)
     width = float(style.arrow_width)
+    display_scale = getattr(style, "arrow_scale", None)
+    manual_length, manual_width = _marker_data_size(ax, style, length, width)
     # Graphviz-style calibration expects arrowheads to read slightly heavier
     # than the edge stroke, so keep marker fill/outline fully opaque.
     color = to_rgba(style.arrow_color or style.color, 1.0)
@@ -1388,7 +1433,7 @@ def _draw_edge_marker(
             (base_x, base_y),
             (tip_x, tip_y),
             arrowstyle=f"{arrowstyle},head_length={head_length:.3f},head_width=1.0",
-            mutation_scale=width,
+            mutation_scale=float(display_scale) if display_scale is not None else width,
             linewidth=style.width,
             edgecolor=color,
             facecolor=color if filled else "none",
@@ -1402,13 +1447,13 @@ def _draw_edge_marker(
         return
 
     if marker == "open":
-        base_x = tip_x - ux * length
-        base_y = tip_y - uy * length
+        base_x = tip_x - ux * manual_length
+        base_y = tip_y - uy * manual_length
         polygon = Polygon(
             [
                 (tip_x, tip_y),
-                (base_x + px * width / 2, base_y + py * width / 2),
-                (base_x - px * width / 2, base_y - py * width / 2),
+                (base_x + px * manual_width / 2, base_y + py * manual_width / 2),
+                (base_x - px * manual_width / 2, base_y - py * manual_width / 2),
             ],
             closed=True,
             facecolor="none",
@@ -1421,7 +1466,7 @@ def _draw_edge_marker(
         return
 
     if marker in {"dot", "circle"}:
-        radius = width * (0.32 if marker == "dot" else 0.5)
+        radius = manual_width * (0.32 if marker == "dot" else 0.5)
         center_x = tip_x - ux * radius
         center_y = tip_y - uy * radius
         circle = Circle(
@@ -1436,16 +1481,16 @@ def _draw_edge_marker(
         return
 
     if marker == "diamond":
-        mid_x = tip_x - ux * (length / 2)
-        mid_y = tip_y - uy * (length / 2)
-        back_x = tip_x - ux * length
-        back_y = tip_y - uy * length
+        mid_x = tip_x - ux * (manual_length / 2)
+        mid_y = tip_y - uy * (manual_length / 2)
+        back_x = tip_x - ux * manual_length
+        back_y = tip_y - uy * manual_length
         diamond = Polygon(
             [
                 (tip_x, tip_y),
-                (mid_x + px * width / 2, mid_y + py * width / 2),
+                (mid_x + px * manual_width / 2, mid_y + py * manual_width / 2),
                 (back_x, back_y),
-                (mid_x - px * width / 2, mid_y - py * width / 2),
+                (mid_x - px * manual_width / 2, mid_y - py * manual_width / 2),
             ],
             closed=True,
             facecolor=color if filled else "none",
@@ -1462,8 +1507,8 @@ def _draw_edge_marker(
         bar_y = tip_y - uy * (style.width / 2)
         ax.add_line(
             Line2D(
-                [bar_x + px * width / 2, bar_x - px * width / 2],
-                [bar_y + py * width / 2, bar_y - py * width / 2],
+                [bar_x + px * manual_width / 2, bar_x - px * manual_width / 2],
+                [bar_y + py * manual_width / 2, bar_y - py * manual_width / 2],
                 color=color,
                 linewidth=style.width,
                 zorder=1.2,
@@ -1472,12 +1517,12 @@ def _draw_edge_marker(
         return
 
     if marker == "crow":
-        back_x = tip_x - ux * length
-        back_y = tip_y - uy * length
+        back_x = tip_x - ux * manual_length
+        back_y = tip_y - uy * manual_length
         for end_x, end_y in (
             (back_x, back_y),
-            (back_x + px * width / 2, back_y + py * width / 2),
-            (back_x - px * width / 2, back_y - py * width / 2),
+            (back_x + px * manual_width / 2, back_y + py * manual_width / 2),
+            (back_x - px * manual_width / 2, back_y - py * manual_width / 2),
         ):
             ax.add_line(
                 Line2D(
