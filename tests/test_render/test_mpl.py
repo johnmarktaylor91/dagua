@@ -9,6 +9,7 @@ from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
 from dagua.render import render
+from dagua.styles import EdgeStyle, NodeStyle
 
 
 class TestRenderBasic:
@@ -161,3 +162,82 @@ class TestRenderEdgeLabels:
         out = str(tmp_path / "labeled.png")
         render(g, pos, output=out)
         assert Path(out).exists()
+
+
+class TestRenderStyleFlexibility:
+    @pytest.mark.slow
+    def test_dotted_border_renders(self, fast_config, tmp_path):
+        g = DaguaGraph.from_edge_list([("a", "b")])
+        g.node_styles[0] = NodeStyle(stroke_dash="dotted")
+        pos = layout(g, fast_config)
+        out = str(tmp_path / "dotted.png")
+        render(g, pos, output=out)
+        assert Path(out).exists()
+        assert Path(out).stat().st_size > 0
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "triangle",
+            "hexagon",
+            "pentagon",
+            "octagon",
+            "star",
+            "parallelogram",
+            "trapezoid",
+            "cylinder",
+        ],
+    )
+    def test_new_shapes_render(self, fast_config, tmp_path, shape):
+        g = DaguaGraph.from_edge_list([("a", "b")])
+        g.node_styles[0] = NodeStyle(shape=shape, shadow=True, gradient="linear")
+        pos = layout(g, fast_config)
+        out = str(tmp_path / f"{shape}.png")
+        render(g, pos, output=out)
+        assert Path(out).exists()
+        assert Path(out).stat().st_size > 0
+
+    @pytest.mark.slow
+    def test_rich_label_renders(self, fast_config, tmp_path):
+        g = DaguaGraph.from_edge_list([("a", "b")])
+        g.node_labels[0] = "**Bold** and *italic*\n{color:#FF0000}red{/color} `mono`"
+        g.node_styles[0] = NodeStyle(
+            label_format="rich",
+            text_align="left",
+            text_valign="top",
+            text_outline=True,
+        )
+        pos = layout(g, fast_config)
+        out = str(tmp_path / "rich.png")
+        render(g, pos, output=out)
+        assert Path(out).exists()
+        assert Path(out).stat().st_size > 0
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize(
+        "arrow",
+        ["normal", "vee", "dot", "diamond", "tee", "crow", "circle", "open", "none"],
+    )
+    def test_arrow_types_render(self, fast_config, tmp_path, arrow):
+        g = DaguaGraph.from_edge_list([("a", "b")])
+        g.edge_styles[0] = EdgeStyle(arrow=arrow, tail_arrow="diamond", arrow_fill="hollow")
+        pos = layout(g, fast_config)
+        out = str(tmp_path / f"{arrow}.png")
+        render(g, pos, output=out)
+        assert Path(out).exists()
+        assert Path(out).stat().st_size > 0
+
+    @pytest.mark.slow
+    def test_edge_label_font_fields_render(self, fast_config, tmp_path):
+        g = DaguaGraph.from_edge_list([("a", "b")])
+        g.edge_labels = ["edge label"]
+        g.edge_styles[0] = EdgeStyle(
+            label_font_family="DejaVu Sans",
+            label_font_weight="bold",
+        )
+        pos = layout(g, fast_config)
+        out = str(tmp_path / "edge-label-fonts.png")
+        render(g, pos, output=out)
+        assert Path(out).exists()
+        assert Path(out).stat().st_size > 0

@@ -169,19 +169,37 @@ def make_node_colors(base_hex: str) -> Tuple[str, str]:
 
 @dataclass
 class NodeStyle:
-    """Visual style for a node."""
+    """Visual style for a node.
 
-    shape: str = "roundrect"  # rect, roundrect, ellipse, diamond, circle
+    Notes
+    -----
+    Supported ``shape`` values are ``"rect"``, ``"roundrect"``, ``"ellipse"``,
+    ``"diamond"``, ``"circle"``, ``"triangle"``, ``"hexagon"``,
+    ``"parallelogram"``, ``"pentagon"``, ``"octagon"``, ``"star"``,
+    ``"cylinder"``, and ``"trapezoid"``.
+    """
+
+    shape: str = "roundrect"
     fill: str = ""  # empty = computed from base_color
     stroke: str = ""  # empty = computed from base_color
     stroke_width: float = 0.57
-    stroke_dash: str = "solid"  # solid, dashed
+    stroke_dash: str = "solid"  # solid, dashed, dotted
+    stroke_dash_pattern: Optional[Tuple[float, ...]] = None  # custom (on, off, ...)
+    border_opacity: float = 1.0
     font_family: str = ""  # empty = use FONT_FAMILY default
     font_size: float = 9.0
     font_color: str = NEAR_BLACK
+    text_align: str = "center"  # left, center, right
+    text_valign: str = "center"  # top, center, bottom
+    text_outline: bool = False
+    text_outline_color: str = "#FFFFFF"
+    text_outline_width: float = 2.0
     padding: Tuple[float, float] = (10.0, 6.0)  # horizontal, vertical
     corner_radius: float = 6.0
     opacity: float = 1.0
+    gradient: str = "none"  # none, linear, radial
+    gradient_color: str = ""  # empty = computed from fill
+    gradient_angle: float = 0.0  # degrees for linear gradients
     base_color: str = PALETTE["sky"]  # Wong palette color
     # New fields (Part 2)
     font_weight: str = "regular"  # Layout-affecting: changes text width
@@ -189,10 +207,12 @@ class NodeStyle:
     shadow: bool = False  # render-only decoration
     shadow_offset: Tuple[float, float] = (1.5, -1.5)  # render-only
     shadow_color: str = "#00000020"  # render-only
+    shadow_blur: float = 0.0
     min_width: Optional[float] = None  # Layout-affecting: floor on node width
     # New fields (Part 3) — overflow policy
     overflow_policy: str = "shrink_text"  # "shrink_text", "expand_node", "overflow"
     min_font_size: float = 5.0  # Floor for shrink_text policy
+    label_format: str = "plain"  # plain, rich
 
     def __post_init__(self):
         if not self.fill:
@@ -216,7 +236,10 @@ class EdgeStyle:
 
     color: str = "#6B7280"  # medium gray — visible but recedes behind nodes
     width: float = 1.2
-    arrow: str = "normal"  # normal, none
+    arrow: str = "normal"  # normal, vee, dot, diamond, tee, crow, circle, open, none
+    tail_arrow: str = "none"
+    arrow_fill: str = "filled"  # filled, hollow
+    arrow_color: str = ""  # empty = use edge color
     arrow_length: float = 10.0
     arrow_width: float = 7.0
     style: str = "solid"  # solid, dashed, dotted
@@ -226,6 +249,8 @@ class EdgeStyle:
     label_font_size: float = 7.0  # render-only
     label_font_color: str = NEAR_BLACK  # render-only
     label_background: str = WARM_WHITE  # render-only
+    label_font_family: str = ""  # empty = use default
+    label_font_weight: str = "regular"  # regular, bold
     # New fields (Part 3) — edge aesthetics
     label_position: float = 0.5  # Position along curve (0=start, 1=end)
     label_offset: float = 8.0  # Perpendicular distance from edge centerline

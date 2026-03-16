@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections import deque
 from functools import lru_cache
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
+
+RichMarkup = Dict[str, Any]
+RichSegment = Tuple[str, RichMarkup]
 
 
 class VRAMBudget:
@@ -97,10 +100,23 @@ def measure_text(
     font_size: float = 8.5,
     font_weight: str = "regular",
 ) -> Tuple[float, float]:
-    """Measure text dimensions using matplotlib TextPath.
+    """Measure plain-text dimensions.
 
-    If font_family is empty, uses the resolved best-available font.
-    font_weight affects text width (bold text is wider).
+    Parameters
+    ----------
+    text : str
+        Label text to measure.
+    font_family : str, default=""
+        Preferred font family. Empty strings use Dagua's resolved default font.
+    font_size : float, default=8.5
+        Font size in points.
+    font_weight : str, default="regular"
+        Font weight passed through to matplotlib font resolution.
+
+    Returns
+    -------
+    tuple[float, float]
+        Approximate text width and height in points.
     """
     if not font_family:
         try:
@@ -120,10 +136,21 @@ def measure_text_fallback(
     font_size: float = 8.5,
     font_weight: str = "regular",
 ) -> Tuple[float, float]:
-    """Fast proportional-font approximation (no matplotlib needed).
+    """Approximate plain-text dimensions without matplotlib.
 
-    For sans-serif fonts, average char width ≈ 0.52 × font_size.
-    Bold text is ~5% wider.
+    Parameters
+    ----------
+    text : str
+        Label text to measure.
+    font_size : float, default=8.5
+        Font size in points.
+    font_weight : str, default="regular"
+        Font weight hint. Bold text is treated as slightly wider.
+
+    Returns
+    -------
+    tuple[float, float]
+        Approximate text width and height in points.
     """
     lines = text.split("\n")
     max_chars = max(len(line) for line in lines) if lines else 1
@@ -142,7 +169,24 @@ def _measure_text_exact_cached(
     font_size: float,
     font_weight: str,
 ) -> Tuple[float, float]:
-    """Cached exact text measurement via matplotlib TextPath."""
+    """Measure plain text exactly with matplotlib.
+
+    Parameters
+    ----------
+    text : str
+        Label text to measure.
+    font_family : str
+        Font family name.
+    font_size : float
+        Font size in points.
+    font_weight : str
+        Font weight name.
+
+    Returns
+    -------
+    tuple[float, float]
+        Exact text width and height in points.
+    """
     from matplotlib.font_manager import FontProperties
     from matplotlib.textpath import TextPath
 
@@ -150,6 +194,131 @@ def _measure_text_exact_cached(
     tp = TextPath((0, 0), text, prop=fp)
     bbox = tp.get_extents()
     return max(bbox.width, 1.0), max(bbox.height, font_size)
+
+
+def parse_rich_markup(text: str) -> List[RichSegment]:
+    """Parse lightweight rich-text markup into styled segments.
+
+    Parameters
+    ----------
+    text : str
+        Input text supporting ``**bold**``, ``*italic*``, `` `mono` ``,
+        ``~~strike~~``, ``__underline__``, and ``{color:#RRGGBB}...{/color}``.
+
+    Returns
+    -------
+    list[tuple[str, dict[str, Any]]]
+        Ordered segments of literal text paired with formatting flags.
+    """
+    segments: List[RichSegment] = []
+    buffer: List[str] = []
+    current: RichMarkup = {
+        "bold": False,
+        "italic": False,
+        "mono": False,
+        "strike": False,
+        "underline": False,
+        "color": None,
+    }
+    color_stack: List[Any] = []
+    idx = 0
+
+    def flush_buffer() -> None:
+        """Persist the current text buffer as a segment."""
+        if not buffer:
+            return
+        text_value = "".join(buffer)
+        buffer.clear()
+        if segments and segments[-1][1] == current:
+            prev_text, prev_style = segments[-1]
+            segments[-1] = (prev_text + text_value, prev_style)
+            return
+        segments.append((text_value, dict(current)))
+
+    while idx < len(text):
+        if text.startswith("{/color}", idx):
+            flush_buffer()
+            current["color"] = color_stack.pop() if color_stack else None
+            idx += len("{/color}")
+            continue
+
+        if text.startswith("{color:#", idx):
+            end = text.find("}", idx)
+            if end != -1:
+                color_value = text[idx + len("{color:") : end]
+                flush_buffer()
+                color_stack.append(current.get("color"))
+                current["color"] = color_value
+                idx = end + 1
+                continue
+
+        token_map = [
+            ("**", "bold"),
+            ("~~", "strike"),
+            ("__", "underline"),
+            ("`", "mono"),
+            ("*", "italic"),
+        ]
+        matched = False
+        for token, key in token_map:
+            if text.startswith(token, idx):
+                flush_buffer()
+                current[key] = not bool(current[key])
+                idx += len(token)
+                matched = True
+                break
+        if matched:
+            continue
+
+        buffer.append(text[idx])
+        idx += 1
+
+    flush_buffer()
+    return segments or [("", dict(current))]
+
+
+def measure_rich_text(
+    label: str,
+    font_family: str,
+    font_size: float,
+) -> Tuple[float, float]:
+    """Measure the rendered size of a rich-format label.
+
+    Parameters
+    ----------
+    label : str
+        Rich-format label text.
+    font_family : str
+        Base font family for non-monospace segments.
+    font_size : float
+        Font size in points.
+
+    Returns
+    -------
+    tuple[float, float]
+        Estimated rich-text width and height in points.
+    """
+    from dagua.styles import FONT_FAMILY_MONO
+
+    segments = parse_rich_markup(label)
+    line_widths: List[float] = [0.0]
+    line_heights: List[float] = [max(font_size, 1.0)]
+
+    for segment_text, segment_style in segments:
+        parts = segment_text.split("\n")
+        for part_index, part in enumerate(parts):
+            if part:
+                segment_family = FONT_FAMILY_MONO[0] if segment_style["mono"] else font_family
+                segment_weight = "bold" if segment_style["bold"] else "regular"
+                width, height = measure_text(part, segment_family, font_size, segment_weight)
+                line_widths[-1] += width
+                line_heights[-1] = max(line_heights[-1], height)
+            if part_index != len(parts) - 1:
+                line_widths.append(0.0)
+                line_heights.append(max(font_size * 1.2, 1.0))
+
+    total_height = sum(max(height, font_size * 1.2) for height in line_heights)
+    return max(line_widths, default=1.0), max(total_height, font_size)
 
 
 # Node sizing constants
@@ -168,19 +337,35 @@ def compute_node_size(
     font_weight: str = "regular",
     overflow_policy: str = "shrink_text",
     min_font_size: float = 5.0,
+    label_format: str = "plain",
 ) -> Tuple[float, float, float]:
-    """Compute node bounding box from label text.
+    """Compute a node bounding box from its label.
 
-    Returns (width, height, effective_font_size).
+    Parameters
+    ----------
+    label : str
+        Node label text.
+    font_family : str, default=""
+        Preferred font family.
+    font_size : float, default=8.5
+        Font size in points.
+    padding : tuple[float, float], default=(8.0, 5.0)
+        Horizontal and vertical padding in points.
+    shape : str, default="roundrect"
+        Node shape identifier.
+    font_weight : str, default="regular"
+        Font weight used for plain-text labels.
+    overflow_policy : str, default="shrink_text"
+        Overflow policy for oversized labels.
+    min_font_size : float, default=5.0
+        Minimum font size for the shrink-to-fit policy.
+    label_format : str, default="plain"
+        Label format, either ``"plain"`` or ``"rich"``.
 
-    Enforces minimum dimensions and maximum aspect ratio per style guide.
-    Shape adjustments: diamonds need ~1.42x (text inscribed in rotated square),
-    circles need square bounding boxes.
-
-    Overflow policies:
-    - "shrink_text" (default): reduce font_size to fit MAX_LABEL_WIDTH
-    - "expand_node": no max-width capping, aspect ratio relaxed to 10.0
-    - "overflow": standard sizing, text may exceed node bounds
+    Returns
+    -------
+    tuple[float, float, float]
+        Node width, node height, and effective font size.
     """
     return _compute_node_size_cached(
         label,
@@ -191,6 +376,7 @@ def compute_node_size(
         font_weight,
         overflow_policy,
         min_font_size,
+        label_format,
     )
 
 
@@ -204,17 +390,51 @@ def _compute_node_size_cached(
     font_weight: str,
     overflow_policy: str,
     min_font_size: float,
+    label_format: str,
 ) -> Tuple[float, float, float]:
-    """Cached implementation for compute_node_size."""
+    """Cached implementation of :func:`compute_node_size`.
+
+    Parameters
+    ----------
+    label : str
+        Node label text.
+    font_family : str
+        Preferred font family.
+    font_size : float
+        Font size in points.
+    padding : tuple[float, float]
+        Horizontal and vertical padding in points.
+    shape : str
+        Node shape identifier.
+    font_weight : str
+        Font weight used for plain-text labels.
+    overflow_policy : str
+        Overflow policy for oversized labels.
+    min_font_size : float
+        Minimum font size when shrinking labels.
+    label_format : str
+        Label format, either ``"plain"`` or ``"rich"``.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        Node width, node height, and effective font size.
+    """
     effective_font_size = font_size
 
+    def measure_label(current_font_size: float) -> Tuple[float, float]:
+        """Measure the label using the requested formatting mode."""
+        if label_format == "rich":
+            return measure_rich_text(label, font_family, current_font_size)
+        return measure_text(label, font_family, current_font_size, font_weight)
+
     if overflow_policy == "shrink_text":
-        text_w, text_h = measure_text(label, font_family, font_size, font_weight)
+        text_w, text_h = measure_label(font_size)
         while text_w > MAX_LABEL_WIDTH and effective_font_size > min_font_size:
             effective_font_size -= 0.5
-            text_w, text_h = measure_text(label, font_family, effective_font_size, font_weight)
+            text_w, text_h = measure_label(effective_font_size)
     else:
-        text_w, text_h = measure_text(label, font_family, font_size, font_weight)
+        text_w, text_h = measure_label(font_size)
 
     w = text_w + padding[0] * 2
     h = text_h + padding[1] * 2
