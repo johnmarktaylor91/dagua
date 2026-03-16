@@ -46,6 +46,7 @@ Public documentation surfaces, roughly in the order a new user or reviewer is li
 - Benchmark artifact guide: `docs/BENCHMARK_ARTIFACT_GUIDE.md`
 - Benchmark failure taxonomy: `docs/BENCHMARK_FAILURE_TAXONOMY.md`
 - Layout vs render reference: `docs/LAYOUT_VS_RENDER_REFERENCE.md`
+- Render scaling reference: `docs/SCALING.md`
 - Command cheat sheet: `docs/COMMAND_CHEATSHEET.md`
 - Baseline playbook: `docs/BASELINE_PLAYBOOK.md`
 - Visual reset brief: `docs/VISUAL_RESET_BRIEF.md`
