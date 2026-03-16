@@ -201,15 +201,15 @@ class TestBuiltInThemes:
         """Graphviz-match defaults should expose the album override values."""
 
         assert GRAPHVIZ_MATCH_DEFAULTS == {
-            "stroke_width": 2.0,
-            "padding": (14.0, 10.0),
-            "font_size": 14.0,
-            "arrow_length": 20.0,
-            "arrow_width": 14.0,
-            "arrow_scale": 32.0,
-            "edge_width": 2.0,
+            "stroke_width": 1.4,
+            "padding": (10.0, 6.0),
+            "font_size": 12.0,
+            "arrow_length": 14.0,
+            "arrow_width": 10.0,
+            "arrow_scale": 22.0,
+            "edge_width": 1.4,
             "edge_opacity": 1.0,
-            "min_height": 36.0,
+            "min_height": 28.0,
         }
 
 
