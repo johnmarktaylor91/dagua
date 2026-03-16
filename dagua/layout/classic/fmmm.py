@@ -17,6 +17,7 @@ from dagua.layout.classic.fr import layout_fr
 _MIN_DISTANCE = 1.0e-3
 _COARSE_TARGET = 50
 _MAX_TREE_DEPTH = 10
+_COOLING_FACTOR = 0.9
 
 
 @dataclass
@@ -103,6 +104,24 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
     centered = positions - positions.mean(dim=0, keepdim=True)
     span = centered.abs().max().clamp(min=1.0)
     return centered * (extent / span)
+
+
+def _fr_ideal_length(area: float, num_nodes: int) -> float:
+    """Compute the FR ideal edge length for the current refinement level.
+
+    Parameters
+    ----------
+    area : float
+        Target drawing area for the current level.
+    num_nodes : int
+        Number of nodes on the current level.
+
+    Returns
+    -------
+    float
+        Ideal FR length ``k = sqrt(area / N)``.
+    """
+    return max((area / max(num_nodes, 1)) ** 0.5, _MIN_DISTANCE)
 
 
 def _unique_edges(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -365,6 +384,7 @@ def _repulsion_from_cell(
     point: torch.Tensor,
     cell: _QuadCell,
     theta: float,
+    ideal_length: float,
 ) -> torch.Tensor:
     """Approximate the repulsion contribution of one quad-tree cell.
 
@@ -378,6 +398,8 @@ def _repulsion_from_cell(
         Current quad-tree cell.
     theta : float
         Barnes-Hut opening angle threshold.
+    ideal_length : float
+        FR ideal edge length ``k`` for the current level.
 
     Returns
     -------
@@ -393,15 +415,25 @@ def _repulsion_from_cell(
     distance = torch.linalg.norm(delta).clamp(min=_MIN_DISTANCE)
     width = max(cell.x_max - cell.x_min, cell.y_max - cell.y_min)
     if not cell.children or width / float(distance.item()) < theta:
-        return delta * (cell.mass / distance.square())
+        return delta * ((cell.mass * (ideal_length**2)) / distance.square())
 
     total = torch.zeros(2, dtype=point.dtype, device=point.device)
     for child in cell.children:
-        total = total + _repulsion_from_cell(node_index, point, child, theta)
+        total = total + _repulsion_from_cell(
+            node_index,
+            point,
+            child,
+            theta,
+            ideal_length,
+        )
     return total
 
 
-def _barnes_hut_repulsion(positions: torch.Tensor, theta: float) -> torch.Tensor:
+def _barnes_hut_repulsion(
+    positions: torch.Tensor,
+    theta: float,
+    ideal_length: float,
+) -> torch.Tensor:
     """Compute repulsive forces using a Barnes-Hut quad-tree.
 
     Parameters
@@ -410,6 +442,8 @@ def _barnes_hut_repulsion(positions: torch.Tensor, theta: float) -> torch.Tensor
         Position tensor with shape ``[N, 2]``.
     theta : float
         Barnes-Hut opening angle threshold.
+    ideal_length : float
+        FR ideal edge length ``k`` for the current level.
 
     Returns
     -------
@@ -424,11 +458,21 @@ def _barnes_hut_repulsion(positions: torch.Tensor, theta: float) -> torch.Tensor
     )
     forces = torch.zeros_like(positions)
     for node_index in range(int(positions.shape[0])):
-        forces[node_index] = _repulsion_from_cell(node_index, positions[node_index], root, theta)
+        forces[node_index] = _repulsion_from_cell(
+            node_index,
+            positions[node_index],
+            root,
+            theta,
+            ideal_length,
+        )
     return forces
 
 
-def _attractive_force(positions: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+def _attractive_force(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    ideal_length: float,
+) -> torch.Tensor:
     """Compute exact attractive forces along graph edges.
 
     Parameters
@@ -437,6 +481,8 @@ def _attractive_force(positions: torch.Tensor, edge_index: torch.Tensor) -> torc
         Position tensor with shape ``[N, 2]``.
     edge_index : torch.Tensor
         Unique undirected edges with shape ``[2, E]``.
+    ideal_length : float
+        FR ideal edge length ``k`` for the current level.
 
     Returns
     -------
@@ -451,7 +497,7 @@ def _attractive_force(positions: torch.Tensor, edge_index: torch.Tensor) -> torc
     dst = edge_index[1].to(device=positions.device, dtype=torch.long)
     delta = positions[dst] - positions[src]
     distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
-    edge_force = delta * distances.unsqueeze(1)
+    edge_force = delta * (distances / ideal_length).unsqueeze(1)
     forces.index_add_(0, src, edge_force)
     forces.index_add_(0, dst, -edge_force)
     return forces
@@ -462,6 +508,8 @@ def _refine_level(
     edge_index: torch.Tensor,
     steps: int,
     theta: float,
+    area: float,
+    cooling_factor: float = _COOLING_FACTOR,
 ) -> torch.Tensor:
     """Run Barnes-Hut force refinement on one hierarchy level.
 
@@ -475,6 +523,10 @@ def _refine_level(
         Number of refinement iterations.
     theta : float
         Barnes-Hut opening angle threshold.
+    area : float
+        Target drawing area for the current level.
+    cooling_factor : float, default=0.9
+        Multiplicative temperature decay applied after each refinement step.
 
     Returns
     -------
@@ -482,14 +534,20 @@ def _refine_level(
         Refined positions.
     """
     refined = positions.clone()
-    for step in range(max(steps, 1)):
-        repulsive = 0.08 * _barnes_hut_repulsion(refined, theta)
-        attractive = -0.02 * _attractive_force(refined, edge_index)
+    if steps <= 0:
+        return refined
+
+    ideal_length = _fr_ideal_length(area, int(refined.shape[0]))
+    temperature = ideal_length
+    for _ in range(steps):
+        repulsive = _barnes_hut_repulsion(refined, theta, ideal_length)
+        attractive = _attractive_force(refined, edge_index, ideal_length)
         gravity = -0.01 * (refined - refined.mean(dim=0, keepdim=True))
         displacement = repulsive + attractive + gravity
         norm = torch.linalg.norm(displacement, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
-        temperature = 0.5 / (1.0 + step)
-        refined = refined + (displacement / norm) * temperature
+        limited_step = torch.minimum(norm, torch.full_like(norm, temperature))
+        refined = refined + (displacement / norm) * limited_step
+        temperature = max(temperature * cooling_factor, _MIN_DISTANCE)
     return refined
 
 
@@ -537,6 +595,7 @@ def layout_fmmm(
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
 
     extent = _layout_extent(num_nodes, node_sizes)
+    refinement_area = (2.0 * extent) ** 2
     edges_per_level, mappings = _hierarchy(edge_index, num_nodes)
     coarsest_edges = edges_per_level[-1]
     coarsest_nodes = num_nodes if not mappings else int(mappings[-1].max().item()) + 1
@@ -561,9 +620,21 @@ def layout_fmmm(
             torch.randn((fine_nodes, 2), generator=generator, dtype=torch.float32) * jitter_scale
         )
         fine_positions = fine_positions + jitter
-        positions = _refine_level(fine_positions, edges_per_level[level], level_budget, theta=1.0)
+        positions = _refine_level(
+            fine_positions,
+            edges_per_level[level],
+            level_budget,
+            theta=1.0,
+            area=refinement_area,
+        )
 
     if not mappings:
-        positions = _refine_level(positions, edges_per_level[0], level_budget, theta=1.0)
+        positions = _refine_level(
+            positions,
+            edges_per_level[0],
+            level_budget,
+            theta=1.0,
+            area=refinement_area,
+        )
 
     return _normalize_positions(positions.to(device), extent).to(dtype=torch.float32, device=device)

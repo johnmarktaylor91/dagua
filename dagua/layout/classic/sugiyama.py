@@ -17,11 +17,23 @@ from __future__ import annotations
 
 import heapq
 import random
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 
 from dagua.layout.cycle import detect_back_edges, make_acyclic
+
+
+@dataclass(frozen=True)
+class _ExpandedLayeredGraph:
+    """Store the dummy-node-expanded DAG used by Sugiyama sweeps."""
+
+    edge_index: torch.Tensor
+    layers: list[list[int]]
+    node_sizes: torch.Tensor
+    edge_paths: list[list[int]]
+    num_nodes: int
 
 
 def layout_sugiyama(
@@ -33,7 +45,12 @@ def layout_sugiyama(
     seed: int = 42,
     barycenter_passes: int = 24,
     trace_every: int = 0,
-) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
+    return_edge_routes: bool = False,
+) -> Union[
+    torch.Tensor,
+    Tuple[torch.Tensor, List[torch.Tensor]],
+    Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]],
+]:
     """Run classic Sugiyama layered layout.
 
     Parameters
@@ -57,54 +74,88 @@ def layout_sugiyama(
     trace_every : int
         If greater than zero, record position snapshots during barycenter
         sweeps after every ``trace_every`` full passes.
+    return_edge_routes : bool, default=False
+        If ``True``, also return a routed polyline for each input edge. Long
+        edges are expanded through dummy nodes during ordering and coordinate
+        assignment, then converted back into per-edge point sequences aligned
+        to the input edge order.
 
     Returns
     -------
     torch.Tensor or tuple
-        Final positions ``[N, 2]``, or ``(positions, traces)`` if tracing.
+        Final positions ``[N, 2]`` by default. If ``trace_every > 0``, returns
+        ``(positions, traces)``. If ``return_edge_routes`` is enabled, returns
+        ``(positions, edge_routes)`` or ``(positions, traces, edge_routes)``,
+        where each route tensor has shape ``[P, 2]``.
 
     Raises
     ------
     ValueError
         If ``edge_index`` or ``node_sizes`` have invalid shapes, or if
-        ``num_nodes`` is negative.
+        ``num_nodes`` or ``trace_every`` is negative.
     """
     _validate_layout_inputs(edge_index=edge_index, num_nodes=num_nodes, node_sizes=node_sizes)
+    if trace_every < 0:
+        raise ValueError("trace_every must be non-negative")
 
     output_device = edge_index.device
     if node_sizes is not None:
         output_device = node_sizes.device
 
     resolved_sizes = _resolve_node_sizes(node_sizes=node_sizes, num_nodes=num_nodes)
-    acyclic_edges = _prepare_acyclic_edges(edge_index=edge_index, num_nodes=num_nodes)
+    acyclic_edges, reversed_edge_mask = _prepare_acyclic_edges(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+    )
     layer_assignments = _longest_path_layering(edge_index=acyclic_edges, num_nodes=num_nodes)
-    layers = _group_nodes_by_layer(layer_assignments=layer_assignments, num_nodes=num_nodes)
-    parents, children = _build_neighbor_lists(edge_index=acyclic_edges, num_nodes=num_nodes)
+    expanded_graph = _expand_long_edges_with_dummy_nodes(
+        edge_index=acyclic_edges,
+        layer_assignments=layer_assignments,
+        node_sizes=resolved_sizes,
+        num_original_nodes=num_nodes,
+    )
+    parents, children = _build_neighbor_lists(
+        edge_index=expanded_graph.edge_index,
+        num_nodes=expanded_graph.num_nodes,
+    )
     ordered_layers, traces = _barycenter_ordering(
-        layers=layers,
+        layers=expanded_graph.layers,
         parents=parents,
         children=children,
-        num_nodes=num_nodes,
+        num_nodes=expanded_graph.num_nodes,
         num_passes=barycenter_passes,
         seed=seed,
-        node_sizes=resolved_sizes,
+        node_sizes=expanded_graph.node_sizes,
         rank_sep=rank_sep,
         node_sep=node_sep,
         trace_every=trace_every,
         output_device=output_device,
     )
-    positions = _coordinate_assignment(
+    expanded_positions = _coordinate_assignment(
         layers=ordered_layers,
-        node_sizes=resolved_sizes,
-        num_nodes=num_nodes,
+        node_sizes=expanded_graph.node_sizes,
+        num_nodes=expanded_graph.num_nodes,
         rank_sep=rank_sep,
         node_sep=node_sep,
         output_device=output_device,
     )
+    positions = expanded_positions[:num_nodes]
+    visible_traces = [trace[:num_nodes] for trace in traces]
 
+    if not return_edge_routes:
+        if trace_every > 0:
+            return positions, visible_traces
+        return positions
+
+    edge_routes = _build_edge_routes(
+        positions=expanded_positions,
+        edge_paths=expanded_graph.edge_paths,
+        reversed_edge_mask=reversed_edge_mask,
+        output_device=output_device,
+    )
     if trace_every > 0:
-        return positions, traces
-    return positions
+        return positions, visible_traces, edge_routes
+    return positions, edge_routes
 
 
 def _validate_layout_inputs(
@@ -157,7 +208,10 @@ def _resolve_node_sizes(node_sizes: Optional[torch.Tensor], num_nodes: int) -> t
     return node_sizes.detach().to(device="cpu", dtype=torch.float32)
 
 
-def _prepare_acyclic_edges(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+def _prepare_acyclic_edges(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Return a CPU ``edge_index`` with detected back edges reversed.
 
     Parameters
@@ -169,17 +223,19 @@ def _prepare_acyclic_edges(edge_index: torch.Tensor, num_nodes: int) -> torch.Te
 
     Returns
     -------
-    torch.Tensor
-        CPU long tensor with shape ``[2, E]`` suitable for Kahn layering.
+    tuple
+        ``(acyclic_edges, reversed_mask)`` where ``acyclic_edges`` is a CPU
+        long tensor with shape ``[2, E]`` suitable for Kahn layering and
+        ``reversed_mask`` marks input edges reversed during cycle breaking.
     """
     edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
     if edge_index_cpu.numel() == 0:
-        return edge_index_cpu
+        return edge_index_cpu, torch.zeros((0,), dtype=torch.bool)
 
     back_edge_mask = detect_back_edges(edge_index_cpu, num_nodes)
     if back_edge_mask.any():
-        return make_acyclic(edge_index_cpu, back_edge_mask)
-    return edge_index_cpu
+        return make_acyclic(edge_index_cpu, back_edge_mask), back_edge_mask.to(dtype=torch.bool)
+    return edge_index_cpu, back_edge_mask.to(dtype=torch.bool)
 
 
 def _longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -257,6 +313,118 @@ def _group_nodes_by_layer(layer_assignments: torch.Tensor, num_nodes: int) -> Li
         layer_index = int(layer_assignments[node].item())
         layers[layer_index].append(node)
     return layers
+
+
+def _expand_long_edges_with_dummy_nodes(
+    edge_index: torch.Tensor,
+    layer_assignments: torch.Tensor,
+    node_sizes: torch.Tensor,
+    num_original_nodes: int,
+) -> _ExpandedLayeredGraph:
+    """Insert dummy nodes for edges spanning more than one layer.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Acyclic edge list with shape ``[2, E]`` on CPU.
+    layer_assignments : torch.Tensor
+        Original-node layer indices with shape ``[N]``.
+    node_sizes : torch.Tensor
+        Original-node sizes with shape ``[N, 2]`` on CPU.
+    num_original_nodes : int
+        Number of real graph nodes before dummy expansion.
+
+    Returns
+    -------
+    _ExpandedLayeredGraph
+        Expanded layered DAG with dummy nodes inserted on intermediate layers.
+    """
+    expanded_layers = _group_nodes_by_layer(
+        layer_assignments=layer_assignments,
+        num_nodes=num_original_nodes,
+    )
+    dummy_sizes: list[list[float]] = []
+    expanded_sources: list[int] = []
+    expanded_targets: list[int] = []
+    edge_paths: list[list[int]] = []
+    next_dummy_index = num_original_nodes
+
+    for source, target in zip(edge_index[0].tolist(), edge_index[1].tolist()):
+        source_layer = int(layer_assignments[source].item())
+        target_layer = int(layer_assignments[target].item())
+        path = [source]
+        previous = source
+
+        for layer_index in range(source_layer + 1, target_layer):
+            dummy_index = next_dummy_index
+            next_dummy_index += 1
+            expanded_layers[layer_index].append(dummy_index)
+            dummy_sizes.append([0.0, 0.0])
+            expanded_sources.append(previous)
+            expanded_targets.append(dummy_index)
+            path.append(dummy_index)
+            previous = dummy_index
+
+        expanded_sources.append(previous)
+        expanded_targets.append(target)
+        path.append(target)
+        edge_paths.append(path)
+
+    if dummy_sizes:
+        expanded_node_sizes = torch.cat(
+            [
+                node_sizes,
+                torch.tensor(dummy_sizes, dtype=torch.float32),
+            ],
+            dim=0,
+        )
+    else:
+        expanded_node_sizes = node_sizes.clone()
+
+    expanded_edge_index = torch.tensor(
+        [expanded_sources, expanded_targets],
+        dtype=torch.long,
+    )
+    return _ExpandedLayeredGraph(
+        edge_index=expanded_edge_index,
+        layers=expanded_layers,
+        node_sizes=expanded_node_sizes,
+        edge_paths=edge_paths,
+        num_nodes=next_dummy_index,
+    )
+
+
+def _build_edge_routes(
+    positions: torch.Tensor,
+    edge_paths: Sequence[Sequence[int]],
+    reversed_edge_mask: torch.Tensor,
+    output_device: torch.device,
+) -> List[torch.Tensor]:
+    """Convert dummy-node chains into routed edge polylines.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Expanded-node coordinates with shape ``[N_total, 2]``.
+    edge_paths : sequence of sequence of int
+        Expanded node ids visited by each original edge.
+    reversed_edge_mask : torch.Tensor
+        Boolean tensor marking edges reversed during cycle breaking.
+    output_device : torch.device
+        Device for returned route tensors.
+
+    Returns
+    -------
+    list[torch.Tensor]
+        Per-edge point sequences aligned to the input edge order.
+    """
+    routes: List[torch.Tensor] = []
+    for edge_index, node_path in enumerate(edge_paths):
+        route = positions[list(node_path)].to(device=output_device)
+        if edge_index < reversed_edge_mask.numel() and bool(reversed_edge_mask[edge_index].item()):
+            route = torch.flip(route, dims=[0])
+        routes.append(route)
+    return routes
 
 
 def _build_neighbor_lists(
