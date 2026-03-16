@@ -24,6 +24,7 @@ _EXACT_BLOCK_SIZE = 1_024
 _SAMPLED_REPULSION_K = 1_000
 _SAMPLED_BLOCK_SIZE = 256
 _MAX_SPEED = 10.0
+_MAX_DISPLACEMENT = 10.0
 
 
 def layout_fa2(
@@ -119,7 +120,7 @@ def layout_fa2(
         )
         force = repulsion_force + attraction_force + gravity_force
 
-        speed, speed_efficiency, global_traction = _adaptive_speed(
+        speed, speed_efficiency, node_traction = _adaptive_speed(
             force=force,
             previous_force=previous_force,
             speed=speed,
@@ -127,12 +128,21 @@ def layout_fa2(
             jitter_tolerance=jitter_tolerance,
         )
         node_speed = _node_speed(
+            speed=speed,
+            node_traction=node_traction,
             force=force,
             previous_force=previous_force,
-            speed=speed,
-            global_traction=global_traction,
         )
-        pos = pos + (force * node_speed.unsqueeze(1))
+        displacement = force * node_speed.unsqueeze(1)
+        disp_mag = displacement.norm(dim=1, keepdim=True)
+        # Clamp per-node displacement so a single unstable step cannot eject nodes.
+        safe_disp_mag = disp_mag.clamp(min=1e-6)
+        scale = torch.where(
+            disp_mag > _MAX_DISPLACEMENT,
+            _MAX_DISPLACEMENT / safe_disp_mag,
+            torch.ones_like(disp_mag),
+        )
+        pos = pos + displacement * scale
         previous_force = force
 
         if trace_every > 0 and step_index % trace_every == 0:
@@ -422,7 +432,7 @@ def _adaptive_speed(
     speed: float,
     speed_efficiency: float,
     jitter_tolerance: float,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, torch.Tensor]:
     """Update the FA2 integration speed from force oscillation.
 
     Parameters
@@ -440,8 +450,9 @@ def _adaptive_speed(
 
     Returns
     -------
-    tuple[float, float, float]
-        Updated ``(speed, speed_efficiency, global_traction)`` tuple.
+    tuple[float, float, torch.Tensor]
+        Updated ``(speed, speed_efficiency, node_traction)`` tuple, where
+        ``node_traction`` has shape ``[N]``.
     """
     swing = (force - previous_force).norm(dim=1).sum().item()
     node_traction = (0.5 * (force + previous_force)).norm(dim=1)
@@ -457,16 +468,24 @@ def _adaptive_speed(
         speed_efficiency = min(speed_efficiency * 1.05, 1.5)
 
     speed = jitter * speed_efficiency / (1.0 + jitter * math.sqrt(max(ratio, 0.0)))
-    return min(speed, _MAX_SPEED), speed_efficiency, traction
+    return min(speed, _MAX_SPEED), speed_efficiency, node_traction
 
 
 def _node_speed(
     force: torch.Tensor,
     previous_force: torch.Tensor,
     speed: float,
-    global_traction: float,
+    global_traction: Optional[float] = None,
+    node_traction: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Compute per-node FA2 integration speeds.
+    """Compute per-node speed using ForceAtlas2 adaptive heuristic.
+
+    Uses the formula from Jacomy et al. (2014):
+        node_speed(v) = global_speed * traction(v)
+        / (traction(v) + sqrt(traction(v)) * swing(v))
+
+    This keeps the speed ratio bounded as forces grow, which prevents the
+    integration step from diverging numerically.
 
     Parameters
     ----------
@@ -475,14 +494,25 @@ def _node_speed(
     previous_force : torch.Tensor
         Previous force tensor, shape ``[N, 2]``.
     speed : float
-        Global FA2 speed scalar.
-    global_traction : float
-        Sum of per-node traction magnitudes.
+        Global adaptive speed from ``_adaptive_speed()``.
+    global_traction : float, optional
+        Legacy aggregate traction scalar. When ``node_traction`` is omitted, the
+        function falls back to the older global-traction cap for compatibility.
+    node_traction : torch.Tensor, optional
+        Per-node traction magnitudes, shape ``[N]``. When provided, this uses
+        the Jacomy et al. bounded denominator.
 
     Returns
     -------
     torch.Tensor
-        Per-node speed tensor with shape ``[N]``.
+        Per-node speed factors, shape ``[N]``.
     """
     node_swing = (force - previous_force).norm(dim=1)
-    return torch.clamp((speed * global_traction) / (node_swing + 1.0), max=_MAX_SPEED)
+    if node_traction is None:
+        if global_traction is None:
+            node_traction = (0.5 * (force + previous_force)).norm(dim=1)
+        else:
+            return torch.clamp((speed * global_traction) / (node_swing + 1.0), max=_MAX_SPEED)
+
+    denom = node_traction + node_traction.sqrt() * node_swing + 1e-6
+    return torch.clamp(speed * node_traction / denom, max=_MAX_SPEED)
