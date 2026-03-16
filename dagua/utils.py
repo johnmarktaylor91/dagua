@@ -471,11 +471,37 @@ def _process_wave_edges_chunked(
     layers: torch.Tensor,
     remaining: torch.Tensor,
     E: int,
-) -> None:
-    """Process wave edges in chunks to avoid materializing a full [E] mask.
+) -> torch.Tensor:
+    """Process wave edges in chunks and return the touched child nodes.
 
-    Mutates `layers` and `remaining` in place.
+    Parameters
+    ----------
+    src : torch.Tensor
+        Source indices shaped ``[E]``.
+    tgt : torch.Tensor
+        Target indices shaped ``[E]``.
+    wave_set : torch.Tensor
+        Boolean membership mask shaped ``[N]`` for the current frontier.
+    layers : torch.Tensor
+        Layer assignments shaped ``[N]``.
+    remaining : torch.Tensor
+        Remaining in-degree counts shaped ``[N]``.
+    E : int
+        Total edge count.
+
+    Returns
+    -------
+    torch.Tensor
+        Unique child nodes touched by this wave. The caller filters this set
+        down to children whose ``remaining`` count just reached zero.
+
+    Notes
+    -----
+    This streams edge chunks to avoid materializing a full ``[E]`` mask on
+    very large graphs where memory headroom matters more than extra kernel
+    launches.
     """
+    touched_children: List[torch.Tensor] = []
     for start in range(0, E, _EDGE_CHUNK):
         end = min(start + _EDGE_CHUNK, E)
         chunk_src = src[start:end]
@@ -487,6 +513,39 @@ def _process_wave_edges_chunked(
             layers.scatter_reduce_(0, children, candidate, reduce="amax")
             ones = torch.ones(children.shape[0], dtype=remaining.dtype, device=remaining.device)
             remaining.scatter_add_(0, children, -ones)
+            touched_children.append(children.unique())
+
+    if not touched_children:
+        return torch.empty(0, dtype=torch.long, device=remaining.device)
+    if len(touched_children) == 1:
+        return touched_children[0]
+    return torch.cat(touched_children).unique()
+
+
+def _frontier_from_touched_children(
+    children: torch.Tensor,
+    remaining: torch.Tensor,
+) -> torch.Tensor:
+    """Build the next BFS frontier from children touched in the prior wave.
+
+    Parameters
+    ----------
+    children : torch.Tensor
+        Child node indices touched by the current wave, shaped ``[K]``.
+    remaining : torch.Tensor
+        Remaining in-degree counts shaped ``[N]`` after decrements.
+
+    Returns
+    -------
+    torch.Tensor
+        Unique child nodes whose remaining in-degree is now zero.
+    """
+    if children.numel() == 0:
+        return torch.empty(0, dtype=torch.long, device=remaining.device)
+
+    unique_children = children.unique()
+    child_remaining = remaining[unique_children]
+    return unique_children[child_remaining == 0]
 
 
 def _longest_path_layering_vectorized(
@@ -549,23 +608,30 @@ def _longest_path_layering_vectorized(
         total_processed = 0
         current_layer = 0
         probe_waves = 10
+        frontier = (remaining == 0).nonzero(as_tuple=True)[0]
 
         # Pre-allocate wave_set once — reuse via .zero_() each wave
         wave_set = torch.zeros(N, dtype=torch.bool, device=compute_device)
 
         for _ in range(probe_waves):
-            wave = (remaining == 0).nonzero(as_tuple=True)[0]
-            if wave.numel() == 0:
+            if frontier.numel() == 0:
                 break
-            total_processed += wave.numel()
-            layers[wave] = current_layer
-            remaining[wave] = -1
+            total_processed += frontier.numel()
+            layers[frontier] = current_layer
+            remaining[frontier] = -1
 
             wave_set.zero_()
-            wave_set[wave] = True
+            wave_set[frontier] = True
 
             if chunked:
-                _process_wave_edges_chunked(src, tgt, wave_set, layers, remaining, E)
+                touched_children = _process_wave_edges_chunked(
+                    src,
+                    tgt,
+                    wave_set,
+                    layers,
+                    remaining,
+                    E,
+                )
             else:
                 edge_mask = wave_set[src]
                 children = tgt[edge_mask]
@@ -574,6 +640,9 @@ def _longest_path_layering_vectorized(
                     layers.scatter_reduce_(0, children, candidate, reduce="amax")
                     ones = torch.ones(children.shape[0], dtype=val_dtype, device=compute_device)
                     remaining.scatter_add_(0, children, -ones)
+                touched_children = children
+
+            frontier = _frontier_from_touched_children(touched_children, remaining)
 
             current_layer += 1
 
@@ -586,19 +655,18 @@ def _longest_path_layering_vectorized(
         # Wide graph: continue with waves (fast when few iterations needed)
         if avg_wave > 1000:
             for _ in range(N):
-                wave = (remaining == 0).nonzero(as_tuple=True)[0]
-                if wave.numel() == 0:
+                if frontier.numel() == 0:
                     break
-                layers[wave] = current_layer
-                remaining[wave] = -1
+                layers[frontier] = current_layer
+                remaining[frontier] = -1
 
-                wave_starts = csr_offsets[wave]
-                wave_ends = csr_offsets[wave + 1]
+                wave_starts = csr_offsets[frontier]
+                wave_ends = csr_offsets[frontier + 1]
                 edge_counts = wave_ends - wave_starts
                 total_children = int(edge_counts.sum().item())
 
                 if total_children > 0:
-                    wave_expanded = torch.repeat_interleave(wave, edge_counts)
+                    wave_expanded = torch.repeat_interleave(frontier, edge_counts)
                     if total_children < 10_000_000:
                         offsets_within = torch.cat(
                             [
@@ -623,6 +691,9 @@ def _longest_path_layering_vectorized(
                     layers.scatter_reduce_(0, children, candidate, reduce="amax")
                     ones = torch.ones(total_children, dtype=val_dtype, device=compute_device)
                     remaining.scatter_add_(0, children, -ones)
+                    frontier = _frontier_from_touched_children(children, remaining)
+                else:
+                    frontier = torch.empty(0, dtype=torch.long, device=compute_device)
 
                 current_layer += 1
 
