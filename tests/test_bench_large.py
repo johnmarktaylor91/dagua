@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from argparse import Namespace
 from pathlib import Path
 
 import torch
@@ -503,3 +504,18 @@ def test_find_existing_run_pid_ignores_shell_wrappers(monkeypatch):
     monkeypatch.setattr(bench_large.os, "getpid", lambda: 999)
 
     assert bench_large._find_existing_run_pid("1b") == 456
+
+
+def test_fast_final_refine_steps_and_resume_signature() -> None:
+    """The fast-final flag should lower refine steps and invalidate stale resumes."""
+    args = Namespace(
+        device="cpu",
+        workers=4,
+        steps=10,
+        seed=42,
+        fast_final=True,
+    )
+
+    assert bench_large._multilevel_refine_steps(False) == 15
+    assert bench_large._multilevel_refine_steps(True) == 5
+    assert bench_large._layout_resume_signature(args)["multilevel_refine_steps"] == 5
