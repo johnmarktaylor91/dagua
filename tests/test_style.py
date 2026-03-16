@@ -7,6 +7,7 @@ from dagua.styles import (
     DEFAULT_NODE_STYLES,
     DEFAULT_THEME,
     DEFAULT_THEME_OBJ,
+    GRAPHVIZ_MATCH_DEFAULTS,
     GRAPHVIZ_MATCH_NODE_STYLES,
     GRAPHVIZ_MATCH_THEME,
     MINIMAL_THEME,
@@ -184,6 +185,19 @@ class TestBuiltInThemes:
         assert GRAPHVIZ_MATCH_THEME is GRAPHVIZ_MATCH_NODE_STYLES
         assert isinstance(DEFAULT_THEME, dict)
         assert "default" in DEFAULT_THEME
+
+    def test_graphviz_match_defaults_are_album_scoped(self):
+        """Graphviz-match defaults should expose the album override values."""
+
+        assert GRAPHVIZ_MATCH_DEFAULTS == {
+            "stroke_width": 1.5,
+            "padding": (14.0, 10.0),
+            "font_size": 12.0,
+            "arrow_length": 14.0,
+            "arrow_width": 10.0,
+            "edge_width": 1.5,
+            "edge_opacity": 0.85,
+        }
 
 
 @pytest.mark.smoke
