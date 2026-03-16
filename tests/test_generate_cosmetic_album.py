@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+import torch
 
 from scripts.generate_cosmetic_album import build_case_catalog, build_cosmetic_album
 
@@ -95,6 +96,56 @@ def test_pairwise_comparison_cases_use_top_to_bottom_positions() -> None:
     ]:
         positions = cases[case_id].positions
         assert float(positions[0, 1].item()) > float(positions[1, 1].item())
+
+
+def test_direction_cases_use_wider_horizontal_spacing() -> None:
+    """LR and RL direction demos should keep nodes visibly separated."""
+
+    cases = {case.case_id: case for case in build_case_catalog()}
+
+    assert torch.equal(
+        cases["direction_lr"].positions,
+        torch.tensor(
+            [[0.0, 0.0], [160.0, 0.0], [320.0, 0.0]],
+            dtype=torch.float32,
+        ),
+    )
+    assert torch.equal(
+        cases["direction_rl"].positions,
+        torch.tensor(
+            [[320.0, 0.0], [160.0, 0.0], [0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+    )
+
+
+def test_cluster_cases_use_vertical_chain_positions() -> None:
+    """Flat cluster demos should show a top-to-bottom chain through the cluster."""
+
+    cases = {case.case_id: case for case in build_case_catalog()}
+    expected_positions = torch.tensor(
+        [[0.0, 120.0], [0.0, 0.0], [0.0, -120.0]],
+        dtype=torch.float32,
+    )
+
+    assert torch.equal(cases["cluster_fill"].positions, expected_positions)
+    assert torch.equal(cases["cluster_border"].positions, expected_positions)
+
+
+def test_ortho_routing_case_uses_offset_positions() -> None:
+    """The orthogonal routing demo should offset x to expose the elbow segment."""
+
+    cases = {case.case_id: case for case in build_case_catalog()}
+    positions = cases["edge_routing_ortho"].positions
+
+    assert torch.equal(
+        positions,
+        torch.tensor(
+            [[-40.0, 55.0], [40.0, -55.0]],
+            dtype=torch.float32,
+        ),
+    )
+    assert not torch.isclose(positions[0, 0], positions[1, 0])
 
 
 def test_build_cosmetic_album_dagua_only_requires_cached_competitors(tmp_path: Path) -> None:
