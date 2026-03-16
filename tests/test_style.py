@@ -226,3 +226,73 @@ class TestDarkenHex:
         result = darken_hex("#FAFAFA", 0.0)
         # Should be unchanged (or very close)
         assert result.lower() == "#fafafa"
+
+
+def test_graphviz_strict_theme_loads() -> None:
+    """graphviz_strict theme is available and returns correct values."""
+
+    from dagua.styles import get_theme
+
+    theme = get_theme("graphviz_strict")
+    assert theme.name == "graphviz_strict"
+    node_style = theme.get_node_style("default")
+    assert node_style.shape == "ellipse"
+    assert node_style.fill == "#FFFFFF"
+    assert node_style.stroke == "#000000"
+    assert node_style.font_size == 14.0
+    assert node_style.stroke_width == 1.4
+    assert node_style.font_family == "Times New Roman"
+    assert node_style.padding == (12.0, 5.0)
+
+    edge_style = theme.get_edge_style("default")
+    assert edge_style.width == 1.3
+    assert edge_style.opacity == 1.0
+
+    assert theme.cluster_style.fill == "#F0F0F0"
+    assert theme.graph_style.edge_label_background_opacity == 1.0
+
+
+def test_graphviz_improved_theme_loads() -> None:
+    """graphviz improved theme is available and exposes its softer defaults."""
+
+    from dagua.styles import get_theme
+
+    theme = get_theme("graphviz")
+    assert theme.name == "graphviz"
+    node_style = theme.get_node_style("default")
+    assert node_style.shape == "ellipse"
+    assert node_style.font_size == 12.0
+    assert node_style.stroke != "#000000"
+    assert node_style.fill != "#FFFFFF"
+    edge_style = theme.get_edge_style("default")
+    assert edge_style.opacity == 0.92
+    assert theme.get_edge_style("if").opacity == 0.92
+    assert theme.get_edge_style("then").opacity == 0.92
+    assert theme.get_edge_style("buffer").opacity == 0.7
+    assert theme.cluster_style.stroke == "#999999"
+    assert theme.cluster_style.opacity == 0.8
+    assert theme.graph_style.edge_label_background_opacity == 1.0
+
+
+def test_graphviz_strict_vs_improved_differences() -> None:
+    """Strict and improved Graphviz themes should differ on documented fields."""
+
+    from dagua.styles import get_theme
+
+    strict_theme = get_theme("graphviz_strict")
+    improved_theme = get_theme("graphviz")
+    strict_node_style = strict_theme.get_node_style("default")
+    improved_node_style = improved_theme.get_node_style("default")
+    assert strict_node_style.font_family != improved_node_style.font_family
+    assert strict_node_style.font_size > improved_node_style.font_size
+    assert strict_node_style.stroke != improved_node_style.stroke
+
+
+def test_all_themes_load() -> None:
+    """Every registered theme should load without error."""
+
+    from dagua.styles import THEME_REGISTRY, get_theme
+
+    for name in THEME_REGISTRY:
+        theme = get_theme(name)
+        assert theme.name == name

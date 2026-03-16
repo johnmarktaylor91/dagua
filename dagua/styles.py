@@ -669,6 +669,173 @@ TORCHLENS_THEME = Theme(
     ),
 )
 
+GRAPHVIZ_STRICT_THEME = Theme(
+    name="graphviz_strict",
+    node_styles={
+        "default": NodeStyle(
+            shape="ellipse",
+            fill="#FFFFFF",
+            stroke="#000000",
+            stroke_width=1.4,  # 1.0 renders thinner than Graphviz due to matplotlib AA
+            font_family="Times New Roman",
+            font_size=14.0,
+            font_color="#000000",
+            padding=(12.0, 5.0),
+            corner_radius=0.0,
+            opacity=1.0,
+            base_color="#000000",
+            min_width=54.0,
+            min_height=36.0,
+        ),
+        "input": NodeStyle(
+            shape="ellipse",
+            fill="#FFFFFF",
+            stroke="#000000",
+            stroke_width=1.4,  # 1.0 renders thinner than Graphviz due to matplotlib AA
+            font_family="Times New Roman",
+            font_size=14.0,
+            font_color="#000000",
+            padding=(12.0, 5.0),
+            corner_radius=0.0,
+            base_color="#000000",
+        ),
+        "output": NodeStyle(
+            shape="ellipse",
+            fill="#FFFFFF",
+            stroke="#000000",
+            stroke_width=1.4,  # 1.0 renders thinner than Graphviz due to matplotlib AA
+            font_family="Times New Roman",
+            font_size=14.0,
+            font_color="#000000",
+            padding=(12.0, 5.0),
+            corner_radius=0.0,
+            base_color="#000000",
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#000000",
+            width=1.3,
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_length=10.0,
+            arrow_width=7.0,
+            arrow_scale=14.0,
+            style="solid",
+            opacity=1.0,
+            label_font_size=14.0,
+            label_font_color="#000000",
+            label_background="#FFFFFF",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0F0F0",
+        stroke="#000000",
+        stroke_width=1.0,
+        corner_radius=0.0,
+        padding=8.0,
+        label_position="top-left",
+        font_size=14.0,
+        font_weight="bold",
+        font_color="#000000",
+        opacity=1.0,
+    ),
+    graph_style=GraphStyle(
+        background_color="#FFFFFF",
+        margin=18.0,
+        title_font_size=14.0,
+        title_font_color="#000000",
+        edge_label_font_size=14.0,
+        edge_label_background="#FFFFFF",
+        edge_label_background_opacity=1.0,
+    ),
+)
+
+GRAPHVIZ_THEME = Theme(
+    name="graphviz",
+    node_styles={
+        "default": NodeStyle(
+            shape="ellipse",
+            fill="#FAFBFC",  # DEPARTURE: very subtle off-white instead of pure white
+            stroke="#333333",  # DEPARTURE: dark gray instead of pure black (softer)
+            stroke_width=1.2,  # DEPARTURE: slightly heavier for crispness at screen res
+            font_family="",  # DEPARTURE: uses system sans-serif instead of Times-Roman
+            font_size=12.0,  # DEPARTURE: 12pt instead of 14pt (less cluttered)
+            font_color="#1A1A1A",  # DEPARTURE: near-black instead of pure black
+            padding=(9.0, 5.0),  # DEPARTURE: slightly more generous padding
+            corner_radius=0.0,
+            opacity=1.0,
+            base_color="#333333",
+            min_width=50.0,  # DEPARTURE: slightly smaller minimum for denser screens
+            min_height=34.0,  # DEPARTURE: scaled down with the reduced minimum width
+        ),
+        "input": NodeStyle(
+            shape="ellipse",
+            fill="#F0FAF0",  # DEPARTURE: very subtle green tint for inputs
+            stroke="#2D6A2D",  # DEPARTURE: dark green instead of black
+            stroke_width=1.2,
+            font_family="",  # DEPARTURE: uses system sans-serif instead of Times-Roman
+            font_size=12.0,  # DEPARTURE: 12pt instead of 14pt (less cluttered)
+            font_color="#1A1A1A",  # DEPARTURE: near-black instead of pure black
+            padding=(9.0, 5.0),  # DEPARTURE: slightly more generous padding
+            corner_radius=0.0,
+            base_color="#2D6A2D",
+        ),
+        "output": NodeStyle(
+            shape="ellipse",
+            fill="#FFF0F0",  # DEPARTURE: very subtle red tint for outputs
+            stroke="#8B2D2D",  # DEPARTURE: dark red instead of black
+            stroke_width=1.2,
+            font_family="",  # DEPARTURE: uses system sans-serif instead of Times-Roman
+            font_size=12.0,  # DEPARTURE: 12pt instead of 14pt (less cluttered)
+            font_color="#1A1A1A",  # DEPARTURE: near-black instead of pure black
+            padding=(9.0, 5.0),  # DEPARTURE: slightly more generous padding
+            corner_radius=0.0,
+            base_color="#8B2D2D",
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#4A4A4A",  # DEPARTURE: dark gray instead of black
+            width=1.1,  # DEPARTURE: slightly thicker
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_length=10.0,
+            arrow_width=7.0,
+            arrow_scale=14.0,
+            style="solid",
+            opacity=0.92,  # DEPARTURE: edges recede slightly behind nodes
+            label_font_size=11.0,  # DEPARTURE: slightly smaller than node text
+            label_font_color="#333333",
+            label_background="#FAFBFC",
+        ),
+        "if": EdgeStyle(color="#B08A1F", width=1.1, style="dashed", opacity=0.92),
+        "then": EdgeStyle(color="#2D8A68", width=1.1, style="dashed", opacity=0.92),
+        "buffer": EdgeStyle(color="#7B8594", width=1.0, style="dotted", opacity=0.7),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F5F5F5",  # DEPARTURE: subtle fill instead of transparent
+        stroke="#999999",  # DEPARTURE: medium gray instead of black
+        stroke_width=1.0,
+        corner_radius=3.0,  # DEPARTURE: very subtle rounding
+        padding=12.0,
+        label_position="top-left",
+        font_size=12.0,  # DEPARTURE: matches node font size
+        font_weight="bold",
+        font_color="#333333",  # DEPARTURE: dark gray instead of black
+        opacity=0.8,  # DEPARTURE: semi-transparent for layering
+    ),
+    graph_style=GraphStyle(
+        background_color="#FAFAFA",  # DEPARTURE: warm white
+        margin=18.0,
+        title_font_size=12.0,
+        title_font_color="#1A1A1A",
+        edge_label_font_size=10.0,
+        edge_label_background="#FAFAFA",
+        edge_label_background_opacity=1.0,
+    ),
+)
+
 
 # ─── Theme Registry ──────────────────────────────────────────────────────
 
@@ -677,6 +844,8 @@ THEME_REGISTRY: Dict[str, Theme] = {
     "dark": DARK_THEME,
     "minimal": MINIMAL_THEME,
     "torchlens": TORCHLENS_THEME,
+    "graphviz": GRAPHVIZ_THEME,
+    "graphviz_strict": GRAPHVIZ_STRICT_THEME,
 }
 
 
