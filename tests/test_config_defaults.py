@@ -3,7 +3,7 @@
 from dagua.config import LayoutConfig
 
 
-def test_layout_config_default_aesthetic_values():
+def test_layout_config_default_aesthetic_values() -> None:
     config = LayoutConfig()
 
     assert config.node_sep == 28.0
@@ -12,3 +12,4 @@ def test_layout_config_default_aesthetic_values():
     assert config.w_crossing == 1.8
     assert config.w_straightness == 2.2
     assert config.w_length_variance == 0.7
+    assert config.optimizer_fallback == "auto"

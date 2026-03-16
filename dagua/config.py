@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Tuple
 
 if TYPE_CHECKING:
     from dagua.flex import LayoutFlex
@@ -91,6 +91,11 @@ class LayoutConfig:
     #   overlap) on CPU. Only the [N, 2] gradient transfers between devices.
     #   Auto: on when device=cuda and N > 2M.
     hybrid_device: str = "auto"
+    # optimizer_fallback: optimizer choice for huge hybrid refinement levels when
+    # Adam's state no longer fits on GPU.
+    # "auto" = Adam -> SGD+Nesterov -> SGD, "adam" = never downgrade optimizer,
+    # "sgd" = skip Nesterov and use vanilla SGD as the only fallback tier.
+    optimizer_fallback: Literal["auto", "adam", "sgd"] = "auto"
 
     # CPU worker threads for hybrid-mode parallel loss computation.
     # 0 = sequential (no workers). 2+ = parallel CPU losses.
