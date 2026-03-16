@@ -76,6 +76,22 @@ def _checkpoint_paths(root: Path) -> dict[str, Path]:
 _LAYOUT_CHECKPOINT_SCHEMA = 1
 
 
+def _multilevel_refine_steps(fast_final: bool) -> int:
+    """Return the multilevel refine-step baseline for this benchmark run.
+
+    Parameters
+    ----------
+    fast_final : bool
+        Whether to use the aggressive final-level preset.
+
+    Returns
+    -------
+    int
+        Baseline refine-step count passed into ``LayoutConfig``.
+    """
+    return 5 if fast_final else 15
+
+
 def _source_fingerprint() -> str:
     """Hash the critical large-layout code paths that shape derived checkpoints."""
     hasher = hashlib.sha256()
@@ -103,7 +119,7 @@ def _layout_resume_signature(args: argparse.Namespace) -> dict[str, object]:
         "multilevel_threshold": 50_000,
         "multilevel_min_nodes": 2_000,
         "multilevel_coarse_steps": 50,
-        "multilevel_refine_steps": 15,
+        "multilevel_refine_steps": _multilevel_refine_steps(args.fast_final),
     }
 
 
@@ -531,7 +547,8 @@ def _build_edges_chunked(n: int, w: int, e_backbone: int) -> torch.Tensor:
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 
-def main():
+def main() -> None:
+    """Run the synthetic large-graph benchmark from the command line."""
     faulthandler.enable(all_threads=True)
     sys.stderr.reconfigure(line_buffering=True)
     sys.stdout.reconfigure(line_buffering=True)
@@ -577,6 +594,13 @@ def main():
         "--force-duplicate-run",
         action="store_true",
         help="Allow multiple concurrent runs against the same checkpoint root.",
+    )
+    parser.add_argument(
+        "--fast-final",
+        action="store_true",
+        help=(
+            "Use aggressive step/sample reduction for final level (faster, slightly lower quality)"
+        ),
     )
     args = parser.parse_args()
 
@@ -732,7 +756,7 @@ def main():
         multilevel_threshold=50000,
         multilevel_min_nodes=2000,
         multilevel_coarse_steps=50,
-        multilevel_refine_steps=15,
+        multilevel_refine_steps=_multilevel_refine_steps(args.fast_final),
         steps=args.steps,
         seed=args.seed,
         offload_to_disk=not args.no_offload,

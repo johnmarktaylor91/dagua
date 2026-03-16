@@ -18,9 +18,10 @@ from __future__ import annotations
 import shutil
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, Literal, Optional, Union
+from typing import Any, Callable, Iterator, List, Literal, Optional, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -40,6 +41,11 @@ _SKIP_ANCHOR_DEGREE = 2
 _SKIP_ANCHOR_SPAN = 1.5
 _HUGE_GRAPH_REFINEMENT_THRESHOLD = 50_000_000
 _FALLBACK_BATCH_SCALES = (1.0, 0.5, 0.25)
+_FINAL_LEVEL_SAMPLE_CAP = 1_000_000
+_MEMORY_GUARD_THRESHOLD = 100_000_000
+_MEMORY_GUARD_BYTES_PER_NODE = 20
+_MEMORY_GUARD_HEADROOM = 1.5
+_CPU_FINAL_EDGE_BATCH_CAP = 2_000_000
 
 OptimizerType = Literal["adam", "sgd_nesterov", "sgd"]
 
@@ -440,6 +446,159 @@ def _select_refinement_execution(
                 return False, True, optimizer_type, test_batch
 
     return True, False, level_optimizer_type, base_batch
+
+
+def _scaled_final_refine_steps(level_index: int, fine_n: int, base_refine: int) -> int:
+    """Return the refine-step count for a multilevel refinement stage.
+
+    Parameters
+    ----------
+    level_index : int
+        Zero-based level index within the refinement loop. ``0`` is the final
+        refinement on the full graph.
+    fine_n : int
+        Node count at the current refinement level.
+    base_refine : int
+        Baseline refinement step count from the runtime config.
+
+    Returns
+    -------
+    int
+        Step count for the current refinement level.
+    """
+    if level_index == 0:
+        final_steps = base_refine * 2
+        if fine_n >= 500_000_000:
+            return min(final_steps, 8)
+        if fine_n >= 200_000_000:
+            return min(final_steps, 12)
+        if fine_n >= 100_000_000:
+            return min(final_steps, 18)
+        return final_steps
+    if level_index <= 2:
+        return base_refine
+    return max(base_refine // 2, 5)
+
+
+def _scaled_sample_cap(num_nodes: int, base_cap: int = _FINAL_LEVEL_SAMPLE_CAP) -> int:
+    """Scale the sampled-node cap for huge refinement levels.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Total node count at the current refinement level.
+    base_cap : int, default=1_000_000
+        Default active-node cap for graphs below the huge-graph thresholds.
+
+    Returns
+    -------
+    int
+        Sampled active-node cap to apply for the level.
+    """
+    if num_nodes < 50_000_000:
+        return base_cap
+    if num_nodes < 200_000_000:
+        return min(base_cap, 500_000)
+    if num_nodes < 500_000_000:
+        return min(base_cap, 200_000)
+    return min(base_cap, 100_000)
+
+
+def _scaled_amortization(num_nodes: int) -> tuple[int, int]:
+    """Return crossing and overlap-projection intervals for the level.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Total node count at the current refinement level.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(crossing_interval, projection_interval)`` for the level.
+    """
+    if num_nodes <= 50:
+        return 10, 5
+    if num_nodes <= 500:
+        return 5, 5
+    if num_nodes <= 5_000:
+        return 3, 5
+    if num_nodes <= 50_000:
+        return 3, 10
+    if num_nodes <= 1_000_000:
+        return 3, 20
+    if num_nodes < 50_000_000:
+        return 3, 40
+    if num_nodes < 200_000_000:
+        return 5, 30
+    if num_nodes < 500_000_000:
+        return 8, 50
+    return 10, 100
+
+
+def _apply_final_level_memory_guard(fine_n: int, refine_steps: int) -> tuple[int, bool]:
+    """Reduce final-level work when available RAM is below the safe floor.
+
+    Parameters
+    ----------
+    fine_n : int
+        Node count at the current final refinement level.
+    refine_steps : int
+        Refine-step count selected before the memory guard.
+
+    Returns
+    -------
+    tuple[int, bool]
+        Adjusted refine-step count and whether aggressive sampling should be
+        forced for this level.
+    """
+    if fine_n < _MEMORY_GUARD_THRESHOLD:
+        return refine_steps, False
+
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - optional dependency
+        return refine_steps, False
+
+    mem = psutil.virtual_memory()
+    required_bytes = fine_n * _MEMORY_GUARD_BYTES_PER_NODE
+    if mem.available >= int(required_bytes * _MEMORY_GUARD_HEADROOM):
+        return refine_steps, False
+
+    import sys
+
+    print(
+        "WARNING: Final level needs "
+        f"~{required_bytes // 2**30}GB, only {mem.available // 2**30}GB available. "
+        "Reducing sample sizes aggressively.",
+        file=sys.stderr,
+        flush=True,
+    )
+    return min(refine_steps, 5), True
+
+
+@contextmanager
+def _temporary_sample_cap(sample_cap: int) -> Iterator[None]:
+    """Temporarily override the engine sampled-node cap for one layout call.
+
+    Parameters
+    ----------
+    sample_cap : int
+        Active-node cap to expose to ``dagua.layout.engine``.
+
+    Yields
+    ------
+    None
+        Context manager used around a single ``_layout_inner`` invocation.
+    """
+    from dagua.layout import engine as _engine
+
+    previous_cap = _engine.SAMPLED_NODE_CONTEXT_CAP
+    _engine.SAMPLED_NODE_CONTEXT_CAP = sample_cap
+    try:
+        yield
+    finally:
+        _engine.SAMPLED_NODE_CONTEXT_CAP = previous_cap
 
 
 def _coarsen_once_streaming(
@@ -1198,7 +1357,7 @@ def multilevel_layout(
             steps: int, lr: float = config.lr, seed: Optional[int] = config.seed
         ) -> LayoutConfig:
             """Build a level-specific layout config."""
-            return LayoutConfig(
+            level_config = LayoutConfig(
                 steps=steps,
                 lr=lr,
                 device=device,
@@ -1222,7 +1381,10 @@ def multilevel_layout(
                 optimizer_fallback=config.optimizer_fallback,
                 num_workers=config.num_workers,
                 edge_batch_size=config.edge_batch_size,
+                overlap_check_interval=config.overlap_check_interval,
             )
+            setattr(level_config, "_dagua_crossing_interval_override", None)
+            return level_config
 
         # Offload original graph to disk during Phase 2 — not needed until
         # refinement level i=0. Saves ~32GB at 1B scale.
@@ -1334,12 +1496,13 @@ def multilevel_layout(
 
             n_fine_edges = fine_ei_cpu.shape[1] if fine_ei_cpu.numel() > 0 else 0
             base_refine = config.multilevel_refine_steps
+            refine_steps = _scaled_final_refine_steps(i, fine_n, base_refine)
+            force_aggressive_sampling = False
             if i == 0:
-                refine_steps = base_refine * 2
-            elif i <= 2:
-                refine_steps = base_refine
-            else:
-                refine_steps = max(base_refine // 2, 5)
+                refine_steps, force_aggressive_sampling = _apply_final_level_memory_guard(
+                    fine_n,
+                    refine_steps,
+                )
 
             level_num = len(levels) - i
             _vlog(
@@ -1368,6 +1531,8 @@ def multilevel_layout(
                     device,
                 )
             )
+            if force_cpu and fine_n >= 200_000_000:
+                level_edge_batch = min(level_edge_batch, _CPU_FINAL_EDGE_BATCH_CAP)
 
             assert pos is not None
             assert level.fine_to_coarse is not None
@@ -1420,6 +1585,22 @@ def multilevel_layout(
 
                 refine_config = _copy.copy(refine_config)
                 refine_config.edge_batch_size = level_edge_batch
+            sample_cap = _scaled_sample_cap(fine_n)
+            if force_aggressive_sampling:
+                sample_cap = min(sample_cap, _scaled_sample_cap(500_000_000))
+            crossing_interval, projection_interval = _scaled_amortization(fine_n)
+            if (
+                config.overlap_check_interval == 0
+                and refine_config.overlap_check_interval != projection_interval
+            ) or getattr(
+                refine_config, "_dagua_crossing_interval_override", None
+            ) != crossing_interval:
+                import copy as _copy
+
+                refine_config = _copy.copy(refine_config)
+                if config.overlap_check_interval == 0:
+                    refine_config.overlap_check_interval = projection_interval
+                setattr(refine_config, "_dagua_crossing_interval_override", crossing_interval)
             level_layer_index = (
                 build_layer_index(level.fine_layer_assignments, device="cpu")
                 if level.fine_layer_assignments is not None
@@ -1431,20 +1612,21 @@ def multilevel_layout(
                 if hasattr(trace, "mark_phase"):
                     trace.mark_phase("Final Refinement", f"{fine_n:,} nodes")
 
-            pos = _layout_inner(
-                fine_ei_cpu,
-                fine_n,
-                fine_sizes,
-                refine_config,
-                device=level_device,
-                optimizer_type=level_optimizer_type,
-                init_pos=pos,
-                layer_assignments=level.fine_layer_assignments,
-                progress_context=ProgressContext(indent="    "),
-                trace=level_trace,
-                prebuilt_layer_index=level_layer_index,
-                skip_classification=True,
-            )
+            with _temporary_sample_cap(sample_cap):
+                pos = _layout_inner(
+                    fine_ei_cpu,
+                    fine_n,
+                    fine_sizes,
+                    refine_config,
+                    device=level_device,
+                    optimizer_type=level_optimizer_type,
+                    init_pos=pos,
+                    layer_assignments=level.fine_layer_assignments,
+                    progress_context=ProgressContext(indent="    "),
+                    trace=level_trace,
+                    prebuilt_layer_index=level_layer_index,
+                    skip_classification=True,
+                )
 
             levels[i] = CoarseLevel(
                 edge_index=None,
