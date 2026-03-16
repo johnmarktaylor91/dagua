@@ -1223,13 +1223,22 @@ def multilevel_layout(
                     pass
             _reset_peak()
 
+            level_device = device
             if device == "cuda":
                 from dagua.layout.engine import _estimate_gpu_memory
 
-                next_level_mem = _estimate_gpu_memory(fine_n, n_fine_edges, per_loss_bw=True)
+                next_level_mem = _estimate_gpu_memory(
+                    fine_n,
+                    n_fine_edges,
+                    per_loss_bw=True,
+                    edges_on_cpu=True,
+                    edge_batch=config.edge_batch_size or 5_000_000,
+                )
                 if not _vram_fits(next_level_mem):
-                    assert pos is not None
-                    pos = pos.cpu()
+                    # This level is too large for GPU — run on CPU
+                    level_device = "cpu"
+                    if pos is not None and pos.device.type == "cuda":
+                        pos = pos.cpu()
                     torch.cuda.empty_cache()
 
             assert pos is not None
@@ -1256,8 +1265,8 @@ def multilevel_layout(
                 del pos_cpu
             pos = None
 
-            fine_sizes = fine_sizes_cpu.to(device)
-            pos = fine_pos if fine_pos.device.type == device else fine_pos.to(device)
+            fine_sizes = fine_sizes_cpu.to(level_device)
+            pos = fine_pos if fine_pos.device.type == level_device else fine_pos.to(level_device)
             del fine_pos
 
             refine_config = _make_config(steps=refine_steps, seed=None)
@@ -1277,7 +1286,7 @@ def multilevel_layout(
                 fine_n,
                 fine_sizes,
                 refine_config,
-                device=device,
+                device=level_device,
                 init_pos=pos,
                 layer_assignments=level.fine_layer_assignments,
                 progress_context=ProgressContext(indent="    "),
