@@ -29,6 +29,7 @@ from dagua.utils import collect_cluster_leaves, measure_text, parse_rich_markup
 
 _VECTOR_FORMATS = {"pdf", "ps", "eps", "svg", "svgz"}
 _RASTER_FORMATS = {"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"}
+_GRAPHVIZ_DASH_PATTERN: Tuple[float, float] = (6.0, 4.0)
 
 
 def _detect_output_format(output: Optional[str], format: Optional[str]) -> Optional[str]:
@@ -313,10 +314,14 @@ def _node_linestyle(style: Any) -> Any:
     """
     if style.stroke_dash_pattern is not None:
         return (0, style.stroke_dash_pattern)
-    return {"solid": "-", "dashed": "--", "dotted": ":"}.get(style.stroke_dash, "-")
+    if style.stroke_dash == "dashed":
+        return (0, _GRAPHVIZ_DASH_PATTERN)
+    if style.stroke_dash == "dotted":
+        return ":"
+    return "-"
 
 
-def _edge_linestyle(style: Any) -> str:
+def _edge_linestyle(style: Any) -> Any:
     """Resolve the matplotlib linestyle for an edge body.
 
     Parameters
@@ -326,10 +331,67 @@ def _edge_linestyle(style: Any) -> str:
 
     Returns
     -------
-    str
-        Matplotlib linestyle string.
+    Any
+        Matplotlib linestyle string or dash tuple.
     """
-    return {"solid": "-", "dashed": "--", "dotted": ":"}.get(style.style, "-")
+    if style.style == "dashed":
+        return (0, _GRAPHVIZ_DASH_PATTERN)
+    if style.style == "dotted":
+        return ":"
+    return "-"
+
+
+def _triangle_vertices(x: float, y: float, w: float, h: float) -> np.ndarray:
+    """Return vertices for a centered equilateral triangle within a node box.
+
+    Parameters
+    ----------
+    x : float
+        Node center x-coordinate.
+    y : float
+        Node center y-coordinate.
+    w : float
+        Node width.
+    h : float
+        Node height.
+
+    Returns
+    -------
+    numpy.ndarray
+        Triangle vertices with shape ``[3, 2]``.
+    """
+    equilateral_height_ratio = float(np.sqrt(3.0) / 2.0)
+    triangle_width = min(w, h / equilateral_height_ratio)
+    triangle_height = triangle_width * equilateral_height_ratio
+    half_width = triangle_width / 2.0
+    half_height = triangle_height / 2.0
+    return np.array(
+        [
+            [x, y + half_height],
+            [x + half_width, y - half_height],
+            [x - half_width, y - half_height],
+        ]
+    )
+
+
+def _cluster_linestyle(stroke_dash: str) -> Any:
+    """Resolve the matplotlib linestyle for cluster borders.
+
+    Parameters
+    ----------
+    stroke_dash : str
+        Cluster dash style name.
+
+    Returns
+    -------
+    Any
+        Matplotlib linestyle string or dash tuple.
+    """
+    if stroke_dash == "dashed":
+        return (0, _GRAPHVIZ_DASH_PATTERN)
+    if stroke_dash == "dotted":
+        return ":"
+    return "-"
 
 
 def _regular_polygon_vertices(
@@ -500,8 +562,7 @@ def _build_node_patch(
             zorder=zorder,
         )
     if shape == "triangle":
-        vertices = _regular_polygon_vertices(3, x, y, w, h)
-        vertices = np.roll(vertices, -1, axis=0)
+        vertices = _triangle_vertices(x, y, w, h)
         return Polygon(
             vertices,
             closed=True,
@@ -1295,7 +1356,7 @@ def _draw_edge_marker(
     """
     from matplotlib.colors import to_rgba
     from matplotlib.lines import Line2D
-    from matplotlib.patches import Circle, Polygon
+    from matplotlib.patches import Circle, FancyArrowPatch, Polygon
 
     dx, dy = direction
     dist = float(np.hypot(dx, dy))
@@ -1310,7 +1371,29 @@ def _draw_edge_marker(
     filled = style.arrow_fill == "filled" and marker not in {"open", "vee", "tee", "crow"}
     tip_x, tip_y = point
 
-    if marker in {"normal", "open"}:
+    if marker in {"normal", "vee"}:
+        base_x = tip_x - ux * length
+        base_y = tip_y - uy * length
+        arrowstyle = "->" if marker == "vee" else "-|>"
+        head_length = length / max(width, 1e-6)
+        arrow = FancyArrowPatch(
+            (base_x, base_y),
+            (tip_x, tip_y),
+            arrowstyle=f"{arrowstyle},head_length={head_length:.3f},head_width=1.0",
+            mutation_scale=width,
+            linewidth=style.width,
+            edgecolor=color,
+            facecolor=color if filled else "none",
+            shrinkA=0.0,
+            shrinkB=0.0,
+            capstyle="round",
+            joinstyle="round",
+            zorder=1.2,
+        )
+        ax.add_patch(arrow)
+        return
+
+    if marker == "open":
         base_x = tip_x - ux * length
         base_y = tip_y - uy * length
         polygon = Polygon(
@@ -1320,36 +1403,13 @@ def _draw_edge_marker(
                 (base_x - px * width / 2, base_y - py * width / 2),
             ],
             closed=True,
-            facecolor=color if marker == "normal" and filled else "none",
+            facecolor="none",
             edgecolor=color,
             linewidth=style.width,
             joinstyle="round",
             zorder=1.2,
         )
         ax.add_patch(polygon)
-        return
-
-    if marker == "vee":
-        base_x = tip_x - ux * length
-        base_y = tip_y - uy * length
-        ax.add_line(
-            Line2D(
-                [tip_x, base_x + px * width / 2],
-                [tip_y, base_y + py * width / 2],
-                color=color,
-                linewidth=style.width,
-                zorder=1.2,
-            )
-        )
-        ax.add_line(
-            Line2D(
-                [tip_x, base_x - px * width / 2],
-                [tip_y, base_y - py * width / 2],
-                color=color,
-                linewidth=style.width,
-                zorder=1.2,
-            )
-        )
         return
 
     if marker in {"dot", "circle"}:
@@ -1634,12 +1694,6 @@ def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
         boxstyle = "round,pad=0" if cr > 0 else "square,pad=0"
 
         # Stroke dash
-        linestyle = "-"
-        if style.stroke_dash == "dashed":
-            linestyle = "--"
-        elif style.stroke_dash == "dotted":
-            linestyle = "-."
-
         patch = FancyBboxPatch(
             (x_min, y_min),
             x_max - x_min,
@@ -1648,7 +1702,7 @@ def _draw_clusters(ax, graph, pos, sizes, svg_hover_map=None):
             facecolor=fill_color,
             edgecolor=stroke_color,
             linewidth=style.stroke_width,
-            linestyle=linestyle,
+            linestyle=_cluster_linestyle(style.stroke_dash),
             alpha=opacity,
             zorder=0,
         )

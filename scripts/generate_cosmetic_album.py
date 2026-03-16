@@ -33,7 +33,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from dagua import DaguaGraph, render
-from dagua.styles import ClusterStyle, EdgeStyle, GraphStyle, NodeStyle
+from dagua.styles import (
+    GRAPHVIZ_MATCH_DEFAULTS,
+    ClusterStyle,
+    EdgeStyle,
+    GraphStyle,
+    NodeStyle,
+)
 
 PANEL_SIZE: Tuple[int, int] = (920, 680)
 COMPARISON_FIGSIZE: Tuple[float, float] = (12.0, 6.0)
@@ -47,6 +53,10 @@ NODE_STROKE = "#4C77A3"
 EDGE_COLOR = "#5F6C7B"
 CLUSTER_FILL = "#EAF1F8"
 CLUSTER_STROKE = "#A9B8C7"
+GRAPHVIZ_MIN_NODE_WIDTH = 54.0
+GRAPHVIZ_PAIR_VERTICAL_GAP = 170.0
+PANEL_CONTENT_MARGIN = 36
+CONTENT_CROP_PADDING = 12
 
 
 @dataclass
@@ -148,6 +158,60 @@ def _graphviz_available() -> bool:
     return shutil.which("dot") is not None
 
 
+def _graphviz_match_node_style_defaults() -> Dict[str, Any]:
+    """Return album-only node style overrides that mimic Graphviz's scale.
+
+    Returns
+    -------
+    dict[str, Any]
+        Keyword arguments suitable for ``NodeStyle`` construction.
+    """
+
+    return {
+        "stroke_width": GRAPHVIZ_MATCH_DEFAULTS["stroke_width"],
+        "padding": GRAPHVIZ_MATCH_DEFAULTS["padding"],
+        "font_size": GRAPHVIZ_MATCH_DEFAULTS["font_size"],
+        "min_width": GRAPHVIZ_MIN_NODE_WIDTH,
+    }
+
+
+def _graphviz_match_edge_style_defaults() -> Dict[str, Any]:
+    """Return album-only edge style overrides that mimic Graphviz's weight.
+
+    Returns
+    -------
+    dict[str, Any]
+        Keyword arguments suitable for ``EdgeStyle`` construction.
+    """
+
+    return {
+        "width": GRAPHVIZ_MATCH_DEFAULTS["edge_width"],
+        "opacity": GRAPHVIZ_MATCH_DEFAULTS["edge_opacity"],
+        "arrow_length": GRAPHVIZ_MATCH_DEFAULTS["arrow_length"],
+        "arrow_width": GRAPHVIZ_MATCH_DEFAULTS["arrow_width"],
+    }
+
+
+def _top_bottom_pair_positions(
+    vertical_gap: float = GRAPHVIZ_PAIR_VERTICAL_GAP,
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """Return symmetric top-to-bottom positions for a two-node comparison.
+
+    Parameters
+    ----------
+    vertical_gap : float, default=GRAPHVIZ_PAIR_VERTICAL_GAP
+        Distance between the source and target nodes.
+
+    Returns
+    -------
+    tuple[tuple[float, float], tuple[float, float]]
+        Source position first, target position second.
+    """
+
+    half_gap = vertical_gap / 2.0
+    return (0.0, half_gap), (0.0, -half_gap)
+
+
 def _base_graph_style() -> GraphStyle:
     """Create the graph-wide render defaults used by album cases.
 
@@ -183,15 +247,14 @@ def _base_node_style(**overrides: Any) -> NodeStyle:
         shape="roundrect",
         fill=NODE_FILL,
         stroke=NODE_STROKE,
-        font_size=12.0,
         font_color="#1F2937",
-        padding=(16.0, 11.0),
         corner_radius=6.0,
         opacity=1.0,
         gradient="none",
         font_weight="regular",
         font_style="normal",
         shadow=False,
+        **_graphviz_match_node_style_defaults(),
     )
     for field_name, value in overrides.items():
         setattr(style, field_name, value)
@@ -214,15 +277,12 @@ def _base_edge_style(**overrides: Any) -> EdgeStyle:
 
     style = EdgeStyle(
         color=EDGE_COLOR,
-        width=1.8,
         arrow="normal",
         tail_arrow="none",
         arrow_fill="filled",
         style="solid",
-        opacity=0.95,
         routing="bezier",
-        arrow_length=11.0,
-        arrow_width=8.0,
+        **_graphviz_match_edge_style_defaults(),
     )
     for field_name, value in overrides.items():
         setattr(style, field_name, value)
@@ -246,7 +306,7 @@ def _base_cluster_style(**overrides: Any) -> ClusterStyle:
     style = ClusterStyle(
         fill=CLUSTER_FILL,
         stroke=CLUSTER_STROKE,
-        stroke_width=1.2,
+        stroke_width=float(GRAPHVIZ_MATCH_DEFAULTS["stroke_width"]),
         stroke_dash="solid",
         corner_radius=10.0,
         padding=24.0,
@@ -386,9 +446,9 @@ def _direction_graph(direction: str) -> Tuple[DaguaGraph, torch.Tensor]:
     """
 
     if direction == "TB":
-        positions = [(0.0, 0.0), (0.0, 130.0), (0.0, 260.0)]
-    elif direction == "BT":
         positions = [(0.0, 260.0), (0.0, 130.0), (0.0, 0.0)]
+    elif direction == "BT":
+        positions = [(0.0, 0.0), (0.0, 130.0), (0.0, 260.0)]
     elif direction == "LR":
         positions = [(0.0, 0.0), (170.0, 0.0), (340.0, 0.0)]
     elif direction == "RL":
@@ -758,7 +818,12 @@ def _build_graphviz_dot(graph: DaguaGraph, spec: GraphvizRenderSpec) -> str:
     return "\n".join(lines)
 
 
-def _render_graphviz_png(dot_source: str, output_path: Path, engine: str) -> None:
+def _render_graphviz_png(
+    dot_source: str,
+    output_path: Path,
+    engine: str,
+    dpi: int = RAW_RENDER_DPI,
+) -> None:
     """Render DOT source to a PNG with Graphviz.
 
     Parameters
@@ -769,6 +834,8 @@ def _render_graphviz_png(dot_source: str, output_path: Path, engine: str) -> Non
         Destination PNG path.
     engine : str
         Graphviz engine executable.
+    dpi : int, default=RAW_RENDER_DPI
+        Rasterization DPI passed through to Graphviz.
 
     Returns
     -------
@@ -777,7 +844,7 @@ def _render_graphviz_png(dot_source: str, output_path: Path, engine: str) -> Non
     """
 
     result = subprocess.run(
-        [engine, f"-Gdpi={RAW_RENDER_DPI}", "-Tpng", "-o", str(output_path)],
+        [engine, f"-Gdpi={dpi}", "-Tpng", "-o", str(output_path)],
         input=dot_source,
         text=True,
         capture_output=True,
@@ -787,7 +854,12 @@ def _render_graphviz_png(dot_source: str, output_path: Path, engine: str) -> Non
         raise RuntimeError(result.stderr.strip() or "Graphviz render failed")
 
 
-def _render_dagua_png(graph: DaguaGraph, positions: torch.Tensor, output_path: Path) -> None:
+def _render_dagua_png(
+    graph: DaguaGraph,
+    positions: torch.Tensor,
+    output_path: Path,
+    dpi: int = RAW_RENDER_DPI,
+) -> None:
     """Render a Dagua graph to a PNG using fixed positions.
 
     Parameters
@@ -798,6 +870,8 @@ def _render_dagua_png(graph: DaguaGraph, positions: torch.Tensor, output_path: P
         Fixed node positions with shape ``[N, 2]``.
     output_path : Path
         Destination PNG path.
+    dpi : int, default=RAW_RENDER_DPI
+        Rasterization DPI passed through to Dagua's renderer.
 
     Returns
     -------
@@ -806,8 +880,55 @@ def _render_dagua_png(graph: DaguaGraph, positions: torch.Tensor, output_path: P
     """
 
     graph.compute_node_sizes()
-    fig, _ = render(graph, positions, output=str(output_path), dpi=RAW_RENDER_DPI)
+    fig, _ = render(graph, positions, output=str(output_path), dpi=dpi)
     plt.close(fig)
+
+
+def _content_crop_box(image: Image.Image) -> Optional[Tuple[int, int, int, int]]:
+    """Return a padded crop box around non-white content.
+
+    Parameters
+    ----------
+    image : PIL.Image.Image
+        Source image.
+
+    Returns
+    -------
+    tuple[int, int, int, int] | None
+        Crop bounds in PIL coordinates, or ``None`` when no content is found.
+    """
+
+    data = np.asarray(image.convert("RGBA"))
+    content_mask = (data[:, :, 3] > 0) & np.any(data[:, :, :3] < 252, axis=2)
+    if not bool(content_mask.any()):
+        return None
+
+    ys, xs = np.nonzero(content_mask)
+    left = max(int(xs.min()) - CONTENT_CROP_PADDING, 0)
+    top = max(int(ys.min()) - CONTENT_CROP_PADDING, 0)
+    right = min(int(xs.max()) + CONTENT_CROP_PADDING + 1, image.width)
+    bottom = min(int(ys.max()) + CONTENT_CROP_PADDING + 1, image.height)
+    return left, top, right, bottom
+
+
+def _crop_to_content(image: Image.Image) -> Image.Image:
+    """Crop an image to its visible content when possible.
+
+    Parameters
+    ----------
+    image : PIL.Image.Image
+        Source image.
+
+    Returns
+    -------
+    PIL.Image.Image
+        Cropped image, or the original image when no content bounds are found.
+    """
+
+    crop_box = _content_crop_box(image)
+    if crop_box is None:
+        return image
+    return image.crop(crop_box)
 
 
 def _normalize_panel_image(image_path: Path, panel_size: Tuple[int, int]) -> Image.Image:
@@ -827,8 +948,11 @@ def _normalize_panel_image(image_path: Path, panel_size: Tuple[int, int]) -> Ima
     """
 
     with Image.open(image_path) as image:
-        rgba = image.convert("RGBA")
-        rgba.thumbnail((panel_size[0] - 48, panel_size[1] - 48), Image.LANCZOS)
+        rgba = _crop_to_content(image.convert("RGBA"))
+        rgba.thumbnail(
+            (panel_size[0] - PANEL_CONTENT_MARGIN, panel_size[1] - PANEL_CONTENT_MARGIN),
+            Image.LANCZOS,
+        )
         canvas = Image.new("RGBA", panel_size, WHITE)
         offset = ((panel_size[0] - rgba.width) // 2, (panel_size[1] - rgba.height) // 2)
         canvas.paste(rgba, offset, rgba)
@@ -916,6 +1040,136 @@ def _compose_solo_image(
     plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))
     fig.savefig(output_path, dpi=ALBUM_DPI, bbox_inches="tight", facecolor=WHITE)
     plt.close(fig)
+
+
+def _compose_comparison(
+    dagua_path: Path,
+    competitor_path: Path,
+    title: str,
+    output_path: Path,
+    competitor_label: str = GRAPHVIZ_COMPETITOR,
+) -> None:
+    """Compatibility wrapper exposing the shared comparison composer.
+
+    Parameters
+    ----------
+    dagua_path : Path
+        Rendered Dagua panel source.
+    competitor_path : Path
+        Rendered competitor panel source.
+    title : str
+        Figure title.
+    output_path : Path
+        Final composed output path.
+    competitor_label : str, default=GRAPHVIZ_COMPETITOR
+        Right-hand panel label.
+
+    Returns
+    -------
+    None
+        The composed image is written to ``output_path``.
+    """
+
+    _compose_comparison_image(
+        dagua_image=dagua_path,
+        competitor_image=competitor_path,
+        title=title,
+        competitor_label=competitor_label,
+        output_path=output_path,
+    )
+
+
+def _compose_solo(
+    dagua_path: Path,
+    title: str,
+    output_path: Path,
+) -> None:
+    """Compatibility wrapper exposing the shared solo composer.
+
+    Parameters
+    ----------
+    dagua_path : Path
+        Rendered Dagua panel source.
+    title : str
+        Figure title.
+    output_path : Path
+        Final composed output path.
+
+    Returns
+    -------
+    None
+        The composed image is written to ``output_path``.
+    """
+
+    _compose_solo_image(dagua_image=dagua_path, title=title, output_path=output_path)
+
+
+def _competitor_cache_path(root: Path, case: AlbumCase) -> Path:
+    """Return the persistent cache path for a competitor render.
+
+    Parameters
+    ----------
+    root : Path
+        Album root directory.
+    case : AlbumCase
+        Album case being rendered.
+
+    Returns
+    -------
+    Path
+        Cache path for the competitor PNG.
+    """
+
+    if case.graphviz is None:
+        raise ValueError("Competitor cache path requested for a Dagua-only case.")
+    return root / "_cache" / "competitor" / f"{case.case_id}_{case.graphviz.engine}.png"
+
+
+def _resolve_competitor_image(
+    case: AlbumCase,
+    root: Path,
+    temp_root: Path,
+    dagua_only: bool,
+    cache_competitor: bool,
+) -> Path:
+    """Return a competitor image path, rendering or reusing a cached PNG.
+
+    Parameters
+    ----------
+    case : AlbumCase
+        Album case being rendered.
+    root : Path
+        Album root directory.
+    temp_root : Path
+        Temporary directory for uncached renders.
+    dagua_only : bool
+        Whether competitor renders should be skipped in favor of cached images.
+    cache_competitor : bool
+        Whether to persist and reuse competitor renders.
+
+    Returns
+    -------
+    Path
+        Path to the competitor PNG.
+    """
+
+    if case.graphviz is None:
+        raise ValueError("Competitor image requested for a Dagua-only case.")
+
+    cache_path = _competitor_cache_path(root, case)
+    if cache_competitor and cache_path.exists():
+        return cache_path
+    if dagua_only:
+        raise RuntimeError(
+            f"Missing cached competitor render for {case.case_id!r}. "
+            "Run once without --dagua-only to populate the cache."
+        )
+
+    output_path = cache_path if cache_competitor else temp_root / f"{case.case_id}_graphviz.png"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    dot_source = _build_graphviz_dot(case.graph, case.graphviz)
+    _render_graphviz_png(dot_source, output_path, case.graphviz.engine)
+    return output_path
 
 
 def _case_output_path(root: Path, case: AlbumCase) -> Path:
@@ -1007,7 +1261,7 @@ def _node_shape_cases() -> List[AlbumCase]:
     ]
     cases: List[AlbumCase] = []
     for slug, title_name, dagua_shape, gv_node_attrs in shape_specs:
-        graph, positions = _pair_graph([(-110.0, 0.0), (110.0, 0.0)], ["Source", "Target"])
+        graph, positions = _pair_graph(_top_bottom_pair_positions(), ["Source", "Target"])
         _set_all_node_styles(graph, _base_node_style(shape=dagua_shape))
         _set_all_edge_styles(graph, _base_edge_style())
         cases.append(
@@ -1046,7 +1300,7 @@ def _arrow_type_cases() -> List[AlbumCase]:
     ]
     cases: List[AlbumCase] = []
     for slug, title_name, dagua_arrow, gv_arrow in arrow_specs:
-        graph, positions = _pair_graph([(0.0, 0.0), (0.0, 170.0)], ["Upstream", "Downstream"])
+        graph, positions = _pair_graph(_top_bottom_pair_positions(), ["Upstream", "Downstream"])
         _set_all_node_styles(graph, _base_node_style())
         _set_all_edge_styles(graph, _base_edge_style(arrow=dagua_arrow))
         cases.append(
@@ -1063,7 +1317,7 @@ def _arrow_type_cases() -> List[AlbumCase]:
         )
 
     for slug, title_name, dagua_arrow, gv_arrow in arrow_specs:
-        graph, positions = _pair_graph([(0.0, 0.0), (0.0, 170.0)], ["Start", "End"])
+        graph, positions = _pair_graph(_top_bottom_pair_positions(), ["Start", "End"])
         _set_all_node_styles(graph, _base_node_style())
         _set_all_edge_styles(graph, _base_edge_style(arrow="none", tail_arrow=dagua_arrow))
         cases.append(
@@ -1086,7 +1340,7 @@ def _arrow_type_cases() -> List[AlbumCase]:
         ("normal_hollow", "Hollow", "hollow", "empty"),
     ]
     for slug, title_name, dagua_fill, gv_arrow in fill_specs:
-        graph, positions = _pair_graph([(0.0, 0.0), (0.0, 170.0)], ["Filled", "Target"])
+        graph, positions = _pair_graph(_top_bottom_pair_positions(), ["Filled", "Target"])
         _set_all_node_styles(graph, _base_node_style())
         _set_all_edge_styles(graph, _base_edge_style(arrow="normal", arrow_fill=dagua_fill))
         cases.append(
@@ -1120,7 +1374,7 @@ def _border_style_cases() -> List[AlbumCase]:
     ]
     cases: List[AlbumCase] = []
     for slug, title_name, dagua_dash, gv_style in border_specs:
-        graph, positions = _pair_graph([(-110.0, 0.0), (110.0, 0.0)], ["Node A", "Node B"])
+        graph, positions = _pair_graph(_top_bottom_pair_positions(), ["Node A", "Node B"])
         _set_all_node_styles(graph, _base_node_style(stroke_dash=dagua_dash))
         _set_all_edge_styles(graph, _base_edge_style(arrow="none"))
         cases.append(
@@ -1154,7 +1408,7 @@ def _edge_style_cases() -> List[AlbumCase]:
     ]
     cases: List[AlbumCase] = []
     for slug, title_name in edge_specs:
-        graph, positions = _pair_graph([(-110.0, 0.0), (110.0, 0.0)], ["Source", "Target"])
+        graph, positions = _pair_graph(_top_bottom_pair_positions(), ["Source", "Target"])
         _set_all_node_styles(graph, _base_node_style())
         _set_all_edge_styles(graph, _base_edge_style(style=slug))
         cases.append(
@@ -1188,7 +1442,7 @@ def _edge_routing_cases() -> List[AlbumCase]:
     ]
     cases: List[AlbumCase] = []
     for slug, title_name, dagua_routing, gv_splines in routing_specs:
-        graph, positions = _pair_graph([(-110.0, -30.0), (110.0, 150.0)], ["From", "To"])
+        graph, positions = _pair_graph(_top_bottom_pair_positions(), ["From", "To"])
         _set_all_node_styles(graph, _base_node_style())
         _set_all_edge_styles(graph, _base_edge_style(routing=dagua_routing))
         cases.append(
@@ -1660,6 +1914,8 @@ def build_cosmetic_album(
     output_dir: str = "eval_output/cosmetic_album",
     categories: Optional[Sequence[str]] = None,
     case_ids: Optional[Sequence[str]] = None,
+    dagua_only: bool = False,
+    cache_competitor: bool = False,
 ) -> CosmeticAlbumResult:
     """Render the cosmetic comparison album and manifest.
 
@@ -1671,6 +1927,10 @@ def build_cosmetic_album(
         Optional subset of categories to render.
     case_ids : sequence[str] | None, default=None
         Optional subset of case identifiers to render.
+    dagua_only : bool, default=False
+        Reuse cached competitor renders instead of invoking Graphviz again.
+    cache_competitor : bool, default=False
+        Persist competitor PNGs under ``output_dir/_cache/competitor``.
 
     Returns
     -------
@@ -1686,11 +1946,17 @@ def build_cosmetic_album(
     if not selected_cases:
         raise ValueError("No cosmetic album cases matched the requested filters.")
 
-    if any(case.graphviz is not None for case in selected_cases) and not _graphviz_available():
+    needs_graphviz_cases = any(case.graphviz is not None for case in selected_cases)
+    if dagua_only and needs_graphviz_cases and not cache_competitor:
+        raise ValueError("--dagua-only requires --cache-competitor for comparison cases.")
+
+    if needs_graphviz_cases and not dagua_only and not _graphviz_available():
         raise RuntimeError("Graphviz `dot` is required for comparison cases but is not installed.")
 
     for category in sorted({case.category for case in selected_cases}):
         (root / category).mkdir(parents=True, exist_ok=True)
+    if cache_competitor:
+        (root / "_cache" / "competitor").mkdir(parents=True, exist_ok=True)
 
     image_paths: List[str] = []
     manifest_cases: List[Dict[str, object]] = []
@@ -1705,9 +1971,13 @@ def build_cosmetic_album(
 
             output_path = _case_output_path(root, case)
             if case.graphviz is not None:
-                graphviz_raw = temp_root / f"{case.case_id}_graphviz.png"
-                dot_source = _build_graphviz_dot(case.graph, case.graphviz)
-                _render_graphviz_png(dot_source, graphviz_raw, case.graphviz.engine)
+                graphviz_raw = _resolve_competitor_image(
+                    case=case,
+                    root=root,
+                    temp_root=temp_root,
+                    dagua_only=dagua_only,
+                    cache_competitor=cache_competitor,
+                )
                 _compose_comparison_image(
                     dagua_image=dagua_raw,
                     competitor_image=graphviz_raw,
@@ -1761,12 +2031,24 @@ def main() -> int:
         default=None,
         help="Optional subset of stable case identifiers.",
     )
+    parser.add_argument(
+        "--dagua-only",
+        action="store_true",
+        help="Reuse cached competitor renders and regenerate only the Dagua side.",
+    )
+    parser.add_argument(
+        "--cache-competitor",
+        action="store_true",
+        help="Persist Graphviz comparison panels under the output directory cache.",
+    )
     args = parser.parse_args()
 
     result = build_cosmetic_album(
         output_dir=args.output_dir,
         categories=args.categories,
         case_ids=args.case_ids,
+        dagua_only=args.dagua_only,
+        cache_competitor=args.cache_competitor,
     )
     print(result.output_dir)
     print(result.manifest_path)
