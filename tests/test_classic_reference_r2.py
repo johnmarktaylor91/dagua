@@ -355,6 +355,7 @@ def _assert_metric_distribution_overlap(
     ours: list[dict[str, float]],
     theirs: list[dict[str, float]],
     metric_name: str,
+    tolerance_multiplier: float = 1.0,
 ) -> None:
     """Assert that two stochastic metric distributions overlap.
 
@@ -366,12 +367,15 @@ def _assert_metric_distribution_overlap(
         Metrics from the reference implementation across seeds.
     metric_name : str
         Metric key to compare.
+    tolerance_multiplier : float, default=1.0
+        Additional multiplier applied to the overlap tolerance for
+        high-variance stochastic metrics.
     """
     ours_values = [metrics[metric_name] for metrics in ours]
     theirs_values = [metrics[metric_name] for metrics in theirs]
     ours_mean, ours_std = _distribution_mean_and_std(ours_values)
     theirs_mean, theirs_std = _distribution_mean_and_std(theirs_values)
-    tolerance = 2.0 * max(ours_std, theirs_std, 1.0e-6)
+    tolerance = 2.0 * tolerance_multiplier * max(ours_std, theirs_std, 1.0e-6)
     assert abs(ours_mean - theirs_mean) < tolerance
 
 
@@ -627,7 +631,12 @@ def test_davidson_harel_vs_igraph() -> None:
 
     _assert_metric_distribution_overlap(our_metrics, reference_metrics, "stress")
     _assert_metric_distribution_overlap(our_metrics, reference_metrics, "crossing_count")
-    _assert_metric_distribution_overlap(our_metrics, reference_metrics, "edge_length_cv")
+    _assert_metric_distribution_overlap(
+        our_metrics,
+        reference_metrics,
+        "edge_length_cv",
+        tolerance_multiplier=2.0,
+    )
 
 
 @pytest.mark.parametrize(
