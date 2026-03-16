@@ -10,6 +10,7 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
+from dagua.layout.constraints import edge_attraction_loss, edge_straightness_loss
 from dagua.layout.engine import (
     _auto_layout_steps,
     _create_optimizer,
@@ -21,10 +22,19 @@ from dagua.layout.engine import (
     _overlap_interval,
     _override_for_tree,
     _resolve_memory_strategy,
+    _should_use_tiled_gpu,
 )
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
 from dagua.layout.layers import build_layer_index
-from dagua.layout.multilevel import _select_refinement_execution, build_hierarchy, coarsen_once
+from dagua.layout.multilevel import (
+    _scaled_amortization,
+    _scaled_final_refine_steps,
+    _scaled_sample_cap,
+    _select_refinement_execution,
+    build_hierarchy,
+    coarsen_once,
+)
+from dagua.layout.tiled_compute import _partition_edges_by_tile
 from dagua.metrics import compute_all_metrics
 
 
@@ -237,6 +247,33 @@ def test_edge_batch_size_scaling() -> None:
     assert _edge_batch_size(1_000_000, config) == 500_000
     assert _edge_batch_size(5_000_000, config) == 2_000_000
     assert _edge_batch_size(300_000_000, config) == 5_000_000
+
+
+def test_scaled_sample_cap() -> None:
+    """Huge final levels should reduce sampled active-node caps."""
+    assert _scaled_sample_cap(1_000) == 1_000_000
+    assert _scaled_sample_cap(100_000_000) == 500_000
+    assert _scaled_sample_cap(1_000_000_000) == 100_000
+
+
+def test_scaled_amortization_preserves_small_graph_defaults() -> None:
+    """Amortization overrides should leave sub-50M graphs unchanged."""
+    assert _scaled_amortization(25) == (10, 5)
+    assert _scaled_amortization(1_000) == (3, 5)
+    assert _scaled_amortization(1_000_000) == (3, 20)
+    assert _scaled_amortization(49_999_999) == (3, 40)
+    assert _scaled_amortization(100_000_000) == (5, 30)
+    assert _scaled_amortization(300_000_000) == (8, 50)
+    assert _scaled_amortization(1_000_000_000) == (10, 100)
+
+
+def test_scaled_final_refine_steps_only_changes_huge_final_level() -> None:
+    """Final-level step reduction should start only at the documented thresholds."""
+    assert _scaled_final_refine_steps(level_index=0, fine_n=49_999_999, base_refine=15) == 30
+    assert _scaled_final_refine_steps(level_index=0, fine_n=100_000_000, base_refine=15) == 18
+    assert _scaled_final_refine_steps(level_index=0, fine_n=200_000_000, base_refine=15) == 12
+    assert _scaled_final_refine_steps(level_index=0, fine_n=500_000_000, base_refine=15) == 8
+    assert _scaled_final_refine_steps(level_index=3, fine_n=500_000_000, base_refine=15) == 7
 
 
 def test_edge_batch_size_cuda_uses_available_vram(
@@ -1286,3 +1323,93 @@ def test_hub_isolation() -> None:
 
     hub_group = result.fine_to_coarse[0].item()
     assert int((result.fine_to_coarse == hub_group).sum().item()) == 1
+
+
+def test_edge_partitioning() -> None:
+    """Edges should split into tile-local tensors plus a cross-tile residual."""
+    edge_index = torch.tensor(
+        [
+            [0, 1, 2, 4, 1],
+            [1, 2, 3, 5, 5],
+        ],
+        dtype=torch.long,
+    )
+
+    tile_edges, cross_edges = _partition_edges_by_tile(edge_index, [0, 3], [3, 6])
+
+    assert len(tile_edges) == 2
+    assert torch.equal(tile_edges[0], torch.tensor([[0, 1], [1, 2]], dtype=torch.long))
+    assert torch.equal(tile_edges[1], torch.tensor([[1], [2]], dtype=torch.long))
+    assert torch.equal(cross_edges, torch.tensor([[2, 1], [3, 5]], dtype=torch.long))
+
+
+def test_tiled_compute_skips_for_small_graphs() -> None:
+    """Tiled GPU mode should stay disabled below the huge-graph threshold."""
+    assert not _should_use_tiled_gpu("cuda", "cpu", 1_000, 2_000)
+    assert not _should_use_tiled_gpu("cpu", "cpu", 60_000_000, 80_000_000)
+    assert not _should_use_tiled_gpu("cuda", "cuda", 60_000_000, 80_000_000)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_tiled_compute_produces_gradients(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tiled GPU compute should match full-GPU gradients for edge-local losses."""
+    tiled_compute_module = importlib.import_module("dagua.layout.tiled_compute")
+
+    torch.manual_seed(0)
+    num_nodes = 1000
+    src = torch.arange(0, num_nodes - 1, dtype=torch.long)
+    edge_index = torch.stack([src, src + 1])
+    node_sizes = torch.full((num_nodes, 2), 10.0)
+    initial_pos = torch.randn(num_nodes, 2, dtype=torch.float32)
+
+    monkeypatch.setattr(tiled_compute_module, "_compute_tile_size", lambda _n, _vram: 500)
+
+    tiled = tiled_compute_module.TiledGPUCompute(
+        num_nodes=num_nodes,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+    )
+    tiled.cross_tile_loss_mask = [True, True]
+
+    def tiled_attract(
+        pos: torch.Tensor,
+        node_sizes_tile: torch.Tensor,
+        layer_index: object,
+    ) -> torch.Tensor:
+        """Evaluate attraction on the active tiled edge batch."""
+        del node_sizes_tile, layer_index
+        assert tiled.current_edge_index is not None
+        return edge_attraction_loss(
+            pos,
+            tiled.current_edge_index,
+            x_bias=1.5,
+            edge_ctx=tiled.current_edge_ctx,
+        )
+
+    def tiled_straightness(
+        pos: torch.Tensor,
+        node_sizes_tile: torch.Tensor,
+        layer_index: object,
+    ) -> torch.Tensor:
+        """Evaluate straightness on the active tiled edge batch."""
+        del node_sizes_tile, layer_index
+        assert tiled.current_edge_index is not None
+        return edge_straightness_loss(
+            pos,
+            tiled.current_edge_index,
+            edge_ctx=tiled.current_edge_ctx,
+        )
+
+    tiled_pos = initial_pos.clone().requires_grad_(True)
+    tiled_loss = tiled.compute_step(tiled_pos, [tiled_attract, tiled_straightness], [1.0, 0.5])
+    assert tiled_pos.grad is not None
+    tiled_grad = tiled_pos.grad.detach().clone()
+
+    full_pos = initial_pos.to("cuda").requires_grad_(True)
+    full_loss = edge_attraction_loss(full_pos, edge_index.to("cuda"), x_bias=1.5)
+    full_loss = full_loss + 0.5 * edge_straightness_loss(full_pos, edge_index.to("cuda"))
+    full_loss.backward()
+    assert full_pos.grad is not None
+
+    assert tiled_loss == pytest.approx(full_loss.item(), rel=1e-5, abs=1e-5)
+    assert torch.allclose(tiled_grad, full_pos.grad.cpu(), atol=1e-4, rtol=1e-4)
