@@ -57,6 +57,15 @@ from dagua.utils import VRAMBudget, longest_path_layering
 
 LossFn = Callable[[torch.Tensor, torch.Tensor, Optional[LayerIndex]], torch.Tensor]
 
+SAMPLED_NODE_CONTEXT_CAP = 1_000_000
+MIN_SAMPLED_ACTIVE_SET = 10_000
+SAMPLED_SAME_LAYER_K = 64
+REPULSION_ESTIMATE_NN_K = 20
+AUTOGRAD_INTERMEDIATE_FACTOR = 1.3
+INTERMEDIATE_SAFETY_FACTOR = 1.5
+CHECKPOINT_MEMORY_REDUCTION = 2
+CUDA_ACTIVE_SET_HEADROOM = 0.85
+
 
 @dataclass
 class ProgressContext:
@@ -110,9 +119,85 @@ def _build_sampled_node_context(
         tensor stores same-layer samples first, followed by adjacent-layer
         random samples.
     """
-    n_active = min(max(int(num_nodes**0.75), min(num_nodes, 256)), 1_000_000)
+    n_active, _, _ = _sampled_node_context_sizes(num_nodes, rvs_nn_k)
+    return _build_sampled_node_context_for_active(
+        num_nodes,
+        layer_index,
+        device,
+        rvs_nn_k,
+        n_active,
+    )
+
+
+def _sampled_node_context_sizes(
+    num_nodes: int,
+    rvs_nn_k: int,
+    n_active_override: Optional[int] = None,
+) -> tuple[int, int, int]:
+    """Return the sampled-node context dimensions for a graph size.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Total number of nodes in the current layout problem.
+    rvs_nn_k : int
+        Same-layer sample count used by the repulsion RVS path.
+    n_active_override : int, optional
+        Explicit active-node count to use instead of the default ``N**0.75``
+        scaling.
+
+    Returns
+    -------
+    tuple[int, int, int]
+        ``(n_active, n_random, k_same)`` for the sampled context.
+    """
+    default_n_active = min(max(int(num_nodes**0.75), min(num_nodes, 256)), SAMPLED_NODE_CONTEXT_CAP)
+    if n_active_override is None:
+        n_active = default_n_active
+    else:
+        n_active = max(min(n_active_override, default_n_active), 0)
     n_random = max(int(num_nodes**0.25), 4)
-    k_same = max(64, min(rvs_nn_k, num_nodes - 1))
+    k_same = max(SAMPLED_SAME_LAYER_K, min(rvs_nn_k, max(num_nodes - 1, 0)))
+    return n_active, n_random, k_same
+
+
+def _build_sampled_node_context_for_active(
+    num_nodes: int,
+    layer_index: LayerIndex,
+    device: Union[str, torch.device],
+    rvs_nn_k: int,
+    n_active: int,
+) -> SampledNodeContext:
+    """Build a sampled-node context with an explicit active-set size.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Total number of nodes in the current layout problem.
+    layer_index : LayerIndex
+        Pre-computed layer structure for the graph.
+    device : str | torch.device
+        Device where the sampled tensors should be allocated.
+    rvs_nn_k : int
+        Same-layer sample count used by the repulsion RVS path.
+    n_active : int
+        Number of active nodes to sample for the shared context.
+
+    Returns
+    -------
+    SampledNodeContext
+        Shared active-node indices and structured neighbor samples sized for the
+        requested active set.
+    """
+    _, n_random, k_same = _sampled_node_context_sizes(
+        num_nodes,
+        rvs_nn_k,
+        n_active_override=n_active,
+    )
+    if n_active <= 0:
+        empty_idx = torch.zeros(0, dtype=torch.long, device=device)
+        empty_sampled = torch.zeros((0, 0), dtype=torch.long, device=device)
+        return SampledNodeContext(active_idx=empty_idx, sampled=empty_sampled)
 
     active_idx = torch.randint(0, num_nodes, (n_active,), device=device)
     layers = layer_index.node_to_layer
@@ -142,6 +227,181 @@ def _build_sampled_node_context(
 
     sampled = torch.cat([same_sampled, random_sampled], dim=1)
     return SampledNodeContext(active_idx=active_idx, sampled=sampled)
+
+
+def _estimate_gpu_memory_terms(
+    n: int,
+    num_edges: int,
+    *,
+    edges_on_cpu: bool = False,
+    edge_batch: int = 0,
+    n_active_override: Optional[int] = None,
+) -> tuple[int, int, int, int]:
+    """Estimate the major GPU memory terms for the layout engine.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes in the layout problem.
+    num_edges : int
+        Number of edges in the layout problem.
+    edges_on_cpu : bool, default=False
+        Whether edges are streamed from CPU instead of kept resident on GPU.
+    edge_batch : int, default=0
+        Edge batch size. ``0`` means the full edge set is transferred.
+    n_active_override : int, optional
+        Explicit active-node count to use for the sampled context and large-node
+        losses.
+
+    Returns
+    -------
+    tuple[int, int, int, int]
+        ``(base, repulsion_forward, overlap_forward, edge_forward)`` in bytes.
+    """
+    base = n * 2 * 4 * 4
+    base += n * (2 * 4 + 2 * 8)
+
+    actual_batch = num_edges if edge_batch <= 0 else min(edge_batch, num_edges)
+    if edges_on_cpu:
+        base += actual_batch * 2 * 8
+    else:
+        base += num_edges * 2 * 8
+
+    n_active, n_random, k_same = _sampled_node_context_sizes(
+        n,
+        SAMPLED_SAME_LAYER_K,
+        n_active_override=n_active_override,
+    )
+    k_total = k_same + n_random
+    sampled_ctx = n_active * (k_total * 8 + 8)
+    base += sampled_ctx
+
+    k_repul = min(REPULSION_ESTIMATE_NN_K, max(n - 1, 0)) + n_random
+    repul_forward = (
+        n_active * k_repul * 2 * 4
+        + n_active * k_repul * 2 * 4
+        + n_active * k_repul * 4
+        + n_active * k_repul * 4 * 4
+        + n_active * k_repul * 4
+        + n_active * k_repul * 1
+        + n_active * k_repul * 8
+    )
+
+    k_overlap = 64
+    overlap_forward = (
+        n_active * k_overlap * 4 * 4
+        + n_active * k_overlap * 4 * 2
+        + n_active * k_overlap * 4 * 2
+        + n_active * k_overlap * 4
+        + n_active * k_overlap * 1
+        + n_active * k_overlap * 8
+    )
+
+    edge_forward = actual_batch * 4 * 8
+    return base, repul_forward, overlap_forward, edge_forward
+
+
+def _cap_sampled_active_nodes_for_budget(
+    n: int,
+    num_edges: int,
+    budget_bytes: int,
+    *,
+    edges_on_cpu: bool = False,
+    edge_batch: int = 0,
+    use_checkpointing: bool = False,
+) -> int:
+    """Return the largest active set that fits the provided GPU budget.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes in the layout problem.
+    num_edges : int
+        Number of edges in the layout problem.
+    budget_bytes : int
+        Total GPU budget available for the layout peak estimate.
+    edges_on_cpu : bool, default=False
+        Whether edges are streamed from CPU instead of kept resident on GPU.
+    edge_batch : int, default=0
+        Edge batch size. ``0`` means the full edge set is transferred.
+    use_checkpointing : bool, default=False
+        Whether gradient checkpointing is enabled for heavy losses.
+
+    Returns
+    -------
+    int
+        Active-node count that fits the budget, or ``0`` when even the minimum
+        active set would exceed the budget.
+    """
+    default_n_active, _, _ = _sampled_node_context_sizes(n, SAMPLED_SAME_LAYER_K)
+    if default_n_active <= MIN_SAMPLED_ACTIVE_SET:
+        estimated = _estimate_gpu_memory(
+            n,
+            num_edges,
+            per_loss_bw=True,
+            edges_on_cpu=edges_on_cpu,
+            edge_batch=edge_batch,
+            n_active_override=default_n_active,
+        )
+        if use_checkpointing:
+            estimated //= CHECKPOINT_MEMORY_REDUCTION
+        return default_n_active if estimated <= budget_bytes else 0
+
+    base, repul_forward, overlap_forward, edge_forward = _estimate_gpu_memory_terms(
+        n,
+        num_edges,
+        edges_on_cpu=edges_on_cpu,
+        edge_batch=edge_batch,
+        n_active_override=default_n_active,
+    )
+    peak_intermediate = max(repul_forward, overlap_forward, edge_forward)
+    scale = AUTOGRAD_INTERMEDIATE_FACTOR * INTERMEDIATE_SAFETY_FACTOR
+    if use_checkpointing:
+        scale /= CHECKPOINT_MEMORY_REDUCTION
+    estimated = int(base + peak_intermediate * scale)
+    if estimated <= budget_bytes:
+        return default_n_active
+    if budget_bytes <= 0:
+        return 0
+
+    non_sampled_base = _estimate_gpu_memory_terms(
+        n,
+        num_edges,
+        edges_on_cpu=edges_on_cpu,
+        edge_batch=edge_batch,
+        n_active_override=0,
+    )[0]
+    if budget_bytes <= non_sampled_base:
+        return 0
+
+    min_active = min(default_n_active, MIN_SAMPLED_ACTIVE_SET)
+    allowed_intermediate = max(int((budget_bytes - non_sampled_base) / scale), 0)
+    scaled_active = int(default_n_active * allowed_intermediate / max(peak_intermediate, 1))
+    candidate = max(min(scaled_active, default_n_active), min_active)
+    candidate_estimate = _estimate_gpu_memory(
+        n,
+        num_edges,
+        per_loss_bw=True,
+        edges_on_cpu=edges_on_cpu,
+        edge_batch=edge_batch,
+        n_active_override=candidate,
+    )
+    if use_checkpointing:
+        candidate_estimate //= CHECKPOINT_MEMORY_REDUCTION
+    if candidate_estimate <= budget_bytes:
+        return candidate
+
+    min_estimate = _estimate_gpu_memory(
+        n,
+        num_edges,
+        per_loss_bw=True,
+        edges_on_cpu=edges_on_cpu,
+        edge_batch=edge_batch,
+        n_active_override=min_active,
+    )
+    if use_checkpointing:
+        min_estimate //= CHECKPOINT_MEMORY_REDUCTION
+    return min_active if min_estimate <= budget_bytes else 0
 
 
 def _auto_layout_steps(num_nodes: int) -> int:
@@ -468,6 +728,8 @@ def _layout_inner(
         num_edges,
         device,
         config,
+        edges_on_cpu=edges_on_cpu,
+        edge_batch=edge_batch,
     )
     # Create thread pool for parallel hybrid losses
     executor = None
@@ -883,12 +1145,47 @@ def _layout_inner(
                 cpu_layer_index if use_hybrid and cpu_layer_index is not None else layer_index
             )
             sampled_device: Union[str, torch.device] = "cpu" if use_hybrid else pos.device
-            sampled_ctx = _build_sampled_node_context(
-                n,
-                sampled_layer_index,
-                sampled_device,
-                config.rvs_nn_k,
-            )
+            sampled_n_active, _, _ = _sampled_node_context_sizes(n, config.rvs_nn_k)
+            default_n_active = sampled_n_active
+            if (
+                device == "cuda"
+                and not use_hybrid
+                and use_per_loss_bw
+                and torch.cuda.is_available()
+            ):
+                free, _ = torch.cuda.mem_get_info()
+                total_budget = int(
+                    (free + torch.cuda.memory_allocated()) * CUDA_ACTIVE_SET_HEADROOM
+                )
+                capped_n_active = _cap_sampled_active_nodes_for_budget(
+                    n,
+                    num_edges,
+                    total_budget,
+                    edges_on_cpu=edges_on_cpu,
+                    edge_batch=edge_batch,
+                    use_checkpointing=use_checkpointing,
+                )
+                if 0 < capped_n_active < sampled_n_active:
+                    sampled_n_active = capped_n_active
+                    _vlog(
+                        "capped sampled active set to "
+                        f"{sampled_n_active:,} nodes to keep per-loss GPU execution in budget"
+                    )
+            if sampled_n_active == default_n_active:
+                sampled_ctx = _build_sampled_node_context(
+                    n,
+                    sampled_layer_index,
+                    sampled_device,
+                    config.rvs_nn_k,
+                )
+            else:
+                sampled_ctx = _build_sampled_node_context_for_active(
+                    n,
+                    sampled_layer_index,
+                    sampled_device,
+                    config.rvs_nn_k,
+                    sampled_n_active,
+                )
         elif not use_sampled_context:
             sampled_ctx = None
         sampled_ctx_ref[0] = sampled_ctx
@@ -1111,14 +1408,30 @@ def _resolve_memory_strategy(
     num_edges: int,
     device: str,
     config: LayoutConfig,
-) -> tuple:
+    edges_on_cpu: bool = False,
+    edge_batch: int = 0,
+) -> tuple[bool, bool, bool]:
     """Resolve memory optimization flags, VRAM-aware when on CUDA.
 
-    Returns (use_per_loss_bw, use_checkpointing, use_hybrid).
+    Parameters
+    ----------
+    n : int
+        Number of nodes in the layout problem.
+    num_edges : int
+        Number of edges in the layout problem.
+    device : str
+        Target compute device.
+    config : LayoutConfig
+        Layout configuration that may force or disable memory strategies.
+    edges_on_cpu : bool, default=False
+        Whether edges are streamed from CPU instead of stored on GPU.
+    edge_batch : int, default=0
+        Edge batch size. ``0`` means the full edge set is transferred.
 
-    When all flags are "auto", queries available VRAM and estimates peak memory
-    to pick the lightest strategy that fits. When flags are "on"/"off", those
-    override the auto logic.
+    Returns
+    -------
+    tuple[bool, bool, bool]
+        ``(use_per_loss_bw, use_checkpointing, use_hybrid)``.
     """
     plb = config.per_loss_backward
     gcp = config.gradient_checkpointing
@@ -1140,9 +1453,21 @@ def _resolve_memory_strategy(
     usable = budget.remaining()
 
     # Estimate peak GPU memory for different strategies
-    mem_full = _estimate_gpu_memory(n, num_edges, per_loss_bw=False)
-    mem_plb = _estimate_gpu_memory(n, num_edges, per_loss_bw=True)
-    mem_plb_ckpt = mem_plb // 2  # checkpointing halves intermediate storage
+    mem_full = _estimate_gpu_memory(
+        n,
+        num_edges,
+        per_loss_bw=False,
+        edges_on_cpu=edges_on_cpu,
+        edge_batch=edge_batch,
+    )
+    mem_plb = _estimate_gpu_memory(
+        n,
+        num_edges,
+        per_loss_bw=True,
+        edges_on_cpu=edges_on_cpu,
+        edge_batch=edge_batch,
+    )
+    mem_plb_ckpt = mem_plb // CHECKPOINT_MEMORY_REDUCTION
 
     # Pick lightest strategy that fits (escalating memory savings)
     if plb == "off" and gcp == "off" and hyb == "off":
@@ -1156,6 +1481,15 @@ def _resolve_memory_strategy(
     use_plb = plb != "off"
     if mem_plb < usable and gcp != "on" and hyb != "on":
         return use_plb, False, False
+    capped_active = _cap_sampled_active_nodes_for_budget(
+        n,
+        num_edges,
+        usable,
+        edges_on_cpu=edges_on_cpu,
+        edge_batch=edge_batch,
+    )
+    if capped_active > 0 and gcp != "on" and hyb != "on":
+        return use_plb, False, False
 
     # Level 2: per-loss backward + checkpointing (6-8x reduction, ~30% slower)
     use_ckpt = gcp != "off"
@@ -1167,75 +1501,95 @@ def _resolve_memory_strategy(
     return use_plb, use_ckpt, use_hyb
 
 
-def _estimate_gpu_memory(n: int, num_edges: int, per_loss_bw: bool = False) -> int:
+def _estimate_gpu_memory(
+    n: int,
+    num_edges: int,
+    per_loss_bw: bool = False,
+    *,
+    edges_on_cpu: bool = False,
+    edge_batch: int = 0,
+    n_active_override: Optional[int] = None,
+) -> int:
     """Estimate peak GPU memory in bytes for full-GPU layout.
 
-    Accounts for: positions, Adam state, gradients, graph data, and
-    per-step autograd intermediates (forward + backward retained tensors).
+    Parameters
+    ----------
+    n : int
+        Number of nodes in the layout problem.
+    num_edges : int
+        Number of edges in the layout problem.
+    per_loss_bw : bool, default=False
+        Whether per-loss backward frees each loss graph before the next heavy
+        term is evaluated.
+    edges_on_cpu : bool, default=False
+        Whether edges are streamed from CPU instead of kept resident on GPU.
+    edge_batch : int, default=0
+        Edge batch size. ``0`` means the full edge set is transferred.
+    n_active_override : int, optional
+        Explicit active-node count for the sampled-node context estimate.
 
-    Includes a 3x safety factor for PyTorch allocator fragmentation,
-    autograd graph metadata, and multilevel hierarchy overhead.
-    Calibrated against empirical measurements: 5M nodes ≈ 5GB actual.
+    Returns
+    -------
+    int
+        Estimated peak GPU memory in bytes.
     """
-    # Base allocations (persist across steps)
-    # pos + adam (momentum + variance) + grad: 4 * [N,2] f32
-    base = n * 2 * 4 * 4  # 32 bytes/node
-    # node_sizes [N,2] f32 + layer_index arrays ~3*[N] i64
-    base += n * (2 * 4 + 3 * 8)  # 32 bytes/node
-    # edge_index [2,E] i64
-    base += num_edges * 2 * 8
-
-    # Per-step intermediate tensors (autograd retains for backward)
-    n_active = max(int(n**0.75), min(n, 256))
-
-    # RVS repulsion: [A, K_total, 2] diffs + [A, K_total] dist + size factors
-    k_repul = 70  # n_random + k_nn
-    repul = n_active * k_repul * 4 * 8  # ~8 intermediate tensors, f32
-
-    # Active-subset overlap: [A, K, 2] similar structure
-    k_overlap = 64
-    overlap = n_active * k_overlap * 4 * 8
-
-    # Edge-based losses: [E_batch] tensors for dag, attract, straightness, etc.
-    e_batch = min(num_edges, 200000)
-    edge_losses = e_batch * 4 * 6 * 4  # ~6 tensors per loss, ~4 edge losses
-
-    # Autograd backward roughly doubles forward intermediates
-    autograd_factor = 2
-
-    # Safety factor: PyTorch allocator overhead, fragmentation, autograd graph
-    # metadata, multilevel hierarchy tensors, and Python/framework overhead.
-    # 2x provides sufficient headroom; per_loss_backward and hybrid mode
-    # are available as automatic fallbacks if VRAM is still tight.
-    safety = 2
-
+    base, repul_forward, overlap_forward, edge_forward = _estimate_gpu_memory_terms(
+        n,
+        num_edges,
+        edges_on_cpu=edges_on_cpu,
+        edge_batch=edge_batch,
+        n_active_override=n_active_override,
+    )
     if per_loss_bw:
-        # Only one term's intermediates alive at a time
-        peak_intermediate = max(repul, overlap, edge_losses)
-        return (base + peak_intermediate * autograd_factor) * safety
-    else:
-        # All terms alive simultaneously
-        return (base + (repul + overlap + edge_losses) * autograd_factor) * safety
+        peak_intermediate = max(repul_forward, overlap_forward, edge_forward)
+        return int(
+            base + peak_intermediate * AUTOGRAD_INTERMEDIATE_FACTOR * INTERMEDIATE_SAFETY_FACTOR
+        )
+    all_intermediates = repul_forward + overlap_forward + edge_forward
+    return int(base + all_intermediates * AUTOGRAD_INTERMEDIATE_FACTOR * INTERMEDIATE_SAFETY_FACTOR)
 
 
-def _estimate_hybrid_gpu_memory(n: int, num_edges: int) -> int:
+def _estimate_hybrid_gpu_memory(
+    n: int,
+    num_edges: int,
+    *,
+    edges_on_cpu: bool = False,
+    edge_batch: int = 0,
+) -> int:
     """Estimate GPU memory when heavy losses run on CPU (hybrid mode).
 
-    Only positions, Adam state, edge data, and edge-loss intermediates on GPU.
-    Repulsion and overlap intermediates stay on CPU.
+    Parameters
+    ----------
+    n : int
+        Number of nodes in the layout problem.
+    num_edges : int
+        Number of edges in the layout problem.
+    edges_on_cpu : bool, default=False
+        Whether edges are streamed from CPU instead of kept resident on GPU.
+    edge_batch : int, default=0
+        Edge batch size. ``0`` means the full edge set is transferred.
+
+    Returns
+    -------
+    int
+        Estimated peak GPU memory in bytes while hybrid mode keeps the heavy
+        node losses on CPU.
     """
-    # Base: pos + adam + grad + node_sizes + layer_index + edge_index
-    base = n * 64 + num_edges * 16
+    base = n * 2 * 4 * 4
+    base += n * (2 * 4 + 2 * 8)
+    actual_batch = num_edges if edge_batch <= 0 else min(edge_batch, num_edges)
+    if edges_on_cpu:
+        base += actual_batch * 2 * 8
+    else:
+        base += num_edges * 2 * 8
 
-    # Only edge-based loss intermediates on GPU
-    e_batch = min(num_edges, 200000)
-    edge_losses = e_batch * 4 * 6 * 4 * 2  # forward + backward
-
-    # CPU→GPU gradient transfer: [N, 2] f32 per heavy loss backward
+    edge_forward = actual_batch * 4 * 8
     grad_transfer = n * 2 * 4
-
-    # Same 3x safety factor
-    return (base + edge_losses + grad_transfer) * 3
+    return int(
+        base
+        + edge_forward * AUTOGRAD_INTERMEDIATE_FACTOR * INTERMEDIATE_SAFETY_FACTOR
+        + grad_transfer
+    )
 
 
 def _compute_loss_term(
