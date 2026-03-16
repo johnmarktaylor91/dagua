@@ -352,6 +352,46 @@ def test_normal_arrow_renders_polygon_with_arrow_scale() -> None:
     plt.close(fig)
 
 
+def test_vee_arrow_is_open_polygon() -> None:
+    """Vee arrow should render as an open Polygon, not FancyArrowPatch."""
+
+    import torch
+    from matplotlib.patches import FancyArrowPatch, Polygon
+
+    graph = DaguaGraph()
+    graph.add_node("A", label="From")
+    graph.add_node("B", label="To")
+    graph.add_edge("A", "B", style=EdgeStyle(arrow="vee"))
+    positions = torch.tensor([[0.0, 50.0], [0.0, -50.0]])
+
+    fig, ax = render(graph, positions)
+    polygons = [patch for patch in ax.patches if isinstance(patch, Polygon)]
+    fancy_arrows = [patch for patch in ax.patches if isinstance(patch, FancyArrowPatch)]
+    plt.close(fig)
+
+    assert len(polygons) >= 1, "Vee arrow should be a Polygon"
+    assert len(fancy_arrows) == 0, "Vee arrow should not use FancyArrowPatch"
+
+
+def test_straight_routing_has_arrowhead() -> None:
+    """Straight routing must still draw arrow markers when control points collapse."""
+
+    import torch
+    from matplotlib.patches import Polygon
+
+    graph = DaguaGraph()
+    graph.add_node("A", label="From")
+    graph.add_node("B", label="To")
+    graph.add_edge("A", "B", style=EdgeStyle(routing="straight", arrow="normal"))
+    positions = torch.tensor([[0.0, 50.0], [0.0, -50.0]])
+
+    fig, ax = render(graph, positions)
+    polygons = [patch for patch in ax.patches if isinstance(patch, Polygon)]
+    plt.close(fig)
+
+    assert polygons, "Straight routing should have at least one arrow polygon"
+
+
 def test_open_marker_preserves_legacy_data_sizing_without_arrow_scale() -> None:
     """Manual markers should keep legacy data-space sizing when arrow_scale is absent."""
 

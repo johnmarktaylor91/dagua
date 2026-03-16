@@ -1405,7 +1405,7 @@ def _draw_edge_marker(
     """
     from matplotlib.colors import to_rgba
     from matplotlib.lines import Line2D
-    from matplotlib.patches import Circle, FancyArrowPatch, Polygon
+    from matplotlib.patches import Circle, Polygon
 
     dx, dy = direction
     dist = float(np.hypot(dx, dy))
@@ -1416,7 +1416,6 @@ def _draw_edge_marker(
     px, py = -uy, ux
     length = float(style.arrow_length)
     width = float(style.arrow_width)
-    display_scale = getattr(style, "arrow_scale", None)
     manual_length, manual_width = _marker_data_size(ax, style, length, width)
     # Graphviz-style calibration expects arrowheads to read slightly heavier
     # than the edge stroke, so keep marker fill/outline fully opaque.
@@ -1446,24 +1445,23 @@ def _draw_edge_marker(
         return
 
     if marker == "vee":
-        base_x = tip_x - ux * length
-        base_y = tip_y - uy * length
-        head_length = length / max(width, 1e-6)
-        arrow = FancyArrowPatch(
-            (base_x, base_y),
-            (tip_x, tip_y),
-            arrowstyle=f"->,head_length={head_length:.3f},head_width=1.0",
-            mutation_scale=float(display_scale) if display_scale is not None else width,
-            linewidth=style.width,
-            edgecolor=color,
+        base_x = tip_x - ux * manual_length
+        base_y = tip_y - uy * manual_length
+        polygon = Polygon(
+            [
+                (base_x + px * manual_width / 2, base_y + py * manual_width / 2),
+                (tip_x, tip_y),
+                (base_x - px * manual_width / 2, base_y - py * manual_width / 2),
+            ],
+            closed=False,
             facecolor="none",
-            shrinkA=0.0,
-            shrinkB=0.0,
-            capstyle="round",
+            edgecolor=color,
+            linewidth=style.width,
             joinstyle="round",
+            capstyle="round",
             zorder=1.2,
         )
-        ax.add_patch(arrow)
+        ax.add_patch(polygon)
         return
 
     if marker == "open":
@@ -1596,20 +1594,33 @@ def _draw_edges(
         _set_svg_hover(
             path_patch, f"dagua-edge-{e_idx}", _edge_hover_text(graph, e_idx), svg_hover_map
         )
-        # Target arrow: direction points BACK along curve (into the gap)
-        # so the arrow body extends away from the node into visible space.
+        # Target arrow: direction continues past the endpoint (same sense as
+        # the curve's tangent at p1).  For bezier cp2-p1 already points that
+        # way; for straight/ortho the control point collapses onto p1, so we
+        # fall back to the overall edge direction p1-p0 (continuing past target).
+        head_dx = curve.cp2[0] - curve.p1[0]
+        head_dy = curve.cp2[1] - curve.p1[1]
+        if head_dx * head_dx + head_dy * head_dy < 1e-12:
+            head_dx = curve.p1[0] - curve.p0[0]
+            head_dy = curve.p1[1] - curve.p0[1]
         _draw_edge_marker(
             ax,
             curve.p1,
-            (curve.cp2[0] - curve.p1[0], curve.cp2[1] - curve.p1[1]),
+            (head_dx, head_dy),
             style.arrow,
             style,
         )
-        # Source tail arrow: direction also points back along curve
+        # Source tail arrow: same tangent logic — cp1-p0 continues past the
+        # source; fallback to p0-p1 when cp1 collapses onto p0.
+        tail_dx = curve.cp1[0] - curve.p0[0]
+        tail_dy = curve.cp1[1] - curve.p0[1]
+        if tail_dx * tail_dx + tail_dy * tail_dy < 1e-12:
+            tail_dx = curve.p0[0] - curve.p1[0]
+            tail_dy = curve.p0[1] - curve.p1[1]
         _draw_edge_marker(
             ax,
             curve.p0,
-            (curve.cp1[0] - curve.p0[0], curve.cp1[1] - curve.p0[1]),
+            (tail_dx, tail_dy),
             style.tail_arrow,
             style,
         )
