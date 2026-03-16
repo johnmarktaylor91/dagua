@@ -351,11 +351,10 @@ def test_tee_arrow_marker_uses_visible_bar_offset_and_width() -> None:
     assert len(ax.lines) == 1
     x_data = ax.lines[0].get_xdata()
     y_data = ax.lines[0].get_ydata()
-    plt.close(fig)
-
     assert float(np.mean(y_data)) == pytest.approx(style.arrow_length / 3.0)
-    assert float(abs(x_data[0] - x_data[1])) == pytest.approx(style.arrow_width * 1.4)
-    assert ax.lines[0].get_linewidth() == pytest.approx(max(style.width * 3.5, 4.0))
+    assert float(abs(x_data[0] - x_data[1])) == pytest.approx(style.arrow_width * 2.4)
+    assert ax.lines[0].get_linewidth() == pytest.approx(max(style.width * 4.0, 5.0))
+    plt.close(fig)
 
 
 def test_star_vertices_use_deeper_concavities() -> None:
@@ -381,7 +380,7 @@ def test_shape_size_adjustments_match_graphviz_calibration() -> None:
     pentagon_w, pentagon_h, _ = compute_node_size("", padding=(0.0, 10.0), shape="pentagon")
     octagon_w, octagon_h, _ = compute_node_size("", padding=(0.0, 10.0), shape="octagon")
 
-    assert triangle_w / triangle_h == pytest.approx(2.7)
+    assert triangle_w / triangle_h == pytest.approx(3.2)
     assert star_w == pytest.approx(star_h)
     assert diamond_w / diamond_h == pytest.approx(1.4)
     assert hexagon_w / hexagon_h == pytest.approx(1.3)
@@ -399,10 +398,10 @@ def test_compute_node_size_uses_reduced_graphviz_minimums() -> None:
 
 
 def test_vee_arrow_marker_uses_wider_graphviz_spread() -> None:
-    """Vee markers should use the widened wing span."""
+    """Vee markers should use the widened wing span and heavier outline."""
 
     fig, ax = plt.subplots()
-    style = EdgeStyle(arrow="vee", arrow_width=10.0, arrow_length=14.0)
+    style = EdgeStyle(arrow="vee", width=1.1, arrow_width=10.0, arrow_length=14.0)
     _draw_edge_marker(
         ax=ax,
         point=(0.0, 0.0),
@@ -412,16 +411,16 @@ def test_vee_arrow_marker_uses_wider_graphviz_spread() -> None:
     )
 
     vertices = ax.patches[0].get_xy()
-    plt.close(fig)
-
     assert abs(float(vertices[0][0] - vertices[2][0])) == pytest.approx(style.arrow_width * 1.4)
+    assert ax.patches[0].get_linewidth() == pytest.approx(max(style.width * 1.8, 2.0))
+    plt.close(fig)
 
 
 def test_crow_arrow_marker_uses_wider_graphviz_spread() -> None:
-    """Crow markers should widen their outer tines to match Graphviz."""
+    """Crow markers should widen their outer tines and use heavier strokes."""
 
     fig, ax = plt.subplots()
-    style = EdgeStyle(arrow="crow", arrow_width=10.0, arrow_length=14.0)
+    style = EdgeStyle(arrow="crow", width=1.1, arrow_width=10.0, arrow_length=14.0)
     _draw_edge_marker(
         ax=ax,
         point=(0.0, 0.0),
@@ -432,9 +431,10 @@ def test_crow_arrow_marker_uses_wider_graphviz_spread() -> None:
 
     assert len(ax.lines) == 3
     outer_x_offsets = sorted(abs(float(line.get_xdata()[1])) for line in ax.lines[1:])
-    plt.close(fig)
-
     assert outer_x_offsets == pytest.approx([style.arrow_width * 0.7, style.arrow_width * 0.7])
+    for line in ax.lines:
+        assert line.get_linewidth() == pytest.approx(max(style.width * 1.8, 2.0))
+    plt.close(fig)
 
 
 def test_vee_arrow_marker_is_unfilled() -> None:
@@ -565,7 +565,7 @@ def test_open_marker_preserves_legacy_data_sizing_without_arrow_scale() -> None:
     plt.close(fig)
 
     assert float(base_center[1]) == pytest.approx(style.arrow_length)
-    assert abs(float(vertices[1][0] - vertices[2][0])) == pytest.approx(style.arrow_width)
+    assert abs(float(vertices[1][0] - vertices[2][0])) == pytest.approx(style.arrow_width * 1.2)
 
 
 def test_open_marker_uses_display_scaled_dimensions_with_arrow_scale() -> None:
@@ -593,8 +593,105 @@ def test_open_marker_uses_display_scaled_dimensions_with_arrow_scale() -> None:
 
     assert float(base_center[1]) == pytest.approx(style.arrow_scale * expected_scale)
     assert abs(float(vertices[1][0] - vertices[2][0])) == pytest.approx(
-        style.arrow_width * expected_scale
+        style.arrow_width * expected_scale * 1.2
     )
+
+
+def test_normal_arrow_marker_uses_wider_graphviz_base() -> None:
+    """Normal arrow markers should use the widened triangular base."""
+
+    fig, ax = plt.subplots()
+    style = EdgeStyle(arrow="normal", arrow_width=10.0, arrow_length=14.0)
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="normal",
+        style=style,
+    )
+
+    assert len(ax.patches) == 1
+    vertices = ax.patches[0].get_xy()
+    assert abs(float(vertices[1][0] - vertices[2][0])) == pytest.approx(style.arrow_width * 1.2)
+    plt.close(fig)
+
+
+def test_triangle_labels_shift_toward_visual_centroid() -> None:
+    """Triangle labels should sit lower than the geometric center."""
+
+    graph = DaguaGraph()
+    graph.add_node("a", label="Triangle", style=NodeStyle(shape="triangle"))
+    pos = np.array([[10.0, 20.0]])
+    sizes = np.array([[120.0, 60.0]])
+
+    fig, ax = plt.subplots()
+    mpl_renderer._draw_node_labels(ax, graph, pos, sizes)
+
+    assert len(ax.texts) == 1
+    assert float(ax.texts[0].get_position()[1]) == pytest.approx(10.0)
+    plt.close(fig)
+
+
+def test_triangle_rich_labels_shift_toward_visual_centroid() -> None:
+    """Rich triangle labels should use the same centroid-aware anchor."""
+
+    graph = DaguaGraph()
+    graph.add_node(
+        "a",
+        label="Triangle",
+        style=NodeStyle(shape="triangle", label_format="rich"),
+    )
+    pos = np.array([[10.0, 20.0]])
+    sizes = np.array([[120.0, 60.0]])
+
+    fig, ax = plt.subplots()
+    mpl_renderer._draw_node_labels(ax, graph, pos, sizes)
+
+    assert len(ax.texts) == 1
+    assert float(ax.texts[0].get_position()[1]) == pytest.approx(10.0)
+    plt.close(fig)
+
+
+def test_parallelogram_patch_uses_stronger_graphviz_skew() -> None:
+    """Parallelograms should use the increased shoulder skew."""
+
+    patch = _build_node_patch(
+        x=0.0,
+        y=0.0,
+        w=100.0,
+        h=50.0,
+        style=NodeStyle(shape="parallelogram"),
+        facecolor="#ffffff",
+        edgecolor="#000000",
+        linewidth=1.0,
+        linestyle="-",
+        zorder=1.0,
+    )
+    vertices = patch.get_xy()[:-1]
+
+    assert float(vertices[0][0]) == pytest.approx(-22.0)
+    assert float(vertices[2][0]) == pytest.approx(22.0)
+
+
+def test_trapezoid_patch_uses_stronger_graphviz_taper() -> None:
+    """Trapezoids should use the increased top-edge inset."""
+
+    patch = _build_node_patch(
+        x=0.0,
+        y=0.0,
+        w=100.0,
+        h=50.0,
+        style=NodeStyle(shape="trapezoid"),
+        facecolor="#ffffff",
+        edgecolor="#000000",
+        linewidth=1.0,
+        linestyle="-",
+        zorder=1.0,
+    )
+    vertices = patch.get_xy()[:-1]
+
+    assert float(vertices[0][0]) == pytest.approx(-22.0)
+    assert float(vertices[1][0]) == pytest.approx(22.0)
 
 
 def test_cluster_labels_expand_bbox_using_measured_width(
