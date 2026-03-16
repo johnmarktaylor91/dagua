@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from scripts.generate_cosmetic_album import build_case_catalog, build_cosmetic_album
+from scripts.generate_cosmetic_album import (
+    GRAPHVIZ_PAIR_VERTICAL_GAP,
+    _base_cluster_style,
+    build_case_catalog,
+    build_cosmetic_album,
+)
 
 
 def test_build_case_catalog_covers_expected_counts() -> None:
@@ -98,6 +103,22 @@ def test_pairwise_comparison_cases_use_top_to_bottom_positions() -> None:
         assert float(positions[0, 1].item()) > float(positions[1, 1].item())
 
 
+def test_pairwise_comparison_cases_use_compact_vertical_gap() -> None:
+    """Two-node comparison cases should use the tighter Graphviz-matched gap."""
+
+    cases = {case.case_id: case for case in build_case_catalog()}
+
+    for case_id in [
+        "arrow_head_normal",
+        "border_style_dashed",
+        "edge_style_dotted",
+        "edge_routing_bezier",
+    ]:
+        positions = cases[case_id].positions
+        vertical_gap = float(positions[0, 1].item() - positions[1, 1].item())
+        assert vertical_gap == GRAPHVIZ_PAIR_VERTICAL_GAP
+
+
 def test_direction_cases_use_wider_horizontal_spacing() -> None:
     """LR and RL direction demos should keep nodes visibly separated."""
 
@@ -130,6 +151,33 @@ def test_cluster_cases_use_vertical_chain_positions() -> None:
 
     assert torch.equal(cases["cluster_fill"].positions, expected_positions)
     assert torch.equal(cases["cluster_border"].positions, expected_positions)
+
+
+def test_base_cluster_style_uses_visible_graphviz_matched_defaults() -> None:
+    """Cluster defaults should keep borders visible with labels inside the box."""
+
+    style = _base_cluster_style()
+
+    assert style.stroke_width == 2.0
+    assert style.padding == 30.0
+    assert style.font_size == 12.0
+    assert style.opacity == 0.85
+    assert style.label_position == "top-left"
+    assert style.label_offset == (10.0, 8.0)
+
+
+def test_cluster_border_case_keeps_heavier_base_border_defaults() -> None:
+    """The dashed cluster demo should only override fill and dash pattern."""
+
+    cases = {case.case_id: case for case in build_case_catalog()}
+    style = cases["cluster_border"].graph.cluster_styles["group"]
+
+    assert style.fill == "#FFFFFF"
+    assert style.stroke_dash == "dashed"
+    assert style.stroke_width == 2.0
+    assert style.opacity == 0.85
+    assert style.label_position == "top-left"
+    assert style.label_offset == (10.0, 8.0)
 
 
 def test_ortho_routing_case_uses_offset_positions() -> None:
