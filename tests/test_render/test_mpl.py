@@ -10,7 +10,13 @@ from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
 from dagua.render import render
-from dagua.render.mpl import _build_node_patch, _draw_edge_marker, _edge_linestyle, _node_linestyle
+from dagua.render.mpl import (
+    _build_node_patch,
+    _cluster_linestyle,
+    _draw_edge_marker,
+    _edge_linestyle,
+    _node_linestyle,
+)
 from dagua.styles import EdgeStyle, NodeStyle
 
 
@@ -249,9 +255,10 @@ def test_graphviz_dash_patterns_are_explicit() -> None:
     """Renderer dash mappings should use Graphviz-like stroke lengths."""
 
     assert _node_linestyle(NodeStyle(stroke_dash="dashed")) == (0, (6.0, 4.0))
-    assert _node_linestyle(NodeStyle(stroke_dash="dotted")) == ":"
+    assert _node_linestyle(NodeStyle(stroke_dash="dotted")) == (0, (1.5, 2.5))
     assert _edge_linestyle(EdgeStyle(style="dashed")) == (0, (6.0, 4.0))
-    assert _edge_linestyle(EdgeStyle(style="dotted")) == ":"
+    assert _edge_linestyle(EdgeStyle(style="dotted")) == (0, (1.5, 2.5))
+    assert _cluster_linestyle("dotted") == (0, (1.5, 2.5))
 
 
 def test_triangle_patch_uses_equilateral_proportions() -> None:

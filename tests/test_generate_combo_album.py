@@ -1,4 +1,4 @@
-"""Tests for the cosmetic combo album generator script."""
+"""Tests for the cosmetic combo album generator."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.generate_combo_album import build_case_catalog, build_combo_album
+from scripts.generate_combo_album import build_case_catalog, build_combo_album, build_combo_catalog
 
 
 def test_build_case_catalog_covers_expected_counts() -> None:
     """The combo catalog should cover every requested category and case count."""
 
-    cases = build_case_catalog()
+    cases = build_combo_catalog()
     category_counts: dict[str, int] = {}
     for case in cases:
         category_counts[case.category] = category_counts.get(case.category, 0) + 1
@@ -44,58 +44,149 @@ def test_build_case_catalog_covers_expected_counts() -> None:
     }
 
 
+def test_build_case_catalog_alias_matches_combo_catalog() -> None:
+    """The legacy and new catalog entry points should return the same case IDs."""
+
+    assert [case.case_id for case in build_case_catalog()] == [
+        case.case_id for case in build_combo_catalog()
+    ]
+
+
+def test_build_combo_catalog_contains_part_two_cases() -> None:
+    """Part 2 case IDs should be present in the catalog."""
+
+    case_ids = {case.case_id for case in build_combo_catalog()}
+    assert {
+        "both_faded",
+        "shadow_large_radius",
+        "lr_dashed",
+        "dashed_cluster_dashed_nodes",
+        "black_gradient",
+        "pipeline",
+        "parallel_mixed_all",
+    }.issubset(case_ids)
+
+
 def test_build_combo_album_renders_dagua_only_subset(tmp_path: Path) -> None:
-    """Dagua-only iteration mode should render comparison-capable cases as solo panels."""
+    """A Dagua-only category should render without Graphviz."""
 
     output_dir = tmp_path / "combo_album"
     result = build_combo_album(
         output_dir=str(output_dir),
-        case_ids=["star_dashed", "dark_baseline"],
+        categories=["02_shape_x_gradient"],
+    )
+
+    assert Path(result.manifest_path).exists()
+    assert (output_dir / "summary.md").exists()
+    assert len(list((output_dir / "02_shape_x_gradient").glob("*.png"))) == 8
+
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["total_images"] == 8
+    assert manifest["category_counts"] == {"02_shape_x_gradient": 8}
+    assert all(row["comparison"] is False for row in manifest["cases"])
+
+
+def test_build_combo_album_can_force_solo_panels(tmp_path: Path) -> None:
+    """Comparison-capable cases should still render in Dagua-only mode."""
+
+    output_dir = tmp_path / "combo_album"
+    result = build_combo_album(
+        output_dir=str(output_dir),
+        categories=["01_shape_x_border"],
         dagua_only=True,
     )
 
-    manifest_path = Path(result.manifest_path)
-    summary_path = output_dir / "summary.md"
-    assert manifest_path.exists()
-    assert summary_path.exists()
-    assert output_dir.joinpath("01_shape_x_border", "star_dashed.png").exists()
-    assert output_dir.joinpath("16_dark_mode", "dark_baseline.png").exists()
+    assert Path(result.manifest_path).exists()
+    assert len(list((output_dir / "01_shape_x_border").glob("*.png"))) == 12
 
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["total_images"] == 2
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["total_images"] == 12
     assert manifest["dagua_only"] is True
-    assert manifest["category_counts"] == {
-        "01_shape_x_border": 1,
-        "16_dark_mode": 1,
-    }
-    assert {row["case_id"] for row in manifest["cases"]} == {"star_dashed", "dark_baseline"}
-    assert {row["render_mode"] for row in manifest["cases"]} == {"dagua_only"}
-    assert "## Category Index" in summary_path.read_text(encoding="utf-8")
+    assert all(row["render_mode"] == "dagua_only" for row in manifest["cases"])
+    assert all(row["comparison"] is True for row in manifest["cases"])
 
 
-def test_build_combo_album_renders_graphviz_subset(tmp_path: Path) -> None:
-    """A comparison-capable case should render a Graphviz comparison when Graphviz is installed."""
-
-    if shutil.which("dot") is None or shutil.which("neato") is None:
-        pytest.skip("Graphviz executables are not installed")
+def test_build_combo_album_renders_cluster_combo_subset(tmp_path: Path) -> None:
+    """A Part 2 cluster category should render in Dagua-only mode."""
 
     output_dir = tmp_path / "combo_album"
     result = build_combo_album(
         output_dir=str(output_dir),
-        case_ids=["star_dashed"],
+        categories=["14_cluster_combos"],
+        dagua_only=True,
     )
 
-    image_path = output_dir / "01_shape_x_border" / "star_dashed.png"
-    manifest_path = Path(result.manifest_path)
-    summary_path = output_dir / "summary.md"
+    assert Path(result.manifest_path).exists()
+    assert len(list((output_dir / "14_cluster_combos").glob("*.png"))) == 10
 
-    assert image_path.exists()
-    assert image_path.stat().st_size > 0
-    assert manifest_path.exists()
-    assert summary_path.exists()
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["total_images"] == 10
+    assert manifest["dagua_only"] is True
+    assert all(row["render_mode"] == "dagua_only" for row in manifest["cases"])
 
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["total_images"] == 1
-    assert manifest["cases"][0]["case_id"] == "star_dashed"
+
+def test_build_combo_album_renders_kitchen_sink_subset(tmp_path: Path) -> None:
+    """Kitchen-sink Dagua-only cases should render without shadow/dash regressions."""
+
+    output_dir = tmp_path / "combo_album"
+    result = build_combo_album(
+        output_dir=str(output_dir),
+        categories=["20_kitchen_sink"],
+        case_ids=["diamond_dashed_gradient_shadow", "selfloop_dashed_vee_label_shadow"],
+        dagua_only=True,
+    )
+
+    assert Path(result.manifest_path).exists()
+    assert len(list((output_dir / "20_kitchen_sink").glob("*.png"))) == 2
+
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["total_images"] == 2
+    assert manifest["dagua_only"] is True
+    assert {row["case_id"] for row in manifest["cases"]} == {
+        "diamond_dashed_gradient_shadow",
+        "selfloop_dashed_vee_label_shadow",
+    }
+
+
+def test_build_combo_album_renders_graphviz_category(tmp_path: Path) -> None:
+    """A comparison category should emit Graphviz-backed images when available."""
+
+    if shutil.which("dot") is None:
+        pytest.skip("Graphviz dot is not installed")
+
+    output_dir = tmp_path / "combo_album"
+    result = build_combo_album(
+        output_dir=str(output_dir),
+        categories=["01_shape_x_border"],
+    )
+
+    assert Path(result.manifest_path).exists()
+    assert len(list((output_dir / "01_shape_x_border").glob("*.png"))) == 12
+
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["total_images"] == 12
+    assert manifest["dagua_only"] is False
     assert manifest["cases"][0]["comparison"] is True
     assert manifest["cases"][0]["render_mode"] == "comparison"
+
+
+def test_build_combo_album_renders_cluster_graphviz_category(tmp_path: Path) -> None:
+    """Cluster comparison cases should render with Graphviz when available."""
+
+    if shutil.which("dot") is None:
+        pytest.skip("Graphviz dot is not installed")
+
+    output_dir = tmp_path / "combo_album"
+    result = build_combo_album(
+        output_dir=str(output_dir),
+        categories=["14_cluster_combos"],
+    )
+
+    assert Path(result.manifest_path).exists()
+    assert len(list((output_dir / "14_cluster_combos").glob("*.png"))) == 10
+
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["total_images"] == 10
+    assert manifest["dagua_only"] is False
+    assert any(row["comparison"] is True for row in manifest["cases"])
+    assert any(row["render_mode"] == "comparison" for row in manifest["cases"])

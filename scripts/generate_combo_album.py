@@ -2555,8 +2555,8 @@ def _kitchen_sink_cases() -> List[AlbumCase]:
     return cases
 
 
-def build_case_catalog() -> List[AlbumCase]:
-    """Build the full combo album case catalog.
+def _legacy_build_case_catalog() -> List[AlbumCase]:
+    """Build the legacy partial combo album case catalog.
 
     Returns
     -------
@@ -3257,6 +3257,1192 @@ def _cat15_color_contrast_cases() -> List[AlbumCase]:
         )
     )
     return cases
+
+
+def _dark_mode_graph_style() -> GraphStyle:
+    """Return the graph style used for dark-mode cases.
+
+    Returns
+    -------
+    GraphStyle
+        Dark background graph style.
+    """
+
+    return GraphStyle(
+        background_color="#1A1E24",
+        margin=26.0,
+        edge_label_background="#1A1E24",
+        edge_label_background_opacity=0.95,
+    )
+
+
+def _dark_node_style(**overrides: object) -> NodeStyle:
+    """Return the dark-mode node style for combo album cases.
+
+    Parameters
+    ----------
+    **overrides : object
+        Field overrides applied to the base style.
+
+    Returns
+    -------
+    NodeStyle
+        Configured node style.
+    """
+
+    style = _base_node_style(fill="#2A3A4A", stroke="#5A8AB0", font_color="#E0E0E0")
+    for key, value in overrides.items():
+        setattr(style, key, value)
+    return style
+
+
+def _dark_edge_style(**overrides: object) -> EdgeStyle:
+    """Return the dark-mode edge style for combo album cases.
+
+    Parameters
+    ----------
+    **overrides : object
+        Field overrides applied to the base style.
+
+    Returns
+    -------
+    EdgeStyle
+        Configured edge style.
+    """
+
+    style = _base_edge_style(color="#5A8AB0")
+    for key, value in overrides.items():
+        setattr(style, key, value)
+    return style
+
+
+def _cat16_dark_mode_cases() -> List[AlbumCase]:
+    """Build category 16 dark-mode cases.
+
+    Returns
+    -------
+    list[AlbumCase]
+        Requested ``16_dark_mode`` cases.
+    """
+
+    specs = [
+        ("dark_baseline", "baseline"),
+        ("dark_gradient", "gradient"),
+        ("dark_shadow", "shadow"),
+        ("dark_opacity", "opacity"),
+        ("dark_dashed", "dashed"),
+        ("dark_cluster", "cluster"),
+    ]
+
+    cases: List[AlbumCase] = []
+    for case_id, variant in specs:
+        graph, positions = _chain_graph(3, ["Input", "Process", "Output"], direction="LR")
+        graph._theme.graph_style = _dark_mode_graph_style()
+        graph.node_styles = [_dark_node_style() for _ in range(3)]
+        graph.edge_styles = [_dark_edge_style() for _ in range(2)]
+        if variant == "gradient":
+            graph.node_styles = [_dark_node_style(gradient="linear") for _ in range(3)]
+        elif variant == "shadow":
+            graph.node_styles = [_dark_node_style(shadow=True) for _ in range(3)]
+        elif variant == "opacity":
+            graph.node_styles = [_dark_node_style(opacity=0.6) for _ in range(3)]
+        elif variant == "dashed":
+            graph.edge_styles = [_dark_edge_style(style="dashed") for _ in range(2)]
+        elif variant == "cluster":
+            graph.add_cluster("dark_cluster", ["n0", "n1"], label="Backend")
+            graph.cluster_styles["dark_cluster"] = _base_cluster_style(
+                fill="#2A3A4A44",
+                stroke="#5A8AB0",
+                font_color="#E0E0E0",
+            )
+        cases.append(
+            _make_case(
+                case_id=case_id,
+                category="16_dark_mode",
+                title=case_id.replace("_", " ").title(),
+                graph=graph,
+                positions=positions,
+                options_tested=[f"variant={variant}", "background=#1A1E24"],
+                graphviz=None,
+            )
+        )
+    return cases
+
+
+def _cat17_extreme_params_cases() -> List[AlbumCase]:
+    """Build category 17 extreme-parameter cases.
+
+    Returns
+    -------
+    list[AlbumCase]
+        Requested ``17_extreme_params`` cases.
+    """
+
+    cases: List[AlbumCase] = []
+
+    node_specs = [
+        (
+            "tiny_font",
+            {"shape": "diamond", "font_size": 6.0},
+            {"shape": "diamond", "fontsize": "6"},
+        ),
+        (
+            "huge_font",
+            {"shape": "roundrect", "font_size": 24.0},
+            {"shape": "box", "style": "filled,rounded", "fontsize": "24"},
+        ),
+        (
+            "thick_border",
+            {"shape": "roundrect", "stroke_width": 5.0},
+            {"shape": "box", "style": "filled,rounded", "penwidth": "5"},
+        ),
+        (
+            "thin_border",
+            {"shape": "diamond", "stroke_width": 0.2},
+            {"shape": "diamond", "penwidth": "0.2"},
+        ),
+        ("pill_shape", {"shape": "roundrect", "corner_radius": 25.0}, None),
+        ("sharp_roundrect", {"shape": "roundrect", "corner_radius": 0.0}, None),
+    ]
+    for case_id, overrides, gv_attrs in node_specs:
+        graph, positions = _single_node_graph("Extreme")
+        graph.node_styles[0] = _base_node_style(**overrides)
+        cases.append(
+            _make_case(
+                case_id=case_id,
+                category="17_extreme_params",
+                title=case_id.replace("_", " ").title(),
+                graph=graph,
+                positions=positions,
+                options_tested=[f"node.{key}={value}" for key, value in overrides.items()],
+                graphviz=None
+                if gv_attrs is None
+                else _pinned_graphviz_spec(positions, node_attrs={0: gv_attrs}),
+            )
+        )
+
+    edge_specs = [
+        ("huge_arrow", {"arrow_length": 25.0, "arrow_width": 20.0}, {"arrowsize": "2.0"}),
+        ("tiny_arrow", {"arrow_length": 4.0, "arrow_width": 3.0}, {"arrowsize": "0.3"}),
+        ("max_curvature", {"curvature": 1.0}, None),
+        ("zero_curvature", {"curvature": 0.0}, None),
+    ]
+    for case_id, overrides, gv_attrs in edge_specs:
+        graph, positions = _pair_graph(_pair_positions(direction="LR"), ["A", "B"], direction="LR")
+        _set_all_edge_styles(graph, _base_edge_style(**overrides))
+        cases.append(
+            _make_case(
+                case_id=case_id,
+                category="17_extreme_params",
+                title=case_id.replace("_", " ").title(),
+                graph=graph,
+                positions=positions,
+                options_tested=[f"edge.{key}={value}" for key, value in overrides.items()],
+                graphviz=None
+                if gv_attrs is None
+                else _pinned_graphviz_spec(positions, default_edge_attrs=gv_attrs),
+            )
+        )
+    return cases
+
+
+def _cat18_dense_mixed_cases() -> List[AlbumCase]:
+    """Build category 18 dense mixed-style cases.
+
+    Returns
+    -------
+    list[AlbumCase]
+        Requested ``18_dense_mixed`` cases.
+    """
+
+    cases: List[AlbumCase] = []
+
+    graph, positions = _chain_graph(
+        6,
+        ["Rect", "Circle", "Diamond", "Hex", "Trap", "Star"],
+        direction="LR",
+        spacing=130.0,
+    )
+    graph.node_styles = [
+        _base_node_style(shape="roundrect"),
+        _base_node_style(shape="circle"),
+        _base_node_style(shape="diamond"),
+        _base_node_style(shape="hexagon"),
+        _base_node_style(shape="trapezoid"),
+        _base_node_style(shape="star"),
+    ]
+    _set_all_edge_styles(graph, _base_edge_style())
+    cases.append(
+        _make_case(
+            case_id="six_shapes_chain",
+            category="18_dense_mixed",
+            title="Six Shapes Chain",
+            graph=graph,
+            positions=positions,
+            options_tested=["nodes=6", "mixed_shapes=true"],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                node_attrs={
+                    index: _graphviz_shape_attrs(style.shape)
+                    for index, style in enumerate(graph.node_styles)
+                },
+            ),
+        )
+    )
+
+    fills = ["#DCEBFA", "#F8D6CC", "#D9F2E2", "#FBE7B8", "#E8D8F0", "#F7F2D2"]
+    graph, positions = _chain_graph(
+        6, ["A", "B", "C", "D", "E", "F"], direction="LR", spacing=130.0
+    )
+    graph.node_styles = [_base_node_style(fill=fill) for fill in fills]
+    _set_all_edge_styles(graph, _base_edge_style())
+    cases.append(
+        _make_case(
+            case_id="six_colors_chain",
+            category="18_dense_mixed",
+            title="Six Colors Chain",
+            graph=graph,
+            positions=positions,
+            options_tested=["nodes=6", "mixed_fills=true"],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                node_attrs={
+                    index: {"fillcolor": fill, "color": graph.node_styles[index].stroke}
+                    for index, fill in enumerate(fills)
+                },
+            ),
+        )
+    )
+
+    graph, positions = _diamond_dag(["Start", "Left", "Right", "End"])
+    graph.edge_styles = [
+        _base_edge_style(style="solid"),
+        _base_edge_style(style="dashed"),
+        _base_edge_style(style="dotted"),
+        _base_edge_style(width=3.0),
+    ]
+    cases.append(
+        _make_case(
+            case_id="four_edge_styles",
+            category="18_dense_mixed",
+            title="Four Edge Styles",
+            graph=graph,
+            positions=positions,
+            options_tested=["diamond_dag=true", "mixed_edge_styles=true"],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                edge_attrs={
+                    0: {"style": "solid"},
+                    1: {"style": "dashed"},
+                    2: {"style": "dotted"},
+                    3: {"penwidth": "3"},
+                },
+            ),
+        )
+    )
+
+    graph, positions = _diamond_dag(["Start", "Left", "Right", "End"])
+    graph.edge_styles = [
+        _base_edge_style(arrow="normal"),
+        _base_edge_style(arrow="vee"),
+        _base_edge_style(arrow="diamond"),
+        _base_edge_style(arrow="crow"),
+    ]
+    cases.append(
+        _make_case(
+            case_id="four_arrows",
+            category="18_dense_mixed",
+            title="Four Arrows",
+            graph=graph,
+            positions=positions,
+            options_tested=["diamond_dag=true", "mixed_arrows=true"],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                edge_attrs={
+                    0: {"arrowhead": "normal"},
+                    1: {"arrowhead": "vee"},
+                    2: {"arrowhead": "diamond"},
+                    3: {"arrowhead": "crow"},
+                },
+            ),
+        )
+    )
+
+    cluster_positions = {
+        "a0": (-280.0, 90.0),
+        "a1": (-160.0, 90.0),
+        "a2": (-280.0, -30.0),
+        "a3": (-160.0, -30.0),
+        "b0": (160.0, 90.0),
+        "b1": (280.0, 90.0),
+        "b2": (160.0, -30.0),
+        "b3": (280.0, -30.0),
+    }
+    graph, positions = _cluster_graph_custom(
+        [
+            ("a0", "A0", {"shape": "roundrect"}),
+            ("a1", "A1", {"shape": "circle"}),
+            ("a2", "A2", {"shape": "diamond"}),
+            ("a3", "A3", {"shape": "hexagon"}),
+            ("b0", "B0", {"shape": "trapezoid"}),
+            ("b1", "B1", {"shape": "star"}),
+            ("b2", "B2", {"shape": "roundrect"}),
+            ("b3", "B3", {"shape": "circle"}),
+        ],
+        [
+            ("a0", "a1"),
+            ("a1", "a3"),
+            ("a0", "a2"),
+            ("b0", "b1"),
+            ("b1", "b3"),
+            ("b0", "b2"),
+            ("a3", "b0"),
+            ("a2", "b2"),
+        ],
+        [
+            ("left", "Left", ["a0", "a1", "a2", "a3"], {}),
+            ("right", "Right", ["b0", "b1", "b2", "b3"], {"fill": "#EAF1F8"}),
+        ],
+        positions=cluster_positions,
+        direction="LR",
+    )
+    cases.append(
+        _make_case(
+            case_id="two_clusters_mixed",
+            category="18_dense_mixed",
+            title="Two Clusters Mixed",
+            graph=graph,
+            positions=positions,
+            options_tested=["nodes=8", "clusters=2", "mixed_shapes=true"],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                node_attrs={
+                    index: _graphviz_shape_attrs(style.shape)
+                    for index, style in enumerate(graph.node_styles)
+                },
+                cluster_attrs={"right": {"style": "filled", "fillcolor": "#EAF1F8"}},
+            ),
+        )
+    )
+
+    graph, positions = _chain_graph(
+        6, ["G0", "G1", "G2", "S0", "S1", "S2"], direction="LR", spacing=125.0
+    )
+    graph.node_styles = [
+        _base_node_style(gradient="linear"),
+        _base_node_style(gradient="radial"),
+        _base_node_style(gradient="linear"),
+        _base_node_style(shadow=True),
+        _base_node_style(shadow=True),
+        _base_node_style(shadow=True),
+    ]
+    _set_all_edge_styles(graph, _base_edge_style())
+    cases.append(
+        _make_case(
+            case_id="gradient_shadow_mix",
+            category="18_dense_mixed",
+            title="Gradient Shadow Mix",
+            graph=graph,
+            positions=positions,
+            options_tested=["gradients=3", "shadows=3"],
+            graphviz=None,
+        )
+    )
+
+    graph, positions = _fan_graph("Hub", ["Circle", "Diamond", "Hex", "Trap"])
+    graph.node_styles = [
+        _base_node_style(),
+        _base_node_style(shape="circle", fill="#DCEBFA"),
+        _base_node_style(shape="diamond", fill="#F8D6CC"),
+        _base_node_style(shape="hexagon", fill="#D9F2E2"),
+        _base_node_style(shape="trapezoid", fill="#FBE7B8"),
+    ]
+    _set_all_edge_styles(graph, _base_edge_style())
+    cases.append(
+        _make_case(
+            case_id="fan_shapes",
+            category="18_dense_mixed",
+            title="Fan Shapes",
+            graph=graph,
+            positions=positions,
+            options_tested=["fan_out=true", "mixed_leaf_shapes=true", "mixed_leaf_colors=true"],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                node_attrs={
+                    index: _graphviz_shape_attrs(style.shape)
+                    for index, style in enumerate(graph.node_styles)
+                },
+            ),
+        )
+    )
+
+    graph, positions = _grid_graph(3, 3)
+    graph.node_styles = [
+        _base_node_style(
+            shape="rect" if (index + row) % 2 == 0 else "circle",
+            stroke_dash="solid" if (index + row) % 2 == 0 else "dashed",
+        )
+        for row in range(3)
+        for index in range(3)
+    ]
+    _set_all_edge_styles(graph, _base_edge_style())
+    cases.append(
+        _make_case(
+            case_id="grid_checkerboard",
+            category="18_dense_mixed",
+            title="Grid Checkerboard",
+            graph=graph,
+            positions=positions,
+            options_tested=["grid=3x3", "checkerboard_shapes=true", "checkerboard_borders=true"],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                node_attrs={
+                    index: _graphviz_shape_attrs(style.shape, style.stroke_dash)
+                    for index, style in enumerate(graph.node_styles)
+                },
+            ),
+        )
+    )
+    return cases
+
+
+def _cat19_real_world_patterns_cases() -> List[AlbumCase]:
+    """Build category 19 real-world pattern cases.
+
+    Returns
+    -------
+    list[AlbumCase]
+        Requested ``19_real_world_patterns`` cases.
+    """
+
+    cases: List[AlbumCase] = []
+
+    graph, positions = _chain_graph(
+        5,
+        ["Input", "Parse", "Transform", "Validate", "Output"],
+        direction="LR",
+        spacing=150.0,
+    )
+    _set_all_node_styles(graph, _base_node_style(shape="roundrect"))
+    graph.edge_styles = [
+        _base_edge_style(routing="ortho"),
+        _base_edge_style(routing="ortho"),
+        _base_edge_style(routing="ortho"),
+        _base_edge_style(routing="ortho", style="dashed"),
+    ]
+    _set_all_edge_labels(graph, ["data", "transform", "validate", "output"])
+    graph.add_cluster("processing", ["n1", "n2", "n3"], label="Processing")
+    graph.cluster_styles["processing"] = _base_cluster_style()
+    cases.append(
+        _make_case(
+            case_id="pipeline",
+            category="19_real_world_patterns",
+            title="Pipeline",
+            graph=graph,
+            positions=positions,
+            options_tested=[
+                "direction=LR",
+                "routing=ortho",
+                "cluster=Processing",
+                "optional_last_edge=true",
+            ],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                graph_attrs={"rankdir": "LR", "splines": "ortho"},
+                node_attrs={index: _graphviz_shape_attrs("roundrect") for index in range(5)},
+                edge_attrs={3: {"style": "dashed"}},
+            ),
+        )
+    )
+
+    state_positions = torch.tensor(
+        [[-340.0, 0.0], [-180.0, 0.0], [-20.0, 0.0], [160.0, 0.0], [340.0, 0.0]],
+        dtype=torch.float32,
+    )
+    graph = DaguaGraph(direction="LR")
+    _apply_graph_style(graph)
+    for node_id, label in [
+        ("start", ""),
+        ("idle", "Idle"),
+        ("active", "Active"),
+        ("processing", "Processing"),
+        ("done", "Done"),
+    ]:
+        graph.add_node(node_id, label=label)
+    for source, target in [
+        ("start", "idle"),
+        ("idle", "active"),
+        ("active", "processing"),
+        ("processing", "done"),
+        ("processing", "idle"),
+        ("processing", "processing"),
+    ]:
+        graph.add_edge(source, target)
+    graph.node_styles = [
+        _base_node_style(
+            shape="circle", fill="#1F2937", stroke="#1F2937", min_width=20.0, padding=(4.0, 4.0)
+        ),
+        _base_node_style(shape="circle"),
+        _base_node_style(shape="circle"),
+        _base_node_style(shape="circle"),
+        _base_node_style(shape="circle"),
+    ]
+    graph.edge_styles = [_base_edge_style() for _ in range(6)]
+    _set_all_edge_labels(graph, [None, "start", "process", "complete", "timeout", "retry"])
+    cases.append(
+        _make_case(
+            case_id="state_machine",
+            category="19_real_world_patterns",
+            title="State Machine",
+            graph=graph,
+            positions=state_positions,
+            options_tested=[
+                "direction=LR",
+                "self_loop=retry",
+                "edge_labels=start,process,complete,timeout",
+            ],
+            graphviz=_pinned_graphviz_spec(
+                state_positions,
+                graph_attrs={"rankdir": "LR", "splines": "true"},
+                node_attrs={index: _graphviz_shape_attrs("circle") for index in range(5)},
+            ),
+        )
+    )
+
+    flow_positions = torch.tensor(
+        [[0.0, 240.0], [0.0, 100.0], [-150.0, -40.0], [150.0, -40.0], [0.0, -210.0]],
+        dtype=torch.float32,
+    )
+    graph = DaguaGraph(direction="TB")
+    _apply_graph_style(graph)
+    for node_id, label in [
+        ("start", "Start"),
+        ("decision", "Decision"),
+        ("a", "Process A"),
+        ("b", "Process B"),
+        ("end", "End"),
+    ]:
+        graph.add_node(node_id, label=label)
+    for source, target in [
+        ("start", "decision"),
+        ("decision", "a"),
+        ("decision", "b"),
+        ("a", "end"),
+        ("b", "end"),
+    ]:
+        graph.add_edge(source, target)
+    graph.node_styles = [
+        _base_node_style(shape="roundrect"),
+        _base_node_style(shape="diamond"),
+        _base_node_style(shape="rect"),
+        _base_node_style(shape="rect"),
+        _base_node_style(shape="roundrect"),
+    ]
+    graph.edge_styles = [
+        _base_edge_style(),
+        _base_edge_style(),
+        _base_edge_style(),
+        _base_edge_style(),
+        _base_edge_style(style="dashed"),
+    ]
+    _set_all_edge_labels(graph, [None, "yes", "no", None, "error"])
+    cases.append(
+        _make_case(
+            case_id="flowchart",
+            category="19_real_world_patterns",
+            title="Flowchart",
+            graph=graph,
+            positions=flow_positions,
+            options_tested=["decision=true", "decision_labels=yes,no", "error_path=dashed"],
+            graphviz=_pinned_graphviz_spec(
+                flow_positions,
+                node_attrs={
+                    0: _graphviz_shape_attrs("roundrect"),
+                    1: _graphviz_shape_attrs("diamond"),
+                    2: _graphviz_shape_attrs("rect"),
+                    3: _graphviz_shape_attrs("rect"),
+                    4: _graphviz_shape_attrs("roundrect"),
+                },
+                edge_attrs={4: {"style": "dashed"}},
+            ),
+        )
+    )
+
+    neural_positions = torch.tensor(
+        [
+            [0.0, 320.0],
+            [0.0, 230.0],
+            [0.0, 140.0],
+            [0.0, 50.0],
+            [0.0, -40.0],
+            [0.0, -130.0],
+            [0.0, -220.0],
+            [0.0, -310.0],
+        ],
+        dtype=torch.float32,
+    )
+    graph = DaguaGraph(direction="TB")
+    _apply_graph_style(graph)
+    for index in range(8):
+        graph.add_node(f"n{index}", label=f"Layer {index}")
+    for source, target in [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7), (1, 5)]:
+        graph.add_edge(f"n{source}", f"n{target}")
+    graph.node_styles = [_base_node_style(font_size=9.0) for _ in range(8)]
+    _set_all_edge_styles(graph, _base_edge_style())
+    graph.add_cluster("encoder", ["n0", "n1", "n2", "n3"], label="Encoder")
+    graph.add_cluster("decoder", ["n4", "n5", "n6", "n7"], label="Decoder")
+    graph.cluster_styles["encoder"] = _base_cluster_style()
+    graph.cluster_styles["decoder"] = _base_cluster_style(fill="#EAF1F8")
+    cases.append(
+        _make_case(
+            case_id="neural_net",
+            category="19_real_world_patterns",
+            title="Neural Net",
+            graph=graph,
+            positions=neural_positions,
+            options_tested=[
+                "layers=8",
+                "skip_connection=n1->n5",
+                "font_size=9",
+                "clusters=Encoder,Decoder",
+            ],
+            graphviz=_pinned_graphviz_spec(
+                neural_positions,
+                cluster_attrs={"decoder": {"style": "filled", "fillcolor": "#EAF1F8"}},
+            ),
+        )
+    )
+
+    org_positions = torch.tensor(
+        [
+            [0.0, 250.0],
+            [-240.0, 80.0],
+            [0.0, 80.0],
+            [240.0, 80.0],
+            [-240.0, -100.0],
+            [0.0, -100.0],
+            [240.0, -100.0],
+        ],
+        dtype=torch.float32,
+    )
+    graph = DaguaGraph(direction="TB")
+    _apply_graph_style(graph)
+    for node_id, label in [
+        ("ceo", "CEO"),
+        ("vp_ops", "VP Ops"),
+        ("vp_sales", "VP Sales"),
+        ("vp_eng", "VP Eng"),
+        ("dir_ops", "Director Ops"),
+        ("dir_sales", "Director Sales"),
+        ("dir_eng", "Director Eng"),
+    ]:
+        graph.add_node(node_id, label=label)
+    for source, target in [
+        ("ceo", "vp_ops"),
+        ("ceo", "vp_sales"),
+        ("ceo", "vp_eng"),
+        ("vp_ops", "dir_ops"),
+        ("vp_sales", "dir_sales"),
+        ("vp_eng", "dir_eng"),
+        ("dir_ops", "vp_sales"),
+    ]:
+        graph.add_edge(source, target)
+    graph.node_styles = [_base_node_style(shape="roundrect") for _ in range(7)]
+    graph.edge_styles = [
+        _base_edge_style(width=2.0),
+        _base_edge_style(width=2.0),
+        _base_edge_style(width=2.0),
+        _base_edge_style(width=2.0),
+        _base_edge_style(width=2.0),
+        _base_edge_style(width=2.0),
+        _base_edge_style(width=1.0, style="dashed"),
+    ]
+    cases.append(
+        _make_case(
+            case_id="org_chart",
+            category="19_real_world_patterns",
+            title="Org Chart",
+            graph=graph,
+            positions=org_positions,
+            options_tested=["tree=true", "main_edge_width=2.0", "reporting_edge=dashed"],
+            graphviz=_pinned_graphviz_spec(
+                org_positions,
+                node_attrs={index: _graphviz_shape_attrs("roundrect") for index in range(7)},
+                edge_attrs={
+                    0: {"penwidth": "2"},
+                    1: {"penwidth": "2"},
+                    2: {"penwidth": "2"},
+                    3: {"penwidth": "2"},
+                    4: {"penwidth": "2"},
+                    5: {"penwidth": "2"},
+                    6: {"style": "dashed", "penwidth": "1"},
+                },
+            ),
+        )
+    )
+
+    data_positions = torch.tensor(
+        [
+            [-320.0, 40.0],
+            [-130.0, 40.0],
+            [40.0, 120.0],
+            [40.0, -40.0],
+            [220.0, 40.0],
+            [390.0, 40.0],
+        ],
+        dtype=torch.float32,
+    )
+    graph = DaguaGraph(direction="LR")
+    _apply_graph_style(graph)
+    for node_id, label in [
+        ("client", "Client"),
+        ("router", "Router"),
+        ("api", "API Server"),
+        ("auth", "Auth Service"),
+        ("db", "Database"),
+        ("response", "Response"),
+    ]:
+        graph.add_node(node_id, label=label)
+    for source, target in [
+        ("client", "router"),
+        ("router", "api"),
+        ("router", "auth"),
+        ("api", "db"),
+        ("db", "response"),
+        ("auth", "response"),
+    ]:
+        graph.add_edge(source, target)
+    graph.node_styles = [
+        _base_node_style(shape="ellipse"),
+        _base_node_style(shape="diamond"),
+        _base_node_style(shape="rect"),
+        _base_node_style(shape="rect"),
+        _base_node_style(shape="cylinder"),
+        _base_node_style(shape="ellipse"),
+    ]
+    graph.edge_styles = [_base_edge_style(routing="ortho") for _ in range(6)]
+    _set_all_edge_labels(graph, ["request", "route", "auth", "query", "result", "token"])
+    graph.add_cluster("backend", ["api", "auth", "db"], label="Backend")
+    graph.cluster_styles["backend"] = _base_cluster_style()
+    cases.append(
+        _make_case(
+            case_id="data_flow",
+            category="19_real_world_patterns",
+            title="Data Flow",
+            graph=graph,
+            positions=data_positions,
+            options_tested=[
+                "mixed_shapes=true",
+                "routing=ortho",
+                "edge_labels=true",
+                "cluster=Backend",
+            ],
+            graphviz=_pinned_graphviz_spec(
+                data_positions,
+                graph_attrs={"rankdir": "LR", "splines": "ortho"},
+                node_attrs={
+                    0: _graphviz_shape_attrs("ellipse"),
+                    1: _graphviz_shape_attrs("diamond"),
+                    2: _graphviz_shape_attrs("rect"),
+                    3: _graphviz_shape_attrs("rect"),
+                    4: _graphviz_shape_attrs("cylinder"),
+                    5: _graphviz_shape_attrs("ellipse"),
+                },
+            ),
+        )
+    )
+    return cases
+
+
+def _cat20_kitchen_sink_cases() -> List[AlbumCase]:
+    """Build category 20 kitchen-sink stress cases.
+
+    Returns
+    -------
+    list[AlbumCase]
+        Requested ``20_kitchen_sink`` cases.
+    """
+
+    cases: List[AlbumCase] = []
+
+    graph, positions = _single_node_graph("Diamond")
+    graph.node_styles[0] = _base_node_style(
+        shape="diamond", stroke_dash="dashed", gradient="linear", shadow=True
+    )
+    cases.append(
+        _make_case(
+            case_id="diamond_dashed_gradient_shadow",
+            category="20_kitchen_sink",
+            title="Diamond Dashed Gradient Shadow",
+            graph=graph,
+            positions=positions,
+            options_tested=[
+                "shape=diamond",
+                "stroke_dash=dashed",
+                "gradient=linear",
+                "shadow=true",
+            ],
+            graphviz=None,
+        )
+    )
+
+    graph, positions = _pair_graph(
+        _pair_positions(direction="LR"), ["Focus", "Target"], direction="LR"
+    )
+    graph.node_styles = [
+        _base_node_style(shape="circle", font_weight="bold", font_style="italic"),
+        _base_node_style(shape="circle", font_weight="bold", font_style="italic"),
+    ]
+    graph.edge_styles = [_base_edge_style(arrow="vee", style="dotted")]
+    cases.append(
+        _make_case(
+            case_id="circle_bold_italic_vee_dotted",
+            category="20_kitchen_sink",
+            title="Circle Bold Italic Vee Dotted",
+            graph=graph,
+            positions=positions,
+            options_tested=[
+                "shape=circle",
+                "font_weight=bold",
+                "font_style=italic",
+                "arrow=vee",
+                "style=dotted",
+            ],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                node_attrs={
+                    0: {"shape": "circle", "fontname": _graphviz_font_name("bold", "italic")},
+                    1: {"shape": "circle", "fontname": _graphviz_font_name("bold", "italic")},
+                },
+                default_edge_attrs={"arrowhead": "vee", "style": "dotted"},
+            ),
+        )
+    )
+
+    graph, positions = _single_node_graph("Hex")
+    graph.node_styles[0] = _base_node_style(
+        shape="hexagon", gradient="radial", opacity=0.7, shadow=True
+    )
+    cases.append(
+        _make_case(
+            case_id="hexagon_radial_opacity_shadow",
+            category="20_kitchen_sink",
+            title="Hexagon Radial Opacity Shadow",
+            graph=graph,
+            positions=positions,
+            options_tested=["shape=hexagon", "gradient=radial", "opacity=0.7", "shadow=true"],
+            graphviz=None,
+        )
+    )
+
+    graph, positions = _single_node_graph("Star")
+    graph.node_styles[0] = _base_node_style(
+        shape="star", stroke_width=3.0, stroke_dash="dotted", font_style="italic"
+    )
+    cases.append(
+        _make_case(
+            case_id="star_thick_dotted_italic",
+            category="20_kitchen_sink",
+            title="Star Thick Dotted Italic",
+            graph=graph,
+            positions=positions,
+            options_tested=[
+                "shape=star",
+                "stroke_width=3",
+                "stroke_dash=dotted",
+                "font_style=italic",
+            ],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                node_attrs={
+                    0: {
+                        "shape": "star",
+                        "style": "filled,dotted",
+                        "penwidth": "3",
+                        "fontname": _graphviz_font_name("regular", "italic"),
+                    }
+                },
+            ),
+        )
+    )
+
+    graph, positions = _diamond_dag(["Entry", "Left", "Right", "Exit"])
+    graph.add_cluster("group", ["n1", "n2"], label="Cluster")
+    graph.node_styles = [_base_node_style(shape="diamond") for _ in range(4)]
+    graph.edge_styles = [_base_edge_style(style="dashed", routing="ortho") for _ in range(4)]
+    graph.cluster_styles["group"] = _base_cluster_style()
+    cases.append(
+        _make_case(
+            case_id="cluster_diamond_dashed_ortho",
+            category="20_kitchen_sink",
+            title="Cluster Diamond Dashed Ortho",
+            graph=graph,
+            positions=positions,
+            options_tested=["cluster=true", "shape=diamond", "style=dashed", "routing=ortho"],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                graph_attrs={"splines": "ortho"},
+                node_attrs={index: _graphviz_shape_attrs("diamond") for index in range(4)},
+                default_edge_attrs={"style": "dashed"},
+            ),
+        )
+    )
+
+    graph, positions = _chain_graph(3, ["Input", "Work", "Output"], direction="LR")
+    graph.node_styles = [_base_node_style(shape="trapezoid") for _ in range(3)]
+    graph.edge_styles = [_base_edge_style(arrow="crow", width=3.0) for _ in range(2)]
+    cases.append(
+        _make_case(
+            case_id="lr_trapezoid_crow_thick",
+            category="20_kitchen_sink",
+            title="LR Trapezoid Crow Thick",
+            graph=graph,
+            positions=positions,
+            options_tested=["direction=LR", "shape=trapezoid", "arrow=crow", "width=3"],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                graph_attrs={"rankdir": "LR"},
+                node_attrs={index: _graphviz_shape_attrs("trapezoid") for index in range(3)},
+                default_edge_attrs={"arrowhead": "crow", "penwidth": "3"},
+            ),
+        )
+    )
+
+    graph, positions = _diamond_dag(["In", "Prep", "Ship", "Out"])
+    graph._theme.graph_style = _dark_mode_graph_style()
+    graph.add_cluster("dark_cluster", ["n1", "n2"], label="Cluster")
+    graph.node_styles = [_dark_node_style(gradient="linear", shadow=True) for _ in range(4)]
+    graph.edge_styles = [_dark_edge_style(style="dashed") for _ in range(4)]
+    graph.cluster_styles["dark_cluster"] = _base_cluster_style(
+        fill="#2A3A4A44", stroke="#5A8AB0", font_color="#E0E0E0"
+    )
+    cases.append(
+        _make_case(
+            case_id="dark_gradient_shadow_dashed_cluster",
+            category="20_kitchen_sink",
+            title="Dark Gradient Shadow Dashed Cluster",
+            graph=graph,
+            positions=positions,
+            options_tested=[
+                "dark_mode=true",
+                "gradient=true",
+                "shadow=true",
+                "dashed=true",
+                "cluster=true",
+            ],
+            graphviz=None,
+        )
+    )
+
+    graph, positions = _pair_graph(_pair_positions(gap=55.0), ["Near", "Nearer"])
+    graph.edge_styles = [_base_edge_style(style="dashed", tail_arrow="dot")]
+    _set_all_edge_labels(graph, ["flow"])
+    cases.append(
+        _make_case(
+            case_id="short_headtail_label_dashed",
+            category="20_kitchen_sink",
+            title="Short Headtail Label Dashed",
+            graph=graph,
+            positions=positions,
+            options_tested=["short_edge=true", "tail_arrow=dot", "label=flow", "style=dashed"],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                default_edge_attrs={"dir": "both", "arrowtail": "dot", "style": "dashed"},
+            ),
+        )
+    )
+
+    nested_positions = {
+        "a": (0.0, 180.0),
+        "b": (-100.0, 50.0),
+        "c": (100.0, 50.0),
+        "d": (0.0, -120.0),
+    }
+    graph, positions = _cluster_graph_custom(
+        [
+            ("a", "Outer", {"shape": "roundrect"}),
+            ("b", "Inner L", {"shape": "diamond", "gradient": "linear"}),
+            ("c", "Inner R", {"shape": "hexagon", "gradient": "radial"}),
+            ("d", "Exit", {"shape": "circle"}),
+        ],
+        [("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")],
+        [
+            ("outer", "Outer", ["a", "b", "c", "d"], {}),
+            ("inner", "Inner", ["b", "c"], {"fill": "#DCEBFA"}),
+        ],
+        positions=nested_positions,
+        cluster_parents={"inner": "outer"},
+    )
+    _set_all_edge_labels(graph, ["enter", "branch", "left", "right"])
+    cases.append(
+        _make_case(
+            case_id="nested_mixed_gradient_labels",
+            category="20_kitchen_sink",
+            title="Nested Mixed Gradient Labels",
+            graph=graph,
+            positions=positions,
+            options_tested=[
+                "nested_clusters=true",
+                "mixed_shapes=true",
+                "gradients=true",
+                "edge_labels=true",
+            ],
+            graphviz=None,
+        )
+    )
+
+    graph, positions = _pair_graph(
+        _pair_positions(direction="LR"), ["Source", "Sink"], direction="LR"
+    )
+    graph.node_styles = [
+        _base_node_style(font_weight="bold"),
+        _base_node_style(font_weight="bold"),
+    ]
+    graph.edge_styles = [
+        _base_edge_style(style="dotted", width=3.0, arrow="diamond", arrow_length=25.0)
+    ]
+    _set_all_edge_labels(graph, ["Important"])
+    cases.append(
+        _make_case(
+            case_id="thick_dotted_large_diamond_bold",
+            category="20_kitchen_sink",
+            title="Thick Dotted Large Diamond Bold",
+            graph=graph,
+            positions=positions,
+            options_tested=[
+                "style=dotted",
+                "width=3",
+                "arrow=diamond",
+                "large_arrow=true",
+                "font_weight=bold",
+            ],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                node_attrs={
+                    0: {"fontname": _graphviz_font_name("bold", "normal")},
+                    1: {"fontname": _graphviz_font_name("bold", "normal")},
+                },
+                default_edge_attrs={
+                    "style": "dotted",
+                    "penwidth": "3",
+                    "arrowhead": "diamond",
+                    "arrowsize": "2.0",
+                },
+            ),
+        )
+    )
+
+    graph, positions = _parallel_graph(3)
+    graph.edge_styles = [
+        _base_edge_style(style="solid", arrow="normal"),
+        _base_edge_style(style="dashed", arrow="vee"),
+        _base_edge_style(style="dotted", arrow="diamond"),
+    ]
+    cases.append(
+        _make_case(
+            case_id="parallel_mixed_all",
+            category="20_kitchen_sink",
+            title="Parallel Mixed All",
+            graph=graph,
+            positions=positions,
+            options_tested=["parallel_edges=3", "mixed_styles=true", "mixed_arrows=true"],
+            graphviz=_pinned_graphviz_spec(
+                positions,
+                graph_attrs={"splines": "true"},
+                edge_attrs={
+                    0: {"style": "solid", "arrowhead": "normal"},
+                    1: {"style": "dashed", "arrowhead": "vee"},
+                    2: {"style": "dotted", "arrowhead": "diamond"},
+                },
+            ),
+        )
+    )
+
+    graph, positions = _self_loop_plus_normal_graph()
+    graph.node_styles[0] = _base_node_style(shadow=True)
+    graph.edge_styles = [_base_edge_style(style="dashed", arrow="vee"), _base_edge_style()]
+    _set_all_edge_labels(graph, ["retry", None])
+    cases.append(
+        _make_case(
+            case_id="selfloop_dashed_vee_label_shadow",
+            category="20_kitchen_sink",
+            title="Selfloop Dashed Vee Label Shadow",
+            graph=graph,
+            positions=positions,
+            options_tested=[
+                "self_loop=true",
+                "style=dashed",
+                "arrow=vee",
+                "label=retry",
+                "shadow=true",
+            ],
+            graphviz=None,
+        )
+    )
+    return cases
+
+
+def build_combo_catalog() -> List[AlbumCase]:
+    """Build the full combo album case catalog.
+
+    Returns
+    -------
+    list[AlbumCase]
+        All album cases in output order.
+    """
+
+    builders: Sequence[CategoryBuilder] = (
+        _shape_x_border_cases,
+        _shape_x_gradient_cases,
+        _arrow_x_edgestyle_cases,
+        _arrow_x_routing_cases,
+        _arrow_proportions_cases,
+        _arrow_head_tail_cases,
+        _text_overflow_cases,
+        _edge_label_cases,
+        _short_edge_cases,
+        _self_loops_parallel_cases,
+        _cat11_opacity_interactions_cases,
+        _cat12_shadow_interactions_cases,
+        _cat13_direction_x_routing_cases,
+        _cat14_cluster_combos_cases,
+        _cat15_color_contrast_cases,
+        _cat16_dark_mode_cases,
+        _cat17_extreme_params_cases,
+        _cat18_dense_mixed_cases,
+        _cat19_real_world_patterns_cases,
+        _cat20_kitchen_sink_cases,
+    )
+    cases: List[AlbumCase] = []
+    for builder in builders:
+        cases.extend(builder())
+
+    seen_outputs: set[Tuple[str, str]] = set()
+    for case in cases:
+        output_key = (case.category, case.filename)
+        if output_key in seen_outputs:
+            raise ValueError(
+                f"Duplicate combo album output target: {case.category}/{case.filename}"
+            )
+        seen_outputs.add(output_key)
+    return cases
+
+
+def build_case_catalog() -> List[AlbumCase]:
+    """Return the combo album case catalog.
+
+    Returns
+    -------
+    list[AlbumCase]
+        Full combo album case catalog.
+
+    Notes
+    -----
+    This compatibility alias preserves the original Part 1 entry point while
+    exposing the spec-requested ``build_combo_catalog`` name.
+    """
+
+    return build_combo_catalog()
 
 
 def _select_cases(
