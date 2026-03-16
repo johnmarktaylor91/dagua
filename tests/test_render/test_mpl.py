@@ -367,10 +367,11 @@ def test_vee_arrow_is_open_polygon() -> None:
     fig, ax = render(graph, positions)
     polygons = [patch for patch in ax.patches if isinstance(patch, Polygon)]
     fancy_arrows = [patch for patch in ax.patches if isinstance(patch, FancyArrowPatch)]
-    plt.close(fig)
-
     assert len(polygons) >= 1, "Vee arrow should be a Polygon"
     assert len(fancy_arrows) == 0, "Vee arrow should not use FancyArrowPatch"
+    vee = polygons[0]
+    assert vee.get_facecolor()[3] < 0.01, "Vee should be unfilled (open chevron)"
+    plt.close(fig)
 
 
 def test_straight_routing_has_arrowhead() -> None:
@@ -387,9 +388,16 @@ def test_straight_routing_has_arrowhead() -> None:
 
     fig, ax = render(graph, positions)
     polygons = [patch for patch in ax.patches if isinstance(patch, Polygon)]
+    assert len(polygons) >= 1, "Straight routing should produce arrow polygon"
+    verts = polygons[0].get_xy()
+    if np.allclose(verts[0], verts[-1]):
+        verts = verts[:-1]
+    tip_y = min(vertex[1] for vertex in verts)
+    base_ys = sorted(vertex[1] for vertex in verts)[1:]
+    assert all(base_y > tip_y for base_y in base_ys), (
+        f"Arrow tip (y={tip_y:.1f}) should be closest to target; base vertices at y={base_ys}"
+    )
     plt.close(fig)
-
-    assert polygons, "Straight routing should have at least one arrow polygon"
 
 
 def test_open_marker_preserves_legacy_data_sizing_without_arrow_scale() -> None:

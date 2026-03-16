@@ -954,11 +954,10 @@ def _marker_data_size(
 
     Notes
     -----
-    FancyArrowPatch markers already size themselves in display space via
-    ``mutation_scale``. Polygon and circle markers need an explicit conversion
-    when ``arrow_scale`` is provided so album renders stay visually comparable
-    after composition scaling, while ``arrow_scale=None`` preserves the legacy
-    data-space sizing.
+    All markers use Polygon or Circle patches in data coordinates. When
+    ``arrow_scale`` is provided, this function converts display-point sizes to
+    data units so album renders stay visually comparable after composition
+    scaling, while ``arrow_scale=None`` preserves the legacy data-space sizing.
     """
 
     arrow_scale = getattr(style, "arrow_scale", None)
@@ -1596,8 +1595,8 @@ def _draw_edges(
         )
         # Target arrow: direction continues past the endpoint (same sense as
         # the curve's tangent at p1).  For bezier cp2-p1 already points that
-        # way; for straight/ortho the control point collapses onto p1, so we
-        # fall back to the overall edge direction p1-p0 (continuing past target).
+        # way; for straight routing the control point collapses onto p1, so
+        # we fall back to the overall edge direction p1-p0.
         head_dx = curve.cp2[0] - curve.p1[0]
         head_dy = curve.cp2[1] - curve.p1[1]
         if head_dx * head_dx + head_dy * head_dy < 1e-12:
@@ -1611,7 +1610,7 @@ def _draw_edges(
             style,
         )
         # Source tail arrow: same tangent logic — cp1-p0 continues past the
-        # source; fallback to p0-p1 when cp1 collapses onto p0.
+        # source; fallback to p0-p1 for straight routing where cp1==p0.
         tail_dx = curve.cp1[0] - curve.p0[0]
         tail_dy = curve.cp1[1] - curve.p0[1]
         if tail_dx * tail_dx + tail_dy * tail_dy < 1e-12:
