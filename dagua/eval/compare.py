@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import torch
 
@@ -14,6 +14,52 @@ from dagua.eval.graphs import TestGraph, get_test_graphs
 from dagua.graphviz_utils import layout_with_graphviz, render_comparison
 from dagua.layout import layout
 from dagua.metrics import compute_all_metrics, graphviz_delta
+
+if TYPE_CHECKING:
+    from dagua.graph import DaguaGraph
+
+
+def layout_all(
+    graph: "DaguaGraph",
+    engines: Optional[List[str]] = None,
+    timeout: float = 300.0,
+) -> Dict[str, Optional[torch.Tensor]]:
+    """Run all available competitor engines on a single graph.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph to lay out.
+    engines : list of str, optional
+        Engine names to include. ``None`` runs every available engine.
+    timeout : float, optional
+        Per-engine timeout in seconds.
+
+    Returns
+    -------
+    Dict[str, Optional[torch.Tensor]]
+        Mapping of engine name to a position tensor with shape ``[N, 2]`` or
+        ``None`` if the engine was skipped or failed.
+    """
+    from dagua.eval.competitors import get_available_competitors
+
+    competitors = get_available_competitors()
+    if engines is not None:
+        engine_set = set(engines)
+        competitors = [competitor for competitor in competitors if competitor.name in engine_set]
+
+    results: Dict[str, Optional[torch.Tensor]] = {}
+    for competitor in competitors:
+        if graph.num_nodes > competitor.max_nodes > 0:
+            results[competitor.name] = None
+            continue
+        try:
+            result = competitor.layout(graph, timeout=timeout)
+        except Exception:
+            results[competitor.name] = None
+            continue
+        results[competitor.name] = result.pos
+    return results
 
 
 @dataclass
@@ -152,6 +198,7 @@ class MultiComparisonResult:
     graph_name: str
     engine_metrics: Dict[str, Dict[str, float]]
     engine_positions: Dict[str, Optional[torch.Tensor]]
+    pairwise_similarity: Dict[Tuple[str, str], Dict[str, float]] = field(default_factory=dict)
     winner: str = ""
 
     def __post_init__(self):
@@ -173,24 +220,32 @@ def compare_engines(
 ) -> List[MultiComparisonResult]:
     """Compare multiple layout engines on a collection of graphs.
 
-    Uses the competitor registry to run all available engines (or a filtered subset).
+    Parameters
+    ----------
+    graphs : list of TestGraph, optional
+        Graphs to compare. ``None`` loads the default test corpus.
+    engines : list of str, optional
+        Engine names to include. ``None`` uses every available competitor.
+    config : LayoutConfig, optional
+        Layout configuration used for comparison rendering helpers.
+    output_dir : str, optional
+        Directory for rendered comparison images.
+    max_nodes : int, optional
+        Skip graphs larger than this limit.
 
-    Args:
-        graphs: Test graphs. If None, uses all test graphs.
-        engines: Engine names to include. If None, uses all available.
-        config: LayoutConfig for Dagua. If None, uses defaults.
-        output_dir: If set, saves multi-comparison images here.
-        max_nodes: Skip graphs larger than this.
+    Returns
+    -------
+    List[MultiComparisonResult]
+        Per-graph comparison results including pairwise layout similarity.
 
-    Returns:
-        List of MultiComparisonResult objects.
-
-    Like ``compare_with_graphviz``, this function is meant for placement and
-    metric comparison first. It is not a full-fidelity reproduction of every
-    engine's native rendering semantics.
+    Notes
+    -----
+    This is a placement and metric comparison entrypoint. It does not attempt
+    to reproduce each engine's native rendering semantics.
     """
     from dagua.eval.competitors import get_available_competitors
     from dagua.graphviz_utils import render_multi_comparison
+    from dagua.metrics import layout_similarity
 
     if graphs is None:
         graphs = get_test_graphs(max_nodes=max_nodes)
@@ -215,7 +270,7 @@ def compare_engines(
         engine_positions: Dict[str, Optional[torch.Tensor]] = {}
 
         for comp in competitors:
-            if tg.graph.num_nodes > comp.max_nodes:
+            if tg.graph.num_nodes > comp.max_nodes > 0:
                 continue
             try:
                 result = comp.layout(tg.graph)
@@ -235,6 +290,15 @@ def compare_engines(
             engine_metrics=engine_metrics,
             engine_positions=engine_positions,
         )
+        valid_names = [name for name, pos in engine_positions.items() if pos is not None]
+        if len(valid_names) >= 2:
+            for index, name_a in enumerate(valid_names):
+                for name_b in valid_names[index + 1 :]:
+                    pos_a = engine_positions[name_a]
+                    pos_b = engine_positions[name_b]
+                    if pos_a is None or pos_b is None:
+                        continue
+                    mr.pairwise_similarity[(name_a, name_b)] = layout_similarity(pos_a, pos_b)
         results.append(mr)
 
         # Save multi-comparison image
