@@ -17,6 +17,7 @@ from typing import Optional, Union
 import torch
 
 _MAX_PIVOTS = 200
+_AUTO_SAMPLE_THRESHOLD = 1_000
 _MIN_DISTANCE = 0.01
 _UNREACHED = -1
 
@@ -285,13 +286,143 @@ def _trace_snapshot(traces: list[torch.Tensor], pos: torch.Tensor) -> None:
     traces.append(pos.detach().clone())
 
 
+def _resolve_sample_size(num_nodes: int, sample_size: Union[int, str]) -> int:
+    """Resolve the effective epoch sampling budget.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the graph.
+    sample_size : int or str
+        User-provided sampling budget. ``"auto"`` uses a full epoch for
+        graphs with at most 1000 nodes and a 1000-pair sample otherwise.
+
+    Returns
+    -------
+    int
+        Effective sampling budget.
+
+    Raises
+    ------
+    ValueError
+        If ``sample_size`` is invalid.
+    """
+    if isinstance(sample_size, str):
+        if sample_size != "auto":
+            raise ValueError("sample_size must be a positive integer or 'auto'.")
+        if num_nodes <= _AUTO_SAMPLE_THRESHOLD:
+            return max(num_nodes, 1)
+        return _AUTO_SAMPLE_THRESHOLD
+
+    if sample_size <= 0:
+        raise ValueError("sample_size must be positive.")
+    return sample_size
+
+
+def _schedule_bounds(pivot_dist: torch.Tensor) -> tuple[float, float]:
+    """Compute the distance bounds used by the Zheng et al. learning-rate schedule.
+
+    Parameters
+    ----------
+    pivot_dist : torch.Tensor
+        Pivot-to-node hop distances with shape ``[P, N]``.
+
+    Returns
+    -------
+    tuple[float, float]
+        Minimum and maximum positive graph distances.
+    """
+    positive_distances = pivot_dist[pivot_dist > 0]
+    if int(positive_distances.numel()) == 0:
+        return 1.0, 1.0
+
+    d_min = float(positive_distances.min().item())
+    d_max = float(positive_distances.max().item())
+    return max(d_min, 1.0), max(d_max, d_min, 1.0)
+
+
+def _learning_rate(step_index: int, steps: int, d_min: float, d_max: float) -> float:
+    """Evaluate the Zheng et al. distance-interpolated learning-rate schedule.
+
+    Parameters
+    ----------
+    step_index : int
+        Zero-based optimization step.
+    steps : int
+        Total number of optimization steps.
+    d_min : float
+        Minimum positive graph distance.
+    d_max : float
+        Maximum positive graph distance.
+
+    Returns
+    -------
+    float
+        Step size ``eta_t``.
+    """
+    fraction = float(step_index) / float(max(steps - 1, 1))
+    distance = d_min + fraction * (d_max - d_min)
+    return 1.0 / max(distance * distance, _MIN_DISTANCE)
+
+
+def _sample_pairs(
+    num_nodes: int,
+    sample_size: int,
+    generator: torch.Generator,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample a batch of distinct node pairs for one SGD epoch.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the graph.
+    sample_size : int
+        Effective epoch budget. When ``sample_size >= num_nodes``, this returns
+        the full set of unordered node pairs for a paper-style full epoch.
+    generator : torch.Generator
+        Random generator for deterministic sampling.
+    device : torch.device
+        Device for the returned tensors.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Source and target node indices with matching shape ``[S]``.
+    """
+    if num_nodes <= 1:
+        empty = torch.empty((0,), dtype=torch.long, device=device)
+        return empty, empty
+
+    if sample_size >= num_nodes:
+        pair_indices = torch.triu_indices(num_nodes, num_nodes, offset=1, device=device)
+        return pair_indices[0], pair_indices[1]
+
+    i_indices = torch.randint(
+        0,
+        num_nodes,
+        (sample_size,),
+        generator=generator,
+        device=device,
+    )
+    j_indices = torch.randint(
+        0,
+        num_nodes,
+        (sample_size,),
+        generator=generator,
+        device=device,
+    )
+    valid_pairs = i_indices != j_indices
+    return i_indices[valid_pairs], j_indices[valid_pairs]
+
+
 def layout_stress_sgd(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
     steps: int = 500,
     seed: int = 42,
-    sample_size: int = 200,
+    sample_size: Union[int, str] = "auto",
     trace_every: int = 0,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, list[torch.Tensor]]]:
     """Run stochastic stress minimization layout.
@@ -308,8 +439,10 @@ def layout_stress_sgd(
         Number of SGD epochs.
     seed : int
         Random seed.
-    sample_size : int
-        Number of node pairs to sample per step.
+    sample_size : int or str, default="auto"
+        Per-epoch pair budget. ``"auto"`` performs a full all-pairs epoch when
+        ``num_nodes <= 1000`` and samples 1000 pairs otherwise. Explicit values
+        greater than or equal to ``num_nodes`` also trigger a full epoch.
     trace_every : int
         If > 0, record snapshots every N steps.
 
@@ -324,8 +457,6 @@ def layout_stress_sgd(
         raise ValueError("num_nodes must be non-negative")
     if steps < 0:
         raise ValueError("steps must be non-negative")
-    if sample_size <= 0:
-        raise ValueError("sample_size must be positive")
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative")
 
@@ -343,12 +474,14 @@ def layout_stress_sgd(
     component_ids_cpu = _connected_components(adjacency)
     pivots_cpu = _choose_pivots(component_ids_cpu, min(num_nodes, _MAX_PIVOTS), generator)
     pivot_dist_cpu = _compute_pivot_distances(adjacency, pivots_cpu)
+    effective_sample_size = _resolve_sample_size(num_nodes, sample_size)
 
     finite_distances = pivot_dist_cpu[pivot_dist_cpu >= 0]
     graph_diameter = (
         max(int(finite_distances.max().item()), 1) if int(finite_distances.numel()) > 0 else 1
     )
     disconnected_distance = float(max(graph_diameter * 3, 2))
+    d_min, d_max = _schedule_bounds(pivot_dist_cpu)
 
     pivot_dist = pivot_dist_cpu.to(device=device)
     component_ids = component_ids_cpu.to(device=device)
@@ -362,31 +495,22 @@ def layout_stress_sgd(
         _trace_snapshot(traces, positions)
 
     for step_index in range(steps):
-        progress = step_index / max(steps - 1, 1)
-        eta = math.exp(progress * math.log(1.0 / float(graph_diameter**2)))
-
-        i_indices = torch.randint(
-            0,
-            num_nodes,
-            (sample_size,),
+        eta = _learning_rate(
+            step_index=step_index,
+            steps=steps,
+            d_min=d_min,
+            d_max=d_max,
+        )
+        i_indices, j_indices = _sample_pairs(
+            num_nodes=num_nodes,
+            sample_size=effective_sample_size,
             generator=generator,
             device=device,
         )
-        j_indices = torch.randint(
-            0,
-            num_nodes,
-            (sample_size,),
-            generator=generator,
-            device=device,
-        )
-        valid_pairs = i_indices != j_indices
-        if not bool(valid_pairs.any()):
+        if i_indices.numel() == 0:
             if trace_every > 0 and (step_index + 1) % trace_every == 0:
                 _trace_snapshot(traces, positions)
             continue
-
-        i_indices = i_indices[valid_pairs]
-        j_indices = j_indices[valid_pairs]
         target_distances = _approx_distance(
             i_indices=i_indices,
             j_indices=j_indices,
@@ -395,19 +519,16 @@ def layout_stress_sgd(
             disconnected_distance=disconnected_distance,
         )
 
-        for pair_index in range(int(i_indices.shape[0])):
-            source_index = int(i_indices[pair_index].item())
-            target_index = int(j_indices[pair_index].item())
-            target_distance = target_distances[pair_index]
+        delta = positions.index_select(0, i_indices) - positions.index_select(0, j_indices)
+        current_distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
+        weights = 1.0 / target_distances.square().clamp(min=_MIN_DISTANCE)
+        magnitudes = eta * weights * (1.0 - target_distances / current_distances)
+        displacements = magnitudes.unsqueeze(1) * delta * 0.5
 
-            delta = positions[source_index] - positions[target_index]
-            current_distance = delta.norm().clamp(min=_MIN_DISTANCE)
-            weight = 1.0 / target_distance.square().clamp(min=_MIN_DISTANCE)
-            magnitude = eta * weight * (1.0 - target_distance / current_distance)
-            displacement = magnitude * delta * 0.5
-
-            positions[source_index] -= displacement
-            positions[target_index] += displacement
+        position_updates = torch.zeros_like(positions)
+        position_updates.index_add_(0, i_indices, -displacements)
+        position_updates.index_add_(0, j_indices, displacements)
+        positions += position_updates
 
         positions -= positions.mean(dim=0, keepdim=True)
 

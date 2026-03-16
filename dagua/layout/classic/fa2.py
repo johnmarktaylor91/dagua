@@ -119,14 +119,20 @@ def layout_fa2(
         )
         force = repulsion_force + attraction_force + gravity_force
 
-        speed, speed_efficiency = _adaptive_speed(
+        speed, speed_efficiency, global_traction = _adaptive_speed(
             force=force,
             previous_force=previous_force,
             speed=speed,
             speed_efficiency=speed_efficiency,
             jitter_tolerance=jitter_tolerance,
         )
-        pos = pos + (force * speed)
+        node_speed = _node_speed(
+            force=force,
+            previous_force=previous_force,
+            speed=speed,
+            global_traction=global_traction,
+        )
+        pos = pos + (force * node_speed.unsqueeze(1))
         previous_force = force
 
         if trace_every > 0 and step_index % trace_every == 0:
@@ -416,7 +422,7 @@ def _adaptive_speed(
     speed: float,
     speed_efficiency: float,
     jitter_tolerance: float,
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     """Update the FA2 integration speed from force oscillation.
 
     Parameters
@@ -434,12 +440,12 @@ def _adaptive_speed(
 
     Returns
     -------
-    tuple[float, float]
-        Updated ``(speed, speed_efficiency)`` pair.
+    tuple[float, float, float]
+        Updated ``(speed, speed_efficiency, global_traction)`` tuple.
     """
     swing = (force - previous_force).norm(dim=1).sum().item()
-    traction = (0.5 * (force + previous_force)).norm(dim=1).sum().item()
-    traction = max(traction, 1e-6)
+    node_traction = (0.5 * (force + previous_force)).norm(dim=1)
+    traction = max(float(node_traction.sum().item()), 1e-6)
 
     estimated_optimal_jitter = 0.05 * traction
     jitter = jitter_tolerance * max(estimated_optimal_jitter, 0.01)
@@ -451,4 +457,32 @@ def _adaptive_speed(
         speed_efficiency = min(speed_efficiency * 1.05, 1.5)
 
     speed = jitter * speed_efficiency / (1.0 + jitter * math.sqrt(max(ratio, 0.0)))
-    return min(speed, _MAX_SPEED), speed_efficiency
+    return min(speed, _MAX_SPEED), speed_efficiency, traction
+
+
+def _node_speed(
+    force: torch.Tensor,
+    previous_force: torch.Tensor,
+    speed: float,
+    global_traction: float,
+) -> torch.Tensor:
+    """Compute per-node FA2 integration speeds.
+
+    Parameters
+    ----------
+    force : torch.Tensor
+        Current force tensor, shape ``[N, 2]``.
+    previous_force : torch.Tensor
+        Previous force tensor, shape ``[N, 2]``.
+    speed : float
+        Global FA2 speed scalar.
+    global_traction : float
+        Sum of per-node traction magnitudes.
+
+    Returns
+    -------
+    torch.Tensor
+        Per-node speed tensor with shape ``[N]``.
+    """
+    node_swing = (force - previous_force).norm(dim=1)
+    return torch.clamp((speed * global_traction) / (node_swing + 1.0), max=_MAX_SPEED)

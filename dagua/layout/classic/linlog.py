@@ -7,6 +7,7 @@ small Adam loop over node coordinates.
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import torch
@@ -135,17 +136,28 @@ def _sample_repulsion_pairs(
     """
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed + step + 1)
-    sample_size = min(num_nodes, _SAMPLED_REPULSION_NEIGHBORS)
-    src = torch.arange(num_nodes, dtype=torch.long).repeat_interleave(sample_size)
+    total_pairs = max(num_nodes * (num_nodes - 1) // 2, 1)
+    sample_size = min(total_pairs, max(num_nodes, num_nodes * _SAMPLED_REPULSION_NEIGHBORS // 2))
+    src = torch.randint(
+        0,
+        num_nodes,
+        (sample_size,),
+        generator=generator,
+        dtype=torch.long,
+    )
     dst = torch.randint(
         0,
         num_nodes,
-        (num_nodes * sample_size,),
+        (sample_size,),
         generator=generator,
         dtype=torch.long,
     )
     mask = src != dst
-    return src[mask].to(device), dst[mask].to(device)
+    src = src[mask]
+    dst = dst[mask]
+    ordered_src = torch.minimum(src, dst)
+    ordered_dst = torch.maximum(src, dst)
+    return ordered_src.to(device), ordered_dst.to(device)
 
 
 def _linlog_loss(
@@ -153,6 +165,8 @@ def _linlog_loss(
     edge_index: torch.Tensor,
     seed: int,
     step: int,
+    a: float = 1.0,
+    r: float = 0.0,
 ) -> torch.Tensor:
     """Evaluate the sampled LinLog objective.
 
@@ -166,6 +180,11 @@ def _linlog_loss(
         Base random seed.
     step : int
         Optimization step.
+    a : float, default=1.0
+        Attraction exponent in ``|p_i - p_j|^a``.
+    r : float, default=0.0
+        Repulsion exponent in ``-|p_i - p_j|^r``. ``0`` recovers the standard
+        logarithmic LinLog repulsion.
 
     Returns
     -------
@@ -179,23 +198,30 @@ def _linlog_loss(
         edge_lengths = torch.linalg.norm(positions[src] - positions[dst], dim=1).clamp(
             min=_MIN_DISTANCE
         )
-        attraction = edge_lengths.mean()
+        attraction = edge_lengths.pow(a).sum()
 
     num_nodes = int(positions.shape[0])
     if num_nodes <= _FULL_REPULSION_LIMIT:
-        delta = positions.unsqueeze(1) - positions.unsqueeze(0)
-        distances = torch.linalg.norm(delta, dim=2).clamp(min=_MIN_DISTANCE)
-        mask = ~torch.eye(num_nodes, dtype=torch.bool, device=positions.device)
-        repulsion = -torch.log(distances[mask]).mean()
+        pairwise_distances = torch.pdist(positions, p=2).clamp(min=_MIN_DISTANCE)
+        if r == 0.0:
+            repulsion = -torch.log(pairwise_distances).sum()
+        else:
+            repulsion = -pairwise_distances.pow(r).sum()
     else:
         src, dst = _sample_repulsion_pairs(num_nodes, positions.device, step, seed)
-        sampled_lengths = torch.linalg.norm(positions[src] - positions[dst], dim=1).clamp(
-            min=_MIN_DISTANCE
-        )
-        repulsion = -torch.log(sampled_lengths).mean()
+        sampled_lengths = torch.linalg.norm(
+            positions[src] - positions[dst],
+            dim=1,
+        ).clamp(min=_MIN_DISTANCE)
+        total_pairs = max(num_nodes * (num_nodes - 1) // 2, 1)
+        if int(sampled_lengths.numel()) == 0:
+            repulsion = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
+        elif r == 0.0:
+            repulsion = -torch.log(sampled_lengths).mean() * float(total_pairs)
+        else:
+            repulsion = -sampled_lengths.pow(r).mean() * float(total_pairs)
 
-    gravity = 0.01 * positions.square().mean()
-    return attraction + 1.5 * repulsion + gravity
+    return attraction + repulsion
 
 
 def layout_linlog(
@@ -204,6 +230,8 @@ def layout_linlog(
     node_sizes: Optional[torch.Tensor] = None,
     steps: int = 300,
     seed: int = 42,
+    a: float = 1.0,
+    r: float = 0.0,
 ) -> torch.Tensor:
     """Lay out a graph with a LinLog energy model.
 
@@ -223,6 +251,11 @@ def layout_linlog(
         Number of Adam updates.
     seed : int, default=42
         Random seed for initialization and repulsion sampling.
+    a : float, default=1.0
+        Attraction exponent in ``|p_i - p_j|^a``.
+    r : float, default=0.0
+        Repulsion exponent in ``-|p_i - p_j|^r``. ``0`` recovers the standard
+        logarithmic LinLog energy.
 
     Returns
     -------
@@ -233,6 +266,10 @@ def layout_linlog(
         raise ValueError("num_nodes must be non-negative.")
     if steps < 0:
         raise ValueError("steps must be non-negative.")
+    if a < 0:
+        raise ValueError("a must be non-negative.")
+    if r < 0:
+        raise ValueError("r must be non-negative.")
 
     device = _layout_device(edge_index, node_sizes)
     if num_nodes == 0:
@@ -241,15 +278,18 @@ def layout_linlog(
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
 
     positions = _initialize_positions(num_nodes, device, seed).requires_grad_(True)
-    optimizer = torch.optim.Adam([positions], lr=0.08)
+    initial_lr = min(0.05, 0.8 / float(max(num_nodes, 1)))
+    final_lr = max(initial_lr * 0.1, initial_lr / math.sqrt(float(max(steps, 1))))
+    optimizer = torch.optim.Adam([positions], lr=initial_lr)
 
     for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        loss = _linlog_loss(positions, edge_index, seed, step)
+        loss = _linlog_loss(positions, edge_index, seed, step, a=a, r=r)
         loss.backward()
         optimizer.step()
 
-        decay = 0.08 * (1.0 - float(step + 1) / float(max(steps, 1))) + 0.01
+        fraction = float(step + 1) / float(max(steps, 1))
+        decay = initial_lr + (final_lr - initial_lr) * fraction
         optimizer.param_groups[0]["lr"] = decay
 
     extent = _layout_extent(num_nodes, node_sizes)
