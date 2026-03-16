@@ -263,11 +263,11 @@ class TestRenderStyleFlexibility:
 def test_graphviz_dash_patterns_are_explicit() -> None:
     """Renderer dash mappings should use Graphviz-like stroke lengths."""
 
-    assert _node_linestyle(NodeStyle(stroke_dash="dashed")) == (0, (6.0, 4.0))
-    assert _node_linestyle(NodeStyle(stroke_dash="dotted")) == (0, (1.5, 2.5))
-    assert _edge_linestyle(EdgeStyle(style="dashed")) == (0, (6.0, 4.0))
-    assert _edge_linestyle(EdgeStyle(style="dotted")) == (0, (1.5, 2.5))
-    assert _cluster_linestyle("dotted") == (0, (1.5, 2.5))
+    assert _node_linestyle(NodeStyle(stroke_dash="dashed")) == (0, (5.0, 3.0))
+    assert _node_linestyle(NodeStyle(stroke_dash="dotted")) == (0, (0.1, 3.0))
+    assert _edge_linestyle(EdgeStyle(style="dashed")) == (0, (5.0, 3.0))
+    assert _edge_linestyle(EdgeStyle(style="dotted")) == (0, (0.1, 3.0))
+    assert _cluster_linestyle("dotted") == (0, (0.1, 3.0))
 
 
 def test_triangle_patch_uses_graphviz_like_wide_proportions() -> None:
