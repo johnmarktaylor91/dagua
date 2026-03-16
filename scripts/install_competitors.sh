@@ -34,7 +34,7 @@ echo "--- Python packages (current user/env) ---"
 
 # Core competitor dependencies
 pip install --quiet networkx          # NetworkX spring + kamada_kawai layouts
-pip install --quiet python-igraph     # igraph FR, sugiyama, DrL, GEM, Davidson-Harel
+pip install --quiet igraph             # igraph FR, sugiyama, DrL, GEM, Davidson-Harel
 pip install --quiet pydot             # DOT file parsing for Graphviz interop
 pip install --quiet scipy             # Sparse matrix ops, MDS, eigensolvers
 pip install --quiet scikit-learn      # t-SNE, MDS for reference comparison tests
