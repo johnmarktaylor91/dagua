@@ -21,8 +21,10 @@ from dagua.render.mpl import (
     _edge_linestyle,
     _node_linestyle,
     _points_to_data_units,
+    _star_vertices,
 )
 from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
+from dagua.utils import compute_node_size
 
 mpl_renderer = importlib.import_module("dagua.render.mpl")
 
@@ -268,8 +270,8 @@ def test_graphviz_dash_patterns_are_explicit() -> None:
     assert _cluster_linestyle("dotted") == (0, (1.5, 2.5))
 
 
-def test_triangle_patch_uses_equilateral_proportions() -> None:
-    """Triangle nodes should be close to equilateral instead of flat and wide."""
+def test_triangle_patch_uses_graphviz_like_wide_proportions() -> None:
+    """Triangle nodes should fill a wide, flat bounding box."""
 
     patch = _build_node_patch(
         x=0.0,
@@ -288,7 +290,74 @@ def test_triangle_patch_uses_equilateral_proportions() -> None:
     width = float(content[:, 0].max() - content[:, 0].min())
     height = float(content[:, 1].max() - content[:, 1].min())
 
-    assert height / width == pytest.approx(3**0.5 / 2.0, rel=0.05)
+    assert width / height == pytest.approx(120.0 / 80.0)
+
+
+def test_circle_arrow_marker_is_hollow() -> None:
+    """Circle arrowheads should render as outline-only markers."""
+
+    fig, ax = plt.subplots()
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="circle",
+        style=EdgeStyle(arrow="circle", arrow_fill="filled"),
+    )
+
+    assert len(ax.patches) == 1
+    facecolor = ax.patches[0].get_facecolor()
+    edgecolor = ax.patches[0].get_edgecolor()
+    plt.close(fig)
+
+    assert facecolor[-1] == pytest.approx(0.0)
+    assert edgecolor[-1] == pytest.approx(1.0)
+
+
+def test_tee_arrow_marker_uses_visible_bar_offset_and_width() -> None:
+    """Tee markers should sit back from the tip and use a heavier stroke."""
+
+    fig, ax = plt.subplots()
+    style = EdgeStyle(arrow="tee", width=1.2, arrow_width=10.0, arrow_length=14.0)
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="tee",
+        style=style,
+    )
+
+    assert len(ax.lines) == 1
+    x_data = ax.lines[0].get_xdata()
+    y_data = ax.lines[0].get_ydata()
+    plt.close(fig)
+
+    assert float(np.mean(y_data)) == pytest.approx(style.arrow_length / 4.0)
+    assert float(abs(x_data[0] - x_data[1])) == pytest.approx(style.arrow_width)
+    assert ax.lines[0].get_linewidth() == pytest.approx(max(style.width * 2.5, 3.0))
+
+
+def test_star_vertices_use_deeper_concavities() -> None:
+    """Star nodes should keep a small inner radius for pronounced points."""
+
+    vertices = _star_vertices(x=0.0, y=0.0, w=100.0, h=100.0)
+    radii = np.linalg.norm(vertices, axis=1)
+    outer_radius = float(radii[0])
+    inner_radius = float(radii[1])
+
+    assert inner_radius / outer_radius == pytest.approx(0.32)
+
+
+def test_shape_size_adjustments_match_graphviz_calibration() -> None:
+    """Graphviz-calibrated shapes should reserve the updated label bounds."""
+
+    triangle_w, triangle_h, _ = compute_node_size("A", shape="triangle")
+    star_w, star_h, _ = compute_node_size("A", shape="star")
+    diamond_w, diamond_h, _ = compute_node_size("A", shape="diamond")
+
+    assert triangle_w / triangle_h == pytest.approx(2.2)
+    assert star_w == pytest.approx(star_h)
+    assert diamond_w / diamond_h == pytest.approx(1.15)
 
 
 def test_vee_arrow_marker_is_unfilled() -> None:

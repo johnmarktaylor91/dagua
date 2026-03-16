@@ -343,7 +343,7 @@ def _edge_linestyle(style: Any) -> Any:
 
 
 def _triangle_vertices(x: float, y: float, w: float, h: float) -> np.ndarray:
-    """Return vertices for a centered equilateral triangle within a node box.
+    """Return vertices for a wide triangle matching Graphviz proportions.
 
     Parameters
     ----------
@@ -361,11 +361,10 @@ def _triangle_vertices(x: float, y: float, w: float, h: float) -> np.ndarray:
     numpy.ndarray
         Triangle vertices with shape ``[3, 2]``.
     """
-    equilateral_height_ratio = float(np.sqrt(3.0) / 2.0)
-    triangle_width = min(w, h / equilateral_height_ratio)
-    triangle_height = triangle_width * equilateral_height_ratio
-    half_width = triangle_width / 2.0
-    half_height = triangle_height / 2.0
+    # Graphviz renders triangles wider than tall, so fill the requested node
+    # bounds instead of forcing an equilateral silhouette.
+    half_width = w / 2.0
+    half_height = h / 2.0
     return np.array(
         [
             [x, y + half_height],
@@ -451,8 +450,8 @@ def _star_vertices(x: float, y: float, w: float, h: float) -> np.ndarray:
     points: List[Tuple[float, float]] = []
     outer_rx = w / 2
     outer_ry = h / 2
-    inner_rx = outer_rx * 0.45
-    inner_ry = outer_ry * 0.45
+    inner_rx = outer_rx * 0.32
+    inner_ry = outer_ry * 0.32
     for idx in range(10):
         angle = np.pi / 2 + idx * np.pi / 5
         rx = outer_rx if idx % 2 == 0 else inner_rx
@@ -1486,15 +1485,17 @@ def _draw_edge_marker(
         radius = manual_width * (0.32 if marker == "dot" else 0.5)
         center_x = tip_x - ux * radius
         center_y = tip_y - uy * radius
-        circle = Circle(
+        # Graphviz uses a filled dot marker but a hollow circle marker.
+        is_filled = marker == "dot" and filled
+        circle_patch = Circle(
             (center_x, center_y),
             radius,
-            facecolor=color if filled else "none",
+            facecolor=color if is_filled else "none",
             edgecolor=color,
             linewidth=style.width,
             zorder=1.2,
         )
-        ax.add_patch(circle)
+        ax.add_patch(circle_patch)
         return
 
     if marker == "diamond":
@@ -1520,14 +1521,18 @@ def _draw_edge_marker(
         return
 
     if marker == "tee":
-        bar_x = tip_x - ux * (style.width / 2)
-        bar_y = tip_y - uy * (style.width / 2)
+        # Keep the tee close to the endpoint, but far enough back that the bar
+        # does not collapse into the line ending.
+        bar_x = tip_x - ux * (manual_length / 4)
+        bar_y = tip_y - uy * (manual_length / 4)
+        bar_linewidth = max(style.width * 2.5, 3.0)
         ax.add_line(
             Line2D(
                 [bar_x + px * manual_width / 2, bar_x - px * manual_width / 2],
                 [bar_y + py * manual_width / 2, bar_y - py * manual_width / 2],
                 color=color,
-                linewidth=style.width,
+                linewidth=bar_linewidth,
+                solid_capstyle="butt",
                 zorder=1.2,
             )
         )
