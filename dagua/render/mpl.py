@@ -30,7 +30,7 @@ from dagua.utils import collect_cluster_leaves, measure_text, parse_rich_markup
 _VECTOR_FORMATS = {"pdf", "ps", "eps", "svg", "svgz"}
 _RASTER_FORMATS = {"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"}
 _GRAPHVIZ_DASH_PATTERN: Tuple[float, float] = (6.0, 4.0)
-_GRAPHVIZ_DOT_PATTERN: Tuple[float, float] = (1.5, 2.5)
+_GRAPHVIZ_DOT_PATTERN: Tuple[float, float] = (0.1, 3.0)
 
 
 def _detect_output_format(output: Optional[str], format: Optional[str]) -> Optional[str]:
