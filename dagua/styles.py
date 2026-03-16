@@ -401,6 +401,15 @@ GRAPHVIZ_MATCH_NODE_STYLES: Dict[str, NodeStyle] = {
 # Backwards-compatible aliases
 DEFAULT_THEME: Dict[str, NodeStyle] = DEFAULT_NODE_STYLES
 GRAPHVIZ_MATCH_THEME: Dict[str, NodeStyle] = GRAPHVIZ_MATCH_NODE_STYLES
+GRAPHVIZ_MATCH_DEFAULTS: Dict[str, Any] = {
+    "stroke_width": 1.5,
+    "padding": (14.0, 10.0),
+    "font_size": 12.0,
+    "arrow_length": 14.0,
+    "arrow_width": 10.0,
+    "edge_width": 1.5,
+    "edge_opacity": 0.85,
+}
 
 # ─── Full Theme Objects ────────────────────────────────────────────────────
 
