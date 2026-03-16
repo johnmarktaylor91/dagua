@@ -452,9 +452,9 @@ def _direction_graph(direction: str) -> Tuple[DaguaGraph, torch.Tensor]:
     elif direction == "BT":
         positions = [(0.0, 0.0), (0.0, 70.0), (0.0, 140.0)]
     elif direction == "LR":
-        positions = [(0.0, 0.0), (100.0, 0.0), (200.0, 0.0)]
+        positions = [(0.0, 0.0), (160.0, 0.0), (320.0, 0.0)]
     elif direction == "RL":
-        positions = [(200.0, 0.0), (100.0, 0.0), (0.0, 0.0)]
+        positions = [(320.0, 0.0), (160.0, 0.0), (0.0, 0.0)]
     else:
         raise ValueError(f"Unsupported direction: {direction}")
 
@@ -486,7 +486,7 @@ def _basic_cluster_graph() -> Tuple[DaguaGraph, torch.Tensor]:
     graph.add_edge("B", "C")
     graph.add_cluster("group", ["A", "B"], label="Cluster")
     positions = torch.tensor(
-        [[-60.0, 0.0], [60.0, 0.0], [0.0, 90.0]],
+        [[0.0, 120.0], [0.0, 0.0], [0.0, -120.0]],
         dtype=torch.float32,
     )
     return graph, positions
@@ -1444,7 +1444,19 @@ def _edge_routing_cases() -> List[AlbumCase]:
     ]
     cases: List[AlbumCase] = []
     for slug, title_name, dagua_routing, gv_splines in routing_specs:
-        graph, positions = _pair_graph(_top_bottom_pair_positions(), ["From", "To"])
+        if dagua_routing == "ortho":
+            graph = DaguaGraph()
+            _apply_graph_style(graph)
+            graph.add_node("A", label="From")
+            graph.add_node("B", label="To")
+            graph.add_edge("A", "B")
+            # Offset x so the orthogonal route shows a visible right-angle turn.
+            positions = torch.tensor(
+                [[-40.0, 55.0], [40.0, -55.0]],
+                dtype=torch.float32,
+            )
+        else:
+            graph, positions = _pair_graph(_top_bottom_pair_positions(), ["From", "To"])
         _set_all_node_styles(graph, _base_node_style())
         _set_all_edge_styles(graph, _base_edge_style(routing=dagua_routing))
         cases.append(
