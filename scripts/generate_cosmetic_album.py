@@ -190,6 +190,7 @@ def _graphviz_match_edge_style_defaults() -> Dict[str, Any]:
         "opacity": GRAPHVIZ_MATCH_DEFAULTS["edge_opacity"],
         "arrow_length": GRAPHVIZ_MATCH_DEFAULTS["arrow_length"],
         "arrow_width": GRAPHVIZ_MATCH_DEFAULTS["arrow_width"],
+        "arrow_scale": GRAPHVIZ_MATCH_DEFAULTS.get("arrow_scale", 40.0),
     }
 
 

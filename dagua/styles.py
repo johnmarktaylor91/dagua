@@ -243,6 +243,7 @@ class EdgeStyle:
     arrow_color: str = ""  # empty = use edge color
     arrow_length: float = 10.0
     arrow_width: float = 7.0
+    arrow_scale: Optional[float] = None  # mutation_scale override; None = use arrow_width
     style: str = "solid"  # solid, dashed, dotted
     opacity: float = 0.65
     # New fields (Part 2)
@@ -408,6 +409,7 @@ GRAPHVIZ_MATCH_DEFAULTS: Dict[str, Any] = {
     "font_size": 14.0,
     "arrow_length": 20.0,
     "arrow_width": 14.0,
+    "arrow_scale": 40.0,
     "edge_width": 2.0,
     "edge_opacity": 1.0,
     "min_height": 36.0,
