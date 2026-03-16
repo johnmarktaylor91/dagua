@@ -17,7 +17,7 @@ for SIZE in "${SIZES[@]}"; do
     rm -f "$CKPT/positions.pt" "$CKPT/coarsest_positions.pt" "$CKPT/layout_meta.json" 2>/dev/null
     rm -rf "$CKPT/hierarchy" 2>/dev/null
     rm -f "$CKPT/layer_assignments.pt" 2>/dev/null
-    if stdbuf -oL python scripts/bench_large.py "$SIZE" --resume 2>&1 | stdbuf -oL tee /tmp/dagua_ladder_${SIZE}.log; then
+    if stdbuf -oL python scripts/bench_large.py "$SIZE" --resume --no-hierarchy-checkpoint 2>&1 | stdbuf -oL tee /tmp/dagua_ladder_${SIZE}.log; then
         END=$(date +%s.%N)
         ELAPSED=$(echo "$END - $START" | bc)
         echo "$SIZE,$ELAPSED,ok" >> "$RESULTS"
