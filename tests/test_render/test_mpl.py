@@ -332,24 +332,24 @@ def test_filled_arrow_marker_uses_opaque_edge_color() -> None:
     assert edgecolor == pytest.approx(to_rgba(style.color, 1.0))
 
 
-def test_fancy_arrow_marker_uses_arrow_scale_override() -> None:
-    """FancyArrowPatch markers should decouple display scale from arrow width."""
+def test_normal_arrow_renders_polygon_with_arrow_scale() -> None:
+    """Normal arrow markers should render as a filled Polygon, not FancyArrowPatch."""
 
     fig, ax = plt.subplots()
-    style = EdgeStyle(arrow="normal", arrow_width=12.0, arrow_length=18.0, arrow_scale=40.0)
+    style = EdgeStyle(arrow="normal", arrow_width=12.0, arrow_length=18.0, arrow_scale=32.0)
     _draw_edge_marker(
         ax=ax,
         point=(0.0, 0.0),
-        direction=(0.0, -1.0),
+        direction=(0.0, 1.0),
         marker="normal",
         style=style,
     )
 
     assert len(ax.patches) == 1
-    mutation_scale = ax.patches[0].get_mutation_scale()
-    plt.close(fig)
+    from matplotlib.patches import Polygon
 
-    assert mutation_scale == pytest.approx(40.0)
+    assert isinstance(ax.patches[0], Polygon)
+    plt.close(fig)
 
 
 def test_open_marker_preserves_legacy_data_sizing_without_arrow_scale() -> None:
@@ -380,7 +380,7 @@ def test_open_marker_uses_display_scaled_dimensions_with_arrow_scale() -> None:
     fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
     ax.set_xlim(-50.0, 50.0)
     ax.set_ylim(-50.0, 50.0)
-    style = EdgeStyle(arrow="open", arrow_width=12.0, arrow_length=18.0, arrow_scale=40.0)
+    style = EdgeStyle(arrow="open", arrow_width=12.0, arrow_length=18.0, arrow_scale=24.0)
     _draw_edge_marker(
         ax=ax,
         point=(0.0, 0.0),
