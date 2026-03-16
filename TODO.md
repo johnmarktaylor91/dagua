@@ -63,6 +63,9 @@ while Dagua continues to run. Dagua handles 50K nodes in ~8 min and 100K in ~35 
 - [ ] overall_quality not normalized by graph size — area penalty dominates for large graphs
 - [ ] No per-metric normalization (scores not comparable across different-sized graphs)
 
+### Tests
+- [ ] `test_davidson_harel_vs_igraph` flaky — edge_length_cv tolerance too tight (5 seeds insufficient for stable DH statistics). Widen tolerance or increase seed count.
+
 ## Completed (Sprint 2)
 
 - [x] Multi-pass barycenter crossing reduction (10-30 passes, adaptive to graph size)
