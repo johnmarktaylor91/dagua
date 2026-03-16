@@ -2,6 +2,14 @@
 
 __version__ = "0.1.0"
 
+# Enable expandable CUDA memory segments to prevent allocator fragmentation.
+# Without this, large graphs (100M+ nodes) can OOM even with sufficient total
+# VRAM because the allocator holds reserved-but-unusable memory blocks.
+import os as _os
+
+if "PYTORCH_CUDA_ALLOC_CONF" not in _os.environ:
+    _os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 from dataclasses import replace
 
 from dagua.animation import (
