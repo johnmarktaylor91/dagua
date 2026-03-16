@@ -251,8 +251,9 @@ def test_graphviz_strict_theme_loads() -> None:
     edge_style = theme.get_edge_style("default")
     assert edge_style.width == 1.3
     assert edge_style.opacity == 1.0
-    assert edge_style.arrow_scale == 18.0
-    assert edge_style.arrow_length == 12.0
+    assert edge_style.arrow_scale is None  # ignored; mpl uses unified point conversion
+    assert edge_style.arrow_length == 22.0
+    assert edge_style.arrow_width == 15.0
     assert edge_style.label_font_family == "Times New Roman"
 
     assert theme.cluster_style.fill == "#F8F8F8"
@@ -292,8 +293,9 @@ def test_graphviz_improved_theme_loads() -> None:
     assert node_style.min_width == 44.0
     edge_style = theme.get_edge_style("default")
     assert edge_style.opacity == 0.92
-    assert edge_style.arrow_scale == 16.0
-    assert edge_style.arrow_length == 11.0
+    assert edge_style.arrow_scale is None  # ignored; mpl uses unified point conversion
+    assert edge_style.arrow_length == 20.0
+    assert edge_style.arrow_width == 14.0
     assert edge_style.arrow_color == "#333333"
     assert theme.get_edge_style("if").opacity == 0.92
     assert theme.get_edge_style("then").opacity == 0.92
