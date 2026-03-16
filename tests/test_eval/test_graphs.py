@@ -3,8 +3,27 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
+from typing import Callable
 
-from dagua.eval.graphs import _synthetic_graphs
+from dagua.eval.graphs import (
+    _synthetic_graphs,
+    make_clustered_medium,
+    make_complete_bipartite,
+    make_compound_dag,
+    make_dependency_graph,
+    make_grid,
+    make_hub_and_spoke,
+    make_long_skip_only,
+    make_org_chart,
+    make_parallel_cycles,
+    make_resnet_block,
+    make_scale_free,
+    make_small_world,
+    make_sparse_dense_pair,
+    make_transformer_full,
+    make_wide_single_layer,
+)
+from dagua.graph import DaguaGraph
 
 
 def _component_count(edge_index, num_nodes: int) -> int:
@@ -236,3 +255,85 @@ def test_label_stress_graphs_cover_edge_and_cluster_annotation_failures():
     storm = graphs["small_label_storm"].graph
     assert sum(label is not None for label in storm.edge_labels) == storm.edge_index.shape[1]
     assert len(storm.cluster_labels) >= 2
+
+
+def test_all_new_graphs_produce_valid_output() -> None:
+    """Every new graph generator should return a valid graph with node sizes."""
+    generators: list[Callable[[], DaguaGraph | tuple[DaguaGraph, DaguaGraph]]] = [
+        lambda: make_scale_free(),
+        lambda: make_grid(4, 5),
+        lambda: make_complete_bipartite(),
+        lambda: make_clustered_medium(),
+        lambda: make_hub_and_spoke(),
+        lambda: make_wide_single_layer(),
+        lambda: make_sparse_dense_pair(),
+        lambda: make_compound_dag(),
+        lambda: make_long_skip_only(),
+        lambda: make_parallel_cycles(),
+        lambda: make_resnet_block(),
+        lambda: make_transformer_full(),
+        lambda: make_dependency_graph(),
+        lambda: make_org_chart(),
+        lambda: make_small_world(),
+    ]
+
+    for generator in generators:
+        produced = generator()
+        graphs = produced if isinstance(produced, tuple) else (produced,)
+        for graph in graphs:
+            assert hasattr(graph, "num_nodes")
+            assert graph.num_nodes > 0
+            assert graph.edge_index.shape[0] == 2
+            assert graph.node_sizes is not None
+            assert graph.node_sizes.shape == (graph.num_nodes, 2)
+
+
+def test_new_graph_collection_entries_are_registered() -> None:
+    """The synthetic collection should expose the new structural coverage graphs."""
+    graphs = {tg.name: tg for tg in _synthetic_graphs()}
+
+    expected_names = {
+        "scale_free_ba_120",
+        "grid_rect_6x8",
+        "complete_bipartite_8x12",
+        "clustered_medium_5x20",
+        "hub_and_spoke_3x20",
+        "wide_single_layer_1_50_1",
+        "sparse_pair_50",
+        "dense_pair_50",
+        "compound_dag_5x30",
+        "long_skip_only_24",
+        "parallel_cycles_4x5",
+        "resnet_stack_4x16",
+        "transformer_full_4h_2l",
+        "dependency_graph_100",
+        "org_chart_1_5_4_8",
+        "small_world_100",
+    }
+    assert expected_names <= set(graphs)
+
+    expected_tags = {
+        "scale-free",
+        "grid",
+        "bipartite",
+        "clustered",
+        "hub-spoke",
+        "wide-layer",
+        "compound",
+        "cyclic",
+        "neural-net",
+        "small-world",
+        "dependency",
+    }
+    assert expected_tags <= set().union(*(tg.tags for tg in graphs.values()))
+
+
+def test_new_graph_generators_handle_edge_cases_and_grid_compatibility() -> None:
+    """Edge cases should stay valid, and legacy grid scale calls should still work."""
+    assert make_scale_free(0).num_nodes == 0
+    assert make_complete_bipartite(1, 0).num_nodes == 1
+    assert make_parallel_cycles(1, 1).edge_index.shape[1] == 1
+
+    legacy_grid = make_grid(25, seed=7)
+    assert hasattr(legacy_grid, "graph")
+    assert legacy_grid.graph.num_nodes >= 4

@@ -10,8 +10,10 @@ Sources: synthetic generators + TorchLens model traces.
 
 from __future__ import annotations
 
+import math
+import random
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Set
+from typing import Any, List, Optional, Sequence, Set, Tuple, Union, overload
 
 import torch
 
@@ -65,11 +67,72 @@ def _build_all_test_graphs() -> List[TestGraph]:
     return graphs
 
 
+def _finalize_generated_graph(graph: DaguaGraph) -> DaguaGraph:
+    """Compute node sizes for a generated graph before returning it.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph whose node labels should be measured eagerly.
+
+    Returns
+    -------
+    DaguaGraph
+        The same graph instance with ``node_sizes`` populated.
+    """
+    graph.compute_node_sizes()
+    return graph
+
+
+def _build_named_graph(
+    node_ids: Sequence[str],
+    edges: Sequence[Tuple[str, str]],
+) -> DaguaGraph:
+    """Build a graph from explicit node IDs and directed edges.
+
+    Parameters
+    ----------
+    node_ids : Sequence[str]
+        Node IDs and labels to materialize, including isolated nodes.
+    edges : Sequence[Tuple[str, str]]
+        Directed edges expressed in terms of ``node_ids``.
+
+    Returns
+    -------
+    DaguaGraph
+        Graph with eagerly computed node sizes.
+    """
+    graph = DaguaGraph()
+    for node_id in node_ids:
+        graph.add_node(node_id, label=node_id)
+    for src, tgt in edges:
+        graph.add_edge(src, tgt)
+    return _finalize_generated_graph(graph)
+
+
+def _empty_generated_graph() -> DaguaGraph:
+    """Return an empty generated graph with computed node-size tensors.
+
+    Returns
+    -------
+    DaguaGraph
+        Empty graph suitable for edge-case tests.
+    """
+    return _finalize_generated_graph(DaguaGraph())
+
+
 # ─── Synthetic Graph Generators ───────────────────────────────────────────────
 
 
 def _synthetic_graphs() -> List[TestGraph]:
-    """Generate synthetic test graphs covering structural categories."""
+    """Generate the synthetic benchmark graph collection.
+
+    Returns
+    -------
+    List[TestGraph]
+        Curated synthetic graphs spanning structural, styling, and routing
+        stress cases used by the evaluation stack.
+    """
     graphs = []
 
     # 1. Linear chain (shallow)
@@ -1475,6 +1538,8 @@ def _synthetic_graphs() -> List[TestGraph]:
         )
     )
 
+    graphs.extend(_expanded_structural_graphs())
+
     return graphs
 
 
@@ -2004,23 +2069,35 @@ def make_bipartite(n: int, seed: int = 42, max_degree: int = 8) -> TestGraph:
     )
 
 
-def make_grid(n: int, seed: int = 42) -> TestGraph:
-    """Grid DAG: √n × √n grid with edges pointing right and down."""
-    import math
+def _make_scale_grid_test_graph(n: int, seed: int = 42) -> TestGraph:
+    """Build the existing scale-suite square-grid test graph.
 
-    cols = max(int(math.sqrt(n)), 2)
-    rows = max(n // cols, 2)
+    Parameters
+    ----------
+    n : int
+        Approximate requested node count.
+    seed : int, default=42
+        Unused compatibility parameter retained for parity with other scale
+        generators.
+
+    Returns
+    -------
+    TestGraph
+        Scale-suite grid benchmark entry.
+    """
+    del seed
+    cols = max(int(math.sqrt(max(n, 1))), 2)
+    rows = max(max(n, 1) // cols, 2)
     actual_n = rows * cols
 
-    src, tgt = [], []
+    src: List[int] = []
+    tgt: List[int] = []
     for r in range(rows):
         for c in range(cols):
             idx = r * cols + c
-            # right edge
             if c + 1 < cols:
                 src.append(idx)
                 tgt.append(idx + 1)
-            # down edge
             if r + 1 < rows:
                 src.append(idx)
                 tgt.append(idx + cols)
@@ -2033,6 +2110,42 @@ def make_grid(n: int, seed: int = 42) -> TestGraph:
         tags={"diamond", "scale"},
         description=f"Grid DAG: {rows}×{cols} = {actual_n} nodes",
     )
+
+
+@overload
+def make_grid(rows: int, seed: int = 42) -> TestGraph: ...
+
+
+@overload
+def make_grid(rows: int, cols: int, seed: int = 42) -> DaguaGraph: ...
+
+
+def make_grid(
+    rows: int, cols: Optional[int] = None, seed: int = 42
+) -> Union[TestGraph, DaguaGraph]:
+    """Build either the scale-suite grid or the structural rectangular grid.
+
+    Parameters
+    ----------
+    rows : int
+        Either the approximate node count for the scale-suite form or the row
+        count for the structural rectangular grid.
+    cols : int, optional
+        Column count for the structural rectangular grid. When omitted, the
+        legacy scale-suite behavior is preserved.
+    seed : int, default=42
+        Random seed kept for a consistent generator signature.
+
+    Returns
+    -------
+    Union[TestGraph, DaguaGraph]
+        ``TestGraph`` when called as ``make_grid(n, seed=...)`` for the scale
+        suite, otherwise a rectangular ``DaguaGraph`` when ``cols`` is
+        provided.
+    """
+    if cols is None:
+        return _make_scale_grid_test_graph(rows, seed=seed)
+    return _make_rectangular_grid_graph(rows=rows, cols=cols, seed=seed)
 
 
 def make_sparse_layered(
@@ -2142,6 +2255,826 @@ def make_powerlaw_dag(n: int, seed: int = 42) -> TestGraph:
         tags={"large-sparse", "scale"},
         description=f"Power-law DAG: {n} nodes, preferential attachment",
     )
+
+
+def make_scale_free(n: int = 120, m: int = 3, seed: int = 42) -> DaguaGraph:
+    """Build a preferential-attachment DAG with hub-heavy degree skew.
+
+    Parameters
+    ----------
+    n : int, default=120
+        Number of nodes.
+    m : int, default=3
+        Maximum number of incoming attachments per new node.
+    seed : int, default=42
+        Random seed for reproducible attachment choices.
+
+    Returns
+    -------
+    DaguaGraph
+        Scale-free DAG whose earlier nodes attract more later edges. This
+        stresses hub placement and edge bundling around high-degree nodes.
+    """
+    if n <= 0:
+        return _empty_generated_graph()
+
+    rng = random.Random(seed)
+    node_ids = [f"sf_{idx}" for idx in range(n)]
+    edge_list: List[Tuple[str, str]] = []
+    weighted_pool: List[int] = [0]
+    attachment_count = max(m, 0)
+
+    for node_idx in range(1, n):
+        target_count = min(attachment_count, node_idx)
+        targets: Set[int] = set()
+        while len(targets) < target_count and weighted_pool:
+            targets.add(weighted_pool[rng.randrange(len(weighted_pool))])
+            if len(targets) == node_idx:
+                break
+        while len(targets) < target_count:
+            targets.add(rng.randrange(node_idx))
+
+        for target_idx in sorted(targets):
+            edge_list.append((node_ids[target_idx], node_ids[node_idx]))
+            weighted_pool.append(target_idx)
+        weighted_pool.extend([node_idx] * (len(targets) + 1))
+
+    return _build_named_graph(node_ids, edge_list)
+
+
+def _make_rectangular_grid_graph(rows: int, cols: int, seed: int = 42) -> DaguaGraph:
+    """Build a rectangular grid DAG with rightward and downward flow.
+
+    Parameters
+    ----------
+    rows : int
+        Number of rows.
+    cols : int
+        Number of columns.
+    seed : int, default=42
+        Unused seed parameter retained for API consistency.
+
+    Returns
+    -------
+    DaguaGraph
+        Rectangular grid DAG for testing regular layered structure and local
+        crossing pressure.
+    """
+    del seed
+    if rows <= 0 or cols <= 0:
+        return _empty_generated_graph()
+
+    node_ids = [f"grid_{r}_{c}" for r in range(rows) for c in range(cols)]
+    edge_list: List[Tuple[str, str]] = []
+    for r in range(rows):
+        for c in range(cols):
+            node_id = f"grid_{r}_{c}"
+            if c + 1 < cols:
+                edge_list.append((node_id, f"grid_{r}_{c + 1}"))
+            if r + 1 < rows:
+                edge_list.append((node_id, f"grid_{r + 1}_{c}"))
+    return _build_named_graph(node_ids, edge_list)
+
+
+def make_complete_bipartite(a: int = 8, b: int = 12, seed: int = 42) -> DaguaGraph:
+    """Build a complete bipartite DAG with left-to-right connectivity.
+
+    Parameters
+    ----------
+    a : int, default=8
+        Node count in the left partition.
+    b : int, default=12
+        Node count in the right partition.
+    seed : int, default=42
+        Unused seed parameter retained for API consistency.
+
+    Returns
+    -------
+    DaguaGraph
+        Complete bipartite graph ``K(a, b)`` used to test ordering and
+        crossing minimization between two dense layers.
+    """
+    del seed
+    if a <= 0 and b <= 0:
+        return _empty_generated_graph()
+
+    left_nodes = [f"left_{idx}" for idx in range(max(a, 0))]
+    right_nodes = [f"right_{idx}" for idx in range(max(b, 0))]
+    edge_list = [(src, tgt) for src in left_nodes for tgt in right_nodes]
+    return _build_named_graph(left_nodes + right_nodes, edge_list)
+
+
+def make_clustered_medium(
+    n_clusters: int = 5,
+    nodes_per_cluster: int = 20,
+    inter_density: float = 0.05,
+    seed: int = 42,
+) -> DaguaGraph:
+    """Build a medium-sized clustered DAG with sparse cross-cluster handoffs.
+
+    Parameters
+    ----------
+    n_clusters : int, default=5
+        Number of clusters.
+    nodes_per_cluster : int, default=20
+        Nodes per cluster.
+    inter_density : float, default=0.05
+        Probability of adding an edge between adjacent clusters.
+    seed : int, default=42
+        Random seed for reproducible internal and external edges.
+
+    Returns
+    -------
+    DaguaGraph
+        Clustered DAG that tests cluster separation, inter-cluster routing,
+        and medium-scale readability.
+    """
+    if n_clusters <= 0 or nodes_per_cluster <= 0:
+        return _empty_generated_graph()
+
+    rng = random.Random(seed)
+    graph = DaguaGraph()
+    cluster_nodes: List[List[str]] = []
+    bridge_density = max(0.0, min(inter_density, 1.0))
+
+    for cluster_idx in range(n_clusters):
+        members = [
+            f"cluster_{cluster_idx}.node_{node_idx}" for node_idx in range(nodes_per_cluster)
+        ]
+        cluster_nodes.append(members)
+        for member in members:
+            graph.add_node(member, label=member)
+        for node_idx in range(nodes_per_cluster - 1):
+            graph.add_edge(members[node_idx], members[node_idx + 1])
+            if node_idx + 2 < nodes_per_cluster and rng.random() < 0.3:
+                graph.add_edge(members[node_idx], members[node_idx + 2])
+
+    for cluster_idx in range(n_clusters - 1):
+        src_members = cluster_nodes[cluster_idx]
+        tgt_members = cluster_nodes[cluster_idx + 1]
+        for src in src_members:
+            for tgt in tgt_members:
+                if rng.random() < bridge_density:
+                    graph.add_edge(src, tgt)
+
+    for cluster_idx, members in enumerate(cluster_nodes):
+        graph.add_cluster(
+            f"cluster_{cluster_idx}",
+            members,
+            label=f"Cluster {cluster_idx}",
+        )
+
+    return _finalize_generated_graph(graph)
+
+
+def make_hub_and_spoke(
+    n_hubs: int = 3,
+    spokes_per_hub: int = 20,
+    seed: int = 42,
+) -> DaguaGraph:
+    """Build a hub-and-spoke DAG with dominant high-degree centers.
+
+    Parameters
+    ----------
+    n_hubs : int, default=3
+        Number of central hubs.
+    spokes_per_hub : int, default=20
+        Number of spoke nodes attached to each hub.
+    seed : int, default=42
+        Unused seed parameter retained for API consistency.
+
+    Returns
+    -------
+    DaguaGraph
+        Hub-heavy DAG that stresses placement around dominant fan-out and
+        fan-in nodes.
+    """
+    del seed
+    if n_hubs <= 0:
+        return _empty_generated_graph()
+
+    graph = DaguaGraph()
+    graph.add_node("entry", label="entry")
+    graph.add_node("exit", label="exit")
+    for hub_idx in range(n_hubs):
+        hub_id = f"hub_{hub_idx}"
+        graph.add_node(hub_id, label=hub_id)
+        graph.add_edge("entry", hub_id)
+        if hub_idx + 1 < n_hubs:
+            graph.add_edge(hub_id, f"hub_{hub_idx + 1}")
+        for spoke_idx in range(max(spokes_per_hub, 0)):
+            spoke_id = f"{hub_id}.spoke_{spoke_idx}"
+            graph.add_node(spoke_id, label=spoke_id)
+            graph.add_edge(hub_id, spoke_id)
+            graph.add_edge(spoke_id, "exit")
+    return _finalize_generated_graph(graph)
+
+
+def make_wide_single_layer(
+    n_sources: int = 1,
+    n_wide: int = 50,
+    n_sinks: int = 1,
+    seed: int = 42,
+) -> DaguaGraph:
+    """Build a DAG with a very wide middle layer.
+
+    Parameters
+    ----------
+    n_sources : int, default=1
+        Number of source nodes.
+    n_wide : int, default=50
+        Number of nodes in the wide middle layer.
+    n_sinks : int, default=1
+        Number of sink nodes.
+    seed : int, default=42
+        Unused seed parameter retained for API consistency.
+
+    Returns
+    -------
+    DaguaGraph
+        Three-layer DAG with a very wide middle that stresses horizontal
+        spacing, ordering, and symmetric fan-in/fan-out.
+    """
+    del seed
+    if n_sources <= 0 and n_wide <= 0 and n_sinks <= 0:
+        return _empty_generated_graph()
+
+    source_nodes = [f"src_{idx}" for idx in range(max(n_sources, 0))]
+    wide_nodes = [f"mid_{idx}" for idx in range(max(n_wide, 0))]
+    sink_nodes = [f"sink_{idx}" for idx in range(max(n_sinks, 0))]
+    edge_list = [(src, mid) for src in source_nodes for mid in wide_nodes]
+    edge_list.extend((mid, sink) for mid in wide_nodes for sink in sink_nodes)
+    return _build_named_graph(source_nodes + wide_nodes + sink_nodes, edge_list)
+
+
+def make_sparse_dense_pair(n: int = 50, seed: int = 42) -> Tuple[DaguaGraph, DaguaGraph]:
+    """Build paired sparse and dense DAGs over the same node set.
+
+    Parameters
+    ----------
+    n : int, default=50
+        Shared node count for both graphs.
+    seed : int, default=42
+        Random seed for the dense variant.
+
+    Returns
+    -------
+    Tuple[DaguaGraph, DaguaGraph]
+        Sparse then dense graphs sharing identical node labels. This pair tests
+        how layout quality changes under edge-density growth alone.
+    """
+    if n <= 0:
+        empty = _empty_generated_graph()
+        return empty, _empty_generated_graph()
+
+    rng = random.Random(seed)
+    node_ids = [f"pair_{idx}" for idx in range(n)]
+
+    sparse_edges: List[Tuple[str, str]] = []
+    for node_idx in range(n - 1):
+        sparse_edges.append((node_ids[node_idx], node_ids[node_idx + 1]))
+        if node_idx + 3 < n and node_idx % 4 == 0:
+            sparse_edges.append((node_ids[node_idx], node_ids[node_idx + 3]))
+
+    dense_edges: List[Tuple[str, str]] = list(sparse_edges)
+    for src_idx in range(n - 1):
+        for tgt_idx in range(src_idx + 2, min(src_idx + 9, n)):
+            if rng.random() < 0.45:
+                dense_edges.append((node_ids[src_idx], node_ids[tgt_idx]))
+
+    return _build_named_graph(node_ids, sparse_edges), _build_named_graph(node_ids, dense_edges)
+
+
+def make_compound_dag(
+    n_clusters: int = 5,
+    n_per_cluster: int = 30,
+    seed: int = 42,
+) -> DaguaGraph:
+    """Build a clustered DAG whose clusters themselves form a DAG.
+
+    Parameters
+    ----------
+    n_clusters : int, default=5
+        Number of top-level clusters.
+    n_per_cluster : int, default=30
+        Nodes per cluster.
+    seed : int, default=42
+        Random seed for intra-cluster shortcuts and inter-cluster skips.
+
+    Returns
+    -------
+    DaguaGraph
+        Compound DAG with explicit clusters arranged in topological order. It
+        stresses cluster-aware routing and higher-level DAG flow.
+    """
+    if n_clusters <= 0 or n_per_cluster <= 0:
+        return _empty_generated_graph()
+
+    rng = random.Random(seed)
+    graph = DaguaGraph()
+    cluster_nodes: List[List[str]] = []
+
+    for cluster_idx in range(n_clusters):
+        members = [f"stage_{cluster_idx}.node_{node_idx}" for node_idx in range(n_per_cluster)]
+        cluster_nodes.append(members)
+        for member in members:
+            graph.add_node(member, label=member)
+        for node_idx in range(n_per_cluster - 1):
+            graph.add_edge(members[node_idx], members[node_idx + 1])
+            if node_idx + 3 < n_per_cluster and rng.random() < 0.2:
+                graph.add_edge(members[node_idx], members[node_idx + 3])
+
+    for cluster_idx in range(n_clusters - 1):
+        src_members = cluster_nodes[cluster_idx][-3:]
+        tgt_members = cluster_nodes[cluster_idx + 1][:3]
+        for src in src_members:
+            for tgt in tgt_members:
+                graph.add_edge(src, tgt)
+        if cluster_idx + 2 < n_clusters and rng.random() < 0.5:
+            graph.add_edge(cluster_nodes[cluster_idx][-1], cluster_nodes[cluster_idx + 2][0])
+
+    for cluster_idx, members in enumerate(cluster_nodes):
+        graph.add_cluster(
+            f"compound_stage_{cluster_idx}",
+            members,
+            label=f"Stage {cluster_idx}",
+        )
+
+    return _finalize_generated_graph(graph)
+
+
+def make_long_skip_only(n: int = 20, seed: int = 42) -> DaguaGraph:
+    """Build a DAG where every edge jumps at least three layers.
+
+    Parameters
+    ----------
+    n : int, default=20
+        Node count.
+    seed : int, default=42
+        Unused seed parameter retained for API consistency.
+
+    Returns
+    -------
+    DaguaGraph
+        Skip-heavy DAG with no local edges, stressing long-edge routing and
+        layer assignment under pathological span patterns.
+    """
+    del seed
+    if n <= 0:
+        return _empty_generated_graph()
+
+    node_ids = [f"skip_{idx}" for idx in range(n)]
+    edge_list: List[Tuple[str, str]] = []
+    for node_idx in range(n):
+        for jump in (3, 4):
+            if node_idx + jump < n:
+                edge_list.append((node_ids[node_idx], node_ids[node_idx + jump]))
+    return _build_named_graph(node_ids, edge_list)
+
+
+def make_parallel_cycles(
+    n_cycles: int = 3,
+    cycle_length: int = 5,
+    seed: int = 42,
+) -> DaguaGraph:
+    """Build multiple disconnected directed cycles.
+
+    Parameters
+    ----------
+    n_cycles : int, default=3
+        Number of independent cycles.
+    cycle_length : int, default=5
+        Nodes per cycle.
+    seed : int, default=42
+        Unused seed parameter retained for API consistency.
+
+    Returns
+    -------
+    DaguaGraph
+        Disconnected cyclic graph used to test cycle handling and component
+        packing.
+    """
+    del seed
+    if n_cycles <= 0 or cycle_length <= 0:
+        return _empty_generated_graph()
+
+    node_ids: List[str] = []
+    edge_list: List[Tuple[str, str]] = []
+    for cycle_idx in range(n_cycles):
+        cycle_nodes = [f"cycle_{cycle_idx}.node_{idx}" for idx in range(cycle_length)]
+        node_ids.extend(cycle_nodes)
+        if cycle_length == 1:
+            edge_list.append((cycle_nodes[0], cycle_nodes[0]))
+            continue
+        for node_idx, node_id in enumerate(cycle_nodes):
+            edge_list.append((node_id, cycle_nodes[(node_idx + 1) % cycle_length]))
+    return _build_named_graph(node_ids, edge_list)
+
+
+def make_resnet_block(n_blocks: int = 4, width: int = 16, seed: int = 42) -> DaguaGraph:
+    """Build a simple ResNet-style stack of residual blocks.
+
+    Parameters
+    ----------
+    n_blocks : int, default=4
+        Number of residual blocks.
+    width : int, default=16
+        Channel width encoded into node labels.
+    seed : int, default=42
+        Unused seed parameter retained for API consistency.
+
+    Returns
+    -------
+    DaguaGraph
+        Residual network DAG that stresses skip routing, repeated motifs, and
+        block-level clustering.
+    """
+    del seed
+    if n_blocks <= 0:
+        return _build_named_graph([f"input_{width}ch"], [])
+
+    graph = DaguaGraph()
+    current = f"input_{width}ch"
+    graph.add_node(current, label=current)
+
+    for block_idx in range(n_blocks):
+        block_nodes = [
+            f"block_{block_idx}.conv1_{width}ch",
+            f"block_{block_idx}.bn1",
+            f"block_{block_idx}.relu1",
+            f"block_{block_idx}.conv2_{width}ch",
+            f"block_{block_idx}.bn2",
+            f"block_{block_idx}.add",
+            f"block_{block_idx}.relu2",
+        ]
+        for node_id in block_nodes:
+            graph.add_node(node_id, label=node_id)
+        graph.add_edge(current, block_nodes[0])
+        for src, tgt in zip(block_nodes, block_nodes[1:]):
+            graph.add_edge(src, tgt)
+        graph.add_edge(current, block_nodes[5])
+        graph.add_cluster(
+            f"resnet_block_{block_idx}",
+            block_nodes,
+            label=f"Residual Block {block_idx}",
+        )
+        current = block_nodes[-1]
+
+    output = f"output_{width}ch"
+    graph.add_node(output, label=output)
+    graph.add_edge(current, output)
+    return _finalize_generated_graph(graph)
+
+
+def make_transformer_full(
+    n_heads: int = 4,
+    n_layers: int = 2,
+    seed: int = 42,
+) -> DaguaGraph:
+    """Build a multi-layer transformer-style attention stack.
+
+    Parameters
+    ----------
+    n_heads : int, default=4
+        Attention heads per layer.
+    n_layers : int, default=2
+        Transformer layers.
+    seed : int, default=42
+        Unused seed parameter retained for API consistency.
+
+    Returns
+    -------
+    DaguaGraph
+        Transformer-style DAG with per-head parallel branches, residual adds,
+        and layer-level clusters.
+    """
+    del seed
+    if n_layers <= 0:
+        return _build_named_graph(["transformer_input"], [])
+
+    graph = DaguaGraph()
+    current = "transformer_input"
+    graph.add_node(current, label=current)
+    head_count = max(n_heads, 1)
+
+    for layer_idx in range(n_layers):
+        norm1 = f"layer_{layer_idx}.norm1"
+        concat = f"layer_{layer_idx}.concat"
+        proj = f"layer_{layer_idx}.attn_out"
+        add1 = f"layer_{layer_idx}.add1"
+        norm2 = f"layer_{layer_idx}.norm2"
+        ffn1 = f"layer_{layer_idx}.ffn1"
+        ffn2 = f"layer_{layer_idx}.ffn2"
+        add2 = f"layer_{layer_idx}.add2"
+        layer_nodes = [norm1, concat, proj, add1, norm2, ffn1, ffn2, add2]
+        for node_id in layer_nodes:
+            graph.add_node(node_id, label=node_id)
+
+        head_nodes: List[str] = []
+        graph.add_edge(current, norm1)
+        for head_idx in range(head_count):
+            head_id = f"layer_{layer_idx}.head_{head_idx}.attn"
+            head_nodes.append(head_id)
+            graph.add_node(head_id, label=head_id)
+            graph.add_edge(norm1, head_id)
+            graph.add_edge(head_id, concat)
+
+        graph.add_edge(concat, proj)
+        graph.add_edge(proj, add1)
+        graph.add_edge(current, add1)
+        graph.add_edge(add1, norm2)
+        graph.add_edge(norm2, ffn1)
+        graph.add_edge(ffn1, ffn2)
+        graph.add_edge(ffn2, add2)
+        graph.add_edge(add1, add2)
+
+        graph.add_cluster(
+            f"transformer_layer_{layer_idx}",
+            layer_nodes + head_nodes,
+            label=f"Transformer Layer {layer_idx}",
+        )
+        graph.add_cluster(
+            f"transformer_layer_{layer_idx}.attention",
+            head_nodes + [concat, proj],
+            label=f"Attention {layer_idx}",
+            parent=f"transformer_layer_{layer_idx}",
+        )
+
+        current = add2
+
+    output = "transformer_output"
+    graph.add_node(output, label=output)
+    graph.add_edge(current, output)
+    return _finalize_generated_graph(graph)
+
+
+def make_dependency_graph(n: int = 100, n_core: int = 5, seed: int = 42) -> DaguaGraph:
+    """Build a dependency DAG with a small set of dominant core libraries.
+
+    Parameters
+    ----------
+    n : int, default=100
+        Total node count.
+    n_core : int, default=5
+        Number of core libraries that attract many dependents.
+    seed : int, default=42
+        Random seed for preferential dependency assignment.
+
+    Returns
+    -------
+    DaguaGraph
+        Dependency-style DAG with core packages near the sources and a
+        power-law fan-out into application packages.
+    """
+    if n <= 0:
+        return _empty_generated_graph()
+
+    rng = random.Random(seed)
+    core_count = max(0, min(n_core, n))
+    node_ids = [f"core_{idx}" for idx in range(core_count)] + [
+        f"pkg_{idx}" for idx in range(max(n - core_count, 0))
+    ]
+    edge_list: List[Tuple[str, str]] = []
+
+    weighted_sources: List[int] = list(range(core_count)) or [0]
+    for node_idx in range(core_count, n):
+        dep_candidates: Set[int] = set()
+        target_count = min(3, node_idx)
+        while len(dep_candidates) < target_count:
+            dep_candidates.add(weighted_sources[rng.randrange(len(weighted_sources))] % node_idx)
+        for dep_idx in sorted(dep_candidates):
+            edge_list.append((node_ids[dep_idx], node_ids[node_idx]))
+            weighted_sources.append(dep_idx)
+        weighted_sources.extend([node_idx] * (len(dep_candidates) + 1))
+
+    graph = _build_named_graph(node_ids, edge_list)
+    if core_count > 0:
+        graph.add_cluster(
+            "dependency_core",
+            [f"core_{idx}" for idx in range(core_count)],
+            label="Core Libraries",
+        )
+    return _finalize_generated_graph(graph)
+
+
+def make_org_chart(
+    levels: int = 4,
+    branching: Tuple[int, ...] = (1, 5, 4, 8),
+    seed: int = 42,
+) -> DaguaGraph:
+    """Build a non-uniform tree resembling an organizational chart.
+
+    Parameters
+    ----------
+    levels : int, default=4
+        Number of levels to materialize.
+    branching : Tuple[int, ...], default=(1, 5, 4, 8)
+        Interpreted as desired node counts per level. When shorter than
+        ``levels``, the last value is repeated.
+    seed : int, default=42
+        Unused seed parameter retained for API consistency.
+
+    Returns
+    -------
+    DaguaGraph
+        Non-uniform tree used to test breadth variation between levels and
+        parent-child spacing in organizational layouts.
+    """
+    del seed
+    if levels <= 0:
+        return _empty_generated_graph()
+
+    if not branching:
+        branching = (1,)
+    level_sizes = [branching[min(idx, len(branching) - 1)] for idx in range(levels)]
+    level_sizes[0] = max(level_sizes[0], 1)
+
+    node_ids: List[str] = []
+    level_nodes: List[List[str]] = []
+    for level_idx, level_size in enumerate(level_sizes):
+        size = max(level_size, 0)
+        nodes = [f"level_{level_idx}.person_{node_idx}" for node_idx in range(size)]
+        level_nodes.append(nodes)
+        node_ids.extend(nodes)
+
+    edge_list: List[Tuple[str, str]] = []
+    for level_idx in range(len(level_nodes) - 1):
+        parents = level_nodes[level_idx]
+        children = level_nodes[level_idx + 1]
+        if not parents or not children:
+            continue
+        for child_idx, child in enumerate(children):
+            parent = parents[child_idx % len(parents)]
+            edge_list.append((parent, child))
+
+    return _build_named_graph(node_ids, edge_list)
+
+
+def make_small_world(n: int = 100, k: int = 4, p: float = 0.1, seed: int = 42) -> DaguaGraph:
+    """Build a directed small-world graph using Watts-Strogatz-style rewiring.
+
+    Parameters
+    ----------
+    n : int, default=100
+        Node count.
+    k : int, default=4
+        Each node connects to ``k / 2`` forward neighbors on the ring.
+    p : float, default=0.1
+        Rewiring probability for each edge.
+    seed : int, default=42
+        Random seed for rewiring.
+
+    Returns
+    -------
+    DaguaGraph
+        Directed small-world graph that stresses cyclic structure, short paths,
+        and non-layered global geometry.
+    """
+    if n <= 0:
+        return _empty_generated_graph()
+
+    rng = random.Random(seed)
+    neighbor_span = max(k // 2, 0)
+    node_ids = [f"sw_{idx}" for idx in range(n)]
+    edge_set: Set[Tuple[str, str]] = set()
+    rewire_prob = max(0.0, min(p, 1.0))
+
+    for src_idx in range(n):
+        for offset in range(1, neighbor_span + 1):
+            tgt_idx = (src_idx + offset) % n
+            if rng.random() < rewire_prob and n > 1:
+                candidate_idx = tgt_idx
+                while candidate_idx == src_idx:
+                    candidate_idx = rng.randrange(n)
+                tgt_idx = candidate_idx
+            edge_set.add((node_ids[src_idx], node_ids[tgt_idx]))
+
+    return _build_named_graph(node_ids, sorted(edge_set))
+
+
+def _expanded_structural_graphs() -> List[TestGraph]:
+    """Build the supplemental structural graphs requested for evaluation.
+
+    Returns
+    -------
+    List[TestGraph]
+        New structural coverage graphs wrapped with evaluation metadata.
+    """
+    sparse_graph, dense_graph = make_sparse_dense_pair(n=50, seed=42)
+    return [
+        TestGraph(
+            name="scale_free_ba_120",
+            graph=make_scale_free(n=120, m=3, seed=42),
+            tags={"scale-free", "large-sparse"},
+            description="Barabasi-Albert style preferential-attachment DAG",
+            expected_challenges="High-degree hubs, edge bundling, and hub dominance",
+        ),
+        TestGraph(
+            name="grid_rect_6x8",
+            graph=make_grid(6, 8, seed=42),
+            tags={"grid", "diamond"},
+            description="Rectangular 6x8 grid DAG with right/down edges",
+            expected_challenges="Regular spacing, local ordering, and dense local crossings",
+        ),
+        TestGraph(
+            name="complete_bipartite_8x12",
+            graph=make_complete_bipartite(8, 12, seed=42),
+            tags={"bipartite", "wide-parallel"},
+            description="Complete bipartite K(8,12) layered DAG",
+            expected_challenges="Crossing minimization between two dense layers",
+        ),
+        TestGraph(
+            name="clustered_medium_5x20",
+            graph=make_clustered_medium(5, 20, inter_density=0.05, seed=42),
+            tags={"clustered", "nested-shallow"},
+            description="Five medium clusters with sparse inter-cluster handoffs",
+            expected_challenges="Cluster separation, ordering, and sparse bridge routing",
+        ),
+        TestGraph(
+            name="hub_and_spoke_3x20",
+            graph=make_hub_and_spoke(3, 20, seed=42),
+            tags={"hub-spoke", "wide-parallel"},
+            description="Three dominant hubs each fanning to twenty spokes",
+            expected_challenges="Fan-out balance around high-degree hub nodes",
+        ),
+        TestGraph(
+            name="wide_single_layer_1_50_1",
+            graph=make_wide_single_layer(1, 50, 1, seed=42),
+            tags={"wide-layer", "wide-parallel"},
+            description="Single source and sink around a very wide middle layer",
+            expected_challenges="Extreme width, horizontal spacing, and ordering stability",
+        ),
+        TestGraph(
+            name="sparse_pair_50",
+            graph=sparse_graph,
+            tags={"large-sparse"},
+            description="Sparse half of a matched sparse-versus-dense DAG pair",
+            expected_challenges="Baseline readability for density comparisons",
+        ),
+        TestGraph(
+            name="dense_pair_50",
+            graph=dense_graph,
+            tags={"large-dense"},
+            description="Dense half of a matched sparse-versus-dense DAG pair",
+            expected_challenges="Crossing pressure compared against the sparse twin",
+        ),
+        TestGraph(
+            name="compound_dag_5x30",
+            graph=make_compound_dag(5, 30, seed=42),
+            tags={"compound", "clustered", "nested-shallow"},
+            description="Clustered DAG where stages form a higher-level DAG",
+            expected_challenges="Compound hierarchy, cluster flow, and skip handoffs",
+        ),
+        TestGraph(
+            name="long_skip_only_24",
+            graph=make_long_skip_only(24, seed=42),
+            tags={"skip-heavy", "linear-deep"},
+            description="Pathological DAG where every edge skips at least three layers",
+            expected_challenges="Very long edges without local anchors",
+        ),
+        TestGraph(
+            name="parallel_cycles_4x5",
+            graph=make_parallel_cycles(4, 5, seed=42),
+            tags={"cyclic", "disconnected"},
+            description="Four independent directed 5-cycles",
+            expected_challenges="Cycle handling plus disconnected component packing",
+        ),
+        TestGraph(
+            name="resnet_stack_4x16",
+            graph=make_resnet_block(4, 16, seed=42),
+            tags={"neural-net", "skip-light", "nested-shallow"},
+            description="Four-block residual stack with block-level clusters",
+            expected_challenges="Repeated residual motifs and merge alignment",
+        ),
+        TestGraph(
+            name="transformer_full_4h_2l",
+            graph=make_transformer_full(4, 2, seed=42),
+            tags={"neural-net", "wide-parallel", "nested-deep"},
+            description="Two-layer transformer-style stack with four attention heads",
+            expected_challenges="Parallel heads, residual routing, and nested attention groups",
+        ),
+        TestGraph(
+            name="dependency_graph_100",
+            graph=make_dependency_graph(100, 5, seed=42),
+            tags={"dependency", "scale-free", "clustered"},
+            description="Dependency DAG with dominant core libraries and many packages",
+            expected_challenges="Hub-heavy sources and dependency fan-in toward packages",
+        ),
+        TestGraph(
+            name="org_chart_1_5_4_8",
+            graph=make_org_chart(4, (1, 5, 4, 8), seed=42),
+            tags={"tree"},
+            description="Non-uniform organizational tree with changing level widths",
+            expected_challenges="Parent-child spacing under uneven breadth",
+        ),
+        TestGraph(
+            name="small_world_100",
+            graph=make_small_world(100, 4, 0.1, seed=42),
+            tags={"small-world", "cyclic"},
+            description="Directed Watts-Strogatz small-world graph",
+            expected_challenges="Short paths, cycles, and non-layered global geometry",
+        ),
+    ]
 
 
 _SCALE_SIZES = {
