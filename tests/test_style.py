@@ -71,13 +71,13 @@ class TestEdgeStyleNewFields:
 
     def test_custom_label_style(self):
         s = EdgeStyle(
-            arrow_scale=40.0,
+            arrow_scale=32.0,
             label_font_size=9.0,
             label_font_color="#FF0000",
             label_offset=12.0,
             label_side="right",
         )
-        assert s.arrow_scale == 40.0
+        assert s.arrow_scale == 32.0
         assert s.label_font_size == 9.0
         assert s.label_font_color == "#FF0000"
         assert s.label_offset == 12.0
@@ -206,7 +206,7 @@ class TestBuiltInThemes:
             "font_size": 14.0,
             "arrow_length": 20.0,
             "arrow_width": 14.0,
-            "arrow_scale": 40.0,
+            "arrow_scale": 32.0,
             "edge_width": 2.0,
             "edge_opacity": 1.0,
             "min_height": 36.0,
