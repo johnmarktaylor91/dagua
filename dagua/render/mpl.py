@@ -636,10 +636,10 @@ def _build_node_patch(
         return Polygon(
             np.array(
                 [
-                    [x - w / 2 + inset, y + h / 2],
-                    [x + w / 2 - inset, y + h / 2],
-                    [x + w / 2, y - h / 2],
-                    [x - w / 2, y - h / 2],
+                    [x - w / 2, y + h / 2],
+                    [x + w / 2, y + h / 2],
+                    [x + w / 2 - inset, y - h / 2],
+                    [x - w / 2 + inset, y - h / 2],
                 ]
             ),
             closed=True,
@@ -1547,21 +1547,38 @@ def _draw_edge_marker(
         return
 
     if marker == "tee":
-        # Keep the tee close to the endpoint, but far enough back that the bar
-        # does not collapse into the line ending.
-        bar_x = tip_x - ux * (manual_length / 3)
-        bar_y = tip_y - uy * (manual_length / 3)
-        bar_linewidth = max(style.width * 4.0, 5.0)
-        ax.add_line(
-            Line2D(
-                [bar_x + px * manual_width * 1.2, bar_x - px * manual_width * 1.2],
-                [bar_y + py * manual_width * 1.2, bar_y - py * manual_width * 1.2],
-                color=color,
-                linewidth=bar_linewidth,
-                solid_capstyle="butt",
-                zorder=1.2,
-            )
+        # Use a thin rectangle instead of a thick line so the tee reads as a
+        # wide, flat bar instead of a square cap at small render sizes.
+        bar_x = tip_x - ux * (manual_length / 4)
+        bar_y = tip_y - uy * (manual_length / 4)
+        bar_half_span = manual_width * 1.3
+        bar_half_thick = manual_length / 6
+        polygon = Polygon(
+            [
+                (
+                    bar_x + px * bar_half_span + ux * bar_half_thick,
+                    bar_y + py * bar_half_span + uy * bar_half_thick,
+                ),
+                (
+                    bar_x + px * bar_half_span - ux * bar_half_thick,
+                    bar_y + py * bar_half_span - uy * bar_half_thick,
+                ),
+                (
+                    bar_x - px * bar_half_span - ux * bar_half_thick,
+                    bar_y - py * bar_half_span - uy * bar_half_thick,
+                ),
+                (
+                    bar_x - px * bar_half_span + ux * bar_half_thick,
+                    bar_y - py * bar_half_span + uy * bar_half_thick,
+                ),
+            ],
+            closed=True,
+            facecolor=color,
+            edgecolor=color,
+            linewidth=0.5,
+            zorder=1.2,
         )
+        ax.add_patch(polygon)
         return
 
     if marker == "crow":
@@ -1569,8 +1586,8 @@ def _draw_edge_marker(
         back_y = tip_y - uy * manual_length
         for end_x, end_y in (
             (back_x, back_y),
-            (back_x + px * manual_width * 0.7, back_y + py * manual_width * 0.7),
-            (back_x - px * manual_width * 0.7, back_y - py * manual_width * 0.7),
+            (back_x + px * manual_width * 0.85, back_y + py * manual_width * 0.85),
+            (back_x - px * manual_width * 0.85, back_y - py * manual_width * 0.85),
         ):
             ax.add_line(
                 Line2D(
