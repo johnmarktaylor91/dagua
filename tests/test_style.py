@@ -60,6 +60,8 @@ class TestEdgeStyleNewFields:
     def test_defaults(self):
         s = EdgeStyle()
         assert s.arrow_scale is None
+        assert s.arrow_node_fraction == 0.0
+        assert s.arrow_width_ratio == 0.7
         assert s.routing == "bezier"
         assert s.label_font_size == 7.0
         assert s.label_font_color == NEAR_BLACK
@@ -74,12 +76,16 @@ class TestEdgeStyleNewFields:
     def test_custom_label_style(self):
         s = EdgeStyle(
             arrow_scale=32.0,
+            arrow_node_fraction=0.4,
+            arrow_width_ratio=0.65,
             label_font_size=9.0,
             label_font_color="#FF0000",
             label_offset=12.0,
             label_side="right",
         )
         assert s.arrow_scale == 32.0
+        assert s.arrow_node_fraction == 0.4
+        assert s.arrow_width_ratio == 0.65
         assert s.label_font_size == 9.0
         assert s.label_font_color == "#FF0000"
         assert s.label_offset == 12.0
@@ -254,6 +260,8 @@ def test_graphviz_strict_theme_loads() -> None:
     assert edge_style.arrow_scale is None  # ignored; mpl uses unified point conversion
     assert edge_style.arrow_length == 22.0
     assert edge_style.arrow_width == 15.0
+    assert edge_style.arrow_node_fraction == pytest.approx(0.26)
+    assert edge_style.arrow_width_ratio == pytest.approx(0.7)
     assert edge_style.label_font_family == "Times New Roman"
 
     assert theme.cluster_style.fill == "#F8F8F8"
@@ -296,6 +304,8 @@ def test_graphviz_improved_theme_loads() -> None:
     assert edge_style.arrow_scale is None  # ignored; mpl uses unified point conversion
     assert edge_style.arrow_length == 20.0
     assert edge_style.arrow_width == 14.0
+    assert edge_style.arrow_node_fraction == pytest.approx(0.24)
+    assert edge_style.arrow_width_ratio == pytest.approx(0.7)
     assert edge_style.arrow_color == "#333333"
     assert theme.get_edge_style("if").opacity == 0.92
     assert theme.get_edge_style("then").opacity == 0.92
