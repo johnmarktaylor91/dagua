@@ -669,48 +669,29 @@ TORCHLENS_THEME = Theme(
     ),
 )
 
+_GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
+    shape="ellipse",
+    fill="#FFFFFF",
+    stroke="#000000",
+    stroke_width=1.4,  # 1.0 renders thinner than Graphviz due to matplotlib AA
+    font_family="Times New Roman",
+    font_size=14.0,
+    font_color="#000000",
+    padding=(12.0, 5.0),
+    corner_radius=0.0,
+    opacity=1.0,
+    base_color="#000000",
+    min_width=48.0,  # ellipse width factor now provides the extra width
+    min_height=36.0,
+    overflow_policy="expand_node",
+)
+
 GRAPHVIZ_STRICT_THEME = Theme(
     name="graphviz_strict",
     node_styles={
-        "default": NodeStyle(
-            shape="ellipse",
-            fill="#FFFFFF",
-            stroke="#000000",
-            stroke_width=1.4,  # 1.0 renders thinner than Graphviz due to matplotlib AA
-            font_family="Times New Roman",
-            font_size=14.0,
-            font_color="#000000",
-            padding=(12.0, 5.0),
-            corner_radius=0.0,
-            opacity=1.0,
-            base_color="#000000",
-            min_width=48.0,  # ellipse width factor now provides the extra width
-            min_height=36.0,
-        ),
-        "input": NodeStyle(
-            shape="ellipse",
-            fill="#FFFFFF",
-            stroke="#000000",
-            stroke_width=1.4,  # 1.0 renders thinner than Graphviz due to matplotlib AA
-            font_family="Times New Roman",
-            font_size=14.0,
-            font_color="#000000",
-            padding=(12.0, 5.0),
-            corner_radius=0.0,
-            base_color="#000000",
-        ),
-        "output": NodeStyle(
-            shape="ellipse",
-            fill="#FFFFFF",
-            stroke="#000000",
-            stroke_width=1.4,  # 1.0 renders thinner than Graphviz due to matplotlib AA
-            font_family="Times New Roman",
-            font_size=14.0,
-            font_color="#000000",
-            padding=(12.0, 5.0),
-            corner_radius=0.0,
-            base_color="#000000",
-        ),
+        "default": copy.deepcopy(_GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE),
+        "input": copy.deepcopy(_GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE),
+        "output": copy.deepcopy(_GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE),
     },
     edge_styles={
         "default": EdgeStyle(
@@ -730,17 +711,17 @@ GRAPHVIZ_STRICT_THEME = Theme(
         ),
     },
     cluster_style=ClusterStyle(
-        fill="#F0F0F0",
+        fill="#F8F8F8",
         stroke="#000000",
         stroke_width=1.0,
         corner_radius=0.0,
         padding=8.0,
         label_position="top-left",
-        font_size=14.0,
-        font_weight="bold",
+        font_size=12.0,
+        font_weight="regular",
         font_color="#000000",
         font_family="Times New Roman",
-        opacity=1.0,
+        opacity=0.85,
     ),
     graph_style=GraphStyle(
         background_color="#FFFFFF",
