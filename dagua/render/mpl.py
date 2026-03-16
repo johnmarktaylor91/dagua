@@ -30,6 +30,7 @@ from dagua.utils import collect_cluster_leaves, measure_text, parse_rich_markup
 _VECTOR_FORMATS = {"pdf", "ps", "eps", "svg", "svgz"}
 _RASTER_FORMATS = {"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"}
 _GRAPHVIZ_DASH_PATTERN: Tuple[float, float] = (6.0, 4.0)
+_GRAPHVIZ_DOT_PATTERN: Tuple[float, float] = (1.5, 2.5)
 
 
 def _detect_output_format(output: Optional[str], format: Optional[str]) -> Optional[str]:
@@ -317,7 +318,7 @@ def _node_linestyle(style: Any) -> Any:
     if style.stroke_dash == "dashed":
         return (0, _GRAPHVIZ_DASH_PATTERN)
     if style.stroke_dash == "dotted":
-        return ":"
+        return (0, _GRAPHVIZ_DOT_PATTERN)
     return "-"
 
 
@@ -337,7 +338,7 @@ def _edge_linestyle(style: Any) -> Any:
     if style.style == "dashed":
         return (0, _GRAPHVIZ_DASH_PATTERN)
     if style.style == "dotted":
-        return ":"
+        return (0, _GRAPHVIZ_DOT_PATTERN)
     return "-"
 
 
@@ -390,7 +391,7 @@ def _cluster_linestyle(stroke_dash: str) -> Any:
     if stroke_dash == "dashed":
         return (0, _GRAPHVIZ_DASH_PATTERN)
     if stroke_dash == "dotted":
-        return ":"
+        return (0, _GRAPHVIZ_DOT_PATTERN)
     return "-"
 
 
@@ -893,7 +894,7 @@ def _draw_shadow(ax: Any, x: float, y: float, w: float, h: float, style: Any) ->
             (base_r, base_g, base_b, alpha),
             "none",
             0.0,
-            _node_linestyle(style),
+            "-",
             zorder=1.4 - idx * 0.01,
         )
         ax.add_patch(shadow)
