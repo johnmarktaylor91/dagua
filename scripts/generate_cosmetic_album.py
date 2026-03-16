@@ -224,8 +224,8 @@ def _base_graph_style() -> GraphStyle:
 
     return GraphStyle(
         background_color=WHITE,
-        margin=12.0,
-        min_figsize=(4.0, 3.2),
+        margin=8.0,
+        min_figsize=(2.0, 1.5),
         max_figsize=(8.0, 6.0),
     )
 
@@ -573,9 +573,9 @@ def _graphviz_base_node_attrs() -> Dict[str, str]:
         "style": "filled",
         "fillcolor": NODE_FILL,
         "color": NODE_STROKE,
-        "penwidth": "1.6",
+        "penwidth": "2.0",
         "fontname": "Helvetica",
-        "fontsize": "12",
+        "fontsize": "14",
         "fontcolor": "#1F2937",
     }
 
@@ -591,8 +591,8 @@ def _graphviz_base_edge_attrs() -> Dict[str, str]:
 
     return {
         "color": EDGE_COLOR,
-        "penwidth": "1.8",
-        "arrowsize": "0.9",
+        "penwidth": "2.0",
+        "arrowsize": "1.1",
     }
 
 
