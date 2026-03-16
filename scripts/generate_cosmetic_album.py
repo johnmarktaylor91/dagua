@@ -54,7 +54,7 @@ EDGE_COLOR = "#5F6C7B"
 CLUSTER_FILL = "#EAF1F8"
 CLUSTER_STROKE = "#A9B8C7"
 GRAPHVIZ_MIN_NODE_WIDTH = 54.0
-GRAPHVIZ_PAIR_VERTICAL_GAP = 170.0
+GRAPHVIZ_PAIR_VERTICAL_GAP = 90.0
 PANEL_CONTENT_MARGIN = 36
 CONTENT_CROP_PADDING = 12
 
@@ -447,13 +447,13 @@ def _direction_graph(direction: str) -> Tuple[DaguaGraph, torch.Tensor]:
     """
 
     if direction == "TB":
-        positions = [(0.0, 260.0), (0.0, 130.0), (0.0, 0.0)]
+        positions = [(0.0, 140.0), (0.0, 70.0), (0.0, 0.0)]
     elif direction == "BT":
-        positions = [(0.0, 0.0), (0.0, 130.0), (0.0, 260.0)]
+        positions = [(0.0, 0.0), (0.0, 70.0), (0.0, 140.0)]
     elif direction == "LR":
-        positions = [(0.0, 0.0), (170.0, 0.0), (340.0, 0.0)]
+        positions = [(0.0, 0.0), (100.0, 0.0), (200.0, 0.0)]
     elif direction == "RL":
-        positions = [(340.0, 0.0), (170.0, 0.0), (0.0, 0.0)]
+        positions = [(200.0, 0.0), (100.0, 0.0), (0.0, 0.0)]
     else:
         raise ValueError(f"Unsupported direction: {direction}")
 
@@ -485,7 +485,7 @@ def _basic_cluster_graph() -> Tuple[DaguaGraph, torch.Tensor]:
     graph.add_edge("B", "C")
     graph.add_cluster("group", ["A", "B"], label="Cluster")
     positions = torch.tensor(
-        [[-80.0, 0.0], [80.0, 0.0], [0.0, 170.0]],
+        [[-60.0, 0.0], [60.0, 0.0], [0.0, 90.0]],
         dtype=torch.float32,
     )
     return graph, positions
@@ -512,7 +512,7 @@ def _nested_cluster_graph() -> Tuple[DaguaGraph, torch.Tensor]:
     graph.add_cluster("outer", ["A", "B", "C", "D"], label="Outer")
     graph.add_cluster("inner", ["B", "C"], label="Inner", parent="outer")
     positions = torch.tensor(
-        [[-170.0, 40.0], [-50.0, -40.0], [70.0, -40.0], [190.0, 40.0]],
+        [[-110.0, 25.0], [-35.0, -25.0], [35.0, -25.0], [110.0, 25.0]],
         dtype=torch.float32,
     )
     return graph, positions
