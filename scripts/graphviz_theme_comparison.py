@@ -1270,7 +1270,7 @@ def render_dagua_theme(graph: DaguaGraph, theme_name: str, output_path: Path) ->
 
     themed_graph = _copy_graph_with_theme(graph, theme_name)
     themed_graph.compute_node_sizes()
-    config = LayoutConfig(steps=50)
+    config = LayoutConfig(steps=100)
     positions = dagua.layout(themed_graph, config)
     dagua.render(themed_graph, positions, output=str(output_path), dpi=180)
 
