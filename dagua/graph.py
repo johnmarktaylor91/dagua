@@ -419,6 +419,7 @@ class DaguaGraph:
                 font_weight=style.font_weight,
                 overflow_policy=style.overflow_policy,
                 min_font_size=style.min_font_size,
+                label_format=style.label_format,
             )
             # Apply min_width if set
             if style.min_width is not None:

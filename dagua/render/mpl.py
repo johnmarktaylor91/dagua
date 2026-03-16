@@ -14,17 +14,18 @@ import gzip
 import io
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from dagua.edges import BezierCurve, preferred_edge_label_position, route_edges
 from dagua.styles import (
     FONT_FAMILY,
+    FONT_FAMILY_MONO,
     RESOLVED_FONT,
     darken_hex,
 )
-from dagua.utils import collect_cluster_leaves
+from dagua.utils import collect_cluster_leaves, measure_text, parse_rich_markup
 
 _VECTOR_FORMATS = {"pdf", "ps", "eps", "svg", "svgz"}
 _RASTER_FORMATS = {"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"}
@@ -103,23 +104,41 @@ def render(
     label_positions: Optional[List[Optional[Tuple[float, float]]]] = None,
     svg_hover_text: bool = True,
 ):
-    """Render graph with computed positions.
+    """Render a graph with computed node positions.
 
-    Args:
-        graph: DaguaGraph instance
-        positions: [N, 2] tensor of node positions
-        config: LayoutConfig (optional)
-        output: file path to save
-        format: explicit output format override. If None, inferred from output path.
-        figsize: figure size in inches
-        dpi: resolution for raster output
-        show: whether to call plt.show()
-        title: optional title for the figure
-        curves: pre-computed BezierCurve list (skips re-routing if provided)
-        label_positions: pre-computed (x, y) per edge label (from place_edge_labels)
+    Parameters
+    ----------
+    graph : Any
+        Graph object exposing Dagua's render-facing API.
+    positions : Any, optional
+        Node positions with shape ``[N, 2]``. When omitted, the graph must have
+        a fresh cached layout.
+    config : Any, optional
+        Unused render-time layout config placeholder kept for API compatibility.
+    output : str, optional
+        Output file path.
+    format : str, optional
+        Explicit output format override. When omitted, the renderer infers the
+        format from ``output``.
+    figsize : tuple[float, float], optional
+        Figure size in inches.
+    dpi : int, default=150
+        Raster output resolution.
+    show : bool, default=False
+        Whether to call ``plt.show()``.
+    title : str, optional
+        Figure title.
+    curves : list[BezierCurve], optional
+        Pre-routed bezier curves for edges.
+    label_positions : list[tuple[float, float] | None], optional
+        Pre-computed positions for edge labels.
+    svg_hover_text : bool, default=True
+        Whether to embed hover tooltips in SVG outputs.
 
-    Returns:
-        (fig, ax) matplotlib objects
+    Returns
+    -------
+    tuple[Any, Any]
+        Matplotlib ``(figure, axes)``.
     """
     import warnings
 
@@ -187,6 +206,11 @@ def render(
     setattr(fig, "_dagua_svg_hover_map", {} if svg_hover_text else None)
     svg_hover_map = getattr(fig, "_dagua_svg_hover_map")
 
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
     # --- Layer 0: Cluster backgrounds ---
     _draw_clusters(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
 
@@ -196,21 +220,15 @@ def render(
     _draw_edges(ax, graph, curves, svg_hover_map=svg_hover_map)
 
     # --- Layer 2: Nodes ---
-    _draw_nodes(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
+    clip_patches = _draw_nodes(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
 
     # --- Layer 3: Node labels ---
-    _draw_node_labels(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
+    _draw_node_labels(ax, graph, pos, sizes, clip_patches, svg_hover_map=svg_hover_map)
 
     # --- Layer 4: Edge labels ---
     _draw_edge_labels(
         ax, graph, curves, label_positions=label_positions, svg_hover_map=svg_hover_map
     )
-
-    # Configure axes
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    ax.set_aspect("equal")
-    ax.axis("off")
 
     if title:
         title_ff = gs.title_font_family or RESOLVED_FONT
@@ -280,294 +298,1208 @@ def _inject_svg_hover_text(output: str, svg_hover_map, compressed: bool = False)
         Path(output).write_text(svg_text, encoding="utf-8")
 
 
-def _draw_nodes(ax, graph, pos, sizes, svg_hover_map=None):
-    """Draw node shapes with muted fills and strong borders."""
-    from matplotlib.patches import Circle, Ellipse, FancyBboxPatch
+def _node_linestyle(style: Any) -> Any:
+    """Resolve the matplotlib linestyle for node borders.
 
-    for i in range(graph.num_nodes):
-        x, y = pos[i, 0], pos[i, 1]
-        w, h = sizes[i, 0], sizes[i, 1]
-        style = graph.get_style_for_node(i)
+    Parameters
+    ----------
+    style : Any
+        Node style object.
 
-        cr = style.corner_radius
+    Returns
+    -------
+    Any
+        Matplotlib linestyle string or dash tuple.
+    """
+    if style.stroke_dash_pattern is not None:
+        return (0, style.stroke_dash_pattern)
+    return {"solid": "-", "dashed": "--", "dotted": ":"}.get(style.stroke_dash, "-")
 
-        linestyle = "-"
-        if style.stroke_dash == "dashed":
-            linestyle = "--"
 
-        # Shadow (render-only decoration)
-        if style.shadow:
-            _draw_shadow(ax, x, y, w, h, style)
+def _edge_linestyle(style: Any) -> str:
+    """Resolve the matplotlib linestyle for an edge body.
 
-        if style.shape in ("roundrect", "rect"):
-            pad = cr * 0.01 if style.shape == "roundrect" else 0
-            boxstyle = f"round,pad={pad}" if style.shape == "roundrect" else "square,pad=0"
-            patch = FancyBboxPatch(
-                (x - w / 2, y - h / 2),
-                w,
-                h,
-                boxstyle=boxstyle,
-                facecolor=style.fill,
-                edgecolor=style.stroke,
-                linewidth=style.stroke_width,
-                linestyle=linestyle,
-                alpha=style.opacity,
-                zorder=2,
-            )
-        elif style.shape == "ellipse":
-            patch = Ellipse(
-                (x, y),
-                w,
-                h,
-                facecolor=style.fill,
-                edgecolor=style.stroke,
-                linewidth=style.stroke_width,
-                linestyle=linestyle,
-                alpha=style.opacity,
-                zorder=2,
-            )
-        elif style.shape == "circle":
-            r = max(w, h) / 2
-            patch = Circle(
-                (x, y),
-                r,
-                facecolor=style.fill,
-                edgecolor=style.stroke,
-                linewidth=style.stroke_width,
-                linestyle=linestyle,
-                alpha=style.opacity,
-                zorder=2,
-            )
-        elif style.shape == "diamond":
-            from matplotlib.patches import Polygon
+    Parameters
+    ----------
+    style : Any
+        Edge style object.
 
-            pts = np.array(
+    Returns
+    -------
+    str
+        Matplotlib linestyle string.
+    """
+    return {"solid": "-", "dashed": "--", "dotted": ":"}.get(style.style, "-")
+
+
+def _regular_polygon_vertices(
+    num_vertices: int,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    rotation: float = np.pi / 2,
+) -> np.ndarray:
+    """Return vertices for a polygon inscribed in a node bounding box.
+
+    Parameters
+    ----------
+    num_vertices : int
+        Number of polygon corners.
+    x : float
+        Node center x-coordinate.
+    y : float
+        Node center y-coordinate.
+    w : float
+        Node width.
+    h : float
+        Node height.
+    rotation : float, default=np.pi / 2
+        Initial rotation in radians.
+
+    Returns
+    -------
+    numpy.ndarray
+        Polygon vertices with shape ``[num_vertices, 2]``.
+    """
+    angles = rotation + (2.0 * np.pi * np.arange(num_vertices) / num_vertices)
+    return np.column_stack((x + (w / 2) * np.cos(angles), y + (h / 2) * np.sin(angles)))
+
+
+def _star_vertices(x: float, y: float, w: float, h: float) -> np.ndarray:
+    """Return vertices for a five-point star.
+
+    Parameters
+    ----------
+    x : float
+        Node center x-coordinate.
+    y : float
+        Node center y-coordinate.
+    w : float
+        Node width.
+    h : float
+        Node height.
+
+    Returns
+    -------
+    numpy.ndarray
+        Star vertices with shape ``[10, 2]``.
+    """
+    points: List[Tuple[float, float]] = []
+    outer_rx = w / 2
+    outer_ry = h / 2
+    inner_rx = outer_rx * 0.45
+    inner_ry = outer_ry * 0.45
+    for idx in range(10):
+        angle = np.pi / 2 + idx * np.pi / 5
+        rx = outer_rx if idx % 2 == 0 else inner_rx
+        ry = outer_ry if idx % 2 == 0 else inner_ry
+        points.append((x + rx * np.cos(angle), y + ry * np.sin(angle)))
+    return np.array(points)
+
+
+def _build_node_patch(
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    style: Any,
+    facecolor: Any,
+    edgecolor: Any,
+    linewidth: float,
+    linestyle: Any,
+    zorder: float,
+) -> Any:
+    """Build a matplotlib patch for a node shape.
+
+    Parameters
+    ----------
+    x : float
+        Node center x-coordinate.
+    y : float
+        Node center y-coordinate.
+    w : float
+        Node width.
+    h : float
+        Node height.
+    style : Any
+        Node style object.
+    facecolor : Any
+        Matplotlib-compatible face color.
+    edgecolor : Any
+        Matplotlib-compatible edge color.
+    linewidth : float
+        Border width.
+    linestyle : Any
+        Matplotlib linestyle string or dash tuple.
+    zorder : float
+        Patch z-order.
+
+    Returns
+    -------
+    Any
+        Matplotlib patch instance.
+    """
+    from matplotlib.patches import Circle, Ellipse, FancyBboxPatch, PathPatch, Polygon
+    from matplotlib.path import Path
+
+    shape = style.shape
+    if shape in ("roundrect", "rect"):
+        corner_radius = style.corner_radius if shape == "roundrect" else 0.0
+        if corner_radius > 0:
+            boxstyle = f"round,pad=0,rounding_size={corner_radius}"
+        else:
+            boxstyle = "square,pad=0"
+        return FancyBboxPatch(
+            (x - w / 2, y - h / 2),
+            w,
+            h,
+            boxstyle=boxstyle,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
+    if shape == "ellipse":
+        return Ellipse(
+            (x, y),
+            w,
+            h,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
+    if shape == "circle":
+        return Circle(
+            (x, y),
+            max(w, h) / 2,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
+    if shape == "diamond":
+        return Polygon(
+            np.array(
                 [
                     [x, y + h / 2],
                     [x + w / 2, y],
                     [x, y - h / 2],
                     [x - w / 2, y],
                 ]
-            )
-            patch = Polygon(
-                pts,
-                closed=True,
-                facecolor=style.fill,
-                edgecolor=style.stroke,
-                linewidth=style.stroke_width,
-                linestyle=linestyle,
-                alpha=style.opacity,
-                zorder=2,
-            )
-        else:
-            patch = FancyBboxPatch(
-                (x - w / 2, y - h / 2),
-                w,
-                h,
-                boxstyle="round,pad=0.02",
-                facecolor=style.fill,
-                edgecolor=style.stroke,
-                linewidth=style.stroke_width,
-                linestyle=linestyle,
-                alpha=style.opacity,
-                zorder=2,
-            )
+            ),
+            closed=True,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
+    if shape == "triangle":
+        vertices = _regular_polygon_vertices(3, x, y, w, h)
+        vertices = np.roll(vertices, -1, axis=0)
+        return Polygon(
+            vertices,
+            closed=True,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
+    if shape == "hexagon":
+        return Polygon(
+            _regular_polygon_vertices(6, x, y, w, h),
+            closed=True,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
+    if shape == "pentagon":
+        return Polygon(
+            _regular_polygon_vertices(5, x, y, w, h),
+            closed=True,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
+    if shape == "octagon":
+        return Polygon(
+            _regular_polygon_vertices(8, x, y, w, h, rotation=np.pi / 8),
+            closed=True,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
+    if shape == "star":
+        return Polygon(
+            _star_vertices(x, y, w, h),
+            closed=True,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            joinstyle="round",
+            zorder=zorder,
+        )
+    if shape == "parallelogram":
+        skew = w * 0.18
+        return Polygon(
+            np.array(
+                [
+                    [x - w / 2 + skew, y + h / 2],
+                    [x + w / 2, y + h / 2],
+                    [x + w / 2 - skew, y - h / 2],
+                    [x - w / 2, y - h / 2],
+                ]
+            ),
+            closed=True,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
+    if shape == "trapezoid":
+        inset = w * 0.18
+        return Polygon(
+            np.array(
+                [
+                    [x - w / 2 + inset, y + h / 2],
+                    [x + w / 2 - inset, y + h / 2],
+                    [x + w / 2, y - h / 2],
+                    [x - w / 2, y - h / 2],
+                ]
+            ),
+            closed=True,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
+    if shape == "cylinder":
+        cap_h = max(h * 0.16, 1.0)
+        top_cy = y + h / 2 - cap_h
+        bottom_cy = y - h / 2 + cap_h
+        vertices = [
+            (x - w / 2, top_cy),
+            (x - w / 2, top_cy + cap_h),
+            (x + w / 2, top_cy + cap_h),
+            (x + w / 2, top_cy),
+            (x + w / 2, bottom_cy),
+            (x + w / 2, bottom_cy - cap_h),
+            (x - w / 2, bottom_cy - cap_h),
+            (x - w / 2, bottom_cy),
+            (x - w / 2, top_cy),
+        ]
+        codes = [
+            Path.MOVETO,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.LINETO,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.CLOSEPOLY,
+        ]
+        return PathPatch(
+            Path(vertices, codes),
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
+    return FancyBboxPatch(
+        (x - w / 2, y - h / 2),
+        w,
+        h,
+        boxstyle="round,pad=0,rounding_size=6",
+        facecolor=facecolor,
+        edgecolor=edgecolor,
+        linewidth=linewidth,
+        linestyle=linestyle,
+        zorder=zorder,
+    )
 
+
+def _draw_node_shape_extras(
+    ax: Any,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    style: Any,
+    edgecolor: Any,
+    zorder: float,
+) -> None:
+    """Draw shape-specific decorative details after the main node patch.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    x : float
+        Node center x-coordinate.
+    y : float
+        Node center y-coordinate.
+    w : float
+        Node width.
+    h : float
+        Node height.
+    style : Any
+        Node style object.
+    edgecolor : Any
+        Matplotlib-compatible edge color.
+    zorder : float
+        Artist z-order.
+    """
+    if style.shape != "cylinder":
+        return
+
+    from matplotlib.patches import Ellipse
+
+    cap_h = max(h * 0.16, 1.0)
+    rim = Ellipse(
+        (x, y + h / 2 - cap_h),
+        w,
+        cap_h * 2,
+        facecolor="none",
+        edgecolor=edgecolor,
+        linewidth=style.stroke_width,
+        linestyle=_node_linestyle(style),
+        zorder=zorder,
+    )
+    ax.add_patch(rim)
+
+
+def _draw_gradient_fill(
+    ax: Any, patch: Any, x: float, y: float, w: float, h: float, style: Any
+) -> None:
+    """Draw a gradient image clipped to a node patch.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    patch : Any
+        Clip patch for the gradient image.
+    x : float
+        Node center x-coordinate.
+    y : float
+        Node center y-coordinate.
+    w : float
+        Node width.
+    h : float
+        Node height.
+    style : Any
+        Node style object.
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+
+    resolution = 128
+    grid = np.linspace(-1.0, 1.0, resolution)
+    xx, yy = np.meshgrid(grid, grid)
+
+    if style.gradient == "radial":
+        data = np.clip(np.sqrt(xx**2 + yy**2), 0.0, 1.0)
+    else:
+        angle = np.deg2rad(style.gradient_angle)
+        projection = xx * np.cos(angle) + yy * np.sin(angle)
+        data = np.clip((projection + 1.0) / 2.0, 0.0, 1.0)
+
+    gradient_color = style.gradient_color or style.stroke or darken_hex(style.fill, 0.12)
+    cmap = LinearSegmentedColormap.from_list("dagua-node-gradient", [style.fill, gradient_color])
+    image = ax.imshow(
+        data,
+        extent=(x - w / 2, x + w / 2, y - h / 2, y + h / 2),
+        origin="lower",
+        cmap=cmap,
+        interpolation="bicubic",
+        alpha=style.opacity,
+        zorder=1.95,
+        aspect="auto",
+    )
+    image.set_clip_path(patch)
+
+
+def _draw_nodes(
+    ax: Any,
+    graph: Any,
+    pos: np.ndarray,
+    sizes: np.ndarray,
+    svg_hover_map: Optional[Dict[str, str]] = None,
+) -> List[Any]:
+    """Draw node shapes and return clip patches for labels.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    graph : Any
+        Graph exposing Dagua's node-style API.
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]``.
+    sizes : numpy.ndarray
+        Node sizes with shape ``[N, 2]``.
+    svg_hover_map : dict[str, str], optional
+        SVG hover text accumulator.
+
+    Returns
+    -------
+    list[Any]
+        Primary node patches used to clip node labels.
+    """
+    from matplotlib.colors import to_rgba
+
+    clip_patches: List[Any] = []
+    for i in range(graph.num_nodes):
+        x, y = float(pos[i, 0]), float(pos[i, 1])
+        w, h = float(sizes[i, 0]), float(sizes[i, 1])
+        style = graph.get_style_for_node(i)
+
+        if style.shadow:
+            _draw_shadow(ax, x, y, w, h, style)
+
+        facecolor = to_rgba(style.fill, style.opacity)
+        edgecolor = to_rgba(style.stroke, style.opacity * style.border_opacity)
+        patch_face = "none" if style.gradient != "none" else facecolor
+        patch = _build_node_patch(
+            x,
+            y,
+            w,
+            h,
+            style,
+            patch_face,
+            edgecolor,
+            style.stroke_width,
+            _node_linestyle(style),
+            zorder=2,
+        )
         ax.add_patch(patch)
+        if style.gradient != "none":
+            _draw_gradient_fill(ax, patch, x, y, w, h, style)
+        _draw_node_shape_extras(ax, x, y, w, h, style, edgecolor, zorder=2.05)
+        clip_patches.append(patch)
         _set_svg_hover(patch, f"dagua-node-{i}", graph.node_labels[i], svg_hover_map)
+    return clip_patches
 
 
-def _draw_shadow(ax, x, y, w, h, style):
-    """Draw a shadow offset duplicate patch behind the node."""
-    from matplotlib.patches import Circle, Ellipse, FancyBboxPatch
+def _draw_shadow(ax: Any, x: float, y: float, w: float, h: float, style: Any) -> None:
+    """Draw a node shadow, approximating blur with layered fills.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    x : float
+        Node center x-coordinate.
+    y : float
+        Node center y-coordinate.
+    w : float
+        Node width.
+    h : float
+        Node height.
+    style : Any
+        Node style object.
+    """
+    from matplotlib.colors import to_rgba
 
     ox, oy = style.shadow_offset
-    shadow_color = style.shadow_color
+    base_r, base_g, base_b, base_a = to_rgba(style.shadow_color)
+    steps = 1 if style.shadow_blur <= 0 else min(max(int(np.ceil(style.shadow_blur)), 2), 6)
+    for idx in range(steps, 0, -1):
+        scale = 1.0 + (0.01 * style.shadow_blur * idx)
+        alpha = base_a / (idx + 1) if steps > 1 else base_a
+        shadow = _build_node_patch(
+            x + ox,
+            y + oy,
+            w * scale,
+            h * scale,
+            style,
+            (base_r, base_g, base_b, alpha),
+            "none",
+            0.0,
+            _node_linestyle(style),
+            zorder=1.4 - idx * 0.01,
+        )
+        ax.add_patch(shadow)
 
-    if style.shape in ("roundrect", "rect"):
-        cr = style.corner_radius
-        pad = cr * 0.01 if style.shape == "roundrect" else 0
-        boxstyle = f"round,pad={pad}" if style.shape == "roundrect" else "square,pad=0"
-        shadow = FancyBboxPatch(
-            (x - w / 2 + ox, y - h / 2 + oy),
-            w,
-            h,
-            boxstyle=boxstyle,
-            facecolor=shadow_color,
-            edgecolor="none",
-            zorder=1.5,
-        )
-    elif style.shape == "ellipse":
-        shadow = Ellipse(
-            (x + ox, y + oy),
-            w,
-            h,
-            facecolor=shadow_color,
-            edgecolor="none",
-            zorder=1.5,
-        )
-    elif style.shape == "circle":
-        r = max(w, h) / 2
-        shadow = Circle(
-            (x + ox, y + oy),
-            r,
-            facecolor=shadow_color,
-            edgecolor="none",
-            zorder=1.5,
-        )
-    elif style.shape == "diamond":
-        from matplotlib.patches import Polygon
 
-        pts = np.array(
-            [
-                [x + ox, y + h / 2 + oy],
-                [x + w / 2 + ox, y + oy],
-                [x + ox, y - h / 2 + oy],
-                [x - w / 2 + ox, y + oy],
-            ]
-        )
-        shadow = Polygon(pts, closed=True, facecolor=shadow_color, edgecolor="none", zorder=1.5)
+def _points_to_data_units(ax: Any, points: float, axis: str) -> float:
+    """Convert typographic points to data units along one axis.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    points : float
+        Distance in points.
+    axis : str
+        Axis name, either ``"x"`` or ``"y"``.
+
+    Returns
+    -------
+    float
+        Distance in data units.
+    """
+    pixels = points * ax.figure.dpi / 72.0
+    transformed = ax.transData.transform([(0.0, 0.0), (1.0, 1.0)])
+    if axis == "x":
+        scale = abs(transformed[1][0] - transformed[0][0])
     else:
-        shadow = FancyBboxPatch(
-            (x - w / 2 + ox, y - h / 2 + oy),
-            w,
-            h,
-            boxstyle="round,pad=0.02",
-            facecolor=shadow_color,
-            edgecolor="none",
-            zorder=1.5,
-        )
-
-    ax.add_patch(shadow)
+        scale = abs(transformed[1][1] - transformed[0][1])
+    if scale <= 1e-9:
+        return 0.0
+    return pixels / scale
 
 
-def _draw_node_labels(ax, graph, pos, sizes, svg_hover_map=None):
-    """Draw centered text labels inside nodes."""
-    gs = graph.graph_style
+def _label_anchor_x(align: str, x: float, w: float, pad_x: float, line_width: float) -> float:
+    """Resolve the x anchor for a label line.
 
-    for i in range(graph.num_nodes):
-        x, y = pos[i, 0], pos[i, 1]
-        style = graph.get_style_for_node(i)
-        label = graph.node_labels[i]
+    Parameters
+    ----------
+    align : str
+        Horizontal alignment value.
+    x : float
+        Node center x-coordinate.
+    w : float
+        Node width.
+    pad_x : float
+        Horizontal padding in data units.
+    line_width : float
+        Line width in data units.
 
-        lines = label.split("\n")
-        # Use per-node effective font size when available, fall back to style
-        if graph.node_font_sizes is not None and i < graph.node_font_sizes.shape[0]:
-            fontsize = graph.node_font_sizes[i].item()
-        else:
-            fontsize = style.font_size
-        font_family = style.font_family_list
-        font_weight = style.font_weight
-        font_style = style.font_style
+    Returns
+    -------
+    float
+        X coordinate for the line anchor.
+    """
+    if align == "left":
+        return x - w / 2 + pad_x
+    if align == "right":
+        return x + w / 2 - pad_x - line_width
+    return x - line_width / 2
 
-        if len(lines) == 1:
+
+def _label_anchor_y(valign: str, y: float, h: float, pad_y: float, block_height: float) -> float:
+    """Resolve the top of a multi-line label block.
+
+    Parameters
+    ----------
+    valign : str
+        Vertical alignment value.
+    y : float
+        Node center y-coordinate.
+    h : float
+        Node height.
+    pad_y : float
+        Vertical padding in data units.
+    block_height : float
+        Total block height in data units.
+
+    Returns
+    -------
+    float
+        Top edge of the laid-out text block.
+    """
+    if valign == "top":
+        return y + h / 2 - pad_y
+    if valign == "bottom":
+        return y - h / 2 + pad_y + block_height
+    return y + block_height / 2
+
+
+def _segment_font_properties(
+    segment_style: Dict[str, Any], style: Any
+) -> Tuple[str, str, str, str]:
+    """Resolve font properties for one rich-text segment.
+
+    Parameters
+    ----------
+    segment_style : dict[str, Any]
+        Parsed rich-text formatting flags.
+    style : Any
+        Base node style.
+
+    Returns
+    -------
+    tuple[str, str, str, str]
+        Font family, font weight, font style, and color.
+    """
+    font_family = FONT_FAMILY_MONO[0] if segment_style.get("mono") else style.font_family_list[0]
+    font_weight = "bold" if segment_style.get("bold") else style.font_weight
+    font_style = "italic" if segment_style.get("italic") else style.font_style
+    color = str(segment_style.get("color") or style.font_color)
+    return font_family, font_weight, font_style, color
+
+
+def _split_rich_lines(
+    segments: Sequence[Tuple[str, Dict[str, Any]]],
+) -> List[List[Tuple[str, Dict[str, Any]]]]:
+    """Split rich-text segments into line-wise segment groups.
+
+    Parameters
+    ----------
+    segments : sequence[tuple[str, dict[str, Any]]]
+        Parsed rich-text segments.
+
+    Returns
+    -------
+    list[list[tuple[str, dict[str, Any]]]]
+        Segments grouped per output line.
+    """
+    lines: List[List[Tuple[str, Dict[str, Any]]]] = [[]]
+    for text, segment_style in segments:
+        parts = text.split("\n")
+        for part_index, part in enumerate(parts):
+            if part:
+                lines[-1].append((part, segment_style))
+            if part_index != len(parts) - 1:
+                lines.append([])
+    return lines
+
+
+def _apply_text_effects(text_artist: Any, style: Any) -> None:
+    """Apply optional outline effects to a text artist.
+
+    Parameters
+    ----------
+    text_artist : Any
+        Matplotlib text artist.
+    style : Any
+        Node style object.
+    """
+    if not style.text_outline:
+        return
+
+    import matplotlib.patheffects as pe
+
+    text_artist.set_path_effects(
+        [
+            pe.withStroke(
+                linewidth=style.text_outline_width,
+                foreground=style.text_outline_color,
+            )
+        ]
+    )
+
+
+def _draw_text_decoration(
+    ax: Any,
+    x0: float,
+    x1: float,
+    y: float,
+    color: str,
+    clip_patch: Optional[Any],
+    zorder: float,
+) -> None:
+    """Draw an underline or strike-through for a rich-text segment.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    x0 : float
+        Decoration start x-coordinate.
+    x1 : float
+        Decoration end x-coordinate.
+    y : float
+        Decoration y-coordinate.
+    color : str
+        Decoration color.
+    clip_patch : Any, optional
+        Clip patch for keeping the decoration inside the node.
+    zorder : float
+        Artist z-order.
+    """
+    from matplotlib.lines import Line2D
+
+    line = Line2D([x0, x1], [y, y], color=color, linewidth=1.0, zorder=zorder)
+    if clip_patch is not None:
+        line.set_clip_path(clip_patch)
+    ax.add_line(line)
+
+
+def _render_rich_label(
+    ax: Any,
+    label: str,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    font_size: float,
+    style: Any,
+    clip_patch: Optional[Any],
+    base_gid: str,
+    svg_hover_map: Optional[Dict[str, str]],
+) -> None:
+    """Render mixed-format node labels as per-segment text artists.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    label : str
+        Rich-format label text.
+    x : float
+        Node center x-coordinate.
+    y : float
+        Node center y-coordinate.
+    w : float
+        Node width.
+    h : float
+        Node height.
+    font_size : float
+        Base font size in points.
+    style : Any
+        Node style object.
+    clip_patch : Any, optional
+        Clip patch for label rendering.
+    base_gid : str
+        SVG hover identifier prefix.
+    svg_hover_map : dict[str, str], optional
+        SVG hover text accumulator.
+    """
+    segments = parse_rich_markup(label)
+    lines = _split_rich_lines(segments)
+    pad_x = _points_to_data_units(ax, style.padding[0], "x")
+    pad_y = _points_to_data_units(ax, style.padding[1], "y")
+    line_height = _points_to_data_units(ax, font_size * 1.2, "y")
+    total_height = max(line_height * len(lines), line_height)
+    block_top = _label_anchor_y(style.text_valign, y, h, pad_y, total_height)
+
+    for line_index, line_segments in enumerate(lines):
+        segment_widths: List[float] = []
+        for segment_text, segment_style in line_segments:
+            family, weight, _, _ = _segment_font_properties(segment_style, style)
+            width_pt, _ = measure_text(segment_text, family, font_size, weight)
+            segment_widths.append(_points_to_data_units(ax, width_pt, "x"))
+
+        line_width = sum(segment_widths)
+        current_x = _label_anchor_x(style.text_align, x, w, pad_x, line_width)
+        line_y = block_top - (line_index + 0.5) * line_height
+
+        for segment_index, (segment, segment_style) in enumerate(line_segments):
+            family, weight, font_style, color = _segment_font_properties(segment_style, style)
             text_artist = ax.text(
-                x,
-                y,
-                label,
-                ha="center",
+                current_x,
+                line_y,
+                segment,
+                ha="left",
                 va="center",
-                fontsize=fontsize,
-                fontfamily=font_family[0],
-                color=style.font_color,
-                fontweight=font_weight,
+                fontsize=font_size,
+                fontfamily=family,
+                fontweight=weight,
                 fontstyle=font_style,
+                color=color,
                 zorder=3,
                 clip_on=True,
             )
-            _set_svg_hover(text_artist, f"dagua-node-label-{i}", label, svg_hover_map)
-        else:
-            line_height = fontsize * 1.2
-            total_height = line_height * len(lines)
-            start_y = y + total_height / 2 - line_height / 2
+            if clip_patch is not None:
+                text_artist.set_clip_path(clip_patch)
+            _apply_text_effects(text_artist, style)
+            _set_svg_hover(
+                text_artist, f"{base_gid}-{line_index}-{segment_index}", label, svg_hover_map
+            )
 
-            for j, line in enumerate(lines):
-                ly = start_y - j * line_height
-                # Secondary lines slightly smaller
-                fs = fontsize if j == 0 else fontsize * gs.node_label_secondary_scale
-                text_artist = ax.text(
-                    x,
-                    ly,
-                    line,
-                    ha="center",
-                    va="center",
-                    fontsize=fs,
-                    fontfamily=font_family[0],
-                    color=style.font_color,
-                    fontweight=font_weight,
-                    fontstyle=font_style,
-                    zorder=3,
-                    clip_on=True,
+            segment_width = segment_widths[segment_index]
+            if segment_style.get("underline"):
+                underline_y = line_y - _points_to_data_units(ax, font_size * 0.32, "y")
+                _draw_text_decoration(
+                    ax,
+                    current_x,
+                    current_x + segment_width,
+                    underline_y,
+                    color,
+                    clip_patch,
+                    zorder=3.05,
                 )
-                _set_svg_hover(text_artist, f"dagua-node-label-{i}-{j}", label, svg_hover_map)
+            if segment_style.get("strike"):
+                strike_y = line_y + _points_to_data_units(ax, font_size * 0.08, "y")
+                _draw_text_decoration(
+                    ax,
+                    current_x,
+                    current_x + segment_width,
+                    strike_y,
+                    color,
+                    clip_patch,
+                    zorder=3.05,
+                )
+            current_x += segment_width
 
 
-def _draw_edges(ax, graph, curves: List[BezierCurve], svg_hover_map=None):
-    """Draw bezier edges with arrowheads.
+def _draw_node_labels(
+    ax: Any,
+    graph: Any,
+    pos: np.ndarray,
+    sizes: np.ndarray,
+    clip_patches: Optional[Sequence[Any]] = None,
+    svg_hover_map: Optional[Dict[str, str]] = None,
+) -> None:
+    """Draw node labels with alignment, rich-text, and outline support.
 
-    Edges are quiet: medium gray at 70% opacity, 0.75pt width.
-    Arrowheads: small filled triangles (5pt x 3.5pt).
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    graph : Any
+        Graph exposing Dagua's node-label API.
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]``.
+    sizes : numpy.ndarray
+        Node sizes with shape ``[N, 2]``.
+    clip_patches : sequence[Any], optional
+        Clip patches returned by :func:`_draw_nodes`. When omitted, labels are
+        rendered without per-node clipping for backward compatibility with
+        internal utility callers.
+    svg_hover_map : dict[str, str], optional
+        SVG hover text accumulator.
     """
-    from matplotlib.patches import FancyArrowPatch
+    gs = graph.graph_style
+    clip_patch_seq: Sequence[Any] = clip_patches or []
+
+    for i in range(graph.num_nodes):
+        x, y = float(pos[i, 0]), float(pos[i, 1])
+        w, h = float(sizes[i, 0]), float(sizes[i, 1])
+        style = graph.get_style_for_node(i)
+        label = graph.node_labels[i]
+        clip_patch = clip_patch_seq[i] if i < len(clip_patch_seq) else None
+
+        if graph.node_font_sizes is not None and i < graph.node_font_sizes.shape[0]:
+            fontsize = float(graph.node_font_sizes[i].item())
+        else:
+            fontsize = float(style.font_size)
+
+        if style.label_format == "rich":
+            _render_rich_label(
+                ax,
+                label,
+                x,
+                y,
+                w,
+                h,
+                fontsize,
+                style,
+                clip_patch,
+                f"dagua-node-label-{i}",
+                svg_hover_map,
+            )
+            continue
+
+        font_family = style.font_family_list[0]
+        pad_x = _points_to_data_units(ax, style.padding[0], "x")
+        pad_y = _points_to_data_units(ax, style.padding[1], "y")
+        if "\n" not in label:
+            text_x = _label_anchor_x(style.text_align, x, w, pad_x, 0.0)
+            if style.text_align == "center":
+                text_x = x
+            elif style.text_align == "right":
+                text_x = x + w / 2 - pad_x
+
+            if style.text_valign == "top":
+                text_y = y + h / 2 - pad_y
+            elif style.text_valign == "bottom":
+                text_y = y - h / 2 + pad_y
+            else:
+                text_y = y
+
+            text_artist = ax.text(
+                text_x,
+                text_y,
+                label,
+                ha=style.text_align,
+                va=style.text_valign,
+                fontsize=fontsize,
+                fontfamily=font_family,
+                color=style.font_color,
+                fontweight=style.font_weight,
+                fontstyle=style.font_style,
+                zorder=3,
+                clip_on=True,
+            )
+            if clip_patch is not None:
+                text_artist.set_clip_path(clip_patch)
+            _apply_text_effects(text_artist, style)
+            _set_svg_hover(text_artist, f"dagua-node-label-{i}", label, svg_hover_map)
+            continue
+
+        lines = label.split("\n")
+        line_height = _points_to_data_units(ax, fontsize * 1.2, "y")
+        total_height = line_height * len(lines)
+        block_top = _label_anchor_y(style.text_valign, y, h, pad_y, total_height)
+        text_x = (
+            x
+            if style.text_align == "center"
+            else _label_anchor_x(style.text_align, x, w, pad_x, 0.0)
+        )
+        if style.text_align == "right":
+            text_x = x + w / 2 - pad_x
+
+        for j, line in enumerate(lines):
+            line_y = block_top - (j + 0.5) * line_height
+            line_font_size = fontsize if j == 0 else fontsize * gs.node_label_secondary_scale
+            text_artist = ax.text(
+                text_x,
+                line_y,
+                line,
+                ha=style.text_align,
+                va="center",
+                fontsize=line_font_size,
+                fontfamily=font_family,
+                color=style.font_color,
+                fontweight=style.font_weight,
+                fontstyle=style.font_style,
+                zorder=3,
+                clip_on=True,
+            )
+            if clip_patch is not None:
+                text_artist.set_clip_path(clip_patch)
+            _apply_text_effects(text_artist, style)
+            _set_svg_hover(text_artist, f"dagua-node-label-{i}-{j}", label, svg_hover_map)
+
+
+def _draw_edge_marker(
+    ax: Any,
+    point: Tuple[float, float],
+    direction: Tuple[float, float],
+    marker: str,
+    style: Any,
+) -> None:
+    """Draw a custom edge endpoint marker.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    point : tuple[float, float]
+        Marker tip position.
+    direction : tuple[float, float]
+        Direction vector pointing out of the endpoint.
+    marker : str
+        Marker name.
+    style : Any
+        Edge style object.
+    """
+    from matplotlib.colors import to_rgba
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Circle, Polygon
+
+    dx, dy = direction
+    dist = float(np.hypot(dx, dy))
+    if dist <= 1e-9 or marker == "none":
+        return
+
+    ux, uy = dx / dist, dy / dist
+    px, py = -uy, ux
+    length = float(style.arrow_length)
+    width = float(style.arrow_width)
+    color = to_rgba(style.arrow_color or style.color, style.opacity)
+    filled = style.arrow_fill == "filled" and marker not in {"open", "vee", "tee", "crow"}
+    tip_x, tip_y = point
+
+    if marker in {"normal", "open"}:
+        base_x = tip_x - ux * length
+        base_y = tip_y - uy * length
+        polygon = Polygon(
+            [
+                (tip_x, tip_y),
+                (base_x + px * width / 2, base_y + py * width / 2),
+                (base_x - px * width / 2, base_y - py * width / 2),
+            ],
+            closed=True,
+            facecolor=color if marker == "normal" and filled else "none",
+            edgecolor=color,
+            linewidth=style.width,
+            joinstyle="round",
+            zorder=1.2,
+        )
+        ax.add_patch(polygon)
+        return
+
+    if marker == "vee":
+        base_x = tip_x - ux * length
+        base_y = tip_y - uy * length
+        ax.add_line(
+            Line2D(
+                [tip_x, base_x + px * width / 2],
+                [tip_y, base_y + py * width / 2],
+                color=color,
+                linewidth=style.width,
+                zorder=1.2,
+            )
+        )
+        ax.add_line(
+            Line2D(
+                [tip_x, base_x - px * width / 2],
+                [tip_y, base_y - py * width / 2],
+                color=color,
+                linewidth=style.width,
+                zorder=1.2,
+            )
+        )
+        return
+
+    if marker in {"dot", "circle"}:
+        radius = width * (0.32 if marker == "dot" else 0.5)
+        center_x = tip_x - ux * radius
+        center_y = tip_y - uy * radius
+        circle = Circle(
+            (center_x, center_y),
+            radius,
+            facecolor=color if filled else "none",
+            edgecolor=color,
+            linewidth=style.width,
+            zorder=1.2,
+        )
+        ax.add_patch(circle)
+        return
+
+    if marker == "diamond":
+        mid_x = tip_x - ux * (length / 2)
+        mid_y = tip_y - uy * (length / 2)
+        back_x = tip_x - ux * length
+        back_y = tip_y - uy * length
+        diamond = Polygon(
+            [
+                (tip_x, tip_y),
+                (mid_x + px * width / 2, mid_y + py * width / 2),
+                (back_x, back_y),
+                (mid_x - px * width / 2, mid_y - py * width / 2),
+            ],
+            closed=True,
+            facecolor=color if filled else "none",
+            edgecolor=color,
+            linewidth=style.width,
+            joinstyle="round",
+            zorder=1.2,
+        )
+        ax.add_patch(diamond)
+        return
+
+    if marker == "tee":
+        bar_x = tip_x - ux * (style.width / 2)
+        bar_y = tip_y - uy * (style.width / 2)
+        ax.add_line(
+            Line2D(
+                [bar_x + px * width / 2, bar_x - px * width / 2],
+                [bar_y + py * width / 2, bar_y - py * width / 2],
+                color=color,
+                linewidth=style.width,
+                zorder=1.2,
+            )
+        )
+        return
+
+    if marker == "crow":
+        back_x = tip_x - ux * length
+        back_y = tip_y - uy * length
+        for end_x, end_y in (
+            (back_x, back_y),
+            (back_x + px * width / 2, back_y + py * width / 2),
+            (back_x - px * width / 2, back_y - py * width / 2),
+        ):
+            ax.add_line(
+                Line2D(
+                    [tip_x, end_x],
+                    [tip_y, end_y],
+                    color=color,
+                    linewidth=style.width,
+                    zorder=1.2,
+                )
+            )
+
+
+def _draw_edges(
+    ax: Any,
+    graph: Any,
+    curves: List[BezierCurve],
+    svg_hover_map: Optional[Dict[str, str]] = None,
+) -> None:
+    """Draw bezier edges with configurable endpoint markers.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    graph : Any
+        Graph exposing Dagua's edge-style API.
+    curves : list[BezierCurve]
+        Routed edge curves.
+    svg_hover_map : dict[str, str], optional
+        SVG hover text accumulator.
+    """
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import PathPatch
     from matplotlib.path import Path
 
     for e_idx, curve in enumerate(curves):
         style = graph.get_style_for_edge(e_idx)
-
-        # Extend p1 slightly into the target node so arrowhead visually
-        # touches the node border (3px inset along curve direction)
-        p1 = curve.p1
-        if style.arrow != "none":
-            dx = p1[0] - curve.cp2[0]
-            dy = p1[1] - curve.cp2[1]
-            dist = (dx * dx + dy * dy) ** 0.5
-            if dist > 1e-6:
-                inset = 3.0
-                p1 = (p1[0] + dx / dist * inset, p1[1] + dy / dist * inset)
-
-        verts = [curve.p0, curve.cp1, curve.cp2, p1]
+        verts = [curve.p0, curve.cp1, curve.cp2, curve.p1]
         codes = [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4]
-        path = Path(verts, codes)
-
-        # Arrow style: "none" -> no arrowhead, otherwise small filled triangle
-        if style.arrow == "none":
-            arrowstyle = "-"
-        else:
-            arrow_l = style.arrow_length
-            arrow_w = style.arrow_width
-            arrowstyle = f"->,head_length={arrow_l},head_width={arrow_w}"
-
-        linestyle = "-"
-        if style.style == "dashed":
-            linestyle = "--"
-        elif style.style == "dotted":
-            linestyle = "-."
-
-        arrow = FancyArrowPatch(
-            path=path,
-            arrowstyle=arrowstyle,
-            color=style.color,
+        path_patch = PathPatch(
+            Path(verts, codes),
+            facecolor="none",
+            edgecolor=to_rgba(style.color, style.opacity),
             linewidth=style.width,
-            linestyle=linestyle,
-            alpha=style.opacity,
+            linestyle=_edge_linestyle(style),
+            capstyle="round",
+            joinstyle="round",
             zorder=1,
-            mutation_scale=1,
         )
-        ax.add_patch(arrow)
-        _set_svg_hover(arrow, f"dagua-edge-{e_idx}", _edge_hover_text(graph, e_idx), svg_hover_map)
+        ax.add_patch(path_patch)
+        _set_svg_hover(
+            path_patch, f"dagua-edge-{e_idx}", _edge_hover_text(graph, e_idx), svg_hover_map
+        )
+        _draw_edge_marker(
+            ax,
+            curve.p1,
+            (curve.p1[0] - curve.cp2[0], curve.p1[1] - curve.cp2[1]),
+            style.arrow,
+            style,
+        )
+        _draw_edge_marker(
+            ax,
+            curve.p0,
+            (curve.p0[0] - curve.cp1[0], curve.p0[1] - curve.cp1[1]),
+            style.tail_arrow,
+            style,
+        )
 
 
 def _draw_edge_labels(
-    ax,
-    graph,
+    ax: Any,
+    graph: Any,
     curves: List[BezierCurve],
     label_positions: Optional[List[Optional[Tuple[float, float]]]] = None,
-    svg_hover_map=None,
-):
-    """Draw edge labels offset from the curve midpoint.
+    svg_hover_map: Optional[Dict[str, str]] = None,
+) -> None:
+    """Draw edge labels using per-edge font settings.
 
-    Uses per-edge style for font size/color/background, with fallback to graph_style.
-    When label_positions is provided, uses pre-computed (x, y) positions.
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    graph : Any
+        Graph exposing Dagua's edge-label API.
+    curves : list[BezierCurve]
+        Routed edge curves.
+    label_positions : list[tuple[float, float] | None], optional
+        Pre-computed label positions.
+    svg_hover_map : dict[str, str], optional
+        SVG hover text accumulator.
     """
     gs = graph.graph_style
 
@@ -579,8 +1511,6 @@ def _draw_edge_labels(
             continue
 
         style = graph.get_style_for_edge(e_idx)
-
-        # Use pre-computed position if available
         if (
             label_positions is not None
             and e_idx < len(label_positions)
@@ -597,26 +1527,22 @@ def _draw_edge_labels(
                 label_side=style.label_side,
             )
 
-        font_size = style.label_font_size
-        font_color = style.label_font_color
-        label_bg = style.label_background
-        bg_opacity = gs.edge_label_background_opacity
-
+        font_family = style.label_font_family or RESOLVED_FONT
         text_artist = ax.text(
             lx,
             ly,
             label,
             ha="center",
             va="center",
-            fontsize=font_size,
-            fontweight="regular",
-            fontfamily=RESOLVED_FONT,
-            color=font_color,
+            fontsize=style.label_font_size,
+            fontweight=style.label_font_weight,
+            fontfamily=font_family,
+            color=style.label_font_color,
             bbox=dict(
                 boxstyle="round,pad=0.15",
-                facecolor=label_bg,
+                facecolor=style.label_background,
                 edgecolor="none",
-                alpha=bg_opacity,
+                alpha=gs.edge_label_background_opacity,
             ),
             zorder=4,
         )
