@@ -12,8 +12,10 @@ from dagua.graph import DaguaGraph
 from dagua.layout import layout
 from dagua.layout.engine import (
     _auto_layout_steps,
+    _create_optimizer,
     _edge_batch_size,
     _estimate_gpu_memory,
+    _estimate_hybrid_gpu_memory,
     _layout_inner,
     _make_amortized_loss,
     _overlap_interval,
@@ -22,7 +24,7 @@ from dagua.layout.engine import (
 )
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
 from dagua.layout.layers import build_layer_index
-from dagua.layout.multilevel import build_hierarchy, coarsen_once
+from dagua.layout.multilevel import _select_refinement_execution, build_hierarchy, coarsen_once
 from dagua.metrics import compute_all_metrics
 
 
@@ -266,6 +268,41 @@ def test_gpu_memory_estimate_no_phantom_edges() -> None:
     assert streamed < resident - 500_000_000
 
 
+def test_hybrid_memory_estimate_optimizer_tiers() -> None:
+    """Hybrid memory estimates should get cheaper as optimizer state shrinks."""
+    num_nodes = 200_000_000
+    num_edges = 300_000_000
+
+    adam = _estimate_hybrid_gpu_memory(num_nodes, num_edges, optimizer_type="adam")
+    nesterov = _estimate_hybrid_gpu_memory(num_nodes, num_edges, optimizer_type="sgd_nesterov")
+    sgd = _estimate_hybrid_gpu_memory(num_nodes, num_edges, optimizer_type="sgd")
+
+    assert adam > nesterov > sgd
+    assert pytest.approx((adam - nesterov) / 1024**3, rel=0.0, abs=0.2) == 1.5
+    assert pytest.approx((nesterov - sgd) / 1024**3, rel=0.0, abs=0.2) == 1.5
+
+
+def test_create_optimizer_uses_requested_tier() -> None:
+    """Optimizer creation should preserve the requested algorithm and LR scaling."""
+    pos = torch.zeros((4, 2), requires_grad=True)
+    config = LayoutConfig(lr=0.1)
+
+    adam = _create_optimizer(pos, config, optimizer_type="adam")
+    nesterov = _create_optimizer(pos, config, optimizer_type="sgd_nesterov")
+    sgd = _create_optimizer(pos, config, optimizer_type="sgd")
+
+    assert isinstance(adam, torch.optim.Adam)
+    assert adam.param_groups[0]["lr"] == pytest.approx(0.1)
+    assert isinstance(nesterov, torch.optim.SGD)
+    assert nesterov.param_groups[0]["lr"] == pytest.approx(0.3)
+    assert nesterov.param_groups[0]["nesterov"] is True
+    assert nesterov.param_groups[0]["momentum"] == pytest.approx(0.9)
+    assert isinstance(sgd, torch.optim.SGD)
+    assert sgd.param_groups[0]["lr"] == pytest.approx(0.5)
+    assert sgd.param_groups[0]["nesterov"] is False
+    assert sgd.param_groups[0]["momentum"] == pytest.approx(0.0)
+
+
 def test_memory_strategy_selects_plb_not_hybrid_at_50m(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -295,6 +332,128 @@ def test_memory_strategy_selects_plb_not_hybrid_at_50m(
     assert use_plb is True
     assert use_checkpointing is False
     assert use_hybrid is False
+
+
+def test_refinement_execution_uses_nesterov_fallback_when_adam_does_not_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Huge refinement levels should try cheaper hybrid optimizers before CPU."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+
+    def _fake_estimate_gpu_memory(
+        n: int,
+        num_edges: int,
+        per_loss_bw: bool = False,
+        *,
+        edges_on_cpu: bool = False,
+        edge_batch: int = 0,
+        n_active_override: int | None = None,
+    ) -> int:
+        """Return large Adam estimates that force the fallback cascade."""
+        del n, num_edges, edges_on_cpu, edge_batch, n_active_override
+        return 120 if per_loss_bw else 130
+
+    def _fake_estimate_hybrid_gpu_memory(
+        n: int,
+        num_edges: int,
+        *,
+        edge_batch: int = 5_000_000,
+        optimizer_type: str = "adam",
+    ) -> int:
+        """Return synthetic hybrid estimates keyed by optimizer tier and batch."""
+        del n, num_edges
+        lookup = {
+            ("adam", 5_000_000): 70,
+            ("sgd_nesterov", 5_000_000): 60,
+            ("sgd_nesterov", 2_500_000): 45,
+            ("sgd", 5_000_000): 40,
+        }
+        return lookup.get((optimizer_type, edge_batch), 80)
+
+    monkeypatch.setattr(engine_module, "_estimate_gpu_memory", _fake_estimate_gpu_memory)
+    monkeypatch.setattr(
+        engine_module,
+        "_estimate_hybrid_gpu_memory",
+        _fake_estimate_hybrid_gpu_memory,
+    )
+    monkeypatch.setattr(multilevel_module, "_vram_fits", lambda needed_bytes: needed_bytes <= 50)
+
+    force_cpu, force_hybrid, optimizer_type, edge_batch = _select_refinement_execution(
+        200_000_000,
+        300_000_000,
+        LayoutConfig(device="cuda"),
+        "cuda",
+    )
+
+    assert force_cpu is False
+    assert force_hybrid is True
+    assert optimizer_type == "sgd_nesterov"
+    assert edge_batch == 2_500_000
+
+
+def test_refinement_execution_keeps_50m_behavior_without_sgd_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new fallback tiers should stay disabled at and below 50M nodes."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+
+    monkeypatch.setattr(
+        engine_module,
+        "_estimate_gpu_memory",
+        lambda *args, **kwargs: 120,
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "_estimate_hybrid_gpu_memory",
+        lambda *args, **kwargs: 70 if kwargs.get("optimizer_type", "adam") == "adam" else 40,
+    )
+    monkeypatch.setattr(multilevel_module, "_vram_fits", lambda needed_bytes: needed_bytes <= 50)
+
+    force_cpu, force_hybrid, optimizer_type, edge_batch = _select_refinement_execution(
+        50_000_000,
+        75_000_000,
+        LayoutConfig(device="cuda"),
+        "cuda",
+    )
+
+    assert force_cpu is True
+    assert force_hybrid is False
+    assert optimizer_type == "adam"
+    assert edge_batch == 5_000_000
+
+
+def test_refinement_execution_respects_adam_only_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """adam-only fallback policy should skip SGD tiers and fall back to CPU."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+
+    monkeypatch.setattr(
+        engine_module,
+        "_estimate_gpu_memory",
+        lambda *args, **kwargs: 120,
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "_estimate_hybrid_gpu_memory",
+        lambda *args, **kwargs: 70 if kwargs.get("optimizer_type", "adam") == "adam" else 40,
+    )
+    monkeypatch.setattr(multilevel_module, "_vram_fits", lambda needed_bytes: needed_bytes <= 50)
+
+    force_cpu, force_hybrid, optimizer_type, edge_batch = _select_refinement_execution(
+        200_000_000,
+        300_000_000,
+        LayoutConfig(device="cuda", optimizer_fallback="adam"),
+        "cuda",
+    )
+
+    assert force_cpu is True
+    assert force_hybrid is False
+    assert optimizer_type == "adam"
+    assert edge_batch == 5_000_000
 
 
 def test_auto_steps_scaling() -> None:

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Literal, Optional, Union
 
 import torch
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
@@ -65,6 +65,14 @@ AUTOGRAD_INTERMEDIATE_FACTOR = 2.0
 INTERMEDIATE_SAFETY_FACTOR = 1.5
 CHECKPOINT_MEMORY_REDUCTION = 2
 CUDA_ACTIVE_SET_HEADROOM = 0.85
+DEFAULT_HYBRID_EDGE_BATCH = 5_000_000
+CUDA_CONTEXT_OVERHEAD_BYTES = 500 * 1024 * 1024
+HYBRID_OPTIMIZER_LR_MULTIPLIERS = {
+    "adam": 1.0,
+    "sgd_nesterov": 3.0,
+    "sgd": 5.0,
+}
+OptimizerType = Literal["adam", "sgd_nesterov", "sgd"]
 
 
 @dataclass
@@ -547,12 +555,47 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
         graph._restore_after_layout()
 
 
+def _create_optimizer(
+    pos: torch.Tensor,
+    config: LayoutConfig,
+    optimizer_type: OptimizerType = "adam",
+) -> torch.optim.Optimizer:
+    """Create the position optimizer for the current layout solve.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Learnable position tensor shaped ``[N, 2]``.
+    config : LayoutConfig
+        Layout configuration that provides the base learning rate.
+    optimizer_type : {"adam", "sgd_nesterov", "sgd"}, default="adam"
+        Optimizer tier selected for the current solve.
+
+    Returns
+    -------
+    torch.optim.Optimizer
+        Optimizer configured for the requested tier.
+    """
+    lr = config.lr * HYBRID_OPTIMIZER_LR_MULTIPLIERS[optimizer_type]
+    if optimizer_type == "sgd_nesterov":
+        return torch.optim.SGD(
+            [pos],
+            lr=lr,
+            momentum=0.9,
+            nesterov=True,
+        )
+    if optimizer_type == "sgd":
+        return torch.optim.SGD([pos], lr=lr)
+    return torch.optim.Adam([pos], lr=lr)
+
+
 def _layout_inner(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: torch.Tensor,
     config: LayoutConfig,
     device: str = "cpu",
+    optimizer_type: OptimizerType = "adam",
     init_pos: Optional[torch.Tensor] = None,
     clusters: Optional[dict] = None,
     cluster_parents: Optional[dict] = None,
@@ -579,6 +622,9 @@ def _layout_inner(
         Layout configuration for the current solve.
     device : str, default="cpu"
         Target device for optimization.
+    optimizer_type : {"adam", "sgd_nesterov", "sgd"}, default="adam"
+        Optimizer tier selected for this solve. Non-Adam tiers are used only
+        for VRAM-constrained hybrid refinement.
     init_pos : torch.Tensor, optional
         Warm-start positions shaped ``[N, 2]``.
     clusters : dict, optional
@@ -779,7 +825,7 @@ def _layout_inner(
     # Step 2: Set up optimization
     pos = pos.clone().detach().requires_grad_(True)
     del init_pos  # Free pre-clone positions (8 GB at 1B nodes)
-    optimizer = torch.optim.Adam([pos], lr=config.lr)
+    optimizer = _create_optimizer(pos, config, optimizer_type=optimizer_type)
 
     # Step 3: Build loss functions ONCE (reuse across steps via mutable refs)
     # batch_edges_ref is a mutable container so lambdas capture the reference
@@ -1559,8 +1605,8 @@ def _estimate_hybrid_gpu_memory(
     n: int,
     num_edges: int,
     *,
-    edges_on_cpu: bool = False,
-    edge_batch: int = 0,
+    edge_batch: int = DEFAULT_HYBRID_EDGE_BATCH,
+    optimizer_type: OptimizerType = "adam",
 ) -> int:
     """Estimate GPU memory when heavy losses run on CPU (hybrid mode).
 
@@ -1570,10 +1616,11 @@ def _estimate_hybrid_gpu_memory(
         Number of nodes in the layout problem.
     num_edges : int
         Number of edges in the layout problem.
-    edges_on_cpu : bool, default=False
-        Whether edges are streamed from CPU instead of kept resident on GPU.
-    edge_batch : int, default=0
-        Edge batch size. ``0`` means the full edge set is transferred.
+    edge_batch : int, default=5_000_000
+        Edge batch size resident on GPU for the current step. ``0`` means the
+        full edge set is transferred.
+    optimizer_type : {"adam", "sgd_nesterov", "sgd"}, default="adam"
+        Optimizer tier whose state must fit alongside the GPU position tensor.
 
     Returns
     -------
@@ -1581,20 +1628,15 @@ def _estimate_hybrid_gpu_memory(
         Estimated peak GPU memory in bytes while hybrid mode keeps the heavy
         node losses on CPU.
     """
-    base = n * 2 * 4 * 4
-    base += n * (2 * 4 + 2 * 8)
     actual_batch = num_edges if edge_batch <= 0 else min(edge_batch, num_edges)
-    if edges_on_cpu:
-        base += actual_batch * 2 * 8
-    else:
-        base += num_edges * 2 * 8
-
+    bytes_per_pos = n * 2 * 4
+    optimizer_mem = bytes_per_pos * {"adam": 4, "sgd_nesterov": 3, "sgd": 2}[optimizer_type]
+    edge_mem = actual_batch * 2 * 8
     edge_forward = actual_batch * 4 * 8
-    grad_transfer = n * 2 * 4
+    autograd_overhead = edge_forward * AUTOGRAD_INTERMEDIATE_FACTOR * INTERMEDIATE_SAFETY_FACTOR
+    grad_transfer = bytes_per_pos
     return int(
-        base
-        + edge_forward * AUTOGRAD_INTERMEDIATE_FACTOR * INTERMEDIATE_SAFETY_FACTOR
-        + grad_transfer
+        optimizer_mem + edge_mem + autograd_overhead + grad_transfer + CUDA_CONTEXT_OVERHEAD_BYTES
     )
 
 

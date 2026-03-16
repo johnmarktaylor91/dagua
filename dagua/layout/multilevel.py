@@ -20,7 +20,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Union
+from typing import Any, Callable, List, Literal, Optional, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -38,6 +38,10 @@ _MIN_HUB_THRESHOLD = 8
 _HUB_PERCENTILE = 90.0
 _SKIP_ANCHOR_DEGREE = 2
 _SKIP_ANCHOR_SPAN = 1.5
+_HUGE_GRAPH_REFINEMENT_THRESHOLD = 50_000_000
+_FALLBACK_BATCH_SCALES = (1.0, 0.5, 0.25)
+
+OptimizerType = Literal["adam", "sgd_nesterov", "sgd"]
 
 try:
     from numba import njit as _numba_njit
@@ -305,6 +309,137 @@ def _can_prolong_on_gpu(
     needed_bytes += fine_n * pos.shape[1] * pos.element_size()
     needed_bytes += fine_n * pos.shape[1] * pos.element_size()
     return VRAMBudget().fits(needed_bytes)
+
+
+def _select_refinement_execution(
+    fine_n: int,
+    num_edges: int,
+    config: LayoutConfig,
+    device: str,
+) -> tuple[bool, bool, OptimizerType, int]:
+    """Choose device mode, optimizer tier, and edge batch for a refine level.
+
+    Parameters
+    ----------
+    fine_n : int
+        Number of nodes in the refine-level graph.
+    num_edges : int
+        Number of edges in the refine-level graph.
+    config : LayoutConfig
+        Layout configuration for the current solve.
+    device : str
+        Requested multilevel device.
+
+    Returns
+    -------
+    tuple[bool, bool, {"adam", "sgd_nesterov", "sgd"}, int]
+        ``(force_cpu, force_hybrid, optimizer_type, edge_batch)`` for the level.
+    """
+    if device != "cuda":
+        return False, False, "adam", config.edge_batch_size
+
+    from dagua.layout.engine import (
+        CHECKPOINT_MEMORY_REDUCTION,
+        DEFAULT_HYBRID_EDGE_BATCH,
+        _estimate_gpu_memory,
+        _estimate_hybrid_gpu_memory,
+    )
+
+    base_batch = config.edge_batch_size or DEFAULT_HYBRID_EDGE_BATCH
+    level_optimizer_type: OptimizerType = "adam"
+
+    mem_full = _estimate_gpu_memory(
+        fine_n,
+        num_edges,
+        per_loss_bw=False,
+        edges_on_cpu=True,
+        edge_batch=base_batch,
+    )
+    mem_plb = _estimate_gpu_memory(
+        fine_n,
+        num_edges,
+        per_loss_bw=True,
+        edges_on_cpu=True,
+        edge_batch=base_batch,
+    )
+    mem_plb_ckpt = mem_plb // CHECKPOINT_MEMORY_REDUCTION
+
+    if (
+        config.per_loss_backward == "off"
+        and config.gradient_checkpointing == "off"
+        and config.hybrid_device == "off"
+    ):
+        return (
+            (False, False, level_optimizer_type, base_batch)
+            if _vram_fits(mem_full)
+            else (
+                True,
+                False,
+                level_optimizer_type,
+                base_batch,
+            )
+        )
+
+    if (
+        config.per_loss_backward != "on"
+        and config.gradient_checkpointing != "on"
+        and config.hybrid_device != "on"
+        and _vram_fits(mem_full)
+    ):
+        return False, False, level_optimizer_type, base_batch
+
+    if (
+        config.gradient_checkpointing != "on"
+        and config.hybrid_device != "on"
+        and _vram_fits(mem_plb)
+    ):
+        return False, False, level_optimizer_type, base_batch
+
+    if (
+        config.hybrid_device != "on"
+        and config.gradient_checkpointing != "off"
+        and _vram_fits(mem_plb_ckpt)
+    ):
+        return False, False, level_optimizer_type, base_batch
+
+    if config.hybrid_device == "off":
+        return True, False, level_optimizer_type, base_batch
+
+    hybrid_mem = _estimate_hybrid_gpu_memory(
+        fine_n,
+        num_edges,
+        edge_batch=base_batch,
+        optimizer_type="adam",
+    )
+    if _vram_fits(hybrid_mem):
+        return False, True, level_optimizer_type, base_batch
+
+    if fine_n <= _HUGE_GRAPH_REFINEMENT_THRESHOLD:
+        return True, False, level_optimizer_type, base_batch
+
+    fallback_policy = config.optimizer_fallback
+    if fallback_policy == "adam":
+        return True, False, level_optimizer_type, base_batch
+
+    fallback_optimizers: tuple[OptimizerType, ...]
+    if fallback_policy == "sgd":
+        fallback_optimizers = ("sgd",)
+    else:
+        fallback_optimizers = ("sgd_nesterov", "sgd")
+
+    for optimizer_type in fallback_optimizers:
+        for batch_scale in _FALLBACK_BATCH_SCALES:
+            test_batch = max(1, int(base_batch * batch_scale))
+            test_mem = _estimate_hybrid_gpu_memory(
+                fine_n,
+                num_edges,
+                edge_batch=test_batch,
+                optimizer_type=optimizer_type,
+            )
+            if _vram_fits(test_mem):
+                return False, True, optimizer_type, test_batch
+
+    return True, False, level_optimizer_type, base_batch
 
 
 def _coarsen_once_streaming(
@@ -1084,7 +1219,9 @@ def multilevel_layout(
                 per_loss_backward=config.per_loss_backward,
                 gradient_checkpointing=config.gradient_checkpointing,
                 hybrid_device=config.hybrid_device,
+                optimizer_fallback=config.optimizer_fallback,
                 num_workers=config.num_workers,
+                edge_batch_size=config.edge_batch_size,
             )
 
         # Offload original graph to disk during Phase 2 — not needed until
@@ -1223,29 +1360,14 @@ def multilevel_layout(
                     pass
             _reset_peak()
 
-            force_hybrid = False
-            force_cpu = False
-            if device == "cuda":
-                from dagua.layout.engine import (
-                    _estimate_gpu_memory,
-                    _estimate_hybrid_gpu_memory,
-                )
-
-                next_level_mem = _estimate_gpu_memory(
+            force_cpu, force_hybrid, level_optimizer_type, level_edge_batch = (
+                _select_refinement_execution(
                     fine_n,
                     n_fine_edges,
-                    per_loss_bw=True,
-                    edges_on_cpu=True,
-                    edge_batch=config.edge_batch_size or 5_000_000,
+                    config,
+                    device,
                 )
-                if not _vram_fits(next_level_mem):
-                    # Check if hybrid fits (pos + optimizer + edge losses only)
-                    hybrid_mem = _estimate_hybrid_gpu_memory(fine_n, n_fine_edges)
-                    if _vram_fits(hybrid_mem):
-                        force_hybrid = True
-                    else:
-                        # Even hybrid doesn't fit — fall back to full CPU
-                        force_cpu = True
+            )
 
             assert pos is not None
             assert level.fine_to_coarse is not None
@@ -1284,6 +1406,20 @@ def multilevel_layout(
 
                 refine_config = _copy.copy(refine_config)
                 refine_config.hybrid_device = "on"
+            if fine_n > _HUGE_GRAPH_REFINEMENT_THRESHOLD and i == 0:
+                if not force_hybrid:
+                    import copy as _copy
+
+                    refine_config = _copy.copy(refine_config)
+                refine_config.steps = min(refine_config.steps, 30)
+            if (
+                fine_n > _HUGE_GRAPH_REFINEMENT_THRESHOLD
+                and refine_config.edge_batch_size != level_edge_batch
+            ):
+                import copy as _copy
+
+                refine_config = _copy.copy(refine_config)
+                refine_config.edge_batch_size = level_edge_batch
             level_layer_index = (
                 build_layer_index(level.fine_layer_assignments, device="cpu")
                 if level.fine_layer_assignments is not None
@@ -1301,6 +1437,7 @@ def multilevel_layout(
                 fine_sizes,
                 refine_config,
                 device=level_device,
+                optimizer_type=level_optimizer_type,
                 init_pos=pos,
                 layer_assignments=level.fine_layer_assignments,
                 progress_context=ProgressContext(indent="    "),
