@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from functools import lru_cache
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -46,12 +46,13 @@ class VRAMBudget:
     def dynamic_safety(self) -> float:
         """Return a safety factor based on allocator fragmentation.
 
-        Clean state (``frag_ratio > 0.9``): aggressive ``0.85``.
-        Moderate state (``0.5-0.9``): linear interpolation.
-        Fragmented state (``frag_ratio < 0.5``): conservative ``0.60``.
+        The baseline headroom depends on total VRAM so consumer cards stay more
+        conservative than large datacenter GPUs. Fragmentation can only reduce
+        that baseline further.
         """
         clamped = max(0.5, min(self._frag_ratio, 1.0))
-        return 0.60 + (clamped - 0.5) * (0.85 - 0.60) / 0.5
+        frag_safety = 0.60 + (clamped - 0.5) * (0.85 - 0.60) / 0.5
+        return min(_vram_safety_factor(self._total), frag_safety)
 
     def fits(self, needed_bytes: int) -> bool:
         """Return whether ``needed_bytes`` fit in free VRAM with headroom.
@@ -92,6 +93,33 @@ def _vram_fits(needed_bytes: int, safety: float = 0.8) -> bool:
     """
     _ = safety
     return VRAMBudget().fits(needed_bytes)
+
+
+def _vram_safety_factor(total_bytes: Optional[int] = None) -> float:
+    """Return the VRAM headroom factor for the active CUDA device.
+
+    Parameters
+    ----------
+    total_bytes : int, optional
+        Explicit total VRAM capacity in bytes. When omitted, the value is read
+        from the current CUDA device.
+
+    Returns
+    -------
+    float
+        Safety factor tuned by GPU memory class: ``0.75`` for cards below
+        16 GB, ``0.80`` for 16-32 GB, and ``0.85`` for 32 GB or larger.
+    """
+    if total_bytes is None:
+        if not torch.cuda.is_available():
+            return 0.75
+        total_bytes = torch.cuda.get_device_properties(0).total_memory
+
+    if total_bytes < 16 * 1024**3:
+        return 0.75
+    if total_bytes < 32 * 1024**3:
+        return 0.80
+    return 0.85
 
 
 def measure_text(
