@@ -409,7 +409,7 @@ GRAPHVIZ_MATCH_DEFAULTS: Dict[str, Any] = {
     "font_size": 14.0,
     "arrow_length": 20.0,
     "arrow_width": 14.0,
-    "arrow_scale": 40.0,
+    "arrow_scale": 32.0,
     "edge_width": 2.0,
     "edge_opacity": 1.0,
     "min_height": 36.0,
