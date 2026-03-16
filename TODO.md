@@ -33,9 +33,12 @@ while Dagua continues to run. Dagua handles 50K nodes in ~8 min and 100K in ~35 
 
 ### Rendering
 - [ ] Multi-line node labels: secondary line font scaling is hardcoded (0.8x)
-- [ ] Edge arrowheads: mutation_scale=1 makes heads very small at some zoom levels
 - [ ] Cluster label position is hardcoded (top-left) — should respect ClusterStyle.label_position
 - [ ] No legend for node types / edge types
+- [ ] Cluster box too narrow when member nodes are in a vertical column — needs layout-aware minimum width or horizontal spread
+- [ ] BT direction: arrowheads missing or pointing wrong direction
+- [ ] LR/RL direction: nodes render as narrow pills — node sizing doesn't adapt for horizontal layout
+- [ ] Ortho edge routing renders as bezier/spline instead of right-angle segments
 
 ### API / UX
 - [ ] `from_edge_index` doesn't accept `labels` kwarg — must set manually
