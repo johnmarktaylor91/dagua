@@ -260,6 +260,25 @@ def test_coarsen_once_streaming_logs_gpu_skip_reason(
         lambda _num_nodes: (None, "insufficient VRAM"),
     )
 
+    def _fake_cpu_assignment(
+        min_neighbor: torch.Tensor,
+        num_nodes: int,
+        layers: torch.Tensor,
+        layer_counts: torch.Tensor,
+        layer_offsets: torch.Tensor,
+        index_dtype: torch.dtype,
+        progress: object,
+    ) -> tuple[torch.Tensor, int, bool, float]:
+        """Return a deterministic CPU-only streaming assignment stub."""
+        del min_neighbor, layers, layer_counts, layer_offsets, progress
+        return torch.arange(num_nodes, dtype=index_dtype) // 2, 3, False, 0.0
+
+    monkeypatch.setattr(
+        multilevel_module,
+        "_assign_streaming_coarse_groups",
+        _fake_cpu_assignment,
+    )
+
     _coarsen_once_streaming(
         edge_index=edge_index,
         N=5,
@@ -291,6 +310,25 @@ def test_coarsen_once_streaming_logs_gpu_activation(
         "_can_use_gpu_for_streaming_coarsen",
         lambda _num_nodes: ("cuda", ""),
     )
+
+    def _fake_assign_streaming_groups(
+        min_neighbor: torch.Tensor,
+        num_nodes: int,
+        layers: torch.Tensor,
+        layer_counts: torch.Tensor,
+        layer_offsets: torch.Tensor,
+        index_dtype: torch.dtype,
+        progress: object,
+    ) -> tuple[torch.Tensor, int, bool, float]:
+        """Return a deterministic CUDA-activated assignment stub."""
+        del min_neighbor, layers, layer_counts, layer_offsets, progress
+        return torch.arange(num_nodes, dtype=index_dtype) // 2, 2, True, 0.001
+
+    monkeypatch.setattr(
+        multilevel_module,
+        "_assign_streaming_coarse_groups",
+        _fake_assign_streaming_groups,
+    )
     monkeypatch.setattr(
         multilevel_module,
         "_build_streaming_min_neighbor",
@@ -321,7 +359,545 @@ def test_coarsen_once_streaming_logs_gpu_activation(
         progress=messages.append,
     )
 
-    assert "GPU coarsen: scatter + dedup on CUDA (3.0ms)" in messages
+    assert "GPU coarsen: assignment + scatter + dedup on CUDA (4.0ms)" in messages
+
+
+def _make_streaming_assignment_case(
+    layer_width: int = 200,
+    num_layers: int = 50,
+) -> tuple[torch.Tensor, int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build a deterministic streaming-coarsening fixture.
+
+    Parameters
+    ----------
+    layer_width : int, default=200
+        Number of nodes in each layer.
+    num_layers : int, default=50
+        Number of layers in the synthetic graph.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        Empty edge index, node count, node sizes, layers, layer counts, layer
+        offsets, and a deterministic ``min_neighbor`` signature.
+    """
+    num_nodes = layer_width * num_layers
+    edge_index = torch.zeros((2, 0), dtype=torch.long)
+    node_sizes = torch.full((num_nodes, 2), 10.0)
+    layers = torch.arange(num_nodes, dtype=torch.long) // layer_width
+    layer_counts = torch.full((num_layers,), layer_width, dtype=torch.long)
+    layer_offsets = torch.zeros(num_layers + 1, dtype=torch.long)
+    layer_offsets[1:] = layer_counts.cumsum(0)
+    local_index = torch.arange(num_nodes, dtype=torch.long) % layer_width
+    min_neighbor = (local_index * 17 + layers * 13) % num_nodes
+    return edge_index, num_nodes, node_sizes, layers, layer_counts, layer_offsets, min_neighbor
+
+
+def _make_streaming_tie_case(
+    layer_width: int = 240,
+    num_layers: int = 12,
+) -> tuple[torch.Tensor, int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build a streaming-coarsening fixture with repeated tie values.
+
+    Parameters
+    ----------
+    layer_width : int, default=240
+        Number of nodes per layer.
+    num_layers : int, default=12
+        Number of layers in the synthetic graph.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        Empty edge index, node count, node sizes, layers, layer counts, layer
+        offsets, and a tie-heavy ``min_neighbor`` signature.
+    """
+    edge_index, num_nodes, node_sizes, layers, layer_counts, layer_offsets, _ = (
+        _make_streaming_assignment_case(layer_width=layer_width, num_layers=num_layers)
+    )
+    tie_bucket = (torch.arange(num_nodes, dtype=torch.long) % layer_width) // 24
+    min_neighbor = tie_bucket + layers * 5
+    return edge_index, num_nodes, node_sizes, layers, layer_counts, layer_offsets, min_neighbor
+
+
+def _make_test_layered_dag(
+    nodes_per_layer: int,
+    num_layers: int,
+) -> tuple[torch.Tensor, int, torch.Tensor]:
+    """Build a simple layered DAG for end-to-end multilevel tests.
+
+    Parameters
+    ----------
+    nodes_per_layer : int
+        Number of nodes in each DAG layer.
+    num_layers : int
+        Number of layers in the graph.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int, torch.Tensor]
+        Edge index, total node count, and node sizes.
+    """
+    num_nodes = nodes_per_layer * num_layers
+    src: list[int] = []
+    tgt: list[int] = []
+    for layer_idx in range(num_layers - 1):
+        src_base = layer_idx * nodes_per_layer
+        tgt_base = (layer_idx + 1) * nodes_per_layer
+        for node_idx in range(nodes_per_layer):
+            for offset in range(min(3, nodes_per_layer)):
+                src.append(src_base + node_idx)
+                tgt.append(tgt_base + (node_idx + offset) % nodes_per_layer)
+    edge_index = torch.tensor([src, tgt], dtype=torch.long)
+    node_sizes = torch.full((num_nodes, 2), 10.0)
+    return edge_index, num_nodes, node_sizes
+
+
+def _run_streaming_coarsen_with_min_neighbor(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    min_neighbor: torch.Tensor,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    layers: torch.Tensor,
+    layer_counts: torch.Tensor,
+    layer_offsets: torch.Tensor,
+    simulate_cuda: bool,
+    free_vram: int = 1_000_000_000,
+) -> torch.Tensor:
+    """Run the streaming coarsener with a patched min-neighbor signature.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Test monkeypatch fixture.
+    min_neighbor : torch.Tensor
+        Deterministic minimum-neighbor signature with shape ``[N]``.
+    edge_index : torch.Tensor
+        Fine edge index with shape ``[2, E]``.
+    num_nodes : int
+        Fine-graph node count.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    layers : torch.Tensor
+        Layer assignments with shape ``[N]``.
+    layer_counts : torch.Tensor
+        Node counts per layer with shape ``[L]``.
+    layer_offsets : torch.Tensor
+        Layer offsets with shape ``[L + 1]``.
+    simulate_cuda : bool
+        Whether to drive the CUDA segmented-sort branch using CPU-backed test
+        doubles for the device-hop helpers.
+    free_vram : int, default=1_000_000_000
+        Mocked free VRAM reported by ``torch.cuda.mem_get_info``.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU ``fine_to_coarse`` assignment produced by
+        ``_coarsen_once_streaming()``.
+    """
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+    layers_module = importlib.import_module("dagua.layout.layers")
+
+    monkeypatch.setattr(
+        multilevel_module,
+        "_build_streaming_min_neighbor",
+        lambda edge_index, num_nodes, index_dtype, gpu_device: (
+            min_neighbor.to(dtype=index_dtype),
+            False,
+            0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        multilevel_module,
+        "_deduplicate_streaming_coarse_edges",
+        lambda edge_index, fine_to_coarse, num_coarse_nodes, output_device, gpu_device: (
+            torch.zeros((2, 0), dtype=torch.long, device=output_device),
+            False,
+            0.0,
+        ),
+    )
+
+    if simulate_cuda:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (free_vram, free_vram * 2))
+        monkeypatch.setattr(
+            layers_module,
+            "_cuda_layer_argsort",
+            lambda node_to_layer, output_device: node_to_layer.argsort(stable=True).to(
+                output_device
+            ),
+        )
+        monkeypatch.setattr(
+            multilevel_module,
+            "_stable_argsort_on_device",
+            lambda values, compute_device: values.argsort(stable=True),
+        )
+    else:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    result = _coarsen_once_streaming(
+        edge_index=edge_index,
+        N=num_nodes,
+        node_sizes=node_sizes,
+        layers=layers,
+        num_layers=int(layer_counts.shape[0]),
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        device="cpu",
+    )
+    assert result.fine_to_coarse is not None
+    return result.fine_to_coarse.cpu()
+
+
+def test_streaming_coarsen_assignment_matches_cpu_and_simulated_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stable segmented sort should match between CPU and CUDA paths."""
+    edge_index, num_nodes, node_sizes, layers, layer_counts, layer_offsets, min_neighbor = (
+        _make_streaming_assignment_case()
+    )
+
+    cpu_fine_to_coarse = _run_streaming_coarsen_with_min_neighbor(
+        monkeypatch,
+        min_neighbor=min_neighbor,
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        layers=layers,
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        simulate_cuda=False,
+    )
+    gpu_fine_to_coarse = _run_streaming_coarsen_with_min_neighbor(
+        monkeypatch,
+        min_neighbor=min_neighbor,
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        layers=layers,
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        simulate_cuda=True,
+    )
+
+    assert torch.equal(cpu_fine_to_coarse, gpu_fine_to_coarse)
+
+
+def test_streaming_coarsen_ties_keep_stable_node_id_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Equal ``min_neighbor`` values should preserve node-ID tie ordering."""
+    edge_index, num_nodes, node_sizes, layers, layer_counts, layer_offsets, min_neighbor = (
+        _make_streaming_tie_case()
+    )
+
+    cpu_fine_to_coarse = _run_streaming_coarsen_with_min_neighbor(
+        monkeypatch,
+        min_neighbor=min_neighbor,
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        layers=layers,
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        simulate_cuda=False,
+    )
+    gpu_fine_to_coarse = _run_streaming_coarsen_with_min_neighbor(
+        monkeypatch,
+        min_neighbor=min_neighbor,
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        layers=layers,
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        simulate_cuda=True,
+    )
+
+    assert torch.equal(cpu_fine_to_coarse, gpu_fine_to_coarse)
+
+
+def test_streaming_coarsen_streamed_blocks_match_full_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Layer-block streaming should preserve the same coarse assignment."""
+    edge_index, num_nodes, node_sizes, layers, layer_counts, layer_offsets, min_neighbor = (
+        _make_streaming_assignment_case()
+    )
+
+    full_gpu = _run_streaming_coarsen_with_min_neighbor(
+        monkeypatch,
+        min_neighbor=min_neighbor,
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        layers=layers,
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        simulate_cuda=True,
+        free_vram=10_000_000_000,
+    )
+    streamed_gpu = _run_streaming_coarsen_with_min_neighbor(
+        monkeypatch,
+        min_neighbor=min_neighbor,
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        layers=layers,
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        simulate_cuda=True,
+        free_vram=200_000,
+    )
+
+    assert torch.equal(full_gpu, streamed_gpu)
+
+
+def test_streaming_coarsen_cpu_fallback_without_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No-CUDA environments should fall back to the CPU assignment path."""
+    edge_index, num_nodes, node_sizes, layers, layer_counts, layer_offsets, min_neighbor = (
+        _make_streaming_assignment_case(layer_width=40, num_layers=8)
+    )
+
+    fine_to_coarse = _run_streaming_coarsen_with_min_neighbor(
+        monkeypatch,
+        min_neighbor=min_neighbor,
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        layers=layers,
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        simulate_cuda=False,
+    )
+
+    assert fine_to_coarse.shape == (num_nodes,)
+    assert fine_to_coarse.min().item() == 0
+    assert fine_to_coarse.max().item() + 1 == int(((layer_counts + 2) // 3).sum().item())
+
+
+def test_build_layer_index_gpu_argsort_matches_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """CUDA and CPU LayerIndex builds should produce identical tensors."""
+    layers_module = importlib.import_module("dagua.layout.layers")
+    layer_assignments = torch.arange(10_000, dtype=torch.long) % 50
+
+    cpu_index = build_layer_index(
+        layer_assignments,
+        device="cpu",
+        enable_cuda_sort=False,
+    )
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (10_000_000_000, 20_000_000_000))
+    monkeypatch.setattr(
+        layers_module,
+        "_cuda_layer_argsort",
+        lambda node_to_layer, output_device: node_to_layer.argsort(stable=True).to(output_device),
+    )
+
+    gpu_index = build_layer_index(
+        layer_assignments,
+        device="cpu",
+        verbose=True,
+    )
+
+    assert torch.equal(cpu_index.sorted_nodes, gpu_index.sorted_nodes)
+    assert torch.equal(cpu_index.layer_offsets, gpu_index.layer_offsets)
+    assert "[dagua]   LayerIndex: CUDA (" in capsys.readouterr().out
+
+
+def test_build_layer_index_logs_cpu_fallback_on_low_vram(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """LayerIndex should report the standardized low-VRAM CPU fallback."""
+    layers_module = importlib.import_module("dagua.layout.layers")
+    layer_assignments = torch.arange(4_096, dtype=torch.long) % 64
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (1, 2))
+    monkeypatch.setattr(
+        layers_module,
+        "_cuda_layer_argsort",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected CUDA argsort")),
+    )
+
+    layer_index = build_layer_index(layer_assignments, device="cpu", verbose=True)
+
+    assert layer_index.sorted_nodes.shape == (layer_assignments.shape[0],)
+    assert "[dagua]   LayerIndex: CPU fallback (need " in capsys.readouterr().out
+
+
+def test_gpu_layering_logs_cpu_fallback_on_low_vram(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """GPU layering should log low-VRAM fallback and return the CPU result."""
+    utils_module = importlib.import_module("dagua.utils")
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    expected = utils_module.longest_path_layering(edge_index, 4, device="cpu")
+
+    class _FakeBudget:
+        """Pretend CUDA budget telemetry is available without using a real GPU."""
+
+        def __init__(self) -> None:
+            """Satisfy the ``VRAMBudget`` constructor contract."""
+
+        @staticmethod
+        def available() -> bool:
+            """Report CUDA budget telemetry as available."""
+            return True
+
+        def fits(self, needed_bytes: int) -> bool:
+            """Allow the explicit 60% free-VRAM cap to drive the fallback."""
+            del needed_bytes
+            return True
+
+    monkeypatch.setattr(utils_module, "VRAMBudget", _FakeBudget)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (1, 2))
+    monkeypatch.setattr(
+        utils_module,
+        "_gpu_longest_path_layering",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected GPU layering")),
+    )
+
+    result = utils_module.longest_path_layering(edge_index, 4, device="cuda", verbose=True)
+
+    assert result == expected
+    assert "[dagua]   GPU layering: CPU fallback (need " in capsys.readouterr().out
+
+
+def test_gpu_layering_logs_oom_cpu_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """GPU layering should log OOM fallback and return the CPU result."""
+    utils_module = importlib.import_module("dagua.utils")
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    expected = utils_module.longest_path_layering(edge_index, 4, device="cpu")
+
+    class _FakeBudget:
+        """Pretend CUDA budget telemetry is available without using a real GPU."""
+
+        def __init__(self) -> None:
+            """Satisfy the ``VRAMBudget`` constructor contract."""
+
+        @staticmethod
+        def available() -> bool:
+            """Report CUDA budget telemetry as available."""
+            return True
+
+        def fits(self, needed_bytes: int) -> bool:
+            """Allow the staged GPU attempt to proceed."""
+            del needed_bytes
+            return True
+
+    def _raise_oom(*args: object, **kwargs: object) -> torch.Tensor:
+        """Raise the CUDA OOM shape expected by the fallback path."""
+        del args, kwargs
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    monkeypatch.setattr(utils_module, "VRAMBudget", _FakeBudget)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (10_000_000_000, 20_000_000_000))
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(utils_module, "_gpu_longest_path_layering", _raise_oom)
+
+    result = utils_module.longest_path_layering(edge_index, 4, device="cuda", verbose=True)
+
+    assert result == expected
+    out = capsys.readouterr().out
+    assert "[dagua]   GPU layering: CUDA (" in out
+    assert "[dagua]   GPU layering: OOM, CPU fallback" in out
+
+
+def test_streaming_coarsen_end_to_end_matches_cpu_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming CUDA assignment should preserve final layout quality."""
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+    layers_module = importlib.import_module("dagua.layout.layers")
+    original_build_min_neighbor = multilevel_module._build_streaming_min_neighbor
+    original_dedup = multilevel_module._deduplicate_streaming_coarse_edges
+
+    edge_index, num_nodes, node_sizes = _make_test_layered_dag(100, 10)
+    graph_cpu = DaguaGraph()
+    graph_cpu.num_nodes = num_nodes
+    graph_cpu._edge_index_tensor = edge_index.clone()
+    graph_cpu.node_sizes = node_sizes.clone()
+
+    graph_gpu = DaguaGraph()
+    graph_gpu.num_nodes = num_nodes
+    graph_gpu._edge_index_tensor = edge_index.clone()
+    graph_gpu.node_sizes = node_sizes.clone()
+
+    config = LayoutConfig(
+        steps=5,
+        seed=42,
+        verbose=False,
+        multilevel_threshold=100,
+        multilevel_min_nodes=50,
+        multilevel_coarse_steps=5,
+        multilevel_refine_steps=3,
+    )
+
+    old_threshold = multilevel_module._STREAMING_THRESHOLD
+    try:
+        multilevel_module._STREAMING_THRESHOLD = 100
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        cpu_pos = layout(graph_cpu, config)
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (10_000_000_000, 20_000_000_000))
+        monkeypatch.setattr(
+            layers_module,
+            "_cuda_layer_argsort",
+            lambda node_to_layer, output_device: node_to_layer.argsort(stable=True).to(
+                output_device
+            ),
+        )
+        monkeypatch.setattr(
+            multilevel_module,
+            "_stable_argsort_on_device",
+            lambda values, compute_device: values.argsort(stable=True),
+        )
+        monkeypatch.setattr(
+            multilevel_module,
+            "_build_streaming_min_neighbor",
+            lambda edge_index, num_nodes, index_dtype, gpu_device: original_build_min_neighbor(
+                edge_index,
+                num_nodes,
+                index_dtype,
+                None,
+            ),
+        )
+        monkeypatch.setattr(
+            multilevel_module,
+            "_deduplicate_streaming_coarse_edges",
+            lambda edge_index, fine_to_coarse, num_coarse_nodes, output_device, gpu_device: (
+                original_dedup(
+                    edge_index,
+                    fine_to_coarse,
+                    num_coarse_nodes,
+                    output_device,
+                    None,
+                )
+            ),
+        )
+        gpu_pos = layout(graph_gpu, config)
+    finally:
+        multilevel_module._STREAMING_THRESHOLD = old_threshold
+
+    assert torch.allclose(cpu_pos, gpu_pos, atol=50.0)
 
 
 def test_edge_batch_size_scaling() -> None:
@@ -721,6 +1297,57 @@ def test_layout_inner_with_prebuilt(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert pos.shape == (4, 2)
     assert torch.isfinite(pos).all()
+
+
+def test_layout_inner_uses_cuda_layering_for_subset_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Subset-GPU mode should still request CUDA layering when available."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    requested_devices: list[str] = []
+
+    def _record_layering(
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        device: str = "cpu",
+        *,
+        verbose: bool = False,
+    ) -> torch.Tensor:
+        """Record the device chosen for the longest-path layering stage."""
+        del edge_index
+        del verbose
+        requested_devices.append(device)
+        return torch.zeros(num_nodes, dtype=torch.long)
+
+    monkeypatch.setattr(engine_module, "longest_path_layering", _record_layering)
+
+    pos = _layout_inner(
+        torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long),
+        4,
+        torch.full((4, 2), 20.0),
+        LayoutConfig(
+            steps=1,
+            device="cuda",
+            execution_mode="subset_gpu",
+            w_dag=0.0,
+            w_attract=0.0,
+            w_repel=0.0,
+            w_overlap=0.0,
+            w_cluster=0.0,
+            w_cluster_contain=0.0,
+            w_crossing=0.0,
+            w_straightness=0.0,
+            w_length_variance=0.0,
+            w_spacing=0.0,
+            w_fanout=0.0,
+            w_back_edge=0.0,
+        ),
+        device="cuda",
+        skip_classification=True,
+    )
+
+    assert pos.shape == (4, 2)
+    assert requested_devices == ["cuda" if torch.cuda.is_available() else "cpu"]
 
 
 def test_classify_early_exit(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -27,13 +27,36 @@ def init_positions(
     node_sep: float = 25.0,
     rank_sep: float = 50.0,
     device: str = "cpu",
+    *,
+    verbose: bool = False,
 ) -> torch.Tensor:
-    """Compute initial positions via topological layering + barycenter ordering.
+    """Compute initial positions via topological layering and barycenter ordering.
 
-    Returns: [N, 2] tensor of (x, y) positions.
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    node_sizes : torch.Tensor
+        Node-size tensor shaped ``[N, 2]``.
+    node_sep : float, default=25.0
+        Horizontal spacing target between adjacent nodes in the same layer.
+    rank_sep : float, default=50.0
+        Vertical spacing target between consecutive layers.
+    device : str, default="cpu"
+        Device for the returned position tensor.
+    verbose : bool, default=False
+        Whether CUDA layering activation and fallback messages should be
+        emitted while computing the topological layers.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial position tensor shaped ``[N, 2]``.
     """
     # Step 1: Assign layers (y-coordinates) via longest-path
-    layers = longest_path_layering(edge_index, num_nodes, device=device)
+    layers = longest_path_layering(edge_index, num_nodes, device=device, verbose=verbose)
 
     # Vectorized path is faster even at N=100 due to tensor ops vs Python loops
     if num_nodes > 100:

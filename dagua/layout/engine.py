@@ -1400,6 +1400,7 @@ def _layout_inner(
             node_sep=node_sep,
             rank_sep=rank_sep,
             device=resident_device,
+            verbose=verbose,
         )
 
     if trace is not None and hasattr(trace, "capture_layout_positions"):
@@ -1416,14 +1417,32 @@ def _layout_inner(
     if prebuilt_layer_index is not None:
         layer_index = prebuilt_layer_index
         if layer_index.node_to_layer.device.type != resident_device_type:
-            layer_index = build_layer_index(layer_index.node_to_layer, device=resident_device)
+            layer_index = build_layer_index(
+                layer_index.node_to_layer,
+                device=resident_device,
+                verbose=verbose,
+            )
         layer_assignments_raw = layer_index.node_to_layer
     elif layer_assignments is not None:
-        layer_index = build_layer_index(layer_assignments, device=resident_device)
+        layer_index = build_layer_index(
+            layer_assignments,
+            device=resident_device,
+            verbose=verbose,
+        )
         layer_assignments_raw = layer_assignments
     elif edge_index.numel() > 0:
-        layer_assignments_raw = longest_path_layering(edge_index, n, device=resident_device)
-        layer_index = build_layer_index(layer_assignments_raw, device=resident_device)
+        layering_device = "cuda" if torch.cuda.is_available() else "cpu"
+        layer_assignments_raw = longest_path_layering(
+            edge_index,
+            n,
+            device=layering_device,
+            verbose=verbose,
+        )
+        layer_index = build_layer_index(
+            layer_assignments_raw,
+            device=resident_device,
+            verbose=verbose,
+        )
 
     # Determine adaptive parameters based on graph size
     num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
@@ -1567,9 +1586,14 @@ def _layout_inner(
                 cpu_layer_index = build_layer_index(
                     prebuilt_layer_index.node_to_layer,
                     device="cpu",
+                    verbose=verbose,
                 )
         elif layer_assignments_raw is not None:
-            cpu_layer_index = build_layer_index(layer_assignments_raw, device="cpu")
+            cpu_layer_index = build_layer_index(
+                layer_assignments_raw,
+                device="cpu",
+                verbose=verbose,
+            )
     elif edges_on_cpu:
         cpu_edge_index = edge_index
 
