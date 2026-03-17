@@ -68,6 +68,8 @@ CUDA_ACTIVE_SET_HEADROOM = 0.85
 DEFAULT_HYBRID_EDGE_BATCH = 5_000_000
 CUDA_CONTEXT_OVERHEAD_BYTES = 500 * 1024 * 1024
 TILED_GPU_MIN_NODES = 50_000_000
+STANDARD_CUDA_RESIDENT_HEADROOM = 0.85
+STANDARD_CUDA_WORKING_SET_BYTES = 2_000_000_000
 HYBRID_OPTIMIZER_LR_MULTIPLIERS = {
     "adam": 1.0,
     "sgd_nesterov": 3.0,
@@ -626,6 +628,12 @@ def _should_use_tiled_gpu(
         return False
     if not torch.cuda.is_available():
         return False
+    resident_batched_gpu_memory = _estimate_batched_cuda_resident_memory(num_nodes, num_edges)
+    total_vram = _cuda_total_vram_bytes()
+    if total_vram > 0 and resident_batched_gpu_memory < int(
+        total_vram * STANDARD_CUDA_RESIDENT_HEADROOM
+    ):
+        return False
     full_gpu_memory = _estimate_gpu_memory(
         num_nodes,
         num_edges,
@@ -634,6 +642,53 @@ def _should_use_tiled_gpu(
         edge_batch=0,
     )
     return not VRAMBudget().fits(full_gpu_memory)
+
+
+def _cuda_total_vram_bytes() -> int:
+    """Return the active CUDA device capacity in bytes.
+
+    Returns
+    -------
+    int
+        Total VRAM for the current CUDA device, or ``0`` when CUDA is
+        unavailable.
+    """
+    if not torch.cuda.is_available():
+        return 0
+    try:
+        return int(torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory)
+    except Exception:
+        return 0
+
+
+def _estimate_batched_cuda_resident_memory(
+    num_nodes: int,
+    num_edges: int,
+    edge_batch: int = DEFAULT_HYBRID_EDGE_BATCH,
+) -> int:
+    """Estimate CUDA residency when positions stay on GPU and edges are batched.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the current layout problem.
+    num_edges : int
+        Number of edges in the current layout problem.
+    edge_batch : int, default=5_000_000
+        Maximum number of edges transferred to GPU per optimization step.
+
+    Returns
+    -------
+    int
+        Estimated resident bytes for positions, gradients, one edge batch, and
+        a conservative working-set margin.
+    """
+    position_bytes = num_nodes * 2 * 4
+    gradient_bytes = position_bytes
+    batched_edge_bytes = min(num_edges, edge_batch) * 2 * 8
+    return int(
+        position_bytes + gradient_bytes + batched_edge_bytes + STANDARD_CUDA_WORKING_SET_BYTES
+    )
 
 
 def _backward_standard_loss_terms(
@@ -960,6 +1015,7 @@ def _layout_inner(
     batch_edges_ref: List[Optional[torch.Tensor]] = [None]
     edge_ctx_ref: List[Optional[EdgeBatchContext]] = [None]
     sampled_ctx_ref: List[Optional[SampledNodeContext]] = [None]
+    current_step_ref: List[int] = [0]
 
     def _active_edges(p: torch.Tensor) -> torch.Tensor:
         if (
@@ -1204,16 +1260,17 @@ def _layout_inner(
         ) -> torch.Tensor:
             """Compute the fanout-distribution regularizer for active edges."""
             del ns, li
+            active_edges = _active_edges(p)
+            active_edge_ctx = _active_edge_ctx(p)
+            edge_is_sampled = active_edges.shape[1] < num_edges
             return fanout_distribution_loss(
                 p,
-                _active_edges(p),
+                active_edges,
+                edge_ctx=active_edge_ctx,
+                step=current_step_ref[0],
+                edge_is_sampled=edge_is_sampled,
             )
 
-        if n > config.fanout_amortize_threshold and config.fanout_amortize_interval > 1:
-            fanout_fn = _make_amortized_loss(
-                fanout_fn,
-                skip_every=config.fanout_amortize_interval,
-            )
         loss_fns.append(("w_fanout", fanout_fn, False, False, True, True))
 
     if config.w_back_edge > 0:
@@ -1307,6 +1364,7 @@ def _layout_inner(
 
     for step in range(steps):
         t = step / max(steps - 1, 1)  # 0 → 1
+        current_step_ref[0] = step
 
         if verbose and step > 0 and step % _log_interval == 0:
             _vlog(

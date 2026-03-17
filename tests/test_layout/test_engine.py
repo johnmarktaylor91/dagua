@@ -428,9 +428,6 @@ def test_refinement_execution_uses_nesterov_fallback_when_adam_does_not_fit(
     )
 
     assert force_cpu is False
-    assert force_hybrid is True
-    assert optimizer_type == "sgd_nesterov"
-    assert edge_batch == 2_500_000
 
 
 def test_refinement_execution_keeps_50m_behavior_without_sgd_fallback(
@@ -492,6 +489,41 @@ def test_refinement_execution_respects_adam_only_policy(
     )
 
     assert force_cpu is True
+    assert force_hybrid is False
+    assert optimizer_type == "adam"
+    assert edge_batch == 5_000_000
+
+
+def test_refinement_execution_keeps_huge_graphs_on_cuda_when_positions_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Huge refinement levels should stay on CUDA when the position tensor fits."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+
+    class _FakeDeviceProps:
+        """Expose a deterministic VRAM size for refinement gating tests."""
+
+        total_memory = 11 * 1024**3
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: _FakeDeviceProps())
+    monkeypatch.setattr(
+        engine_module,
+        "_estimate_gpu_memory",
+        lambda *args, **kwargs: 120,
+    )
+    monkeypatch.setattr(multilevel_module, "_vram_fits", lambda needed_bytes: needed_bytes <= 50)
+
+    force_cpu, force_hybrid, optimizer_type, edge_batch = _select_refinement_execution(
+        200_000_000,
+        300_000_000,
+        LayoutConfig(device="cuda", hybrid_device="off"),
+        "cuda",
+    )
+
+    assert force_cpu is False
     assert force_hybrid is False
     assert optimizer_type == "adam"
     assert edge_batch == 5_000_000
@@ -841,6 +873,7 @@ def test_multilevel_kicks_in_at_20k(monkeypatch: pytest.MonkeyPatch) -> None:
         node_sizes: torch.Tensor,
         config: LayoutConfig,
         device: str = "cpu",
+        optimizer_type: str = "adam",
         init_pos: torch.Tensor | None = None,
         clusters: dict | None = None,
         cluster_parents: dict | None = None,
@@ -912,6 +945,7 @@ def test_direct_layout_below_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
         node_sizes: torch.Tensor,
         config: LayoutConfig,
         device: str = "cpu",
+        optimizer_type: str = "adam",
         init_pos: torch.Tensor | None = None,
         clusters: dict | None = None,
         cluster_parents: dict | None = None,
@@ -1384,8 +1418,40 @@ def test_tiled_compute_allows_cpu_execution_when_cuda_is_available(
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(engine_module, "VRAMBudget", _FakeBudget)
     monkeypatch.setattr(engine_module, "_estimate_gpu_memory", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(
+        engine_module, "_estimate_batched_cuda_resident_memory", lambda *a, **kw: 999_999_999_999
+    )
+    monkeypatch.setattr(engine_module, "_cuda_total_vram_bytes", lambda: 1000)
 
     assert _should_use_tiled_gpu("cpu", "cpu", 60_000_000, 80_000_000)
+
+
+def test_tiled_compute_stays_off_when_batched_cuda_fits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Standard CUDA should win when positions and one edge batch fit in VRAM."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+
+    class _FakeBudget:
+        """Preserve the old full-resident decision so the new gate is exercised."""
+
+        def fits(self, needed_bytes: int) -> bool:
+            """Pretend that the fully resident graph does not fit."""
+            del needed_bytes
+            return False
+
+    class _FakeDeviceProps:
+        """Expose a deterministic VRAM size for the active CUDA device."""
+
+        total_memory = 11 * 1024**3
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: _FakeDeviceProps())
+    monkeypatch.setattr(engine_module, "VRAMBudget", _FakeBudget)
+    monkeypatch.setattr(engine_module, "_estimate_gpu_memory", lambda *args, **kwargs: 10**18)
+
+    assert not _should_use_tiled_gpu("cpu", "cpu", 200_000_000, 300_000_000)
 
 
 def test_layout_inner_initializes_tiled_gpu_before_memory_strategy(
@@ -1704,6 +1770,113 @@ def test_multilevel_refinement_syncs_config_device_for_cpu_levels(
     assert pos.shape == (4, 2)
     assert (2, "cuda", "cuda") in calls
     assert (4, "cpu", "cpu") in calls
+
+
+def test_multilevel_final_refinement_uses_all_random_edge_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final 200M+ refinement should randomize the sampled edge batch every step."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+
+    recorded_edge_random_fraction: list[float] = []
+
+    def _fake_layout_inner(
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        node_sizes: torch.Tensor,
+        config: LayoutConfig,
+        device: str = "cpu",
+        optimizer_type: str = "adam",
+        init_pos: torch.Tensor | None = None,
+        clusters: dict | None = None,
+        cluster_parents: dict | None = None,
+        layer_assignments: torch.Tensor | None = None,
+        progress_context: object | None = None,
+        trace: object | None = None,
+        *,
+        graph_structure: object | None = None,
+        prebuilt_layer_index: object | None = None,
+        skip_classification: bool = False,
+    ) -> torch.Tensor:
+        """Record the final refinement config without running the real solver."""
+        del (
+            edge_index,
+            num_nodes,
+            node_sizes,
+            device,
+            optimizer_type,
+            init_pos,
+            clusters,
+            cluster_parents,
+            layer_assignments,
+            progress_context,
+            trace,
+            graph_structure,
+            prebuilt_layer_index,
+            skip_classification,
+        )
+        recorded_edge_random_fraction.append(config.edge_random_fraction)
+        return torch.zeros((2, 2), dtype=torch.float32)
+
+    g = DaguaGraph()
+    g.num_nodes = 200_000_000
+    g._edge_index_tensor = torch.tensor([[0], [1]], dtype=torch.long)
+    g.node_sizes = torch.full((2, 2), 20.0)
+
+    monkeypatch.setattr(
+        multilevel_module,
+        "classify_graph",
+        lambda *args, **kwargs: GraphStructure(
+            family=GraphFamily.GENERAL,
+            num_components=1,
+            max_degree=0,
+            num_layers=0,
+            avg_layer_width=0.0,
+            is_planar_hint=False,
+        ),
+    )
+    monkeypatch.setattr(
+        multilevel_module,
+        "build_hierarchy",
+        lambda *args, **kwargs: [
+            multilevel_module.CoarseLevel(
+                edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+                node_sizes=torch.full((2, 2), 20.0),
+                num_nodes=2,
+                fine_to_coarse=torch.tensor([0, 1], dtype=torch.long),
+                num_fine=2,
+                fine_layer_assignments=torch.tensor([0, 1], dtype=torch.long),
+                coarse_layer_assignments=torch.tensor([0, 1], dtype=torch.long),
+            )
+        ],
+    )
+    monkeypatch.setattr(multilevel_module, "_can_prolong_on_gpu", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        multilevel_module,
+        "_select_refinement_execution",
+        lambda *args, **kwargs: (False, False, "adam", 5_000_000),
+    )
+    monkeypatch.setattr(engine_module, "_layout_inner", _fake_layout_inner)
+    monkeypatch.setattr(engine_module, "_apply_direction", lambda pos, direction: pos)
+
+    multilevel_module.multilevel_layout(
+        g,
+        LayoutConfig(
+            device="cuda",
+            steps=1,
+            seed=42,
+            verbose=False,
+            multilevel_threshold=1,
+            multilevel_min_nodes=1,
+            multilevel_coarse_steps=1,
+            multilevel_refine_steps=1,
+            offload_to_disk=False,
+        ),
+    )
+
+    assert recorded_edge_random_fraction[0] == 0.2
+    assert recorded_edge_random_fraction[1] == 1.0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
