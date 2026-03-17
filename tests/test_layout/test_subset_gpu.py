@@ -10,6 +10,8 @@ import torch
 from dagua.config import LayoutConfig
 from dagua.layout.constraints import (
     edge_attraction_loss,
+    edge_length_variance_loss,
+    edge_straightness_loss,
     overlap_avoidance_loss,
     repulsion_loss,
     spacing_consistency_loss,
@@ -103,7 +105,10 @@ def test_edge_access_pattern_remaps_indices_correctly() -> None:
 
     torch.testing.assert_close(unique_nodes, expected_nodes)
     assert prepared.local_edges is not None
-    torch.testing.assert_close(prepared.local_edges, expected_edges)
+    torch.testing.assert_close(
+        prepared.local_edges,
+        expected_edges.to(dtype=prepared.local_edges.dtype),
+    )
     torch.testing.assert_close(unique_nodes[prepared.local_edges], edge_batch)
 
 
@@ -231,6 +236,329 @@ def test_subset_gpu_edge_loss_matches_standard() -> None:
     )
 
     torch.testing.assert_close(grad_buffer, direct_grad, atol=1e-5, rtol=1e-5)
+
+
+def test_subset_gpu_shared_edge_remap_matches_per_term_remap() -> None:
+    """Shared edge remapping should preserve the multi-term edge gradient."""
+    torch.manual_seed(19)
+    num_nodes = 256
+    pos = torch.randn(num_nodes, 2, dtype=torch.float32)
+    node_sizes = torch.full((num_nodes, 2), 8.0, dtype=torch.float32)
+    edge_index = torch.stack(
+        [
+            torch.arange(0, num_nodes - 1, dtype=torch.long),
+            torch.arange(1, num_nodes, dtype=torch.long),
+        ]
+    )
+
+    def _run_executor(*edge_batches: torch.Tensor) -> torch.Tensor:
+        """Execute the same edge losses against the provided edge batches."""
+        edge_ref: list[Optional[torch.Tensor]] = [edge_index]
+        edge_ctx_ref: list[Optional[EdgeBatchContext]] = [None]
+        sampled_ref: list[Optional[SampledNodeContext]] = [None]
+
+        def attraction_loss(
+            p: torch.Tensor,
+            ns: torch.Tensor,
+            li: Optional[LayerIndex],
+        ) -> torch.Tensor:
+            """Return the active edge-attraction loss."""
+            del ns, li
+            assert edge_ref[0] is not None
+            return edge_attraction_loss(p, edge_ref[0], x_bias=1.1, edge_ctx=edge_ctx_ref[0])
+
+        def straightness_loss(
+            p: torch.Tensor,
+            ns: torch.Tensor,
+            li: Optional[LayerIndex],
+        ) -> torch.Tensor:
+            """Return the active edge-straightness loss."""
+            del ns, li
+            assert edge_ref[0] is not None
+            return edge_straightness_loss(p, edge_ref[0], edge_ctx=edge_ctx_ref[0])
+
+        def variance_loss(
+            p: torch.Tensor,
+            ns: torch.Tensor,
+            li: Optional[LayerIndex],
+        ) -> torch.Tensor:
+            """Return the active edge-length-variance loss."""
+            del ns, li
+            assert edge_ref[0] is not None
+            return edge_length_variance_loss(p, edge_ref[0], edge_ctx=edge_ctx_ref[0])
+
+        executor = _make_executor(node_sizes, None, edge_ref, edge_ctx_ref, sampled_ref)
+        return executor.compute_step(
+            pos.clone().requires_grad_(True),
+            [
+                SubsetGPULossTerm(
+                    name="attract",
+                    weight=1.3,
+                    loss_fn=attraction_loss,
+                    access_pattern=EdgeAccessPattern(edge_batches[0]),
+                ),
+                SubsetGPULossTerm(
+                    name="straight",
+                    weight=0.4,
+                    loss_fn=straightness_loss,
+                    access_pattern=EdgeAccessPattern(edge_batches[1]),
+                ),
+                SubsetGPULossTerm(
+                    name="variance",
+                    weight=0.2,
+                    loss_fn=variance_loss,
+                    access_pattern=EdgeAccessPattern(edge_batches[2]),
+                ),
+            ],
+        )
+
+    direct_pos = pos.clone().requires_grad_(True)
+    direct_loss = (
+        1.3 * edge_attraction_loss(direct_pos, edge_index, x_bias=1.1)
+        + 0.4 * edge_straightness_loss(direct_pos, edge_index)
+        + 0.2 * edge_length_variance_loss(direct_pos, edge_index)
+    )
+    direct_grad = torch.autograd.grad(direct_loss, direct_pos)[0]
+
+    shared_grad = _run_executor(edge_index, edge_index, edge_index)
+    per_term_grad = _run_executor(edge_index.clone(), edge_index.clone(), edge_index.clone())
+
+    torch.testing.assert_close(shared_grad, direct_grad, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(shared_grad, per_term_grad, atol=1e-5, rtol=1e-5)
+
+
+def test_subset_gpu_shared_remap_falls_back_for_distinct_edge_batches() -> None:
+    """Distinct edge batch objects should skip shared remap and still succeed."""
+    pos = torch.tensor(
+        [[0.0, 0.0], [25.0, 15.0], [50.0, 10.0], [80.0, 35.0]],
+        dtype=torch.float32,
+    )
+    node_sizes = torch.full((4, 2), 10.0, dtype=torch.float32)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    edge_ref: list[Optional[torch.Tensor]] = [edge_index]
+    edge_ctx_ref: list[Optional[EdgeBatchContext]] = [None]
+    sampled_ref: list[Optional[SampledNodeContext]] = [None]
+
+    def attraction_loss(
+        p: torch.Tensor,
+        ns: torch.Tensor,
+        li: Optional[LayerIndex],
+    ) -> torch.Tensor:
+        """Return the active edge-attraction loss."""
+        del ns, li
+        assert edge_ref[0] is not None
+        return edge_attraction_loss(p, edge_ref[0], x_bias=1.0, edge_ctx=edge_ctx_ref[0])
+
+    def straightness_loss(
+        p: torch.Tensor,
+        ns: torch.Tensor,
+        li: Optional[LayerIndex],
+    ) -> torch.Tensor:
+        """Return the active edge-straightness loss."""
+        del ns, li
+        assert edge_ref[0] is not None
+        return edge_straightness_loss(p, edge_ref[0], edge_ctx=edge_ctx_ref[0])
+
+    direct_pos = pos.clone().requires_grad_(True)
+    direct_grad = torch.autograd.grad(
+        0.8 * edge_attraction_loss(direct_pos, edge_index, x_bias=1.0)
+        + 0.3 * edge_straightness_loss(direct_pos, edge_index),
+        direct_pos,
+    )[0]
+
+    executor = _make_executor(node_sizes, None, edge_ref, edge_ctx_ref, sampled_ref)
+    grad_buffer = executor.compute_step(
+        pos.clone().requires_grad_(True),
+        [
+            SubsetGPULossTerm(
+                name="attract",
+                weight=0.8,
+                loss_fn=attraction_loss,
+                access_pattern=EdgeAccessPattern(edge_index.clone()),
+            ),
+            SubsetGPULossTerm(
+                name="straight",
+                weight=0.3,
+                loss_fn=straightness_loss,
+                access_pattern=EdgeAccessPattern(edge_index.clone()),
+            ),
+        ],
+    )
+
+    torch.testing.assert_close(grad_buffer, direct_grad, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_subset_gpu_shared_remap_logs_cpu_fallback_on_low_vram(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Low-VRAM shared remap should fall back to per-term execution cleanly."""
+    pos = torch.randn(128, 2, dtype=torch.float32)
+    node_sizes = torch.full((128, 2), 8.0, dtype=torch.float32)
+    edge_index = torch.stack(
+        [
+            torch.arange(0, 127, dtype=torch.long),
+            torch.arange(1, 128, dtype=torch.long),
+        ]
+    )
+    edge_ref: list[Optional[torch.Tensor]] = [edge_index]
+    edge_ctx_ref: list[Optional[EdgeBatchContext]] = [None]
+    sampled_ref: list[Optional[SampledNodeContext]] = [None]
+
+    def attraction_loss(
+        p: torch.Tensor,
+        ns: torch.Tensor,
+        li: Optional[LayerIndex],
+    ) -> torch.Tensor:
+        """Return the active edge-attraction loss."""
+        del ns, li
+        assert edge_ref[0] is not None
+        return edge_attraction_loss(p, edge_ref[0], x_bias=1.1, edge_ctx=edge_ctx_ref[0])
+
+    def straightness_loss(
+        p: torch.Tensor,
+        ns: torch.Tensor,
+        li: Optional[LayerIndex],
+    ) -> torch.Tensor:
+        """Return the active edge-straightness loss."""
+        del ns, li
+        assert edge_ref[0] is not None
+        return edge_straightness_loss(p, edge_ref[0], edge_ctx=edge_ctx_ref[0])
+
+    direct_pos = pos.clone().to("cuda").requires_grad_(True)
+    direct_grad = torch.autograd.grad(
+        0.8 * edge_attraction_loss(direct_pos, edge_index.to("cuda"), x_bias=1.1)
+        + 0.3 * edge_straightness_loss(direct_pos, edge_index.to("cuda")),
+        direct_pos,
+    )[0].cpu()
+
+    executor = SubsetGPUExecutor(
+        node_sizes=node_sizes,
+        layer_index=None,
+        execution_device="cuda",
+        batch_edges_ref=edge_ref,
+        edge_ctx_ref=edge_ctx_ref,
+        sampled_ctx_ref=sampled_ref,
+        verbose=True,
+    )
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (1, 2))
+
+    grad_buffer = executor.compute_step(
+        pos.clone().requires_grad_(True),
+        [
+            SubsetGPULossTerm(
+                name="attract",
+                weight=0.8,
+                loss_fn=attraction_loss,
+                access_pattern=EdgeAccessPattern(edge_index),
+            ),
+            SubsetGPULossTerm(
+                name="straight",
+                weight=0.3,
+                loss_fn=straightness_loss,
+                access_pattern=EdgeAccessPattern(edge_index),
+            ),
+        ],
+    )
+
+    torch.testing.assert_close(grad_buffer, direct_grad, atol=1e-5, rtol=1e-5)
+    assert "[dagua]   Shared edge remap: CPU fallback (need " in capsys.readouterr().out
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_subset_gpu_shared_remap_logs_oom_cpu_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Shared remap OOM should fall back to per-term execution cleanly."""
+    subset_gpu_module = __import__("dagua.layout.subset_gpu", fromlist=["unused"])
+    pos = torch.randn(96, 2, dtype=torch.float32)
+    node_sizes = torch.full((96, 2), 8.0, dtype=torch.float32)
+    edge_index = torch.stack(
+        [
+            torch.arange(0, 95, dtype=torch.long),
+            torch.arange(1, 96, dtype=torch.long),
+        ]
+    )
+    edge_ref: list[Optional[torch.Tensor]] = [edge_index]
+    edge_ctx_ref: list[Optional[EdgeBatchContext]] = [None]
+    sampled_ref: list[Optional[SampledNodeContext]] = [None]
+
+    def attraction_loss(
+        p: torch.Tensor,
+        ns: torch.Tensor,
+        li: Optional[LayerIndex],
+    ) -> torch.Tensor:
+        """Return the active edge-attraction loss."""
+        del ns, li
+        assert edge_ref[0] is not None
+        return edge_attraction_loss(p, edge_ref[0], x_bias=1.0, edge_ctx=edge_ctx_ref[0])
+
+    def variance_loss(
+        p: torch.Tensor,
+        ns: torch.Tensor,
+        li: Optional[LayerIndex],
+    ) -> torch.Tensor:
+        """Return the active edge-length-variance loss."""
+        del ns, li
+        assert edge_ref[0] is not None
+        return edge_length_variance_loss(p, edge_ref[0], edge_ctx=edge_ctx_ref[0])
+
+    direct_pos = pos.clone().to("cuda").requires_grad_(True)
+    direct_grad = torch.autograd.grad(
+        0.9 * edge_attraction_loss(direct_pos, edge_index.to("cuda"), x_bias=1.0)
+        + 0.2 * edge_length_variance_loss(direct_pos, edge_index.to("cuda")),
+        direct_pos,
+    )[0].cpu()
+
+    original_build_local_edge_context = subset_gpu_module._build_local_edge_context
+    raised = {"done": False}
+
+    def _raise_oom_once(
+        local_pos: torch.Tensor,
+        local_edge_index: torch.Tensor,
+    ) -> EdgeBatchContext:
+        """Raise one shared-remap OOM before delegating to the real builder."""
+        if not raised["done"]:
+            raised["done"] = True
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+        return original_build_local_edge_context(local_pos, local_edge_index)
+
+    executor = SubsetGPUExecutor(
+        node_sizes=node_sizes,
+        layer_index=None,
+        execution_device="cuda",
+        batch_edges_ref=edge_ref,
+        edge_ctx_ref=edge_ctx_ref,
+        sampled_ctx_ref=sampled_ref,
+        verbose=True,
+    )
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (10_000_000_000, 20_000_000_000))
+    monkeypatch.setattr(subset_gpu_module, "_build_local_edge_context", _raise_oom_once)
+
+    grad_buffer = executor.compute_step(
+        pos.clone().requires_grad_(True),
+        [
+            SubsetGPULossTerm(
+                name="attract",
+                weight=0.9,
+                loss_fn=attraction_loss,
+                access_pattern=EdgeAccessPattern(edge_index),
+            ),
+            SubsetGPULossTerm(
+                name="variance",
+                weight=0.2,
+                loss_fn=variance_loss,
+                access_pattern=EdgeAccessPattern(edge_index),
+            ),
+        ],
+    )
+
+    torch.testing.assert_close(grad_buffer, direct_grad, atol=1e-5, rtol=1e-5)
+    out = capsys.readouterr().out
+    assert "[dagua]   Shared edge remap: CUDA (" in out
+    assert "[dagua]   Shared edge remap: OOM, CPU fallback" in out
 
 
 def test_subset_gpu_sampled_repulsion_matches_standard() -> None:
