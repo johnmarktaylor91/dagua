@@ -23,7 +23,12 @@ Cross-cutting:
 from __future__ import annotations
 
 import copy
+import json
+import math
+import os
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Callable, List, Literal, Optional, Union, cast
 
 import torch
@@ -57,7 +62,14 @@ from dagua.utils import VRAMBudget, longest_path_layering
 
 LossFn = Callable[[torch.Tensor, torch.Tensor, Optional[LayerIndex]], torch.Tensor]
 
-SAMPLED_NODE_CONTEXT_CAP = 1_000_000
+_SAMPLED_NODE_BYTES_PER_ROW = 1_200
+_SAMPLED_NODE_VRAM_FRACTION = 0.30
+_SAMPLED_NODE_MAX_CAP = 2_000_000
+_BYTES_PER_EDGE_ESTIMATE = 120
+_EDGE_BATCH_VRAM_FRACTION = 0.60
+_EDGE_BATCH_MIN = 1_000_000
+_EDGE_BATCH_MAX = 50_000_000
+SAMPLED_NODE_CONTEXT_CAP = _SAMPLED_NODE_MAX_CAP
 MIN_SAMPLED_ACTIVE_SET = 10_000
 SAMPLED_SAME_LAYER_K = 64
 REPULSION_ESTIMATE_NN_K = 20
@@ -65,7 +77,7 @@ AUTOGRAD_INTERMEDIATE_FACTOR = 2.0
 INTERMEDIATE_SAFETY_FACTOR = 1.5
 CHECKPOINT_MEMORY_REDUCTION = 2
 CUDA_ACTIVE_SET_HEADROOM = 0.85
-DEFAULT_HYBRID_EDGE_BATCH = 5_000_000
+DEFAULT_HYBRID_EDGE_BATCH = _EDGE_BATCH_MIN
 CUDA_CONTEXT_OVERHEAD_BYTES = 500 * 1024 * 1024
 TILED_GPU_MIN_NODES = 50_000_000
 STANDARD_CUDA_RESIDENT_HEADROOM = 0.85
@@ -78,6 +90,11 @@ HYBRID_OPTIMIZER_LR_MULTIPLIERS = {
     "sgd_nesterov": 3.0,
     "sgd": 5.0,
 }
+_PROGRESS_LOG_INTERVAL_SECONDS = 30.0
+_PROGRESS_FILE_INTERVAL_SECONDS = 60.0
+_PROGRESS_BATCH_FRACTION = 0.25
+_PROGRESS_FILE_NODE_THRESHOLD = 1_000_000
+_DEFAULT_PROGRESS_FILENAME = "progress.json"
 OptimizerType = Literal["adam", "sgd_nesterov", "sgd"]
 ExecutionMode = Literal["standard", "subset_gpu"]
 
@@ -108,11 +125,386 @@ class SampledNodeContext:
     sampled: torch.Tensor
 
 
+def _resolve_progress_file_path(
+    config: LayoutConfig,
+    progress_file_path: Optional[Union[str, Path]] = None,
+) -> Path:
+    """Resolve the monitoring file path for large layout runs.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Layout configuration that may expose a ``progress_path`` override.
+    progress_file_path : str | Path, optional
+        Explicit progress file path forwarded by the caller.
+
+    Returns
+    -------
+    Path
+        Absolute path for the JSON progress file.
+    """
+    configured_path = progress_file_path
+    if configured_path is None:
+        configured_path = cast(Optional[Union[str, Path]], getattr(config, "progress_path", None))
+    if configured_path is None:
+        configured_path = Path.cwd() / _DEFAULT_PROGRESS_FILENAME
+    return Path(configured_path).expanduser().resolve()
+
+
+def _current_vram_mb() -> int:
+    """Return the currently allocated VRAM in megabytes.
+
+    Returns
+    -------
+    int
+        Current CUDA allocation rounded to the nearest megabyte, or ``0`` when
+        CUDA is unavailable.
+    """
+    if not torch.cuda.is_available():
+        return 0
+    return int(round(torch.cuda.memory_allocated() / 1024**2))
+
+
+def _current_rss_gb() -> float:
+    """Return the current resident set size in gigabytes.
+
+    Returns
+    -------
+    float
+        Current process RSS in gigabytes. Linux ``/proc`` is used when
+        available so monitoring reflects the live resident set instead of the
+        peak value exposed by ``resource``.
+    """
+    statm_path = Path("/proc/self/statm")
+    if statm_path.exists():
+        try:
+            pages = statm_path.read_text(encoding="utf-8").split()
+            if len(pages) >= 2:
+                rss_pages = int(pages[1])
+                page_size = os.sysconf("SC_PAGE_SIZE")
+                return rss_pages * page_size / 1024**3
+        except (OSError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _write_progress_json(path: Path, payload: dict[str, object]) -> None:
+    """Write progress data atomically for external polling.
+
+    Parameters
+    ----------
+    path : Path
+        Destination JSON path.
+    payload : dict[str, object]
+        Serializable progress payload to write.
+
+    Returns
+    -------
+    None
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+    tmp_path.replace(path)
+
+
+def _compute_edge_batch_progress(
+    step: int,
+    num_edges: int,
+    edge_batch: int,
+    random_interval: int,
+) -> Optional[tuple[int, int]]:
+    """Return the current edge-batch position for verbose progress logs.
+
+    Parameters
+    ----------
+    step : int
+        Zero-based optimizer step.
+    num_edges : int
+        Total edge count for the current solve.
+    edge_batch : int
+        Active edge batch size. ``0`` means the full edge set is resident.
+    random_interval : int
+        Sampling cadence for random edge re-mixing. A value of ``0`` means
+        contiguous chunks are always used.
+
+    Returns
+    -------
+    tuple[int, int] | None
+        One-based current batch index and total number of batches when edge
+        streaming is active; otherwise ``None``.
+    """
+    if edge_batch <= 0 or num_edges <= edge_batch:
+        return None
+    total_batches = max(int(math.ceil(num_edges / edge_batch)), 1)
+    if random_interval > 0:
+        batch_index = (step % total_batches) + 1
+    else:
+        start = (step * edge_batch) % num_edges
+        batch_index = (start // edge_batch) + 1
+    return batch_index, total_batches
+
+
+def _progress_strategy(
+    use_per_loss_bw: bool,
+    use_checkpointing: bool,
+    use_hybrid: bool,
+    edges_on_cpu: bool,
+    tiled_compute_active: bool,
+    execution_mode: ExecutionMode,
+) -> str:
+    """Return the compact strategy string stored in ``progress.json``.
+
+    Parameters
+    ----------
+    use_per_loss_bw : bool
+        Whether per-loss backward execution is active.
+    use_checkpointing : bool
+        Whether gradient checkpointing is active.
+    use_hybrid : bool
+        Whether hybrid CPU/GPU execution is active.
+    edges_on_cpu : bool
+        Whether edge tensors are streamed from CPU.
+    tiled_compute_active : bool
+        Whether tiled GPU execution is active.
+    execution_mode : {"standard", "subset_gpu"}
+        Effective execution mode for the current solve.
+
+    Returns
+    -------
+    str
+        Comma-separated strategy flags, or ``"standard"`` when no special
+        strategy is active.
+    """
+    flags: list[str] = []
+    if use_per_loss_bw:
+        flags.append("per_loss_bw")
+    if use_checkpointing:
+        flags.append("checkpoint")
+    if use_hybrid:
+        flags.append("hybrid")
+    if edges_on_cpu:
+        flags.append("edge_stream")
+    if tiled_compute_active:
+        flags.append("tiled_gpu")
+    if execution_mode == "subset_gpu":
+        flags.append("subset_gpu")
+    return ",".join(flags) if flags else "standard"
+
+
+def _format_auto_count(value: int) -> str:
+    """Return a compact string for an auto-sized count.
+
+    Parameters
+    ----------
+    value : int
+        Absolute count selected by an auto-sizing helper.
+
+    Returns
+    -------
+    str
+        Human-readable count using ``k`` and ``M`` suffixes where helpful.
+    """
+    if value >= 1_000_000:
+        scaled = value / 1_000_000.0
+        return f"{scaled:.1f}".rstrip("0").rstrip(".") + "M"
+    if value >= 1_000:
+        scaled = value / 1_000.0
+        return f"{scaled:.1f}".rstrip("0").rstrip(".") + "k"
+    return f"{value:,}"
+
+
+def _format_auto_gb(num_bytes: int) -> str:
+    """Return a compact string for a byte budget in gigabytes.
+
+    Parameters
+    ----------
+    num_bytes : int
+        Memory quantity in bytes.
+
+    Returns
+    -------
+    str
+        Rounded value in gigabytes.
+    """
+    return f"{num_bytes / 1024**3:.1f}GB"
+
+
+def _log_auto_allocation(
+    label: str,
+    value: int,
+    free_bytes: int,
+    budget_fraction: float,
+    verbose: bool,
+) -> None:
+    """Emit a verbose auto-allocation decision log.
+
+    Parameters
+    ----------
+    label : str
+        Resource label being sized.
+    value : int
+        Auto-selected count or byte budget.
+    free_bytes : int
+        Free memory observed while sizing the resource.
+    budget_fraction : float
+        Fraction of free memory reserved for this resource.
+    verbose : bool
+        Whether verbose logging is enabled for the current layout call.
+    """
+    if not verbose:
+        return
+    print(
+        f"[dagua] Auto {label}: {_format_auto_count(value)} "
+        f"({_format_auto_gb(free_bytes)} free, {budget_fraction:.0%} budget)",
+        flush=True,
+    )
+
+
+def _auto_sampled_node_cap(verbose: bool = False) -> int:
+    """Choose the sampled-node active-set cap from free VRAM.
+
+    Parameters
+    ----------
+    verbose : bool, default=False
+        Whether to log the selected cap.
+
+    Returns
+    -------
+    int
+        Active-row cap for sampled repulsion and overlap contexts. Falls back
+        to ``MIN_SAMPLED_ACTIVE_SET`` when CUDA telemetry is unavailable.
+    """
+    max_cap = max(SAMPLED_NODE_CONTEXT_CAP, 0)
+    fallback_cap = min(MIN_SAMPLED_ACTIVE_SET, max_cap)
+    if not torch.cuda.is_available():
+        if verbose:
+            print(
+                f"[dagua] Auto sampled node cap: {fallback_cap:,} (CUDA unavailable, fallback)",
+                flush=True,
+            )
+        return fallback_cap
+    try:
+        free_vram, _ = torch.cuda.mem_get_info()
+    except RuntimeError:
+        if verbose:
+            print(
+                f"[dagua] Auto sampled node cap: {fallback_cap:,} "
+                "(VRAM telemetry unavailable, fallback)",
+                flush=True,
+            )
+        return fallback_cap
+    safe_budget = int(free_vram * _SAMPLED_NODE_VRAM_FRACTION)
+    sampled_cap = max(MIN_SAMPLED_ACTIVE_SET, safe_budget // _SAMPLED_NODE_BYTES_PER_ROW)
+    sampled_cap = min(sampled_cap, _SAMPLED_NODE_MAX_CAP, max_cap)
+    _log_auto_allocation(
+        label="sampled node cap",
+        value=sampled_cap,
+        free_bytes=int(free_vram),
+        budget_fraction=_SAMPLED_NODE_VRAM_FRACTION,
+        verbose=verbose,
+    )
+    return sampled_cap
+
+
+def _auto_edge_batch_size(verbose: bool = False) -> int:
+    """Choose the largest edge batch that fits in available VRAM.
+
+    Parameters
+    ----------
+    verbose : bool, default=False
+        Whether to log the selected batch size.
+
+    Returns
+    -------
+    int
+        Edge batch size scaled to current free VRAM. Falls back to the
+        minimum batch when CUDA is unavailable.
+    """
+    if not torch.cuda.is_available():
+        if verbose:
+            print(
+                f"[dagua] Auto edge batch: {DEFAULT_HYBRID_EDGE_BATCH:,} "
+                "(CUDA unavailable, fallback)",
+                flush=True,
+            )
+        return DEFAULT_HYBRID_EDGE_BATCH
+    try:
+        free_vram, _ = torch.cuda.mem_get_info()
+    except RuntimeError:
+        if verbose:
+            print(
+                f"[dagua] Auto edge batch: {DEFAULT_HYBRID_EDGE_BATCH:,} "
+                "(VRAM telemetry unavailable, fallback)",
+                flush=True,
+            )
+        return DEFAULT_HYBRID_EDGE_BATCH
+    safe_budget = int(free_vram * _EDGE_BATCH_VRAM_FRACTION)
+    batch = max(_EDGE_BATCH_MIN, safe_budget // _BYTES_PER_EDGE_ESTIMATE)
+    batch = min(batch, _EDGE_BATCH_MAX)
+    _log_auto_allocation(
+        label="edge batch",
+        value=batch,
+        free_bytes=int(free_vram),
+        budget_fraction=_EDGE_BATCH_VRAM_FRACTION,
+        verbose=verbose,
+    )
+    return batch
+
+
+def _auto_subset_gpu_sampled_budget(verbose: bool = False) -> int:
+    """Choose the subset-GPU sampled transfer budget from free VRAM.
+
+    Parameters
+    ----------
+    verbose : bool, default=False
+        Whether to log the selected transfer budget.
+
+    Returns
+    -------
+    int
+        Byte budget reserved for copying sampled node subsets to CUDA. Falls
+        back to ``SUBSET_GPU_SAMPLED_BASE_BYTES`` when CUDA telemetry is
+        unavailable.
+    """
+    if not torch.cuda.is_available():
+        if verbose:
+            print(
+                "[dagua] Auto subset-GPU sampled budget: "
+                f"{_format_auto_gb(SUBSET_GPU_SAMPLED_BASE_BYTES)} "
+                "(CUDA unavailable, fallback)",
+                flush=True,
+            )
+        return SUBSET_GPU_SAMPLED_BASE_BYTES
+    try:
+        free_vram, _ = torch.cuda.mem_get_info()
+    except RuntimeError:
+        if verbose:
+            print(
+                "[dagua] Auto subset-GPU sampled budget: "
+                f"{_format_auto_gb(SUBSET_GPU_SAMPLED_BASE_BYTES)} "
+                "(VRAM telemetry unavailable, fallback)",
+                flush=True,
+            )
+        return SUBSET_GPU_SAMPLED_BASE_BYTES
+    budget = max(int(free_vram * 0.25), 0)
+    if verbose:
+        print(
+            f"[dagua] Auto subset-GPU sampled budget: {_format_auto_gb(budget)} "
+            f"({_format_auto_gb(int(free_vram))} free, 25% budget)",
+            flush=True,
+        )
+    return budget
+
+
 def _build_sampled_node_context(
     num_nodes: int,
     layer_index: LayerIndex,
     device: Union[str, torch.device],
     rvs_nn_k: int,
+    verbose: bool = False,
 ) -> SampledNodeContext:
     """Build shared sampled-node state for large-node repulsion and overlap terms.
 
@@ -126,6 +518,8 @@ def _build_sampled_node_context(
         Device where the sampled tensors should be allocated.
     rvs_nn_k : int
         Same-layer sample count used by the repulsion RVS path.
+    verbose : bool, default=False
+        Whether to log the auto-selected sampled-node cap.
 
     Returns
     -------
@@ -134,7 +528,7 @@ def _build_sampled_node_context(
         tensor stores same-layer samples first, followed by adjacent-layer
         random samples.
     """
-    n_active, _, _ = _sampled_node_context_sizes(num_nodes, rvs_nn_k)
+    n_active, _, _ = _sampled_node_context_sizes(num_nodes, rvs_nn_k, verbose=verbose)
     return _build_sampled_node_context_for_active(
         num_nodes,
         layer_index,
@@ -148,6 +542,7 @@ def _sampled_node_context_sizes(
     num_nodes: int,
     rvs_nn_k: int,
     n_active_override: Optional[int] = None,
+    verbose: bool = False,
 ) -> tuple[int, int, int]:
     """Return the sampled-node context dimensions for a graph size.
 
@@ -160,13 +555,16 @@ def _sampled_node_context_sizes(
     n_active_override : int, optional
         Explicit active-node count to use instead of the default ``N**0.75``
         scaling.
+    verbose : bool, default=False
+        Whether to log the auto-selected sampled-node cap.
 
     Returns
     -------
     tuple[int, int, int]
         ``(n_active, n_random, k_same)`` for the sampled context.
     """
-    default_n_active = min(max(int(num_nodes**0.75), min(num_nodes, 256)), SAMPLED_NODE_CONTEXT_CAP)
+    auto_cap = _auto_sampled_node_cap(verbose=verbose)
+    default_n_active = min(max(int(num_nodes**0.75), min(num_nodes, 256)), auto_cap)
     if n_active_override is None:
         n_active = default_n_active
     else:
@@ -627,19 +1025,55 @@ def _should_use_tiled_gpu(
         enough to justify tiling, CUDA is available, and a full resident GPU
         layout estimate does not fit the active VRAM budget.
     """
+    return _tiled_gpu_decision(
+        requested_device=requested_device,
+        execution_device=execution_device,
+        num_nodes=num_nodes,
+        num_edges=num_edges,
+    )[0]
+
+
+def _tiled_gpu_decision(
+    requested_device: str,
+    execution_device: str,
+    num_nodes: int,
+    num_edges: int,
+) -> tuple[bool, str]:
+    """Return the tiled-GPU decision together with the skip reason.
+
+    Parameters
+    ----------
+    requested_device : str
+        Device stored on the current layout config. This is retained for API
+        compatibility, but tiled GPU eligibility is determined by the actual
+        execution mode because multilevel refinement normalizes configs to the
+        per-level device.
+    execution_device : str
+        Device selected for the current engine call.
+    num_nodes : int
+        Number of nodes in the current layout problem.
+    num_edges : int
+        Number of edges in the current layout problem.
+
+    Returns
+    -------
+    tuple[bool, str]
+        ``(enabled, reason)`` where ``reason`` explains why tiled GPU is
+        skipped when ``enabled`` is ``False``.
+    """
     del requested_device
     if execution_device != "cpu":
-        return False
+        return False, f"execution_device={execution_device}"
     if num_nodes < TILED_GPU_MIN_NODES:
-        return False
+        return False, f"below threshold ({num_nodes:,} < {TILED_GPU_MIN_NODES:,})"
     if not torch.cuda.is_available():
-        return False
+        return False, "no CUDA"
     resident_batched_gpu_memory = _estimate_batched_cuda_resident_memory(num_nodes, num_edges)
     total_vram = _cuda_total_vram_bytes()
     if total_vram > 0 and resident_batched_gpu_memory < int(
         total_vram * STANDARD_CUDA_RESIDENT_HEADROOM
     ):
-        return False
+        return False, "fits in VRAM"
     full_gpu_memory = _estimate_gpu_memory(
         num_nodes,
         num_edges,
@@ -647,7 +1081,9 @@ def _should_use_tiled_gpu(
         edges_on_cpu=False,
         edge_batch=0,
     )
-    return not VRAMBudget().fits(full_gpu_memory)
+    if VRAMBudget().fits(full_gpu_memory):
+        return False, "fits in VRAM"
+    return True, "resident GPU layout exceeds VRAM budget"
 
 
 def _resolve_execution_mode(
@@ -690,7 +1126,7 @@ def _resolve_execution_mode(
 
 def _cap_subset_gpu_sampled_context(
     sampled_ctx: SampledNodeContext,
-    budget_bytes: int,
+    verbose: bool = False,
 ) -> SampledNodeContext:
     """Cap sampled active rows to keep one subset transfer within VRAM budget.
 
@@ -698,14 +1134,15 @@ def _cap_subset_gpu_sampled_context(
     ----------
     sampled_ctx : SampledNodeContext
         CPU-resident sampled-node context for the current step.
-    budget_bytes : int
-        Effective device budget available for the subset transfer.
+    verbose : bool, default=False
+        Whether to log the auto-selected subset transfer budget.
 
     Returns
     -------
     SampledNodeContext
         Original or truncated sampled context sized for the budget.
     """
+    budget_bytes = _auto_subset_gpu_sampled_budget(verbose=verbose)
     active_rows = sampled_ctx.active_idx.shape[0]
     if active_rows == 0 or sampled_ctx.sampled.numel() == 0:
         return sampled_ctx
@@ -781,6 +1218,7 @@ def _backward_standard_loss_terms(
     loss_terms: list[tuple[float, LossFn]],
     node_sizes: torch.Tensor,
     layer_index: Optional[LayerIndex],
+    progress_callback: Optional[Callable[[float], None]] = None,
 ) -> tuple[float, float]:
     """Evaluate standard loss terms and backpropagate them immediately.
 
@@ -794,6 +1232,8 @@ def _backward_standard_loss_terms(
         Node size tensor shaped ``[N, 2]`` aligned with ``pos``.
     layer_index : LayerIndex, optional
         Pre-computed layer structure for the current graph.
+    progress_callback : Callable[[float], None], optional
+        Callback invoked after each term with the cumulative unweighted loss.
 
     Returns
     -------
@@ -810,6 +1250,8 @@ def _backward_standard_loss_terms(
             val = float(term.item())
             total_loss_val += val
             unweighted_loss_val += val / weight if weight else 0.0
+            if progress_callback is not None:
+                progress_callback(unweighted_loss_val)
 
     return total_loss_val, unweighted_loss_val
 
@@ -848,6 +1290,8 @@ def _layout_inner(
     graph_structure: Optional[GraphStructure] = None,
     prebuilt_layer_index: Optional[LayerIndex] = None,
     skip_classification: bool = False,
+    progress_file_path: Optional[Union[str, Path]] = None,
+    progress_metadata: Optional[dict[str, object]] = None,
 ) -> torch.Tensor:
     """Optimize node positions for a tensor-only layout problem.
 
@@ -887,6 +1331,11 @@ def _layout_inner(
         When ``True``, skip structural classification and use the general layout
         path. This is used during multilevel refinement where the optimization
         strategy is already fixed by the V-cycle.
+    progress_file_path : str | Path, optional
+        Optional output path for atomic JSON progress snapshots.
+    progress_metadata : dict[str, object], optional
+        Extra metadata to merge into each progress snapshot. Multilevel
+        refinement uses this to attach phase and level information.
 
     Returns
     -------
@@ -910,6 +1359,11 @@ def _layout_inner(
 
     verbose = getattr(config, "verbose", False)
     _indent = progress_context.indent if progress_context else "  "
+    progress_path = (
+        _resolve_progress_file_path(config, progress_file_path)
+        if n > _PROGRESS_FILE_NODE_THRESHOLD
+        else None
+    )
 
     def _vlog(msg):
         if verbose:
@@ -924,6 +1378,10 @@ def _layout_inner(
         return torch.zeros(0, 2, device=resident_device)
     if n == 1:
         return torch.zeros(1, 2, device=resident_device)
+
+    subset_threshold = max(int(getattr(config, "subset_gpu_threshold", 10_000_000)), 1)
+    if execution_mode == "subset_gpu":
+        _vlog(f"Execution mode: subset_gpu (N={n:,}, threshold={subset_threshold:,})")
 
     # Apply adaptive spacing based on graph size
     node_sep = config.node_sep
@@ -1019,7 +1477,11 @@ def _layout_inner(
             edges_on_cpu = True
 
     tiled_compute = None
-    if execution_mode == "standard" and _should_use_tiled_gpu(config.device, device, n, num_edges):
+    tiled_enabled = False
+    tiled_reason = f"execution_mode={execution_mode}"
+    if execution_mode == "standard":
+        tiled_enabled, tiled_reason = _tiled_gpu_decision(config.device, device, n, num_edges)
+    if execution_mode == "standard" and tiled_enabled:
         from dagua.layout.tiled_compute import TiledGPUCompute
 
         tiled_compute = TiledGPUCompute(
@@ -1038,6 +1500,8 @@ def _layout_inner(
                     dtype=torch.long,
                 )
         print(f"[dagua] {_indent}TILED GPU active: {n:,} nodes in tiles", flush=True)
+    elif verbose:
+        _vlog(f"Tiled GPU: SKIPPED ({tiled_reason})")
 
     # Resolve memory optimization flags (VRAM-aware when on CUDA)
     if execution_mode == "subset_gpu":
@@ -1075,6 +1539,13 @@ def _layout_inner(
         flags.append("subset_gpu")
     if executor is not None:
         flags.append(f"workers={config.num_workers}")
+    use_sampled_context = (
+        tiled_compute is None
+        and layer_index is not None
+        and (config.w_repel > 0 or config.w_overlap > 0)
+    )
+    if use_sampled_context:
+        flags.append("sampled_ctx")
     _vlog(
         "init done, "
         f"{num_edges:,} edges, batch={edge_batch}, "
@@ -1230,6 +1701,7 @@ def _layout_inner(
                     layer_index=li,
                     rvs_threshold=config.rvs_threshold,
                     sampled_ctx=_active_sampled_ctx(p),
+                    debug_callback=_log_overlap_path if verbose else None,
                 ),
                 True,
                 True,
@@ -1465,26 +1937,135 @@ def _layout_inner(
     stall_count = 0
     _t_loop = _time.perf_counter()
     _log_interval = max(steps // 4, 1)  # log at 25%, 50%, 75%, 100%
-    use_sampled_context = (
-        tiled_compute is None
-        and layer_index is not None
-        and (config.w_repel > 0 or config.w_overlap > 0)
-    )
+    last_progress_write = _t_loop
+    last_edge_batch_log = _t_loop
+    next_edge_batch_fraction = _PROGRESS_BATCH_FRACTION
+    last_edge_batch_number = 0
     sample_refresh_interval = (
         config.repel_amortize_interval
         if n > config.repel_amortize_threshold and config.repel_amortize_interval > 1
         else 1
     )
     sampled_ctx: Optional[SampledNodeContext] = None
+    overlap_path_logged = False
     random_interval = (
         max(int(1.0 / config.edge_random_fraction), 1)
         if 0.0 < config.edge_random_fraction < 1.0
         else 0
     )
+    progress_strategy = _progress_strategy(
+        use_per_loss_bw=use_per_loss_bw,
+        use_checkpointing=use_checkpointing,
+        use_hybrid=use_hybrid,
+        edges_on_cpu=edges_on_cpu,
+        tiled_compute_active=tiled_compute is not None,
+        execution_mode=execution_mode,
+    )
+
+    def _log_overlap_path(msg: str) -> None:
+        """Emit the overlap-path selection once per layout solve."""
+        nonlocal overlap_path_logged
+        if overlap_path_logged:
+            return
+        _vlog(msg)
+        overlap_path_logged = True
+
+    def _maybe_write_progress_snapshot(
+        step_index: int,
+        loss_value: float,
+        *,
+        force: bool = False,
+    ) -> None:
+        """Write ``progress.json`` on the configured large-graph cadence.
+
+        Parameters
+        ----------
+        step_index : int
+            One-based optimizer step associated with the snapshot.
+        loss_value : float
+            Current unweighted loss estimate.
+        force : bool, default=False
+            Whether to bypass the normal write interval.
+
+        Returns
+        -------
+        None
+        """
+        nonlocal last_progress_write
+        if progress_path is None:
+            return
+        now = _time.perf_counter()
+        if not force and now - last_progress_write < _PROGRESS_FILE_INTERVAL_SECONDS:
+            return
+        payload: dict[str, object] = {
+            "step": step_index,
+            "total_steps": steps,
+            "step_pct": step_index / max(steps, 1),
+            "loss": float(loss_value),
+            "elapsed_seconds": now - _t_loop,
+            "vram_mb": _current_vram_mb(),
+            "rss_gb": round(_current_rss_gb(), 1),
+            "strategy": progress_strategy,
+            "num_nodes": n,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        }
+        if progress_metadata is not None:
+            payload.update(progress_metadata)
+        _write_progress_json(progress_path, payload)
+        last_progress_write = now
+
+    def _maybe_log_edge_batch_progress(
+        batch_progress: Optional[tuple[int, int]],
+        loss_value: float,
+        *,
+        force: bool = False,
+    ) -> None:
+        """Emit periodic edge-batch progress for verbose streamed-edge runs.
+
+        Parameters
+        ----------
+        batch_progress : tuple[int, int] | None
+            One-based current batch index and total number of batches.
+        loss_value : float
+            Current unweighted loss estimate.
+        force : bool, default=False
+            Whether to bypass the normal time threshold.
+
+        Returns
+        -------
+        None
+        """
+        nonlocal last_edge_batch_log, next_edge_batch_fraction, last_edge_batch_number
+        if not verbose or batch_progress is None:
+            return
+        batch_number, total_batches = batch_progress
+        if total_batches <= 1:
+            return
+        if batch_number < last_edge_batch_number:
+            next_edge_batch_fraction = _PROGRESS_BATCH_FRACTION
+        batch_fraction = batch_number / max(total_batches, 1)
+        now = _time.perf_counter()
+        time_due = now - last_edge_batch_log >= _PROGRESS_LOG_INTERVAL_SECONDS
+        fraction_due = batch_fraction >= next_edge_batch_fraction
+        if not (force or time_due or fraction_due):
+            last_edge_batch_number = batch_number
+            return
+        batch_pct = int(round(batch_fraction * 100))
+        print(
+            f"[dagua] {_indent}edge batch {batch_number}/{total_batches} "
+            f"({batch_pct}%) loss={loss_value:.1f} "
+            f"({now - _t_loop:.1f}s elapsed)",
+            flush=True,
+        )
+        last_edge_batch_log = now
+        while next_edge_batch_fraction <= batch_fraction:
+            next_edge_batch_fraction += _PROGRESS_BATCH_FRACTION
+        last_edge_batch_number = batch_number
 
     for step in range(steps):
         t = step / max(steps - 1, 1)  # 0 → 1
         current_step_ref[0] = step
+        batch_progress = _compute_edge_batch_progress(step, num_edges, edge_batch, random_interval)
 
         if verbose and step > 0 and step % _log_interval == 0:
             _vlog(
@@ -1551,10 +2132,15 @@ def _layout_inner(
                 cpu_layer_index if use_hybrid and cpu_layer_index is not None else layer_index
             )
             assert sampled_layer_index is not None
+            auto_log = verbose and step == 0
             sampled_device: Union[str, torch.device] = (
                 "cpu" if use_hybrid or execution_mode == "subset_gpu" else pos.device
             )
-            sampled_n_active, _, _ = _sampled_node_context_sizes(n, config.rvs_nn_k)
+            sampled_n_active, _, _ = _sampled_node_context_sizes(
+                n,
+                config.rvs_nn_k,
+                verbose=auto_log,
+            )
             default_n_active = sampled_n_active
             if (
                 device == "cuda"
@@ -1589,6 +2175,7 @@ def _layout_inner(
                     sampled_layer_index,
                     sampled_device,
                     config.rvs_nn_k,
+                    verbose=auto_log,
                 )
             else:
                 sampled_ctx = _build_sampled_node_context_for_active(
@@ -1599,13 +2186,7 @@ def _layout_inner(
                     sampled_n_active,
                 )
             if execution_mode == "subset_gpu" and device == "cuda" and torch.cuda.is_available():
-                free, _ = torch.cuda.mem_get_info()
-                cached_free = max(
-                    0,
-                    torch.cuda.memory_reserved() - torch.cuda.memory_allocated(),
-                )
-                total_budget = int((free + cached_free) * CUDA_ACTIVE_SET_HEADROOM)
-                capped_ctx = _cap_subset_gpu_sampled_context(sampled_ctx, total_budget)
+                capped_ctx = _cap_subset_gpu_sampled_context(sampled_ctx, verbose=auto_log)
                 if capped_ctx.active_idx.shape[0] < sampled_ctx.active_idx.shape[0]:
                     _vlog(
                         "capped subset-GPU sampled active set to "
@@ -1668,6 +2249,21 @@ def _layout_inner(
         total_loss_val = 0.0
         unweighted_loss_val = 0.0
 
+        def _on_term_progress(current_unweighted_loss: float) -> None:
+            """Handle periodic logging and JSON snapshots during one step.
+
+            Parameters
+            ----------
+            current_unweighted_loss : float
+                Current cumulative unweighted loss for the active step.
+
+            Returns
+            -------
+            None
+            """
+            _maybe_log_edge_batch_progress(batch_progress, current_unweighted_loss)
+            _maybe_write_progress_snapshot(step + 1, current_unweighted_loss)
+
         if execution_mode == "subset_gpu":
             from typing import Union as _Union
 
@@ -1686,6 +2282,7 @@ def _layout_inner(
                 batch_edges_ref=batch_edges_ref,
                 edge_ctx_ref=edge_ctx_ref,
                 sampled_ctx_ref=sampled_ctx_ref,
+                verbose=verbose,
             )
             subset_terms: List[SubsetGPULossTerm] = []
             for (
@@ -1722,7 +2319,11 @@ def _layout_inner(
                     )
                 )
 
-            pos.grad = subset_executor.compute_step(pos, subset_terms)
+            pos.grad = subset_executor.compute_step(
+                pos,
+                subset_terms,
+                progress_callback=_on_term_progress,
+            )
             total_loss_val = subset_executor.last_total_loss
             unweighted_loss_val = subset_executor.last_unweighted_loss
         elif tiled_compute is not None:
@@ -1772,6 +2373,7 @@ def _layout_inner(
                         list(zip(tiled_loss_weights, tiled_loss_fns)),
                         node_sizes,
                         layer_index,
+                        progress_callback=_on_term_progress,
                     )
                     total_loss_val += fallback_total
                     unweighted_loss_val += fallback_unweighted
@@ -1782,6 +2384,7 @@ def _layout_inner(
                 [(weight, loss_fn) for weight, loss_fn, _is_heavy in fallback_terms],
                 node_sizes,
                 layer_index,
+                progress_callback=_on_term_progress,
             )
             total_loss_val += fallback_total
             unweighted_loss_val += fallback_unweighted
@@ -1820,6 +2423,7 @@ def _layout_inner(
                         val = term.item()
                         total_loss_val += val
                         unweighted_loss_val += val / weight if weight else 0.0
+                        _on_term_progress(unweighted_loss_val)
 
                 # Gather heavy loss results
                 for weight, future in heavy_futures:
@@ -1829,6 +2433,7 @@ def _layout_inner(
                         val = term.item()
                         total_loss_val += val
                         unweighted_loss_val += val / weight if weight else 0.0
+                        _on_term_progress(unweighted_loss_val)
             else:
                 # Sequential per-loss backward
                 for (
@@ -1857,6 +2462,7 @@ def _layout_inner(
                         val = term.item()
                         total_loss_val += val
                         unweighted_loss_val += val / weight if weight else 0.0
+                        _on_term_progress(unweighted_loss_val)
         else:
             # Standard: accumulate all losses, single backward
             loss = torch.tensor(0.0, device=pos.device)
@@ -1884,6 +2490,7 @@ def _layout_inner(
                 if term is not None:
                     loss = loss + term
                     unweighted_loss_val += term.item() / weight if weight else 0.0
+                    _on_term_progress(unweighted_loss_val)
             loss.backward()
             total_loss_val = loss.item()
 
@@ -1920,6 +2527,10 @@ def _layout_inner(
                 positions=pos.detach(),
             )
 
+        _maybe_log_edge_batch_progress(batch_progress, unweighted_loss_val)
+        _maybe_write_progress_snapshot(step + 1, unweighted_loss_val)
+        completed_steps = step + 1
+
         # Early stopping check (use unweighted loss — immune to annealing)
         # Small graphs converge faster — detect convergence sooner
         rel_threshold = 5e-4 if n <= 200 else 1e-4
@@ -1937,6 +2548,8 @@ def _layout_inner(
         prev_unweighted = unweighted_loss_val
 
     _vlog(f"done ({_time.perf_counter() - _t_loop:.1f}s)")
+    if completed_steps > 0:
+        _maybe_write_progress_snapshot(completed_steps, prev_unweighted, force=True)
 
     # Free optimizer and grad before final projection — no longer needed
     del optimizer
@@ -2246,7 +2859,18 @@ class _GradBridge(torch.autograd.Function):
 def _edge_batch_size(num_edges: int, config: LayoutConfig) -> int:
     """Determine edge batch size based on graph scale.
 
-    Returns 0 for "use all edges" (no batching).
+    Parameters
+    ----------
+    num_edges : int
+        Number of edges in the current layout problem.
+    config : LayoutConfig
+        Layout configuration that may provide an explicit batch override.
+
+    Returns
+    -------
+    int
+        Edge batch size for the current solve. Returns ``0`` for "use all
+        edges" when the graph fits comfortably within the active VRAM budget.
     """
     if config.edge_batch_size > 0:
         return config.edge_batch_size
@@ -2255,14 +2879,10 @@ def _edge_batch_size(num_edges: int, config: LayoutConfig) -> int:
         return 0
 
     if config.device == "cuda":
-        try:
-            free, _ = torch.cuda.mem_get_info()
-            max_safe = int(free * 0.3 / 128)
-            if num_edges <= max_safe:
-                return 0
-            return min(max_safe, num_edges)
-        except Exception:
-            pass
+        auto_batch = _auto_edge_batch_size(verbose=getattr(config, "verbose", False))
+        if num_edges <= auto_batch:
+            return 0
+        return min(auto_batch, num_edges)
 
     if num_edges <= 100000:
         return 50000

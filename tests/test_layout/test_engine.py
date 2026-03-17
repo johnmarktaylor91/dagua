@@ -23,10 +23,12 @@ from dagua.layout.engine import (
     _override_for_tree,
     _resolve_memory_strategy,
     _should_use_tiled_gpu,
+    _tiled_gpu_decision,
 )
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
 from dagua.layout.layers import build_layer_index
 from dagua.layout.multilevel import (
+    _coarsen_once_streaming,
     _scaled_amortization,
     _scaled_final_refine_steps,
     _scaled_sample_cap,
@@ -241,6 +243,87 @@ def test_coarsening_reaches_min_nodes() -> None:
     assert coarsest_n < 10000, f"Coarsest has {coarsest_n} nodes, expected < 10K"
 
 
+def test_coarsen_once_streaming_logs_gpu_skip_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming coarsening should report why the CUDA helper path was skipped."""
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+    messages: list[str] = []
+    edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long)
+    node_sizes = torch.full((5, 2), 10.0)
+    layers = torch.tensor([0, 0, 1, 1, 2], dtype=torch.long)
+    layer_counts = torch.tensor([2, 2, 1], dtype=torch.long)
+    layer_offsets = torch.tensor([0, 2, 4, 5], dtype=torch.long)
+    monkeypatch.setattr(
+        multilevel_module,
+        "_can_use_gpu_for_streaming_coarsen",
+        lambda _num_nodes: (None, "insufficient VRAM"),
+    )
+
+    _coarsen_once_streaming(
+        edge_index=edge_index,
+        N=5,
+        node_sizes=node_sizes,
+        layers=layers,
+        num_layers=3,
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        progress=messages.append,
+    )
+
+    assert "GPU coarsen: SKIPPED (reason: insufficient VRAM)" in messages
+
+
+def test_coarsen_once_streaming_logs_gpu_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming coarsening should report when CUDA scatter and dedup activate."""
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+    messages: list[str] = []
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 10.0)
+    layers = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+    layer_counts = torch.tensor([2, 2], dtype=torch.long)
+    layer_offsets = torch.tensor([0, 2, 4], dtype=torch.long)
+
+    monkeypatch.setattr(
+        multilevel_module,
+        "_can_use_gpu_for_streaming_coarsen",
+        lambda _num_nodes: ("cuda", ""),
+    )
+    monkeypatch.setattr(
+        multilevel_module,
+        "_build_streaming_min_neighbor",
+        lambda edge_index, num_nodes, index_dtype, gpu_device: (
+            torch.arange(num_nodes, dtype=index_dtype),
+            True,
+            0.001,
+        ),
+    )
+    monkeypatch.setattr(
+        multilevel_module,
+        "_deduplicate_streaming_coarse_edges",
+        lambda edge_index, fine_to_coarse, num_coarse_nodes, output_device, gpu_device: (
+            torch.tensor([[0], [1]], dtype=torch.long, device=output_device),
+            True,
+            0.002,
+        ),
+    )
+
+    _coarsen_once_streaming(
+        edge_index=edge_index,
+        N=4,
+        node_sizes=node_sizes,
+        layers=layers,
+        num_layers=2,
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        progress=messages.append,
+    )
+
+    assert "GPU coarsen: scatter + dedup on CUDA (3.0ms)" in messages
+
+
 def test_edge_batch_size_scaling() -> None:
     """Edge batch sizes should scale up with large edge counts."""
     config = LayoutConfig()
@@ -286,10 +369,12 @@ def test_edge_batch_size_cuda_uses_available_vram(
     """CUDA auto-batching should use the largest safe batch or all edges if they fit."""
     config = LayoutConfig(device="cuda")
 
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (128_000_000, 256_000_000))
 
     assert _edge_batch_size(100_000, config) == 0
-    assert _edge_batch_size(500_000, config) == 300_000
+    assert _edge_batch_size(500_000, config) == 0
+    assert _edge_batch_size(5_000_000, config) == 1_000_000
 
 
 def test_gpu_memory_estimate_no_phantom_edges() -> None:
@@ -412,6 +497,7 @@ def test_refinement_execution_uses_nesterov_fallback_when_adam_does_not_fit(
         }
         return lookup.get((optimizer_type, edge_batch), 80)
 
+    monkeypatch.setattr(engine_module, "_auto_edge_batch_size", lambda verbose=False: 5_000_000)
     monkeypatch.setattr(engine_module, "_estimate_gpu_memory", _fake_estimate_gpu_memory)
     monkeypatch.setattr(
         engine_module,
@@ -437,6 +523,7 @@ def test_refinement_execution_keeps_50m_behavior_without_sgd_fallback(
     engine_module = importlib.import_module("dagua.layout.engine")
     multilevel_module = importlib.import_module("dagua.layout.multilevel")
 
+    monkeypatch.setattr(engine_module, "_auto_edge_batch_size", lambda verbose=False: 5_000_000)
     monkeypatch.setattr(
         engine_module,
         "_estimate_gpu_memory",
@@ -469,6 +556,7 @@ def test_refinement_execution_respects_adam_only_policy(
     engine_module = importlib.import_module("dagua.layout.engine")
     multilevel_module = importlib.import_module("dagua.layout.multilevel")
 
+    monkeypatch.setattr(engine_module, "_auto_edge_batch_size", lambda verbose=False: 5_000_000)
     monkeypatch.setattr(
         engine_module,
         "_estimate_gpu_memory",
@@ -506,6 +594,7 @@ def test_refinement_execution_keeps_huge_graphs_on_cuda_when_positions_fit(
 
         total_memory = 11 * 1024**3
 
+    monkeypatch.setattr(engine_module, "_auto_edge_batch_size", lambda verbose=False: 5_000_000)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: _FakeDeviceProps())
@@ -687,11 +776,12 @@ def test_sampled_context_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
         layer_index: object,
         device: str | torch.device,
         rvs_nn_k: int,
+        verbose: bool = False,
     ) -> object:
         """Count sampled-context rebuilds while delegating to the real helper."""
         nonlocal build_calls
         build_calls += 1
-        return original_builder(num_nodes, layer_index, device, rvs_nn_k)
+        return original_builder(num_nodes, layer_index, device, rvs_nn_k, verbose=verbose)
 
     monkeypatch.setattr(engine_module, "_build_sampled_node_context", _counting_builder)
 
@@ -884,6 +974,8 @@ def test_multilevel_kicks_in_at_20k(monkeypatch: pytest.MonkeyPatch) -> None:
         graph_structure: object | None = None,
         prebuilt_layer_index: object | None = None,
         skip_classification: bool = False,
+        progress_file_path: object | None = None,
+        progress_metadata: dict[str, object] | None = None,
     ) -> torch.Tensor:
         """Fail the test if the direct path is selected unexpectedly."""
         del (
@@ -901,6 +993,8 @@ def test_multilevel_kicks_in_at_20k(monkeypatch: pytest.MonkeyPatch) -> None:
             graph_structure,
             prebuilt_layer_index,
             skip_classification,
+            progress_file_path,
+            progress_metadata,
         )
         called["direct"] = True
         return torch.zeros((n, 2), dtype=torch.float32)
@@ -956,6 +1050,8 @@ def test_direct_layout_below_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
         graph_structure: object | None = None,
         prebuilt_layer_index: object | None = None,
         skip_classification: bool = False,
+        progress_file_path: object | None = None,
+        progress_metadata: dict[str, object] | None = None,
     ) -> torch.Tensor:
         """Return a deterministic tensor while recording direct-path usage."""
         del (
@@ -972,6 +1068,8 @@ def test_direct_layout_below_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
             graph_structure,
             prebuilt_layer_index,
             skip_classification,
+            progress_file_path,
+            progress_metadata,
         )
         called["direct"] = True
         return torch.zeros((num_nodes, 2), dtype=torch.float32)
@@ -1387,6 +1485,24 @@ def test_tiled_compute_skips_for_small_graphs() -> None:
     assert not _should_use_tiled_gpu("cuda", "cuda", 60_000_000, 80_000_000)
 
 
+def test_tiled_gpu_decision_reports_skip_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tiled-GPU gate should explain why standard CPU execution stays in place."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        engine_module, "_estimate_batched_cuda_resident_memory", lambda *args, **kwargs: 1
+    )
+    monkeypatch.setattr(engine_module, "_cuda_total_vram_bytes", lambda: 100)
+
+    enabled, reason = _tiled_gpu_decision("cpu", "cpu", 60_000_000, 80_000_000)
+
+    assert not enabled
+    assert reason == "fits in VRAM"
+
+
 def test_tiled_compute_edge_batch_size_uses_full_edge_context_budget() -> None:
     """Cross-tile batches should budget for edge tensors plus autograd context."""
     assert _compute_edge_batch_size(11_000_000_000) == 12_890_625
@@ -1509,7 +1625,11 @@ def test_layout_inner_initializes_tiled_gpu_before_memory_strategy(
         assert state["tiled_ready"] is True
         return False, False, False
 
-    monkeypatch.setattr(engine_module, "_should_use_tiled_gpu", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        engine_module,
+        "_tiled_gpu_decision",
+        lambda *args, **kwargs: (True, "resident GPU layout exceeds VRAM budget"),
+    )
     monkeypatch.setattr(engine_module, "_resolve_memory_strategy", _fake_resolve_memory_strategy)
     monkeypatch.setattr(tiled_compute_module, "TiledGPUCompute", _FakeTiledGPUCompute)
 
@@ -1534,6 +1654,179 @@ def test_layout_inner_initializes_tiled_gpu_before_memory_strategy(
     assert pos.shape == (3, 2)
     assert state["resolved"] is False
     assert "TILED GPU active: 3 nodes in tiles" in capsys.readouterr().out
+
+
+def test_layout_inner_logs_subset_gpu_execution_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verbose layout runs should report subset-GPU selection and the resulting strategy."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+
+    monkeypatch.setattr(
+        engine_module,
+        "_resolve_execution_mode",
+        lambda *args, **kwargs: "subset_gpu",
+    )
+
+    _layout_inner(
+        torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        3,
+        torch.full((3, 2), 20.0),
+        LayoutConfig(
+            steps=1,
+            device="cuda",
+            verbose=True,
+            subset_gpu_threshold=10_000,
+            w_repel=0.0,
+            w_overlap=0.0,
+            w_crossing=0.0,
+            w_spacing=0.0,
+            w_fanout=0.0,
+        ),
+        device="cuda",
+        skip_classification=True,
+    )
+
+    out = capsys.readouterr().out
+    assert "Execution mode: subset_gpu (N=3, threshold=10,000)" in out
+    assert "Tiled GPU: SKIPPED (execution_mode=subset_gpu)" in out
+    assert "strategy=[edge_stream, subset_gpu]" in out
+
+
+def test_layout_inner_logs_tiled_gpu_skip_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verbose layout runs should expose why tiled GPU stayed disabled."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+
+    monkeypatch.setattr(
+        engine_module,
+        "_resolve_execution_mode",
+        lambda *args, **kwargs: "standard",
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "_tiled_gpu_decision",
+        lambda *args, **kwargs: (False, "fits in VRAM"),
+    )
+
+    _layout_inner(
+        torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        3,
+        torch.full((3, 2), 20.0),
+        LayoutConfig(
+            steps=1,
+            device="cpu",
+            verbose=True,
+            w_repel=0.0,
+            w_overlap=0.0,
+            w_crossing=0.0,
+            w_spacing=0.0,
+            w_fanout=0.0,
+        ),
+        device="cpu",
+        skip_classification=True,
+    )
+
+    assert "Tiled GPU: SKIPPED (fits in VRAM)" in capsys.readouterr().out
+
+
+def test_layout_inner_logs_edge_batch_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verbose layout runs should report quarter-mark edge batch progress."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+
+    monkeypatch.setattr(
+        engine_module,
+        "_resolve_execution_mode",
+        lambda *args, **kwargs: "standard",
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "_tiled_gpu_decision",
+        lambda *args, **kwargs: (False, "fits in VRAM"),
+    )
+
+    _layout_inner(
+        torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long),
+        5,
+        torch.full((5, 2), 20.0),
+        LayoutConfig(
+            steps=1,
+            device="cpu",
+            verbose=True,
+            edge_batch_size=1,
+            w_dag=0.0,
+            w_repel=0.0,
+            w_overlap=0.0,
+            w_cluster=0.0,
+            w_cluster_contain=0.0,
+            w_crossing=0.0,
+            w_straightness=0.0,
+            w_length_variance=0.0,
+            w_spacing=0.0,
+            w_fanout=0.0,
+            w_back_edge=0.0,
+        ),
+        device="cpu",
+        skip_classification=True,
+    )
+
+    out = capsys.readouterr().out
+    assert "edge batch 1/4 (25%) loss=" in out
+    assert "[dagua]" in out
+
+
+def test_layout_inner_logs_sampled_overlap_path_once(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verbose layout runs should reveal when overlap uses the sampled shared context."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+
+    monkeypatch.setattr(
+        engine_module,
+        "_resolve_execution_mode",
+        lambda *args, **kwargs: "standard",
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "_tiled_gpu_decision",
+        lambda *args, **kwargs: (False, "below threshold (3 < 50,000,000)"),
+    )
+
+    _layout_inner(
+        torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        3,
+        torch.full((3, 2), 20.0),
+        LayoutConfig(
+            steps=2,
+            device="cpu",
+            verbose=True,
+            w_dag=0.0,
+            w_attract=0.0,
+            w_repel=0.0,
+            w_overlap=1.0,
+            w_cluster=0.0,
+            w_cluster_contain=0.0,
+            w_crossing=0.0,
+            w_straightness=0.0,
+            w_length_variance=0.0,
+            w_spacing=0.0,
+            w_fanout=0.0,
+            w_back_edge=0.0,
+        ),
+        device="cpu",
+        skip_classification=True,
+    )
+
+    out = capsys.readouterr().out
+    assert out.count("Overlap path: sampled_ctx") == 1
+    assert "strategy=[sampled_ctx]" in out
 
 
 def test_layout_inner_falls_back_to_cpu_when_tiled_gpu_oom(
@@ -1603,7 +1896,11 @@ def test_layout_inner_falls_back_to_cpu_when_tiled_gpu_oom(
             self.current_edge_index = None
             self.current_edge_ctx = None
 
-    monkeypatch.setattr(engine_module, "_should_use_tiled_gpu", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        engine_module,
+        "_tiled_gpu_decision",
+        lambda *args, **kwargs: (True, "resident GPU layout exceeds VRAM budget"),
+    )
     monkeypatch.setattr(tiled_compute_module, "TiledGPUCompute", _OOMTiledGPUCompute)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
 
@@ -1617,7 +1914,11 @@ def test_layout_inner_falls_back_to_cpu_when_tiled_gpu_oom(
         skip_classification=True,
     )
 
-    monkeypatch.setattr(engine_module, "_should_use_tiled_gpu", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        engine_module,
+        "_tiled_gpu_decision",
+        lambda *args, **kwargs: (False, "fits in VRAM"),
+    )
 
     cpu_pos = _layout_inner(
         edge_index,
@@ -1692,6 +1993,8 @@ def test_multilevel_refinement_syncs_config_device_for_cpu_levels(
         graph_structure: object | None = None,
         prebuilt_layer_index: object | None = None,
         skip_classification: bool = False,
+        progress_file_path: object | None = None,
+        progress_metadata: dict[str, object] | None = None,
     ) -> torch.Tensor:
         """Capture engine device inputs while returning deterministic positions."""
         del (
@@ -1707,6 +2010,8 @@ def test_multilevel_refinement_syncs_config_device_for_cpu_levels(
             graph_structure,
             prebuilt_layer_index,
             skip_classification,
+            progress_file_path,
+            progress_metadata,
         )
         calls.append((num_nodes, config.device, device))
         return torch.zeros((num_nodes, 2), dtype=torch.float32)
@@ -1798,6 +2103,8 @@ def test_multilevel_final_refinement_uses_all_random_edge_batches(
         graph_structure: object | None = None,
         prebuilt_layer_index: object | None = None,
         skip_classification: bool = False,
+        progress_file_path: object | None = None,
+        progress_metadata: dict[str, object] | None = None,
     ) -> torch.Tensor:
         """Record the final refinement config without running the real solver."""
         del (
@@ -1815,6 +2122,8 @@ def test_multilevel_final_refinement_uses_all_random_edge_batches(
             graph_structure,
             prebuilt_layer_index,
             skip_classification,
+            progress_file_path,
+            progress_metadata,
         )
         recorded_edge_random_fraction.append(config.edge_random_fraction)
         return torch.zeros((2, 2), dtype=torch.float32)

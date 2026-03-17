@@ -431,7 +431,7 @@ def test_streaming_coarsen_gpu_path_logs_timings(
     captured = capsys.readouterr()
 
     assert result.num_nodes < node_count
-    assert "coarsen GPU:" in captured.out
+    assert "GPU coarsen:" in captured.out
 
 
 def _make_layered_dag(n_per_layer: int, n_layers: int):

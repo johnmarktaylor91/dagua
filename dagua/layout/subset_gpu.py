@@ -8,6 +8,7 @@ signatures used by the layout engine.
 
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional, Sequence, Union
@@ -18,6 +19,8 @@ from dagua.layout.engine import EdgeBatchContext, SampledNodeContext
 from dagua.layout.layers import LayerIndex
 
 LossFn = Callable[[torch.Tensor, torch.Tensor, Optional[LayerIndex]], torch.Tensor]
+ProgressCallback = Callable[[float], None]
+_PROGRESS_LOG_INTERVAL_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -325,6 +328,8 @@ class SubsetGPUExecutor:
     sampled_ctx_ref : list[SampledNodeContext | None]
         Mutable engine sampled-context reference. Local remapped sampled
         indices are installed during sampled subset evaluation.
+    verbose : bool, default=False
+        Whether timed subset progress logs should be emitted.
     """
 
     def __init__(
@@ -335,6 +340,7 @@ class SubsetGPUExecutor:
         batch_edges_ref: list[Optional[torch.Tensor]],
         edge_ctx_ref: list[Optional[EdgeBatchContext]],
         sampled_ctx_ref: list[Optional[SampledNodeContext]],
+        verbose: bool = False,
     ) -> None:
         self.node_sizes = node_sizes
         self.layer_index = layer_index
@@ -342,6 +348,7 @@ class SubsetGPUExecutor:
         self.batch_edges_ref = batch_edges_ref
         self.edge_ctx_ref = edge_ctx_ref
         self.sampled_ctx_ref = sampled_ctx_ref
+        self.verbose = verbose
         self.last_total_loss = 0.0
         self.last_unweighted_loss = 0.0
         self._grad_buffer: Optional[torch.Tensor] = None
@@ -350,6 +357,8 @@ class SubsetGPUExecutor:
         self,
         pos: torch.Tensor,
         loss_terms: Sequence[SubsetGPULossTerm],
+        verbose: Optional[bool] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> torch.Tensor:
         """Compute one optimizer-step gradient buffer.
 
@@ -360,6 +369,12 @@ class SubsetGPUExecutor:
             ``requires_grad=True``.
         loss_terms : Sequence[SubsetGPULossTerm]
             Weighted loss terms to evaluate for the current optimizer step.
+        verbose : bool, optional
+            Override for timed subset progress logging. When omitted, the
+            executor-level setting is used.
+        progress_callback : Callable[[float], None], optional
+            Callback invoked when a timed progress heartbeat fires. The engine
+            uses this to refresh ``progress.json`` during long subset steps.
 
         Returns
         -------
@@ -370,14 +385,33 @@ class SubsetGPUExecutor:
         grad_buffer = self._prepare_grad_buffer(pos)
         self.last_total_loss = 0.0
         self.last_unweighted_loss = 0.0
+        active_verbose = self.verbose if verbose is None else verbose
+        active_terms = sum(1 for term in loss_terms if term.weight > 0.0)
+        step_start = time.perf_counter()
+        next_progress_time = step_start + _PROGRESS_LOG_INTERVAL_SECONDS
+        completed_terms = 0
 
         for term in loss_terms:
             if term.weight <= 0.0:
                 continue
             if isinstance(term.access_pattern, GlobalAccessPattern):
                 self._accumulate_global_grad(term, pos, grad_buffer)
+            else:
+                self._accumulate_subset_grad(term, pos, grad_buffer)
+            completed_terms += 1
+            now = time.perf_counter()
+            if now < next_progress_time:
                 continue
-            self._accumulate_subset_grad(term, pos, grad_buffer)
+            elapsed = now - step_start
+            if active_verbose:
+                print(
+                    f"[dagua]       subset_gpu: {completed_terms}/{active_terms} terms, "
+                    f"loss={self.last_unweighted_loss:.1f} ({elapsed:.1f}s elapsed)",
+                    flush=True,
+                )
+            if progress_callback is not None:
+                progress_callback(self.last_unweighted_loss)
+            next_progress_time = now + _PROGRESS_LOG_INTERVAL_SECONDS
 
         return grad_buffer
 
