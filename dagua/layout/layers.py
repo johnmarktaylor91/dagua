@@ -7,8 +7,11 @@ projection, and overlap detection. Eliminates repeated Python dict-building.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable, List, Optional, Union
 
 import torch
+
+from dagua.utils import _cuda_stage_status_message
 
 
 @dataclass
@@ -43,13 +46,110 @@ class LayerIndex:
         return int(self.layer_sizes().max().item())
 
 
-def build_layer_index(
-    layer_assignments,
-    device: str = "cpu",
-) -> LayerIndex:
-    """Build a LayerIndex from layer assignments (List[int] or torch.Tensor).
+def _log_layer_index_status(
+    message: str,
+    progress: Optional[Callable[[str], None]],
+    verbose: bool,
+) -> None:
+    """Emit a LayerIndex status message when verbose logging is enabled.
 
-    O(N log N) from the sort. All subsequent per-layer operations are O(1) indexed.
+    Parameters
+    ----------
+    message : str
+        Status message without the ``[dagua]`` prefix.
+    progress : Callable[[str], None] | None
+        Optional progress sink used by callers that own log formatting.
+    verbose : bool
+        Whether fallback and activation logs should be emitted.
+
+    Returns
+    -------
+    None
+    """
+    if not verbose:
+        return
+    if progress is not None:
+        progress(message)
+    else:
+        print(f"[dagua]   {message}", flush=True)
+
+
+def _layer_index_gpu_sort_required_bytes(num_nodes: int) -> int:
+    """Return the conservative scratch estimate for CUDA layer-index sorting.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the layer assignment tensor.
+
+    Returns
+    -------
+    int
+        Estimated bytes for input, scratch, and output tensors during CUDA
+        argsort.
+    """
+    return num_nodes * 8 * 3
+
+
+def _cuda_layer_argsort(
+    node_to_layer: torch.Tensor,
+    output_device: str,
+) -> torch.Tensor:
+    """Run a stable CUDA argsort for layer assignments.
+
+    Parameters
+    ----------
+    node_to_layer : torch.Tensor
+        Layer assignment tensor with shape ``[N]``.
+    output_device : str
+        Device for the returned permutation tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Stable layer-sorted node order with shape ``[N]``.
+    """
+    sort_input = (
+        node_to_layer
+        if node_to_layer.device.type == "cuda"
+        else node_to_layer.to(device="cuda", dtype=node_to_layer.dtype)
+    )
+    sorted_indices = sort_input.argsort(stable=True)
+    return sorted_indices.to(device=output_device)
+
+
+def build_layer_index(
+    layer_assignments: Union[List[int], torch.Tensor],
+    device: str = "cpu",
+    *,
+    verbose: bool = False,
+    progress: Optional[Callable[[str], None]] = None,
+    enable_cuda_sort: bool = True,
+) -> LayerIndex:
+    """Build a layer index from node layer assignments.
+
+    Parameters
+    ----------
+    layer_assignments : list[int] | torch.Tensor
+        Layer IDs for each node with shape ``[N]``.
+    device : str, default="cpu"
+        Device for the returned ``LayerIndex`` tensors.
+    verbose : bool, default=False
+        Whether to emit CUDA activation and fallback logs.
+    progress : Callable[[str], None], optional
+        Optional progress sink used by callers that own log formatting.
+    enable_cuda_sort : bool, default=True
+        Whether CUDA argsort may be used when enough VRAM is available.
+
+    Returns
+    -------
+    LayerIndex
+        Indexed layer structure with stable node ordering inside each layer.
+
+    Notes
+    -----
+    The sort is always stable so equal-layer nodes keep ascending node-ID
+    order, which is required by the streaming coarsening tie-break contract.
     """
     index_dtype = (
         torch.int32 if len(layer_assignments) <= torch.iinfo(torch.int32).max else torch.long
@@ -67,15 +167,56 @@ def build_layer_index(
         node_to_layer = torch.tensor(layer_assignments, dtype=index_dtype, device=device)
     num_layers = int(node_to_layer.max().item()) + 1 if n > 0 else 0
 
-    # Sort nodes by layer
-    sorted_indices = node_to_layer.argsort()
+    sorted_indices: torch.Tensor
+    required_bytes = _layer_index_gpu_sort_required_bytes(n)
+    free_vram = 0
+    use_cuda_sort = False
+    if enable_cuda_sort and n > 0 and torch.cuda.is_available():
+        try:
+            free_vram, _total_vram = torch.cuda.mem_get_info()
+        except RuntimeError:
+            free_vram = 0
+        else:
+            use_cuda_sort = required_bytes < int(free_vram * 0.6)
+
+        if use_cuda_sort:
+            _log_layer_index_status(
+                _cuda_stage_status_message("LayerIndex", "cuda", required_bytes, free_vram),
+                progress=progress,
+                verbose=verbose,
+            )
+            try:
+                sorted_indices = _cuda_layer_argsort(node_to_layer, output_device=device)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                _log_layer_index_status(
+                    _cuda_stage_status_message("LayerIndex", "oom_fallback"),
+                    progress=progress,
+                    verbose=verbose,
+                )
+                sorted_indices = node_to_layer.argsort(stable=True)
+        else:
+            _log_layer_index_status(
+                _cuda_stage_status_message("LayerIndex", "cpu_fallback", required_bytes, free_vram),
+                progress=progress,
+                verbose=verbose,
+            )
+            sorted_indices = node_to_layer.argsort(stable=True)
+    else:
+        if enable_cuda_sort and verbose and n > 0 and not torch.cuda.is_available():
+            _log_layer_index_status(
+                _cuda_stage_status_message("LayerIndex", "cpu_fallback", required_bytes, 0),
+                progress=progress,
+                verbose=verbose,
+            )
+        sorted_indices = node_to_layer.argsort(stable=True)
 
     # Compute layer boundaries
     # layer_offsets[k] = first position in sorted_nodes where layer == k
     offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=device)
     if n > 0:
         # Count nodes per layer
-        counts = torch.bincount(node_to_layer, minlength=num_layers)
+        counts = torch.bincount(node_to_layer.to(dtype=torch.long), minlength=num_layers)
         offsets[1:] = counts.cumsum(0)
 
     return LayerIndex(
