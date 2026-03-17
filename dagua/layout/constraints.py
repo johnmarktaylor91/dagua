@@ -1515,54 +1515,76 @@ def fanout_distribution_loss(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
     degree_threshold: int = 5,
+    edge_ctx: Optional[EdgeBatchLike] = None,
+    step: int = 0,
+    edge_is_sampled: bool = False,
 ) -> torch.Tensor:
     """Penalize uneven angular distribution of children for high-degree nodes.
 
-    For hub nodes (out_degree >= degree_threshold), computes the angles from
-    hub to each child, sorts them, and penalizes variance in the angular gaps.
-    This prevents the optimizer from collapsing fan-out children into a tight cluster.
+    For hub nodes, compute the angular gaps between outgoing edges and penalize
+    deviations from the ideal equal-spacing target. Large full-graph scans are
+    amortized, but sampled edge batches still evaluate every step because they
+    are already bounded by the engine's edge batching.
 
-    O(E) + O(K log K) per hub.
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge indices with shape ``[2, E]``.
+    degree_threshold : int, default=5
+        Minimum out-degree required for a node to be treated as a fan-out hub.
+    edge_ctx : EdgeBatchLike | None, default=None
+        Optional sampled edge context for the current step. When present, hub
+        degrees are estimated from this sampled edge set instead of the full
+        graph, which keeps huge-graph solves aligned with edge batching.
+    step : int, default=0
+        Zero-based optimizer step. Only used for large full-edge scans.
+    edge_is_sampled : bool, default=False
+        Whether ``edge_index`` already represents a sampled subset of edges.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar fan-out regularization term.
     """
-    if edge_index.numel() == 0:
-        return torch.tensor(0.0, device=pos.device)
+    if edge_ctx is None and not edge_is_sampled and pos.shape[0] > 1_000_000 and step % 5 != 0:
+        return torch.tensor(0.0, device=pos.device, dtype=pos.dtype, requires_grad=True)
 
     device = pos.device
-    N = pos.shape[0]
-    src, tgt = edge_index[0], edge_index[1]
-
-    # Compute out-degree per node
-    out_degree = torch.zeros(N, dtype=torch.long, device=device)
-    out_degree.scatter_add_(0, src, torch.ones(src.shape[0], dtype=out_degree.dtype, device=device))
-
-    # Find hub nodes
-    hub_mask = out_degree >= degree_threshold
-    hub_nodes = torch.where(hub_mask)[0]
-
-    if hub_nodes.numel() == 0:
+    if edge_ctx is not None:
+        src, tgt = edge_ctx.src, edge_ctx.tgt
+    elif edge_index.numel() == 0:
         return torch.tensor(0.0, device=pos.device)
+    else:
+        src, tgt = _non_self_edges(edge_index)
+
+    if src.numel() == 0:
+        return torch.tensor(0.0, device=device)
 
     edge_order = src.argsort()
     sorted_src = src[edge_order]
     sorted_tgt = tgt[edge_order]
-    hub_starts = torch.searchsorted(sorted_src, hub_nodes)
-    hub_degrees = out_degree[hub_nodes]
+    hub_nodes, hub_degrees = sorted_src.unique_consecutive(return_counts=True)
 
-    valid_hub_mask = hub_degrees >= 2
-    # Verify searchsorted found the right position: sorted_src[start] must
-    # equal the hub node. With edge batching, some hubs' edges may not be
-    # in this batch, causing searchsorted to land at the wrong position.
-    E_batch = sorted_src.shape[0]
-    in_bounds = hub_starts < E_batch
-    correct_start = in_bounds & (sorted_src[hub_starts.clamp(max=E_batch - 1)] == hub_nodes)
-    valid_hub_mask = valid_hub_mask & correct_start
+    if hub_nodes.numel() == 0:
+        return torch.tensor(0.0, device=device)
 
+    hub_mask = hub_degrees >= degree_threshold
+    if not hub_mask.any():
+        return torch.tensor(0.0, device=device)
+
+    hub_offsets = torch.zeros(hub_degrees.shape[0] + 1, dtype=torch.long, device=device)
+    hub_offsets[1:] = hub_degrees.cumsum(0)
+    hub_starts = hub_offsets[:-1][hub_mask]
+
+    valid_hub_mask = hub_degrees[hub_mask] >= 2
     if not valid_hub_mask.any():
         return torch.tensor(0.0, device=device)
 
-    hub_nodes_v = hub_nodes[valid_hub_mask]
+    hub_nodes_v = hub_nodes[hub_mask][valid_hub_mask]
     hub_starts_v = hub_starts[valid_hub_mask]
-    hub_degrees_v = hub_degrees[valid_hub_mask]
+    hub_degrees_v = hub_degrees[hub_mask][valid_hub_mask]
     num_hubs = hub_nodes_v.shape[0]
 
     child_flat_idx = torch.repeat_interleave(torch.arange(num_hubs, device=device), hub_degrees_v)
