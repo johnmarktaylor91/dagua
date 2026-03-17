@@ -47,6 +47,9 @@ _MEMORY_GUARD_BYTES_PER_NODE = 20
 _MEMORY_GUARD_HEADROOM = 1.5
 _CPU_FINAL_EDGE_BATCH_CAP = 2_000_000
 _REFINEMENT_POSITION_VRAM_FRACTION = 0.40
+_STREAMING_GPU_SCATTER_TARGET_COUNT = 7
+_STREAMING_GPU_DEDUP_BYTES = 500_000_000
+_STREAMING_GPU_SAFETY_FRACTION = 0.70
 
 OptimizerType = Literal["adam", "sgd_nesterov", "sgd"]
 
@@ -316,6 +319,211 @@ def _can_prolong_on_gpu(
     needed_bytes += fine_n * pos.shape[1] * pos.element_size()
     needed_bytes += fine_n * pos.shape[1] * pos.element_size()
     return VRAMBudget().fits(needed_bytes)
+
+
+def _select_streaming_gpu_device(num_nodes: int) -> Optional[str]:
+    """Return the CUDA device for streaming coarsening when VRAM headroom allows.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Fine-graph node count for the streaming coarsening level.
+
+    Returns
+    -------
+    str | None
+        ``"cuda"`` when the streaming scatter and dedup scratch buffers fit in
+        currently free VRAM with conservative headroom, otherwise ``None``.
+
+    Notes
+    -----
+    The scatter estimate intentionally assumes seven int32-sized targets to stay
+    conservative for the 200M+ node regime, even though the current streaming
+    path only offloads a subset of those reductions.
+    """
+    if not torch.cuda.is_available():
+        return None
+
+    scatter_mem = num_nodes * _STREAMING_GPU_SCATTER_TARGET_COUNT * 4
+    total_gpu_mem = scatter_mem + _STREAMING_GPU_DEDUP_BYTES
+    try:
+        free_mem, _total_mem = torch.cuda.mem_get_info()
+    except RuntimeError:
+        return None
+
+    if total_gpu_mem >= int(free_mem * _STREAMING_GPU_SAFETY_FRACTION):
+        return None
+    return "cuda"
+
+
+def _build_streaming_min_neighbor(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    index_dtype: torch.dtype,
+    gpu_device: Optional[str],
+) -> tuple[torch.Tensor, bool, float]:
+    """Build the per-node minimum-neighbor signature for streaming coarsening.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge list with shape ``[2, E]`` on CPU or CUDA.
+    num_nodes : int
+        Fine-graph node count.
+    index_dtype : torch.dtype
+        Integer dtype used for node IDs in the current hierarchy level.
+    gpu_device : str | None
+        Candidate CUDA device selected by the streaming VRAM guard.
+
+    Returns
+    -------
+    tuple[torch.Tensor, bool, float]
+        CPU ``min_neighbor`` tensor with shape ``[N]``, whether CUDA executed
+        this phase, and the elapsed time in seconds.
+    """
+    edge_count = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    scatter_candidates = ["cpu"] if gpu_device is None else [gpu_device, "cpu"]
+    last_error: Optional[RuntimeError] = None
+
+    for scatter_candidate in scatter_candidates:
+        scatter_start = time.perf_counter()
+        try:
+            min_neighbor = torch.full(
+                (num_nodes,),
+                num_nodes,
+                dtype=index_dtype,
+                device=scatter_candidate,
+            )
+            if edge_count > 0:
+                src_all = edge_index[0]
+                tgt_all = edge_index[1]
+                for start in range(0, edge_count, _EDGE_CHUNK):
+                    end = min(start + _EDGE_CHUNK, edge_count)
+                    src = src_all[start:end].to(device=scatter_candidate, dtype=index_dtype)
+                    tgt = tgt_all[start:end].to(device=scatter_candidate, dtype=index_dtype)
+                    min_neighbor.scatter_reduce_(0, src, tgt, reduce="amin")
+                    min_neighbor.scatter_reduce_(0, tgt, src, reduce="amin")
+
+            if scatter_candidate == "cuda":
+                torch.cuda.synchronize()
+                min_neighbor = min_neighbor.cpu()
+                torch.cuda.empty_cache()
+            return min_neighbor, scatter_candidate == "cuda", time.perf_counter() - scatter_start
+        except RuntimeError as exc:
+            last_error = exc
+            if scatter_candidate != "cuda":
+                raise
+            torch.cuda.empty_cache()
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Failed to compute streaming min-neighbor signatures")
+
+
+def _deduplicate_streaming_coarse_edges(
+    edge_index: torch.Tensor,
+    fine_to_coarse: torch.Tensor,
+    num_coarse_nodes: int,
+    output_device: str,
+    gpu_device: Optional[str],
+) -> tuple[torch.Tensor, bool, float]:
+    """Deduplicate streaming coarse edges with optional CUDA unique/sort passes.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed fine edge list with shape ``[2, E]``.
+    fine_to_coarse : torch.Tensor
+        CPU tensor of shape ``[N]`` mapping each fine node to a coarse node.
+    num_coarse_nodes : int
+        Coarse node count produced for this level.
+    output_device : str
+        Device for the returned coarse edge tensor.
+    gpu_device : str | None
+        Candidate CUDA device selected by the streaming VRAM guard.
+
+    Returns
+    -------
+    tuple[torch.Tensor, bool, float]
+        Deduplicated coarse edge index with shape ``[2, E_coarse]``, whether
+        CUDA executed this phase, and the elapsed time in seconds.
+    """
+    edge_count = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    if edge_count == 0:
+        coarse_edge_index = torch.zeros(2, 0, dtype=torch.long, device="cpu")
+        return coarse_edge_index.to(output_device), False, 0.0
+
+    dedup_candidates = ["cpu"] if gpu_device is None else [gpu_device, "cpu"]
+    bucket_count = max(1, (edge_count + _DEDUP_BUCKET_TARGET - 1) // _DEDUP_BUCKET_TARGET)
+    last_error: Optional[RuntimeError] = None
+
+    for dedup_candidate in dedup_candidates:
+        dedup_start = time.perf_counter()
+        try:
+            bucket_uniques: List[torch.Tensor] = []
+            for bucket_idx in range(bucket_count):
+                running_unique: Optional[torch.Tensor] = None
+                for start in range(0, edge_count, _EDGE_CHUNK):
+                    end = min(start + _EDGE_CHUNK, edge_count)
+                    src_index = edge_index[0, start:end].to(device="cpu")
+                    tgt_index = edge_index[1, start:end].to(device="cpu")
+                    chunk_src = fine_to_coarse[src_index].to(dtype=torch.long)
+                    chunk_tgt = fine_to_coarse[tgt_index].to(dtype=torch.long)
+                    not_self = chunk_src != chunk_tgt
+                    chunk_src = chunk_src[not_self]
+                    chunk_tgt = chunk_tgt[not_self]
+                    if chunk_src.numel() == 0:
+                        continue
+
+                    chunk_hash = chunk_src * num_coarse_nodes + chunk_tgt
+                    if bucket_count > 1:
+                        bucket_mask = torch.remainder(chunk_hash, bucket_count) == bucket_idx
+                        chunk_hash = chunk_hash[bucket_mask]
+                    if chunk_hash.numel() == 0:
+                        continue
+
+                    if dedup_candidate == "cuda":
+                        chunk_hash = chunk_hash.to(dedup_candidate)
+                    chunk_unique = chunk_hash.unique()
+                    if running_unique is None:
+                        running_unique = chunk_unique
+                    else:
+                        merged = torch.cat([running_unique, chunk_unique]).sort().values
+                        running_unique = torch.unique_consecutive(merged)
+                        del merged
+
+                if running_unique is not None and running_unique.numel() > 0:
+                    if dedup_candidate == "cuda":
+                        torch.cuda.synchronize()
+                        running_unique = running_unique.cpu()
+                    bucket_uniques.append(running_unique)
+
+            if bucket_uniques:
+                all_unique = (
+                    torch.cat(bucket_uniques) if len(bucket_uniques) > 1 else bucket_uniques[0]
+                )
+                unique_src = all_unique // num_coarse_nodes
+                unique_tgt = all_unique % num_coarse_nodes
+                coarse_edge_index = torch.stack([unique_src, unique_tgt])
+            else:
+                coarse_edge_index = torch.zeros(2, 0, dtype=torch.long, device="cpu")
+
+            if dedup_candidate == "cuda":
+                torch.cuda.empty_cache()
+            return (
+                coarse_edge_index.to(output_device),
+                dedup_candidate == "cuda",
+                time.perf_counter() - dedup_start,
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            if dedup_candidate != "cuda":
+                raise
+            torch.cuda.empty_cache()
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Failed to deduplicate streaming coarse edges")
 
 
 def _select_refinement_execution(
@@ -641,112 +849,119 @@ def _coarsen_once_streaming(
     layer_counts: torch.Tensor,
     layer_offsets: torch.Tensor,
     device: str = "cpu",
+    progress: Optional[Callable[[str], None]] = None,
 ) -> CoarseLevel:
-    """Streaming coarsening for 1B+ node graphs.
+    """Coarsen a very large graph level with chunked CPU matching and GPU helpers.
 
-    Processes edges in chunks and matches nodes per-layer to avoid
-    materializing full [N]- or [E]-sized temporaries. Peak memory ~60 GB
-    at 1B nodes (vs ~100 GB for the vectorized path).
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge list with shape ``[2, E]``.
+    N : int
+        Fine-graph node count.
+    node_sizes : torch.Tensor
+        Node size tensor with shape ``[N, 2]`` or an empty tensor that will be
+        expanded to that shape.
+    layers : torch.Tensor
+        Layer assignment tensor with shape ``[N]``.
+    num_layers : int
+        Total number of layers present in ``layers``.
+    layer_counts : torch.Tensor
+        Node counts per layer with shape ``[num_layers]``.
+    layer_offsets : torch.Tensor
+        Prefix offsets per layer with shape ``[num_layers + 1]``.
+    device : str, default="cpu"
+        Output device for the returned coarse tensors.
+    progress : Callable[[str], None], optional
+        Optional progress callback used by verbose multilevel layout calls.
+
+    Returns
+    -------
+    CoarseLevel
+        Coarsened graph level with remapped edges, coarse node sizes, and the
+        fine-to-coarse assignment for this streaming step.
+
+    Notes
+    -----
+    Matching stays on CPU to preserve the existing streaming coarsening logic.
+    CUDA is used only for the chunked scatter and bucketed dedup phases when
+    the VRAM guard says the temporary scratch buffers fit safely.
     """
     node_sizes = _ensure_node_sizes_2d(node_sizes, N)
-    E = edge_index.shape[1] if edge_index.numel() > 0 else 0
     index_dtype = torch.int32 if N <= torch.iinfo(torch.int32).max else torch.long
+    gpu_device = _select_streaming_gpu_device(N)
+    scatter_time = 0.0
+    dedup_time = 0.0
 
     # --- Phase A: Per-layer node matching ---
     # Compute min_neighbor via chunked scatter_reduce (avoids [E]-sized ones).
     # Nodes sharing a low-index neighbor become consecutive after sort →
     # grouped into the same coarse node → shared edges collapse.
-    min_neighbor = torch.full((N,), N, dtype=index_dtype, device=device)
-    if E > 0:
-        src_all = edge_index[0].to(dtype=index_dtype)
-        tgt_all = edge_index[1].to(dtype=index_dtype)
-        for start in range(0, E, _EDGE_CHUNK):
-            end = min(start + _EDGE_CHUNK, E)
-            min_neighbor.scatter_reduce_(0, src_all[start:end], tgt_all[start:end], reduce="amin")
-            min_neighbor.scatter_reduce_(0, tgt_all[start:end], src_all[start:end], reduce="amin")
+    min_neighbor, scatter_used_gpu, scatter_time = _build_streaming_min_neighbor(
+        edge_index=edge_index,
+        num_nodes=N,
+        index_dtype=index_dtype,
+        gpu_device=gpu_device,
+    )
 
     # Coarse node counts per layer. Grouping is still local-in-layer; the
     # streaming path just avoids the global sort/materialization cost.
-    coarse_per_layer = (layer_counts + 2) // 3
-    coarse_offsets = torch.zeros(num_layers + 1, dtype=index_dtype, device=device)
+    layer_counts_cpu = layer_counts.to(device="cpu", dtype=index_dtype)
+    coarse_per_layer = (layer_counts_cpu + 2) // 3
+    coarse_offsets = torch.zeros(num_layers + 1, dtype=index_dtype, device="cpu")
     coarse_offsets[1:] = coarse_per_layer.cumsum(0)
     N_coarse = int(coarse_offsets[-1].item())
 
     # Assign coarse IDs per-layer using boolean masking (no global argsort).
     # Reuses a [N] bool mask (~1 GB at 1B) instead of sorted_by_layer (8+8 GB).
-    fine_to_coarse = torch.empty(N, dtype=index_dtype, device=device)
-    layer_mask = torch.empty(N, dtype=torch.bool, device=device)
+    fine_to_coarse = torch.empty(N, dtype=index_dtype, device="cpu")
+    layers_cpu = layers.to(device="cpu", dtype=index_dtype)
+    layer_mask = torch.empty(N, dtype=torch.bool, device="cpu")
     for layer_idx in range(num_layers):
-        if layer_counts[layer_idx].item() == 0:
+        if layer_counts_cpu[layer_idx].item() == 0:
             continue
-        torch.eq(layers, layer_idx, out=layer_mask)
+        torch.eq(layers_cpu, layer_idx, out=layer_mask)
         layer_nodes = layer_mask.nonzero(as_tuple=True)[0]
         local_order = min_neighbor[layer_nodes].argsort()  # ascending
         n_layer = layer_nodes.shape[0]
         coarse_base = int(coarse_offsets[layer_idx].item())
         fine_to_coarse[layer_nodes[local_order]] = (
-            torch.arange(n_layer, dtype=index_dtype, device=device) // 3 + coarse_base
+            torch.arange(n_layer, dtype=index_dtype, device="cpu") // 3 + coarse_base
         )
 
-    del layer_mask, min_neighbor
+    del layer_mask, min_neighbor, layers_cpu
 
     # --- Phase B: Coarse node sizes ---
     # Every coarse node takes the max width/height of its assigned fine nodes.
     # This keeps cluster/refinement spacing conservative after coarsening.
-    coarse_sizes = torch.zeros(N_coarse, 2, dtype=node_sizes.dtype, device=device)
-    coarse_sizes[:, 0].scatter_reduce_(0, fine_to_coarse, node_sizes[:, 0], reduce="amax")
-    coarse_sizes[:, 1].scatter_reduce_(0, fine_to_coarse, node_sizes[:, 1], reduce="amax")
+    node_sizes_cpu = node_sizes.to(device="cpu")
+    coarse_sizes = torch.zeros(N_coarse, 2, dtype=node_sizes_cpu.dtype, device="cpu")
+    coarse_sizes[:, 0].scatter_reduce_(0, fine_to_coarse, node_sizes_cpu[:, 0], reduce="amax")
+    coarse_sizes[:, 1].scatter_reduce_(0, fine_to_coarse, node_sizes_cpu[:, 1], reduce="amax")
 
     # --- Phase C: Chunked edge dedup ---
     # We hash coarse edges instead of building a giant dense adjacency. Bucketed
     # dedup keeps the peak memory lower on billion-edge runs.
-    if E > 0:
-        bucket_count = max(1, (E + _DEDUP_BUCKET_TARGET - 1) // _DEDUP_BUCKET_TARGET)
-        bucket_uniques: List[torch.Tensor] = []
-        for bucket_idx in range(bucket_count):
-            running_unique: Optional[torch.Tensor] = None
-            for start in range(0, E, _EDGE_CHUNK):
-                end = min(start + _EDGE_CHUNK, E)
-                chunk_src = fine_to_coarse[edge_index[0, start:end]].long()
-                chunk_tgt = fine_to_coarse[edge_index[1, start:end]].long()
-                not_self = chunk_src != chunk_tgt
-                chunk_src = chunk_src[not_self]
-                chunk_tgt = chunk_tgt[not_self]
-                if chunk_src.numel() > 0:
-                    chunk_hash = chunk_src * N_coarse + chunk_tgt
-                    if bucket_count > 1:
-                        bucket_mask = torch.remainder(chunk_hash, bucket_count) == bucket_idx
-                        chunk_hash = chunk_hash[bucket_mask]
-                    if chunk_hash.numel() > 0:
-                        chunk_unique = chunk_hash.unique()
-                        if running_unique is None:
-                            running_unique = chunk_unique
-                        else:
-                            merged = torch.cat([running_unique, chunk_unique]).sort().values
-                            running_unique = torch.unique_consecutive(merged)
-                            del merged
-                    del chunk_hash
-                del chunk_src, chunk_tgt
-            if running_unique is not None and running_unique.numel() > 0:
-                bucket_uniques.append(running_unique)
+    coarse_edge_index, dedup_used_gpu, dedup_time = _deduplicate_streaming_coarse_edges(
+        edge_index=edge_index,
+        fine_to_coarse=fine_to_coarse,
+        num_coarse_nodes=N_coarse,
+        output_device=device,
+        gpu_device=gpu_device,
+    )
 
-        if bucket_uniques:
-            all_unique = torch.cat(bucket_uniques) if len(bucket_uniques) > 1 else bucket_uniques[0]
-            unique_src = all_unique // N_coarse
-            unique_tgt = all_unique % N_coarse
-            del bucket_uniques, all_unique
-            coarse_edge_index = torch.stack([unique_src, unique_tgt])
-            del unique_src, unique_tgt
+    if scatter_used_gpu or dedup_used_gpu:
+        gpu_msg = f"coarsen GPU: scatter={scatter_time:.1f}s dedup={dedup_time:.1f}s"
+        if progress is not None:
+            progress(gpu_msg)
         else:
-            coarse_edge_index = torch.zeros(2, 0, dtype=torch.long, device=device)
-    else:
-        coarse_edge_index = torch.zeros(2, 0, dtype=torch.long, device=device)
+            print(f"[dagua]   {gpu_msg}", flush=True)
 
     return CoarseLevel(
         edge_index=coarse_edge_index,
-        node_sizes=coarse_sizes,
+        node_sizes=coarse_sizes.to(device),
         num_nodes=int(N_coarse),
-        fine_to_coarse=fine_to_coarse,
+        fine_to_coarse=fine_to_coarse.to(device),
         num_fine=N,
     )
 
@@ -799,6 +1014,7 @@ def coarsen_once(
             layer_counts,
             layer_offsets,
             device,
+            progress,
         )
 
     # Build adjacency features used for smarter within-layer ordering.
@@ -1563,8 +1779,11 @@ def multilevel_layout(
                     device,
                 )
             )
-            if force_cpu and fine_n >= 200_000_000:
-                level_edge_batch = min(level_edge_batch, _CPU_FINAL_EDGE_BATCH_CAP)
+            if fine_n >= 200_000_000:
+                # Cap edge batch for very large graphs to prevent CUDA OOM.
+                # With 200M+ positions on GPU, backward() intermediates can
+                # exceed VRAM if the edge batch is too large.
+                level_edge_batch = min(level_edge_batch, 2_000_000)
 
             assert pos is not None
             assert level.fine_to_coarse is not None
