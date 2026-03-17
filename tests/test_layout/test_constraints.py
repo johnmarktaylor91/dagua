@@ -300,6 +300,37 @@ class TestFanoutDistributionLoss:
         loss = fanout_distribution_loss(pos, ei)
         assert loss.item() == 0.0
 
+    def test_large_graph_amortizes_full_edge_scan(self) -> None:
+        """Large full-edge fanout scans should skip most steps."""
+        pos = torch.zeros(1_000_001, 2)
+        pos[1:5, 0] = torch.tensor([50.0, 52.0, 54.0, 56.0])
+        pos[1:5, 1] = 50.0
+        ei = torch.tensor([[0, 0, 0, 0], [1, 2, 3, 4]])
+
+        loss = fanout_distribution_loss(pos, ei, degree_threshold=2, step=1)
+
+        assert loss.item() == 0.0
+        assert loss.requires_grad is True
+
+    def test_sampled_edges_bypass_large_graph_amortization(self) -> None:
+        """Sampled edge batches should still evaluate on skipped full-edge steps."""
+        pos = torch.zeros(1_000_001, 2)
+        pos[1:5, 0] = torch.tensor([50.0, 52.0, 54.0, 56.0])
+        pos[1:5, 1] = 50.0
+        ei = torch.tensor([[0, 0, 0, 0], [1, 2, 3, 4]])
+        edge_ctx = _build_edge_batch_context(pos, ei)
+
+        loss = fanout_distribution_loss(
+            pos,
+            ei,
+            degree_threshold=2,
+            edge_ctx=edge_ctx,
+            step=1,
+            edge_is_sampled=True,
+        )
+
+        assert loss.item() > 0.0
+
 
 class TestBackEdgeCompactnessLoss:
     def test_back_edge_has_loss(self):
