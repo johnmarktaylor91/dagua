@@ -91,6 +91,16 @@ class LayoutConfig:
     #   overlap) on CPU. Only the [N, 2] gradient transfers between devices.
     #   Auto: on when device=cuda and N > 2M.
     hybrid_device: str = "auto"
+    # execution_mode: overall position residency strategy.
+    # "standard" keeps positions on the requested device. "subset_gpu" keeps
+    # large tensors on CPU and accelerates per-loss subsets on GPU. "auto"
+    # selects subset_gpu once the graph is large enough that full CUDA
+    # residency becomes unsafe.
+    execution_mode: Literal["auto", "standard", "subset_gpu"] = "auto"
+    # Node-count threshold for auto-activating subset_gpu when CUDA is the
+    # requested execution device. Above 50M nodes the engine forces
+    # subset_gpu regardless of this value.
+    subset_gpu_threshold: int = 10_000_000
     # optimizer_fallback: optimizer choice for huge hybrid refinement levels when
     # Adam's state no longer fits on GPU.
     # "auto" = Adam -> SGD+Nesterov -> SGD, "adam" = never downgrade optimizer,
