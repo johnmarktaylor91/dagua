@@ -14,7 +14,7 @@ Scaling strategy (Sprint 3 — fully vectorized):
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional, Protocol, Tuple, Union
+from typing import Callable, Dict, List, Optional, Protocol, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -528,12 +528,35 @@ def overlap_avoidance_loss(
     layer_index: Optional[LayerIndex] = None,
     rvs_threshold: int = 100000,
     sampled_ctx: Optional[SampledNodeLike] = None,
+    debug_callback: Optional[Callable[[str], None]] = None,
 ) -> torch.Tensor:
-    """Soft penalty on bounding box intersection.
+    """Return the overlap-avoidance penalty for the active layout state.
 
-    For N <= 500: exact O(N^2).
-    For N > 500 with layer_index: vectorized same-layer sampling (ZERO Python loops).
-    For N > 500 without layer_index: vectorized grid-based.
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    padding : float, default=2.0
+        Extra separation margin applied around every node.
+    layer_index : LayerIndex | None, default=None
+        Optional per-layer index used for layer-local overlap sampling.
+    rvs_threshold : int, default=100000
+        Node-count threshold where the large-graph active-subset path replaces
+        the exact or same-layer scatter paths.
+    sampled_ctx : SampledNodeLike | None, default=None
+        Optional shared sampled-node context. When present with at least one
+        active row, this path takes precedence over the size-based overlap
+        branches so subset-GPU execution can reuse the same sampled rows as
+        repulsion.
+    debug_callback : Callable[[str], None] | None, default=None
+        Optional observer notified when the shared sampled-node path is chosen.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar overlap penalty.
     """
     n = pos.shape[0]
     if n <= 1:
@@ -542,6 +565,8 @@ def overlap_avoidance_loss(
     has_active_sampled_ctx = sampled_ctx is not None and sampled_ctx.active_idx.numel() > 0
     if has_active_sampled_ctx:
         assert sampled_ctx is not None
+        if debug_callback is not None:
+            debug_callback("Overlap path: sampled_ctx")
         return _overlap_active_subset_from_context(pos, node_sizes, padding, sampled_ctx)
 
     if n <= 500:
