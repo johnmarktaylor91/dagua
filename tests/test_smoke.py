@@ -7,6 +7,7 @@ multilevel layout with verbose=True.
 All tests marked @pytest.mark.smoke — run with: pytest tests/test_smoke.py -m smoke
 """
 
+import importlib
 import time
 
 import pytest
@@ -218,6 +219,57 @@ class TestLongestPathLayeringVectorized:
         assert result_list[1] == 1
         assert result_list[2] == 2
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_gpu_layering_matches_cpu_longest_path(self) -> None:
+        """CUDA layering should match the CPU longest-path assignment exactly."""
+        num_layers = 100
+        width = 50
+        num_nodes = num_layers * width
+        src_parts = []
+        tgt_parts = []
+        for layer in range(num_layers - 1):
+            start = layer * width
+            next_start = (layer + 1) * width
+            current_nodes = torch.arange(start, start + width, dtype=torch.long)
+            next_nodes = torch.arange(next_start, next_start + width, dtype=torch.long)
+            src_parts.append(current_nodes.repeat_interleave(2))
+            tgt_parts.append(
+                torch.stack([next_nodes, next_nodes.roll(shifts=-1)]).transpose(0, 1).reshape(-1)
+            )
+        edge_index = torch.stack([torch.cat(src_parts), torch.cat(tgt_parts)])
+
+        cpu_result = longest_path_layering(edge_index, num_nodes, device="cpu")
+        gpu_result = longest_path_layering(edge_index, num_nodes, device="cuda")
+        cpu_tensor = torch.as_tensor(cpu_result, dtype=torch.long)
+        gpu_tensor = torch.as_tensor(gpu_result, dtype=torch.long)
+
+        torch.testing.assert_close(gpu_tensor, cpu_tensor)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_gpu_layering_matches_cpu_with_cycles(self) -> None:
+        """CUDA layering should match the CPU fallback policy for cyclic nodes."""
+        edge_index = torch.tensor(
+            [[0, 1, 2, 2, 3, 5], [1, 2, 3, 4, 2, 6]],
+            dtype=torch.long,
+        )
+        cpu_result = longest_path_layering(edge_index, 8, device="cpu")
+        gpu_result = longest_path_layering(edge_index, 8, device="cuda")
+
+        assert torch.as_tensor(gpu_result, dtype=torch.long).tolist() == list(cpu_result)
+
+    def test_gpu_layering_falls_back_when_cuda_unavailable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A requested CUDA layering pass should fall back to the CPU path."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+
+        cpu_result = longest_path_layering(edge_index, 4, device="cpu")
+        fallback_result = longest_path_layering(edge_index, 4, device="cuda")
+
+        assert list(fallback_result) == list(cpu_result)
+
     def test_large_wide_dag_completes_in_time(self):
         """A 100K-node wide DAG should complete quickly on the fast path."""
         n = 100_000
@@ -405,6 +457,57 @@ def test_streaming_gpu_memory_guard_uses_free_vram_headroom(
     )
 
     assert _multilevel_mod._select_streaming_gpu_device(200_000_000) == "cuda"
+
+
+@pytest.mark.smoke
+def test_streaming_assignment_blocks_preserve_tie_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Layer-block streaming should match the CPU tie-break ordering exactly."""
+    layers_module = importlib.import_module("dagua.layout.layers")
+    num_layers = 6
+    layer_width = 60
+    num_nodes = num_layers * layer_width
+    layers = torch.arange(num_nodes, dtype=torch.long) // layer_width
+    layer_counts = torch.full((num_layers,), layer_width, dtype=torch.long)
+    layer_offsets = torch.zeros(num_layers + 1, dtype=torch.long)
+    layer_offsets[1:] = layer_counts.cumsum(0)
+    min_neighbor = ((torch.arange(num_nodes, dtype=torch.long) % layer_width) // 15) + layers * 3
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    cpu_fine_to_coarse, _, _, _ = _multilevel_mod._assign_streaming_coarse_groups(
+        min_neighbor=min_neighbor,
+        num_nodes=num_nodes,
+        layers=layers,
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        index_dtype=torch.int32,
+        progress=None,
+    )
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (10_000, 20_000))
+    monkeypatch.setattr(
+        layers_module,
+        "_cuda_layer_argsort",
+        lambda node_to_layer, output_device: node_to_layer.argsort(stable=True).to(output_device),
+    )
+    monkeypatch.setattr(
+        _multilevel_mod,
+        "_stable_argsort_on_device",
+        lambda values, compute_device: values.argsort(stable=True),
+    )
+    gpu_fine_to_coarse, _, _, _ = _multilevel_mod._assign_streaming_coarse_groups(
+        min_neighbor=min_neighbor,
+        num_nodes=num_nodes,
+        layers=layers,
+        layer_counts=layer_counts,
+        layer_offsets=layer_offsets,
+        index_dtype=torch.int32,
+        progress=None,
+    )
+
+    assert torch.equal(cpu_fine_to_coarse, gpu_fine_to_coarse)
 
 
 @pytest.mark.gpu

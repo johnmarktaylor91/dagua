@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import torch
 
@@ -120,6 +120,56 @@ def _vram_safety_factor(total_bytes: Optional[int] = None) -> float:
     if total_bytes < 32 * 1024**3:
         return 0.80
     return 0.85
+
+
+def _is_cuda_oom_error(exc: BaseException) -> bool:
+    """Return whether an exception represents a CUDA out-of-memory failure.
+
+    Parameters
+    ----------
+    exc : BaseException
+        Raised exception to classify.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``exc`` is a CUDA OOM emitted by PyTorch.
+    """
+    return isinstance(exc, torch.cuda.OutOfMemoryError) or "CUDA out of memory" in str(exc)
+
+
+def _cuda_stage_status_message(
+    stage: str,
+    status: Literal["cuda", "cpu_fallback", "oom_fallback"],
+    required_bytes: int = 0,
+    free_bytes: int = 0,
+) -> str:
+    """Return a standardized CUDA stage status message body.
+
+    Parameters
+    ----------
+    stage : str
+        Human-readable stage name.
+    status : {"cuda", "cpu_fallback", "oom_fallback"}
+        Status variant to format.
+    required_bytes : int, default=0
+        Estimated bytes required by the CUDA stage.
+    free_bytes : int, default=0
+        Free VRAM currently reported by CUDA.
+
+    Returns
+    -------
+    str
+        Message body without the ``[dagua]`` prefix.
+    """
+    if status == "cuda":
+        return f"{stage}: CUDA ({required_bytes / 1e9:.1f}GB, {free_bytes / 1e9:.1f}GB free)"
+    if status == "cpu_fallback":
+        return (
+            f"{stage}: CPU fallback "
+            f"(need {required_bytes / 1e9:.1f}GB, {free_bytes / 1e9:.1f}GB free)"
+        )
+    return f"{stage}: OOM, CPU fallback"
 
 
 def measure_text(
@@ -562,20 +612,51 @@ def longest_path_layering(
     edge_index: torch.Tensor,
     num_nodes: int,
     device: str = "cpu",
+    *,
+    verbose: bool = False,
 ) -> "List[int] | torch.Tensor":
-    """Assign layer indices via longest-path from sources. O(V+E).
+    """Assign layer indices using longest-path semantics from all roots.
 
-    For large graphs (>10K nodes), uses a vectorized wave-based approach
-    that avoids Python-level per-node iteration. Returns a tensor directly
-    for large N to avoid expensive .tolist() conversions.
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    device : str, default="cpu"
+        Preferred execution device. When ``"cuda"`` is requested, a scan-based
+        GPU path is attempted first and falls back to the CPU implementation
+        when VRAM headroom is insufficient or CUDA OOMs.
+    verbose : bool, default=False
+        Whether CUDA activation and fallback decisions should be logged.
+
+    Returns
+    -------
+    list[int] | torch.Tensor
+        Layer assignment per node. Small graphs return a Python list to avoid
+        surprising API changes in existing callers; larger graphs return a
+        tensor directly.
+
+    Notes
+    -----
+    Nodes trapped in cycles never reach zero in-degree during Kahn traversal.
+    Those nodes are assigned to ``max_layer + 1`` so cycle-involved nodes stay
+    after the acyclic frontier, matching the large-graph policy used here.
     """
     if edge_index.numel() == 0:
         if num_nodes > 10000:
             return torch.zeros(num_nodes, dtype=torch.long)
         return [0] * num_nodes
 
+    if device == "cuda":
+        gpu_layers = _maybe_gpu_longest_path_layering(edge_index, num_nodes, verbose=verbose)
+        if gpu_layers is not None:
+            if num_nodes > 10000:
+                return gpu_layers
+            return gpu_layers.cpu().tolist()
+
     if num_nodes > 10000:
-        return _longest_path_layering_vectorized(edge_index, num_nodes, device)
+        return _longest_path_layering_vectorized(edge_index, num_nodes, device="cpu")
 
     src = edge_index[0].tolist()
     tgt = edge_index[1].tolist()
@@ -587,9 +668,11 @@ def longest_path_layering(
         children[s].append(t)
         in_degree[t] += 1
 
-    # BFS from sources
-    layers = [0] * num_nodes
+    # BFS from sources with longest-path propagation.
+    layers = [-1] * num_nodes
     queue = deque([i for i in range(num_nodes) if in_degree[i] == 0])
+    for node in queue:
+        layers[node] = 0
 
     while queue:
         node = queue.popleft()
@@ -599,11 +682,228 @@ def longest_path_layering(
             if in_degree[child] == 0:
                 queue.append(child)
 
+    unresolved = [index for index, layer in enumerate(layers) if layer < 0]
+    if unresolved:
+        fill_layer = max((layer for layer in layers if layer >= 0), default=-1) + 1
+        for index in unresolved:
+            layers[index] = fill_layer
+
     return layers
 
 
 _EDGE_CHUNK = 10_000_000  # edges per chunk for streaming ops
 _STREAMING_NODE_THRESHOLD = 100_000_000  # switch to chunked ops above this
+_GPU_LAYERING_VRAM_FRACTION = 0.60
+_GPU_LAYERING_INDEX_LIMIT = 2**31
+_GPU_LAYERING_WORK_ARRAYS = 13
+_INT32_BYTES = 4
+
+
+def _estimate_gpu_longest_path_layering_bytes(edge_index: torch.Tensor, num_nodes: int) -> int:
+    """Estimate peak working-set bytes for scan-based GPU layering.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    int
+        Conservative byte estimate for resident GPU edges, wave-state arrays,
+        and the concatenated touched-children scratch buffer.
+    """
+    edge_count = int(edge_index.shape[1])
+    index_bytes = 4 if num_nodes < _GPU_LAYERING_INDEX_LIMIT else edge_index.element_size()
+    edge_bytes = int(edge_index.numel()) * index_bytes
+    node_bytes = num_nodes * _GPU_LAYERING_WORK_ARRAYS * _INT32_BYTES
+    touched_children_bytes = edge_count * index_bytes
+    return edge_bytes + node_bytes + touched_children_bytes
+
+
+def _gpu_longest_path_budget_status(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> tuple[bool, int, int]:
+    """Return the GPU layering fit decision with byte counts.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    tuple[bool, int, int]
+        Whether both VRAM guards allow the GPU path, the estimated working-set
+        bytes, and the currently free VRAM in bytes.
+    """
+    estimated_bytes = _estimate_gpu_longest_path_layering_bytes(edge_index, num_nodes)
+    if not VRAMBudget.available():
+        return False, estimated_bytes, 0
+    budget = VRAMBudget()
+    if not budget.fits(estimated_bytes):
+        try:
+            free_bytes, _ = torch.cuda.mem_get_info()
+        except RuntimeError:
+            free_bytes = 0
+        return False, estimated_bytes, free_bytes
+    try:
+        free_bytes, _ = torch.cuda.mem_get_info()
+    except RuntimeError:
+        return False, estimated_bytes, 0
+    fits = estimated_bytes <= int(free_bytes * _GPU_LAYERING_VRAM_FRACTION)
+    return fits, estimated_bytes, free_bytes
+
+
+def _maybe_gpu_longest_path_layering(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    *,
+    verbose: bool = False,
+) -> Optional[torch.Tensor]:
+    """Attempt the GPU longest-path layering path, else return ``None``.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    verbose : bool, default=False
+        Whether CUDA activation and fallback decisions should be logged.
+
+    Returns
+    -------
+    torch.Tensor | None
+        Layer assignments on CPU when GPU execution succeeds, otherwise
+        ``None`` so callers can fall back to the CPU implementation.
+    """
+    fits, required_bytes, free_bytes = _gpu_longest_path_budget_status(edge_index, num_nodes)
+    if not fits:
+        if verbose:
+            print(
+                "[dagua]   "
+                + _cuda_stage_status_message(
+                    "GPU layering",
+                    "cpu_fallback",
+                    required_bytes,
+                    free_bytes,
+                ),
+                flush=True,
+            )
+        return None
+    try:
+        if verbose:
+            print(
+                "[dagua]   "
+                + _cuda_stage_status_message(
+                    "GPU layering",
+                    "cuda",
+                    required_bytes,
+                    free_bytes,
+                ),
+                flush=True,
+            )
+        return _gpu_longest_path_layering(edge_index, num_nodes)
+    except RuntimeError as exc:
+        if not _is_cuda_oom_error(exc):
+            raise
+        if verbose:
+            print(
+                f"[dagua]   {_cuda_stage_status_message('GPU layering', 'oom_fallback')}",
+                flush=True,
+            )
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return None
+
+
+def _gpu_longest_path_layering(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    device: str = "cuda",
+) -> torch.Tensor:
+    """Run Kahn-style longest-path layering by scanning edges on the GPU.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    device : str, default="cuda"
+        CUDA device where the wave scans should execute.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU tensor of layer assignments shaped ``[N]``.
+
+    Notes
+    -----
+    This path intentionally avoids CSR construction. Each wave scans the edge
+    list directly so peak VRAM stays dominated by resident edges and the
+    ``[N]`` working arrays instead of CSR scratch.
+    """
+    cuda_device = torch.device(device)
+    edge_dtype = torch.int32 if num_nodes < _GPU_LAYERING_INDEX_LIMIT else torch.long
+    src = edge_index[0].to(device=cuda_device, dtype=edge_dtype)
+    tgt = edge_index[1].to(device=cuda_device, dtype=edge_dtype)
+    edge_count = int(src.shape[0])
+
+    layer = torch.full((num_nodes,), -1, dtype=torch.int32, device=cuda_device)
+    indegree = torch.zeros(num_nodes, dtype=torch.int32, device=cuda_device)
+
+    for start in range(0, edge_count, _EDGE_CHUNK):
+        end = min(start + _EDGE_CHUNK, edge_count)
+        tgt_chunk = tgt[start:end].long()
+        ones = torch.ones(tgt_chunk.shape[0], dtype=indegree.dtype, device=cuda_device)
+        indegree.scatter_add_(0, tgt_chunk, ones)
+
+    frontier = (indegree == 0).nonzero(as_tuple=True)[0]
+    if frontier.numel() > 0:
+        layer[frontier] = 0
+    frontier_mask = torch.zeros(num_nodes, dtype=torch.bool, device=cuda_device)
+
+    while frontier.numel() > 0:
+        frontier_mask.zero_()
+        frontier_mask[frontier] = True
+        touched_children: List[torch.Tensor] = []
+
+        for start in range(0, edge_count, _EDGE_CHUNK):
+            end = min(start + _EDGE_CHUNK, edge_count)
+            src_chunk = src[start:end]
+            tgt_chunk = tgt[start:end]
+            active_mask = frontier_mask[src_chunk.long()]
+            if not bool(active_mask.any()):
+                continue
+
+            active_src = src_chunk[active_mask].long()
+            active_tgt = tgt_chunk[active_mask].long()
+            candidates = layer[active_src] + 1
+            layer.scatter_reduce_(0, active_tgt, candidates, reduce="amax")
+            neg_ones = -torch.ones(active_tgt.shape[0], dtype=indegree.dtype, device=cuda_device)
+            indegree.scatter_add_(0, active_tgt, neg_ones)
+            touched_children.append(active_tgt)
+
+        if not touched_children:
+            break
+        children = (
+            touched_children[0] if len(touched_children) == 1 else torch.cat(touched_children)
+        )
+        frontier = _frontier_from_touched_children(children, indegree)
+
+    unresolved = layer < 0
+    if bool(unresolved.any()):
+        fill_layer = int(layer.max().item()) + 1
+        layer[unresolved] = fill_layer
+
+    return layer.long().cpu()
 
 
 def _build_flat_indices(
@@ -874,7 +1174,7 @@ def _longest_path_layering_vectorized(
         # Max in-degree and layer index both fit comfortably in int32.
         val_dtype = torch.int32 if chunked else torch.long
 
-        # Compute in-degree — chunked for large graphs to avoid [E]-sized ones tensor
+        # Compute in-degree — chunked for large graphs to avoid [E]-sized ones tensor.
         in_degree = torch.zeros(N, dtype=val_dtype, device=compute_device)
         if chunked:
             for start in range(0, E, _EDGE_CHUNK):
@@ -886,7 +1186,7 @@ def _longest_path_layering_vectorized(
             in_degree.scatter_add_(0, tgt, ones_E)
 
         # Probe: run a few waves to decide strategy
-        layers = torch.zeros(N, dtype=val_dtype, device=compute_device)
+        layers = torch.full((N,), -1, dtype=val_dtype, device=compute_device)
         remaining = in_degree.clone()
         total_processed = 0
         current_layer = 0
@@ -981,6 +1281,10 @@ def _longest_path_layering_vectorized(
                 current_layer += 1
 
             del csr_offsets, csr_targets
+            unresolved = layers < 0
+            if bool(unresolved.any()):
+                fill_layer = int(layers.max().item()) + 1
+                layers[unresolved] = fill_layer
             if chunked:
                 del remaining, wave_set, in_degree
                 return layers
@@ -1000,8 +1304,10 @@ def _longest_path_layering_vectorized(
         csr_off = csr_offsets.numpy()
 
         # BFS from sources — true O(V+E)
-        layer_arr = np.zeros(N, dtype=np.int64)
+        layer_arr = np.full(N, -1, dtype=np.int64)
         queue = deque(int(i) for i in range(N) if in_deg[i] == 0)
+        for node in queue:
+            layer_arr[node] = 0
 
         while queue:
             node = queue.popleft()
@@ -1013,6 +1319,11 @@ def _longest_path_layering_vectorized(
                 in_deg[child] -= 1
                 if in_deg[child] == 0:
                     queue.append(child)
+
+        unresolved = layer_arr < 0
+        if np.any(unresolved):
+            fill_layer = int(layer_arr[~unresolved].max()) + 1 if np.any(~unresolved) else 0
+            layer_arr[unresolved] = fill_layer
 
         return torch.from_numpy(layer_arr)
     except RuntimeError:

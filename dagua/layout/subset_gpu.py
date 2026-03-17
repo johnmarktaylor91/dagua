@@ -17,10 +17,13 @@ import torch
 
 from dagua.layout.engine import EdgeBatchContext, SampledNodeContext
 from dagua.layout.layers import LayerIndex
+from dagua.utils import _cuda_stage_status_message
 
 LossFn = Callable[[torch.Tensor, torch.Tensor, Optional[LayerIndex]], torch.Tensor]
 ProgressCallback = Callable[[float], None]
 _PROGRESS_LOG_INTERVAL_SECONDS = 30.0
+_INT32_INDEX_LIMIT = 2**31
+_SHARED_EDGE_REMAP_VRAM_FRACTION = 0.60
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,97 @@ class PreparedSubsetData:
     global_indices: torch.Tensor
     local_edges: Optional[torch.Tensor] = None
     local_sampled_ctx: Optional[SampledNodeContext] = None
+
+
+@dataclass(frozen=True)
+class SharedEdgeSubsetData:
+    """Shared edge remap state reused across multiple edge-based losses.
+
+    Parameters
+    ----------
+    global_indices : torch.Tensor
+        Sorted unique global node IDs shaped ``[M]`` gathered from the full
+        CPU-resident position tensor.
+    local_edges : torch.Tensor
+        Local edge tensor shaped ``[2, E]`` already moved to the execution
+        device.
+    pos_local : torch.Tensor
+        Gathered local position tensor shaped ``[M, 2]`` with
+        ``requires_grad=True``.
+    node_sizes_local : torch.Tensor
+        Gathered local node-size tensor shaped ``[M, 2]`` on the execution
+        device.
+    edge_ctx : EdgeBatchContext
+        Precomputed edge deltas for ``local_edges``.
+    """
+
+    global_indices: torch.Tensor
+    local_edges: torch.Tensor
+    pos_local: torch.Tensor
+    node_sizes_local: torch.Tensor
+    edge_ctx: EdgeBatchContext
+
+
+def _estimate_shared_edge_remap_bytes(
+    global_indices: torch.Tensor,
+    edge_index: torch.Tensor,
+    value_dtype: torch.dtype,
+) -> int:
+    """Estimate CUDA bytes required by the shared edge-remap path.
+
+    Parameters
+    ----------
+    global_indices : torch.Tensor
+        Sorted unique global node IDs shaped ``[M]``.
+    edge_index : torch.Tensor
+        Global edge tensor shaped ``[2, E]``.
+    value_dtype : torch.dtype
+        Floating-point dtype used by positions and node sizes.
+
+    Returns
+    -------
+    int
+        Conservative byte estimate for the local edge tensor, gathered node
+        tensors, and the precomputed edge context.
+    """
+    node_count = int(global_indices.numel())
+    edge_count = int(edge_index.shape[1])
+    index_bytes = 4 if node_count < _INT32_INDEX_LIMIT else edge_index.element_size()
+    value_bytes = torch.tensor([], dtype=value_dtype).element_size()
+    local_edges_bytes = 2 * edge_count * index_bytes
+    gathered_nodes_bytes = 4 * node_count * value_bytes
+    edge_context_bytes = (2 * edge_count * index_bytes) + (3 * edge_count * value_bytes)
+    return local_edges_bytes + gathered_nodes_bytes + edge_context_bytes
+
+
+def _remap_edge_index_to_local(
+    global_indices: torch.Tensor,
+    edge_index: torch.Tensor,
+) -> torch.Tensor:
+    """Remap one global edge batch into local node coordinates.
+
+    Parameters
+    ----------
+    global_indices : torch.Tensor
+        Sorted unique global node IDs shaped ``[M]``.
+    edge_index : torch.Tensor
+        Global edge tensor shaped ``[2, E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Remapped local edge tensor shaped ``[2, E]``. When ``M < 2^31``,
+        ``torch.searchsorted(..., out_int32=True)`` is used to halve the remap
+        index footprint.
+    """
+    use_int32 = global_indices.numel() < _INT32_INDEX_LIMIT
+    if use_int32:
+        return torch.searchsorted(
+            global_indices.to(dtype=torch.int32),
+            edge_index.to(dtype=torch.int32),
+            out_int32=True,
+        )
+    return torch.searchsorted(global_indices, edge_index)
 
 
 @dataclass(frozen=True)
@@ -90,7 +184,7 @@ class EdgeAccessPattern:
         if global_indices.numel() == 0 or self.edge_index.numel() == 0:
             empty_edges = torch.zeros((2, 0), dtype=torch.long, device=global_indices.device)
             return PreparedSubsetData(global_indices=global_indices, local_edges=empty_edges)
-        local_edges = torch.searchsorted(global_indices, self.edge_index)
+        local_edges = _remap_edge_index_to_local(global_indices, self.edge_index)
         return PreparedSubsetData(global_indices=global_indices, local_edges=local_edges)
 
 
@@ -390,11 +484,14 @@ class SubsetGPUExecutor:
         step_start = time.perf_counter()
         next_progress_time = step_start + _PROGRESS_LOG_INTERVAL_SECONDS
         completed_terms = 0
+        shared_edge_data = self._prepare_shared_edge_data(pos, loss_terms, active_verbose)
 
         for term in loss_terms:
             if term.weight <= 0.0:
                 continue
-            if isinstance(term.access_pattern, GlobalAccessPattern):
+            if isinstance(term.access_pattern, EdgeAccessPattern) and shared_edge_data is not None:
+                self._accumulate_shared_edge_grad(term, grad_buffer, shared_edge_data)
+            elif isinstance(term.access_pattern, GlobalAccessPattern):
                 self._accumulate_global_grad(term, pos, grad_buffer)
             else:
                 self._accumulate_subset_grad(term, pos, grad_buffer)
@@ -414,6 +511,150 @@ class SubsetGPUExecutor:
             next_progress_time = now + _PROGRESS_LOG_INTERVAL_SECONDS
 
         return grad_buffer
+
+    def _prepare_shared_edge_data(
+        self,
+        pos: torch.Tensor,
+        loss_terms: Sequence[SubsetGPULossTerm],
+        active_verbose: bool,
+    ) -> Optional[SharedEdgeSubsetData]:
+        """Build one shared edge remap when all edge terms use the same batch.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            CPU-resident position tensor shaped ``[N, 2]``.
+        loss_terms : Sequence[SubsetGPULossTerm]
+            Weighted loss terms scheduled for the current step.
+        active_verbose : bool
+            Whether subset progress logging is enabled for this step.
+
+        Returns
+        -------
+        SharedEdgeSubsetData | None
+            Shared remap state when the edge terms all reference the same
+            edge-batch object, otherwise ``None``.
+        """
+        edge_terms = [
+            term
+            for term in loss_terms
+            if term.weight > 0.0 and isinstance(term.access_pattern, EdgeAccessPattern)
+        ]
+        if not edge_terms:
+            return None
+
+        shared_edge_index = edge_terms[0].access_pattern.edge_index
+        try:
+            for term in edge_terms[1:]:
+                assert term.access_pattern.edge_index is shared_edge_index, (
+                    "shared remap requires same edge batch"
+                )
+        except AssertionError:
+            if active_verbose:
+                print(
+                    "[dagua]       subset_gpu: shared edge remap disabled (edge batches differ)",
+                    flush=True,
+                )
+            return None
+
+        if shared_edge_index.numel() == 0:
+            return None
+
+        global_indices = torch.unique(shared_edge_index.reshape(-1))
+        shared_logging_enabled = active_verbose and len(edge_terms) > 1
+
+        if self.execution_device.type == "cuda":
+            required_bytes = _estimate_shared_edge_remap_bytes(
+                global_indices,
+                shared_edge_index,
+                pos.dtype,
+            )
+            if not torch.cuda.is_available():
+                if shared_logging_enabled:
+                    print(
+                        "[dagua]   "
+                        + _cuda_stage_status_message(
+                            "Shared edge remap",
+                            "cpu_fallback",
+                            required_bytes,
+                            0,
+                        ),
+                        flush=True,
+                    )
+                return None
+            try:
+                free_bytes, _ = torch.cuda.mem_get_info()
+            except RuntimeError:
+                free_bytes = 0
+            if required_bytes > int(free_bytes * _SHARED_EDGE_REMAP_VRAM_FRACTION):
+                if shared_logging_enabled:
+                    print(
+                        "[dagua]   "
+                        + _cuda_stage_status_message(
+                            "Shared edge remap",
+                            "cpu_fallback",
+                            required_bytes,
+                            free_bytes,
+                        ),
+                        flush=True,
+                    )
+                return None
+            if shared_logging_enabled:
+                print(
+                    "[dagua]   "
+                    + _cuda_stage_status_message(
+                        "Shared edge remap",
+                        "cuda",
+                        required_bytes,
+                        free_bytes,
+                    ),
+                    flush=True,
+                )
+            try:
+                local_edges = _remap_edge_index_to_local(global_indices, shared_edge_index).to(
+                    self.execution_device
+                )
+                pos_local = (
+                    pos.index_select(0, global_indices)
+                    .to(self.execution_device)
+                    .detach()
+                    .requires_grad_(True)
+                )
+                node_sizes_local = self.node_sizes.index_select(0, global_indices).to(
+                    self.execution_device
+                )
+                edge_ctx = _build_local_edge_context(pos_local, local_edges)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                if shared_logging_enabled:
+                    print(
+                        "[dagua]   "
+                        + _cuda_stage_status_message("Shared edge remap", "oom_fallback"),
+                        flush=True,
+                    )
+                return None
+        else:
+            local_edges = _remap_edge_index_to_local(global_indices, shared_edge_index).to(
+                self.execution_device
+            )
+            pos_local = (
+                pos.index_select(0, global_indices)
+                .to(self.execution_device)
+                .detach()
+                .requires_grad_(True)
+            )
+            node_sizes_local = self.node_sizes.index_select(0, global_indices).to(
+                self.execution_device
+            )
+            edge_ctx = _build_local_edge_context(pos_local, local_edges)
+
+        return SharedEdgeSubsetData(
+            global_indices=global_indices,
+            local_edges=local_edges,
+            pos_local=pos_local,
+            node_sizes_local=node_sizes_local,
+            edge_ctx=edge_ctx,
+        )
 
     def _prepare_grad_buffer(self, pos: torch.Tensor) -> torch.Tensor:
         """Return a reusable zeroed gradient buffer aligned with ``pos``.
@@ -467,6 +708,41 @@ class SubsetGPUExecutor:
         grad = self._loss_grad(loss, pos)
         if grad is not None:
             grad_buffer.add_(grad)
+
+    def _accumulate_shared_edge_grad(
+        self,
+        term: SubsetGPULossTerm,
+        grad_buffer: torch.Tensor,
+        shared_edge_data: SharedEdgeSubsetData,
+    ) -> None:
+        """Evaluate one edge term against the shared gathered edge subset.
+
+        Parameters
+        ----------
+        term : SubsetGPULossTerm
+            Weighted edge loss term to evaluate.
+        grad_buffer : torch.Tensor
+            Gradient accumulator shaped ``[N, 2]``.
+        shared_edge_data : SharedEdgeSubsetData
+            Shared remap state reused across all edge terms in this step.
+
+        Returns
+        -------
+        None
+        """
+        with self._shared_edge_refs(shared_edge_data):
+            loss = term.weight * term.loss_fn(
+                shared_edge_data.pos_local,
+                shared_edge_data.node_sizes_local,
+                None,
+            )
+        self._record_loss(term.weight, loss)
+        grad_local = self._loss_grad(loss, shared_edge_data.pos_local, retain_graph=True)
+        if grad_local is None:
+            return
+
+        scatter_index = shared_edge_data.global_indices.to(device=grad_buffer.device)
+        grad_buffer.index_add_(0, scatter_index, grad_local.to(device=grad_buffer.device))
 
     def _accumulate_subset_grad(
         self,
@@ -530,6 +806,7 @@ class SubsetGPUExecutor:
         self,
         loss: torch.Tensor,
         variable: torch.Tensor,
+        retain_graph: bool = False,
     ) -> Optional[torch.Tensor]:
         """Return ``d(loss)/d(variable)`` when the loss is connected.
 
@@ -539,6 +816,9 @@ class SubsetGPUExecutor:
             Scalar loss tensor.
         variable : torch.Tensor
             Tensor to differentiate with respect to.
+        retain_graph : bool, default=False
+            Whether autograd should retain the forward graph after the
+            derivative is computed.
 
         Returns
         -------
@@ -552,6 +832,7 @@ class SubsetGPUExecutor:
             loss,
             variable,
             allow_unused=True,
+            retain_graph=retain_graph,
         )[0]
         return grad
 
@@ -594,6 +875,33 @@ class SubsetGPUExecutor:
                 )
             else:
                 self.sampled_ctx_ref[0] = prev_sampled_ctx
+            yield
+        finally:
+            self.batch_edges_ref[0] = prev_edges
+            self.edge_ctx_ref[0] = prev_edge_ctx
+            self.sampled_ctx_ref[0] = prev_sampled_ctx
+
+    @contextmanager
+    def _shared_edge_refs(self, shared_edge_data: SharedEdgeSubsetData) -> Iterator[None]:
+        """Install one shared local edge batch for edge-term reuse.
+
+        Parameters
+        ----------
+        shared_edge_data : SharedEdgeSubsetData
+            Shared local edge remap, gathered positions, and edge context.
+
+        Yields
+        ------
+        None
+            Context where the engine edge refs target the shared local batch.
+        """
+        prev_edges = self.batch_edges_ref[0]
+        prev_edge_ctx = self.edge_ctx_ref[0]
+        prev_sampled_ctx = self.sampled_ctx_ref[0]
+        try:
+            self.batch_edges_ref[0] = shared_edge_data.local_edges
+            self.edge_ctx_ref[0] = shared_edge_data.edge_ctx
+            self.sampled_ctx_ref[0] = prev_sampled_ctx
             yield
         finally:
             self.batch_edges_ref[0] = prev_edges

@@ -17,7 +17,72 @@ from typing import Optional
 import torch
 
 from dagua.layout.layers import LayerIndex
-from dagua.utils import _vram_fits
+from dagua.utils import _cuda_stage_status_message, _is_cuda_oom_error, _vram_fits
+
+_GPU_PROJECTION_ARGSORT_BYTES_PER_NODE = 72
+_GPU_PROJECTION_VRAM_FRACTION = 0.60
+
+
+def _copy_layer_index_to_cpu(layer_index: Optional[LayerIndex]) -> Optional[LayerIndex]:
+    """Return a CPU copy of ``layer_index`` when one is available.
+
+    Parameters
+    ----------
+    layer_index : LayerIndex, optional
+        Layer structure to copy.
+
+    Returns
+    -------
+    LayerIndex | None
+        CPU-resident copy preserving the original layer metadata.
+    """
+    if layer_index is None:
+        return None
+    return LayerIndex(
+        node_to_layer=layer_index.node_to_layer.cpu(),
+        layer_offsets=layer_index.layer_offsets.cpu(),
+        sorted_nodes=layer_index.sorted_nodes.cpu(),
+        num_layers=layer_index.num_layers,
+    )
+
+
+def _run_projection_impl(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float,
+    iterations: int,
+    layer_index: Optional[LayerIndex],
+) -> None:
+    """Dispatch to the appropriate projection kernel for the current device.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor shaped ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor shaped ``[N, 2]``.
+    padding : float
+        Extra spacing added between projected node boxes.
+    iterations : int
+        Maximum number of projection passes.
+    layer_index : LayerIndex, optional
+        Layer information for layered sweep projection.
+
+    Returns
+    -------
+    None
+    """
+    n = pos.shape[0]
+    if n <= 500:
+        _project_exact(pos, node_sizes, padding, iterations)
+    elif layer_index is not None and pos.device.type == "cuda":
+        _project_sweep_cuda(pos, node_sizes, padding, iterations, layer_index)
+    elif layer_index is not None and n > 100_000_000:
+        _project_sweep_streaming(pos, node_sizes, padding, iterations, layer_index)
+    elif layer_index is not None:
+        _project_sweep(pos, node_sizes, padding, iterations, layer_index)
+    else:
+        _project_grid(pos, node_sizes, padding, iterations)
 
 
 def project_overlaps(
@@ -29,45 +94,94 @@ def project_overlaps(
 ) -> torch.Tensor:
     """Push overlapping node bounding boxes apart in-place.
 
-    Returns the (modified) pos tensor.
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor shaped ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor shaped ``[N, 2]``.
+    padding : float, default=2.0
+        Extra spacing enforced between boxes.
+    iterations : int, default=10
+        Maximum number of projection passes.
+    layer_index : LayerIndex, optional
+        Layer metadata used by the sweep-based projector.
+
+    Returns
+    -------
+    torch.Tensor
+        The same ``pos`` tensor after in-place overlap resolution.
     """
     n = pos.shape[0]
     if n <= 1:
         return pos
 
-    # Run projection on CPU when argsort temp allocations won't fit in VRAM.
-    # Estimate: sort_key + indices + workspace + auxiliary ≈ N * 72 bytes.
-    # No autograd here (torch.no_grad), so the only cost is the CPU↔GPU
-    # transfer of the [N, 2] pos tensor.
     device = pos.device
-    run_on_cpu = device.type == "cuda" and not _vram_fits(n * 72)
+    cuda_projection_stage = device.type == "cuda" and layer_index is not None and n > 500
+    required_bytes = n * _GPU_PROJECTION_ARGSORT_BYTES_PER_NODE
+    free_bytes = 0
+    gpu_sweep_active = False
+    if cuda_projection_stage:
+        try:
+            free_bytes, _ = torch.cuda.mem_get_info()
+        except RuntimeError:
+            free_bytes = 0
+        gpu_sweep_active = _vram_fits(required_bytes) and (
+            required_bytes <= int(free_bytes * _GPU_PROJECTION_VRAM_FRACTION)
+        )
+    run_on_cpu = cuda_projection_stage and not gpu_sweep_active
 
     if run_on_cpu:
+        print(
+            "[dagua]   "
+            + _cuda_stage_status_message(
+                "Overlap projection",
+                "cpu_fallback",
+                required_bytes,
+                free_bytes,
+            ),
+            flush=True,
+        )
         pos_cpu = pos.cpu()
         ns_cpu = node_sizes.cpu()
-        if layer_index is not None:
-            li_cpu = LayerIndex(
-                node_to_layer=layer_index.node_to_layer.cpu(),
-                layer_offsets=layer_index.layer_offsets.cpu(),
-                sorted_nodes=layer_index.sorted_nodes.cpu(),
-                num_layers=layer_index.num_layers,
-            )
-        else:
-            li_cpu = None
+        li_cpu = _copy_layer_index_to_cpu(layer_index)
     else:
         pos_cpu = pos
         ns_cpu = node_sizes
         li_cpu = layer_index
 
     with torch.no_grad():
-        if n <= 500:
-            _project_exact(pos_cpu, ns_cpu, padding, iterations)
-        elif li_cpu is not None and n > 100_000_000:
-            _project_sweep_streaming(pos_cpu, ns_cpu, padding, iterations, li_cpu)
-        elif li_cpu is not None:
-            _project_sweep(pos_cpu, ns_cpu, padding, iterations, li_cpu)
+        if pos_cpu.device.type == "cuda":
+            try:
+                if gpu_sweep_active and li_cpu is not None:
+                    print(
+                        "[dagua]   "
+                        + _cuda_stage_status_message(
+                            "Overlap projection",
+                            "cuda",
+                            required_bytes,
+                            free_bytes,
+                        ),
+                        flush=True,
+                    )
+                _run_projection_impl(pos_cpu, ns_cpu, padding, iterations, li_cpu)
+            except RuntimeError as exc:
+                if not _is_cuda_oom_error(exc):
+                    raise
+                print(
+                    f"[dagua]   {_cuda_stage_status_message('Overlap projection', 'oom_fallback')}",
+                    flush=True,
+                )
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                pos_cpu = pos.detach().cpu()
+                ns_cpu = node_sizes.detach().cpu()
+                li_cpu = _copy_layer_index_to_cpu(layer_index)
+                _run_projection_impl(pos_cpu, ns_cpu, padding, iterations, li_cpu)
+                pos.data.copy_(pos_cpu.to(device))
+                return pos
         else:
-            _project_grid(pos_cpu, ns_cpu, padding, iterations)
+            _run_projection_impl(pos_cpu, ns_cpu, padding, iterations, li_cpu)
 
         if run_on_cpu:
             pos.data.copy_(pos_cpu.to(device))
@@ -148,21 +262,12 @@ def _project_sweep(
     Uses composite sort key: layer * BIG_NUMBER + x to get within-layer
     x-ordering via a single global sort.
     """
-    N = pos.shape[0]
+    n = pos.shape[0]
     device = pos.device
     layers = layer_index.node_to_layer  # [N]
     half_w = node_sizes[:, 0] / 2
     for _ in range(iterations):
-        # Sort all nodes by (layer, x_position) using composite key
-        # This groups same-layer nodes together, sorted by x within each layer
-        x_pos = pos[:, 0]
-        # Normalize x to [0, 1) range within a large bucket per layer
-        x_min = x_pos.min()
-        x_range = (x_pos.max() - x_min).clamp(min=1.0)
-        x_norm = (x_pos - x_min) / x_range  # [0, 1)
-
-        sort_key = layers.float() * 2.0 + x_norm  # layer dominates, x breaks ties
-        sorted_indices = sort_key.argsort()  # [N]
+        sorted_indices = _layer_sorted_x_indices(pos, layers)
 
         # Get sorted layer assignments to find same-layer consecutive pairs
         sorted_layers = layers[sorted_indices]  # [N]
@@ -195,8 +300,8 @@ def _project_sweep(
 
         # Scatter push amounts to nodes
         # Node a moves left, node b moves right
-        push_a = torch.zeros(N, device=device)
-        push_b = torch.zeros(N, device=device)
+        push_a = torch.zeros(n, device=device)
+        push_b = torch.zeros(n, device=device)
         push_a.scatter_add_(0, idx_a, -push_amount)
         push_b.scatter_add_(0, idx_b, push_amount)
 
@@ -205,7 +310,7 @@ def _project_sweep(
         # Also check near-neighbors (window=2) for wider overlaps.
         # Skip for large graphs — window-1 consecutive resolution is sufficient
         # at scale, and this doubles tensor operations per iteration.
-        if N <= 100_000 and N > 2:
+        if n <= 100_000 and n > 2:
             same_layer_2 = sorted_layers[:-2] == sorted_layers[2:]
             idx_a2 = sorted_indices[:-2]
             idx_b2 = sorted_indices[2:]
@@ -218,11 +323,107 @@ def _project_sweep(
                 push_amount2 = torch.where(
                     needs_push2, overlap_x2 * 0.125, torch.zeros_like(overlap_x2)
                 )
-                push_a2 = torch.zeros(N, device=device)
-                push_b2 = torch.zeros(N, device=device)
+                push_a2 = torch.zeros(n, device=device)
+                push_b2 = torch.zeros(n, device=device)
                 push_a2.scatter_add_(0, idx_a2, -push_amount2)
                 push_b2.scatter_add_(0, idx_b2, push_amount2)
                 pos[:, 0] += push_a2 + push_b2
+
+
+def _layer_sorted_x_indices(pos: torch.Tensor, layers: torch.Tensor) -> torch.Tensor:
+    """Return node indices sorted by ``(layer, x)`` using stable tensor sorts.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor shaped ``[N, 2]``.
+    layers : torch.Tensor
+        Layer assignment tensor shaped ``[N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Node indices shaped ``[N]`` ordered first by layer, then by x.
+    """
+    x_sorted = pos[:, 0].argsort(stable=True)
+    layer_sorted = layers[x_sorted].argsort(stable=True)
+    return x_sorted[layer_sorted]
+
+
+def _project_sweep_cuda(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float,
+    iterations: int,
+    layer_index: LayerIndex,
+) -> None:
+    """Run the layered sweep projector with repeated CUDA segmented sorts.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        CUDA position tensor shaped ``[N, 2]``.
+    node_sizes : torch.Tensor
+        CUDA node-size tensor shaped ``[N, 2]``.
+    padding : float
+        Extra spacing enforced between boxes.
+    iterations : int
+        Maximum number of projection passes.
+    layer_index : LayerIndex
+        CUDA-resident layer metadata for segmented sweep ordering.
+
+    Returns
+    -------
+    None
+    """
+    n = pos.shape[0]
+    device = pos.device
+    layers = layer_index.node_to_layer
+    half_w = node_sizes[:, 0] / 2
+
+    for _ in range(iterations):
+        ordered = _layer_sorted_x_indices(pos, layers)
+        ordered_layers = layers[ordered]
+        same_layer = ordered_layers[:-1] == ordered_layers[1:]
+        if not same_layer.any():
+            break
+
+        left = ordered[:-1]
+        right = ordered[1:]
+        dx = pos[right, 0] - pos[left, 0]
+        min_sep = half_w[left] + half_w[right] + padding
+        overlap = min_sep - dx
+        needs_push = same_layer & (overlap > 0)
+        if not needs_push.any():
+            break
+
+        delta = torch.zeros(n, dtype=pos.dtype, device=device)
+        push = torch.where(needs_push, overlap * 0.25, torch.zeros_like(overlap))
+        delta.scatter_add_(0, left, -push)
+        delta.scatter_add_(0, right, push)
+        pos[:, 0].add_(delta)
+
+        # Match the CPU sweep's second-neighbor pass so overlap chains settle
+        # the same way on CUDA.
+        if n <= 100_000 and n > 2:
+            same_layer_2 = ordered_layers[:-2] == ordered_layers[2:]
+            if same_layer_2.any():
+                left_2 = ordered[:-2]
+                right_2 = ordered[2:]
+                dx_2 = pos[right_2, 0] - pos[left_2, 0]
+                min_sep_2 = half_w[left_2] + half_w[right_2] + padding
+                overlap_2 = min_sep_2 - dx_2
+                needs_push_2 = same_layer_2 & (overlap_2 > 0)
+                if needs_push_2.any():
+                    delta_2 = torch.zeros(n, dtype=pos.dtype, device=device)
+                    push_2 = torch.where(
+                        needs_push_2,
+                        overlap_2 * 0.125,
+                        torch.zeros_like(overlap_2),
+                    )
+                    delta_2.scatter_add_(0, left_2, -push_2)
+                    delta_2.scatter_add_(0, right_2, push_2)
+                    pos[:, 0].add_(delta_2)
 
 
 def _project_sweep_streaming(
