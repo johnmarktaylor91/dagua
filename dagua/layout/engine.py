@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Callable, List, Literal, Optional, Union
+from typing import Callable, List, Literal, Optional, Union, cast
 
 import torch
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
@@ -70,12 +70,16 @@ CUDA_CONTEXT_OVERHEAD_BYTES = 500 * 1024 * 1024
 TILED_GPU_MIN_NODES = 50_000_000
 STANDARD_CUDA_RESIDENT_HEADROOM = 0.85
 STANDARD_CUDA_WORKING_SET_BYTES = 2_000_000_000
+SUBSET_GPU_REQUIRED_THRESHOLD = 50_000_000
+SUBSET_GPU_SAMPLED_BASE_BYTES = 256 * 1024 * 1024
+SUBSET_GPU_BYTES_PER_SAMPLE = 64
 HYBRID_OPTIMIZER_LR_MULTIPLIERS = {
     "adam": 1.0,
     "sgd_nesterov": 3.0,
     "sgd": 5.0,
 }
 OptimizerType = Literal["adam", "sgd_nesterov", "sgd"]
+ExecutionMode = Literal["standard", "subset_gpu"]
 
 
 @dataclass
@@ -517,13 +521,6 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
             return pos
 
         # Tier 0-2: Direct layout — move data to device
-        edge_index = graph.edge_index.to(device)
-        node_sizes = graph.node_sizes.to(device)
-
-        if config.verbose:
-            num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
-            print(f"[dagua] Layout: {n:,} nodes, {num_edges:,} edges", flush=True)
-
         # Resolve flex node IDs to integer indices before headless engine
         effective_config = _resolve_flex_ids(config, graph)
         if effective_config.device != device:
@@ -536,6 +533,15 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
 
             effective_config = _c.copy(effective_config)
             effective_config.flex = _resolve_graph_flex(graph.flex, graph._id_to_index)
+
+        execution_mode = _resolve_execution_mode(effective_config, device, n)
+        tensor_device = "cpu" if execution_mode == "subset_gpu" else device
+        edge_index = graph.edge_index.to(tensor_device)
+        node_sizes = graph.node_sizes.to(tensor_device)
+
+        if config.verbose:
+            num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+            print(f"[dagua] Layout: {n:,} nodes, {num_edges:,} edges", flush=True)
 
         pos = _layout_inner(
             edge_index,
@@ -642,6 +648,85 @@ def _should_use_tiled_gpu(
         edge_batch=0,
     )
     return not VRAMBudget().fits(full_gpu_memory)
+
+
+def _resolve_execution_mode(
+    config: LayoutConfig,
+    device: str,
+    num_nodes: int,
+) -> ExecutionMode:
+    """Resolve the actual execution mode for the current solve.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Layout configuration for the current solve.
+    device : str
+        Requested execution device passed into the engine.
+    num_nodes : int
+        Number of nodes in the layout problem.
+
+    Returns
+    -------
+    {"standard", "subset_gpu"}
+        Effective execution mode after applying device availability and
+        large-graph safety thresholds.
+    """
+    requested_mode = getattr(config, "execution_mode", "auto")
+    if requested_mode == "standard":
+        return "standard"
+    if device != "cuda" or not torch.cuda.is_available():
+        return "standard"
+    if requested_mode == "subset_gpu":
+        return "subset_gpu"
+
+    subset_threshold = max(int(getattr(config, "subset_gpu_threshold", 10_000_000)), 1)
+    if num_nodes >= SUBSET_GPU_REQUIRED_THRESHOLD:
+        return "subset_gpu"
+    if num_nodes > subset_threshold:
+        return "subset_gpu"
+    return "standard"
+
+
+def _cap_subset_gpu_sampled_context(
+    sampled_ctx: SampledNodeContext,
+    budget_bytes: int,
+) -> SampledNodeContext:
+    """Cap sampled active rows to keep one subset transfer within VRAM budget.
+
+    Parameters
+    ----------
+    sampled_ctx : SampledNodeContext
+        CPU-resident sampled-node context for the current step.
+    budget_bytes : int
+        Effective device budget available for the subset transfer.
+
+    Returns
+    -------
+    SampledNodeContext
+        Original or truncated sampled context sized for the budget.
+    """
+    active_rows = sampled_ctx.active_idx.shape[0]
+    if active_rows == 0 or sampled_ctx.sampled.numel() == 0:
+        return sampled_ctx
+    if budget_bytes <= SUBSET_GPU_SAMPLED_BASE_BYTES:
+        empty_idx = sampled_ctx.active_idx[:0]
+        empty_sampled = sampled_ctx.sampled[:0]
+        return SampledNodeContext(active_idx=empty_idx, sampled=empty_sampled)
+
+    samples_per_row = max(sampled_ctx.sampled.shape[1], 1)
+    bytes_per_row = samples_per_row * SUBSET_GPU_BYTES_PER_SAMPLE + 64
+    max_rows = max(int((budget_bytes - SUBSET_GPU_SAMPLED_BASE_BYTES) / bytes_per_row), 0)
+    if max_rows <= 0:
+        empty_idx = sampled_ctx.active_idx[:0]
+        empty_sampled = sampled_ctx.sampled[:0]
+        return SampledNodeContext(active_idx=empty_idx, sampled=empty_sampled)
+    if max_rows >= active_rows:
+        return sampled_ctx
+    return SampledNodeContext(
+        active_idx=sampled_ctx.active_idx[:max_rows].clone(),
+        sampled=sampled_ctx.sampled[:max_rows].clone(),
+    )
 
 
 def _cuda_total_vram_bytes() -> int:
@@ -811,11 +896,17 @@ def _layout_inner(
     import time as _time
 
     n = num_nodes
-    device_type = torch.device(device).type
+    execution_mode = _resolve_execution_mode(config, device, n)
+    resident_device = "cpu" if execution_mode == "subset_gpu" else device
+    resident_device_type = torch.device(resident_device).type
     if node_sizes.ndim == 1:
         node_sizes = node_sizes.unsqueeze(1).expand(-1, 2).contiguous()
     elif node_sizes.ndim == 2 and node_sizes.shape[1] == 1:
         node_sizes = node_sizes.expand(-1, 2).contiguous()
+    if node_sizes.device.type != resident_device_type:
+        node_sizes = node_sizes.to(resident_device)
+    if execution_mode == "subset_gpu" and edge_index.device.type != "cpu":
+        edge_index = edge_index.cpu()
 
     verbose = getattr(config, "verbose", False)
     _indent = progress_context.indent if progress_context else "  "
@@ -830,9 +921,9 @@ def _layout_inner(
             print(f"[dagua] {_indent}{msg}{vram}", flush=True)
 
     if n == 0:
-        return torch.zeros(0, 2, device=device)
+        return torch.zeros(0, 2, device=resident_device)
     if n == 1:
-        return torch.zeros(1, 2, device=device)
+        return torch.zeros(1, 2, device=resident_device)
 
     # Apply adaptive spacing based on graph size
     node_sep = config.node_sep
@@ -842,7 +933,7 @@ def _layout_inner(
 
     # Step 1: Initialization
     if init_pos is not None:
-        pos = init_pos.to(device)
+        pos = init_pos.to(resident_device)
     else:
         pos = init_positions(
             edge_index,
@@ -850,7 +941,7 @@ def _layout_inner(
             node_sizes,
             node_sep=node_sep,
             rank_sep=rank_sep,
-            device=device,
+            device=resident_device,
         )
 
     if trace is not None and hasattr(trace, "capture_layout_positions"):
@@ -866,15 +957,15 @@ def _layout_inner(
     layer_index: Optional[LayerIndex] = None
     if prebuilt_layer_index is not None:
         layer_index = prebuilt_layer_index
-        if layer_index.node_to_layer.device.type != device_type:
-            layer_index = build_layer_index(layer_index.node_to_layer, device=device)
+        if layer_index.node_to_layer.device.type != resident_device_type:
+            layer_index = build_layer_index(layer_index.node_to_layer, device=resident_device)
         layer_assignments_raw = layer_index.node_to_layer
     elif layer_assignments is not None:
-        layer_index = build_layer_index(layer_assignments, device=device)
+        layer_index = build_layer_index(layer_assignments, device=resident_device)
         layer_assignments_raw = layer_assignments
     elif edge_index.numel() > 0:
-        layer_assignments_raw = longest_path_layering(edge_index, n, device=device)
-        layer_index = build_layer_index(layer_assignments_raw, device=device)
+        layer_assignments_raw = longest_path_layering(edge_index, n, device=resident_device)
+        layer_index = build_layer_index(layer_assignments_raw, device=resident_device)
 
     # Determine adaptive parameters based on graph size
     num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
@@ -918,7 +1009,9 @@ def _layout_inner(
     # Edge streaming: if edges are too large for GPU, keep them on CPU
     # and stream batches to GPU each step.  This lets positions stay on GPU
     # while edges (which can be 800MB+) stay in CPU RAM.
-    edges_on_cpu = edge_index.device.type == "cpu" and device == "cuda"
+    edges_on_cpu = execution_mode == "subset_gpu" or (
+        edge_index.device.type == "cpu" and device == "cuda"
+    )
     if not edges_on_cpu and device == "cuda" and edge_index.numel() > 0:
         edge_bytes = edge_index.numel() * edge_index.element_size()
         if not VRAMBudget().fits(edge_bytes):
@@ -926,7 +1019,7 @@ def _layout_inner(
             edges_on_cpu = True
 
     tiled_compute = None
-    if _should_use_tiled_gpu(config.device, device, n, num_edges):
+    if execution_mode == "standard" and _should_use_tiled_gpu(config.device, device, n, num_edges):
         from dagua.layout.tiled_compute import TiledGPUCompute
 
         tiled_compute = TiledGPUCompute(
@@ -947,7 +1040,9 @@ def _layout_inner(
         print(f"[dagua] {_indent}TILED GPU active: {n:,} nodes in tiles", flush=True)
 
     # Resolve memory optimization flags (VRAM-aware when on CUDA)
-    if tiled_compute is None:
+    if execution_mode == "subset_gpu":
+        use_per_loss_bw, use_checkpointing, use_hybrid = False, False, False
+    elif tiled_compute is None:
         use_per_loss_bw, use_checkpointing, use_hybrid = _resolve_memory_strategy(
             n,
             num_edges,
@@ -976,6 +1071,8 @@ def _layout_inner(
         flags.append("edge_stream")
     if tiled_compute is not None:
         flags.append("tiled_gpu")
+    if execution_mode == "subset_gpu":
+        flags.append("subset_gpu")
     if executor is not None:
         flags.append(f"workers={config.num_workers}")
     _vlog(
@@ -1036,7 +1133,7 @@ def _layout_inner(
             and tiled_compute.current_edge_ctx is not None
             and p.device == tiled_compute.current_edge_ctx.src.device
         ):
-            return tiled_compute.current_edge_ctx
+            return cast(EdgeBatchContext, tiled_compute.current_edge_ctx)
         if use_per_loss_bw:
             return None
         if edge_ctx_ref[0] is not None and p.device == edge_ctx_ref[0].src.device:
@@ -1051,7 +1148,7 @@ def _layout_inner(
     # Static loss functions — each returns
     # (base_weight_key, loss_fn, is_heavy, is_annealed, tiled_ok, cross_tile_ok)
     # base_weight_key is a string to look up the annealed weight at each step
-    loss_fns: List[tuple[str, LossFn, bool, bool, bool, bool]] = []
+    loss_fns: List[tuple[str, LossFn, bool, bool, bool, bool, str]] = []
 
     if config.w_dag > 0:
         loss_fns.append(
@@ -1068,6 +1165,7 @@ def _layout_inner(
                 True,
                 True,
                 True,
+                "edge",
             )
         )
 
@@ -1085,12 +1183,14 @@ def _layout_inner(
                 False,
                 True,
                 True,
+                "edge",
             )
         )
 
     if config.w_repel > 0:
+        repel_fn: LossFn
 
-        def repel_fn(
+        def _repel_fn(
             p: torch.Tensor,
             ns: torch.Tensor,
             li: Optional[LayerIndex],
@@ -1108,6 +1208,7 @@ def _layout_inner(
                 sampled_ctx=_active_sampled_ctx(p),
             )
 
+        repel_fn = _repel_fn
         if n > config.repel_amortize_threshold and config.repel_amortize_interval > 1:
             repel_fn = _make_amortized_loss(
                 repel_fn,
@@ -1117,7 +1218,7 @@ def _layout_inner(
         # Amortized skip steps return 0.0 which is safe for hybrid but NOT
         # for checkpointing (variable saved tensor count). Checkpointing is
         # handled in _compute_loss_term by checking the actual loss value.
-        loss_fns.append(("w_repel", repel_fn, True, True, True, False))
+        loss_fns.append(("w_repel", repel_fn, True, True, True, False, "sampled"))
 
     if config.w_overlap > 0:
         loss_fns.append(
@@ -1134,6 +1235,7 @@ def _layout_inner(
                 True,
                 True,
                 False,
+                "sampled",
             )
         )
 
@@ -1146,6 +1248,7 @@ def _layout_inner(
                 False,
                 False,
                 False,
+                "global",
             )
         )
         loss_fns.append(
@@ -1158,6 +1261,7 @@ def _layout_inner(
                 False,
                 False,
                 False,
+                "global",
             )
         )
 
@@ -1172,6 +1276,7 @@ def _layout_inner(
                 False,
                 False,
                 False,
+                "global",
             )
         )
 
@@ -1197,7 +1302,7 @@ def _layout_inner(
                 max_pairs=500,
             )
 
-        loss_fns.append(("w_crossing", _crossing_fn, False, True, False, False))
+        loss_fns.append(("w_crossing", _crossing_fn, False, True, False, False, "global"))
 
     if config.w_straightness > 0:
         loss_fns.append(
@@ -1212,6 +1317,7 @@ def _layout_inner(
                 True,
                 True,
                 True,
+                "edge",
             )
         )
 
@@ -1228,6 +1334,7 @@ def _layout_inner(
                 False,
                 True,
                 True,
+                "edge",
             )
         )
 
@@ -1248,6 +1355,7 @@ def _layout_inner(
                 False,
                 False,
                 False,
+                "global",
             )
         )
 
@@ -1271,7 +1379,7 @@ def _layout_inner(
                 edge_is_sampled=edge_is_sampled,
             )
 
-        loss_fns.append(("w_fanout", fanout_fn, False, False, True, True))
+        loss_fns.append(("w_fanout", fanout_fn, False, False, True, True, "edge"))
 
     if config.w_back_edge > 0:
         loss_fns.append(
@@ -1286,11 +1394,12 @@ def _layout_inner(
                 False,
                 True,
                 True,
+                "edge",
             )
         )
 
     # --- Flex constraints: pins, alignment, flex spacing ---
-    flex_data = _prepare_flex_data(config, n, device)
+    flex_data = _prepare_flex_data(config, n, resident_device)
 
     if flex_data["has_soft_pins"]:
         _pin_idx = flex_data["pin_indices"]
@@ -1305,13 +1414,22 @@ def _layout_inner(
                 False,
                 False,
                 False,
+                "global",
             )
         )
 
     if flex_data["align_groups"]:
         _ag = flex_data["align_groups"]
         loss_fns.append(
-            ("w_align_flex", lambda p, ns, li: alignment_loss(p, _ag), False, False, False, False)
+            (
+                "w_align_flex",
+                lambda p, ns, li: alignment_loss(p, _ag),
+                False,
+                False,
+                False,
+                False,
+                "global",
+            )
         )
 
     if flex_data["flex_node_sep"] is not None:
@@ -1325,12 +1443,14 @@ def _layout_inner(
                 False,
                 False,
                 False,
+                "global",
             )
         )
 
     # Pre-allocate edge batch buffer (avoids per-step tensor allocation)
+    batch_device = "cpu" if execution_mode == "subset_gpu" else device
     batch_buf = (
-        torch.empty(2, edge_batch, dtype=torch.long, device=device)
+        torch.empty(2, edge_batch, dtype=torch.long, device=batch_device)
         if tiled_compute is None and edge_batch > 0 and num_edges > edge_batch
         else None
     )
@@ -1398,7 +1518,9 @@ def _layout_inner(
                     batch_buf[:, actual:].copy_(edge_index[:, :remaining])
             batch_edges_ref[0] = batch_buf
         elif edges_on_cpu:
-            batch_edges_ref[0] = edge_index.to(device)
+            batch_edges_ref[0] = (
+                edge_index if execution_mode == "subset_gpu" else edge_index.to(device)
+            )
         else:
             batch_edges_ref[0] = edge_index
 
@@ -1428,7 +1550,10 @@ def _layout_inner(
             sampled_layer_index = (
                 cpu_layer_index if use_hybrid and cpu_layer_index is not None else layer_index
             )
-            sampled_device: Union[str, torch.device] = "cpu" if use_hybrid else pos.device
+            assert sampled_layer_index is not None
+            sampled_device: Union[str, torch.device] = (
+                "cpu" if use_hybrid or execution_mode == "subset_gpu" else pos.device
+            )
             sampled_n_active, _, _ = _sampled_node_context_sizes(n, config.rvs_nn_k)
             default_n_active = sampled_n_active
             if (
@@ -1473,6 +1598,20 @@ def _layout_inner(
                     config.rvs_nn_k,
                     sampled_n_active,
                 )
+            if execution_mode == "subset_gpu" and device == "cuda" and torch.cuda.is_available():
+                free, _ = torch.cuda.mem_get_info()
+                cached_free = max(
+                    0,
+                    torch.cuda.memory_reserved() - torch.cuda.memory_allocated(),
+                )
+                total_budget = int((free + cached_free) * CUDA_ACTIVE_SET_HEADROOM)
+                capped_ctx = _cap_subset_gpu_sampled_context(sampled_ctx, total_budget)
+                if capped_ctx.active_idx.shape[0] < sampled_ctx.active_idx.shape[0]:
+                    _vlog(
+                        "capped subset-GPU sampled active set to "
+                        f"{capped_ctx.active_idx.shape[0]:,} rows for VRAM headroom"
+                    )
+                sampled_ctx = capped_ctx
         elif not use_sampled_context:
             sampled_ctx = None
         sampled_ctx_ref[0] = sampled_ctx
@@ -1512,22 +1651,95 @@ def _layout_inner(
 
         # Build loss_terms from static functions + current weights
         loss_terms: List[tuple] = []
-        for key, loss_fn, is_heavy, _is_annealed, tiled_ok, cross_tile_ok in loss_fns:
+        for (
+            key,
+            loss_fn,
+            is_heavy,
+            _is_annealed,
+            tiled_ok,
+            cross_tile_ok,
+            access_kind,
+        ) in loss_fns:
             w = weight_map[key]
             if w > 0:
-                loss_terms.append((w, loss_fn, is_heavy, tiled_ok, cross_tile_ok))
+                loss_terms.append((key, w, loss_fn, is_heavy, tiled_ok, cross_tile_ok, access_kind))
 
         # Execute loss terms with selected memory strategy
         total_loss_val = 0.0
         unweighted_loss_val = 0.0
 
-        if tiled_compute is not None:
+        if execution_mode == "subset_gpu":
+            from typing import Union as _Union
+
+            from dagua.layout.subset_gpu import (
+                EdgeAccessPattern,
+                GlobalAccessPattern,
+                SampledAccessPattern,
+                SubsetGPUExecutor,
+                SubsetGPULossTerm,
+            )
+
+            subset_executor = SubsetGPUExecutor(
+                node_sizes=node_sizes,
+                layer_index=layer_index,
+                execution_device=device,
+                batch_edges_ref=batch_edges_ref,
+                edge_ctx_ref=edge_ctx_ref,
+                sampled_ctx_ref=sampled_ctx_ref,
+            )
+            subset_terms: List[SubsetGPULossTerm] = []
+            for (
+                key,
+                weight,
+                loss_fn,
+                _is_heavy,
+                _tiled_ok,
+                _cross_tile_ok,
+                access_kind,
+            ) in loss_terms:
+                access_pattern: _Union[
+                    EdgeAccessPattern,
+                    SampledAccessPattern,
+                    GlobalAccessPattern,
+                ]
+                if access_kind == "edge":
+                    access_pattern = EdgeAccessPattern(_active_edges(pos))
+                elif access_kind == "sampled":
+                    active_sampled_ctx = _active_sampled_ctx(pos)
+                    access_pattern = (
+                        SampledAccessPattern(active_sampled_ctx)
+                        if active_sampled_ctx is not None
+                        else GlobalAccessPattern()
+                    )
+                else:
+                    access_pattern = GlobalAccessPattern()
+                subset_terms.append(
+                    SubsetGPULossTerm(
+                        name=key,
+                        weight=weight,
+                        loss_fn=loss_fn,
+                        access_pattern=access_pattern,
+                    )
+                )
+
+            pos.grad = subset_executor.compute_step(pos, subset_terms)
+            total_loss_val = subset_executor.last_total_loss
+            unweighted_loss_val = subset_executor.last_unweighted_loss
+        elif tiled_compute is not None:
             tiled_loss_fns: List[LossFn] = []
             tiled_loss_weights: List[float] = []
             tiled_cross_mask: List[bool] = []
             fallback_terms: List[tuple[float, LossFn, bool]] = []
 
-            for weight, loss_fn, is_heavy, tiled_ok, cross_tile_ok in loss_terms:
+            for (
+                _key,
+                weight,
+                loss_fn,
+                is_heavy,
+                tiled_ok,
+                cross_tile_ok,
+                _access_kind,
+            ) in loss_terms:
                 if tiled_ok:
                     tiled_loss_fns.append(loss_fn)
                     tiled_loss_weights.append(weight)
@@ -1578,7 +1790,15 @@ def _layout_inner(
                 # Parallel: heavy losses on CPU threads, light losses on GPU
                 heavy_futures = []
                 light_terms_list = []
-                for weight, loss_fn, is_heavy, _tiled_ok, _cross_tile_ok in loss_terms:
+                for (
+                    _key,
+                    weight,
+                    loss_fn,
+                    is_heavy,
+                    _tiled_ok,
+                    _cross_tile_ok,
+                    _access_kind,
+                ) in loss_terms:
                     if is_heavy:
                         future = executor.submit(
                             _hybrid_loss,
@@ -1611,7 +1831,15 @@ def _layout_inner(
                         unweighted_loss_val += val / weight if weight else 0.0
             else:
                 # Sequential per-loss backward
-                for weight, loss_fn, is_heavy, _tiled_ok, _cross_tile_ok in loss_terms:
+                for (
+                    _key,
+                    weight,
+                    loss_fn,
+                    is_heavy,
+                    _tiled_ok,
+                    _cross_tile_ok,
+                    _access_kind,
+                ) in loss_terms:
                     term = _compute_loss_term(
                         pos,
                         weight,
@@ -1631,8 +1859,16 @@ def _layout_inner(
                         unweighted_loss_val += val / weight if weight else 0.0
         else:
             # Standard: accumulate all losses, single backward
-            loss = torch.tensor(0.0, device=device)
-            for weight, loss_fn, is_heavy, _tiled_ok, _cross_tile_ok in loss_terms:
+            loss = torch.tensor(0.0, device=pos.device)
+            for (
+                _key,
+                weight,
+                loss_fn,
+                is_heavy,
+                _tiled_ok,
+                _cross_tile_ok,
+                _access_kind,
+            ) in loss_terms:
                 term = _compute_loss_term(
                     pos,
                     weight,
@@ -1978,6 +2214,7 @@ def _hybrid_loss(
     Creates a CPU copy of positions, computes the loss on CPU (where memory
     is plentiful), then transfers only the [N, 2] gradient back to GPU.
     """
+    assert cpu_node_sizes is not None
     pos_cpu = pos_gpu.detach().cpu().requires_grad_(True)
     cpu_loss = weight * loss_fn(pos_cpu, cpu_node_sizes, cpu_layer_index)
 
@@ -2064,7 +2301,7 @@ def _make_amortized_loss(loss_fn: LossFn, skip_every: int) -> LossFn:
         """Evaluate the wrapped loss except on periodic skipped steps."""
         step_ref[0] += 1
         if step_ref[0] % skip_every == 0:
-            return pos.sum() * 0.0
+            return torch.zeros(1, device=pos.device, dtype=pos.dtype, requires_grad=True)
         return loss_fn(pos, node_sizes, layer_index)
 
     return _amortized_loss
