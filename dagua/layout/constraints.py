@@ -539,11 +539,13 @@ def overlap_avoidance_loss(
     if n <= 1:
         return torch.tensor(0.0, device=pos.device)
 
+    has_active_sampled_ctx = sampled_ctx is not None and sampled_ctx.active_idx.numel() > 0
+    if has_active_sampled_ctx:
+        assert sampled_ctx is not None
+        return _overlap_active_subset_from_context(pos, node_sizes, padding, sampled_ctx)
+
     if n <= 500:
         return _overlap_exact(pos, node_sizes, padding)
-
-    if sampled_ctx is not None:
-        return _overlap_active_subset_from_context(pos, node_sizes, padding, sampled_ctx)
 
     if n > rvs_threshold and layer_index is not None:
         return _overlap_active_subset(pos, node_sizes, padding, layer_index)
@@ -1380,6 +1382,7 @@ def _spacing_consistency_loss_layerlocal(
     num_layers: int,
     target_gap: float,
     device: torch.device,
+    layer_index: Optional[LayerIndex] = None,
 ) -> torch.Tensor:
     """Layer-local spacing consistency for very large graphs (N > 100M).
 
@@ -1405,6 +1408,8 @@ def _spacing_consistency_loss_layerlocal(
         Target horizontal gap between adjacent nodes.
     device : torch.device
         Compute device.
+    layer_index : LayerIndex, optional
+        Layer-index structure that may already include nodes sorted by layer.
 
     Returns
     -------
@@ -1414,7 +1419,7 @@ def _spacing_consistency_loss_layerlocal(
     total_deviation_sq = torch.tensor(0.0, device=device)
     total_pairs = 0
 
-    sorted_by_layer = layers.argsort()
+    sorted_by_layer = layer_index.sorted_nodes if layer_index is not None else layers.argsort()
 
     for layer_idx in range(num_layers):
         start = int(offsets[layer_idx].item())
@@ -1475,7 +1480,14 @@ def spacing_consistency_loss(
     # Results are mathematically identical since the composite key groups by layer.
     if N > 100_000_000:
         return _spacing_consistency_loss_layerlocal(
-            pos, node_sizes, layers, offsets, num_layers, target_gap, device
+            pos,
+            node_sizes,
+            layers,
+            offsets,
+            num_layers,
+            target_gap,
+            device,
+            layer_index=layer_index,
         )
 
     # Standard path: global sort (one kernel launch, fast for moderate N)
