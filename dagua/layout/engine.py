@@ -636,6 +636,61 @@ def _should_use_tiled_gpu(
     return not VRAMBudget().fits(full_gpu_memory)
 
 
+def _backward_standard_loss_terms(
+    pos: torch.Tensor,
+    loss_terms: list[tuple[float, LossFn]],
+    node_sizes: torch.Tensor,
+    layer_index: Optional[LayerIndex],
+) -> tuple[float, float]:
+    """Evaluate standard loss terms and backpropagate them immediately.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor shaped ``[N, 2]`` on the active execution device.
+    loss_terms : list[tuple[float, LossFn]]
+        Weighted loss functions to evaluate in standard eager mode.
+    node_sizes : torch.Tensor
+        Node size tensor shaped ``[N, 2]`` aligned with ``pos``.
+    layer_index : LayerIndex, optional
+        Pre-computed layer structure for the current graph.
+
+    Returns
+    -------
+    tuple[float, float]
+        Weighted and unweighted loss totals for the evaluated terms.
+    """
+    total_loss_val = 0.0
+    unweighted_loss_val = 0.0
+
+    for weight, loss_fn in loss_terms:
+        term = weight * loss_fn(pos, node_sizes, layer_index)
+        if term is not None and term.requires_grad:
+            term.backward()
+            val = float(term.item())
+            total_loss_val += val
+            unweighted_loss_val += val / weight if weight else 0.0
+
+    return total_loss_val, unweighted_loss_val
+
+
+def _is_cuda_oom_error(exc: BaseException) -> bool:
+    """Return whether the exception represents a CUDA out-of-memory failure.
+
+    Parameters
+    ----------
+    exc : BaseException
+        Exception raised while running the tiled GPU step.
+
+    Returns
+    -------
+    bool
+        ``True`` when the exception is a CUDA OOM from modern or older
+        PyTorch versions.
+    """
+    return isinstance(exc, torch.cuda.OutOfMemoryError) or "CUDA out of memory" in str(exc)
+
+
 def _layout_inner(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -1424,29 +1479,42 @@ def _layout_inner(
 
             if tiled_loss_fns:
                 tiled_compute.cross_tile_loss_mask = tiled_cross_mask
-                total_loss_val += tiled_compute.compute_step(
-                    pos,
-                    tiled_loss_fns,
-                    tiled_loss_weights,
-                )
-                unweighted_loss_val += tiled_compute.last_unweighted_loss
+                try:
+                    total_loss_val += tiled_compute.compute_step(
+                        pos,
+                        tiled_loss_fns,
+                        tiled_loss_weights,
+                    )
+                    unweighted_loss_val += tiled_compute.last_unweighted_loss
+                except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
+                    if not _is_cuda_oom_error(exc):
+                        raise
+                    if hasattr(tiled_compute, "_reset_runtime_state"):
+                        tiled_compute._reset_runtime_state()
+                    print(
+                        f"[dagua] {_indent}TILED GPU OOM - falling back to CPU for this step",
+                        flush=True,
+                    )
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    fallback_total, fallback_unweighted = _backward_standard_loss_terms(
+                        pos,
+                        list(zip(tiled_loss_weights, tiled_loss_fns)),
+                        node_sizes,
+                        layer_index,
+                    )
+                    total_loss_val += fallback_total
+                    unweighted_loss_val += fallback_unweighted
+                    tiled_compute.last_unweighted_loss = fallback_unweighted
 
-            for weight, loss_fn, is_heavy in fallback_terms:
-                term = _compute_loss_term(
-                    pos,
-                    weight,
-                    loss_fn,
-                    is_heavy,
-                    use_hybrid=False,
-                    use_checkpointing=False,
-                    node_sizes=node_sizes,
-                    layer_index=layer_index,
-                )
-                if term is not None and term.requires_grad:
-                    term.backward()
-                    val = term.item()
-                    total_loss_val += val
-                    unweighted_loss_val += val / weight if weight else 0.0
+            fallback_total, fallback_unweighted = _backward_standard_loss_terms(
+                pos,
+                [(weight, loss_fn) for weight, loss_fn, _is_heavy in fallback_terms],
+                node_sizes,
+                layer_index,
+            )
+            total_loss_val += fallback_total
+            unweighted_loss_val += fallback_unweighted
         elif use_per_loss_bw:
             if executor is not None:
                 # Parallel: heavy losses on CPU threads, light losses on GPU
