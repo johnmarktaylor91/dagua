@@ -46,6 +46,7 @@ _MEMORY_GUARD_THRESHOLD = 100_000_000
 _MEMORY_GUARD_BYTES_PER_NODE = 20
 _MEMORY_GUARD_HEADROOM = 1.5
 _CPU_FINAL_EDGE_BATCH_CAP = 2_000_000
+_REFINEMENT_POSITION_VRAM_FRACTION = 0.40
 
 OptimizerType = Literal["adam", "sgd_nesterov", "sgd"]
 
@@ -353,6 +354,7 @@ def _select_refinement_execution(
 
     base_batch = config.edge_batch_size or DEFAULT_HYBRID_EDGE_BATCH
     level_optimizer_type: OptimizerType = "adam"
+    positions_fit_cuda = _positions_fit_cuda_refinement(fine_n)
 
     mem_full = _estimate_gpu_memory(
         fine_n,
@@ -409,6 +411,8 @@ def _select_refinement_execution(
         return False, False, level_optimizer_type, base_batch
 
     if config.hybrid_device == "off":
+        if positions_fit_cuda:
+            return False, False, level_optimizer_type, base_batch
         return True, False, level_optimizer_type, base_batch
 
     hybrid_mem = _estimate_hybrid_gpu_memory(
@@ -445,7 +449,34 @@ def _select_refinement_execution(
             if _vram_fits(test_mem):
                 return False, True, optimizer_type, test_batch
 
+    if positions_fit_cuda:
+        return False, False, level_optimizer_type, base_batch
+
     return True, False, level_optimizer_type, base_batch
+
+
+def _positions_fit_cuda_refinement(fine_n: int) -> bool:
+    """Return whether the refinement position tensor fits comfortably on CUDA.
+
+    Parameters
+    ----------
+    fine_n : int
+        Number of nodes in the refine-level graph.
+
+    Returns
+    -------
+    bool
+        ``True`` when the resident ``[N, 2]`` float32 position tensor fits
+        within the reserved fraction of total VRAM.
+    """
+    if not torch.cuda.is_available():
+        return False
+    try:
+        total_vram = int(torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory)
+    except Exception:
+        return False
+    position_bytes = fine_n * 2 * 4
+    return position_bytes < int(total_vram * _REFINEMENT_POSITION_VRAM_FRACTION)
 
 
 def _scaled_final_refine_steps(level_index: int, fine_n: int, base_refine: int) -> int:
@@ -1381,6 +1412,7 @@ def multilevel_layout(
                 optimizer_fallback=config.optimizer_fallback,
                 num_workers=config.num_workers,
                 edge_batch_size=config.edge_batch_size,
+                edge_random_fraction=config.edge_random_fraction,
                 overlap_check_interval=config.overlap_check_interval,
             )
             setattr(level_config, "_dagua_crossing_interval_override", None)
@@ -1577,6 +1609,13 @@ def multilevel_layout(
 
                     refine_config = _copy.copy(refine_config)
                 refine_config.steps = min(refine_config.steps, 30)
+            if i == 0 and fine_n >= 200_000_000 and refine_config.edge_random_fraction != 1.0:
+                import copy as _copy
+
+                refine_config = _copy.copy(refine_config)
+                # Huge refinement levels benefit from re-mixing the edge batch
+                # every step instead of walking contiguous chunks.
+                refine_config.edge_random_fraction = 1.0
             if (
                 fine_n > _HUGE_GRAPH_REFINEMENT_THRESHOLD
                 and refine_config.edge_batch_size != level_edge_batch
