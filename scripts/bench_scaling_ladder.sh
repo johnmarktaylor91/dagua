@@ -1,12 +1,28 @@
 #!/usr/bin/env bash
-# bench_scaling_ladder.sh — Run bench_large.py at 200M, 500M, 1B, 1.5B, 2B sequentially.
+# bench_scaling_ladder.sh — Full scaling ladder from 10 nodes to 2B.
 # Uses --resume to pick up from existing checkpoints.
 # Resource checks between runs to avoid OOM.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-SIZES=("50000000" "100000000" "200000000" "500000000" "1000000000" "1500000000" "2000000000")
-LABELS=("50M" "100M" "200M" "500M" "1B" "1.5B" "2B")
+SIZES=(
+    "10" "20" "50" "100" "200" "500"
+    "1000" "2000" "5000" "10000" "20000" "50000"
+    "100000" "200000" "500000"
+    "1000000" "2000000" "5000000"
+    "10000000" "20000000" "50000000"
+    "100000000" "200000000" "500000000"
+    "1000000000" "1500000000" "2000000000"
+)
+LABELS=(
+    "10" "20" "50" "100" "200" "500"
+    "1K" "2K" "5K" "10K" "20K" "50K"
+    "100K" "200K" "500K"
+    "1M" "2M" "5M"
+    "10M" "20M" "50M"
+    "100M" "200M" "500M"
+    "1B" "1.5B" "2B"
+)
 MIN_RAM_GB=32
 
 check_resources() {
@@ -21,7 +37,7 @@ check_resources() {
     return 0
 }
 
-echo "=== Scaling Ladder: ${LABELS[*]} ==="
+echo "=== Scaling Ladder: 10 → 2B ==="
 echo "Started: $(date -Iseconds)"
 echo ""
 

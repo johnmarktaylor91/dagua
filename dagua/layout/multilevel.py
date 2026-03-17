@@ -53,6 +53,7 @@ _REFINEMENT_POSITION_VRAM_FRACTION = 0.40
 _STREAMING_GPU_SCATTER_TARGET_COUNT = 7
 _STREAMING_GPU_DEDUP_BYTES = 500_000_000
 _STREAMING_GPU_SAFETY_FRACTION = 0.70
+_STREAMING_ASSIGNMENT_VRAM_FRACTION = 0.60
 
 OptimizerType = Literal["adam", "sgd_nesterov", "sgd"]
 
@@ -90,7 +91,7 @@ def _match_scan_python(
         Integer array of shape ``[N]`` mapping each ordered node to a coarse
         group ID.
     """
-    group_ids = np.empty(n, dtype=np.int64)
+    group_ids: npt.NDArray[np.int64] = np.empty(n, dtype=np.int64)
     group = 0
     i = 0
     while i < n:
@@ -439,6 +440,348 @@ def _build_streaming_min_neighbor(
     if last_error is not None:
         raise last_error
     raise RuntimeError("Failed to compute streaming min-neighbor signatures")
+
+
+def _streaming_assignment_required_bytes(num_nodes: int) -> int:
+    """Return the conservative scratch estimate for segmented-sort assignment.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the streamed coarsening level.
+
+    Returns
+    -------
+    int
+        Estimated bytes for the packed sort key, the sort order, and the
+        temporary neighbor transfer used by the CUDA segmented sort.
+    """
+    return num_nodes * (8 + 8 + 8)
+
+
+def _stable_argsort_on_device(
+    values: torch.Tensor,
+    compute_device: str,
+) -> torch.Tensor:
+    """Return a stable argsort of ``values`` on the requested device.
+
+    Parameters
+    ----------
+    values : torch.Tensor
+        Key tensor with shape ``[N]``.
+    compute_device : str
+        Device that should execute the sort.
+
+    Returns
+    -------
+    torch.Tensor
+        Stable argsort permutation with shape ``[N]``.
+    """
+    sort_values = (
+        values if values.device.type == compute_device else values.to(device=compute_device)
+    )
+    return sort_values.argsort(stable=True)
+
+
+def _build_streaming_assignment_blocks(
+    layer_counts: torch.Tensor,
+    layer_offsets: torch.Tensor,
+    max_block_nodes: int,
+) -> Optional[List[tuple[int, int, int, int]]]:
+    """Partition a streaming coarsening level into complete-layer blocks.
+
+    Parameters
+    ----------
+    layer_counts : torch.Tensor
+        CPU tensor of shape ``[num_layers]`` with nodes per layer.
+    layer_offsets : torch.Tensor
+        CPU tensor of shape ``[num_layers + 1]`` with prefix offsets.
+    max_block_nodes : int
+        Maximum number of nodes that may be processed in one CUDA block.
+
+    Returns
+    -------
+    list[tuple[int, int, int, int]] | None
+        Consecutive ``(layer_start, layer_end, node_start, node_end)`` blocks
+        that never split a layer, or ``None`` when at least one non-empty layer
+        is wider than the block budget.
+    """
+    if max_block_nodes <= 0:
+        return None
+
+    layer_counts_cpu = layer_counts.to(device="cpu", dtype=torch.long)
+    layer_offsets_cpu = layer_offsets.to(device="cpu", dtype=torch.long)
+    num_layers = int(layer_counts_cpu.shape[0])
+    blocks: List[tuple[int, int, int, int]] = []
+    block_layer_start = 0
+    block_nodes = 0
+
+    for layer_idx in range(num_layers):
+        layer_size = int(layer_counts_cpu[layer_idx].item())
+        if layer_size > max_block_nodes:
+            return None
+        if block_nodes > 0 and block_nodes + layer_size > max_block_nodes:
+            node_start = int(layer_offsets_cpu[block_layer_start].item())
+            node_end = int(layer_offsets_cpu[layer_idx].item())
+            if node_end > node_start:
+                blocks.append((block_layer_start, layer_idx, node_start, node_end))
+            block_layer_start = layer_idx
+            block_nodes = 0
+        block_nodes += layer_size
+
+    if block_layer_start < num_layers:
+        node_start = int(layer_offsets_cpu[block_layer_start].item())
+        node_end = int(layer_offsets_cpu[num_layers].item())
+        if node_end > node_start:
+            blocks.append((block_layer_start, num_layers, node_start, node_end))
+
+    return blocks
+
+
+def _streaming_block_group_ids(
+    sorted_nodes_block: torch.Tensor,
+    order_cpu: torch.Tensor,
+    block_counts: torch.Tensor,
+    block_coarse_offsets: torch.Tensor,
+    index_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert a sorted block permutation into coarse-group assignments.
+
+    Parameters
+    ----------
+    sorted_nodes_block : torch.Tensor
+        CPU tensor of shape ``[N_block]`` containing nodes grouped by layer.
+    order_cpu : torch.Tensor
+        CPU stable sort permutation of shape ``[N_block]``.
+    block_counts : torch.Tensor
+        CPU tensor of shape ``[L_block]`` with nodes per layer in the block.
+    block_coarse_offsets : torch.Tensor
+        CPU tensor of shape ``[L_block]`` with coarse-ID bases for each layer.
+    index_dtype : torch.dtype
+        Output dtype for the group IDs.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        ``(ordered_nodes, coarse_group_ids)`` on CPU, both with shape
+        ``[N_block]``.
+    """
+    ordered_nodes = sorted_nodes_block[order_cpu]
+    block_counts_cpu = block_counts.to(device="cpu", dtype=torch.long)
+    block_offsets = torch.zeros(block_counts_cpu.shape[0] + 1, dtype=torch.long, device="cpu")
+    block_offsets[1:] = block_counts_cpu.cumsum(0)
+    within_layer_pos = torch.arange(sorted_nodes_block.shape[0], dtype=torch.long, device="cpu")
+    within_layer_pos.sub_(torch.repeat_interleave(block_offsets[:-1], block_counts_cpu))
+    coarse_bases = torch.repeat_interleave(
+        block_coarse_offsets.to(device="cpu", dtype=torch.long),
+        block_counts_cpu,
+    )
+    group_ids = coarse_bases + torch.div(within_layer_pos, 3, rounding_mode="floor")
+    return ordered_nodes, group_ids.to(dtype=index_dtype)
+
+
+def _streaming_block_order(
+    sorted_nodes_block: torch.Tensor,
+    min_neighbor: torch.Tensor,
+    block_counts: torch.Tensor,
+    total_num_nodes: int,
+    compute_device: str,
+) -> torch.Tensor:
+    """Return the stable within-block order for streaming coarsening.
+
+    Parameters
+    ----------
+    sorted_nodes_block : torch.Tensor
+        CPU tensor of shape ``[N_block]`` containing nodes grouped by layer.
+    min_neighbor : torch.Tensor
+        CPU tensor of shape ``[N]`` with per-node minimum-neighbor signatures.
+    block_counts : torch.Tensor
+        CPU tensor of shape ``[L_block]`` with nodes per layer in the block.
+    total_num_nodes : int
+        Fine-graph node count used for the packed-key multiplier.
+    compute_device : str
+        Device that should execute the stable sort.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU permutation of shape ``[N_block]`` for the segmented order.
+    """
+    block_counts_cpu = block_counts.to(device="cpu", dtype=torch.long)
+    if sorted_nodes_block.numel() == 0:
+        return torch.zeros(0, dtype=torch.long, device="cpu")
+
+    block_layer_ids = torch.repeat_interleave(
+        torch.arange(block_counts_cpu.shape[0], dtype=torch.long),
+        block_counts_cpu,
+    )
+    sort_key = block_layer_ids
+    sort_key.mul_(total_num_nodes + 1)
+    sort_key.add_(min_neighbor[sorted_nodes_block].to(device="cpu", dtype=torch.long))
+    order = _stable_argsort_on_device(sort_key, compute_device)
+    return order.to(device="cpu")
+
+
+def _assign_streaming_coarse_groups(
+    min_neighbor: torch.Tensor,
+    num_nodes: int,
+    layers: torch.Tensor,
+    layer_counts: torch.Tensor,
+    layer_offsets: torch.Tensor,
+    index_dtype: torch.dtype,
+    progress: Optional[Callable[[str], None]],
+) -> tuple[torch.Tensor, int, bool, float]:
+    """Assign streaming coarse groups with stable segmented sorting.
+
+    Parameters
+    ----------
+    min_neighbor : torch.Tensor
+        CPU tensor of shape ``[N]`` containing the minimum-neighbor signature
+        for each fine node.
+    num_nodes : int
+        Fine-graph node count.
+    layers : torch.Tensor
+        Layer assignments with shape ``[N]``.
+    layer_counts : torch.Tensor
+        Node counts per layer with shape ``[num_layers]``.
+    layer_offsets : torch.Tensor
+        Prefix offsets per layer with shape ``[num_layers + 1]``.
+    index_dtype : torch.dtype
+        Integer dtype for the returned ``fine_to_coarse`` mapping.
+    progress : Callable[[str], None] | None
+        Optional progress sink for verbose logging.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int, bool, float]
+        CPU ``fine_to_coarse`` tensor, coarse node count, whether CUDA was used
+        for the segmented sort, and the elapsed assignment time in seconds.
+    """
+    assignment_start = time.perf_counter()
+    layer_index = build_layer_index(
+        layers,
+        device="cpu",
+        verbose=True,
+        progress=progress,
+    )
+    sorted_nodes = layer_index.sorted_nodes.to(device="cpu", dtype=torch.long)
+    layer_counts_cpu = layer_counts.to(device="cpu", dtype=torch.long)
+    layer_offsets_cpu = layer_offsets.to(device="cpu", dtype=torch.long)
+    coarse_per_layer = (layer_counts_cpu + 2) // 3
+    coarse_offsets = torch.zeros(layer_counts_cpu.shape[0] + 1, dtype=index_dtype, device="cpu")
+    coarse_offsets[1:] = coarse_per_layer.to(dtype=index_dtype).cumsum(0)
+    num_coarse = int(coarse_offsets[-1].item())
+
+    assignment_required = _streaming_assignment_required_bytes(num_nodes)
+    fine_to_coarse = torch.empty(num_nodes, dtype=index_dtype, device="cpu")
+    use_cuda = False
+    blocks: Optional[List[tuple[int, int, int, int]]] = None
+
+    if torch.cuda.is_available():
+        try:
+            free_vram, _total_vram = torch.cuda.mem_get_info()
+        except RuntimeError:
+            free_vram = 0
+        else:
+            if assignment_required < int(free_vram * _STREAMING_ASSIGNMENT_VRAM_FRACTION):
+                use_cuda = True
+                blocks = [(0, int(layer_counts_cpu.shape[0]), 0, num_nodes)]
+                if progress is not None:
+                    progress(
+                        "Coarsen assignment: CUDA segmented sort "
+                        f"({assignment_required / 1e9:.1f}GB, {free_vram / 1e9:.1f}GB free)"
+                    )
+                else:
+                    print(
+                        "[dagua]   Coarsen assignment: CUDA segmented sort "
+                        f"({assignment_required / 1e9:.1f}GB, {free_vram / 1e9:.1f}GB free)",
+                        flush=True,
+                    )
+            else:
+                max_block_nodes = int(
+                    (free_vram * _STREAMING_ASSIGNMENT_VRAM_FRACTION)
+                    // max(_streaming_assignment_required_bytes(1), 1)
+                )
+                candidate_blocks = _build_streaming_assignment_blocks(
+                    layer_counts_cpu,
+                    layer_offsets_cpu,
+                    max_block_nodes=max_block_nodes,
+                )
+                if candidate_blocks is not None and candidate_blocks:
+                    use_cuda = True
+                    blocks = candidate_blocks
+                    if progress is not None:
+                        progress(
+                            "Coarsen assignment: CUDA segmented sort "
+                            f"in {len(candidate_blocks)} layer blocks "
+                            f"({assignment_required / 1e9:.1f}GB, {free_vram / 1e9:.1f}GB free)"
+                        )
+                    else:
+                        print(
+                            "[dagua]   Coarsen assignment: CUDA segmented sort "
+                            f"in {len(candidate_blocks)} layer blocks "
+                            f"({assignment_required / 1e9:.1f}GB, {free_vram / 1e9:.1f}GB free)",
+                            flush=True,
+                        )
+                else:
+                    if progress is not None:
+                        progress(
+                            "Coarsen assignment: CPU fallback "
+                            f"(need {assignment_required / 1e9:.1f}GB, "
+                            f"{free_vram / 1e9:.1f}GB free)"
+                        )
+                    else:
+                        print(
+                            "[dagua]   Coarsen assignment: CPU fallback "
+                            f"(need {assignment_required / 1e9:.1f}GB, "
+                            f"{free_vram / 1e9:.1f}GB free)",
+                            flush=True,
+                        )
+    elif progress is not None:
+        progress("Coarsen assignment: CPU fallback (no CUDA)")
+    else:
+        print("[dagua]   Coarsen assignment: CPU fallback (no CUDA)", flush=True)
+
+    if blocks is None:
+        blocks = [(0, int(layer_counts_cpu.shape[0]), 0, num_nodes)]
+
+    def _fill_assignments(block_device: str) -> None:
+        """Populate ``fine_to_coarse`` for one execution mode."""
+        for layer_start, layer_end, node_start, node_end in blocks or []:
+            sorted_nodes_block = sorted_nodes[node_start:node_end]
+            block_counts = layer_counts_cpu[layer_start:layer_end]
+            block_coarse_offsets = coarse_offsets[layer_start:layer_end]
+            order_cpu = _streaming_block_order(
+                sorted_nodes_block=sorted_nodes_block,
+                min_neighbor=min_neighbor,
+                block_counts=block_counts,
+                total_num_nodes=num_nodes,
+                compute_device=block_device,
+            )
+            ordered_nodes, block_group_ids = _streaming_block_group_ids(
+                sorted_nodes_block=sorted_nodes_block,
+                order_cpu=order_cpu,
+                block_counts=block_counts,
+                block_coarse_offsets=block_coarse_offsets,
+                index_dtype=index_dtype,
+            )
+            fine_to_coarse[ordered_nodes] = block_group_ids
+
+    if use_cuda:
+        try:
+            _fill_assignments("cuda")
+            torch.cuda.empty_cache()
+            return fine_to_coarse, num_coarse, True, time.perf_counter() - assignment_start
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if progress is not None:
+                progress("Coarsen assignment: OOM, falling back to CPU")
+            else:
+                print("[dagua]   Coarsen assignment: OOM, falling back to CPU", flush=True)
+            fine_to_coarse = torch.empty(num_nodes, dtype=index_dtype, device="cpu")
+
+    _fill_assignments("cpu")
+    return fine_to_coarse, num_coarse, False, time.perf_counter() - assignment_start
 
 
 def _deduplicate_streaming_coarse_edges(
@@ -972,7 +1315,7 @@ def _coarsen_once_streaming(
     device: str = "cpu",
     progress: Optional[Callable[[str], None]] = None,
 ) -> CoarseLevel:
-    """Coarsen a very large graph level with chunked CPU matching and GPU helpers.
+    """Coarsen a very large graph level with stable streaming matching.
 
     Parameters
     ----------
@@ -1004,14 +1347,16 @@ def _coarsen_once_streaming(
 
     Notes
     -----
-    Matching stays on CPU to preserve the existing streaming coarsening logic.
-    CUDA is used only for the chunked scatter and bucketed dedup phases when
-    the VRAM guard says the temporary scratch buffers fit safely.
+    The streaming path preserves the existing per-layer triple grouping model,
+    but replaces the Python layer scan with a stable segmented sort. When VRAM
+    allows, CUDA performs the packed-key sort either for the whole level or for
+    complete-layer blocks; otherwise the same stable ordering runs on CPU.
     """
     node_sizes = _ensure_node_sizes_2d(node_sizes, N)
     index_dtype = torch.int32 if N <= torch.iinfo(torch.int32).max else torch.long
     gpu_device, gpu_skip_reason = _can_use_gpu_for_streaming_coarsen(N)
     scatter_time = 0.0
+    assignment_time = 0.0
     dedup_time = 0.0
 
     # --- Phase A: Per-layer node matching ---
@@ -1025,32 +1370,18 @@ def _coarsen_once_streaming(
         gpu_device=gpu_device,
     )
 
-    # Coarse node counts per layer. Grouping is still local-in-layer; the
-    # streaming path just avoids the global sort/materialization cost.
-    layer_counts_cpu = layer_counts.to(device="cpu", dtype=index_dtype)
-    coarse_per_layer = (layer_counts_cpu + 2) // 3
-    coarse_offsets = torch.zeros(num_layers + 1, dtype=index_dtype, device="cpu")
-    coarse_offsets[1:] = coarse_per_layer.cumsum(0)
-    N_coarse = int(coarse_offsets[-1].item())
-
-    # Assign coarse IDs per-layer using boolean masking (no global argsort).
-    # Reuses a [N] bool mask (~1 GB at 1B) instead of sorted_by_layer (8+8 GB).
-    fine_to_coarse = torch.empty(N, dtype=index_dtype, device="cpu")
-    layers_cpu = layers.to(device="cpu", dtype=index_dtype)
-    layer_mask = torch.empty(N, dtype=torch.bool, device="cpu")
-    for layer_idx in range(num_layers):
-        if layer_counts_cpu[layer_idx].item() == 0:
-            continue
-        torch.eq(layers_cpu, layer_idx, out=layer_mask)
-        layer_nodes = layer_mask.nonzero(as_tuple=True)[0]
-        local_order = min_neighbor[layer_nodes].argsort()  # ascending
-        n_layer = layer_nodes.shape[0]
-        coarse_base = int(coarse_offsets[layer_idx].item())
-        fine_to_coarse[layer_nodes[local_order]] = (
-            torch.arange(n_layer, dtype=index_dtype, device="cpu") // 3 + coarse_base
+    fine_to_coarse, N_coarse, assignment_used_gpu, assignment_time = (
+        _assign_streaming_coarse_groups(
+            min_neighbor=min_neighbor,
+            num_nodes=N,
+            layers=layers,
+            layer_counts=layer_counts,
+            layer_offsets=layer_offsets,
+            index_dtype=index_dtype,
+            progress=progress,
         )
-
-    del layer_mask, min_neighbor, layers_cpu
+    )
+    del min_neighbor
 
     # --- Phase B: Coarse node sizes ---
     # Every coarse node takes the max width/height of its assigned fine nodes.
@@ -1071,9 +1402,18 @@ def _coarsen_once_streaming(
         gpu_device=gpu_device,
     )
 
-    if scatter_used_gpu or dedup_used_gpu:
+    gpu_components: List[str] = []
+    if assignment_used_gpu:
+        gpu_components.append("assignment")
+    if scatter_used_gpu:
+        gpu_components.append("scatter")
+    if dedup_used_gpu:
+        gpu_components.append("dedup")
+    if gpu_components:
         gpu_msg = (
-            f"GPU coarsen: scatter + dedup on CUDA ({(scatter_time + dedup_time) * 1000.0:.1f}ms)"
+            "GPU coarsen: "
+            + " + ".join(gpu_components)
+            + f" on CUDA ({(assignment_time + scatter_time + dedup_time) * 1000.0:.1f}ms)"
         )
     else:
         skip_reason = gpu_skip_reason if gpu_device is None else "CUDA runtime fallback"
@@ -1236,7 +1576,7 @@ def coarsen_once(
         layer_offsets_np,
     )
 
-    all_ordered = np.empty(N, dtype=np.int64)
+    all_ordered: npt.NDArray[np.int64] = np.empty(N, dtype=np.int64)
     max_cluster_key = np.iinfo(np.int64).max
     for layer_idx in range(num_layers):
         start = int(layer_offsets_np[layer_idx])
@@ -1653,7 +1993,11 @@ def multilevel_layout(
             ei = cpu_ei.to(device)
             ns = cpu_ns.to(device)
             direct_layer_index = (
-                build_layer_index(precomputed_layers, device=device)
+                build_layer_index(
+                    precomputed_layers,
+                    device=device,
+                    verbose=verbose,
+                )
                 if precomputed_layers is not None
                 else None
             )
@@ -1710,7 +2054,11 @@ def multilevel_layout(
             ei = cpu_ei.to(device)
             ns = cpu_ns.to(device)
             direct_layer_index = (
-                build_layer_index(precomputed_layers, device=device)
+                build_layer_index(
+                    precomputed_layers,
+                    device=device,
+                    verbose=verbose,
+                )
                 if precomputed_layers is not None
                 else None
             )
@@ -1817,7 +2165,11 @@ def multilevel_layout(
             _vlog(f"Restored coarsest positions ({coarsest.num_nodes:,} nodes)", indent="  ")
         else:
             coarsest_layer_index = (
-                build_layer_index(coarsest.coarse_layer_assignments, device="cpu")
+                build_layer_index(
+                    coarsest.coarse_layer_assignments,
+                    device="cpu",
+                    verbose=verbose,
+                )
                 if coarsest.coarse_layer_assignments is not None
                 else None
             )
@@ -2026,7 +2378,11 @@ def multilevel_layout(
             if refine_config.device != level_device:
                 refine_config.device = level_device
             level_layer_index = (
-                build_layer_index(level.fine_layer_assignments, device="cpu")
+                build_layer_index(
+                    level.fine_layer_assignments,
+                    device="cpu",
+                    verbose=verbose,
+                )
                 if level.fine_layer_assignments is not None
                 else None
             )
