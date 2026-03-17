@@ -45,7 +45,10 @@ _FINAL_LEVEL_SAMPLE_CAP = 1_000_000
 _MEMORY_GUARD_THRESHOLD = 100_000_000
 _MEMORY_GUARD_BYTES_PER_NODE = 20
 _MEMORY_GUARD_HEADROOM = 1.5
-_CPU_FINAL_EDGE_BATCH_CAP = 2_000_000
+_CPU_EDGE_BATCH_BYTES_PER_EDGE = 120
+_CPU_EDGE_BATCH_RAM_FRACTION = 0.05
+_CPU_FINAL_EDGE_BATCH_CAP = 500_000
+_CPU_FINAL_EDGE_BATCH_MAX = 20_000_000
 _REFINEMENT_POSITION_VRAM_FRACTION = 0.40
 _STREAMING_GPU_SCATTER_TARGET_COUNT = 7
 _STREAMING_GPU_DEDUP_BYTES = 500_000_000
@@ -341,19 +344,37 @@ def _select_streaming_gpu_device(num_nodes: int) -> Optional[str]:
     conservative for the 200M+ node regime, even though the current streaming
     path only offloads a subset of those reductions.
     """
+    return _can_use_gpu_for_streaming_coarsen(num_nodes)[0]
+
+
+def _can_use_gpu_for_streaming_coarsen(num_nodes: int) -> tuple[Optional[str], str]:
+    """Return the streaming-coarsen CUDA device together with the skip reason.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Fine-graph node count for the streaming coarsening level.
+
+    Returns
+    -------
+    tuple[str | None, str]
+        ``("cuda", "")`` when the temporary scatter and dedup scratch space
+        fits within the guarded free-VRAM budget. Otherwise returns ``(None,
+        reason)`` where ``reason`` explains why the GPU path is skipped.
+    """
     if not torch.cuda.is_available():
-        return None
+        return None, "no CUDA"
 
     scatter_mem = num_nodes * _STREAMING_GPU_SCATTER_TARGET_COUNT * 4
     total_gpu_mem = scatter_mem + _STREAMING_GPU_DEDUP_BYTES
     try:
         free_mem, _total_mem = torch.cuda.mem_get_info()
     except RuntimeError:
-        return None
+        return None, "no CUDA"
 
     if total_gpu_mem >= int(free_mem * _STREAMING_GPU_SAFETY_FRACTION):
-        return None
-    return "cuda"
+        return None, "insufficient VRAM"
+    return "cuda", ""
 
 
 def _build_streaming_min_neighbor(
@@ -551,16 +572,17 @@ def _select_refinement_execution(
         ``(force_cpu, force_hybrid, optimizer_type, edge_batch)`` for the level.
     """
     if device != "cuda":
-        return False, False, "adam", config.edge_batch_size
+        cpu_batch = config.edge_batch_size or _auto_cpu_edge_batch_size(verbose=config.verbose)
+        return False, False, "adam", cpu_batch
 
     from dagua.layout.engine import (
         CHECKPOINT_MEMORY_REDUCTION,
-        DEFAULT_HYBRID_EDGE_BATCH,
+        _auto_edge_batch_size,
         _estimate_gpu_memory,
         _estimate_hybrid_gpu_memory,
     )
 
-    base_batch = config.edge_batch_size or DEFAULT_HYBRID_EDGE_BATCH
+    base_batch = config.edge_batch_size or _auto_edge_batch_size(verbose=config.verbose)
     level_optimizer_type: OptimizerType = "adam"
     positions_fit_cuda = _positions_fit_cuda_refinement(fine_n)
 
@@ -685,6 +707,67 @@ def _positions_fit_cuda_refinement(fine_n: int) -> bool:
         return False
     position_bytes = fine_n * 2 * 4
     return position_bytes < int(total_vram * _REFINEMENT_POSITION_VRAM_FRACTION)
+
+
+def _available_ram_bytes() -> int:
+    """Return currently available host RAM in bytes.
+
+    Returns
+    -------
+    int
+        Available RAM in bytes, or ``0`` when the host telemetry is
+        unavailable.
+    """
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - optional dependency
+        pass
+    else:
+        return int(psutil.virtual_memory().available)
+
+    try:
+        with open("/proc/meminfo", encoding="ascii") as meminfo:
+            for line in meminfo:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        return 0
+    return 0
+
+
+def _auto_cpu_edge_batch_size(verbose: bool = False) -> int:
+    """Choose the largest CPU edge batch that fits in available RAM.
+
+    Parameters
+    ----------
+    verbose : bool, default=False
+        Whether to log the selected batch size.
+
+    Returns
+    -------
+    int
+        CPU-side edge batch size scaled to available RAM. Falls back to the
+        minimum batch when RAM telemetry is unavailable.
+    """
+    available_ram = _available_ram_bytes()
+    if available_ram <= 0:
+        if verbose:
+            print(
+                "[dagua] Auto CPU edge batch: "
+                f"{_CPU_FINAL_EDGE_BATCH_CAP:,} (RAM telemetry unavailable, fallback)",
+                flush=True,
+            )
+        return _CPU_FINAL_EDGE_BATCH_CAP
+    safe_budget = int(available_ram * _CPU_EDGE_BATCH_RAM_FRACTION)
+    batch = max(_CPU_FINAL_EDGE_BATCH_CAP, safe_budget // _CPU_EDGE_BATCH_BYTES_PER_EDGE)
+    batch = min(batch, _CPU_FINAL_EDGE_BATCH_MAX)
+    if verbose:
+        print(
+            f"[dagua] Auto CPU edge batch: {batch:,} "
+            f"({available_ram / 1024**3:.1f}GB free, 5% budget)",
+            flush=True,
+        )
+    return batch
 
 
 def _apply_large_final_level_execution_overrides(
@@ -927,7 +1010,7 @@ def _coarsen_once_streaming(
     """
     node_sizes = _ensure_node_sizes_2d(node_sizes, N)
     index_dtype = torch.int32 if N <= torch.iinfo(torch.int32).max else torch.long
-    gpu_device = _select_streaming_gpu_device(N)
+    gpu_device, gpu_skip_reason = _can_use_gpu_for_streaming_coarsen(N)
     scatter_time = 0.0
     dedup_time = 0.0
 
@@ -989,11 +1072,16 @@ def _coarsen_once_streaming(
     )
 
     if scatter_used_gpu or dedup_used_gpu:
-        gpu_msg = f"coarsen GPU: scatter={scatter_time:.1f}s dedup={dedup_time:.1f}s"
-        if progress is not None:
-            progress(gpu_msg)
-        else:
-            print(f"[dagua]   {gpu_msg}", flush=True)
+        gpu_msg = (
+            f"GPU coarsen: scatter + dedup on CUDA ({(scatter_time + dedup_time) * 1000.0:.1f}ms)"
+        )
+    else:
+        skip_reason = gpu_skip_reason if gpu_device is None else "CUDA runtime fallback"
+        gpu_msg = f"GPU coarsen: SKIPPED (reason: {skip_reason})"
+    if progress is not None:
+        progress(gpu_msg)
+    else:
+        print(f"[dagua]   {gpu_msg}", flush=True)
 
     return CoarseLevel(
         edge_index=coarse_edge_index,
@@ -1509,7 +1597,12 @@ def multilevel_layout(
     """
     import time as _time
 
-    from dagua.layout.engine import ProgressContext, _layout_inner
+    from dagua.layout.engine import (
+        ProgressContext,
+        _auto_edge_batch_size,
+        _layout_inner,
+        _resolve_progress_file_path,
+    )
 
     verbose = config.verbose
 
@@ -1537,15 +1630,16 @@ def multilevel_layout(
         device = "cpu"
 
     n = graph.num_nodes
+    progress_file_path = _resolve_progress_file_path(config) if n > 1_000_000 else None
     _t0 = _time.perf_counter()
     precomputed_layers = getattr(graph, "_precomputed_layer_assignments", None)
 
     if config.seed is not None:
         torch.manual_seed(config.seed)
 
-    # Build hierarchy on CPU — coarsening uses large temporary tensors
-    # (edge_hash.unique() at 50M+ edges OOMs on small GPUs).
-    # Keep all graph data on CPU; only move what's needed to GPU per-level.
+    # Build hierarchy on CPU — coarsening keeps its resident tensors in host
+    # memory, while the streaming path can still borrow CUDA scratch buffers
+    # for scatter/dedup when the guard says they fit.
     cpu_ei = graph.edge_index
     cpu_ns = graph.node_sizes
     min_nodes = config.multilevel_min_nodes
@@ -1576,6 +1670,7 @@ def multilevel_layout(
                 trace=trace,
                 graph_structure=structure,
                 prebuilt_layer_index=direct_layer_index,
+                progress_file_path=progress_file_path,
             )
             from dagua.layout.engine import _apply_direction
 
@@ -1632,6 +1727,7 @@ def multilevel_layout(
                 trace=trace,
                 graph_structure=structure,
                 prebuilt_layer_index=direct_layer_index,
+                progress_file_path=progress_file_path,
             )
             from dagua.layout.engine import _apply_direction
 
@@ -1735,6 +1831,7 @@ def multilevel_layout(
                 progress_context=ProgressContext(),
                 prebuilt_layer_index=coarsest_layer_index,
                 skip_classification=True,
+                progress_file_path=progress_file_path,
             )
             coarsest_pos_callback = getattr(graph, "_coarsest_positions_callback", None)
             if coarsest_pos_callback is not None:
@@ -1825,8 +1922,13 @@ def multilevel_layout(
                 # state within RAM bounds.
                 force_cpu = False
                 force_hybrid = False
-                level_edge_batch = 1_000_000  # 1M edges — fits in ~200MB
+                level_edge_batch = _auto_edge_batch_size(verbose=config.verbose)
                 level_optimizer_type = "sgd"  # lightest optimizer footprint
+                if i == 0:
+                    _vlog(
+                        f"Final level override: subset_gpu + SGD (N={fine_n // 1_000_000}M)",
+                        indent="  ",
+                    )
 
             assert pos is not None
             assert level.fine_to_coarse is not None
@@ -1948,6 +2050,13 @@ def multilevel_layout(
                     trace=level_trace,
                     prebuilt_layer_index=level_layer_index,
                     skip_classification=True,
+                    progress_file_path=progress_file_path,
+                    progress_metadata={
+                        "phase": "refine",
+                        "level": level_num,
+                        "total_levels": num_refine_levels,
+                        "level_nodes": fine_n,
+                    },
                 )
 
             levels[i] = CoarseLevel(
