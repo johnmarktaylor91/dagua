@@ -34,7 +34,11 @@ from dagua.layout.multilevel import (
     build_hierarchy,
     coarsen_once,
 )
-from dagua.layout.tiled_compute import _partition_edges_by_tile
+from dagua.layout.tiled_compute import (
+    _compute_cross_edge_batch_size,
+    _compute_edge_batch_size,
+    _partition_edges_by_tile,
+)
 from dagua.metrics import compute_all_metrics
 
 
@@ -1349,6 +1353,20 @@ def test_tiled_compute_skips_for_small_graphs() -> None:
     assert not _should_use_tiled_gpu("cuda", "cuda", 60_000_000, 80_000_000)
 
 
+def test_tiled_compute_edge_batch_size_uses_full_edge_context_budget() -> None:
+    """Cross-tile batches should budget for edge tensors plus autograd context."""
+    assert _compute_edge_batch_size(11_000_000_000) == 12_890_625
+
+
+def test_tiled_compute_cross_edge_batches_shrink_for_large_cross_sets() -> None:
+    """Large cross-edge sets should use smaller batches than tile-local work."""
+    edge_batch_size = _compute_edge_batch_size(11_000_000_000)
+
+    assert _compute_cross_edge_batch_size(300_000_000, 11_000_000_000, edge_batch_size) == (
+        edge_batch_size // 2
+    )
+
+
 def test_tiled_compute_allows_cpu_execution_when_cuda_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1450,6 +1468,103 @@ def test_layout_inner_initializes_tiled_gpu_before_memory_strategy(
     assert pos.shape == (3, 2)
     assert state["resolved"] is False
     assert "TILED GPU active: 3 nodes in tiles" in capsys.readouterr().out
+
+
+def test_layout_inner_falls_back_to_cpu_when_tiled_gpu_oom(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Tiled GPU OOM should preserve the step by re-running the losses on CPU."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    tiled_compute_module = importlib.import_module("dagua.layout.tiled_compute")
+
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    node_sizes = torch.full((3, 2), 20.0)
+    init_pos = torch.tensor(
+        [[0.0, 0.0], [40.0, 20.0], [90.0, -10.0]],
+        dtype=torch.float32,
+    )
+    config = LayoutConfig(
+        steps=1,
+        device="cpu",
+        seed=42,
+        verbose=False,
+        w_dag=0.0,
+        w_attract=1.0,
+        w_repel=0.0,
+        w_overlap=0.0,
+        w_cluster=0.0,
+        w_cluster_contain=0.0,
+        w_crossing=0.0,
+        w_straightness=0.0,
+        w_length_variance=0.0,
+        w_spacing=0.0,
+        w_fanout=0.0,
+        w_back_edge=0.0,
+    )
+
+    class _OOMTiledGPUCompute:
+        """Force the tiled engine path to raise a CUDA OOM."""
+
+        def __init__(
+            self,
+            num_nodes: int,
+            edge_index: torch.Tensor,
+            node_sizes: torch.Tensor,
+            device: str = "cuda",
+            vram_budget: int | None = None,
+        ) -> None:
+            """Store the minimal state required by the engine."""
+            del num_nodes, edge_index, node_sizes, device, vram_budget
+            self.current_edge_index: torch.Tensor | None = None
+            self.current_edge_ctx: object | None = None
+            self.layer_assignments: torch.Tensor | None = None
+            self.cross_tile_loss_mask: list[bool] = []
+            self.last_unweighted_loss = 0.0
+
+        def compute_step(
+            self,
+            pos: torch.Tensor,
+            loss_fns: list[object],
+            loss_weights: list[float],
+        ) -> float:
+            """Raise the same error shape that CUDA emits on OOM."""
+            del pos, loss_fns, loss_weights
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+        def _reset_runtime_state(self) -> None:
+            """Match the tiled runtime cleanup hook used by the engine."""
+            self.current_edge_index = None
+            self.current_edge_ctx = None
+
+    monkeypatch.setattr(engine_module, "_should_use_tiled_gpu", lambda *args, **kwargs: True)
+    monkeypatch.setattr(tiled_compute_module, "TiledGPUCompute", _OOMTiledGPUCompute)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    oom_pos = _layout_inner(
+        edge_index,
+        3,
+        node_sizes,
+        config,
+        device="cpu",
+        init_pos=init_pos,
+        skip_classification=True,
+    )
+
+    monkeypatch.setattr(engine_module, "_should_use_tiled_gpu", lambda *args, **kwargs: False)
+
+    cpu_pos = _layout_inner(
+        edge_index,
+        3,
+        node_sizes,
+        config,
+        device="cpu",
+        init_pos=init_pos,
+        skip_classification=True,
+    )
+
+    assert torch.allclose(oom_pos, cpu_pos, atol=1e-6, rtol=1e-6)
+    assert "TILED GPU OOM - falling back to CPU for this step" in capsys.readouterr().out
 
 
 def test_multilevel_refinement_syncs_config_device_for_cpu_levels(
