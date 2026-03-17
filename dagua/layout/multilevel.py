@@ -1601,6 +1601,11 @@ def multilevel_layout(
                 if config.overlap_check_interval == 0:
                     refine_config.overlap_check_interval = projection_interval
                 setattr(refine_config, "_dagua_crossing_interval_override", crossing_interval)
+            # Keep the level config aligned with the actual execution device so
+            # engine-side memory planning can select CPU, hybrid, or tiled GPU
+            # paths using the same device view as the refinement loop.
+            if refine_config.device != level_device:
+                refine_config.device = level_device
             level_layer_index = (
                 build_layer_index(level.fine_layer_assignments, device="cpu")
                 if level.fine_layer_assignments is not None

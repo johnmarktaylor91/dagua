@@ -39,6 +39,9 @@ while Dagua continues to run. Dagua handles 50K nodes in ~8 min and 100K in ~35 
 - [ ] BT direction: arrowheads missing or pointing wrong direction
 - [ ] LR/RL direction: nodes render as narrow pills — node sizing doesn't adapt for horizontal layout
 - [ ] Ortho edge routing renders as bezier/spline instead of right-angle segments
+- [ ] Dense graph arrowhead overlap — when many edges converge on one node, arrowheads collide. Needs per-edge collision avoidance or size reduction at high-degree targets.
+- [ ] Three-way comparison panel thumbnailing loses arrowhead detail — consider larger panels (1200×900+) or skip compositing for the advertising gallery
+- [ ] Graphviz theme dotted lines may still render as micro-dashes at certain DPIs — verify round capstyle + (0.1, 3.0) pattern at various resolutions
 
 ### API / UX
 - [ ] `from_edge_index` doesn't accept `labels` kwarg — must set manually

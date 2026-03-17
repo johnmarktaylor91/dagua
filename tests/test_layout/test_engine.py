@@ -1346,8 +1346,249 @@ def test_edge_partitioning() -> None:
 def test_tiled_compute_skips_for_small_graphs() -> None:
     """Tiled GPU mode should stay disabled below the huge-graph threshold."""
     assert not _should_use_tiled_gpu("cuda", "cpu", 1_000, 2_000)
-    assert not _should_use_tiled_gpu("cpu", "cpu", 60_000_000, 80_000_000)
     assert not _should_use_tiled_gpu("cuda", "cuda", 60_000_000, 80_000_000)
+
+
+def test_tiled_compute_allows_cpu_execution_when_cuda_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large CPU solves should still enable tiled GPU when CUDA can accelerate them."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+
+    class _FakeBudget:
+        """Return a deterministic VRAM fit decision for tiled GPU tests."""
+
+        def fits(self, needed_bytes: int) -> bool:
+            """Report that a full resident GPU layout would exceed budget."""
+            del needed_bytes
+            return False
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(engine_module, "VRAMBudget", _FakeBudget)
+    monkeypatch.setattr(engine_module, "_estimate_gpu_memory", lambda *args, **kwargs: 10)
+
+    assert _should_use_tiled_gpu("cpu", "cpu", 60_000_000, 80_000_000)
+
+
+def test_layout_inner_initializes_tiled_gpu_before_memory_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Tiled GPU activation should happen before standard memory strategy selection."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    tiled_compute_module = importlib.import_module("dagua.layout.tiled_compute")
+
+    state = {"tiled_ready": False, "resolved": False}
+
+    class _FakeTiledGPUCompute:
+        """Minimal tiled compute stub for ordering tests."""
+
+        def __init__(
+            self,
+            num_nodes: int,
+            edge_index: torch.Tensor,
+            node_sizes: torch.Tensor,
+            device: str = "cuda",
+            vram_budget: int | None = None,
+        ) -> None:
+            """Record tiled initialization without requiring a real GPU."""
+            del num_nodes, edge_index, node_sizes, device, vram_budget
+            state["tiled_ready"] = True
+            self.current_edge_index: torch.Tensor | None = None
+            self.current_edge_ctx: object | None = None
+            self.layer_assignments: torch.Tensor | None = None
+            self.cross_tile_loss_mask: list[bool] = []
+            self.last_unweighted_loss = 0.0
+
+        def compute_step(
+            self,
+            pos: torch.Tensor,
+            loss_fns: list[object],
+            loss_weights: list[float],
+        ) -> float:
+            """Return a no-op tiled loss value for activation tests."""
+            del pos, loss_fns, loss_weights
+            self.last_unweighted_loss = 0.0
+            return 0.0
+
+    def _fake_resolve_memory_strategy(
+        n: int,
+        num_edges: int,
+        device: str,
+        config: LayoutConfig,
+        edges_on_cpu: bool = False,
+        edge_batch: int = 0,
+    ) -> tuple[bool, bool, bool]:
+        """Assert tiled GPU setup runs before standard strategy selection."""
+        del n, num_edges, device, config, edges_on_cpu, edge_batch
+        state["resolved"] = True
+        assert state["tiled_ready"] is True
+        return False, False, False
+
+    monkeypatch.setattr(engine_module, "_should_use_tiled_gpu", lambda *args, **kwargs: True)
+    monkeypatch.setattr(engine_module, "_resolve_memory_strategy", _fake_resolve_memory_strategy)
+    monkeypatch.setattr(tiled_compute_module, "TiledGPUCompute", _FakeTiledGPUCompute)
+
+    pos = _layout_inner(
+        torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        3,
+        torch.full((3, 2), 20.0),
+        LayoutConfig(
+            steps=1,
+            device="cpu",
+            seed=42,
+            verbose=False,
+            w_repel=0.0,
+            w_overlap=0.0,
+            w_crossing=0.0,
+            w_spacing=0.0,
+            w_fanout=0.0,
+        ),
+        device="cpu",
+    )
+
+    assert pos.shape == (3, 2)
+    assert state["resolved"] is False
+    assert "TILED GPU active: 3 nodes in tiles" in capsys.readouterr().out
+
+
+def test_multilevel_refinement_syncs_config_device_for_cpu_levels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU refinement levels should pass a CPU config into the inner engine."""
+    engine_module = importlib.import_module("dagua.layout.engine")
+    multilevel_module = importlib.import_module("dagua.layout.multilevel")
+
+    g = DaguaGraph()
+    g.num_nodes = 4
+    g._edge_index_tensor = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    g.node_sizes = torch.full((4, 2), 20.0)
+
+    calls: list[tuple[int, str, str]] = []
+    original_tensor_to = torch.Tensor.to
+    original_randn = torch.randn
+
+    def _fake_tensor_to(self: torch.Tensor, *args: object, **kwargs: object) -> torch.Tensor:
+        """Treat mocked CUDA transfers as no-ops so the test can run on CPU."""
+        if args:
+            target = args[0]
+            if isinstance(target, str) and target == "cuda":
+                return self
+            if isinstance(target, torch.device) and target.type == "cuda":
+                return self
+        target_device = kwargs.get("device")
+        if isinstance(target_device, str) and target_device == "cuda":
+            kwargs = {key: value for key, value in kwargs.items() if key != "device"}
+            return original_tensor_to(self, *args, **kwargs)
+        if isinstance(target_device, torch.device) and target_device.type == "cuda":
+            kwargs = {key: value for key, value in kwargs.items() if key != "device"}
+            return original_tensor_to(self, *args, **kwargs)
+        return original_tensor_to(self, *args, **kwargs)
+
+    def _fake_randn(*args: object, **kwargs: object) -> torch.Tensor:
+        """Allocate mocked CUDA random tensors on CPU for the device-sync test."""
+        device = kwargs.get("device")
+        if isinstance(device, str) and device == "cuda":
+            kwargs = {key: value for key, value in kwargs.items() if key != "device"}
+        elif isinstance(device, torch.device) and device.type == "cuda":
+            kwargs = {key: value for key, value in kwargs.items() if key != "device"}
+        return original_randn(*args, **kwargs)
+
+    def _fake_layout_inner(
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        node_sizes: torch.Tensor,
+        config: LayoutConfig,
+        device: str = "cpu",
+        optimizer_type: str = "adam",
+        init_pos: torch.Tensor | None = None,
+        clusters: dict | None = None,
+        cluster_parents: dict | None = None,
+        layer_assignments: torch.Tensor | None = None,
+        progress_context: object | None = None,
+        trace: object | None = None,
+        *,
+        graph_structure: object | None = None,
+        prebuilt_layer_index: object | None = None,
+        skip_classification: bool = False,
+    ) -> torch.Tensor:
+        """Capture engine device inputs while returning deterministic positions."""
+        del (
+            edge_index,
+            node_sizes,
+            optimizer_type,
+            init_pos,
+            clusters,
+            cluster_parents,
+            layer_assignments,
+            progress_context,
+            trace,
+            graph_structure,
+            prebuilt_layer_index,
+            skip_classification,
+        )
+        calls.append((num_nodes, config.device, device))
+        return torch.zeros((num_nodes, 2), dtype=torch.float32)
+
+    monkeypatch.setattr(torch.Tensor, "to", _fake_tensor_to, raising=False)
+    monkeypatch.setattr(torch, "randn", _fake_randn)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(
+        multilevel_module,
+        "classify_graph",
+        lambda *args, **kwargs: GraphStructure(
+            family=GraphFamily.GENERAL,
+            num_components=1,
+            max_degree=0,
+            num_layers=0,
+            avg_layer_width=0.0,
+            is_planar_hint=False,
+        ),
+    )
+    monkeypatch.setattr(
+        multilevel_module,
+        "build_hierarchy",
+        lambda *args, **kwargs: [
+            multilevel_module.CoarseLevel(
+                edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+                node_sizes=torch.full((2, 2), 20.0),
+                num_nodes=2,
+                fine_to_coarse=torch.tensor([0, 0, 1, 1], dtype=torch.long),
+                num_fine=4,
+                fine_layer_assignments=torch.tensor([0, 0, 1, 1], dtype=torch.long),
+                coarse_layer_assignments=torch.tensor([0, 1], dtype=torch.long),
+            )
+        ],
+    )
+    monkeypatch.setattr(multilevel_module, "_can_prolong_on_gpu", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        multilevel_module,
+        "_select_refinement_execution",
+        lambda *args, **kwargs: (True, False, "adam", 0),
+    )
+    monkeypatch.setattr(engine_module, "_layout_inner", _fake_layout_inner)
+    monkeypatch.setattr(engine_module, "_apply_direction", lambda pos, direction: pos)
+
+    pos = multilevel_module.multilevel_layout(
+        g,
+        LayoutConfig(
+            device="cuda",
+            steps=1,
+            seed=42,
+            verbose=False,
+            multilevel_threshold=1,
+            multilevel_min_nodes=1,
+            multilevel_coarse_steps=1,
+            multilevel_refine_steps=1,
+            offload_to_disk=False,
+        ),
+    )
+
+    assert pos.shape == (4, 2)
+    assert (2, "cuda", "cuda") in calls
+    assert (4, "cpu", "cpu") in calls
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

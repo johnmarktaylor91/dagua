@@ -601,7 +601,10 @@ def _should_use_tiled_gpu(
     Parameters
     ----------
     requested_device : str
-        Device requested by the user configuration.
+        Device stored on the current layout config. This is retained for API
+        compatibility, but tiled GPU eligibility is determined by the actual
+        execution mode because multilevel refinement normalizes configs to the
+        per-level device.
     execution_device : str
         Device selected for the current engine call.
     num_nodes : int
@@ -612,11 +615,12 @@ def _should_use_tiled_gpu(
     Returns
     -------
     bool
-        ``True`` when CUDA was requested, the current solve is running on CPU,
-        the graph is large enough to justify tiling, CUDA is available, and a
-        full resident GPU layout estimate does not fit the active VRAM budget.
+        ``True`` when the current solve is running on CPU, the graph is large
+        enough to justify tiling, CUDA is available, and a full resident GPU
+        layout estimate does not fit the active VRAM budget.
     """
-    if requested_device != "cuda" or execution_device != "cpu":
+    del requested_device
+    if execution_device != "cpu":
         return False
     if num_nodes < TILED_GPU_MIN_NODES:
         return False
@@ -811,15 +815,39 @@ def _layout_inner(
             edge_index = edge_index.cpu()
             edges_on_cpu = True
 
+    tiled_compute = None
+    if _should_use_tiled_gpu(config.device, device, n, num_edges):
+        from dagua.layout.tiled_compute import TiledGPUCompute
+
+        tiled_compute = TiledGPUCompute(
+            num_nodes=n,
+            edge_index=edge_index if edge_index.device.type == "cpu" else edge_index.cpu(),
+            node_sizes=node_sizes if node_sizes.device.type == "cpu" else node_sizes.cpu(),
+            device="cuda",
+            vram_budget=VRAMBudget().remaining(),
+        )
+        if layer_assignments_raw is not None:
+            if isinstance(layer_assignments_raw, torch.Tensor):
+                tiled_compute.layer_assignments = layer_assignments_raw.to(device="cpu")
+            else:
+                tiled_compute.layer_assignments = torch.tensor(
+                    layer_assignments_raw,
+                    dtype=torch.long,
+                )
+        print(f"[dagua] {_indent}TILED GPU active: {n:,} nodes in tiles", flush=True)
+
     # Resolve memory optimization flags (VRAM-aware when on CUDA)
-    use_per_loss_bw, use_checkpointing, use_hybrid = _resolve_memory_strategy(
-        n,
-        num_edges,
-        device,
-        config,
-        edges_on_cpu=edges_on_cpu,
-        edge_batch=edge_batch,
-    )
+    if tiled_compute is None:
+        use_per_loss_bw, use_checkpointing, use_hybrid = _resolve_memory_strategy(
+            n,
+            num_edges,
+            device,
+            config,
+            edges_on_cpu=edges_on_cpu,
+            edge_batch=edge_batch,
+        )
+    else:
+        use_per_loss_bw, use_checkpointing, use_hybrid = False, False, False
     # Create thread pool for parallel hybrid losses
     executor = None
     if use_hybrid and use_per_loss_bw and getattr(config, "num_workers", 0) > 0:
@@ -836,6 +864,8 @@ def _layout_inner(
         flags.append("hybrid")
     if edges_on_cpu:
         flags.append("edge_stream")
+    if tiled_compute is not None:
+        flags.append("tiled_gpu")
     if executor is not None:
         flags.append(f"workers={config.num_workers}")
     _vlog(
@@ -864,26 +894,6 @@ def _layout_inner(
             cpu_layer_index = build_layer_index(layer_assignments_raw, device="cpu")
     elif edges_on_cpu:
         cpu_edge_index = edge_index
-
-    tiled_compute = None
-    if _should_use_tiled_gpu(config.device, device, n, num_edges):
-        from dagua.layout.tiled_compute import TiledGPUCompute
-
-        tiled_compute = TiledGPUCompute(
-            num_nodes=n,
-            edge_index=edge_index if edge_index.device.type == "cpu" else edge_index.cpu(),
-            node_sizes=node_sizes if node_sizes.device.type == "cpu" else node_sizes.cpu(),
-            device="cuda",
-            vram_budget=VRAMBudget().remaining(),
-        )
-        if layer_assignments_raw is not None:
-            if isinstance(layer_assignments_raw, torch.Tensor):
-                tiled_compute.layer_assignments = layer_assignments_raw.to(device="cpu")
-            else:
-                tiled_compute.layer_assignments = torch.tensor(
-                    layer_assignments_raw,
-                    dtype=torch.long,
-                )
 
     # Step 2: Set up optimization
     pos = pos.clone().detach().requires_grad_(True)
