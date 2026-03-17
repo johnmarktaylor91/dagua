@@ -1780,10 +1780,13 @@ def multilevel_layout(
                 )
             )
             if fine_n >= 200_000_000:
-                # Cap edge batch for very large graphs to prevent CUDA OOM.
-                # With 200M+ positions on GPU, backward() intermediates can
-                # exceed VRAM if the edge batch is too large.
-                level_edge_batch = min(level_edge_batch, 2_000_000)
+                # Force minimal CUDA strategy for 200M+: positions on GPU,
+                # small edge batch, per_loss_bw only (no hybrid/checkpoint
+                # which load too much auxiliary data and OOM).
+                force_cpu = False
+                force_hybrid = False
+                level_edge_batch = 1_000_000  # 1M edges — fits in ~200MB
+                level_optimizer_type = "sgd"  # lightest optimizer footprint
 
             assert pos is not None
             assert level.fine_to_coarse is not None
@@ -1843,6 +1846,14 @@ def multilevel_layout(
 
                 refine_config = _copy.copy(refine_config)
                 refine_config.edge_batch_size = level_edge_batch
+            # For 200M+ on CUDA: force minimal memory strategy to prevent OOM
+            if fine_n >= 200_000_000 and not force_cpu:
+                import copy as _copy
+
+                refine_config = _copy.copy(refine_config)
+                refine_config.per_loss_backward = "on"
+                refine_config.hybrid_device = "off"
+                refine_config.gradient_checkpointing = "off"
             sample_cap = _scaled_sample_cap(fine_n)
             if force_aggressive_sampling:
                 sample_cap = min(sample_cap, _scaled_sample_cap(500_000_000))
