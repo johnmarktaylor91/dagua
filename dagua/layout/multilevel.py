@@ -687,6 +687,44 @@ def _positions_fit_cuda_refinement(fine_n: int) -> bool:
     return position_bytes < int(total_vram * _REFINEMENT_POSITION_VRAM_FRACTION)
 
 
+def _apply_large_final_level_execution_overrides(
+    refine_config: LayoutConfig,
+    fine_n: int,
+    force_cpu: bool,
+    level_edge_batch: int,
+) -> LayoutConfig:
+    """Apply the huge-final-level refinement overrides.
+
+    Parameters
+    ----------
+    refine_config : LayoutConfig
+        Level-specific refine config before the huge-graph overrides.
+    fine_n : int
+        Number of nodes at the current refinement level.
+    force_cpu : bool
+        Whether refinement has already been forced fully onto CPU.
+    level_edge_batch : int
+        Edge batch size selected for the current level.
+
+    Returns
+    -------
+    LayoutConfig
+        Possibly copied config with the 200M+ final-level execution overrides.
+    """
+    if fine_n < 200_000_000 or force_cpu:
+        return refine_config
+
+    import copy as _copy
+
+    overridden = _copy.copy(refine_config)
+    overridden.execution_mode = "subset_gpu"
+    overridden.edge_batch_size = level_edge_batch
+    overridden.per_loss_backward = "off"
+    overridden.hybrid_device = "off"
+    overridden.gradient_checkpointing = "off"
+    return overridden
+
+
 def _scaled_final_refine_steps(level_index: int, fine_n: int, base_refine: int) -> int:
     """Return the refine-step count for a multilevel refinement stage.
 
@@ -1625,6 +1663,8 @@ def multilevel_layout(
                 per_loss_backward=config.per_loss_backward,
                 gradient_checkpointing=config.gradient_checkpointing,
                 hybrid_device=config.hybrid_device,
+                execution_mode=config.execution_mode,
+                subset_gpu_threshold=config.subset_gpu_threshold,
                 optimizer_fallback=config.optimizer_fallback,
                 num_workers=config.num_workers,
                 edge_batch_size=config.edge_batch_size,
@@ -1780,9 +1820,9 @@ def multilevel_layout(
                 )
             )
             if fine_n >= 200_000_000:
-                # Force minimal CUDA strategy for 200M+: positions on GPU,
-                # small edge batch, per_loss_bw only (no hybrid/checkpoint
-                # which load too much auxiliary data and OOM).
+                # Force subset-GPU refinement for 200M+: positions stay on CPU,
+                # per-loss subsets are gathered to CUDA, and SGD keeps optimizer
+                # state within RAM bounds.
                 force_cpu = False
                 force_hybrid = False
                 level_edge_batch = 1_000_000  # 1M edges — fits in ~200MB
@@ -1791,7 +1831,13 @@ def multilevel_layout(
             assert pos is not None
             assert level.fine_to_coarse is not None
             fine_to_coarse = level.fine_to_coarse
-            use_gpu_prolong = _can_prolong_on_gpu(pos, fine_to_coarse, level.num_fine, device)
+            keep_cpu_resident = (
+                i == 0 and fine_n >= 200_000_000 and not force_cpu and device == "cuda"
+            )
+            use_gpu_prolong = (
+                _can_prolong_on_gpu(pos, fine_to_coarse, level.num_fine, device)
+                and not keep_cpu_resident
+            )
 
             pos_cpu: Optional[torch.Tensor]
             if use_gpu_prolong:
@@ -1813,8 +1859,12 @@ def multilevel_layout(
             pos = None
 
             level_device = "cpu" if force_cpu else device
-            fine_sizes = fine_sizes_cpu.to(level_device)
-            pos = fine_pos if fine_pos.device.type == level_device else fine_pos.to(level_device)
+            fine_sizes = fine_sizes_cpu if keep_cpu_resident else fine_sizes_cpu.to(level_device)
+            pos = (
+                fine_pos
+                if keep_cpu_resident or fine_pos.device.type == level_device
+                else fine_pos.to(level_device)
+            )
             if force_cpu and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             del fine_pos
@@ -1846,14 +1896,12 @@ def multilevel_layout(
 
                 refine_config = _copy.copy(refine_config)
                 refine_config.edge_batch_size = level_edge_batch
-            # For 200M+ on CUDA: force minimal memory strategy to prevent OOM
-            if fine_n >= 200_000_000 and not force_cpu:
-                import copy as _copy
-
-                refine_config = _copy.copy(refine_config)
-                refine_config.per_loss_backward = "on"
-                refine_config.hybrid_device = "off"
-                refine_config.gradient_checkpointing = "off"
+            refine_config = _apply_large_final_level_execution_overrides(
+                refine_config,
+                fine_n,
+                force_cpu,
+                level_edge_batch,
+            )
             sample_cap = _scaled_sample_cap(fine_n)
             if force_aggressive_sampling:
                 sample_cap = min(sample_cap, _scaled_sample_cap(500_000_000))
