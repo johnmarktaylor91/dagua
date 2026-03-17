@@ -384,6 +384,56 @@ def test_int32_coarsening() -> None:
     assert first_level.fine_layer_assignments.dtype == torch.int32
 
 
+@pytest.mark.smoke
+def test_streaming_gpu_memory_guard_uses_free_vram_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming GPU offload should require the configured free-VRAM margin."""
+    monkeypatch.setattr(_multilevel_mod.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        _multilevel_mod.torch.cuda,
+        "mem_get_info",
+        lambda: (8_500_000_000, 11_000_000_000),
+    )
+
+    assert _multilevel_mod._select_streaming_gpu_device(200_000_000) is None
+
+    monkeypatch.setattr(
+        _multilevel_mod.torch.cuda,
+        "mem_get_info",
+        lambda: (8_800_000_000, 11_000_000_000),
+    )
+
+    assert _multilevel_mod._select_streaming_gpu_device(200_000_000) == "cuda"
+
+
+@pytest.mark.gpu
+def test_streaming_coarsen_gpu_path_logs_timings(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Streaming coarsening should report GPU timings when CUDA offload runs."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    edge_index, node_count, node_sizes = _make_layered_dag(50, 5)
+    layers = longest_path_layering(edge_index, node_count)
+    if isinstance(layers, list):
+        layers = torch.tensor(layers, dtype=torch.long)
+
+    old_threshold = _multilevel_mod._STREAMING_THRESHOLD
+    try:
+        _multilevel_mod._STREAMING_THRESHOLD = 100
+        monkeypatch.setattr(_multilevel_mod, "_select_streaming_gpu_device", lambda _: "cuda")
+        result = coarsen_once(edge_index, node_count, node_sizes, layers)
+    finally:
+        _multilevel_mod._STREAMING_THRESHOLD = old_threshold
+
+    captured = capsys.readouterr()
+
+    assert result.num_nodes < node_count
+    assert "coarsen GPU:" in captured.out
+
+
 def _make_layered_dag(n_per_layer: int, n_layers: int):
     """Create a layered DAG with edges from each layer to the next."""
     N = n_per_layer * n_layers
