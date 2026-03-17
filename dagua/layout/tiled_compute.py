@@ -13,8 +13,9 @@ LossFn = Callable[[torch.Tensor, torch.Tensor, Optional[LayerIndex]], torch.Tens
 
 _BYTES_PER_TILE_NODE = 64
 _CUDA_CONTEXT_OVERHEAD_BYTES = 500_000_000
-_EDGE_BATCH_BYTES = 64
+_EDGE_BATCH_BYTES = 256
 _EDGE_BUDGET_RATIO = 0.30
+_CROSS_EDGE_HEADROOM_RATIO = 0.80
 _MIN_TILE_SIZE = 1_000_000
 _MIN_EDGE_BATCH = 100_000
 
@@ -146,6 +147,40 @@ def _compute_edge_batch_size(vram_bytes: int) -> int:
     return max(int(edge_budget / _EDGE_BATCH_BYTES), _MIN_EDGE_BATCH)
 
 
+def _compute_cross_edge_batch_size(
+    cross_edge_count: int,
+    vram_bytes: int,
+    edge_batch_size: int,
+) -> int:
+    """Return a conservative batch size for cross-tile edges.
+
+    Parameters
+    ----------
+    cross_edge_count : int
+        Number of cross-tile edges that remain after tile-local partitioning.
+    vram_bytes : int
+        Available VRAM budget in bytes.
+    edge_batch_size : int
+        Default tiled edge batch size derived from the global VRAM budget.
+
+    Returns
+    -------
+    int
+        Edge batch size for cross-tile work. Large cross-edge sets use a
+        smaller batch because ``torch.unique`` and active-node gathers add
+        transient allocations that do not appear in the raw edge index size.
+    """
+    if cross_edge_count <= 0:
+        return edge_batch_size
+
+    cross_edge_mem = cross_edge_count * _EDGE_BATCH_BYTES
+    if cross_edge_mem <= int(vram_bytes * _CROSS_EDGE_HEADROOM_RATIO):
+        return edge_batch_size
+
+    reduced_batch = max(edge_batch_size // 2, _MIN_EDGE_BATCH)
+    return min(reduced_batch, cross_edge_count)
+
+
 class TiledGPUCompute:
     """Tiled GPU loss computation for graphs that exceed VRAM.
 
@@ -271,29 +306,41 @@ class TiledGPUCompute:
         ends = [min(start + self.tile_size, self.num_nodes) for start in starts]
         return starts, ends
 
-    def _iter_edge_batches(self, edge_index: torch.Tensor) -> Sequence[torch.Tensor]:
+    def _iter_edge_batches(
+        self,
+        edge_index: torch.Tensor,
+        batch_size: Optional[int] = None,
+    ) -> Sequence[torch.Tensor]:
         """Yield self-loop-free CPU edge batches.
 
         Parameters
         ----------
         edge_index : torch.Tensor
             CPU edge tensor shaped ``[2, E]``.
+        batch_size : int, optional
+            Explicit batch size override. When omitted, ``self.edge_batch_size``
+            is used.
 
         Returns
         -------
         Sequence[torch.Tensor]
             Sequence of edge batches sized to the configured VRAM budget.
         """
+        active_batch_size = self.edge_batch_size if batch_size is None else max(batch_size, 1)
         edge_count = edge_index.shape[1] if edge_index.numel() > 0 else 0
         if edge_count == 0:
             return ()
-        if edge_count <= self.edge_batch_size:
+        if edge_count <= active_batch_size:
             return (_remove_self_loops(edge_index),)
         batches = []
-        for start in range(0, edge_count, self.edge_batch_size):
-            end = min(start + self.edge_batch_size, edge_count)
+        for start in range(0, edge_count, active_batch_size):
+            end = min(start + active_batch_size, edge_count)
             batches.append(_remove_self_loops(edge_index[:, start:end]))
         return tuple(batches)
+
+    def _synchronize_cuda(self) -> None:
+        """Synchronize the tiled CUDA device to surface transfer OOMs early."""
+        torch.cuda.synchronize(device=self.device)
 
     def _tile_layer_index(self, start: int, end: int) -> Optional[LayerIndex]:
         """Build the layer index for one tile.
@@ -477,7 +524,9 @@ class TiledGPUCompute:
 
         for tile_edges, start, end in zip(self.tile_edges, self.tile_starts, self.tile_ends):
             tile_pos = positions[start:end].detach().to(self.device).requires_grad_(True)
+            self._synchronize_cuda()
             tile_sizes = self.node_sizes[start:end].to(self.device)
+            self._synchronize_cuda()
             tile_layer_index = self._tile_layer_index(start, end)
 
             self._reset_runtime_state()
@@ -503,6 +552,7 @@ class TiledGPUCompute:
                         max(self.total_edge_count, 1)
                     )
                     edge_batch = edge_batch_cpu.to(self.device)
+                    self._synchronize_cuda()
                     self.current_edge_index = edge_batch
                     self.current_edge_ctx = self._edge_context(tile_pos, edge_batch)
                     batch_total, batch_unweighted = self._backward_loss_group(
@@ -522,7 +572,14 @@ class TiledGPUCompute:
             torch.cuda.empty_cache()
 
         if edge_loss_fns and self.cross_edges.numel() > 0:
-            for edge_batch_cpu in self._iter_edge_batches(self.cross_edges):
+            cross_batch_size = _compute_cross_edge_batch_size(
+                cross_edge_count=self.cross_edges.shape[1],
+                vram_bytes=self.vram_budget,
+                edge_batch_size=self.edge_batch_size,
+            )
+            for edge_batch_cpu in self._iter_edge_batches(
+                self.cross_edges, batch_size=cross_batch_size
+            ):
                 if edge_batch_cpu.numel() == 0:
                     continue
                 edge_scale = float(edge_batch_cpu.shape[1]) / float(max(self.total_edge_count, 1))
@@ -532,8 +589,11 @@ class TiledGPUCompute:
                     return_inverse=True,
                 )
                 edge_batch = inverse.reshape(2, -1).to(self.device)
+                self._synchronize_cuda()
                 cross_pos = positions[active_nodes].detach().to(self.device).requires_grad_(True)
+                self._synchronize_cuda()
                 cross_sizes = self.node_sizes[active_nodes].to(self.device)
+                self._synchronize_cuda()
                 self.current_edge_index = edge_batch
                 self.current_edge_ctx = self._edge_context(cross_pos, edge_batch)
                 batch_total, batch_unweighted = self._backward_loss_group(
