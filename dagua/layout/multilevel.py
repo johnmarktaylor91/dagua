@@ -222,7 +222,14 @@ def _reload_level_from_disk(level: CoarseLevel, path: Path) -> None:
     data = torch.load(path, map_location="cpu")
     level.edge_index = data["edge_index"]
     level.node_sizes = data["node_sizes"]
-    path.unlink(missing_ok=True)
+    # Restore fine_layer_assignments if present -- avoids expensive layering
+    # recompute (10-15 min at 100M+ nodes) during refinement.
+    if "fine_layer_assignments" in data and level.fine_layer_assignments is None:
+        level.fine_layer_assignments = data["fine_layer_assignments"]
+    # Don't delete checkpoint files -- they may be shared with the hierarchy
+    # checkpoint dir and needed for future resumes.
+    if not str(path).startswith("/mnt/"):
+        path.unlink(missing_ok=True)
     level.offload_path = None
 
 
@@ -1473,8 +1480,12 @@ def coarsen_once(
     layer_offsets = torch.zeros(num_layers + 1, dtype=torch.long, device=device)
     layer_offsets[1:] = layer_counts.cumsum(0)
 
-    # Dispatch to streaming path for very large graphs
-    if N > _STREAMING_THRESHOLD:
+    # Dispatch to streaming path for very large graphs.
+    # Also use streaming when edge count is disproportionately high —
+    # the non-streaming path allocates O(E)-sized ones tensors that can
+    # OOM when edges >> nodes (e.g. 37M nodes with 942M edges).
+    E = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    if N > _STREAMING_THRESHOLD or E > _STREAMING_THRESHOLD:
         return _coarsen_once_streaming(
             edge_index,
             N,
@@ -2036,11 +2047,11 @@ def multilevel_layout(
 
         if precomputed_levels is not None:
             levels = precomputed_levels
+            coarsest = levels[-1]
             _vlog(f"Phase 1/3: Restored hierarchy ({n:,} nodes)... {len(levels)} levels")
-            # Free restored levels from RAM — the checkpoint files on disk
-            # already contain the data, so we just point offload_path at the
-            # original checkpoint files and null the in-memory tensors.
-            # No temp-dir write needed (avoids filling /tmp with 60GB+).
+
+            # Free earlier restored levels FIRST — they're not needed for
+            # continued coarsening and hold 40-60GB at billion-node scale.
             _hier_dir = getattr(graph, "_hierarchy_checkpoint_dir", None)
             if _hier_dir is not None and config.offload_to_disk and n > 10_000_000:
                 for lvl_idx, lvl in enumerate(levels[:-1]):
@@ -2052,9 +2063,92 @@ def multilevel_layout(
                 import gc as _gc_restore
 
                 _gc_restore.collect()
-                _vlog(f"  Freed {len(levels)} restored levels (reload from checkpoint on demand)")
+                try:
+                    import ctypes as _ctypes_restore
+
+                    _ctypes_restore.CDLL("libc.so.6").malloc_trim(0)
+                except OSError:
+                    pass
+                _vlog(f"  Freed {len(levels) - 1} earlier levels (reload from checkpoint on demand)")
+
+            # Offload original graph BEFORE continuing coarsening — the
+            # coarsening needs 20-30GB of working arrays and the original
+            # graph (28GB at 1B) isn't needed until final refinement.
+            if config.offload_to_disk and n > 10_000_000:
+                import tempfile as _tmpfile_early
+
+                _locker_dir_early = Path("/mnt/locker/jt3295/dagua_bench_large")
+                _orig_dir_early = _tmpfile_early.mkdtemp(
+                    prefix="dagua_orig_graph_",
+                    dir=_locker_dir_early if _locker_dir_early.is_dir() else None,
+                )
+                _original_graph_path = Path(_orig_dir_early) / "original_graph.pt"
+                torch.save({"edge_index": cpu_ei, "node_sizes": cpu_ns}, _original_graph_path)
+                # Delete BOTH local vars AND the graph object's references —
+                # otherwise the 24GB edge tensor stays alive via g._edge_index_tensor.
+                del cpu_ei, cpu_ns
+                if hasattr(graph, "_edge_index_tensor"):
+                    graph._edge_index_tensor = None
+                if hasattr(graph, "node_sizes"):
+                    graph.node_sizes = None
+                import gc as _gc_early
+
+                _gc_early.collect()
+                try:
+                    import ctypes as _ctypes_early
+
+                    _ctypes_early.CDLL("libc.so.6").malloc_trim(0)
+                except OSError:
+                    pass
+                _vlog("  Offloaded original graph before coarsening")
+
+            # If the restored hierarchy is incomplete (coarsest level still
+            # above min_nodes), continue coarsening from where we left off.
+            if coarsest.num_nodes > min_nodes:
+                _vlog(
+                    f"  Hierarchy incomplete — coarsest is {coarsest.num_nodes:,} nodes, "
+                    f"need <= {min_nodes:,}. Continuing coarsening..."
+                )
+                assert coarsest.edge_index is not None
+                assert coarsest.node_sizes is not None
+                extra_levels = build_hierarchy(
+                    coarsest.edge_index,
+                    coarsest.num_nodes,
+                    coarsest.node_sizes,
+                    min_nodes=min_nodes,
+                    device="cpu",
+                    progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
+                    initial_layer_assignments=coarsest.coarse_layer_assignments,
+                    offload_to_disk=config.offload_to_disk,
+                )
+                if extra_levels:
+                    levels.extend(extra_levels)
+                    _vlog(f"  Extended hierarchy by {len(extra_levels)} levels → {levels[-1].num_nodes:,} coarsest nodes")
         else:
             _t_hier = _time.perf_counter()
+            # Capture references then free the graph object's copies.
+            # At 1.5B: layer_assignments (6GB) + node_sizes (6GB) on the graph
+            # object duplicate what cpu_ei/cpu_ns/precomputed_layers already hold.
+            _hier_initial_la = getattr(graph, "_precomputed_layer_assignments", None)
+            _hier_la_callback = getattr(graph, "_layer_assignments_callback", None)
+            _hier_level_callback = getattr(graph, "_hierarchy_levels_callback", None)
+            _hier_cluster_ids = graph.cluster_ids
+            if n > 10_000_000:
+                if hasattr(graph, "_precomputed_layer_assignments"):
+                    graph._precomputed_layer_assignments = None
+                if hasattr(graph, "node_sizes"):
+                    graph.node_sizes = None
+                if hasattr(graph, "_edge_index_tensor"):
+                    graph._edge_index_tensor = None
+                import gc as _gc_pre_hier
+
+                _gc_pre_hier.collect()
+                try:
+                    import ctypes as _ct_pre_hier
+
+                    _ct_pre_hier.CDLL("libc.so.6").malloc_trim(0)
+                except OSError:
+                    pass
             levels = build_hierarchy(
                 cpu_ei,
                 n,
@@ -2062,10 +2156,10 @@ def multilevel_layout(
                 min_nodes=min_nodes,
                 device="cpu",
                 progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
-                cluster_ids=graph.cluster_ids,
-                initial_layer_assignments=getattr(graph, "_precomputed_layer_assignments", None),
-                layer_assignments_callback=getattr(graph, "_layer_assignments_callback", None),
-                level_callback=getattr(graph, "_hierarchy_levels_callback", None),
+                cluster_ids=_hier_cluster_ids,
+                initial_layer_assignments=_hier_initial_la,
+                layer_assignments_callback=_hier_la_callback,
+                level_callback=_hier_level_callback,
                 offload_to_disk=config.offload_to_disk,
             )
             hierarchy_complete_callback = getattr(
@@ -2077,6 +2171,34 @@ def multilevel_layout(
                 f"Phase 1/3: Building hierarchy ({n:,} nodes)... "
                 f"{len(levels)} levels ({_time.perf_counter() - _t_hier:.1f}s)"
             )
+
+        # Offload original graph to disk — not needed until refinement level
+        # i=0.  Skipped if already offloaded in the restore path above.
+        if levels and config.offload_to_disk and n > 10_000_000 and _original_graph_path is None:
+            import tempfile as _tmpfile
+
+            _locker_dir = Path("/mnt/locker/jt3295/dagua_bench_large")
+            _orig_dir = _tmpfile.mkdtemp(
+                prefix="dagua_orig_graph_",
+                dir=_locker_dir if _locker_dir.is_dir() else None,
+            )
+            _original_graph_path = Path(_orig_dir) / "original_graph.pt"
+            torch.save({"edge_index": cpu_ei, "node_sizes": cpu_ns}, _original_graph_path)
+            del cpu_ei, cpu_ns
+            if hasattr(graph, "_edge_index_tensor"):
+                graph._edge_index_tensor = None
+            if hasattr(graph, "node_sizes"):
+                graph.node_sizes = None
+            import gc as _gc
+
+            _gc.collect()
+            try:
+                import ctypes
+
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except OSError:
+                pass
+            _vlog(f"  Offloaded original graph to disk ({_original_graph_path})")
 
         if not levels:
             # Graph is already small enough — use direct layout
@@ -2146,29 +2268,6 @@ def multilevel_layout(
             )
             setattr(level_config, "_dagua_crossing_interval_override", None)
             return level_config
-
-        # Offload original graph to disk during Phase 2 — not needed until
-        # refinement level i=0. Saves ~32GB at 1B scale.
-        if config.offload_to_disk and n > 10_000_000:
-            import tempfile as _tmpfile
-
-            _locker_dir = Path("/mnt/locker/jt3295/dagua_bench_large")
-            _orig_dir = _tmpfile.mkdtemp(
-                prefix="dagua_orig_graph_",
-                dir=_locker_dir if _locker_dir.is_dir() else None,
-            )
-            _original_graph_path = Path(_orig_dir) / "original_graph.pt"
-            torch.save({"edge_index": cpu_ei, "node_sizes": cpu_ns}, _original_graph_path)
-            del cpu_ei, cpu_ns
-            import gc as _gc
-
-            _gc.collect()
-            try:
-                import ctypes
-
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
-            except OSError:
-                pass
 
         # Layout coarsest graph with many steps.
         # Pass edges on CPU — _layout_inner will stream batches to GPU.
