@@ -327,6 +327,52 @@ class OGDFStress(_OGDFBase):
 
 
 @register
+class OGDFLinLog(_OGDFBase):
+    """Competitor adapter for OGDF's LinLog layout."""
+
+    name = "ogdf_linlog"
+    max_nodes = 20_000
+
+    def create_layout_algorithm(self, ogdf: Any) -> Any:
+        """Create the OGDF LinLog layout instance.
+
+        Parameters
+        ----------
+        ogdf : Any
+            OGDF binding namespace returned by :func:`_load_ogdf`.
+
+        Returns
+        -------
+        Any
+            OGDF LinLog layout instance.
+        """
+        return ogdf.energybased.LinLogLayout()
+
+
+@register
+class OGDFPivotMDS(_OGDFBase):
+    """Competitor adapter for OGDF's Pivot-MDS layout."""
+
+    name = "ogdf_pivot_mds"
+    max_nodes = 100_000
+
+    def create_layout_algorithm(self, ogdf: Any) -> Any:
+        """Create the OGDF Pivot-MDS layout instance.
+
+        Parameters
+        ----------
+        ogdf : Any
+            OGDF binding namespace returned by :func:`_load_ogdf`.
+
+        Returns
+        -------
+        Any
+            OGDF Pivot-MDS layout instance.
+        """
+        return ogdf.energybased.PivotMDS()
+
+
+@register
 class OGDFSugiyama(_OGDFBase):
     """Competitor adapter for OGDF's Sugiyama layered layout."""
 
