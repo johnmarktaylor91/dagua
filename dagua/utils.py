@@ -784,6 +784,23 @@ def _maybe_gpu_longest_path_layering(
         ``None`` so callers can fall back to the CPU implementation.
     """
     fits, required_bytes, free_bytes = _gpu_longest_path_budget_status(edge_index, num_nodes)
+
+    # The GPU layering path scans ALL edges per wave without CSR — O(waves × E).
+    # For deep graphs (many layers, few nodes per layer), the CPU CSR-based path
+    # at O(N+E) is orders of magnitude faster.  Heuristic: if the edge-to-node
+    # ratio is high (> 10), the graph likely has deep layer structure and the
+    # CSR path wins.  At E/N=50 with 31K layers this avoids 186K CUDA kernel
+    # launches that would take 30+ minutes vs 30 seconds on CPU with CSR.
+    num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    if num_edges > num_nodes * 10:
+        if verbose:
+            print(
+                f"[dagua]   GPU layering: skipped (E/N={num_edges/max(num_nodes,1):.0f}, "
+                f"CSR path faster for deep graphs)",
+                flush=True,
+            )
+        return None
+
     if not fits:
         if verbose:
             print(

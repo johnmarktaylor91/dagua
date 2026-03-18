@@ -240,63 +240,76 @@ def _load_hierarchy_checkpoint(
     from dagua.layout.multilevel import CoarseLevel
 
     manifest = json.loads(paths["hierarchy_meta"].read_text(encoding="utf-8"))
-    if manifest.get("complete") is not True:
-        return None
+    # Accept incomplete hierarchies — multilevel_layout will continue
+    # coarsening from the last level if needed.
     level_names = manifest.get("levels", [])
     if not isinstance(level_names, list):
         return None
     if manifest.get("num_levels") is not None and int(manifest["num_levels"]) != len(level_names):
         return None
     levels = []
-    for filename in level_names:
+    num_levels = len(level_names)
+    for idx, filename in enumerate(level_names):
         level_path = paths["hierarchy_dir"] / filename
         if not level_path.exists():
             return None
+        is_coarsest = idx == num_levels - 1
+
         item = torch.load(level_path, map_location="cpu")
-        edge_index = item["edge_index"]
-        node_sizes = item["node_sizes"]
-        fine_to_coarse = item["fine_to_coarse"]
-        fine_layer_assignments = item.get("fine_layer_assignments")
-        coarse_layer_assignments = item.get("coarse_layer_assignments")
         num_nodes = int(item["num_nodes"])
         num_fine = int(item["num_fine"])
-        if edge_index is not None and (edge_index.ndim != 2 or edge_index.shape[0] != 2):
+        fine_to_coarse = item["fine_to_coarse"]
+
+        if fine_to_coarse is None or fine_to_coarse.ndim != 1 or fine_to_coarse.shape[0] != num_fine:
             return None
-        if (
-            node_sizes is None
-            or node_sizes.ndim != 2
-            or node_sizes.shape[0] != num_nodes
-            or node_sizes.shape[1] != 2
-        ):
-            return None
-        if (
-            fine_to_coarse is None
-            or fine_to_coarse.ndim != 1
-            or fine_to_coarse.shape[0] != num_fine
-        ):
-            return None
-        if (
-            fine_layer_assignments is None
-            or fine_layer_assignments.ndim != 1
-            or fine_layer_assignments.shape[0] != num_fine
-        ):
-            return None
-        if (
-            coarse_layer_assignments is None
-            or coarse_layer_assignments.ndim != 1
-            or coarse_layer_assignments.shape[0] != num_nodes
-        ):
-            return None
-        level = CoarseLevel(
-            edge_index=edge_index,
-            node_sizes=node_sizes,
-            num_nodes=num_nodes,
-            fine_to_coarse=fine_to_coarse,
-            num_fine=num_fine,
-            fine_layer_assignments=fine_layer_assignments,
-            coarse_layer_assignments=coarse_layer_assignments,
-        )
+
+        if is_coarsest:
+            # Full load — needed for Phase 2 layout + continued coarsening
+            edge_index = item["edge_index"]
+            node_sizes = item["node_sizes"]
+            fine_layer_assignments = item.get("fine_layer_assignments")
+            coarse_layer_assignments = item.get("coarse_layer_assignments")
+            if edge_index is not None and (edge_index.ndim != 2 or edge_index.shape[0] != 2):
+                return None
+            if node_sizes is None or node_sizes.ndim != 2 or node_sizes.shape[0] != num_nodes:
+                return None
+            level = CoarseLevel(
+                edge_index=edge_index,
+                node_sizes=node_sizes,
+                num_nodes=num_nodes,
+                fine_to_coarse=fine_to_coarse,
+                num_fine=num_fine,
+                fine_layer_assignments=fine_layer_assignments,
+                coarse_layer_assignments=coarse_layer_assignments,
+            )
+        else:
+            # Lazy load — only keep fine_to_coarse + metadata. Edge data and
+            # fine_layer_assignments are reloaded on demand during refinement.
+            level = CoarseLevel(
+                edge_index=None,
+                node_sizes=None,
+                num_nodes=num_nodes,
+                fine_to_coarse=fine_to_coarse,
+                num_fine=num_fine,
+            )
+            level.offload_path = level_path
+
         levels.append(level)
+        del item
+        # Force glibc to return freed pages after loading large level files.
+        # Without this, loading level_00.pt (28GB) + level_01.pt (19GB) leaves
+        # ~47GB of freed-but-unreturned pages in glibc's malloc arena, which
+        # combined with live data pushes past 125GB during coarsening.
+        if not is_coarsest:
+            import gc as _gc_hier
+
+            _gc_hier.collect()
+            try:
+                import ctypes as _ctypes_hier
+
+                _ctypes_hier.CDLL("libc.so.6").malloc_trim(0)
+            except OSError:
+                pass
     return levels
 
 

@@ -180,3 +180,36 @@ make gallery             # rebuild showcase gallery
 make explainer           # rebuild algorithm explainer
 make artifact-index      # rebuild report artifact index
 ```
+
+## Scale Work Rules (100M+ nodes)
+
+These rules are mandatory for any task touching layout at >100M node scale.
+Learned from 17 bugs during the 1B-node scaling campaign.
+
+### Memory
+- Budget PEAK memory (3-4x base for autograd/sort/temps), not target alloc
+- After freeing >1GB: `gc.collect()` + `malloc_trim(0)` + verify RSS dropped
+- `del x` only decrements refcount. Null ALL refs (graph attrs, closures)
+- Gate thresholds on N, E, depth, max_degree, AND E/N ratio
+
+### Algorithm Selection
+- Document cost model (passes * complexity * memory), not just Big-O
+- GPU wave-scan is O(waves*E). CPU CSR is O(N+E). Measure, don't assume
+- Counting sort for bounded integer keys at >10M elements
+- Skip full classification for N>10M -- use cheap O(N) topology probes
+
+### Code Paths
+- Build and restore paths must be symmetric -- diff them line by line
+- Shared structures must be immutable or copy-on-write, versioned by input hash
+- `step % N == 0` fires at step 0. Guard with `step > 0` if step-0 is expensive
+- Streaming threshold must check BOTH N and E, not just N
+
+### Checkpoints
+- Fingerprint schema version + data shape, not source code
+- Checkpoint schema is code (enforced manifest), not documentation
+- _reload_level_from_disk must load ALL fields the refinement loop needs
+
+### Testing at Scale
+- Every fix must add a guardrail (assertion/test), not just a patch
+- Test at 100K, 1M, 10M -- not just one smoke-test size
+- Test below AND above every mode-switch threshold
