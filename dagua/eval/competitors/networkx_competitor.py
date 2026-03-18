@@ -82,3 +82,13 @@ class NetworkXKamadaKawai(_NetworkXBase):
     max_nodes = 5_000
     layout_func = "kamada_kawai_layout"
     layout_kwargs = {}
+
+
+@register
+class NetworkXSpectral(_NetworkXBase):
+    """Competitor adapter for NetworkX's spectral layout."""
+
+    name = "nx_spectral"
+    max_nodes = 10_000
+    layout_func = "spectral_layout"
+    layout_kwargs = {"dim": 2}
