@@ -14,6 +14,9 @@ from dagua.eval.competitors import (
     graphviz_competitor,  # noqa: F401
     igraph_competitor,  # noqa: F401
     networkx_competitor,  # noqa: F401
+    sgd2_competitor,  # noqa: F401
+    tsne_competitor,  # noqa: F401
+    umap_competitor,  # noqa: F401
 )
 from dagua.eval.competitors.base import (
     CompetitorBase,
