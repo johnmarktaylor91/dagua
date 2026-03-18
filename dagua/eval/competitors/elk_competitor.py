@@ -183,7 +183,7 @@ def _collect_elk_positions(
 @register
 class ElkLayered(CompetitorBase):
     name = "elk_layered"
-    max_nodes = 50_000
+    max_nodes = 15_000
     supports_clusters = True
 
     def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:

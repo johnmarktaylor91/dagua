@@ -1,5 +1,6 @@
 """End-to-end integration tests."""
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -160,6 +161,59 @@ class TestGraphvizComparison:
         g = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
         pos = layout_with_graphviz(g)
         assert pos.shape == (3, 2)
+
+    def test_layout_with_graphviz_respects_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`layout_with_graphviz` should pass the requested timeout to Graphviz.
+
+        Parameters
+        ----------
+        monkeypatch : pytest.MonkeyPatch
+            Fixture used to intercept the Graphviz subprocess call.
+
+        Returns
+        -------
+        None
+            The assertion validates timeout propagation.
+        """
+        from dagua import graphviz_utils
+
+        graph = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
+        observed: dict[str, float] = {}
+
+        def _fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            """Capture subprocess keyword arguments for the regression test.
+
+            Parameters
+            ----------
+            *args : object
+                Positional arguments forwarded to ``subprocess.run``.
+            **kwargs : object
+                Keyword arguments forwarded to ``subprocess.run``.
+
+            Returns
+            -------
+            subprocess.CompletedProcess[str]
+                Minimal successful Graphviz JSON response.
+            """
+            del args
+            observed["timeout"] = float(kwargs["timeout"])
+            return subprocess.CompletedProcess(
+                args=["dot"],
+                returncode=0,
+                stdout='{"objects":[{"name":"n0","pos":"1,2"},{"name":"n1","pos":"3,4"},{"name":"n2","pos":"5,6"}]}',
+                stderr="",
+            )
+
+        monkeypatch.setattr(graphviz_utils.subprocess, "run", _fake_run)
+
+        positions = graphviz_utils.layout_with_graphviz(graph, timeout=12.5)
+
+        assert observed["timeout"] == 12.5
+        assert tuple(positions.shape) == (3, 2)
+        assert torch.equal(
+            positions,
+            torch.tensor([[1.0, -2.0], [3.0, -4.0], [5.0, -6.0]]),
+        )
 
     def test_render_comparison(self, tmp_path):
         from dagua.graphviz_utils import layout_with_graphviz, render_comparison
