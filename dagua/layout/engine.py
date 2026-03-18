@@ -915,43 +915,70 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
             from dagua.layout.multilevel import multilevel_layout
 
             pos = multilevel_layout(graph, config, trace=trace)
-            graph.cache_layout(pos)
-            return pos
+        else:
+            # Tier 0-2: Direct layout — move data to device
+            # Resolve flex node IDs to integer indices before headless engine
+            effective_config = _resolve_flex_ids(config, graph)
+            if effective_config.device != device:
+                effective_config = copy.copy(effective_config)
+                effective_config.device = device
 
-        # Tier 0-2: Direct layout — move data to device
-        # Resolve flex node IDs to integer indices before headless engine
-        effective_config = _resolve_flex_ids(config, graph)
-        if effective_config.device != device:
-            effective_config = copy.copy(effective_config)
-            effective_config.device = device
+            # Also pick up flex from graph.flex if config doesn't have one
+            if effective_config.flex is None and getattr(graph, "flex", None) is not None:
+                import copy as _c
 
-        # Also pick up flex from graph.flex if config doesn't have one
-        if effective_config.flex is None and getattr(graph, "flex", None) is not None:
-            import copy as _c
+                effective_config = _c.copy(effective_config)
+                effective_config.flex = _resolve_graph_flex(graph.flex, graph._id_to_index)
 
-            effective_config = _c.copy(effective_config)
-            effective_config.flex = _resolve_graph_flex(graph.flex, graph._id_to_index)
+            execution_mode = _resolve_execution_mode(effective_config, device, n)
+            tensor_device = "cpu" if execution_mode == "subset_gpu" else device
+            edge_index = graph.edge_index.to(tensor_device)
+            node_sizes = graph.node_sizes.to(tensor_device)
 
-        execution_mode = _resolve_execution_mode(effective_config, device, n)
-        tensor_device = "cpu" if execution_mode == "subset_gpu" else device
-        edge_index = graph.edge_index.to(tensor_device)
-        node_sizes = graph.node_sizes.to(tensor_device)
+            if config.verbose:
+                num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+                print(f"[dagua] Layout: {n:,} nodes, {num_edges:,} edges", flush=True)
 
-        if config.verbose:
-            num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
-            print(f"[dagua] Layout: {n:,} nodes, {num_edges:,} edges", flush=True)
+            pos = _layout_inner(
+                edge_index,
+                n,
+                node_sizes,
+                effective_config,
+                device=device,
+                clusters=graph.clusters if hasattr(graph, "clusters") else None,
+                cluster_parents=graph.cluster_parents if hasattr(graph, "cluster_parents") else None,
+                progress_context=ProgressContext(),
+                trace=trace,
+            )
 
-        pos = _layout_inner(
-            edge_index,
-            n,
-            node_sizes,
-            effective_config,
-            device=device,
-            clusters=graph.clusters if hasattr(graph, "clusters") else None,
-            cluster_parents=graph.cluster_parents if hasattr(graph, "cluster_parents") else None,
-            progress_context=ProgressContext(),
-            trace=trace,
-        )
+        # Force-directed relaxation: re-run with w_dag=0 to soften rigid
+        # layer structure into a more organic layout.
+        if config.relax_steps > 0:
+            if config.verbose:
+                print(
+                    f"[dagua] Relaxation pass ({config.relax_steps} steps, w_dag=0)",
+                    flush=True,
+                )
+            relax_config = copy.copy(config)
+            relax_config.w_dag = 0.0
+            relax_config.steps = config.relax_steps
+            relax_config.lr = config.lr * 0.5
+            relax_config.relax_steps = 0  # no recursive relaxation
+
+            tensor_device_r = "cpu" if _resolve_execution_mode(relax_config, device, n) == "subset_gpu" else device
+            edge_index_r = graph.edge_index.to(tensor_device_r)
+            node_sizes_r = graph.node_sizes.to(tensor_device_r)
+
+            pos = _layout_inner(
+                edge_index_r,
+                n,
+                node_sizes_r,
+                relax_config,
+                device=device,
+                init_pos=pos,
+                progress_context=ProgressContext(),
+                trace=trace,
+            )
 
         # Apply direction transform
         direction = config.direction if config else graph.direction
