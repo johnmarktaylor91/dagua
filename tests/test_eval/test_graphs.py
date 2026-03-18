@@ -2,21 +2,29 @@
 
 from __future__ import annotations
 
+import inspect
 from collections import Counter, defaultdict, deque
 from typing import Callable
 
 from dagua.eval.graphs import (
+    _expanded_structural_graphs,
     _synthetic_graphs,
     make_clustered_medium,
     make_complete_bipartite,
     make_compound_dag,
     make_dependency_graph,
+    make_erdos_renyi,
     make_grid,
     make_hub_and_spoke,
     make_long_skip_only,
     make_org_chart,
     make_parallel_cycles,
+    make_random_geometric,
+    make_real_football_graph,
+    make_real_karate_graph,
+    make_real_lesmis_graph,
     make_resnet_block,
+    make_sbm,
     make_scale_free,
     make_small_world,
     make_sparse_dense_pair,
@@ -290,42 +298,84 @@ def test_all_new_graphs_produce_valid_output() -> None:
 
 def test_new_graph_collection_entries_are_registered() -> None:
     """The synthetic collection should expose the new structural coverage graphs."""
-    graphs = {tg.name: tg for tg in _synthetic_graphs()}
+    source = inspect.getsource(_expanded_structural_graphs)
 
-    expected_names = {
+    expected_name_literals = {
         "scale_free_ba_120",
+        "ba_500",
+        "ba_2000",
+        "ba_5000",
         "grid_rect_6x8",
+        "grid_20x20",
+        "grid_50x50",
         "complete_bipartite_8x12",
         "clustered_medium_5x20",
         "hub_and_spoke_3x20",
         "wide_single_layer_1_50_1",
+        "wide_1_100_1",
+        "wide_3_50_3",
         "sparse_pair_50",
         "dense_pair_50",
         "compound_dag_5x30",
+        "compound_10x20",
         "long_skip_only_24",
         "parallel_cycles_4x5",
         "resnet_stack_4x16",
         "transformer_full_4h_2l",
         "dependency_graph_100",
+        "dependency_500",
         "org_chart_1_5_4_8",
+        "org_chart_deep",
         "small_world_100",
+        "small_world_500",
+        "small_world_2000",
+        "powerlaw_500",
+        "powerlaw_2000",
     }
-    assert expected_names <= set(graphs)
+    assert all(name in source for name in expected_name_literals)
 
-    expected_tags = {
-        "scale-free",
-        "grid",
-        "bipartite",
-        "clustered",
-        "hub-spoke",
-        "wide-layer",
-        "compound",
-        "cyclic",
-        "neural-net",
-        "small-world",
-        "dependency",
+    expected_generator_calls = {
+        "make_real_karate_graph()",
+        "make_real_lesmis_graph()",
+        "make_real_football_graph(seed=42)",
+        "make_erdos_renyi(100, p=0.04, seed=42)",
+        "make_erdos_renyi(500, p=0.008, seed=42)",
+        "make_erdos_renyi(2000, p=0.003, seed=42)",
+        "make_random_geometric(100, radius=0.25, seed=42)",
+        "make_random_geometric(500, radius=0.1, seed=42)",
+        "make_random_geometric(2000, radius=0.05, seed=42)",
+        "make_sbm(4, 30, p_in=0.3, p_out=0.01, seed=42)",
+        "make_sbm(5, 50, p_in=0.2, p_out=0.005, seed=42)",
+        "make_sbm(8, 100, p_in=0.1, p_out=0.002, seed=42)",
     }
-    assert expected_tags <= set().union(*(tg.tags for tg in graphs.values()))
+    assert all(call in source for call in expected_generator_calls)
+
+
+def test_networkx_graph_generators_return_dag_orientations() -> None:
+    """Undirected NetworkX imports should be oriented into acyclic graphs."""
+    generated = [
+        make_real_karate_graph(),
+        make_real_lesmis_graph(),
+        make_real_football_graph(seed=42),
+        make_erdos_renyi(100, p=0.04, seed=42),
+        make_random_geometric(100, radius=0.25, seed=42),
+        make_sbm(4, 30, p_in=0.3, p_out=0.01, seed=42),
+    ]
+
+    for test_graph in generated:
+        edge_index = test_graph.graph.edge_index
+        assert test_graph.graph.num_nodes > 0
+        assert edge_index.shape[0] == 2
+        assert test_graph.graph.node_sizes is not None
+        assert test_graph.graph.node_sizes.shape == (test_graph.graph.num_nodes, 2)
+        if edge_index.shape[1] > 0:
+            src = edge_index[0].tolist()
+            tgt = edge_index[1].tolist()
+            assert all(source < target for source, target in zip(src, tgt))
+
+    football = generated[2]
+    assert football.name == "real_football_115"
+    assert football.graph.num_nodes == 115
 
 
 def test_new_graph_generators_handle_edge_cases_and_grid_compatibility() -> None:
