@@ -30,8 +30,13 @@ def test_standard_suite_contains_expected_cases():
     assert "tl_cnn_small" in names
     assert "tl_resnet_2block" in names
     assert "tl_transformer_1layer" in names
+    assert "real_karate_34" in names
+    assert "er_2000" in names
+    assert "ba_5000" in names
+    assert "grid_50x50" in names
+    assert "org_chart_deep" in names
     assert "scale_100k" in names
-    assert len(suite) >= 15
+    assert len(suite) >= 40
 
 
 @pytest.mark.smoke
