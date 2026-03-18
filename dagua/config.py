@@ -140,6 +140,12 @@ class LayoutConfig:
     # Contiguous is more cache-friendly; random ensures coverage.
     edge_random_fraction: float = 0.2
 
+    # Force-directed relaxation pass after the main hierarchical layout.
+    # Runs additional steps with w_dag=0, softening rigid layer structure
+    # into a more organic layout while preserving overall flow.
+    # 0 = no relaxation (default). 20-50 = light softening. 100+ = strong.
+    relax_steps: int = 0
+
     # Disk offloading: when True, large intermediate tensors are saved to
     # temporary files during multilevel layout to reduce peak RSS.
     # Disable for machines with sufficient RAM to keep the full hierarchy

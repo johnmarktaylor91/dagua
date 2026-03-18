@@ -150,6 +150,11 @@ def generate_scale_free(
     *,
     seed: int = 42,
     m: int = 3,
+    aging: float = 0.0,
+    fitness_spread: float = 0.0,
+    num_communities: int = 0,
+    community_bias: float = 0.8,
+    reciprocity: float = 0.0,
 ) -> DaguaGraph:
     """Scale-free DAG via batched preferential attachment.
 
@@ -164,6 +169,30 @@ def generate_scale_free(
         Random seed.
     m : int
         Edges per new node (controls density and hub strength).
+        m=1 tree-like, m=3 moderate with clear hubs, m=10 dense mesh.
+    aging : float, default=0.0
+        Rate at which older nodes lose attractiveness. 0 = no aging
+        (classic BA), 0.5 = moderate aging (older nodes gradually fade),
+        1.0 = strong aging (newcomers can easily overtake old hubs).
+        Models real social dynamics where people become less active.
+    fitness_spread : float, default=0.0
+        Standard deviation of per-node fitness scores (log-normal).
+        0 = all nodes equally fit (classic BA). 0.5 = moderate variation.
+        1.0+ = high variation (some newcomers attract much faster than
+        established hubs). Models innate "quality" differences.
+    num_communities : int, default=0
+        Number of communities for biased attachment. 0 = no communities.
+        When > 0, nodes prefer attaching within their community, creating
+        visible clusters with hub-to-hub bridges between them. Realistic
+        for social networks (geographic/cultural clustering).
+    community_bias : float, default=0.8
+        Probability of attaching within own community (vs any node).
+        Only used when ``num_communities > 0``. 0.5 = weak clustering,
+        0.9 = strong clustering with sparse inter-community bridges.
+    reciprocity : float, default=0.0
+        Probability that edge A→B also creates B→A (as A←B for DAG
+        ordering). 0 = fully directed, 1.0 = all edges reciprocated.
+        Social networks typically have high reciprocity (~0.3-0.7).
     """
     torch.manual_seed(seed)
     n = num_nodes
@@ -181,33 +210,80 @@ def generate_scale_free(
             init_edges_src.append(i)
             init_edges_tgt.append(j)
 
-    # Degree array for preferential attachment (in-degree + out-degree)
+    # Per-node fitness (log-normal distribution centered at 1.0)
+    fitness = torch.ones(n, dtype=torch.float32)
+    if fitness_spread > 0:
+        fitness = torch.exp(torch.randn(n) * fitness_spread)
+
+    # Community assignments (round-robin for balanced sizes)
+    community = None
+    if num_communities > 0:
+        community = torch.arange(n, dtype=torch.long) % num_communities
+
+    # Degree array for preferential attachment
     degree = torch.zeros(n, dtype=torch.float32)
     for i in range(m + 1):
-        degree[i] = m  # initial clique
+        degree[i] = m
 
     all_src = [torch.tensor(init_edges_src, dtype=torch.long)]
     all_tgt = [torch.tensor(init_edges_tgt, dtype=torch.long)]
 
-    # Batched preferential attachment — process nodes in chunks
+    # Batched preferential attachment
     batch_size = min(100_000, n)
     for batch_start in range(m + 1, n, batch_size):
         batch_end = min(batch_start + batch_size, n)
         batch_n = batch_end - batch_start
 
-        # Sample m targets for each new node, weighted by degree
-        # Each new node connects to m existing nodes (indices < node_id)
-        probs = degree[:batch_start].clone()
-        probs = probs / probs.sum()
+        # Base attachment probability: degree × fitness
+        probs = degree[:batch_start].clone() * fitness[:batch_start]
 
-        # Multinomial sampling: batch_n * m samples from existing nodes
-        targets = torch.multinomial(probs, batch_n * m, replacement=True).reshape(batch_n, m)
+        # Aging: reduce attractiveness of older nodes
+        if aging > 0:
+            age = torch.arange(batch_start, dtype=torch.float32)
+            age_factor = 1.0 / (1.0 + aging * age / batch_start)
+            probs *= age_factor
 
-        # Source = new node ids (higher index → lower index = DAG)
+        # Community bias: boost same-community nodes
+        if community is not None:
+            batch_communities = community[batch_start:batch_end]
+            # Process per-community for biased sampling
+            targets_list = []
+            for b_idx in range(batch_n):
+                node_comm = batch_communities[b_idx].item()
+                comm_probs = probs.clone()
+                same_comm = community[:batch_start] == node_comm
+                # Boost same-community by community_bias ratio
+                boost = torch.where(
+                    same_comm,
+                    torch.tensor(community_bias),
+                    torch.tensor(1.0 - community_bias),
+                )
+                comm_probs *= boost
+                comm_probs = comm_probs / comm_probs.sum().clamp(min=1e-10)
+                tgt = torch.multinomial(comm_probs, m, replacement=True)
+                targets_list.append(tgt)
+            targets = torch.stack(targets_list)
+        else:
+            probs = probs / probs.sum().clamp(min=1e-10)
+            targets = torch.multinomial(probs, batch_n * m, replacement=True).reshape(batch_n, m)
+
+        # Source = new node ids (higher index → DAG)
         sources = torch.arange(batch_start, batch_end, dtype=torch.long).unsqueeze(1).expand(-1, m)
 
         all_src.append(sources.reshape(-1))
         all_tgt.append(targets.reshape(-1))
+
+        # Reciprocal edges (B→A where we just added A→B, maintaining DAG)
+        if reciprocity > 0:
+            recip_mask = torch.rand(batch_n * m) < reciprocity
+            if recip_mask.any():
+                recip_src = targets.reshape(-1)[recip_mask]
+                recip_tgt = sources.reshape(-1)[recip_mask]
+                # Maintain DAG: only keep where src < tgt
+                valid = recip_src < recip_tgt
+                if valid.any():
+                    all_src.append(recip_src[valid])
+                    all_tgt.append(recip_tgt[valid])
 
         # Update degrees
         degree[batch_start:batch_end] += m
