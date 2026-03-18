@@ -64,6 +64,9 @@ DEFAULT_COMPETITOR_ORDER = [
     "elk_layered",
     "dagre",
     "nx_spring",
+    "sgd2",
+    "tsne_graph",
+    "umap_graph",
 ]
 VISUAL_MAX_NODES = 2_000
 CRITIC_MAX_NODES = 500
@@ -116,7 +119,7 @@ def _named_graphs(max_nodes: Optional[int] = None) -> Dict[str, TestGraph]:
 
 def get_standard_suite_graphs() -> List[BenchmarkGraph]:
     """Representative benchmark roster designed to stay within a local budget."""
-    named = _named_graphs(max_nodes=2_500)
+    named = _named_graphs(max_nodes=10_000)
     selected: List[BenchmarkGraph] = []
 
     def add_named(name: str, category: str, visualize: bool = True) -> None:
@@ -169,6 +172,48 @@ def get_standard_suite_graphs() -> List[BenchmarkGraph]:
     add_named("tl_cnn_small", "cnn")
     add_named("tl_resnet_2block", "resnet")
     add_named("tl_transformer_1layer", "transformer")
+
+    # New structural families
+    # Real-world classic benchmarks
+    add_named("real_karate_34", "real-world")
+    add_named("real_lesmis_77", "real-world")
+    add_named("real_football_115", "real-world")
+
+    # Erdos-Renyi random graphs
+    add_named("er_100", "erdos-renyi")
+    add_named("er_500", "erdos-renyi")
+    add_named("er_2000", "erdos-renyi")
+
+    # Random geometric graphs
+    add_named("rgg_100", "geometric")
+    add_named("rgg_500", "geometric")
+    add_named("rgg_2000", "geometric")
+
+    # Barabasi-Albert scale-free at larger scales
+    add_named("ba_500", "scale-free")
+    add_named("ba_2000", "scale-free")
+    add_named("ba_5000", "scale-free")
+
+    # Community structure (SBM)
+    add_named("sbm_4x30", "community")
+    add_named("sbm_5x50", "community")
+    add_named("sbm_8x100", "community")
+
+    # Larger meshes
+    add_named("grid_20x20", "mesh")
+    add_named("grid_50x50", "mesh")
+
+    # Extended existing families
+    add_named("small_world_500", "small-world")
+    add_named("small_world_2000", "small-world")
+    add_named("hub_spoke_5x50", "hub-spoke")
+    add_named("hub_spoke_10x20", "hub-spoke")
+    add_named("powerlaw_500", "power-law")
+    add_named("powerlaw_2000", "power-law")
+    add_named("wide_1_100_1", "wide-layer")
+    add_named("compound_10x20", "compound")
+    add_named("dependency_500", "dependency")
+    add_named("org_chart_deep", "tree")
 
     # Scale ladder
     scale_specs = [
@@ -285,6 +330,10 @@ def _system_metadata() -> Dict[str, Any]:
         "elk": _node_package_version("elkjs"),
         "dagre": _node_package_version("dagre"),
         "networkx": _safe_import_version("networkx"),
+        "s_gd2": _safe_import_version("s_gd2"),
+        "scipy": _safe_import_version("scipy"),
+        "sklearn": _safe_import_version("sklearn"),
+        "umap": _safe_umap_version(),
         "dagua": dagua_version,
         "dagua_git_hash": git_hash,
         "platform": platform.platform(),
@@ -297,6 +346,23 @@ def _safe_import_version(module_name: str) -> Optional[str]:
     except Exception:
         return None
     return getattr(module, "__version__", None)
+
+
+def _safe_umap_version() -> Optional[str]:
+    """Return the installed UMAP version if it imports cleanly.
+
+    Returns
+    -------
+    Optional[str]
+        UMAP version string, or ``None`` when the package is missing or
+        unusable in the current environment.
+    """
+    os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/dagua-numba-cache")
+    try:
+        import umap
+    except Exception:
+        return None
+    return getattr(umap, "__version__", None)
 
 
 def _benchmark_db_root(output_dir: str) -> Path:
@@ -455,7 +521,12 @@ def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
         "elk_layered": "elk",
         "dagre": "dagre",
         "nx_spring": "networkx",
+        "sgd2": "s_gd2",
     }
+    if name == "tsne_graph":
+        return f"{name}:{system.get('sklearn')}:{system.get('scipy')}"
+    if name == "umap_graph":
+        return f"{name}:{system.get('umap')}:{system.get('scipy')}"
     key = version_keys.get(name)
     value = system.get(key) if key is not None else None
     return f"{name}:{value}"
