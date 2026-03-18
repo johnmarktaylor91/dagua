@@ -39,6 +39,12 @@ pip install --quiet pydot             # DOT file parsing for Graphviz interop
 pip install --quiet scipy             # Sparse matrix ops, MDS, eigensolvers
 pip install --quiet scikit-learn      # t-SNE, MDS for reference comparison tests
 
+# Reference implementations for classic algorithm validation
+pip install --quiet s-gd2             # Stress-SGD reference (Zheng 2018, C++ core)
+pip install --quiet fa2-modified      # ForceAtlas2 reference (maintained fork)
+pip install --quiet umap-learn        # UMAP embedding for graph layout
+pip install --quiet ogdf-python       # OGDF bindings: GEM, LinLog, FM³, Maxent-Stress, DH
+
 # Optional accelerators
 pip install --quiet numba             # JIT for coarsening matching loop (~50x faster)
 
@@ -75,6 +81,10 @@ deps = {
     'pydot': 'pydot',
     'scipy': 'scipy',
     'sklearn': 'sklearn',
+    's_gd2': 's_gd2',
+    'fa2': 'fa2',
+    'umap': 'umap',
+    'ogdf-python': 'ogdf',
     'numba': 'numba',
 }
 for name, module in deps.items():
