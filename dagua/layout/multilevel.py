@@ -463,7 +463,7 @@ def _stable_argsort_on_device(
     values: torch.Tensor,
     compute_device: str,
 ) -> torch.Tensor:
-    """Return a stable argsort of ``values`` on the requested device.
+    """Return an argsort of ``values`` on the requested device.
 
     Parameters
     ----------
@@ -475,12 +475,16 @@ def _stable_argsort_on_device(
     Returns
     -------
     torch.Tensor
-        Stable argsort permutation with shape ``[N]``.
+        Argsort permutation with shape ``[N]``.
     """
     sort_values = (
         values if values.device.type == compute_device else values.to(device=compute_device)
     )
-    return sort_values.argsort(stable=True)
+    # Unstable sort is 2-3× faster on CPU for large tensors. Use it above
+    # 50M where the performance difference matters and exact tie-breaking
+    # order is irrelevant for layout quality.
+    use_stable = values.numel() <= 50_000_000
+    return sort_values.argsort(stable=use_stable)
 
 
 def _build_streaming_assignment_blocks(
@@ -1796,7 +1800,13 @@ def build_hierarchy(
     layer_dtype = torch.int32 if current_n <= torch.iinfo(torch.int32).max else torch.long
     offload_dir: Optional[Path] = None
     if offload_to_disk and current_n > 10_000_000:
-        offload_dir = Path(tempfile.mkdtemp(prefix="dagua_hierarchy_"))
+        # Use locker for offload if available — /tmp can't hold 60GB+ of
+        # hierarchy data at billion-node scale.
+        _locker = Path("/mnt/locker/jt3295/dagua_bench_large")
+        if _locker.is_dir():
+            offload_dir = Path(tempfile.mkdtemp(prefix="dagua_hierarchy_", dir=_locker))
+        else:
+            offload_dir = Path(tempfile.mkdtemp(prefix="dagua_hierarchy_"))
 
     # Compute layers once on the original graph — returns tensor for large N.
     # Allow a precomputed checkpoint for giant runs so retries can skip the
@@ -1873,12 +1883,15 @@ def build_hierarchy(
         if level_callback is not None:
             level_callback(levels)
 
-        # Keep only one level's large tensors resident once the next coarse
-        # level exists. Small graphs stay entirely in memory.
-        if offload_dir is not None and len(levels) >= 2:
-            prev_level = levels[-2]
-            if prev_level.edge_index is not None:
-                _offload_level_to_disk(prev_level, len(levels) - 2, offload_dir)
+        # Offload ALL previous levels to disk — only the current coarse
+        # graph is needed for the next coarsen_once call. Prolongation
+        # reloads from disk later. This prevents OOM at 1B+ scale where
+        # earlier levels hold tens of GB of edge data.
+        if offload_dir is not None:
+            for prev_idx in range(len(levels) - 1):
+                prev_level = levels[prev_idx]
+                if prev_level.edge_index is not None:
+                    _offload_level_to_disk(prev_level, prev_idx, offload_dir)
 
         # Safety: stop if coarsening didn't reduce nodes enough.
         # Edge count alone is not a reliable stopping signal for wide DAGs:
@@ -2024,6 +2037,22 @@ def multilevel_layout(
         if precomputed_levels is not None:
             levels = precomputed_levels
             _vlog(f"Phase 1/3: Restored hierarchy ({n:,} nodes)... {len(levels)} levels")
+            # Free restored levels from RAM — the checkpoint files on disk
+            # already contain the data, so we just point offload_path at the
+            # original checkpoint files and null the in-memory tensors.
+            # No temp-dir write needed (avoids filling /tmp with 60GB+).
+            _hier_dir = getattr(graph, "_hierarchy_checkpoint_dir", None)
+            if _hier_dir is not None and config.offload_to_disk and n > 10_000_000:
+                for lvl_idx, lvl in enumerate(levels[:-1]):
+                    ckpt_path = Path(_hier_dir) / f"level_{lvl_idx:02d}.pt"
+                    if ckpt_path.exists() and lvl.edge_index is not None:
+                        lvl.edge_index = None
+                        lvl.node_sizes = None
+                        lvl.offload_path = ckpt_path
+                import gc as _gc_restore
+
+                _gc_restore.collect()
+                _vlog(f"  Freed {len(levels)} restored levels (reload from checkpoint on demand)")
         else:
             _t_hier = _time.perf_counter()
             levels = build_hierarchy(
@@ -2123,7 +2152,11 @@ def multilevel_layout(
         if config.offload_to_disk and n > 10_000_000:
             import tempfile as _tmpfile
 
-            _orig_dir = _tmpfile.mkdtemp(prefix="dagua_orig_graph_")
+            _locker_dir = Path("/mnt/locker/jt3295/dagua_bench_large")
+            _orig_dir = _tmpfile.mkdtemp(
+                prefix="dagua_orig_graph_",
+                dir=_locker_dir if _locker_dir.is_dir() else None,
+            )
             _original_graph_path = Path(_orig_dir) / "original_graph.pt"
             torch.save({"edge_index": cpu_ei, "node_sizes": cpu_ns}, _original_graph_path)
             del cpu_ei, cpu_ns

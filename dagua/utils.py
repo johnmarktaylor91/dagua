@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from functools import lru_cache
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 import torch
 
@@ -1004,10 +1004,66 @@ def _build_csr(
     csr_offsets = torch.zeros(num_nodes + 1, dtype=torch.long, device=device)
     csr_offsets[1:] = out_degree.to(torch.long).cumsum(0)
 
-    order = src.argsort(stable=True)
+    order = src.argsort(stable=False)
     csr_targets = tgt[order]
     del order
     return csr_offsets, csr_targets
+
+
+_numba_scatter_fn: Optional[Callable] = None
+
+
+def _get_numba_scatter() -> Optional[Callable]:
+    """Return a numba-JIT'd counting sort kernel, or None if unavailable."""
+    global _numba_scatter_fn
+    if _numba_scatter_fn is not None:
+        return _numba_scatter_fn
+    try:
+        from numba import njit
+
+        @njit
+        def _scatter(src, tgt, offsets, out):  # type: ignore[misc]
+            write = offsets[:-1].copy()
+            for i in range(len(src)):
+                s = src[i]
+                out[write[s]] = tgt[i]
+                write[s] += 1
+
+        # Warmup compile with tiny arrays
+        import numpy as _np
+
+        _scatter(
+            _np.zeros(1, dtype=_np.int32),
+            _np.zeros(1, dtype=_np.int32),
+            _np.array([0, 1], dtype=_np.int64),
+            _np.zeros(1, dtype=_np.int32),
+        )
+        _numba_scatter_fn = _scatter
+        return _scatter
+    except Exception:
+        return None
+
+
+def _try_counting_sort_csr(
+    src_np: Any,
+    tgt_np: Any,
+    csr_offsets: torch.Tensor,
+    num_edges: int,
+) -> Optional[torch.Tensor]:
+    """Attempt O(E) counting sort via numba JIT.
+
+    Returns csr_targets on success, None if numba is unavailable.
+    """
+    import numpy as np
+
+    scatter = _get_numba_scatter()
+    if scatter is None:
+        return None
+
+    offsets_np = csr_offsets.numpy().copy()
+    out_np = np.empty(num_edges, dtype=tgt_np.dtype)
+    scatter(src_np, tgt_np, offsets_np, out_np)
+    return torch.from_numpy(out_np)
 
 
 def _build_csr_numpy(
@@ -1015,7 +1071,10 @@ def _build_csr_numpy(
     tgt: torch.Tensor,
     num_nodes: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Build CSR via NumPy sorting for large CPU tensors.
+    """Build CSR for large CPU tensors.
+
+    Tries O(E) counting sort via numba first; falls back to numpy quicksort
+    O(E log E) if numba is unavailable.
 
     Parameters
     ----------
@@ -1033,16 +1092,23 @@ def _build_csr_numpy(
     """
     import numpy as np
 
-    src_np = src.detach().cpu().numpy()
-    tgt_np = tgt.detach().cpu().numpy()
-
-    order = np.argsort(src_np, kind="stable")
-    csr_targets = torch.from_numpy(tgt_np[order].copy())
-
     out_degree = torch.bincount(src.to(torch.long), minlength=num_nodes)
     csr_offsets = torch.zeros(num_nodes + 1, dtype=torch.long)
     csr_offsets[1:] = out_degree.cumsum(0)
 
+    use_int32 = num_nodes < 2**31 and src.shape[0] < 2**31
+    np_dtype = np.int32 if use_int32 else np.int64
+    src_np = src.detach().cpu().numpy().astype(np_dtype, copy=False)
+    tgt_np = tgt.detach().cpu().numpy()
+
+    # O(E) counting sort via numba — ~5s at 1.5B edges vs ~10min for argsort.
+    result = _try_counting_sort_csr(src_np, tgt_np, csr_offsets, src.shape[0])
+    if result is not None:
+        return csr_offsets, result
+
+    # Fallback: unstable quicksort (2-3× faster than stable mergesort).
+    order = np.argsort(src_np, kind="quicksort")
+    csr_targets = torch.from_numpy(tgt_np[order].copy())
     del order
     return csr_offsets, csr_targets
 
@@ -1157,6 +1223,29 @@ def _longest_path_layering_vectorized(
     N = num_nodes
     E = edge_index.shape[1]
 
+    # Progress bar for large graphs — the layering can take 10-20 min at 1B.
+    _use_tqdm = N > 10_000_000
+    _tqdm_bar = None
+    if _use_tqdm:
+        try:
+            from tqdm import tqdm
+
+            _tqdm_bar = tqdm(total=N, desc="Layering", unit="nodes", unit_scale=True)
+        except ImportError:
+            _use_tqdm = False
+
+    def _progress(n_processed: int) -> None:
+        if _tqdm_bar is not None:
+            _tqdm_bar.update(n_processed)
+
+    def _progress_set_postfix(**kwargs: object) -> None:
+        if _tqdm_bar is not None:
+            _tqdm_bar.set_postfix(**kwargs)
+
+    def _progress_close() -> None:
+        if _tqdm_bar is not None:
+            _tqdm_bar.close()
+
     compute_device = "cpu"
     if device == "cuda" and VRAMBudget.available():
         estimated_bytes = N * 25 + E * 16
@@ -1173,6 +1262,8 @@ def _longest_path_layering_vectorized(
         # Use int32 for working arrays when chunked (saves 12 GB at 1B nodes).
         # Max in-degree and layer index both fit comfortably in int32.
         val_dtype = torch.int32 if chunked else torch.long
+
+        _progress_set_postfix(phase="in-degree")
 
         # Compute in-degree — chunked for large graphs to avoid [E]-sized ones tensor.
         in_degree = torch.zeros(N, dtype=val_dtype, device=compute_device)
@@ -1231,17 +1322,21 @@ def _longest_path_layering_vectorized(
 
         avg_wave = total_processed / max(current_layer, 1)
 
-        # Build CSR for efficient wave processing — O(E log E) from argsort,
-        # then O(V+E) total for all remaining waves.
+        # Build CSR for efficient wave processing — O(E) with numba counting
+        # sort, then O(V+E) total for all remaining waves.
+        _progress_set_postfix(phase="CSR build")
         csr_offsets, csr_targets = _build_csr(src, tgt, N, compute_device)
 
         # Wide graph: continue with waves (fast when few iterations needed)
         if avg_wave > 1000:
+            _progress_set_postfix(phase="waves")
             for _ in range(N):
                 if frontier.numel() == 0:
                     break
+                n_frontier = frontier.numel()
                 layers[frontier] = current_layer
                 remaining[frontier] = -1
+                _progress(n_frontier)
 
                 wave_starts = csr_offsets[frontier]
                 wave_ends = csr_offsets[frontier + 1]
@@ -1285,6 +1380,7 @@ def _longest_path_layering_vectorized(
             if bool(unresolved.any()):
                 fill_layer = int(layers.max().item()) + 1
                 layers[unresolved] = fill_layer
+            _progress_close()
             if chunked:
                 del remaining, wave_set, in_degree
                 return layers
@@ -1325,8 +1421,10 @@ def _longest_path_layering_vectorized(
             fill_layer = int(layer_arr[~unresolved].max()) + 1 if np.any(~unresolved) else 0
             layer_arr[unresolved] = fill_layer
 
+        _progress_close()
         return torch.from_numpy(layer_arr)
     except RuntimeError:
+        _progress_close()
         if compute_device != "cuda":
             raise
         torch.cuda.empty_cache()

@@ -77,6 +77,32 @@ class SharedEdgeSubsetData:
     edge_ctx: EdgeBatchContext
 
 
+@dataclass(frozen=True)
+class SharedSampledSubsetData:
+    """Shared sampled-node remap state reused across multiple sampled losses.
+
+    Parameters
+    ----------
+    global_indices : torch.Tensor
+        Sorted unique global node IDs shaped ``[M]`` gathered from the union
+        of active and sampled indices.
+    pos_local : torch.Tensor
+        Gathered local position tensor shaped ``[M, 2]`` with
+        ``requires_grad=True`` on the execution device.
+    node_sizes_local : torch.Tensor
+        Gathered local node-size tensor shaped ``[M, 2]`` on the execution
+        device.
+    local_sampled_ctx : SampledNodeContext
+        Sampled-node context remapped into local ``[0, M)`` coordinates and
+        already resident on the execution device.
+    """
+
+    global_indices: torch.Tensor
+    pos_local: torch.Tensor
+    node_sizes_local: torch.Tensor
+    local_sampled_ctx: SampledNodeContext
+
+
 def _estimate_shared_edge_remap_bytes(
     global_indices: torch.Tensor,
     edge_index: torch.Tensor,
@@ -485,12 +511,18 @@ class SubsetGPUExecutor:
         next_progress_time = step_start + _PROGRESS_LOG_INTERVAL_SECONDS
         completed_terms = 0
         shared_edge_data = self._prepare_shared_edge_data(pos, loss_terms, active_verbose)
+        shared_sampled_data = self._prepare_shared_sampled_data(pos, loss_terms, active_verbose)
 
         for term in loss_terms:
             if term.weight <= 0.0:
                 continue
             if isinstance(term.access_pattern, EdgeAccessPattern) and shared_edge_data is not None:
                 self._accumulate_shared_edge_grad(term, grad_buffer, shared_edge_data)
+            elif (
+                isinstance(term.access_pattern, SampledAccessPattern)
+                and shared_sampled_data is not None
+            ):
+                self._accumulate_shared_sampled_grad(term, grad_buffer, shared_sampled_data)
             elif isinstance(term.access_pattern, GlobalAccessPattern):
                 self._accumulate_global_grad(term, pos, grad_buffer)
             else:
@@ -655,6 +687,114 @@ class SubsetGPUExecutor:
             node_sizes_local=node_sizes_local,
             edge_ctx=edge_ctx,
         )
+
+    def _prepare_shared_sampled_data(
+        self,
+        pos: torch.Tensor,
+        loss_terms: Sequence[SubsetGPULossTerm],
+        active_verbose: bool,
+    ) -> Optional[SharedSampledSubsetData]:
+        """Build one shared sampled-node gather when sampled terms share a pattern.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            CPU-resident position tensor shaped ``[N, 2]``.
+        loss_terms : Sequence[SubsetGPULossTerm]
+            Weighted loss terms scheduled for the current step.
+        active_verbose : bool
+            Whether subset progress logging is enabled for this step.
+
+        Returns
+        -------
+        SharedSampledSubsetData | None
+            Shared gather state when at least one active sampled term exists,
+            otherwise ``None``.
+        """
+        sampled_terms = [
+            term
+            for term in loss_terms
+            if term.weight > 0.0 and isinstance(term.access_pattern, SampledAccessPattern)
+        ]
+        if not sampled_terms:
+            return None
+
+        pattern = sampled_terms[0].access_pattern
+        global_indices = pattern.get_indices()
+        if global_indices.numel() == 0:
+            return None
+
+        prepared = pattern.remap_to_local(global_indices)
+        if prepared.local_sampled_ctx is None:
+            return None
+
+        try:
+            pos_local = (
+                pos.index_select(0, global_indices)
+                .to(self.execution_device)
+                .detach()
+                .requires_grad_(True)
+            )
+            node_sizes_local = self.node_sizes.index_select(0, global_indices).to(
+                self.execution_device
+            )
+            local_sampled_ctx = SampledNodeContext(
+                active_idx=prepared.local_sampled_ctx.active_idx.to(self.execution_device),
+                sampled=prepared.local_sampled_ctx.sampled.to(self.execution_device),
+            )
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if active_verbose:
+                print(
+                    "[dagua]       subset_gpu: shared sampled remap OOM, falling back to per-term",
+                    flush=True,
+                )
+            return None
+
+        if active_verbose and len(sampled_terms) > 1:
+            print(
+                f"[dagua]   Shared sampled remap: {global_indices.shape[0]:,} nodes, "
+                f"{len(sampled_terms)} terms",
+                flush=True,
+            )
+
+        return SharedSampledSubsetData(
+            global_indices=global_indices,
+            pos_local=pos_local,
+            node_sizes_local=node_sizes_local,
+            local_sampled_ctx=local_sampled_ctx,
+        )
+
+    def _accumulate_shared_sampled_grad(
+        self,
+        term: SubsetGPULossTerm,
+        grad_buffer: torch.Tensor,
+        shared_sampled_data: SharedSampledSubsetData,
+    ) -> None:
+        """Evaluate one sampled term against the shared gathered sampled subset.
+
+        Parameters
+        ----------
+        term : SubsetGPULossTerm
+            Weighted sampled loss term to evaluate.
+        grad_buffer : torch.Tensor
+            Gradient accumulator shaped ``[N, 2]``.
+        shared_sampled_data : SharedSampledSubsetData
+            Shared gather state reused across all sampled terms in this step.
+        """
+        with self._shared_sampled_refs(shared_sampled_data):
+            loss = term.weight * term.loss_fn(
+                shared_sampled_data.pos_local,
+                shared_sampled_data.node_sizes_local,
+                None,
+            )
+        self._record_loss(term.weight, loss)
+        grad_local = self._loss_grad(loss, shared_sampled_data.pos_local, retain_graph=True)
+        if grad_local is None:
+            return
+
+        scatter_index = shared_sampled_data.global_indices.to(device=grad_buffer.device)
+        grad_buffer.index_add_(0, scatter_index, grad_local.to(device=grad_buffer.device))
 
     def _prepare_grad_buffer(self, pos: torch.Tensor) -> torch.Tensor:
         """Return a reusable zeroed gradient buffer aligned with ``pos``.
@@ -906,6 +1046,28 @@ class SubsetGPUExecutor:
         finally:
             self.batch_edges_ref[0] = prev_edges
             self.edge_ctx_ref[0] = prev_edge_ctx
+            self.sampled_ctx_ref[0] = prev_sampled_ctx
+
+    @contextmanager
+    def _shared_sampled_refs(self, shared_sampled_data: SharedSampledSubsetData) -> Iterator[None]:
+        """Install shared local sampled-node context for sampled-term reuse.
+
+        Parameters
+        ----------
+        shared_sampled_data : SharedSampledSubsetData
+            Shared local sampled context, gathered positions, and node sizes.
+
+        Yields
+        ------
+        None
+            Context where the engine sampled-ctx ref targets the shared local
+            context.
+        """
+        prev_sampled_ctx = self.sampled_ctx_ref[0]
+        try:
+            self.sampled_ctx_ref[0] = shared_sampled_data.local_sampled_ctx
+            yield
+        finally:
             self.sampled_ctx_ref[0] = prev_sampled_ctx
 
 

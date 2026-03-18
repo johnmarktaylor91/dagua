@@ -2086,6 +2086,11 @@ def _layout_inner(
             next_edge_batch_fraction += _PROGRESS_BATCH_FRACTION
         last_edge_batch_number = batch_number
 
+    # Cross-step cache for the sampled access pattern — avoids redundant
+    # torch.unique + searchsorted when sampled_ctx hasn't been refreshed.
+    _cached_sampled_pattern: Optional[object] = None
+    _cached_sampled_ctx_id: int = -1
+
     for step in range(steps):
         t = step / max(steps - 1, 1)  # 0 → 1
         current_step_ref[0] = step
@@ -2308,6 +2313,20 @@ def _layout_inner(
                 sampled_ctx_ref=sampled_ctx_ref,
                 verbose=verbose,
             )
+
+            # Build ONE shared sampled access pattern for all sampled terms,
+            # and cache it across steps when sampled_ctx hasn't been refreshed.
+            shared_sampled_pattern: Optional[SampledAccessPattern] = None
+            active_sampled_ctx = _active_sampled_ctx(pos)
+            if active_sampled_ctx is not None:
+                ctx_id = id(active_sampled_ctx)
+                if ctx_id != _cached_sampled_ctx_id:
+                    shared_sampled_pattern = SampledAccessPattern(active_sampled_ctx)
+                    _cached_sampled_pattern = shared_sampled_pattern
+                    _cached_sampled_ctx_id = ctx_id
+                else:
+                    shared_sampled_pattern = _cached_sampled_pattern  # type: ignore[assignment]
+
             subset_terms: List[SubsetGPULossTerm] = []
             for (
                 key,
@@ -2323,13 +2342,18 @@ def _layout_inner(
                     SampledAccessPattern,
                     GlobalAccessPattern,
                 ]
+                # Skip heavy global terms at very large scale — they run on
+                # the full N-node tensor on CPU (e.g. spacing does argsort of
+                # all N nodes) and dominate step time.  The edge + sampled
+                # terms already cover layout quality at this scale.
+                if access_kind == "global" and _is_heavy and n > 50_000_000:
+                    continue
                 if access_kind == "edge":
                     access_pattern = EdgeAccessPattern(_active_edges(pos))
                 elif access_kind == "sampled":
-                    active_sampled_ctx = _active_sampled_ctx(pos)
                     access_pattern = (
-                        SampledAccessPattern(active_sampled_ctx)
-                        if active_sampled_ctx is not None
+                        shared_sampled_pattern
+                        if shared_sampled_pattern is not None
                         else GlobalAccessPattern()
                     )
                 else:
@@ -2533,8 +2557,11 @@ def _layout_inner(
             )
 
         # Hard overlap projection (adaptive frequency + adaptive iterations)
-        if step % overlap_interval == 0 or step == steps - 1:
+        # Skip step 0 — positions are fresh from init and haven't moved yet.
+        if step > 0 and (step % overlap_interval == 0 or step == steps - 1):
             proj_iters = 5 if n <= 500_000 else 3 if n <= 5_000_000 else 2
+            if verbose and n > 1_000_000:
+                _vlog(f"overlap projection (step {step}, N={n:,}, iters={proj_iters})")
             project_overlaps(
                 pos,
                 node_sizes,
@@ -2989,8 +3016,13 @@ def _overlap_interval(num_nodes: int, config: LayoutConfig) -> int:
         return 10
     elif num_nodes <= 1_000_000:
         return 20
-    else:
+    elif num_nodes <= 50_000_000:
         return 40
+    else:
+        # At 50M+ nodes projection is O(N log N) per iteration on CPU
+        # (argsort of the full position tensor). Run sparingly — the overlap
+        # avoidance loss already provides soft resolution every step.
+        return 200
 
 
 def _adaptive_spacing(
