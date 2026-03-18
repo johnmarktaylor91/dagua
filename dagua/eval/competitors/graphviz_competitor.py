@@ -317,16 +317,43 @@ class _GraphvizBase(CompetitorBase):
     engine: str = "dot"
 
     def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+        """Run the configured Graphviz engine for a graph.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime in seconds.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and timing information.
+        """
         from dagua.graphviz_utils import layout_with_graphviz
 
         start = time.perf_counter()
         try:
-            pos = layout_with_graphviz(graph, engine=self.engine)
+            pos = layout_with_graphviz(graph, engine=self.engine, timeout=timeout)
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
-        except Exception as e:
+        except subprocess.TimeoutExpired:
             elapsed = time.perf_counter() - start
-            return CompetitorResult(name=self.name, pos=None, runtime_seconds=elapsed, error=str(e))
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=elapsed,
+                error="timeout",
+            )
+        except Exception as exc:
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=elapsed,
+                error=str(exc),
+            )
 
     def available(self) -> bool:
         return _graphviz_available()
@@ -359,6 +386,14 @@ class GraphvizDot(_GraphvizBase):
             pos = _layout_with_dot(graph, timeout=timeout)
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+        except subprocess.TimeoutExpired:
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=elapsed,
+                error="timeout",
+            )
         except Exception as error:
             elapsed = time.perf_counter() - start
             return CompetitorResult(

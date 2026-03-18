@@ -9,12 +9,15 @@ Provides functions to:
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional, cast
 
 import torch
+
+_CLUSTER_NAME_PATTERN = re.compile(r"[^0-9A-Za-z_]")
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -24,14 +27,25 @@ if TYPE_CHECKING:
 
 
 def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
-    """Convert DaguaGraph to DOT format.
+    """Convert a graph to DOT source.
 
-    If positions are provided, pins them with pos="x,y!" attributes
-    so Graphviz respects the layout (neato -n2 mode).
+    If positions are provided, they are emitted as ``pos="x,y!"`` attributes
+    so Graphviz respects the layout in ``neato -n2`` mode. This exporter
+    intentionally maps Dagua's richer style space down to a small DOT subset.
+    Use it for placement and comparison workflows rather than full-fidelity
+    round-tripping.
 
-    This exporter intentionally maps Dagua's richer style space down to a small
-    DOT subset. Use it for placement/comparison workflows, not as a claim of
-    full-fidelity Dagua -> Graphviz round-tripping.
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph to export.
+    positions : torch.Tensor | None, optional
+        Optional node positions with shape ``[N, 2]`` in point units.
+
+    Returns
+    -------
+    str
+        DOT source for the graph.
     """
     lines = ["digraph G {"]
     lines.append("  rankdir=TB;")
@@ -42,7 +56,7 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
         pos = positions.detach().cpu()
 
     for i in range(graph.num_nodes):
-        label = graph.node_labels[i].replace('"', '\\"')
+        label = graph.node_labels[i].replace("\\", "\\\\").replace('"', '\\"')
         style = graph.get_style_for_node(i)
         attrs = [
             f'label="{label}"',
@@ -77,7 +91,7 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
             t = int(graph.edge_index[1, e].item())
             edge_attrs: list[str] = []
             if e < len(graph.edge_labels) and graph.edge_labels[e]:
-                lbl = str(graph.edge_labels[e]).replace('"', '\\"')
+                lbl = str(graph.edge_labels[e]).replace("\\", "\\\\").replace('"', '\\"')
                 edge_attrs.append(f'label="{lbl}"')
             edge_style = graph.get_style_for_edge(e)
             edge_attrs.append(f'color="{edge_style.color}"')
@@ -100,8 +114,11 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
                 indices = members
             if not indices:
                 continue
-            cluster_label = graph.cluster_labels.get(name, name)
-            lines.append(f"  subgraph cluster_{name.replace('.', '_')} {{")
+            cluster_label = (
+                graph.cluster_labels.get(name, name).replace("\\", "\\\\").replace('"', '\\"')
+            )
+            safe_id = _CLUSTER_NAME_PATTERN.sub("_", name)
+            lines.append(f"  subgraph cluster_{safe_id} {{")
             lines.append(f'    label="{cluster_label}";')
             lines.append('    style=filled; color=lightgrey; fillcolor="#f0f0f0";')
             for idx in indices:
@@ -115,11 +132,23 @@ def to_dot(graph: DaguaGraph, positions: Optional[torch.Tensor] = None) -> str:
 def layout_with_graphviz(
     graph: DaguaGraph,
     engine: str = "dot",
+    timeout: float = 300.0,
 ) -> torch.Tensor:
-    """Layout a DaguaGraph using Graphviz and return positions as a tensor.
+    """Layout a graph with Graphviz and parse the resulting node positions.
 
-    Runs `dot -Tjson` to get computed positions, then parses them back
-    into a [N, 2] tensor matching node order.
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph to lay out.
+    engine : str, default="dot"
+        Graphviz engine executable to invoke.
+    timeout : float, default=300.0
+        Maximum subprocess runtime in seconds.
+
+    Returns
+    -------
+    torch.Tensor
+        Node positions with shape ``[N, 2]`` in graph node order.
     """
     dot_str = to_dot(graph)
 
@@ -132,7 +161,7 @@ def layout_with_graphviz(
             [engine, "-Tjson", dot_path],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout,
         )
         if result.returncode != 0:
             raise RuntimeError(f"Graphviz failed: {result.stderr}")
@@ -166,10 +195,28 @@ def render_graphviz_native(
     output: str,
     engine: str = "dot",
     fmt: Optional[str] = None,
+    timeout: float = 300.0,
 ) -> str:
-    """Render a DaguaGraph using Graphviz's native renderer.
+    """Render a graph using Graphviz's native renderer.
 
-    Returns path to the output file.
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph to render.
+    output : str
+        Output file path.
+    engine : str, default="dot"
+        Graphviz engine executable to invoke.
+    fmt : str | None, optional
+        Explicit Graphviz output format. When omitted, it is inferred from
+        ``output``.
+    timeout : float, default=300.0
+        Maximum subprocess runtime in seconds.
+
+    Returns
+    -------
+    str
+        Output path.
     """
     dot_str = to_dot(graph)
 
@@ -186,7 +233,7 @@ def render_graphviz_native(
             [engine, f"-T{fmt}", "-o", output, dot_path],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout,
         )
         if result.returncode != 0:
             raise RuntimeError(f"Graphviz render failed: {result.stderr}")
@@ -261,12 +308,30 @@ def _render_on_axes(
     positions: torch.Tensor,
     title: str,
 ) -> None:
-    """Render a graph layout onto a specific matplotlib axes."""
+    """Render a graph layout onto a specific matplotlib axes.
+
+    Parameters
+    ----------
+    ax : Axes
+        Matplotlib axes to draw into.
+    graph : DaguaGraph
+        Graph being rendered.
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    title : str
+        Title for the axes.
+
+    Returns
+    -------
+    None
+        The function draws directly onto ``ax``.
+    """
     from dagua.edges import route_edges
     from dagua.render.mpl import _draw_clusters, _draw_edges, _draw_node_labels, _draw_nodes
 
     pos = positions.detach().cpu().numpy()
     graph.compute_node_sizes()
+    assert graph.node_sizes is not None
     sizes = graph.node_sizes.detach().cpu().numpy()
 
     n = graph.num_nodes
