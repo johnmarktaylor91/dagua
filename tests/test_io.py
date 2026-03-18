@@ -1389,3 +1389,45 @@ class TestFromDot:
         # The DOT export uses n0, n1 as node names
         assert g2.num_nodes == 2
         assert g2.edge_index.shape[1] == 1
+
+    def test_to_dot_escapes_backslashes_and_quotes(self) -> None:
+        """DOT export should escape backslashes before embedded quotes.
+
+        Returns
+        -------
+        None
+            The assertions validate emitted DOT labels.
+        """
+        from dagua.graphviz_utils import to_dot
+
+        graph = graph_from_json(
+            {
+                "nodes": [
+                    {"id": "a", "label": 'Node \\ "A"'},
+                    {"id": "b", "label": "Target"},
+                ],
+                "edges": [{"source": "a", "target": "b", "label": 'Edge \\ "B"'}],
+                "clusters": [{"name": "grp", "members": ["a"], "label": 'Cluster \\ "C"'}],
+            }
+        )
+        dot_str = to_dot(graph)
+
+        assert 'label="Node \\\\ \\"A\\""' in dot_str
+        assert 'label="Edge \\\\ \\"B\\""' in dot_str
+        assert 'label="Cluster \\\\ \\"C\\""' in dot_str
+
+    def test_to_dot_sanitizes_cluster_ids(self) -> None:
+        """DOT export should sanitize cluster subgraph identifiers."""
+        from dagua.graphviz_utils import to_dot
+
+        graph = graph_from_json(
+            {
+                "nodes": [{"id": "a"}, {"id": "b"}],
+                "edges": [{"source": "a", "target": "b"}],
+                "clusters": [{"name": "group.one/two", "members": ["a", "b"]}],
+            }
+        )
+
+        dot_str = to_dot(graph)
+
+        assert "subgraph cluster_group_one_two {" in dot_str

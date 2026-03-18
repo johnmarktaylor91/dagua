@@ -550,7 +550,7 @@ class ClassicDavidsonHarel(_ClassicBase):
     """Competitor wrapper for the classic Davidson-Harel reimplementation."""
 
     name = "classic_davidson_harel"
-    max_nodes = 500
+    max_nodes = 50
 
     def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
         """Run the classic Davidson-Harel layout.
