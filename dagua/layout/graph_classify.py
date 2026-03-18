@@ -170,7 +170,10 @@ def _resolve_layer_assignments(
     if num_nodes == 0 or edge_index.numel() == 0:
         return None
 
-    computed_layers = longest_path_layering(edge_index.detach().cpu(), num_nodes, device="cpu")
+    prefer_device = "cuda" if torch.cuda.is_available() else "cpu"
+    computed_layers = longest_path_layering(
+        edge_index.detach().cpu(), num_nodes, device=prefer_device
+    )
     if isinstance(computed_layers, torch.Tensor):
         return computed_layers.to(device="cpu", dtype=torch.long)
     return torch.tensor(computed_layers, dtype=torch.long)
@@ -226,6 +229,25 @@ def classify_graph(
         Detected structure with metadata.
     """
     num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+
+    # At very large scale, classification is always GENERAL — skip the
+    # expensive degree computation (20GB+ allocation) and union-find.
+    if num_nodes > 10_000_000:
+        resolved_layers = (
+            _resolve_layer_assignments(edge_index, num_nodes, layer_assignments)
+            if layer_assignments is not None
+            else None
+        )
+        num_layers, avg_layer_width = _analyze_layers(resolved_layers, num_nodes)
+        return GraphStructure(
+            family=GraphFamily.GENERAL,
+            num_components=1,
+            max_degree=0,
+            num_layers=num_layers,
+            avg_layer_width=avg_layer_width,
+            is_planar_hint=num_edges < 3 * num_nodes - 6,
+        )
+
     degree = _compute_degree(edge_index, num_nodes)
     max_degree = int(degree.max().item()) if degree.numel() > 0 else 0
     num_components, is_acyclic = _count_components_and_acyclic(edge_index, num_nodes)
