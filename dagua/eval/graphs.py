@@ -121,6 +121,315 @@ def _empty_generated_graph() -> DaguaGraph:
     return _finalize_generated_graph(DaguaGraph())
 
 
+def _import_networkx() -> Any:
+    """Import NetworkX for optional benchmark graph generation.
+
+    Returns
+    -------
+    Any
+        Imported ``networkx`` module.
+
+    Raises
+    ------
+    ImportError
+        Raised when NetworkX is unavailable in the current environment.
+    """
+    try:
+        import networkx as nx
+    except ImportError as exc:
+        raise ImportError(
+            "NetworkX is required for the evaluation graph collection. "
+            "Install it with: pip install networkx"
+        ) from exc
+    return nx
+
+
+def _undirected_to_dag(graph: DaguaGraph) -> DaguaGraph:
+    """Orient an undirected graph into a DAG using ascending node indices.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph whose undirected edges should be converted into a single acyclic
+        orientation.
+
+    Returns
+    -------
+    DaguaGraph
+        The same graph instance with each undirected edge oriented from the
+        lower internal node index to the higher one.
+    """
+    edge_index = graph.edge_index
+    if edge_index.numel() == 0:
+        graph.edge_labels = []
+        graph.edge_types = []
+        graph.edge_styles = []
+        return _finalize_generated_graph(graph)
+
+    forward_mask = edge_index[0] < edge_index[1]
+    reverse_mask = edge_index[0] > edge_index[1]
+    forward_edges = edge_index[:, forward_mask]
+    reverse_edges = torch.stack([edge_index[1, reverse_mask], edge_index[0, reverse_mask]])
+    dag_edges = torch.cat([forward_edges, reverse_edges], dim=1)
+    dag_edges = torch.unique(dag_edges, dim=1)
+    graph.edge_index = dag_edges
+    edge_count = int(dag_edges.shape[1])
+    graph.edge_labels = [None] * edge_count
+    graph.edge_types = ["normal"] * edge_count
+    graph.edge_styles = [None] * edge_count
+    return _finalize_generated_graph(graph)
+
+
+def _graph_from_undirected_networkx(nx_graph: Any) -> DaguaGraph:
+    """Convert an undirected NetworkX graph into a Dagua DAG.
+
+    Parameters
+    ----------
+    nx_graph : Any
+        NetworkX graph object to convert.
+
+    Returns
+    -------
+    DaguaGraph
+        Converted graph with a deterministic acyclic orientation and computed
+        node sizes.
+    """
+    graph = DaguaGraph.from_networkx(nx_graph)
+    return _undirected_to_dag(graph)
+
+
+def _make_sbm_graph(
+    sizes: Sequence[int],
+    p_in: float,
+    p_out: float,
+    seed: int = 42,
+) -> DaguaGraph:
+    """Build a stochastic block model graph and orient it into a DAG.
+
+    Parameters
+    ----------
+    sizes : Sequence[int]
+        Community sizes.
+    p_in : float
+        Intra-community edge probability.
+    p_out : float
+        Inter-community edge probability.
+    seed : int, default=42
+        Random seed for reproducible block-model sampling.
+
+    Returns
+    -------
+    DaguaGraph
+        SBM graph converted into a DAG by orienting each sampled undirected edge
+        from lower to higher internal node index.
+    """
+    nx = _import_networkx()
+    n_communities = len(sizes)
+    probability_matrix = [
+        [p_in if row_idx == col_idx else p_out for col_idx in range(n_communities)]
+        for row_idx in range(n_communities)
+    ]
+    nx_graph = nx.stochastic_block_model(list(sizes), probability_matrix, seed=seed)
+    return _graph_from_undirected_networkx(nx_graph)
+
+
+def make_real_karate_graph() -> TestGraph:
+    """Build the classic Zachary karate club social network benchmark.
+
+    Returns
+    -------
+    TestGraph
+        Directed acyclic version of the karate club graph for real-world
+        community-structure testing.
+    """
+    nx = _import_networkx()
+    graph = _graph_from_undirected_networkx(nx.karate_club_graph())
+    return TestGraph(
+        name="real_karate_34",
+        graph=graph,
+        tags={"social", "community", "real-world"},
+        description="Zachary's Karate Club social network oriented into a DAG",
+        source="networkx",
+        expected_challenges="Community separation with hub-heavy social structure",
+    )
+
+
+def make_real_lesmis_graph() -> TestGraph:
+    """Build the Les Miserables co-occurrence benchmark graph.
+
+    Returns
+    -------
+    TestGraph
+        Directed acyclic version of a real-world literary character network.
+    """
+    nx = _import_networkx()
+    if hasattr(nx, "les_miserables_graph"):
+        nx_graph = nx.les_miserables_graph()
+        name = "real_lesmis_77"
+        description = "Les Miserables character co-occurrence graph oriented into a DAG"
+    else:
+        nx_graph = nx.florentine_families_graph()
+        name = "real_lesmis_77"
+        description = (
+            "Florentine families graph used as a fallback social benchmark, oriented into a DAG"
+        )
+    graph = _graph_from_undirected_networkx(nx_graph)
+    return TestGraph(
+        name=name,
+        graph=graph,
+        tags={"social", "community", "real-world", "weighted"},
+        description=description,
+        source="networkx",
+        expected_challenges="Dense local communities and a nontrivial social core",
+    )
+
+
+def make_real_football_graph(seed: int = 42) -> TestGraph:
+    """Build the football benchmark graph or its synthetic community fallback.
+
+    Parameters
+    ----------
+    seed : int, default=42
+        Random seed used by the synthetic fallback when a built-in football
+        graph is unavailable.
+
+    Returns
+    -------
+    TestGraph
+        Football-style community graph oriented into a DAG.
+    """
+    nx = _import_networkx()
+    if hasattr(nx, "football_graph"):
+        graph = _graph_from_undirected_networkx(nx.football_graph())
+        source = "networkx"
+        description = "American college football schedule network oriented into a DAG"
+    else:
+        # The fallback keeps the benchmark's strong conference structure even
+        # when the canonical NetworkX loader is unavailable.
+        graph = _make_sbm_graph(
+            sizes=[10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 5],
+            p_in=0.7,
+            p_out=0.05,
+            seed=seed,
+        )
+        source = "synthetic-fallback"
+        description = "Football-style synthetic SBM fallback with 12 uneven communities"
+
+    return TestGraph(
+        name="real_football_115",
+        graph=graph,
+        tags={"social", "community", "real-world"},
+        description=description,
+        source=source,
+        expected_challenges="Strong communities with enough inter-group edges to stress separation",
+    )
+
+
+def make_erdos_renyi(n: int, p: float = 0.02, seed: int = 42) -> TestGraph:
+    """Build an Erdos-Renyi random graph benchmark and orient it into a DAG.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes.
+    p : float, default=0.02
+        Edge probability for the undirected random graph.
+    seed : int, default=42
+        Random seed for reproducible sampling.
+
+    Returns
+    -------
+    TestGraph
+        Random graph benchmark with an acyclic orientation.
+    """
+    nx = _import_networkx()
+    nx_graph = nx.erdos_renyi_graph(n, p, seed=seed, directed=False)
+    graph = _graph_from_undirected_networkx(nx_graph)
+    return TestGraph(
+        name=f"er_{n}",
+        graph=graph,
+        tags={"erdos-renyi", "random"},
+        description=f"Erdos-Renyi random graph with {n} nodes and p={p}",
+        source="networkx",
+        expected_challenges="Unstructured connectivity with weak layering cues",
+    )
+
+
+def make_random_geometric(n: int, radius: float = 0.15, seed: int = 42) -> TestGraph:
+    """Build a random geometric graph benchmark and orient it into a DAG.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes.
+    radius : float, default=0.15
+        Connection radius in the unit square.
+    seed : int, default=42
+        Random seed for reproducible spatial sampling.
+
+    Returns
+    -------
+    TestGraph
+        Spatial random graph with local neighborhoods and high clustering.
+    """
+    nx = _import_networkx()
+    nx_graph = nx.random_geometric_graph(n, radius, seed=seed)
+    graph = _graph_from_undirected_networkx(nx_graph)
+    return TestGraph(
+        name=f"rgg_{n}",
+        graph=graph,
+        tags={"geometric", "spatial", "random"},
+        description=f"Random geometric graph with {n} nodes and radius {radius}",
+        source="networkx",
+        expected_challenges="Spatial locality, clustered neighborhoods, and irregular density",
+    )
+
+
+def make_sbm(
+    n_communities: int = 5,
+    community_size: int = 40,
+    p_in: float = 0.3,
+    p_out: float = 0.01,
+    seed: int = 42,
+) -> TestGraph:
+    """Build a stochastic block model benchmark with planted communities.
+
+    Parameters
+    ----------
+    n_communities : int, default=5
+        Number of communities.
+    community_size : int, default=40
+        Node count per community.
+    p_in : float, default=0.3
+        Intra-community edge probability.
+    p_out : float, default=0.01
+        Inter-community edge probability.
+    seed : int, default=42
+        Random seed for reproducible block-model sampling.
+
+    Returns
+    -------
+    TestGraph
+        Community benchmark with an acyclic orientation.
+    """
+    graph = _make_sbm_graph(
+        sizes=[community_size] * max(n_communities, 0),
+        p_in=p_in,
+        p_out=p_out,
+        seed=seed,
+    )
+    return TestGraph(
+        name=f"sbm_{n_communities}x{community_size}",
+        graph=graph,
+        tags={"community", "clustered", "random"},
+        description=(
+            f"Stochastic block model with {n_communities} communities of {community_size} nodes"
+        ),
+        source="networkx",
+        expected_challenges="Planted communities with sparse inter-block bridges",
+    )
+
+
 # ─── Synthetic Graph Generators ───────────────────────────────────────────────
 
 
@@ -2961,7 +3270,19 @@ def _expanded_structural_graphs() -> List[TestGraph]:
         New structural coverage graphs wrapped with evaluation metadata.
     """
     sparse_graph, dense_graph = make_sparse_dense_pair(n=50, seed=42)
-    return [
+    powerlaw_500 = make_powerlaw_dag(500, seed=42)
+    powerlaw_500.name = "powerlaw_500"
+    powerlaw_500.tags = {"scale-free", "large-sparse"}
+    powerlaw_500.description = "Power-law DAG benchmark at 500 nodes"
+    powerlaw_500.expected_challenges = "Degree skew and sparse long-range attachment patterns"
+
+    powerlaw_2000 = make_powerlaw_dag(2000, seed=42)
+    powerlaw_2000.name = "powerlaw_2000"
+    powerlaw_2000.tags = {"scale-free", "large-sparse"}
+    powerlaw_2000.description = "Power-law DAG benchmark at 2,000 nodes"
+    powerlaw_2000.expected_challenges = "High-degree concentration at larger sparse scale"
+
+    graphs = [
         TestGraph(
             name="scale_free_ba_120",
             graph=make_scale_free(n=120, m=3, seed=42),
@@ -3075,6 +3396,150 @@ def _expanded_structural_graphs() -> List[TestGraph]:
             expected_challenges="Short paths, cycles, and non-layered global geometry",
         ),
     ]
+
+    # Real-world classics
+    graphs.extend(
+        [
+            make_real_karate_graph(),
+            make_real_lesmis_graph(),
+            make_real_football_graph(seed=42),
+        ]
+    )
+
+    # Erdos-Renyi random graphs
+    graphs.extend(
+        [
+            make_erdos_renyi(100, p=0.04, seed=42),
+            make_erdos_renyi(500, p=0.008, seed=42),
+            make_erdos_renyi(2000, p=0.003, seed=42),
+        ]
+    )
+
+    # Random geometric graphs
+    graphs.extend(
+        [
+            make_random_geometric(100, radius=0.25, seed=42),
+            make_random_geometric(500, radius=0.1, seed=42),
+            make_random_geometric(2000, radius=0.05, seed=42),
+        ]
+    )
+
+    # Additional scale-free and community benchmarks
+    graphs.extend(
+        [
+            TestGraph(
+                name="ba_500",
+                graph=make_scale_free(n=500, m=3, seed=42),
+                tags={"scale-free", "large-sparse"},
+                description="Barabasi-Albert style preferential-attachment DAG at 500 nodes",
+                expected_challenges="High-degree hubs at medium sparse scale",
+            ),
+            TestGraph(
+                name="ba_2000",
+                graph=make_scale_free(n=2000, m=3, seed=42),
+                tags={"scale-free", "large-sparse"},
+                description="Barabasi-Albert style preferential-attachment DAG at 2,000 nodes",
+                expected_challenges="Hub dominance and long sparse spokes at larger scale",
+            ),
+            TestGraph(
+                name="ba_5000",
+                graph=make_scale_free(n=5000, m=4, seed=42),
+                tags={"scale-free", "large-sparse"},
+                description="Barabasi-Albert style preferential-attachment DAG at 5,000 nodes",
+                expected_challenges="Extremely dominant hubs and bundled fan-in at scale",
+            ),
+            make_sbm(4, 30, p_in=0.3, p_out=0.01, seed=42),
+            make_sbm(5, 50, p_in=0.2, p_out=0.005, seed=42),
+            make_sbm(8, 100, p_in=0.1, p_out=0.002, seed=42),
+        ]
+    )
+
+    # Larger meshes and broader coverage of existing generator families
+    graphs.extend(
+        [
+            TestGraph(
+                name="grid_20x20",
+                graph=make_grid(20, 20, seed=42),
+                tags={"grid", "mesh", "large-dense"},
+                description="20x20 mesh-like grid DAG",
+                expected_challenges="Regular spacing over a moderately large mesh",
+            ),
+            TestGraph(
+                name="grid_50x50",
+                graph=make_grid(50, 50, seed=42),
+                tags={"grid", "mesh", "large-dense"},
+                description="50x50 mesh-like grid DAG",
+                expected_challenges="Large regular mesh with dense local edge pressure",
+            ),
+            TestGraph(
+                name="wide_1_100_1",
+                graph=make_wide_single_layer(1, 100, 1, seed=42),
+                tags={"wide-layer", "wide-parallel"},
+                description="Single source and sink around a 100-node middle layer",
+                expected_challenges="Extreme width with minimal vertical structure",
+            ),
+            TestGraph(
+                name="wide_3_50_3",
+                graph=make_wide_single_layer(3, 50, 3, seed=42),
+                tags={"wide-layer", "wide-parallel"},
+                description="Three sources and sinks around a 50-node middle layer",
+                expected_challenges="Ordering stability under broader symmetric fan-in and fan-out",
+            ),
+            TestGraph(
+                name="hub_spoke_5x50",
+                graph=make_hub_and_spoke(5, 50, seed=42),
+                tags={"hub-spoke", "wide-parallel"},
+                description="Five hubs each feeding fifty spokes toward a shared exit",
+                expected_challenges="Large fan-out around multiple dominant hub centers",
+            ),
+            TestGraph(
+                name="hub_spoke_10x20",
+                graph=make_hub_and_spoke(10, 20, seed=42),
+                tags={"hub-spoke", "wide-parallel"},
+                description="Ten hubs each feeding twenty spokes toward a shared exit",
+                expected_challenges="Competing hub centers with repeated spoke bundles",
+            ),
+            TestGraph(
+                name="compound_10x20",
+                graph=make_compound_dag(10, 20, seed=42),
+                tags={"compound", "clustered", "nested-shallow"},
+                description="Ten-stage compound DAG with twenty nodes per cluster",
+                expected_challenges="Cluster flow and inter-stage routing at moderate scale",
+            ),
+            TestGraph(
+                name="small_world_500",
+                graph=make_small_world(500, 6, 0.1, seed=42),
+                tags={"small-world", "cyclic"},
+                description="Directed Watts-Strogatz small-world graph at 500 nodes",
+                expected_challenges="Short paths and cycles at medium scale",
+            ),
+            TestGraph(
+                name="small_world_2000",
+                graph=make_small_world(2000, 4, 0.05, seed=42),
+                tags={"small-world", "cyclic"},
+                description="Directed Watts-Strogatz small-world graph at 2,000 nodes",
+                expected_challenges="Sparse cyclic structure with weak global layering cues",
+            ),
+            TestGraph(
+                name="dependency_500",
+                graph=make_dependency_graph(500, 10, seed=42),
+                tags={"dependency", "scale-free", "clustered"},
+                description="Dependency DAG with ten dominant core libraries at 500 nodes",
+                expected_challenges="Large dependency fan-in around a compact core",
+            ),
+            TestGraph(
+                name="org_chart_deep",
+                graph=make_org_chart(6, (1, 3, 5, 10, 20, 40), seed=42),
+                tags={"tree"},
+                description="Six-level organizational chart with widening breadth by level",
+                expected_challenges="Parent-child spacing across strongly varying level widths",
+            ),
+            powerlaw_500,
+            powerlaw_2000,
+        ]
+    )
+
+    return graphs
 
 
 _SCALE_SIZES = {
