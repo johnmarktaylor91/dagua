@@ -36,6 +36,8 @@ from dagua.defaults import (
 from dagua.edges import place_edge_labels, route_edges
 from dagua.eval.compare import layout_all
 from dagua.flex import AlignGroup, Flex, LayoutFlex
+from dagua.generators import STRUCTURES as STRUCTURES
+from dagua.generators import generate_graph as generate_graph
 from dagua.graph import DaguaGraph
 from dagua.io import (
     ImageAIConfig,

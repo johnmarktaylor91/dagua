@@ -124,14 +124,23 @@ def _layout_resume_signature(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _layout_signature_matches(paths: dict[str, Path], signature: dict[str, object]) -> bool:
-    """Return whether derived layout artifacts match the current run signature."""
+    """Return whether derived layout artifacts match the current run signature.
+
+    NOTE: source_fingerprint check is temporarily disabled during active
+    development — every edit to engine.py/multilevel.py invalidates cached
+    hierarchies. Re-enable once the code stabilizes.
+    """
     if not paths["layout_meta"].exists():
         return False
     try:
         payload = json.loads(paths["layout_meta"].read_text(encoding="utf-8"))
     except Exception:
         return False
-    return payload == signature
+    # Skip source_fingerprint comparison during development
+    payload.pop("source_fingerprint", None)
+    sig_copy = dict(signature)
+    sig_copy.pop("source_fingerprint", None)
+    return payload == sig_copy
 
 
 def _save_checkpoint_meta(path: Path, payload: dict) -> None:
@@ -706,6 +715,7 @@ def main() -> None:
     g.node_sizes = node_sizes
     if hierarchy_levels is not None:
         g._precomputed_hierarchy_levels = hierarchy_levels
+        g._hierarchy_checkpoint_dir = checkpoint_paths["hierarchy_dir"]
     if coarsest_positions is not None:
         g._precomputed_coarsest_positions = coarsest_positions
     if layer_assignments is not None:
