@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ import torch
 
 from dagua.eval.benchmark import (
     BenchmarkGraph,
+    _competitor_signature,
     benchmark_run_status,
     get_rare_suite_graphs,
     get_standard_suite_graphs,
@@ -189,6 +191,19 @@ def test_merge_latest_results_and_generate_report(tmp_path):
 
 
 @pytest.mark.smoke
+def test_dagua_competitor_signature_uses_device_and_source_hash(monkeypatch):
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._dagua_source_signature",
+        lambda: "abc123def4567890",  # pragma: allowlist secret
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    assert _competitor_signature("dagua", {"dagua_git_hash": "ignored"}) == (
+        "dagua:cpu:abc123def4567890"
+    )
+
+
+@pytest.mark.smoke
 def test_standard_suite_reuses_cached_non_dagua_results(tmp_path, monkeypatch):
     output_dir = tmp_path / "eval_output"
     latest_run = output_dir / "benchmark_db" / "standard" / "2026-03-12T00:00:00+00:00"
@@ -250,7 +265,7 @@ def test_standard_suite_reuses_cached_non_dagua_results(tmp_path, monkeypatch):
         },
         "competitor_signatures": {
             "graphviz_dot": "graphviz_dot:dot 1.0",
-            "dagua": "dagua:new",
+            "dagua": "dagua:cpu:newhash",
         },
     }
     (latest_run / "results.json").write_text(
@@ -440,6 +455,207 @@ def test_rare_suite_resumes_from_partial_results(tmp_path, monkeypatch):
 
 
 @pytest.mark.smoke
+def test_standard_suite_retry_failed_resumes_only_failed_results(tmp_path, monkeypatch):
+    output_dir = tmp_path / "eval_output"
+    run_dir = output_dir / "benchmark_db" / "standard" / "2026-03-12T00:00:00+00:00"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    graph = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
+    tg = TestGraph(
+        name="tiny_retry",
+        graph=graph,
+        tags={"linear"},
+        description="retry only failures",
+        source="synthetic",
+        expected_challenges="none",
+    )
+    suite = [BenchmarkGraph(tg, "linear", "standard", True, "small")]
+    partial = {
+        "run_id": run_dir.name,
+        "suite": "standard",
+        "system": {"dagua_git_hash": "new", "graphviz": "dot 1.0"},
+        "graphs": {
+            "tiny_retry": {
+                "n_nodes": 3,
+                "n_edges": 2,
+                "structural_category": "linear",
+                "description": "retry only failures",
+                "expected_challenges": "none",
+                "tags": ["linear"],
+                "source": "synthetic",
+                "visualize": True,
+                "scale_tier": "small",
+                "competitors": {
+                    "dagua": {
+                        "status": "FAILED",
+                        "reason": "exception",
+                        "runtime_seconds": None,
+                        "metrics": {},
+                        "composite_score": None,
+                        "metrics_computed": [],
+                        "metrics_skipped": ["tier1", "tier2", "tier3"],
+                        "positions_path": None,
+                    },
+                    "graphviz_dot": {
+                        "status": "OK",
+                        "runtime_seconds": 0.01,
+                        "metrics": {"overall_quality": 80.0},
+                        "composite_score": 80.0,
+                        "metrics_computed": ["tier1"],
+                        "metrics_skipped": ["tier2", "tier3"],
+                        "positions_path": None,
+                    },
+                },
+            }
+        },
+    }
+    (run_dir / "results.partial.json").write_text(json.dumps(partial), encoding="utf-8")
+
+    calls = {"dagua": 0, "graphviz_dot": 0}
+    pos = torch.tensor([[0.0, 0.0], [0.0, 50.0], [0.0, 100.0]], dtype=torch.float32)
+
+    class FakeCompetitor:
+        def __init__(self, name):
+            self.name = name
+            self.max_nodes = 10
+
+        def available(self):
+            return True
+
+        def layout(self, graph, timeout=300.0):
+            calls[self.name] += 1
+            return type("Result", (), {"pos": pos, "runtime_seconds": 0.02, "error": None})()
+
+    monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._competitor_map",
+        lambda names=None: [FakeCompetitor("dagua"), FakeCompetitor("graphviz_dot")],
+    )
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._system_metadata",
+        lambda: {"dagua_git_hash": "new", "graphviz": "dot 1.0"},
+    )
+    monkeypatch.setattr(
+        "dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}}
+    )
+    monkeypatch.setattr("dagua.eval.report.generate_report", lambda *args, **kwargs: {})
+
+    payload = run_standard_suite(
+        output_dir=str(output_dir),
+        reuse_cached=False,
+        resume_incomplete=True,
+        retry_failed=True,
+    )
+
+    assert payload["run_id"] == run_dir.name
+    assert calls["dagua"] == 1
+    assert calls["graphviz_dot"] == 0
+    assert payload["graphs"]["tiny_retry"]["competitors"]["dagua"]["status"] == "OK"
+    assert payload["graphs"]["tiny_retry"]["competitors"]["graphviz_dot"]["status"] == "OK"
+
+
+@pytest.mark.smoke
+def test_standard_suite_retry_failed_reruns_failed_cached_results(tmp_path, monkeypatch):
+    output_dir = tmp_path / "eval_output"
+    latest_run = output_dir / "benchmark_db" / "standard" / "2026-03-12T00:00:00+00:00"
+    latest_run.mkdir(parents=True, exist_ok=True)
+
+    graph = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
+    tg = TestGraph(
+        name="tiny_cached_retry",
+        graph=graph,
+        tags={"linear"},
+        description="retry cached failures",
+        source="synthetic",
+        expected_challenges="none",
+    )
+    suite = [BenchmarkGraph(tg, "linear", "standard", True, "small")]
+
+    latest_payload = {
+        "run_id": latest_run.name,
+        "suite": "standard",
+        "system": {"graphviz": "dot 1.0"},
+        "graphs": {
+            "tiny_cached_retry": {
+                "n_nodes": 3,
+                "n_edges": 2,
+                "structural_category": "linear",
+                "description": "retry cached failures",
+                "expected_challenges": "none",
+                "tags": ["linear"],
+                "source": "synthetic",
+                "visualize": True,
+                "scale_tier": "small",
+                "competitors": {
+                    "graphviz_dot": {
+                        "status": "FAILED",
+                        "reason": "exception",
+                        "runtime_seconds": None,
+                        "metrics": {},
+                        "composite_score": None,
+                        "metrics_computed": [],
+                        "metrics_skipped": ["tier1", "tier2", "tier3"],
+                        "positions_path": None,
+                    }
+                },
+            }
+        },
+    }
+    latest_metadata = {
+        "graph_signatures": {
+            "tiny_cached_retry": __import__("hashlib")
+            .sha256(
+                json.dumps(graph.to_json(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+            )
+            .hexdigest()
+        },
+        "competitor_signatures": {
+            "graphviz_dot": "graphviz_dot:dot 1.0",
+            "dagua": "dagua:cpu:newhash",
+        },
+    }
+    (latest_run / "results.json").write_text(json.dumps(latest_payload), encoding="utf-8")
+    (latest_run / "metadata.json").write_text(json.dumps(latest_metadata), encoding="utf-8")
+    (latest_run.parent / "latest").symlink_to(latest_run.name)
+
+    calls = {"graphviz_dot": 0}
+    pos = torch.tensor([[0.0, 0.0], [0.0, 50.0], [0.0, 100.0]], dtype=torch.float32)
+
+    class FakeCompetitor:
+        def __init__(self, name):
+            self.name = name
+            self.max_nodes = 10
+
+        def available(self):
+            return True
+
+        def layout(self, graph, timeout=300.0):
+            calls[self.name] += 1
+            return type("Result", (), {"pos": pos, "runtime_seconds": 0.02, "error": None})()
+
+    monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._competitor_map", lambda names=None: [FakeCompetitor("graphviz_dot")]
+    )
+    monkeypatch.setattr("dagua.eval.benchmark._system_metadata", lambda: {"graphviz": "dot 1.0"})
+    monkeypatch.setattr(
+        "dagua.eval.benchmark.merge_latest_results", lambda output_dir=None: {"graphs": {}}
+    )
+    monkeypatch.setattr("dagua.eval.report.generate_report", lambda *args, **kwargs: {})
+
+    payload = run_standard_suite(
+        output_dir=str(output_dir),
+        reuse_cached=True,
+        resume_incomplete=False,
+        retry_failed=True,
+    )
+
+    result = payload["graphs"]["tiny_cached_retry"]["competitors"]["graphviz_dot"]
+    assert calls["graphviz_dot"] == 1
+    assert result["status"] == "OK"
+    assert "reused_from" not in result
+
+
+@pytest.mark.smoke
 def test_benchmark_run_status_reports_partial_progress(tmp_path):
     output_dir = tmp_path / "eval_output"
     run_dir = output_dir / "benchmark_db" / "rare" / "2026-03-12T00:00:00+00:00"
@@ -494,6 +710,78 @@ def test_benchmark_run_status_reports_partial_progress(tmp_path):
     assert status["current_competitor"] == "dagua"
     assert status["graphs"]["done_graph"]["status"] == "complete"
     assert status["graphs"]["todo_graph"]["status"] == "incomplete"
+
+
+@pytest.mark.smoke
+def test_standard_suite_checkpoints_after_each_competitor(tmp_path, monkeypatch):
+    output_dir = tmp_path / "eval_output"
+    graph = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
+    tg = TestGraph(
+        name="tiny_checkpoint",
+        graph=graph,
+        tags={"linear"},
+        description="checkpoint after each competitor",
+        source="synthetic",
+        expected_challenges="none",
+    )
+    suite = [BenchmarkGraph(tg, "linear", "standard", True, "small")]
+    pos = torch.tensor([[0.0, 0.0], [0.0, 50.0], [0.0, 100.0]], dtype=torch.float32)
+    observed = {"checkpoint_seen": False}
+
+    class FakeCompetitor:
+        def __init__(self, name):
+            self.name = name
+            self.max_nodes = 10
+
+        def available(self):
+            return True
+
+        def layout(self, graph, timeout=300.0):
+            if self.name == "dagua":
+                return type("Result", (), {"pos": pos, "runtime_seconds": 0.01, "error": None})()
+
+            partial_paths = sorted(
+                {
+                    path.resolve()
+                    for path in (output_dir / "benchmark_db" / "standard").glob(
+                        "*/results.partial.json"
+                    )
+                }
+            )
+            if len(partial_paths) == 1:
+                partial_payload = json.loads(partial_paths[0].read_text(encoding="utf-8"))
+                competitors = partial_payload["graphs"]["tiny_checkpoint"]["competitors"]
+                observed["checkpoint_seen"] = (
+                    competitors.get("dagua", {}).get("status") == "OK"
+                    and "graphviz_dot" not in competitors
+                )
+            raise KeyboardInterrupt("stop after first competitor")
+
+    monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._competitor_map",
+        lambda names=None: [FakeCompetitor("dagua"), FakeCompetitor("graphviz_dot")],
+    )
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._system_metadata",
+        lambda: {"dagua_git_hash": "new", "graphviz": "dot 1.0"},
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="stop after first competitor"):
+        run_standard_suite(output_dir=str(output_dir), reuse_cached=False)
+
+    partial_paths = sorted(
+        {
+            path.resolve()
+            for path in (output_dir / "benchmark_db" / "standard").glob("*/results.partial.json")
+        }
+    )
+    assert len(partial_paths) == 1
+    partial_payload = json.loads(partial_paths[0].read_text(encoding="utf-8"))
+    competitors = partial_payload["graphs"]["tiny_checkpoint"]["competitors"]
+    assert observed["checkpoint_seen"] is True
+    assert competitors["dagua"]["status"] == "OK"
+    assert "graphviz_dot" not in competitors
 
 
 @pytest.mark.smoke

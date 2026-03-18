@@ -27,6 +27,7 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -315,12 +316,56 @@ def _progress_path(run_dir: Path) -> Path:
 
 
 def _save_json(path: Path, payload: Dict[str, Any]) -> None:
+    """Persist a JSON payload with stable formatting.
+
+    Parameters
+    ----------
+    path : Path
+        Destination file path.
+    payload : Dict[str, Any]
+        Data to serialize as JSON.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=False, default=str)
 
 
+def _save_json_atomic(path: Path, data: Dict[str, Any]) -> None:
+    """Write JSON atomically via a temporary file.
+
+    Parameters
+    ----------
+    path : Path
+        Target file path.
+    data : Dict[str, Any]
+        Data to serialize.
+    """
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp", prefix=path.stem)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as file_obj:
+            json.dump(data, file_obj, indent=2, default=str)
+        Path(tmp_path).replace(path)
+    except BaseException:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+
+
 def _load_json(path: Path) -> Dict[str, Any]:
+    """Load a JSON object from disk.
+
+    Parameters
+    ----------
+    path : Path
+        JSON file path.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Parsed JSON payload.
+    """
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -334,17 +379,77 @@ def _update_latest_symlink(parent: Path, run_id: str) -> None:
 
 
 def _graph_signature(graph) -> str:
+    """Compute a stable structural hash for a graph payload.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object exposing ``to_json()``.
+
+    Returns
+    -------
+    str
+        SHA256 hex digest of the canonical graph JSON.
+    """
     payload = json.dumps(graph.to_json(), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _dagua_source_signature() -> str:
+    """Hash Dagua source files that affect layout output.
+
+    Returns
+    -------
+    str
+        Hex digest prefix of the combined file hash.
+    """
+    hasher = hashlib.sha256()
+    dagua_root = Path(__file__).resolve().parent.parent
+
+    for py_file in sorted(dagua_root.rglob("*.py")):
+        if "eval" in py_file.relative_to(dagua_root).parts:
+            continue
+        hasher.update(py_file.read_bytes())
+
+    return hasher.hexdigest()[:16]
+
+
 def _graph_signature_map(graphs: Sequence[BenchmarkGraph]) -> Dict[str, str]:
+    """Build graph signatures for a benchmark suite.
+
+    Parameters
+    ----------
+    graphs : Sequence[BenchmarkGraph]
+        Graph definitions to hash.
+
+    Returns
+    -------
+    Dict[str, str]
+        Mapping from graph name to structural signature.
+    """
     return {bg.test_graph.name: _graph_signature(bg.test_graph.graph) for bg in graphs}
 
 
 def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
+    """Build a cache signature for a competitor implementation.
+
+    Parameters
+    ----------
+    name : str
+        Competitor identifier.
+    system : Dict[str, Any]
+        Collected runtime metadata for the benchmark host.
+
+    Returns
+    -------
+    str
+        Signature string used to validate cache compatibility.
+    """
+    if name == "dagua":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        return f"dagua:{device}:{_dagua_source_signature()}"
+
     version_keys = {
-        "dagua": "dagua_git_hash",
         "graphviz_dot": "graphviz",
         "graphviz_sfdp": "graphviz",
         "elk_layered": "elk",
@@ -360,6 +465,20 @@ def _competitor_signature_map(
     competitors: Sequence[CompetitorBase],
     system: Dict[str, Any],
 ) -> Dict[str, str]:
+    """Build cache signatures for all requested competitors.
+
+    Parameters
+    ----------
+    competitors : Sequence[CompetitorBase]
+        Competitors participating in the run.
+    system : Dict[str, Any]
+        Collected runtime metadata for the benchmark host.
+
+    Returns
+    -------
+    Dict[str, str]
+        Mapping from competitor name to cache signature.
+    """
     return {
         competitor.name: _competitor_signature(competitor.name, system)
         for competitor in competitors
@@ -736,7 +855,49 @@ def _build_results_payload(
     rerun_competitors: Optional[Sequence[str]] = None,
     existing_payload: Optional[Dict[str, Any]] = None,
     checkpoint_each_graph: bool = False,
+    retry_failed: bool = False,
 ) -> Dict[str, Any]:
+    """Execute a suite and assemble the persisted benchmark payload.
+
+    Parameters
+    ----------
+    suite : str
+        Benchmark suite identifier.
+    run_id : str
+        Unique timestamp-like run identifier.
+    graphs : Sequence[BenchmarkGraph]
+        Graphs to execute.
+    competitors : Sequence[CompetitorBase]
+        Competitors to run for each graph.
+    timeout : float
+        Per-competitor timeout in seconds.
+    output_dir : str
+        Benchmark output root.
+    cached_payload : Optional[Dict[str, Any]], optional
+        Latest completed payload used for cache reuse.
+    cached_metadata : Optional[Dict[str, Any]], optional
+        Metadata paired with the cached payload.
+    latest_run_dir : Optional[Path], optional
+        Filesystem location of the cached run.
+    graph_signatures : Optional[Dict[str, str]], optional
+        Current graph signatures for cache validation.
+    competitor_signatures : Optional[Dict[str, str]], optional
+        Current competitor signatures for cache validation.
+    rerun_competitors : Optional[Sequence[str]], optional
+        Competitors that must ignore cache reuse.
+    existing_payload : Optional[Dict[str, Any]], optional
+        Partial payload to resume from.
+    checkpoint_each_graph : bool, optional
+        Whether to persist resumable partial results during execution.
+    retry_failed : bool, optional
+        Whether previously failed competitors should be retried on resume or
+        cache reuse.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Full benchmark results payload.
+    """
     run_dir = _run_dir(output_dir, suite, run_id)
     _positions_dir(run_dir)
     graph_signatures = graph_signatures or {}
@@ -773,8 +934,12 @@ def _build_results_payload(
         graph_payload.setdefault("competitors", {})
         for competitor in competitors:
             existing_result = graph_payload["competitors"].get(competitor.name)
-            if existing_result and existing_result.get("status") in {"OK", "FAILED", "SKIPPED"}:
-                continue
+            if existing_result:
+                status = existing_result.get("status")
+                if status in {"OK", "SKIPPED"}:
+                    continue
+                if status == "FAILED" and not retry_failed:
+                    continue
             _write_progress(
                 run_dir,
                 suite,
@@ -790,6 +955,7 @@ def _build_results_payload(
                 else None,
             )
             reused = None
+            competitor_result: Optional[Dict[str, Any]] = None
             if competitor.name not in rerun_set:
                 reused = _reuse_cached_result(
                     graph_name=bg.test_graph.name,
@@ -801,12 +967,19 @@ def _build_results_payload(
                     graph_signatures=graph_signatures,
                     competitor_signatures=competitor_signatures,
                 )
-            graph_payload["competitors"][competitor.name] = reused or _run_one_competitor(
-                bg,
-                competitor,
-                timeout=timeout,
-                run_dir=run_dir,
-            )
+                if reused is not None and (not retry_failed or reused.get("status") != "FAILED"):
+                    competitor_result = reused
+            if competitor_result is None:
+                competitor_result = _run_one_competitor(
+                    bg,
+                    competitor,
+                    timeout=timeout,
+                    run_dir=run_dir,
+                )
+            graph_payload["competitors"][competitor.name] = competitor_result
+            payload["graphs"][bg.test_graph.name] = graph_payload
+            if checkpoint_each_graph:
+                _save_json_atomic(_partial_results_path(run_dir), payload)
             _write_progress(
                 run_dir,
                 suite,
@@ -821,19 +994,6 @@ def _build_results_payload(
                 last_artifact=graph_payload["competitors"][competitor.name].get("positions_path"),
             )
         payload["graphs"][bg.test_graph.name] = graph_payload
-        if checkpoint_each_graph:
-            _save_json(_partial_results_path(run_dir), payload)
-            _write_progress(
-                run_dir,
-                suite,
-                run_id,
-                graphs,
-                competitors,
-                payload,
-                current_graph=bg.test_graph.name,
-                step="checkpointed",
-                last_artifact=str(_partial_results_path(run_dir)),
-            )
 
     _write_progress(
         run_dir,
@@ -978,7 +1138,38 @@ def run_suite(
     rerun_competitors: Optional[Sequence[str]] = None,
     resume_incomplete: bool = True,
     checkpoint_each_graph: bool = False,
+    retry_failed: bool = False,
 ) -> Dict[str, Any]:
+    """Run a benchmark suite and persist the resulting artifacts.
+
+    Parameters
+    ----------
+    suite : str, optional
+        Benchmark suite identifier.
+    output_dir : str, optional
+        Output root for benchmark artifacts.
+    competitors : Optional[Sequence[str]], optional
+        Explicit competitor order to run.
+    timeout : float, optional
+        Per-competitor timeout in seconds.
+    generate_report_artifacts : bool, optional
+        Whether to build report outputs after completion.
+    reuse_cached : bool, optional
+        Whether compatible results from the latest run may be reused.
+    rerun_competitors : Optional[Sequence[str]], optional
+        Competitors that must ignore cache reuse.
+    resume_incomplete : bool, optional
+        Whether to resume the latest partial run for the suite.
+    checkpoint_each_graph : bool, optional
+        Whether to persist resumable partial results during execution.
+    retry_failed : bool, optional
+        Whether previously failed competitors should be retried.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Full benchmark results payload.
+    """
     graphs = _suite_graphs(suite)
     competitor_list = _competitor_map(competitors)
     system = _system_metadata()
@@ -1021,6 +1212,7 @@ def run_suite(
             "rerun_competitors": rerun_list,
             "resume_incomplete": resume_incomplete,
             "checkpoint_each_graph": checkpoint_each_graph,
+            "retry_failed": retry_failed,
             "resumed_from_partial": existing_run_dir is not None,
         },
     )
@@ -1050,6 +1242,7 @@ def run_suite(
         rerun_competitors=rerun_list,
         existing_payload=existing_payload,
         checkpoint_each_graph=checkpoint_each_graph,
+        retry_failed=retry_failed,
     )
     _save_json(run_dir / "results.json", payload)
     _write_progress(
@@ -1083,7 +1276,34 @@ def run_standard_suite(
     rerun_competitors: Optional[Sequence[str]] = None,
     resume_incomplete: bool = True,
     checkpoint_each_graph: bool = True,
+    retry_failed: bool = False,
 ) -> Dict[str, Any]:
+    """Run the standard benchmark suite.
+
+    Parameters
+    ----------
+    output_dir : str, optional
+        Output root for benchmark artifacts.
+    competitors : Optional[Sequence[str]], optional
+        Explicit competitor order to run.
+    timeout : float, optional
+        Per-competitor timeout in seconds.
+    reuse_cached : bool, optional
+        Whether compatible results from the latest run may be reused.
+    rerun_competitors : Optional[Sequence[str]], optional
+        Competitors that must ignore cache reuse.
+    resume_incomplete : bool, optional
+        Whether to resume the latest partial run.
+    checkpoint_each_graph : bool, optional
+        Whether to persist resumable partial results during execution.
+    retry_failed : bool, optional
+        Whether previously failed competitors should be retried.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Full benchmark results payload.
+    """
     return run_suite(
         suite=STANDARD_SUITE,
         output_dir=output_dir,
@@ -1094,6 +1314,7 @@ def run_standard_suite(
         rerun_competitors=rerun_competitors,
         resume_incomplete=resume_incomplete,
         checkpoint_each_graph=checkpoint_each_graph,
+        retry_failed=retry_failed,
     )
 
 
@@ -1104,7 +1325,32 @@ def run_rare_suite(
     reuse_cached: bool = True,
     rerun_competitors: Optional[Sequence[str]] = None,
     resume_incomplete: bool = True,
+    retry_failed: bool = False,
 ) -> Dict[str, Any]:
+    """Run the rare benchmark suite.
+
+    Parameters
+    ----------
+    output_dir : str, optional
+        Output root for benchmark artifacts.
+    competitors : Optional[Sequence[str]], optional
+        Explicit competitor order to run.
+    timeout : float, optional
+        Per-competitor timeout in seconds.
+    reuse_cached : bool, optional
+        Whether compatible results from the latest run may be reused.
+    rerun_competitors : Optional[Sequence[str]], optional
+        Competitors that must ignore cache reuse.
+    resume_incomplete : bool, optional
+        Whether to resume the latest partial run.
+    retry_failed : bool, optional
+        Whether previously failed competitors should be retried.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Full benchmark results payload.
+    """
     if competitors is None:
         competitors = ["dagua", "graphviz_sfdp"]
     return run_suite(
@@ -1117,6 +1363,7 @@ def run_rare_suite(
         rerun_competitors=rerun_competitors,
         resume_incomplete=resume_incomplete,
         checkpoint_each_graph=True,
+        retry_failed=retry_failed,
     )
 
 
@@ -1145,7 +1392,56 @@ def run_benchmark(
     return _flatten_results(payload)
 
 
+def _print_summary(payload: Dict[str, Any]) -> None:
+    """Print a human-readable benchmark summary.
+
+    Parameters
+    ----------
+    payload : Dict[str, Any]
+        Full benchmark results payload.
+    """
+    graphs = payload.get("graphs", {})
+    if not graphs:
+        return
+
+    all_competitors: set[str] = set()
+    for graph_data in graphs.values():
+        all_competitors.update(graph_data.get("competitors", {}).keys())
+    competitors = sorted(all_competitors)
+
+    print(f"\n{'Graph':<30s}", end="")
+    for competitor_name in competitors:
+        print(f"{competitor_name:<16s}", end="")
+    print()
+    print("-" * (30 + 16 * len(competitors)))
+
+    for graph_name in graphs:
+        graph_data = graphs[graph_name]
+        print(f"{graph_name:<30s}", end="")
+        for competitor_name in competitors:
+            competitor_data = graph_data.get("competitors", {}).get(competitor_name, {})
+            status = competitor_data.get("status", "—")
+            print(f"{status:<16s}", end="")
+        print()
+
+    print("-" * (30 + 16 * len(competitors)))
+    for competitor_name in competitors:
+        ok_count = sum(
+            1
+            for graph_data in graphs.values()
+            if graph_data.get("competitors", {}).get(competitor_name, {}).get("status") == "OK"
+        )
+        total_count = sum(
+            1
+            for graph_data in graphs.values()
+            if competitor_name in graph_data.get("competitors", {})
+        )
+        print(f"  {competitor_name}: {ok_count}/{total_count} OK")
+    print()
+
+
 def main() -> None:
+    """Run the benchmark CLI entry point."""
     parser = argparse.ArgumentParser(description="Run Dagua benchmark suites")
     parser.add_argument("--suite", choices=[STANDARD_SUITE, RARE_SUITE], default=STANDARD_SUITE)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
@@ -1153,6 +1449,11 @@ def main() -> None:
     parser.add_argument("--competitors", default=None, help="Comma-separated competitor list")
     parser.add_argument(
         "--rerun-competitors", default=None, help="Comma-separated competitors to force rerun"
+    )
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Re-run only competitors that previously FAILED (skip OK and SKIPPED)",
     )
     parser.add_argument(
         "--merge-only",
@@ -1187,24 +1488,28 @@ def main() -> None:
 
     competitors = args.competitors.split(",") if args.competitors else None
     rerun_competitors = args.rerun_competitors.split(",") if args.rerun_competitors else None
+    result_payload: Dict[str, Any]
     if args.suite == STANDARD_SUITE:
-        run_standard_suite(
+        result_payload = run_standard_suite(
             output_dir=args.output_dir,
             competitors=competitors,
             timeout=args.timeout,
             reuse_cached=not args.no_reuse_cached,
             rerun_competitors=rerun_competitors,
             resume_incomplete=not args.no_resume,
+            retry_failed=args.retry_failed,
         )
     else:
-        run_rare_suite(
+        result_payload = run_rare_suite(
             output_dir=args.output_dir,
             competitors=competitors,
             timeout=args.timeout,
             reuse_cached=not args.no_reuse_cached,
             rerun_competitors=rerun_competitors,
             resume_incomplete=not args.no_resume,
+            retry_failed=args.retry_failed,
         )
+    _print_summary(result_payload)
 
 
 if __name__ == "__main__":
