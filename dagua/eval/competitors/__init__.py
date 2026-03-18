@@ -11,9 +11,11 @@ from dagua.eval.competitors import (
     dagre_competitor,  # noqa: F401
     dagua_competitor,  # noqa: F401
     elk_competitor,  # noqa: F401
+    fa2_competitor,  # noqa: F401
     graphviz_competitor,  # noqa: F401
     igraph_competitor,  # noqa: F401
     networkx_competitor,  # noqa: F401
+    ogdf_competitor,  # noqa: F401
     sgd2_competitor,  # noqa: F401
     tsne_competitor,  # noqa: F401
     umap_competitor,  # noqa: F401
