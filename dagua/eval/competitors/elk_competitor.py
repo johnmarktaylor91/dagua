@@ -186,7 +186,12 @@ class ElkLayered(CompetitorBase):
     max_nodes = 15_000
     supports_clusters = True
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run ELK layered layout with nested clusters mapped to group nodes.
 
         Parameters
@@ -195,12 +200,17 @@ class ElkLayered(CompetitorBase):
             Graph to lay out.
         timeout : float, default=300.0
             Maximum runtime in seconds.
+        seed : int | None, default=None
+            Accepted for interface consistency but ignored because ELK layered
+            is deterministic for a fixed input.
 
         Returns
         -------
         CompetitorResult
             Layout result and timing information.
         """
+        del seed
+
         n = graph.num_nodes
         emitted_nodes: Set[int] = set()
         children = _build_elk_children(graph, None, _cluster_children(graph), emitted_nodes)
