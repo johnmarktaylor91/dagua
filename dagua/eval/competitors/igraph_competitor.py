@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -41,15 +41,43 @@ class _IgraphBase(CompetitorBase):
 
     layout_algo: str = "sugiyama"
     layout_kwargs: dict = {}
+    accepts_seed: bool = False
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the configured igraph layout algorithm.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility timeout parameter.
+        seed : int | None, default=None
+            Random seed forwarded only for igraph layouts that expose a
+            ``seed`` keyword, currently Fruchterman-Reingold.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and timing information.
+        """
+        del timeout
+
         import igraph  # noqa: F401
 
         ig = _graph_to_igraph(graph)
 
         start = time.perf_counter()
         try:
-            ig_layout = ig.layout(self.layout_algo, **self.layout_kwargs)
+            kwargs = dict(self.layout_kwargs)
+            if seed is not None and self.accepts_seed:
+                kwargs["seed"] = seed
+            ig_layout = ig.layout(self.layout_algo, **kwargs)
             elapsed = time.perf_counter() - start
             pos = _igraph_pos_to_tensor(ig_layout, graph.num_nodes)
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -80,6 +108,7 @@ class IgraphFR(_IgraphBase):
     max_nodes = 50_000
     layout_algo = "fruchterman_reingold"
     layout_kwargs = {"niter": 500}
+    accepts_seed = True
 
 
 @register

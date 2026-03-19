@@ -8,6 +8,8 @@ import pytest
 import torch
 
 from dagua.eval.competitors import get_available_competitors
+from dagua.eval.competitors.classic_competitor import ClassicFR
+from dagua.eval.graphs import get_test_graphs
 from dagua.graph import DaguaGraph
 
 EXPECTED_CLASSIC_NAMES = {
@@ -123,6 +125,23 @@ def test_classic_competitor_positions_have_expected_shape() -> None:
         result = competitors[competitor_name].layout(graph)
         assert result.pos is not None
         assert tuple(result.pos.shape) == (graph.num_nodes, 2)
+
+
+def test_classic_fr_seed_override_changes_layout() -> None:
+    """Classic FR should preserve the default seed and honor explicit overrides."""
+    graph = next(tg.graph for tg in get_test_graphs() if tg.name == "residual_block")
+    graph.compute_node_sizes()
+
+    competitor = ClassicFR()
+    default_result = competitor.layout(graph)
+    seeded_result = competitor.layout(graph, seed=42)
+    other_seed_result = competitor.layout(graph, seed=99)
+
+    assert default_result.pos is not None
+    assert seeded_result.pos is not None
+    assert other_seed_result.pos is not None
+    assert torch.allclose(default_result.pos, seeded_result.pos)
+    assert not torch.allclose(seeded_result.pos, other_seed_result.pos)
 
 
 def test_graphviz_dot_with_clusters() -> None:
