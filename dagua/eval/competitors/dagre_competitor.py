@@ -207,7 +207,12 @@ class DagreCompetitor(CompetitorBase):
     max_nodes = 2_000
     supports_clusters = True
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run Dagre with compound-graph cluster assignments.
 
         Parameters
@@ -216,12 +221,17 @@ class DagreCompetitor(CompetitorBase):
             Graph to lay out.
         timeout : float, default=300.0
             Maximum runtime in seconds.
+        seed : int | None, default=None
+            Accepted for interface consistency but ignored because Dagre is
+            deterministic for a fixed input.
 
         Returns
         -------
         CompetitorResult
             Layout result and timing information.
         """
+        del seed
+
         n = graph.num_nodes
         input_data = json.dumps(_build_dagre_input(graph))
 

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
+from dagua.eval.competitors.base import (
+    CompetitorBase,
+    CompetitorResult,
+    register,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -90,7 +94,12 @@ class UMAPGraph(CompetitorBase):
     name = "umap_graph"
     max_nodes = 20_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run UMAP on all-pairs graph shortest-path distances.
 
         Parameters
@@ -100,6 +109,9 @@ class UMAPGraph(CompetitorBase):
         timeout : float, optional
             Unused adapter timeout in seconds. Included for interface
             compatibility with the benchmark harness.
+        seed : int | None, default=None
+            Random seed for UMAP initialization. ``None`` preserves the
+            adapter's historical default of ``42``.
 
         Returns
         -------
@@ -127,7 +139,7 @@ class UMAPGraph(CompetitorBase):
             reducer = umap.UMAP(
                 n_components=2,
                 metric="precomputed",
-                random_state=42,
+                random_state=seed if seed is not None else 42,
                 n_neighbors=min(15, num_nodes - 1),
             )
             coordinates = reducer.fit_transform(distances)

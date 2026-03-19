@@ -316,7 +316,12 @@ class _GraphvizBase(CompetitorBase):
 
     engine: str = "dot"
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the configured Graphviz engine for a graph.
 
         Parameters
@@ -325,12 +330,17 @@ class _GraphvizBase(CompetitorBase):
             Graph to lay out.
         timeout : float, default=300.0
             Maximum runtime in seconds.
+        seed : int | None, default=None
+            Accepted for interface consistency but ignored because Graphviz's
+            Python entry points do not expose seed control here.
 
         Returns
         -------
         CompetitorResult
             Layout result and timing information.
         """
+        del seed
+
         from dagua.graphviz_utils import layout_with_graphviz
 
         start = time.perf_counter()
@@ -366,7 +376,12 @@ class GraphvizDot(_GraphvizBase):
     max_nodes = 5_000
     supports_clusters = True
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run Graphviz dot with nested-cluster awareness.
 
         Parameters
@@ -375,12 +390,17 @@ class GraphvizDot(_GraphvizBase):
             Graph to lay out.
         timeout : float, default=300.0
             Maximum runtime in seconds.
+        seed : int | None, default=None
+            Accepted for interface consistency but ignored because Graphviz's
+            ``dot`` JSON path does not expose seed control.
 
         Returns
         -------
         CompetitorResult
             Layout result and timing information.
         """
+        del seed
+
         start = time.perf_counter()
         try:
             pos = _layout_with_dot(graph, timeout=timeout)

@@ -932,7 +932,28 @@ def _run_one_competitor(
     competitor: CompetitorBase,
     timeout: float,
     run_dir: Path,
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
+    """Run one competitor on one benchmark graph and serialize its positions.
+
+    Parameters
+    ----------
+    bg : BenchmarkGraph
+        Benchmark graph wrapper describing the graph under test.
+    competitor : CompetitorBase
+        Adapter being executed for this graph.
+    timeout : float
+        Maximum runtime in seconds for the competitor invocation.
+    run_dir : Path
+        Benchmark run directory where position tensors are written.
+    seed : Optional[int], optional
+        Random seed forwarded to stochastic competitor adapters.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Persistable result payload for the graph/competitor pair.
+    """
     graph = bg.test_graph.graph
     graph.compute_node_sizes()
     n_nodes = graph.num_nodes
@@ -962,7 +983,7 @@ def _run_one_competitor(
         }
 
     try:
-        result = competitor.layout(graph, timeout=timeout)
+        result = competitor.layout(graph, timeout=timeout, seed=seed)
     except Exception as exc:
         return {
             "status": "FAILED",
@@ -1012,6 +1033,7 @@ def _build_results_payload(
     competitors: Sequence[CompetitorBase],
     timeout: float,
     output_dir: str,
+    seed: Optional[int] = None,
     cached_payload: Optional[Dict[str, Any]] = None,
     cached_metadata: Optional[Dict[str, Any]] = None,
     latest_run_dir: Optional[Path] = None,
@@ -1038,6 +1060,10 @@ def _build_results_payload(
         Per-competitor timeout in seconds.
     output_dir : str
         Benchmark output root.
+    seed : Optional[int], optional
+        Random seed forwarded to stochastic competitor adapters. ``None``
+        preserves their single-run defaults. Explicit seeds also disable cache
+        reuse so layouts from different seeds cannot be mixed.
     cached_payload : Optional[Dict[str, Any]], optional
         Latest completed payload used for cache reuse.
     cached_metadata : Optional[Dict[str, Any]], optional
@@ -1121,7 +1147,7 @@ def _build_results_payload(
             )
             reused = None
             competitor_result: Optional[Dict[str, Any]] = None
-            if competitor.name not in rerun_set:
+            if seed is None and competitor.name not in rerun_set:
                 reused = _reuse_cached_result(
                     graph_name=bg.test_graph.name,
                     competitor_name=competitor.name,
@@ -1140,6 +1166,7 @@ def _build_results_payload(
                     competitor,
                     timeout=timeout,
                     run_dir=run_dir,
+                    seed=seed,
                 )
             graph_payload["competitors"][competitor.name] = competitor_result
             payload["graphs"][bg.test_graph.name] = graph_payload

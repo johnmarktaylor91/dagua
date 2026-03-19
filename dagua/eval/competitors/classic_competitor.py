@@ -7,9 +7,13 @@ they can be benchmarked alongside the original reference implementations.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
-from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
+from dagua.eval.competitors.base import (
+    CompetitorBase,
+    CompetitorResult,
+    register,
+)
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
@@ -17,6 +21,21 @@ if TYPE_CHECKING:
 
 class _ClassicBase(CompetitorBase):
     """Base for classic reimplementation adapters."""
+
+    def _layout_seed(self, seed: Optional[int]) -> int:
+        """Resolve the seed for stochastic classic layouts.
+
+        Parameters
+        ----------
+        seed : int | None
+            Explicit benchmark seed override.
+
+        Returns
+        -------
+        int
+            Explicit benchmark seed, or ``42`` when no override is provided.
+        """
+        return 42 if seed is None else seed
 
     def available(self) -> bool:
         """Report whether the adapter can run in the current environment.
@@ -36,7 +55,12 @@ class ClassicFR(_ClassicBase):
     name = "classic_fr"
     max_nodes = 50_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic Fruchterman-Reingold layout.
 
         Parameters
@@ -45,6 +69,9 @@ class ClassicFR(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -62,7 +89,7 @@ class ClassicFR(_ClassicBase):
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
                 steps=200,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -83,7 +110,12 @@ class ClassicKK(_ClassicBase):
     name = "classic_kk"
     max_nodes = 5_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic Kamada-Kawai layout.
 
         Parameters
@@ -92,6 +124,9 @@ class ClassicKK(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -109,7 +144,7 @@ class ClassicKK(_ClassicBase):
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
                 steps=300,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -130,7 +165,12 @@ class ClassicFA2(_ClassicBase):
     name = "classic_fa2"
     max_nodes = 50_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic ForceAtlas2 layout.
 
         Parameters
@@ -139,6 +179,9 @@ class ClassicFA2(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -156,7 +199,7 @@ class ClassicFA2(_ClassicBase):
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
                 steps=200,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -177,7 +220,12 @@ class ClassicStressSGD(_ClassicBase):
     name = "classic_stress_sgd"
     max_nodes = 50_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic Stress-SGD layout.
 
         Parameters
@@ -186,6 +234,9 @@ class ClassicStressSGD(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -203,7 +254,7 @@ class ClassicStressSGD(_ClassicBase):
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
                 steps=300,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -224,7 +275,12 @@ class ClassicSugiyama(_ClassicBase):
     name = "classic_sugiyama"
     max_nodes = 50_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic Sugiyama layout.
 
         Parameters
@@ -233,6 +289,9 @@ class ClassicSugiyama(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for barycenter tie-breaking. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -249,6 +308,7 @@ class ClassicSugiyama(_ClassicBase):
                 graph.edge_index,
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -269,7 +329,12 @@ class ClassicSpectral(_ClassicBase):
     name = "classic_spectral"
     max_nodes = 100_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic spectral layout.
 
         Parameters
@@ -278,6 +343,9 @@ class ClassicSpectral(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -294,7 +362,7 @@ class ClassicSpectral(_ClassicBase):
                 graph.edge_index,
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -315,7 +383,12 @@ class ClassicPivotMDS(_ClassicBase):
     name = "classic_pivot_mds"
     max_nodes = 500_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic pivot-MDS layout.
 
         Parameters
@@ -324,6 +397,9 @@ class ClassicPivotMDS(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for pivot sampling. ``None`` preserves the historical
+            default of ``42``.
 
         Returns
         -------
@@ -341,7 +417,7 @@ class ClassicPivotMDS(_ClassicBase):
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
                 n_pivots=50,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -362,7 +438,12 @@ class ClassicLinLog(_ClassicBase):
     name = "classic_linlog"
     max_nodes = 50_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic LinLog layout.
 
         Parameters
@@ -371,6 +452,9 @@ class ClassicLinLog(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -388,7 +472,7 @@ class ClassicLinLog(_ClassicBase):
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
                 steps=300,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -409,7 +493,12 @@ class ClassicGEM(_ClassicBase):
     name = "classic_gem"
     max_nodes = 50_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic GEM layout.
 
         Parameters
@@ -418,6 +507,9 @@ class ClassicGEM(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -435,7 +527,7 @@ class ClassicGEM(_ClassicBase):
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
                 max_iters=500,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -456,7 +548,12 @@ class ClassicTsNET(_ClassicBase):
     name = "classic_tsnet"
     max_nodes = 10_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic tsNET layout.
 
         Parameters
@@ -465,6 +562,9 @@ class ClassicTsNET(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -483,7 +583,7 @@ class ClassicTsNET(_ClassicBase):
                 node_sizes=graph.node_sizes,
                 perplexity=30,
                 steps=500,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -504,7 +604,12 @@ class ClassicMaxentStress(_ClassicBase):
     name = "classic_maxent_stress"
     max_nodes = 100_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic maxent-stress layout.
 
         Parameters
@@ -513,6 +618,9 @@ class ClassicMaxentStress(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -531,7 +639,7 @@ class ClassicMaxentStress(_ClassicBase):
                 node_sizes=graph.node_sizes,
                 steps=200,
                 alpha=1.0,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -552,7 +660,12 @@ class ClassicDavidsonHarel(_ClassicBase):
     name = "classic_davidson_harel"
     max_nodes = 50
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic Davidson-Harel layout.
 
         Parameters
@@ -561,6 +674,9 @@ class ClassicDavidsonHarel(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -578,7 +694,7 @@ class ClassicDavidsonHarel(_ClassicBase):
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
                 rounds=100,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -599,7 +715,12 @@ class ClassicFMMM(_ClassicBase):
     name = "classic_fmmm"
     max_nodes = 500_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the classic FM^3 layout.
 
         Parameters
@@ -608,6 +729,9 @@ class ClassicFMMM(_ClassicBase):
             Graph to lay out.
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
 
         Returns
         -------
@@ -625,7 +749,7 @@ class ClassicFMMM(_ClassicBase):
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
                 steps=100,
-                seed=42,
+                seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import time
-from typing import TYPE_CHECKING, Any, Callable, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 import torch
 
@@ -201,7 +201,12 @@ class _OGDFBase(CompetitorBase):
         """
         raise NotImplementedError
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run the configured OGDF layout and convert its positions to torch.
 
         Parameters
@@ -211,6 +216,9 @@ class _OGDFBase(CompetitorBase):
         timeout : float, optional
             Unused adapter timeout in seconds. Included for interface
             compatibility with the benchmark harness.
+        seed : int | None, default=None
+            Accepted for interface consistency but ignored because the Python
+            bindings do not expose OGDF's internal randomness controls.
 
         Returns
         -------
@@ -218,6 +226,8 @@ class _OGDFBase(CompetitorBase):
             Layout result with positions shaped ``[N, 2]`` on CPU, or an error
             payload if the third-party engine fails.
         """
+        del timeout, seed
+
         start = time.perf_counter()
         try:
             if graph.num_nodes <= 1:
