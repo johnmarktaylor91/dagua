@@ -222,6 +222,9 @@ def _reload_level_from_disk(level: CoarseLevel, path: Path) -> None:
     data = torch.load(path, map_location="cpu")
     level.edge_index = data["edge_index"]
     level.node_sizes = data["node_sizes"]
+    # Restore fine_to_coarse if it was freed to save RAM during coarsening.
+    if "fine_to_coarse" in data and level.fine_to_coarse is None:
+        level.fine_to_coarse = data["fine_to_coarse"]
     # Restore fine_layer_assignments if present -- avoids expensive layering
     # recompute (10-15 min at 100M+ nodes) during refinement.
     if "fine_layer_assignments" in data and level.fine_layer_assignments is None:
@@ -2070,6 +2073,19 @@ def multilevel_layout(
                 except OSError:
                     pass
                 _vlog(f"  Freed {len(levels) - 1} earlier levels (reload from checkpoint on demand)")
+
+            # Also free fine_to_coarse on earlier levels -- only needed during
+            # refinement prolongation, dead weight during coarsening. At 1.2B
+            # this is 4.8GB for level 0 alone.
+            if n > 10_000_000:
+                for _lvl in levels[:-1]:
+                    if _lvl.fine_to_coarse is not None:
+                        _lvl.fine_to_coarse = None
+                _gc_restore.collect()
+                try:
+                    _ctypes_restore.CDLL("libc.so.6").malloc_trim(0)
+                except (OSError, NameError):
+                    pass
 
             # Offload original graph BEFORE continuing coarsening — the
             # coarsening needs 20-30GB of working arrays and the original
