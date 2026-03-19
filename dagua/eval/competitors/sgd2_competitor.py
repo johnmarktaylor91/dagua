@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -69,7 +69,12 @@ class SGD2(CompetitorBase):
     name = "sgd2"
     max_nodes = 50_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run ``s_gd2`` and convert its output to a CPU tensor.
 
         Parameters
@@ -79,6 +84,8 @@ class SGD2(CompetitorBase):
         timeout : float, optional
             Unused adapter timeout in seconds. Included for interface
             compatibility with the benchmark harness.
+        seed : int | None, default=None
+            Random seed forwarded to ``s_gd2`` when explicitly requested.
 
         Returns
         -------
@@ -106,7 +113,10 @@ class SGD2(CompetitorBase):
                 elapsed = time.perf_counter() - start
                 return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
 
-            coordinates = s_gd2.layout(sources.tolist(), targets.tolist())
+            layout_kwargs = {}
+            if seed is not None:
+                layout_kwargs["random_seed"] = seed
+            coordinates = s_gd2.layout(sources.tolist(), targets.tolist(), **layout_kwargs)
             pos = torch.tensor(coordinates, dtype=torch.float32) * 100.0
 
             elapsed = time.perf_counter() - start

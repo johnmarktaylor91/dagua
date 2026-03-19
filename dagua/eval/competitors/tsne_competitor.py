@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
+from dagua.eval.competitors.base import (
+    CompetitorBase,
+    CompetitorResult,
+    register,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -58,7 +62,12 @@ class TSNEGraph(CompetitorBase):
     name = "tsne_graph"
     max_nodes = 5_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run sklearn t-SNE on all-pairs graph shortest-path distances.
 
         Parameters
@@ -68,6 +77,9 @@ class TSNEGraph(CompetitorBase):
         timeout : float, optional
             Unused adapter timeout in seconds. Included for interface
             compatibility with the benchmark harness.
+        seed : int | None, default=None
+            Random seed for t-SNE initialization. ``None`` preserves the
+            adapter's historical default of ``42``.
 
         Returns
         -------
@@ -95,7 +107,7 @@ class TSNEGraph(CompetitorBase):
                 n_components=2,
                 metric="precomputed",
                 init="random",
-                random_state=42,
+                random_state=seed if seed is not None else 42,
                 perplexity=min(30.0, float(num_nodes - 1)),
             )
             coordinates = tsne.fit_transform(distances)

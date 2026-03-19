@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional
@@ -30,8 +31,29 @@ class CompetitorBase(ABC):
     supports_clusters: bool = False
 
     @abstractmethod
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
-        """Run layout and return result with timing."""
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run layout and return result with timing.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime in seconds.
+        seed : int | None, default=None
+            Random seed for stochastic algorithms. ``None`` means use the
+            adapter default, typically ``42`` for reproducibility.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout outcome, runtime, and optional error details.
+        """
         ...
 
     def available(self) -> bool:
@@ -42,6 +64,29 @@ class CompetitorBase(ABC):
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 _COMPETITORS: Dict[str, CompetitorBase] = {}
+_RUNTIME_SEED_ENV_VAR = "DAGUA_COMPETITOR_SEED"
+
+
+def get_runtime_seed(default: Optional[int] = 42) -> Optional[int]:
+    """Return the benchmark runtime seed when one has been configured.
+
+    Parameters
+    ----------
+    default : int | None, default=42
+        Fallback seed used when no benchmark-specific override is present.
+
+    Returns
+    -------
+    int | None
+        Seed value for stochastic competitor adapters.
+    """
+    raw_seed = os.environ.get(_RUNTIME_SEED_ENV_VAR)
+    if raw_seed is None:
+        return default
+    try:
+        return int(raw_seed)
+    except ValueError:
+        return default
 
 
 def register(cls):
