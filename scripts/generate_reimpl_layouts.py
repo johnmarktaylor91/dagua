@@ -70,7 +70,7 @@ _register(
     "dagua.layout.classic.fa2",
     "layout_fa2",
     stochastic=True,
-    original_competitor="",
+    original_competitor="fa2_ref",
     max_nodes=50_000,
 )
 _register(
@@ -88,7 +88,7 @@ _register(
     "dagua.layout.classic.stress_sgd",
     "layout_stress_sgd",
     stochastic=True,
-    original_competitor="",
+    original_competitor="sgd2",
     max_nodes=50_000,
 )
 _register(
@@ -106,7 +106,7 @@ _register(
     "dagua.layout.classic.spectral",
     "layout_spectral",
     stochastic=False,
-    original_competitor="",
+    original_competitor="nx_spectral",
     max_nodes=100_000,
 )
 _register(
@@ -135,7 +135,7 @@ _register(
     "dagua.layout.classic.tsnet",
     "layout_tsnet",
     stochastic=True,
-    original_competitor="",
+    original_competitor="tsne_graph",
     max_nodes=10_000,
 )
 
