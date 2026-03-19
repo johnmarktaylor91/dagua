@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
+from dagua.eval.competitors.base import (
+    CompetitorBase,
+    CompetitorResult,
+    register,
+)
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
@@ -43,7 +47,31 @@ class _NetworkXBase(CompetitorBase):
     layout_func: str = "spring_layout"
     layout_kwargs: dict = {}
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the configured NetworkX layout algorithm.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility timeout parameter.
+        seed : int | None, default=None
+            Random seed forwarded when the underlying NetworkX layout accepts
+            a ``seed`` keyword. Deterministic layouts ignore it.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        del timeout
+
         import networkx as nx
 
         G = _graph_to_nx(graph)
@@ -51,7 +79,10 @@ class _NetworkXBase(CompetitorBase):
         start = time.perf_counter()
         try:
             func = getattr(nx, self.layout_func)
-            nx_pos = func(G, **self.layout_kwargs)
+            layout_kwargs = dict(self.layout_kwargs)
+            if seed is not None and "seed" in layout_kwargs:
+                layout_kwargs["seed"] = seed
+            nx_pos = func(G, **layout_kwargs)
             elapsed = time.perf_counter() - start
             pos = _nx_pos_to_tensor(nx_pos, graph.num_nodes)
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)

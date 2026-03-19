@@ -5,7 +5,9 @@ import pytest
 import torch
 
 from dagua.eval.benchmark import (
+    DEFAULT_COMPETITOR_ORDER,
     BenchmarkGraph,
+    _build_results_payload,
     _competitor_signature,
     benchmark_run_status,
     get_rare_suite_graphs,
@@ -14,6 +16,7 @@ from dagua.eval.benchmark import (
     run_rare_suite,
     run_standard_suite,
 )
+from dagua.eval.competitors import get_available_competitors
 from dagua.eval.competitors.dagua_competitor import DaguaCompetitor
 from dagua.eval.graphs import TestGraph
 from dagua.eval.report import generate_report
@@ -209,6 +212,183 @@ def test_dagua_competitor_signature_uses_device_and_source_hash(monkeypatch):
 
 
 @pytest.mark.smoke
+def test_competitor_signatures_cover_extended_families(monkeypatch):
+    """Ensure the benchmark cache key logic covers all supported families."""
+    source_signature = "abc123def4567890"  # pragma: allowlist secret
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._dagua_source_signature",
+        lambda: source_signature,  # pragma: allowlist secret
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    system = {
+        "graphviz": "dot 12.0",
+        "elk": "0.9.0",
+        "dagre": "1.1.5",
+        "igraph": "0.11.8",
+        "networkx": "3.4",
+        "sgd2": "1.0.0",
+        "fa2": "installed",
+        "umap": "0.5.7",
+        "sklearn": "1.6.1",
+        "scipy": "1.15.2",
+    }
+    names = [
+        "dagua",
+        "graphviz_dot",
+        "graphviz_sfdp",
+        "graphviz_neato",
+        "graphviz_fdp",
+        "elk_layered",
+        "dagre",
+        "igraph_sugiyama",
+        "igraph_fr",
+        "igraph_rt",
+        "nx_spring",
+        "nx_kamada_kawai",
+        "nx_spectral",
+        "sgd2",
+        "fa2_ref",
+        "tsne_graph",
+        "umap_graph",
+        "ogdf_gem",
+        "classic_fr",
+        "classic_fmmm",
+    ]
+
+    signatures = {name: _competitor_signature(name, system) for name in names}
+
+    assert all(":None" not in signature for signature in signatures.values())
+    assert signatures["classic_fr"] == f"classic_fr:{source_signature}"
+    assert signatures["classic_fmmm"] == f"classic_fmmm:{source_signature}"
+    assert signatures["tsne_graph"] == "tsne_graph:1.6.1:1.15.2"
+    assert signatures["umap_graph"] == "umap_graph:0.5.7:1.15.2"
+    assert signatures["ogdf_gem"] in {
+        "ogdf_gem:ogdf_available",
+        "ogdf_gem:ogdf_unavailable",
+    }
+
+
+@pytest.mark.smoke
+def test_build_results_payload_forwards_seed_to_competitor(tmp_path):
+    graph = DaguaGraph.from_edge_list([("a", "b"), ("b", "c")])
+    tg = TestGraph(
+        name="tiny_seeded",
+        graph=graph,
+        tags={"linear"},
+        description="seed forwarding",
+        source="synthetic",
+        expected_challenges="none",
+    )
+    suite = [BenchmarkGraph(tg, "linear", "standard", True, "small")]
+    observed: dict[str, int | None] = {"seed": None}
+    pos = torch.tensor([[0.0, 0.0], [0.0, 50.0], [0.0, 100.0]], dtype=torch.float32)
+
+    class FakeCompetitor:
+        name = "fake_seeded"
+        max_nodes = 10
+
+        def available(self):
+            return True
+
+        def layout(self, graph, timeout=300.0, seed=None):
+            del graph, timeout
+            observed["seed"] = seed
+            return type("Result", (), {"pos": pos, "runtime_seconds": 0.01, "error": None})()
+
+    cached_payload = {
+        "run_id": "2026-03-17T00:00:00+00:00",
+        "graphs": {
+            "tiny_seeded": {
+                "competitors": {
+                    "fake_seeded": {
+                        "status": "OK",
+                        "runtime_seconds": 0.5,
+                        "metrics": {},
+                        "composite_score": None,
+                        "metrics_computed": [],
+                        "metrics_skipped": ["tier1", "tier2", "tier3"],
+                        "positions_path": None,
+                    }
+                }
+            }
+        },
+    }
+    cached_metadata = {
+        "graph_signatures": {"tiny_seeded": "graph-v1"},
+        "competitor_signatures": {"fake_seeded": "fake-v1"},
+    }
+
+    payload = _build_results_payload(
+        suite="standard",
+        run_id="2026-03-18T00:00:00+00:00",
+        graphs=suite,
+        competitors=[FakeCompetitor()],
+        timeout=30.0,
+        output_dir=str(tmp_path),
+        seed=99,
+        cached_payload=cached_payload,
+        cached_metadata=cached_metadata,
+        latest_run_dir=tmp_path,
+        graph_signatures={"tiny_seeded": "graph-v1"},
+        competitor_signatures={"fake_seeded": "fake-v1"},
+    )
+
+    assert observed["seed"] == 99
+    assert payload["graphs"]["tiny_seeded"]["competitors"]["fake_seeded"]["status"] == "OK"
+    assert "reused_from" not in payload["graphs"]["tiny_seeded"]["competitors"]["fake_seeded"]
+
+
+@pytest.mark.smoke
+def test_default_competitor_order_covers_expected_and_available_competitors():
+    """Keep the default benchmark roster aligned with registered competitors."""
+    expected = {
+        "dagua",
+        "graphviz_dot",
+        "elk_layered",
+        "dagre",
+        "igraph_sugiyama",
+        "graphviz_sfdp",
+        "graphviz_neato",
+        "graphviz_fdp",
+        "nx_spring",
+        "nx_kamada_kawai",
+        "nx_spectral",
+        "igraph_fr",
+        "igraph_rt",
+        "sgd2",
+        "fa2_ref",
+        "tsne_graph",
+        "umap_graph",
+        "ogdf_gem",
+        "ogdf_fmmm",
+        "ogdf_stress",
+        "ogdf_sugiyama",
+        "ogdf_davidson_harel",
+        "ogdf_linlog",
+        "ogdf_pivot_mds",
+        "classic_fr",
+        "classic_kk",
+        "classic_fa2",
+        "classic_stress_sgd",
+        "classic_sugiyama",
+        "classic_spectral",
+        "classic_pivot_mds",
+        "classic_linlog",
+        "classic_gem",
+        "classic_tsnet",
+        "classic_maxent_stress",
+        "classic_davidson_harel",
+        "classic_fmmm",
+    }
+    order = set(DEFAULT_COMPETITOR_ORDER)
+    available = {competitor.name for competitor in get_available_competitors()}
+
+    assert expected <= order
+    assert available <= order
+
+
+@pytest.mark.smoke
 def test_standard_suite_reuses_cached_non_dagua_results(tmp_path, monkeypatch):
     output_dir = tmp_path / "eval_output"
     latest_run = output_dir / "benchmark_db" / "standard" / "2026-03-12T00:00:00+00:00"
@@ -289,11 +469,13 @@ def test_standard_suite_reuses_cached_non_dagua_results(tmp_path, monkeypatch):
         def available(self):
             return True
 
-        def layout(self, graph, timeout=300.0):
+        def layout(self, graph, timeout=300.0, seed=None):
+            del graph, timeout, seed
             raise AssertionError(f"{self.name} should not have been rerun")
 
     class FakeDagua(FakeCompetitor):
-        def layout(self, graph, timeout=300.0):
+        def layout(self, graph, timeout=300.0, seed=None):
+            del graph, timeout, seed
             return type("Result", (), {"pos": pos, "runtime_seconds": 0.02, "error": None})()
 
     monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)
@@ -343,7 +525,8 @@ def test_standard_suite_can_force_rerun_specific_competitor(tmp_path, monkeypatc
         def available(self):
             return True
 
-        def layout(self, graph, timeout=300.0):
+        def layout(self, graph, timeout=300.0, seed=None):
+            del graph, timeout, seed
             calls[self.name.split("_")[-1] if self.name != "dagua" else "dagua"] += 1
             return type("Result", (), {"pos": pos, "runtime_seconds": 0.01, "error": None})()
 
@@ -440,7 +623,8 @@ def test_rare_suite_resumes_from_partial_results(tmp_path, monkeypatch):
         def available(self):
             return True
 
-        def layout(self, graph, timeout=300.0):
+        def layout(self, graph, timeout=300.0, seed=None):
+            del graph, timeout, seed
             calls["dagua"] += 1
             return type("Result", (), {"pos": pos, "runtime_seconds": 0.02, "error": None})()
 
@@ -526,7 +710,8 @@ def test_standard_suite_retry_failed_resumes_only_failed_results(tmp_path, monke
         def available(self):
             return True
 
-        def layout(self, graph, timeout=300.0):
+        def layout(self, graph, timeout=300.0, seed=None):
+            del graph, timeout, seed
             calls[self.name] += 1
             return type("Result", (), {"pos": pos, "runtime_seconds": 0.02, "error": None})()
 
@@ -633,7 +818,8 @@ def test_standard_suite_retry_failed_reruns_failed_cached_results(tmp_path, monk
         def available(self):
             return True
 
-        def layout(self, graph, timeout=300.0):
+        def layout(self, graph, timeout=300.0, seed=None):
+            del graph, timeout, seed
             calls[self.name] += 1
             return type("Result", (), {"pos": pos, "runtime_seconds": 0.02, "error": None})()
 
@@ -741,7 +927,8 @@ def test_standard_suite_checkpoints_after_each_competitor(tmp_path, monkeypatch)
         def available(self):
             return True
 
-        def layout(self, graph, timeout=300.0):
+        def layout(self, graph, timeout=300.0, seed=None):
+            del graph, timeout, seed
             if self.name == "dagua":
                 return type("Result", (), {"pos": pos, "runtime_seconds": 0.01, "error": None})()
 
@@ -812,7 +999,8 @@ def test_standard_suite_writes_partial_checkpoints(tmp_path, monkeypatch):
         def available(self):
             return True
 
-        def layout(self, graph, timeout=300.0):
+        def layout(self, graph, timeout=300.0, seed=None):
+            del graph, timeout, seed
             return type("Result", (), {"pos": pos, "runtime_seconds": 0.01, "error": None})()
 
     monkeypatch.setattr("dagua.eval.benchmark._suite_graphs", lambda suite_name: suite)

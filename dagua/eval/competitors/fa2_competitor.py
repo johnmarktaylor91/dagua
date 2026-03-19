@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any, Type
+from typing import TYPE_CHECKING, Any, Optional, Type
 
 import torch
 
@@ -61,7 +61,12 @@ class FA2Reference(CompetitorBase):
     name = "fa2_ref"
     max_nodes = 20_000
 
-    def layout(self, graph: DaguaGraph, timeout: float = 300.0) -> CompetitorResult:
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
         """Run ForceAtlas2 through its NetworkX adapter.
 
         Parameters
@@ -71,6 +76,9 @@ class FA2Reference(CompetitorBase):
         timeout : float, optional
             Unused adapter timeout in seconds. Included for interface
             compatibility with the benchmark harness.
+        seed : int | None, default=None
+            Random seed for the NumPy-backed initial positions used by the
+            reference implementation. ``None`` keeps the library default.
 
         Returns
         -------
@@ -82,6 +90,13 @@ class FA2Reference(CompetitorBase):
 
         start = time.perf_counter()
         try:
+            if seed is not None:
+                import numpy as np
+
+                # The reference library samples initial positions from NumPy's
+                # global RNG rather than accepting a seed argument directly.
+                np.random.seed(seed)
+
             if graph.num_nodes <= 1:
                 pos = torch.zeros((graph.num_nodes, 2), dtype=torch.float32)
                 elapsed = time.perf_counter() - start
