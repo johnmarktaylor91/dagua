@@ -34,17 +34,17 @@ import torch
 REIMPL_TO_ORIGINALS = {
     "classic_fr": ["nx_spring", "igraph_fr"],
     "classic_kk": ["nx_kamada_kawai"],
-    "classic_fa2": [],  # no direct Python-accessible original
-    "classic_gem": [],  # igraph has layout_gem but our adapter name differs
-    "classic_stress_sgd": [],
-    "classic_maxent_stress": [],
-    "classic_spectral": [],  # could compare to nx spectral_layout
-    "classic_pivot_mds": [],
-    "classic_sugiyama": ["graphviz_dot"],
-    "classic_tsnet": [],
-    "classic_davidson_harel": [],
-    "classic_linlog": [],
-    "classic_fmmm": [],
+    "classic_fa2": ["fa2_ref"],
+    "classic_gem": [],  # OGDF unavailable (cppyy C++20 incompatibility)
+    "classic_stress_sgd": ["sgd2"],
+    "classic_maxent_stress": [],  # no reference available
+    "classic_spectral": ["nx_spectral"],
+    "classic_pivot_mds": [],  # OGDF unavailable
+    "classic_sugiyama": ["graphviz_dot", "igraph_sugiyama"],
+    "classic_tsnet": ["tsne_graph"],  # closest proxy (vanilla t-SNE, not full tsNET loss)
+    "classic_davidson_harel": [],  # OGDF unavailable
+    "classic_linlog": [],  # OGDF unavailable
+    "classic_fmmm": [],  # OGDF unavailable
 }
 
 
