@@ -58,15 +58,49 @@ DEFAULT_TIMEOUT = 300.0
 STANDARD_SUITE = "standard"
 RARE_SUITE = "rare"
 DEFAULT_COMPETITOR_ORDER = [
+    # Our engine
     "dagua",
+    # Hierarchical/layered
     "graphviz_dot",
-    "graphviz_sfdp",
     "elk_layered",
     "dagre",
+    "igraph_sugiyama",
+    # Force-directed libraries
+    "graphviz_sfdp",
+    "graphviz_neato",
+    "graphviz_fdp",
     "nx_spring",
+    "nx_kamada_kawai",
+    "nx_spectral",
+    "igraph_fr",
+    "igraph_rt",
+    # Reference implementations
     "sgd2",
+    "fa2_ref",
     "tsne_graph",
     "umap_graph",
+    # OGDF family
+    "ogdf_gem",
+    "ogdf_fmmm",
+    "ogdf_stress",
+    "ogdf_sugiyama",
+    "ogdf_davidson_harel",
+    "ogdf_linlog",
+    "ogdf_pivot_mds",
+    # Dagua classic reimplementations
+    "classic_fr",
+    "classic_kk",
+    "classic_fa2",
+    "classic_stress_sgd",
+    "classic_sugiyama",
+    "classic_spectral",
+    "classic_pivot_mds",
+    "classic_linlog",
+    "classic_gem",
+    "classic_tsnet",
+    "classic_maxent_stress",
+    "classic_davidson_harel",
+    "classic_fmmm",
 ]
 VISUAL_MAX_NODES = 2_000
 CRITIC_MAX_NODES = 500
@@ -295,6 +329,14 @@ def _node_package_version(package_name: str) -> Optional[str]:
 
 
 def _system_metadata() -> Dict[str, Any]:
+    """Collect benchmark host metadata used for cache invalidation.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Runtime environment details, including tool and package versions for
+        competitor backends.
+    """
     try:
         import psutil
 
@@ -329,8 +371,11 @@ def _system_metadata() -> Dict[str, Any]:
         "graphviz": _tool_version(["dot", "-V"], stderr=True),
         "elk": _node_package_version("elkjs"),
         "dagre": _node_package_version("dagre"),
+        "igraph": _safe_import_version("igraph"),
         "networkx": _safe_import_version("networkx"),
+        "sgd2": _safe_import_version("s_gd2"),
         "s_gd2": _safe_import_version("s_gd2"),
+        "fa2": _safe_fa2_version(),
         "scipy": _safe_import_version("scipy"),
         "sklearn": _safe_import_version("sklearn"),
         "umap": _safe_umap_version(),
@@ -346,6 +391,33 @@ def _safe_import_version(module_name: str) -> Optional[str]:
     except Exception:
         return None
     return getattr(module, "__version__", None)
+
+
+def _safe_fa2_version() -> Optional[str]:
+    """Return the installed ForceAtlas2 package version.
+
+    Returns
+    -------
+    Optional[str]
+        Version string for ``fa2`` or ``fa2_modified`` when available,
+        ``"installed"`` when the supported package imports without exposing
+        ``__version__``, or ``None`` when neither package is available.
+    """
+    from importlib import metadata
+
+    for module_name in ("fa2", "fa2_modified"):
+        try:
+            module = __import__(module_name)
+        except ImportError:
+            continue
+        version = getattr(module, "__version__", None)
+        if version is not None:
+            return version
+        try:
+            return metadata.version(module_name)
+        except metadata.PackageNotFoundError:
+            return "installed"
+    return None
 
 
 def _safe_umap_version() -> Optional[str]:
@@ -516,13 +588,35 @@ def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
         return f"dagua:{device}:{_dagua_source_signature()}"
 
     version_keys = {
+        # Graphviz family shares the same dot binary version.
         "graphviz_dot": "graphviz",
         "graphviz_sfdp": "graphviz",
+        "graphviz_neato": "graphviz",
+        "graphviz_fdp": "graphviz",
         "elk_layered": "elk",
         "dagre": "dagre",
+        "igraph_sugiyama": "igraph",
+        "igraph_fr": "igraph",
+        "igraph_rt": "igraph",
         "nx_spring": "networkx",
-        "sgd2": "s_gd2",
+        "nx_kamada_kawai": "networkx",
+        "nx_spectral": "networkx",
+        "sgd2": "sgd2",
+        "fa2_ref": "fa2",
+        "umap_graph": "umap",
+        "tsne_graph": "sklearn",
     }
+    if name.startswith("classic_"):
+        # Classic adapters are Dagua-owned implementations, so their cache key
+        # should track our source changes instead of an external package.
+        return f"{name}:{_dagua_source_signature()}"
+    if name.startswith("ogdf_"):
+        try:
+            from ogdf_python import ogdf as _ogdf
+        except (ImportError, OSError):
+            return f"{name}:ogdf_unavailable"
+        del _ogdf
+        return f"{name}:ogdf_available"
     if name == "tsne_graph":
         return f"{name}:{system.get('sklearn')}:{system.get('scipy')}"
     if name == "umap_graph":
