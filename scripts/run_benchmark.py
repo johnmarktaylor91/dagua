@@ -1636,14 +1636,34 @@ def main() -> int:
         )
         return 0
 
-    try:
-        executor = ProcessPoolExecutor(max_workers=args.workers)
-    except PermissionError:
-        print("[benchmark] ERROR: failed to start ProcessPoolExecutor in this environment")
-        return 1
+    # ── Serial execution (--workers 1) or parallel ─────────────────────────
+    def _process_record(record: BenchmarkRecord) -> None:
+        """Handle bookkeeping after one work item completes."""
+        nonlocal completed_scope
+        results[record.key] = record
+        completed_scope += 1
+        graph_completion_counts[record.graph_name] = (
+            graph_completion_counts.get(record.graph_name, 0) + 1
+        )
+        save_results(results_path, results)
 
-    future_to_item: dict[Future[dict[str, Any]], WorkItem] = {}
-    try:
+        if record.status in {"error", "timeout"}:
+            seed_suffix = "" if record.seed is None else f" seed={record.seed}"
+            print(
+                f"[benchmark] {record.status.upper()}: {record.engine_name} on "
+                f"{record.graph_name}{seed_suffix} ({record.detail()})"
+            )
+
+        if completed_scope % PROGRESS_INTERVAL == 0 or completed_scope == total_scope:
+            print(progress_line("complete", completed_scope, total_scope, record))
+
+        if graph_completion_counts.get(record.graph_name, 0) == graph_completion_targets.get(
+            record.graph_name, 0
+        ):
+            print(f"[benchmark] Graph complete: {record.graph_name}")
+
+    if args.workers <= 1:
+        # Serial mode — run in-process, no fork overhead
         for work_item in work_items:
             summary_record = graph_summaries[work_item.graph_name]
             results[work_item.key] = running_record(
@@ -1653,15 +1673,9 @@ def main() -> int:
                 num_nodes=summary_record.num_nodes,
                 num_edges=summary_record.num_edges,
             )
-            future = executor.submit(_run_single_work_item, work_item)
-            future_to_item[future] = work_item
-
-        save_results(results_path, results)
-
-        for future in as_completed(future_to_item):
-            work_item = future_to_item[future]
             try:
-                record = BenchmarkRecord.from_dict(future.result())
+                result_dict = _run_single_work_item(work_item)
+                record = BenchmarkRecord.from_dict(result_dict)
             except Exception as exc:
                 record = _record_with_pairings(
                     graph_name=work_item.graph_name,
@@ -1675,30 +1689,51 @@ def main() -> int:
                     positions_file=None,
                     skip_reason=None,
                 )
+            _process_record(record)
+    else:
+        # Parallel mode
+        try:
+            executor = ProcessPoolExecutor(max_workers=args.workers)
+        except PermissionError:
+            print("[benchmark] ERROR: failed to start ProcessPoolExecutor")
+            return 1
 
-            results[record.key] = record
-            completed_scope += 1
-            graph_completion_counts[record.graph_name] = (
-                graph_completion_counts.get(record.graph_name, 0) + 1
-            )
+        future_to_item: dict[Future[dict[str, Any]], WorkItem] = {}
+        try:
+            for work_item in work_items:
+                summary_record = graph_summaries[work_item.graph_name]
+                results[work_item.key] = running_record(
+                    graph_name=work_item.graph_name,
+                    engine_name=work_item.engine_name,
+                    seed=work_item.seed,
+                    num_nodes=summary_record.num_nodes,
+                    num_edges=summary_record.num_edges,
+                )
+                future = executor.submit(_run_single_work_item, work_item)
+                future_to_item[future] = work_item
+
             save_results(results_path, results)
 
-            if record.status in {"error", "timeout"}:
-                seed_suffix = "" if record.seed is None else f" seed={record.seed}"
-                print(
-                    f"[benchmark] {record.status.upper()}: {record.engine_name} on "
-                    f"{record.graph_name}{seed_suffix} ({record.detail()})"
-                )
-
-            if completed_scope % PROGRESS_INTERVAL == 0 or completed_scope == total_scope:
-                print(progress_line("complete", completed_scope, total_scope, record))
-
-            if graph_completion_counts.get(record.graph_name, 0) == graph_completion_targets.get(
-                record.graph_name, 0
-            ):
-                print(f"[benchmark] Graph complete: {record.graph_name}")
-    finally:
-        executor.shutdown(wait=True, cancel_futures=False)
+            for future in as_completed(future_to_item):
+                work_item = future_to_item[future]
+                try:
+                    record = BenchmarkRecord.from_dict(future.result())
+                except Exception as exc:
+                    record = _record_with_pairings(
+                        graph_name=work_item.graph_name,
+                        engine_name=work_item.engine_name,
+                        seed=work_item.seed,
+                        num_nodes=0,
+                        num_edges=0,
+                        status="error",
+                        runtime_seconds=None,
+                        error=f"{type(exc).__name__}: {exc}",
+                        positions_file=None,
+                        skip_reason=None,
+                    )
+                _process_record(record)
+        finally:
+            executor.shutdown(wait=True, cancel_futures=False)
 
     current_records = list(scoped_results(results, scoped_keys).values())
     _save_json_atomic(

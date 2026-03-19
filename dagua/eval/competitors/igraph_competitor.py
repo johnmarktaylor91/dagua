@@ -76,7 +76,12 @@ class _IgraphBase(CompetitorBase):
         try:
             kwargs = dict(self.layout_kwargs)
             if seed is not None and self.accepts_seed:
-                kwargs["seed"] = seed
+                # igraph FR's "seed" param is an initial position matrix, not an int.
+                # Generate random initial positions from the integer seed instead.
+                import numpy as np
+
+                rng = np.random.RandomState(seed)
+                kwargs["seed"] = rng.uniform(-1, 1, size=(graph.num_nodes, 2)).tolist()
             ig_layout = ig.layout(self.layout_algo, **kwargs)
             elapsed = time.perf_counter() - start
             pos = _igraph_pos_to_tensor(ig_layout, graph.num_nodes)
