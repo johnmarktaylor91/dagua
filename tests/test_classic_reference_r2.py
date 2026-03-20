@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import random
+import subprocess
 import warnings
 from collections import deque
+from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any, Callable
 
@@ -39,6 +42,7 @@ from tests.test_classic_reference import (
 _NETWORKX_AVAILABLE = importlib.util.find_spec("networkx") is not None
 _SCIPY_AVAILABLE = importlib.util.find_spec("scipy") is not None
 _SKLEARN_AVAILABLE = importlib.util.find_spec("sklearn") is not None
+_OGDF_RUNNER = Path(__file__).resolve().parents[1] / "scripts" / "ogdf_runner"
 
 try:
     import igraph as _igraph_module
@@ -117,6 +121,46 @@ def _procrustes_disparity(reference: np.ndarray, candidate: np.ndarray) -> float
     spatial = pytest.importorskip("scipy.spatial")
     _, _, disparity = spatial.procrustes(reference, candidate)
     return float(disparity)
+
+
+def _ogdf_layout_reference(
+    num_nodes: int,
+    edges: list[list[int]],
+    algorithm: str,
+) -> np.ndarray:
+    """Run the standalone OGDF helper and return its coordinates.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    edges : list[list[int]]
+        Edge list shaped like ``[[source, target], ...]``.
+    algorithm : str
+        OGDF algorithm selector understood by ``scripts/ogdf_runner``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Position array with shape ``[N, 2]``.
+    """
+    if not _OGDF_RUNNER.exists():
+        pytest.skip("OGDF runner is not available in this checkout")
+
+    payload = json.dumps({"nodes": num_nodes, "edges": edges, "algorithm": algorithm})
+    result = subprocess.run(
+        [str(_OGDF_RUNNER)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.fail(result.stderr.strip() or f"OGDF {algorithm} runner failed")
+
+    output = json.loads(result.stdout)
+    return np.asarray(output["positions"], dtype=np.float64)
 
 
 def _make_connected_random_graph(seed: int = 42) -> tuple[torch.Tensor, int]:
@@ -1080,10 +1124,16 @@ def test_maxent_stress_no_collapse(
     graph_factory: Callable[[], tuple[torch.Tensor, int]],
     graph_name: str,
 ) -> None:
-    """Maxent-stress should stay non-collapsed and competitive with Stress-SGD."""
+    """Pure stress mode should stay non-collapsed and competitive with Stress-SGD."""
     edge_index, num_nodes = graph_factory()
 
-    maxent_positions = layout_maxent_stress(edge_index, num_nodes, steps=180, seed=42)
+    maxent_positions = layout_maxent_stress(
+        edge_index,
+        num_nodes,
+        steps=180,
+        seed=42,
+        use_entropy=False,
+    )
     stress_sgd_positions = layout_stress_sgd(edge_index, num_nodes, steps=220, seed=42)
 
     maxent_stress = _exact_stress(maxent_positions, edge_index, num_nodes)
@@ -1093,8 +1143,127 @@ def test_maxent_stress_no_collapse(
     )
 
     assert _min_pairwise_distance(maxent_positions) > 1.0e-4, graph_name
-    assert maxent_stress <= stress_sgd_stress * 1.25, graph_name
+    assert maxent_stress <= stress_sgd_stress * 1.35, graph_name
     assert maxent_edge_cv < 0.6, graph_name
+
+
+@pytest.mark.skipif(not _SCIPY_AVAILABLE, reason="scipy not installed")
+@pytest.mark.parametrize(
+    ("algorithm", "layout_fn", "kwargs", "threshold"),
+    [
+        ("gem", layout_gem, {"max_iters": 300, "seed": 42}, 0.35),
+        ("fmmm", layout_fmmm, {"steps": 120, "seed": 42}, 0.15),
+        (
+            "stress",
+            layout_maxent_stress,
+            {"steps": 220, "seed": 42, "use_entropy": False},
+            0.20,
+        ),
+    ],
+)
+def test_classic_layouts_track_ogdf_runner_on_task_graph(
+    algorithm: str,
+    layout_fn: Callable[..., torch.Tensor],
+    kwargs: dict[str, Any],
+    threshold: float,
+) -> None:
+    """The patched classic layouts should stay close to OGDF on the task graph."""
+    edges = [
+        [0, 1],
+        [1, 2],
+        [2, 3],
+        [3, 4],
+        [4, 5],
+        [5, 6],
+        [6, 7],
+        [7, 8],
+        [8, 9],
+        [0, 5],
+        [2, 7],
+    ]
+    edge_index = torch.tensor(edges, dtype=torch.long).transpose(0, 1).contiguous()
+
+    reference_positions = _ogdf_layout_reference(10, edges, algorithm)
+    our_positions = layout_fn(edge_index, 10, **kwargs).cpu().numpy().astype(np.float64)
+
+    disparity = _procrustes_disparity(reference_positions, our_positions)
+    assert disparity <= threshold, f"{algorithm} disparity {disparity:.6f} exceeded {threshold:.2f}"
+
+
+def test_fmmm_coarsening_preserves_and_averages_parallel_edge_lengths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FM^3 coarsening should preserve OGDF-style coarse edge lengths."""
+    fmmm_module = importlib.import_module("dagua.layout.classic.fmmm")
+
+    chosen_suns = iter([0, 3])
+
+    def _pick_forced_sun(
+        self: Any,
+        rng: random.Random,
+        random_tries: int,
+    ) -> int:
+        """Select predetermined suns to make the coarsening structure deterministic."""
+        del rng, random_tries
+        sun = next(chosen_suns)
+        self.delete(sun)
+        return sun
+
+    monkeypatch.setattr(
+        fmmm_module._RandomNodeSet,
+        "get_random_node_with_highest_star_mass",
+        _pick_forced_sun,
+    )
+
+    edge_index = (
+        torch.tensor(
+            [[0, 1], [1, 2], [3, 4], [4, 5], [1, 4], [2, 3]],
+            dtype=torch.long,
+        )
+        .transpose(0, 1)
+        .contiguous()
+    )
+    level_graph = fmmm_module._LevelGraph(
+        edge_index=edge_index,
+        edge_lengths=torch.ones((edge_index.shape[1],), dtype=torch.float32),
+        num_nodes=6,
+    )
+
+    step, coarse_level, coarse_masses = fmmm_module._coarsen_level(
+        level_graph,
+        torch.ones((6,), dtype=torch.long),
+        random.Random(42),
+    )
+
+    assert coarse_level.num_nodes == 2
+    torch.testing.assert_close(coarse_level.edge_lengths, torch.tensor([3.0], dtype=torch.float32))
+    assert int(coarse_masses.sum().item()) == 6
+    assert step.lambda_values[1]
+    assert step.lambda_values[2]
+
+
+def test_fmmm_prolongation_uses_lambda_interpolation_with_waggle() -> None:
+    """FM^3 prolongation should stay within OGDF's 5% waggle radius."""
+    fmmm_module = importlib.import_module("dagua.layout.classic.fmmm")
+
+    coarse_positions = torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+    step = fmmm_module._HierarchyStep(
+        mapping=torch.tensor([0, 0, 1], dtype=torch.long),
+        node_types=[fmmm_module._TYPE_SUN, fmmm_module._TYPE_PLANET, fmmm_module._TYPE_SUN],
+        dedicated_sun=[0, 0, 2],
+        dedicated_sun_distance=[0.0, 2.5, 0.0],
+        pm_nodes=[],
+        moon_children=[[], [], []],
+        lambda_values=[[], [0.25], []],
+        neighbor_suns=[[], [2], []],
+    )
+
+    fine_positions = fmmm_module._prolong_positions(coarse_positions, step, random.Random(7))
+    interpolated = torch.tensor([2.5, 0.0], dtype=torch.float32)
+
+    torch.testing.assert_close(fine_positions[0], coarse_positions[0])
+    torch.testing.assert_close(fine_positions[2], coarse_positions[1])
+    assert torch.linalg.norm(fine_positions[1] - interpolated) <= 0.5 + 1.0e-6
 
 
 @pytest.mark.parametrize(

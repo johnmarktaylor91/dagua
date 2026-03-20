@@ -133,7 +133,9 @@ class UMAPGraph(CompetitorBase):
             if num_nodes <= 3:
                 # UMAP's spectral init uses sparse eigensolver which fails
                 # when k >= N. Fall back to random placement for tiny graphs.
-                pos = torch.randn(num_nodes, 2, dtype=torch.float32)
+                generator = torch.Generator(device="cpu")
+                generator.manual_seed(42 if seed is None else seed)
+                pos = torch.randn((num_nodes, 2), generator=generator, dtype=torch.float32)
                 elapsed = time.perf_counter() - start
                 return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
 
