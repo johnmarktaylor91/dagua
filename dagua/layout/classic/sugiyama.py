@@ -24,6 +24,8 @@ import torch
 
 from dagua.layout.cycle import detect_back_edges, make_acyclic
 
+_COORDINATE_REFINEMENT_SWEEPS = 5
+
 
 @dataclass(frozen=True)
 class _ExpandedLayeredGraph:
@@ -108,6 +110,11 @@ def layout_sugiyama(
         num_nodes=num_nodes,
     )
     layer_assignments = _longest_path_layering(edge_index=acyclic_edges, num_nodes=num_nodes)
+    layer_assignments = _promote_layer_assignments(
+        edge_index=acyclic_edges,
+        layer_assignments=layer_assignments,
+        num_nodes=num_nodes,
+    )
     expanded_graph = _expand_long_edges_with_dummy_nodes(
         edge_index=acyclic_edges,
         layer_assignments=layer_assignments,
@@ -133,6 +140,8 @@ def layout_sugiyama(
     )
     expanded_positions = _coordinate_assignment(
         layers=ordered_layers,
+        parents=parents,
+        children=children,
         node_sizes=expanded_graph.node_sizes,
         num_nodes=expanded_graph.num_nodes,
         rank_sep=rank_sep,
@@ -313,6 +322,65 @@ def _group_nodes_by_layer(layer_assignments: torch.Tensor, num_nodes: int) -> Li
         layer_index = int(layer_assignments[node].item())
         layers[layer_index].append(node)
     return layers
+
+
+def _promote_layer_assignments(
+    edge_index: torch.Tensor,
+    layer_assignments: torch.Tensor,
+    num_nodes: int,
+) -> torch.Tensor:
+    """Promote nodes downward to reduce outgoing dummy nodes.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Acyclic edge list with shape ``[2, E]`` on CPU.
+    layer_assignments : torch.Tensor
+        Initial longest-path layer indices with shape ``[N]``.
+    num_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Promoted layer indices with shape ``[N]``.
+
+    Notes
+    -----
+    The promotion target uses the minimum successor layer minus one. This is
+    the deepest feasible layer that preserves all outgoing edges while still
+    removing avoidable dummy vertices on outgoing long edges.
+    """
+    if num_nodes == 0 or edge_index.numel() == 0:
+        return layer_assignments
+
+    _, children = _build_neighbor_lists(edge_index=edge_index, num_nodes=num_nodes)
+    promoted_layers = layer_assignments.clone()
+
+    changed = True
+    while changed:
+        changed = False
+        node_order = sorted(
+            range(num_nodes),
+            key=lambda node: int(promoted_layers[node].item()),
+            reverse=True,
+        )
+        for node in node_order:
+            successor_layers = [int(promoted_layers[child].item()) for child in children[node]]
+            if not successor_layers:
+                continue
+
+            current_layer = int(promoted_layers[node].item())
+            min_successor_layer = min(successor_layers)
+            if min_successor_layer < current_layer + 2:
+                continue
+
+            candidate_layer = min_successor_layer - 1
+            if candidate_layer > current_layer:
+                promoted_layers[node] = candidate_layer
+                changed = True
+
+    return promoted_layers
 
 
 def _expand_long_edges_with_dummy_nodes(
@@ -533,6 +601,8 @@ def _barycenter_ordering(
             traces.append(
                 _coordinate_assignment(
                     layers=ordered_layers,
+                    parents=parents,
+                    children=children,
                     node_sizes=node_sizes,
                     num_nodes=num_nodes,
                     rank_sep=rank_sep,
@@ -597,6 +667,8 @@ def _node_order_map(layers: Sequence[Sequence[int]]) -> Dict[int, float]:
 
 def _coordinate_assignment(
     layers: Sequence[Sequence[int]],
+    parents: Sequence[Sequence[int]],
+    children: Sequence[Sequence[int]],
     node_sizes: torch.Tensor,
     num_nodes: int,
     rank_sep: float,
@@ -609,6 +681,10 @@ def _coordinate_assignment(
     ----------
     layers : sequence of sequence of int
         Ordered nodes per layer.
+    parents : sequence of sequence of int
+        Parent adjacency indexed by node id.
+    children : sequence of sequence of int
+        Child adjacency indexed by node id.
     node_sizes : torch.Tensor
         CPU node sizes ``[N, 2]``.
     num_nodes : int
@@ -625,8 +701,72 @@ def _coordinate_assignment(
     torch.Tensor
         Position tensor with shape ``[N, 2]``.
     """
-    positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
+    positions = _initialize_layer_positions(
+        layers=layers,
+        node_sizes=node_sizes,
+        num_nodes=num_nodes,
+        rank_sep=rank_sep,
+        node_sep=node_sep,
+    )
+    if num_nodes == 0:
+        return positions.to(output_device)
 
+    for _ in range(_COORDINATE_REFINEMENT_SWEEPS):
+        current_x = positions[:, 0].clone()
+        for layer_idx, layer_nodes in enumerate(layers):
+            if not layer_nodes:
+                continue
+
+            desired_x = [
+                _neighbor_mean_x(
+                    node=node,
+                    current_x=current_x,
+                    parents=parents,
+                    children=children,
+                )
+                for node in layer_nodes
+            ]
+            resolved_x = _resolve_layer_overlaps(
+                layer_nodes=layer_nodes,
+                desired_x=desired_x,
+                node_sizes=node_sizes,
+                node_sep=node_sep,
+            )
+            for index, node in enumerate(layer_nodes):
+                positions[node, 0] = resolved_x[index]
+                positions[node, 1] = float(layer_idx) * rank_sep
+
+    return positions.to(output_device)
+
+
+def _initialize_layer_positions(
+    layers: Sequence[Sequence[int]],
+    node_sizes: torch.Tensor,
+    num_nodes: int,
+    rank_sep: float,
+    node_sep: float,
+) -> torch.Tensor:
+    """Create centered initial coordinates for the ordered layers.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered nodes per layer.
+    node_sizes : torch.Tensor
+        CPU node sizes ``[N, 2]``.
+    num_nodes : int
+        Number of nodes.
+    rank_sep : float
+        Vertical distance between layers.
+    node_sep : float
+        Horizontal gap between node bounding boxes.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial position tensor with shape ``[N, 2]``.
+    """
+    positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
     for layer_idx, layer_nodes in enumerate(layers):
         if not layer_nodes:
             continue
@@ -635,11 +775,82 @@ def _coordinate_assignment(
         total_width = sum(float(node_sizes[node, 0].item()) for node in layer_nodes)
         total_width += node_sep * float(max(len(layer_nodes) - 1, 0))
         x_cursor = -total_width / 2.0
-
         for node in layer_nodes:
             node_width = float(node_sizes[node, 0].item())
             positions[node, 0] = x_cursor + node_width / 2.0
             positions[node, 1] = y
             x_cursor += node_width + node_sep
+    return positions
 
-    return positions.to(output_device)
+
+def _neighbor_mean_x(
+    node: int,
+    current_x: torch.Tensor,
+    parents: Sequence[Sequence[int]],
+    children: Sequence[Sequence[int]],
+) -> float:
+    """Average the adjacent-layer X coordinates for one node.
+
+    Parameters
+    ----------
+    node : int
+        Node id whose desired X position is being computed.
+    current_x : torch.Tensor
+        Current X coordinates with shape ``[N]``.
+    parents : sequence of sequence of int
+        Parent adjacency indexed by node id.
+    children : sequence of sequence of int
+        Child adjacency indexed by node id.
+
+    Returns
+    -------
+    float
+        Desired X coordinate from parent and child barycenters.
+    """
+    neighbor_x = [float(current_x[parent].item()) for parent in parents[node]]
+    neighbor_x.extend(float(current_x[child].item()) for child in children[node])
+    if not neighbor_x:
+        return float(current_x[node].item())
+    return sum(neighbor_x) / float(len(neighbor_x))
+
+
+def _resolve_layer_overlaps(
+    layer_nodes: Sequence[int],
+    desired_x: Sequence[float],
+    node_sizes: torch.Tensor,
+    node_sep: float,
+) -> List[float]:
+    """Push nodes apart within a layer while preserving their order.
+
+    Parameters
+    ----------
+    layer_nodes : sequence of int
+        Nodes in their fixed within-layer order.
+    desired_x : sequence of float
+        Desired X coordinates for each node in ``layer_nodes``.
+    node_sizes : torch.Tensor
+        CPU node sizes ``[N, 2]``.
+    node_sep : float
+        Horizontal gap between node bounding boxes.
+
+    Returns
+    -------
+    list of float
+        Resolved X coordinates without overlaps.
+    """
+    if not layer_nodes:
+        return []
+
+    resolved_x = list(desired_x)
+    for index in range(1, len(layer_nodes)):
+        left_node = layer_nodes[index - 1]
+        right_node = layer_nodes[index]
+        min_gap = (
+            float(node_sizes[left_node, 0].item()) + float(node_sizes[right_node, 0].item())
+        ) / 2.0 + node_sep
+        resolved_x[index] = max(resolved_x[index], resolved_x[index - 1] + min_gap)
+
+    desired_center = sum(desired_x) / float(len(desired_x))
+    resolved_center = sum(resolved_x) / float(len(resolved_x))
+    shift = desired_center - resolved_center
+    return [x + shift for x in resolved_x]

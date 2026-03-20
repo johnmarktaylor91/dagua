@@ -110,18 +110,90 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
     return centered * (extent / span)
 
 
-def _sample_repulsion_pairs(
+def _unique_undirected_edge_ids(
+    edge_index: torch.Tensor,
     num_nodes: int,
     device: torch.device,
-    step: int,
-    seed: int,
+) -> torch.Tensor:
+    """Pack unique undirected edges into sortable integer ids.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+    device : torch.device
+        Device for the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Unique packed edge ids with shape ``[E_unique]``.
+    """
+    if edge_index.numel() == 0:
+        return torch.empty((0,), dtype=torch.long, device=device)
+
+    src = edge_index[0].to(device=device, dtype=torch.long)
+    dst = edge_index[1].to(device=device, dtype=torch.long)
+    ordered_src = torch.minimum(src, dst)
+    ordered_dst = torch.maximum(src, dst)
+    mask = ordered_src != ordered_dst
+    if not bool(mask.any()):
+        return torch.empty((0,), dtype=torch.long, device=device)
+    packed_ids = ordered_src[mask] * num_nodes + ordered_dst[mask]
+    return torch.unique(packed_ids)
+
+
+def _full_non_edge_pairs(
+    num_nodes: int,
+    edge_ids: torch.Tensor,
+    device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Draw deterministic random node pairs for repulsion sampling.
+    """Enumerate all unordered non-edge pairs for exact repulsion.
 
     Parameters
     ----------
     num_nodes : int
         Number of nodes.
+    edge_ids : torch.Tensor
+        Packed unique undirected edge ids.
+    device : torch.device
+        Device for the returned tensors.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Source and target indices for all unordered non-edge pairs.
+    """
+    src, dst = torch.triu_indices(num_nodes, num_nodes, offset=1, device=device)
+    if edge_ids.numel() == 0:
+        return src, dst
+
+    adjacency = torch.zeros((num_nodes, num_nodes), dtype=torch.bool, device=device)
+    edge_src = edge_ids // num_nodes
+    edge_dst = edge_ids % num_nodes
+    adjacency[edge_src, edge_dst] = True
+    adjacency[edge_dst, edge_src] = True
+    mask = ~adjacency[src, dst]
+    return src[mask], dst[mask]
+
+
+def _sample_non_edge_pairs(
+    num_nodes: int,
+    edge_ids: torch.Tensor,
+    device: torch.device,
+    step: int,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Draw deterministic non-edge pairs for sampled repulsion.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    edge_ids : torch.Tensor
+        Packed unique undirected edge ids.
     device : torch.device
         Device for the sampled tensors.
     step : int
@@ -131,33 +203,62 @@ def _sample_repulsion_pairs(
 
     Returns
     -------
-    tuple[torch.Tensor, torch.Tensor]
-        Source and target index tensors of equal length.
+    tuple[torch.Tensor, torch.Tensor, int]
+        Source indices, target indices, and the total non-edge pair count.
     """
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed + step + 1)
     total_pairs = max(num_nodes * (num_nodes - 1) // 2, 1)
-    sample_size = min(total_pairs, max(num_nodes, num_nodes * _SAMPLED_REPULSION_NEIGHBORS // 2))
-    src = torch.randint(
-        0,
-        num_nodes,
-        (sample_size,),
-        generator=generator,
-        dtype=torch.long,
+    total_non_edge_pairs = max(total_pairs - int(edge_ids.numel()), 0)
+    sample_size = min(
+        total_non_edge_pairs,
+        max(num_nodes, num_nodes * _SAMPLED_REPULSION_NEIGHBORS // 2),
     )
-    dst = torch.randint(
-        0,
-        num_nodes,
-        (sample_size,),
-        generator=generator,
-        dtype=torch.long,
+    if sample_size == 0:
+        empty = torch.empty((0,), dtype=torch.long, device=device)
+        return empty, empty, total_non_edge_pairs
+
+    edge_ids_cpu = edge_ids.to(device="cpu", dtype=torch.long)
+    sampled_src: list[torch.Tensor] = []
+    sampled_dst: list[torch.Tensor] = []
+    collected = 0
+
+    for _ in range(8):
+        if collected >= sample_size:
+            break
+
+        draw_size = max((sample_size - collected) * 3, num_nodes)
+        src = torch.randint(0, num_nodes, (draw_size,), generator=generator, dtype=torch.long)
+        dst = torch.randint(0, num_nodes, (draw_size,), generator=generator, dtype=torch.long)
+        distinct_mask = src != dst
+        if not bool(distinct_mask.any()):
+            continue
+
+        ordered_src = torch.minimum(src[distinct_mask], dst[distinct_mask])
+        ordered_dst = torch.maximum(src[distinct_mask], dst[distinct_mask])
+        if edge_ids_cpu.numel() > 0:
+            pair_ids = ordered_src * num_nodes + ordered_dst
+            non_edge_mask = ~torch.isin(pair_ids, edge_ids_cpu)
+            ordered_src = ordered_src[non_edge_mask]
+            ordered_dst = ordered_dst[non_edge_mask]
+
+        if ordered_src.numel() == 0:
+            continue
+
+        take_count = min(int(ordered_src.numel()), sample_size - collected)
+        sampled_src.append(ordered_src[:take_count])
+        sampled_dst.append(ordered_dst[:take_count])
+        collected += take_count
+
+    if collected == 0:
+        empty = torch.empty((0,), dtype=torch.long, device=device)
+        return empty, empty, total_non_edge_pairs
+
+    return (
+        torch.cat(sampled_src).to(device=device),
+        torch.cat(sampled_dst).to(device=device),
+        total_non_edge_pairs,
     )
-    mask = src != dst
-    src = src[mask]
-    dst = dst[mask]
-    ordered_src = torch.minimum(src, dst)
-    ordered_dst = torch.maximum(src, dst)
-    return ordered_src.to(device), ordered_dst.to(device)
 
 
 def _linlog_loss(
@@ -192,6 +293,11 @@ def _linlog_loss(
         Scalar objective value.
     """
     attraction = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
+    edge_ids = _unique_undirected_edge_ids(
+        edge_index=edge_index,
+        num_nodes=int(positions.shape[0]),
+        device=positions.device,
+    )
     if edge_index.numel() > 0:
         src = edge_index[0].to(device=positions.device, dtype=torch.long)
         dst = edge_index[1].to(device=positions.device, dtype=torch.long)
@@ -202,24 +308,40 @@ def _linlog_loss(
 
     num_nodes = int(positions.shape[0])
     if num_nodes <= _FULL_REPULSION_LIMIT:
-        pairwise_distances = torch.pdist(positions, p=2).clamp(min=_MIN_DISTANCE)
-        if r == 0.0:
-            repulsion = -torch.log(pairwise_distances).sum()
+        non_edge_src, non_edge_dst = _full_non_edge_pairs(
+            num_nodes=num_nodes,
+            edge_ids=edge_ids,
+            device=positions.device,
+        )
+        if int(non_edge_src.numel()) == 0:
+            repulsion = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
         else:
-            repulsion = -pairwise_distances.pow(r).sum()
+            pairwise_distances = torch.linalg.norm(
+                positions[non_edge_src] - positions[non_edge_dst],
+                dim=1,
+            ).clamp(min=_MIN_DISTANCE)
+            if r == 0.0:
+                repulsion = -torch.log(pairwise_distances).sum()
+            else:
+                repulsion = -pairwise_distances.pow(r).sum()
     else:
-        src, dst = _sample_repulsion_pairs(num_nodes, positions.device, step, seed)
+        src, dst, total_non_edge_pairs = _sample_non_edge_pairs(
+            num_nodes=num_nodes,
+            edge_ids=edge_ids,
+            device=positions.device,
+            step=step,
+            seed=seed,
+        )
         sampled_lengths = torch.linalg.norm(
             positions[src] - positions[dst],
             dim=1,
         ).clamp(min=_MIN_DISTANCE)
-        total_pairs = max(num_nodes * (num_nodes - 1) // 2, 1)
         if int(sampled_lengths.numel()) == 0:
             repulsion = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
         elif r == 0.0:
-            repulsion = -torch.log(sampled_lengths).mean() * float(total_pairs)
+            repulsion = -torch.log(sampled_lengths).mean() * float(total_non_edge_pairs)
         else:
-            repulsion = -sampled_lengths.pow(r).mean() * float(total_pairs)
+            repulsion = -sampled_lengths.pow(r).mean() * float(total_non_edge_pairs)
 
     return attraction + repulsion
 
