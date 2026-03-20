@@ -241,7 +241,10 @@ def _pivot_mds_coordinates(distance_matrix: torch.Tensor) -> torch.Tensor:
     if coord_dims == 0:
         return torch.zeros((distance_matrix.shape[1], 2), dtype=torch.float32)
 
-    scales = torch.sqrt(singular_values[:coord_dims].clamp_min(0.0))
+    # Brandes-Pich 2007: for rectangular PxN pivot distance matrix C,
+    # SVD gives C = U*S*V^T and coordinates are X = V[:,:k] * S[:k].
+    # NOT sqrt(S) — that's only for classical MDS on square NxN matrices.
+    scales = singular_values[:coord_dims].clamp_min(0.0)
     coords = vh[:coord_dims].transpose(0, 1) * scales.unsqueeze(0)
     if coord_dims == 1:
         zeros = torch.zeros((coords.shape[0], 1), dtype=coords.dtype)
