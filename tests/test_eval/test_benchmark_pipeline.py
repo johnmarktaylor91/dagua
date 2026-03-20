@@ -243,11 +243,15 @@ def test_competitor_signatures_cover_extended_families(monkeypatch):
         "dagre",
         "igraph_sugiyama",
         "igraph_fr",
+        "igraph_kamada_kawai",
+        "igraph_mds",
+        "igraph_davidson_harel",
         "igraph_rt",
         "nx_spring",
         "nx_kamada_kawai",
         "nx_spectral",
         "sgd2",
+        "sgd2_mds",
         "fa2_ref",
         "tsne_graph",
         "umap_graph",
@@ -261,6 +265,8 @@ def test_competitor_signatures_cover_extended_families(monkeypatch):
     assert all(":None" not in signature for signature in signatures.values())
     assert signatures["classic_fr"] == f"classic_fr:{source_signature}"
     assert signatures["classic_fmmm"] == f"classic_fmmm:{source_signature}"
+    assert signatures["igraph_mds"] == "igraph_mds:0.11.8"
+    assert signatures["sgd2_mds"] == "sgd2_mds:1.0.0"
     assert signatures["tsne_graph"] == "tsne_graph:1.6.1:1.15.2"
     assert signatures["umap_graph"] == "umap_graph:0.5.7:1.15.2"
     assert signatures["ogdf_gem"] in {
@@ -355,8 +361,12 @@ def test_default_competitor_order_covers_expected_and_available_competitors():
         "nx_kamada_kawai",
         "nx_spectral",
         "igraph_fr",
+        "igraph_kamada_kawai",
+        "igraph_mds",
+        "igraph_davidson_harel",
         "igraph_rt",
         "sgd2",
+        "sgd2_mds",
         "fa2_ref",
         "tsne_graph",
         "umap_graph",

@@ -1,5 +1,6 @@
 """Tests for the classic Sugiyama layered layout."""
 
+import pytest
 import torch
 
 from dagua.layout.classic import layout_sugiyama
@@ -78,7 +79,7 @@ def test_layout_sugiyama_chain_graph_produces_vertical_line() -> None:
 
     assert isinstance(positions, torch.Tensor)
     torch.testing.assert_close(positions[:, 0], torch.zeros(4))
-    assert torch.equal(positions[:, 1], torch.tensor([0.0, 50.0, 100.0, 150.0]))
+    assert torch.equal(positions[:, 1], torch.tensor([0.0, 1.0, 2.0, 3.0]))
 
 
 def test_layout_sugiyama_trace_mode_returns_snapshots() -> None:
@@ -115,7 +116,7 @@ def test_layout_sugiyama_routes_long_edges_through_intermediate_layers() -> None
     torch.testing.assert_close(long_edge_route[-1], positions[3])
     torch.testing.assert_close(
         long_edge_route[:, 1],
-        torch.tensor([0.0, 50.0, 100.0, 150.0]),
+        torch.tensor([0.0, 1.0, 2.0, 3.0]),
     )
 
 
@@ -127,3 +128,35 @@ def test_layout_sugiyama_handles_isolated_nodes() -> None:
     assert isinstance(positions, torch.Tensor)
     assert torch.equal(positions[:, 1], torch.zeros(3))
     assert positions[0, 0].item() < positions[1, 0].item() < positions[2, 0].item()
+
+
+def test_layout_sugiyama_promotes_layers_to_reduce_dummy_nodes() -> None:
+    edge_index = torch.tensor([[4, 1, 2, 0], [1, 2, 3, 3]], dtype=torch.long)
+
+    positions, edge_routes = layout_sugiyama(
+        edge_index=edge_index,
+        num_nodes=5,
+        return_edge_routes=True,
+    )
+
+    assert positions[0, 1].item() == pytest.approx(2.0)
+    assert edge_routes[-1].shape == (2, 2)
+    torch.testing.assert_close(edge_routes[-1][0], positions[0])
+    torch.testing.assert_close(edge_routes[-1][-1], positions[3])
+
+
+def test_layout_sugiyama_coordinates_follow_adjacent_layer_barycenters() -> None:
+    edge_index = torch.tensor([[0, 1, 2], [3, 4, 4]], dtype=torch.long)
+
+    positions = layout_sugiyama(edge_index=edge_index, num_nodes=5, seed=0)
+
+    assert abs(positions[3, 0].item() - positions[0, 0].item()) <= 0.5
+    assert abs(positions[4, 0].item() - ((positions[1, 0] + positions[2, 0]) / 2.0).item()) <= 0.5
+
+
+def test_layout_sugiyama_layer_sep_alias_overrides_rank_sep() -> None:
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+
+    positions = layout_sugiyama(edge_index=edge_index, num_nodes=4, rank_sep=10.0, layer_sep=2.0)
+
+    torch.testing.assert_close(positions[:, 1], torch.tensor([0.0, 2.0, 4.0, 6.0]))

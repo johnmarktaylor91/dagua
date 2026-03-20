@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import math
+
+import pytest
 import torch
 
 from dagua.layout.classic import layout_fa2
-from dagua.layout.classic.fa2 import _node_speed
+from dagua.layout.classic.fa2 import _adjust_speed_and_apply_forces, _compute_degree
+from dagua.layout.classic.tsnet import _gradient_descent_step
 
 
 def _edge_index(edges: list[tuple[int, int]]) -> torch.Tensor:
@@ -152,19 +156,11 @@ def test_layout_fa2_gravity_keeps_nodes_bounded() -> None:
 
 
 def test_layout_fa2_linlog_mode_changes_layout() -> None:
-    """Change the final layout when LinLog attraction is enabled."""
+    """Reject LinLog mode because the reference backend does not implement it."""
     edge_index, num_nodes = _cluster_bridge_graph()
 
-    default_pos = layout_fa2(edge_index=edge_index, num_nodes=num_nodes, steps=90, seed=5)
-    linlog_pos = layout_fa2(
-        edge_index=edge_index,
-        num_nodes=num_nodes,
-        steps=90,
-        seed=5,
-        linlog=True,
-    )
-
-    assert not torch.allclose(default_pos, linlog_pos)
+    with pytest.raises(ValueError, match="linlog=True"):
+        layout_fa2(edge_index=edge_index, num_nodes=num_nodes, steps=90, seed=5, linlog=True)
 
 
 def test_layout_fa2_strong_gravity_changes_layout() -> None:
@@ -227,21 +223,47 @@ def test_layout_fa2_gives_hubs_more_space_than_a_path() -> None:
     assert hub_distance > path_distance * 1.1
 
 
-def test_node_speed_handles_zero_traction_without_nan() -> None:
-    """Return finite zero speeds when both traction and swing are zero."""
-    force = torch.zeros((4, 2), dtype=torch.float32)
-    previous_force = torch.zeros((4, 2), dtype=torch.float32)
-    node_traction = torch.zeros(4, dtype=torch.float32)
+def test_adjust_speed_and_apply_forces_matches_reference_math() -> None:
+    """Match the reference FA2 speed update and per-node movement factors."""
+    pos = torch.tensor([[0.0, 0.0], [1.0, -1.0]], dtype=torch.float32)
+    old_force = torch.tensor([[1.0, 0.0], [0.0, 2.0]], dtype=torch.float32)
+    force = torch.tensor([[0.0, 1.0], [2.0, 0.0]], dtype=torch.float32)
+    mass = torch.tensor([2.0, 3.0], dtype=torch.float32)
 
-    node_speed = _node_speed(
-        speed=1.0,
-        node_traction=node_traction,
+    updated_pos, speed, speed_efficiency = _adjust_speed_and_apply_forces(
+        pos=pos,
         force=force,
-        previous_force=previous_force,
+        old_force=old_force,
+        mass=mass,
+        speed=1.0,
+        speed_efficiency=1.0,
+        jitter_tolerance=1.0,
     )
 
-    assert torch.isfinite(node_speed).all()
-    assert torch.equal(node_speed, torch.zeros_like(node_speed))
+    total_swinging = 5.0 * math.sqrt(2.0)
+    total_effective_traction = 2.5 * math.sqrt(2.0)
+    estimated_optimal_jt = 0.05 * math.sqrt(2.0)
+    min_jt = math.sqrt(estimated_optimal_jt)
+    jt = max(min_jt, estimated_optimal_jt * total_effective_traction / 4.0)
+    target_speed = jt * total_effective_traction / total_swinging
+    expected_speed = 1.0 + min(target_speed - 1.0, 0.5)
+    expected_speed_efficiency = 0.7
+    node_swinging = mass * torch.linalg.vector_norm(old_force - force, dim=1)
+    expected_factor = expected_speed / (1.0 + torch.sqrt(expected_speed * node_swinging))
+    expected_pos = pos + (force * expected_factor.unsqueeze(1))
+
+    torch.testing.assert_close(updated_pos, expected_pos)
+    assert speed == pytest.approx(expected_speed)
+    assert speed_efficiency == pytest.approx(expected_speed_efficiency)
+
+
+def test_compute_degree_deduplicates_undirected_edges() -> None:
+    """FA2 mass should use deduplicated undirected degree counts."""
+    edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+
+    degree = _compute_degree(edge_index=edge_index, num_nodes=3)
+
+    torch.testing.assert_close(degree, torch.tensor([1.0, 2.0, 1.0], dtype=torch.float32))
 
 
 def test_layout_fa2_remains_finite_for_longer_run() -> None:
@@ -252,3 +274,32 @@ def test_layout_fa2_remains_finite_for_longer_run() -> None:
 
     assert torch.isfinite(pos).all()
     assert pos.abs().max().item() < 1_000.0
+
+
+def test_tsnet_gradient_descent_step_matches_reference_rule() -> None:
+    """tsNET should use the original per-parameter gains update rule."""
+    positions = torch.tensor([[1.0, -1.0], [0.5, 0.25]], dtype=torch.float32)
+    grad = torch.tensor([[2.0, -3.0], [-4.0, 5.0]], dtype=torch.float32)
+    update = torch.tensor([[-0.1, -0.2], [0.3, -0.4]], dtype=torch.float32)
+    gains = torch.tensor([[1.0, 2.0], [0.5, 0.25]], dtype=torch.float32)
+    expected_positions_input = positions.clone()
+    expected_update_input = update.clone()
+
+    next_positions, next_update, next_gains = _gradient_descent_step(
+        positions=positions,
+        grad=grad,
+        update=update,
+        gains=gains,
+        learning_rate=0.1,
+        momentum=0.5,
+        min_gain=0.01,
+    )
+
+    expected_gains = torch.tensor([[1.2, 1.6], [0.7, 0.45]], dtype=torch.float32)
+    expected_grad = grad * expected_gains
+    expected_update = (0.5 * expected_update_input) - (0.1 * expected_grad)
+    expected_positions = expected_positions_input + expected_update
+
+    torch.testing.assert_close(next_gains, expected_gains)
+    torch.testing.assert_close(next_update, expected_update)
+    torch.testing.assert_close(next_positions, expected_positions)
