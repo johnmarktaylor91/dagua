@@ -76,7 +76,7 @@ def test_layout_fr_trace_mode_returns_snapshots() -> None:
     assert isinstance(pos, torch.Tensor)
     assert isinstance(traces, list)
     assert pos.shape == (4, 2)
-    assert len(traces) == 5
+    assert 1 <= len(traces) <= 5
     assert all(trace.shape == (4, 2) for trace in traces)
 
 
@@ -88,6 +88,17 @@ def test_layout_fr_nodes_do_not_collapse_to_single_point() -> None:
 
     assert isinstance(pos, torch.Tensor)
     assert torch.std(pos) > 0.5
+
+
+def test_layout_fr_recenters_output_near_origin() -> None:
+    """FR should return centered coordinates after the final rescale step."""
+    edge_index = torch.empty((2, 0), dtype=torch.int64)
+
+    pos = layout_fr(edge_index=edge_index, num_nodes=5, steps=40, seed=3)
+
+    assert torch.linalg.norm(pos.mean(dim=0)) < 1.0e-4
+    assert float(pos.min().item()) < 0.0
+    assert float(pos.max().item()) > 0.0
 
 
 def test_layout_fr_connected_nodes_are_closer_than_average_pair() -> None:

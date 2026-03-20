@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from dagua.eval.competitors import get_competitors
-from dagua.eval.competitors.sgd2_competitor import SGD2
+from dagua.eval.competitors.sgd2_competitor import SGD2, SGD2MDS
 from dagua.eval.competitors.umap_competitor import UMAPGraph
 from dagua.graph import DaguaGraph
 
@@ -40,7 +40,7 @@ def test_embedding_competitors_registered() -> None:
         This test asserts on the global competitor registry contents.
     """
     names = {competitor.name for competitor in get_competitors()}
-    assert {"sgd2", "tsne_graph", "umap_graph"} <= names
+    assert {"sgd2", "sgd2_mds", "tsne_graph", "umap_graph"} <= names
 
 
 @pytest.mark.smoke
@@ -75,6 +75,59 @@ class TestSGD2:
         assert result.pos is not None
         assert result.pos.shape == (6, 2)
         assert result.error is None
+
+
+@pytest.mark.smoke
+class TestSGD2MDS:
+    """Smoke coverage for the ``s_gd2`` classical MDS adapter."""
+
+    def test_available_check(self) -> None:
+        """The availability probe should return a boolean.
+
+        Returns
+        -------
+        None
+            This test asserts on the availability probe result.
+        """
+        competitor = SGD2MDS()
+        assert isinstance(competitor.available(), bool)
+
+    @pytest.mark.skipif(
+        not SGD2_AVAILABLE,
+        reason="s_gd2 not installed",
+    )
+    def test_layout_returns_positions(self) -> None:
+        """The adapter should return 2D positions for a connected graph.
+
+        Returns
+        -------
+        None
+            This test asserts on the returned position tensor.
+        """
+        graph = _make_small_graph()
+        result = SGD2MDS().layout(graph, timeout=30.0)
+        assert result.pos is not None
+        assert result.pos.shape == (6, 2)
+        assert result.error is None
+
+    @pytest.mark.skipif(
+        not SGD2_AVAILABLE,
+        reason="s_gd2 not installed",
+    )
+    def test_disconnected_graph_returns_error(self) -> None:
+        """Disconnected graphs should surface the MDS precondition failure.
+
+        Returns
+        -------
+        None
+            This test asserts on the adapter's error payload.
+        """
+        graph = DaguaGraph()
+        graph.add_node("0")
+        graph.add_node("1")
+        result = SGD2MDS().layout(graph, timeout=30.0)
+        assert result.pos is None
+        assert result.error == "graph is disconnected"
 
 
 @pytest.mark.smoke
