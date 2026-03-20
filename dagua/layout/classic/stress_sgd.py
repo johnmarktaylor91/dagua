@@ -1,11 +1,8 @@
 """Stochastic Gradient Descent stress minimization.
 
-Modern scalable alternative to Kamada-Kawai. Instead of computing stress over
-all N² pairs, samples random node pairs and updates positions via SGD on the
-stress of each sampled pair. Scales to large graphs.
-
-Reference: Zheng, Pawar & Goodman, "Graph Drawing by Stochastic Gradient
-Descent" (2018), IEEE TVCG.
+This implementation follows the public ``s_gd2`` defaults for connected,
+unweighted graphs and keeps the repo's sampling fallback for larger graphs as a
+documented acceleration.
 """
 
 from __future__ import annotations
@@ -17,9 +14,12 @@ from typing import Optional, Union
 import torch
 
 _MAX_PIVOTS = 200
+_AUTO_FULL_EPOCH_THRESHOLD = 1_000
 _AUTO_SAMPLE_THRESHOLD = 1_000
+_EXACT_DISTANCE_THRESHOLD = 10_000
 _MIN_DISTANCE = 0.01
 _UNREACHED = -1
+_DEFAULT_EPS = 0.01
 
 
 def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> list[list[int]]:
@@ -86,8 +86,26 @@ def _bfs_distances(adjacency: list[list[int]], source: int) -> torch.Tensor:
     return distances
 
 
-def _connected_components(adjacency: list[list[int]]) -> torch.Tensor:
-    """Label connected components in the undirected graph.
+def _is_connected(adjacency: list[list[int]]) -> bool:
+    """Report whether the undirected graph is connected.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]]
+        Undirected adjacency list.
+
+    Returns
+    -------
+    bool
+        ``True`` when every node is reachable from node zero.
+    """
+    if len(adjacency) <= 1:
+        return True
+    return bool((_bfs_distances(adjacency, 0) >= 0).all().item())
+
+
+def _all_pairs_shortest_paths(adjacency: list[list[int]]) -> torch.Tensor:
+    """Compute exact all-pairs shortest paths with repeated BFS.
 
     Parameters
     ----------
@@ -97,43 +115,19 @@ def _connected_components(adjacency: list[list[int]]) -> torch.Tensor:
     Returns
     -------
     torch.Tensor
-        Component labels, shape ``[N]``.
+        Distance matrix with shape ``[N, N]``.
     """
-    num_nodes = len(adjacency)
-    component_ids = torch.full((num_nodes,), _UNREACHED, dtype=torch.long)
-    component_index = 0
-
-    for start in range(num_nodes):
-        if int(component_ids[start].item()) != _UNREACHED:
-            continue
-
-        frontier: deque[int] = deque([start])
-        component_ids[start] = component_index
-
-        while frontier:
-            node = frontier.popleft()
-            for neighbor in adjacency[node]:
-                if int(component_ids[neighbor].item()) != _UNREACHED:
-                    continue
-                component_ids[neighbor] = component_index
-                frontier.append(neighbor)
-
-        component_index += 1
-
-    return component_ids
+    rows = [_bfs_distances(adjacency, node) for node in range(len(adjacency))]
+    return torch.stack(rows, dim=0).to(dtype=torch.float32)
 
 
-def _choose_pivots(
-    component_ids: torch.Tensor,
-    max_pivots: int,
-    generator: torch.Generator,
-) -> torch.Tensor:
+def _choose_pivots(num_nodes: int, max_pivots: int, generator: torch.Generator) -> torch.Tensor:
     """Choose pivot nodes for approximate shortest-path queries.
 
     Parameters
     ----------
-    component_ids : torch.Tensor
-        Connected-component labels, shape ``[N]``.
+    num_nodes : int
+        Number of nodes.
     max_pivots : int
         Maximum number of pivots to use.
     generator : torch.Generator
@@ -144,41 +138,14 @@ def _choose_pivots(
     torch.Tensor
         Selected pivot indices, shape ``[P]``.
     """
-    num_nodes = int(component_ids.shape[0])
-    if num_nodes == 0:
-        return torch.empty(0, dtype=torch.long)
-
     if num_nodes <= max_pivots:
         return torch.arange(num_nodes, dtype=torch.long)
 
-    pivots: list[int] = []
-    seen_components: set[int] = set()
-    for node, component in enumerate(component_ids.tolist()):
-        if component in seen_components:
-            continue
-        pivots.append(node)
-        seen_components.add(component)
-        if len(pivots) == max_pivots:
-            return torch.tensor(pivots, dtype=torch.long)
-
-    remaining = max_pivots - len(pivots)
-    if remaining <= 0:
-        return torch.tensor(pivots, dtype=torch.long)
-
-    pivot_mask = torch.zeros(num_nodes, dtype=torch.bool)
-    pivot_mask[torch.tensor(pivots, dtype=torch.long)] = True
-    candidates = torch.arange(num_nodes, dtype=torch.long)[~pivot_mask]
-    permutation = torch.randperm(int(candidates.shape[0]), generator=generator)
-    extra = candidates[permutation[:remaining]]
-    if extra.numel() == 0:
-        return torch.tensor(pivots, dtype=torch.long)
-    return torch.cat([torch.tensor(pivots, dtype=torch.long), extra], dim=0)
+    order = torch.randperm(num_nodes, generator=generator)
+    return order[:max_pivots]
 
 
-def _compute_pivot_distances(
-    adjacency: list[list[int]],
-    pivots: torch.Tensor,
-) -> torch.Tensor:
+def _compute_pivot_distances(adjacency: list[list[int]], pivots: torch.Tensor) -> torch.Tensor:
     """Run BFS from each pivot node.
 
     Parameters
@@ -196,76 +163,47 @@ def _compute_pivot_distances(
     num_pivots = int(pivots.shape[0])
     num_nodes = len(adjacency)
     if num_pivots == 0:
-        return torch.empty((0, num_nodes), dtype=torch.long)
+        return torch.empty((0, num_nodes), dtype=torch.float32)
 
-    distances = torch.empty((num_pivots, num_nodes), dtype=torch.long)
+    distances = torch.empty((num_pivots, num_nodes), dtype=torch.float32)
     for pivot_index, pivot in enumerate(pivots.tolist()):
-        distances[pivot_index] = _bfs_distances(adjacency, pivot)
+        distances[pivot_index] = _bfs_distances(adjacency, pivot).to(dtype=torch.float32)
     return distances
 
 
 def _approx_distance(
-    i_indices: torch.Tensor,
-    j_indices: torch.Tensor,
+    source_index: int,
+    target_index: int,
     pivot_dist: torch.Tensor,
-    component_ids: torch.Tensor,
-    disconnected_distance: float,
-) -> torch.Tensor:
-    """Approximate graph distances for sampled node pairs.
+) -> float:
+    """Approximate graph distance for one node pair.
 
     Parameters
     ----------
-    i_indices : torch.Tensor
-        Source node indices, shape ``[S]``.
-    j_indices : torch.Tensor
-        Target node indices, shape ``[S]``.
+    source_index : int
+        Source node index.
+    target_index : int
+        Target node index.
     pivot_dist : torch.Tensor
         Pivot-to-node distances, shape ``[P, N]``.
-    component_ids : torch.Tensor
-        Connected-component labels, shape ``[N]``.
-    disconnected_distance : float
-        Target distance used for pairs in different components.
 
     Returns
     -------
-    torch.Tensor
-        Approximate graph distances, shape ``[S]``.
+    float
+        Approximate shortest-path distance.
     """
     if pivot_dist.numel() == 0:
-        return torch.full(
-            (i_indices.shape[0],),
-            disconnected_distance,
-            dtype=torch.float32,
-            device=i_indices.device,
-        )
+        return 1.0
 
-    pivot_i = pivot_dist.index_select(1, i_indices)
-    pivot_j = pivot_dist.index_select(1, j_indices)
-
-    reachable = (pivot_i >= 0) & (pivot_j >= 0)
-    lower_bounds = (pivot_i - pivot_j).abs().to(dtype=torch.float32)
-    upper_bounds = (pivot_i + pivot_j).to(dtype=torch.float32)
-
-    lower_bounds = torch.where(reachable, lower_bounds, torch.zeros_like(lower_bounds))
-    upper_bounds = torch.where(
-        reachable,
-        upper_bounds,
-        torch.full_like(upper_bounds, float("inf")),
-    )
-
-    best_lower = lower_bounds.max(dim=0).values
-    best_upper = upper_bounds.min(dim=0).values
-    midpoint = (best_lower + best_upper) * 0.5
-
-    same_component = component_ids.index_select(0, i_indices) == component_ids.index_select(
-        0, j_indices
-    )
-    fallback_same_component = torch.ones_like(midpoint)
-    fallback_disconnected = torch.full_like(midpoint, disconnected_distance)
-    fallback = torch.where(same_component, fallback_same_component, fallback_disconnected)
-
-    approx = torch.where(torch.isfinite(best_upper), midpoint, fallback)
-    return approx.clamp(min=1.0)
+    pivot_i = pivot_dist[:, source_index]
+    pivot_j = pivot_dist[:, target_index]
+    lower = torch.abs(pivot_i - pivot_j)
+    upper = pivot_i + pivot_j
+    best_lower = float(lower.max().item())
+    best_upper = float(upper.min().item())
+    if math.isfinite(best_upper):
+        return max((best_lower + best_upper) * 0.5, 1.0)
+    return max(best_lower, 1.0)
 
 
 def _trace_snapshot(traces: list[torch.Tensor], pos: torch.Tensor) -> None:
@@ -292,15 +230,15 @@ def _resolve_sample_size(num_nodes: int, sample_size: Union[int, str]) -> int:
     Parameters
     ----------
     num_nodes : int
-        Number of nodes in the graph.
+        Number of nodes.
     sample_size : int or str
-        User-provided sampling budget. ``"auto"`` uses a full epoch for
-        graphs with at most 1000 nodes and a 1000-pair sample otherwise.
+        User-provided sampling budget. ``"auto"`` uses a full epoch for small
+        graphs and a fixed-size sample otherwise.
 
     Returns
     -------
     int
-        Effective sampling budget.
+        Effective per-epoch pair budget.
 
     Raises
     ------
@@ -310,8 +248,8 @@ def _resolve_sample_size(num_nodes: int, sample_size: Union[int, str]) -> int:
     if isinstance(sample_size, str):
         if sample_size != "auto":
             raise ValueError("sample_size must be a positive integer or 'auto'.")
-        if num_nodes <= _AUTO_SAMPLE_THRESHOLD:
-            return max(num_nodes, 1)
+        if num_nodes <= _AUTO_FULL_EPOCH_THRESHOLD:
+            return num_nodes
         return _AUTO_SAMPLE_THRESHOLD
 
     if sample_size <= 0:
@@ -319,20 +257,20 @@ def _resolve_sample_size(num_nodes: int, sample_size: Union[int, str]) -> int:
     return sample_size
 
 
-def _schedule_bounds(pivot_dist: torch.Tensor) -> tuple[float, float]:
-    """Compute the distance bounds used by the Zheng et al. learning-rate schedule.
+def _schedule_bounds(distance_data: torch.Tensor) -> tuple[float, float]:
+    """Compute the distance bounds used by the ``s_gd2`` schedule.
 
     Parameters
     ----------
-    pivot_dist : torch.Tensor
-        Pivot-to-node hop distances with shape ``[P, N]``.
+    distance_data : torch.Tensor
+        Exact or approximate graph distances.
 
     Returns
     -------
     tuple[float, float]
         Minimum and maximum positive graph distances.
     """
-    positive_distances = pivot_dist[pivot_dist > 0]
+    positive_distances = distance_data[distance_data > 0]
     if int(positive_distances.numel()) == 0:
         return 1.0, 1.0
 
@@ -341,8 +279,14 @@ def _schedule_bounds(pivot_dist: torch.Tensor) -> tuple[float, float]:
     return max(d_min, 1.0), max(d_max, d_min, 1.0)
 
 
-def _learning_rate(step_index: int, steps: int, d_min: float, d_max: float) -> float:
-    """Evaluate the Zheng et al. distance-interpolated learning-rate schedule.
+def _learning_rate(
+    step_index: int,
+    steps: int,
+    d_min: float,
+    d_max: float,
+    eps: float = _DEFAULT_EPS,
+) -> float:
+    """Evaluate the exponential ``s_gd2`` learning-rate schedule.
 
     Parameters
     ----------
@@ -354,15 +298,46 @@ def _learning_rate(step_index: int, steps: int, d_min: float, d_max: float) -> f
         Minimum positive graph distance.
     d_max : float
         Maximum positive graph distance.
+    eps : float, default=0.01
+        Smallest relative step-size scale.
 
     Returns
     -------
     float
         Step size ``eta_t``.
     """
-    fraction = float(step_index) / float(max(steps - 1, 1))
-    distance = d_min + fraction * (d_max - d_min)
-    return 1.0 / max(distance * distance, _MIN_DISTANCE)
+    eta_max = 1.0 / max(d_min * d_min, _MIN_DISTANCE)
+    eta_min = eps / max(d_max * d_max, _MIN_DISTANCE)
+    if steps <= 1:
+        return eta_max
+    lambd = math.log(eta_max / eta_min) / float(steps - 1)
+    return eta_max * math.exp(-lambd * float(step_index))
+
+
+def _shuffled_full_pairs(
+    num_nodes: int,
+    generator: torch.Generator,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return all unordered node pairs in shuffled order.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    generator : torch.Generator
+        Random generator for deterministic shuffling.
+    device : torch.device
+        Device for the returned tensors.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Source and target node indices with matching shape ``[S]``.
+    """
+    pair_indices = torch.triu_indices(num_nodes, num_nodes, offset=1, device=device)
+    order = torch.randperm(pair_indices.shape[1], generator=generator, device=device)
+    return pair_indices[0, order], pair_indices[1, order]
 
 
 def _sample_pairs(
@@ -376,10 +351,9 @@ def _sample_pairs(
     Parameters
     ----------
     num_nodes : int
-        Number of nodes in the graph.
+        Number of nodes.
     sample_size : int
-        Effective epoch budget. When ``sample_size >= num_nodes``, this returns
-        the full set of unordered node pairs for a paper-style full epoch.
+        Per-epoch pair budget.
     generator : torch.Generator
         Random generator for deterministic sampling.
     device : torch.device
@@ -393,10 +367,6 @@ def _sample_pairs(
     if num_nodes <= 1:
         empty = torch.empty((0,), dtype=torch.long, device=device)
         return empty, empty
-
-    if sample_size >= num_nodes:
-        pair_indices = torch.triu_indices(num_nodes, num_nodes, offset=1, device=device)
-        return pair_indices[0], pair_indices[1]
 
     i_indices = torch.randint(
         0,
@@ -416,11 +386,84 @@ def _sample_pairs(
     return i_indices[valid_pairs], j_indices[valid_pairs]
 
 
+def _pair_distance(
+    source_index: int,
+    target_index: int,
+    exact_distances: Optional[torch.Tensor],
+    pivot_dist: Optional[torch.Tensor],
+) -> float:
+    """Lookup the target graph distance for one pair.
+
+    Parameters
+    ----------
+    source_index : int
+        Source node index.
+    target_index : int
+        Target node index.
+    exact_distances : torch.Tensor, optional
+        Exact distance matrix with shape ``[N, N]``.
+    pivot_dist : torch.Tensor, optional
+        Pivot-to-node distances with shape ``[P, N]``.
+
+    Returns
+    -------
+    float
+        Target distance.
+    """
+    if exact_distances is not None:
+        return float(exact_distances[source_index, target_index].item())
+    if pivot_dist is None:
+        return 1.0
+    return _approx_distance(
+        source_index=source_index,
+        target_index=target_index,
+        pivot_dist=pivot_dist,
+    )
+
+
+def _apply_pair_update(
+    positions: torch.Tensor,
+    source_index: int,
+    target_index: int,
+    target_distance: float,
+    eta: float,
+) -> None:
+    """Apply one symmetric Stress-SGD pair update in place.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current positions, shape ``[N, 2]``.
+    source_index : int
+        Source node index.
+    target_index : int
+        Target node index.
+    target_distance : float
+        Desired graph distance for the pair.
+    eta : float
+        Current learning rate.
+
+    Returns
+    -------
+    None
+        Positions are updated in place.
+    """
+    weight = 1.0 / max(target_distance * target_distance, _MIN_DISTANCE)
+    mu = min(weight * eta, 1.0)
+    delta = positions[target_index] - positions[source_index]
+    current_distance = float(torch.linalg.norm(delta).item())
+    current_distance = max(current_distance, _MIN_DISTANCE)
+    ratio = (current_distance - target_distance) / (2.0 * current_distance)
+    movement = mu * ratio * delta
+    positions[source_index] += movement
+    positions[target_index] -= movement
+
+
 def layout_stress_sgd(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
-    steps: int = 500,
+    steps: int = 30,
     seed: int = 42,
     sample_size: Union[int, str] = "auto",
     trace_every: int = 0,
@@ -435,21 +478,27 @@ def layout_stress_sgd(
         Number of nodes.
     node_sizes : torch.Tensor, optional
         Unused, accepted for interface compatibility.
-    steps : int
+    steps : int, default=30
         Number of SGD epochs.
-    seed : int
+    seed : int, default=42
         Random seed.
     sample_size : int or str, default="auto"
-        Per-epoch pair budget. ``"auto"`` performs a full all-pairs epoch when
-        ``num_nodes <= 1000`` and samples 1000 pairs otherwise. Explicit values
-        greater than or equal to ``num_nodes`` also trigger a full epoch.
-    trace_every : int
-        If > 0, record snapshots every N steps.
+        Per-epoch pair budget. ``"auto"`` performs a full shuffled epoch for
+        graphs with at most ``1000`` nodes and samples ``1000`` pairs
+        otherwise. Explicit values greater than or equal to ``num_nodes`` also
+        request a full epoch, preserving the previous public API.
+    trace_every : int, default=0
+        If greater than zero, record snapshots every ``trace_every`` steps.
 
     Returns
     -------
-    torch.Tensor or tuple
+    torch.Tensor or tuple[torch.Tensor, list[torch.Tensor]]
         Final positions ``[N, 2]``, or ``(positions, traces)`` if tracing.
+
+    Raises
+    ------
+    ValueError
+        If the graph is disconnected.
     """
     del node_sizes
 
@@ -465,31 +514,33 @@ def layout_stress_sgd(
     traces: list[torch.Tensor] = []
     if num_nodes == 0:
         return (positions, traces) if trace_every > 0 else positions
+    if num_nodes == 1:
+        return (positions, traces) if trace_every > 0 else positions
 
     generator_device = device.type if device.type != "mps" else "cpu"
     generator = torch.Generator(device=generator_device)
     generator.manual_seed(seed)
 
     adjacency = _build_undirected_adjacency(edge_index, num_nodes)
-    component_ids_cpu = _connected_components(adjacency)
-    pivots_cpu = _choose_pivots(component_ids_cpu, min(num_nodes, _MAX_PIVOTS), generator)
-    pivot_dist_cpu = _compute_pivot_distances(adjacency, pivots_cpu)
+    if not _is_connected(adjacency):
+        raise ValueError("Stress-SGD requires a connected graph.")
+
     effective_sample_size = _resolve_sample_size(num_nodes, sample_size)
+    use_full_epoch = effective_sample_size >= num_nodes and num_nodes <= _AUTO_FULL_EPOCH_THRESHOLD
 
-    finite_distances = pivot_dist_cpu[pivot_dist_cpu >= 0]
-    graph_diameter = (
-        max(int(finite_distances.max().item()), 1) if int(finite_distances.numel()) > 0 else 1
-    )
-    disconnected_distance = float(max(graph_diameter * 3, 2))
-    d_min, d_max = _schedule_bounds(pivot_dist_cpu)
+    exact_distances: Optional[torch.Tensor] = None
+    pivot_dist: Optional[torch.Tensor] = None
+    if num_nodes <= _EXACT_DISTANCE_THRESHOLD:
+        exact_distances_cpu = _all_pairs_shortest_paths(adjacency)
+        exact_distances = exact_distances_cpu.to(device=device)
+        d_min, d_max = _schedule_bounds(exact_distances_cpu)
+    else:
+        pivots_cpu = _choose_pivots(num_nodes, min(num_nodes, _MAX_PIVOTS), generator)
+        pivot_dist_cpu = _compute_pivot_distances(adjacency, pivots_cpu)
+        pivot_dist = pivot_dist_cpu.to(device=device)
+        d_min, d_max = _schedule_bounds(pivot_dist_cpu)
 
-    pivot_dist = pivot_dist_cpu.to(device=device)
-    component_ids = component_ids_cpu.to(device=device)
-
-    positions = torch.randn(
-        (num_nodes, 2), generator=generator, device=device, dtype=torch.float32
-    ) * math.sqrt(float(max(num_nodes, 1)))
-    positions -= positions.mean(dim=0, keepdim=True)
+    positions = torch.rand((num_nodes, 2), generator=generator, device=device, dtype=torch.float32)
 
     if trace_every > 0 and steps == 0:
         _trace_snapshot(traces, positions)
@@ -501,36 +552,36 @@ def layout_stress_sgd(
             d_min=d_min,
             d_max=d_max,
         )
-        i_indices, j_indices = _sample_pairs(
-            num_nodes=num_nodes,
-            sample_size=effective_sample_size,
-            generator=generator,
-            device=device,
-        )
-        if i_indices.numel() == 0:
-            if trace_every > 0 and (step_index + 1) % trace_every == 0:
-                _trace_snapshot(traces, positions)
-            continue
-        target_distances = _approx_distance(
-            i_indices=i_indices,
-            j_indices=j_indices,
-            pivot_dist=pivot_dist,
-            component_ids=component_ids,
-            disconnected_distance=disconnected_distance,
-        )
+        if use_full_epoch:
+            i_indices, j_indices = _shuffled_full_pairs(
+                num_nodes=num_nodes,
+                generator=generator,
+                device=device,
+            )
+        else:
+            i_indices, j_indices = _sample_pairs(
+                num_nodes=num_nodes,
+                sample_size=effective_sample_size,
+                generator=generator,
+                device=device,
+            )
 
-        delta = positions.index_select(0, i_indices) - positions.index_select(0, j_indices)
-        current_distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
-        weights = 1.0 / target_distances.square().clamp(min=_MIN_DISTANCE)
-        magnitudes = eta * weights * (1.0 - target_distances / current_distances)
-        displacements = magnitudes.unsqueeze(1) * delta * 0.5
-
-        position_updates = torch.zeros_like(positions)
-        position_updates.index_add_(0, i_indices, -displacements)
-        position_updates.index_add_(0, j_indices, displacements)
-        positions += position_updates
-
-        positions -= positions.mean(dim=0, keepdim=True)
+        for pair_index in range(int(i_indices.shape[0])):
+            source_index = int(i_indices[pair_index].item())
+            target_index = int(j_indices[pair_index].item())
+            target_distance = _pair_distance(
+                source_index=source_index,
+                target_index=target_index,
+                exact_distances=exact_distances,
+                pivot_dist=pivot_dist,
+            )
+            _apply_pair_update(
+                positions=positions,
+                source_index=source_index,
+                target_index=target_index,
+                target_distance=target_distance,
+                eta=eta,
+            )
 
         if trace_every > 0 and (step_index + 1) % trace_every == 0:
             _trace_snapshot(traces, positions)

@@ -10,6 +10,7 @@ Reference: Fruchterman & Reingold, "Graph Drawing by Force-directed Placement"
 
 from __future__ import annotations
 
+from math import sqrt
 from typing import Optional, Union
 
 import torch
@@ -17,6 +18,8 @@ import torch
 MIN_DISTANCE = 0.01
 SAMPLED_REPULSION_LIMIT = 10_000
 SAMPLED_NEIGHBORS = 1_000
+CONVERGENCE_THRESHOLD = 1.0e-4
+OUTPUT_SCALE_FACTOR = 50.0
 
 
 def _layout_device(
@@ -119,6 +122,13 @@ def _repulsive_displacement_sampled(
     -------
     torch.Tensor
         Approximate repulsive displacement with shape ``[N, 2]``.
+
+    Notes
+    -----
+    NetworkX evaluates the full ``O(N^2)`` repulsion term. Dagua keeps this
+    sampled approximation only above ``SAMPLED_REPULSION_LIMIT`` as a
+    graph-size-specific acceleration; for smaller graphs the force update
+    matches the reference implementation.
     """
     num_nodes = pos.shape[0]
     sample_size = min(num_nodes, SAMPLED_NEIGHBORS)
@@ -167,6 +177,64 @@ def _repulsive_displacement(
     return _repulsive_displacement_full(pos, k)
 
 
+def _adjacency_matrix(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build the dense symmetric adjacency used by the exact FR update.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+    device : torch.device
+        Device for the adjacency matrix.
+
+    Returns
+    -------
+    torch.Tensor
+        Dense adjacency matrix with shape ``[N, N]``.
+    """
+    adjacency = torch.zeros((num_nodes, num_nodes), dtype=torch.float32, device=device)
+    if edge_index.numel() == 0:
+        return adjacency
+
+    src = edge_index[0].to(dtype=torch.long, device=device)
+    dst = edge_index[1].to(dtype=torch.long, device=device)
+    adjacency[src, dst] = 1.0
+    adjacency[dst, src] = 1.0
+    return adjacency
+
+
+def _exact_displacement(pos: torch.Tensor, adjacency: torch.Tensor, k: float) -> torch.Tensor:
+    """Compute the exact NetworkX FR displacement for smaller graphs.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    adjacency : torch.Tensor
+        Dense adjacency matrix with shape ``[N, N]``.
+    k : float
+        Ideal spring length.
+
+    Returns
+    -------
+    torch.Tensor
+        Displacement tensor with shape ``[N, 2]``.
+    """
+    delta = pos.unsqueeze(1) - pos.unsqueeze(0)
+    distance = torch.linalg.norm(delta, dim=-1).clamp(min=MIN_DISTANCE)
+    return torch.einsum(
+        "ijk,ij->ik",
+        delta,
+        ((k * k) / distance.square()) - (adjacency * distance / k),
+    )
+
+
 def _attractive_displacement(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -203,6 +271,49 @@ def _attractive_displacement(
     disp.index_add_(0, src, edge_disp)
     disp.index_add_(0, dst, -edge_disp)
     return disp
+
+
+def _initial_temperature(pos: torch.Tensor) -> float:
+    """Compute the NetworkX initial temperature from the current extent.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Current positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Initial simulation temperature.
+    """
+    if pos.shape[0] == 0:
+        return 0.0
+
+    x_extent = float((pos[:, 0].max() - pos[:, 0].min()).item())
+    y_extent = float((pos[:, 1].max() - pos[:, 1].min()).item())
+    return max(x_extent, y_extent) * 0.1
+
+
+def _rescale_layout(positions: torch.Tensor, scale: float) -> torch.Tensor:
+    """Center and rescale positions like ``networkx.rescale_layout``.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    scale : float
+        Target half-width after rescaling.
+
+    Returns
+    -------
+    torch.Tensor
+        Rescaled positions with shape ``[N, 2]``.
+    """
+    centered = positions - positions.mean(dim=0, keepdim=True)
+    limit = float(centered.abs().max().item())
+    if limit > 0.0:
+        centered = centered * (scale / limit)
+    return centered
 
 
 def layout_fr(
@@ -258,29 +369,41 @@ def layout_fr(
     if layout_area <= 0.0:
         raise ValueError("area must be positive")
 
-    side = layout_area**0.5
     pos = _initialize_positions(num_nodes, layout_area, device, seed)
+    adjacency = (
+        _adjacency_matrix(edge_index=edge_index, num_nodes=num_nodes, device=device)
+        if num_nodes <= SAMPLED_REPULSION_LIMIT
+        else None
+    )
     if steps == 0:
-        return (pos, traces) if trace_every > 0 else pos
+        scaled = _rescale_layout(pos, scale=sqrt(max(num_nodes, 1)) * OUTPUT_SCALE_FACTOR)
+        return (scaled, traces) if trace_every > 0 else scaled
 
     k = (layout_area / num_nodes) ** 0.5
-    temp = side / 10.0
-    cooling = temp / steps
+    temp = _initial_temperature(pos)
+    cooling = temp / (steps + 1)
 
     for step in range(steps):
-        disp = _repulsive_displacement(pos, k, seed, step)
-        disp = disp + _attractive_displacement(pos, edge_index, k)
+        if adjacency is not None:
+            disp = _exact_displacement(pos, adjacency, k)
+        else:
+            disp = _repulsive_displacement(pos, k, seed, step)
+            disp = disp + _attractive_displacement(pos, edge_index, k)
 
         disp_norm = torch.linalg.norm(disp, dim=1, keepdim=True).clamp(min=MIN_DISTANCE)
-        temp_tensor = torch.full_like(disp_norm, temp)
-        pos = pos + (disp / disp_norm) * torch.minimum(disp_norm, temp_tensor)
-        pos = pos.clamp(min=0.0, max=side)
+        delta_pos = disp * (temp / disp_norm)
+        pos = pos + delta_pos
 
         temp -= cooling
 
         if trace_every > 0 and step % trace_every == 0:
             traces.append(pos.clone())
 
+        if (torch.linalg.norm(delta_pos) / num_nodes) < CONVERGENCE_THRESHOLD:
+            break
+
+    scaled = _rescale_layout(pos, scale=sqrt(max(num_nodes, 1)) * OUTPUT_SCALE_FACTOR)
+
     if trace_every > 0:
-        return pos, traces
-    return pos
+        return scaled, traces
+    return scaled
