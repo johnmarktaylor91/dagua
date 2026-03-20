@@ -1,10 +1,13 @@
-"""OGDF competitor adapters for selected energy-based and layered layouts."""
+"""OGDF competitor adapters backed by the standalone runner subprocess."""
 
 from __future__ import annotations
 
-import importlib
+import json
+import shutil
+import subprocess
 import time
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -13,193 +16,127 @@ from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, regist
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
-OGDFGraphBundle = Tuple[Any, Any, List[Any]]
-OGDFGraphBuilder = Callable[["DaguaGraph", Any], OGDFGraphBundle]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+OGDF_RUNNER = _REPO_ROOT / "scripts" / "ogdf_runner"
 
 
-def _load_ogdf() -> Any:
-    """Load the OGDF binding namespace from ``ogdf_python``.
+def _resolve_ogdf_runner() -> Optional[str]:
+    """Resolve the OGDF runner executable path.
 
     Returns
     -------
-    Any
-        OGDF binding namespace exposing ``Graph``, ``GraphAttributes``, and
-        the layout algorithm classes.
-
-    Raises
-    ------
-    ImportError
-        If ``ogdf_python`` is not importable or cannot load its native
-        dependencies.
-    OSError
-        If the binding package loads but its shared libraries are unusable.
+    str | None
+        Absolute path to the compiled runner, or ``None`` when it is not
+        available either in the repository or on ``PATH``.
     """
-    try:
-        from ogdf_python import ogdf
-
-        return ogdf
-    except (ImportError, OSError):
-        pass
-
-    try:
-        return importlib.import_module("ogdf_python.ogdf")
-    except (ImportError, OSError):
-        pass
-
-    import ogdf_python as ogdf_module
-
-    if hasattr(ogdf_module, "ogdf"):
-        return ogdf_module.ogdf
-    return ogdf_module
+    if OGDF_RUNNER.exists():
+        return str(OGDF_RUNNER)
+    return shutil.which("ogdf_runner")
 
 
 def _ogdf_available() -> bool:
-    """Return whether the OGDF Python bindings are usable.
+    """Report whether the standalone OGDF runner is available.
 
     Returns
     -------
     bool
-        ``True`` when the binding package and its native dependencies can be
-        imported successfully.
+        ``True`` when the compiled runner can be resolved.
     """
-    try:
-        _load_ogdf()
-    except Exception:
-        return False
-    return True
+    return _resolve_ogdf_runner() is not None
 
 
-def _build_ogdf_graph(graph: DaguaGraph, ogdf: Any) -> OGDFGraphBundle:
-    """Convert ``DaguaGraph`` into an OGDF graph for undirected layouts.
+def _graph_edges(graph: DaguaGraph) -> list[list[int]]:
+    """Convert ``edge_index`` into a JSON-serializable edge list.
 
     Parameters
     ----------
     graph : DaguaGraph
-        Graph whose ``edge_index`` is converted.
-    ogdf : Any
-        OGDF binding namespace returned by :func:`_load_ogdf`.
+        Source graph whose edges should be exported.
 
     Returns
     -------
-    tuple[Any, Any, list[Any]]
-        OGDF graph object, its graph attributes, and node handles in Dagua
-        index order.
+    list[list[int]]
+        Edge list shaped like ``[[source, target], ...]``.
     """
-    ogdf_graph = ogdf.Graph()
-    graph_attributes = ogdf.GraphAttributes(
-        ogdf_graph,
-        ogdf.GraphAttributes.nodeGraphics | ogdf.GraphAttributes.edgeGraphics,
-    )
-    nodes = [ogdf_graph.newNode() for _ in range(graph.num_nodes)]
-
     edge_index = graph.edge_index.cpu().numpy()
-    seen_edges: set[tuple[int, int]] = set()
-    for edge_idx in range(edge_index.shape[1]):
-        source = int(edge_index[0, edge_idx])
-        target = int(edge_index[1, edge_idx])
-        if source == target:
-            continue
-
-        undirected_edge = (min(source, target), max(source, target))
-        if undirected_edge in seen_edges:
-            continue
-
-        # Energy-based OGDF layouts are effectively undirected; add one
-        # reciprocal pair per logical edge so already-bidirectional inputs do
-        # not get double-counted.
-        ogdf_graph.newEdge(nodes[source], nodes[target])
-        ogdf_graph.newEdge(nodes[target], nodes[source])
-        seen_edges.add(undirected_edge)
-
-    return ogdf_graph, graph_attributes, nodes
+    return [
+        [int(edge_index[0, idx]), int(edge_index[1, idx])] for idx in range(edge_index.shape[1])
+    ]
 
 
-def _build_ogdf_digraph(graph: DaguaGraph, ogdf: Any) -> OGDFGraphBundle:
-    """Convert ``DaguaGraph`` into an OGDF graph for directed layouts.
+def _run_ogdf(graph: DaguaGraph, algorithm: str, timeout: float) -> torch.Tensor:
+    """Run an OGDF algorithm through the standalone subprocess wrapper.
 
     Parameters
     ----------
     graph : DaguaGraph
-        Graph whose ``edge_index`` is converted.
-    ogdf : Any
-        OGDF binding namespace returned by :func:`_load_ogdf`.
-
-    Returns
-    -------
-    tuple[Any, Any, list[Any]]
-        OGDF graph object, its graph attributes, and node handles in Dagua
-        index order.
-    """
-    ogdf_graph = ogdf.Graph()
-    graph_attributes = ogdf.GraphAttributes(
-        ogdf_graph,
-        ogdf.GraphAttributes.nodeGraphics | ogdf.GraphAttributes.edgeGraphics,
-    )
-    nodes = [ogdf_graph.newNode() for _ in range(graph.num_nodes)]
-
-    edge_index = graph.edge_index.cpu().numpy()
-    seen_edges: set[tuple[int, int]] = set()
-    for edge_idx in range(edge_index.shape[1]):
-        source = int(edge_index[0, edge_idx])
-        target = int(edge_index[1, edge_idx])
-        edge = (source, target)
-        if source == target or edge in seen_edges:
-            continue
-
-        ogdf_graph.newEdge(nodes[source], nodes[target])
-        seen_edges.add(edge)
-
-    return ogdf_graph, graph_attributes, nodes
-
-
-def _read_positions(graph_attributes: Any, nodes: List[Any], num_nodes: int) -> torch.Tensor:
-    """Extract an ``[N, 2]`` CPU tensor from OGDF graph attributes.
-
-    Parameters
-    ----------
-    graph_attributes : Any
-        OGDF ``GraphAttributes`` object after layout execution.
-    nodes : list[Any]
-        Node handles in Dagua index order.
-    num_nodes : int
-        Number of nodes in the source graph.
+        Graph to lay out.
+    algorithm : str
+        OGDF algorithm selector understood by the C++ runner.
+    timeout : float
+        Wall-clock timeout in seconds for the subprocess.
 
     Returns
     -------
     torch.Tensor
         Position tensor shaped ``[N, 2]`` on CPU.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the OGDF runner binary is not available.
+    RuntimeError
+        If the runner exits with a non-zero status or emits invalid JSON.
+    subprocess.TimeoutExpired
+        If the subprocess exceeds the timeout budget.
     """
-    pos = torch.zeros((num_nodes, 2), dtype=torch.float32)
-    for node_idx, node in enumerate(nodes):
-        pos[node_idx, 0] = float(graph_attributes.x(node))
-        pos[node_idx, 1] = float(graph_attributes.y(node))
+    if graph.num_nodes == 0:
+        return torch.zeros((0, 2), dtype=torch.float32)
+
+    runner = _resolve_ogdf_runner()
+    if runner is None:
+        raise FileNotFoundError("OGDF runner binary not found")
+
+    payload = json.dumps(
+        {
+            "nodes": graph.num_nodes,
+            "edges": _graph_edges(graph),
+            "algorithm": algorithm,
+        }
+    )
+    result = subprocess.run(
+        [runner],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        raise RuntimeError(f"OGDF failed: {stderr or 'unknown error'}")
+
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"OGDF returned invalid JSON: {exc}") from exc
+
+    positions = output.get("positions")
+    if not isinstance(positions, list):
+        raise RuntimeError("OGDF output missing positions")
+    pos = torch.tensor(positions, dtype=torch.float32)
+    if pos.shape != (graph.num_nodes, 2):
+        raise RuntimeError(
+            "OGDF returned invalid position shape: "
+            f"expected {(graph.num_nodes, 2)}, got {tuple(pos.shape)}"
+        )
     return pos
 
 
 class _OGDFBase(CompetitorBase):
-    """Base class for OGDF layout adapters."""
+    """Base class for OGDF subprocess-backed adapters."""
 
-    graph_builder: OGDFGraphBuilder = staticmethod(_build_ogdf_graph)
-
-    def create_layout_algorithm(self, ogdf: Any) -> Any:
-        """Construct the OGDF layout algorithm instance for this adapter.
-
-        Parameters
-        ----------
-        ogdf : Any
-            OGDF binding namespace returned by :func:`_load_ogdf`.
-
-        Returns
-        -------
-        Any
-            Configured OGDF layout algorithm object.
-
-        Raises
-        ------
-        NotImplementedError
-            If a subclass does not provide an algorithm implementation.
-        """
-        raise NotImplementedError
+    algorithm: str = ""
 
     def layout(
         self,
@@ -207,46 +144,39 @@ class _OGDFBase(CompetitorBase):
         timeout: float = 300.0,
         seed: Optional[int] = None,
     ) -> CompetitorResult:
-        """Run the configured OGDF layout and convert its positions to torch.
+        """Run the configured OGDF algorithm through the helper binary.
 
         Parameters
         ----------
         graph : DaguaGraph
             Input graph to lay out.
-        timeout : float, optional
-            Unused adapter timeout in seconds. Included for interface
-            compatibility with the benchmark harness.
+        timeout : float, default=300.0
+            Wall-clock timeout budget for the subprocess.
         seed : int | None, default=None
-            Accepted for interface consistency but ignored because the Python
-            bindings do not expose OGDF's internal randomness controls.
+            Accepted for interface compatibility but ignored because the helper
+            binary currently exposes no seed parameter.
 
         Returns
         -------
         CompetitorResult
             Layout result with positions shaped ``[N, 2]`` on CPU, or an error
-            payload if the third-party engine fails.
+            payload if execution fails.
         """
-        del timeout, seed
+        del seed
 
         start = time.perf_counter()
         try:
-            if graph.num_nodes <= 1:
-                pos = torch.zeros((graph.num_nodes, 2), dtype=torch.float32)
-                elapsed = time.perf_counter() - start
-                return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
-
-            ogdf = _load_ogdf()
-            ogdf_graph, graph_attributes, nodes = self.graph_builder(graph, ogdf)
-            layout_algorithm = self.create_layout_algorithm(ogdf)
-            layout_algorithm.call(graph_attributes)
-            pos = _read_positions(graph_attributes, nodes, graph.num_nodes)
-
-            # Keep the native graph object referenced until after coordinates
-            # are read; cppyy-backed handles can otherwise become invalid.
-            _ = ogdf_graph
-
+            pos = _run_ogdf(graph, self.algorithm, timeout)
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+        except subprocess.TimeoutExpired:
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=elapsed,
+                error="timeout",
+            )
         except Exception as exc:
             elapsed = time.perf_counter() - start
             return CompetitorResult(
@@ -257,12 +187,12 @@ class _OGDFBase(CompetitorBase):
             )
 
     def available(self) -> bool:
-        """Report whether OGDF bindings are usable in the current environment.
+        """Report whether the OGDF helper binary is available.
 
         Returns
         -------
         bool
-            ``True`` when the OGDF Python bindings import successfully.
+            ``True`` when the compiled runner exists locally or on ``PATH``.
         """
         return _ogdf_available()
 
@@ -272,45 +202,17 @@ class OGDFGem(_OGDFBase):
     """Competitor adapter for OGDF's GEM layout."""
 
     name = "ogdf_gem"
+    algorithm = "gem"
     max_nodes = 20_000
-
-    def create_layout_algorithm(self, ogdf: Any) -> Any:
-        """Create the OGDF GEM layout instance.
-
-        Parameters
-        ----------
-        ogdf : Any
-            OGDF binding namespace returned by :func:`_load_ogdf`.
-
-        Returns
-        -------
-        Any
-            OGDF GEM layout instance.
-        """
-        return ogdf.energybased.GEMLayout()
 
 
 @register
 class OGDFFMMM(_OGDFBase):
-    """Competitor adapter for OGDF's FM^3 multilevel layout."""
+    """Competitor adapter for OGDF's FM^3 layout."""
 
     name = "ogdf_fmmm"
+    algorithm = "fmmm"
     max_nodes = 100_000
-
-    def create_layout_algorithm(self, ogdf: Any) -> Any:
-        """Create the OGDF FM^3 layout instance.
-
-        Parameters
-        ----------
-        ogdf : Any
-            OGDF binding namespace returned by :func:`_load_ogdf`.
-
-        Returns
-        -------
-        Any
-            OGDF FM^3 layout instance.
-        """
-        return ogdf.energybased.FMMMLayout()
 
 
 @register
@@ -318,45 +220,8 @@ class OGDFStress(_OGDFBase):
     """Competitor adapter for OGDF's stress minimization layout."""
 
     name = "ogdf_stress"
+    algorithm = "stress"
     max_nodes = 10_000
-
-    def create_layout_algorithm(self, ogdf: Any) -> Any:
-        """Create the OGDF stress minimization layout instance.
-
-        Parameters
-        ----------
-        ogdf : Any
-            OGDF binding namespace returned by :func:`_load_ogdf`.
-
-        Returns
-        -------
-        Any
-            OGDF stress minimization layout instance.
-        """
-        return ogdf.energybased.StressMinimization()
-
-
-@register
-class OGDFLinLog(_OGDFBase):
-    """Competitor adapter for OGDF's LinLog layout."""
-
-    name = "ogdf_linlog"
-    max_nodes = 20_000
-
-    def create_layout_algorithm(self, ogdf: Any) -> Any:
-        """Create the OGDF LinLog layout instance.
-
-        Parameters
-        ----------
-        ogdf : Any
-            OGDF binding namespace returned by :func:`_load_ogdf`.
-
-        Returns
-        -------
-        Any
-            OGDF LinLog layout instance.
-        """
-        return ogdf.energybased.LinLogLayout()
 
 
 @register
@@ -364,46 +229,8 @@ class OGDFPivotMDS(_OGDFBase):
     """Competitor adapter for OGDF's Pivot-MDS layout."""
 
     name = "ogdf_pivot_mds"
+    algorithm = "pivot_mds"
     max_nodes = 100_000
-
-    def create_layout_algorithm(self, ogdf: Any) -> Any:
-        """Create the OGDF Pivot-MDS layout instance.
-
-        Parameters
-        ----------
-        ogdf : Any
-            OGDF binding namespace returned by :func:`_load_ogdf`.
-
-        Returns
-        -------
-        Any
-            OGDF Pivot-MDS layout instance.
-        """
-        return ogdf.energybased.PivotMDS()
-
-
-@register
-class OGDFSugiyama(_OGDFBase):
-    """Competitor adapter for OGDF's Sugiyama layered layout."""
-
-    name = "ogdf_sugiyama"
-    max_nodes = 20_000
-    graph_builder: OGDFGraphBuilder = staticmethod(_build_ogdf_digraph)
-
-    def create_layout_algorithm(self, ogdf: Any) -> Any:
-        """Create the OGDF Sugiyama layout instance.
-
-        Parameters
-        ----------
-        ogdf : Any
-            OGDF binding namespace returned by :func:`_load_ogdf`.
-
-        Returns
-        -------
-        Any
-            OGDF Sugiyama layout instance.
-        """
-        return ogdf.layered.SugiyamaLayout()
 
 
 @register
@@ -411,19 +238,23 @@ class OGDFDavidsonHarel(_OGDFBase):
     """Competitor adapter for OGDF's Davidson-Harel layout."""
 
     name = "ogdf_davidson_harel"
+    algorithm = "davidson_harel"
     max_nodes = 500
 
-    def create_layout_algorithm(self, ogdf: Any) -> Any:
-        """Create the OGDF Davidson-Harel layout instance.
 
-        Parameters
-        ----------
-        ogdf : Any
-            OGDF binding namespace returned by :func:`_load_ogdf`.
+@register
+class OGDFSugiyama(_OGDFBase):
+    """Competitor adapter for OGDF's Sugiyama layout."""
 
-        Returns
-        -------
-        Any
-            OGDF Davidson-Harel layout instance.
-        """
-        return ogdf.energybased.DavidsonHarelLayout()
+    name = "ogdf_sugiyama"
+    algorithm = "sugiyama"
+    max_nodes = 20_000
+
+
+@register
+class OGDFLinLog(_OGDFBase):
+    """Competitor adapter for the requested OGDF LinLog layout."""
+
+    name = "ogdf_linlog"
+    algorithm = "linlog"
+    max_nodes = 20_000

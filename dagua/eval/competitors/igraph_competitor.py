@@ -1,9 +1,9 @@
-"""igraph competitor adapters — Sugiyama, Fruchterman-Reingold, Reingold-Tilford."""
+"""igraph competitor adapters for selected layered and force-directed layouts."""
 
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
@@ -13,8 +13,19 @@ if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
 
-def _graph_to_igraph(graph: DaguaGraph):
-    """Convert DaguaGraph to igraph.Graph (minimal, for layout only)."""
+def _graph_to_igraph(graph: DaguaGraph) -> Any:
+    """Convert a ``DaguaGraph`` into an ``igraph.Graph``.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph whose node and edge structure should be mirrored.
+
+    Returns
+    -------
+    Any
+        ``igraph.Graph`` instance suitable for layout calls.
+    """
     import igraph
 
     g = igraph.Graph(directed=True)
@@ -26,8 +37,21 @@ def _graph_to_igraph(graph: DaguaGraph):
     return g
 
 
-def _igraph_pos_to_tensor(layout, num_nodes: int) -> torch.Tensor:
-    """Convert igraph Layout to [N, 2] tensor, scaled to dagua units."""
+def _igraph_pos_to_tensor(layout: Any, num_nodes: int) -> torch.Tensor:
+    """Convert an igraph layout into a scaled ``[N, 2]`` tensor.
+
+    Parameters
+    ----------
+    layout : Any
+        igraph layout object exposing 2D coordinates by index.
+    num_nodes : int
+        Number of nodes expected in the output tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU tensor shaped ``[N, 2]`` in Dagua's coordinate scale.
+    """
     pos = torch.zeros(num_nodes, 2)
     for i in range(min(len(layout), num_nodes)):
         # igraph layouts return coordinates in arbitrary units; scale up
@@ -121,4 +145,28 @@ class IgraphRT(_IgraphBase):
     name = "igraph_rt"
     max_nodes = 10_000
     layout_algo = "reingold_tilford"
+    layout_kwargs = {}
+
+
+@register
+class IgraphDavidsonHarel(_IgraphBase):
+    name = "igraph_davidson_harel"
+    max_nodes = 500
+    layout_algo = "davidson_harel"
+    layout_kwargs = {}
+
+
+@register
+class IgraphKamadaKawai(_IgraphBase):
+    name = "igraph_kamada_kawai"
+    max_nodes = 5_000
+    layout_algo = "kamada_kawai"
+    layout_kwargs = {}
+
+
+@register
+class IgraphMDS(_IgraphBase):
+    name = "igraph_mds"
+    max_nodes = 5_000
+    layout_algo = "mds"
     layout_kwargs = {}
