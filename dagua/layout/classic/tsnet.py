@@ -274,6 +274,51 @@ def _tsne_loss(positions: torch.Tensor, probabilities: torch.Tensor) -> torch.Te
     return (probabilities * (probabilities.log() - q.clamp(min=_MIN_DISTANCE).log())).sum()
 
 
+def _gradient_descent_step(
+    positions: torch.Tensor,
+    grad: torch.Tensor,
+    update: torch.Tensor,
+    gains: torch.Tensor,
+    learning_rate: float,
+    momentum: float,
+    min_gain: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Apply one exact t-SNE gains-plus-momentum update.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current embedding with shape ``[N, 2]``.
+    grad : torch.Tensor
+        Gradient tensor with shape ``[N, 2]``.
+    update : torch.Tensor
+        Velocity tensor with shape ``[N, 2]``.
+    gains : torch.Tensor
+        Per-parameter gain tensor with shape ``[N, 2]``.
+    learning_rate : float
+        Step size for the current optimization phase.
+    momentum : float
+        Momentum coefficient for the current optimization phase.
+    min_gain : float
+        Floor applied to every gain entry.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Updated ``(positions, update, gains)`` tensors.
+    """
+    inc = (update * grad) < 0.0
+    dec = ~inc
+    gains[inc] += 0.2
+    gains[dec] *= 0.8
+    gains.clamp_(min=min_gain)
+    grad = grad * gains
+
+    update = momentum * update - learning_rate * grad
+    positions.add_(update)
+    return positions, update, gains
+
+
 def layout_tsnet(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -286,9 +331,9 @@ def layout_tsnet(
 
     Reference
     ---------
-    Kruiger et al., "Graph Layout by t-SNE" (2017). This keeps the
-    PivotMDS-based initialization variant while switching the optimizer to the
-    paper-style momentum SGD schedule.
+    Kruiger et al., "Graph Layout by t-SNE" (2017). The optimization loop
+    follows the original t-SNE gains-plus-momentum update rule rather than an
+    adaptive optimizer.
 
     Parameters
     ----------
@@ -340,30 +385,33 @@ def layout_tsnet(
     positions = initial_positions.clone().requires_grad_(True)
     early_exaggeration = 12.0
     early_exaggeration_steps = min(250, steps)
-    initial_lr = float(max(num_nodes, 1)) / (4.0 * early_exaggeration)
-    optimizer = torch.optim.SGD([positions], lr=initial_lr, momentum=0.5)
+    min_gain = 0.01
+    early_learning_rate = max(float(max(num_nodes, 1)) / 48.0, 200.0)
+    late_learning_rate = early_learning_rate * 4.0
+    update = torch.zeros_like(positions)
     gains = torch.ones_like(positions)
-    previous_grad = torch.zeros_like(positions)
 
     for step in range(steps):
-        optimizer.zero_grad(set_to_none=True)
         exaggeration = early_exaggeration if step < early_exaggeration_steps else 1.0
         loss = _tsne_loss(positions, probabilities * exaggeration)
         loss.backward()
+
+        grad = positions.grad.detach().clone()
+        momentum = 0.5 if step < early_exaggeration_steps else 0.8
+        learning_rate = (
+            early_learning_rate if step < early_exaggeration_steps else late_learning_rate
+        )
         with torch.no_grad():
-            current_grad = positions.grad.detach().clone()
-            direction_changed = torch.sign(current_grad) != torch.sign(previous_grad)
-            gains = torch.where(
-                direction_changed,
-                gains + 0.2,
-                torch.clamp(gains * 0.8, min=0.01),
+            positions, update, gains = _gradient_descent_step(
+                positions=positions,
+                grad=grad,
+                update=update,
+                gains=gains,
+                learning_rate=learning_rate,
+                momentum=momentum,
+                min_gain=min_gain,
             )
-            positions.grad.mul_(gains)
-            previous_grad = current_grad
-        optimizer.step()
-        if step + 1 == early_exaggeration_steps and step + 1 < steps:
-            optimizer.param_groups[0]["lr"] = float(max(num_nodes, 1)) / 4.0
-            optimizer.param_groups[0]["momentum"] = 0.8
+            positions.grad.zero_()
 
     extent = _layout_extent(num_nodes, node_sizes)
     return _normalize_positions(positions.detach(), extent).to(dtype=torch.float32, device=device)
