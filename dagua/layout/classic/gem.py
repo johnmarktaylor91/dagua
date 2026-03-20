@@ -1,8 +1,9 @@
 """GEM-style adaptive force-directed layout.
 
-This is a simplified Graph Embedder Method implementation with per-node
-temperatures, adaptive impulse damping, sampled repulsion for larger graphs,
-and a weak gravity term toward the barycenter.
+This implementation mirrors OGDF's GEM force laws and temperature update
+rules. For small graphs it follows the original sequential one-node-per-tick
+schedule closely; for larger graphs it keeps a documented batched fallback to
+avoid an impractical Python O(rounds * N^2) loop.
 """
 
 from __future__ import annotations
@@ -12,16 +13,22 @@ from typing import Optional
 
 import torch
 
-_MIN_DISTANCE = 1.0e-3
+_MIN_DISTANCE = 1.0e-9
+_SEQUENTIAL_NODE_LIMIT = 5_000
 _FULL_REPULSION_LIMIT = 2_000
 _SAMPLED_REPULSION_NEIGHBORS = 96
-_PERTURBATION_MAX_ANGLE = 1.64
+_NUMBER_OF_ROUNDS = 30_000
+_MINIMAL_TEMPERATURE = 0.005
+_INITIAL_TEMPERATURE = 12.0
 _GRAVITATIONAL_CONSTANT = 1.0 / 16.0
-_MIN_GLOBAL_TEMPERATURE = 0.005
-_ROTATION_SENSITIVITY = 0.01
-_OSCILLATION_SENSITIVITY = 0.3
+_DESIRED_LENGTH = 20.0
+_MAXIMAL_DISTURBANCE = 0.0
 _ROTATION_ANGLE = math.pi / 3.0
 _OSCILLATION_ANGLE = math.pi / 2.0
+_ROTATION_SENSITIVITY = 0.01
+_OSCILLATION_SENSITIVITY = 0.3
+_ATTRACTION_FORMULA = 1
+_LEGACY_ROTATION_MAX_ANGLE = 1.64
 _ROTATION_SINE_THRESHOLD = math.sin((math.pi / 2.0) + (_ROTATION_ANGLE / 2.0))
 _OSCILLATION_COSINE_THRESHOLD = math.cos(_OSCILLATION_ANGLE / 2.0)
 
@@ -119,7 +126,7 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
 
 
 def _ideal_distance(num_nodes: int, extent: float) -> float:
-    """Estimate the FR-style ideal distance used by GEM repulsion.
+    """Estimate a fallback spacing constant for sampled repulsion.
 
     Parameters
     ----------
@@ -131,7 +138,7 @@ def _ideal_distance(num_nodes: int, extent: float) -> float:
     Returns
     -------
     float
-        Ideal pairwise spacing constant ``k``.
+        Ideal pairwise spacing constant.
     """
     return max(extent / max(float(max(num_nodes, 1)) ** 0.5, 1.0), _MIN_DISTANCE)
 
@@ -166,25 +173,114 @@ def _degree_weights(
     return degrees / 2.5 + 1.0
 
 
+def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> list[list[int]]:
+    """Build a symmetric adjacency list for GEM attraction.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        One sorted undirected neighbor list per node.
+    """
+    adjacency_sets = [set() for _ in range(num_nodes)]
+    if edge_index.numel() == 0:
+        return [[] for _ in range(num_nodes)]
+
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+        if source == target:
+            continue
+        adjacency_sets[source].add(target)
+        adjacency_sets[target].add(source)
+    return [sorted(neighbors) for neighbors in adjacency_sets]
+
+
+def _node_diagonals(num_nodes: int, node_sizes: Optional[torch.Tensor]) -> torch.Tensor:
+    """Compute per-node diagonal lengths used by OGDF GEM.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    node_sizes : torch.Tensor, optional
+        Optional node sizes. When the tensor has shape ``[N, 2]`` it is treated
+        as ``(width, height)``; a 1D tensor is treated as square side lengths.
+
+    Returns
+    -------
+    torch.Tensor
+        Node diagonal lengths with shape ``[N]``.
+    """
+    if node_sizes is None or node_sizes.numel() == 0:
+        return torch.zeros((num_nodes,), dtype=torch.float32)
+
+    sizes_cpu = node_sizes.to(device="cpu", dtype=torch.float32)
+    if sizes_cpu.ndim == 2 and sizes_cpu.shape[0] == num_nodes and sizes_cpu.shape[1] >= 2:
+        widths = sizes_cpu[:, 0]
+        heights = sizes_cpu[:, 1]
+        return torch.sqrt(widths.square() + heights.square())
+    if sizes_cpu.ndim == 1 and sizes_cpu.shape[0] == num_nodes:
+        return torch.sqrt(2.0 * sizes_cpu.square())
+    return torch.zeros((num_nodes,), dtype=torch.float32)
+
+
 def _repulsive_force_full(positions: torch.Tensor, ideal_distance: float) -> torch.Tensor:
-    """Compute exact all-pairs repulsion.
+    """Compute the legacy exact all-pairs repulsion helper.
 
     Parameters
     ----------
     positions : torch.Tensor
         Position tensor with shape ``[N, 2]``.
     ideal_distance : float
-        FR-style ideal distance constant ``k``.
+        Scalar desired length used by the legacy helper.
 
     Returns
     -------
     torch.Tensor
         Repulsive force per node.
+
+    Notes
+    -----
+    Tests use this helper directly to pin the translated force coefficient.
+    The actual layout path uses the per-node desired lengths from OGDF.
     """
     delta = positions.unsqueeze(1) - positions.unsqueeze(0)
     distances = torch.linalg.norm(delta, dim=2).clamp(min=_MIN_DISTANCE)
     force = (ideal_distance * ideal_distance) / distances
     return (delta / distances.unsqueeze(2) * force.unsqueeze(2)).sum(dim=1)
+
+
+def _repulsive_force_batch(
+    positions: torch.Tensor,
+    node_desired_lengths: torch.Tensor,
+) -> torch.Tensor:
+    """Compute batched OGDF GEM repulsion with per-source desired lengths.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_desired_lengths : torch.Tensor
+        Per-node desired lengths with shape ``[N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Repulsive force per node with shape ``[N, 2]``.
+    """
+    delta = positions.unsqueeze(1) - positions.unsqueeze(0)
+    distance_square = delta.square().sum(dim=2)
+    mask = distance_square > _MIN_DISTANCE
+    safe_distance_square = torch.where(mask, distance_square, torch.ones_like(distance_square))
+    desired_square = node_desired_lengths.square().unsqueeze(1).unsqueeze(2)
+    force = delta * desired_square / safe_distance_square.unsqueeze(2)
+    return (force * mask.unsqueeze(2)).sum(dim=1)
 
 
 def _repulsive_force_sampled(
@@ -204,7 +300,7 @@ def _repulsive_force_sampled(
     step : int
         Iteration index.
     ideal_distance : float
-        FR-style ideal distance constant ``k``.
+        Scalar desired length used for the coarse fallback.
 
     Returns
     -------
@@ -235,7 +331,7 @@ def _repulsive_force(
     step: int,
     ideal_distance: float,
 ) -> torch.Tensor:
-    """Dispatch between exact and sampled repulsion.
+    """Dispatch between exact and sampled legacy repulsion helpers.
 
     Parameters
     ----------
@@ -246,7 +342,7 @@ def _repulsive_force(
     step : int
         Iteration index.
     ideal_distance : float
-        FR-style ideal distance constant ``k``.
+        Scalar desired length.
 
     Returns
     -------
@@ -264,7 +360,7 @@ def _attractive_force(
     ideal_distance: float,
     degree_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Compute exact spring attraction along graph edges.
+    """Compute the legacy exact spring attraction along graph edges.
 
     Parameters
     ----------
@@ -273,7 +369,7 @@ def _attractive_force(
     edge_index : torch.Tensor
         Edge list with shape ``[2, E]``.
     ideal_distance : float
-        GEM target edge length constant ``k``.
+        Scalar desired length used by the helper.
     degree_weights : torch.Tensor, optional
         Degree-based OGDF node weights with shape ``[N]``.
 
@@ -298,6 +394,60 @@ def _attractive_force(
     denominator = max(ideal_distance, _MIN_DISTANCE)
     source_force = -delta * (distances / (denominator * source_weights)).unsqueeze(1)
     target_force = delta * (distances / (denominator * target_weights)).unsqueeze(1)
+    forces.index_add_(0, src, source_force)
+    forces.index_add_(0, dst, target_force)
+    return forces
+
+
+def _attractive_force_batch(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_desired_lengths: torch.Tensor,
+    degree_weights: torch.Tensor,
+) -> torch.Tensor:
+    """Compute batched OGDF GEM attraction with per-node desired lengths.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge list with shape ``[2, E]``.
+    node_desired_lengths : torch.Tensor
+        Per-node desired lengths with shape ``[N]``.
+    degree_weights : torch.Tensor
+        Degree-based OGDF node weights with shape ``[N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Attractive force per node with shape ``[N, 2]``.
+    """
+    forces = torch.zeros_like(positions)
+    if edge_index.numel() == 0:
+        return forces
+
+    src = edge_index[0].to(device=positions.device, dtype=torch.long)
+    dst = edge_index[1].to(device=positions.device, dtype=torch.long)
+    delta = positions[src] - positions[dst]
+    distances = torch.linalg.norm(delta, dim=1)
+    source_weights = degree_weights[src].clamp(min=1.0)
+    target_weights = degree_weights[dst].clamp(min=1.0)
+    source_desired = node_desired_lengths[src].clamp(min=_MIN_DISTANCE)
+    target_desired = node_desired_lengths[dst].clamp(min=_MIN_DISTANCE)
+
+    if _ATTRACTION_FORMULA == 1:
+        source_force = -delta * (distances / (source_desired * source_weights)).unsqueeze(1)
+        target_force = delta * (distances / (target_desired * target_weights)).unsqueeze(1)
+    else:
+        distance_square = distances.square()
+        source_force = -delta * (
+            distance_square / (source_desired.square() * source_weights)
+        ).unsqueeze(1)
+        target_force = delta * (
+            distance_square / (target_desired.square() * target_weights)
+        ).unsqueeze(1)
+
     forces.index_add_(0, src, source_force)
     forces.index_add_(0, dst, target_force)
     return forces
@@ -337,7 +487,7 @@ def _rotate_impulse(
     generator: torch.Generator,
     device: torch.device,
 ) -> torch.Tensor:
-    """Apply GEM's symmetry-breaking random rotation to each impulse vector.
+    """Apply the legacy deterministic impulse rotation helper.
 
     Parameters
     ----------
@@ -352,10 +502,15 @@ def _rotate_impulse(
     -------
     torch.Tensor
         Rotated impulse tensor with shape ``[N, 2]``.
+
+    Notes
+    -----
+    OGDF GEM does not rotate impulses. The helper remains only because the
+    reference tests import it directly.
     """
     angles = (
         torch.rand((impulse.shape[0],), generator=generator, dtype=torch.float32) * 2.0 - 1.0
-    ) * _PERTURBATION_MAX_ANGLE
+    ) * _LEGACY_ROTATION_MAX_ANGLE
     angles = angles.to(device=device)
     cos_angle = torch.cos(angles)
     sin_angle = torch.sin(angles)
@@ -416,22 +571,249 @@ def _update_temperatures(
     ) / safe_product
 
     rotation_mask = valid & (sin_beta > _ROTATION_SINE_THRESHOLD)
-    skew_gauge = torch.where(
-        rotation_mask,
-        skew_gauge + _ROTATION_SENSITIVITY,
-        skew_gauge,
-    )
+    skew_gauge = torch.where(rotation_mask, skew_gauge + _ROTATION_SENSITIVITY, skew_gauge)
 
     oscillation_mask = valid & (cos_beta.abs() > _OSCILLATION_COSINE_THRESHOLD)
     oscillation_scale = 1.0 + cos_beta * _OSCILLATION_SENSITIVITY
-    temperatures = torch.where(
-        oscillation_mask,
-        temperatures * oscillation_scale,
-        temperatures,
-    )
+    temperatures = torch.where(oscillation_mask, temperatures * oscillation_scale, temperatures)
     temperatures = temperatures * (1.0 - skew_gauge.abs())
-    temperatures = temperatures.clamp(min=_MIN_GLOBAL_TEMPERATURE, max=initial_temperature)
+    temperatures = torch.minimum(temperatures, torch.full_like(temperatures, initial_temperature))
     return temperatures, skew_gauge
+
+
+def _compute_impulse_sequential(
+    node_index: int,
+    positions: torch.Tensor,
+    barycenter: torch.Tensor,
+    adjacency: list[list[int]],
+    node_desired_lengths: torch.Tensor,
+    degree_weights: torch.Tensor,
+) -> torch.Tensor:
+    """Compute one OGDF GEM impulse with immediate-position semantics.
+
+    Parameters
+    ----------
+    node_index : int
+        Node index being updated.
+    positions : torch.Tensor
+        Current position tensor with shape ``[N, 2]`` on CPU.
+    barycenter : torch.Tensor
+        Weighted coordinate sum with shape ``[2]``.
+    adjacency : list[list[int]]
+        Undirected adjacency list.
+    node_desired_lengths : torch.Tensor
+        Per-node desired lengths with shape ``[N]``.
+    degree_weights : torch.Tensor
+        OGDF node weights with shape ``[N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Raw impulse vector with shape ``[2]``.
+    """
+    num_nodes = int(positions.shape[0])
+    x_coord = float(positions[node_index, 0].item())
+    y_coord = float(positions[node_index, 1].item())
+    desired_length = float(node_desired_lengths[node_index].item())
+    desired_square = desired_length * desired_length
+
+    impulse_x = (
+        float(barycenter[0].item()) / max(num_nodes, 1) - x_coord
+    ) * _GRAVITATIONAL_CONSTANT
+    impulse_y = (
+        float(barycenter[1].item()) / max(num_nodes, 1) - y_coord
+    ) * _GRAVITATIONAL_CONSTANT
+
+    if _MAXIMAL_DISTURBANCE > 0.0:
+        raise NotImplementedError("Non-zero GEM disturbance is intentionally unsupported.")
+
+    for other_index in range(num_nodes):
+        if other_index == node_index:
+            continue
+        delta_x = x_coord - float(positions[other_index, 0].item())
+        delta_y = y_coord - float(positions[other_index, 1].item())
+        distance = math.hypot(delta_x, delta_y)
+        if distance > 0.0:
+            distance_square = distance * distance
+            impulse_x += delta_x * desired_square / distance_square
+            impulse_y += delta_y * desired_square / distance_square
+
+    node_weight = float(degree_weights[node_index].item())
+    for neighbor_index in adjacency[node_index]:
+        delta_x = x_coord - float(positions[neighbor_index, 0].item())
+        delta_y = y_coord - float(positions[neighbor_index, 1].item())
+        distance = math.hypot(delta_x, delta_y)
+        if _ATTRACTION_FORMULA == 1:
+            impulse_x -= delta_x * distance / (desired_length * node_weight)
+            impulse_y -= delta_y * distance / (desired_length * node_weight)
+        else:
+            distance_square = distance * distance
+            impulse_x -= delta_x * distance_square / (desired_square * node_weight)
+            impulse_y -= delta_y * distance_square / (desired_square * node_weight)
+
+    return torch.tensor([impulse_x, impulse_y], dtype=positions.dtype)
+
+
+def _update_node_sequential(
+    node_index: int,
+    positions: torch.Tensor,
+    impulse: torch.Tensor,
+    previous_impulse: torch.Tensor,
+    local_temperatures: torch.Tensor,
+    skew_gauge: torch.Tensor,
+    degree_weights: torch.Tensor,
+    barycenter: torch.Tensor,
+    global_temperature: float,
+) -> float:
+    """Apply one OGDF GEM node update in-place.
+
+    Parameters
+    ----------
+    node_index : int
+        Node index being updated.
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]`` on CPU.
+    impulse : torch.Tensor
+        Raw impulse vector for the node with shape ``[2]``.
+    previous_impulse : torch.Tensor
+        Previous saved node impulses with shape ``[N, 2]``.
+    local_temperatures : torch.Tensor
+        Local node temperatures with shape ``[N]``.
+    skew_gauge : torch.Tensor
+        Per-node skew-gauge values with shape ``[N]``.
+    degree_weights : torch.Tensor
+        OGDF node weights with shape ``[N]``.
+    barycenter : torch.Tensor
+        Weighted coordinate sum with shape ``[2]``.
+    global_temperature : float
+        Current OGDF global temperature.
+
+    Returns
+    -------
+    float
+        Updated global temperature.
+    """
+    num_nodes = int(positions.shape[0])
+    raw_x = float(impulse[0].item())
+    raw_y = float(impulse[1].item())
+    impulse_length = math.hypot(raw_x, raw_y)
+    if impulse_length <= 0.0:
+        return global_temperature
+
+    local_temperature = float(local_temperatures[node_index].item())
+    move_x = raw_x * local_temperature / impulse_length
+    move_y = raw_y * local_temperature / impulse_length
+
+    positions[node_index, 0] += move_x
+    positions[node_index, 1] += move_y
+
+    node_weight = float(degree_weights[node_index].item())
+    barycenter[0] += node_weight * move_x
+    barycenter[1] += node_weight * move_y
+
+    old_x = float(previous_impulse[node_index, 0].item())
+    old_y = float(previous_impulse[node_index, 1].item())
+    product = math.hypot(move_x, move_y) * math.hypot(old_x, old_y)
+    if product > 0.0:
+        global_temperature -= local_temperature / max(num_nodes, 1)
+
+        sin_beta = (move_x * old_x - move_y * old_y) / product
+        cos_beta = (move_x * old_x + move_y * old_y) / product
+
+        skew_value = float(skew_gauge[node_index].item())
+        if sin_beta > _ROTATION_SINE_THRESHOLD:
+            skew_value += _ROTATION_SENSITIVITY
+
+        if abs(cos_beta) > _OSCILLATION_COSINE_THRESHOLD:
+            local_temperature *= 1.0 + (cos_beta * _OSCILLATION_SENSITIVITY)
+
+        local_temperature *= 1.0 - abs(skew_value)
+        if local_temperature >= _INITIAL_TEMPERATURE:
+            local_temperature = _INITIAL_TEMPERATURE
+
+        skew_gauge[node_index] = skew_value
+        local_temperatures[node_index] = local_temperature
+        global_temperature += local_temperature / max(num_nodes, 1)
+
+    previous_impulse[node_index, 0] = move_x
+    previous_impulse[node_index, 1] = move_y
+    return global_temperature
+
+
+def _layout_gem_sequential(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    max_iters: int,
+    seed: int,
+) -> torch.Tensor:
+    """Run the OGDF-like sequential GEM update schedule on CPU.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor.
+    max_iters : int
+        Maximum number of OGDF node updates.
+    seed : int
+        Seed for the random node permutations.
+
+    Returns
+    -------
+    torch.Tensor
+        Unnormalized positions with shape ``[N, 2]`` on CPU.
+    """
+    positions = _initialize_positions(num_nodes, torch.device("cpu"), seed).to(dtype=torch.float64)
+    degree_weights = _degree_weights(
+        edge_index,
+        num_nodes,
+        torch.device("cpu"),
+    ).to(dtype=torch.float64)
+    node_desired_lengths = (
+        _node_diagonals(num_nodes, node_sizes).to(dtype=torch.float64) + _DESIRED_LENGTH
+    )
+    adjacency = _build_undirected_adjacency(edge_index, num_nodes)
+    local_temperatures = torch.full((num_nodes,), _INITIAL_TEMPERATURE, dtype=torch.float64)
+    previous_impulse = torch.zeros((num_nodes, 2), dtype=torch.float64)
+    skew_gauge = torch.zeros((num_nodes,), dtype=torch.float64)
+    barycenter = (positions * degree_weights.unsqueeze(1)).sum(dim=0)
+    global_temperature = _INITIAL_TEMPERATURE
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    permutation: list[int] = []
+    rounds_remaining = max_iters
+
+    while global_temperature > _MINIMAL_TEMPERATURE and rounds_remaining > 0:
+        if not permutation:
+            permutation = torch.randperm(num_nodes, generator=generator).tolist()
+        node_index = permutation.pop()
+        impulse = _compute_impulse_sequential(
+            node_index=node_index,
+            positions=positions,
+            barycenter=barycenter,
+            adjacency=adjacency,
+            node_desired_lengths=node_desired_lengths,
+            degree_weights=degree_weights,
+        )
+        global_temperature = _update_node_sequential(
+            node_index=node_index,
+            positions=positions,
+            impulse=impulse,
+            previous_impulse=previous_impulse,
+            local_temperatures=local_temperatures,
+            skew_gauge=skew_gauge,
+            degree_weights=degree_weights,
+            barycenter=barycenter,
+            global_temperature=global_temperature,
+        )
+        rounds_remaining -= 1
+
+    return positions.to(dtype=torch.float32)
 
 
 def layout_gem(
@@ -441,7 +823,7 @@ def layout_gem(
     max_iters: int = 500,
     seed: int = 42,
 ) -> torch.Tensor:
-    """Lay out a graph with a GEM-style adaptive force simulation.
+    """Lay out a graph with an OGDF-style GEM simulation.
 
     Reference
     ---------
@@ -457,9 +839,9 @@ def layout_gem(
     node_sizes : torch.Tensor, optional
         Optional node sizes used only for final scaling.
     max_iters : int, default=500
-        Number of simulation iterations.
+        Maximum number of OGDF node updates.
     seed : int, default=42
-        Random seed for initialization and perturbations.
+        Random seed for initialization and node permutations.
 
     Returns
     -------
@@ -468,10 +850,9 @@ def layout_gem(
 
     Notes
     -----
-    OGDF updates one node at a time in a random permutation and applies each
-    movement immediately. This implementation keeps the repo's batched GPU-
-    friendly update pattern, so the force laws and temperature adaptation match
-    OGDF but the node-update schedule remains a documented deviation.
+    For ``N <= 5000`` this follows OGDF's sequential update schedule on CPU.
+    Larger graphs use a batched fallback that preserves the translated force
+    laws but not the exact Gauss-Seidel-style node ordering.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
@@ -484,48 +865,67 @@ def layout_gem(
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
 
+    capped_iters = min(max_iters, _NUMBER_OF_ROUNDS)
     extent = _layout_extent(num_nodes, node_sizes)
-    ideal_distance = _ideal_distance(num_nodes, extent)
+
+    if num_nodes <= _SEQUENTIAL_NODE_LIMIT:
+        sequential_positions = _layout_gem_sequential(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            max_iters=capped_iters,
+            seed=seed,
+        )
+        return _normalize_positions(sequential_positions, extent).to(
+            dtype=torch.float32,
+            device=device,
+        )
+
     positions = _initialize_positions(num_nodes, device, seed)
-    initial_temperature = max(extent / max(num_nodes, 1) ** 0.5, 0.05)
+    degree_weights = _degree_weights(edge_index, num_nodes, device)
+    node_desired_lengths = (_node_diagonals(num_nodes, node_sizes) + _DESIRED_LENGTH).to(
+        device=device
+    )
     temperatures = torch.full(
         (num_nodes,),
-        fill_value=initial_temperature,
+        fill_value=_INITIAL_TEMPERATURE,
         dtype=torch.float32,
         device=device,
     )
-    degree_weights = _degree_weights(edge_index, num_nodes, device)
     previous_impulse = torch.zeros_like(positions)
     skew_gauge = torch.zeros((num_nodes,), dtype=torch.float32, device=device)
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed)
+    sampled_ideal_distance = _ideal_distance(num_nodes, extent)
 
-    for step in range(max_iters):
-        if float(temperatures.mean().item()) < _MIN_GLOBAL_TEMPERATURE:
+    for step in range(capped_iters):
+        if float(temperatures.mean().item()) < _MINIMAL_TEMPERATURE:
             break
 
-        repulsive = _repulsive_force(positions, seed, step, ideal_distance)
-        attractive = _attractive_force(
-            positions,
-            edge_index,
-            ideal_distance,
+        if num_nodes > _FULL_REPULSION_LIMIT:
+            repulsive = _repulsive_force_sampled(positions, seed, step, sampled_ideal_distance)
+        else:
+            repulsive = _repulsive_force_batch(positions, node_desired_lengths)
+        attractive = _attractive_force_batch(
+            positions=positions,
+            edge_index=edge_index,
+            node_desired_lengths=node_desired_lengths,
             degree_weights=degree_weights,
         )
         gravity = _gravity_force(positions, degree_weights)
-        impulse = _rotate_impulse(
-            repulsive + attractive + gravity,
-            generator=generator,
-            device=device,
+        impulse = repulsive + attractive + gravity
+        norm = torch.linalg.norm(impulse, dim=1, keepdim=True)
+        safe_norm = norm.clamp(min=_MIN_DISTANCE)
+        movement = torch.where(
+            norm > 0,
+            impulse * (temperatures.unsqueeze(1) / safe_norm),
+            torch.zeros_like(impulse),
         )
-        norm = torch.linalg.norm(impulse, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
-        movement = (impulse / norm) * temperatures.unsqueeze(1)
 
         temperatures, skew_gauge = _update_temperatures(
             temperatures=temperatures,
             current_impulse=movement,
             previous_impulse=previous_impulse,
             skew_gauge=skew_gauge,
-            initial_temperature=initial_temperature,
+            initial_temperature=_INITIAL_TEMPERATURE,
         )
 
         positions = positions + movement
