@@ -550,7 +550,7 @@ def _refine_level(
     for _ in range(steps):
         repulsive = _barnes_hut_repulsion(refined, theta, ideal_length)
         attractive = _attractive_force(refined, edge_index, ideal_length)
-        displacement = (repulsive + attractive) * (ideal_length**2)
+        displacement = repulsive + attractive
         norm = torch.linalg.norm(displacement, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
         limited_step = torch.minimum(norm, torch.full_like(norm, temperature))
         refined = refined + (displacement / norm) * limited_step
