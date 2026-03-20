@@ -92,7 +92,7 @@ def _build_undirected_graph(
     edge_index: torch.Tensor,
     num_nodes: int,
 ) -> tuple[list[list[int]], list[tuple[int, int]]]:
-    """Build the undirected adjacency list and unique edge list.
+    """Build the undirected adjacency list and spring list.
 
     Parameters
     ----------
@@ -104,10 +104,11 @@ def _build_undirected_graph(
     Returns
     -------
     tuple[list[list[int]], list[tuple[int, int]]]
-        Symmetric adjacency list and unique undirected edges.
+        Symmetric adjacency list for BFS growth and a spring list that keeps
+        every non-self edge occurrence.
     """
     adjacency_sets = [set() for _ in range(num_nodes)]
-    edges: set[tuple[int, int]] = set()
+    edges: list[tuple[int, int]] = []
     if edge_index.numel() == 0:
         return [[] for _ in range(num_nodes)], []
 
@@ -121,10 +122,13 @@ def _build_undirected_graph(
         upper = max(source, target)
         adjacency_sets[lower].add(upper)
         adjacency_sets[upper].add(lower)
-        edges.add((lower, upper))
+        # LGL's force model reacts to parallel and reciprocal edges, so we keep
+        # multiplicity in the spring list even though BFS only needs unique
+        # undirected neighbors.
+        edges.append((lower, upper))
 
     adjacency = [sorted(neighbors) for neighbors in adjacency_sets]
-    return adjacency, sorted(edges)
+    return adjacency, edges
 
 
 def _initialize_positions(num_nodes: int, radius: float, seed: int) -> torch.Tensor:
@@ -451,7 +455,7 @@ def layout_lgl(
     if resolved_cellsize <= 0.0:
         raise ValueError("cellsize must be positive.")
 
-    adjacency, _ = _build_undirected_graph(edge_index=edge_index, num_nodes=num_nodes)
+    adjacency, spring_edges = _build_undirected_graph(edge_index=edge_index, num_nodes=num_nodes)
     rng = random.Random(seed)
     root_node = rng.randrange(num_nodes) if root is None else root
     if root_node < 0 or root_node >= num_nodes:
@@ -469,7 +473,11 @@ def layout_lgl(
     placed = torch.zeros(num_nodes, dtype=torch.bool)
     placed[root_node] = True
     active_edges: list[tuple[int, int]] = []
-    active_edge_set: set[tuple[int, int]] = set()
+    edge_active = [False] * len(spring_edges)
+    incident_edge_indices: list[list[int]] = [[] for _ in range(num_nodes)]
+    for edge_idx, (source, target) in enumerate(spring_edges):
+        incident_edge_indices[source].append(edge_idx)
+        incident_edge_indices[target].append(edge_idx)
     shell_scale = radius / _harmonic_number(max(len(layers) - 1, 1))
 
     for layer_index in range(len(layers) - 1):
@@ -524,13 +532,15 @@ def layout_lgl(
                 placed[child] = True
                 layer_child_index += 1
 
-                for neighbor in adjacency[child]:
-                    if not bool(placed[neighbor].item()):
+                for edge_idx in incident_edge_indices[child]:
+                    if edge_active[edge_idx]:
                         continue
-                    edge = (min(child, neighbor), max(child, neighbor))
-                    if edge in active_edge_set:
+                    edge = spring_edges[edge_idx]
+                    source, target = edge
+                    other = target if source == child else source
+                    if not bool(placed[other].item()):
                         continue
-                    active_edge_set.add(edge)
+                    edge_active[edge_idx] = True
                     active_edges.append(edge)
 
         refinement_nodes = torch.nonzero(placed, as_tuple=False).view(-1).tolist()

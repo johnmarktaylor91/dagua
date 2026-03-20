@@ -112,8 +112,8 @@ def _initialize_positions(num_nodes: int, seed: int) -> torch.Tensor:
     return torch.tensor(data, dtype=torch.float64)
 
 
-def _unique_undirected_edges(edge_index: torch.Tensor) -> torch.Tensor:
-    """Collapse an edge tensor into unique undirected pairs.
+def _spring_edges(edge_index: torch.Tensor) -> torch.Tensor:
+    """Return the non-self-loop springs exactly as encoded in ``edge_index``.
 
     Parameters
     ----------
@@ -123,24 +123,22 @@ def _unique_undirected_edges(edge_index: torch.Tensor) -> torch.Tensor:
     Returns
     -------
     torch.Tensor
-        Unique undirected edges with shape ``[2, E_unique]``.
+        Spring edge tensor with shape ``[2, E_clean]``.
+
+    Notes
+    -----
+    igraph GraphOpt treats every edge occurrence as its own spring. Parallel
+    edges and reciprocal directed edges therefore contribute multiple spring
+    forces and must not be deduplicated here.
     """
     if edge_index.numel() == 0:
         return torch.empty((2, 0), dtype=torch.long)
 
-    source = edge_index[0].to(device="cpu", dtype=torch.long)
-    target = edge_index[1].to(device="cpu", dtype=torch.long)
-    non_self = source != target
+    edges = edge_index.to(device="cpu", dtype=torch.long)
+    non_self = edges[0] != edges[1]
     if not bool(non_self.any().item()):
         return torch.empty((2, 0), dtype=torch.long)
-
-    source = source[non_self]
-    target = target[non_self]
-    lower = torch.minimum(source, target)
-    upper = torch.maximum(source, target)
-    undirected = torch.stack([lower, upper], dim=1)
-    unique_pairs = torch.unique(undirected, dim=0)
-    return unique_pairs.transpose(0, 1).contiguous()
+    return edges[:, non_self].contiguous()
 
 
 def layout_graphopt(
@@ -198,7 +196,7 @@ def layout_graphopt(
         return torch.empty((0, 2), dtype=torch.float32, device=device)
 
     positions = _initialize_positions(num_nodes=num_nodes, seed=seed)
-    undirected_edges = _unique_undirected_edges(edge_index=edge_index)
+    spring_edges = _spring_edges(edge_index=edge_index)
     pair_source, pair_target = torch.triu_indices(num_nodes, num_nodes, offset=1)
     max_repulsion_distance_sq = _MAX_REPULSION_DISTANCE * _MAX_REPULSION_DISTANCE
 
@@ -219,9 +217,9 @@ def layout_graphopt(
                 forces.index_add_(0, pair_source[mask], contribution)
                 forces.index_add_(0, pair_target[mask], -contribution)
 
-        if undirected_edges.numel() > 0:
-            source = undirected_edges[0]
-            target = undirected_edges[1]
+        if spring_edges.numel() > 0:
+            source = spring_edges[0]
+            target = spring_edges[1]
             delta = positions[source] - positions[target]
             distance = torch.linalg.norm(delta, dim=1)
             mask = distance > _MIN_DISTANCE

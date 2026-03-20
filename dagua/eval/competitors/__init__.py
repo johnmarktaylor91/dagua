@@ -15,6 +15,7 @@ from dagua.eval.competitors import (
     graphviz_competitor,  # noqa: F401
     igraph_competitor,  # noqa: F401
     networkx_competitor,  # noqa: F401
+    neulay_competitor,  # noqa: F401
     ogdf_competitor,  # noqa: F401
     sgd2_competitor,  # noqa: F401
     tsne_competitor,  # noqa: F401

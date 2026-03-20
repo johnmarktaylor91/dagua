@@ -73,9 +73,17 @@ DEFAULT_COMPETITOR_ORDER = [
     "nx_kamada_kawai",
     "nx_spectral",
     "igraph_fr",
+    "igraph_kamada_kawai",
+    "igraph_mds",
+    "igraph_davidson_harel",
+    "igraph_graphopt",
+    "igraph_drl",
+    "igraph_lgl",
     "igraph_rt",
     # Reference implementations
     "sgd2",
+    "sgd2_mds",
+    "neulay",
     "fa2_ref",
     "tsne_graph",
     "umap_graph",
@@ -375,6 +383,7 @@ def _system_metadata() -> Dict[str, Any]:
         "networkx": _safe_import_version("networkx"),
         "sgd2": _safe_import_version("s_gd2"),
         "s_gd2": _safe_import_version("s_gd2"),
+        "pyg": _safe_import_version("torch_geometric"),
         "fa2": _safe_fa2_version(),
         "scipy": _safe_import_version("scipy"),
         "sklearn": _safe_import_version("sklearn"),
@@ -597,11 +606,19 @@ def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
         "dagre": "dagre",
         "igraph_sugiyama": "igraph",
         "igraph_fr": "igraph",
+        "igraph_kamada_kawai": "igraph",
+        "igraph_mds": "igraph",
+        "igraph_davidson_harel": "igraph",
+        "igraph_graphopt": "igraph",
+        "igraph_drl": "igraph",
+        "igraph_lgl": "igraph",
         "igraph_rt": "igraph",
         "nx_spring": "networkx",
         "nx_kamada_kawai": "networkx",
         "nx_spectral": "networkx",
         "sgd2": "sgd2",
+        "sgd2_mds": "sgd2",
+        "neulay": "pyg",
         "fa2_ref": "fa2",
         "umap_graph": "umap",
         "tsne_graph": "sklearn",
@@ -611,12 +628,9 @@ def _competitor_signature(name: str, system: Dict[str, Any]) -> str:
         # should track our source changes instead of an external package.
         return f"{name}:{_dagua_source_signature()}"
     if name.startswith("ogdf_"):
-        try:
-            from ogdf_python import ogdf as _ogdf
-        except (ImportError, OSError):
-            return f"{name}:ogdf_unavailable"
-        del _ogdf
-        return f"{name}:ogdf_available"
+        from dagua.eval.competitors.ogdf_competitor import _ogdf_available
+
+        return f"{name}:{'ogdf_available' if _ogdf_available() else 'ogdf_unavailable'}"
     if name == "tsne_graph":
         return f"{name}:{system.get('sklearn')}:{system.get('scipy')}"
     if name == "umap_graph":

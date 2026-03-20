@@ -31,7 +31,7 @@ from dagua.layout.classic.linlog import _unique_undirected_edge_ids as _linlog_e
 from dagua.layout.classic.maxent_stress import _build_undirected_adjacency as _maxent_adjacency
 from dagua.layout.classic.maxent_stress import _full_non_edge_pairs as _maxent_full_non_edge_pairs
 from dagua.layout.classic.maxent_stress import _full_stress_terms as _maxent_full_stress_terms
-from dagua.layout.classic.maxent_stress import _maxent_stress_loss
+from dagua.layout.classic.maxent_stress import _majorization_iteration, _maxent_stress_loss
 from dagua.layout.classic.stress_sgd import _learning_rate as _stress_sgd_learning_rate
 
 _NETWORKX_AVAILABLE = importlib.util.find_spec("networkx") is not None
@@ -355,18 +355,18 @@ def test_gem_repulsion_matches_fr_force_law() -> None:
 
 
 def test_gem_attraction_divides_by_ideal_distance() -> None:
-    """GEM attraction should include the paper's ``1 / k`` scale factor."""
+    """GEM attraction should include OGDF's ``1 / (k * weight(v))`` scale."""
     positions = torch.tensor([[0.0, 0.0], [2.0, 0.0]], dtype=torch.float32)
     edge_index = torch.tensor([[0], [1]], dtype=torch.long)
 
     force = _gem_attractive_force(positions=positions, edge_index=edge_index, ideal_distance=4.0)
 
-    expected = torch.tensor([[1.0, 0.0], [-1.0, 0.0]], dtype=torch.float32)
+    expected = torch.tensor([[1.0 / 1.4, 0.0], [-(1.0 / 1.4), 0.0]], dtype=torch.float32)
     torch.testing.assert_close(force, expected)
 
 
 def test_gem_rotation_and_temperature_updates_match_reference_rules() -> None:
-    """GEM should rotate impulses without changing norm and use paper-like factors."""
+    """GEM should use OGDF's oscillation and skew-gauge temperature updates."""
     impulse = torch.tensor([[3.0, 4.0], [0.0, 2.0]], dtype=torch.float32)
     generator = torch.Generator(device="cpu")
     generator.manual_seed(3)
@@ -375,17 +375,20 @@ def test_gem_rotation_and_temperature_updates_match_reference_rules() -> None:
     torch.testing.assert_close(rotated.norm(dim=1), impulse.norm(dim=1))
 
     temperatures = torch.ones((3,), dtype=torch.float32)
-    direction = torch.tensor([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+    current_impulse = torch.tensor([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
     previous_impulse = torch.tensor([[2.0, 0.0], [2.0, 0.0], [2.0, 0.0]], dtype=torch.float32)
-    updated = _gem_update_temperatures(
+    skew_gauge = torch.zeros((3,), dtype=torch.float32)
+    updated, updated_skew = _gem_update_temperatures(
         temperatures=temperatures,
-        direction=direction,
+        current_impulse=current_impulse,
         previous_impulse=previous_impulse,
-        extent=100.0,
+        skew_gauge=skew_gauge,
+        initial_temperature=2.0,
     )
 
-    expected = torch.tensor([3.0, 1.0 / 3.0, 1.0], dtype=torch.float32)
+    expected = torch.tensor([1.287, 0.7, 1.0], dtype=torch.float32)
     torch.testing.assert_close(updated, expected)
+    torch.testing.assert_close(updated_skew, torch.tensor([0.01, 0.0, 0.0], dtype=torch.float32))
 
 
 def _positions_from_networkx_dict(pos_dict: Any, num_nodes: int) -> torch.Tensor:
@@ -924,6 +927,21 @@ def test_maxent_stress_includes_longer_shortest_paths() -> None:
     assert stress_map[(0, 3)] == pytest.approx(3.0)
 
 
+def test_maxent_stress_replaces_disconnected_pairs_with_sqrt_n_distance() -> None:
+    """Disconnected stress pairs should use OGDF's ``avgEdgeCost * sqrt(N)`` fill."""
+    edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
+    adjacency = _maxent_adjacency(edge_index, num_nodes=4)
+
+    stress_src, stress_dst, stress_lengths = _maxent_full_stress_terms(adjacency)
+    stress_map = {
+        (int(source.item()), int(target.item())): float(length.item())
+        for source, target, length in zip(stress_src, stress_dst, stress_lengths)
+    }
+
+    assert stress_map[(0, 2)] == pytest.approx(2.0)
+    assert stress_map[(1, 3)] == pytest.approx(2.0)
+
+
 def test_maxent_stress_matches_exact_small_graph_objective() -> None:
     """Maxent-stress should use full-path stress and exact non-edge log repulsion."""
     positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [5.0, 0.0]], dtype=torch.float32)
@@ -942,6 +960,7 @@ def test_maxent_stress_matches_exact_small_graph_objective() -> None:
         non_edge_src=non_edge_src,
         non_edge_dst=non_edge_dst,
         alpha=0.5,
+        use_entropy=True,
     )
 
     expected_stress = (2.0 - 1.0) ** 2 + (3.0 - 1.0) ** 2 + 0.25 * ((5.0 - 2.0) ** 2)
@@ -959,13 +978,65 @@ def test_maxent_stress_matches_exact_small_graph_objective() -> None:
         non_edge_src=non_edge_src,
         non_edge_dst=non_edge_dst,
         alpha=0.5,
+        use_entropy=True,
     )
     torch.testing.assert_close(translated, actual)
 
 
+def test_maxent_stress_majorization_uses_gauss_seidel_votes() -> None:
+    """Stress majorization should update nodes sequentially within one sweep."""
+    positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [5.0, 0.0]], dtype=torch.float64)
+    graph_distances = torch.tensor(
+        [
+            [0.0, 1.0, 2.0],
+            [1.0, 0.0, 1.0],
+            [2.0, 1.0, 0.0],
+        ],
+        dtype=torch.float64,
+    )
+    weight_matrix = torch.tensor(
+        [
+            [0.0, 1.0, 0.25],
+            [1.0, 0.0, 1.0],
+            [0.25, 1.0, 0.0],
+        ],
+        dtype=torch.float64,
+    )
+
+    _majorization_iteration(positions, graph_distances, weight_matrix)
+
+    expected = torch.tensor([[1.4, 0.0], [3.2, 0.0], [4.04, 0.0]], dtype=torch.float64)
+    torch.testing.assert_close(positions, expected)
+
+
+def test_maxent_stress_pure_mode_drops_entropy_term() -> None:
+    """The pure-stress mode should ignore the non-edge entropy repulsion term."""
+    positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [5.0, 0.0]], dtype=torch.float32)
+    edge_index = _path_edge_index(3)
+    adjacency = _maxent_adjacency(edge_index, num_nodes=3)
+    stress_src, stress_dst, stress_lengths = _maxent_full_stress_terms(adjacency)
+    non_edge_src, non_edge_dst = _maxent_full_non_edge_pairs(adjacency)
+
+    actual = _maxent_stress_loss(
+        positions=positions,
+        stress_src=stress_src,
+        stress_dst=stress_dst,
+        stress_lengths=stress_lengths,
+        pivot_indices=torch.empty((0,), dtype=torch.long),
+        pivot_distances=torch.empty((3, 0), dtype=torch.float32),
+        non_edge_src=non_edge_src,
+        non_edge_dst=non_edge_dst,
+        alpha=5.0,
+        use_entropy=False,
+    )
+
+    expected = (2.0 - 1.0) ** 2 + (3.0 - 1.0) ** 2 + 0.25 * ((5.0 - 2.0) ** 2)
+    torch.testing.assert_close(actual, torch.tensor(expected, dtype=torch.float32))
+
+
 @pytest.mark.smoke
 def test_fmmm_force_model_matches_fr_coefficients() -> None:
-    """FM^3 refinement should use the standard FR force coefficients."""
+    """FM^3 refinement should match OGDF's FR-based force coefficients."""
     from dagua.layout.classic.fmmm import _attractive_force as fmmm_attractive_force
     from dagua.layout.classic.fmmm import _barnes_hut_repulsion as fmmm_barnes_hut_repulsion
 
@@ -977,13 +1048,13 @@ def test_fmmm_force_model_matches_fr_coefficients() -> None:
 
     torch.testing.assert_close(
         repulsive,
-        torch.tensor([[-4.0 / 3.0, 0.0], [4.0 / 3.0, 0.0]], dtype=torch.float32),
+        torch.tensor([[-1.0 / 3.0, 0.0], [1.0 / 3.0, 0.0]], dtype=torch.float32),
         atol=1.0e-5,
         rtol=1.0e-5,
     )
     torch.testing.assert_close(
         attractive,
-        torch.tensor([[4.5, 0.0], [-4.5, 0.0]], dtype=torch.float32),
+        torch.tensor([[9.0 / 8.0, 0.0], [-(9.0 / 8.0), 0.0]], dtype=torch.float32),
         atol=1.0e-5,
         rtol=1.0e-5,
     )

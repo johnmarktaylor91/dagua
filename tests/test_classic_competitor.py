@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import subprocess
+from typing import Any
 
 import pytest
 import torch
 
-from dagua.eval.competitors import get_available_competitors
-from dagua.eval.competitors.classic_competitor import ClassicFR
+from dagua.eval.competitors import classic_competitor, get_available_competitors
+from dagua.eval.competitors.classic_competitor import ClassicFR, ClassicNeuLay, ClassicSGD2Multi
 from dagua.eval.graphs import get_test_graphs
 from dagua.graph import DaguaGraph
 
@@ -142,6 +143,82 @@ def test_classic_fr_seed_override_changes_layout() -> None:
     assert other_seed_result.pos is not None
     assert torch.allclose(default_result.pos, seeded_result.pos)
     assert not torch.allclose(seeded_result.pos, other_seed_result.pos)
+
+
+def test_classic_neulay_uses_full_two_phase_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Classic NeuLay should benchmark the full GCN-enabled configuration."""
+    graph = _make_small_graph()
+    observed: dict[str, object] = {}
+
+    def _fake_quick_classic(
+        name: str,
+        import_path: str,
+        fn_name: str,
+        graph: DaguaGraph,
+        seed: int,
+        **extra_kwargs: Any,
+    ) -> object:
+        """Capture classic NeuLay forwarding parameters."""
+        del graph
+        observed["name"] = name
+        observed["import_path"] = import_path
+        observed["fn_name"] = fn_name
+        observed["seed"] = seed
+        observed["extra_kwargs"] = extra_kwargs
+        return object()
+
+    monkeypatch.setattr(classic_competitor, "_quick_classic", _fake_quick_classic)
+
+    result = ClassicNeuLay().layout(graph, seed=23)
+
+    assert result is not None
+    assert observed["name"] == "classic_neulay"
+    assert observed["import_path"] == "dagua.layout.classic.neulay"
+    assert observed["fn_name"] == "layout_neulay"
+    assert observed["seed"] == 23
+    assert observed["extra_kwargs"] == {
+        "steps": 20_000,
+        "gcn_steps": 2_000,
+        "use_gcn": True,
+    }
+
+
+def test_classic_sgd2_multi_enables_multiple_criteria(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Classic ``(SGD)^2`` should not fall back to pure stress."""
+    graph = _make_small_graph()
+    observed: dict[str, object] = {}
+
+    def _fake_quick_classic(
+        name: str,
+        import_path: str,
+        fn_name: str,
+        graph: DaguaGraph,
+        seed: int,
+        **extra_kwargs: Any,
+    ) -> object:
+        """Capture classic ``(SGD)^2`` forwarding parameters."""
+        del graph
+        observed["name"] = name
+        observed["import_path"] = import_path
+        observed["fn_name"] = fn_name
+        observed["seed"] = seed
+        observed["extra_kwargs"] = extra_kwargs
+        return object()
+
+    monkeypatch.setattr(classic_competitor, "_quick_classic", _fake_quick_classic)
+
+    result = ClassicSGD2Multi().layout(graph, seed=17)
+
+    assert result is not None
+    assert observed["name"] == "classic_sgd2_multi"
+    assert observed["import_path"] == "dagua.layout.classic.sgd2_multi"
+    assert observed["fn_name"] == "layout_sgd2_multi"
+    assert observed["seed"] == 17
+    assert observed["extra_kwargs"] == {"criteria": {"stress": 1.0, "ideal_edge_length": 1.0}}
 
 
 def test_graphviz_dot_with_clusters() -> None:
