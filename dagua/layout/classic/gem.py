@@ -14,11 +14,9 @@ import torch
 _MIN_DISTANCE = 1.0e-3
 _FULL_REPULSION_LIMIT = 2_000
 _SAMPLED_REPULSION_NEIGHBORS = 96
-_PERTURBATION_MAX_ANGLE = 0.05
-_TEMPERATURE_GROWTH_FACTOR = 1.5
-_TEMPERATURE_SHRINK_FACTOR = 0.33
-_TEMPERATURE_DAMPING_FACTOR = 0.92
-_TEMPERATURE_DECAY = 0.995
+_PERTURBATION_MAX_ANGLE = 1.64
+_TEMPERATURE_GROWTH_FACTOR = 3.0
+_TEMPERATURE_SHRINK_FACTOR = 1.0 / 3.0
 
 
 def _layout_device(
@@ -223,7 +221,11 @@ def _repulsive_force(
     return _repulsive_force_full(positions, ideal_distance)
 
 
-def _attractive_force(positions: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+def _attractive_force(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    ideal_distance: float,
+) -> torch.Tensor:
     """Compute exact spring attraction along graph edges.
 
     Parameters
@@ -232,6 +234,8 @@ def _attractive_force(positions: torch.Tensor, edge_index: torch.Tensor) -> torc
         Position tensor with shape ``[N, 2]``.
     edge_index : torch.Tensor
         Edge list with shape ``[2, E]``.
+    ideal_distance : float
+        GEM target edge length constant ``k``.
 
     Returns
     -------
@@ -246,7 +250,7 @@ def _attractive_force(positions: torch.Tensor, edge_index: torch.Tensor) -> torc
     dst = edge_index[1].to(device=positions.device, dtype=torch.long)
     delta = positions[dst] - positions[src]
     distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
-    edge_force = delta * distances.unsqueeze(1)
+    edge_force = delta * (distances / max(ideal_distance, _MIN_DISTANCE)).unsqueeze(1)
     forces.index_add_(0, src, edge_force)
     forces.index_add_(0, dst, -edge_force)
     return forces
@@ -313,6 +317,12 @@ def _update_temperatures(
     -------
     torch.Tensor
         Updated temperature tensor with shape ``[N]``.
+
+    Notes
+    -----
+    The paper updates temperature multiplicatively only for strong alignment
+    or reversal. Neutral moves keep the current temperature instead of
+    applying additional damping.
     """
     previous_norm = torch.linalg.norm(previous_impulse, dim=1, keepdim=True).clamp(
         min=_MIN_DISTANCE
@@ -331,13 +341,8 @@ def _update_temperatures(
         temperatures * _TEMPERATURE_SHRINK_FACTOR,
         temperatures,
     )
-    temperatures = torch.where(
-        ~(same_direction | opposite_direction),
-        temperatures * _TEMPERATURE_DAMPING_FACTOR,
-        temperatures,
-    )
     temperatures = temperatures.clamp(min=0.01, max=extent * 0.25)
-    return temperatures * _TEMPERATURE_DECAY
+    return temperatures
 
 
 def layout_gem(
@@ -398,7 +403,7 @@ def layout_gem(
 
     for step in range(max_iters):
         repulsive = 0.08 * _repulsive_force(positions, seed, step, ideal_distance)
-        attractive = -0.02 * _attractive_force(positions, edge_index)
+        attractive = -0.02 * _attractive_force(positions, edge_index, ideal_distance)
         barycenter = positions.mean(dim=0, keepdim=True)
         gravity = -0.01 * (positions - barycenter)
         impulse = _rotate_impulse(
