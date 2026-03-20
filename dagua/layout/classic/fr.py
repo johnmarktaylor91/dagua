@@ -1,11 +1,8 @@
-"""Fruchterman-Reingold force-directed layout.
+"""Fruchterman-Reingold layout translated from NetworkX's dense solver.
 
-Classic spring-electrical model: all nodes repel (Coulomb), connected nodes
-attract (Hooke). Positions update by direct force displacement with linear
-cooling. No gradients, no optimizer — pure physics simulation.
-
-Reference: Fruchterman & Reingold, "Graph Drawing by Force-directed Placement"
-(1991), Software — Practice and Experience.
+The implementation mirrors ``networkx.drawing.layout._fruchterman_reingold``
+line by line, while preserving Dagua's existing public signature and optional
+trace output.
 """
 
 from __future__ import annotations
@@ -13,11 +10,10 @@ from __future__ import annotations
 from math import sqrt
 from typing import Optional, Union
 
+import numpy as np
 import torch
 
 MIN_DISTANCE = 0.01
-SAMPLED_REPULSION_LIMIT = 10_000
-SAMPLED_NEIGHBORS = 1_000
 CONVERGENCE_THRESHOLD = 1.0e-4
 OUTPUT_SCALE_FACTOR = 50.0
 
@@ -26,7 +22,7 @@ def _layout_device(
     edge_index: torch.Tensor,
     node_sizes: Optional[torch.Tensor],
 ) -> torch.device:
-    """Choose the compute device for the layout.
+    """Choose the device used for the returned tensor.
 
     Parameters
     ----------
@@ -38,7 +34,7 @@ def _layout_device(
     Returns
     -------
     torch.device
-        Device used for the simulation tensors.
+        Output device for the final position tensor.
     """
     if edge_index.numel() > 0:
         return edge_index.device
@@ -47,255 +43,91 @@ def _layout_device(
     return torch.device("cpu")
 
 
-def _initialize_positions(
-    num_nodes: int,
-    area: float,
-    device: torch.device,
-    seed: int,
-) -> torch.Tensor:
-    """Create seeded random initial positions within the layout square.
+def _initialize_positions(num_nodes: int, seed: int) -> torch.Tensor:
+    """Create the exact NetworkX random initialization in the unit square.
 
     Parameters
     ----------
     num_nodes : int
         Number of nodes.
-    area : float
-        Bounding area of the layout square.
-    device : torch.device
-        Device for the position tensor.
     seed : int
-        Random seed for initialization.
+        Random seed for the initial placement.
 
     Returns
     -------
     torch.Tensor
-        Initial positions with shape ``[N, 2]``.
+        Initial positions with shape ``[N, 2]`` and dtype ``float64``.
     """
-    side = area**0.5
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed)
-    pos = torch.rand((num_nodes, 2), generator=generator, dtype=torch.float32)
-    return pos.mul(side).to(device)
+    random_state = np.random.RandomState(seed)
+    positions = np.asarray(random_state.rand(num_nodes, 2), dtype=np.float64)
+    return torch.from_numpy(positions)
 
 
-def _repulsive_displacement_full(pos: torch.Tensor, k: float) -> torch.Tensor:
-    """Compute all-pairs repulsive displacement with full broadcasting.
-
-    Parameters
-    ----------
-    pos : torch.Tensor
-        Node positions with shape ``[N, 2]``.
-    k : float
-        Ideal spring length.
-
-    Returns
-    -------
-    torch.Tensor
-        Repulsive displacement with shape ``[N, 2]``.
-    """
-    delta = pos.unsqueeze(1) - pos.unsqueeze(0)
-    dist = torch.linalg.norm(delta, dim=2).clamp(min=MIN_DISTANCE)
-    force = (k * k) / dist
-    return (delta / dist.unsqueeze(2) * force.unsqueeze(2)).sum(dim=1)
-
-
-def _repulsive_displacement_sampled(
-    pos: torch.Tensor,
-    k: float,
-    seed: int,
-    step: int,
-) -> torch.Tensor:
-    """Approximate repulsive displacement by random sampling for large graphs.
-
-    Parameters
-    ----------
-    pos : torch.Tensor
-        Node positions with shape ``[N, 2]``.
-    k : float
-        Ideal spring length.
-    seed : int
-        Base random seed.
-    step : int
-        Current simulation step.
-
-    Returns
-    -------
-    torch.Tensor
-        Approximate repulsive displacement with shape ``[N, 2]``.
-
-    Notes
-    -----
-    NetworkX evaluates the full ``O(N^2)`` repulsion term. Dagua keeps this
-    sampled approximation only above ``SAMPLED_REPULSION_LIMIT`` as a
-    graph-size-specific acceleration; for smaller graphs the force update
-    matches the reference implementation.
-    """
-    num_nodes = pos.shape[0]
-    sample_size = min(num_nodes, SAMPLED_NEIGHBORS)
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed + step + 1)
-    sampled = torch.randint(
-        0,
-        num_nodes,
-        (num_nodes, sample_size),
-        generator=generator,
-        dtype=torch.long,
-    ).to(pos.device)
-    neighbors = pos[sampled]
-    delta = pos.unsqueeze(1) - neighbors
-    dist = torch.linalg.norm(delta, dim=2).clamp(min=MIN_DISTANCE)
-    force = (k * k) / dist
-    return (delta / dist.unsqueeze(2) * force.unsqueeze(2)).sum(dim=1)
-
-
-def _repulsive_displacement(
-    pos: torch.Tensor,
-    k: float,
-    seed: int,
-    step: int,
-) -> torch.Tensor:
-    """Dispatch between full and sampled repulsion modes.
-
-    Parameters
-    ----------
-    pos : torch.Tensor
-        Node positions with shape ``[N, 2]``.
-    k : float
-        Ideal spring length.
-    seed : int
-        Base random seed.
-    step : int
-        Current simulation step.
-
-    Returns
-    -------
-    torch.Tensor
-        Repulsive displacement with shape ``[N, 2]``.
-    """
-    if pos.shape[0] > SAMPLED_REPULSION_LIMIT:
-        return _repulsive_displacement_sampled(pos, k, seed, step)
-    return _repulsive_displacement_full(pos, k)
-
-
-def _adjacency_matrix(
-    edge_index: torch.Tensor,
-    num_nodes: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """Build the dense symmetric adjacency used by the exact FR update.
+def _adjacency_matrix(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """Build the directed dense adjacency matrix used by NetworkX FR.
 
     Parameters
     ----------
     edge_index : torch.Tensor
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of nodes in the graph.
-    device : torch.device
-        Device for the adjacency matrix.
+        Number of nodes.
 
     Returns
     -------
     torch.Tensor
-        Dense adjacency matrix with shape ``[N, N]``.
+        Dense adjacency matrix with shape ``[N, N]`` and dtype ``float64``.
+
+    Raises
+    ------
+    ValueError
+        If ``edge_index`` has an invalid shape or contains out-of-range nodes.
     """
-    adjacency = torch.zeros((num_nodes, num_nodes), dtype=torch.float32, device=device)
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+
+    adjacency = torch.zeros((num_nodes, num_nodes), dtype=torch.float64)
     if edge_index.numel() == 0:
         return adjacency
 
-    src = edge_index[0].to(dtype=torch.long, device=device)
-    dst = edge_index[1].to(dtype=torch.long, device=device)
-    adjacency[src, dst] = 1.0
-    adjacency[dst, src] = 1.0
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    sources = edge_index_cpu[0]
+    targets = edge_index_cpu[1]
+    if (
+        torch.any(sources < 0)
+        or torch.any(sources >= num_nodes)
+        or torch.any(targets < 0)
+        or torch.any(targets >= num_nodes)
+    ):
+        raise ValueError("edge_index contains a node index outside [0, num_nodes).")
+
+    adjacency[sources, targets] = 1.0
     return adjacency
 
 
-def _exact_displacement(pos: torch.Tensor, adjacency: torch.Tensor, k: float) -> torch.Tensor:
-    """Compute the exact NetworkX FR displacement for smaller graphs.
+def _initial_temperature(positions: torch.Tensor) -> float:
+    """Compute the initial temperature used by NetworkX FR.
 
     Parameters
     ----------
-    pos : torch.Tensor
-        Node positions with shape ``[N, 2]``.
-    adjacency : torch.Tensor
-        Dense adjacency matrix with shape ``[N, N]``.
-    k : float
-        Ideal spring length.
-
-    Returns
-    -------
-    torch.Tensor
-        Displacement tensor with shape ``[N, 2]``.
-    """
-    delta = pos.unsqueeze(1) - pos.unsqueeze(0)
-    distance = torch.linalg.norm(delta, dim=-1).clamp(min=MIN_DISTANCE)
-    return torch.einsum(
-        "ijk,ij->ik",
-        delta,
-        ((k * k) / distance.square()) - (adjacency * distance / k),
-    )
-
-
-def _attractive_displacement(
-    pos: torch.Tensor,
-    edge_index: torch.Tensor,
-    k: float,
-) -> torch.Tensor:
-    """Compute edge-based attractive displacement.
-
-    Parameters
-    ----------
-    pos : torch.Tensor
-        Node positions with shape ``[N, 2]``.
-    edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
-    k : float
-        Ideal spring length.
-
-    Returns
-    -------
-    torch.Tensor
-        Attractive displacement with shape ``[N, 2]``.
-    """
-    disp = torch.zeros_like(pos)
-    if edge_index.numel() == 0:
-        return disp
-
-    src = edge_index[0].to(dtype=torch.long, device=pos.device)
-    dst = edge_index[1].to(dtype=torch.long, device=pos.device)
-
-    delta = pos[dst] - pos[src]
-    dist = torch.linalg.norm(delta, dim=1).clamp(min=MIN_DISTANCE)
-    force = (dist * dist) / k
-    edge_disp = (delta / dist.unsqueeze(1)) * force.unsqueeze(1)
-
-    disp.index_add_(0, src, edge_disp)
-    disp.index_add_(0, dst, -edge_disp)
-    return disp
-
-
-def _initial_temperature(pos: torch.Tensor) -> float:
-    """Compute the NetworkX initial temperature from the current extent.
-
-    Parameters
-    ----------
-    pos : torch.Tensor
-        Current positions with shape ``[N, 2]``.
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
 
     Returns
     -------
     float
-        Initial simulation temperature.
+        Initial temperature.
     """
-    if pos.shape[0] == 0:
+    if positions.shape[0] == 0:
         return 0.0
 
-    x_extent = float((pos[:, 0].max() - pos[:, 0].min()).item())
-    y_extent = float((pos[:, 1].max() - pos[:, 1].min()).item())
+    x_extent = float((positions[:, 0].max() - positions[:, 0].min()).item())
+    y_extent = float((positions[:, 1].max() - positions[:, 1].min()).item())
     return max(x_extent, y_extent) * 0.1
 
 
 def _rescale_layout(positions: torch.Tensor, scale: float) -> torch.Tensor:
-    """Center and rescale positions like ``networkx.rescale_layout``.
+    """Center and scale coordinates like ``networkx.rescale_layout``.
 
     Parameters
     ----------
@@ -307,7 +139,7 @@ def _rescale_layout(positions: torch.Tensor, scale: float) -> torch.Tensor:
     Returns
     -------
     torch.Tensor
-        Rescaled positions with shape ``[N, 2]``.
+        Rescaled position tensor with shape ``[N, 2]``.
     """
     centered = positions - positions.mean(dim=0, keepdim=True)
     limit = float(centered.abs().max().item())
@@ -325,85 +157,86 @@ def layout_fr(
     area: Optional[float] = None,
     trace_every: int = 0,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, list[torch.Tensor]]]:
-    """Run Fruchterman-Reingold layout.
+    """Lay out a graph with the NetworkX Fruchterman-Reingold update.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge list, shape ``[2, E]``.
+        Edge tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of nodes.
+        Number of graph nodes.
     node_sizes : torch.Tensor, optional
-        Node sizes ``[N, 2]``. Unused by FR but accepted for interface compat.
-    steps : int
-        Number of simulation steps.
-    seed : int
-        Random seed for initial placement.
+        Unused, accepted for interface compatibility.
+    steps : int, default=50
+        Maximum number of FR iterations.
+    seed : int, default=42
+        Random seed used for the unit-square initialization.
     area : float, optional
-        Bounding area for the layout. Default ``num_nodes * 100``.
-    trace_every : int
-        If > 0, record position snapshots every this many steps.
-        When active, returns ``(final_pos, [snapshots])``.
+        Accepted for interface compatibility. The NetworkX reference path uses
+        a unit domain, so this value does not affect the translated solver.
+    trace_every : int, default=0
+        If greater than zero, record snapshots every ``trace_every`` updates.
 
     Returns
     -------
-    torch.Tensor or tuple
-        Final positions ``[N, 2]``, or ``(positions, traces)`` if tracing.
+    torch.Tensor or tuple[torch.Tensor, list[torch.Tensor]]
+        Final positions with shape ``[N, 2]``. When tracing is enabled,
+        returns ``(positions, traces)``.
+
+    Raises
+    ------
+    ValueError
+        If ``num_nodes``, ``steps``, ``trace_every``, or ``area`` are invalid.
     """
     _ = node_sizes
 
     if num_nodes < 0:
-        raise ValueError("num_nodes must be non-negative")
+        raise ValueError("num_nodes must be non-negative.")
     if steps < 0:
-        raise ValueError("steps must be non-negative")
+        raise ValueError("steps must be non-negative.")
     if trace_every < 0:
-        raise ValueError("trace_every must be non-negative")
+        raise ValueError("trace_every must be non-negative.")
+    if area is not None and area <= 0.0:
+        raise ValueError("area must be positive.")
 
-    device = _layout_device(edge_index, node_sizes)
-    empty = torch.empty((0, 2), dtype=torch.float32, device=device)
+    device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     traces: list[torch.Tensor] = []
     if num_nodes == 0:
+        empty = torch.empty((0, 2), dtype=torch.float32, device=device)
         return (empty, traces) if trace_every > 0 else empty
 
-    layout_area = float(num_nodes * 100 if area is None else area)
-    if layout_area <= 0.0:
-        raise ValueError("area must be positive")
+    positions = _initialize_positions(num_nodes=num_nodes, seed=seed)
+    adjacency = _adjacency_matrix(edge_index=edge_index, num_nodes=num_nodes)
+    optimal_distance = sqrt(1.0 / float(max(num_nodes, 1)))
+    temperature = _initial_temperature(positions)
+    cooling_step = temperature / float(steps + 1) if steps > 0 else 0.0
 
-    pos = _initialize_positions(num_nodes, layout_area, device, seed)
-    adjacency = (
-        _adjacency_matrix(edge_index=edge_index, num_nodes=num_nodes, device=device)
-        if num_nodes <= SAMPLED_REPULSION_LIMIT
-        else None
-    )
-    if steps == 0:
-        scaled = _rescale_layout(pos, scale=sqrt(max(num_nodes, 1)) * OUTPUT_SCALE_FACTOR)
-        return (scaled, traces) if trace_every > 0 else scaled
+    for iteration in range(steps):
+        delta = positions[:, np.newaxis, :] - positions[np.newaxis, :, :]
+        distance = torch.linalg.norm(delta, dim=-1)
+        distance = torch.clamp(distance, min=MIN_DISTANCE)
+        displacement = torch.einsum(
+            "ijk,ij->ik",
+            delta,
+            (optimal_distance * optimal_distance / distance.square())
+            - (adjacency * distance / optimal_distance),
+        )
+        length = torch.linalg.norm(displacement, dim=-1)
+        length = torch.clamp(length, min=MIN_DISTANCE)
+        delta_pos = torch.einsum("ij,i->ij", displacement, temperature / length)
+        positions = positions + delta_pos
 
-    k = (layout_area / num_nodes) ** 0.5
-    temp = _initial_temperature(pos)
-    cooling = temp / (steps + 1)
+        if trace_every > 0 and iteration % trace_every == 0:
+            traces.append(positions.to(dtype=torch.float32, device=device).clone())
 
-    for step in range(steps):
-        if adjacency is not None:
-            disp = _exact_displacement(pos, adjacency, k)
-        else:
-            disp = _repulsive_displacement(pos, k, seed, step)
-            disp = disp + _attractive_displacement(pos, edge_index, k)
-
-        disp_norm = torch.linalg.norm(disp, dim=1, keepdim=True).clamp(min=MIN_DISTANCE)
-        delta_pos = disp * (temp / disp_norm)
-        pos = pos + delta_pos
-
-        temp -= cooling
-
-        if trace_every > 0 and step % trace_every == 0:
-            traces.append(pos.clone())
-
+        temperature -= cooling_step
         if (torch.linalg.norm(delta_pos) / num_nodes) < CONVERGENCE_THRESHOLD:
             break
 
-    scaled = _rescale_layout(pos, scale=sqrt(max(num_nodes, 1)) * OUTPUT_SCALE_FACTOR)
+    scaled = _rescale_layout(positions, scale=1.0)
+    scaled = scaled * (sqrt(float(max(num_nodes, 1))) * OUTPUT_SCALE_FACTOR)
+    final_positions = scaled.to(dtype=torch.float32, device=device)
 
     if trace_every > 0:
-        return scaled, traces
-    return scaled
+        return final_positions, traces
+    return final_positions
