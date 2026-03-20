@@ -1,13 +1,16 @@
 """Tests for igraph competitor adapters."""
 
 import pytest
+import torch
 
 igraph = pytest.importorskip("igraph")
 
 from dagua.eval.competitors.igraph_competitor import (  # noqa: E402
     IgraphDavidsonHarel,
+    IgraphDRL,
     IgraphFR,
     IgraphKamadaKawai,
+    IgraphLGL,
     IgraphMDS,
     IgraphRT,
     IgraphSugiyama,
@@ -163,6 +166,36 @@ class TestIgraphCompetitors:
         result = comp.layout(g)
         assert result.pos is not None
         assert result.pos.shape == (5, 2)
+
+    def test_drl_layout_is_reproducible_for_same_seed(self) -> None:
+        """The DRL adapter should seed igraph's internal RNG."""
+        g = _make_simple_graph()
+        comp = IgraphDRL()
+
+        first = comp.layout(g, seed=7)
+        second = comp.layout(g, seed=7)
+        third = comp.layout(g, seed=8)
+
+        assert first.pos is not None
+        assert second.pos is not None
+        assert third.pos is not None
+        torch.testing.assert_close(first.pos, second.pos)
+        assert not torch.allclose(first.pos, third.pos)
+
+    def test_lgl_layout_is_reproducible_for_same_seed(self) -> None:
+        """The LGL adapter should seed igraph's internal RNG."""
+        g = _make_simple_graph()
+        comp = IgraphLGL()
+
+        first = comp.layout(g, seed=11)
+        second = comp.layout(g, seed=11)
+        third = comp.layout(g, seed=12)
+
+        assert first.pos is not None
+        assert second.pos is not None
+        assert third.pos is not None
+        torch.testing.assert_close(first.pos, second.pos)
+        assert not torch.allclose(first.pos, third.pos)
 
 
 class TestIgraphRegistration:

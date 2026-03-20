@@ -228,6 +228,7 @@ def test_competitor_signatures_cover_extended_families(monkeypatch):
         "igraph": "0.11.8",
         "networkx": "3.4",
         "sgd2": "1.0.0",
+        "pyg": "2.6.1",
         "fa2": "installed",
         "umap": "0.5.7",
         "sklearn": "1.6.1",
@@ -246,12 +247,16 @@ def test_competitor_signatures_cover_extended_families(monkeypatch):
         "igraph_kamada_kawai",
         "igraph_mds",
         "igraph_davidson_harel",
+        "igraph_graphopt",
+        "igraph_drl",
+        "igraph_lgl",
         "igraph_rt",
         "nx_spring",
         "nx_kamada_kawai",
         "nx_spectral",
         "sgd2",
         "sgd2_mds",
+        "neulay",
         "fa2_ref",
         "tsne_graph",
         "umap_graph",
@@ -267,6 +272,7 @@ def test_competitor_signatures_cover_extended_families(monkeypatch):
     assert signatures["classic_fmmm"] == f"classic_fmmm:{source_signature}"
     assert signatures["igraph_mds"] == "igraph_mds:0.11.8"
     assert signatures["sgd2_mds"] == "sgd2_mds:1.0.0"
+    assert signatures["neulay"] == "neulay:2.6.1"
     assert signatures["tsne_graph"] == "tsne_graph:1.6.1:1.15.2"
     assert signatures["umap_graph"] == "umap_graph:0.5.7:1.15.2"
     assert signatures["ogdf_gem"] in {
@@ -364,9 +370,13 @@ def test_default_competitor_order_covers_expected_and_available_competitors():
         "igraph_kamada_kawai",
         "igraph_mds",
         "igraph_davidson_harel",
+        "igraph_graphopt",
+        "igraph_drl",
+        "igraph_lgl",
         "igraph_rt",
         "sgd2",
         "sgd2_mds",
+        "neulay",
         "fa2_ref",
         "tsne_graph",
         "umap_graph",
