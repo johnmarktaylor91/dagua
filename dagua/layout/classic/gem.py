@@ -7,6 +7,7 @@ and a weak gravity term toward the barycenter.
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import torch
@@ -15,8 +16,14 @@ _MIN_DISTANCE = 1.0e-3
 _FULL_REPULSION_LIMIT = 2_000
 _SAMPLED_REPULSION_NEIGHBORS = 96
 _PERTURBATION_MAX_ANGLE = 1.64
-_TEMPERATURE_GROWTH_FACTOR = 3.0
-_TEMPERATURE_SHRINK_FACTOR = 1.0 / 3.0
+_GRAVITATIONAL_CONSTANT = 1.0 / 16.0
+_MIN_GLOBAL_TEMPERATURE = 0.005
+_ROTATION_SENSITIVITY = 0.01
+_OSCILLATION_SENSITIVITY = 0.3
+_ROTATION_ANGLE = math.pi / 3.0
+_OSCILLATION_ANGLE = math.pi / 2.0
+_ROTATION_SINE_THRESHOLD = math.sin((math.pi / 2.0) + (_ROTATION_ANGLE / 2.0))
+_OSCILLATION_COSINE_THRESHOLD = math.cos(_OSCILLATION_ANGLE / 2.0)
 
 
 def _layout_device(
@@ -129,6 +136,36 @@ def _ideal_distance(num_nodes: int, extent: float) -> float:
     return max(extent / max(float(max(num_nodes, 1)) ** 0.5, 1.0), _MIN_DISTANCE)
 
 
+def _degree_weights(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Compute OGDF's degree-based node weights.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    device : torch.device
+        Device for the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Degree-derived weights with shape ``[N]``.
+    """
+    degrees = torch.zeros((num_nodes,), dtype=torch.float32, device=device)
+    if edge_index.numel() > 0:
+        src = edge_index[0].to(device=device, dtype=torch.long)
+        dst = edge_index[1].to(device=device, dtype=torch.long)
+        degrees.index_add_(0, src, torch.ones_like(src, dtype=torch.float32))
+        degrees.index_add_(0, dst, torch.ones_like(dst, dtype=torch.float32))
+    return degrees / 2.5 + 1.0
+
+
 def _repulsive_force_full(positions: torch.Tensor, ideal_distance: float) -> torch.Tensor:
     """Compute exact all-pairs repulsion.
 
@@ -225,6 +262,7 @@ def _attractive_force(
     positions: torch.Tensor,
     edge_index: torch.Tensor,
     ideal_distance: float,
+    degree_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute exact spring attraction along graph edges.
 
@@ -236,6 +274,8 @@ def _attractive_force(
         Edge list with shape ``[2, E]``.
     ideal_distance : float
         GEM target edge length constant ``k``.
+    degree_weights : torch.Tensor, optional
+        Degree-based OGDF node weights with shape ``[N]``.
 
     Returns
     -------
@@ -248,12 +288,48 @@ def _attractive_force(
 
     src = edge_index[0].to(device=positions.device, dtype=torch.long)
     dst = edge_index[1].to(device=positions.device, dtype=torch.long)
-    delta = positions[dst] - positions[src]
+    delta = positions[src] - positions[dst]
     distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
-    edge_force = delta * (distances / max(ideal_distance, _MIN_DISTANCE)).unsqueeze(1)
-    forces.index_add_(0, src, edge_force)
-    forces.index_add_(0, dst, -edge_force)
+    if degree_weights is None:
+        degree_weights = _degree_weights(edge_index, int(positions.shape[0]), positions.device)
+    source_weights = degree_weights[src].clamp(min=1.0)
+    target_weights = degree_weights[dst].clamp(min=1.0)
+
+    denominator = max(ideal_distance, _MIN_DISTANCE)
+    source_force = -delta * (distances / (denominator * source_weights)).unsqueeze(1)
+    target_force = delta * (distances / (denominator * target_weights)).unsqueeze(1)
+    forces.index_add_(0, src, source_force)
+    forces.index_add_(0, dst, target_force)
     return forces
+
+
+def _gravity_force(
+    positions: torch.Tensor,
+    degree_weights: torch.Tensor,
+) -> torch.Tensor:
+    """Compute OGDF's weighted gravity toward the global barycenter.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    degree_weights : torch.Tensor
+        Degree-based OGDF node weights with shape ``[N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Gravity impulse per node with shape ``[N, 2]``.
+
+    Notes
+    -----
+    OGDF stores the weighted coordinate sum and divides by ``N`` when using it
+    during the impulse computation. This is intentionally not normalized by the
+    total weight sum.
+    """
+    barycenter = (positions * degree_weights.unsqueeze(1)).sum(dim=0, keepdim=True)
+    barycenter = barycenter / max(int(positions.shape[0]), 1)
+    return (barycenter - positions) * _GRAVITATIONAL_CONSTANT
 
 
 def _rotate_impulse(
@@ -296,53 +372,66 @@ def _rotate_impulse(
 
 def _update_temperatures(
     temperatures: torch.Tensor,
-    direction: torch.Tensor,
+    current_impulse: torch.Tensor,
     previous_impulse: torch.Tensor,
-    extent: float,
-) -> torch.Tensor:
-    """Adjust per-node temperatures from impulse alignment.
+    skew_gauge: torch.Tensor,
+    initial_temperature: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Adjust per-node temperatures with OGDF's oscillation and skew rules.
 
     Parameters
     ----------
     temperatures : torch.Tensor
         Per-node temperature tensor with shape ``[N]``.
-    direction : torch.Tensor
-        Current normalized impulse directions, shape ``[N, 2]``.
+    current_impulse : torch.Tensor
+        Current scaled node movements with shape ``[N, 2]``.
     previous_impulse : torch.Tensor
-        Previous unnormalized impulses, shape ``[N, 2]``.
-    extent : float
-        Drawing half-width used to cap temperature growth.
+        Previous scaled node movements with shape ``[N, 2]``.
+    skew_gauge : torch.Tensor
+        Per-node rotation accumulator with shape ``[N]``.
+    initial_temperature : float
+        Maximum allowed per-node temperature.
 
     Returns
     -------
-    torch.Tensor
-        Updated temperature tensor with shape ``[N]``.
-
-    Notes
-    -----
-    The paper updates temperature multiplicatively only for strong alignment
-    or reversal. Neutral moves keep the current temperature instead of
-    applying additional damping.
+    tuple[torch.Tensor, torch.Tensor]
+        Updated temperatures and skew-gauge values, both with shape ``[N]``.
     """
-    previous_norm = torch.linalg.norm(previous_impulse, dim=1, keepdim=True).clamp(
-        min=_MIN_DISTANCE
-    )
-    cosine = (direction * (previous_impulse / previous_norm)).sum(dim=1)
+    current_norm = torch.linalg.norm(current_impulse, dim=1)
+    previous_norm = torch.linalg.norm(previous_impulse, dim=1)
+    product = current_norm * previous_norm
+    valid = product > _MIN_DISTANCE
 
-    same_direction = cosine > 0.5
-    opposite_direction = cosine < -0.2
+    if not bool(valid.any()):
+        return temperatures, skew_gauge
+
+    safe_product = product.clamp(min=_MIN_DISTANCE)
+    sin_beta = (
+        current_impulse[:, 0] * previous_impulse[:, 0]
+        - current_impulse[:, 1] * previous_impulse[:, 1]
+    ) / safe_product
+    cos_beta = (
+        current_impulse[:, 0] * previous_impulse[:, 0]
+        + current_impulse[:, 1] * previous_impulse[:, 1]
+    ) / safe_product
+
+    rotation_mask = valid & (sin_beta > _ROTATION_SINE_THRESHOLD)
+    skew_gauge = torch.where(
+        rotation_mask,
+        skew_gauge + _ROTATION_SENSITIVITY,
+        skew_gauge,
+    )
+
+    oscillation_mask = valid & (cos_beta.abs() > _OSCILLATION_COSINE_THRESHOLD)
+    oscillation_scale = 1.0 + cos_beta * _OSCILLATION_SENSITIVITY
     temperatures = torch.where(
-        same_direction,
-        temperatures * _TEMPERATURE_GROWTH_FACTOR,
+        oscillation_mask,
+        temperatures * oscillation_scale,
         temperatures,
     )
-    temperatures = torch.where(
-        opposite_direction,
-        temperatures * _TEMPERATURE_SHRINK_FACTOR,
-        temperatures,
-    )
-    temperatures = temperatures.clamp(min=0.01, max=extent * 0.25)
-    return temperatures
+    temperatures = temperatures * (1.0 - skew_gauge.abs())
+    temperatures = temperatures.clamp(min=_MIN_GLOBAL_TEMPERATURE, max=initial_temperature)
+    return temperatures, skew_gauge
 
 
 def layout_gem(
@@ -376,6 +465,13 @@ def layout_gem(
     -------
     torch.Tensor
         Node positions with shape ``[N, 2]``.
+
+    Notes
+    -----
+    OGDF updates one node at a time in a random permutation and applies each
+    movement immediately. This implementation keeps the repo's batched GPU-
+    friendly update pattern, so the force laws and temperature adaptation match
+    OGDF but the node-update schedule remains a documented deviation.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
@@ -391,37 +487,48 @@ def layout_gem(
     extent = _layout_extent(num_nodes, node_sizes)
     ideal_distance = _ideal_distance(num_nodes, extent)
     positions = _initialize_positions(num_nodes, device, seed)
+    initial_temperature = max(extent / max(num_nodes, 1) ** 0.5, 0.05)
     temperatures = torch.full(
         (num_nodes,),
-        fill_value=max(extent / max(num_nodes, 1) ** 0.5, 0.05),
+        fill_value=initial_temperature,
         dtype=torch.float32,
         device=device,
     )
+    degree_weights = _degree_weights(edge_index, num_nodes, device)
     previous_impulse = torch.zeros_like(positions)
+    skew_gauge = torch.zeros((num_nodes,), dtype=torch.float32, device=device)
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
 
     for step in range(max_iters):
-        repulsive = 0.08 * _repulsive_force(positions, seed, step, ideal_distance)
-        attractive = -0.02 * _attractive_force(positions, edge_index, ideal_distance)
-        barycenter = positions.mean(dim=0, keepdim=True)
-        gravity = -0.01 * (positions - barycenter)
+        if float(temperatures.mean().item()) < _MIN_GLOBAL_TEMPERATURE:
+            break
+
+        repulsive = _repulsive_force(positions, seed, step, ideal_distance)
+        attractive = _attractive_force(
+            positions,
+            edge_index,
+            ideal_distance,
+            degree_weights=degree_weights,
+        )
+        gravity = _gravity_force(positions, degree_weights)
         impulse = _rotate_impulse(
             repulsive + attractive + gravity,
             generator=generator,
             device=device,
         )
         norm = torch.linalg.norm(impulse, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
-        direction = impulse / norm
+        movement = (impulse / norm) * temperatures.unsqueeze(1)
 
-        temperatures = _update_temperatures(
+        temperatures, skew_gauge = _update_temperatures(
             temperatures=temperatures,
-            direction=direction,
+            current_impulse=movement,
             previous_impulse=previous_impulse,
-            extent=extent,
+            skew_gauge=skew_gauge,
+            initial_temperature=initial_temperature,
         )
 
-        positions = positions + direction * temperatures.unsqueeze(1)
-        previous_impulse = impulse
+        positions = positions + movement
+        previous_impulse = movement
 
     return _normalize_positions(positions, extent).to(dtype=torch.float32, device=device)

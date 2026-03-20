@@ -17,7 +17,7 @@ from dagua.layout.classic.fr import layout_fr
 _MIN_DISTANCE = 1.0e-3
 _COARSE_TARGET = 50
 _MAX_TREE_DEPTH = 10
-_COOLING_FACTOR = 0.9
+_COOLING_FACTOR = 0.99
 
 
 @dataclass
@@ -241,6 +241,12 @@ def _coarsen_edges(edge_index: torch.Tensor, mapping: torch.Tensor) -> torch.Ten
     -------
     torch.Tensor
         Unique undirected coarse edges.
+
+    Notes
+    -----
+    OGDF preserves distance-weighted coarse edges during galaxy coarsening.
+    This reimplementation still collapses them by deduplicating endpoint
+    pairs, which remains an intentional simplification called out by the task.
     """
     coarse_edges: set[tuple[int, int]] = set()
     edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
@@ -415,7 +421,8 @@ def _repulsion_from_cell(
     distance = torch.linalg.norm(delta).clamp(min=_MIN_DISTANCE)
     width = max(cell.x_max - cell.x_min, cell.y_max - cell.y_min)
     if not cell.children or width / float(distance.item()) < theta:
-        return delta * ((cell.mass * (ideal_length**2)) / distance.square())
+        del ideal_length
+        return delta * (cell.mass / distance.square())
 
     total = torch.zeros(2, dtype=point.dtype, device=point.device)
     for child in cell.children:
@@ -497,7 +504,8 @@ def _attractive_force(
     dst = edge_index[1].to(device=positions.device, dtype=torch.long)
     delta = positions[dst] - positions[src]
     distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
-    edge_force = delta * (distances / ideal_length).unsqueeze(1)
+    denominator = max(ideal_length**3, _MIN_DISTANCE)
+    edge_force = delta * (distances / denominator).unsqueeze(1)
     forces.index_add_(0, src, edge_force)
     forces.index_add_(0, dst, -edge_force)
     return forces
@@ -542,8 +550,7 @@ def _refine_level(
     for _ in range(steps):
         repulsive = _barnes_hut_repulsion(refined, theta, ideal_length)
         attractive = _attractive_force(refined, edge_index, ideal_length)
-        gravity = -0.01 * (refined - refined.mean(dim=0, keepdim=True))
-        displacement = repulsive + attractive + gravity
+        displacement = (repulsive + attractive) * (ideal_length**2)
         norm = torch.linalg.norm(displacement, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
         limited_step = torch.minimum(norm, torch.full_like(norm, temperature))
         refined = refined + (displacement / norm) * limited_step

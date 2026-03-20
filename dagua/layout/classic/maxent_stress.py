@@ -14,6 +14,8 @@ from typing import Optional
 
 import torch
 
+from dagua.layout.classic.pivot_mds import layout_pivot_mds
+
 _MIN_DISTANCE = 1.0e-3
 _FULL_STRESS_LIMIT = 1_000
 _PIVOT_COUNT = 50
@@ -211,6 +213,24 @@ def _bfs_distances(adjacency: list[list[int]], source: int) -> torch.Tensor:
     return distances
 
 
+def _cross_component_distance(num_nodes: int, average_edge_cost: float = 1.0) -> float:
+    """Compute OGDF's disconnected-pair fallback distance.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the graph.
+    average_edge_cost : float, default=1.0
+        Average edge cost used by the shortest-path objective.
+
+    Returns
+    -------
+    float
+        Replacement distance for unreachable node pairs.
+    """
+    return average_edge_cost * math.sqrt(float(max(num_nodes, 1)))
+
+
 def _all_pairs_shortest_paths(adjacency: list[list[int]]) -> torch.Tensor:
     """Compute the full BFS shortest-path matrix for a small graph.
 
@@ -222,13 +242,19 @@ def _all_pairs_shortest_paths(adjacency: list[list[int]]) -> torch.Tensor:
     Returns
     -------
     torch.Tensor
-        Integer shortest-path matrix with shape ``[N, N]``.
+        Float shortest-path matrix with shape ``[N, N]``.
     """
     num_nodes = len(adjacency)
     rows = [_bfs_distances(adjacency, node) for node in range(num_nodes)]
     if not rows:
-        return torch.empty((0, 0), dtype=torch.long)
-    return torch.stack(rows, dim=0)
+        return torch.empty((0, 0), dtype=torch.float32)
+
+    distances = torch.stack(rows, dim=0).to(dtype=torch.float32)
+    unreachable = distances < 0
+    if bool(unreachable.any()):
+        distances = distances.clone()
+        distances[unreachable] = _cross_component_distance(num_nodes)
+    return distances
 
 
 def _full_stress_terms(
@@ -253,11 +279,10 @@ def _full_stress_terms(
 
     upper = torch.triu_indices(distances.shape[0], distances.shape[1], offset=1)
     pair_distances = distances[upper[0], upper[1]]
-    reachable = pair_distances > 0
     return (
-        upper[0][reachable],
-        upper[1][reachable],
-        pair_distances[reachable].to(dtype=torch.float32),
+        upper[0],
+        upper[1],
+        pair_distances.to(dtype=torch.float32),
     )
 
 
@@ -337,7 +362,12 @@ def _pivot_stress_terms(
         return pivots, torch.empty((len(adjacency), 0), dtype=torch.float32)
 
     rows = [_bfs_distances(adjacency, int(pivot.item())) for pivot in pivots]
-    return pivots, torch.stack(rows, dim=0).transpose(0, 1).to(dtype=torch.float32)
+    distances = torch.stack(rows, dim=0).transpose(0, 1).to(dtype=torch.float32)
+    unreachable = distances < 0
+    if bool(unreachable.any()):
+        distances = distances.clone()
+        distances[unreachable] = _cross_component_distance(len(adjacency))
+    return pivots, distances
 
 
 def _full_non_edge_pairs(adjacency: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -538,6 +568,7 @@ def _maxent_stress_loss(
     non_edge_src: torch.Tensor,
     non_edge_dst: torch.Tensor,
     alpha: float,
+    use_entropy: bool = True,
 ) -> torch.Tensor:
     """Evaluate the prepared maxent-stress objective.
 
@@ -561,20 +592,25 @@ def _maxent_stress_loss(
         Non-edge target indices.
     alpha : float
         Entropy repulsion weight.
+    use_entropy : bool, default=True
+        Whether to include the logarithmic entropy repulsion term.
 
     Returns
     -------
     torch.Tensor
         Scalar loss value.
     """
-    return _stress_term(
+    loss = _stress_term(
         positions,
         stress_src,
         stress_dst,
         stress_lengths,
         pivot_indices,
         pivot_distances,
-    ) + alpha * _entropy_term(positions, non_edge_src, non_edge_dst, scale=1.0)
+    )
+    if use_entropy:
+        loss = loss + alpha * _entropy_term(positions, non_edge_src, non_edge_dst, scale=1.0)
+    return loss
 
 
 def layout_maxent_stress(
@@ -584,8 +620,9 @@ def layout_maxent_stress(
     steps: int = 200,
     alpha: float = 1.0,
     seed: int = 42,
+    use_entropy: bool = False,
 ) -> torch.Tensor:
-    """Lay out a graph with sparse stress plus entropy repulsion.
+    """Lay out a graph with OGDF-style stress minimization and optional entropy.
 
     Reference
     ---------
@@ -602,9 +639,12 @@ def layout_maxent_stress(
     steps : int, default=200
         Number of Adam updates.
     alpha : float, default=1.0
-        Repulsion weight.
+        Entropy repulsion weight.
     seed : int, default=42
         Random seed.
+    use_entropy : bool, default=False
+        Include the logarithmic entropy repulsion term. ``False`` matches
+        OGDF's pure stress objective more closely.
 
     Returns
     -------
@@ -629,7 +669,11 @@ def layout_maxent_stress(
         stress_src, stress_dst, stress_lengths = _full_stress_terms(adjacency)
         pivot_indices = torch.empty((0,), dtype=torch.long)
         pivot_distances = torch.empty((num_nodes, 0), dtype=torch.float32)
-        full_non_edge_src, full_non_edge_dst = _full_non_edge_pairs(adjacency)
+        if use_entropy:
+            full_non_edge_src, full_non_edge_dst = _full_non_edge_pairs(adjacency)
+        else:
+            full_non_edge_src = torch.empty((0,), dtype=torch.long)
+            full_non_edge_dst = torch.empty((0,), dtype=torch.long)
     else:
         stress_src = torch.empty((0,), dtype=torch.long)
         stress_dst = torch.empty((0,), dtype=torch.long)
@@ -638,7 +682,14 @@ def layout_maxent_stress(
         full_non_edge_src = torch.empty((0,), dtype=torch.long)
         full_non_edge_dst = torch.empty((0,), dtype=torch.long)
 
-    positions = _initialize_positions(num_nodes, device, seed).requires_grad_(True)
+    positions = layout_pivot_mds(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        n_pivots=min(_PIVOT_COUNT, num_nodes),
+        seed=seed,
+    ).to(device=device, dtype=torch.float32)
+    positions = positions.requires_grad_(True)
     initial_lr = min(0.04, 0.8 / float(max(num_nodes, 1)))
     final_lr = max(initial_lr * 0.1, initial_lr / math.sqrt(float(max(steps, 1))))
     optimizer = torch.optim.Adam([positions], lr=initial_lr)
@@ -656,15 +707,9 @@ def layout_maxent_stress(
                 full_non_edge_src.to(device=positions.device),
                 full_non_edge_dst.to(device=positions.device),
                 alpha,
+                use_entropy=use_entropy,
             )
         else:
-            sampled_src, sampled_dst, total_non_edges = _sample_non_edges(
-                adjacency,
-                step,
-                seed,
-                positions.device,
-            )
-            sample_count = max(int(sampled_src.numel()), 1)
             loss = _stress_term(
                 positions,
                 stress_src,
@@ -672,12 +717,23 @@ def layout_maxent_stress(
                 stress_lengths,
                 pivot_indices,
                 pivot_distances,
-            ) + alpha * _entropy_term(
-                positions,
-                sampled_src,
-                sampled_dst,
-                scale=float(total_non_edges) / float(sample_count) if total_non_edges > 0 else 1.0,
             )
+            if use_entropy:
+                sampled_src, sampled_dst, total_non_edges = _sample_non_edges(
+                    adjacency,
+                    step,
+                    seed,
+                    positions.device,
+                )
+                sample_count = max(int(sampled_src.numel()), 1)
+                loss = loss + alpha * _entropy_term(
+                    positions,
+                    sampled_src,
+                    sampled_dst,
+                    scale=(
+                        float(total_non_edges) / float(sample_count) if total_non_edges > 0 else 1.0
+                    ),
+                )
         loss.backward()
         optimizer.step()
         fraction = float(step + 1) / float(max(steps, 1))
