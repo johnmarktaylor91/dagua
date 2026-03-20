@@ -216,8 +216,9 @@ int main() {
 				nodes[static_cast<std::size_t>(edge.second)]);
 		}
 
-		// Random initial positions — GEM and other force-directed algorithms
-		// need non-degenerate starting positions to break symmetry.
+		// Seed OGDF's global RNG so algorithms like GEM get deterministic
+		// permutations. Also set C srand for initial positions.
+		ogdf::setSeed(42);
 		std::srand(static_cast<unsigned>(42));
 		for (int index = 0; index < numNodes; ++index) {
 			graphAttributes.x(nodes[static_cast<std::size_t>(index)]) =
