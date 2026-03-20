@@ -130,8 +130,10 @@ class UMAPGraph(CompetitorBase):
                 elapsed = time.perf_counter() - start
                 return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
 
-            if num_nodes == 1:
-                pos = torch.zeros((1, 2), dtype=torch.float32)
+            if num_nodes <= 3:
+                # UMAP's spectral init uses sparse eigensolver which fails
+                # when k >= N. Fall back to random placement for tiny graphs.
+                pos = torch.randn(num_nodes, 2, dtype=torch.float32)
                 elapsed = time.perf_counter() - start
                 return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
 
@@ -141,6 +143,7 @@ class UMAPGraph(CompetitorBase):
                 metric="precomputed",
                 random_state=seed if seed is not None else 42,
                 n_neighbors=min(15, num_nodes - 1),
+                init="random" if num_nodes < 10 else "spectral",
             )
             coordinates = reducer.fit_transform(distances)
             pos = torch.tensor(coordinates, dtype=torch.float32)
