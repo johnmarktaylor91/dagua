@@ -78,7 +78,7 @@ _register(
     "dagua.layout.classic.gem",
     "layout_gem",
     stochastic=True,
-    original_competitor="igraph_fr",
+    original_competitor="ogdf_gem",
     max_nodes=50_000,
 )
 
@@ -96,7 +96,7 @@ _register(
     "dagua.layout.classic.maxent_stress",
     "layout_maxent_stress",
     stochastic=True,
-    original_competitor="",
+    original_competitor="ogdf_stress",
     max_nodes=100_000,
 )
 
@@ -114,7 +114,7 @@ _register(
     "dagua.layout.classic.pivot_mds",
     "layout_pivot_mds",
     stochastic=False,
-    original_competitor="",
+    original_competitor="ogdf_pivot_mds",
     max_nodes=500_000,
 )
 
@@ -145,7 +145,7 @@ _register(
     "dagua.layout.classic.davidson_harel",
     "layout_davidson_harel",
     stochastic=True,
-    original_competitor="",
+    original_competitor="igraph_davidson_harel",
     max_nodes=500,
 )
 
@@ -155,7 +155,7 @@ _register(
     "dagua.layout.classic.linlog",
     "layout_linlog",
     stochastic=True,
-    original_competitor="",
+    original_competitor="ogdf_linlog",
     max_nodes=50_000,
 )
 
@@ -165,7 +165,7 @@ _register(
     "dagua.layout.classic.fmmm",
     "layout_fmmm",
     stochastic=True,
-    original_competitor="",
+    original_competitor="ogdf_fmmm",
     max_nodes=500_000,
 )
 

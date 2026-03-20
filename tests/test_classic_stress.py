@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import numpy as np
+import pytest
 import torch
 
 from dagua.layout.classic import layout_stress_sgd
+from dagua.layout.classic.stress_sgd import _build_exact_terms, _build_undirected_adjacency
 
 
 def _path_edge_index(num_nodes: int) -> torch.Tensor:
@@ -58,25 +61,18 @@ def test_layout_stress_sgd_is_deterministic_for_same_seed() -> None:
     assert torch.allclose(positions_a, positions_b)
 
 
-def test_layout_stress_sgd_handles_disconnected_components() -> None:
-    """Disconnected graphs layout without NaNs and keep components separated."""
+def test_layout_stress_sgd_rejects_disconnected_components() -> None:
+    """Disconnected graphs should raise, matching ``s_gd2``."""
     edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
 
-    positions = layout_stress_sgd(
-        edge_index=edge_index,
-        num_nodes=4,
-        steps=180,
-        seed=11,
-        sample_size=64,
-    )
-
-    assert torch.isfinite(positions).all()
-
-    centroid_a = positions[torch.tensor([0, 1])].mean(dim=0)
-    centroid_b = positions[torch.tensor([2, 3])].mean(dim=0)
-    centroid_distance = torch.norm(centroid_a - centroid_b)
-
-    assert centroid_distance.item() > 0.1
+    with pytest.raises(ValueError, match="connected graph"):
+        layout_stress_sgd(
+            edge_index=edge_index,
+            num_nodes=4,
+            steps=180,
+            seed=11,
+            sample_size=64,
+        )
 
 
 def test_layout_stress_sgd_trace_mode_returns_snapshots() -> None:
@@ -137,3 +133,29 @@ def test_layout_stress_sgd_path_graph_is_roughly_linear() -> None:
     _, singular_values, _ = torch.linalg.svd(centered, full_matrices=False)
 
     assert singular_values[0] > 2.0 * singular_values[1]
+
+
+def test_layout_stress_sgd_matches_sgd2_on_petersen_graph() -> None:
+    """The exact small-graph path should closely track ``s_gd2`` direct MDS."""
+    s_gd2 = pytest.importorskip("s_gd2")
+    scipy_spatial = pytest.importorskip("scipy.spatial")
+
+    sources = [0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6, 7]
+    targets = [1, 4, 5, 2, 6, 3, 7, 4, 8, 9, 7, 8, 8, 9, 9]
+    num_nodes = 10
+
+    edge_index = torch.tensor([sources + targets, targets + sources], dtype=torch.long)
+    adjacency = _build_undirected_adjacency(edge_index, num_nodes)
+    _, _, distances, weights = _build_exact_terms(adjacency)
+    schedule = s_gd2.default_schedule(np.asarray(weights), t_max=30, eps=0.01)
+    reference = s_gd2.mds_direct(
+        num_nodes,
+        np.asarray(distances),
+        np.asarray(weights),
+        etas=schedule,
+        random_seed=42,
+    )
+    positions = layout_stress_sgd(edge_index=edge_index, num_nodes=num_nodes, seed=42).numpy()
+
+    _, _, disparity = scipy_spatial.procrustes(np.asarray(reference), positions)
+    assert disparity < 0.001

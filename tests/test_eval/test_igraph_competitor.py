@@ -5,7 +5,10 @@ import pytest
 igraph = pytest.importorskip("igraph")
 
 from dagua.eval.competitors.igraph_competitor import (  # noqa: E402
+    IgraphDavidsonHarel,
     IgraphFR,
+    IgraphKamadaKawai,
+    IgraphMDS,
     IgraphRT,
     IgraphSugiyama,
     _graph_to_igraph,
@@ -14,7 +17,14 @@ from dagua.eval.competitors.igraph_competitor import (  # noqa: E402
 from dagua.graph import DaguaGraph  # noqa: E402
 
 
-def _make_simple_graph():
+def _make_simple_graph() -> DaguaGraph:
+    """Create a small connected graph for igraph adapter tests.
+
+    Returns
+    -------
+    DaguaGraph
+        Five-node graph with one shortcut edge.
+    """
     g = DaguaGraph()
     for i in range(5):
         g.add_node(i)
@@ -27,13 +37,27 @@ def _make_simple_graph():
 
 
 class TestIgraphConversion:
-    def test_graph_to_igraph(self):
+    def test_graph_to_igraph(self) -> None:
+        """The conversion helper should preserve node and edge counts.
+
+        Returns
+        -------
+        None
+            This test asserts on the converted igraph structure.
+        """
         g = _make_simple_graph()
         ig = _graph_to_igraph(g)
         assert ig.vcount() == 5
         assert ig.ecount() == 5
 
-    def test_pos_to_tensor(self):
+    def test_pos_to_tensor(self) -> None:
+        """The coordinate helper should scale igraph units into tensors.
+
+        Returns
+        -------
+        None
+            This test asserts on the converted tensor contents.
+        """
         layout = [[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]
         pos = _igraph_pos_to_tensor(layout, 3)
         assert pos.shape == (3, 2)
@@ -42,12 +66,26 @@ class TestIgraphConversion:
 
 
 class TestIgraphCompetitors:
-    def test_sugiyama_available(self):
+    def test_sugiyama_available(self) -> None:
+        """The Sugiyama adapter should report igraph availability.
+
+        Returns
+        -------
+        None
+            This test asserts on the availability probe.
+        """
         comp = IgraphSugiyama()
         assert comp.available()
         assert comp.name == "igraph_sugiyama"
 
-    def test_sugiyama_layout(self):
+    def test_sugiyama_layout(self) -> None:
+        """The Sugiyama adapter should return positions on a small graph.
+
+        Returns
+        -------
+        None
+            This test asserts on the layout result payload.
+        """
         g = _make_simple_graph()
         comp = IgraphSugiyama()
         result = comp.layout(g)
@@ -56,26 +94,92 @@ class TestIgraphCompetitors:
         assert result.error is None
         assert result.runtime_seconds > 0
 
-    def test_fr_layout(self):
+    def test_fr_layout(self) -> None:
+        """The FR adapter should return positions on a small graph.
+
+        Returns
+        -------
+        None
+            This test asserts on the layout result payload.
+        """
         g = _make_simple_graph()
         comp = IgraphFR()
         result = comp.layout(g)
         assert result.pos is not None
         assert result.pos.shape == (5, 2)
 
-    def test_rt_layout(self):
+    def test_rt_layout(self) -> None:
+        """The Reingold-Tilford adapter should return positions.
+
+        Returns
+        -------
+        None
+            This test asserts on the layout result payload.
+        """
         g = _make_simple_graph()
         comp = IgraphRT()
         result = comp.layout(g)
         assert result.pos is not None
         assert result.pos.shape == (5, 2)
 
+    def test_davidson_harel_layout(self) -> None:
+        """The Davidson-Harel adapter should return positions.
+
+        Returns
+        -------
+        None
+            This test asserts on the layout result payload.
+        """
+        g = _make_simple_graph()
+        comp = IgraphDavidsonHarel()
+        result = comp.layout(g)
+        assert result.pos is not None
+        assert result.pos.shape == (5, 2)
+
+    def test_kamada_kawai_layout(self) -> None:
+        """The Kamada-Kawai adapter should return positions.
+
+        Returns
+        -------
+        None
+            This test asserts on the layout result payload.
+        """
+        g = _make_simple_graph()
+        comp = IgraphKamadaKawai()
+        result = comp.layout(g)
+        assert result.pos is not None
+        assert result.pos.shape == (5, 2)
+
+    def test_mds_layout(self) -> None:
+        """The MDS adapter should return positions.
+
+        Returns
+        -------
+        None
+            This test asserts on the layout result payload.
+        """
+        g = _make_simple_graph()
+        comp = IgraphMDS()
+        result = comp.layout(g)
+        assert result.pos is not None
+        assert result.pos.shape == (5, 2)
+
 
 class TestIgraphRegistration:
-    def test_registered_in_competitors(self):
+    def test_registered_in_competitors(self) -> None:
+        """The igraph adapters should be discoverable through the registry.
+
+        Returns
+        -------
+        None
+            This test asserts on the available competitor names.
+        """
         from dagua.eval.competitors import get_available_competitors
 
         names = [c.name for c in get_available_competitors()]
         assert "igraph_sugiyama" in names
         assert "igraph_fr" in names
         assert "igraph_rt" in names
+        assert "igraph_davidson_harel" in names
+        assert "igraph_kamada_kawai" in names
+        assert "igraph_mds" in names

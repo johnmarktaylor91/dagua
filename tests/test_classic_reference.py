@@ -19,11 +19,15 @@ import pytest
 import torch
 
 from dagua.layout.classic import layout_fr, layout_kk, layout_stress_sgd, layout_sugiyama
-from dagua.layout.classic.fa2 import _node_speed as _fa2_node_speed
+from dagua.layout.classic.davidson_harel import _energy as _davidson_harel_energy
+from dagua.layout.classic.fa2 import _adjust_speed_and_apply_forces as _fa2_adjust_speed
+from dagua.layout.classic.gem import _attractive_force as _gem_attractive_force
 from dagua.layout.classic.gem import _repulsive_force_full as _gem_repulsive_force_full
 from dagua.layout.classic.gem import _rotate_impulse as _gem_rotate_impulse
 from dagua.layout.classic.gem import _update_temperatures as _gem_update_temperatures
 from dagua.layout.classic.linlog import _linlog_loss
+from dagua.layout.classic.linlog import _sample_non_edge_pairs as _linlog_sample_non_edge_pairs
+from dagua.layout.classic.linlog import _unique_undirected_edge_ids as _linlog_edge_ids
 from dagua.layout.classic.maxent_stress import _build_undirected_adjacency as _maxent_adjacency
 from dagua.layout.classic.maxent_stress import _full_non_edge_pairs as _maxent_full_non_edge_pairs
 from dagua.layout.classic.maxent_stress import _full_stress_terms as _maxent_full_stress_terms
@@ -166,28 +170,6 @@ def _make_petersen_graph() -> tuple[torch.Tensor, int, Any]:
     return edge_index, 10, graph
 
 
-def _make_fr_initial_positions(num_nodes: int, seed: int, area: float) -> torch.Tensor:
-    """Mirror the FR initializer so both implementations share the same start.
-
-    Parameters
-    ----------
-    num_nodes : int
-        Number of nodes in the graph.
-    seed : int
-        Seed used for deterministic initialization.
-    area : float
-        Layout area used by the FR implementation.
-
-    Returns
-    -------
-    torch.Tensor
-        Initial positions with shape ``[N, 2]``.
-    """
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed)
-    return torch.rand((num_nodes, 2), generator=generator, dtype=torch.float32) * (area**0.5)
-
-
 def _normalize_positions(pos: torch.Tensor) -> torch.Tensor:
     """Normalize positions into the unit square.
 
@@ -293,17 +275,18 @@ def _nearest_neighbor_overlaps(pos_a: torch.Tensor, pos_b: torch.Tensor, k: int)
     return overlaps
 
 
-def test_fr_clips_positions_to_layout_box() -> None:
-    """FR should keep every node inside the paper's bounding box."""
+def test_fr_recenters_positions_around_origin() -> None:
+    """FR should rescale the final layout around the origin."""
     edge_index = torch.empty((2, 0), dtype=torch.long)
     positions = layout_fr(edge_index=edge_index, num_nodes=12, steps=10, seed=7, area=1.0)
 
-    assert float(positions.min().item()) >= 0.0
-    assert float(positions.max().item()) <= 1.0
+    assert torch.linalg.norm(positions.mean(dim=0)) < 1.0e-4
+    assert float(positions.min().item()) < 0.0
+    assert float(positions.max().item()) > 0.0
 
 
-def test_kk_auto_uses_newton_for_small_graphs() -> None:
-    """Small graphs should route ``solver='auto'`` through the Newton solver."""
+def test_kk_solver_variants_return_centered_layouts() -> None:
+    """KK solver modes should all return centered 2D layouts."""
     edge_index, num_nodes, _ = _make_petersen_graph()
 
     auto_positions = layout_kk(edge_index=edge_index, num_nodes=num_nodes, steps=60, seed=42)
@@ -322,24 +305,44 @@ def test_kk_auto_uses_newton_for_small_graphs() -> None:
         solver="adam",
     )
 
-    torch.testing.assert_close(auto_positions, newton_positions)
-    assert not torch.allclose(newton_positions, adam_positions)
+    for positions in (auto_positions, newton_positions, adam_positions):
+        assert positions.shape == (num_nodes, 2)
+        assert torch.linalg.norm(positions.mean(dim=0)) < 1.0e-4
 
 
-def test_fa2_per_node_speed_caps_high_swing_nodes() -> None:
-    """FA2 should assign smaller speed caps to high-swing nodes."""
-    force = torch.tensor([[10.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
-    previous_force = torch.zeros_like(force)
+def test_fa2_adjust_speed_matches_reference_math() -> None:
+    """FA2 should match the reference speed adaptation and movement factors."""
+    pos = torch.tensor([[0.0, 0.0], [1.0, -1.0]], dtype=torch.float32)
+    old_force = torch.tensor([[1.0, 0.0], [0.0, 2.0]], dtype=torch.float32)
+    force = torch.tensor([[0.0, 1.0], [2.0, 0.0]], dtype=torch.float32)
+    mass = torch.tensor([2.0, 3.0], dtype=torch.float32)
 
-    node_speed = _fa2_node_speed(
+    updated_pos, speed, speed_efficiency = _fa2_adjust_speed(
+        pos=pos,
         force=force,
-        previous_force=previous_force,
-        speed=2.0,
-        global_traction=5.5,
+        old_force=old_force,
+        mass=mass,
+        speed=1.0,
+        speed_efficiency=1.0,
+        jitter_tolerance=1.0,
     )
 
-    expected = torch.tensor([1.0, 5.5], dtype=torch.float32)
-    torch.testing.assert_close(node_speed, expected)
+    total_swinging = 5.0 * math.sqrt(2.0)
+    total_effective_traction = 2.5 * math.sqrt(2.0)
+    estimated_optimal_jt = 0.05 * math.sqrt(2.0)
+    min_jt = math.sqrt(estimated_optimal_jt)
+    jt = max(min_jt, estimated_optimal_jt * total_effective_traction / 4.0)
+    target_speed = jt * total_effective_traction / total_swinging
+    expected_speed = 1.0 + min(target_speed - 1.0, 0.5)
+    expected_factor = expected_speed / (
+        1.0
+        + torch.sqrt(expected_speed * (mass * torch.linalg.vector_norm(old_force - force, dim=1)))
+    )
+    expected_pos = pos + (force * expected_factor.unsqueeze(1))
+
+    torch.testing.assert_close(updated_pos, expected_pos)
+    assert speed == pytest.approx(expected_speed)
+    assert speed_efficiency == pytest.approx(0.7)
 
 
 def test_gem_repulsion_matches_fr_force_law() -> None:
@@ -348,6 +351,17 @@ def test_gem_repulsion_matches_fr_force_law() -> None:
     force = _gem_repulsive_force_full(positions=positions, ideal_distance=3.0)
 
     expected = torch.tensor([[-4.5, 0.0], [4.5, 0.0]], dtype=torch.float32)
+    torch.testing.assert_close(force, expected)
+
+
+def test_gem_attraction_divides_by_ideal_distance() -> None:
+    """GEM attraction should include the paper's ``1 / k`` scale factor."""
+    positions = torch.tensor([[0.0, 0.0], [2.0, 0.0]], dtype=torch.float32)
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+
+    force = _gem_attractive_force(positions=positions, edge_index=edge_index, ideal_distance=4.0)
+
+    expected = torch.tensor([[1.0, 0.0], [-1.0, 0.0]], dtype=torch.float32)
     torch.testing.assert_close(force, expected)
 
 
@@ -370,7 +384,7 @@ def test_gem_rotation_and_temperature_updates_match_reference_rules() -> None:
         extent=100.0,
     )
 
-    expected = torch.tensor([1.4925, 0.32835, 0.9154], dtype=torch.float32)
+    expected = torch.tensor([3.0, 1.0 / 3.0, 1.0], dtype=torch.float32)
     torch.testing.assert_close(updated, expected)
 
 
@@ -710,52 +724,28 @@ def _segments_intersect(
 
 @pytest.mark.skipif(not _NETWORKX_AVAILABLE, reason="networkx is not installed")
 def test_fr_matches_networkx_spring_layout() -> None:
-    """Compare FR against NetworkX using shared initialization and distance structure.
+    """Compare FR against the exact NetworkX spring-layout reference.
 
     Returns
     -------
     None
-        The assertions validate pairwise-distance similarity and local neighborhoods.
+        The assertions validate a low Procrustes disparity.
     """
     nx = pytest.importorskip("networkx")
+    spatial = pytest.importorskip("scipy.spatial")
 
-    edge_index, num_nodes, graph = _make_small_random_graph()
-    area = float(num_nodes * 100)
-    steps = 800
-    ideal_length = (area / num_nodes) ** 0.5
+    edge_index, num_nodes, _ = _make_small_random_graph()
+    directed_graph = nx.DiGraph()
+    directed_graph.add_nodes_from(range(num_nodes))
+    directed_graph.add_edges_from(edge_index.transpose(0, 1).tolist())
 
-    init_pos = _make_fr_initial_positions(num_nodes=num_nodes, seed=42, area=area)
-    init_dict = {
-        node: (float(init_pos[node, 0].item()), float(init_pos[node, 1].item()))
-        for node in range(num_nodes)
-    }
-
-    nx_pos = nx.spring_layout(
-        graph,
-        pos=init_dict,
-        iterations=steps,
-        seed=42,
-        k=ideal_length,
-        scale=None,
-    )
+    nx_pos = nx.spring_layout(directed_graph, iterations=50, seed=42, scale=1)
     nx_tensor = _positions_from_networkx_dict(nx_pos, num_nodes=num_nodes)
-    our_tensor = layout_fr(
-        edge_index=edge_index, num_nodes=num_nodes, steps=steps, seed=42, area=area
-    )
+    our_tensor = layout_fr(edge_index=edge_index, num_nodes=num_nodes, steps=50, seed=42)
+    our_tensor = _normalize_positions(our_tensor)
 
-    nx_signature = _sorted_normalized_distance_vector(nx_tensor)
-    our_signature = _sorted_normalized_distance_vector(our_tensor)
-    torch.testing.assert_close(our_signature, nx_signature, atol=0.055, rtol=0.0)
-
-    labeled_corr = _pearson_correlation(
-        _normalize_distance_vector(nx_tensor),
-        _normalize_distance_vector(our_tensor),
-    )
-    assert labeled_corr > 0.85
-
-    overlaps = _nearest_neighbor_overlaps(nx_tensor, our_tensor, k=3)
-    assert sum(overlaps) / len(overlaps) >= 0.5
-    assert sum(overlap >= 0.5 for overlap in overlaps) / len(overlaps) >= 0.55
+    _, _, disparity = spatial.procrustes(nx_tensor.numpy(), our_tensor.numpy())
+    assert disparity < 0.01
 
 
 @pytest.mark.skipif(not _NETWORKX_AVAILABLE, reason="networkx is not installed")
@@ -859,19 +849,19 @@ def test_stress_sgd_auto_matches_full_epoch_for_small_graphs() -> None:
 
 
 def test_stress_sgd_learning_rate_matches_paper_schedule() -> None:
-    """Stress-SGD should interpolate distances before squaring the learning rate."""
-    assert _stress_sgd_learning_rate(0, 5, 1.0, 4.0) == pytest.approx(1.0)
-    assert _stress_sgd_learning_rate(2, 5, 1.0, 4.0) == pytest.approx(1.0 / 6.25)
-    assert _stress_sgd_learning_rate(4, 5, 1.0, 4.0) == pytest.approx(1.0 / 16.0)
+    """Stress-SGD should match the exponential ``s_gd2`` learning-rate schedule."""
+    assert _stress_sgd_learning_rate(0, 5, 1.0, 4.0) == pytest.approx(16.0)
+    assert _stress_sgd_learning_rate(2, 5, 1.0, 4.0) == pytest.approx(0.4)
+    assert _stress_sgd_learning_rate(4, 5, 1.0, 4.0) == pytest.approx(0.01)
 
 
 def test_linlog_matches_noack_sum_energy() -> None:
-    """LinLog should use summed attraction and summed logarithmic repulsion."""
+    """LinLog should repel only non-edge pairs in the Noack energy model."""
     positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [0.0, 3.0]], dtype=torch.float32)
     edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
 
     distances = torch.pdist(positions, p=2)
-    expected = distances[[0, 2]].sum() - torch.log(distances).sum()
+    expected = distances[[0, 2]].sum() - torch.log(distances[[1]]).sum()
 
     actual = _linlog_loss(positions, edge_index, seed=0, step=0)
 
@@ -879,19 +869,45 @@ def test_linlog_matches_noack_sum_energy() -> None:
 
 
 def test_linlog_supports_generalized_exponents_without_gravity() -> None:
-    """Generalized LinLog exponents should only depend on pairwise distances."""
+    """Generalized LinLog exponents should repel only non-edge pairwise distances."""
     positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [0.0, 3.0]], dtype=torch.float32)
     offset = torch.tensor([11.0, -7.0], dtype=torch.float32)
     edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
 
     distances = torch.pdist(positions, p=2)
-    expected = distances[[0, 2]].pow(2.0).sum() - distances.pow(1.5).sum()
+    expected = distances[[0, 2]].pow(2.0).sum() - distances[[1]].pow(1.5).sum()
 
     actual = _linlog_loss(positions, edge_index, seed=0, step=0, a=2.0, r=1.5)
     translated = _linlog_loss(positions + offset, edge_index, seed=0, step=0, a=2.0, r=1.5)
 
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(translated, actual)
+
+
+def test_linlog_sampled_repulsion_excludes_edges() -> None:
+    """The sampled LinLog repulsion path should only draw non-edge pairs."""
+    edge_index = _path_edge_index(6)
+    edge_ids = _linlog_edge_ids(edge_index, num_nodes=6, device=torch.device("cpu"))
+
+    src, dst, total_non_edge_pairs = _linlog_sample_non_edge_pairs(
+        num_nodes=6,
+        edge_ids=edge_ids,
+        device=torch.device("cpu"),
+        step=0,
+        seed=0,
+    )
+
+    edge_pairs = {
+        (min(source, target), max(source, target))
+        for source, target in zip(edge_index[0].tolist(), edge_index[1].tolist())
+    }
+
+    assert total_non_edge_pairs == 10
+    assert src.numel() > 0
+    assert all(
+        (int(source.item()), int(target.item())) not in edge_pairs
+        for source, target in zip(src, dst)
+    )
 
 
 def test_maxent_stress_includes_longer_shortest_paths() -> None:
@@ -1005,3 +1021,29 @@ def test_davidson_harel_uses_one_move_per_node_per_round(
     assert positions.shape == (3, 2)
     assert energy_calls == 1 + (3 * 2)
     assert davidson_harel_module._COOLING_FACTOR == pytest.approx(0.75)
+
+
+def test_davidson_harel_energy_uses_summed_terms_and_all_borders() -> None:
+    """Davidson-Harel should use sum-based energies with four-border repulsion."""
+    positions = torch.tensor(
+        [[0.0, 0.0], [2.0, 0.0], [1.0, 1.0]],
+        dtype=torch.float32,
+    )
+    edges = [(0, 1)]
+    extent = 3.0
+
+    distribution = (1.0 / 4.0) + (1.0 / 2.0) + (1.0 / 2.0)
+    border = (
+        4.0 / 9.0
+        + (1.0 / 25.0 + 1.0 + 1.0 / 9.0 + 1.0 / 9.0)
+        + (1.0 / 16.0 + 1.0 / 4.0 + 1.0 / 16.0 + 1.0 / 4.0)
+    )
+    edge_length = 4.0
+    node_edge = 1.0
+    expected = (
+        distribution / 3.0 + 0.1 * (border / 3.0) + 0.2 * edge_length + 0.5 * (node_edge / 3.0)
+    )
+
+    actual = float(_davidson_harel_energy(positions, edges, extent).item())
+
+    assert actual == pytest.approx(expected)

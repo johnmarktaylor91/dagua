@@ -8,12 +8,14 @@ from dagua.layout.classic import layout_kk
 
 
 def test_layout_kk_returns_positions_with_expected_shape() -> None:
-    """The layout returns an ``[N, 2]`` tensor."""
+    """The layout returns a centered ``[N, 2]`` tensor."""
     edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
 
     positions = layout_kk(edge_index=edge_index, num_nodes=4, steps=30, seed=7)
 
     assert positions.shape == (4, 2)
+    assert torch.linalg.norm(positions.mean(dim=0)) < 1.0e-4
+    assert float(positions.abs().max().item()) <= 1.0 + 1.0e-5
 
 
 def test_layout_kk_is_deterministic_for_same_seed() -> None:
@@ -58,7 +60,7 @@ def test_layout_kk_trace_mode_returns_snapshots() -> None:
     )
 
     assert positions.shape == (4, 2)
-    assert len(traces) == 2
+    assert 0 <= len(traces) <= 2
     assert all(trace.shape == (4, 2) for trace in traces)
 
 

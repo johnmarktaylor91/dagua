@@ -23,6 +23,7 @@ from dagua.layout.classic.maxent_stress import layout_maxent_stress
 from dagua.layout.classic.pivot_mds import layout_pivot_mds
 from dagua.layout.classic.spectral import layout_spectral
 from dagua.layout.classic.stress_sgd import layout_stress_sgd
+from dagua.layout.classic.sugiyama import layout_sugiyama
 from dagua.layout.classic.tsnet import layout_tsnet
 from dagua.metrics import count_crossings, edge_length_cv
 from tests.test_classic_reference import (
@@ -55,6 +56,67 @@ if _IGRAPH_AVAILABLE:
             _IGRAPH_GEM_AVAILABLE = False
 else:
     _IGRAPH_GEM_AVAILABLE = False
+
+
+def _make_karate_edge_index() -> tuple[torch.Tensor, int, Any]:
+    """Build an unweighted Karate Club graph in torch and NetworkX formats.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int, Any]
+        ``(edge_index, num_nodes, graph)`` for an unweighted Karate Club graph.
+    """
+    nx = pytest.importorskip("networkx")
+    base_graph = nx.karate_club_graph()
+    graph = nx.Graph()
+    graph.add_nodes_from(base_graph.nodes())
+    graph.add_edges_from(base_graph.edges())
+    num_nodes = graph.number_of_nodes()
+    edges = list(graph.edges())
+    sources = [source for source, _ in edges] + [target for _, target in edges]
+    targets = [target for _, target in edges] + [source for source, _ in edges]
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    return edge_index, num_nodes, graph
+
+
+def _normalize_for_procrustes(positions: np.ndarray) -> np.ndarray:
+    """Center and scale positions before Procrustes comparison.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Position array with shape ``[N, 2]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Centered array with max absolute coordinate at most ``1``.
+    """
+    centered = positions - positions.mean(axis=0, keepdims=True)
+    scale = float(np.abs(centered).max())
+    if scale > 1.0e-6:
+        centered = centered / scale
+    return centered
+
+
+def _procrustes_disparity(reference: np.ndarray, candidate: np.ndarray) -> float:
+    """Compute SciPy Procrustes disparity between two layouts.
+
+    Parameters
+    ----------
+    reference : numpy.ndarray
+        Reference coordinates with shape ``[N, 2]``.
+    candidate : numpy.ndarray
+        Candidate coordinates with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Procrustes disparity.
+    """
+    spatial = pytest.importorskip("scipy.spatial")
+    _, _, disparity = spatial.procrustes(reference, candidate)
+    return float(disparity)
 
 
 def _make_connected_random_graph(seed: int = 42) -> tuple[torch.Tensor, int]:
@@ -183,6 +245,25 @@ def _make_igraph_graph(edge_index: torch.Tensor, num_nodes: int) -> Any:
     """
     ig = pytest.importorskip("igraph")
     return ig.Graph(n=num_nodes, edges=_edge_list(edge_index), directed=False)
+
+
+def _make_igraph_digraph(edge_index: torch.Tensor, num_nodes: int) -> Any:
+    """Build a directed igraph graph from an edge tensor.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    Any
+        ``igraph.Graph`` instance with ``directed=True``.
+    """
+    ig = pytest.importorskip("igraph")
+    return ig.Graph(n=num_nodes, edges=_edge_list(edge_index), directed=True)
 
 
 def _make_sparse_adjacency(edge_index: torch.Tensor, num_nodes: int) -> Any:
@@ -459,6 +540,7 @@ def _run_sklearn_tsne(distance_matrix: Any, seed: int, perplexity: float) -> tor
         Layout positions with shape ``[N, 2]``.
     """
     sklearn_manifold = pytest.importorskip("sklearn.manifold")
+    distance_matrix_copy = np.array(distance_matrix, copy=True)
     estimator = sklearn_manifold.TSNE(
         n_components=2,
         metric="precomputed",
@@ -468,8 +550,141 @@ def _run_sklearn_tsne(distance_matrix: Any, seed: int, perplexity: float) -> tor
         method="exact",
         max_iter=500,
     )
-    positions = estimator.fit_transform(distance_matrix)
+    positions = estimator.fit_transform(distance_matrix_copy)
     return torch.tensor(positions, dtype=torch.float32)
+
+
+def _within_between_distance_stats(
+    pos: torch.Tensor,
+    graph_distances: torch.Tensor,
+    within_radius: float,
+    between_radius: float,
+) -> tuple[float, float, float]:
+    """Summarize embedded distances for near and far graph pairs.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Layout positions with shape ``[N, 2]``.
+    graph_distances : torch.Tensor
+        All-pairs graph distance matrix with shape ``[N, N]``.
+    within_radius : float
+        Maximum graph distance counted as a near pair.
+    between_radius : float
+        Minimum graph distance counted as a far pair.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        Mean near-pair distance, mean far-pair distance, and the far/near
+        separation ratio.
+    """
+    normalized = _normalize_positions(pos)
+    euclidean = _pairwise_distances(normalized)
+    upper = torch.triu_indices(pos.shape[0], pos.shape[0], offset=1)
+    graph_values = graph_distances[upper[0], upper[1]]
+    euclidean_values = euclidean[upper[0], upper[1]]
+    within = euclidean_values[graph_values <= within_radius]
+    between = euclidean_values[graph_values >= between_radius]
+    within_mean = float(within.mean().item())
+    between_mean = float(between.mean().item())
+    return within_mean, between_mean, between_mean / within_mean
+
+
+def _make_two_cliques_with_bridge() -> tuple[torch.Tensor, int, torch.Tensor]:
+    """Build two six-node cliques connected by a single bridge edge.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int, torch.Tensor]
+        ``(edge_index, num_nodes, community_labels)``.
+    """
+    clique_size = 6
+    num_nodes = clique_size * 2
+    edges: list[tuple[int, int]] = []
+
+    for offset in (0, clique_size):
+        for source in range(offset, offset + clique_size):
+            for target in range(source + 1, offset + clique_size):
+                edges.append((source, target))
+
+    edges.append((clique_size - 1, clique_size))
+    edge_index = torch.tensor(edges, dtype=torch.long).transpose(0, 1).contiguous()
+    labels = torch.tensor([0] * clique_size + [1] * clique_size, dtype=torch.long)
+    return edge_index, num_nodes, labels
+
+
+def _layout_linlog_all_pairs_baseline(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    steps: int,
+    seed: int,
+) -> torch.Tensor:
+    """Optimize the pre-fix LinLog objective with all-pairs repulsion.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Undirected edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    steps : int
+        Number of Adam updates.
+    seed : int
+        Random seed for deterministic initialization.
+
+    Returns
+    -------
+    torch.Tensor
+        Normalized layout positions with shape ``[N, 2]``.
+    """
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    positions = torch.randn((num_nodes, 2), generator=generator, dtype=torch.float32)
+    positions = positions.requires_grad_(True)
+    learning_rate = min(0.05, 0.8 / float(max(num_nodes, 1)))
+    optimizer = torch.optim.Adam([positions], lr=learning_rate)
+
+    for _ in range(steps):
+        optimizer.zero_grad(set_to_none=True)
+        src = edge_index[0].to(dtype=torch.long)
+        dst = edge_index[1].to(dtype=torch.long)
+        attraction = torch.linalg.norm(positions[src] - positions[dst], dim=1).clamp(min=1.0e-3)
+        pair_src, pair_dst = torch.triu_indices(num_nodes, num_nodes, offset=1)
+        pair_lengths = torch.linalg.norm(
+            positions[pair_src] - positions[pair_dst],
+            dim=1,
+        ).clamp(min=1.0e-3)
+        loss = attraction.sum() - torch.log(pair_lengths).sum()
+        loss.backward()
+        optimizer.step()
+
+    return _normalize_positions(positions.detach())
+
+
+def _community_separation_ratio(pos: torch.Tensor, labels: torch.Tensor) -> float:
+    """Measure inter-community separation relative to within-community spread.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Layout positions with shape ``[N, 2]``.
+    labels : torch.Tensor
+        Community labels with shape ``[N]``.
+
+    Returns
+    -------
+    float
+        Centroid separation divided by the combined mean radial spread.
+    """
+    community_zero = pos[labels == 0]
+    community_one = pos[labels == 1]
+    center_zero = community_zero.mean(dim=0)
+    center_one = community_one.mean(dim=0)
+    between = torch.linalg.norm(center_zero - center_one)
+    within = torch.linalg.norm(community_zero - center_zero, dim=1).mean()
+    within += torch.linalg.norm(community_one - center_one, dim=1).mean()
+    return float((between / within.clamp(min=1.0e-6)).item())
 
 
 def _graph_knn_preservation(
@@ -538,6 +753,60 @@ def test_spectral_vs_networkx(
     our_distances = _upper_triangle_values(_pairwise_distances(_normalize_positions(our_positions)))
     correlation = _pearson_correlation(reference_distances, our_distances)
     assert correlation > 0.85, graph_name
+    assert torch.linalg.norm(our_positions.mean(dim=0)) < 1.0e-4
+    assert float(our_positions.abs().max().item()) <= 1.0 + 1.0e-5
+
+
+@pytest.mark.skipif(not (_NETWORKX_AVAILABLE and _SCIPY_AVAILABLE), reason="networkx/scipy missing")
+@pytest.mark.parametrize(
+    ("name", "nx_fn", "our_fn", "kwargs"),
+    [
+        (
+            "FR",
+            lambda graph: pytest.importorskip("networkx").spring_layout(
+                graph,
+                seed=42,
+                iterations=50,
+                scale=1,
+            ),
+            layout_fr,
+            {"seed": 42},
+        ),
+        (
+            "KK",
+            lambda graph: pytest.importorskip("networkx").kamada_kawai_layout(graph, scale=1),
+            layout_kk,
+            {"seed": 42},
+        ),
+        (
+            "Spectral",
+            lambda graph: pytest.importorskip("networkx").spectral_layout(graph, scale=1),
+            layout_spectral,
+            {"seed": 42},
+        ),
+    ],
+)
+def test_classic_layouts_match_networkx_procrustes(
+    name: str,
+    nx_fn: Callable[[Any], Any],
+    our_fn: Callable[..., torch.Tensor],
+    kwargs: dict[str, int],
+) -> None:
+    """FR, KK, and Spectral should match NetworkX on Karate Club."""
+    edge_index, num_nodes, graph = _make_karate_edge_index()
+
+    reference_mapping = nx_fn(graph)
+    reference_positions = np.asarray(
+        [reference_mapping[node] for node in range(num_nodes)],
+        dtype=np.float64,
+    )
+    our_positions = our_fn(edge_index, num_nodes, **kwargs).cpu().numpy().astype(np.float64)
+
+    disparity = _procrustes_disparity(
+        reference_positions,
+        _normalize_for_procrustes(our_positions),
+    )
+    assert disparity < 0.01, f"{name} disparity {disparity:.6f} exceeded 0.01"
 
 
 @pytest.mark.skipif(
@@ -664,6 +933,20 @@ def test_linlog_reduces_energy(
     assert energies[-1] < energies[0], graph_name
 
 
+def test_linlog_non_edge_repulsion_separates_bridge_connected_communities() -> None:
+    """Non-edge repulsion should separate weakly bridged cliques more strongly."""
+    edge_index, num_nodes, labels = _make_two_cliques_with_bridge()
+    seed = 0
+
+    updated_positions = layout_linlog(edge_index, num_nodes, steps=120, seed=seed)
+    baseline_positions = _layout_linlog_all_pairs_baseline(edge_index, num_nodes, 120, seed)
+
+    updated_ratio = _community_separation_ratio(updated_positions, labels)
+    baseline_ratio = _community_separation_ratio(baseline_positions, labels)
+
+    assert updated_ratio > baseline_ratio * 5.0
+
+
 @pytest.mark.skipif(not _SKLEARN_AVAILABLE, reason="sklearn not installed")
 @pytest.mark.parametrize(
     ("graph_factory", "graph_name"),
@@ -685,13 +968,104 @@ def test_tsnet_vs_sklearn(
     perplexity = min(5.0, float(max(num_nodes - 1, 1)))
 
     reference_positions = _run_sklearn_tsne(distance_matrix_np, seed=42, perplexity=perplexity)
-    our_positions = layout_tsnet(edge_index, num_nodes, perplexity=perplexity, steps=250, seed=42)
+    our_positions = layout_tsnet(edge_index, num_nodes, perplexity=perplexity, steps=500, seed=42)
 
     reference_score = _graph_knn_preservation(reference_positions, graph_distances, k=4)
     our_score = _graph_knn_preservation(our_positions, graph_distances, k=4)
 
     assert our_score >= reference_score - 0.15, graph_name
     assert our_score > 0.55, graph_name
+
+
+@pytest.mark.skipif(
+    not (_SCIPY_AVAILABLE and _SKLEARN_AVAILABLE),
+    reason="scipy/sklearn not installed",
+)
+def test_tsnet_matches_sklearn_within_between_distance_distributions() -> None:
+    """tsNET should match sklearn's near/far distance statistics across seeds."""
+    scipy_csgraph = pytest.importorskip("scipy.sparse.csgraph")
+    edge_index, num_nodes = _make_connected_random_graph()
+    adjacency = _make_sparse_adjacency(edge_index, num_nodes)
+    graph_distances = torch.tensor(
+        scipy_csgraph.shortest_path(adjacency, directed=False, unweighted=True),
+        dtype=torch.float32,
+    )
+    perplexity = min(5.0, float(max(num_nodes - 1, 1)))
+
+    reference_stats: list[tuple[float, float, float]] = []
+    our_stats: list[tuple[float, float, float]] = []
+    for seed in range(10):
+        reference_positions = _run_sklearn_tsne(
+            graph_distances.numpy(),
+            seed=seed,
+            perplexity=perplexity,
+        )
+        our_positions = layout_tsnet(
+            edge_index,
+            num_nodes,
+            perplexity=perplexity,
+            steps=500,
+            seed=seed,
+        )
+        reference_stats.append(
+            _within_between_distance_stats(
+                reference_positions,
+                graph_distances,
+                within_radius=2.0,
+                between_radius=3.0,
+            )
+        )
+        our_stats.append(
+            _within_between_distance_stats(
+                our_positions,
+                graph_distances,
+                within_radius=2.0,
+                between_radius=3.0,
+            )
+        )
+
+    for index, tolerance in enumerate((0.05, 0.08)):
+        reference_mean = mean(stats[index] for stats in reference_stats)
+        our_mean = mean(stats[index] for stats in our_stats)
+        assert abs(reference_mean - our_mean) < tolerance
+
+
+@pytest.mark.skipif(not _IGRAPH_AVAILABLE, reason="igraph not installed")
+@pytest.mark.parametrize(
+    ("graph_factory", "graph_name"),
+    [
+        (_make_diamond_dag, "diamond"),
+        (_make_layered_dag, "layered"),
+        (
+            lambda: (
+                torch.tensor(
+                    [[0, 0, 0, 0, 1, 2, 3, 4], [1, 2, 3, 4, 5, 5, 5, 5]],
+                    dtype=torch.long,
+                ),
+                6,
+                None,
+            ),
+            "fan",
+        ),
+    ],
+)
+def test_sugiyama_vs_igraph_procrustes(
+    graph_factory: Callable[[], tuple[torch.Tensor, int] | tuple[torch.Tensor, int, Any]],
+    graph_name: str,
+) -> None:
+    """Sugiyama should stay within a small Procrustes gap to igraph."""
+    graph_parts = graph_factory()
+    edge_index, num_nodes = graph_parts[:2]
+    graph = _make_igraph_digraph(edge_index, num_nodes)
+
+    reference_positions = np.asarray(list(graph.layout_sugiyama()), dtype=np.float64)
+    our_positions = layout_sugiyama(edge_index, num_nodes).cpu().numpy().astype(np.float64)
+
+    disparity = _procrustes_disparity(
+        _normalize_for_procrustes(reference_positions),
+        _normalize_for_procrustes(our_positions),
+    )
+    assert disparity < 0.05, f"{graph_name} disparity {disparity:.6f} exceeded 0.05"
 
 
 @pytest.mark.parametrize(
@@ -760,6 +1134,9 @@ def test_fmmm_produces_reasonable_layout(
     )
 
     assert _min_pairwise_distance(fmmm_positions) > 1.0e-4, graph_name
-    assert fmmm_stress <= min(fr_stress, kk_stress) * 1.25, graph_name
+    # Exact NetworkX KK is a stronger small-graph baseline than the previous
+    # approximate path, so keep this as a competitiveness check rather than
+    # requiring FM^3 to nearly match a direct KK solve.
+    assert fmmm_stress <= min(fr_stress, kk_stress) * 1.3, graph_name
     assert fmmm_crossings <= max(2 * fr_crossings, 2), graph_name
     assert fmmm_edge_cv <= baseline_edge_cv + 0.1, graph_name

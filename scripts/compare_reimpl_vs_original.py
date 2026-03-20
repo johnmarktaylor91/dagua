@@ -33,18 +33,18 @@ import torch
 # Primary comparison is first; secondary comparisons are algorithmic relatives
 REIMPL_TO_ORIGINALS = {
     "classic_fr": ["nx_spring", "igraph_fr"],
-    "classic_kk": ["nx_kamada_kawai"],
+    "classic_kk": ["nx_kamada_kawai", "igraph_kamada_kawai"],
     "classic_fa2": ["fa2_ref"],
-    "classic_gem": [],  # OGDF unavailable (cppyy C++20 incompatibility)
+    "classic_gem": ["ogdf_gem"],
     "classic_stress_sgd": ["sgd2"],
-    "classic_maxent_stress": [],  # no reference available
+    "classic_maxent_stress": ["ogdf_stress"],
     "classic_spectral": ["nx_spectral"],
-    "classic_pivot_mds": [],  # OGDF unavailable
+    "classic_pivot_mds": ["ogdf_pivot_mds", "sgd2_mds", "igraph_mds"],
     "classic_sugiyama": ["graphviz_dot", "igraph_sugiyama"],
     "classic_tsnet": ["tsne_graph"],  # closest proxy (vanilla t-SNE, not full tsNET loss)
-    "classic_davidson_harel": [],  # OGDF unavailable
-    "classic_linlog": [],  # OGDF unavailable
-    "classic_fmmm": [],  # OGDF unavailable
+    "classic_davidson_harel": ["igraph_davidson_harel", "ogdf_davidson_harel"],
+    "classic_linlog": ["ogdf_linlog"],
+    "classic_fmmm": ["ogdf_fmmm"],
 }
 
 

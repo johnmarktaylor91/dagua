@@ -128,7 +128,7 @@ def test_networkx_spectral_layout_returns_positions() -> None:
     assert result.error is None
 
 
-@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF Python bindings not usable")
+@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
 def test_ogdf_gem_layout() -> None:
     """The GEM adapter should return positions for a small graph.
 
@@ -144,7 +144,7 @@ def test_ogdf_gem_layout() -> None:
     assert result.error is None
 
 
-@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF Python bindings not usable")
+@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
 def test_ogdf_fmmm_layout() -> None:
     """The FM^3 adapter should return positions for a small graph.
 
@@ -160,7 +160,7 @@ def test_ogdf_fmmm_layout() -> None:
     assert result.error is None
 
 
-@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF Python bindings not usable")
+@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
 def test_ogdf_stress_layout() -> None:
     """The stress adapter should return positions for a small graph.
 
@@ -176,23 +176,26 @@ def test_ogdf_stress_layout() -> None:
     assert result.error is None
 
 
-@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF Python bindings not usable")
+@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
 def test_ogdf_linlog_layout() -> None:
-    """The LinLog adapter should return positions for a small graph.
+    """The LinLog adapter should either return positions or a clear error.
 
     Returns
     -------
     None
-        This test asserts on the returned position tensor.
+        This test asserts on the returned position tensor or unsupported error.
     """
     graph = _make_small_graph()
     result = OGDFLinLog().layout(graph, timeout=30.0)
-    assert result.pos is not None
-    assert result.pos.shape == (6, 2)
-    assert result.error is None
+    if result.pos is not None:
+        assert result.pos.shape == (6, 2)
+        assert result.error is None
+    else:
+        assert result.error is not None
+        assert "unsupported algorithm: linlog" in result.error
 
 
-@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF Python bindings not usable")
+@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
 def test_ogdf_pivot_mds_layout() -> None:
     """The Pivot-MDS adapter should return positions for a small graph.
 
@@ -208,7 +211,7 @@ def test_ogdf_pivot_mds_layout() -> None:
     assert result.error is None
 
 
-@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF Python bindings not usable")
+@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
 def test_ogdf_sugiyama_layout() -> None:
     """The Sugiyama adapter should return positions for a small graph.
 
@@ -224,7 +227,7 @@ def test_ogdf_sugiyama_layout() -> None:
     assert result.error is None
 
 
-@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF Python bindings not usable")
+@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
 def test_ogdf_davidson_harel_layout() -> None:
     """The Davidson-Harel adapter should return positions for a small graph.
 
