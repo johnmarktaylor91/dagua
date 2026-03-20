@@ -9,6 +9,7 @@
 - [BENCH] Test graphs: check if weighted/directed/connected before comparing. nx.karate_club_graph() has edge weights 1-7.
 - [BENCH] Reimplementation: match the INSTALLED code (`pip show`), not the paper. Papers are ambiguous.
 - [BENCH] Results: never claim fidelity without adversarial review. Show per-graph distributions, not just means.
+- [BENCH] Stop short: if you can name a viable improvement (line-by-line translation, coarsening match, RNG fix), DO IT. Don't frame it as future work. Three rounds of "we could" → "then do it!" wasted hours.
 
 - [LAYOUT] Crossing loss is O(E²) — needs interval amortization for large graphs. Performance-sensitive.
 - [LAYOUT] Seed doesn't affect layout — init is fully deterministic from topology. Random perturbation needed for exploration.
