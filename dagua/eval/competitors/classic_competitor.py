@@ -761,3 +761,143 @@ class ClassicFMMM(_ClassicBase):
                 runtime_seconds=elapsed,
                 error=str(exc),
             )
+
+
+# ── New algorithms (March 2026) ──────────────────────────────────────────────
+
+
+def _quick_classic(name, import_path, fn_name, graph, seed, **extra_kwargs):
+    """Run a classic layout and return CompetitorResult."""
+    import importlib
+
+    mod = importlib.import_module(import_path)
+    fn = getattr(mod, fn_name)
+    start = time.perf_counter()
+    try:
+        pos = fn(
+            graph.edge_index,
+            graph.num_nodes,
+            node_sizes=graph.node_sizes,
+            seed=seed,
+            **extra_kwargs,
+        )
+        return CompetitorResult(name=name, pos=pos, runtime_seconds=time.perf_counter() - start)
+    except Exception as exc:
+        return CompetitorResult(
+            name=name, pos=None, runtime_seconds=time.perf_counter() - start, error=str(exc)
+        )
+
+
+@register
+class ClassicGraphOpt(_ClassicBase):
+    name = "classic_graphopt"
+    max_nodes = 20_000
+
+    def layout(
+        self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
+    ) -> CompetitorResult:
+        del timeout
+        return _quick_classic(
+            self.name,
+            "dagua.layout.classic.graphopt",
+            "layout_graphopt",
+            graph,
+            self._layout_seed(seed),
+        )
+
+
+@register
+class ClassicDRL(_ClassicBase):
+    name = "classic_drl"
+    max_nodes = 100_000
+
+    def layout(
+        self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
+    ) -> CompetitorResult:
+        del timeout
+        return _quick_classic(
+            self.name, "dagua.layout.classic.drl", "layout_drl", graph, self._layout_seed(seed)
+        )
+
+
+@register
+class ClassicLGL(_ClassicBase):
+    name = "classic_lgl"
+    max_nodes = 100_000
+
+    def layout(
+        self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
+    ) -> CompetitorResult:
+        del timeout
+        return _quick_classic(
+            self.name, "dagua.layout.classic.lgl", "layout_lgl", graph, self._layout_seed(seed)
+        )
+
+
+@register
+class ClassicSFDP(_ClassicBase):
+    name = "classic_sfdp"
+    max_nodes = 100_000
+
+    def layout(
+        self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
+    ) -> CompetitorResult:
+        del timeout
+        return _quick_classic(
+            self.name, "dagua.layout.classic.sfdp", "layout_sfdp", graph, self._layout_seed(seed)
+        )
+
+
+@register
+class ClassicUMAP(_ClassicBase):
+    name = "classic_umap"
+    max_nodes = 20_000
+
+    def layout(
+        self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
+    ) -> CompetitorResult:
+        del timeout
+        return _quick_classic(
+            self.name,
+            "dagua.layout.classic.umap_layout",
+            "layout_umap",
+            graph,
+            self._layout_seed(seed),
+        )
+
+
+@register
+class ClassicNeuLay(_ClassicBase):
+    name = "classic_neulay"
+    max_nodes = 50_000
+
+    def layout(
+        self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
+    ) -> CompetitorResult:
+        del timeout
+        return _quick_classic(
+            self.name,
+            "dagua.layout.classic.neulay",
+            "layout_neulay",
+            graph,
+            self._layout_seed(seed),
+            use_gcn=False,
+        )
+
+
+@register
+class ClassicSGD2Multi(_ClassicBase):
+    name = "classic_sgd2_multi"
+    max_nodes = 10_000
+
+    def layout(
+        self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
+    ) -> CompetitorResult:
+        del timeout
+        return _quick_classic(
+            self.name,
+            "dagua.layout.classic.sgd2_multi",
+            "layout_sgd2_multi",
+            graph,
+            self._layout_seed(seed),
+        )
