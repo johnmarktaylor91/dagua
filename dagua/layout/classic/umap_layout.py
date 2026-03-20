@@ -182,29 +182,23 @@ def _bfs_distances(adjacency: list[list[int]], start: int) -> torch.Tensor:
     Returns
     -------
     torch.Tensor
-        Distance vector with shape ``[N]``. Unreachable nodes are assigned
-        ``diameter + 1`` for the source component.
+        Distance vector with shape ``[N]``. Unreachable nodes are left at
+        ``inf`` so the caller can apply a single symmetric fill value.
     """
     num_nodes = len(adjacency)
-    distances = [-1] * num_nodes
-    distances[start] = 0
+    distances = torch.full((num_nodes,), float("inf"), dtype=torch.float32)
+    distances[start] = 0.0
     queue: deque[int] = deque([start])
-    diameter = 0
 
     while queue:
         node = queue.popleft()
-        next_distance = distances[node] + 1
+        next_distance = float(distances[node].item() + 1.0)
         for neighbor in adjacency[node]:
-            if distances[neighbor] == -1:
-                distances[neighbor] = next_distance
-                diameter = max(diameter, next_distance)
-                queue.append(neighbor)
-
-    fill_value = float(diameter + 1 if num_nodes > 1 else 0.0)
-    return torch.tensor(
-        [fill_value if value < 0 else float(value) for value in distances],
-        dtype=torch.float32,
-    )
+            if bool(torch.isfinite(distances[neighbor]).item()):
+                continue
+            distances[neighbor] = next_distance
+            queue.append(neighbor)
+    return distances
 
 
 def _all_pairs_shortest_paths(adjacency: list[list[int]]) -> torch.Tensor:
@@ -223,7 +217,13 @@ def _all_pairs_shortest_paths(adjacency: list[list[int]]) -> torch.Tensor:
     if not adjacency:
         return torch.empty((0, 0), dtype=torch.float32)
     rows = [_bfs_distances(adjacency=adjacency, start=index) for index in range(len(adjacency))]
-    return torch.stack(rows, dim=0)
+    distances = torch.stack(rows, dim=0)
+    finite_mask = torch.isfinite(distances)
+    max_finite = (
+        float(distances[finite_mask].max().item()) if bool(finite_mask.any().item()) else 1.0
+    )
+    fill_value = max(max_finite * 2.0, 1.0)
+    return torch.where(finite_mask, distances, torch.full_like(distances, fill_value))
 
 
 def _knn_from_distances(
