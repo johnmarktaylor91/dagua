@@ -1,5 +1,15 @@
 # Dagua Gotchas & Edge Cases
 
+## Competitor Benchmark Pipeline (2026-03-20 retro)
+- [BENCH] Adapter seed: verify 2 seeds produce DIFFERENT outputs before any multi-seed run. Hardcoded seeds silently produce identical data.
+- [BENCH] Adapter config: audit ALL settings (device, seed, timeout, iterations, graph model) — silent misconfigs waste hours.
+- [BENCH] RNG source: torch.rand(seed=42) != random.random() after random.seed(42). Match the EXACT RNG the reference uses.
+- [BENCH] C extensions (s_gd2, igraph C, OGDF): internal RNG can't be reproduced from Python. Compare objective values, not positions.
+- [BENCH] External tools: subprocess always works. Don't assume Python bindings are needed — we use subprocess for Graphviz/ELK/dagre/OGDF.
+- [BENCH] Test graphs: check if weighted/directed/connected before comparing. nx.karate_club_graph() has edge weights 1-7.
+- [BENCH] Reimplementation: match the INSTALLED code (`pip show`), not the paper. Papers are ambiguous.
+- [BENCH] Results: never claim fidelity without adversarial review. Show per-graph distributions, not just means.
+
 - [LAYOUT] Crossing loss is O(E²) — needs interval amortization for large graphs. Performance-sensitive.
 - [LAYOUT] Seed doesn't affect layout — init is fully deterministic from topology. Random perturbation needed for exploration.
 - [LAYOUT] LR/RL direction: node_sizes not swapped before layout computation.
