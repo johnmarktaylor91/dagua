@@ -436,6 +436,33 @@ def _repulsion_from_cell(
     return total
 
 
+def _exact_repulsion(positions: torch.Tensor) -> torch.Tensor:
+    """Compute exact all-pairs repulsion matching OGDF's f_rep_u_on_v.
+
+    OGDF formula: f_rep_scalar(d) = 1/d, applied as (v-u)/||v-u||^2.
+    No ideal_length in the formula — pure 1/d^2 directional force.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Repulsive force per node with shape ``[N, 2]``.
+    """
+    n = positions.shape[0]
+    if n <= 1:
+        return torch.zeros_like(positions)
+    delta = positions.unsqueeze(1) - positions.unsqueeze(0)  # [N, N, 2]
+    dist = torch.cdist(positions, positions).clamp(min=_MIN_DISTANCE)  # [N, N]
+    # OGDF: scalar = 1/d / d = 1/d^2, applied to (v-u) direction
+    factor = 1.0 / (dist * dist)  # [N, N]
+    factor.fill_diagonal_(0.0)
+    return (delta * factor.unsqueeze(2)).sum(dim=1)
+
+
 def _barnes_hut_repulsion(
     positions: torch.Tensor,
     theta: float,
@@ -547,8 +574,13 @@ def _refine_level(
 
     ideal_length = _fr_ideal_length(area, int(refined.shape[0]))
     temperature = ideal_length
+    use_exact = int(refined.shape[0]) <= 500  # match OGDF's exact path for small graphs
     for _ in range(steps):
-        repulsive = _barnes_hut_repulsion(refined, theta, ideal_length)
+        repulsive = (
+            _exact_repulsion(refined)
+            if use_exact
+            else _barnes_hut_repulsion(refined, theta, ideal_length)
+        )
         attractive = _attractive_force(refined, edge_index, ideal_length)
         displacement = repulsive + attractive
         norm = torch.linalg.norm(displacement, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
