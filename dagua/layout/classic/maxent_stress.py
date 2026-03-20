@@ -18,6 +18,7 @@ from dagua.layout.classic.pivot_mds import layout_pivot_mds
 
 _MIN_DISTANCE = 1.0e-3
 _FULL_STRESS_LIMIT = 1_000
+_MAJORIZATION_NODE_LIMIT = 5_000
 _PIVOT_COUNT = 50
 _SAMPLED_REPULSION_NEIGHBORS = 96
 
@@ -613,57 +614,156 @@ def _maxent_stress_loss(
     return loss
 
 
-def layout_maxent_stress(
+def _majorization_iteration(
+    positions: torch.Tensor,
+    graph_distances: torch.Tensor,
+    weight_matrix: torch.Tensor,
+) -> None:
+    """Run one in-place Gauss-Seidel stress-majorization iteration.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current coordinates with shape ``[N, 2]`` on CPU.
+    graph_distances : torch.Tensor
+        All-pairs graph distances with shape ``[N, N]``.
+    weight_matrix : torch.Tensor
+        Stress weights ``1 / d_ij^2`` with shape ``[N, N]``.
+
+    Returns
+    -------
+    None
+        The position tensor is updated in place.
+    """
+    num_nodes = int(positions.shape[0])
+    for node_index in range(num_nodes):
+        current_x = float(positions[node_index, 0].item())
+        current_y = float(positions[node_index, 1].item())
+        new_x = 0.0
+        new_y = 0.0
+        total_weight = 0.0
+
+        for other_index in range(num_nodes):
+            if node_index == other_index:
+                continue
+
+            weight = float(weight_matrix[node_index, other_index].item())
+            desired_distance = float(graph_distances[node_index, other_index].item())
+            other_x = float(positions[other_index, 0].item())
+            other_y = float(positions[other_index, 1].item())
+            delta_x = current_x - other_x
+            delta_y = current_y - other_y
+            euclidean_distance = math.hypot(delta_x, delta_y)
+
+            vote_x = other_x
+            vote_y = other_y
+            if euclidean_distance != 0.0:
+                vote_x += desired_distance * (current_x - vote_x) / euclidean_distance
+                vote_y += desired_distance * (current_y - vote_y) / euclidean_distance
+
+            new_x += weight * vote_x
+            new_y += weight * vote_y
+            total_weight += weight
+
+        if total_weight != 0.0:
+            positions[node_index, 0] = new_x / total_weight
+            positions[node_index, 1] = new_y / total_weight
+
+
+def _layout_stress_majorization(
     edge_index: torch.Tensor,
     num_nodes: int,
-    node_sizes: Optional[torch.Tensor] = None,
-    steps: int = 200,
-    alpha: float = 1.0,
-    seed: int = 42,
-    use_entropy: bool = False,
+    node_sizes: Optional[torch.Tensor],
+    steps: int,
+    seed: int,
+    device: torch.device,
 ) -> torch.Tensor:
-    """Lay out a graph with OGDF-style stress minimization and optional entropy.
-
-    Reference
-    ---------
-    Gansner, Hu, and North, "A Maxent-Stress Model for Graph Layout" (2013).
+    """Run OGDF-style stress majorization for small graphs.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge list with shape ``[2, E]``.
+        Edge tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of nodes.
+        Number of graph nodes.
     node_sizes : torch.Tensor, optional
         Optional node sizes used only for final scaling.
-    steps : int, default=200
-        Number of Adam updates.
-    alpha : float, default=1.0
-        Entropy repulsion weight.
-    seed : int, default=42
-        Random seed.
-    use_entropy : bool, default=False
-        Include the logarithmic entropy repulsion term. ``False`` matches
-        OGDF's pure stress objective more closely.
+    steps : int
+        Number of majorization iterations.
+    seed : int
+        Seed for the PivotMDS initialization.
+    device : torch.device
+        Target device for the returned positions.
 
     Returns
     -------
     torch.Tensor
-        Node positions with shape ``[N, 2]``.
+        Normalized positions with shape ``[N, 2]``.
     """
-    if num_nodes < 0:
-        raise ValueError("num_nodes must be non-negative.")
-    if steps < 0:
-        raise ValueError("steps must be non-negative.")
-    if alpha < 0:
-        raise ValueError("alpha must be non-negative.")
+    adjacency = _build_undirected_adjacency(edge_index, num_nodes)
+    graph_distances = _all_pairs_shortest_paths(adjacency).to(dtype=torch.float64)
+    weight_matrix = torch.zeros_like(graph_distances)
+    off_diagonal_mask = ~torch.eye(num_nodes, dtype=torch.bool)
+    weight_matrix[off_diagonal_mask] = graph_distances[off_diagonal_mask].reciprocal().square()
 
-    device = _layout_device(edge_index, node_sizes)
-    if num_nodes == 0:
-        return torch.empty((0, 2), dtype=torch.float32, device=device)
-    if num_nodes == 1:
-        return torch.zeros((1, 2), dtype=torch.float32, device=device)
+    positions = layout_pivot_mds(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        n_pivots=min(_PIVOT_COUNT, num_nodes),
+        seed=seed,
+    ).to(device="cpu", dtype=torch.float64)
 
+    for _ in range(steps):
+        _majorization_iteration(
+            positions=positions,
+            graph_distances=graph_distances,
+            weight_matrix=weight_matrix,
+        )
+
+    extent = _layout_extent(num_nodes, node_sizes)
+    return _normalize_positions(positions.to(dtype=torch.float32), extent).to(
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def _layout_maxent_stress_gradient(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    steps: int,
+    alpha: float,
+    seed: int,
+    use_entropy: bool,
+    device: torch.device,
+) -> torch.Tensor:
+    """Run the existing gradient-based maxent-stress fallback.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    node_sizes : torch.Tensor, optional
+        Optional node sizes used only for final scaling.
+    steps : int
+        Number of Adam updates.
+    alpha : float
+        Entropy repulsion weight.
+    seed : int
+        Random seed.
+    use_entropy : bool
+        Whether to include the logarithmic entropy term.
+    device : torch.device
+        Target output device.
+
+    Returns
+    -------
+    torch.Tensor
+        Normalized positions with shape ``[N, 2]``.
+    """
     adjacency = _build_undirected_adjacency(edge_index, num_nodes)
     if num_nodes <= _FULL_STRESS_LIMIT:
         stress_src, stress_dst, stress_lengths = _full_stress_terms(adjacency)
@@ -741,3 +841,87 @@ def layout_maxent_stress(
 
     extent = _layout_extent(num_nodes, node_sizes)
     return _normalize_positions(positions.detach(), extent).to(dtype=torch.float32, device=device)
+
+
+def layout_maxent_stress(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor] = None,
+    steps: int = 200,
+    alpha: float = 1.0,
+    seed: int = 42,
+    use_entropy: bool = False,
+    use_majorization: bool = True,
+) -> torch.Tensor:
+    """Lay out a graph with OGDF-style stress minimization and optional entropy.
+
+    Reference
+    ---------
+    Gansner, Hu, and North, "A Maxent-Stress Model for Graph Layout" (2013).
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    node_sizes : torch.Tensor, optional
+        Optional node sizes used only for final scaling.
+    steps : int, default=200
+        Number of optimization iterations.
+    alpha : float, default=1.0
+        Entropy repulsion weight.
+    seed : int, default=42
+        Random seed.
+    use_entropy : bool, default=False
+        Include the logarithmic entropy repulsion term. ``False`` matches
+        OGDF's pure stress objective more closely.
+    use_majorization : bool, default=True
+        Use OGDF's sequential stress-majorization update for small pure-stress
+        problems. The implementation falls back to the gradient path when
+        entropy repulsion is enabled, the graph is too large, or the caller
+        requests a non-default iteration count.
+
+    Returns
+    -------
+    torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    """
+    if num_nodes < 0:
+        raise ValueError("num_nodes must be non-negative.")
+    if steps < 0:
+        raise ValueError("steps must be non-negative.")
+    if alpha < 0:
+        raise ValueError("alpha must be non-negative.")
+
+    device = _layout_device(edge_index, node_sizes)
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float32, device=device)
+    if num_nodes == 1:
+        return torch.zeros((1, 2), dtype=torch.float32, device=device)
+
+    if (
+        use_majorization
+        and not use_entropy
+        and num_nodes <= _MAJORIZATION_NODE_LIMIT
+        and steps == 200
+    ):
+        return _layout_stress_majorization(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            steps=steps,
+            seed=seed,
+            device=device,
+        )
+
+    return _layout_maxent_stress_gradient(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        steps=steps,
+        alpha=alpha,
+        seed=seed,
+        use_entropy=use_entropy,
+        device=device,
+    )
