@@ -16,7 +16,6 @@ Hierarchical System Structures" (1981), IEEE Trans. SMC.
 from __future__ import annotations
 
 import heapq
-import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -24,7 +23,7 @@ import torch
 
 from dagua.layout.cycle import detect_back_edges, make_acyclic
 
-_COORDINATE_REFINEMENT_SWEEPS = 5
+_COORDINATE_REFINEMENT_SWEEPS = 16
 
 
 @dataclass(frozen=True)
@@ -42,8 +41,9 @@ def layout_sugiyama(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
-    rank_sep: float = 50.0,
-    node_sep: float = 28.0,
+    rank_sep: float = 1.0,
+    node_sep: float = 1.0,
+    layer_sep: Optional[float] = None,
     seed: int = 42,
     barycenter_passes: int = 24,
     trace_every: int = 0,
@@ -64,13 +64,16 @@ def layout_sugiyama(
     num_nodes : int
         Number of nodes.
     node_sizes : torch.Tensor, optional
-        Node sizes ``[N, 2]`` for spacing. Default: 20x20.
+        Node sizes ``[N, 2]`` for spacing. Default: point-like nodes.
     rank_sep : float
         Vertical spacing between layers.
     node_sep : float
         Horizontal spacing between nodes within a layer.
+    layer_sep : float, optional
+        Alias for ``rank_sep``. When provided, it overrides ``rank_sep``.
     seed : int
-        Random seed for deterministic barycenter tie-breaking.
+        Retained for API compatibility. Stable node-order tie handling is used
+        during barycenter sweeps to better match igraph.
     barycenter_passes : int
         Number of up/down sweeps for crossing minimization.
     trace_every : int
@@ -99,6 +102,8 @@ def layout_sugiyama(
     _validate_layout_inputs(edge_index=edge_index, num_nodes=num_nodes, node_sizes=node_sizes)
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative")
+    if layer_sep is not None:
+        rank_sep = layer_sep
 
     output_device = edge_index.device
     if node_sizes is not None:
@@ -213,7 +218,7 @@ def _resolve_node_sizes(node_sizes: Optional[torch.Tensor], num_nodes: int) -> t
         CPU float tensor with shape ``[N, 2]``.
     """
     if node_sizes is None:
-        return torch.full((num_nodes, 2), 20.0, dtype=torch.float32)
+        return torch.zeros((num_nodes, 2), dtype=torch.float32)
     return node_sizes.detach().to(device="cpu", dtype=torch.float32)
 
 
@@ -551,7 +556,7 @@ def _barycenter_ordering(
     num_passes : int
         Number of full down/up sweeps.
     seed : int
-        Seed used for deterministic tie-breaking.
+        Retained for signature compatibility.
     node_sizes : torch.Tensor
         CPU node sizes ``[N, 2]`` for trace snapshots.
     rank_sep : float
@@ -572,8 +577,7 @@ def _barycenter_ordering(
     if num_nodes == 0:
         return ordered_layers, []
 
-    rng = random.Random(seed)
-    tie_break = {node: rng.random() for node in range(num_nodes)}
+    del seed
     traces: List[torch.Tensor] = []
 
     for pass_num in range(num_passes):
@@ -585,7 +589,7 @@ def _barycenter_ordering(
                 neighbors_by_node=parents,
                 order_index=order_index,
             )
-            ordered_layers[layer_idx].sort(key=lambda node: (barycenters[node], tie_break[node]))
+            ordered_layers[layer_idx].sort(key=lambda node: barycenters[node])
             order_index = _node_order_map(ordered_layers)
 
         for layer_idx in range(len(ordered_layers) - 2, -1, -1):
@@ -594,7 +598,7 @@ def _barycenter_ordering(
                 neighbors_by_node=children,
                 order_index=order_index,
             )
-            ordered_layers[layer_idx].sort(key=lambda node: (barycenters[node], tie_break[node]))
+            ordered_layers[layer_idx].sort(key=lambda node: barycenters[node])
             order_index = _node_order_map(ordered_layers)
 
         if trace_every > 0 and (pass_num + 1) % trace_every == 0:
