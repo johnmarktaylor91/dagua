@@ -170,3 +170,35 @@ class IgraphMDS(_IgraphBase):
     max_nodes = 5_000
     layout_algo = "mds"
     layout_kwargs = {}
+
+
+@register
+class IgraphGraphOpt(_IgraphBase):
+    """GraphOpt: force-directed with simulated annealing hybrid."""
+
+    name = "igraph_graphopt"
+    max_nodes = 20_000
+    layout_algo = "graphopt"
+    layout_kwargs = {"niter": 500}
+    accepts_seed = True
+
+
+@register
+class IgraphDRL(_IgraphBase):
+    """DrL (Distributed Recursive Layout): multilevel force-directed for large graphs."""
+
+    name = "igraph_drl"
+    max_nodes = 100_000
+    layout_algo = "drl"
+    layout_kwargs = {}
+    accepts_seed = True
+
+
+@register
+class IgraphLGL(_IgraphBase):
+    """LGL (Large Graph Layout): force-directed for large graphs."""
+
+    name = "igraph_lgl"
+    max_nodes = 100_000
+    layout_algo = "lgl"
+    layout_kwargs = {}
