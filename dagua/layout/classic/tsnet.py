@@ -282,12 +282,13 @@ def layout_tsnet(
     steps: int = 1000,
     seed: int = 42,
 ) -> torch.Tensor:
-    """Lay out a graph with a t-SNE objective over shortest-path distances.
+    """Lay out a graph with a tsNET-style t-SNE objective over graph distances.
 
     Reference
     ---------
-    Maaten and Hinton, "Visualizing Data using t-SNE" (2008); adapted here to
-    graph shortest-path distances as in tsNET-style graph drawing.
+    Kruiger et al., "Graph Layout by t-SNE" (2017). This keeps the
+    PivotMDS-based initialization variant while switching the optimizer to the
+    paper-style momentum SGD schedule.
 
     Parameters
     ----------
@@ -300,7 +301,7 @@ def layout_tsnet(
     perplexity : float, default=30
         Target t-SNE perplexity.
     steps : int, default=1000
-        Number of Adam updates.
+        Number of optimization updates.
     seed : int, default=42
         Random seed.
 
@@ -337,15 +338,32 @@ def layout_tsnet(
         seed=seed,
     ).to(device)
     positions = initial_positions.clone().requires_grad_(True)
-    optimizer = torch.optim.Adam([positions], lr=0.25)
+    early_exaggeration = 12.0
+    early_exaggeration_steps = min(250, steps)
+    initial_lr = float(max(num_nodes, 1)) / (4.0 * early_exaggeration)
+    optimizer = torch.optim.SGD([positions], lr=initial_lr, momentum=0.5)
+    gains = torch.ones_like(positions)
+    previous_grad = torch.zeros_like(positions)
 
     for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        exaggeration = 4.0 if step < min(250, steps // 2) else 1.0
+        exaggeration = early_exaggeration if step < early_exaggeration_steps else 1.0
         loss = _tsne_loss(positions, probabilities * exaggeration)
         loss.backward()
+        with torch.no_grad():
+            current_grad = positions.grad.detach().clone()
+            direction_changed = torch.sign(current_grad) != torch.sign(previous_grad)
+            gains = torch.where(
+                direction_changed,
+                gains + 0.2,
+                torch.clamp(gains * 0.8, min=0.01),
+            )
+            positions.grad.mul_(gains)
+            previous_grad = current_grad
         optimizer.step()
-        optimizer.param_groups[0]["lr"] = 0.25 * (0.98 ** (step / 50.0))
+        if step + 1 == early_exaggeration_steps and step + 1 < steps:
+            optimizer.param_groups[0]["lr"] = float(max(num_nodes, 1)) / 4.0
+            optimizer.param_groups[0]["momentum"] = 0.8
 
     extent = _layout_extent(num_nodes, node_sizes)
     return _normalize_positions(positions.detach(), extent).to(dtype=torch.float32, device=device)

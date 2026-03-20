@@ -196,6 +196,22 @@ def _point_segment_distance(
     return torch.linalg.norm(point - nearest)
 
 
+def _scale_denominator(numerator_count: int) -> float:
+    """Return a non-zero normalization denominator for one energy term.
+
+    Parameters
+    ----------
+    numerator_count : int
+        Expected scale factor for the corresponding summed energy term.
+
+    Returns
+    -------
+    float
+        Positive normalization denominator.
+    """
+    return float(max(numerator_count, 1))
+
+
 def _energy(positions: torch.Tensor, edges: list[tuple[int, int]], extent: float) -> torch.Tensor:
     """Evaluate the Davidson-Harel layout energy.
 
@@ -215,24 +231,29 @@ def _energy(positions: torch.Tensor, edges: list[tuple[int, int]], extent: float
 
     Notes
     -----
-    The energy-term weights remain the local approximation used by this
-    reimplementation. The requested faithfulness fixes for this task target
-    the annealing schedule rather than re-tuning those weights without a
-    clearer reference mapping.
+    The paper defines the individual energy terms as sums. This implementation
+    keeps that formulation, then normalizes each term by its natural graph-size
+    scale so the fixed weights remain comparable across different graph sizes.
     """
     num_nodes = int(positions.shape[0])
     distribution = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
     if num_nodes > 1:
-        delta = positions.unsqueeze(1) - positions.unsqueeze(0)
-        squared_distances = delta.square().sum(dim=2).clamp(min=_MIN_DISTANCE)
-        mask = ~torch.eye(num_nodes, dtype=torch.bool, device=positions.device)
-        distribution = squared_distances[mask].reciprocal().mean()
+        src, dst = torch.triu_indices(num_nodes, num_nodes, offset=1, device=positions.device)
+        squared_distances = (
+            (positions[src] - positions[dst]).square().sum(dim=1).clamp(min=_MIN_DISTANCE)
+        )
+        distribution = squared_distances.reciprocal().sum()
 
-    border_distances = torch.minimum(
-        torch.minimum(positions[:, 0] + extent, extent - positions[:, 0]),
-        torch.minimum(positions[:, 1] + extent, extent - positions[:, 1]),
+    border_distances = torch.stack(
+        [
+            positions[:, 0] + extent,
+            extent - positions[:, 0],
+            positions[:, 1] + extent,
+            extent - positions[:, 1],
+        ],
+        dim=1,
     ).clamp(min=_MIN_DISTANCE)
-    border = border_distances.reciprocal().square().mean()
+    border = border_distances.reciprocal().square().sum()
 
     edge_length = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
     if edges:
@@ -240,7 +261,7 @@ def _energy(positions: torch.Tensor, edges: list[tuple[int, int]], extent: float
             torch.linalg.norm(positions[source] - positions[target]).square()
             for source, target in edges
         ]
-        edge_length = torch.stack(edge_lengths).mean()
+        edge_length = torch.stack(edge_lengths).sum()
 
     crossings = 0.0
     for index, (a, b) in enumerate(edges):
@@ -262,14 +283,21 @@ def _energy(positions: torch.Tensor, edges: list[tuple[int, int]], extent: float
             )
             penalties.append(distance.clamp(min=_MIN_DISTANCE).reciprocal().square())
     if penalties:
-        node_edge = torch.stack(penalties).mean()
+        node_edge = torch.stack(penalties).sum()
+
+    edge_count = len(edges)
+    distribution_scale = _scale_denominator(num_nodes * max(num_nodes - 1, 1) // 2)
+    border_scale = _scale_denominator(num_nodes)
+    edge_length_scale = _scale_denominator(edge_count)
+    crossing_scale = _scale_denominator(edge_count * edge_count)
+    node_edge_scale = _scale_denominator(num_nodes * edge_count)
 
     return (
-        distribution
-        + _BORDER_WEIGHT * border
-        + _EDGE_LENGTH_WEIGHT * edge_length
-        + _CROSSING_WEIGHT * crossing_energy
-        + _NODE_EDGE_WEIGHT * node_edge
+        distribution / distribution_scale
+        + _BORDER_WEIGHT * (border / border_scale)
+        + _EDGE_LENGTH_WEIGHT * (edge_length / edge_length_scale)
+        + _CROSSING_WEIGHT * (crossing_energy / crossing_scale)
+        + _NODE_EDGE_WEIGHT * (node_edge / node_edge_scale)
     )
 
 
@@ -308,7 +336,8 @@ def layout_davidson_harel(
     -----
     This routine follows igraph's more aggressive annealing schedule by using
     one move attempt per node per round and a ``0.75`` cooling factor. The
-    energy weights remain the current conservative approximation.
+    annealing temperature is initialized from the starting energy so the
+    acceptance schedule tracks the sum-based objective scale.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
@@ -324,8 +353,9 @@ def layout_davidson_harel(
     extent = _layout_extent(num_nodes, node_sizes)
     positions = _initialize_positions(num_nodes, extent, device, seed)
     edges = _unique_edges(edge_index, num_nodes)
-    temperature = extent
     current_energy = _energy(positions, edges, extent)
+    initial_temperature = max(0.1 * float(current_energy.item()), _MIN_DISTANCE)
+    temperature = initial_temperature
 
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
@@ -334,9 +364,8 @@ def layout_davidson_harel(
     for _ in range(rounds):
         for _ in range(moves_per_round):
             node = int(torch.randint(0, num_nodes, (1,), generator=generator).item())
-            delta = ((torch.rand((2,), generator=generator) * 2.0) - 1.0).to(device) * (
-                0.25 * temperature
-            )
+            move_scale = 0.25 * extent * (temperature / max(initial_temperature, _MIN_DISTANCE))
+            delta = ((torch.rand((2,), generator=generator) * 2.0) - 1.0).to(device) * (move_scale)
             candidate = positions.clone()
             candidate[node] = (candidate[node] + delta).clamp(min=-extent, max=extent)
             candidate_energy = _energy(candidate, edges, extent)
