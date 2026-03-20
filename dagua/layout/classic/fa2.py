@@ -1,14 +1,14 @@
 """ForceAtlas2 — Gephi's continuous force-directed layout.
 
 Key differences from Fruchterman-Reingold:
-- Gravity: constant pull toward the center of mass (prevents drift)
+- Gravity: pulls nodes toward the origin rather than the centroid
 - Degree-dependent repulsion: high-degree nodes repel more strongly
 - Adaptive speed: step size adjusts based on energy oscillation
 - LinLog mode: uses log-attraction for better cluster separation
 - No cooling schedule: runs until convergence via adaptive speed
 
 Reference: Jacomy et al., "ForceAtlas2, a Continuous Graph Layout Algorithm
-for Handy Network Visualization" (2014), PLoS ONE.
+for Handy Network Visualization" (2014), PLoS ONE, and the ``fa2`` package.
 """
 
 from __future__ import annotations
@@ -23,21 +23,20 @@ _EXACT_REPULSION_THRESHOLD = 10_000
 _EXACT_BLOCK_SIZE = 1_024
 _SAMPLED_REPULSION_K = 1_000
 _SAMPLED_BLOCK_SIZE = 256
-_MAX_SPEED = 10.0
-_MAX_DISPLACEMENT = 10.0
 
 
 def layout_fa2(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
-    steps: int = 500,
+    steps: int = 100,
     seed: int = 42,
     gravity: float = 1.0,
     scaling_ratio: float = 2.0,
     linlog: bool = False,
     strong_gravity: bool = False,
     trace_every: int = 0,
+    outbound_attraction_distribution: bool = True,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, list[torch.Tensor]]]:
     """Run ForceAtlas2 layout.
 
@@ -49,25 +48,29 @@ def layout_fa2(
         Number of nodes.
     node_sizes : torch.Tensor, optional
         Unused, accepted for interface compatibility.
-    steps : int
+    steps : int, default=100
         Number of simulation steps.
-    seed : int
+    seed : int, default=42
         Random seed for initial placement.
-    gravity : float
-        Gravity constant — pulls nodes toward center of mass.
-    scaling_ratio : float
-        Repulsion scaling. Higher = more spread out.
-    linlog : bool
-        Use log-attraction for better cluster separation.
-    strong_gravity : bool
-        Gravity proportional to degree (prevents isolated nodes from drifting).
-    trace_every : int
-        If > 0, record snapshots every N steps.
+    gravity : float, default=1.0
+        Gravity constant.
+    scaling_ratio : float, default=2.0
+        Repulsion scaling. Higher spreads nodes farther apart.
+    linlog : bool, default=False
+        Use the LinLog attraction variant.
+    strong_gravity : bool, default=False
+        Use the strong-gravity mode from the reference implementation.
+    trace_every : int, default=0
+        If greater than zero, record snapshots every ``trace_every`` steps.
+    outbound_attraction_distribution : bool, default=True
+        Divide attraction by source-node mass and compensate using the mean
+        node mass, matching the reference adapter defaults.
 
     Returns
     -------
-    torch.Tensor or tuple
-        Final positions ``[N, 2]``, or ``(positions, traces)`` if tracing.
+    torch.Tensor or tuple[torch.Tensor, list[torch.Tensor]]
+        Final positions with shape ``[N, 2]``, or ``(positions, traces)`` when
+        tracing is enabled.
     """
     del node_sizes
 
@@ -86,17 +89,19 @@ def layout_fa2(
         single = torch.zeros((1, 2), dtype=torch.float32, device=device)
         return (single, [single.clone()]) if trace_every > 0 else single
 
-    generator = torch.Generator(device=device)
+    generator_device = device.type if device.type != "mps" else "cpu"
+    generator = torch.Generator(device=generator_device)
     generator.manual_seed(seed)
 
     degree = _compute_degree(edge_index=edge_index, num_nodes=num_nodes)
-    pos = torch.randn(
+    mass = degree + 1.0
+    attraction_coefficient = float(mass.mean().item()) if outbound_attraction_distribution else 1.0
+    pos = torch.rand(
         (num_nodes, 2),
         generator=generator,
         device=device,
         dtype=torch.float32,
     )
-    pos = pos * 10.0
 
     speed = 1.0
     speed_efficiency = 1.0
@@ -107,16 +112,24 @@ def layout_fa2(
     for step_index in range(steps):
         repulsion_force = _repulsion_force(
             pos=pos,
-            degree=degree,
+            mass=mass,
             scaling_ratio=scaling_ratio,
             generator=generator,
         )
-        attraction_force = _attraction_force(pos=pos, edge_index=edge_index, linlog=linlog)
+        attraction_force = _attraction_force(
+            pos=pos,
+            edge_index=edge_index,
+            mass=mass,
+            linlog=linlog,
+            attraction_coefficient=attraction_coefficient,
+            outbound_attraction_distribution=outbound_attraction_distribution,
+        )
         gravity_force = _gravity_force(
             pos=pos,
-            degree=degree,
+            mass=mass,
             gravity=gravity,
             strong_gravity=strong_gravity,
+            scaling_ratio=scaling_ratio,
         )
         force = repulsion_force + attraction_force + gravity_force
 
@@ -126,23 +139,17 @@ def layout_fa2(
             speed=speed,
             speed_efficiency=speed_efficiency,
             jitter_tolerance=jitter_tolerance,
+            mass=mass,
+            outbound_attraction_distribution=outbound_attraction_distribution,
         )
         node_speed = _node_speed(
             speed=speed,
             node_traction=node_traction,
             force=force,
             previous_force=previous_force,
+            mass=mass,
         )
-        displacement = force * node_speed.unsqueeze(1)
-        disp_mag = displacement.norm(dim=1, keepdim=True)
-        # Clamp per-node displacement so a single unstable step cannot eject nodes.
-        safe_disp_mag = disp_mag.clamp(min=1e-6)
-        scale = torch.where(
-            disp_mag > _MAX_DISPLACEMENT,
-            _MAX_DISPLACEMENT / safe_disp_mag,
-            torch.ones_like(disp_mag),
-        )
-        pos = pos + displacement * scale
+        pos = pos + (force * node_speed.unsqueeze(1))
         previous_force = force
 
         if trace_every > 0 and step_index % trace_every == 0:
@@ -205,7 +212,7 @@ def _validate_inputs(
 
 
 def _compute_degree(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
-    """Compute undirected node degree used as FA2 mass.
+    """Compute deduplicated undirected degree counts.
 
     Parameters
     ----------
@@ -217,21 +224,32 @@ def _compute_degree(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
     Returns
     -------
     torch.Tensor
-        Degree tensor of shape ``[N]`` with minimum value ``1``.
+        Degree tensor of shape ``[N]``.
     """
     degree = torch.zeros(num_nodes, dtype=torch.float32, device=edge_index.device)
     if edge_index.numel() == 0:
-        return degree.add(1.0)
+        return degree
 
-    ones = torch.ones(edge_index.shape[1], dtype=torch.float32, device=edge_index.device)
-    degree.scatter_add_(0, edge_index[0], ones)
-    degree.scatter_add_(0, edge_index[1], ones)
-    return degree.clamp(min=1.0)
+    source = edge_index[0]
+    target = edge_index[1]
+    non_self = source != target
+    if not bool(non_self.any().item()):
+        return degree
+
+    source = source[non_self]
+    target = target[non_self]
+    lower = torch.minimum(source, target)
+    upper = torch.maximum(source, target)
+    unique_edges = torch.unique(torch.stack([lower, upper], dim=1), dim=0)
+    ones = torch.ones(unique_edges.shape[0], dtype=torch.float32, device=edge_index.device)
+    degree.scatter_add_(0, unique_edges[:, 0], ones)
+    degree.scatter_add_(0, unique_edges[:, 1], ones)
+    return degree
 
 
 def _repulsion_force(
     pos: torch.Tensor,
-    degree: torch.Tensor,
+    mass: torch.Tensor,
     scaling_ratio: float,
     generator: torch.Generator,
 ) -> torch.Tensor:
@@ -241,8 +259,8 @@ def _repulsion_force(
     ----------
     pos : torch.Tensor
         Node positions, shape ``[N, 2]``.
-    degree : torch.Tensor
-        Node degree tensor, shape ``[N]``.
+    mass : torch.Tensor
+        Node masses, shape ``[N]``.
     scaling_ratio : float
         Repulsion strength multiplier.
     generator : torch.Generator
@@ -258,11 +276,11 @@ def _repulsion_force(
         return torch.zeros_like(pos)
 
     if num_nodes <= _EXACT_REPULSION_THRESHOLD:
-        return _repulsion_force_exact(pos=pos, degree=degree, scaling_ratio=scaling_ratio)
+        return _repulsion_force_exact(pos=pos, mass=mass, scaling_ratio=scaling_ratio)
 
     return _repulsion_force_sampled(
         pos=pos,
-        degree=degree,
+        mass=mass,
         scaling_ratio=scaling_ratio,
         generator=generator,
     )
@@ -270,17 +288,17 @@ def _repulsion_force(
 
 def _repulsion_force_exact(
     pos: torch.Tensor,
-    degree: torch.Tensor,
+    mass: torch.Tensor,
     scaling_ratio: float,
 ) -> torch.Tensor:
-    """Compute exact all-pairs repulsion in blocks to control memory.
+    """Compute exact all-pairs repulsion in blocks.
 
     Parameters
     ----------
     pos : torch.Tensor
         Node positions, shape ``[N, 2]``.
-    degree : torch.Tensor
-        Node degree tensor, shape ``[N]``.
+    mass : torch.Tensor
+        Node masses, shape ``[N]``.
     scaling_ratio : float
         Repulsion strength multiplier.
 
@@ -290,7 +308,6 @@ def _repulsion_force_exact(
         Repulsive force tensor of shape ``[N, 2]``.
     """
     num_nodes = pos.shape[0]
-    mass = degree + 1.0
     force = torch.zeros_like(pos)
 
     for start in range(0, num_nodes, _EXACT_BLOCK_SIZE):
@@ -306,7 +323,7 @@ def _repulsion_force_exact(
 
 def _repulsion_force_sampled(
     pos: torch.Tensor,
-    degree: torch.Tensor,
+    mass: torch.Tensor,
     scaling_ratio: float,
     generator: torch.Generator,
 ) -> torch.Tensor:
@@ -316,8 +333,8 @@ def _repulsion_force_sampled(
     ----------
     pos : torch.Tensor
         Node positions, shape ``[N, 2]``.
-    degree : torch.Tensor
-        Node degree tensor, shape ``[N]``.
+    mass : torch.Tensor
+        Node masses, shape ``[N]``.
     scaling_ratio : float
         Repulsion strength multiplier.
     generator : torch.Generator
@@ -333,7 +350,6 @@ def _repulsion_force_sampled(
     if sample_k == 0:
         return torch.zeros_like(pos)
 
-    mass = degree + 1.0
     force = torch.zeros_like(pos)
     all_indices = torch.arange(num_nodes, device=pos.device)
     scale = float(num_nodes - 1) / float(sample_k)
@@ -361,7 +377,14 @@ def _repulsion_force_sampled(
     return force
 
 
-def _attraction_force(pos: torch.Tensor, edge_index: torch.Tensor, linlog: bool) -> torch.Tensor:
+def _attraction_force(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    mass: torch.Tensor,
+    linlog: bool,
+    attraction_coefficient: float,
+    outbound_attraction_distribution: bool,
+) -> torch.Tensor:
     """Compute edge attraction forces.
 
     Parameters
@@ -370,8 +393,14 @@ def _attraction_force(pos: torch.Tensor, edge_index: torch.Tensor, linlog: bool)
         Node positions, shape ``[N, 2]``.
     edge_index : torch.Tensor
         Edge list, shape ``[2, E]``.
+    mass : torch.Tensor
+        Node masses, shape ``[N]``.
     linlog : bool
         Whether to use the LinLog attraction variant.
+    attraction_coefficient : float
+        Global attraction coefficient.
+    outbound_attraction_distribution : bool
+        Whether to divide by the source-node mass.
 
     Returns
     -------
@@ -385,9 +414,14 @@ def _attraction_force(pos: torch.Tensor, edge_index: torch.Tensor, linlog: bool)
     src, tgt = edge_index
     delta = pos[tgt] - pos[src]
     dist = delta.norm(dim=1).clamp(min=_EPSILON)
-    attr_mag = torch.log1p(dist) if linlog else dist
-    attr_force = delta / dist.unsqueeze(1) * attr_mag.unsqueeze(1)
 
+    coefficient = torch.full_like(dist, float(attraction_coefficient))
+    if outbound_attraction_distribution:
+        coefficient = coefficient / mass.index_select(0, src)
+    if linlog:
+        coefficient = coefficient * (torch.log1p(dist) / dist)
+
+    attr_force = delta * coefficient.unsqueeze(1)
     force.scatter_add_(0, src.unsqueeze(1).expand_as(attr_force), attr_force)
     force.scatter_add_(0, tgt.unsqueeze(1).expand_as(attr_force), -attr_force)
     return force
@@ -395,35 +429,37 @@ def _attraction_force(pos: torch.Tensor, edge_index: torch.Tensor, linlog: bool)
 
 def _gravity_force(
     pos: torch.Tensor,
-    degree: torch.Tensor,
+    mass: torch.Tensor,
     gravity: float,
     strong_gravity: bool,
+    scaling_ratio: float,
 ) -> torch.Tensor:
-    """Compute center-seeking gravity.
+    """Compute gravity toward the origin.
 
     Parameters
     ----------
     pos : torch.Tensor
         Node positions, shape ``[N, 2]``.
-    degree : torch.Tensor
-        Node degree tensor, shape ``[N]``.
+    mass : torch.Tensor
+        Node masses, shape ``[N]``.
     gravity : float
         Gravity constant.
     strong_gravity : bool
-        Whether to scale gravity by node degree.
+        Whether to use strong gravity mode.
+    scaling_ratio : float
+        Repulsion scaling used by strong gravity mode in the reference.
 
     Returns
     -------
     torch.Tensor
         Gravity force tensor of shape ``[N, 2]``.
     """
-    center = pos.mean(dim=0, keepdim=True)
-    delta = center - pos
+    dist = pos.norm(dim=1).clamp(min=_EPSILON)
     if strong_gravity:
-        return gravity * (degree + 1.0).unsqueeze(1) * delta
-
-    dist = delta.norm(dim=1).clamp(min=_EPSILON)
-    return gravity * delta / dist.unsqueeze(1)
+        factor = scaling_ratio * mass * gravity
+    else:
+        factor = mass * gravity / dist
+    return -pos * factor.unsqueeze(1)
 
 
 def _adaptive_speed(
@@ -432,6 +468,8 @@ def _adaptive_speed(
     speed: float,
     speed_efficiency: float,
     jitter_tolerance: float,
+    mass: torch.Tensor,
+    outbound_attraction_distribution: bool,
 ) -> tuple[float, float, torch.Tensor]:
     """Update the FA2 integration speed from force oscillation.
 
@@ -444,31 +482,48 @@ def _adaptive_speed(
     speed : float
         Current integration speed.
     speed_efficiency : float
-        Current speed efficiency multiplier.
+        Current speed-efficiency multiplier.
     jitter_tolerance : float
         Jitter tolerance hyperparameter.
+    mass : torch.Tensor
+        Node masses, shape ``[N]``.
+    outbound_attraction_distribution : bool
+        Whether the outbound-attraction heuristic is enabled.
 
     Returns
     -------
     tuple[float, float, torch.Tensor]
-        Updated ``(speed, speed_efficiency, node_traction)`` tuple, where
-        ``node_traction`` has shape ``[N]``.
+        Updated ``(speed, speed_efficiency, node_traction)`` tuple.
     """
-    swing = (force - previous_force).norm(dim=1).sum().item()
-    node_traction = (0.5 * (force + previous_force)).norm(dim=1)
-    traction = max(float(node_traction.sum().item()), 1e-6)
+    node_swing = mass * (force - previous_force).norm(dim=1)
+    node_traction = 0.5 * mass * (force + previous_force).norm(dim=1)
+    swing = max(float(node_swing.sum().item()), _EPSILON)
+    traction = max(float(node_traction.sum().item()), _EPSILON)
 
-    estimated_optimal_jitter = 0.05 * traction
-    jitter = jitter_tolerance * max(estimated_optimal_jitter, 0.01)
-    ratio = swing / traction
+    num_nodes = float(force.shape[0])
+    estimated_optimal_jt = 0.05 * math.sqrt(num_nodes)
+    min_jt = math.sqrt(estimated_optimal_jt)
+    max_jt = 10.0
+    jt = jitter_tolerance * max(
+        min_jt,
+        min(max_jt, estimated_optimal_jt * traction / (num_nodes * num_nodes)),
+    )
+    if outbound_attraction_distribution:
+        jt = min(jt, 1.0)
 
-    if ratio > 2.0 and speed_efficiency > 0.05:
+    if swing / traction > 2.0 and speed_efficiency > 0.05:
         speed_efficiency *= 0.5
-    elif ratio < 1.0:
-        speed_efficiency = min(speed_efficiency * 1.05, 1.5)
+        jt = max(jt, jitter_tolerance)
 
-    speed = jitter * speed_efficiency / (1.0 + jitter * math.sqrt(max(ratio, 0.0)))
-    return min(speed, _MAX_SPEED), speed_efficiency, node_traction
+    target_speed = jt * speed_efficiency * traction / swing
+    if swing > jt * traction:
+        if speed_efficiency > 0.05:
+            speed_efficiency *= 0.7
+    elif speed < 1000.0:
+        speed_efficiency *= 1.3
+
+    speed = speed + min(target_speed - speed, 0.5 * max(speed, _EPSILON))
+    return speed, speed_efficiency, node_traction
 
 
 def _node_speed(
@@ -477,15 +532,9 @@ def _node_speed(
     speed: float,
     global_traction: Optional[float] = None,
     node_traction: Optional[torch.Tensor] = None,
+    mass: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Compute per-node speed using ForceAtlas2 adaptive heuristic.
-
-    Uses the formula from Jacomy et al. (2014):
-        node_speed(v) = global_speed * traction(v)
-        / (traction(v) + sqrt(traction(v)) * swing(v))
-
-    This keeps the speed ratio bounded as forces grow, which prevents the
-    integration step from diverging numerically.
+    """Compute per-node movement factors.
 
     Parameters
     ----------
@@ -496,23 +545,24 @@ def _node_speed(
     speed : float
         Global adaptive speed from ``_adaptive_speed()``.
     global_traction : float, optional
-        Legacy aggregate traction scalar. When ``node_traction`` is omitted, the
-        function falls back to the older global-traction cap for compatibility.
+        Legacy scalar used by existing reference tests.
     node_traction : torch.Tensor, optional
-        Per-node traction magnitudes, shape ``[N]``. When provided, this uses
-        the Jacomy et al. bounded denominator.
+        Per-node traction magnitudes, shape ``[N]``.
+    mass : torch.Tensor, optional
+        Node masses, shape ``[N]``.
 
     Returns
     -------
     torch.Tensor
-        Per-node speed factors, shape ``[N]``.
+        Per-node movement factors, shape ``[N]``.
     """
     node_swing = (force - previous_force).norm(dim=1)
-    if node_traction is None:
-        if global_traction is None:
-            node_traction = (0.5 * (force + previous_force)).norm(dim=1)
-        else:
-            return torch.clamp((speed * global_traction) / (node_swing + 1.0), max=_MAX_SPEED)
+    if mass is not None:
+        node_swing = node_swing * mass
 
-    denom = node_traction + node_traction.sqrt() * node_swing + 1e-6
-    return torch.clamp(speed * node_traction / denom, max=_MAX_SPEED)
+    if node_traction is None and global_traction is not None:
+        return (speed * global_traction) / (node_swing + 1.0)
+    factor = speed / (1.0 + torch.sqrt((speed * node_swing).clamp(min=0.0)))
+    if node_traction is None:
+        return factor
+    return torch.where(node_traction > 0, factor, torch.zeros_like(factor))
