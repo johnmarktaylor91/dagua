@@ -5,11 +5,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from dagua.eval.competitors import get_competitors
+from dagua.eval.competitors import get_competitors, neulay_competitor
+from dagua.eval.competitors.neulay_competitor import NeuLayReference
 from dagua.eval.competitors.sgd2_competitor import SGD2, SGD2MDS
 from dagua.eval.competitors.umap_competitor import UMAPGraph
 from dagua.graph import DaguaGraph
 
+NEULAY_AVAILABLE = NeuLayReference().available()
 SGD2_AVAILABLE = SGD2().available()
 UMAP_AVAILABLE = UMAPGraph().available()
 
@@ -40,7 +42,91 @@ def test_embedding_competitors_registered() -> None:
         This test asserts on the global competitor registry contents.
     """
     names = {competitor.name for competitor in get_competitors()}
-    assert {"sgd2", "sgd2_mds", "tsne_graph", "umap_graph"} <= names
+    assert {"sgd2", "sgd2_mds", "neulay", "tsne_graph", "umap_graph"} <= names
+
+
+@pytest.mark.smoke
+class TestNeuLay:
+    """Smoke coverage for the PyG-gated NeuLay competitor."""
+
+    def test_available_check(self) -> None:
+        """The availability probe should return a boolean.
+
+        Returns
+        -------
+        None
+            This test asserts on the availability probe result.
+        """
+        competitor = NeuLayReference()
+        assert isinstance(competitor.available(), bool)
+
+    def test_available_is_false_without_upstream_reference(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The adapter should not benchmark Dagua's own NeuLay implementation."""
+        monkeypatch.setattr(neulay_competitor, "_load_upstream_neulay", lambda: None)
+        competitor = NeuLayReference()
+        assert competitor.available() is False
+
+    def test_layout_uses_upstream_reference_when_present(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The adapter should forward full NeuLay defaults to the upstream callable."""
+        graph = _make_small_graph()
+        observed: dict[str, object] = {}
+
+        def _fake_upstream(
+            edge_index: torch.Tensor,
+            num_nodes: int,
+            *,
+            node_sizes: object,
+            seed: int,
+            steps: int,
+            gcn_steps: int,
+            use_gcn: bool,
+        ) -> torch.Tensor:
+            """Capture NeuLay adapter arguments for the regression test."""
+            observed["edge_shape"] = tuple(edge_index.shape)
+            observed["num_nodes"] = num_nodes
+            observed["node_sizes"] = node_sizes
+            observed["seed"] = seed
+            observed["steps"] = steps
+            observed["gcn_steps"] = gcn_steps
+            observed["use_gcn"] = use_gcn
+            return torch.zeros((num_nodes, 2), dtype=torch.float32)
+
+        monkeypatch.setattr(neulay_competitor, "_load_upstream_neulay", lambda: _fake_upstream)
+
+        result = NeuLayReference().layout(graph, seed=9)
+
+        assert result.error is None
+        assert result.pos is not None
+        assert observed["edge_shape"] == tuple(graph.edge_index.shape)
+        assert observed["num_nodes"] == graph.num_nodes
+        assert observed["seed"] == 9
+        assert observed["steps"] == 20_000
+        assert observed["gcn_steps"] == 2_000
+        assert observed["use_gcn"] is True
+
+    @pytest.mark.skipif(
+        not NEULAY_AVAILABLE,
+        reason="torch_geometric not installed",
+    )
+    def test_layout_returns_positions(self) -> None:
+        """The adapter should return positions for a small graph.
+
+        Returns
+        -------
+        None
+            This test asserts on the returned position tensor.
+        """
+        graph = _make_small_graph()
+        result = NeuLayReference().layout(graph, timeout=30.0)
+        assert result.pos is not None
+        assert result.pos.shape == (6, 2)
+        assert result.error is None
 
 
 @pytest.mark.smoke
@@ -150,6 +236,29 @@ class TestTSNEGraph:
         assert result.pos.shape == (6, 2)
         assert result.error is None
         assert result.pos.dtype == torch.float32
+
+    @pytest.mark.skipif(
+        not UMAP_AVAILABLE,
+        reason="umap not installed or unusable",
+    )
+    def test_tiny_graph_layout_is_seeded(self) -> None:
+        """Tiny-graph fallback should use the benchmark seed."""
+        graph = DaguaGraph()
+        graph.add_node("0")
+        graph.add_node("1")
+        graph.add_node("2")
+        graph.add_edge("0", "1")
+
+        competitor = UMAPGraph()
+        first = competitor.layout(graph, seed=5)
+        second = competitor.layout(graph, seed=5)
+        third = competitor.layout(graph, seed=6)
+
+        assert first.pos is not None
+        assert second.pos is not None
+        assert third.pos is not None
+        torch.testing.assert_close(first.pos, second.pos)
+        assert not torch.allclose(first.pos, third.pos)
 
 
 @pytest.mark.smoke

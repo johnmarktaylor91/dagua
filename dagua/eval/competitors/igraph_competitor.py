@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import random
 import time
-from typing import TYPE_CHECKING, Any, Optional
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 import torch
 
@@ -11,6 +13,41 @@ from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, regist
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
+
+
+@contextmanager
+def _igraph_rng_seed(seed: Optional[int], enabled: bool) -> Iterator[None]:
+    """Temporarily route igraph randomness through a seeded Python RNG.
+
+    Parameters
+    ----------
+    seed : int | None
+        Benchmark seed requested by the caller.
+    enabled : bool
+        Whether the wrapped layout algorithm depends on igraph's internal RNG.
+
+    Returns
+    -------
+    Iterator[None]
+        Context manager that restores igraph's default RNG afterwards.
+
+    Notes
+    -----
+    python-igraph exposes only a setter for the global RNG. We therefore
+    restore the library default PCG32 generator on exit instead of trying to
+    preserve an unknown prior custom generator.
+    """
+    if seed is None or not enabled:
+        yield
+        return
+
+    import igraph
+
+    igraph.set_random_number_generator(random.Random(seed))
+    try:
+        yield
+    finally:
+        igraph.set_random_number_generator(None)
 
 
 def _graph_to_igraph(graph: DaguaGraph) -> Any:
@@ -65,7 +102,8 @@ class _IgraphBase(CompetitorBase):
 
     layout_algo: str = "sugiyama"
     layout_kwargs: dict = {}
-    accepts_seed: bool = False
+    accepts_seed_matrix: bool = False
+    uses_igraph_rng: bool = False
 
     def layout(
         self,
@@ -99,14 +137,15 @@ class _IgraphBase(CompetitorBase):
         start = time.perf_counter()
         try:
             kwargs = dict(self.layout_kwargs)
-            if seed is not None and self.accepts_seed:
+            if seed is not None and self.accepts_seed_matrix:
                 # igraph FR's "seed" param is an initial position matrix, not an int.
                 # Generate random initial positions from the integer seed instead.
                 import numpy as np
 
                 rng = np.random.RandomState(seed)
                 kwargs["seed"] = rng.uniform(-1, 1, size=(graph.num_nodes, 2)).tolist()
-            ig_layout = ig.layout(self.layout_algo, **kwargs)
+            with _igraph_rng_seed(seed=seed, enabled=self.uses_igraph_rng):
+                ig_layout = ig.layout(self.layout_algo, **kwargs)
             elapsed = time.perf_counter() - start
             pos = _igraph_pos_to_tensor(ig_layout, graph.num_nodes)
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -137,7 +176,7 @@ class IgraphFR(_IgraphBase):
     max_nodes = 50_000
     layout_algo = "fruchterman_reingold"
     layout_kwargs = {"niter": 500}
-    accepts_seed = True
+    accepts_seed_matrix = True
 
 
 @register
@@ -180,7 +219,7 @@ class IgraphGraphOpt(_IgraphBase):
     max_nodes = 20_000
     layout_algo = "graphopt"
     layout_kwargs = {"niter": 500}
-    accepts_seed = True
+    accepts_seed_matrix = True
 
 
 @register
@@ -191,7 +230,8 @@ class IgraphDRL(_IgraphBase):
     max_nodes = 100_000
     layout_algo = "drl"
     layout_kwargs = {}
-    accepts_seed = True
+    accepts_seed_matrix = True
+    uses_igraph_rng = True
 
 
 @register
@@ -202,3 +242,4 @@ class IgraphLGL(_IgraphBase):
     max_nodes = 100_000
     layout_algo = "lgl"
     layout_kwargs = {}
+    uses_igraph_rng = True

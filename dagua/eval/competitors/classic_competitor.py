@@ -874,6 +874,23 @@ class ClassicNeuLay(_ClassicBase):
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
     ) -> CompetitorResult:
+        """Run the classic NeuLay reimplementation with the full two-phase setup.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
         del timeout
         return _quick_classic(
             self.name,
@@ -881,7 +898,9 @@ class ClassicNeuLay(_ClassicBase):
             "layout_neulay",
             graph,
             self._layout_seed(seed),
-            use_gcn=False,
+            steps=20_000,
+            gcn_steps=2_000,
+            use_gcn=True,
         )
 
 
@@ -893,6 +912,23 @@ class ClassicSGD2Multi(_ClassicBase):
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
     ) -> CompetitorResult:
+        """Run the classic multicriteria ``(SGD)^2`` reimplementation.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver. ``None`` preserves the
+            historical default of ``42``.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
         del timeout
         return _quick_classic(
             self.name,
@@ -900,4 +936,5 @@ class ClassicSGD2Multi(_ClassicBase):
             "layout_sgd2_multi",
             graph,
             self._layout_seed(seed),
+            criteria={"stress": 1.0, "ideal_edge_length": 1.0},
         )
