@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -29,6 +29,12 @@ DEFAULT_BODY_COLOR = "#8C8C8C"
 DEFAULT_ALPHA = 0.7
 DEFAULT_STROKE_WIDTH = 0.75
 MAX_SEPARATION_RETRIES = 6
+HEAD_DENSITY_ANGLE_DEGREES = 15.0
+HEAD_DENSITY_FALLBACK_COUNT = 10
+HEAD_DENSITY_HIDE_COUNT = 14
+MIN_DENSE_HEAD_SCALE = 0.45
+MIN_ARROW_LENGTH_FACTOR = 1.6
+MIN_ARROW_WIDTH_FACTOR = 1.15
 
 
 @dataclass
@@ -87,6 +93,10 @@ class DaguaEdge:
         Font weight override.
     group_key : tuple[int, int] | None, default=None
         Parallel-edge grouping key.
+    source_node : int | None, default=None
+        Source node index when available.
+    target_node : int | None, default=None
+        Target node index when available.
     """
 
     curve: CubicBezier
@@ -114,6 +124,8 @@ class DaguaEdge:
     label_font_family: str = ""
     label_font_weight: str = "regular"
     group_key: Optional[Tuple[int, int]] = None
+    source_node: Optional[int] = None
+    target_node: Optional[int] = None
 
     def resolved_arrow_length(self) -> float:
         """Return the effective arrowhead length.
@@ -217,6 +229,208 @@ def _head_body_direction(curve: CubicBezier) -> np.ndarray:
     return tangent
 
 
+def _terminal_face(direction: np.ndarray) -> str:
+    """Bucket a terminal tangent into a coarse node-face label.
+
+    Parameters
+    ----------
+    direction : numpy.ndarray
+        Vector pointing from the terminal tip back into the edge body.
+
+    Returns
+    -------
+    str
+        One of ``"east"``, ``"west"``, ``"north"``, or ``"south"``.
+    """
+    if abs(float(direction[0])) >= abs(float(direction[1])):
+        return "east" if float(direction[0]) >= 0.0 else "west"
+    return "north" if float(direction[1]) >= 0.0 else "south"
+
+
+def _fallback_terminal_key(tip: np.ndarray, direction: np.ndarray) -> Tuple[str, int, int, str]:
+    """Build a coarse terminal-grouping key when node ids are unavailable.
+
+    Parameters
+    ----------
+    tip : numpy.ndarray
+        Terminal tip position in data coordinates.
+    direction : numpy.ndarray
+        Vector pointing from the terminal tip back into the edge body.
+
+    Returns
+    -------
+    tuple[str, int, int, str]
+        Fallback grouping key.
+    """
+    return (
+        "tip",
+        int(round(float(tip[0]) * 10.0)),
+        int(round(float(tip[1]) * 10.0)),
+        _terminal_face(direction),
+    )
+
+
+def _terminal_angle(direction: np.ndarray) -> float:
+    """Return the terminal angle in degrees.
+
+    Parameters
+    ----------
+    direction : numpy.ndarray
+        Vector pointing from the terminal tip back into the edge body.
+
+    Returns
+    -------
+    float
+        Terminal angle in degrees on ``[0, 360)``.
+    """
+    angle = float(np.degrees(np.arctan2(float(direction[1]), float(direction[0]))))
+    return angle % 360.0
+
+
+def _nearest_angular_separation(angles: Sequence[float], index: int) -> float:
+    """Return the nearest angular separation for one terminal direction.
+
+    Parameters
+    ----------
+    angles : Sequence[float]
+        Terminal directions in degrees.
+    index : int
+        Angle index to evaluate.
+
+    Returns
+    -------
+    float
+        Smallest pairwise separation in degrees. Singletons return ``360.0``.
+    """
+    if len(angles) <= 1:
+        return 360.0
+    anchor = angles[index]
+    separations = []
+    for offset, other in enumerate(angles):
+        if offset == index:
+            continue
+        delta = abs(anchor - other)
+        separations.append(min(delta, 360.0 - delta))
+    return min(separations)
+
+
+def _scaled_head_size(edge: DaguaEdge, scale: float, terminal: str) -> Tuple[float, float]:
+    """Return density-adjusted head dimensions for one terminal.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge style to scale.
+    scale : float
+        Multiplicative head scale.
+    terminal : str
+        ``"head"`` or ``"tail"``.
+
+    Returns
+    -------
+    tuple[float, float]
+        Scaled ``(length, width)`` in data units.
+    """
+    if terminal == "head":
+        base_length = edge.resolved_arrow_length()
+        base_width = edge.resolved_arrow_width()
+    else:
+        base_length = edge.resolved_tail_arrow_length()
+        base_width = edge.resolved_tail_arrow_width()
+    scaled_length = max(edge.width * MIN_ARROW_LENGTH_FACTOR, base_length * scale)
+    scaled_width = max(edge.width * MIN_ARROW_WIDTH_FACTOR, base_width * scale)
+    return scaled_length, scaled_width
+
+
+def _apply_density_rule(
+    edge: DaguaEdge,
+    terminal: str,
+    min_angle: float,
+    count: int,
+) -> DaguaEdge:
+    """Return an edge with density-aware head adjustments applied.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge to adjust.
+    terminal : str
+        ``"head"`` or ``"tail"``.
+    min_angle : float
+        Smallest angular separation in the local terminal group, in degrees.
+    count : int
+        Number of edges using the same node face.
+
+    Returns
+    -------
+    DaguaEdge
+        Edge with adjusted arrowhead style and size.
+    """
+    scale = 1.0
+    if min_angle < HEAD_DENSITY_ANGLE_DEGREES:
+        fraction = max(min_angle, 0.0) / HEAD_DENSITY_ANGLE_DEGREES
+        scaled_fraction = MIN_DENSE_HEAD_SCALE + (1.0 - MIN_DENSE_HEAD_SCALE) * fraction
+        scale = max(MIN_DENSE_HEAD_SCALE, scaled_fraction)
+
+    spec = edge.arrowhead if terminal == "head" else edge.tail_arrow
+    if count > HEAD_DENSITY_FALLBACK_COUNT:
+        spec = "none" if count >= HEAD_DENSITY_HIDE_COUNT and min_angle < 8.0 else "tee"
+        scale = min(scale, 0.7)
+
+    if terminal == "head":
+        length, width = _scaled_head_size(edge, scale, terminal="head")
+        return replace(edge, arrowhead=spec, arrowhead_length=length, arrowhead_width=width)
+    length, width = _scaled_head_size(edge, scale, terminal="tail")
+    return replace(edge, tail_arrow=spec, tail_arrow_length=length, tail_arrow_width=width)
+
+
+def _apply_terminal_density_rules(edges: Sequence[DaguaEdge]) -> List[DaguaEdge]:
+    """Shrink or simplify crowded terminal markers.
+
+    Parameters
+    ----------
+    edges : Sequence[DaguaEdge]
+        Lane-adjusted edges.
+
+    Returns
+    -------
+    list[DaguaEdge]
+        Density-adjusted edges.
+    """
+    updated_edges = list(edges)
+    terminal_specs = (
+        ("head", "arrowhead", "target_node", "p1", _head_body_direction),
+        ("tail", "tail_arrow", "source_node", "p0", _tail_body_direction),
+    )
+    for terminal, arrow_attr, node_attr, tip_attr, direction_fn in terminal_specs:
+        groups: Dict[Tuple[object, str], List[Tuple[int, float]]] = {}
+        for index, edge in enumerate(updated_edges):
+            spec = getattr(edge, arrow_attr)
+            if spec == "none":
+                continue
+            tip = np.asarray(getattr(edge.curve, tip_attr), dtype=np.float64)
+            direction = direction_fn(edge.curve)
+            node_key = getattr(edge, node_attr)
+            resolved_key = (
+                node_key if node_key is not None else _fallback_terminal_key(tip, direction),
+                _terminal_face(direction),
+            )
+            groups.setdefault(resolved_key, []).append((index, _terminal_angle(direction)))
+
+        for members in groups.values():
+            angles = [angle for _, angle in members]
+            count = len(members)
+            for offset, (edge_index, _) in enumerate(members):
+                min_angle = _nearest_angular_separation(angles, offset)
+                updated_edges[edge_index] = _apply_density_rule(
+                    updated_edges[edge_index],
+                    terminal=terminal,
+                    min_angle=min_angle,
+                    count=count,
+                )
+    return updated_edges
+
+
 def _trimmed_body_curve(
     edge: DaguaEdge, curve: CubicBezier
 ) -> Tuple[Optional[CubicBezier], Optional[ArrowheadResult], Optional[ArrowheadResult]]:
@@ -244,6 +458,7 @@ def _trimmed_body_curve(
             tangent=_head_body_direction(curve),
             length=edge.resolved_arrow_length(),
             width=edge.resolved_arrow_width(),
+            body_width=edge.width,
             fill_mode=edge.arrow_fill,
         )
     if edge.tail_arrow != "none":
@@ -253,6 +468,7 @@ def _trimmed_body_curve(
             tangent=_tail_body_direction(curve),
             length=edge.resolved_tail_arrow_length(),
             width=edge.resolved_tail_arrow_width(),
+            body_width=edge.width,
             fill_mode=edge.arrow_fill,
         )
 
@@ -375,35 +591,7 @@ def _apply_lane_offsets(edges: Sequence[DaguaEdge]) -> List[DaguaEdge]:
             retries += 1
 
         for edge, lane_curve in zip(grouped_edges, centerlines):
-            updated_edges.append(
-                DaguaEdge(
-                    curve=lane_curve,
-                    width=edge.width,
-                    color=edge.color,
-                    alpha=edge.alpha,
-                    linestyle=edge.linestyle,
-                    arrowhead=edge.arrowhead,
-                    tail_arrow=edge.tail_arrow,
-                    arrowhead_length=edge.arrowhead_length,
-                    arrowhead_width=edge.arrowhead_width,
-                    tail_arrow_length=edge.tail_arrow_length,
-                    tail_arrow_width=edge.tail_arrow_width,
-                    arrow_fill=edge.arrow_fill,
-                    arrow_color=edge.arrow_color,
-                    stroke_width=edge.stroke_width,
-                    label=edge.label,
-                    label_position=edge.label_position,
-                    label_offset=edge.label_offset,
-                    label_rotate=edge.label_rotate,
-                    label_side=edge.label_side,
-                    label_font_size=edge.label_font_size,
-                    label_font_color=edge.label_font_color,
-                    label_background=edge.label_background,
-                    label_font_family=edge.label_font_family,
-                    label_font_weight=edge.label_font_weight,
-                    group_key=edge.group_key,
-                )
-            )
+            updated_edges.append(replace(edge, curve=lane_curve))
     return updated_edges
 
 
@@ -421,7 +609,7 @@ class DaguaEdgeCollection:
             Optional tier override.
         """
         lane_edges = _apply_lane_offsets(list(edges))
-        self.edges = lane_edges
+        self.edges = _apply_terminal_density_rules(lane_edges)
         self.tier = tier or choose_rendering_tier(len(self.edges))
         self.prepared_edges = [
             PreparedEdge(
@@ -567,7 +755,7 @@ class DaguaEdgeCollection:
                 for path in result.stroked_paths:
                     stroked_patches.append(PathPatch(path))
                     stroked_colors.append(to_rgba(arrow_color, edge.alpha))
-                    stroked_widths.append(edge.stroke_width)
+                    stroked_widths.append(edge.stroke_width * result.stroke_width_scale)
 
         artists: List[Any] = []
         if filled_patches:
@@ -588,6 +776,8 @@ class DaguaEdgeCollection:
                 facecolors="none",
                 edgecolors=stroked_colors,
                 linewidths=stroked_widths,
+                capstyle="round",
+                joinstyle="round",
                 zorder=2,
             )
             ax.add_collection(stroked)

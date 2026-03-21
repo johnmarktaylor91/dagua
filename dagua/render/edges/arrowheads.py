@@ -10,9 +10,15 @@ from matplotlib.path import Path
 
 from dagua.render.edges.geometry import FLOAT_EPSILON, Point, as_point, perpendicular, unit_vector
 
-ArrowBuilder = Callable[[float, float], "ArrowheadResult"]
+ArrowBuilder = Callable[[float, float, float], "ArrowheadResult"]
 
 LOCAL_CIRCLE_SAMPLES = 24
+JOIN_OVERLAP_RATIO = 0.18
+JOIN_OVERLAP_LENGTH_FLOOR = 0.35
+JOIN_SHOULDER_RATIO = 0.72
+OPEN_HEAD_STROKE_SCALE = 1.2
+TEE_HEAD_STROKE_SCALE = 1.35
+HOLLOW_HEAD_STROKE_SCALE = 1.35
 
 
 @dataclass(frozen=True)
@@ -29,12 +35,15 @@ class ArrowheadResult:
         Contour where the body should terminate.
     trim_t : float, default=1.0
         Centerline parameter where trimming occurs. The renderer fills this.
+    stroke_width_scale : float, default=1.0
+        Multiplier applied when the arrowhead is rendered with strokes.
     """
 
     filled_paths: List[Path]
     stroked_paths: List[Path]
     trim_contour: Path
     trim_t: float = 1.0
+    stroke_width_scale: float = 1.0
 
     @staticmethod
     def compose(results: Sequence["ArrowheadResult"]) -> "ArrowheadResult":
@@ -63,6 +72,7 @@ class ArrowheadResult:
             stroked_paths=stroked_paths,
             trim_contour=results[-1].trim_contour,
             trim_t=results[-1].trim_t,
+            stroke_width_scale=max(result.stroke_width_scale for result in results),
         )
 
 
@@ -224,121 +234,227 @@ def _resolve_fill(
         stroked_paths=[*result.stroked_paths, *result.filled_paths],
         trim_contour=result.trim_contour,
         trim_t=result.trim_t,
+        stroke_width_scale=max(result.stroke_width_scale, HOLLOW_HEAD_STROKE_SCALE),
     )
 
 
-def _triangle(length: float, width: float) -> ArrowheadResult:
-    """Build a standard triangular head."""
-    return ArrowheadResult(
-        filled_paths=[_local_path([(0.0, 0.0), (length, width * 0.5), (length, -width * 0.5)])],
-        stroked_paths=[],
-        trim_contour=_local_trim_contour(length, width),
-    )
+def _join_overlap(length: float, body_width: float) -> float:
+    """Return the overlap distance used to seat a head into the ribbon body.
+
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    body_width : float
+        Ribbon body width in local coordinates.
+
+    Returns
+    -------
+    float
+        Overlap distance measured along the ribbon axis.
+    """
+    return min(length * JOIN_OVERLAP_RATIO, max(body_width * 0.75, JOIN_OVERLAP_LENGTH_FLOOR))
 
 
-def _inverted_triangle(length: float, width: float) -> ArrowheadResult:
-    """Build an inverted triangular head."""
-    return ArrowheadResult(
-        filled_paths=[_local_path([(0.0, width * 0.5), (0.0, -width * 0.5), (length, 0.0)])],
-        stroked_paths=[],
-        trim_contour=_local_trim_contour(length, width),
-    )
+def _joined_polygon_points(
+    length: float,
+    body_width: float,
+    shoulder_x: float,
+    upper_points: Sequence[Tuple[float, float]],
+) -> List[Tuple[float, float]]:
+    """Build a symmetric polygon with a ribbon-width neck.
+
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    body_width : float
+        Ribbon body width in local coordinates.
+    shoulder_x : float
+        Local x position of the last full-width shoulder.
+    upper_points : Sequence[tuple[float, float]]
+        Upper-half polygon vertices from tip toward the body.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Polygon vertices, excluding the implicit closing point.
+    """
+    overlap = _join_overlap(length, body_width)
+    join_x = max(length - overlap, shoulder_x + FLOAT_EPSILON)
+    neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
+    points = list(upper_points)
+    points.extend([(join_x, neck_half_width), (length, neck_half_width)])
+    points.extend([(length, -neck_half_width), (join_x, -neck_half_width)])
+    for x, y in reversed(upper_points[1:]):
+        points.append((x, -y))
+    return points
 
 
-def _diamond(length: float, width: float) -> ArrowheadResult:
-    """Build a diamond head."""
+def _triangle(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a standard triangular head with a ribbon-width neck."""
+    shoulder_x = max(length * JOIN_SHOULDER_RATIO, body_width * 0.75)
     return ArrowheadResult(
         filled_paths=[
             _local_path(
-                [
-                    (0.0, 0.0),
-                    (length * 0.5, width * 0.5),
-                    (length, 0.0),
-                    (length * 0.5, -width * 0.5),
-                ]
+                _joined_polygon_points(
+                    length,
+                    body_width,
+                    shoulder_x=shoulder_x,
+                    upper_points=[(0.0, 0.0), (shoulder_x, width * 0.5)],
+                )
             )
         ],
         stroked_paths=[],
-        trim_contour=_local_trim_contour(length, width),
+        trim_contour=_local_trim_contour(length - _join_overlap(length, body_width), body_width),
     )
 
 
-def _box(length: float, width: float) -> ArrowheadResult:
-    """Build a rectangular head."""
+def _inverted_triangle(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build an inverted triangular head with a ribbon-width neck."""
+    overlap = _join_overlap(length, body_width)
+    join_x = max(length - overlap, length * 0.3)
+    neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
     return ArrowheadResult(
         filled_paths=[
             _local_path(
                 [
                     (0.0, width * 0.5),
-                    (length, width * 0.5),
-                    (length, -width * 0.5),
+                    (join_x, neck_half_width),
+                    (length, neck_half_width),
+                    (length, -neck_half_width),
+                    (join_x, -neck_half_width),
                     (0.0, -width * 0.5),
                 ]
             )
         ],
         stroked_paths=[],
-        trim_contour=_local_trim_contour(length, width),
+        trim_contour=_local_trim_contour(join_x, body_width),
     )
 
 
-def _dot(length: float, width: float) -> ArrowheadResult:
+def _diamond(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a diamond head with a tightened neck transition."""
+    shoulder_x = max(length * 0.48, body_width)
+    neck_x = max(length * 0.78, shoulder_x + FLOAT_EPSILON)
+    return ArrowheadResult(
+        filled_paths=[
+            _local_path(
+                _joined_polygon_points(
+                    length,
+                    body_width,
+                    shoulder_x=neck_x,
+                    upper_points=[
+                        (0.0, 0.0),
+                        (shoulder_x, width * 0.5),
+                        (neck_x, width * 0.18),
+                    ],
+                )
+            )
+        ],
+        stroked_paths=[],
+        trim_contour=_local_trim_contour(length - _join_overlap(length, body_width), body_width),
+    )
+
+
+def _box(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a rectangular head with a small body overlap."""
+    overlap = _join_overlap(length, body_width)
+    join_x = max(length - overlap, length * 0.55)
+    neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
+    return ArrowheadResult(
+        filled_paths=[
+            _local_path(
+                [
+                    (0.0, width * 0.5),
+                    (join_x, width * 0.5),
+                    (length, neck_half_width),
+                    (length, -neck_half_width),
+                    (join_x, -width * 0.5),
+                    (0.0, -width * 0.5),
+                ]
+            )
+        ],
+        stroked_paths=[],
+        trim_contour=_local_trim_contour(join_x, body_width),
+    )
+
+
+def _dot(length: float, width: float, body_width: float) -> ArrowheadResult:
     """Build a filled circular head."""
     radius = min(length, width) * 0.5
     diameter = radius * 2.0
     return ArrowheadResult(
         filled_paths=[_local_circle(radius, radius)],
         stroked_paths=[],
-        trim_contour=_local_trim_contour(diameter, diameter),
+        trim_contour=_local_trim_contour(diameter, max(diameter, body_width)),
     )
 
 
-def _tee(length: float, width: float) -> ArrowheadResult:
-    """Build a tee/bar head."""
+def _tee(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a tee/bar head as a weighted stroked mark."""
     bar_center = max(length * 0.35, width * 0.2)
-    half_thickness = max(width * 0.12, length * 0.08)
-    path = _local_path(
-        [
-            (bar_center - half_thickness, width * 0.5),
-            (bar_center + half_thickness, width * 0.5),
-            (bar_center + half_thickness, -width * 0.5),
-            (bar_center - half_thickness, -width * 0.5),
-        ]
-    )
-    return ArrowheadResult(
-        filled_paths=[path],
-        stroked_paths=[],
-        trim_contour=_local_trim_contour(bar_center + half_thickness, width),
-    )
-
-
-def _vee(length: float, width: float) -> ArrowheadResult:
-    """Build an open vee head."""
-    path = _local_path([(length, width * 0.5), (0.0, 0.0), (length, -width * 0.5)], closed=False)
+    path = _local_path([(bar_center, width * 0.45), (bar_center, -width * 0.45)], closed=False)
     return ArrowheadResult(
         filled_paths=[],
         stroked_paths=[path],
-        trim_contour=_local_trim_contour(length, width),
+        trim_contour=_local_trim_contour(bar_center, max(body_width, FLOAT_EPSILON)),
+        stroke_width_scale=TEE_HEAD_STROKE_SCALE,
     )
 
 
-def _crow(length: float, width: float) -> ArrowheadResult:
-    """Build a crow-foot head."""
-    center = _local_path([(0.0, 0.0), (length, 0.0)], closed=False)
-    left = _local_path([(0.0, 0.0), (length, width * 0.5)], closed=False)
-    right = _local_path([(0.0, 0.0), (length, -width * 0.5)], closed=False)
+def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build an open vee head that seats slightly into the ribbon."""
+    overlap = _join_overlap(length, body_width)
+    shoulder_x = max(length - overlap, length * 0.72)
+    neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
+    path = _local_path(
+        [
+            (length, neck_half_width),
+            (shoulder_x, width * 0.5),
+            (0.0, 0.0),
+            (shoulder_x, -width * 0.5),
+            (length, -neck_half_width),
+        ],
+        closed=False,
+    )
+    return ArrowheadResult(
+        filled_paths=[],
+        stroked_paths=[path],
+        trim_contour=_local_trim_contour(length - overlap, body_width),
+        stroke_width_scale=OPEN_HEAD_STROKE_SCALE,
+    )
+
+
+def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a crow-foot head with body-aligned stroke endpoints."""
+    overlap = _join_overlap(length, body_width)
+    fork_x = max(length - overlap, length * 0.6)
+    neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
+    center = _local_path([(length, 0.0), (0.0, 0.0)], closed=False)
+    left = _local_path(
+        [(length, neck_half_width), (fork_x, width * 0.22), (0.0, 0.0)],
+        closed=False,
+    )
+    right = _local_path(
+        [(length, -neck_half_width), (fork_x, -width * 0.22), (0.0, 0.0)],
+        closed=False,
+    )
     return ArrowheadResult(
         filled_paths=[],
         stroked_paths=[center, left, right],
-        trim_contour=_local_trim_contour(length * 0.7, width),
+        trim_contour=_local_trim_contour(length - overlap, body_width),
+        stroke_width_scale=OPEN_HEAD_STROKE_SCALE,
     )
 
 
-def _curve(length: float, width: float, invert: bool = False) -> ArrowheadResult:
+def _curve(length: float, width: float, body_width: float, invert: bool = False) -> ArrowheadResult:
     """Build a curved outline head."""
     sign = -1.0 if invert else 1.0
+    neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
     vertices = np.array(
         [
-            [0.0, 0.0],
+            [length, sign * neck_half_width],
             [length * 0.3, sign * width * 0.55],
             [length * 0.7, sign * width * 0.55],
             [length, 0.0],
@@ -349,61 +465,83 @@ def _curve(length: float, width: float, invert: bool = False) -> ArrowheadResult
     return ArrowheadResult(
         filled_paths=[],
         stroked_paths=[Path(vertices, codes)],
-        trim_contour=_local_trim_contour(length, width),
+        trim_contour=_local_trim_contour(length - _join_overlap(length, body_width), body_width),
+        stroke_width_scale=OPEN_HEAD_STROKE_SCALE,
     )
 
 
-def _simple(length: float, width: float) -> ArrowheadResult:
-    """Build a simple filled head."""
+def _simple(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a simple filled head with a tighter neck transition."""
+    shoulder_x = max(length * 0.55, body_width)
+    neck_x = max(length * 0.82, shoulder_x + FLOAT_EPSILON)
     return ArrowheadResult(
         filled_paths=[
             _local_path(
-                [
-                    (0.0, 0.0),
-                    (length * 0.55, width * 0.55),
-                    (length, width * 0.32),
-                    (length * 0.8, 0.0),
-                    (length, -width * 0.32),
-                    (length * 0.55, -width * 0.55),
-                ]
+                _joined_polygon_points(
+                    length,
+                    body_width,
+                    shoulder_x=neck_x,
+                    upper_points=[
+                        (0.0, 0.0),
+                        (shoulder_x, width * 0.55),
+                        (neck_x, width * 0.32),
+                    ],
+                )
             )
         ],
         stroked_paths=[],
-        trim_contour=_local_trim_contour(length, width),
+        trim_contour=_local_trim_contour(length - _join_overlap(length, body_width), body_width),
     )
 
 
-def _fancy(length: float, width: float) -> ArrowheadResult:
-    """Build a stockier filled head."""
+def _fancy(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a stockier filled head with an overlapped neck."""
+    shoulder_x = max(length * 0.4, body_width)
+    neck_x = max(length * 0.85, shoulder_x + FLOAT_EPSILON)
     return ArrowheadResult(
         filled_paths=[
             _local_path(
-                [
-                    (0.0, 0.0),
-                    (length * 0.4, width * 0.6),
-                    (length * 0.85, width * 0.42),
-                    (length, 0.0),
-                    (length * 0.85, -width * 0.42),
-                    (length * 0.4, -width * 0.6),
-                ]
+                _joined_polygon_points(
+                    length,
+                    body_width,
+                    shoulder_x=neck_x,
+                    upper_points=[
+                        (0.0, 0.0),
+                        (shoulder_x, width * 0.6),
+                        (neck_x, width * 0.42),
+                    ],
+                )
             )
         ],
         stroked_paths=[],
-        trim_contour=_local_trim_contour(length, width),
+        trim_contour=_local_trim_contour(length - _join_overlap(length, body_width), body_width),
     )
 
 
-def _wedge(length: float, width: float) -> ArrowheadResult:
-    """Build a wedge head."""
+def _wedge(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a wedge head with the same neck model as the normal head."""
     return ArrowheadResult(
-        filled_paths=[_local_path([(0.0, 0.0), (length, width * 0.5), (length, -width * 0.5)])],
+        filled_paths=[
+            _local_path(
+                _joined_polygon_points(
+                    length,
+                    body_width,
+                    shoulder_x=max(length * JOIN_SHOULDER_RATIO, body_width * 0.75),
+                    upper_points=[
+                        (0.0, 0.0),
+                        (max(length * JOIN_SHOULDER_RATIO, body_width * 0.75), width * 0.5),
+                    ],
+                )
+            )
+        ],
         stroked_paths=[],
-        trim_contour=_local_trim_contour(length, width),
+        trim_contour=_local_trim_contour(length - _join_overlap(length, body_width), body_width),
     )
 
 
-def _bracket(length: float, width: float) -> ArrowheadResult:
+def _bracket(length: float, width: float, body_width: float) -> ArrowheadResult:
     """Build a bracket head."""
+    overlap = _join_overlap(length, body_width)
     path = _local_path(
         [
             (length, width * 0.5),
@@ -416,16 +554,17 @@ def _bracket(length: float, width: float) -> ArrowheadResult:
     return ArrowheadResult(
         filled_paths=[],
         stroked_paths=[path],
-        trim_contour=_local_trim_contour(length * 0.2, width),
+        trim_contour=_local_trim_contour(max(length * 0.2, length - overlap), body_width),
+        stroke_width_scale=OPEN_HEAD_STROKE_SCALE,
     )
 
 
-def _none(length: float, width: float) -> ArrowheadResult:
+def _none(length: float, width: float, body_width: float) -> ArrowheadResult:
     """Build an empty head that only reserves trim space."""
     return ArrowheadResult(
         filled_paths=[],
         stroked_paths=[],
-        trim_contour=_local_trim_contour(length * 0.5, max(width, FLOAT_EPSILON)),
+        trim_contour=_local_trim_contour(length * 0.5, max(body_width, FLOAT_EPSILON)),
     )
 
 
@@ -440,10 +579,14 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
     "vee": PrimitiveSpec("vee", _vee, stroke_only=True),
     "crow": PrimitiveSpec("crow", _crow, stroke_only=True),
     "curve": PrimitiveSpec(
-        "curve", lambda length, width: _curve(length, width, invert=False), stroke_only=True
+        "curve",
+        lambda length, width, body_width: _curve(length, width, body_width, invert=False),
+        stroke_only=True,
     ),
     "icurve": PrimitiveSpec(
-        "icurve", lambda length, width: _curve(length, width, invert=True), stroke_only=True
+        "icurve",
+        lambda length, width, body_width: _curve(length, width, body_width, invert=True),
+        stroke_only=True,
     ),
     "simple": PrimitiveSpec("simple", _simple),
     "fancy": PrimitiveSpec("fancy", _fancy),
@@ -557,6 +700,7 @@ def build_arrowhead(
     tangent: Sequence[float],
     length: float,
     width: float,
+    body_width: float | None = None,
     fill_mode: str = "filled",
 ) -> ArrowheadResult:
     """Build a world-coordinate arrowhead result.
@@ -573,6 +717,8 @@ def build_arrowhead(
         Base arrowhead length in data units.
     width : float
         Base arrowhead width in data units.
+    body_width : float | None, default=None
+        Ribbon body width at the arrowhead junction in data units.
     fill_mode : str, default="filled"
         Either ``"filled"`` or ``"hollow"``.
 
@@ -583,6 +729,7 @@ def build_arrowhead(
     """
     tip_point = as_point(tip)
     body_direction = unit_vector(as_point(tangent))
+    resolved_body_width = float(width if body_width is None else body_width)
     parsed = parse_arrowhead_spec(spec)
 
     local_results: List[ArrowheadResult] = []
@@ -592,7 +739,7 @@ def build_arrowhead(
         if registry_key not in ARROWHEAD_REGISTRY:
             raise ValueError(f"Unsupported arrowhead primitive: {registry_key!r}.")
         spec_entry = ARROWHEAD_REGISTRY[registry_key]
-        base_result = spec_entry.builder(length, width)
+        base_result = spec_entry.builder(length, width, resolved_body_width)
         clipped_result = ArrowheadResult(
             filled_paths=[
                 _clip_local_path(path, primitive.side) for path in base_result.filled_paths
@@ -602,6 +749,7 @@ def build_arrowhead(
             ],
             trim_contour=_clip_local_path(base_result.trim_contour, primitive.side),
             trim_t=base_result.trim_t,
+            stroke_width_scale=base_result.stroke_width_scale,
         )
         resolved_result = _resolve_fill(
             clipped_result,
@@ -615,6 +763,7 @@ def build_arrowhead(
             ],
             trim_contour=_translated_path(resolved_result.trim_contour, offset),
             trim_t=resolved_result.trim_t,
+            stroke_width_scale=resolved_result.stroke_width_scale,
         )
         local_results.append(translated_result)
         offset = float(np.max(translated_result.trim_contour.vertices[:, 0]))
@@ -629,6 +778,7 @@ def build_arrowhead(
         ],
         trim_contour=_transform_path(composed.trim_contour, tip_point, body_direction),
         trim_t=composed.trim_t,
+        stroke_width_scale=composed.stroke_width_scale,
     )
 
 
