@@ -13,12 +13,23 @@ from __future__ import annotations
 import gzip
 import io
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from dagua.edges import BezierCurve, preferred_edge_label_position, route_edges
+from dagua.render.borders import (
+    ShapeSpec,
+    add_filled_collections,
+    annular_path,
+    build_shape_path,
+    clamp_border_width,
+    dash_ribbon_paths,
+    inset_shape_path,
+    make_clip_proxy,
+)
 from dagua.render.edges import CubicBezier as RenderBezier
 from dagua.render.edges import DaguaEdge, DaguaEdgeCollection
 from dagua.styles import (
@@ -803,6 +814,126 @@ def _draw_gradient_fill(
     image.set_clip_path(patch)
 
 
+def _scaled_node_style(style: Any, display_scale: float) -> Any:
+    """Convert node geometry-style fields from points into data units.
+
+    Parameters
+    ----------
+    style : Any
+        Node style object.
+    display_scale : float
+        Point-to-data conversion factor.
+
+    Returns
+    -------
+    Any
+        Style copy whose data-geometry fields are converted for the current
+        axes scale.
+    """
+
+    return replace(
+        style,
+        corner_radius=float(style.corner_radius) * display_scale,
+        shadow_offset=(
+            float(style.shadow_offset[0]) * display_scale,
+            float(style.shadow_offset[1]) * display_scale,
+        ),
+    )
+
+
+def _node_border_pattern(style: Any, display_scale: float) -> Any:
+    """Resolve a node border dash pattern in data units.
+
+    Parameters
+    ----------
+    style : Any
+        Node style object.
+    display_scale : float
+        Point-to-data conversion factor.
+
+    Returns
+    -------
+    Any
+        Either a built-in dash name or a custom dash tuple in data units.
+    """
+
+    if style.stroke_dash_pattern is None:
+        return style.stroke_dash
+    return tuple(float(value) * display_scale for value in style.stroke_dash_pattern)
+
+
+def _cluster_render_order(graph: Any) -> List[str]:
+    """Return clusters in parent-first depth-first traversal order.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing ``clusters`` and optional ``cluster_parents``.
+
+    Returns
+    -------
+    list[str]
+        Cluster names in render order.
+    """
+
+    if not getattr(graph, "cluster_parents", {}):
+        return list(graph.clusters.keys())
+
+    children: Dict[Optional[str], List[str]] = {}
+    for name in graph.clusters:
+        parent = graph.cluster_parents.get(name)
+        children.setdefault(parent, []).append(name)
+
+    ordered: List[str] = []
+
+    def visit(name: str) -> None:
+        """Visit one cluster and its descendants."""
+
+        ordered.append(name)
+        for child in children.get(name, []):
+            visit(child)
+
+    for root in children.get(None, []):
+        visit(root)
+
+    if len(ordered) != len(graph.clusters):
+        for name in graph.clusters:
+            if name not in ordered:
+                visit(name)
+    return ordered
+
+
+def _cluster_depths(graph: Any, ordered_clusters: Sequence[str]) -> Dict[str, int]:
+    """Compute cluster nesting depth from parent links or fallback order.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing ``cluster_parents``.
+    ordered_clusters : sequence[str]
+        Flattened render order.
+
+    Returns
+    -------
+    dict[str, int]
+        Cluster depth per cluster name.
+    """
+
+    cluster_parents = getattr(graph, "cluster_parents", {})
+    if not cluster_parents:
+        return {name: index for index, name in enumerate(ordered_clusters)}
+
+    depths: Dict[str, int] = {}
+    for name in ordered_clusters:
+        depth = 0
+        current = name
+        while cluster_parents.get(current) is not None:
+            current = cluster_parents[current]
+            depth += 1
+        depths[name] = depth
+    return depths
+
+
 def _draw_nodes(
     ax: Any,
     graph: Any,
@@ -832,36 +963,67 @@ def _draw_nodes(
     """
     from matplotlib.colors import to_rgba
 
+    display_scale = _compute_display_scale(ax)
     clip_patches: List[Any] = []
+    fill_paths: List[Any] = []
+    fill_colors: List[Any] = []
+    border_paths: List[Any] = []
+    border_colors: List[Any] = []
+
     for i in range(graph.num_nodes):
         x, y = float(pos[i, 0]), float(pos[i, 1])
         w, h = float(sizes[i, 0]), float(sizes[i, 1])
         style = graph.get_style_for_node(i)
+        scaled_style = _scaled_node_style(style, display_scale)
+        border_width = clamp_border_width(float(style.stroke_width) * display_scale, w, h)
+        shape_spec = ShapeSpec(
+            center_x=x,
+            center_y=y,
+            width=w,
+            height=h,
+            shape=str(style.shape),
+            corner_radius=float(scaled_style.corner_radius),
+        )
+        outer_path = build_shape_path(shape_spec)
+        fill_path = inset_shape_path(shape_spec, border_width) if border_width > 0.0 else outer_path
 
         if style.shadow:
-            _draw_shadow(ax, x, y, w, h, style)
+            _draw_shadow(ax, x, y, w, h, scaled_style)
 
         facecolor = to_rgba(style.fill, style.opacity)
         edgecolor = to_rgba(style.stroke, style.opacity * style.border_opacity)
-        patch_face = "none" if style.gradient != "none" else facecolor
-        patch = _build_node_patch(
-            x,
-            y,
-            w,
-            h,
-            style,
-            patch_face,
-            edgecolor,
-            style.stroke_width,
-            _node_linestyle(style),
-            zorder=2,
-        )
-        ax.add_patch(patch)
+        clip_patch = make_clip_proxy(fill_path, ax.transData)
+        if style.gradient == "none":
+            fill_paths.append(fill_path)
+            fill_colors.append(facecolor)
+        elif style.opacity > 0.0:
+            _draw_gradient_fill(ax, clip_patch, x, y, w, h, style)
+
+        if border_width > 0.0 and edgecolor[-1] > 0.0:
+            if style.stroke_dash == "solid" and style.stroke_dash_pattern is None:
+                border_paths.append(annular_path(outer_path, fill_path))
+                border_colors.append(edgecolor)
+            else:
+                centerline_path = inset_shape_path(shape_spec, border_width / 2.0)
+                dash_pattern = _node_border_pattern(style, display_scale)
+                ribbons = dash_ribbon_paths(centerline_path, dash_pattern, border_width)
+                border_paths.extend(ribbons)
+                border_colors.extend([edgecolor] * len(ribbons))
+
+        clip_patches.append(clip_patch)
         if style.gradient != "none":
-            _draw_gradient_fill(ax, patch, x, y, w, h, style)
-        _draw_node_shape_extras(ax, x, y, w, h, style, edgecolor, zorder=2.05)
-        clip_patches.append(patch)
-        _set_svg_hover(patch, f"dagua-node-{i}", graph.node_labels[i], svg_hover_map)
+            _set_svg_hover(clip_patch, f"dagua-node-{i}", graph.node_labels[i], svg_hover_map)
+        _draw_node_shape_extras(ax, x, y, w, h, style, edgecolor, zorder=2.08)
+
+    add_filled_collections(
+        ax=ax,
+        fill_paths=fill_paths,
+        fill_colors=fill_colors,
+        border_paths=border_paths,
+        border_colors=border_colors,
+        fill_zorder=2.0,
+        border_zorder=2.05,
+    )
     return clip_patches
 
 
@@ -950,9 +1112,10 @@ def _compute_display_scale(ax: Any) -> float:
     Notes
     -----
     Use this only for geometry constructed in data coordinates whose intended
-    visual size is specified in points, such as arrowhead polygons, cluster
-    corner radii, and cluster label offsets. Matplotlib already interprets
-    ``linewidth``, ``fontsize``, and dash patterns in points natively.
+    visual size is specified in points, such as node and cluster border bodies,
+    node corner radii, shadow offsets, arrowhead polygons, and cluster label
+    offsets. Matplotlib already interprets ``linewidth`` and ``fontsize`` in
+    points natively.
     """
     scale_x = _points_to_data_units(ax, 1.0, "x")
     scale_y = _points_to_data_units(ax, 1.0, "y")
@@ -1907,42 +2070,25 @@ def _draw_clusters(
     None
         Mutates ``ax`` in place by adding cluster patches and labels.
     """
-    from matplotlib.patches import FancyBboxPatch
+    from matplotlib.colors import to_rgba
 
     if not graph.clusters:
         return
 
-    # Compute true hierarchy depth per cluster via parent chain
-    cluster_parents = getattr(graph, "cluster_parents", {})
-    if cluster_parents:
-        cluster_depths = {}
-        for name in graph.clusters:
-            d, cur = 0, name
-            while cluster_parents.get(cur):
-                cur = cluster_parents[cur]
-                d += 1
-            cluster_depths[name] = d
+    ordered_clusters = _cluster_render_order(graph)
+    cluster_depths = _cluster_depths(graph, ordered_clusters)
+    max_depth = max(cluster_depths.values(), default=0)
+    display_scale = _compute_display_scale(ax)
 
-        # Sort: shallowest first (deeper clusters render on top)
-        sorted_clusters = sorted(
-            graph.clusters.items(),
-            key=lambda kv: cluster_depths.get(kv[0], 0),
-        )
-    else:
-        # Legacy: sort by member count (largest first)
-        sorted_clusters = sorted(
-            graph.clusters.items(),
-            key=lambda kv: len(collect_cluster_leaves(kv[1]) if isinstance(kv[1], dict) else kv[1]),
-            reverse=True,
-        )
-        cluster_depths = {name: i for i, (name, _) in enumerate(sorted_clusters)}
+    fill_paths_by_depth: Dict[int, List[Any]] = {}
+    fill_colors_by_depth: Dict[int, List[Any]] = {}
+    border_paths_by_depth: Dict[int, List[Any]] = {}
+    border_colors_by_depth: Dict[int, List[Any]] = {}
 
-    for name, members in sorted_clusters:
+    for name in ordered_clusters:
+        members = graph.clusters[name]
         depth = cluster_depths.get(name, 0)
-        if isinstance(members, dict):
-            indices = collect_cluster_leaves(members)
-        else:
-            indices = members
+        indices = collect_cluster_leaves(members) if isinstance(members, dict) else members
 
         if not indices:
             continue
@@ -1958,19 +2104,25 @@ def _draw_clusters(
         label = graph.cluster_labels.get(name, name)
         label_fontsize = max(style.font_size - depth * 1.0, 7.0)
         label_ff = style.font_family or RESOLVED_FONT
-        display_scale = _compute_display_scale(ax)
         label_ox = style.label_offset[0] * display_scale
         label_oy = style.label_offset[1] * display_scale
-        label_width, label_height = measure_text(
+        label_width_pt, label_height_pt = measure_text(
             label,
             font_family=label_ff,
             font_size=label_fontsize,
             font_weight=style.font_weight,
         )
+        label_width = _points_to_data_units(ax, label_width_pt, "x")
+        label_height = _points_to_data_units(ax, label_height_pt, "y")
 
         y_min = (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding
         y_max = (
-            (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding + max(14.0, label_height)
+            (member_pos[:, 1] + member_sizes[:, 1] / 2).max()
+            + padding
+            + max(
+                _points_to_data_units(ax, 14.0, "y"),
+                label_height,
+            )
         )
 
         # Cluster labels are few and measure_text is cached, so use the actual
@@ -1986,35 +2138,36 @@ def _draw_clusters(
         fill_color = darken_hex(style.fill, depth * style.depth_fill_step)
         stroke_color = darken_hex(style.stroke, depth * style.depth_stroke_step)
 
-        # Opacity decreases with depth
-        max_depth = len(sorted_clusters)
-        opacity = style.opacity * (1 - depth * 0.15 / max(max_depth, 1))
-        opacity = max(opacity, 0.08)
+        fill_alpha = style.opacity * (1.0 - depth * 0.15 / max(max_depth, 1))
+        fill_alpha = max(fill_alpha, 0.08)
+        border_alpha = style.opacity * (1.0 - depth * 0.15 / max(max_depth, 1))
 
-        # Corner radius
-        corner_radius = style.corner_radius * display_scale
-        if corner_radius > 0:
-            boxstyle = f"round,pad=0,rounding_size={corner_radius}"
-        else:
-            boxstyle = "square,pad=0"
+        width = x_max - x_min
+        height = y_max - y_min
+        border_width = clamp_border_width(float(style.stroke_width) * display_scale, width, height)
+        shape_spec = ShapeSpec(
+            center_x=(x_min + x_max) / 2.0,
+            center_y=(y_min + y_max) / 2.0,
+            width=width,
+            height=height,
+            shape="roundrect",
+            corner_radius=float(style.corner_radius) * display_scale,
+        )
+        outer_path = build_shape_path(shape_spec)
+        fill_path = inset_shape_path(shape_spec, border_width) if border_width > 0.0 else outer_path
 
-        # Stroke dash
-        patch = FancyBboxPatch(
-            (x_min, y_min),
-            x_max - x_min,
-            y_max - y_min,
-            boxstyle=boxstyle,
-            facecolor=fill_color,
-            edgecolor=stroke_color,
-            linewidth=style.stroke_width,
-            linestyle=_cluster_linestyle(style.stroke_dash),
-            alpha=opacity,
-            zorder=0,
-        )
-        ax.add_patch(patch)
-        _set_svg_hover(
-            patch, f"dagua-cluster-{name}", _cluster_hover_text(name, graph, indices), svg_hover_map
-        )
+        fill_paths_by_depth.setdefault(depth, []).append(fill_path)
+        fill_colors_by_depth.setdefault(depth, []).append(to_rgba(fill_color, fill_alpha))
+        if border_width > 0.0:
+            if style.stroke_dash == "solid":
+                border_paths = [annular_path(outer_path, fill_path)]
+            else:
+                centerline_path = inset_shape_path(shape_spec, border_width / 2.0)
+                border_paths = dash_ribbon_paths(centerline_path, style.stroke_dash, border_width)
+            border_paths_by_depth.setdefault(depth, []).extend(border_paths)
+            border_colors_by_depth.setdefault(depth, []).extend(
+                [to_rgba(stroke_color, border_alpha)] * len(border_paths)
+            )
 
         # Cluster label: position from style (label, label_fontsize already computed above)
         if style.label_position == "top-center":
@@ -2027,8 +2180,7 @@ def _draw_clusters(
             lx = x_min + label_ox
             ha = "left"
 
-        # Offset label further down for nested clusters to prevent overlap
-        depth_label_offset = depth * label_fontsize * 1.4
+        depth_label_offset = depth * (_points_to_data_units(ax, label_fontsize, "y")) * 1.4
         ly = y_max - label_oy - depth_label_offset
 
         text_artist = ax.text(
@@ -2041,7 +2193,7 @@ def _draw_clusters(
             color=style.font_color,
             va="top",
             ha=ha,
-            zorder=0.5,
+            zorder=0.1 + depth * 0.01,
             clip_on=False,
         )
         _set_svg_hover(
@@ -2049,4 +2201,15 @@ def _draw_clusters(
             f"dagua-cluster-label-{name}",
             _cluster_hover_text(name, graph, indices),
             svg_hover_map,
+        )
+
+    for depth in sorted(fill_paths_by_depth):
+        add_filled_collections(
+            ax=ax,
+            fill_paths=fill_paths_by_depth.get(depth, []),
+            fill_colors=fill_colors_by_depth.get(depth, []),
+            border_paths=border_paths_by_depth.get(depth, []),
+            border_colors=border_colors_by_depth.get(depth, []),
+            fill_zorder=0.0 + depth * 0.01,
+            border_zorder=0.05 + depth * 0.01,
         )
