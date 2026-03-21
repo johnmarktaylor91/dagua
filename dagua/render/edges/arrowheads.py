@@ -19,8 +19,7 @@ JOIN_SHOULDER_RATIO = 0.72
 OPEN_HEAD_STROKE_SCALE = 1.2
 TEE_HEAD_STROKE_SCALE = 1.35
 HOLLOW_HEAD_STROKE_SCALE = 1.35
-OPEN_HEAD_SEAT_RATIO = 0.34
-OPEN_HEAD_WIDTH_GAIN = 1.08
+OPEN_HEAD_WIDTH_GAIN = 1.12
 
 
 @dataclass(frozen=True)
@@ -277,22 +276,23 @@ def _open_head_stroke_scale(body_width: float, base_scale: float = OPEN_HEAD_STR
     return min(base_scale + proportional_boost, 2.0)
 
 
-def _open_head_seat_x(length: float, overlap: float) -> float:
-    """Return the local x-position of the short shaft seat for open heads.
+def _ornament_half_width(width: float, body_width: float) -> float:
+    """Return the outer half-width used by ornamental open heads.
 
     Parameters
     ----------
-    length : float
-        Arrowhead length in local coordinates.
-    overlap : float
-        Body overlap distance in local coordinates.
+    width : float
+        Requested head width in local coordinates.
+    body_width : float
+        Ribbon body width in local coordinates.
 
     Returns
     -------
     float
-        Seat location measured from the tip.
+        Ornament half-width. The body width is a hard lower bound so stroked
+        heads start from the shaft edges before they flare outward.
     """
-    return max(length - overlap * OPEN_HEAD_SEAT_RATIO, length * 0.84)
+    return max(body_width * 0.5, width * 0.5 * OPEN_HEAD_WIDTH_GAIN)
 
 
 def _joined_polygon_points(
@@ -423,43 +423,52 @@ def _dot(length: float, width: float, body_width: float) -> ArrowheadResult:
     """Build a filled circular head."""
     radius = min(length, width) * 0.5
     diameter = radius * 2.0
+    join_x = max(diameter - _join_overlap(max(length, diameter), body_width), radius)
     return ArrowheadResult(
         filled_paths=[_local_circle(radius, radius)],
         stroked_paths=[],
-        trim_contour=_local_trim_contour(diameter, max(diameter, body_width)),
+        trim_contour=_local_trim_contour(join_x, max(body_width, FLOAT_EPSILON)),
     )
 
 
 def _tee(length: float, width: float, body_width: float) -> ArrowheadResult:
     """Build a tee/bar head as a weighted stroked mark."""
-    bar_center = max(length * 0.35, width * 0.2)
-    path = _local_path([(bar_center, width * 0.45), (bar_center, -width * 0.45)], closed=False)
+    overlap = _join_overlap(length, body_width)
+    bar_x = max(length - overlap, length * 0.35)
+    neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
+    path = _local_path([(bar_x, neck_half_width), (bar_x, -neck_half_width)], closed=False)
     return ArrowheadResult(
         filled_paths=[],
         stroked_paths=[path],
-        trim_contour=_local_trim_contour(bar_center, max(body_width, FLOAT_EPSILON)),
+        trim_contour=_local_trim_contour(bar_x, max(body_width, FLOAT_EPSILON)),
         stroke_width_scale=_open_head_stroke_scale(body_width, base_scale=TEE_HEAD_STROKE_SCALE),
     )
 
 
 def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build an open vee head that seats slightly into the ribbon."""
+    """Build an open vee head whose arms start on the ribbon edges."""
     overlap = _join_overlap(length, body_width)
-    shoulder_x = max(length - overlap, length * 0.7)
-    seat_x = _open_head_seat_x(length, overlap)
     neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
+    outer_half_width = _ornament_half_width(width, body_width)
     path = _local_path(
         [
             (length, neck_half_width),
-            (seat_x, neck_half_width),
-            (shoulder_x, width * 0.5 * OPEN_HEAD_WIDTH_GAIN),
             (0.0, 0.0),
-            (shoulder_x, -width * 0.5 * OPEN_HEAD_WIDTH_GAIN),
-            (seat_x, -neck_half_width),
             (length, -neck_half_width),
         ],
         closed=False,
     )
+    if outer_half_width > neck_half_width + FLOAT_EPSILON:
+        path = _local_path(
+            [
+                (length, neck_half_width),
+                (length * 0.28, outer_half_width),
+                (0.0, 0.0),
+                (length * 0.28, -outer_half_width),
+                (length, -neck_half_width),
+            ],
+            closed=False,
+        )
     return ArrowheadResult(
         filled_paths=[],
         stroked_paths=[path],
@@ -469,30 +478,25 @@ def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build a crow-foot head with body-aligned stroke endpoints."""
-    overlap = _join_overlap(length, body_width)
-    fork_x = max(length - overlap, length * 0.6)
-    seat_x = _open_head_seat_x(length, overlap)
+    """Build a crow-foot head whose tines emerge from the shaft edges."""
     neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
-    center = _local_path([(length, 0.0), (seat_x, 0.0), (0.0, 0.0)], closed=False)
+    tine_half_width = _ornament_half_width(width * 0.62, body_width)
+    center = _local_path([(length, 0.0), (0.0, 0.0)], closed=False)
     left = _local_path(
         [
             (length, neck_half_width),
-            (seat_x, neck_half_width),
-            (fork_x, width * 0.24 * OPEN_HEAD_WIDTH_GAIN),
-            (0.0, 0.0),
+            (0.0, tine_half_width),
         ],
         closed=False,
     )
     right = _local_path(
         [
             (length, -neck_half_width),
-            (seat_x, -neck_half_width),
-            (fork_x, -width * 0.24 * OPEN_HEAD_WIDTH_GAIN),
-            (0.0, 0.0),
+            (0.0, -tine_half_width),
         ],
         closed=False,
     )
+    overlap = _join_overlap(length, body_width)
     return ArrowheadResult(
         filled_paths=[],
         stroked_paths=[center, left, right],
@@ -505,22 +509,21 @@ def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _curve(length: float, width: float, body_width: float, invert: bool = False) -> ArrowheadResult:
-    """Build a curved outline head."""
+    """Build a curved outline head that starts from one ribbon edge."""
     sign = -1.0 if invert else 1.0
     overlap = _join_overlap(length, body_width)
-    seat_x = _open_head_seat_x(length, overlap)
     neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
+    outer_half_width = _ornament_half_width(width, body_width)
     vertices = np.array(
         [
             [length, sign * neck_half_width],
-            [seat_x, sign * neck_half_width],
-            [length * 0.36, sign * width * 0.62 * OPEN_HEAD_WIDTH_GAIN],
-            [length * 0.7, sign * width * 0.54 * OPEN_HEAD_WIDTH_GAIN],
-            [length, 0.0],
+            [length * 0.72, sign * neck_half_width],
+            [length * 0.26, sign * outer_half_width],
+            [0.0, 0.0],
         ],
         dtype=np.float64,
     )
-    codes = [Path.MOVETO, Path.LINETO, Path.CURVE4, Path.CURVE4, Path.CURVE4]
+    codes = [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4]
     return ArrowheadResult(
         filled_paths=[],
         stroked_paths=[Path(vertices, codes)],
@@ -602,22 +605,26 @@ def _wedge(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _bracket(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build a bracket head."""
+    """Build a bracket head whose arms begin on the ribbon edges."""
     overlap = _join_overlap(length, body_width)
-    seat_x = _open_head_seat_x(length, overlap)
+    bracket_x = max(length - overlap * 0.6, length * 0.56)
+    neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
+    bracket_half_width = _ornament_half_width(width, body_width)
     path = _local_path(
         [
-            (length, width * 0.5),
-            (seat_x, width * 0.5),
-            (seat_x, -width * 0.5),
-            (length, -width * 0.5),
+            (length, neck_half_width),
+            (bracket_x, neck_half_width),
+            (bracket_x, bracket_half_width),
+            (bracket_x, -bracket_half_width),
+            (bracket_x, -neck_half_width),
+            (length, -neck_half_width),
         ],
         closed=False,
     )
     return ArrowheadResult(
         filled_paths=[],
         stroked_paths=[path],
-        trim_contour=_local_trim_contour(max(seat_x, length - overlap), body_width),
+        trim_contour=_local_trim_contour(length - overlap, body_width),
         stroke_width_scale=_open_head_stroke_scale(body_width),
     )
 

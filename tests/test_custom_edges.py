@@ -14,6 +14,7 @@ from dagua.render.edges.collection import (
     DaguaEdge,
     DaguaEdgeCollection,
     _stroked_head_linewidth,
+    _trimmed_body_curve,
     choose_rendering_tier,
 )
 from dagua.render.edges.dashes import dash_curve
@@ -43,6 +44,7 @@ def test_adaptive_subdivision_refines_curved_edges() -> None:
     straight_samples = adaptive_subdivide(straight, flatness=0.5)
 
     assert len(curved_samples) > len(straight_samples)
+    assert len(curved_samples) >= 40
     assert len(straight_samples) == 2
 
 
@@ -58,12 +60,11 @@ def test_ribbon_path_is_closed_and_round_caps_add_vertices() -> None:
     assert rounded.vertices.shape[0] > butt.vertices.shape[0]
 
 
-def test_curve_ribbon_path_default_flatness_is_finer_than_legacy_sampling() -> None:
-    """The default ribbon path should use finer subdivision than the coarse legacy setting."""
-    coarse = curve_ribbon_path(_curve(), width=4.0, flatness=0.75)
+def test_curve_ribbon_path_uses_dense_curved_sampling() -> None:
+    """Curved ribbon paths should keep enough vertices to hide the polyline scaffold."""
     refined = curve_ribbon_path(_curve(), width=4.0)
 
-    assert refined.vertices.shape[0] > coarse.vertices.shape[0]
+    assert refined.vertices.shape[0] >= 81
 
 
 def test_dash_curve_uses_round_caps_per_segment() -> None:
@@ -76,14 +77,14 @@ def test_dash_curve_uses_round_caps_per_segment() -> None:
 
 
 def test_dotted_dash_curve_uses_short_round_segments() -> None:
-    """Dotted edges should render as small round marks rather than chunky dashes."""
+    """Dotted edges should render as compact marks with controlled diameter."""
     curve = CubicBezier.from_points((0.0, 0.0), (6.0, 0.0), (12.0, 0.0), (18.0, 0.0))
 
     segments = dash_curve(curve, "dotted", width=3.0)
 
     assert segments
     first_length = build_arc_length_table(segments[0].curve).total_length
-    assert first_length < 1.0
+    assert first_length == pytest.approx(1.5, rel=0.05)
 
 
 def test_dash_curve_drops_truncated_terminal_dash() -> None:
@@ -114,10 +115,23 @@ def test_dashdot_uses_distinct_dash_and_dot_caps() -> None:
     curve = CubicBezier.from_points((0.0, 0.0), (18.0, 10.0), (36.0, -10.0), (54.0, 0.0))
 
     segments = dash_curve(curve, "dashdot", width=2.5)
+    lengths = [build_arc_length_table(segment.curve).total_length for segment in segments]
+    dash_lengths = [
+        length
+        for length, segment in zip(lengths, segments)
+        if segment.cap_start == "butt" and segment.cap_end == "butt"
+    ]
+    dot_lengths = [
+        length
+        for length, segment in zip(lengths, segments)
+        if segment.cap_start == "round" and segment.cap_end == "round"
+    ]
 
     assert segments
-    assert any(segment.cap_start == "butt" and segment.cap_end == "butt" for segment in segments)
-    assert any(segment.cap_start == "round" and segment.cap_end == "round" for segment in segments)
+    assert dash_lengths
+    assert dot_lengths
+    assert max(dash_lengths) == pytest.approx(10.0, rel=0.08)
+    assert max(dot_lengths) == pytest.approx(1.25, rel=0.08)
 
 
 @pytest.mark.parametrize("spec", ["normal", "dot", "diamond", "vee", "crow", "box", "simple"])
@@ -193,7 +207,7 @@ def test_open_arrowhead_seats_on_full_body_width() -> None:
     result = build_arrowhead(
         "vee",
         tip=(0.0, 0.0),
-        tangent=(-1.0, 0.0),
+        tangent=(1.0, 0.0),
         length=10.0,
         width=8.0,
         body_width=6.0,
@@ -204,6 +218,76 @@ def test_open_arrowhead_seats_on_full_body_width() -> None:
     )
 
     assert body_side_span == pytest.approx(6.0)
+
+
+def test_tee_arrowhead_spans_exact_body_width() -> None:
+    """Tee heads should match the ribbon width exactly at the junction."""
+    result = build_arrowhead(
+        "tee",
+        tip=(0.0, 0.0),
+        tangent=(1.0, 0.0),
+        length=8.0,
+        width=10.0,
+        body_width=6.0,
+    )
+
+    bar = result.stroked_paths[0].vertices
+    trim_vertices = result.trim_contour.vertices[:2]
+
+    assert np.allclose(bar[:, 0], trim_vertices[0, 0])
+    assert np.linalg.norm(bar[0] - bar[1]) == pytest.approx(6.0)
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected_anchors"),
+    [
+        ("vee", np.array([-3.0, 3.0], dtype=np.float64)),
+        ("crow", np.array([-3.0, 0.0, 3.0], dtype=np.float64)),
+        ("bracket", np.array([-3.0, 3.0], dtype=np.float64)),
+        ("curve", np.array([3.0], dtype=np.float64)),
+        ("icurve", np.array([-3.0], dtype=np.float64)),
+    ],
+)
+def test_ornamental_heads_anchor_from_body_edges(
+    spec: str,
+    expected_anchors: np.ndarray,
+) -> None:
+    """Open and ornamental heads should start on the ribbon edge geometry."""
+    result = build_arrowhead(
+        spec,
+        tip=(0.0, 0.0),
+        tangent=(1.0, 0.0),
+        length=9.0,
+        width=8.0,
+        body_width=6.0,
+    )
+
+    anchor_values = []
+    for path in result.stroked_paths:
+        max_x = float(np.max(path.vertices[:, 0]))
+        for vertex in path.vertices:
+            if vertex[0] == pytest.approx(max_x):
+                anchor_values.append(float(vertex[1]))
+    observed = np.array(sorted(anchor_values), dtype=np.float64)
+
+    assert np.allclose(observed, expected_anchors)
+
+
+def test_odot_overlaps_into_body_instead_of_sitting_tangent() -> None:
+    """Open dots should trim inside the circle so the body runs into the marker."""
+    result = build_arrowhead(
+        "odot",
+        tip=(0.0, 0.0),
+        tangent=(1.0, 0.0),
+        length=8.0,
+        width=6.0,
+        body_width=4.0,
+    )
+
+    trim_midpoint_x = float(result.trim_contour.vertices[:2, 0].mean())
+    circle_back_x = float(np.max(result.stroked_paths[0].vertices[:, 0]))
+
+    assert trim_midpoint_x < circle_back_x
 
 
 def test_stroked_head_linewidth_grows_with_thick_edges() -> None:
@@ -235,6 +319,16 @@ def test_stroked_head_linewidth_grows_with_thick_edges() -> None:
         _stroked_head_linewidth(thick_edge, hollow_result)
         > _stroked_head_linewidth(thin_edge, hollow_result) * 8.0
     )
+
+
+def test_trimmed_head_preserves_stroke_scale() -> None:
+    """Prepared head results should keep their requested stroke-weight multiplier."""
+    edge = DaguaEdge(curve=_curve(), width=3.0, stroke_width=3.0, arrowhead="vee")
+
+    _, head_result, _ = _trimmed_body_curve(edge, edge.curve)
+
+    assert head_result is not None
+    assert head_result.stroke_width_scale > 1.0
 
 
 def test_available_arrowheads_include_required_builtins() -> None:
