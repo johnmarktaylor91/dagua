@@ -22,6 +22,7 @@ from dagua.render.edges.geometry import (
 
 DEFAULT_CAP_SEGMENTS = 8
 DEFAULT_MITER_LIMIT = 4.0
+DEFAULT_RIBBON_FLATNESS = 0.3
 
 
 def line_intersection(
@@ -241,7 +242,7 @@ def polyline_ribbon_path(
 def curve_ribbon_path(
     curve: CubicBezier,
     width: float,
-    flatness: float = 0.75,
+    flatness: float = DEFAULT_RIBBON_FLATNESS,
     cap_start: str = "butt",
     cap_end: str = "butt",
     join_style: str = "miter",
@@ -255,7 +256,7 @@ def curve_ribbon_path(
         Curve centerline.
     width : float
         Ribbon width in data units.
-    flatness : float, default=0.75
+    flatness : float, default=0.3
         Maximum adaptive-subdivision flatness in data units.
     cap_start : str, default="butt"
         Start-cap style.
