@@ -37,6 +37,23 @@ MIN_ARROW_LENGTH_FACTOR = 1.6
 MIN_ARROW_WIDTH_FACTOR = 1.15
 THICK_STROKED_HEAD_GAIN = 0.05
 THICK_STROKED_HEAD_CAP = 1.4
+MIN_RENDER_WIDTH = 0.5
+ARROW_LENGTH_WIDTH_FLOOR = 3.0
+ARROW_WIDTH_WIDTH_FLOOR = 2.5
+SHORT_EDGE_HEAD_FRACTION = 0.72
+SHORT_EDGE_HEAD_FRACTION_BOTH_TERMINALS = 0.44
+THICK_DASH_THRESHOLD = 4.0
+THICK_DASH_CONNECTOR_WIDTH_RATIO = 0.22
+THICK_DASH_CONNECTOR_ALPHA = 0.24
+THICK_DASH_SEGMENT_WIDTH_RATIO = 0.9
+THICK_DOTTED_SEGMENT_WIDTH_RATIO = 0.74
+ZERO_LENGTH_LOOP_SCALE = 1.75
+ZERO_LENGTH_LOOP_FLOOR = 6.0
+LABEL_TERMINAL_MARGIN_FRACTION = 0.55
+LABEL_TERMINAL_MARGIN_FLOOR = 0.08
+LABEL_TERMINAL_MARGIN_CAP = 0.32
+LABEL_CLEARANCE_WIDTH_RATIO = 1.6
+LABEL_CLEARANCE_FLOOR = 4.0
 
 
 @dataclass
@@ -137,11 +154,12 @@ class DaguaEdge:
         float
             Arrowhead length in data units.
         """
-        return float(
-            self.arrowhead_length
+        base_length = (
+            float(self.arrowhead_length)
             if self.arrowhead_length is not None
             else max(self.width * 4.0, self.width)
         )
+        return max(base_length, self.width * ARROW_LENGTH_WIDTH_FLOOR)
 
     def resolved_arrow_width(self) -> float:
         """Return the effective arrowhead width.
@@ -151,11 +169,12 @@ class DaguaEdge:
         float
             Arrowhead width in data units.
         """
-        return float(
-            self.arrowhead_width
+        base_width = (
+            float(self.arrowhead_width)
             if self.arrowhead_width is not None
             else max(self.width * 3.0, self.width)
         )
+        return max(base_width, self.width * ARROW_WIDTH_WIDTH_FLOOR)
 
     def resolved_tail_arrow_length(self) -> float:
         """Return the effective tail arrow length.
@@ -166,7 +185,7 @@ class DaguaEdge:
             Tail-arrow length in data units.
         """
         if self.tail_arrow_length is not None:
-            return float(self.tail_arrow_length)
+            return max(float(self.tail_arrow_length), self.width * ARROW_LENGTH_WIDTH_FLOOR)
         return self.resolved_arrow_length()
 
     def resolved_tail_arrow_width(self) -> float:
@@ -178,7 +197,7 @@ class DaguaEdge:
             Tail-arrow width in data units.
         """
         if self.tail_arrow_width is not None:
-            return float(self.tail_arrow_width)
+            return max(float(self.tail_arrow_width), self.width * ARROW_WIDTH_WIDTH_FLOOR)
         return self.resolved_arrow_width()
 
 
@@ -213,6 +232,240 @@ def choose_rendering_tier(num_edges: int) -> RenderTier:
     if num_edges <= 100000:
         return "lines"
     return "bundled"
+
+
+def _render_width(width: float) -> float:
+    """Return the visible body width used for rasterized ribbon rendering.
+
+    Parameters
+    ----------
+    width : float
+        Requested body width in data units.
+
+    Returns
+    -------
+    float
+        Width clamped to a minimum visible floor.
+    """
+    return max(float(width), MIN_RENDER_WIDTH)
+
+
+def _curve_length(curve: CubicBezier) -> float:
+    """Return the sampled arc length of a cubic curve.
+
+    Parameters
+    ----------
+    curve : CubicBezier
+        Curve to measure.
+
+    Returns
+    -------
+    float
+        Total arc length in data units.
+    """
+    return build_arc_length_table(curve).total_length
+
+
+def _is_degenerate_curve(curve: CubicBezier) -> bool:
+    """Return whether a curve has no visible span.
+
+    Parameters
+    ----------
+    curve : CubicBezier
+        Curve to inspect.
+
+    Returns
+    -------
+    bool
+        ``True`` when the curve collapses to a coincident endpoint.
+    """
+    return _curve_length(curve) <= FLOAT_EPSILON
+
+
+def _coincident_endpoint_loop(edge: DaguaEdge) -> CubicBezier:
+    """Build a visible micro-loop for coincident endpoints.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Degenerate edge whose endpoints coincide.
+
+    Returns
+    -------
+    CubicBezier
+        Loop curve centered on the degenerate endpoint.
+    """
+    center = np.asarray(edge.curve.p0, dtype=np.float64)
+    terminal_extent = max(
+        edge.resolved_arrow_length() if edge.arrowhead != "none" else 0.0,
+        edge.resolved_tail_arrow_length() if edge.tail_arrow != "none" else 0.0,
+    )
+    loop_radius = max(
+        ZERO_LENGTH_LOOP_FLOOR,
+        _render_width(edge.width) * 3.0,
+        terminal_extent * ZERO_LENGTH_LOOP_SCALE,
+    )
+    return CubicBezier.from_points(
+        center,
+        center + np.array([loop_radius, loop_radius * 1.2], dtype=np.float64),
+        center + np.array([-loop_radius, loop_radius * 1.2], dtype=np.float64),
+        center,
+    )
+
+
+def _normalize_edge_curve(edge: DaguaEdge) -> DaguaEdge:
+    """Replace degenerate centerlines with a visible fallback loop.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge to normalize.
+
+    Returns
+    -------
+    DaguaEdge
+        Edge with a renderable centerline.
+    """
+    if not _is_degenerate_curve(edge.curve):
+        return edge
+    return replace(edge, curve=_coincident_endpoint_loop(edge))
+
+
+def _segment_render_width(edge: DaguaEdge) -> float:
+    """Return the ribbon width used for one visible dash segment.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge being rendered.
+
+    Returns
+    -------
+    float
+        Width used for filled dash ribbons.
+    """
+    render_width = _render_width(edge.width)
+    if not isinstance(edge.linestyle, str):
+        return render_width
+    if render_width < THICK_DASH_THRESHOLD:
+        return render_width
+    if edge.linestyle == "dotted":
+        return render_width * THICK_DOTTED_SEGMENT_WIDTH_RATIO
+    if edge.linestyle in {"dashed", "dashdot"}:
+        return render_width * THICK_DASH_SEGMENT_WIDTH_RATIO
+    return render_width
+
+
+def _needs_dash_connector(edge: DaguaEdge) -> bool:
+    """Return whether a thick dashed edge should get a continuous under-stroke.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge being rendered.
+
+    Returns
+    -------
+    bool
+        ``True`` when a subtle connector stroke should be painted.
+    """
+    return (
+        isinstance(edge.linestyle, str)
+        and edge.linestyle in {"dashed", "dashdot"}
+        and _render_width(edge.width) >= THICK_DASH_THRESHOLD
+    )
+
+
+def _terminal_dimensions(
+    edge: DaguaEdge,
+    curve_length: float,
+    terminal: str,
+    has_both_terminals: bool,
+) -> Tuple[float, float]:
+    """Return head dimensions clamped to the available visible span.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge owning the terminal marker.
+    curve_length : float
+        Available arc length before terminal trimming.
+    terminal : str
+        ``"head"`` or ``"tail"``.
+    has_both_terminals : bool
+        Whether both ends render arrow markers.
+
+    Returns
+    -------
+    tuple[float, float]
+        Terminal ``(length, width)`` in data units.
+    """
+    if terminal == "head":
+        base_length = edge.resolved_arrow_length()
+        base_width = edge.resolved_arrow_width()
+    else:
+        base_length = edge.resolved_tail_arrow_length()
+        base_width = edge.resolved_tail_arrow_width()
+    if curve_length <= FLOAT_EPSILON:
+        return base_length, base_width
+    max_fraction = (
+        SHORT_EDGE_HEAD_FRACTION_BOTH_TERMINALS if has_both_terminals else SHORT_EDGE_HEAD_FRACTION
+    )
+    capped_length = min(base_length, curve_length * max_fraction)
+    min_length = _render_width(edge.width) * MIN_ARROW_LENGTH_FACTOR
+    resolved_length = max(capped_length, min_length)
+    max_width = max(_render_width(edge.width) * MIN_ARROW_WIDTH_FACTOR, resolved_length * 0.9)
+    resolved_width = min(base_width, max_width)
+    resolved_width = max(resolved_width, _render_width(edge.width) * MIN_ARROW_WIDTH_FACTOR)
+    return resolved_length, resolved_width
+
+
+def _label_margin_fraction(edge: DaguaEdge, curve_length: float) -> float:
+    """Return the inward label clamp used to keep text clear of terminals.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge whose label is being placed.
+    curve_length : float
+        Reference curve length in data units.
+
+    Returns
+    -------
+    float
+        Fractional margin applied at both curve ends.
+    """
+    if curve_length <= FLOAT_EPSILON:
+        return LABEL_TERMINAL_MARGIN_FLOOR
+    terminal_extent = 0.0
+    if edge.arrowhead != "none":
+        terminal_extent = max(terminal_extent, edge.resolved_arrow_length())
+    if edge.tail_arrow != "none":
+        terminal_extent = max(terminal_extent, edge.resolved_tail_arrow_length())
+    if terminal_extent <= FLOAT_EPSILON:
+        return LABEL_TERMINAL_MARGIN_FLOOR
+    margin = (terminal_extent * LABEL_TERMINAL_MARGIN_FRACTION) / curve_length
+    return min(max(margin, LABEL_TERMINAL_MARGIN_FLOOR), LABEL_TERMINAL_MARGIN_CAP)
+
+
+def _label_offset(edge: DaguaEdge) -> float:
+    """Return the visible label clearance away from the edge body.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge whose label is being placed.
+
+    Returns
+    -------
+    float
+        Perpendicular label offset in data units.
+    """
+    return max(
+        edge.label_offset,
+        _render_width(edge.width) * LABEL_CLEARANCE_WIDTH_RATIO,
+        LABEL_CLEARANCE_FLOOR,
+    )
 
 
 def _tail_body_direction(curve: CubicBezier) -> np.ndarray:
@@ -339,8 +592,8 @@ def _scaled_head_size(edge: DaguaEdge, scale: float, terminal: str) -> Tuple[flo
     else:
         base_length = edge.resolved_tail_arrow_length()
         base_width = edge.resolved_tail_arrow_width()
-    scaled_length = max(edge.width * MIN_ARROW_LENGTH_FACTOR, base_length * scale)
-    scaled_width = max(edge.width * MIN_ARROW_WIDTH_FACTOR, base_width * scale)
+    scaled_length = max(_render_width(edge.width) * MIN_ARROW_LENGTH_FACTOR, base_length * scale)
+    scaled_width = max(_render_width(edge.width) * MIN_ARROW_WIDTH_FACTOR, base_width * scale)
     return scaled_length, scaled_width
 
 
@@ -474,29 +727,45 @@ def _trimmed_body_curve(
     """
     head_result: Optional[ArrowheadResult] = None
     tail_result: Optional[ArrowheadResult] = None
+    table = build_arc_length_table(curve)
+    has_head = edge.arrowhead != "none"
+    has_tail = edge.tail_arrow != "none"
+    has_both_terminals = has_head and has_tail
+    render_width = _render_width(edge.width)
 
-    if edge.arrowhead != "none":
+    if has_head:
+        head_length, head_width = _terminal_dimensions(
+            edge,
+            curve_length=table.total_length,
+            terminal="head",
+            has_both_terminals=has_both_terminals,
+        )
         head_result = build_arrowhead(
             edge.arrowhead,
             tip=curve.p1,
             tangent=_head_body_direction(curve),
-            length=edge.resolved_arrow_length(),
-            width=edge.resolved_arrow_width(),
-            body_width=edge.width,
+            length=head_length,
+            width=head_width,
+            body_width=render_width,
             fill_mode=edge.arrow_fill,
         )
-    if edge.tail_arrow != "none":
+    if has_tail:
+        tail_length, tail_width = _terminal_dimensions(
+            edge,
+            curve_length=table.total_length,
+            terminal="tail",
+            has_both_terminals=has_both_terminals,
+        )
         tail_result = build_arrowhead(
             edge.tail_arrow,
             tip=curve.p0,
             tangent=_tail_body_direction(curve),
-            length=edge.resolved_tail_arrow_length(),
-            width=edge.resolved_tail_arrow_width(),
-            body_width=edge.width,
+            length=tail_length,
+            width=tail_width,
+            body_width=render_width,
             fill_mode=edge.arrow_fill,
         )
 
-    table = build_arc_length_table(curve)
     start_trim = 0.0
     end_trim = table.total_length
     if tail_result is not None:
@@ -509,7 +778,7 @@ def _trimmed_body_curve(
             start_trim,
         )
 
-    if end_trim - start_trim <= max(edge.width, 0.5):
+    if end_trim - start_trim <= render_width:
         return None, head_result, tail_result
 
     start_t = t_at_arc_length(table, start_trim)
@@ -634,7 +903,8 @@ class DaguaEdgeCollection:
         tier : str | None, default=None
             Optional tier override.
         """
-        lane_edges = _apply_lane_offsets(list(edges))
+        normalized_edges = [_normalize_edge_curve(edge) for edge in edges]
+        lane_edges = _apply_lane_offsets(normalized_edges)
         self.edges = _apply_terminal_density_rules(lane_edges)
         self.tier = tier or choose_rendering_tier(len(self.edges))
         self.prepared_edges = [
@@ -697,11 +967,12 @@ class DaguaEdgeCollection:
             if prepared.body_curve is None:
                 continue
             edge = prepared.edge
+            render_width = _render_width(edge.width)
             if self.tier in {"lines", "bundled"}:
                 dash_segments = dash_curve(
                     prepared.body_curve,
                     edge.linestyle,
-                    edge.width,
+                    render_width,
                     align_to_end=prepared.head_result is not None,
                 )
                 for segment in dash_segments:
@@ -713,18 +984,31 @@ class DaguaEdgeCollection:
             dash_segments = dash_curve(
                 prepared.body_curve,
                 edge.linestyle,
-                edge.width,
+                render_width,
                 align_to_end=prepared.head_result is not None,
             )
+            if _needs_dash_connector(edge):
+                connector_width = max(
+                    MIN_RENDER_WIDTH,
+                    render_width * THICK_DASH_CONNECTOR_WIDTH_RATIO,
+                )
+                connector_path = (
+                    simple_quad_ribbon(prepared.body_curve, connector_width)
+                    if self.tier == "simplified"
+                    else curve_ribbon_path(prepared.body_curve, width=connector_width)
+                )
+                body_paths.append(PathPatch(connector_path))
+                body_colors.append(to_rgba(edge.color, min(edge.alpha, THICK_DASH_CONNECTOR_ALPHA)))
             if not dash_segments:
                 dash_segments = [DashSegment(prepared.body_curve, cap_start="butt", cap_end="butt")]
+            segment_width = _segment_render_width(edge)
             for segment in dash_segments:
                 if self.tier == "simplified":
-                    path = simple_quad_ribbon(segment.curve, edge.width)
+                    path = simple_quad_ribbon(segment.curve, segment_width)
                 else:
                     path = curve_ribbon_path(
                         segment.curve,
-                        width=edge.width,
+                        width=segment_width,
                         cap_start=segment.cap_start,
                         cap_end=segment.cap_end,
                     )
@@ -835,11 +1119,14 @@ class DaguaEdgeCollection:
                 placements.append(None)
                 continue
             reference_curve = prepared.body_curve or prepared.lane_curve
+            curve_length = _curve_length(reference_curve)
+            label_margin = _label_margin_fraction(edge, curve_length)
+            label_position = min(max(edge.label_position, label_margin), 1.0 - label_margin)
             placements.append(
                 place_edge_label(
                     reference_curve,
-                    label_position=edge.label_position,
-                    label_offset=edge.label_offset,
+                    label_position=label_position,
+                    label_offset=_label_offset(edge),
                     label_rotate=edge.label_rotate,
                     label_side=edge.label_side,
                 )
