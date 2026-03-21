@@ -544,7 +544,12 @@ def test_vee_arrow_is_open_polygon() -> None:
     head_collections = [
         collection
         for collection in ax.collections
-        if isinstance(collection, PatchCollection) and float(collection.get_zorder()) == 2.0
+        if isinstance(collection, PatchCollection)
+        and float(collection.get_zorder()) == 2.0
+        and not (
+            len(collection.get_paths()) == graph.num_nodes
+            and np.allclose(collection.get_linewidths(), 0.0)
+        )
     ]
     assert len(polygons) == 0, "Custom heads should not fall back to standalone Polygon patches"
     assert len(head_collections) >= 1, "Vee arrow should be rendered by the custom head collection"
@@ -570,7 +575,12 @@ def test_straight_routing_has_arrowhead() -> None:
     head_collections = [
         collection
         for collection in ax.collections
-        if isinstance(collection, PatchCollection) and float(collection.get_zorder()) == 2.0
+        if isinstance(collection, PatchCollection)
+        and float(collection.get_zorder()) == 2.0
+        and not (
+            len(collection.get_paths()) == graph.num_nodes
+            and np.allclose(collection.get_linewidths(), 0.0)
+        )
     ]
     assert len(head_collections) >= 1, "Straight routing should produce arrowhead collection"
     verts = head_collections[0].get_paths()[0].vertices
@@ -761,6 +771,7 @@ def test_cluster_labels_expand_bbox_using_measured_width(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cluster boxes should widen to fit measured label text."""
+    from matplotlib.collections import PatchCollection
 
     graph = DaguaGraph()
     graph.add_node("a")
@@ -772,12 +783,16 @@ def test_cluster_labels_expand_bbox_using_measured_width(
             padding=0.0,
             font_size=20.0,
             label_offset=(0.0, 20.0),
+            stroke_width=0.0,
         ),
     )
 
     monkeypatch.setattr(mpl_renderer, "measure_text", lambda *args, **kwargs: (80.0, 20.0))
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-200.0, 200.0)
+    ax.set_ylim(-100.0, 100.0)
+    fig.canvas.draw()
     _draw_clusters(
         ax=ax,
         graph=graph,
@@ -785,8 +800,14 @@ def test_cluster_labels_expand_bbox_using_measured_width(
         sizes=np.array([[70.0, 20.0]], dtype=float),
     )
 
-    assert len(ax.patches) == 1
-    assert ax.patches[0].get_width() == pytest.approx(80.0)
+    assert len(ax.patches) == 0
+    assert len(ax.collections) == 1
+    assert isinstance(ax.collections[0], PatchCollection)
+    path = ax.collections[0].get_paths()[0]
+    vertices = path.vertices
+    width = float(vertices[:, 0].max() - vertices[:, 0].min())
+    expected_width = max(70.0, mpl_renderer._points_to_data_units(ax, 80.0, "x"))
+    assert width == pytest.approx(expected_width)
     assert len(ax.texts) == 1
     assert ax.texts[0].get_clip_on() is False
     plt.close(fig)
@@ -796,6 +817,7 @@ def test_cluster_offsets_and_corner_radius_use_display_scale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cluster label offsets and corner radius should be converted from points."""
+    from matplotlib.collections import PatchCollection
 
     graph = DaguaGraph()
     graph.add_node("a")
@@ -807,6 +829,7 @@ def test_cluster_offsets_and_corner_radius_use_display_scale(
             padding=0.0,
             corner_radius=6.0,
             label_offset=(8.0, 20.0),
+            stroke_width=0.0,
         ),
     )
 
@@ -824,18 +847,21 @@ def test_cluster_offsets_and_corner_radius_use_display_scale(
         sizes=np.array([[20.0, 20.0]], dtype=float),
     )
 
-    assert len(ax.patches) == 1
+    assert len(ax.patches) == 0
+    assert len(ax.collections) == 1
+    assert isinstance(ax.collections[0], PatchCollection)
     assert len(ax.texts) == 1
     display_scale = _compute_display_scale(ax)
-    label_width = 40.0
-    label_height = 12.0
+    label_width = mpl_renderer._points_to_data_units(ax, 40.0, "x")
+    label_height = mpl_renderer._points_to_data_units(ax, 12.0, "y")
     initial_x_min = -10.0
     initial_x_max = 10.0
     expanded_width = max(label_width + (8.0 * display_scale * 2.0), initial_x_max - initial_x_min)
     x_min = -expanded_width / 2.0
-    y_max = 10.0 + max(14.0, label_height)
+    y_max = 10.0 + max(mpl_renderer._points_to_data_units(ax, 14.0, "y"), label_height)
+    path = ax.collections[0].get_paths()[0]
 
     assert ax.texts[0].get_position()[0] == pytest.approx(x_min + (8.0 * display_scale))
     assert ax.texts[0].get_position()[1] == pytest.approx(y_max - (20.0 * display_scale))
-    assert ax.patches[0].get_boxstyle().rounding_size == pytest.approx(6.0 * display_scale)
+    assert path.vertices[0][0] == pytest.approx(x_min + (6.0 * display_scale), abs=1e-6)
     plt.close(fig)
