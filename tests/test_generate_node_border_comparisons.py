@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Tuple
 
 import pytest
+from PIL import Image, ImageDraw
 
 import scripts.generate_node_border_comparisons as generator
 from scripts.generate_node_border_comparisons import (
@@ -57,9 +58,23 @@ def test_graphviz_comparison_graph_matches_requested_dag() -> None:
         for index in range(graph.edge_index.shape[1])
     }
 
-    assert graph.node_labels == ["A", "B", "C", "D", "E"]
+    assert graph.node_labels == ["Input", "Process", "Transform", "Validate", "Output"]
     assert positions.shape == (5, 2)
     assert edge_pairs == {(0, 1), (0, 2), (1, 3), (2, 3), (3, 4)}
+
+
+def test_default_and_graphviz_core_dags_share_the_same_showcase_scene() -> None:
+    """The two core images should compare the same labeled DAG."""
+
+    default_graph, default_positions = _default_dag()
+    comparison_graph, comparison_positions = _graphviz_comparison_dag()
+
+    assert default_graph.direction == "TB"
+    assert comparison_graph.direction == "TB"
+    assert default_graph.node_labels == comparison_graph.node_labels
+    assert tuple(default_positions.flatten().tolist()) == tuple(
+        comparison_positions.flatten().tolist()
+    )
 
 
 @pytest.mark.parametrize(
@@ -88,11 +103,11 @@ def test_solid_shape_showcase_uses_shared_fill_and_stroke() -> None:
     assert {spec.style.stroke_dash for spec in specs} == {"solid"}
 
 
-def test_render_graphviz_comparison_uses_dot_engine(
+def test_render_graphviz_comparison_uses_shared_positions_for_graphviz_native(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The Graphviz comparison should render Graphviz via dot without fixed positions."""
+    """The comparison should render Graphviz natively from the shared fixed scene."""
 
     captured: dict[str, object] = {}
 
@@ -103,12 +118,14 @@ def test_render_graphviz_comparison_uses_dot_engine(
         positions: Any,
         *,
         figure_size: Tuple[float, float],
+        margin: float = 26.0,
     ) -> None:
         """Record Dagua panel render arguments without rendering an image."""
 
         captured["dagua_title"] = title
         captured["dagua_labels"] = list(graph.node_labels)
         captured["dagua_positions_shape"] = tuple(positions.shape)
+        captured["dagua_margin"] = margin
         output_path.write_bytes(b"dagua")
 
     def fake_render_graphviz_native(
@@ -144,15 +161,54 @@ def test_render_graphviz_comparison_uses_dot_engine(
 
     generator._render_graphviz_comparison(tmp_path / "graphviz_comparison.png")
 
-    assert captured["engine"] == "dot"
-    assert captured["graphviz_positions"] is None
+    assert captured["engine"] == "neato"
+    assert captured["graphviz_positions"] is not None
+    assert tuple(captured["graphviz_positions"].shape) == (5, 2)
     assert captured["dagua_title"] is None
-    assert captured["dagua_labels"] == ["A", "B", "C", "D", "E"]
-    assert captured["graphviz_labels"] == ["A", "B", "C", "D", "E"]
+    assert captured["dagua_labels"] == ["Input", "Process", "Transform", "Validate", "Output"]
+    assert captured["graphviz_labels"] == ["Input", "Process", "Transform", "Validate", "Output"]
     assert captured["panel_titles"] == ["Graphviz native", "Dagua"]
 
 
-@pytest.mark.skipif(shutil.which("dot") is None, reason="Graphviz dot is not installed")
+def test_normalize_panel_raster_matches_content_scale_across_sources(tmp_path: Path) -> None:
+    """Normalization should remove extra whitespace before panel composition."""
+
+    image_specs = [
+        ("tight.png", (240, 160), (50, 45, 190, 115)),
+        ("loose.png", (420, 280), (140, 105, 280, 175)),
+    ]
+    output_size = (600, 420)
+    normalized_images: list[Any] = []
+
+    for filename, size, rectangle in image_specs:
+        image = Image.new("RGB", size, "white")
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(rectangle, radius=16, fill="#DCEEFF", outline="#4B6E88", width=4)
+        path = tmp_path / filename
+        image.save(path)
+        normalized_images.append(generator._normalize_panel_raster(path, canvas_size=output_size))
+
+    def _content_bbox(image_array: Any) -> tuple[int, int, int, int]:
+        """Return the non-white bounding box for a normalized panel raster."""
+
+        mask = (255 - image_array[..., :3]).sum(axis=2) > 18
+        y_indices, x_indices = mask.nonzero()
+        return (
+            int(x_indices.min()),
+            int(y_indices.min()),
+            int(x_indices.max()) + 1,
+            int(y_indices.max()) + 1,
+        )
+
+    first_bbox = _content_bbox(normalized_images[0])
+    second_bbox = _content_bbox(normalized_images[1])
+
+    assert normalized_images[0].shape == (output_size[1], output_size[0], 3)
+    assert normalized_images[1].shape == (output_size[1], output_size[0], 3)
+    assert first_bbox == second_bbox
+
+
+@pytest.mark.skipif(shutil.which("neato") is None, reason="Graphviz neato is not installed")
 def test_generate_node_border_comparisons_renders_graphviz_panel(tmp_path: Path) -> None:
     """Graphviz comparison generation should emit the requested output file."""
 
