@@ -522,6 +522,7 @@ def _trimmed_body_curve(
             stroked_paths=head_result.stroked_paths,
             trim_contour=head_result.trim_contour,
             trim_t=end_t,
+            stroke_width_scale=head_result.stroke_width_scale,
         )
     if tail_result is not None:
         tail_result = ArrowheadResult(
@@ -529,6 +530,7 @@ def _trimmed_body_curve(
             stroked_paths=tail_result.stroked_paths,
             trim_contour=tail_result.trim_contour,
             trim_t=start_t,
+            stroke_width_scale=tail_result.stroke_width_scale,
         )
     return trimmed, head_result, tail_result
 
