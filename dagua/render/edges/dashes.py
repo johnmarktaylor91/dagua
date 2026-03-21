@@ -26,6 +26,11 @@ DASHDOT_OFF_AFTER_DASH_RATIO = 2.0
 DASHDOT_DOT_RATIO = 0.5
 DASHDOT_OFF_AFTER_DOT_RATIO = 2.0
 TERMINAL_DASH_MIN_RATIO = 0.65
+THICK_PATTERN_THRESHOLD = 3.25
+THICK_PATTERN_GAIN = 0.16
+THICK_DOTTED_ON_RATIO = 0.32
+THICK_DASH_ON_SHRINK = 0.9
+THICK_DOT_GAP_GAIN = 0.2
 
 
 @dataclass(frozen=True)
@@ -64,18 +69,48 @@ def parse_dash_pattern(pattern: DashPattern, width: float) -> Tuple[float, ...]:
     """
     scaled_width = max(float(width), 0.25)
     if isinstance(pattern, str):
+        thick_gain = (
+            1.0
+            if scaled_width <= THICK_PATTERN_THRESHOLD
+            else 1.0 + min((scaled_width - THICK_PATTERN_THRESHOLD) * THICK_PATTERN_GAIN, 0.9)
+        )
         if pattern == "solid":
             return ()
         if pattern == "dashed":
-            return (DASHED_ON_RATIO * scaled_width, DASHED_OFF_RATIO * scaled_width)
+            on_length = DASHED_ON_RATIO * scaled_width
+            off_length = DASHED_OFF_RATIO * scaled_width
+            if scaled_width > THICK_PATTERN_THRESHOLD:
+                on_length *= THICK_DASH_ON_SHRINK
+                off_length *= thick_gain
+            return (on_length, off_length)
         if pattern == "dotted":
-            return (DOTTED_ON_RATIO * scaled_width, DOTTED_OFF_RATIO * scaled_width)
+            on_length = DOTTED_ON_RATIO * scaled_width
+            off_length = DOTTED_OFF_RATIO * scaled_width
+            if scaled_width > THICK_PATTERN_THRESHOLD:
+                on_length = min(on_length, THICK_DOTTED_ON_RATIO * scaled_width)
+                off_length *= 1.0 + min(
+                    (scaled_width - THICK_PATTERN_THRESHOLD) * THICK_DOT_GAP_GAIN,
+                    1.0,
+                )
+            return (on_length, off_length)
         if pattern == "dashdot":
+            dash_length = DASHDOT_ON_RATIO * scaled_width
+            gap_after_dash = DASHDOT_OFF_AFTER_DASH_RATIO * scaled_width
+            dot_length = DASHDOT_DOT_RATIO * scaled_width
+            gap_after_dot = DASHDOT_OFF_AFTER_DOT_RATIO * scaled_width
+            if scaled_width > THICK_PATTERN_THRESHOLD:
+                dash_length *= THICK_DASH_ON_SHRINK
+                gap_after_dash *= thick_gain
+                dot_length = min(dot_length, THICK_DOTTED_ON_RATIO * scaled_width)
+                gap_after_dot *= 1.0 + min(
+                    (scaled_width - THICK_PATTERN_THRESHOLD) * THICK_DOT_GAP_GAIN,
+                    1.0,
+                )
             return (
-                DASHDOT_ON_RATIO * scaled_width,
-                DASHDOT_OFF_AFTER_DASH_RATIO * scaled_width,
-                DASHDOT_DOT_RATIO * scaled_width,
-                DASHDOT_OFF_AFTER_DOT_RATIO * scaled_width,
+                dash_length,
+                gap_after_dash,
+                dot_length,
+                gap_after_dot,
             )
         raise ValueError(f"Unsupported dash pattern: {pattern!r}.")
 
