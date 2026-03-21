@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw
 import scripts.generate_node_border_comparisons as generator
 from scripts.generate_node_border_comparisons import (
     REQUESTED_FILENAMES,
+    _build_graphviz_comparison_graph,
     _cluster_graph,
     _default_dag,
     _graphviz_comparison_dag,
@@ -61,6 +62,21 @@ def test_graphviz_comparison_graph_matches_requested_dag() -> None:
     assert graph.node_labels == ["Input", "Process", "Transform", "Validate", "Output"]
     assert positions.shape == (5, 2)
     assert edge_pairs == {(0, 1), (0, 2), (1, 3), (2, 3), (3, 4)}
+
+
+def test_build_graphviz_comparison_graph_uses_showcase_styling() -> None:
+    """The Dagua comparison panel should use stronger showcase styling."""
+
+    graph = _build_graphviz_comparison_graph()
+
+    assert graph.default_node_style.fill == "#D6E5F9"
+    assert graph.default_node_style.stroke == "#426081"
+    assert graph.default_node_style.stroke_width == pytest.approx(1.9)
+    assert graph.default_node_style.font_size == pytest.approx(11.0)
+    assert graph.default_node_style.font_weight == "bold"
+    assert graph.default_edge_style.color == "#5A6D84"
+    assert graph.default_edge_style.width == pytest.approx(1.9)
+    assert graph.default_edge_style.opacity == pytest.approx(0.95)
 
 
 def test_default_and_graphviz_core_dags_share_the_same_showcase_scene() -> None:
