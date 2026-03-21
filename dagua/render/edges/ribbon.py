@@ -22,7 +22,7 @@ from dagua.render.edges.geometry import (
 
 DEFAULT_CAP_SEGMENTS = 8
 DEFAULT_MITER_LIMIT = 4.0
-DEFAULT_RIBBON_FLATNESS = 0.3
+DEFAULT_RIBBON_FLATNESS = 0.12
 
 
 def line_intersection(
@@ -256,7 +256,7 @@ def curve_ribbon_path(
         Curve centerline.
     width : float
         Ribbon width in data units.
-    flatness : float, default=0.3
+    flatness : float, default=0.12
         Maximum adaptive-subdivision flatness in data units.
     cap_start : str, default="butt"
         Start-cap style.

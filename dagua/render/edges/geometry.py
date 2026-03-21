@@ -15,7 +15,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 FLOAT_EPSILON = 1e-9
-MAX_SUBDIVISION_DEPTH = 16
+MAX_SUBDIVISION_DEPTH = 18
+DEFAULT_SUBDIVISION_FLATNESS = 0.25
+MIN_CURVED_SAMPLE_POINTS = 40
+CURVED_SAMPLE_EPSILON = 1e-4
 
 Point = NDArray[np.float64]
 
@@ -391,15 +394,53 @@ def _adaptive_subdivide(
     _adaptive_subdivide(right, mid, t1, flatness, depth - 1, results)
 
 
-def adaptive_subdivide(curve: CubicBezier, flatness: float = 0.75) -> List[SamplePoint]:
+def _resample_curve(
+    curve: CubicBezier,
+    n_samples: int,
+) -> List[SamplePoint]:
+    """Return uniformly parameterized samples for one cubic curve.
+
+    Parameters
+    ----------
+    curve : CubicBezier
+        Curve to sample.
+    n_samples : int
+        Number of requested samples.
+
+    Returns
+    -------
+    list[SamplePoint]
+        Samples including both endpoints.
+    """
+    if n_samples < 2:
+        raise ValueError("n_samples must be at least 2.")
+    ts = np.linspace(0.0, 1.0, n_samples, dtype=np.float64)
+    return [
+        SamplePoint(
+            t=float(t_value),
+            point=evaluate_cubic(curve, float(t_value)),
+            tangent=tangent_cubic(curve, float(t_value)),
+        )
+        for t_value in ts
+    ]
+
+
+def adaptive_subdivide(
+    curve: CubicBezier,
+    flatness: float = DEFAULT_SUBDIVISION_FLATNESS,
+    min_curved_samples: int = MIN_CURVED_SAMPLE_POINTS,
+) -> List[SamplePoint]:
     """Sample a cubic bezier using flatness-driven subdivision.
 
     Parameters
     ----------
     curve : CubicBezier
         Curve to sample.
-    flatness : float, default=0.75
+    flatness : float, default=0.25
         Maximum chord deviation per accepted segment in data units.
+    min_curved_samples : int, default=40
+        Minimum number of returned samples for non-linear curves. Straight
+        cubics remain at their adaptive minimum so simple edges stay cheap.
 
     Returns
     -------
@@ -409,7 +450,9 @@ def adaptive_subdivide(curve: CubicBezier, flatness: float = 0.75) -> List[Sampl
     start_tangent = tangent_cubic(curve, 0.0)
     results = [SamplePoint(0.0, curve.p0, start_tangent)]
     _adaptive_subdivide(curve, 0.0, 1.0, flatness, MAX_SUBDIVISION_DEPTH, results)
-    return results
+    if cubic_flatness(curve) <= CURVED_SAMPLE_EPSILON or len(results) >= min_curved_samples:
+        return results
+    return _resample_curve(curve, min_curved_samples)
 
 
 def polyline_length(points: NDArray[np.float64]) -> float:
