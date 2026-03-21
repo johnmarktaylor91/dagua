@@ -77,14 +77,28 @@ def test_dash_curve_uses_round_caps_per_segment() -> None:
 
 
 def test_dotted_dash_curve_uses_short_round_segments() -> None:
-    """Dotted edges should render as compact marks with controlled diameter."""
+    """Dotted edges should render as circular dots instead of short capsules."""
     curve = CubicBezier.from_points((0.0, 0.0), (6.0, 0.0), (12.0, 0.0), (18.0, 0.0))
+    width = 3.0
 
-    segments = dash_curve(curve, "dotted", width=3.0)
+    segments = dash_curve(curve, "dotted", width=width)
 
     assert segments
     first_length = build_arc_length_table(segments[0].curve).total_length
-    assert first_length == pytest.approx(1.5, rel=0.05)
+    dot_path = curve_ribbon_path(
+        segments[0].curve,
+        width=width,
+        cap_start=segments[0].cap_start,
+        cap_end=segments[0].cap_end,
+    )
+    dot_vertices = dot_path.vertices
+    dot_width = float(dot_vertices[:, 0].max() - dot_vertices[:, 0].min())
+    dot_height = float(dot_vertices[:, 1].max() - dot_vertices[:, 1].min())
+
+    assert first_length < width * 0.05
+    assert dot_width == pytest.approx(width, rel=0.05)
+    assert dot_height == pytest.approx(width, rel=0.05)
+    assert dot_width / dot_height == pytest.approx(1.0, rel=0.05)
 
 
 def test_dash_curve_drops_truncated_terminal_dash() -> None:
@@ -111,10 +125,11 @@ def test_dash_curve_aligns_terminal_dash_with_arrowhead_join() -> None:
 
 
 def test_dashdot_uses_distinct_dash_and_dot_caps() -> None:
-    """Dashdot should keep short round dots separate from longer butt-capped dashes."""
+    """Dashdot should keep circular dots clearly separated from longer dashes."""
     curve = CubicBezier.from_points((0.0, 0.0), (18.0, 10.0), (36.0, -10.0), (54.0, 0.0))
+    width = 2.5
 
-    segments = dash_curve(curve, "dashdot", width=2.5)
+    segments = dash_curve(curve, "dashdot", width=width)
     lengths = [build_arc_length_table(segment.curve).total_length for segment in segments]
     dash_lengths = [
         length
@@ -126,25 +141,42 @@ def test_dashdot_uses_distinct_dash_and_dot_caps() -> None:
         for length, segment in zip(lengths, segments)
         if segment.cap_start == "round" and segment.cap_end == "round"
     ]
+    dot_paths = [
+        curve_ribbon_path(
+            segment.curve,
+            width=width,
+            cap_start=segment.cap_start,
+            cap_end=segment.cap_end,
+        )
+        for segment in segments
+        if segment.cap_start == "round" and segment.cap_end == "round"
+    ]
 
     assert segments
     assert dash_lengths
     assert dot_lengths
-    assert max(dash_lengths) == pytest.approx(10.0, rel=0.08)
-    assert max(dot_lengths) == pytest.approx(1.25, rel=0.08)
+    assert dot_paths
+    assert max(dash_lengths) == pytest.approx(width * 5.0, rel=0.08)
+    assert max(dot_lengths) < width * 0.05
+    dot_vertices = dot_paths[0].vertices
+    dot_width = float(dot_vertices[:, 0].max() - dot_vertices[:, 0].min())
+    dot_height = float(dot_vertices[:, 1].max() - dot_vertices[:, 1].min())
+    assert dot_width == pytest.approx(width, rel=0.05)
+    assert dot_height == pytest.approx(width, rel=0.05)
+    assert dot_width / dot_height == pytest.approx(1.0, rel=0.05)
 
 
 def test_thick_dash_patterns_expand_gaps_for_readability() -> None:
-    """Thick dashed styles should open their gaps instead of collapsing to solid bars."""
+    """Dash patterns should preserve the intended line-style rhythm at thick widths."""
     dash_on, dash_off = parse_dash_pattern("dashed", width=6.0)
     dashdot_on, dashdot_gap, dot_on, dot_gap = parse_dash_pattern("dashdot", width=6.0)
 
     assert dash_on < 24.0
     assert dash_off > 16.5
-    assert dashdot_on < 24.0
-    assert dashdot_gap > 12.0
-    assert dot_on < 3.0
-    assert dot_gap > 12.0
+    assert dashdot_on == pytest.approx(30.0)
+    assert dashdot_gap == pytest.approx(18.0)
+    assert dot_on < 0.5
+    assert dot_gap == pytest.approx(18.0)
 
 
 @pytest.mark.parametrize("spec", ["normal", "dot", "diamond", "vee", "crow", "box", "simple"])
