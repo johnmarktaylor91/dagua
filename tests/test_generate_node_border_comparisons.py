@@ -103,44 +103,72 @@ def test_solid_shape_showcase_uses_shared_fill_and_stroke() -> None:
     assert {spec.style.stroke_dash for spec in specs} == {"solid"}
 
 
-def test_render_graphviz_comparison_uses_shared_positions_for_graphviz_native(
+def test_render_graphviz_dot_png_invokes_dot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The comparison should render Graphviz natively from the shared fixed scene."""
+    """DOT rendering should shell out to the Graphviz ``dot`` executable."""
+
+    captured: dict[str, Any] = {}
+
+    class FakeCompletedProcess:
+        """Minimal subprocess result for a successful Graphviz render."""
+
+        returncode = 0
+        stderr = ""
+
+    def fake_run(command: list[str], capture_output: bool, text: bool, check: bool) -> Any:
+        """Record the Graphviz command and emulate a successful PNG render."""
+
+        captured["command"] = command
+        captured["dot_source"] = Path(command[2]).read_text()
+        captured["capture_output"] = capture_output
+        captured["text"] = text
+        captured["check"] = check
+        Path(command[4]).write_bytes(b"png")
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(generator.shutil, "which", lambda executable: "/usr/bin/dot")
+    monkeypatch.setattr(generator.subprocess, "run", fake_run)
+
+    output_path = tmp_path / "graphviz_render.png"
+    generator._render_graphviz_dot_png(generator.GRAPHVIZ_COMPARISON_DOT, output_path)
+
+    assert output_path.read_bytes() == b"png"
+    assert captured["command"][0] == "/usr/bin/dot"
+    assert captured["command"][1:] == [
+        "-Tpng",
+        captured["command"][2],
+        "-o",
+        str(output_path),
+    ]
+    assert captured["dot_source"] == generator.GRAPHVIZ_COMPARISON_DOT
+    assert captured["capture_output"] is True
+    assert captured["text"] is True
+    assert captured["check"] is False
+
+
+def test_render_graphviz_comparison_uses_dot_and_dagua_panels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The comparison should compose DOT-rendered Graphviz and Dagua panels."""
 
     captured: dict[str, object] = {}
 
-    def fake_render_dagua_graph(
-        output_path: Path,
-        title: str | None,
-        graph: Any,
-        positions: Any,
-        *,
-        figure_size: Tuple[float, float],
-        margin: float = 26.0,
-    ) -> None:
-        """Record Dagua panel render arguments without rendering an image."""
+    def fake_render_graphviz_dot_png(dot_source: str, output_path: Path) -> None:
+        """Record DOT input without invoking Graphviz."""
 
-        captured["dagua_title"] = title
-        captured["dagua_labels"] = list(graph.node_labels)
-        captured["dagua_positions_shape"] = tuple(positions.shape)
-        captured["dagua_margin"] = margin
-        output_path.write_bytes(b"dagua")
-
-    def fake_render_graphviz_native(
-        graph: Any,
-        output_path: Path,
-        *,
-        engine: str,
-        positions: Any = None,
-    ) -> None:
-        """Record Graphviz render arguments without invoking Graphviz."""
-
-        captured["engine"] = engine
-        captured["graphviz_positions"] = positions
-        captured["graphviz_labels"] = list(graph.node_labels)
+        captured["dot_source"] = dot_source
+        captured["graphviz_path_name"] = output_path.name
         output_path.write_bytes(b"graphviz")
+
+    def fake_render_graphviz_comparison_dagua(graph: Any, output_path: Path) -> None:
+        """Record Dagua graph metadata without rendering an image."""
+
+        captured["dagua_labels"] = list(graph.node_labels)
+        captured["dagua_path_name"] = output_path.name
+        output_path.write_bytes(b"dagua")
 
     def fake_compose_image_panels(
         output_path: Path,
@@ -155,19 +183,22 @@ def test_render_graphviz_comparison_uses_shared_positions_for_graphviz_native(
         captured["panel_titles"] = [panel_title for panel_title, _ in panels]
         output_path.write_bytes(b"comparison")
 
-    monkeypatch.setattr(generator, "_render_dagua_graph", fake_render_dagua_graph)
-    monkeypatch.setattr(generator, "_render_graphviz_native", fake_render_graphviz_native)
+    monkeypatch.setattr(generator, "_render_graphviz_dot_png", fake_render_graphviz_dot_png)
+    monkeypatch.setattr(
+        generator,
+        "_render_graphviz_comparison_dagua",
+        fake_render_graphviz_comparison_dagua,
+    )
     monkeypatch.setattr(generator, "_compose_image_panels", fake_compose_image_panels)
 
     generator._render_graphviz_comparison(tmp_path / "graphviz_comparison.png")
 
-    assert captured["engine"] == "neato"
-    assert captured["graphviz_positions"] is not None
-    assert tuple(captured["graphviz_positions"].shape) == (5, 2)
-    assert captured["dagua_title"] is None
+    assert captured["dot_source"] == generator.GRAPHVIZ_COMPARISON_DOT
+    assert captured["graphviz_path_name"] == "graphviz_render.png"
+    assert captured["dagua_path_name"] == "dagua_render.png"
     assert captured["dagua_labels"] == ["Input", "Process", "Transform", "Validate", "Output"]
-    assert captured["graphviz_labels"] == ["Input", "Process", "Transform", "Validate", "Output"]
-    assert captured["panel_titles"] == ["Graphviz native", "Dagua"]
+    assert captured["composed_title"] == "Graphviz vs Dagua"
+    assert captured["panel_titles"] == ["Graphviz", "Dagua"]
 
 
 def test_normalize_panel_raster_matches_content_scale_across_sources(tmp_path: Path) -> None:
@@ -208,7 +239,7 @@ def test_normalize_panel_raster_matches_content_scale_across_sources(tmp_path: P
     assert first_bbox == second_bbox
 
 
-@pytest.mark.skipif(shutil.which("neato") is None, reason="Graphviz neato is not installed")
+@pytest.mark.skipif(shutil.which("dot") is None, reason="Graphviz dot is not installed")
 def test_generate_node_border_comparisons_renders_graphviz_panel(tmp_path: Path) -> None:
     """Graphviz comparison generation should emit the requested output file."""
 
