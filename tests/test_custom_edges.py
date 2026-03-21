@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pytest
 import torch
 from matplotlib.collections import LineCollection, PatchCollection
@@ -14,6 +15,7 @@ from dagua.render.edges.dashes import dash_curve
 from dagua.render.edges.geometry import (
     CubicBezier,
     adaptive_subdivide,
+    build_arc_length_table,
     offset_cubic_control_points,
     validate_lane_separation,
 )
@@ -60,6 +62,26 @@ def test_dash_curve_uses_round_caps_per_segment() -> None:
     assert all(segment.cap_end == "round" for segment in segments)
 
 
+def test_dotted_dash_curve_uses_short_round_segments() -> None:
+    """Dotted edges should render as small round marks rather than chunky dashes."""
+    curve = CubicBezier.from_points((0.0, 0.0), (6.0, 0.0), (12.0, 0.0), (18.0, 0.0))
+
+    segments = dash_curve(curve, "dotted", width=3.0)
+
+    assert segments
+    first_length = build_arc_length_table(segments[0].curve).total_length
+    assert first_length < 1.0
+
+
+def test_dash_curve_drops_truncated_terminal_dash() -> None:
+    """A final short dash should be omitted instead of ending awkwardly at the head."""
+    curve = CubicBezier.from_points((0.0, 0.0), (6.0, 0.0), (12.0, 0.0), (18.0, 0.0))
+
+    segments = dash_curve(curve, "dashed", width=2.0)
+
+    assert len(segments) == 1
+
+
 @pytest.mark.parametrize("spec", ["normal", "dot", "diamond", "vee", "crow", "box", "simple"])
 def test_arrowhead_result_separates_filled_and_stroked_geometry(spec: str) -> None:
     """Arrowheads should report fill geometry separately from stroke geometry."""
@@ -79,6 +101,53 @@ def test_open_arrowhead_becomes_stroked() -> None:
 
     assert result.filled_paths == []
     assert len(result.stroked_paths) >= 1
+
+
+def test_arrowhead_neck_matches_body_width_and_overlaps_body() -> None:
+    """Filled heads should trim at the ribbon width and overlap slightly into the body."""
+    body_direction = np.array([-1.0, 0.0], dtype=np.float64)
+    tip = np.array([0.0, 0.0], dtype=np.float64)
+    result = build_arrowhead(
+        "normal",
+        tip=tip,
+        tangent=body_direction,
+        length=8.0,
+        width=6.0,
+        body_width=4.0,
+    )
+
+    trim_vertices = result.trim_contour.vertices[:2]
+    trim_width = np.linalg.norm(trim_vertices[0] - trim_vertices[1])
+    trim_depth = np.dot(trim_vertices.mean(axis=0) - tip, body_direction)
+    max_depth = max(
+        np.dot(vertex - tip, body_direction) for vertex in result.filled_paths[0].vertices
+    )
+
+    assert trim_width == pytest.approx(4.0)
+    assert max_depth > trim_depth
+
+
+def test_open_and_hollow_arrowheads_increase_stroke_weight() -> None:
+    """Open and hollow heads should request heavier outline strokes."""
+    vee = build_arrowhead(
+        "vee",
+        tip=(0.0, 0.0),
+        tangent=(-1.0, 0.0),
+        length=8.0,
+        width=5.0,
+        body_width=3.0,
+    )
+    hollow = build_arrowhead(
+        "onormal",
+        tip=(0.0, 0.0),
+        tangent=(-1.0, 0.0),
+        length=8.0,
+        width=5.0,
+        body_width=3.0,
+    )
+
+    assert vee.stroke_width_scale > 1.0
+    assert hollow.stroke_width_scale > 1.0
 
 
 def test_available_arrowheads_include_required_builtins() -> None:
@@ -159,6 +228,50 @@ def test_collection_renders_bodies_and_heads_in_two_passes() -> None:
     assert all(float(artist.get_zorder()) == 1.0 for artist in body_artists)
     assert all(float(artist.get_zorder()) == 2.0 for artist in head_artists)
     plt.close(fig)
+
+
+def test_collection_scales_dense_head_sizes() -> None:
+    """Crowded terminals should shrink arrowheads before rendering."""
+    edges = [
+        DaguaEdge(
+            curve=CubicBezier.from_points(
+                (-40.0, float(offset)),
+                (-24.0, float(offset)),
+                (-8.0, float(offset) * 0.15),
+                (0.0, 0.0),
+            ),
+            width=2.0,
+            arrowhead="normal",
+            target_node=1,
+        )
+        for offset in (-6.0, -3.0, 0.0, 3.0)
+    ]
+
+    collection = DaguaEdgeCollection(edges)
+
+    assert any(edge.resolved_arrow_length() < 8.0 for edge in collection.edges)
+
+
+def test_collection_simplifies_very_dense_terminal_heads() -> None:
+    """Very dense fan-in should fall back to tee or no head."""
+    edges = [
+        DaguaEdge(
+            curve=CubicBezier.from_points(
+                (-40.0, float(offset)),
+                (-24.0, float(offset)),
+                (-8.0, float(offset) * 0.1),
+                (0.0, 0.0),
+            ),
+            width=2.0,
+            arrowhead="normal",
+            target_node=1,
+        )
+        for offset in range(-11, 12, 2)
+    ]
+
+    collection = DaguaEdgeCollection(edges)
+
+    assert all(edge.arrowhead in {"tee", "none"} for edge in collection.edges)
 
 
 def test_line_tier_uses_line_collection() -> None:
