@@ -526,9 +526,10 @@ def test_normal_arrow_renders_polygon_with_arrow_scale() -> None:
 
 
 def test_vee_arrow_is_open_polygon() -> None:
-    """Vee arrow should render as an open Polygon, not FancyArrowPatch."""
+    """Vee arrow should render as a stroked custom head, not FancyArrowPatch."""
 
     import torch
+    from matplotlib.collections import PatchCollection
     from matplotlib.patches import FancyArrowPatch, Polygon
 
     graph = DaguaGraph()
@@ -540,10 +541,16 @@ def test_vee_arrow_is_open_polygon() -> None:
     fig, ax = render(graph, positions)
     polygons = [patch for patch in ax.patches if isinstance(patch, Polygon)]
     fancy_arrows = [patch for patch in ax.patches if isinstance(patch, FancyArrowPatch)]
-    assert len(polygons) >= 1, "Vee arrow should be a Polygon"
+    head_collections = [
+        collection
+        for collection in ax.collections
+        if isinstance(collection, PatchCollection) and float(collection.get_zorder()) == 2.0
+    ]
+    assert len(polygons) == 0, "Custom heads should not fall back to standalone Polygon patches"
+    assert len(head_collections) >= 1, "Vee arrow should be rendered by the custom head collection"
     assert len(fancy_arrows) == 0, "Vee arrow should not use FancyArrowPatch"
-    vee = polygons[0]
-    assert vee.get_facecolor()[3] < 0.01, "Vee should be unfilled (open chevron)"
+    vee = head_collections[-1]
+    assert all(width > 0.0 for width in vee.get_linewidths())
     plt.close(fig)
 
 
@@ -551,7 +558,7 @@ def test_straight_routing_has_arrowhead() -> None:
     """Straight routing must still draw arrow markers when control points collapse."""
 
     import torch
-    from matplotlib.patches import Polygon
+    from matplotlib.collections import PatchCollection
 
     graph = DaguaGraph()
     graph.add_node("A", label="From")
@@ -560,9 +567,13 @@ def test_straight_routing_has_arrowhead() -> None:
     positions = torch.tensor([[0.0, 50.0], [0.0, -50.0]])
 
     fig, ax = render(graph, positions)
-    polygons = [patch for patch in ax.patches if isinstance(patch, Polygon)]
-    assert len(polygons) >= 1, "Straight routing should produce arrow polygon"
-    verts = polygons[0].get_xy()
+    head_collections = [
+        collection
+        for collection in ax.collections
+        if isinstance(collection, PatchCollection) and float(collection.get_zorder()) == 2.0
+    ]
+    assert len(head_collections) >= 1, "Straight routing should produce arrowhead collection"
+    verts = head_collections[0].get_paths()[0].vertices
     if np.allclose(verts[0], verts[-1]):
         verts = verts[:-1]
     tip_y = min(vertex[1] for vertex in verts)
