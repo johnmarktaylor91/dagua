@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from dagua.edges import BezierCurve, preferred_edge_label_position, route_edges
+from dagua.render.edges import CubicBezier as RenderBezier
+from dagua.render.edges import DaguaEdge, DaguaEdgeCollection
 from dagua.styles import (
     FONT_FAMILY,
     FONT_FAMILY_MONO,
@@ -219,7 +221,7 @@ def render(
     # --- Layer 1: Edges ---
     if curves is None:
         curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
-    _draw_edges(ax, graph, curves, svg_hover_map=svg_hover_map)
+    edge_collection = _draw_edges(ax, graph, curves, svg_hover_map=svg_hover_map)
 
     # --- Layer 2: Nodes ---
     clip_patches = _draw_nodes(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
@@ -229,7 +231,12 @@ def render(
 
     # --- Layer 4: Edge labels ---
     _draw_edge_labels(
-        ax, graph, curves, label_positions=label_positions, svg_hover_map=svg_hover_map
+        ax,
+        graph,
+        curves,
+        label_positions=label_positions,
+        svg_hover_map=svg_hover_map,
+        edge_collection=edge_collection,
     )
 
     if title:
@@ -998,6 +1005,120 @@ def _marker_data_size(
     return length * scale, width * scale
 
 
+def _edge_width_data_units(ax: Any, width_points: float) -> float:
+    """Convert an edge body width from points to data units.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    width_points : float
+        Edge width in typographic points.
+
+    Returns
+    -------
+    float
+        Width in data units.
+    """
+    width_x = _points_to_data_units(ax, width_points, "x")
+    width_y = _points_to_data_units(ax, width_points, "y")
+    width = min(width_x, width_y)
+    return width if width > 1e-6 else 1e-6
+
+
+def _curve_to_render_bezier(curve: BezierCurve) -> RenderBezier:
+    """Convert a routed bezier curve to the custom-renderer type.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Routed edge curve.
+
+    Returns
+    -------
+    dagua.render.edges.geometry.CubicBezier
+        Equivalent render-space curve.
+    """
+    return RenderBezier.from_points(curve.p0, curve.cp1, curve.cp2, curve.p1)
+
+
+def _build_custom_edge_collection(
+    ax: Any,
+    graph: Any,
+    curves: List[BezierCurve],
+) -> DaguaEdgeCollection:
+    """Translate graph edge styles into the custom edge collection.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    graph : Any
+        Graph exposing Dagua's edge-style API.
+    curves : list[BezierCurve]
+        Routed edge curves.
+
+    Returns
+    -------
+    DaguaEdgeCollection
+        Prepared custom edge collection.
+    """
+    edges: List[DaguaEdge] = []
+    for e_idx, curve in enumerate(curves):
+        style = graph.get_style_for_edge(e_idx)
+        src_idx = int(graph.edge_index[0, e_idx])
+        tgt_idx = int(graph.edge_index[1, e_idx])
+        src_node_height = float(graph.node_sizes[src_idx, 1])
+        tgt_node_height = float(graph.node_sizes[tgt_idx, 1])
+        head_length, head_width = _marker_data_size(
+            ax,
+            style,
+            float(style.arrow_length),
+            float(style.arrow_width),
+            node_height=tgt_node_height,
+        )
+        tail_length, tail_width = _marker_data_size(
+            ax,
+            style,
+            float(style.arrow_length),
+            float(style.arrow_width),
+            node_height=src_node_height,
+        )
+        label = graph.edge_labels[e_idx] if e_idx < len(graph.edge_labels) else None
+        edges.append(
+            DaguaEdge(
+                curve=_curve_to_render_bezier(curve),
+                width=_edge_width_data_units(ax, float(style.width)),
+                color=str(style.color or "#8C8C8C"),
+                alpha=float(style.opacity if style.opacity is not None else 0.7),
+                linestyle=style.style,
+                arrowhead=str(style.arrow),
+                tail_arrow=str(style.tail_arrow),
+                arrowhead_length=head_length,
+                arrowhead_width=head_width,
+                tail_arrow_length=tail_length,
+                tail_arrow_width=tail_width,
+                arrow_fill=str(style.arrow_fill),
+                arrow_color=str(style.arrow_color) if style.arrow_color else None,
+                stroke_width=float(style.width),
+                label=label,
+                label_position=float(style.label_position),
+                label_offset=float(style.label_offset),
+                label_rotate=False,
+                label_side=str(style.label_side),
+                label_font_size=float(style.label_font_size),
+                label_font_color=str(style.label_font_color),
+                label_background=str(style.label_background),
+                label_font_family=str(style.label_font_family),
+                label_font_weight=str(style.label_font_weight),
+                group_key=(src_idx, tgt_idx),
+                source_node=src_idx,
+                target_node=tgt_idx,
+            )
+        )
+    return DaguaEdgeCollection(edges)
+
+
 def _label_anchor_x(align: str, x: float, w: float, pad_x: float, line_width: float) -> float:
     """Resolve the x anchor for a label line.
 
@@ -1644,8 +1765,8 @@ def _draw_edges(
     graph: Any,
     curves: List[BezierCurve],
     svg_hover_map: Optional[Dict[str, str]] = None,
-) -> None:
-    """Draw bezier edges with configurable endpoint markers.
+) -> Optional[DaguaEdgeCollection]:
+    """Draw edge bodies and arrowheads with the custom batched renderer.
 
     Parameters
     ----------
@@ -1657,65 +1778,17 @@ def _draw_edges(
         Routed edge curves.
     svg_hover_map : dict[str, str], optional
         SVG hover text accumulator.
+    Returns
+    -------
+    dagua.render.edges.collection.DaguaEdgeCollection | None
+        The prepared custom collection so the label pass can reuse it.
     """
-    from matplotlib.colors import to_rgba
-    from matplotlib.patches import PathPatch
-    from matplotlib.path import Path
-
-    for e_idx, curve in enumerate(curves):
-        style = graph.get_style_for_edge(e_idx)
-        tgt_idx = int(graph.edge_index[1, e_idx])
-        tgt_node_height = float(graph.node_sizes[tgt_idx, 1])
-        verts = [curve.p0, curve.cp1, curve.cp2, curve.p1]
-        codes = [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4]
-        path_patch = PathPatch(
-            Path(verts, codes),
-            facecolor="none",
-            edgecolor=to_rgba(style.color, style.opacity),
-            linewidth=style.width,
-            linestyle=_edge_linestyle(style),
-            capstyle="round",
-            joinstyle="round",
-            zorder=1,
-        )
-        ax.add_patch(path_patch)
-        _set_svg_hover(
-            path_patch, f"dagua-edge-{e_idx}", _edge_hover_text(graph, e_idx), svg_hover_map
-        )
-        # Target arrow: direction continues past the endpoint (same sense as
-        # the curve's tangent at p1).  For bezier cp2-p1 already points that
-        # way; for straight routing the control point collapses onto p1, so
-        # we fall back to the overall edge direction p1-p0.
-        head_dx = curve.cp2[0] - curve.p1[0]
-        head_dy = curve.cp2[1] - curve.p1[1]
-        if head_dx * head_dx + head_dy * head_dy < 1e-12:
-            head_dx = curve.p1[0] - curve.p0[0]
-            head_dy = curve.p1[1] - curve.p0[1]
-        _draw_edge_marker(
-            ax,
-            curve.p1,
-            (head_dx, head_dy),
-            style.arrow,
-            style,
-            node_height=tgt_node_height,
-        )
-        # Source tail arrow: same tangent logic — cp1-p0 continues past the
-        # source; fallback to p0-p1 for straight routing where cp1==p0.
-        tail_dx = curve.cp1[0] - curve.p0[0]
-        tail_dy = curve.cp1[1] - curve.p0[1]
-        if tail_dx * tail_dx + tail_dy * tail_dy < 1e-12:
-            tail_dx = curve.p0[0] - curve.p1[0]
-            tail_dy = curve.p0[1] - curve.p1[1]
-        src_idx = int(graph.edge_index[0, e_idx])
-        src_node_height = float(graph.node_sizes[src_idx, 1])
-        _draw_edge_marker(
-            ax,
-            curve.p0,
-            (tail_dx, tail_dy),
-            style.tail_arrow,
-            style,
-            node_height=src_node_height,
-        )
+    if not curves:
+        return None
+    collection = _build_custom_edge_collection(ax, graph, curves)
+    collection.render_bodies(ax)
+    collection.render_heads(ax)
+    return collection
 
 
 def _draw_edge_labels(
@@ -1724,6 +1797,7 @@ def _draw_edge_labels(
     curves: List[BezierCurve],
     label_positions: Optional[List[Optional[Tuple[float, float]]]] = None,
     svg_hover_map: Optional[Dict[str, str]] = None,
+    edge_collection: Optional[DaguaEdgeCollection] = None,
 ) -> None:
     """Draw edge labels using per-edge font settings.
 
@@ -1739,8 +1813,24 @@ def _draw_edge_labels(
         Pre-computed label positions.
     svg_hover_map : dict[str, str], optional
         SVG hover text accumulator.
+    edge_collection : DaguaEdgeCollection | None, optional
+        Prepared collection whose label geometry should be reused.
     """
     gs = graph.graph_style
+
+    if edge_collection is not None and label_positions is None:
+        for e_idx, artist in enumerate(
+            edge_collection.render_labels(
+                ax, label_background_alpha=gs.edge_label_background_opacity
+            )
+        ):
+            _set_svg_hover(
+                artist,
+                f"dagua-edge-label-{e_idx}",
+                _edge_hover_text(graph, e_idx),
+                svg_hover_map,
+            )
+        return
 
     for e_idx, curve in enumerate(curves):
         if e_idx >= len(graph.edge_labels):
