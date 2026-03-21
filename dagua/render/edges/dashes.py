@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from itertools import cycle
 from typing import List, Sequence, Tuple, Union
@@ -18,6 +19,12 @@ DashPattern = Union[str, Sequence[float]]
 MIN_BODY_LENGTH = 0.5
 DOTTED_ON_RATIO = 0.18
 DOTTED_OFF_RATIO = 1.85
+DASHED_ON_RATIO = 4.0
+DASHED_OFF_RATIO = 2.75
+DASHDOT_ON_RATIO = 4.4
+DASHDOT_OFF_AFTER_DASH_RATIO = 2.8
+DASHDOT_DOT_RATIO = 0.16
+DASHDOT_OFF_AFTER_DOT_RATIO = 3.6
 TERMINAL_DASH_MIN_RATIO = 0.65
 
 
@@ -60,15 +67,15 @@ def parse_dash_pattern(pattern: DashPattern, width: float) -> Tuple[float, ...]:
         if pattern == "solid":
             return ()
         if pattern == "dashed":
-            return (4.0 * scaled_width, 2.75 * scaled_width)
+            return (DASHED_ON_RATIO * scaled_width, DASHED_OFF_RATIO * scaled_width)
         if pattern == "dotted":
             return (DOTTED_ON_RATIO * scaled_width, DOTTED_OFF_RATIO * scaled_width)
         if pattern == "dashdot":
             return (
-                4.0 * scaled_width,
-                2.2 * scaled_width,
-                DOTTED_ON_RATIO * scaled_width,
-                2.2 * scaled_width,
+                DASHDOT_ON_RATIO * scaled_width,
+                DASHDOT_OFF_AFTER_DASH_RATIO * scaled_width,
+                DASHDOT_DOT_RATIO * scaled_width,
+                DASHDOT_OFF_AFTER_DOT_RATIO * scaled_width,
             )
         raise ValueError(f"Unsupported dash pattern: {pattern!r}.")
 
@@ -118,11 +125,62 @@ def _segment_bounds(table: ArcLengthTable, start: float, stop: float) -> Tuple[f
     return start_t, end_t
 
 
+def _segment_caps(pattern: DashPattern, part_index: int) -> Tuple[str, str]:
+    """Return the cap style for one visible pattern segment.
+
+    Parameters
+    ----------
+    pattern : str | Sequence[float]
+        Dash description.
+    part_index : int
+        Index of the current visible segment inside one full pattern cycle.
+
+    Returns
+    -------
+    tuple[str, str]
+        Start and end cap style for the segment.
+    """
+    if pattern == "dotted":
+        return "round", "round"
+    if pattern == "dashdot" and part_index % 4 == 2:
+        return "round", "round"
+    if pattern in {"dashed", "dashdot"}:
+        return "butt", "butt"
+    return "round", "round"
+
+
+def _aligned_start_length(total_length: float, dash_pattern: Sequence[float]) -> float:
+    """Return a negative phase shift that ends on a full visible dash.
+
+    Parameters
+    ----------
+    total_length : float
+        Total arc length of the trimmed body.
+    dash_pattern : Sequence[float]
+        Alternating on/off distances. The first distance is the primary dash.
+
+    Returns
+    -------
+    float
+        Starting arc length. Negative values indicate a clipped initial segment.
+    """
+    cycle_length = float(sum(dash_pattern))
+    if cycle_length <= FLOAT_EPSILON:
+        return 0.0
+    phase = math.fmod(total_length - float(dash_pattern[0]), cycle_length)
+    if phase < 0.0:
+        phase += cycle_length
+    if phase <= FLOAT_EPSILON:
+        return 0.0
+    return phase - cycle_length
+
+
 def dash_curve(
     curve: CubicBezier,
     pattern: DashPattern,
     width: float,
     min_body_length: float = MIN_BODY_LENGTH,
+    align_to_end: bool = False,
 ) -> List[DashSegment]:
     """Cut visible dash segments from a cubic centerline.
 
@@ -136,6 +194,10 @@ def dash_curve(
         Edge width in data units.
     min_body_length : float, default=0.5
         Minimum visible body length.
+    align_to_end : bool, default=False
+        Whether to phase-shift the pattern so a full visible dash reaches the
+        end of the curve. This keeps dashed bodies flowing directly into a
+        terminal arrowhead instead of leaving a final gap.
 
     Returns
     -------
@@ -151,29 +213,34 @@ def dash_curve(
     if total_length <= min_body_length:
         return []
     if total_length <= dash_pattern[0]:
-        return [DashSegment(curve=curve, cap_start="round", cap_end="round")]
+        cap_start, cap_end = _segment_caps(pattern, 0)
+        return [DashSegment(curve=curve, cap_start=cap_start, cap_end=cap_end)]
 
     visible_segments: List[Tuple[DashSegment, float, float]] = []
-    current_length = 0.0
+    current_length = _aligned_start_length(total_length, dash_pattern) if align_to_end else 0.0
     draw_segment = True
 
-    for part_length in cycle(dash_pattern):
+    for part_index in cycle(range(len(dash_pattern))):
+        part_length = dash_pattern[part_index]
         if current_length >= total_length - FLOAT_EPSILON:
             break
         next_length = min(current_length + part_length, total_length)
-        segment_length = next_length - current_length
+        visible_start = max(current_length, 0.0)
+        visible_stop = max(min(next_length, total_length), visible_start)
+        segment_length = visible_stop - visible_start
         minimum_length = min(min_body_length, max(part_length * 0.8, FLOAT_EPSILON))
         if draw_segment and segment_length >= minimum_length:
-            start_t, end_t = _segment_bounds(table, current_length, next_length)
+            start_t, end_t = _segment_bounds(table, visible_start, visible_stop)
+            cap_start, cap_end = _segment_caps(pattern, part_index)
             visible_segments.append(
                 (
                     DashSegment(
                         curve=subcurve(curve, start_t, end_t),
-                        cap_start="round",
-                        cap_end="round",
+                        cap_start=cap_start,
+                        cap_end=cap_end,
                     ),
                     part_length,
-                    next_length,
+                    visible_stop,
                 )
             )
         current_length = next_length
@@ -183,7 +250,8 @@ def dash_curve(
         last_segment, nominal_length, stop_length = visible_segments[-1]
         actual_length = build_arc_length_table(last_segment.curve).total_length
         truncated_tail = (
-            stop_length >= total_length - FLOAT_EPSILON
+            not align_to_end
+            and stop_length >= total_length - FLOAT_EPSILON
             and actual_length < nominal_length * TERMINAL_DASH_MIN_RATIO
             and len(visible_segments) > 1
         )
