@@ -17,20 +17,20 @@ from dagua.render.edges.geometry import (
 
 DashPattern = Union[str, Sequence[float]]
 MIN_BODY_LENGTH = 0.5
-DOTTED_ON_RATIO = 0.5
+# Round caps add one full line width to the visible dot diameter, so the
+# centerline span stays near zero for dotted marks that should read as circles.
+DOTTED_ON_RATIO = 0.01
 DOTTED_OFF_RATIO = 2.0
 DASHED_ON_RATIO = 4.0
 DASHED_OFF_RATIO = 2.75
-DASHDOT_ON_RATIO = 4.0
-DASHDOT_OFF_AFTER_DASH_RATIO = 2.0
-DASHDOT_DOT_RATIO = 0.5
-DASHDOT_OFF_AFTER_DOT_RATIO = 2.0
+DASHDOT_ON_RATIO = 5.0
+DASHDOT_OFF_AFTER_DASH_RATIO = 3.0
+DASHDOT_DOT_RATIO = 0.01
+DASHDOT_OFF_AFTER_DOT_RATIO = 3.0
 TERMINAL_DASH_MIN_RATIO = 0.65
 THICK_PATTERN_THRESHOLD = 3.25
 THICK_PATTERN_GAIN = 0.16
-THICK_DOTTED_ON_RATIO = 0.32
 THICK_DASH_ON_SHRINK = 0.9
-THICK_DOT_GAP_GAIN = 0.2
 
 
 @dataclass(frozen=True)
@@ -86,26 +86,12 @@ def parse_dash_pattern(pattern: DashPattern, width: float) -> Tuple[float, ...]:
         if pattern == "dotted":
             on_length = DOTTED_ON_RATIO * scaled_width
             off_length = DOTTED_OFF_RATIO * scaled_width
-            if scaled_width > THICK_PATTERN_THRESHOLD:
-                on_length = min(on_length, THICK_DOTTED_ON_RATIO * scaled_width)
-                off_length *= 1.0 + min(
-                    (scaled_width - THICK_PATTERN_THRESHOLD) * THICK_DOT_GAP_GAIN,
-                    1.0,
-                )
             return (on_length, off_length)
         if pattern == "dashdot":
             dash_length = DASHDOT_ON_RATIO * scaled_width
             gap_after_dash = DASHDOT_OFF_AFTER_DASH_RATIO * scaled_width
             dot_length = DASHDOT_DOT_RATIO * scaled_width
             gap_after_dot = DASHDOT_OFF_AFTER_DOT_RATIO * scaled_width
-            if scaled_width > THICK_PATTERN_THRESHOLD:
-                dash_length *= THICK_DASH_ON_SHRINK
-                gap_after_dash *= thick_gain
-                dot_length = min(dot_length, THICK_DOTTED_ON_RATIO * scaled_width)
-                gap_after_dot *= 1.0 + min(
-                    (scaled_width - THICK_PATTERN_THRESHOLD) * THICK_DOT_GAP_GAIN,
-                    1.0,
-                )
             return (
                 dash_length,
                 gap_after_dash,
