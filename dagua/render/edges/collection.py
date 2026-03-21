@@ -1,0 +1,707 @@
+"""Batched custom edge rendering for matplotlib."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+
+from dagua.render.edges.arrowheads import ArrowheadResult, arrowhead_back_point, build_arrowhead
+from dagua.render.edges.dashes import DashPattern, DashSegment, dash_curve
+from dagua.render.edges.geometry import (
+    FLOAT_EPSILON,
+    CubicBezier,
+    build_arc_length_table,
+    mean_curve_width,
+    offset_cubic_control_points,
+    sample_curve,
+    subcurve,
+    t_at_arc_length,
+    validate_lane_separation,
+    vector_norm,
+)
+from dagua.render.edges.labels import EdgeLabelPlacement, place_edge_label
+from dagua.render.edges.ribbon import curve_ribbon_path, simple_quad_ribbon
+
+RenderTier = str
+DEFAULT_BODY_COLOR = "#8C8C8C"
+DEFAULT_ALPHA = 0.7
+DEFAULT_STROKE_WIDTH = 0.75
+MAX_SEPARATION_RETRIES = 6
+
+
+@dataclass
+class DaguaEdge:
+    """Edge geometry and styling for the custom renderer.
+
+    Parameters
+    ----------
+    curve : CubicBezier
+        Edge centerline in data coordinates.
+    width : float, default=0.75
+        Body width in data units.
+    color : str, default="#8C8C8C"
+        Body fill color.
+    alpha : float, default=0.7
+        Body alpha.
+    linestyle : str | Sequence[float], default="solid"
+        Body dash pattern.
+    arrowhead : str, default="normal"
+        Head arrow spec.
+    tail_arrow : str, default="none"
+        Tail arrow spec.
+    arrowhead_length : float | None, default=None
+        Head arrow length in data units.
+    arrowhead_width : float | None, default=None
+        Head arrow width in data units.
+    tail_arrow_length : float | None, default=None
+        Tail arrow length in data units.
+    tail_arrow_width : float | None, default=None
+        Tail arrow width in data units.
+    arrow_fill : str, default="filled"
+        ``"filled"`` or ``"hollow"``.
+    arrow_color : str | None, default=None
+        Arrow color override.
+    stroke_width : float, default=0.75
+        Stroke width in display points for line tiers and outline-only heads.
+    label : str | None, default=None
+        Optional edge label.
+    label_position : float, default=0.5
+        Arc-length fraction for label placement.
+    label_offset : float, default=3.0
+        Perpendicular label offset in data units.
+    label_rotate : bool, default=False
+        Whether labels follow the local tangent.
+    label_side : str, default="auto"
+        Label side hint.
+    label_font_size : float, default=7.0
+        Font size in points.
+    label_font_color : str, default="#111111"
+        Label text color.
+    label_background : str, default="#FAFAFA"
+        Label background color.
+    label_font_family : str, default=""
+        Font family override.
+    label_font_weight : str, default="regular"
+        Font weight override.
+    group_key : tuple[int, int] | None, default=None
+        Parallel-edge grouping key.
+    """
+
+    curve: CubicBezier
+    width: float = 0.75
+    color: str = DEFAULT_BODY_COLOR
+    alpha: float = DEFAULT_ALPHA
+    linestyle: DashPattern = "solid"
+    arrowhead: str = "normal"
+    tail_arrow: str = "none"
+    arrowhead_length: Optional[float] = None
+    arrowhead_width: Optional[float] = None
+    tail_arrow_length: Optional[float] = None
+    tail_arrow_width: Optional[float] = None
+    arrow_fill: str = "filled"
+    arrow_color: Optional[str] = None
+    stroke_width: float = DEFAULT_STROKE_WIDTH
+    label: Optional[str] = None
+    label_position: float = 0.5
+    label_offset: float = 3.0
+    label_rotate: bool = False
+    label_side: str = "auto"
+    label_font_size: float = 7.0
+    label_font_color: str = "#111111"
+    label_background: str = "#FAFAFA"
+    label_font_family: str = ""
+    label_font_weight: str = "regular"
+    group_key: Optional[Tuple[int, int]] = None
+
+    def resolved_arrow_length(self) -> float:
+        """Return the effective arrowhead length.
+
+        Returns
+        -------
+        float
+            Arrowhead length in data units.
+        """
+        return float(
+            self.arrowhead_length
+            if self.arrowhead_length is not None
+            else max(self.width * 4.0, self.width)
+        )
+
+    def resolved_arrow_width(self) -> float:
+        """Return the effective arrowhead width.
+
+        Returns
+        -------
+        float
+            Arrowhead width in data units.
+        """
+        return float(
+            self.arrowhead_width
+            if self.arrowhead_width is not None
+            else max(self.width * 3.0, self.width)
+        )
+
+    def resolved_tail_arrow_length(self) -> float:
+        """Return the effective tail arrow length.
+
+        Returns
+        -------
+        float
+            Tail-arrow length in data units.
+        """
+        if self.tail_arrow_length is not None:
+            return float(self.tail_arrow_length)
+        return self.resolved_arrow_length()
+
+    def resolved_tail_arrow_width(self) -> float:
+        """Return the effective tail arrow width.
+
+        Returns
+        -------
+        float
+            Tail-arrow width in data units.
+        """
+        if self.tail_arrow_width is not None:
+            return float(self.tail_arrow_width)
+        return self.resolved_arrow_width()
+
+
+@dataclass(frozen=True)
+class PreparedEdge:
+    """Prepared edge geometry ready for body/head rendering."""
+
+    edge: DaguaEdge
+    lane_curve: CubicBezier
+    body_curve: Optional[CubicBezier]
+    head_result: Optional[ArrowheadResult]
+    tail_result: Optional[ArrowheadResult]
+
+
+def choose_rendering_tier(num_edges: int) -> RenderTier:
+    """Choose the rendering tier from edge count.
+
+    Parameters
+    ----------
+    num_edges : int
+        Number of visible edges.
+
+    Returns
+    -------
+    str
+        One of ``"full"``, ``"simplified"``, ``"lines"``, or ``"bundled"``.
+    """
+    if num_edges <= 1000:
+        return "full"
+    if num_edges <= 10000:
+        return "simplified"
+    if num_edges <= 100000:
+        return "lines"
+    return "bundled"
+
+
+def _tail_body_direction(curve: CubicBezier) -> np.ndarray:
+    """Return the direction from the tail tip into the edge body."""
+    tangent = curve.cp1 - curve.p0
+    if vector_norm(tangent) <= FLOAT_EPSILON:
+        tangent = curve.p1 - curve.p0
+    return tangent
+
+
+def _head_body_direction(curve: CubicBezier) -> np.ndarray:
+    """Return the direction from the head tip into the edge body."""
+    tangent = curve.cp2 - curve.p1
+    if vector_norm(tangent) <= FLOAT_EPSILON:
+        tangent = curve.p0 - curve.p1
+    return tangent
+
+
+def _trimmed_body_curve(
+    edge: DaguaEdge, curve: CubicBezier
+) -> Tuple[Optional[CubicBezier], Optional[ArrowheadResult], Optional[ArrowheadResult]]:
+    """Trim a centerline to leave room for arrowheads.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge style and arrow configuration.
+    curve : CubicBezier
+        Lane-adjusted curve.
+
+    Returns
+    -------
+    tuple[CubicBezier | None, ArrowheadResult | None, ArrowheadResult | None]
+        Trimmed body curve, head result, and tail result.
+    """
+    head_result: Optional[ArrowheadResult] = None
+    tail_result: Optional[ArrowheadResult] = None
+
+    if edge.arrowhead != "none":
+        head_result = build_arrowhead(
+            edge.arrowhead,
+            tip=curve.p1,
+            tangent=_head_body_direction(curve),
+            length=edge.resolved_arrow_length(),
+            width=edge.resolved_arrow_width(),
+            fill_mode=edge.arrow_fill,
+        )
+    if edge.tail_arrow != "none":
+        tail_result = build_arrowhead(
+            edge.tail_arrow,
+            tip=curve.p0,
+            tangent=_tail_body_direction(curve),
+            length=edge.resolved_tail_arrow_length(),
+            width=edge.resolved_tail_arrow_width(),
+            fill_mode=edge.arrow_fill,
+        )
+
+    table = build_arc_length_table(curve)
+    start_trim = 0.0
+    end_trim = table.total_length
+    if tail_result is not None:
+        start_trim = min(
+            vector_norm(arrowhead_back_point(tail_result) - curve.p0), table.total_length
+        )
+    if head_result is not None:
+        end_trim = max(
+            table.total_length - vector_norm(arrowhead_back_point(head_result) - curve.p1),
+            start_trim,
+        )
+
+    if end_trim - start_trim <= max(edge.width, 0.5):
+        return None, head_result, tail_result
+
+    start_t = t_at_arc_length(table, start_trim)
+    end_t = t_at_arc_length(table, end_trim)
+    trimmed = subcurve(curve, start_t, end_t)
+
+    if head_result is not None:
+        head_result = ArrowheadResult(
+            filled_paths=head_result.filled_paths,
+            stroked_paths=head_result.stroked_paths,
+            trim_contour=head_result.trim_contour,
+            trim_t=end_t,
+        )
+    if tail_result is not None:
+        tail_result = ArrowheadResult(
+            filled_paths=tail_result.filled_paths,
+            stroked_paths=tail_result.stroked_paths,
+            trim_contour=tail_result.trim_contour,
+            trim_t=start_t,
+        )
+    return trimmed, head_result, tail_result
+
+
+def _group_edges(edges: Sequence[DaguaEdge]) -> Dict[Tuple[int, int], List[DaguaEdge]]:
+    """Group edges for parallel-lane separation.
+
+    Parameters
+    ----------
+    edges : Sequence[DaguaEdge]
+        Edges to group.
+
+    Returns
+    -------
+    dict[tuple[int, int], list[DaguaEdge]]
+        Grouped edges.
+    """
+    groups: Dict[Tuple[int, int], List[DaguaEdge]] = {}
+    for index, edge in enumerate(edges):
+        if edge.group_key is not None:
+            key = edge.group_key
+        else:
+            key = (index, index)
+        groups.setdefault(key, []).append(edge)
+    return groups
+
+
+def _lane_offsets(count: int, separation: float) -> List[float]:
+    """Return symmetric lane offsets for a group.
+
+    Parameters
+    ----------
+    count : int
+        Number of lanes.
+    separation : float
+        Lane spacing in data units.
+
+    Returns
+    -------
+    list[float]
+        Signed offsets.
+    """
+    center = (count - 1) * 0.5
+    return [(index - center) * separation for index in range(count)]
+
+
+def _apply_lane_offsets(edges: Sequence[DaguaEdge]) -> List[DaguaEdge]:
+    """Apply validated parallel-lane offsets to grouped edges.
+
+    Parameters
+    ----------
+    edges : Sequence[DaguaEdge]
+        Source edges.
+
+    Returns
+    -------
+    list[DaguaEdge]
+        Edges with updated centerlines.
+    """
+    updated_edges: List[DaguaEdge] = []
+    for grouped_edges in _group_edges(edges).values():
+        if len(grouped_edges) == 1:
+            updated_edges.append(grouped_edges[0])
+            continue
+
+        max_width = max(edge.width for edge in grouped_edges)
+        separation = max(max_width * 1.5, 1.0)
+        offsets = _lane_offsets(len(grouped_edges), separation)
+        centerlines = [
+            offset_cubic_control_points(edge.curve, offset)
+            for edge, offset in zip(grouped_edges, offsets)
+        ]
+        retries = 0
+        while retries < MAX_SEPARATION_RETRIES:
+            valid, _ = validate_lane_separation(centerlines, min_gap=max_width * 1.05, n_samples=50)
+            if valid:
+                break
+            separation *= 1.25
+            offsets = _lane_offsets(len(grouped_edges), separation)
+            centerlines = [
+                offset_cubic_control_points(edge.curve, offset)
+                for edge, offset in zip(grouped_edges, offsets)
+            ]
+            retries += 1
+
+        for edge, lane_curve in zip(grouped_edges, centerlines):
+            updated_edges.append(
+                DaguaEdge(
+                    curve=lane_curve,
+                    width=edge.width,
+                    color=edge.color,
+                    alpha=edge.alpha,
+                    linestyle=edge.linestyle,
+                    arrowhead=edge.arrowhead,
+                    tail_arrow=edge.tail_arrow,
+                    arrowhead_length=edge.arrowhead_length,
+                    arrowhead_width=edge.arrowhead_width,
+                    tail_arrow_length=edge.tail_arrow_length,
+                    tail_arrow_width=edge.tail_arrow_width,
+                    arrow_fill=edge.arrow_fill,
+                    arrow_color=edge.arrow_color,
+                    stroke_width=edge.stroke_width,
+                    label=edge.label,
+                    label_position=edge.label_position,
+                    label_offset=edge.label_offset,
+                    label_rotate=edge.label_rotate,
+                    label_side=edge.label_side,
+                    label_font_size=edge.label_font_size,
+                    label_font_color=edge.label_font_color,
+                    label_background=edge.label_background,
+                    label_font_family=edge.label_font_family,
+                    label_font_weight=edge.label_font_weight,
+                    group_key=edge.group_key,
+                )
+            )
+    return updated_edges
+
+
+class DaguaEdgeCollection:
+    """Batch renderer for custom edges."""
+
+    def __init__(self, edges: Sequence[DaguaEdge], tier: Optional[RenderTier] = None) -> None:
+        """Initialize a batched edge collection.
+
+        Parameters
+        ----------
+        edges : Sequence[DaguaEdge]
+            Edges to render.
+        tier : str | None, default=None
+            Optional tier override.
+        """
+        lane_edges = _apply_lane_offsets(list(edges))
+        self.edges = lane_edges
+        self.tier = tier or choose_rendering_tier(len(self.edges))
+        self.prepared_edges = [
+            PreparedEdge(
+                edge=edge,
+                lane_curve=edge.curve,
+                body_curve=body_curve,
+                head_result=head_result,
+                tail_result=tail_result,
+            )
+            for edge in self.edges
+            for body_curve, head_result, tail_result in [_trimmed_body_curve(edge, edge.curve)]
+        ]
+
+    def render(self, ax: Any, label_background_alpha: float = 0.85) -> List[Any]:
+        """Render bodies, heads, and labels in the required pass order.
+
+        Parameters
+        ----------
+        ax : Any
+            Matplotlib axes.
+        label_background_alpha : float, default=0.85
+            Label background opacity.
+
+        Returns
+        -------
+        list[Any]
+            Created matplotlib artists.
+        """
+        artists: List[Any] = []
+        artists.extend(self.render_bodies(ax))
+        artists.extend(self.render_heads(ax))
+        artists.extend(self.render_labels(ax, label_background_alpha=label_background_alpha))
+        return artists
+
+    def render_bodies(self, ax: Any) -> List[Any]:
+        """Render the body pass for all edges.
+
+        Parameters
+        ----------
+        ax : Any
+            Matplotlib axes.
+
+        Returns
+        -------
+        list[Any]
+            Added body artists.
+        """
+        from matplotlib.collections import LineCollection, PatchCollection
+        from matplotlib.colors import to_rgba
+        from matplotlib.patches import PathPatch
+
+        body_paths: List[PathPatch] = []
+        body_colors: List[Tuple[float, float, float, float]] = []
+        line_segments: List[np.ndarray] = []
+        line_widths: List[float] = []
+        line_colors: List[Tuple[float, float, float, float]] = []
+
+        for prepared in self.prepared_edges:
+            if prepared.body_curve is None:
+                continue
+            edge = prepared.edge
+            if self.tier in {"lines", "bundled"}:
+                dash_segments = dash_curve(prepared.body_curve, edge.linestyle, edge.width)
+                for segment in dash_segments:
+                    line_segments.append(sample_curve(segment.curve, 12))
+                    line_widths.append(edge.stroke_width)
+                    line_colors.append(to_rgba(edge.color, edge.alpha))
+                continue
+
+            dash_segments = dash_curve(prepared.body_curve, edge.linestyle, edge.width)
+            if not dash_segments:
+                dash_segments = [DashSegment(prepared.body_curve, cap_start="butt", cap_end="butt")]
+            for segment in dash_segments:
+                if self.tier == "simplified":
+                    path = simple_quad_ribbon(segment.curve, edge.width)
+                else:
+                    path = curve_ribbon_path(
+                        segment.curve,
+                        width=edge.width,
+                        cap_start=segment.cap_start,
+                        cap_end=segment.cap_end,
+                    )
+                body_paths.append(PathPatch(path))
+                body_colors.append(to_rgba(edge.color, edge.alpha))
+
+        artists: List[Any] = []
+        if body_paths:
+            collection = PatchCollection(
+                body_paths,
+                match_original=False,
+                facecolors=body_colors,
+                edgecolors="none",
+                linewidths=0.0,
+                zorder=1,
+            )
+            ax.add_collection(collection)
+            artists.append(collection)
+        if line_segments:
+            collection = LineCollection(
+                line_segments,
+                colors=line_colors,
+                linewidths=line_widths,
+                capstyle="round",
+                joinstyle="round",
+                zorder=1,
+            )
+            ax.add_collection(collection)
+            artists.append(collection)
+        return artists
+
+    def render_heads(self, ax: Any) -> List[Any]:
+        """Render the arrowhead pass for all edges.
+
+        Parameters
+        ----------
+        ax : Any
+            Matplotlib axes.
+
+        Returns
+        -------
+        list[Any]
+            Added arrowhead artists.
+        """
+        from matplotlib.collections import PatchCollection
+        from matplotlib.colors import to_rgba
+        from matplotlib.patches import PathPatch
+
+        filled_patches: List[PathPatch] = []
+        filled_colors: List[Tuple[float, float, float, float]] = []
+        stroked_patches: List[PathPatch] = []
+        stroked_colors: List[Tuple[float, float, float, float]] = []
+        stroked_widths: List[float] = []
+
+        for prepared in self.prepared_edges:
+            edge = prepared.edge
+            arrow_color = edge.arrow_color or edge.color
+            for result in (prepared.head_result, prepared.tail_result):
+                if result is None:
+                    continue
+                for path in result.filled_paths:
+                    filled_patches.append(PathPatch(path))
+                    filled_colors.append(to_rgba(arrow_color, edge.alpha))
+                for path in result.stroked_paths:
+                    stroked_patches.append(PathPatch(path))
+                    stroked_colors.append(to_rgba(arrow_color, edge.alpha))
+                    stroked_widths.append(edge.stroke_width)
+
+        artists: List[Any] = []
+        if filled_patches:
+            filled = PatchCollection(
+                filled_patches,
+                match_original=False,
+                facecolors=filled_colors,
+                edgecolors="none",
+                linewidths=0.0,
+                zorder=2,
+            )
+            ax.add_collection(filled)
+            artists.append(filled)
+        if stroked_patches:
+            stroked = PatchCollection(
+                stroked_patches,
+                match_original=False,
+                facecolors="none",
+                edgecolors=stroked_colors,
+                linewidths=stroked_widths,
+                zorder=2,
+            )
+            ax.add_collection(stroked)
+            artists.append(stroked)
+        return artists
+
+    def label_placements(self) -> List[Optional[EdgeLabelPlacement]]:
+        """Resolve label placements for all edges.
+
+        Returns
+        -------
+        list[EdgeLabelPlacement | None]
+            One placement per prepared edge.
+        """
+        placements: List[Optional[EdgeLabelPlacement]] = []
+        for prepared in self.prepared_edges:
+            edge = prepared.edge
+            if not edge.label:
+                placements.append(None)
+                continue
+            reference_curve = prepared.body_curve or prepared.lane_curve
+            placements.append(
+                place_edge_label(
+                    reference_curve,
+                    label_position=edge.label_position,
+                    label_offset=edge.label_offset,
+                    label_rotate=edge.label_rotate,
+                    label_side=edge.label_side,
+                )
+            )
+        return placements
+
+    def render_labels(self, ax: Any, label_background_alpha: float = 0.85) -> List[Any]:
+        """Render labels on top of bodies and heads.
+
+        Parameters
+        ----------
+        ax : Any
+            Matplotlib axes.
+        label_background_alpha : float, default=0.85
+            Label background opacity.
+
+        Returns
+        -------
+        list[Any]
+            Added text artists.
+        """
+        artists: List[Any] = []
+        for prepared, placement in zip(self.prepared_edges, self.label_placements()):
+            if placement is None or not prepared.edge.label:
+                continue
+            edge = prepared.edge
+            artist = ax.text(
+                placement.x,
+                placement.y,
+                edge.label,
+                ha="center",
+                va="center",
+                rotation=placement.angle_degrees,
+                fontsize=edge.label_font_size,
+                fontfamily=edge.label_font_family or None,
+                fontweight=edge.label_font_weight,
+                color=edge.label_font_color,
+                bbox={
+                    "boxstyle": "round,pad=0.15",
+                    "facecolor": edge.label_background,
+                    "edgecolor": "none",
+                    "alpha": label_background_alpha,
+                },
+                zorder=4,
+            )
+            artists.append(artist)
+        return artists
+
+
+def render_edges(
+    ax: Any,
+    edges: Sequence[DaguaEdge],
+    tier: Optional[RenderTier] = None,
+    label_background_alpha: float = 0.85,
+) -> List[Any]:
+    """Render custom edges with one convenience call.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    edges : Sequence[DaguaEdge]
+        Edges to render.
+    tier : str | None, default=None
+        Optional tier override.
+    label_background_alpha : float, default=0.85
+        Label background opacity.
+
+    Returns
+    -------
+    list[Any]
+        Created artists.
+    """
+    collection = DaguaEdgeCollection(edges=edges, tier=tier)
+    return collection.render(ax=ax, label_background_alpha=label_background_alpha)
+
+
+def average_width(edges: Sequence[DaguaEdge]) -> float:
+    """Return the average body width of an edge set.
+
+    Parameters
+    ----------
+    edges : Sequence[DaguaEdge]
+        Edge set.
+
+    Returns
+    -------
+    float
+        Mean width in data units.
+    """
+    return mean_curve_width(edge.width for edge in edges)
