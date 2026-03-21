@@ -10,7 +10,12 @@ from matplotlib.collections import LineCollection, PatchCollection
 
 from dagua.graph import DaguaGraph
 from dagua.render.edges import available_arrowheads, build_arrowhead
-from dagua.render.edges.collection import DaguaEdge, DaguaEdgeCollection, choose_rendering_tier
+from dagua.render.edges.collection import (
+    DaguaEdge,
+    DaguaEdgeCollection,
+    _stroked_head_linewidth,
+    choose_rendering_tier,
+)
 from dagua.render.edges.dashes import dash_curve
 from dagua.render.edges.geometry import (
     CubicBezier,
@@ -53,13 +58,21 @@ def test_ribbon_path_is_closed_and_round_caps_add_vertices() -> None:
     assert rounded.vertices.shape[0] > butt.vertices.shape[0]
 
 
+def test_curve_ribbon_path_default_flatness_is_finer_than_legacy_sampling() -> None:
+    """The default ribbon path should use finer subdivision than the coarse legacy setting."""
+    coarse = curve_ribbon_path(_curve(), width=4.0, flatness=0.75)
+    refined = curve_ribbon_path(_curve(), width=4.0)
+
+    assert refined.vertices.shape[0] > coarse.vertices.shape[0]
+
+
 def test_dash_curve_uses_round_caps_per_segment() -> None:
-    """Visible dash segments should carry round caps on both ends."""
+    """Dashed segments should use butt caps to avoid pill-shaped terminals."""
     segments = dash_curve(_curve(), "dashed", width=3.0)
 
     assert len(segments) >= 2
-    assert all(segment.cap_start == "round" for segment in segments)
-    assert all(segment.cap_end == "round" for segment in segments)
+    assert all(segment.cap_start == "butt" for segment in segments)
+    assert all(segment.cap_end == "butt" for segment in segments)
 
 
 def test_dotted_dash_curve_uses_short_round_segments() -> None:
@@ -80,6 +93,31 @@ def test_dash_curve_drops_truncated_terminal_dash() -> None:
     segments = dash_curve(curve, "dashed", width=2.0)
 
     assert len(segments) == 1
+
+
+def test_dash_curve_aligns_terminal_dash_with_arrowhead_join() -> None:
+    """Aligned dash patterns should finish on a full dash, not a final gap or dot."""
+    curve = CubicBezier.from_points((0.0, 0.0), (20.0, 12.0), (40.0, -12.0), (60.0, 0.0))
+
+    segments = dash_curve(curve, "dashdot", width=3.0, align_to_end=True)
+    lengths = [build_arc_length_table(segment.curve).total_length for segment in segments]
+
+    assert segments
+    assert np.allclose(segments[-1].curve.p1, curve.p1)
+    assert segments[-1].cap_end == "butt"
+    assert lengths[-1] == pytest.approx(max(lengths), rel=0.05)
+    assert min(lengths) < max(lengths) * 0.2
+
+
+def test_dashdot_uses_distinct_dash_and_dot_caps() -> None:
+    """Dashdot should keep short round dots separate from longer butt-capped dashes."""
+    curve = CubicBezier.from_points((0.0, 0.0), (18.0, 10.0), (36.0, -10.0), (54.0, 0.0))
+
+    segments = dash_curve(curve, "dashdot", width=2.5)
+
+    assert segments
+    assert any(segment.cap_start == "butt" and segment.cap_end == "butt" for segment in segments)
+    assert any(segment.cap_start == "round" and segment.cap_end == "round" for segment in segments)
 
 
 @pytest.mark.parametrize("spec", ["normal", "dot", "diamond", "vee", "crow", "box", "simple"])
@@ -148,6 +186,55 @@ def test_open_and_hollow_arrowheads_increase_stroke_weight() -> None:
 
     assert vee.stroke_width_scale > 1.0
     assert hollow.stroke_width_scale > 1.0
+
+
+def test_open_arrowhead_seats_on_full_body_width() -> None:
+    """Open heads should start on the full ribbon width instead of pinching at the join."""
+    result = build_arrowhead(
+        "vee",
+        tip=(0.0, 0.0),
+        tangent=(-1.0, 0.0),
+        length=10.0,
+        width=8.0,
+        body_width=6.0,
+    )
+
+    body_side_span = np.linalg.norm(
+        result.stroked_paths[0].vertices[0] - result.stroked_paths[0].vertices[-1]
+    )
+
+    assert body_side_span == pytest.approx(6.0)
+
+
+def test_stroked_head_linewidth_grows_with_thick_edges() -> None:
+    """Open and hollow heads should gain outline weight as the body gets thicker."""
+    outline_result = build_arrowhead(
+        "vee",
+        tip=(0.0, 0.0),
+        tangent=(-1.0, 0.0),
+        length=8.0,
+        width=5.0,
+        body_width=3.0,
+    )
+    hollow_result = build_arrowhead(
+        "onormal",
+        tip=(0.0, 0.0),
+        tangent=(-1.0, 0.0),
+        length=8.0,
+        width=5.0,
+        body_width=3.0,
+    )
+    thin_edge = DaguaEdge(curve=_curve(), stroke_width=1.0)
+    thick_edge = DaguaEdge(curve=_curve(), stroke_width=8.0)
+
+    assert (
+        _stroked_head_linewidth(thick_edge, outline_result)
+        > _stroked_head_linewidth(thin_edge, outline_result) * 8.0
+    )
+    assert (
+        _stroked_head_linewidth(thick_edge, hollow_result)
+        > _stroked_head_linewidth(thin_edge, hollow_result) * 8.0
+    )
 
 
 def test_available_arrowheads_include_required_builtins() -> None:

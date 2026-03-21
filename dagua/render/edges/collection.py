@@ -35,6 +35,8 @@ HEAD_DENSITY_HIDE_COUNT = 14
 MIN_DENSE_HEAD_SCALE = 0.45
 MIN_ARROW_LENGTH_FACTOR = 1.6
 MIN_ARROW_WIDTH_FACTOR = 1.15
+THICK_STROKED_HEAD_GAIN = 0.05
+THICK_STROKED_HEAD_CAP = 1.4
 
 
 @dataclass
@@ -340,6 +342,28 @@ def _scaled_head_size(edge: DaguaEdge, scale: float, terminal: str) -> Tuple[flo
     scaled_length = max(edge.width * MIN_ARROW_LENGTH_FACTOR, base_length * scale)
     scaled_width = max(edge.width * MIN_ARROW_WIDTH_FACTOR, base_width * scale)
     return scaled_length, scaled_width
+
+
+def _stroked_head_linewidth(edge: DaguaEdge, result: ArrowheadResult) -> float:
+    """Return the display stroke width for one outline-style arrowhead.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge owning the arrowhead.
+    result : ArrowheadResult
+        Prepared arrowhead geometry.
+
+    Returns
+    -------
+    float
+        Stroke width in display points.
+    """
+    base_width = float(edge.stroke_width) * result.stroke_width_scale
+    proportional_boost = 1.0 + (
+        min(max(float(edge.stroke_width), 0.0), 8.0) * THICK_STROKED_HEAD_GAIN
+    )
+    return base_width * min(proportional_boost, THICK_STROKED_HEAD_CAP)
 
 
 def _apply_density_rule(
@@ -672,14 +696,24 @@ class DaguaEdgeCollection:
                 continue
             edge = prepared.edge
             if self.tier in {"lines", "bundled"}:
-                dash_segments = dash_curve(prepared.body_curve, edge.linestyle, edge.width)
+                dash_segments = dash_curve(
+                    prepared.body_curve,
+                    edge.linestyle,
+                    edge.width,
+                    align_to_end=prepared.head_result is not None,
+                )
                 for segment in dash_segments:
-                    line_segments.append(sample_curve(segment.curve, 12))
+                    line_segments.append(sample_curve(segment.curve, 18))
                     line_widths.append(edge.stroke_width)
                     line_colors.append(to_rgba(edge.color, edge.alpha))
                 continue
 
-            dash_segments = dash_curve(prepared.body_curve, edge.linestyle, edge.width)
+            dash_segments = dash_curve(
+                prepared.body_curve,
+                edge.linestyle,
+                edge.width,
+                align_to_end=prepared.head_result is not None,
+            )
             if not dash_segments:
                 dash_segments = [DashSegment(prepared.body_curve, cap_start="butt", cap_end="butt")]
             for segment in dash_segments:
@@ -755,7 +789,7 @@ class DaguaEdgeCollection:
                 for path in result.stroked_paths:
                     stroked_patches.append(PathPatch(path))
                     stroked_colors.append(to_rgba(arrow_color, edge.alpha))
-                    stroked_widths.append(edge.stroke_width * result.stroke_width_scale)
+                    stroked_widths.append(_stroked_head_linewidth(edge, result))
 
         artists: List[Any] = []
         if filled_patches:
