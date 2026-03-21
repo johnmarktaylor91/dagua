@@ -16,6 +16,9 @@ from dagua.render.edges.geometry import (
 
 DashPattern = Union[str, Sequence[float]]
 MIN_BODY_LENGTH = 0.5
+DOTTED_ON_RATIO = 0.18
+DOTTED_OFF_RATIO = 1.85
+TERMINAL_DASH_MIN_RATIO = 0.65
 
 
 @dataclass(frozen=True)
@@ -59,12 +62,12 @@ def parse_dash_pattern(pattern: DashPattern, width: float) -> Tuple[float, ...]:
         if pattern == "dashed":
             return (4.0 * scaled_width, 2.75 * scaled_width)
         if pattern == "dotted":
-            return (1.1 * scaled_width, 2.2 * scaled_width)
+            return (DOTTED_ON_RATIO * scaled_width, DOTTED_OFF_RATIO * scaled_width)
         if pattern == "dashdot":
             return (
                 4.0 * scaled_width,
                 2.2 * scaled_width,
-                1.1 * scaled_width,
+                DOTTED_ON_RATIO * scaled_width,
                 2.2 * scaled_width,
             )
         raise ValueError(f"Unsupported dash pattern: {pattern!r}.")
@@ -150,7 +153,7 @@ def dash_curve(
     if total_length <= dash_pattern[0]:
         return [DashSegment(curve=curve, cap_start="round", cap_end="round")]
 
-    visible_segments: List[DashSegment] = []
+    visible_segments: List[Tuple[DashSegment, float, float]] = []
     current_length = 0.0
     draw_segment = True
 
@@ -158,19 +161,36 @@ def dash_curve(
         if current_length >= total_length - FLOAT_EPSILON:
             break
         next_length = min(current_length + part_length, total_length)
-        if draw_segment and next_length - current_length >= min_body_length:
+        segment_length = next_length - current_length
+        minimum_length = min(min_body_length, max(part_length * 0.8, FLOAT_EPSILON))
+        if draw_segment and segment_length >= minimum_length:
             start_t, end_t = _segment_bounds(table, current_length, next_length)
             visible_segments.append(
-                DashSegment(
-                    curve=subcurve(curve, start_t, end_t),
-                    cap_start="round",
-                    cap_end="round",
+                (
+                    DashSegment(
+                        curve=subcurve(curve, start_t, end_t),
+                        cap_start="round",
+                        cap_end="round",
+                    ),
+                    part_length,
+                    next_length,
                 )
             )
         current_length = next_length
         draw_segment = not draw_segment
 
-    return visible_segments
+    if visible_segments:
+        last_segment, nominal_length, stop_length = visible_segments[-1]
+        actual_length = build_arc_length_table(last_segment.curve).total_length
+        truncated_tail = (
+            stop_length >= total_length - FLOAT_EPSILON
+            and actual_length < nominal_length * TERMINAL_DASH_MIN_RATIO
+            and len(visible_segments) > 1
+        )
+        if truncated_tail:
+            visible_segments.pop()
+
+    return [segment for segment, _, _ in visible_segments]
 
 
 def visible_dash_length(pattern: DashPattern, width: float) -> float:
