@@ -17,7 +17,7 @@ from dagua.render.edges.collection import (
     _trimmed_body_curve,
     choose_rendering_tier,
 )
-from dagua.render.edges.dashes import dash_curve
+from dagua.render.edges.dashes import dash_curve, parse_dash_pattern
 from dagua.render.edges.geometry import (
     CubicBezier,
     adaptive_subdivide,
@@ -134,6 +134,19 @@ def test_dashdot_uses_distinct_dash_and_dot_caps() -> None:
     assert max(dot_lengths) == pytest.approx(1.25, rel=0.08)
 
 
+def test_thick_dash_patterns_expand_gaps_for_readability() -> None:
+    """Thick dashed styles should open their gaps instead of collapsing to solid bars."""
+    dash_on, dash_off = parse_dash_pattern("dashed", width=6.0)
+    dashdot_on, dashdot_gap, dot_on, dot_gap = parse_dash_pattern("dashdot", width=6.0)
+
+    assert dash_on < 24.0
+    assert dash_off > 16.5
+    assert dashdot_on < 24.0
+    assert dashdot_gap > 12.0
+    assert dot_on < 3.0
+    assert dot_gap > 12.0
+
+
 @pytest.mark.parametrize("spec", ["normal", "dot", "diamond", "vee", "crow", "box", "simple"])
 def test_arrowhead_result_separates_filled_and_stroked_geometry(spec: str) -> None:
     """Arrowheads should report fill geometry separately from stroke geometry."""
@@ -153,6 +166,33 @@ def test_open_arrowhead_becomes_stroked() -> None:
 
     assert result.filled_paths == []
     assert len(result.stroked_paths) >= 1
+
+
+def test_hollow_arrowheads_gain_extra_size_for_visual_weight() -> None:
+    """Hollow heads should scale up so they do not look undersized beside filled ones."""
+    filled = build_arrowhead(
+        "normal",
+        tip=(0.0, 0.0),
+        tangent=(1.0, 0.0),
+        length=8.0,
+        width=5.0,
+        body_width=3.0,
+        fill_mode="filled",
+    )
+    hollow = build_arrowhead(
+        "normal",
+        tip=(0.0, 0.0),
+        tangent=(1.0, 0.0),
+        length=8.0,
+        width=5.0,
+        body_width=3.0,
+        fill_mode="hollow",
+    )
+
+    filled_extent = float(np.max(filled.filled_paths[0].vertices[:, 0]))
+    hollow_extent = float(np.max(hollow.stroked_paths[0].vertices[:, 0]))
+
+    assert hollow_extent > filled_extent * 1.25
 
 
 def test_arrowhead_neck_matches_body_width_and_overlaps_body() -> None:
@@ -331,6 +371,27 @@ def test_trimmed_head_preserves_stroke_scale() -> None:
     assert head_result.stroke_width_scale > 1.0
 
 
+def test_compound_arrowheads_insert_tangent_spacing_between_primitives() -> None:
+    """Compound arrowheads should leave visible gaps between successive markers."""
+    result = build_arrowhead(
+        "dotnormaldiamond",
+        tip=(0.0, 0.0),
+        tangent=(1.0, 0.0),
+        length=10.0,
+        width=7.0,
+        body_width=4.0,
+    )
+
+    extents = sorted(
+        (float(np.min(path.vertices[:, 0])), float(np.max(path.vertices[:, 0])))
+        for path in result.filled_paths
+    )
+
+    assert len(extents) == 3
+    assert extents[1][0] > extents[0][1]
+    assert extents[2][0] > extents[1][1]
+
+
 def test_available_arrowheads_include_required_builtins() -> None:
     """The registry should expose the requested Graphviz and matplotlib heads."""
     names = available_arrowheads()
@@ -433,6 +494,15 @@ def test_collection_scales_dense_head_sizes() -> None:
     assert any(edge.resolved_arrow_length() < 8.0 for edge in collection.edges)
 
 
+def test_collection_replaces_zero_length_edges_with_visible_micro_loops() -> None:
+    """Coincident endpoints should render via a synthetic loop instead of disappearing."""
+    zero_curve = CubicBezier.from_points((0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0))
+    collection = DaguaEdgeCollection([DaguaEdge(curve=zero_curve, arrowhead="normal", width=1.0)])
+
+    assert build_arc_length_table(collection.prepared_edges[0].lane_curve).total_length > 0.0
+    assert collection.prepared_edges[0].head_result is not None
+
+
 def test_collection_simplifies_very_dense_terminal_heads() -> None:
     """Very dense fan-in should fall back to tee or no head."""
     edges = [
@@ -453,6 +523,23 @@ def test_collection_simplifies_very_dense_terminal_heads() -> None:
     collection = DaguaEdgeCollection(edges)
 
     assert all(edge.arrowhead in {"tee", "none"} for edge in collection.edges)
+
+
+def test_custom_arrow_overrides_still_respect_thick_edge_head_floors() -> None:
+    """Explicit head dimensions should not undersize thick-edge arrowheads."""
+    edge = DaguaEdge(
+        curve=_curve(),
+        width=5.0,
+        arrowhead_length=8.0,
+        arrowhead_width=8.0,
+        tail_arrow_length=9.0,
+        tail_arrow_width=9.0,
+    )
+
+    assert edge.resolved_arrow_length() == pytest.approx(15.0)
+    assert edge.resolved_arrow_width() == pytest.approx(12.5)
+    assert edge.resolved_tail_arrow_length() == pytest.approx(15.0)
+    assert edge.resolved_tail_arrow_width() == pytest.approx(12.5)
 
 
 def test_line_tier_uses_line_collection() -> None:

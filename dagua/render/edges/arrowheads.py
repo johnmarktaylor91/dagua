@@ -20,6 +20,9 @@ OPEN_HEAD_STROKE_SCALE = 1.2
 TEE_HEAD_STROKE_SCALE = 1.35
 HOLLOW_HEAD_STROKE_SCALE = 1.35
 OPEN_HEAD_WIDTH_GAIN = 1.12
+HOLLOW_HEAD_DIMENSION_SCALE = 1.3
+COMPOUND_HEAD_GAP_RATIO = 0.42
+COMPOUND_HEAD_GAP_FLOOR = 0.6
 
 
 @dataclass(frozen=True)
@@ -764,6 +767,49 @@ def _translated_path(path: Path, dx: float) -> Path:
     return Path(vertices, path.codes)
 
 
+def _local_extent_x(result: ArrowheadResult) -> float:
+    """Return the body-axis extent of a local arrowhead result.
+
+    Parameters
+    ----------
+    result : ArrowheadResult
+        Local-space arrowhead geometry.
+
+    Returns
+    -------
+    float
+        Maximum x extent across the result geometry.
+    """
+    max_x = float(np.max(result.trim_contour.vertices[:, 0]))
+    for path in [*result.filled_paths, *result.stroked_paths]:
+        max_x = max(max_x, float(np.max(path.vertices[:, 0])))
+    return max_x
+
+
+def _compound_gap(length: float, width: float, body_width: float) -> float:
+    """Return the tangent spacing inserted between compound primitives.
+
+    Parameters
+    ----------
+    length : float
+        Primitive length in local coordinates.
+    width : float
+        Primitive width in local coordinates.
+    body_width : float
+        Ribbon body width in local coordinates.
+
+    Returns
+    -------
+    float
+        Tangent gap between adjacent compound markers.
+    """
+    return max(
+        COMPOUND_HEAD_GAP_FLOOR,
+        body_width * COMPOUND_HEAD_GAP_RATIO,
+        min(length, width) * 0.18,
+    )
+
+
 def build_arrowhead(
     spec: str,
     tip: Sequence[float],
@@ -804,12 +850,18 @@ def build_arrowhead(
 
     local_results: List[ArrowheadResult] = []
     offset = 0.0
-    for primitive in parsed:
+    for index, primitive in enumerate(parsed):
         registry_key = primitive.shape
         if registry_key not in ARROWHEAD_REGISTRY:
             raise ValueError(f"Unsupported arrowhead primitive: {registry_key!r}.")
         spec_entry = ARROWHEAD_REGISTRY[registry_key]
-        base_result = spec_entry.builder(length, width, resolved_body_width)
+        primitive_fill_mode = "hollow" if primitive.open_fill else fill_mode
+        primitive_length = float(length)
+        primitive_width = float(width)
+        if primitive_fill_mode == "hollow" and not spec_entry.stroke_only:
+            primitive_length *= HOLLOW_HEAD_DIMENSION_SCALE
+            primitive_width *= HOLLOW_HEAD_DIMENSION_SCALE
+        base_result = spec_entry.builder(primitive_length, primitive_width, resolved_body_width)
         clipped_result = ArrowheadResult(
             filled_paths=[
                 _clip_local_path(path, primitive.side) for path in base_result.filled_paths
@@ -823,7 +875,7 @@ def build_arrowhead(
         )
         resolved_result = _resolve_fill(
             clipped_result,
-            fill_mode="hollow" if primitive.open_fill else fill_mode,
+            fill_mode=primitive_fill_mode,
             stroke_only=spec_entry.stroke_only,
         )
         translated_result = ArrowheadResult(
@@ -836,7 +888,10 @@ def build_arrowhead(
             stroke_width_scale=resolved_result.stroke_width_scale,
         )
         local_results.append(translated_result)
-        offset = float(np.max(translated_result.trim_contour.vertices[:, 0]))
+        next_offset = _local_extent_x(translated_result)
+        if index < len(parsed) - 1:
+            next_offset += _compound_gap(primitive_length, primitive_width, resolved_body_width)
+        offset = next_offset
 
     composed = ArrowheadResult.compose(local_results)
     return ArrowheadResult(
