@@ -1716,8 +1716,11 @@ def main() -> int:
                     skip_reason=None,
                 )
 
-            # Track consecutive timeouts per (engine, graph) combo
-            if record.status in ("timeout", "error") and "timeout" in (record.error or "").lower():
+            # Track consecutive timeouts per (engine, graph) combo.
+            # Check status directly (not error text -- timeouts have error=None).
+            if record.status == "timeout" or (
+                record.status == "error" and "timeout" in (record.error or "").lower()
+            ):
                 consecutive_timeouts[combo_key] = consecutive_timeouts.get(combo_key, 0) + 1
             else:
                 consecutive_timeouts[combo_key] = 0
