@@ -7,11 +7,17 @@ two-dimensional Student-t embedding with early exaggeration.
 
 from __future__ import annotations
 
-from collections import deque
 from typing import Optional
 
+import numpy as np
 import torch
 
+from dagua.layout.classic._graph_distances import (
+    all_pairs_shortest_paths as _shared_all_pairs_shortest_paths,
+)
+from dagua.layout.classic._graph_distances import (
+    build_undirected_adjacency as _shared_build_undirected_adjacency,
+)
 from dagua.layout.classic.pivot_mds import layout_pivot_mds
 
 _MIN_DISTANCE = 1.0e-12
@@ -87,7 +93,11 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
     return centered * (extent / span)
 
 
-def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> list[list[int]]:
+def _build_undirected_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> list[list[tuple[int, float]]]:
     """Build an undirected adjacency list from an edge tensor.
 
     Parameters
@@ -96,80 +106,51 @@ def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> lis
         Edge list with shape ``[2, E]``.
     num_nodes : int
         Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
 
     Returns
     -------
-    list[list[int]]
+    list[list[tuple[int, float]]]
         One sorted neighbor list per node.
     """
-    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
-        raise ValueError("edge_index must have shape [2, E].")
-
-    adjacency_sets = [set() for _ in range(num_nodes)]
-    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
-    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
-        if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
-            raise ValueError("edge_index contains a node index outside [0, num_nodes).")
-        if source == target:
-            continue
-        adjacency_sets[source].add(target)
-        adjacency_sets[target].add(source)
-
-    return [sorted(neighbors) for neighbors in adjacency_sets]
-
-
-def _bfs_distances(adjacency: list[list[int]], start: int) -> torch.Tensor:
-    """Compute unweighted shortest-path distances from one source.
-
-    Parameters
-    ----------
-    adjacency : list[list[int]]
-        Undirected adjacency list.
-    start : int
-        Source node index.
-
-    Returns
-    -------
-    torch.Tensor
-        Float distance vector with unreachable nodes set to ``diameter + 1``.
-    """
-    num_nodes = len(adjacency)
-    distances = [-1] * num_nodes
-    distances[start] = 0
-    queue: deque[int] = deque([start])
-    diameter = 0
-
-    while queue:
-        node = queue.popleft()
-        next_distance = distances[node] + 1
-        for neighbor in adjacency[node]:
-            if distances[neighbor] == -1:
-                distances[neighbor] = next_distance
-                diameter = max(diameter, next_distance)
-                queue.append(neighbor)
-
-    fill_value = float(diameter + 1 if num_nodes > 1 else 0.0)
-    return torch.tensor(
-        [fill_value if distance < 0 else float(distance) for distance in distances],
-        dtype=torch.float32,
+    return _shared_build_undirected_adjacency(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
     )
 
 
-def _all_pairs_shortest_paths(adjacency: list[list[int]]) -> torch.Tensor:
-    """Compute the full shortest-path matrix with repeated BFS.
+def _all_pairs_shortest_paths(
+    adjacency: list[list[tuple[int, float]]],
+    weighted: bool,
+) -> torch.Tensor:
+    """Compute the full shortest-path matrix.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
 
     Returns
     -------
     torch.Tensor
         Distance matrix with shape ``[N, N]``.
     """
-    rows = [_bfs_distances(adjacency, node) for node in range(len(adjacency))]
-    return torch.stack(rows, dim=0)
+    raw_distances = _shared_all_pairs_shortest_paths(adjacency, weighted=weighted)
+    if raw_distances.size == 0:
+        return torch.empty((0, 0), dtype=torch.float32)
+
+    cleaned = raw_distances.astype(np.float64, copy=True)
+    for node in range(cleaned.shape[0]):
+        row = cleaned[node]
+        finite_mask = np.isfinite(row) if weighted else row >= 0
+        max_distance = float(row[finite_mask].max()) if bool(finite_mask.any()) else 0.0
+        fill_value = max_distance + 1.0 if cleaned.shape[0] > 1 else 0.0
+        row[~finite_mask] = fill_value
+    return torch.tensor(cleaned, dtype=torch.float32)
 
 
 def _row_probabilities(distances: torch.Tensor, perplexity: float) -> torch.Tensor:
@@ -326,6 +307,7 @@ def layout_tsnet(
     perplexity: float = 30,
     steps: int = 1000,
     seed: int = 42,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with a tsNET-style t-SNE objective over graph distances.
 
@@ -349,6 +331,9 @@ def layout_tsnet(
         Number of optimization updates.
     seed : int, default=42
         Random seed.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``. When provided, graph
+        distances are computed with Dijkstra instead of BFS.
 
     Returns
     -------
@@ -368,8 +353,8 @@ def layout_tsnet(
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
 
-    adjacency = _build_undirected_adjacency(edge_index, num_nodes)
-    distances = _all_pairs_shortest_paths(adjacency)
+    adjacency = _build_undirected_adjacency(edge_index, num_nodes, edge_weights=edge_weights)
+    distances = _all_pairs_shortest_paths(adjacency, weighted=edge_weights is not None)
     probabilities = _high_dimensional_affinities(
         distances,
         min(perplexity, float(max(num_nodes - 1, 1))),
@@ -381,6 +366,7 @@ def layout_tsnet(
         node_sizes=node_sizes,
         n_pivots=min(32, num_nodes),
         seed=seed,
+        edge_weights=edge_weights,
     ).to(device)
     positions = initial_positions.clone().requires_grad_(True)
     early_exaggeration = 12.0
