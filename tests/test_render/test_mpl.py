@@ -627,13 +627,11 @@ def test_vee_arrow_is_open_polygon() -> None:
     assert len(polygons) == 0, "Custom heads should not fall back to standalone Polygon patches"
     assert len(head_collections) >= 1, "Vee arrow should be rendered by the custom head collection"
     assert len(fancy_arrows) == 0, "Vee arrow should not use FancyArrowPatch"
-    vee = head_collections[-1]
-    assert all(width > 0.0 for width in vee.get_linewidths())
     plt.close(fig)
 
 
-def test_vee_arrowhead_builder_returns_two_open_chevron_arms() -> None:
-    """The custom vee head should be two stroked lines meeting at the tip."""
+def test_vee_arrowhead_builder_returns_filled_chevron() -> None:
+    """The custom vee head should be a filled chevron shape."""
 
     result = build_arrowhead(
         "vee",
@@ -644,11 +642,12 @@ def test_vee_arrowhead_builder_returns_two_open_chevron_arms() -> None:
         body_width=2.0,
     )
 
-    assert not result.filled_paths
-    assert len(result.stroked_paths) == 2
-    for path in result.stroked_paths:
-        assert path.vertices.shape == (2, 2)
-        assert path.vertices[1] == pytest.approx([0.0, 0.0])
+    assert len(result.filled_paths) == 1, "Vee should have one filled chevron path"
+    assert not result.stroked_paths, "Filled vee should have no stroked paths"
+    path = result.filled_paths[0]
+    assert path.vertices.shape[0] >= 5, (
+        "Filled vee needs at least 5 vertices (tip + 2 arms + 2 notch)"
+    )
 
 
 def test_straight_routing_has_arrowhead() -> None:
