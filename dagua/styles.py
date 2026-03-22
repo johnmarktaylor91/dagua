@@ -231,7 +231,7 @@ class NodeStyle:
     text_outline: bool = False
     text_outline_color: str = "#FFFFFF"
     text_outline_width: float = 2.0
-    padding: Tuple[float, float] = (12.0, 7.0)  # horizontal, vertical
+    padding: Tuple[float, float] = (11.0, 9.0)  # horizontal, vertical
     corner_radius: float = 6.0
     opacity: float = 1.0
     gradient: str = "none"  # none, linear, radial
@@ -401,8 +401,8 @@ _yellow_fill, _yellow_stroke = make_node_colors(PALETTE["yellow"])
 # Legacy name: bare Dict[str, NodeStyle] for backwards compat
 DEFAULT_NODE_STYLES: Dict[str, NodeStyle] = {
     "default": NodeStyle(base_color=PALETTE["sky"]),
-    "input": NodeStyle(base_color=PALETTE["bluish_green"], padding=(12.0, 7.0)),
-    "output": NodeStyle(base_color=PALETTE["vermillion"], padding=(12.0, 7.0)),
+    "input": NodeStyle(base_color=PALETTE["bluish_green"], padding=(11.0, 9.0)),
+    "output": NodeStyle(base_color=PALETTE["vermillion"], padding=(11.0, 9.0)),
     "buffer": NodeStyle(base_color=MEDIUM_GRAY),
     "bool": NodeStyle(base_color=PALETTE["amber"]),
     "trainable_params": NodeStyle(base_color=PALETTE["blue"]),
