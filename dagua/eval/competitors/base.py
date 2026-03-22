@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 import torch
 
@@ -29,6 +29,7 @@ class CompetitorBase(ABC):
     name: str = ""
     max_nodes: int = 0
     supports_clusters: bool = False
+    variant_param_names: frozenset[str] = frozenset()
 
     @abstractmethod
     def layout(
@@ -59,6 +60,35 @@ class CompetitorBase(ABC):
     def available(self) -> bool:
         """Check if this competitor's tool is installed and usable."""
         return True
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
+    ) -> CompetitorResult:
+        """Run layout with optional variant-specific parameter overrides.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime in seconds.
+        seed : int | None, default=None
+            Random seed for stochastic algorithms.
+        variant_params : Mapping[str, Any] | None, default=None
+            Optional engine-specific parameter overrides. The base
+            implementation ignores them and delegates to :meth:`layout`.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout outcome, runtime, and optional error details.
+        """
+        del variant_params
+        return self.layout(graph, timeout=timeout, seed=seed)
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
@@ -104,3 +134,19 @@ def get_competitors() -> List[CompetitorBase]:
 def get_available_competitors() -> List[CompetitorBase]:
     """Return only competitors whose tools are installed."""
     return [c for c in _COMPETITORS.values() if c.available()]
+
+
+def get_competitor(name: str) -> Optional[CompetitorBase]:
+    """Return one registered competitor by name.
+
+    Parameters
+    ----------
+    name : str
+        Registered competitor name.
+
+    Returns
+    -------
+    CompetitorBase | None
+        Registered competitor instance, or ``None`` when not present.
+    """
+    return _COMPETITORS.get(name)
