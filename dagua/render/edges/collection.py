@@ -1128,15 +1128,18 @@ class DaguaEdgeCollection:
         for prepared in self.prepared_edges:
             edge = prepared.edge
             arrow_color = edge.arrow_color or edge.color
+            # Boost arrowhead alpha at low opacity so heads remain readable
+            # (matches matplotlib behavior where arrowheads stay more opaque)
+            head_alpha = min(edge.alpha + 0.15, 1.0) if edge.alpha < 0.5 else edge.alpha
             for result in (prepared.head_result, prepared.tail_result):
                 if result is None:
                     continue
                 for path in result.filled_paths:
                     filled_patches.append(PathPatch(path))
-                    filled_colors.append(to_rgba(arrow_color, edge.alpha))
+                    filled_colors.append(to_rgba(arrow_color, head_alpha))
                 for path in result.stroked_paths:
                     stroked_patches.append(PathPatch(path))
-                    stroked_colors.append(to_rgba(arrow_color, edge.alpha))
+                    stroked_colors.append(to_rgba(arrow_color, head_alpha))
                     stroked_widths.append(_stroked_head_linewidth(edge, result))
 
         artists: List[Any] = []
