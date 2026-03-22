@@ -1482,6 +1482,358 @@ NEO4J_THEME = Theme(
 )
 
 
+NETWORKX_THEME = Theme(
+    name="networkx",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#1F78B4",  # ColorBrewer Paired blue -- the iconic NX color
+            stroke="#1F78B4",  # border matches face
+            stroke_width=1.0,
+            font_family="DejaVu Sans",
+            font_size=10.0,
+            font_color="#000000",
+            padding=(6.0, 6.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#33A02C",  # ColorBrewer Paired green
+            stroke="#33A02C",
+            stroke_width=1.0,
+            font_family="DejaVu Sans",
+            font_size=10.0,
+            font_color="#000000",
+            padding=(6.0, 6.0),
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#E31A1C",  # ColorBrewer Paired red
+            stroke="#E31A1C",
+            stroke_width=1.0,
+            font_family="DejaVu Sans",
+            font_size=10.0,
+            font_color="#000000",
+            padding=(6.0, 6.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#000000",
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#000000",
+            routing="straight",
+        ),
+        "back": EdgeStyle(
+            color="#000000",
+            width=1.0,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            routing="straight",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#E0E0E0",
+        stroke="#999999",
+        stroke_width=1.0,
+        corner_radius=0.0,
+        font_size=10.0,
+        font_color="#000000",
+        padding=8.0,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+TIKZ_THEME = Theme(
+    name="tikz",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#ABD7E6",  # tikz-network default vertex fill
+            stroke="#000000",
+            stroke_width=0.6,  # thin LaTeX line
+            font_family="DejaVu Serif",  # closest to Computer Modern
+            font_size=8.0,  # \scriptsize equivalent
+            font_color="#000000",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#C8E6C0",  # light green
+            stroke="#000000",
+            stroke_width=0.6,
+            font_family="DejaVu Serif",
+            font_size=8.0,
+            font_color="#000000",
+            padding=(4.0, 4.0),
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#F0C0C0",  # light red
+            stroke="#000000",
+            stroke_width=0.6,
+            font_family="DejaVu Serif",
+            font_size=8.0,
+            font_color="#000000",
+            padding=(4.0, 4.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#404040",  # black!75
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#404040",
+            routing="straight",
+            label_font_size=8.0,
+            label_background="#FFFFFF",
+        ),
+        "back": EdgeStyle(
+            color="#404040",
+            width=1.2,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            routing="straight",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F5F5F5",
+        stroke="#000000",
+        stroke_width=0.4,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#000000",
+        padding=8.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+SIGMA_THEME = Theme(
+    name="sigma",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#999999",  # sigma default gray
+            stroke="#999999",
+            stroke_width=0.0,  # no border in default circle program
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#000000",
+            padding=(4.0, 4.0),
+            min_width=16.0,
+            min_height=16.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#5B8FF9",
+            stroke="#5B8FF9",
+            stroke_width=0.0,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#000000",
+            padding=(4.0, 4.0),
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#F6903D",
+            stroke="#F6903D",
+            stroke_width=0.0,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#000000",
+            padding=(4.0, 4.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#CCCCCC",  # sigma default light gray
+            width=1.0,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            opacity=0.8,
+        ),
+        "back": EdgeStyle(
+            color="#CCCCCC",
+            width=1.0,
+            style="dashed",
+            arrow="none",
+            routing="straight",
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0F0F0",
+        stroke="#CCCCCC",
+        stroke_width=0.5,
+        corner_radius=0.0,
+        font_size=10.0,
+        font_color="#666666",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+VISJS_THEME = Theme(
+    name="visjs",
+    node_styles={
+        "default": NodeStyle(
+            shape="ellipse",
+            fill="#97C2FC",  # vis.js signature cornflower blue
+            stroke="#2B7CE9",  # darker blue border
+            stroke_width=1.0,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#343434",
+            padding=(10.0, 8.0),
+            min_width=25.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="ellipse",
+            fill="#A8E6A1",  # light green
+            stroke="#4CAF50",
+            stroke_width=1.0,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#343434",
+            padding=(10.0, 8.0),
+        ),
+        "output": NodeStyle(
+            shape="ellipse",
+            fill="#FFAAAA",  # light red
+            stroke="#E53935",
+            stroke_width=1.0,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#343434",
+            padding=(10.0, 8.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#848484",  # vis.js gray
+            width=1.0,
+            style="solid",
+            arrow="none",  # vis.js arrows off by default
+            routing="bezier",
+            curvature=0.3,  # smooth dynamic curves
+        ),
+        "back": EdgeStyle(
+            color="#848484",
+            width=1.0,
+            style="dashed",
+            arrow="none",
+            routing="bezier",
+            curvature=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#EEF2FF",
+        stroke="#2B7CE9",
+        stroke_width=1.0,
+        corner_radius=4.0,
+        font_size=11.0,
+        font_color="#343434",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+GRAPHISTRY_THEME = Theme(
+    name="graphistry",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#6C8EBF",  # muted blue (structure-colored default)
+            stroke="#6C8EBF",
+            stroke_width=0.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#E0E0E0",
+            padding=(3.0, 3.0),
+            min_width=14.0,
+            min_height=14.0,
+            opacity=0.9,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#4CAF50",
+            stroke="#4CAF50",
+            stroke_width=0.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#E0E0E0",
+            padding=(3.0, 3.0),
+            opacity=0.9,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#FF7043",
+            stroke="#FF7043",
+            stroke_width=0.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#E0E0E0",
+            padding=(3.0, 3.0),
+            opacity=0.9,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#555555",
+            width=0.8,
+            style="solid",
+            arrow="simple",
+            arrow_fill="filled",
+            arrow_color="#555555",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.2,
+            opacity=0.3,  # signature low opacity for density handling
+        ),
+        "back": EdgeStyle(
+            color="#555555",
+            width=0.8,
+            style="solid",
+            arrow="simple",
+            opacity=0.2,
+            routing="bezier",
+            curvature=0.2,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#2A2A2A",
+        stroke="#444444",
+        stroke_width=0.5,
+        corner_radius=4.0,
+        font_size=9.0,
+        font_color="#AAAAAA",
+        padding=8.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(
+        background_color="#1E1E1E",  # signature dark background
+    ),
+)
+
+
 # ─── Theme Registry ──────────────────────────────────────────────────────
 
 THEME_REGISTRY: Dict[str, Theme] = {
@@ -1499,6 +1851,11 @@ THEME_REGISTRY: Dict[str, Theme] = {
     "yed": YED_THEME,
     "drawio": DRAWIO_THEME,
     "neo4j": NEO4J_THEME,
+    "networkx": NETWORKX_THEME,
+    "tikz": TIKZ_THEME,
+    "sigma": SIGMA_THEME,
+    "visjs": VISJS_THEME,
+    "graphistry": GRAPHISTRY_THEME,
 }
 
 
