@@ -442,9 +442,9 @@ class DaguaGraph:
     ) -> None:
         """Compute node sizes from labels if not already set.
 
-        Uses per-node style for padding, shape, font_weight, min_width,
-        min_height, overflow_policy, and min_font_size. Populates both
-        node_sizes and node_font_sizes tensors.
+        Uses per-node style for padding, shape, font_weight, font_style,
+        text wrapping/transform, min_width, min_height, overflow_policy, and
+        min_font_size. Populates both node_sizes and node_font_sizes tensors.
         """
         if (
             self.node_sizes is not None
@@ -480,6 +480,9 @@ class DaguaGraph:
                 shape=style.shape,
                 font_weight=style.font_weight,
                 font_style=style.font_style,
+                text_wrap=style.text_wrap,
+                text_max_width=style.text_max_width,
+                text_transform=style.text_transform,
                 overflow_policy=style.overflow_policy,
                 min_font_size=style.min_font_size,
                 label_format=style.label_format,
