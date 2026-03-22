@@ -2460,13 +2460,98 @@ THEME_REGISTRY: Dict[str, Theme] = {
     "graphistry": GRAPHISTRY_THEME,
     "igraph_r": IGRAPH_R_THEME,
     "graph_tool": GRAPH_TOOL_THEME,
-    "excalidraw": EXCALIDRAW_THEME,
-    "github": GITHUB_THEME,
-    "linear": LINEAR_THEME,
-    "n8n": N8N_THEME,
-    "airflow": AIRFLOW_THEME,
-    "dagster": DAGSTER_THEME,
 }
+
+NEURON_THEME = Theme(
+    name="neuron",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#F5EDE3",  # warm parchment soma
+            stroke="#2C1810",  # dark sepia border
+            stroke_width=2.0,
+            font_family="DejaVu Serif",
+            font_size=9.0,
+            font_color="#2C1810",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#D4E8C2",  # dendrite green (sensory)
+            stroke="#2C1810",
+            stroke_width=2.0,
+            font_family="DejaVu Serif",
+            font_size=9.0,
+            font_color="#2C1810",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#E8C2C2",  # axon terminal pink (motor)
+            stroke="#2C1810",
+            stroke_width=2.0,
+            font_family="DejaVu Serif",
+            font_size=9.0,
+            font_color="#2C1810",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#2C1810",  # dark sepia axon
+            width=1.2,
+            style="solid",
+            arrow="dot",  # synaptic terminal bulb
+            arrow_fill="filled",
+            arrow_color="#2C1810",
+            arrow_length=5.0,
+            arrow_width=5.0,
+            routing="bezier",
+            curvature=0.3,
+        ),
+        "back": EdgeStyle(
+            color="#8B7355",  # lighter sepia for inhibitory
+            width=1.0,
+            style="dashed",
+            arrow="dot",
+            arrow_fill="filled",
+            arrow_color="#8B7355",
+            arrow_length=4.0,
+            arrow_width=4.0,
+            routing="bezier",
+            curvature=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#FAF6F0",  # light parchment
+        stroke="#8B7355",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=10.0,
+        font_color="#8B7355",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(
+        background_color="#FFFDF7",  # aged paper
+    ),
+)
+
+THEME_REGISTRY["neuron"] = NEURON_THEME
+THEME_REGISTRY["excalidraw"] = EXCALIDRAW_THEME
+THEME_REGISTRY["github"] = GITHUB_THEME
+THEME_REGISTRY["linear"] = LINEAR_THEME
+THEME_REGISTRY["n8n"] = N8N_THEME
+THEME_REGISTRY["airflow"] = AIRFLOW_THEME
+THEME_REGISTRY["dagster"] = DAGSTER_THEME
 
 
 def get_theme(name: str) -> Theme:
