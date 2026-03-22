@@ -48,6 +48,7 @@ def _validate_inputs(
     niter: int,
     node_mass: float,
     max_sa_movement: float,
+    edge_weights: Optional[torch.Tensor],
 ) -> None:
     """Validate the public GraphOpt arguments.
 
@@ -63,6 +64,8 @@ def _validate_inputs(
         Shared node mass used to scale movement.
     max_sa_movement : float
         Maximum movement per axis per iteration.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
@@ -79,6 +82,13 @@ def _validate_inputs(
         raise ValueError("max_sa_movement must be non-negative.")
     if edge_index.ndim != 2 or edge_index.shape[0] != 2:
         raise ValueError("edge_index must have shape [2, E].")
+    if edge_weights is not None:
+        if edge_weights.ndim != 1:
+            raise ValueError("edge_weights must have shape [E].")
+        if edge_weights.shape[0] != edge_index.shape[1]:
+            raise ValueError(
+                f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
+            )
 
     if edge_index.numel() == 0:
         return
@@ -112,18 +122,24 @@ def _initialize_positions(num_nodes: int, seed: int) -> torch.Tensor:
     return torch.tensor(data, dtype=torch.float64)
 
 
-def _spring_edges(edge_index: torch.Tensor) -> torch.Tensor:
+def _spring_edges(
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Return the non-self-loop springs exactly as encoded in ``edge_index``.
 
     Parameters
     ----------
     edge_index : torch.Tensor
         Edge tensor with shape ``[2, E]``.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
-    torch.Tensor
-        Spring edge tensor with shape ``[2, E_clean]``.
+    tuple[torch.Tensor, Optional[torch.Tensor]]
+        Spring edge tensor with shape ``[2, E_clean]`` and the matching
+        filtered edge weights when provided.
 
     Notes
     -----
@@ -132,13 +148,18 @@ def _spring_edges(edge_index: torch.Tensor) -> torch.Tensor:
     forces and must not be deduplicated here.
     """
     if edge_index.numel() == 0:
-        return torch.empty((2, 0), dtype=torch.long)
+        return torch.empty((2, 0), dtype=torch.long), None
 
     edges = edge_index.to(device="cpu", dtype=torch.long)
     non_self = edges[0] != edges[1]
     if not bool(non_self.any().item()):
-        return torch.empty((2, 0), dtype=torch.long)
-    return edges[:, non_self].contiguous()
+        return torch.empty((2, 0), dtype=torch.long), None
+
+    filtered_edges = edges[:, non_self].contiguous()
+    filtered_weights = None
+    if edge_weights is not None:
+        filtered_weights = edge_weights.detach().to(device="cpu", dtype=torch.float64)[non_self]
+    return filtered_edges, filtered_weights.contiguous() if filtered_weights is not None else None
 
 
 def layout_graphopt(
@@ -152,6 +173,7 @@ def layout_graphopt(
     spring_length: float = 0.0,
     spring_constant: float = 1.0,
     max_sa_movement: float = 5.0,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with the igraph GraphOpt algorithm.
 
@@ -177,6 +199,9 @@ def layout_graphopt(
         Hooke-law spring constant.
     max_sa_movement : float, default=5.0
         Maximum per-axis movement allowed in one iteration.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]`` that scales spring
+        magnitudes for matching edge occurrences.
 
     Returns
     -------
@@ -189,6 +214,7 @@ def layout_graphopt(
         niter=niter,
         node_mass=node_mass,
         max_sa_movement=max_sa_movement,
+        edge_weights=edge_weights,
     )
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     del node_sizes
@@ -196,7 +222,10 @@ def layout_graphopt(
         return torch.empty((0, 2), dtype=torch.float32, device=device)
 
     positions = _initialize_positions(num_nodes=num_nodes, seed=seed)
-    spring_edges = _spring_edges(edge_index=edge_index)
+    spring_edges, spring_weights = _spring_edges(
+        edge_index=edge_index,
+        edge_weights=edge_weights,
+    )
     pair_source, pair_target = torch.triu_indices(num_nodes, num_nodes, offset=1)
     max_repulsion_distance_sq = _MAX_REPULSION_DISTANCE * _MAX_REPULSION_DISTANCE
 
@@ -228,6 +257,8 @@ def layout_graphopt(
                 direction = delta[mask] / masked_distance.unsqueeze(1)
                 stretch = (masked_distance - spring_length).abs()
                 magnitude = 0.5 * spring_constant * stretch
+                if spring_weights is not None:
+                    magnitude = magnitude * spring_weights[mask].to(dtype=magnitude.dtype)
                 source_sign = torch.where(
                     masked_distance > spring_length,
                     torch.full_like(masked_distance, -1.0),

@@ -60,10 +60,19 @@ def get_test_graphs(
 
 
 def _build_all_test_graphs() -> List[TestGraph]:
-    """Build the complete test graph collection."""
+    """Build the complete test graph collection.
+
+    Returns
+    -------
+    List[TestGraph]
+        Synthetic, traced, and weighted benchmark graphs.
+    """
     graphs = []
     graphs.extend(_synthetic_graphs())
     graphs.extend(_torchlens_graphs())
+    graphs.append(_make_weighted_chain())
+    graphs.append(_make_weighted_clusters())
+    graphs.append(make_weighted_karate_graph())
     return graphs
 
 
@@ -80,6 +89,7 @@ def _finalize_generated_graph(graph: DaguaGraph) -> DaguaGraph:
     DaguaGraph
         The same graph instance with ``node_sizes`` populated.
     """
+    _ = graph.edge_index
     graph.compute_node_sizes()
     return graph
 
@@ -171,12 +181,48 @@ def _undirected_to_dag(graph: DaguaGraph) -> DaguaGraph:
     forward_edges = edge_index[:, forward_mask]
     reverse_edges = torch.stack([edge_index[1, reverse_mask], edge_index[0, reverse_mask]])
     dag_edges = torch.cat([forward_edges, reverse_edges], dim=1)
-    dag_edges = torch.unique(dag_edges, dim=1)
-    graph.edge_index = dag_edges
-    edge_count = int(dag_edges.shape[1])
+    dag_weights: Optional[torch.Tensor]
+    weight_dtype: Optional[torch.dtype] = None
+    weight_device: Optional[torch.device] = None
+    if graph.edge_weights is not None:
+        weight_dtype = graph.edge_weights.dtype
+        weight_device = graph.edge_weights.device
+        forward_weights = graph.edge_weights[forward_mask]
+        reverse_weights = graph.edge_weights[reverse_mask]
+        dag_weights = torch.cat([forward_weights, reverse_weights], dim=0)
+    else:
+        dag_weights = None
+
+    unique_edges: list[tuple[int, int]] = []
+    unique_weights: list[float] = []
+    seen_edges: set[tuple[int, int]] = set()
+    for edge_idx in range(int(dag_edges.shape[1])):
+        source = int(dag_edges[0, edge_idx].item())
+        target = int(dag_edges[1, edge_idx].item())
+        edge_pair = (source, target)
+        if edge_pair in seen_edges:
+            continue
+        seen_edges.add(edge_pair)
+        unique_edges.append(edge_pair)
+        if dag_weights is not None:
+            unique_weights.append(float(dag_weights[edge_idx].item()))
+
+    if unique_edges:
+        oriented_edges = torch.tensor(unique_edges, dtype=graph.index_dtype).t().contiguous()
+    else:
+        oriented_edges = torch.zeros((2, 0), dtype=graph.index_dtype)
+
+    graph.edge_index = oriented_edges
+    edge_count = int(oriented_edges.shape[1])
     graph.edge_labels = [None] * edge_count
     graph.edge_types = ["normal"] * edge_count
     graph.edge_styles = [None] * edge_count
+    if dag_weights is not None:
+        graph.edge_weights = torch.tensor(
+            unique_weights,
+            dtype=weight_dtype if weight_dtype is not None else torch.float32,
+            device=weight_device,
+        )
     return _finalize_generated_graph(graph)
 
 
@@ -251,6 +297,122 @@ def make_real_karate_graph() -> TestGraph:
         description="Zachary's Karate Club social network oriented into a DAG",
         source="networkx",
         expected_challenges="Community separation with hub-heavy social structure",
+    )
+
+
+def _make_weighted_chain(n: int = 20) -> TestGraph:
+    """Build a weighted linear chain benchmark.
+
+    Parameters
+    ----------
+    n : int, default=20
+        Number of nodes in the chain.
+
+    Returns
+    -------
+    TestGraph
+        Linear graph with monotonically increasing edge weights.
+    """
+    graph = DaguaGraph()
+    for node_idx in range(n):
+        graph.add_node(node_idx, label=str(node_idx))
+    for node_idx in range(n - 1):
+        weight = 1.0 + (4.0 * float(node_idx) / float(max(n - 2, 1)))
+        graph.add_edge(node_idx, node_idx + 1, weight=weight)
+    return TestGraph(
+        name=f"weighted_chain_{n}",
+        graph=_finalize_generated_graph(graph),
+        tags={"weighted", "linear", "synthetic"},
+        description="Linear chain with weights increasing from 1.0 to 5.0",
+        source="synthetic",
+        expected_challenges="Asymmetric spacing due to weight gradient",
+    )
+
+
+def _make_weighted_clusters(
+    cluster_size: int = 10,
+    n_clusters: int = 3,
+    seed: int = 42,
+) -> TestGraph:
+    """Build a clustered weighted-community benchmark.
+
+    Parameters
+    ----------
+    cluster_size : int, default=10
+        Nodes per cluster.
+    n_clusters : int, default=3
+        Number of clusters to generate.
+    seed : int, default=42
+        Random seed for reproducible edge sampling.
+
+    Returns
+    -------
+    TestGraph
+        Clustered graph with heavy intra-cluster and light inter-cluster edges.
+    """
+    rng = random.Random(seed)
+
+    graph = DaguaGraph()
+    total_nodes = cluster_size * n_clusters
+    for node_idx in range(total_nodes):
+        graph.add_node(node_idx, label=str(node_idx))
+
+    for cluster_idx in range(n_clusters):
+        cluster_base = cluster_idx * cluster_size
+        for source_offset in range(cluster_size):
+            for target_offset in range(source_offset + 1, cluster_size):
+                if rng.random() < 0.6:
+                    graph.add_edge(
+                        cluster_base + source_offset,
+                        cluster_base + target_offset,
+                        weight=5.0,
+                    )
+
+    for source_cluster in range(n_clusters):
+        for target_cluster in range(source_cluster + 1, n_clusters):
+            for _ in range(2):
+                source_idx = rng.randint(0, cluster_size - 1)
+                target_idx = rng.randint(0, cluster_size - 1)
+                graph.add_edge(
+                    source_cluster * cluster_size + source_idx,
+                    target_cluster * cluster_size + target_idx,
+                    weight=0.5,
+                )
+
+    return TestGraph(
+        name=f"weighted_clusters_{n_clusters}x{cluster_size}",
+        graph=_finalize_generated_graph(graph),
+        tags={"weighted", "community", "synthetic"},
+        description="3 clusters of 10 with heavy intra / light inter edges",
+        source="synthetic",
+        expected_challenges="Cluster separation proportional to weight ratio",
+    )
+
+
+def make_weighted_karate_graph() -> TestGraph:
+    """Build a weighted Zachary karate club benchmark.
+
+    Returns
+    -------
+    TestGraph
+        Karate club graph with deterministic heuristic edge weights preserved
+        through DAG orientation.
+    """
+    nx = _import_networkx()
+    nx_graph = nx.karate_club_graph()
+    for source, target in nx_graph.edges():
+        weight = float(nx_graph.degree(source) + nx_graph.degree(target)) / 10.0
+        nx_graph[source][target]["weight"] = weight
+
+    graph = DaguaGraph.from_networkx(nx_graph)
+    graph = _undirected_to_dag(graph)
+    return TestGraph(
+        name="weighted_karate_34",
+        graph=graph,
+        tags={"weighted", "social", "community", "real-world"},
+        description="Zachary's Karate Club with degree-based interaction weights",
+        source="networkx",
+        expected_challenges="Weight-aware community separation with hub structure",
     )
 
 

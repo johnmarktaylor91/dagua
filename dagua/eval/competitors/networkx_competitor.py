@@ -17,16 +17,33 @@ if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
 
-def _graph_to_nx(graph: DaguaGraph):
-    """Convert DaguaGraph to networkx.DiGraph."""
+def _graph_to_nx(graph: DaguaGraph) -> Any:
+    """Convert a ``DaguaGraph`` to a weighted ``networkx.DiGraph``.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Source graph whose topology and optional edge weights should be copied.
+
+    Returns
+    -------
+    Any
+        ``networkx.DiGraph`` with ``weight`` edge attributes when available.
+    """
     import networkx as nx
 
     G = nx.DiGraph()
     G.add_nodes_from(range(graph.num_nodes))
     if graph.edge_index.numel() > 0:
         ei = graph.edge_index
+        weights = graph.edge_weights
         for e in range(ei.shape[1]):
-            G.add_edge(ei[0, e].item(), ei[1, e].item())
+            source = ei[0, e].item()
+            target = ei[1, e].item()
+            if weights is not None:
+                G.add_edge(source, target, weight=float(weights[e].item()))
+            else:
+                G.add_edge(source, target)
     return G
 
 

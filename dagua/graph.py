@@ -55,6 +55,7 @@ class DaguaGraph:
     edge_labels: List[Optional[str]] = field(default_factory=list)
     edge_types: List[str] = field(default_factory=list)
     edge_styles: List[Optional[EdgeStyle]] = field(default_factory=list)
+    edge_weights: Optional[torch.Tensor] = None  # [E] per-edge weight, float32
 
     # Cluster hierarchy: name -> list of node indices
     clusters: Dict[str, Any] = field(default_factory=dict)
@@ -84,6 +85,7 @@ class DaguaGraph:
 
     # Internal edge storage — not part of the public API
     _pending_edges: List[Tuple[int, int]] = field(default_factory=list, repr=False)
+    _pending_edge_weights: List[Optional[float]] = field(default_factory=list, repr=False)
     _edge_index_tensor: Optional[torch.Tensor] = field(default=None, repr=False)
 
     # Cycle support — populated lazily by has_cycles / back_edge_mask
@@ -110,12 +112,26 @@ class DaguaGraph:
 
     @edge_index.setter
     def edge_index(self, value: torch.Tensor) -> None:
-        """Set the edge_index tensor directly (clears any pending edges)."""
+        """Set the edge_index tensor directly.
+
+        Parameters
+        ----------
+        value : torch.Tensor
+            Edge tensor with shape ``[2, E]``. Any pending edge additions and
+            pending edge weights are discarded before storing the tensor.
+
+        Returns
+        -------
+        None
+        """
         self._pending_edges.clear()
+        self._pending_edge_weights.clear()
         value = value.to(dtype=self.index_dtype)
         self._validate_index_range(value)
         self._edge_index_tensor = value
         self._back_edge_mask = None  # invalidate cycle cache
+        if self.edge_weights is not None and self.edge_weights.shape[0] != value.shape[1]:
+            self.edge_weights = None
         self.invalidate_layout()
         self._touch()
 
@@ -168,7 +184,12 @@ class DaguaGraph:
             raise ValueError("edge indices do not fit in int32 storage")
 
     def _finalize_edges(self) -> None:
-        """Flush pending edges into the edge_index tensor (called lazily)."""
+        """Flush pending edges and weights into tensor storage.
+
+        Returns
+        -------
+        None
+        """
         if not self._pending_edges:
             return
 
@@ -179,7 +200,25 @@ class DaguaGraph:
             self._edge_index_tensor = new_edges
         else:
             self._edge_index_tensor = torch.cat([self._edge_index_tensor, new_edges], dim=1)
+
+        has_any_weight = any(weight is not None for weight in self._pending_edge_weights)
+        if has_any_weight or self.edge_weights is not None:
+            new_weights = torch.tensor(
+                [weight if weight is not None else 1.0 for weight in self._pending_edge_weights],
+                dtype=torch.float32,
+            )
+            if self.edge_weights is not None:
+                self.edge_weights = torch.cat([self.edge_weights, new_weights])
+            else:
+                existing_count = self._edge_index_tensor.shape[1] - len(self._pending_edges)
+                if existing_count > 0:
+                    backfill = torch.ones(existing_count, dtype=torch.float32)
+                    self.edge_weights = torch.cat([backfill, new_weights])
+                else:
+                    self.edge_weights = new_weights
+
         self._pending_edges.clear()
+        self._pending_edge_weights.clear()
         self._back_edge_mask = None  # invalidate cycle cache
 
     def _touch(self) -> None:
@@ -278,8 +317,30 @@ class DaguaGraph:
         label: Optional[str] = None,
         type: str = "normal",
         style: Optional[EdgeStyle] = None,
+        weight: Optional[float] = None,
     ) -> None:
-        """Add an edge between two nodes (auto-creates nodes if needed)."""
+        """Add an edge between two nodes.
+
+        Parameters
+        ----------
+        source : Any
+            Source node identifier. The node is created if it does not exist.
+        target : Any
+            Target node identifier. The node is created if it does not exist.
+        label : Optional[str], default=None
+            Optional label associated with the edge.
+        type : str, default="normal"
+            Edge type used by the style cascade.
+        style : Optional[EdgeStyle], default=None
+            Optional per-edge style override.
+        weight : Optional[float], default=None
+            Optional edge weight. Missing weights are backfilled to ``1.0`` once
+            any edge in the graph carries an explicit weight.
+
+        Returns
+        -------
+        None
+        """
         if source not in self._id_to_index:
             self.add_node(source)
         if target not in self._id_to_index:
@@ -289,6 +350,7 @@ class DaguaGraph:
         tgt_idx = self._id_to_index[target]
 
         self._pending_edges.append((src_idx, tgt_idx))
+        self._pending_edge_weights.append(weight)
 
         self.edge_labels.append(label)
         self.edge_types.append(type)
@@ -802,9 +864,22 @@ class DaguaGraph:
         return self._theme.graph_style
 
     def to(self, device: str) -> DaguaGraph:
-        """Move tensors to device."""
+        """Move graph tensors to a device.
+
+        Parameters
+        ----------
+        device : str
+            Torch device string such as ``"cpu"`` or ``"cuda"``.
+
+        Returns
+        -------
+        DaguaGraph
+            The graph instance with tensor fields moved in place.
+        """
         self._finalize_edges()
         self._edge_index_tensor = self._edge_index_tensor.to(device)  # type: ignore[union-attr]
+        if self.edge_weights is not None:
+            self.edge_weights = self.edge_weights.to(device)
         if self.node_sizes is not None:
             self.node_sizes = self.node_sizes.to(device)
         if self.node_font_sizes is not None:
@@ -814,25 +889,53 @@ class DaguaGraph:
     # --- Class methods for construction ---
 
     @classmethod
-    def from_edge_list(cls, edges: List[Tuple], **kwargs) -> DaguaGraph:
-        """Create graph from list of (source, target) tuples.
+    def from_edge_list(cls, edges: List[Tuple[Any, ...]], **kwargs) -> DaguaGraph:
+        """Create a graph from edge tuples.
 
-        Builds all edges at once for O(E) construction instead of O(E²).
-        If ``num_nodes`` is provided, nodes 0..num_nodes-1 are pre-created
-        before edges are added (so add_edge won't miscount).
+        Parameters
+        ----------
+        edges : List[Tuple[Any, ...]]
+            Edge tuples of the form ``(source, target)`` or
+            ``(source, target, weight)``.
+        **kwargs : Any
+            Additional keyword arguments forwarded to ``DaguaGraph``.
+
+        Returns
+        -------
+        DaguaGraph
+            Graph populated from the provided edge list.
         """
         num_nodes = kwargs.pop("num_nodes", None)
         g = cls(**kwargs)
         if num_nodes is not None:
             for i in range(num_nodes):
                 g.add_node(i)
-        for src, tgt in edges:
-            g.add_edge(src, tgt)
+        for edge in edges:
+            if len(edge) == 3:
+                src, tgt, weight = edge
+                g.add_edge(src, tgt, weight=weight)
+            else:
+                src, tgt = edge
+                g.add_edge(src, tgt)
+        g._finalize_edges()
         return g
 
     @classmethod
-    def from_networkx(cls, nx_graph, **kwargs) -> DaguaGraph:
-        """Create graph from NetworkX DiGraph."""
+    def from_networkx(cls, nx_graph: Any, **kwargs: Any) -> DaguaGraph:
+        """Create a graph from a NetworkX graph.
+
+        Parameters
+        ----------
+        nx_graph : Any
+            NetworkX graph object supplying node and edge attributes.
+        **kwargs : Any
+            Additional keyword arguments forwarded to ``DaguaGraph``.
+
+        Returns
+        -------
+        DaguaGraph
+            Graph populated from the NetworkX object.
+        """
         g = cls(**kwargs)
         for node in nx_graph.nodes():
             label = nx_graph.nodes[node].get("label", str(node))
@@ -841,15 +944,45 @@ class DaguaGraph:
 
         for u, v in nx_graph.edges():
             label = nx_graph.edges[u, v].get("label", None)
-            g.add_edge(u, v, label=label)
+            weight = nx_graph.edges[u, v].get("weight", None)
+            if weight is not None:
+                weight = float(weight)
+            g.add_edge(u, v, label=label, weight=weight)
 
+        g._finalize_edges()
         return g
 
     @classmethod
-    def from_edge_index(cls, edge_index: torch.Tensor, num_nodes: int, **kwargs) -> DaguaGraph:
-        """Create graph from PyG-style edge_index tensor.
+    def from_edge_index(
+        cls,
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        edge_weights: Optional[torch.Tensor] = None,
+        **kwargs: Any,
+    ) -> DaguaGraph:
+        """Create a graph from a PyG-style edge tensor.
 
-        Validates that all indices in edge_index are < num_nodes.
+        Parameters
+        ----------
+        edge_index : torch.Tensor
+            Edge tensor with shape ``[2, E]``.
+        num_nodes : int
+            Number of nodes in the graph.
+        edge_weights : Optional[torch.Tensor], default=None
+            Optional weight tensor with shape ``[E]``.
+        **kwargs : Any
+            Additional keyword arguments forwarded to ``DaguaGraph``.
+
+        Returns
+        -------
+        DaguaGraph
+            Graph populated from the provided tensors.
+
+        Raises
+        ------
+        ValueError
+            If ``edge_index`` contains invalid node indices or
+            ``edge_weights`` does not match the edge count.
         """
         requested_dtype = kwargs.get("index_dtype")
         if requested_dtype is None:
@@ -881,6 +1014,13 @@ class DaguaGraph:
         g.edge_types = ["normal"] * edge_index.shape[1]
         g.edge_styles = [None] * edge_index.shape[1]
         g._id_to_index = {i: i for i in range(num_nodes)}
+        if edge_weights is not None:
+            if edge_weights.shape[0] != edge_index.shape[1]:
+                raise ValueError(
+                    f"edge_weights length {edge_weights.shape[0]} != "
+                    f"edge count {edge_index.shape[1]}"
+                )
+            g.edge_weights = edge_weights.to(dtype=torch.float32)
         return g
 
     @classmethod
