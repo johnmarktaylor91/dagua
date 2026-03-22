@@ -1866,6 +1866,143 @@ GRAPHISTRY_THEME = Theme(
 )
 
 
+IGRAPH_R_THEME = Theme(
+    name="igraph_r",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#7EC0EE",  # R SkyBlue2
+            stroke="#000000",
+            stroke_width=1.0,
+            font_family="DejaVu Serif",  # R serif default
+            font_size=10.0,
+            font_color="#000000",
+            padding=(6.0, 6.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#56B4E9",  # R colorblind palette blue
+            stroke="#000000",
+            stroke_width=1.0,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#000000",
+            padding=(6.0, 6.0),
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#D55E00",  # R colorblind palette vermillion
+            stroke="#000000",
+            stroke_width=1.0,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#000000",
+            padding=(6.0, 6.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#A9A9A9",  # darkgrey
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#A9A9A9",
+            routing="straight",
+        ),
+        "back": EdgeStyle(
+            color="#A9A9A9",
+            width=1.0,
+            style="dashed",
+            arrow="normal",
+            routing="straight",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0F0F0",
+        stroke="#999999",
+        stroke_width=1.0,
+        corner_radius=0.0,
+        font_size=10.0,
+        font_color="#000000",
+        padding=8.0,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+GRAPH_TOOL_THEME = Theme(
+    name="graph_tool",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#A50F15",  # graph-tool dark crimson
+            stroke="#999999",
+            stroke_width=0.8,
+            font_family="DejaVu Serif",
+            font_size=9.0,
+            font_color="#000000",
+            padding=(3.0, 3.0),
+            min_width=14.0,
+            min_height=14.0,
+            opacity=0.8,  # graph-tool signature 80% opacity
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#2171B5",  # blue variant
+            stroke="#999999",
+            stroke_width=0.8,
+            font_family="DejaVu Serif",
+            font_size=9.0,
+            font_color="#000000",
+            padding=(3.0, 3.0),
+            opacity=0.8,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#238B45",  # green variant
+            stroke="#999999",
+            stroke_width=0.8,
+            font_family="DejaVu Serif",
+            font_size=9.0,
+            font_color="#000000",
+            padding=(3.0, 3.0),
+            opacity=0.8,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#2D3436",  # near-black charcoal
+            width=1.0,
+            style="solid",
+            arrow="none",  # graph-tool: no arrows by default
+            routing="straight",
+            opacity=0.8,
+        ),
+        "back": EdgeStyle(
+            color="#2D3436",
+            width=1.0,
+            style="dashed",
+            arrow="none",
+            routing="straight",
+            opacity=0.6,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F5F5F5",
+        stroke="#CCCCCC",
+        stroke_width=0.5,
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#333333",
+        padding=6.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+
 # ─── Theme Registry ──────────────────────────────────────────────────────
 
 THEME_REGISTRY: Dict[str, Theme] = {
@@ -1888,6 +2025,8 @@ THEME_REGISTRY: Dict[str, Theme] = {
     "sigma": SIGMA_THEME,
     "visjs": VISJS_THEME,
     "graphistry": GRAPHISTRY_THEME,
+    "igraph_r": IGRAPH_R_THEME,
+    "graph_tool": GRAPH_TOOL_THEME,
 }
 
 
