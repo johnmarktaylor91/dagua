@@ -31,8 +31,8 @@ if str(REPO_ROOT) not in sys.path:
 
 import dagua
 from dagua import DaguaGraph
-from dagua.config import LayoutConfig
 from dagua.graphs import list_graphs, load
+from dagua.graphviz_utils import layout_with_graphviz
 from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle, get_theme
 
 WHITE = "#FFFFFF"
@@ -1251,7 +1251,7 @@ def _copy_graph_with_theme(graph: DaguaGraph, theme_name: str) -> DaguaGraph:
 
 
 def render_dagua_theme(graph: DaguaGraph, theme_name: str, output_path: Path) -> None:
-    """Render a graph with a specific Dagua theme.
+    """Render a graph with a specific Dagua theme on Graphviz positions.
 
     Parameters
     ----------
@@ -1270,12 +1270,11 @@ def render_dagua_theme(graph: DaguaGraph, theme_name: str, output_path: Path) ->
 
     themed_graph = _copy_graph_with_theme(graph, theme_name)
     themed_graph.compute_node_sizes()
-    config = LayoutConfig(
-        steps=100,
-        node_sep=56.0,
-        rank_sep=100.0,
-    )
-    positions = dagua.layout(themed_graph, config)
+    positions = layout_with_graphviz(themed_graph, engine="dot")
+    # layout_with_graphviz negates y for dagua's TB layout engine, but for
+    # rendering at fixed positions we need Graphviz's original y-up orientation
+    # so the graph reads top-to-bottom like the Graphviz native reference.
+    positions[:, 1] = -positions[:, 1]
     dagua.render(themed_graph, positions, output=str(output_path), dpi=210)
 
 
