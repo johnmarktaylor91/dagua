@@ -1490,6 +1490,10 @@ def _draw_node_labels(
                 outline=style.text_outline,
                 outline_color=style.text_outline_color,
                 outline_width=style.text_outline_width,
+                background=style.text_background if style.text_background else None,
+                background_alpha=style.text_background_opacity,
+                background_padding=style.text_background_padding,
+                background_corner_radius=style.text_background_corner_radius,
                 clip_patch=clip_patch,
                 clip_on=True,
                 zorder=3.0,
@@ -1766,76 +1770,92 @@ def _draw_edge_labels(
     edge_collection : DaguaEdgeCollection | None, optional
         Prepared collection whose label geometry should be reused.
     """
-    gs = graph.graph_style
     display_scale = _compute_display_scale(ax)
+    specs: List[DaguaText] = []
 
     if edge_collection is not None and label_positions is None:
-        if svg_hover_map is not None:
-            for e_idx, prepared in enumerate(edge_collection.prepared_edges):
-                if not prepared.edge.label:
-                    continue
+        for e_idx, (prepared, placement) in enumerate(
+            zip(edge_collection.prepared_edges, edge_collection.label_placements())
+        ):
+            label = prepared.edge.label
+            if placement is None or not label:
+                continue
+
+            style = graph.get_style_for_edge(e_idx)
+            specs.append(
+                DaguaText(
+                    x=placement.x,
+                    y=placement.y,
+                    text=label,
+                    font_size=float(style.label_font_size),
+                    font_family=str(style.label_font_family or RESOLVED_FONT),
+                    font_weight=str(style.label_font_weight),
+                    font_color=str(style.label_font_color),
+                    ha="center",
+                    va="center",
+                    rotation=placement.angle_degrees if prepared.edge.label_rotate else 0.0,
+                    background=style.label_background if style.label_background else None,
+                    background_alpha=float(style.label_background_opacity),
+                    background_padding=style.label_background_padding,
+                    background_corner_radius=float(style.label_background_corner_radius),
+                    clip_on=False,
+                    zorder=4.0,
+                    gid=f"dagua-edge-label-{e_idx}",
+                )
+            )
+            if svg_hover_map is not None:
                 hover_text = _edge_hover_text(graph, e_idx)
                 svg_hover_map[f"dagua-edge-label-{e_idx}"] = hover_text
                 svg_hover_map[f"dagua-edge-label-{e_idx}-background"] = hover_text
-        edge_collection.render_labels(
-            ax,
-            display_scale=display_scale,
-            label_background_alpha=gs.edge_label_background_opacity,
-            svg_hover_map=svg_hover_map,
-        )
-        return
+    else:
+        for e_idx, curve in enumerate(curves):
+            if e_idx >= len(graph.edge_labels):
+                break
+            label = graph.edge_labels[e_idx]
+            if not label:
+                continue
 
-    specs: List[DaguaText] = []
-    for e_idx, curve in enumerate(curves):
-        if e_idx >= len(graph.edge_labels):
-            break
-        label = graph.edge_labels[e_idx]
-        if not label:
-            continue
+            style = graph.get_style_for_edge(e_idx)
+            if (
+                label_positions is not None
+                and e_idx < len(label_positions)
+                and label_positions[e_idx] is not None
+            ):
+                label_pos = label_positions[e_idx]
+                assert label_pos is not None
+                lx, ly = label_pos
+            else:
+                lx, ly = preferred_edge_label_position(
+                    curve,
+                    label_position=style.label_position,
+                    label_offset=style.label_offset,
+                    label_side=style.label_side,
+                )
 
-        style = graph.get_style_for_edge(e_idx)
-        if (
-            label_positions is not None
-            and e_idx < len(label_positions)
-            and label_positions[e_idx] is not None
-        ):
-            label_pos = label_positions[e_idx]
-            assert label_pos is not None
-            lx, ly = label_pos
-        else:
-            lx, ly = preferred_edge_label_position(
-                curve,
-                label_position=style.label_position,
-                label_offset=style.label_offset,
-                label_side=style.label_side,
+            specs.append(
+                DaguaText(
+                    x=lx,
+                    y=ly,
+                    text=label,
+                    font_size=float(style.label_font_size),
+                    font_family=str(style.label_font_family or RESOLVED_FONT),
+                    font_weight=str(style.label_font_weight),
+                    font_color=str(style.label_font_color),
+                    ha="center",
+                    va="center",
+                    background=style.label_background if style.label_background else None,
+                    background_alpha=float(style.label_background_opacity),
+                    background_padding=style.label_background_padding,
+                    background_corner_radius=float(style.label_background_corner_radius),
+                    clip_on=False,
+                    zorder=4.0,
+                    gid=f"dagua-edge-label-{e_idx}",
+                )
             )
-
-        specs.append(
-            DaguaText(
-                x=lx,
-                y=ly,
-                text=label,
-                font_size=float(style.label_font_size),
-                font_family=str(style.label_font_family or RESOLVED_FONT),
-                font_weight=str(style.label_font_weight),
-                font_color=str(style.label_font_color),
-                ha="center",
-                va="center",
-                background=str(style.label_background),
-                background_alpha=float(gs.edge_label_background_opacity),
-                background_padding=(
-                    float(style.label_font_size) * 0.15,
-                    float(style.label_font_size) * 0.15,
-                ),
-                background_corner_radius=float(style.label_font_size) * 0.15,
-                clip_on=False,
-                zorder=4.0,
-                gid=f"dagua-edge-label-{e_idx}",
-            )
-        )
-        if svg_hover_map is not None:
-            svg_hover_map[f"dagua-edge-label-{e_idx}"] = _edge_hover_text(graph, e_idx)
-            svg_hover_map[f"dagua-edge-label-{e_idx}-background"] = _edge_hover_text(graph, e_idx)
+            if svg_hover_map is not None:
+                hover_text = _edge_hover_text(graph, e_idx)
+                svg_hover_map[f"dagua-edge-label-{e_idx}"] = hover_text
+                svg_hover_map[f"dagua-edge-label-{e_idx}-background"] = hover_text
 
     render_text(ax, specs, display_scale, svg_hover_map)
 

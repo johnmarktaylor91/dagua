@@ -23,6 +23,25 @@ OPEN_HEAD_WIDTH_GAIN = 1.12
 HOLLOW_HEAD_DIMENSION_SCALE = 1.3
 COMPOUND_HEAD_GAP_RATIO = 0.42
 COMPOUND_HEAD_GAP_FLOOR = 0.6
+CROWS_FOOT_ONE_BAR_X_RATIO = 0.15
+CROWS_FOOT_ONE_TRIM_RATIO = 0.3
+CROWS_FOOT_ONE_HALF_WIDTH_RATIO = 0.4
+CROWS_FOOT_MANY_TIP_X_RATIO = 0.05
+CROWS_FOOT_MANY_BASE_X_RATIO = 0.5
+CROWS_FOOT_MANY_HALF_WIDTH_RATIO = 0.5
+CROWS_FOOT_ONE_MANDATORY_SECOND_BAR_X_RATIO = 0.35
+CROWS_FOOT_ONE_MANDATORY_TRIM_RATIO = 0.5
+CROWS_FOOT_MANY_MANDATORY_BAR_X_RATIO = 0.55
+CROWS_FOOT_MANY_MANDATORY_BAR_HALF_WIDTH_RATIO = 0.8
+CROWS_FOOT_MANY_MANDATORY_BASE_X_RATIO = 0.45
+CROWS_FOOT_MANY_MANDATORY_TRIM_RATIO = 0.65
+CROWS_FOOT_MANY_OPTIONAL_CIRCLE_RADIUS_RATIO = 0.15
+CROWS_FOOT_MANY_OPTIONAL_CIRCLE_X_RATIO = 0.6
+CROWS_FOOT_MANY_OPTIONAL_BASE_X_RATIO = 0.4
+CROWS_FOOT_MANY_OPTIONAL_TRIM_RATIO = 0.75
+TRIANGLE_TEE_TRIANGLE_LENGTH_RATIO = 0.6
+TRIANGLE_TEE_BAR_HALF_WIDTH_RATIO = 1.1
+TRIANGLE_TEE_TRIM_PADDING_RATIO = 0.05
 
 
 @dataclass(frozen=True)
@@ -510,6 +529,217 @@ def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
     )
 
 
+def _crows_foot_one(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a single-bar ER cardinality head.
+
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    width : float
+        Arrowhead width in local coordinates.
+    body_width : float
+        Ribbon body width in local coordinates.
+
+    Returns
+    -------
+    ArrowheadResult
+        Outline-only geometry for the ER ``one`` marker.
+    """
+    bar_x = length * CROWS_FOOT_ONE_BAR_X_RATIO
+    half_width = width * CROWS_FOOT_ONE_HALF_WIDTH_RATIO
+    bar = _local_path([(bar_x, -half_width), (bar_x, half_width)], closed=False)
+    return ArrowheadResult(
+        filled_paths=[],
+        stroked_paths=[bar],
+        trim_contour=_local_trim_contour(length * CROWS_FOOT_ONE_TRIM_RATIO, body_width),
+        stroke_width_scale=_open_head_stroke_scale(body_width),
+    )
+
+
+def _crows_foot_many(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build the classic three-tine ER many marker.
+
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    width : float
+        Arrowhead width in local coordinates.
+    body_width : float
+        Ribbon body width in local coordinates.
+
+    Returns
+    -------
+    ArrowheadResult
+        Outline-only geometry for the ER ``many`` marker.
+    """
+    half_width = width * CROWS_FOOT_MANY_HALF_WIDTH_RATIO
+    tip_x = length * CROWS_FOOT_MANY_TIP_X_RATIO
+    base_x = length * CROWS_FOOT_MANY_BASE_X_RATIO
+    tine_top = _local_path([(base_x, 0.0), (tip_x, half_width)], closed=False)
+    tine_mid = _local_path([(base_x, 0.0), (tip_x, 0.0)], closed=False)
+    tine_bottom = _local_path([(base_x, 0.0), (tip_x, -half_width)], closed=False)
+    return ArrowheadResult(
+        filled_paths=[],
+        stroked_paths=[tine_top, tine_mid, tine_bottom],
+        trim_contour=_local_trim_contour(base_x, body_width),
+        stroke_width_scale=_open_head_stroke_scale(body_width),
+    )
+
+
+def _crows_foot_one_mandatory(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build the ER exactly-one mandatory double-bar marker.
+
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    width : float
+        Arrowhead width in local coordinates.
+    body_width : float
+        Ribbon body width in local coordinates.
+
+    Returns
+    -------
+    ArrowheadResult
+        Outline-only geometry for the ER mandatory ``one`` marker.
+    """
+    half_width = width * CROWS_FOOT_ONE_HALF_WIDTH_RATIO
+    first_bar_x = length * CROWS_FOOT_ONE_BAR_X_RATIO
+    second_bar_x = length * CROWS_FOOT_ONE_MANDATORY_SECOND_BAR_X_RATIO
+    first_bar = _local_path([(first_bar_x, -half_width), (first_bar_x, half_width)], closed=False)
+    second_bar = _local_path(
+        [(second_bar_x, -half_width), (second_bar_x, half_width)],
+        closed=False,
+    )
+    return ArrowheadResult(
+        filled_paths=[],
+        stroked_paths=[first_bar, second_bar],
+        trim_contour=_local_trim_contour(
+            length * CROWS_FOOT_ONE_MANDATORY_TRIM_RATIO,
+            body_width,
+        ),
+        stroke_width_scale=_open_head_stroke_scale(body_width),
+    )
+
+
+def _crows_foot_many_mandatory(
+    length: float,
+    width: float,
+    body_width: float,
+) -> ArrowheadResult:
+    """Build the ER many-and-mandatory marker.
+
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    width : float
+        Arrowhead width in local coordinates.
+    body_width : float
+        Ribbon body width in local coordinates.
+
+    Returns
+    -------
+    ArrowheadResult
+        Outline-only geometry combining a crow's foot with a bar.
+    """
+    half_width = width * CROWS_FOOT_MANY_HALF_WIDTH_RATIO
+    bar_half_width = half_width * CROWS_FOOT_MANY_MANDATORY_BAR_HALF_WIDTH_RATIO
+    bar_x = length * CROWS_FOOT_MANY_MANDATORY_BAR_X_RATIO
+    bar = _local_path([(bar_x, -bar_half_width), (bar_x, bar_half_width)], closed=False)
+    tip_x = length * CROWS_FOOT_MANY_TIP_X_RATIO
+    base_x = length * CROWS_FOOT_MANY_MANDATORY_BASE_X_RATIO
+    tine_top = _local_path([(base_x, 0.0), (tip_x, half_width)], closed=False)
+    tine_mid = _local_path([(base_x, 0.0), (tip_x, 0.0)], closed=False)
+    tine_bottom = _local_path([(base_x, 0.0), (tip_x, -half_width)], closed=False)
+    return ArrowheadResult(
+        filled_paths=[],
+        stroked_paths=[bar, tine_top, tine_mid, tine_bottom],
+        trim_contour=_local_trim_contour(
+            length * CROWS_FOOT_MANY_MANDATORY_TRIM_RATIO,
+            body_width,
+        ),
+        stroke_width_scale=_open_head_stroke_scale(body_width),
+    )
+
+
+def _crows_foot_many_optional(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build the ER many-and-optional marker.
+
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    width : float
+        Arrowhead width in local coordinates.
+    body_width : float
+        Ribbon body width in local coordinates.
+
+    Returns
+    -------
+    ArrowheadResult
+        Outline-only geometry combining a crow's foot with an open circle.
+    """
+    half_width = width * CROWS_FOOT_MANY_HALF_WIDTH_RATIO
+    circle_radius = width * CROWS_FOOT_MANY_OPTIONAL_CIRCLE_RADIUS_RATIO
+    circle_x = length * CROWS_FOOT_MANY_OPTIONAL_CIRCLE_X_RATIO
+    circle = _local_circle(circle_x, circle_radius)
+    tip_x = length * CROWS_FOOT_MANY_TIP_X_RATIO
+    base_x = length * CROWS_FOOT_MANY_OPTIONAL_BASE_X_RATIO
+    tine_top = _local_path([(base_x, 0.0), (tip_x, half_width)], closed=False)
+    tine_mid = _local_path([(base_x, 0.0), (tip_x, 0.0)], closed=False)
+    tine_bottom = _local_path([(base_x, 0.0), (tip_x, -half_width)], closed=False)
+    return ArrowheadResult(
+        filled_paths=[],
+        stroked_paths=[circle, tine_top, tine_mid, tine_bottom],
+        trim_contour=_local_trim_contour(
+            length * CROWS_FOOT_MANY_OPTIONAL_TRIM_RATIO,
+            body_width,
+        ),
+        stroke_width_scale=_open_head_stroke_scale(body_width),
+    )
+
+
+def _triangle_tee(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a triangle head with a tee bar at its base.
+
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    width : float
+        Arrowhead width in local coordinates.
+    body_width : float
+        Ribbon body width in local coordinates.
+
+    Returns
+    -------
+    ArrowheadResult
+        Filled triangle geometry plus a stroked tee bar.
+    """
+    half_width = width * 0.5
+    triangle_length = length * TRIANGLE_TEE_TRIANGLE_LENGTH_RATIO
+    triangle = _local_path(
+        [(0.0, 0.0), (triangle_length, half_width), (triangle_length, -half_width)],
+        closed=True,
+    )
+    bar_half_width = half_width * TRIANGLE_TEE_BAR_HALF_WIDTH_RATIO
+    bar = _local_path(
+        [(triangle_length, -bar_half_width), (triangle_length, bar_half_width)],
+        closed=False,
+    )
+    return ArrowheadResult(
+        filled_paths=[triangle],
+        stroked_paths=[bar],
+        trim_contour=_local_trim_contour(
+            triangle_length + (length * TRIANGLE_TEE_TRIM_PADDING_RATIO),
+            body_width,
+        ),
+    )
+
+
 def _curve(length: float, width: float, body_width: float, invert: bool = False) -> ArrowheadResult:
     """Build a curved outline head that starts from one ribbon edge."""
     sign = -1.0 if invert else 1.0
@@ -650,6 +880,24 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
     "bar": PrimitiveSpec("bar", _tee),
     "vee": PrimitiveSpec("vee", _vee, stroke_only=True),
     "crow": PrimitiveSpec("crow", _crow, stroke_only=True),
+    "crows_foot_one": PrimitiveSpec("crows_foot_one", _crows_foot_one, stroke_only=True),
+    "crows_foot_many": PrimitiveSpec("crows_foot_many", _crows_foot_many, stroke_only=True),
+    "crows_foot_one_mandatory": PrimitiveSpec(
+        "crows_foot_one_mandatory",
+        _crows_foot_one_mandatory,
+        stroke_only=True,
+    ),
+    "crows_foot_many_mandatory": PrimitiveSpec(
+        "crows_foot_many_mandatory",
+        _crows_foot_many_mandatory,
+        stroke_only=True,
+    ),
+    "crows_foot_many_optional": PrimitiveSpec(
+        "crows_foot_many_optional",
+        _crows_foot_many_optional,
+        stroke_only=True,
+    ),
+    "triangle_tee": PrimitiveSpec("triangle_tee", _triangle_tee),
     "curve": PrimitiveSpec(
         "curve",
         lambda length, width, body_width: _curve(length, width, body_width, invert=False),
