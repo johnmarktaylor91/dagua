@@ -15,6 +15,7 @@
 - [ ] [MED] Add Gephi/YifanHu as competitor layout algorithm (Java Gephi Toolkit JAR, subprocess adapter)
 - [ ] [LOW] Edge jump styles at crossings (arc/gap/sharp). Draw.io. Requires crossing detection.
 - [ ] [LOW] Pie chart node fills (16-slice). Cytoscape only.
+- [ ] [MED] Import adapters for workflow/pipeline tools: parse native file formats into DaguaGraph. n8n (.json workflows), Airflow (DAG .py -> task graph), dbt (manifest.json -> model lineage), Dagster (asset graph), GitHub Actions (.yml -> job/step DAG), AWS Step Functions (ASL .json -> state machine), Terraform (.tfstate -> resource graph), Argo Workflows (workflow .yaml -> DAG). Each adapter: read file -> extract nodes/edges/metadata -> return DaguaGraph with appropriate theme auto-applied.
 - [ ] [MED] Warm-start chain variants: benchmark FR->KK and KK->FR two-pass layouts using pos= forwarding. Does warm-starting KK from FR output beat either alone? Add as variant entries once plumbing is validated.
 - [ ] [HIGH] Pixel-unit overrides: support "2pt" syntax for fixed-size elements (Union[float, str] values in styles). Users who want pixel-based sizing for specific elements.
 - [ ] [HIGH] Expose text rendering capabilities in style fields: NodeStyle.text_background, text_underline, text_strikethrough, EdgeStyle.label_outline, ClusterStyle.label_outline. Capabilities exist in dagua/render/text/ but not exposed in styles.

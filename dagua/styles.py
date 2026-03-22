@@ -2003,6 +2003,439 @@ GRAPH_TOOL_THEME = Theme(
 )
 
 
+EXCALIDRAW_THEME = Theme(
+    name="excalidraw",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#A5D8FF",  # Open Color blue-2
+            stroke="#1E1E1E",
+            stroke_width=1.5,
+            stroke_dash="solid",
+            font_family="Comic Sans MS",  # closest to Virgil/Excalifont
+            font_size=12.0,
+            font_color="#1E1E1E",
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#B2F2BB",  # Open Color green-2
+            stroke="#1E1E1E",
+            stroke_width=1.5,
+            font_family="Comic Sans MS",
+            font_size=12.0,
+            font_color="#1E1E1E",
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#FFC9C9",  # Open Color red-2
+            stroke="#1E1E1E",
+            stroke_width=1.5,
+            font_family="Comic Sans MS",
+            font_size=12.0,
+            font_color="#1E1E1E",
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#1E1E1E",
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#1E1E1E",
+            routing="straight",
+        ),
+        "back": EdgeStyle(
+            color="#1E1E1E",
+            width=1.5,
+            style="dashed",
+            arrow="normal",
+            routing="straight",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#FFEC99",  # Open Color yellow-2
+        stroke="#1E1E1E",
+        stroke_width=1.5,
+        corner_radius=6.0,
+        font_size=12.0,
+        font_color="#1E1E1E",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.6,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+GITHUB_THEME = Theme(
+    name="github",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#F6F8FA",  # Primer gray-0
+            stroke="#D0D7DE",  # Primer gray-3
+            stroke_width=1.0,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#1F2328",  # Primer fg-default
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#DAFBE1",  # Primer green-1
+            stroke="#1A7F37",  # Primer green-6
+            stroke_width=1.0,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#1F2328",
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#FFEBE9",  # Primer red-1
+            stroke="#CF222E",  # Primer red-5
+            stroke_width=1.0,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#1F2328",
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#656D76",  # Primer gray-5
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#656D76",
+            routing="ortho",
+        ),
+        "back": EdgeStyle(
+            color="#656D76",
+            width=1.5,
+            style="dashed",
+            arrow="normal",
+            routing="ortho",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F6F8FA",
+        stroke="#D0D7DE",
+        stroke_width=1.0,
+        corner_radius=6.0,
+        font_size=11.0,
+        font_color="#656D76",
+        font_weight="bold",
+        padding=12.0,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+LINEAR_THEME = Theme(
+    name="linear",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#1E1E20",  # dark surface
+            stroke="#2A2A2E",  # barely visible border
+            stroke_width=1.0,
+            font_family="Inter",
+            font_size=11.0,
+            font_color="#EEEFF1",  # off-white
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#1E1E20",
+            stroke="#5E6AD2",  # indigo accent border
+            stroke_width=1.5,
+            font_family="Inter",
+            font_size=11.0,
+            font_color="#EEEFF1",
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#1E1E20",
+            stroke="#E5484D",  # red accent
+            stroke_width=1.5,
+            font_family="Inter",
+            font_size=11.0,
+            font_color="#EEEFF1",
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#3A3A3E",
+            width=1.0,
+            style="solid",
+            arrow="simple",
+            arrow_fill="filled",
+            arrow_color="#3A3A3E",
+            routing="bezier",
+            opacity=0.7,
+        ),
+        "back": EdgeStyle(
+            color="#3A3A3E",
+            width=1.0,
+            style="dashed",
+            arrow="simple",
+            routing="bezier",
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#161618",
+        stroke="#2A2A2E",
+        stroke_width=0.5,
+        corner_radius=8.0,
+        font_size=10.0,
+        font_color="#7C7C84",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.6,
+    ),
+    graph_style=GraphStyle(
+        background_color="#0F0F10",  # "Woodsmoke" ultra-dark
+    ),
+)
+
+N8N_THEME = Theme(
+    name="n8n",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#FFFFFF",
+            stroke="#DBDFE7",
+            stroke_width=1.0,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#525356",
+            corner_radius=8.0,
+            padding=(14.0, 10.0),
+            shadow=True,
+            shadow_color="#00000011",
+            shadow_offset=(2.0, -2.0),
+            shadow_blur=0.0,
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#FFFFFF",
+            stroke="#10B981",  # green accent
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#525356",
+            corner_radius=8.0,
+            padding=(14.0, 10.0),
+            shadow=True,
+            shadow_color="#00000011",
+            shadow_offset=(2.0, -2.0),
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#FFFFFF",
+            stroke="#EA4B71",  # n8n brand pink
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#525356",
+            corner_radius=8.0,
+            padding=(14.0, 10.0),
+            shadow=True,
+            shadow_color="#00000011",
+            shadow_offset=(2.0, -2.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#B0B0B0",
+            width=1.5,
+            style="solid",
+            arrow="none",  # n8n uses connection dots, not arrowheads
+            routing="bezier",
+            curvature=0.4,
+        ),
+        "back": EdgeStyle(
+            color="#B0B0B0",
+            width=1.5,
+            style="dashed",
+            arrow="none",
+            routing="bezier",
+            curvature=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F5F5F5",
+        stroke="#DBDFE7",
+        stroke_width=1.0,
+        corner_radius=8.0,
+        font_size=11.0,
+        font_color="#525356",
+        font_weight="bold",
+        padding=12.0,
+    ),
+    graph_style=GraphStyle(background_color="#F5F5F5"),
+)
+
+AIRFLOW_THEME = Theme(
+    name="airflow",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#FFFFFF",
+            stroke="#017CEE",  # Airflow blue
+            stroke_width=1.5,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#333333",
+            corner_radius=4.0,
+            padding=(10.0, 6.0),
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#E6F1F2",  # sensor cyan
+            stroke="#4BB8A9",
+            stroke_width=1.5,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#333333",
+            corner_radius=4.0,
+            padding=(10.0, 6.0),
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#FFE0B2",  # operator orange
+            stroke="#F4A460",
+            stroke_width=1.5,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#333333",
+            corner_radius=4.0,
+            padding=(10.0, 6.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#666666",
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#666666",
+            routing="straight",
+        ),
+        "back": EdgeStyle(
+            color="#999999",
+            width=1.5,
+            style="dashed",
+            arrow="normal",
+            routing="straight",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0F4F8",
+        stroke="#017CEE",
+        stroke_width=1.0,
+        corner_radius=4.0,
+        font_size=10.0,
+        font_color="#017CEE",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+DAGSTER_THEME = Theme(
+    name="dagster",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#252830",  # dark surface
+            stroke="#333740",
+            stroke_width=1.0,
+            font_family="Inter",
+            font_size=10.0,
+            font_color="#E0E0E0",
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#252830",
+            stroke="#7C3AED",  # Dagster purple accent
+            stroke_width=1.5,
+            font_family="Inter",
+            font_size=10.0,
+            font_color="#E0E0E0",
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#252830",
+            stroke="#22C55E",  # success green
+            stroke_width=1.5,
+            font_family="Inter",
+            font_size=10.0,
+            font_color="#E0E0E0",
+            corner_radius=6.0,
+            padding=(12.0, 8.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#444444",
+            width=1.0,
+            style="solid",
+            arrow="simple",
+            arrow_fill="filled",
+            arrow_color="#444444",
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.6,
+        ),
+        "back": EdgeStyle(
+            color="#444444",
+            width=1.0,
+            style="dashed",
+            arrow="simple",
+            routing="bezier",
+            opacity=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1C1F25",
+        stroke="#333740",
+        stroke_width=0.5,
+        corner_radius=6.0,
+        font_size=10.0,
+        font_color="#888888",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(
+        background_color="#1C1F25",
+    ),
+)
+
+
 # ─── Theme Registry ──────────────────────────────────────────────────────
 
 THEME_REGISTRY: Dict[str, Theme] = {
@@ -2027,6 +2460,12 @@ THEME_REGISTRY: Dict[str, Theme] = {
     "graphistry": GRAPHISTRY_THEME,
     "igraph_r": IGRAPH_R_THEME,
     "graph_tool": GRAPH_TOOL_THEME,
+    "excalidraw": EXCALIDRAW_THEME,
+    "github": GITHUB_THEME,
+    "linear": LINEAR_THEME,
+    "n8n": N8N_THEME,
+    "airflow": AIRFLOW_THEME,
+    "dagster": DAGSTER_THEME,
 }
 
 
