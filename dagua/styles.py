@@ -740,8 +740,8 @@ GRAPHVIZ_STRICT_THEME = Theme(
             width=1.0,  # Graphviz default penwidth
             arrow="normal",
             arrow_fill="filled",
-            arrow_length=8.0,  # compact slim triangle matching Graphviz
-            arrow_width=5.5,  # narrow to avoid overlapping ellipse nodes
+            arrow_length=7.0,  # slim compact triangle
+            arrow_width=4.5,  # narrow, proportional to 1.0pt edge
             arrow_scale=None,
             arrow_node_fraction=0.0,  # fixed size, not node-relative
             arrow_width_ratio=0.7,
@@ -754,17 +754,17 @@ GRAPHVIZ_STRICT_THEME = Theme(
         ),
     },
     cluster_style=ClusterStyle(
-        fill="#F5F5F5",  # Graphviz uses no fill, but subtle gray aids readability
-        stroke="#000000",
-        stroke_width=1.0,
+        fill="#F0F0F0",  # very subtle gray (Graphviz defaults to no fill)
+        stroke="#666666",  # medium gray like Graphviz's light border
+        stroke_width=0.8,  # thin border matching Graphviz
         corner_radius=0.0,
-        padding=12.0,  # Graphviz default cluster margin
+        padding=16.0,  # generous padding like Graphviz
         label_position="top-left",
         font_size=12.0,
         font_weight="regular",
         font_color="#000000",
         font_family="Times New Roman",
-        opacity=0.85,
+        opacity=0.6,  # subtle fill, not heavy
     ),
     graph_style=GraphStyle(
         background_color="#FFFFFF",
