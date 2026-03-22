@@ -238,6 +238,28 @@ def render(
             x_max = max(x_max, cx_max + margin)
             y_max = max(y_max, cy_max + margin)
 
+    # Expand figure bounds for self-loop arcs that extend beyond nodes.
+    edge_index = graph.edge_index.detach().cpu().numpy()
+    direction = getattr(graph, "direction", "TB")
+    for e_idx in range(edge_index.shape[1]):
+        src, tgt = int(edge_index[0, e_idx]), int(edge_index[1, e_idx])
+        if src == tgt:
+            sx, sy = float(pos[src, 0]), float(pos[src, 1])
+            sw, sh = float(sizes[src, 0]), float(sizes[src, 1])
+            loop_size = max(sw, sh)
+            loop_w = loop_size * 0.9
+            loop_h = loop_size * 2.0
+            if direction == "TB":
+                y_max = max(y_max, sy + sh / 2 + loop_h + margin)
+                x_min = min(x_min, sx - loop_w - margin)
+                x_max = max(x_max, sx + loop_w + margin)
+            elif direction == "BT":
+                y_min = min(y_min, sy - sh / 2 - loop_h - margin)
+            elif direction == "LR":
+                x_min = min(x_min, sx - sw / 2 - loop_h - margin)
+            elif direction == "RL":
+                x_max = max(x_max, sx + sw / 2 + loop_h + margin)
+
     width = x_max - x_min
     height = y_max - y_min
 
