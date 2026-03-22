@@ -247,8 +247,8 @@ def render(
             sx, sy = float(pos[src, 0]), float(pos[src, 1])
             sw, sh = float(sizes[src, 0]), float(sizes[src, 1])
             loop_size = max(sw, sh)
-            loop_w = loop_size * 0.9
-            loop_h = loop_size * 2.0
+            loop_w = loop_size * 0.35 * 1.33  # spread * cp_factor
+            loop_h = loop_size * 1.6  # arc_height
             if direction == "TB":
                 y_max = max(y_max, sy + sh / 2 + loop_h + margin)
                 x_min = min(x_min, sx - loop_w - margin)
@@ -1886,6 +1886,25 @@ def _draw_clusters(
 
     from matplotlib.patches import PathPatch
 
+    # Pre-compute cluster y_max bounds in CHILD-FIRST order so parents
+    # can extend above children's headers (prevents label overlap).
+    cluster_y_maxes: Dict[str, float] = {}
+    for name in reversed(ordered_clusters):
+        members = graph.clusters[name]
+        indices_pre = collect_cluster_leaves(members) if isinstance(members, dict) else members
+        if not indices_pre:
+            continue
+        cstyle = graph.get_style_for_cluster(name)
+        cpad = cstyle.padding
+        raw_y_max_pre = (pos[indices_pre][:, 1] + sizes[indices_pre][:, 1] / 2).max()
+        # Extend above any child cluster headers
+        children_map = graph.cluster_parents or {}
+        for child_name, parent_name in children_map.items():
+            if parent_name == name and child_name in cluster_y_maxes:
+                raw_y_max_pre = max(raw_y_max_pre, cluster_y_maxes[child_name])
+        lh = _points_to_data_units(ax, max(14.0, cstyle.font_size * 1.2), "y")
+        cluster_y_maxes[name] = raw_y_max_pre + cpad + lh
+
     for name in ordered_clusters:
         members = graph.clusters[name]
         depth = cluster_depths.get(name, 0)
@@ -1917,13 +1936,9 @@ def _draw_clusters(
         label_height = _points_to_data_units(ax, label_height_pt, "y")
 
         y_min = (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding
-        y_max = (
-            (member_pos[:, 1] + member_sizes[:, 1] / 2).max()
-            + padding
-            + max(
-                _points_to_data_units(ax, 14.0, "y"),
-                label_height,
-            )
+        # Use precomputed y_max which accounts for child cluster headers
+        y_max = cluster_y_maxes.get(
+            name, (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding + label_height
         )
 
         # Enforce a modest minimum cluster width so tall vertical stacks do not
@@ -2005,8 +2020,9 @@ def _draw_clusters(
             lx = x_min + label_ox
             ha = "left"
 
-        depth_label_offset = depth * (_points_to_data_units(ax, label_fontsize, "y")) * 1.4
-        ly = y_max - label_oy - depth_label_offset
+        # Each cluster label sits inside its OWN container's top edge,
+        # not stacked at the outermost cluster's top-left.
+        ly = y_max - label_oy
 
         if label:
             cluster_label_specs.append(

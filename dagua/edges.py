@@ -34,6 +34,10 @@ def _compute_self_loop_curve(
 ) -> BezierCurve:
     """Compute a direction-aware self-loop curve.
 
+    Creates a wide semicircular arc that exits and re-enters the node at
+    two distinct points on the outward-facing edge, matching the visual
+    style of Graphviz and matplotlib self-loops.
+
     Parameters
     ----------
     sx : float
@@ -51,46 +55,51 @@ def _compute_self_loop_curve(
     Returns
     -------
     BezierCurve
-        Closed teardrop loop placed on the outward-facing side for the
-        requested layout direction.
+        Wide semicircular loop on the outward-facing side.
     """
-    loop_size = max(sw, sh)
-    loop_width = loop_size * 0.9
-    loop_height = loop_size * 2.0
+    # Loop exits at two separate points on the node edge, spread apart,
+    # with control points creating a wide circular arc.
+    spread = max(sw, sh) * 0.35  # how far apart the exit/entry points are
+    arc_height = max(sw, sh) * 1.6  # how far the loop extends from the node
+
+    # Cubic bezier approximation of a semicircular arc:
+    # For a semicircle of radius r, the control point offset is ~r * 1.33
+    cp_factor = 1.33
 
     if direction == "BT":
-        anchor_y = sy - sh / 2
+        edge_y = sy - sh / 2  # bottom edge
         return BezierCurve(
-            p0=(sx, anchor_y),
-            cp1=(sx - loop_width, anchor_y - loop_height),
-            cp2=(sx + loop_width, anchor_y - loop_height),
-            p1=(sx, anchor_y),
+            p0=(sx - spread, edge_y),
+            cp1=(sx - spread * cp_factor, edge_y - arc_height),
+            cp2=(sx + spread * cp_factor, edge_y - arc_height),
+            p1=(sx + spread, edge_y),
         )
 
     if direction == "LR":
-        anchor_x = sx - sw / 2
+        edge_x = sx - sw / 2  # left edge
         return BezierCurve(
-            p0=(anchor_x, sy),
-            cp1=(anchor_x - loop_height, sy + loop_width),
-            cp2=(anchor_x - loop_height, sy - loop_width),
-            p1=(anchor_x, sy),
+            p0=(edge_x, sy - spread),
+            cp1=(edge_x - arc_height, sy - spread * cp_factor),
+            cp2=(edge_x - arc_height, sy + spread * cp_factor),
+            p1=(edge_x, sy + spread),
         )
 
     if direction == "RL":
-        anchor_x = sx + sw / 2
+        edge_x = sx + sw / 2  # right edge
         return BezierCurve(
-            p0=(anchor_x, sy),
-            cp1=(anchor_x + loop_height, sy + loop_width),
-            cp2=(anchor_x + loop_height, sy - loop_width),
-            p1=(anchor_x, sy),
+            p0=(edge_x, sy + spread),
+            cp1=(edge_x + arc_height, sy + spread * cp_factor),
+            cp2=(edge_x + arc_height, sy - spread * cp_factor),
+            p1=(edge_x, sy - spread),
         )
 
-    anchor_y = sy + sh / 2
+    # TB (default): loop above the node
+    edge_y = sy + sh / 2  # top edge
     return BezierCurve(
-        p0=(sx, anchor_y),
-        cp1=(sx - loop_width, anchor_y + loop_height),
-        cp2=(sx + loop_width, anchor_y + loop_height),
-        p1=(sx, anchor_y),
+        p0=(sx + spread, edge_y),
+        cp1=(sx + spread * cp_factor, edge_y + arc_height),
+        cp2=(sx - spread * cp_factor, edge_y + arc_height),
+        p1=(sx - spread, edge_y),
     )
 
 
