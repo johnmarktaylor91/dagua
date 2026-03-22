@@ -12,8 +12,21 @@ import math
 from collections import deque
 from typing import Optional
 
+import numpy as np
 import torch
 
+from dagua.layout.classic._graph_distances import (
+    all_pairs_shortest_paths as _shared_all_pairs_shortest_paths,
+)
+from dagua.layout.classic._graph_distances import (
+    bfs_distances as _shared_bfs_distances,
+)
+from dagua.layout.classic._graph_distances import (
+    build_undirected_adjacency as _shared_build_undirected_adjacency,
+)
+from dagua.layout.classic._graph_distances import (
+    dijkstra_distances as _shared_dijkstra_distances,
+)
 from dagua.layout.classic.pivot_mds import layout_pivot_mds
 
 _MIN_DISTANCE = 1.0e-3
@@ -115,7 +128,11 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
     return centered * (extent / span)
 
 
-def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> list[list[int]]:
+def _build_undirected_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> list[list[tuple[int, float]]]:
     """Build an undirected adjacency list from the edge tensor.
 
     Parameters
@@ -124,34 +141,27 @@ def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> lis
         Edge list with shape ``[2, E]``.
     num_nodes : int
         Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
 
     Returns
     -------
-    list[list[int]]
+    list[list[tuple[int, float]]]
         One neighbor list per node.
     """
-    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
-        raise ValueError("edge_index must have shape [2, E].")
-
-    adjacency_sets = [set() for _ in range(num_nodes)]
-    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
-    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
-        if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
-            raise ValueError("edge_index contains a node index outside [0, num_nodes).")
-        if source == target:
-            continue
-        adjacency_sets[source].add(target)
-        adjacency_sets[target].add(source)
-
-    return [sorted(neighbors) for neighbors in adjacency_sets]
+    return _shared_build_undirected_adjacency(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
 
 
-def _connected_components(adjacency: list[list[int]]) -> torch.Tensor:
+def _connected_components(adjacency: list[list[tuple[int, float]]]) -> torch.Tensor:
     """Label connected components in the undirected graph.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
 
     Returns
@@ -171,7 +181,7 @@ def _connected_components(adjacency: list[list[int]]) -> torch.Tensor:
         component_ids[start] = component_index
         while frontier:
             node = frontier.popleft()
-            for neighbor in adjacency[node]:
+            for neighbor, _ in adjacency[node]:
                 if int(component_ids[neighbor].item()) >= 0:
                     continue
                 component_ids[neighbor] = component_index
@@ -182,36 +192,55 @@ def _connected_components(adjacency: list[list[int]]) -> torch.Tensor:
     return component_ids
 
 
-def _bfs_distances(adjacency: list[list[int]], source: int) -> torch.Tensor:
-    """Compute full shortest-path distances from one source node.
+def _average_edge_cost(edge_weights: Optional[torch.Tensor]) -> float:
+    """Compute the average edge cost used for disconnected-pair fallbacks.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    float
+        Mean edge cost, or ``1.0`` for unweighted graphs.
+    """
+    if edge_weights is None or edge_weights.numel() == 0:
+        return 1.0
+    return float(edge_weights.detach().to(device="cpu", dtype=torch.float32).mean().item())
+
+
+def _single_source_distances(
+    adjacency: list[list[tuple[int, float]]],
+    source: int,
+    weighted: bool,
+    disconnected_distance: float,
+) -> torch.Tensor:
+    """Compute one source's graph distances with disconnected fallback values.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
     source : int
-        BFS root node index.
+        Shortest-path source node index.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
+    disconnected_distance : float
+        Replacement distance for unreachable nodes.
 
     Returns
     -------
     torch.Tensor
-        Integer distances with shape ``[N]`` and ``-1`` for unreachable nodes.
+        Float distances with shape ``[N]``.
     """
-    num_nodes = len(adjacency)
-    distances = torch.full((num_nodes,), -1, dtype=torch.long)
-    distances[source] = 0
-    frontier: deque[int] = deque([source])
-
-    while frontier:
-        node = frontier.popleft()
-        next_distance = int(distances[node].item()) + 1
-        for neighbor in adjacency[node]:
-            if int(distances[neighbor].item()) >= 0:
-                continue
-            distances[neighbor] = next_distance
-            frontier.append(neighbor)
-
-    return distances
+    if weighted:
+        distances = _shared_dijkstra_distances(adjacency, source)
+        cleaned = np.where(np.isinf(distances), disconnected_distance, distances)
+    else:
+        distances = _shared_bfs_distances(adjacency, source).astype(np.float64)
+        cleaned = np.where(distances < 0, disconnected_distance, distances)
+    return torch.tensor(cleaned, dtype=torch.float32)
 
 
 def _cross_component_distance(num_nodes: int, average_edge_cost: float = 1.0) -> float:
@@ -232,48 +261,69 @@ def _cross_component_distance(num_nodes: int, average_edge_cost: float = 1.0) ->
     return average_edge_cost * math.sqrt(float(max(num_nodes, 1)))
 
 
-def _all_pairs_shortest_paths(adjacency: list[list[int]]) -> torch.Tensor:
-    """Compute the full BFS shortest-path matrix for a small graph.
+def _all_pairs_shortest_paths(
+    adjacency: list[list[tuple[int, float]]],
+    weighted: bool,
+    average_edge_cost: float,
+) -> torch.Tensor:
+    """Compute the full shortest-path matrix for a small graph.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
+    average_edge_cost : float
+        Average edge cost used for disconnected-pair fallback values.
 
     Returns
     -------
     torch.Tensor
         Float shortest-path matrix with shape ``[N, N]``.
     """
-    num_nodes = len(adjacency)
-    rows = [_bfs_distances(adjacency, node) for node in range(num_nodes)]
-    if not rows:
+    raw_distances = _shared_all_pairs_shortest_paths(adjacency, weighted=weighted)
+    if raw_distances.size == 0:
         return torch.empty((0, 0), dtype=torch.float32)
 
-    distances = torch.stack(rows, dim=0).to(dtype=torch.float32)
-    unreachable = distances < 0
-    if bool(unreachable.any()):
-        distances = distances.clone()
-        distances[unreachable] = _cross_component_distance(num_nodes)
-    return distances
+    disconnected_distance = _cross_component_distance(
+        len(adjacency),
+        average_edge_cost=average_edge_cost,
+    )
+    cleaned = raw_distances.astype(np.float64, copy=True)
+    if weighted:
+        cleaned[np.isinf(cleaned)] = disconnected_distance
+    else:
+        cleaned[cleaned < 0] = disconnected_distance
+    return torch.tensor(cleaned, dtype=torch.float32)
 
 
 def _full_stress_terms(
-    adjacency: list[list[int]],
+    adjacency: list[list[tuple[int, float]]],
+    weighted: bool = False,
+    average_edge_cost: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build exact stress pairs from the all-pairs shortest-path matrix.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
+    average_edge_cost : float
+        Average edge cost used for disconnected-pair fallback values.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         Unique reachable node pairs and their graph distances.
     """
-    distances = _all_pairs_shortest_paths(adjacency)
+    distances = _all_pairs_shortest_paths(
+        adjacency,
+        weighted=weighted,
+        average_edge_cost=average_edge_cost,
+    )
     if distances.numel() == 0:
         empty = torch.empty((0,), dtype=torch.long)
         return empty, empty, torch.empty((0,), dtype=torch.float32)
@@ -339,17 +389,23 @@ def _choose_pivots(
 
 
 def _pivot_stress_terms(
-    adjacency: list[list[int]],
+    adjacency: list[list[tuple[int, float]]],
     seed: int,
+    weighted: bool = False,
+    average_edge_cost: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build a KK-style pivot approximation for large-graph stress.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
     seed : int
         Random seed for pivot selection.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
+    average_edge_cost : float
+        Average edge cost used for disconnected-pair fallback values.
 
     Returns
     -------
@@ -362,21 +418,31 @@ def _pivot_stress_terms(
     if int(pivots.numel()) == 0:
         return pivots, torch.empty((len(adjacency), 0), dtype=torch.float32)
 
-    rows = [_bfs_distances(adjacency, int(pivot.item())) for pivot in pivots]
+    disconnected_distance = _cross_component_distance(
+        len(adjacency),
+        average_edge_cost=average_edge_cost,
+    )
+    rows = [
+        _single_source_distances(
+            adjacency,
+            int(pivot.item()),
+            weighted=weighted,
+            disconnected_distance=disconnected_distance,
+        )
+        for pivot in pivots
+    ]
     distances = torch.stack(rows, dim=0).transpose(0, 1).to(dtype=torch.float32)
-    unreachable = distances < 0
-    if bool(unreachable.any()):
-        distances = distances.clone()
-        distances[unreachable] = _cross_component_distance(len(adjacency))
     return pivots, distances
 
 
-def _full_non_edge_pairs(adjacency: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
+def _full_non_edge_pairs(
+    adjacency: list[list[tuple[int, float]]],
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Enumerate all unique non-edge pairs for exact entropy repulsion.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
 
     Returns
@@ -392,7 +458,11 @@ def _full_non_edge_pairs(adjacency: list[list[int]]) -> tuple[torch.Tensor, torc
     adjacency_mask = torch.zeros((num_nodes, num_nodes), dtype=torch.bool)
     for source, neighbors in enumerate(adjacency):
         if neighbors:
-            adjacency_mask[source, torch.tensor(neighbors, dtype=torch.long)] = True
+            neighbor_indices = torch.tensor(
+                [neighbor for neighbor, _ in neighbors],
+                dtype=torch.long,
+            )
+            adjacency_mask[source, neighbor_indices] = True
 
     upper = torch.triu_indices(num_nodes, num_nodes, offset=1)
     mask = ~adjacency_mask[upper[0], upper[1]]
@@ -400,7 +470,7 @@ def _full_non_edge_pairs(adjacency: list[list[int]]) -> tuple[torch.Tensor, torc
 
 
 def _sample_non_edges(
-    adjacency: list[list[int]],
+    adjacency: list[list[tuple[int, float]]],
     step: int,
     seed: int,
     device: torch.device,
@@ -409,7 +479,7 @@ def _sample_non_edges(
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
     step : int
         Optimization step.
@@ -439,7 +509,9 @@ def _sample_non_edges(
         max(num_nodes, num_nodes * _SAMPLED_REPULSION_NEIGHBORS // 2),
     )
 
-    adjacency_sets = [set(neighbors) | {node} for node, neighbors in enumerate(adjacency)]
+    adjacency_sets = [
+        {neighbor for neighbor, _ in neighbors} | {node} for node, neighbors in enumerate(adjacency)
+    ]
     sources: list[int] = []
     targets: list[int] = []
     while len(sources) < sample_size:
@@ -677,6 +749,7 @@ def _layout_stress_majorization(
     steps: int,
     seed: int,
     device: torch.device,
+    edge_weights: Optional[torch.Tensor],
 ) -> torch.Tensor:
     """Run OGDF-style stress majorization for small graphs.
 
@@ -694,14 +767,21 @@ def _layout_stress_majorization(
         Seed for the PivotMDS initialization.
     device : torch.device
         Target device for the returned positions.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
 
     Returns
     -------
     torch.Tensor
         Normalized positions with shape ``[N, 2]``.
     """
-    adjacency = _build_undirected_adjacency(edge_index, num_nodes)
-    graph_distances = _all_pairs_shortest_paths(adjacency).to(dtype=torch.float64)
+    average_edge_cost = _average_edge_cost(edge_weights)
+    adjacency = _build_undirected_adjacency(edge_index, num_nodes, edge_weights=edge_weights)
+    graph_distances = _all_pairs_shortest_paths(
+        adjacency,
+        weighted=edge_weights is not None,
+        average_edge_cost=average_edge_cost,
+    ).to(dtype=torch.float64)
     weight_matrix = torch.zeros_like(graph_distances)
     off_diagonal_mask = ~torch.eye(num_nodes, dtype=torch.bool)
     weight_matrix[off_diagonal_mask] = graph_distances[off_diagonal_mask].reciprocal().square()
@@ -712,6 +792,7 @@ def _layout_stress_majorization(
         node_sizes=node_sizes,
         n_pivots=min(_PIVOT_COUNT, num_nodes),
         seed=seed,
+        edge_weights=edge_weights,
     ).to(device="cpu", dtype=torch.float64)
 
     for _ in range(steps):
@@ -737,6 +818,7 @@ def _layout_maxent_stress_gradient(
     seed: int,
     use_entropy: bool,
     device: torch.device,
+    edge_weights: Optional[torch.Tensor],
 ) -> torch.Tensor:
     """Run the existing gradient-based maxent-stress fallback.
 
@@ -758,15 +840,22 @@ def _layout_maxent_stress_gradient(
         Whether to include the logarithmic entropy term.
     device : torch.device
         Target output device.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
 
     Returns
     -------
     torch.Tensor
         Normalized positions with shape ``[N, 2]``.
     """
-    adjacency = _build_undirected_adjacency(edge_index, num_nodes)
+    average_edge_cost = _average_edge_cost(edge_weights)
+    adjacency = _build_undirected_adjacency(edge_index, num_nodes, edge_weights=edge_weights)
     if num_nodes <= _FULL_STRESS_LIMIT:
-        stress_src, stress_dst, stress_lengths = _full_stress_terms(adjacency)
+        stress_src, stress_dst, stress_lengths = _full_stress_terms(
+            adjacency,
+            weighted=edge_weights is not None,
+            average_edge_cost=average_edge_cost,
+        )
         pivot_indices = torch.empty((0,), dtype=torch.long)
         pivot_distances = torch.empty((num_nodes, 0), dtype=torch.float32)
         if use_entropy:
@@ -778,7 +867,12 @@ def _layout_maxent_stress_gradient(
         stress_src = torch.empty((0,), dtype=torch.long)
         stress_dst = torch.empty((0,), dtype=torch.long)
         stress_lengths = torch.empty((0,), dtype=torch.float32)
-        pivot_indices, pivot_distances = _pivot_stress_terms(adjacency, seed)
+        pivot_indices, pivot_distances = _pivot_stress_terms(
+            adjacency,
+            seed,
+            weighted=edge_weights is not None,
+            average_edge_cost=average_edge_cost,
+        )
         full_non_edge_src = torch.empty((0,), dtype=torch.long)
         full_non_edge_dst = torch.empty((0,), dtype=torch.long)
 
@@ -788,6 +882,7 @@ def _layout_maxent_stress_gradient(
         node_sizes=node_sizes,
         n_pivots=min(_PIVOT_COUNT, num_nodes),
         seed=seed,
+        edge_weights=edge_weights,
     ).to(device=device, dtype=torch.float32)
     positions = positions.requires_grad_(True)
     initial_lr = min(0.04, 0.8 / float(max(num_nodes, 1)))
@@ -852,6 +947,7 @@ def layout_maxent_stress(
     seed: int = 42,
     use_entropy: bool = False,
     use_majorization: bool = True,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with OGDF-style stress minimization and optional entropy.
 
@@ -881,6 +977,9 @@ def layout_maxent_stress(
         problems. The implementation falls back to the gradient path when
         entropy repulsion is enabled, the graph is too large, or the caller
         requests a non-default iteration count.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``. When provided, graph
+        distances are computed with Dijkstra instead of BFS.
 
     Returns
     -------
@@ -913,6 +1012,7 @@ def layout_maxent_stress(
             steps=steps,
             seed=seed,
             device=device,
+            edge_weights=edge_weights,
         )
 
     return _layout_maxent_stress_gradient(
@@ -924,4 +1024,5 @@ def layout_maxent_stress(
         seed=seed,
         use_entropy=use_entropy,
         device=device,
+        edge_weights=edge_weights,
     )

@@ -63,7 +63,11 @@ def _initialize_positions(num_nodes: int, seed: int) -> torch.Tensor:
     return torch.from_numpy(positions)
 
 
-def _adjacency_matrix(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+def _adjacency_matrix(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """Build the directed dense adjacency matrix used by NetworkX FR.
 
     Parameters
@@ -72,6 +76,8 @@ def _adjacency_matrix(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
@@ -101,7 +107,11 @@ def _adjacency_matrix(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
     ):
         raise ValueError("edge_index contains a node index outside [0, num_nodes).")
 
-    adjacency[sources, targets] = 1.0
+    if edge_weights is not None:
+        weights = edge_weights.detach().to(device="cpu", dtype=torch.float64)
+        adjacency[sources, targets] = weights
+    else:
+        adjacency[sources, targets] = 1.0
     return adjacency
 
 
@@ -156,6 +166,8 @@ def layout_fr(
     seed: int = 42,
     area: Optional[float] = None,
     trace_every: int = 0,
+    pos: Optional[torch.Tensor] = None,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, list[torch.Tensor]]]:
     """Lay out a graph with the NetworkX Fruchterman-Reingold update.
 
@@ -176,6 +188,12 @@ def layout_fr(
         a unit domain, so this value does not affect the translated solver.
     trace_every : int, default=0
         If greater than zero, record snapshots every ``trace_every`` updates.
+    pos : torch.Tensor, optional
+        Initial positions with shape ``[N, 2]``. When provided, replaces the
+        random unit-square initialization. Must have dtype ``float64``.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``. When provided, weights
+        scale the FR attraction term through the dense adjacency matrix.
 
     Returns
     -------
@@ -198,6 +216,13 @@ def layout_fr(
         raise ValueError("trace_every must be non-negative.")
     if area is not None and area <= 0.0:
         raise ValueError("area must be positive.")
+    if edge_weights is not None:
+        if edge_weights.ndim != 1:
+            raise ValueError("edge_weights must have shape [E].")
+        if edge_weights.shape[0] != edge_index.shape[1]:
+            raise ValueError(
+                f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
+            )
 
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     traces: list[torch.Tensor] = []
@@ -205,8 +230,17 @@ def layout_fr(
         empty = torch.empty((0, 2), dtype=torch.float32, device=device)
         return (empty, traces) if trace_every > 0 else empty
 
-    positions = _initialize_positions(num_nodes=num_nodes, seed=seed)
-    adjacency = _adjacency_matrix(edge_index=edge_index, num_nodes=num_nodes)
+    if pos is not None:
+        if pos.shape != (num_nodes, 2):
+            raise ValueError(f"pos must have shape ({num_nodes}, 2), got {tuple(pos.shape)}")
+        positions = pos.to(dtype=torch.float64, device="cpu").clone()
+    else:
+        positions = _initialize_positions(num_nodes=num_nodes, seed=seed)
+    adjacency = _adjacency_matrix(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
     optimal_distance = sqrt(1.0 / float(max(num_nodes, 1)))
     temperature = _initial_temperature(positions)
     cooling_step = temperature / float(steps + 1) if steps > 0 else 0.0

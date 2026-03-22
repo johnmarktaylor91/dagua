@@ -7,6 +7,12 @@ from typing import Any, Optional, Union
 import numpy as np
 import torch
 
+from dagua.layout.classic._graph_distances import (
+    bfs_distances,
+    build_directed_adjacency,
+    dijkstra_distances,
+)
+
 UNREACHABLE_DISTANCE = 1.0e6
 DISTANCE_EPSILON = 1.0e-3
 CENTERING_WEIGHT = 1.0e-3
@@ -37,50 +43,18 @@ def _layout_device(
     return torch.device("cpu")
 
 
-def _build_directed_adjacency(edge_index: torch.Tensor, num_nodes: int) -> list[list[int]]:
-    """Build a directed adjacency list from a ``[2, E]`` edge tensor.
-
-    Parameters
-    ----------
-    edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
-    num_nodes : int
-        Number of nodes.
-
-    Returns
-    -------
-    list[list[int]]
-        Directed adjacency list.
-
-    Raises
-    ------
-    ValueError
-        If ``edge_index`` has an invalid shape or contains out-of-range nodes.
-    """
-    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
-        raise ValueError("edge_index must have shape [2, E].")
-
-    adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
-    if edge_index.numel() == 0:
-        return adjacency
-
-    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
-    sources = edge_index_cpu[0].tolist()
-    targets = edge_index_cpu[1].tolist()
-    for source, target in zip(sources, targets):
-        if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
-            raise ValueError("edge_index contains a node index outside [0, num_nodes).")
-        adjacency[source].append(target)
-    return adjacency
-
-
-def _shortest_path_distance_matrix(adjacency: list[list[int]]) -> np.ndarray:
+def _shortest_path_distance_matrix(
+    adjacency: list[list[tuple[int, float]]],
+    weighted: bool,
+) -> np.ndarray:
     """Compute directed all-pairs shortest-path distances.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Directed adjacency list.
+    weighted : bool
+        Whether to compute weighted shortest paths with Dijkstra.
 
     Returns
     -------
@@ -90,18 +64,15 @@ def _shortest_path_distance_matrix(adjacency: list[list[int]]) -> np.ndarray:
     num_nodes = len(adjacency)
     distances = np.full((num_nodes, num_nodes), UNREACHABLE_DISTANCE, dtype=np.float64)
     for source in range(num_nodes):
-        distances[source, source] = 0.0
-        frontier = [source]
-        cursor = 0
-        while cursor < len(frontier):
-            node = frontier[cursor]
-            cursor += 1
-            next_distance = distances[source, node] + 1.0
-            for neighbor in adjacency[node]:
-                if distances[source, neighbor] != UNREACHABLE_DISTANCE:
-                    continue
-                distances[source, neighbor] = next_distance
-                frontier.append(neighbor)
+        if weighted:
+            source_distances = dijkstra_distances(adjacency, source)
+            source_distances[np.isinf(source_distances)] = UNREACHABLE_DISTANCE
+            distances[source] = source_distances
+            continue
+
+        source_distances = bfs_distances(adjacency, source).astype(np.float64)
+        source_distances[source_distances < 0] = UNREACHABLE_DISTANCE
+        distances[source] = source_distances
     return distances
 
 
@@ -225,7 +196,7 @@ def _solve_kamada_kawai(
     distance_matrix : numpy.ndarray
         Preferred graph distances with shape ``[N, N]``.
     initial_positions : numpy.ndarray
-        Circular initialization with shape ``[N, 2]``.
+        Initial coordinates with shape ``[N, 2]``.
     steps : int
         Maximum optimization iterations.
     trace_every : int
@@ -279,6 +250,8 @@ def layout_kk(
     seed: int = 42,
     trace_every: int = 0,
     solver: str = "auto",
+    pos: Optional[torch.Tensor] = None,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, list[torch.Tensor]]]:
     """Lay out a graph with the NetworkX Kamada-Kawai reference algorithm.
 
@@ -301,6 +274,12 @@ def layout_kk(
     solver : {"auto", "newton", "adam"}, default="auto"
         Retained for interface compatibility. All accepted values resolve to
         the exact SciPy L-BFGS-B NetworkX solver path.
+    pos : torch.Tensor, optional
+        Initial positions with shape ``[N, 2]``. When provided, replaces the
+        circular initialization. Must be convertible to ``float64``.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``. When provided, directed
+        shortest-path targets are computed with Dijkstra instead of BFS.
 
     Returns
     -------
@@ -335,9 +314,21 @@ def layout_kk(
         single = torch.zeros((1, 2), dtype=torch.float32, device=device)
         return (single, []) if trace_every > 0 else single
 
-    adjacency = _build_directed_adjacency(edge_index=edge_index, num_nodes=num_nodes)
-    distance_matrix = _shortest_path_distance_matrix(adjacency)
-    initial_positions = _circular_layout(num_nodes=num_nodes)
+    adjacency = build_directed_adjacency(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
+    distance_matrix = _shortest_path_distance_matrix(
+        adjacency,
+        weighted=edge_weights is not None,
+    )
+    if pos is not None:
+        if pos.shape != (num_nodes, 2):
+            raise ValueError(f"pos must have shape ({num_nodes}, 2), got {tuple(pos.shape)}")
+        initial_positions = pos.detach().cpu().numpy().astype(np.float64)
+    else:
+        initial_positions = _circular_layout(num_nodes=num_nodes)
     solved_positions, traces = _solve_kamada_kawai(
         distance_matrix=distance_matrix,
         initial_positions=initial_positions,

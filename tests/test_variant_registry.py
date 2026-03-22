@@ -61,7 +61,7 @@ def _test_graph() -> DaguaGraph:
 
 def test_all_variants_have_valid_base_engine() -> None:
     """Every registry entry should point at a registered classic base engine."""
-    assert len(VARIANT_REGISTRY) == 93
+    assert len(VARIANT_REGISTRY) == 97
     for variant in VARIANT_REGISTRY:
         assert variant.base_engine in _CLASSIC_LAYOUT_SPECS
         assert get_variant(variant.variant_id) == variant
