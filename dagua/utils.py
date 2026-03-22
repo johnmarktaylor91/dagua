@@ -636,7 +636,7 @@ def _compute_node_size_cached(
         max_dim = max(w, h) * 1.42
         # Diamonds lose usable interior width at the left/right corners, so
         # keep a slightly wider final floor than rectangular nodes.
-        w = max(max_dim * 1.4, MIN_NODE_WIDTH * 2.1)
+        w = max(max_dim * 1.15, MIN_NODE_WIDTH * 1.8)
         h = max_dim
     elif shape == "triangle":
         # Graphviz triangles are wide and flat, so reserve enough width for
