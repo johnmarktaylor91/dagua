@@ -1904,11 +1904,12 @@ def _draw_clusters(
             )
         )
 
-        # Enforce minimum cluster width: at least 60% of height so vertical
-        # column layouts get reasonable horizontal breathing room.
+        # Enforce a modest minimum cluster width so tall vertical stacks do not
+        # collapse into needle-thin boxes, while still allowing nested
+        # clusters to stay closer to the matplotlib reference proportions.
         cluster_height = y_max - y_min
         cluster_width = x_max - x_min
-        min_cluster_width = cluster_height * 0.8
+        min_cluster_width = cluster_height * 0.65
         if cluster_width < min_cluster_width:
             expand_w = (min_cluster_width - cluster_width) / 2.0
             x_min -= expand_w
