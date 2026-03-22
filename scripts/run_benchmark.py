@@ -1662,9 +1662,35 @@ def main() -> int:
         ):
             print(f"[benchmark] Graph complete: {record.graph_name}")
 
+    # Track consecutive timeouts per (engine, graph) pair.  If an algorithm
+    # times out on 3 consecutive seeds of the same graph, skip the remaining
+    # seeds for that combo — they will almost certainly time out too.
+    CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD = 3
+    consecutive_timeouts: dict[tuple[str, str], int] = {}
+
     if args.workers <= 1:
         # Serial mode — run in-process, no fork overhead
         for work_item in work_items:
+            # Skip if this (engine, graph) pair has hit the consecutive timeout threshold
+            combo_key = (work_item.engine_name, work_item.graph_name)
+            if consecutive_timeouts.get(combo_key, 0) >= CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD:
+                record = _record_with_pairings(
+                    graph_name=work_item.graph_name,
+                    engine_name=work_item.engine_name,
+                    seed=work_item.seed,
+                    num_nodes=graph_summaries[work_item.graph_name].num_nodes,
+                    num_edges=graph_summaries[work_item.graph_name].num_edges,
+                    status="skipped",
+                    runtime_seconds=None,
+                    error=None,
+                    positions_file=None,
+                    skip_reason=(
+                        f"skipped after {CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD} consecutive timeouts"
+                    ),
+                )
+                _process_record(record)
+                continue
+
             summary_record = graph_summaries[work_item.graph_name]
             results[work_item.key] = running_record(
                 graph_name=work_item.graph_name,
@@ -1689,6 +1715,13 @@ def main() -> int:
                     positions_file=None,
                     skip_reason=None,
                 )
+
+            # Track consecutive timeouts per (engine, graph) combo
+            if record.status in ("timeout", "error") and "timeout" in (record.error or "").lower():
+                consecutive_timeouts[combo_key] = consecutive_timeouts.get(combo_key, 0) + 1
+            else:
+                consecutive_timeouts[combo_key] = 0
+
             _process_record(record)
     else:
         # Parallel mode
