@@ -902,6 +902,50 @@ def preferred_edge_label_position(
     return mx + perp_x * label_offset * side_sign, my + perp_y * label_offset * side_sign
 
 
+def edge_endpoint_label_position(
+    curve: BezierCurve,
+    endpoint: str,
+    label_offset: float = 5.0,
+) -> Tuple[float, float]:
+    """Return a label anchor near the source or target end of a bezier edge.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Cubic bezier describing the routed edge centerline.
+    endpoint : str
+        Endpoint selector. Supported values are ``"head"`` and ``"tail"``.
+    label_offset : float, default=5.0
+        Distance in data coordinates to move away from the node along the local
+        tangent direction so the label does not sit directly on the boundary.
+
+    Returns
+    -------
+    tuple[float, float]
+        Label anchor in data coordinates.
+
+    Raises
+    ------
+    ValueError
+        If ``endpoint`` is not ``"head"`` or ``"tail"``.
+    """
+    if endpoint not in {"head", "tail"}:
+        raise ValueError(f"Unsupported edge endpoint label target: {endpoint!r}")
+
+    t = 0.9 if endpoint == "head" else 0.1
+    x, y = evaluate_bezier(curve, t)
+    tdx, tdy = bezier_tangent(curve, t)
+    magnitude = (tdx**2 + tdy**2) ** 0.5
+    if magnitude < 1e-6:
+        return x, y
+
+    direction_x = tdx / magnitude
+    direction_y = tdy / magnitude
+    if endpoint == "head":
+        return x - direction_x * label_offset, y - direction_y * label_offset
+    return x + direction_x * label_offset, y + direction_y * label_offset
+
+
 def _label_side_candidates(label_side: str, allow_search: bool) -> List[float]:
     if label_side == "left":
         return [1.0]
