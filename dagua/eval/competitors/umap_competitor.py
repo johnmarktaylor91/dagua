@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 import torch
 
@@ -93,12 +93,51 @@ class UMAPGraph(CompetitorBase):
 
     name = "umap_graph"
     max_nodes = 20_000
+    variant_param_names = frozenset(
+        {
+            "learning_rate",
+            "min_dist",
+            "n_epochs",
+            "n_neighbors",
+            "negative_sample_rate",
+            "repulsion_strength",
+            "spread",
+        }
+    )
 
     def layout(
         self,
         graph: DaguaGraph,
         timeout: float = 300.0,
         seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run UMAP on all-pairs graph shortest-path distances.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Input graph to lay out.
+        timeout : float, optional
+            Unused adapter timeout in seconds. Included for interface
+            compatibility with the benchmark harness.
+        seed : int | None, default=None
+            Random seed for UMAP initialization. ``None`` preserves the
+            adapter's historical default of ``42``.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result with positions shaped ``[N, 2]`` on CPU, or an error
+            payload if UMAP or SciPy fails.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
     ) -> CompetitorResult:
         """Run UMAP on all-pairs graph shortest-path distances.
 
@@ -140,13 +179,17 @@ class UMAPGraph(CompetitorBase):
                 return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
 
             distances = _distance_matrix(graph)
-            reducer = umap.UMAP(
-                n_components=2,
-                metric="precomputed",
-                random_state=seed if seed is not None else 42,
-                n_neighbors=min(15, num_nodes - 1),
-                init="random" if num_nodes < 10 else "spectral",
-            )
+            reducer_kwargs: dict[str, Any] = {
+                "n_components": 2,
+                "metric": "precomputed",
+                "random_state": seed if seed is not None else 42,
+                "n_neighbors": min(15, num_nodes - 1),
+                "init": "random" if num_nodes < 10 else "spectral",
+            }
+            if variant_params is not None:
+                reducer_kwargs.update(dict(variant_params))
+            reducer_kwargs["n_neighbors"] = min(int(reducer_kwargs["n_neighbors"]), num_nodes - 1)
+            reducer = umap.UMAP(**reducer_kwargs)
             coordinates = reducer.fit_transform(distances)
             pos = torch.tensor(coordinates, dtype=torch.float32)
 

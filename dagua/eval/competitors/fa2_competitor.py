@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any, Optional, Type
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Type
 
 import torch
 
@@ -60,12 +60,49 @@ class FA2Reference(CompetitorBase):
 
     name = "fa2_ref"
     max_nodes = 20_000
+    variant_param_names = frozenset(
+        {
+            "gravity",
+            "iterations",
+            "outboundAttractionDistribution",
+            "scalingRatio",
+            "strongGravityMode",
+        }
+    )
 
     def layout(
         self,
         graph: DaguaGraph,
         timeout: float = 300.0,
         seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run ForceAtlas2 through its NetworkX adapter.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Input graph to lay out.
+        timeout : float, optional
+            Unused adapter timeout in seconds. Included for interface
+            compatibility with the benchmark harness.
+        seed : int | None, default=None
+            Random seed for the NumPy-backed initial positions used by the
+            reference implementation. ``None`` keeps the library default.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result with positions shaped ``[N, 2]`` on CPU, or an error
+            payload if the third-party engine fails.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
     ) -> CompetitorResult:
         """Run ForceAtlas2 through its NetworkX adapter.
 
@@ -112,21 +149,29 @@ class FA2Reference(CompetitorBase):
                 if source != target:
                     nx_graph.add_edge(source, target)
 
-            layout_engine = forceatlas2_cls(
-                outboundAttractionDistribution=True,
-                edgeWeightInfluence=1.0,
-                jitterTolerance=1.0,
-                barnesHutOptimize=True,
-                barnesHutTheta=1.2,
-                scalingRatio=2.0,
-                strongGravityMode=False,
-                gravity=1.0,
-                verbose=False,
-            )
+            engine_kwargs: dict[str, Any] = {
+                "outboundAttractionDistribution": True,
+                "edgeWeightInfluence": 1.0,
+                "jitterTolerance": 1.0,
+                "barnesHutOptimize": True,
+                "barnesHutTheta": 1.2,
+                "scalingRatio": 2.0,
+                "strongGravityMode": False,
+                "gravity": 1.0,
+                "verbose": False,
+            }
+            layout_kwargs: dict[str, Any] = {"pos": None, "iterations": 100}
+            if variant_params is not None:
+                for key, value in dict(variant_params).items():
+                    if key == "iterations":
+                        layout_kwargs["iterations"] = value
+                    else:
+                        engine_kwargs[key] = value
+
+            layout_engine = forceatlas2_cls(**engine_kwargs)
             positions = layout_engine.forceatlas2_networkx_layout(
                 nx_graph,
-                pos=None,
-                iterations=100,
+                **layout_kwargs,
             )
 
             pos = torch.zeros((graph.num_nodes, 2), dtype=torch.float32)

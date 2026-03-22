@@ -37,6 +37,19 @@ from typing import Any, Optional, Sequence
 
 import torch
 
+from dagua.eval.variants import (
+    base_pairings,
+    engine_is_heavy,
+    engine_is_stochastic,
+    engine_timeout_cap,
+    get_variant,
+    get_variant_for_original_name,
+    original_variant_engine_names,
+    original_variant_name,
+    variant_pairings,
+    variants_for_base_engine,
+)
+
 DEFAULT_OUTPUT_DIR = Path("eval_output/benchmark_full")
 DEFAULT_TIMEOUT = 120
 DEFAULT_WORKERS = 4
@@ -45,49 +58,7 @@ DEFAULT_SEED_START = 42
 PROGRESS_INTERVAL = 25
 RUNNING_STATUS = "running"
 POSITION_DIRNAME = "positions"
-
-# Engines known to become disproportionately slow in the benchmark corpus.
-SLOW_ENGINES: dict[str, int] = {
-    "classic_davidson_harel": 60,
-    "classic_stress_sgd": 90,
-}
-
-STOCHASTIC_ENGINES: set[str] = {
-    "classic_fr",
-    "classic_kk",
-    "classic_fa2",
-    "classic_stress_sgd",
-    "classic_linlog",
-    "classic_gem",
-    "classic_tsnet",
-    "classic_maxent_stress",
-    "classic_davidson_harel",
-    "classic_fmmm",
-    "nx_spring",
-    "igraph_fr",
-    "graphviz_fdp",
-    "graphviz_sfdp",
-    "sgd2",
-    "fa2_ref",
-    "tsne_graph",
-    "umap_graph",
-}
-
-REIMPL_TO_ORIGINAL: dict[str, list[str]] = {
-    "classic_fr": ["nx_spring", "igraph_fr"],
-    "classic_kk": ["nx_kamada_kawai"],
-    "classic_fa2": ["fa2_ref"],
-    "classic_stress_sgd": ["sgd2"],
-    "classic_spectral": ["nx_spectral"],
-    "classic_sugiyama": ["graphviz_dot", "igraph_sugiyama"],
-    "classic_tsnet": ["tsne_graph"],
-    "classic_gem": [],
-    "classic_maxent_stress": [],
-    "classic_pivot_mds": [],
-    "classic_davidson_harel": [],
-    "classic_linlog": [],
-    "classic_fmmm": [],
-}
+CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD = 3
 
 
 class _WorkerLayoutTimeoutError(TimeoutError):
@@ -435,7 +406,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run all layout algorithms on all selected test graphs."
     )
-    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
+    parser.add_argument("--workers", type=str, default=str(DEFAULT_WORKERS))
     parser.add_argument(
         "--timeout",
         type=int,
@@ -481,11 +452,49 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip saving position tensors and only record timing/status metadata",
     )
+    parser.add_argument(
+        "--variants",
+        action="store_true",
+        help="Expand classic and original engines into parameterized variant competitors",
+    )
     return parser.parse_args()
 
 
-def reverse_pairings() -> dict[str, list[str]]:
+def _pairings_for_engine_name(engine_name: str) -> tuple[list[str], list[str]]:
+    """Return pairing metadata for one engine or synthetic variant name.
+
+    Parameters
+    ----------
+    engine_name : str
+        Base competitor name or synthetic variant competitor name.
+
+    Returns
+    -------
+    tuple[list[str], list[str]]
+        ``(original_for, reimpl_of)`` lists for ``BenchmarkRecord`` metadata.
+    """
+    variant = get_variant(engine_name)
+    if variant is not None:
+        original_name = original_variant_name(variant)
+        return [], ([] if original_name is None else [original_name])
+
+    original_variant = get_variant_for_original_name(engine_name)
+    if original_variant is not None:
+        return [original_variant.variant_id], []
+
+    pairings = base_pairings()
+    reversed_pairings = reverse_pairings(use_variants=False)
+    return reversed_pairings.get(engine_name, []), pairings.get(engine_name, [])
+
+
+def reverse_pairings(use_variants: bool) -> dict[str, list[str]]:
     """Build the reverse original-to-reimplementation pairing map.
+
+    Parameters
+    ----------
+    use_variants : bool
+        Whether to use synthetic variant pairings instead of base-engine
+        pairings.
 
     Returns
     -------
@@ -493,8 +502,9 @@ def reverse_pairings() -> dict[str, list[str]]:
         Mapping from original engine name to the reimplementations that cite it
         as a reference.
     """
+    pairings = variant_pairings() if use_variants else base_pairings()
     reversed_map: dict[str, list[str]] = {}
-    for reimpl_name, original_names in REIMPL_TO_ORIGINAL.items():
+    for reimpl_name, original_names in pairings.items():
         for original_name in original_names:
             reversed_map.setdefault(original_name, []).append(reimpl_name)
     for original_names in reversed_map.values():
@@ -517,9 +527,38 @@ def seeds_for_engine(engine_name: str, seed_count: int) -> list[Optional[int]]:
     list[int | None]
         One deterministic ``None`` entry or a sequence starting at 42.
     """
-    if engine_name not in STOCHASTIC_ENGINES:
+    if not engine_is_stochastic(engine_name):
         return [None]
     return list(range(DEFAULT_SEED_START, DEFAULT_SEED_START + seed_count))
+
+
+def resolve_worker_count(workers_arg: str) -> int:
+    """Resolve ``--workers`` into a concrete worker count.
+
+    Parameters
+    ----------
+    workers_arg : str
+        Raw CLI value, either a positive integer or ``"auto"``.
+
+    Returns
+    -------
+    int
+        Concrete worker count.
+    """
+    if workers_arg != "auto":
+        return int(workers_arg)
+
+    try:
+        import psutil
+    except ImportError:
+        cores = os.cpu_count() or 1
+        return max(1, min(cores - 1, 6))
+
+    mem = psutil.virtual_memory()
+    cores = os.cpu_count() or 1
+    max_by_ram = max(1, int(mem.available / (4 * 1024**3)))
+    max_by_cpu = max(1, cores - 1)
+    return min(max_by_ram, max_by_cpu, 6)
 
 
 def graph_summary(test_graph: Any) -> GraphSummary:
@@ -572,6 +611,12 @@ def select_graphs(graph_filter: Optional[str], max_nodes: int) -> list[Any]:
         return selected
 
     requested_names = [name.strip() for name in graph_filter.split(",") if name.strip()]
+    if "tiny_graph" in requested_names and selected:
+        smallest_graph = min(selected, key=lambda test_graph: test_graph.graph.num_nodes)
+        requested_names = [
+            smallest_graph.name if requested_name == "tiny_graph" else requested_name
+            for requested_name in requested_names
+        ]
     by_name = {test_graph.name: test_graph for test_graph in selected}
     missing = [name for name in requested_names if name not in by_name]
     if missing:
@@ -579,13 +624,117 @@ def select_graphs(graph_filter: Optional[str], max_nodes: int) -> list[Any]:
     return [by_name[name] for name in requested_names]
 
 
-def select_engines(engine_filter: str) -> list[Any]:
+def _expand_engine_name_for_variants(engine_name: str) -> list[str]:
+    """Expand one engine selection into variant competitor names.
+
+    Parameters
+    ----------
+    engine_name : str
+        Base competitor name or already-expanded variant name.
+
+    Returns
+    -------
+    list[str]
+        Expanded engine names in benchmark order.
+    """
+    is_variant = get_variant(engine_name) is not None
+    is_original_variant = get_variant_for_original_name(engine_name) is not None
+    if is_variant or is_original_variant:
+        return [engine_name]
+
+    reimpl_variants = variants_for_base_engine(engine_name)
+    if reimpl_variants:
+        return [variant.variant_id for variant in reimpl_variants]
+
+    original_names = [
+        original_name
+        for variant in sum((variants_for_base_engine(base) for base in base_pairings().keys()), [])
+        for original_name in [original_variant_name(variant)]
+        if variant.original_engine == engine_name and original_name is not None
+    ]
+    if original_names:
+        return original_names
+    return [engine_name]
+
+
+def _dedupe_preserving_order(values: Sequence[str]) -> list[str]:
+    """Return values with duplicates removed and order preserved.
+
+    Parameters
+    ----------
+    values : Sequence[str]
+        Values to deduplicate.
+
+    Returns
+    -------
+    list[str]
+        Unique values in first-seen order.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def _build_engine_instance(
+    engine_name: str,
+    competitor_by_name: dict[str, Any],
+) -> Any:
+    """Build a concrete competitor or synthetic variant wrapper.
+
+    Parameters
+    ----------
+    engine_name : str
+        Base competitor name or synthetic variant competitor name.
+    competitor_by_name : dict[str, Any]
+        Registered base competitors keyed by name.
+
+    Returns
+    -------
+    Any
+        Base competitor instance or ``VariantCompetitor`` wrapper.
+    """
+    from dagua.eval.competitors.classic_competitor import VariantCompetitor
+
+    variant = get_variant(engine_name)
+    if variant is not None:
+        base_competitor = competitor_by_name[variant.base_engine]
+        return VariantCompetitor(
+            base_competitor=base_competitor,
+            variant_params=variant.reimpl_params,
+            name=variant.variant_id,
+            display_name=variant.display_name,
+            is_heavy=variant.is_heavy,
+        )
+
+    original_variant = get_variant_for_original_name(engine_name)
+    if original_variant is not None and original_variant.original_engine is not None:
+        base_competitor = competitor_by_name[original_variant.original_engine]
+        return VariantCompetitor(
+            base_competitor=base_competitor,
+            variant_params=original_variant.original_params,
+            name=engine_name,
+            display_name=f"{original_variant.display_name} [original]",
+            is_heavy=engine_is_heavy(engine_name),
+        )
+
+    return competitor_by_name[engine_name]
+
+
+def select_engines(engine_filter: str, include_variants: bool) -> list[Any]:
     """Select competitor adapters based on the CLI filter.
 
     Parameters
     ----------
     engine_filter : str
         Filter string from ``--engines``.
+    include_variants : bool
+        Whether classic and original engines should expand into synthetic
+        variant competitors.
 
     Returns
     -------
@@ -600,7 +749,55 @@ def select_engines(engine_filter: str) -> list[Any]:
     from dagua.eval.competitors import get_available_competitors, get_competitors
 
     all_competitors = get_competitors()
+    competitor_by_name = {competitor.name: competitor for competitor in all_competitors}
     available_names = {competitor.name for competitor in get_available_competitors()}
+
+    if engine_filter == "all":
+        selected_names = [
+            competitor.name for competitor in all_competitors if competitor.name in available_names
+        ]
+    elif engine_filter == "originals":
+        selected_names = [
+            competitor.name
+            for competitor in all_competitors
+            if competitor.name in available_names
+            and not competitor.name.startswith("classic_")
+            and competitor.name != "dagua"
+        ]
+    elif engine_filter == "reimpl":
+        selected_names = [
+            competitor.name
+            for competitor in all_competitors
+            if competitor.name in available_names and competitor.name.startswith("classic_")
+        ]
+    else:
+        requested_names = [name.strip() for name in engine_filter.split(",") if name.strip()]
+        known_names = {
+            *competitor_by_name.keys(),
+            *(
+                variant.variant_id
+                for base in base_pairings()
+                for variant in variants_for_base_engine(base)
+            ),
+            *original_variant_engine_names(),
+        }
+        missing = [name for name in requested_names if name not in known_names]
+        if missing:
+            raise ValueError(f"Unknown engine selection: {', '.join(sorted(missing))}")
+        selected_names = requested_names
+
+    if include_variants:
+        expanded_names = _dedupe_preserving_order(
+            [
+                expanded_name
+                for selected_name in selected_names
+                for expanded_name in _expand_engine_name_for_variants(selected_name)
+            ]
+        )
+        return [
+            _build_engine_instance(engine_name, competitor_by_name)
+            for engine_name in expanded_names
+        ]
 
     if engine_filter == "all":
         return [c for c in all_competitors if c.name in available_names]
@@ -616,14 +813,7 @@ def select_engines(engine_filter: str) -> list[Any]:
             for c in all_competitors
             if c.name in available_names and c.name.startswith("classic_")
         ]
-
-    requested_names = [name.strip() for name in engine_filter.split(",") if name.strip()]
-    known_names = {competitor.name for competitor in all_competitors}
-    missing = [name for name in requested_names if name not in known_names]
-    if missing:
-        raise ValueError(f"Unknown engine selection: {', '.join(sorted(missing))}")
-    competitor_by_name = {competitor.name: competitor for competitor in all_competitors}
-    return [competitor_by_name[name] for name in requested_names]
+    return [competitor_by_name[name] for name in selected_names]
 
 
 def _load_results(path: Path) -> dict[str, BenchmarkRecord]:
@@ -713,6 +903,106 @@ def save_results(path: Path, results: dict[str, BenchmarkRecord]) -> None:
     """
     payload = {key: record.to_dict() for key, record in sorted(results.items())}
     _save_json_atomic(path, payload)
+
+
+def recover_results_from_positions(
+    output_dir: Path,
+    graphs: Sequence[Any],
+    engines: Sequence[Any],
+    seed_count: int,
+) -> dict[str, BenchmarkRecord]:
+    """Rebuild best-effort successful records from saved position tensors.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Benchmark output directory containing ``positions/``.
+    graphs : Sequence[Any]
+        Selected test-graph objects.
+    engines : Sequence[Any]
+        Selected competitor instances, including synthetic variants.
+    seed_count : int
+        Seed count requested for stochastic engines.
+
+    Returns
+    -------
+    dict[str, BenchmarkRecord]
+        Recovered successful records keyed by benchmark record key.
+    """
+    positions_dir = output_dir / POSITION_DIRNAME
+    if not positions_dir.exists():
+        return {}
+
+    expected_by_filename: dict[str, tuple[str, str, Optional[int], GraphSummary]] = {}
+    for test_graph in graphs:
+        summary = graph_summary(test_graph)
+        for competitor in engines:
+            for seed in seeds_for_engine(competitor.name, seed_count):
+                relative_path = position_relative_path(summary.name, competitor.name, seed)
+                expected_by_filename[relative_path.name] = (
+                    summary.name,
+                    competitor.name,
+                    seed,
+                    summary,
+                )
+
+    recovered: dict[str, BenchmarkRecord] = {}
+    for path in positions_dir.glob("*.pt"):
+        expected = expected_by_filename.get(path.name)
+        if expected is None:
+            continue
+        graph_name, engine_name, seed, summary = expected
+        try:
+            tensor = torch.load(path, map_location="cpu")
+        except Exception:
+            continue
+        if not isinstance(tensor, torch.Tensor):
+            continue
+        if tuple(tensor.shape) != (summary.num_nodes, 2):
+            continue
+
+        record = _record_with_pairings(
+            graph_name=graph_name,
+            engine_name=engine_name,
+            seed=seed,
+            num_nodes=summary.num_nodes,
+            num_edges=summary.num_edges,
+            status="ok",
+            runtime_seconds=None,
+            error=None,
+            positions_file=str(Path(POSITION_DIRNAME) / path.name),
+            skip_reason=None,
+        )
+        recovered[record.key] = record
+    return recovered
+
+
+def merge_recovered_results(
+    existing_results: dict[str, BenchmarkRecord],
+    recovered_results: dict[str, BenchmarkRecord],
+) -> dict[str, BenchmarkRecord]:
+    """Merge recovered position-backed records into existing results.
+
+    Parameters
+    ----------
+    existing_results : dict[str, BenchmarkRecord]
+        Existing ``results.json`` contents.
+    recovered_results : dict[str, BenchmarkRecord]
+        Best-effort position-backed successful records.
+
+    Returns
+    -------
+    dict[str, BenchmarkRecord]
+        Merged results preferring recovered ``status="ok"`` records while
+        preserving existing runtime metadata when available.
+    """
+    merged = dict(existing_results)
+    for key, recovered_record in recovered_results.items():
+        existing_record = merged.get(key)
+        if existing_record is not None and existing_record.runtime_seconds is not None:
+            recovered_record.runtime_seconds = existing_record.runtime_seconds
+        merged[key] = recovered_record
+    return merged
 
 
 def is_record_complete(
@@ -856,7 +1146,20 @@ def _ensure_worker_cache() -> tuple[dict[str, Any], dict[str, Any]]:
     if _WORKER_COMPETITORS is None:
         from dagua.eval.competitors import get_competitors
 
-        _WORKER_COMPETITORS = {competitor.name: competitor for competitor in get_competitors()}
+        base_competitors = get_competitors()
+        _WORKER_COMPETITORS = {competitor.name: competitor for competitor in base_competitors}
+        for variant_name in _dedupe_preserving_order(
+            [
+                variant.variant_id
+                for base_engine in base_pairings().keys()
+                for variant in variants_for_base_engine(base_engine)
+            ]
+            + original_variant_engine_names()
+        ):
+            _WORKER_COMPETITORS[variant_name] = _build_engine_instance(
+                variant_name,
+                _WORKER_COMPETITORS,
+            )
     if _WORKER_GRAPHS is None:
         from dagua.eval.graphs import get_test_graphs
 
@@ -906,7 +1209,7 @@ def _record_with_pairings(
     BenchmarkRecord
         Fully populated record.
     """
-    original_to_reimpl = reverse_pairings()
+    original_for, reimpl_of = _pairings_for_engine_name(engine_name)
     return BenchmarkRecord(
         graph_name=graph_name,
         engine_name=engine_name,
@@ -917,10 +1220,10 @@ def _record_with_pairings(
         positions_file=positions_file,
         num_nodes=num_nodes,
         num_edges=num_edges,
-        is_stochastic=engine_name in STOCHASTIC_ENGINES,
+        is_stochastic=engine_is_stochastic(engine_name),
         skip_reason=skip_reason,
-        original_for=original_to_reimpl.get(engine_name, []),
-        reimpl_of=REIMPL_TO_ORIGINAL.get(engine_name, []),
+        original_for=original_for,
+        reimpl_of=reimpl_of,
     )
 
 
@@ -1096,6 +1399,105 @@ def _run_single_work_item(work_item: WorkItem) -> dict[str, Any]:
     finally:
         set_runtime_seed(None)
         _disable_worker_timeout(previous_handler)
+
+
+def _is_timeout_record(record: BenchmarkRecord) -> bool:
+    """Return whether a record should count against the timeout threshold.
+
+    Parameters
+    ----------
+    record : BenchmarkRecord
+        Completed benchmark record.
+
+    Returns
+    -------
+    bool
+        ``True`` when the record represents a timeout.
+    """
+    return record.status == "timeout" or (
+        record.status == "error" and "timeout" in (record.error or "").lower()
+    )
+
+
+def group_work_items(work_items: Sequence[WorkItem]) -> list[list[WorkItem]]:
+    """Group work items by ``(engine, graph)`` while preserving order.
+
+    Parameters
+    ----------
+    work_items : Sequence[WorkItem]
+        Planned benchmark attempts.
+
+    Returns
+    -------
+    list[list[WorkItem]]
+        Work-item groups whose seeds should execute sequentially together.
+    """
+    grouped: dict[tuple[str, str], list[WorkItem]] = {}
+    ordered_keys: list[tuple[str, str]] = []
+    for work_item in work_items:
+        group_key = (work_item.engine_name, work_item.graph_name)
+        if group_key not in grouped:
+            grouped[group_key] = []
+            ordered_keys.append(group_key)
+        grouped[group_key].append(work_item)
+    return [grouped[group_key] for group_key in ordered_keys]
+
+
+def _run_work_group(work_group: Sequence[WorkItem]) -> list[dict[str, Any]]:
+    """Run one ``(engine, graph)`` seed group sequentially.
+
+    Parameters
+    ----------
+    work_group : Sequence[WorkItem]
+        All seeds for one engine/graph combination.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Serialized benchmark records for the group.
+    """
+    if not work_group:
+        return []
+
+    competitors, graphs = _ensure_worker_cache()
+    del competitors
+    test_graph = graphs.get(work_group[0].graph_name)
+    num_nodes = 0
+    num_edges = 0
+    if test_graph is not None:
+        edge_index = test_graph.graph.edge_index
+        num_nodes = int(test_graph.graph.num_nodes)
+        num_edges = int(edge_index.shape[1]) if edge_index.numel() > 0 else 0
+
+    records: list[dict[str, Any]] = []
+    consecutive_timeouts = 0
+    for work_item in work_group:
+        if consecutive_timeouts >= CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD:
+            records.append(
+                _record_with_pairings(
+                    graph_name=work_item.graph_name,
+                    engine_name=work_item.engine_name,
+                    seed=work_item.seed,
+                    num_nodes=num_nodes,
+                    num_edges=num_edges,
+                    status="skipped",
+                    runtime_seconds=None,
+                    error=None,
+                    positions_file=None,
+                    skip_reason=(
+                        f"skipped after {CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD} consecutive timeouts"
+                    ),
+                ).to_dict()
+            )
+            continue
+
+        record = BenchmarkRecord.from_dict(_run_single_work_item(work_item))
+        if _is_timeout_record(record):
+            consecutive_timeouts += 1
+        else:
+            consecutive_timeouts = 0
+        records.append(record.to_dict())
+    return records
 
 
 def running_record(
@@ -1299,7 +1701,12 @@ def pairing_summary_rows(records: Sequence[BenchmarkRecord]) -> list[str]:
                 ok_counts_by_engine.get(record.engine_name, 0) + 1
             )
 
-    for reimpl_name, original_names in REIMPL_TO_ORIGINAL.items():
+    pairings: dict[str, list[str]] = {}
+    for record in records:
+        if record.reimpl_of:
+            pairings.setdefault(record.engine_name, list(record.reimpl_of))
+
+    for reimpl_name, original_names in sorted(pairings.items()):
         reimpl_ok = ok_counts_by_engine.get(reimpl_name, 0)
         original_ok = sum(
             ok_counts_by_engine.get(original_name, 0) for original_name in original_names
@@ -1421,11 +1828,14 @@ def manifest_payload(
     dict[str, Any]
         JSON-serializable manifest payload.
     """
-    original_to_reimpl = reverse_pairings()
+    use_variants = bool(args.variants)
+    pairings = variant_pairings() if use_variants else base_pairings()
+    original_to_reimpl = reverse_pairings(use_variants=use_variants)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "config": {
-            "workers": int(args.workers),
+            "workers": str(args.workers),
+            "resolved_workers": int(args.resolved_workers),
             "timeout": int(args.timeout),
             "seeds": int(args.seeds),
             "max_nodes": int(args.max_nodes),
@@ -1434,11 +1844,14 @@ def manifest_payload(
             "resume": bool(args.resume),
             "output_dir": str(args.output_dir),
             "save_positions": not bool(args.no_positions),
+            "variants": use_variants,
         },
         "seed_values": list(range(DEFAULT_SEED_START, DEFAULT_SEED_START + int(args.seeds))),
-        "stochastic_engines": sorted(STOCHASTIC_ENGINES),
+        "stochastic_engines": sorted(
+            competitor.name for competitor in engines if engine_is_stochastic(competitor.name)
+        ),
         "pairings": {
-            "reimpl_to_original": REIMPL_TO_ORIGINAL,
+            "reimpl_to_original": pairings,
             "original_to_reimpl": original_to_reimpl,
         },
         "graphs": [asdict(graph_summary(test_graph)) for test_graph in graphs],
@@ -1447,9 +1860,10 @@ def manifest_payload(
                 "name": competitor.name,
                 "max_nodes": int(getattr(competitor, "max_nodes", 0)),
                 "available": bool(competitor.available()),
-                "is_stochastic": competitor.name in STOCHASTIC_ENGINES,
+                "is_stochastic": engine_is_stochastic(competitor.name),
+                "is_heavy": engine_is_heavy(competitor.name),
                 "original_for": original_to_reimpl.get(competitor.name, []),
-                "reimpl_of": REIMPL_TO_ORIGINAL.get(competitor.name, []),
+                "reimpl_of": pairings.get(competitor.name, []),
             }
             for competitor in engines
         ],
@@ -1471,8 +1885,12 @@ def validate_args(args: argparse.Namespace) -> None:
     ValueError
         Raised when a numeric argument is out of range.
     """
-    if args.workers <= 0:
-        raise ValueError("--workers must be positive")
+    if args.workers != "auto":
+        try:
+            if int(args.workers) <= 0:
+                raise ValueError("--workers must be positive")
+        except ValueError as exc:
+            raise ValueError("--workers must be a positive integer or 'auto'") from exc
     if args.timeout <= 0:
         raise ValueError("--timeout must be positive")
     if args.seeds <= 0:
@@ -1491,6 +1909,7 @@ def main() -> int:
     """
     args = parse_args()
     validate_args(args)
+    args.resolved_workers = resolve_worker_count(args.workers)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     if hasattr(sys.stderr, "reconfigure"):
@@ -1503,14 +1922,25 @@ def main() -> int:
     manifest_path = output_dir / "manifest.json"
 
     try:
-        selected_engines = select_engines(args.engines)
+        selected_engines = select_engines(args.engines, include_variants=bool(args.variants))
         selected_graphs = select_graphs(args.graphs, args.max_nodes)
     except ValueError as exc:
         print(f"[benchmark] ERROR: {exc}")
         return 2
 
-    existing_results = _load_results(results_path) if args.resume else {}
-    results = dict(existing_results)
+    disk_results = _load_results(results_path)
+    recovered_results = (
+        {}
+        if args.no_positions
+        else recover_results_from_positions(
+            output_dir=output_dir,
+            graphs=selected_graphs,
+            engines=selected_engines,
+            seed_count=args.seeds,
+        )
+    )
+    existing_results = merge_recovered_results(disk_results, recovered_results)
+    results = dict(existing_results if args.resume else recovered_results)
 
     engine_names = [competitor.name for competitor in selected_engines]
     graph_names = [test_graph.name for test_graph in selected_graphs]
@@ -1585,7 +2015,12 @@ def main() -> int:
                     continue
 
                 timeout_seconds = float(
-                    min(args.timeout, SLOW_ENGINES.get(competitor.name, args.timeout))
+                    min(
+                        args.timeout,
+                        engine_timeout_cap(competitor.name)
+                        if engine_timeout_cap(competitor.name) is not None
+                        else args.timeout,
+                    )
                 )
                 work_items.append(
                     WorkItem(
@@ -1610,7 +2045,7 @@ def main() -> int:
         ),
     )
 
-    stochastic_engine_count = sum(name in STOCHASTIC_ENGINES for name in engine_names)
+    stochastic_engine_count = sum(engine_is_stochastic(name) for name in engine_names)
     print(
         "[benchmark] Starting: "
         f"{len(graph_names)} graphs x {len(engine_names)} engines, "
@@ -1662,35 +2097,11 @@ def main() -> int:
         ):
             print(f"[benchmark] Graph complete: {record.graph_name}")
 
-    # Track consecutive timeouts per (engine, graph) pair.  If an algorithm
-    # times out on 3 consecutive seeds of the same graph, skip the remaining
-    # seeds for that combo — they will almost certainly time out too.
-    CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD = 3
-    consecutive_timeouts: dict[tuple[str, str], int] = {}
+    work_groups = group_work_items(work_items)
 
-    if args.workers <= 1:
-        # Serial mode — run in-process, no fork overhead
-        for work_item in work_items:
-            # Skip if this (engine, graph) pair has hit the consecutive timeout threshold
-            combo_key = (work_item.engine_name, work_item.graph_name)
-            if consecutive_timeouts.get(combo_key, 0) >= CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD:
-                record = _record_with_pairings(
-                    graph_name=work_item.graph_name,
-                    engine_name=work_item.engine_name,
-                    seed=work_item.seed,
-                    num_nodes=graph_summaries[work_item.graph_name].num_nodes,
-                    num_edges=graph_summaries[work_item.graph_name].num_edges,
-                    status="skipped",
-                    runtime_seconds=None,
-                    error=None,
-                    positions_file=None,
-                    skip_reason=(
-                        f"skipped after {CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD} consecutive timeouts"
-                    ),
-                )
-                _process_record(record)
-                continue
-
+    def _mark_group_running(work_group: Sequence[WorkItem]) -> None:
+        """Persist running placeholders for one grouped submission."""
+        for work_item in work_group:
             summary_record = graph_summaries[work_item.graph_name]
             results[work_item.key] = running_record(
                 graph_name=work_item.graph_name,
@@ -1699,77 +2110,60 @@ def main() -> int:
                 num_nodes=summary_record.num_nodes,
                 num_edges=summary_record.num_edges,
             )
-            try:
-                result_dict = _run_single_work_item(work_item)
-                record = BenchmarkRecord.from_dict(result_dict)
-            except Exception as exc:
-                record = _record_with_pairings(
-                    graph_name=work_item.graph_name,
-                    engine_name=work_item.engine_name,
-                    seed=work_item.seed,
-                    num_nodes=0,
-                    num_edges=0,
-                    status="error",
-                    runtime_seconds=None,
-                    error=f"{type(exc).__name__}: {exc}",
-                    positions_file=None,
-                    skip_reason=None,
-                )
 
-            # Track consecutive timeouts per (engine, graph) combo.
-            # Check status directly (not error text -- timeouts have error=None).
-            if record.status == "timeout" or (
-                record.status == "error" and "timeout" in (record.error or "").lower()
-            ):
-                consecutive_timeouts[combo_key] = consecutive_timeouts.get(combo_key, 0) + 1
-            else:
-                consecutive_timeouts[combo_key] = 0
-
-            _process_record(record)
+    if args.resolved_workers <= 1:
+        for work_group in work_groups:
+            _mark_group_running(work_group)
+            for payload in _run_work_group(work_group):
+                _process_record(BenchmarkRecord.from_dict(payload))
     else:
-        # Parallel mode
+        light_groups = [group for group in work_groups if not engine_is_heavy(group[0].engine_name)]
+        heavy_groups = [group for group in work_groups if engine_is_heavy(group[0].engine_name)]
+
         try:
-            executor = ProcessPoolExecutor(max_workers=args.workers)
+            executor = ProcessPoolExecutor(max_workers=args.resolved_workers)
         except PermissionError:
             print("[benchmark] ERROR: failed to start ProcessPoolExecutor")
             return 1
 
-        future_to_item: dict[Future[dict[str, Any]], WorkItem] = {}
+        future_to_group: dict[Future[list[dict[str, Any]]], Sequence[WorkItem]] = {}
         try:
-            for work_item in work_items:
-                summary_record = graph_summaries[work_item.graph_name]
-                results[work_item.key] = running_record(
-                    graph_name=work_item.graph_name,
-                    engine_name=work_item.engine_name,
-                    seed=work_item.seed,
-                    num_nodes=summary_record.num_nodes,
-                    num_edges=summary_record.num_edges,
-                )
-                future = executor.submit(_run_single_work_item, work_item)
-                future_to_item[future] = work_item
+            for work_group in light_groups:
+                _mark_group_running(work_group)
+                future = executor.submit(_run_work_group, work_group)
+                future_to_group[future] = work_group
 
             save_results(results_path, results)
 
-            for future in as_completed(future_to_item):
-                work_item = future_to_item[future]
+            for future in as_completed(future_to_group):
+                work_group = future_to_group[future]
                 try:
-                    record = BenchmarkRecord.from_dict(future.result())
+                    payloads = future.result()
                 except Exception as exc:
-                    record = _record_with_pairings(
-                        graph_name=work_item.graph_name,
-                        engine_name=work_item.engine_name,
-                        seed=work_item.seed,
-                        num_nodes=0,
-                        num_edges=0,
-                        status="error",
-                        runtime_seconds=None,
-                        error=f"{type(exc).__name__}: {exc}",
-                        positions_file=None,
-                        skip_reason=None,
-                    )
-                _process_record(record)
+                    payloads = [
+                        _record_with_pairings(
+                            graph_name=work_item.graph_name,
+                            engine_name=work_item.engine_name,
+                            seed=work_item.seed,
+                            num_nodes=graph_summaries[work_item.graph_name].num_nodes,
+                            num_edges=graph_summaries[work_item.graph_name].num_edges,
+                            status="error",
+                            runtime_seconds=None,
+                            error=f"{type(exc).__name__}: {exc}",
+                            positions_file=None,
+                            skip_reason=None,
+                        ).to_dict()
+                        for work_item in work_group
+                    ]
+                for payload in payloads:
+                    _process_record(BenchmarkRecord.from_dict(payload))
         finally:
             executor.shutdown(wait=True, cancel_futures=False)
+
+        for work_group in heavy_groups:
+            _mark_group_running(work_group)
+            for payload in _run_work_group(work_group):
+                _process_record(BenchmarkRecord.from_dict(payload))
 
     current_records = list(scoped_results(results, scoped_keys).values())
     _save_json_atomic(
