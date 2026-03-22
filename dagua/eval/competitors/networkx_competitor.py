@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 import torch
 
@@ -45,13 +45,39 @@ class _NetworkXBase(CompetitorBase):
     """Base for NetworkX layout algorithms."""
 
     layout_func: str = "spring_layout"
-    layout_kwargs: dict = {}
+    layout_kwargs: dict[str, Any] = {}
 
     def layout(
         self,
         graph: DaguaGraph,
         timeout: float = 300.0,
         seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the configured NetworkX layout algorithm.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility timeout parameter.
+        seed : int | None, default=None
+            Random seed forwarded when the underlying NetworkX layout accepts
+            a ``seed`` keyword. Deterministic layouts ignore it.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
     ) -> CompetitorResult:
         """Run the configured NetworkX layout algorithm.
 
@@ -80,6 +106,8 @@ class _NetworkXBase(CompetitorBase):
         try:
             func = getattr(nx, self.layout_func)
             layout_kwargs = dict(self.layout_kwargs)
+            if variant_params is not None:
+                layout_kwargs.update(dict(variant_params))
             if seed is not None and "seed" in layout_kwargs:
                 layout_kwargs["seed"] = seed
             nx_pos = func(G, **layout_kwargs)
@@ -105,6 +133,7 @@ class NetworkXSpring(_NetworkXBase):
     max_nodes = 50_000
     layout_func = "spring_layout"
     layout_kwargs = {"seed": 42, "iterations": 50}
+    variant_param_names = frozenset({"gravity", "iterations", "k", "scale"})
 
 
 @register
@@ -113,6 +142,7 @@ class NetworkXKamadaKawai(_NetworkXBase):
     max_nodes = 5_000
     layout_func = "kamada_kawai_layout"
     layout_kwargs = {}
+    variant_param_names = frozenset()
 
 
 @register
@@ -123,3 +153,4 @@ class NetworkXSpectral(_NetworkXBase):
     max_nodes = 10_000
     layout_func = "spectral_layout"
     layout_kwargs = {"dim": 2}
+    variant_param_names = frozenset({"dim", "scale"})
