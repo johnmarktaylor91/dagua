@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import os
 import random
 import re
@@ -50,12 +51,18 @@ from dagua.eval.variants import (
     variants_for_base_engine,
 )
 
+# Use forkserver to avoid deadlocks when torch is imported in the main process.
+# fork + torch's internal threading locks = hang on large job counts.
+_MP_CONTEXT = multiprocessing.get_context("forkserver")
+
 DEFAULT_OUTPUT_DIR = Path("eval_output/benchmark_full")
 DEFAULT_TIMEOUT = 120
 DEFAULT_WORKERS = 4
 DEFAULT_SEED_COUNT = 10
 DEFAULT_SEED_START = 42
 PROGRESS_INTERVAL = 25
+SAVE_INTERVAL = 100  # flush results to disk every N completions
+SUBMIT_BATCH_SIZE = 200  # submit futures in batches to avoid overwhelming the pool
 RUNNING_STATUS = "running"
 POSITION_DIRNAME = "positions"
 CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD = 3
@@ -2080,7 +2087,10 @@ def main() -> int:
         graph_completion_counts[record.graph_name] = (
             graph_completion_counts.get(record.graph_name, 0) + 1
         )
-        save_results(results_path, results)
+
+        # Throttle disk saves -- every SAVE_INTERVAL completions instead of every record
+        if completed_scope % SAVE_INTERVAL == 0 or completed_scope == total_scope:
+            save_results(results_path, results)
 
         if record.status in {"error", "timeout"}:
             seed_suffix = "" if record.seed is None else f" seed={record.seed}"
@@ -2121,22 +2131,26 @@ def main() -> int:
         heavy_groups = [group for group in work_groups if engine_is_heavy(group[0].engine_name)]
 
         try:
-            executor = ProcessPoolExecutor(max_workers=args.resolved_workers)
+            executor = ProcessPoolExecutor(
+                max_workers=args.resolved_workers, mp_context=_MP_CONTEXT
+            )
         except PermissionError:
             print("[benchmark] ERROR: failed to start ProcessPoolExecutor")
             return 1
 
-        future_to_group: dict[Future[list[dict[str, Any]]], Sequence[WorkItem]] = {}
-        try:
-            for work_group in light_groups:
-                _mark_group_running(work_group)
-                future = executor.submit(_run_work_group, work_group)
-                future_to_group[future] = work_group
+        # Submit light groups in batches to avoid overwhelming the executor
+        # and blocking on massive JSON serialization.
+        print(
+            f"[benchmark] Parallel: {len(light_groups)} light groups "
+            f"(batch={SUBMIT_BATCH_SIZE}), {len(heavy_groups)} heavy groups (serial)"
+        )
 
-            save_results(results_path, results)
-
-            for future in as_completed(future_to_group):
-                work_group = future_to_group[future]
+        def _drain_futures(
+            future_map: dict[Future[list[dict[str, Any]]], Sequence[WorkItem]],
+        ) -> None:
+            """Drain all completed futures from the map."""
+            for future in as_completed(future_map):
+                work_group = future_map.pop(future)
                 try:
                     payloads = future.result()
                 except Exception as exc:
@@ -2157,9 +2171,20 @@ def main() -> int:
                     ]
                 for payload in payloads:
                     _process_record(BenchmarkRecord.from_dict(payload))
+
+        try:
+            for batch_start in range(0, len(light_groups), SUBMIT_BATCH_SIZE):
+                batch = light_groups[batch_start : batch_start + SUBMIT_BATCH_SIZE]
+                future_to_group: dict[Future[list[dict[str, Any]]], Sequence[WorkItem]] = {}
+                for work_group in batch:
+                    _mark_group_running(work_group)
+                    future = executor.submit(_run_work_group, work_group)
+                    future_to_group[future] = work_group
+                _drain_futures(future_to_group)
         finally:
             executor.shutdown(wait=True, cancel_futures=False)
 
+        # Heavy groups run serially to avoid memory pressure
         for work_group in heavy_groups:
             _mark_group_running(work_group)
             for payload in _run_work_group(work_group):
