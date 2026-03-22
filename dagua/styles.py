@@ -2545,6 +2545,373 @@ NEURON_THEME = Theme(
     ),
 )
 
+BLUEPRINT_THEME = Theme(
+    name="blueprint",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#1B3A5C",  # slightly lighter than bg
+            stroke="#FFFFFF",
+            stroke_width=1.5,
+            font_family="DejaVu Sans",
+            font_size=9.0,
+            font_color="#FFFFFF",
+            padding=(5.0, 5.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#1B3A5C",
+            stroke="#88CCFF",  # highlight blue
+            stroke_width=2.0,
+            font_family="DejaVu Sans",
+            font_size=9.0,
+            font_color="#88CCFF",
+            padding=(5.0, 5.0),
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#1B3A5C",
+            stroke="#FFD700",  # gold highlight
+            stroke_width=2.0,
+            font_family="DejaVu Sans",
+            font_size=9.0,
+            font_color="#FFD700",
+            padding=(5.0, 5.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#FFFFFF",
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#FFFFFF",
+            routing="straight",
+            opacity=0.7,
+        ),
+        "back": EdgeStyle(
+            color="#FFFFFF",
+            width=0.8,
+            style="dashed",
+            arrow="normal",
+            routing="straight",
+            opacity=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#162D4A",
+        stroke="#FFFFFF",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#88CCFF",
+        padding=8.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(
+        background_color="#0F2744",  # Prussian blue
+    ),
+)
+
+CHALKBOARD_THEME = Theme(
+    name="chalkboard",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#2B4034",  # slightly lighter than board
+            stroke="#E8E4D4",  # chalk white
+            stroke_width=1.5,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#E8E4D4",
+            padding=(5.0, 5.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#2B4034",
+            stroke="#FFD59A",  # yellow chalk
+            stroke_width=1.5,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#FFD59A",
+            padding=(5.0, 5.0),
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#2B4034",
+            stroke="#FF9A9A",  # pink chalk
+            stroke_width=1.5,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#FF9A9A",
+            padding=(5.0, 5.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#E8E4D4",  # chalk white
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#E8E4D4",
+            routing="straight",
+            opacity=0.8,
+        ),
+        "back": EdgeStyle(
+            color="#E8E4D4",
+            width=1.0,
+            style="dashed",
+            arrow="normal",
+            routing="straight",
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#263A2E",
+        stroke="#E8E4D4",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=10.0,
+        font_color="#E8E4D4",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(
+        background_color="#1E3228",  # dark green slate
+    ),
+)
+
+SUBWAY_THEME = Theme(
+    name="subway",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",
+            stroke="#333333",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=9.0,
+            font_color="#333333",
+            padding=(4.0, 4.0),
+            min_width=18.0,
+            min_height=18.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",
+            stroke="#E32636",  # Central line red
+            stroke_width=3.0,
+            font_family="Arial",
+            font_size=9.0,
+            font_color="#333333",
+            padding=(4.0, 4.0),
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",
+            stroke="#003688",  # Piccadilly line blue
+            stroke_width=3.0,
+            font_family="Arial",
+            font_size=9.0,
+            font_color="#333333",
+            padding=(4.0, 4.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#0098D4",  # Victoria line cyan
+            width=4.0,  # thick transit lines
+            style="solid",
+            arrow="none",  # subway lines have no arrows
+            routing="ortho",  # Beck's orthogonal routing
+            line_cap="round",
+        ),
+        "back": EdgeStyle(
+            color="#9B0056",  # Metropolitan line magenta
+            width=4.0,
+            style="solid",
+            arrow="none",
+            routing="ortho",
+            line_cap="round",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F5F5F5",
+        stroke="#CCCCCC",
+        stroke_width=1.0,
+        corner_radius=0.0,
+        font_size=10.0,
+        font_color="#333333",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+VINTAGE_TEXTBOOK_THEME = Theme(
+    name="vintage_textbook",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#FAF3E6",  # cream paper
+            stroke="#333333",
+            stroke_width=1.0,
+            font_family="DejaVu Serif",
+            font_size=11.0,
+            font_color="#333333",
+            font_style="italic",
+            padding=(5.0, 5.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#FAF3E6",
+            stroke="#333333",
+            stroke_width=1.5,
+            font_family="DejaVu Serif",
+            font_size=11.0,
+            font_color="#333333",
+            font_style="italic",
+            padding=(5.0, 5.0),
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#333333",  # filled black (common in textbooks)
+            stroke="#333333",
+            stroke_width=1.0,
+            font_family="DejaVu Serif",
+            font_size=11.0,
+            font_color="#FAF3E6",
+            font_style="italic",
+            padding=(5.0, 5.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#333333",
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#333333",
+            routing="straight",
+        ),
+        "back": EdgeStyle(
+            color="#333333",
+            width=0.8,
+            style="dashed",
+            arrow="normal",
+            routing="straight",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F5ECD8",
+        stroke="#333333",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=10.0,
+        font_color="#333333",
+        font_weight="bold",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(
+        background_color="#FAF3E6",  # cream textbook paper
+    ),
+)
+
+FEYNMAN_THEME = Theme(
+    name="feynman",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",
+            stroke="#000000",
+            stroke_width=0.0,  # vertices are just dots in Feynman diagrams
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#000000",
+            font_style="italic",
+            padding=(2.0, 2.0),
+            min_width=8.0,  # small vertex dots
+            min_height=8.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#000000",  # filled vertex
+            stroke="#000000",
+            stroke_width=0.0,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#000000",
+            font_style="italic",
+            padding=(2.0, 2.0),
+            min_width=8.0,
+            min_height=8.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#000000",
+            stroke="#000000",
+            stroke_width=0.0,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#000000",
+            font_style="italic",
+            padding=(2.0, 2.0),
+            min_width=8.0,
+            min_height=8.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#000000",
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#000000",
+            routing="straight",
+        ),
+        "back": EdgeStyle(
+            color="#000000",
+            width=1.5,
+            style="dashed",  # dashed = virtual particle
+            arrow="normal",
+            routing="bezier",
+            curvature=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F8F8F8",
+        stroke="#CCCCCC",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=10.0,
+        font_color="#666666",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+THEME_REGISTRY["blueprint"] = BLUEPRINT_THEME
+THEME_REGISTRY["chalkboard"] = CHALKBOARD_THEME
+THEME_REGISTRY["subway"] = SUBWAY_THEME
+THEME_REGISTRY["vintage_textbook"] = VINTAGE_TEXTBOOK_THEME
+THEME_REGISTRY["feynman"] = FEYNMAN_THEME
 THEME_REGISTRY["neuron"] = NEURON_THEME
 THEME_REGISTRY["excalidraw"] = EXCALIDRAW_THEME
 THEME_REGISTRY["github"] = GITHUB_THEME
