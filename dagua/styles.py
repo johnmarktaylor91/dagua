@@ -714,16 +714,16 @@ _GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
     shape="ellipse",
     fill="#FFFFFF",
     stroke="#000000",
-    stroke_width=1.4,  # 1.0 renders thinner than Graphviz due to matplotlib AA
+    stroke_width=1.3,  # slightly above 1.0 to compensate for AA thinning
     font_family="Times New Roman",
     font_size=14.0,
     font_color="#000000",
-    padding=(12.0, 5.0),
+    padding=(8.0, 4.0),  # Graphviz margin: 0.11in x 0.055in = ~8pt x 4pt
     corner_radius=0.0,
     opacity=1.0,
     base_color="#000000",
-    min_width=48.0,  # ellipse width factor now provides the extra width
-    min_height=36.0,
+    min_width=54.0,  # Graphviz default: 0.75in = 54pt
+    min_height=36.0,  # Graphviz default: 0.5in = 36pt
     overflow_policy="expand_node",
 )
 
@@ -737,14 +737,14 @@ GRAPHVIZ_STRICT_THEME = Theme(
     edge_styles={
         "default": EdgeStyle(
             color="#000000",
-            width=1.3,
+            width=1.2,  # slightly above 1.0 for AA compensation
             arrow="normal",
             arrow_fill="filled",
-            arrow_length=22.0,  # points — calibrated to match Graphviz visual weight
-            arrow_width=15.0,  # points — stocky triangle like Graphviz
-            arrow_scale=None,  # ignored; unified display scaling handles conversion
-            arrow_node_fraction=0.26,  # 26% of target node height — calibrated to Graphviz
-            arrow_width_ratio=0.7,  # width = 70% of length — stocky triangle
+            arrow_length=18.0,  # calibrated to Graphviz arrowsize=1.0
+            arrow_width=12.0,  # Graphviz arrow proportions (~67% of length)
+            arrow_scale=None,
+            arrow_node_fraction=0.0,  # fixed size, not node-relative
+            arrow_width_ratio=0.7,
             style="solid",
             opacity=1.0,
             label_font_size=14.0,
@@ -754,11 +754,11 @@ GRAPHVIZ_STRICT_THEME = Theme(
         ),
     },
     cluster_style=ClusterStyle(
-        fill="#F8F8F8",
+        fill="#F5F5F5",  # Graphviz uses no fill, but subtle gray aids readability
         stroke="#000000",
         stroke_width=1.0,
         corner_radius=0.0,
-        padding=8.0,
+        padding=12.0,  # Graphviz default cluster margin
         label_position="top-left",
         font_size=12.0,
         font_weight="regular",
