@@ -60,7 +60,11 @@ def _rescale_layout(positions: np.ndarray, scale: float = 1.0) -> np.ndarray:
     return positions
 
 
-def _build_adjacency(edge_index: torch.Tensor, num_nodes: int) -> sparse.csr_matrix:
+def _build_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> sparse.csr_matrix:
     """Build the directed sparse adjacency matrix from ``edge_index``.
 
     Parameters
@@ -69,6 +73,8 @@ def _build_adjacency(edge_index: torch.Tensor, num_nodes: int) -> sparse.csr_mat
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
@@ -97,7 +103,10 @@ def _build_adjacency(edge_index: torch.Tensor, num_nodes: int) -> sparse.csr_mat
     ):
         raise ValueError("edge_index contains a node index outside [0, num_nodes).")
 
-    data = np.ones(rows.shape[0], dtype=np.float64)
+    if edge_weights is not None:
+        data = edge_weights.detach().to(device="cpu").numpy().astype(np.float64)
+    else:
+        data = np.ones(rows.shape[0], dtype=np.float64)
     return sparse.csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes), dtype=np.float64)
 
 
@@ -160,6 +169,7 @@ def layout_spectral(
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
     seed: int = 42,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with the NetworkX spectral layout translation.
 
@@ -174,6 +184,9 @@ def layout_spectral(
     seed : int, default=42
         Accepted for interface compatibility. NetworkX's spectral layout does
         not use a seed on the translated path.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]`` that scales adjacency
+        values before the Laplacian eigendecomposition.
 
     Returns
     -------
@@ -189,6 +202,13 @@ def layout_spectral(
 
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
+    if edge_weights is not None:
+        if edge_weights.ndim != 1:
+            raise ValueError("edge_weights must have shape [E].")
+        if edge_weights.shape[0] != edge_index.shape[1]:
+            raise ValueError(
+                f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
+            )
 
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     if num_nodes == 0:
@@ -198,7 +218,11 @@ def layout_spectral(
     if num_nodes == 2:
         return torch.zeros((2, 2), dtype=torch.float32, device=device)
 
-    adjacency = _build_adjacency(edge_index=edge_index, num_nodes=num_nodes)
+    adjacency = _build_adjacency(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
     # Check if adjacency is already symmetric (edge_index has both directions).
     # NX only does A+A.T for directed graphs. If our edge_index already has
     # both (i,j) and (j,i), the adjacency is already symmetric — don't double.

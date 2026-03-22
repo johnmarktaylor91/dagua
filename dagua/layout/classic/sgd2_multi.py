@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import math
-from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+
+from dagua.layout.classic._graph_distances import (
+    all_pairs_shortest_paths as _shared_all_pairs_shortest_paths,
+)
+from dagua.layout.classic._graph_distances import (
+    build_undirected_adjacency as _shared_build_undirected_adjacency,
+)
 
 _EPS = 1.0e-6
 _CROSSING_SHARPNESS = 10.0
@@ -90,7 +97,7 @@ class _PreparedState:
 
     device: torch.device
     edges: torch.Tensor
-    adjacency: list[list[int]]
+    adjacency: list[list[tuple[int, float]]]
     all_pairs_distances: Optional[torch.Tensor]
     stress_pairs: Optional[torch.Tensor]
     stress_distances: Optional[torch.Tensor]
@@ -230,70 +237,49 @@ def _clean_undirected_edges(edge_index: torch.Tensor, device: torch.device) -> t
     return unique_pairs.transpose(0, 1).contiguous()
 
 
-def _build_adjacency(edges: torch.Tensor, num_nodes: int) -> list[list[int]]:
+def _build_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> list[list[tuple[int, float]]]:
     """Build a deterministic undirected adjacency list.
 
     Parameters
     ----------
-    edges : torch.Tensor
-        Unique undirected edges with shape ``[2, E]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
 
     Returns
     -------
-    list[list[int]]
+    list[list[tuple[int, float]]]
         Sorted neighbor lists for each node.
     """
-    adjacency_sets = [set() for _ in range(num_nodes)]
-    if edges.numel() == 0:
-        return [[] for _ in range(num_nodes)]
-
-    edges_cpu = edges.to(device="cpu")
-    for src, dst in zip(edges_cpu[0].tolist(), edges_cpu[1].tolist()):
-        adjacency_sets[src].add(dst)
-        adjacency_sets[dst].add(src)
-    return [sorted(neighbors) for neighbors in adjacency_sets]
+    return _shared_build_undirected_adjacency(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
 
 
-def _bfs_distances(adjacency: list[list[int]], source: int) -> list[int]:
-    """Compute unweighted shortest-path distances from one source node.
-
-    Parameters
-    ----------
-    adjacency : list[list[int]]
-        Undirected adjacency list.
-    source : int
-        Source node index.
-
-    Returns
-    -------
-    list[int]
-        Hop distances with ``-1`` for unreachable nodes.
-    """
-    distances = [-1] * len(adjacency)
-    distances[source] = 0
-    frontier: deque[int] = deque([source])
-    while frontier:
-        node = frontier.popleft()
-        next_distance = distances[node] + 1
-        for neighbor in adjacency[node]:
-            if distances[neighbor] != -1:
-                continue
-            distances[neighbor] = next_distance
-            frontier.append(neighbor)
-    return distances
-
-
-def _all_pairs_shortest_paths(adjacency: list[list[int]], device: torch.device) -> torch.Tensor:
-    """Compute the full all-pairs hop-distance matrix.
+def _all_pairs_shortest_paths(
+    adjacency: list[list[tuple[int, float]]],
+    device: torch.device,
+    weighted: bool,
+) -> torch.Tensor:
+    """Compute the full all-pairs distance matrix.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
     device : torch.device
         Device used for the returned tensor.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
 
     Returns
     -------
@@ -301,14 +287,12 @@ def _all_pairs_shortest_paths(adjacency: list[list[int]], device: torch.device) 
         Distance matrix with shape ``[N, N]`` and ``inf`` for unreachable
         pairs.
     """
-    num_nodes = len(adjacency)
-    distances = torch.full((num_nodes, num_nodes), float("inf"), dtype=torch.float32, device=device)
-    for source in range(num_nodes):
-        source_distances = _bfs_distances(adjacency, source)
-        for target, value in enumerate(source_distances):
-            if value >= 0:
-                distances[source, target] = float(value)
-    return distances
+    distances = _shared_all_pairs_shortest_paths(adjacency, weighted=weighted)
+    cleaned = distances.astype(np.float64, copy=False)
+    if not weighted:
+        cleaned = cleaned.copy()
+        cleaned[cleaned < 0] = np.inf
+    return torch.tensor(cleaned, dtype=torch.float32, device=device)
 
 
 def _build_stress_terms(distances: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -380,6 +364,7 @@ def _prepare_state(
     num_nodes: int,
     device: torch.device,
     needs_distances: bool,
+    edge_weights: Optional[torch.Tensor],
 ) -> _PreparedState:
     """Precompute the graph structures needed by active criteria.
 
@@ -393,6 +378,8 @@ def _prepare_state(
         Optimization device.
     needs_distances : bool
         Whether shortest-path-derived criteria are active.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
 
     Returns
     -------
@@ -400,7 +387,11 @@ def _prepare_state(
         Precomputed state shared by the loss terms.
     """
     edges = _clean_undirected_edges(edge_index=edge_index, device=device)
-    adjacency = _build_adjacency(edges=edges, num_nodes=num_nodes)
+    adjacency = _build_adjacency(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
     if not needs_distances:
         return _PreparedState(
             device=device,
@@ -413,7 +404,11 @@ def _prepare_state(
             graph_knn_mask=None,
         )
 
-    distances = _all_pairs_shortest_paths(adjacency=adjacency, device=device)
+    distances = _all_pairs_shortest_paths(
+        adjacency=adjacency,
+        device=device,
+        weighted=edge_weights is not None,
+    )
     stress_pairs, stress_distances, stress_weights = _build_stress_terms(distances)
     graph_knn_mask = _graph_knn_mask(distances=distances, k=_DEFAULT_GRAPH_K)
     return _PreparedState(
@@ -894,7 +889,7 @@ def _aspect_ratio_loss(pos: torch.Tensor, target: float) -> torch.Tensor:
 def _angular_resolution_loss(
     pos: torch.Tensor,
     anchor_nodes: torch.Tensor,
-    adjacency: list[list[int]],
+    adjacency: list[list[tuple[int, float]]],
 ) -> torch.Tensor:
     """Evaluate the angular-resolution criterion on sampled nodes.
 
@@ -904,7 +899,7 @@ def _angular_resolution_loss(
         Position tensor with shape ``[N, 2]``.
     anchor_nodes : torch.Tensor
         Anchor-node indices with shape ``[B]``.
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
 
     Returns
@@ -918,7 +913,11 @@ def _angular_resolution_loss(
         degree = len(neighbors)
         if degree < 2:
             continue
-        neighbor_index = torch.tensor(neighbors, dtype=torch.long, device=pos.device)
+        neighbor_index = torch.tensor(
+            [neighbor for neighbor, _ in neighbors],
+            dtype=torch.long,
+            device=pos.device,
+        )
         vectors = pos[neighbor_index] - pos[node]
         vector_count = vectors.shape[0]
         if vector_count < 2:
@@ -1067,6 +1066,7 @@ def layout_sgd2_multi(
     momentum: float = 0.7,
     grad_clamp: float = 20.0,
     batch_size: int = 16,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with the (SGD)^2 multicriteria optimizer.
 
@@ -1094,6 +1094,9 @@ def layout_sgd2_multi(
         Symmetric gradient clamp.
     batch_size : int, default=16
         Global mini-batch size shared by the criteria.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``. When provided, shortest
+        paths are computed with Dijkstra instead of BFS.
 
     Returns
     -------
@@ -1127,6 +1130,7 @@ def layout_sgd2_multi(
         num_nodes=num_nodes,
         device=device,
         needs_distances=needs_distances,
+        edge_weights=edge_weights,
     )
 
     positions = torch.nn.Parameter(

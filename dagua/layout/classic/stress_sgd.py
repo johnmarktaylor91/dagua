@@ -10,11 +10,23 @@ memory and runtime.
 from __future__ import annotations
 
 import math
-from collections import deque
 from typing import Optional, Union
 
 import numpy as np
 import torch
+
+from dagua.layout.classic._graph_distances import (
+    bfs_distances as _shared_bfs_distances,
+)
+from dagua.layout.classic._graph_distances import (
+    build_undirected_adjacency as _shared_build_undirected_adjacency,
+)
+from dagua.layout.classic._graph_distances import (
+    dijkstra_distances as _shared_dijkstra_distances,
+)
+from dagua.layout.classic._graph_distances import (
+    is_connected as _shared_is_connected,
+)
 
 _AUTO_FULL_EPOCH_THRESHOLD = 1_000
 _AUTO_SAMPLE_THRESHOLD = 1_000
@@ -24,7 +36,11 @@ _MAX_PIVOTS = 200
 _UNREACHED = -1
 
 
-def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> list[list[int]]:
+def _build_undirected_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> list[list[tuple[int, float]]]:
     """Build a deterministic undirected adjacency list.
 
     Parameters
@@ -33,65 +49,55 @@ def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> lis
         Edge list with shape ``[2, E]``.
     num_nodes : int
         Number of nodes in the graph.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
 
     Returns
     -------
-    list[list[int]]
+    list[list[tuple[int, float]]]
         Undirected adjacency list with sorted neighbors.
     """
-    adjacency_sets = [set() for _ in range(num_nodes)]
-    if edge_index.numel() == 0:
-        return [[] for _ in range(num_nodes)]
-
-    edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
-    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
-        if source == target:
-            continue
-        adjacency_sets[source].add(target)
-        adjacency_sets[target].add(source)
-
-    return [sorted(neighbors) for neighbors in adjacency_sets]
+    return _shared_build_undirected_adjacency(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
 
 
-def _bfs_distances(adjacency: list[list[int]], source: int) -> np.ndarray:
-    """Compute shortest-path distances from one source node.
+def _graph_distances(
+    adjacency: list[list[tuple[int, float]]],
+    source: int,
+    weighted: bool,
+) -> np.ndarray:
+    """Compute graph distances from one source node.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
     source : int
-        BFS source node index.
+        Shortest-path source node index.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
 
     Returns
     -------
     np.ndarray
-        Integer hop distances with shape ``[N]`` and ``-1`` for unreachable
-        nodes.
+        Distances with shape ``[N]`` and ``-1`` for unreachable nodes.
     """
-    num_nodes = len(adjacency)
-    distances = np.full(num_nodes, _UNREACHED, dtype=np.int32)
-    distances[source] = 0
-    frontier: deque[int] = deque([source])
+    if not weighted:
+        return _shared_bfs_distances(adjacency, source)
 
-    while frontier:
-        node = frontier.popleft()
-        next_distance = int(distances[node]) + 1
-        for neighbor in adjacency[node]:
-            if int(distances[neighbor]) != _UNREACHED:
-                continue
-            distances[neighbor] = next_distance
-            frontier.append(neighbor)
-
-    return distances
+    distances = _shared_dijkstra_distances(adjacency, source)
+    return np.where(np.isinf(distances), float(_UNREACHED), distances)
 
 
-def _is_connected(adjacency: list[list[int]]) -> bool:
+def _is_connected(adjacency: list[list[tuple[int, float]]]) -> bool:
     """Report whether the undirected graph is connected.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
 
     Returns
@@ -99,9 +105,7 @@ def _is_connected(adjacency: list[list[int]]) -> bool:
     bool
         ``True`` when every node is reachable from node zero.
     """
-    if len(adjacency) <= 1:
-        return True
-    return bool(np.all(_bfs_distances(adjacency, 0) >= 0))
+    return _shared_is_connected(adjacency)
 
 
 def _schedule_bounds(distance_data: np.ndarray) -> tuple[float, float]:
@@ -260,15 +264,21 @@ def _choose_pivots(num_nodes: int, max_pivots: int, rng: np.random.RandomState) 
     return rng.choice(num_nodes, size=max_pivots, replace=False).astype(np.int32, copy=False)
 
 
-def _compute_pivot_distances(adjacency: list[list[int]], pivots: np.ndarray) -> np.ndarray:
-    """Run BFS from each pivot node.
+def _compute_pivot_distances(
+    adjacency: list[list[tuple[int, float]]],
+    pivots: np.ndarray,
+    weighted: bool,
+) -> np.ndarray:
+    """Run shortest-path queries from each pivot node.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
     pivots : np.ndarray
         Pivot indices with shape ``[P]``.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
 
     Returns
     -------
@@ -281,7 +291,11 @@ def _compute_pivot_distances(adjacency: list[list[int]], pivots: np.ndarray) -> 
 
     distances = np.empty((int(pivots.size), num_nodes), dtype=np.float32)
     for pivot_index, pivot in enumerate(pivots.tolist()):
-        distances[pivot_index] = _bfs_distances(adjacency, int(pivot)).astype(np.float32)
+        distances[pivot_index] = _graph_distances(
+            adjacency,
+            int(pivot),
+            weighted=weighted,
+        ).astype(np.float32)
     return distances
 
 
@@ -333,14 +347,17 @@ def _pair_count(num_nodes: int) -> int:
 
 
 def _build_exact_terms(
-    adjacency: list[list[int]],
+    adjacency: list[list[tuple[int, float]]],
+    weighted: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build the exact upper-triangle ``s_gd2`` term arrays.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
+    weighted : bool, default=False
+        Whether to use Dijkstra instead of BFS.
 
     Returns
     -------
@@ -356,16 +373,16 @@ def _build_exact_terms(
 
     write_index = 0
     for source_index in range(num_nodes - 1):
-        bfs_distances = _bfs_distances(adjacency, source_index)
+        source_distances = _graph_distances(adjacency, source_index, weighted=weighted)
         for target_index in range(source_index + 1, num_nodes):
-            graph_distance = int(bfs_distances[target_index])
+            graph_distance = float(source_distances[target_index])
             if graph_distance <= 0:
                 raise ValueError("Stress-SGD requires a connected graph.")
 
-            weight = 1.0 / float(graph_distance * graph_distance)
+            weight = 1.0 / (graph_distance * graph_distance)
             sources[write_index] = source_index
             targets[write_index] = target_index
-            distances[write_index] = float(graph_distance)
+            distances[write_index] = graph_distance
             weights[write_index] = weight
             write_index += 1
 
@@ -648,6 +665,7 @@ def layout_stress_sgd(
     trace_every: int = 0,
     eps: float = _DEFAULT_EPS,
     max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, list[torch.Tensor]]]:
     """Run stochastic stress minimization layout.
 
@@ -677,6 +695,9 @@ def layout_stress_sgd(
         Maximum node count for the exact all-pairs BFS translation. Larger
         graphs fall back to the pivot-based approximation to avoid quadratic
         memory and runtime.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``. When provided, shortest
+        paths are computed with Dijkstra instead of BFS.
 
     Returns
     -------
@@ -708,7 +729,7 @@ def layout_stress_sgd(
     if num_nodes <= 1:
         return (positions, traces) if trace_every > 0 else positions
 
-    adjacency = _build_undirected_adjacency(edge_index, num_nodes)
+    adjacency = _build_undirected_adjacency(edge_index, num_nodes, edge_weights=edge_weights)
     if not _is_connected(adjacency):
         raise ValueError("Stress-SGD requires a connected graph.")
 
@@ -720,7 +741,10 @@ def layout_stress_sgd(
     rng = np.random  # use global RNG, not a separate RandomState
 
     if num_nodes <= max_exact_nodes:
-        sources, targets, distances, weights = _build_exact_terms(adjacency)
+        sources, targets, distances, weights = _build_exact_terms(
+            adjacency,
+            weighted=edge_weights is not None,
+        )
         positions_np, traces = _run_exact_schedule(
             num_nodes=num_nodes,
             sources=sources,
@@ -736,7 +760,11 @@ def layout_stress_sgd(
     else:
         effective_sample_size = _resolve_sample_size(num_nodes, sample_size)
         pivots = _choose_pivots(num_nodes, min(num_nodes, _MAX_PIVOTS), rng)
-        pivot_dist = _compute_pivot_distances(adjacency, pivots)
+        pivot_dist = _compute_pivot_distances(
+            adjacency,
+            pivots,
+            weighted=edge_weights is not None,
+        )
         positions_np, traces = _run_approximate_schedule(
             num_nodes=num_nodes,
             pivot_dist=pivot_dist,

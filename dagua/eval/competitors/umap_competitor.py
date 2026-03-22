@@ -76,7 +76,11 @@ def _distance_matrix(graph: DaguaGraph) -> "np.ndarray":
     edge_index = graph.edge_index.cpu().numpy()
     rows = np.concatenate([edge_index[0], edge_index[1]]) if edge_index.size else np.empty(0, int)
     cols = np.concatenate([edge_index[1], edge_index[0]]) if edge_index.size else np.empty(0, int)
-    data = np.ones(rows.shape[0], dtype=np.float32)
+    if graph.edge_weights is not None:
+        edge_weights = graph.edge_weights.cpu().numpy().astype(np.float32)
+        data = np.concatenate([edge_weights, edge_weights])
+    else:
+        data = np.ones(rows.shape[0], dtype=np.float32)
     adjacency = csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes))
     distances = shortest_path(adjacency, directed=False)
 
