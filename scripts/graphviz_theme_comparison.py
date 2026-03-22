@@ -1276,6 +1276,18 @@ def render_dagua_theme(graph: DaguaGraph, theme_name: str, output_path: Path) ->
     # and set direction to BT so edge routing uses correct control points.
     positions[:, 1] = -positions[:, 1]
     themed_graph.direction = "BT"
+    # In BT mode with y-up coordinates, dagua puts the arrowhead at the
+    # "head" end (high y = source). We need it at the "tail" end (low y =
+    # target) to match Graphviz's visual direction. Swap arrow/tail_arrow
+    # on all edges so arrowheads point toward the target node.
+    for e_idx in range(int(themed_graph.edge_index.shape[1])):
+        style = themed_graph.get_style_for_edge(e_idx)
+        if style.arrow != "none" and style.tail_arrow == "none":
+            # Simple case: move the head arrow to the tail position
+            from dataclasses import replace as dc_replace
+
+            swapped = dc_replace(style, arrow="none", tail_arrow=style.arrow)
+            themed_graph.edge_styles[e_idx] = swapped
 
     # Compute figsize so Graphviz's point-space positions render at the same
     # physical scale as native Graphviz (72 points = 1 inch).
