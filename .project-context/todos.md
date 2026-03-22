@@ -11,6 +11,8 @@
 - [ ] [LOW] Arrowhead sizing still slightly smaller than Graphviz's chunky triangles. Current graphviz_strict uses arrow_length=7, arrow_width=4.5 -- may need to increase to ~10x7 once the placement bug is fixed.
 
 ## Improvements (Nice-to-Have)
+- [ ] [MED] Interactive graph rendering: pan/zoom, hover tooltips, click handlers. WebGL or HTML5 Canvas backend alongside matplotlib.
+- [ ] [MED] 3D graph rendering: z-coordinate support, 3D force-directed layout, perspective/orthographic projection. Consider Three.js export or matplotlib 3D axes.
 - [ ] [MED] Add Cytoscape.js fcose as competitor layout algorithm (npm install cytoscape cytoscape-fcose, Node.js subprocess adapter, same pattern as ELK/dagre)
 - [ ] [MED] Add Gephi/YifanHu as competitor layout algorithm (Java Gephi Toolkit JAR, subprocess adapter)
 - [ ] [LOW] Edge jump styles at crossings (arc/gap/sharp). Draw.io. Requires crossing detection.
