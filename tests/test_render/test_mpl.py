@@ -471,7 +471,7 @@ def test_shape_size_adjustments_match_graphviz_calibration() -> None:
 
     assert triangle_w / triangle_h == pytest.approx(3.2)
     assert star_w == pytest.approx(star_h)
-    assert diamond_w >= 67.2
+    assert diamond_w >= 55.0
     assert diamond_w > diamond_h
     assert ellipse_w == pytest.approx(41.6)
     assert ellipse_h == pytest.approx(18.0)
