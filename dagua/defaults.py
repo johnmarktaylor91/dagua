@@ -31,7 +31,7 @@ from typing import Any, Dict, Iterator, Optional
 import torch
 
 from dagua.styles import (
-    DEFAULT_THEME_OBJ,
+    GRAPHVIZ_THEME,
     ClusterStyle,
     EdgeStyle,
     GraphStyle,
@@ -147,7 +147,7 @@ class _Defaults:
 
     def __init__(self):
         self.theme_name: str = "default"
-        self.theme: Theme = copy.deepcopy(DEFAULT_THEME_OBJ)
+        self.theme: Theme = copy.deepcopy(GRAPHVIZ_THEME)
         self.device: str = "cpu"
         self.index_dtype: torch.dtype = torch.int64
         self.size_dtype: torch.dtype = torch.float32
