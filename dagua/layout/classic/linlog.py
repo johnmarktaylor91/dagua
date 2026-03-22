@@ -268,6 +268,7 @@ def _linlog_loss(
     step: int,
     a: float = 1.0,
     r: float = 0.0,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Evaluate the sampled LinLog objective.
 
@@ -286,6 +287,9 @@ def _linlog_loss(
     r : float, default=0.0
         Repulsion exponent in ``-|p_i - p_j|^r``. ``0`` recovers the standard
         logarithmic LinLog repulsion.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]`` that scales the
+        attraction term for each edge occurrence.
 
     Returns
     -------
@@ -304,7 +308,11 @@ def _linlog_loss(
         edge_lengths = torch.linalg.norm(positions[src] - positions[dst], dim=1).clamp(
             min=_MIN_DISTANCE
         )
-        attraction = edge_lengths.pow(a).sum()
+        if edge_weights is not None:
+            weights = edge_weights.to(device=positions.device, dtype=edge_lengths.dtype)
+            attraction = (weights * edge_lengths.pow(a)).sum()
+        else:
+            attraction = edge_lengths.pow(a).sum()
 
     num_nodes = int(positions.shape[0])
     if num_nodes <= _FULL_REPULSION_LIMIT:
@@ -354,6 +362,7 @@ def layout_linlog(
     seed: int = 42,
     a: float = 1.0,
     r: float = 0.0,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with a LinLog energy model.
 
@@ -378,6 +387,8 @@ def layout_linlog(
     r : float, default=0.0
         Repulsion exponent in ``-|p_i - p_j|^r``. ``0`` recovers the standard
         logarithmic LinLog energy.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]`` that scales attraction.
 
     Returns
     -------
@@ -392,6 +403,13 @@ def layout_linlog(
         raise ValueError("a must be non-negative.")
     if r < 0:
         raise ValueError("r must be non-negative.")
+    if edge_weights is not None:
+        if edge_weights.ndim != 1:
+            raise ValueError("edge_weights must have shape [E].")
+        if edge_weights.shape[0] != edge_index.shape[1]:
+            raise ValueError(
+                f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
+            )
 
     device = _layout_device(edge_index, node_sizes)
     if num_nodes == 0:
@@ -406,7 +424,15 @@ def layout_linlog(
 
     for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        loss = _linlog_loss(positions, edge_index, seed, step, a=a, r=r)
+        loss = _linlog_loss(
+            positions,
+            edge_index,
+            seed,
+            step,
+            a=a,
+            r=r,
+            edge_weights=edge_weights,
+        )
         loss.backward()
         optimizer.step()
 

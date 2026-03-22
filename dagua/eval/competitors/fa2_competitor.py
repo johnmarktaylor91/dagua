@@ -62,8 +62,12 @@ class FA2Reference(CompetitorBase):
     max_nodes = 20_000
     variant_param_names = frozenset(
         {
+            "barnesHutOptimize",
+            "barnesHutTheta",
+            "dissuadeHubs",
             "gravity",
             "iterations",
+            "linLogMode",
             "outboundAttractionDistribution",
             "scalingRatio",
             "strongGravityMode",
@@ -141,13 +145,21 @@ class FA2Reference(CompetitorBase):
 
             forceatlas2_cls = _load_forceatlas2()
             edge_index = graph.edge_index.cpu().numpy()
+            weights = graph.edge_weights
             nx_graph = nx.Graph()
             nx_graph.add_nodes_from(range(graph.num_nodes))
             for edge_idx in range(edge_index.shape[1]):
                 source = int(edge_index[0, edge_idx])
                 target = int(edge_index[1, edge_idx])
                 if source != target:
-                    nx_graph.add_edge(source, target)
+                    if weights is not None:
+                        nx_graph.add_edge(
+                            source,
+                            target,
+                            weight=float(weights[edge_idx].item()),
+                        )
+                    else:
+                        nx_graph.add_edge(source, target)
 
             engine_kwargs: dict[str, Any] = {
                 "outboundAttractionDistribution": True,

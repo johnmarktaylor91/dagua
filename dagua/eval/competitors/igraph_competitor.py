@@ -71,6 +71,8 @@ def _graph_to_igraph(graph: DaguaGraph) -> Any:
         ei = graph.edge_index
         edges = [(ei[0, e].item(), ei[1, e].item()) for e in range(ei.shape[1])]
         g.add_edges(edges)
+        if graph.edge_weights is not None:
+            g.es["weight"] = graph.edge_weights.cpu().tolist()
     return g
 
 

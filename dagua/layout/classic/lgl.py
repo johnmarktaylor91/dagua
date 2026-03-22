@@ -48,6 +48,7 @@ def _validate_inputs(
     num_nodes: int,
     maxiter: int,
     coolexp: float,
+    edge_weights: Optional[torch.Tensor],
 ) -> None:
     """Validate the public LGL arguments.
 
@@ -61,6 +62,8 @@ def _validate_inputs(
         Maximum refinement iterations per layer.
     coolexp : float
         Cooling exponent.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
@@ -75,6 +78,13 @@ def _validate_inputs(
         raise ValueError("coolexp must be positive.")
     if edge_index.ndim != 2 or edge_index.shape[0] != 2:
         raise ValueError("edge_index must have shape [2, E].")
+    if edge_weights is not None:
+        if edge_weights.ndim != 1:
+            raise ValueError("edge_weights must have shape [E].")
+        if edge_weights.shape[0] != edge_index.shape[1]:
+            raise ValueError(
+                f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
+            )
 
     if edge_index.numel() == 0:
         return
@@ -91,7 +101,8 @@ def _validate_inputs(
 def _build_undirected_graph(
     edge_index: torch.Tensor,
     num_nodes: int,
-) -> tuple[list[list[int]], list[tuple[int, int]]]:
+    edge_weights: Optional[torch.Tensor] = None,
+) -> tuple[list[list[int]], list[tuple[int, int]], Optional[list[float]]]:
     """Build the undirected adjacency list and spring list.
 
     Parameters
@@ -100,22 +111,31 @@ def _build_undirected_graph(
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
-    tuple[list[list[int]], list[tuple[int, int]]]
+    tuple[list[list[int]], list[tuple[int, int]], Optional[list[float]]]
         Symmetric adjacency list for BFS growth and a spring list that keeps
-        every non-self edge occurrence.
+        every non-self edge occurrence, plus matching spring weights when
+        provided.
     """
     adjacency_sets = [set() for _ in range(num_nodes)]
     edges: list[tuple[int, int]] = []
+    weights: list[float] = []
     if edge_index.numel() == 0:
-        return [[] for _ in range(num_nodes)], []
+        return [[] for _ in range(num_nodes)], [], None
 
     edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
     sources = edge_index_cpu[0].tolist()
     targets = edge_index_cpu[1].tolist()
-    for source, target in zip(sources, targets):
+    weight_list = (
+        edge_weights.detach().to(device="cpu", dtype=torch.float64).tolist()
+        if edge_weights is not None
+        else None
+    )
+    for edge_idx, (source, target) in enumerate(zip(sources, targets)):
         if source == target:
             continue
         lower = min(source, target)
@@ -126,9 +146,11 @@ def _build_undirected_graph(
         # multiplicity in the spring list even though BFS only needs unique
         # undirected neighbors.
         edges.append((lower, upper))
+        if weight_list is not None:
+            weights.append(float(weight_list[edge_idx]))
 
     adjacency = [sorted(neighbors) for neighbors in adjacency_sets]
-    return adjacency, edges
+    return adjacency, edges, weights if weight_list is not None else None
 
 
 def _initialize_positions(num_nodes: int, radius: float, seed: int) -> torch.Tensor:
@@ -270,6 +292,7 @@ def _run_refinement(
     positions: torch.Tensor,
     active_nodes: list[int],
     active_edges: list[tuple[int, int]],
+    active_edge_weights: Optional[list[float]],
     maxiter: int,
     maxdelta: float,
     coolexp: float,
@@ -287,6 +310,8 @@ def _run_refinement(
         Nodes placed so far.
     active_edges : list[tuple[int, int]]
         Edges whose endpoints are both active.
+    active_edge_weights : list[float], optional
+        Edge weights for ``active_edges`` in the same order.
     maxiter : int
         Maximum iterations for this phase.
     maxdelta : float
@@ -309,6 +334,11 @@ def _run_refinement(
         return
 
     node_count = positions.shape[0]
+    weight_tensor = (
+        torch.tensor(active_edge_weights, dtype=torch.float64)
+        if active_edge_weights is not None
+        else None
+    )
     for iteration in range(maxiter):
         temperature = maxdelta * (((maxiter - iteration) / float(maxiter)) ** coolexp)
         forces = torch.zeros((node_count, 2), dtype=torch.float64)
@@ -324,6 +354,8 @@ def _run_refinement(
                 masked_distance = distance[mask]
                 direction = delta[mask] / masked_distance.unsqueeze(1)
                 magnitude = masked_distance.square() / max(frk, _MIN_DISTANCE)
+                if weight_tensor is not None:
+                    magnitude = magnitude * weight_tensor[mask]
                 contribution = direction * magnitude.unsqueeze(1)
                 forces.index_add_(0, source[mask], -contribution)
                 forces.index_add_(0, target[mask], contribution)
@@ -405,6 +437,7 @@ def layout_lgl(
     repulserad: Optional[float] = None,
     cellsize: Optional[float] = None,
     root: Optional[int] = None,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with the igraph Large Graph Layout algorithm.
 
@@ -432,13 +465,22 @@ def layout_lgl(
         Sparse-grid cell size. Defaults to ``area ** 0.25``.
     root : int, optional
         BFS root. When omitted, a seed-controlled random vertex is chosen.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]`` that scales the spring
+        force for each non-self edge occurrence.
 
     Returns
     -------
     torch.Tensor
         Final positions with shape ``[N, 2]`` and dtype ``float32``.
     """
-    _validate_inputs(edge_index=edge_index, num_nodes=num_nodes, maxiter=maxiter, coolexp=coolexp)
+    _validate_inputs(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        maxiter=maxiter,
+        coolexp=coolexp,
+        edge_weights=edge_weights,
+    )
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     del node_sizes
     if num_nodes == 0:
@@ -455,7 +497,11 @@ def layout_lgl(
     if resolved_cellsize <= 0.0:
         raise ValueError("cellsize must be positive.")
 
-    adjacency, spring_edges = _build_undirected_graph(edge_index=edge_index, num_nodes=num_nodes)
+    adjacency, spring_edges, spring_edge_weights = _build_undirected_graph(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
     rng = random.Random(seed)
     root_node = rng.randrange(num_nodes) if root is None else root
     if root_node < 0 or root_node >= num_nodes:
@@ -473,6 +519,7 @@ def layout_lgl(
     placed = torch.zeros(num_nodes, dtype=torch.bool)
     placed[root_node] = True
     active_edges: list[tuple[int, int]] = []
+    active_edge_weights: Optional[list[float]] = [] if spring_edge_weights is not None else None
     edge_active = [False] * len(spring_edges)
     incident_edge_indices: list[list[int]] = [[] for _ in range(num_nodes)]
     for edge_idx, (source, target) in enumerate(spring_edges):
@@ -542,12 +589,15 @@ def layout_lgl(
                         continue
                     edge_active[edge_idx] = True
                     active_edges.append(edge)
+                    if active_edge_weights is not None:
+                        active_edge_weights.append(float(spring_edge_weights[edge_idx]))
 
         refinement_nodes = torch.nonzero(placed, as_tuple=False).view(-1).tolist()
         _run_refinement(
             positions=positions,
             active_nodes=refinement_nodes,
             active_edges=active_edges,
+            active_edge_weights=active_edge_weights,
             maxiter=maxiter,
             maxdelta=resolved_maxdelta,
             coolexp=coolexp,

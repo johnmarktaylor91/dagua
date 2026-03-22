@@ -156,11 +156,19 @@ def test_layout_fa2_gravity_keeps_nodes_bounded() -> None:
 
 
 def test_layout_fa2_linlog_mode_changes_layout() -> None:
-    """Reject LinLog mode because the reference backend does not implement it."""
+    """Produce a different layout when LinLog attraction is enabled."""
     edge_index, num_nodes = _cluster_bridge_graph()
 
-    with pytest.raises(ValueError, match="linlog=True"):
-        layout_fa2(edge_index=edge_index, num_nodes=num_nodes, steps=90, seed=5, linlog=True)
+    default_pos = layout_fa2(edge_index=edge_index, num_nodes=num_nodes, steps=90, seed=5)
+    linlog_pos = layout_fa2(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        steps=90,
+        seed=5,
+        linlog=True,
+    )
+
+    assert not torch.allclose(default_pos, linlog_pos)
 
 
 def test_layout_fa2_strong_gravity_changes_layout() -> None:
