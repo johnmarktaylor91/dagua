@@ -1271,10 +1271,12 @@ def render_dagua_theme(graph: DaguaGraph, theme_name: str, output_path: Path) ->
     themed_graph = _copy_graph_with_theme(graph, theme_name)
     themed_graph.compute_node_sizes()
     positions = layout_with_graphviz(themed_graph, engine="dot")
-    # layout_with_graphviz negates y for dagua's TB layout engine, but for
-    # rendering at fixed positions we need Graphviz's original y-up orientation
-    # so the graph reads top-to-bottom like the Graphviz native reference.
+    # layout_with_graphviz negates y for dagua's TB layout engine.
+    # Undo the negation to get Graphviz's native y-up coordinates,
+    # and set direction="BT" so the edge router uses the correct
+    # control point orientation for y-up rendering.
     positions[:, 1] = -positions[:, 1]
+    themed_graph.direction = "BT"
 
     # Compute figsize so Graphviz's point-space positions render at the same
     # physical scale as native Graphviz (72 points = 1 inch).
