@@ -38,6 +38,26 @@ class TestGraphConstruction:
         assert "x" in g._id_to_index
         assert "y" in g._id_to_index
 
+    def test_edge_weights_via_add_edge(self):
+        """Edge weights accumulate correctly via add_edge."""
+        g = DaguaGraph()
+        g.add_edge("a", "b", weight=2.0)
+        g.add_edge("b", "c", weight=3.0)
+        g.add_edge("c", "d")
+        assert g.edge_weights is None
+        assert g.edge_index.shape == (2, 3)
+        assert g.edge_weights is not None
+        assert g.edge_weights.shape == (3,)
+        assert g.edge_weights.tolist() == [2.0, 3.0, 1.0]
+
+    def test_edge_weights_none_when_no_weights(self):
+        """edge_weights stays None when no weights are provided."""
+        g = DaguaGraph()
+        g.add_edge("a", "b")
+        g.add_edge("b", "c")
+        _ = g.edge_index
+        assert g.edge_weights is None
+
     def test_graph_uses_configured_storage_dtypes(self):
         import dagua
 
@@ -91,6 +111,18 @@ class TestFromEdgeList:
         assert g.num_nodes == 3
         assert g.edge_index.shape == (2, 2)
 
+    def test_edge_weights_from_edge_list_3tuples(self):
+        """from_edge_list with (src, tgt, weight) triples."""
+        g = DaguaGraph.from_edge_list([(0, 1, 2.5), (1, 2, 0.5)], num_nodes=3)
+        assert g.edge_weights is not None
+        assert g.edge_weights.tolist() == [2.5, 0.5]
+
+    def test_edge_weights_from_edge_list_mixed(self):
+        """from_edge_list with mixed 2-tuples and 3-tuples."""
+        g = DaguaGraph.from_edge_list([(0, 1), (1, 2, 3.0)], num_nodes=3)
+        assert g.edge_weights is not None
+        assert g.edge_weights.tolist() == [1.0, 3.0]
+
     def test_preserves_order(self):
         edges = [("x", "y"), ("y", "z"), ("x", "z")]
         g = DaguaGraph.from_edge_list(edges)
@@ -108,6 +140,21 @@ class TestFromEdgeIndex:
         assert g.num_nodes == 3
         assert g.edge_index.shape == (2, 2)
 
+    def test_edge_weights_from_edge_index(self):
+        """from_edge_index with explicit edge_weights tensor."""
+        ei = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+        ew = torch.tensor([2.0, 3.0])
+        g = DaguaGraph.from_edge_index(ei, num_nodes=3, edge_weights=ew)
+        assert g.edge_weights is not None
+        assert g.edge_weights.tolist() == [2.0, 3.0]
+
+    def test_edge_weights_from_edge_index_validation(self):
+        """from_edge_index rejects mismatched edge_weights."""
+        ei = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+        ew = torch.tensor([2.0, 3.0, 4.0])
+        with pytest.raises(ValueError, match="edge_weights length"):
+            DaguaGraph.from_edge_index(ei, num_nodes=3, edge_weights=ew)
+
     def test_respects_index_dtype_override(self):
         ei = torch.tensor([[0, 1], [1, 2]], dtype=torch.int64)
         g = DaguaGraph.from_edge_index(ei, num_nodes=3, index_dtype=torch.int32)
@@ -118,6 +165,35 @@ class TestFromEdgeIndex:
         g = DaguaGraph.from_edge_index(ei, num_nodes=3)
         g.node_labels = ["A", "B", "C"]
         assert g.node_labels == ["A", "B", "C"]
+
+
+def test_edge_weights_from_networkx():
+    """from_networkx extracts weight edge attribute."""
+    import networkx as nx
+
+    graph = nx.Graph()
+    graph.add_edge(0, 1, weight=2.0)
+    graph.add_edge(1, 2, weight=5.0)
+    graph.add_edge(2, 3)
+    g = DaguaGraph.from_networkx(graph)
+    assert g.edge_weights is not None
+    assert g.edge_weights.shape[0] == g.edge_index.shape[1]
+    weights_set = set(g.edge_weights.tolist())
+    assert 2.0 in weights_set
+    assert 5.0 in weights_set
+
+
+def test_edge_weights_backfill():
+    """Weights backfill to 1.0 for pre-existing unweighted edges."""
+    g = DaguaGraph()
+    g.add_edge("a", "b")
+    _ = g.edge_index
+    g.add_edge("b", "c", weight=5.0)
+    _ = g.edge_index
+    assert g.edge_weights is not None
+    assert g.edge_weights.shape[0] == 2
+    assert g.edge_weights[0].item() == 1.0
+    assert g.edge_weights[1].item() == 5.0
 
 
 class TestNodeSizes:
@@ -187,10 +263,9 @@ class TestStyles:
         g.add_node("inp")
         g.node_types[-1] = "input"  # override the default type
         style = g.get_style_for_node(0)
-        # Input type uses bluish green from Wong palette (muted fill)
-        from dagua.styles import PALETTE, make_fill
+        from dagua.styles import GRAPHVIZ_THEME
 
-        expected_fill = make_fill(PALETTE["bluish_green"])
+        expected_fill = GRAPHVIZ_THEME.get_node_style("input").fill
         assert style.fill == expected_fill
 
 

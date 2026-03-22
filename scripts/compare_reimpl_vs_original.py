@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -13,14 +14,18 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
-from dagua.eval.graphs import get_test_graphs
-from dagua.eval.variants import (
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from dagua.eval.graphs import get_test_graphs  # noqa: E402
+from dagua.eval.variants import (  # noqa: E402
     VARIANT_REGISTRY,
     algorithm_family,
     engine_is_stochastic,
     original_variant_name,
 )
-from scripts.run_benchmark import BenchmarkRecord
+from scripts.run_benchmark import BenchmarkRecord  # noqa: E402
 
 METRICS_TO_COMPARE = (
     "aspect_ratio",

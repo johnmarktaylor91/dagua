@@ -3,9 +3,54 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Optional, Union
 
+import numpy as np
 import torch
+
+_BARNES_HUT_MIN_SIZE = 1e-6
+_BARNES_HUT_MAX_DEPTH = 32
+
+
+@dataclass(slots=True)
+class _BarnesHutNode:
+    """Quadtree node used for Barnes-Hut repulsion approximation.
+
+    Parameters
+    ----------
+    cx : float
+        X coordinate of the node center of mass.
+    cy : float
+        Y coordinate of the node center of mass.
+    mass : float
+        Total mass contained in the node.
+    size : float
+        Side length of the square cell represented by the node.
+    xmin : float
+        Minimum x bound of the cell.
+    xmax : float
+        Maximum x bound of the cell.
+    ymin : float
+        Minimum y bound of the cell.
+    ymax : float
+        Maximum y bound of the cell.
+    children : list[_BarnesHutNode] or None
+        Child quadrants for internal nodes.
+    indices : np.ndarray or None
+        Particle indices stored in a leaf node.
+    """
+
+    cx: float
+    cy: float
+    mass: float
+    size: float
+    xmin: float
+    xmax: float
+    ymin: float
+    ymax: float
+    children: Optional[list["_BarnesHutNode"]]
+    indices: Optional[np.ndarray]
 
 
 def layout_fa2(
@@ -20,6 +65,10 @@ def layout_fa2(
     strong_gravity: bool = False,
     trace_every: int = 0,
     outbound_attraction_distribution: bool = True,
+    edge_weights: Optional[torch.Tensor] = None,
+    dissuade_hubs: bool = False,
+    barnes_hut: bool = False,
+    barnes_hut_theta: float = 1.2,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, list[torch.Tensor]]]:
     """Run a vectorized ForceAtlas2 stepper matching ``fa2_modified``.
 
@@ -40,8 +89,8 @@ def layout_fa2(
     scaling_ratio : float, default=2.0
         Repulsion scaling coefficient.
     linlog : bool, default=False
-        Kept for signature compatibility. The reference backend does not
-        implement LinLog mode.
+        Whether to use ``log(1 + distance)`` attraction instead of the default
+        linear attraction term.
     strong_gravity : bool, default=False
         Whether to use strong-gravity mode.
     trace_every : int, default=0
@@ -49,6 +98,17 @@ def layout_fa2(
     outbound_attraction_distribution : bool, default=True
         Whether to divide attraction by source-node mass and compensate using
         the mean mass.
+    edge_weights : torch.Tensor, optional
+        Per-edge weights with shape ``[E]``. Directed duplicates are summed when
+        collapsing to undirected edges.
+    dissuade_hubs : bool, default=False
+        Whether to divide attraction by the source-node mass again to spread
+        hub nodes.
+    barnes_hut : bool, default=False
+        Whether to approximate repulsion with a Barnes-Hut quadtree.
+    barnes_hut_theta : float, default=1.2
+        Acceptance threshold for Barnes-Hut approximation. Smaller values are
+        more accurate and slower.
 
     Returns
     -------
@@ -63,9 +123,9 @@ def layout_fa2(
         num_nodes=num_nodes,
         steps=steps,
         trace_every=trace_every,
+        edge_weights=edge_weights,
+        barnes_hut_theta=barnes_hut_theta,
     )
-    if linlog:
-        raise ValueError("linlog=True is not supported by the fa2_modified reference.")
 
     device = edge_index.device
     if num_nodes == 0:
@@ -75,11 +135,10 @@ def layout_fa2(
         single = torch.zeros((1, 2), dtype=torch.float32, device=device)
         return (single, [single.clone()]) if trace_every > 0 else single
 
-    generator_device = device.type if device.type != "mps" else "cpu"
-    generator = torch.Generator(device=generator_device)
-    generator.manual_seed(seed)
-
-    undirected_edges = _unique_undirected_edges(edge_index)
+    undirected_edges, undirected_weights = _unique_undirected_edges_with_weights(
+        edge_index=edge_index,
+        edge_weights=edge_weights,
+    )
     masses = _compute_degree(undirected_edges, num_nodes=num_nodes) + 1.0
     outbound_att_compensation = (
         float(masses.mean().item()) if outbound_attraction_distribution else 1.0
@@ -103,7 +162,15 @@ def layout_fa2(
 
     for step_index in range(steps):
         force = torch.zeros_like(pos)
-        force = force + _repulsion_force(pos=pos, mass=masses, scaling_ratio=scaling_ratio)
+        if barnes_hut:
+            force = force + _barnes_hut_repulsion(
+                pos=pos,
+                mass=masses,
+                scaling_ratio=scaling_ratio,
+                theta=barnes_hut_theta,
+            )
+        else:
+            force = force + _repulsion_force(pos=pos, mass=masses, scaling_ratio=scaling_ratio)
         force = force + _gravity_force(
             pos=pos,
             mass=masses,
@@ -117,6 +184,9 @@ def layout_fa2(
             mass=masses,
             outbound_att_compensation=outbound_att_compensation,
             outbound_attraction_distribution=outbound_attraction_distribution,
+            linlog=linlog,
+            edge_weights=undirected_weights,
+            dissuade_hubs=dissuade_hubs,
         )
         pos, speed, speed_efficiency = _adjust_speed_and_apply_forces(
             pos=pos,
@@ -142,6 +212,8 @@ def _validate_inputs(
     num_nodes: int,
     steps: int,
     trace_every: int,
+    edge_weights: Optional[torch.Tensor],
+    barnes_hut_theta: float,
 ) -> None:
     """Validate public layout arguments.
 
@@ -155,6 +227,10 @@ def _validate_inputs(
         Number of optimization steps.
     trace_every : int
         Snapshot cadence.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
+    barnes_hut_theta : float
+        Barnes-Hut acceptance threshold.
 
     Returns
     -------
@@ -167,6 +243,8 @@ def _validate_inputs(
         raise ValueError("steps must be non-negative")
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative")
+    if barnes_hut_theta <= 0.0:
+        raise ValueError("barnes_hut_theta must be positive")
     if edge_index.dim() != 2 or edge_index.shape[0] != 2:
         raise ValueError("edge_index must have shape [2, E]")
     if edge_index.dtype not in {
@@ -177,6 +255,11 @@ def _validate_inputs(
         torch.uint8,
     }:
         raise ValueError("edge_index must use an integer dtype")
+    if edge_weights is not None:
+        if edge_weights.dim() != 1:
+            raise ValueError("edge_weights must be a one-dimensional tensor")
+        if edge_weights.shape[0] != edge_index.shape[1]:
+            raise ValueError("edge_weights length must match edge_index column count")
     if edge_index.numel() == 0:
         return
 
@@ -201,21 +284,61 @@ def _unique_undirected_edges(edge_index: torch.Tensor) -> torch.Tensor:
     torch.Tensor
         Unique undirected edge list with shape ``[2, E_unique]``.
     """
+    undirected_edges, _ = _unique_undirected_edges_with_weights(
+        edge_index=edge_index,
+        edge_weights=None,
+    )
+    return undirected_edges
+
+
+def _unique_undirected_edges_with_weights(
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Collapse directed edges into unique undirected pairs, summing weights.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge list with shape ``[2, E]``.
+    edge_weights : torch.Tensor, optional
+        Per-edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, Optional[torch.Tensor]]
+        Unique undirected edge list with shape ``[2, E_unique]``` and the
+        summed undirected weights with shape ``[E_unique]`` when provided.
+    """
     if edge_index.numel() == 0:
-        return torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
+        empty = torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
+        return empty, None
 
     source = edge_index[0].to(dtype=torch.long)
     target = edge_index[1].to(dtype=torch.long)
     non_self = source != target
     if not bool(non_self.any().item()):
-        return torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
+        empty = torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
+        return empty, None
 
     source = source[non_self]
     target = target[non_self]
     lower = torch.minimum(source, target)
     upper = torch.maximum(source, target)
-    unique_pairs = torch.unique(torch.stack([lower, upper], dim=1), dim=0)
-    return unique_pairs.transpose(0, 1).contiguous()
+    pairs = torch.stack([lower, upper], dim=1)
+    unique_pairs, inverse = torch.unique(pairs, dim=0, return_inverse=True)
+    undirected = unique_pairs.transpose(0, 1).contiguous()
+
+    if edge_weights is not None:
+        weights = edge_weights[non_self].to(dtype=torch.float32)
+        summed_weights = torch.zeros(
+            unique_pairs.shape[0],
+            dtype=torch.float32,
+            device=edge_index.device,
+        )
+        summed_weights.scatter_add_(0, inverse, weights)
+        return undirected, summed_weights
+    return undirected, None
 
 
 def _compute_degree(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -321,6 +444,9 @@ def _attraction_force(
     mass: torch.Tensor,
     outbound_att_compensation: float,
     outbound_attraction_distribution: bool,
+    linlog: bool = False,
+    edge_weights: Optional[torch.Tensor] = None,
+    dissuade_hubs: bool = False,
 ) -> torch.Tensor:
     """Compute ForceAtlas2 attraction over unique undirected edges.
 
@@ -336,6 +462,12 @@ def _attraction_force(
         Mean-mass compensation used when outbound attraction distribution is on.
     outbound_attraction_distribution : bool
         Whether to divide attraction by the source-node mass.
+    linlog : bool, default=False
+        Whether to use ``log(1 + distance)`` attraction.
+    edge_weights : torch.Tensor, optional
+        Per-edge weights with shape ``[E]``.
+    dissuade_hubs : bool, default=False
+        Whether to divide attraction by source-node mass a second time.
 
     Returns
     -------
@@ -349,21 +481,331 @@ def _attraction_force(
     source = edge_index[0]
     target = edge_index[1]
     delta = pos.index_select(0, source) - pos.index_select(0, target)
-    factor = torch.full(
-        (edge_index.shape[1],),
-        fill_value=-float(outbound_att_compensation),
-        dtype=pos.dtype,
-        device=pos.device,
-    )
+    if linlog:
+        distance = torch.linalg.vector_norm(delta, dim=1, keepdim=True).clamp(min=1e-6)
+        direction = delta / distance
+        factor = -torch.log1p(distance).squeeze(1)
+    else:
+        factor = torch.full(
+            (edge_index.shape[1],),
+            fill_value=-float(outbound_att_compensation),
+            dtype=pos.dtype,
+            device=pos.device,
+        )
+
     if outbound_attraction_distribution:
         factor = factor / mass.index_select(0, source)
+    if dissuade_hubs:
+        factor = factor / mass.index_select(0, source)
+    if edge_weights is not None:
+        factor = factor * edge_weights.to(dtype=pos.dtype, device=pos.device)
 
-    attraction = delta * factor.unsqueeze(1)
+    if linlog:
+        attraction = direction * factor.unsqueeze(1)
+    else:
+        attraction = delta * factor.unsqueeze(1)
     index = source.unsqueeze(1).expand_as(attraction)
     force.scatter_add_(0, index, attraction)
     index = target.unsqueeze(1).expand_as(attraction)
     force.scatter_add_(0, index, -attraction)
     return force
+
+
+def _build_barnes_hut_tree(
+    pos_np: np.ndarray,
+    mass_np: np.ndarray,
+    indices: np.ndarray,
+    xmin: float,
+    xmax: float,
+    ymin: float,
+    ymax: float,
+    depth: int,
+) -> Optional[_BarnesHutNode]:
+    """Build a quadtree node for Barnes-Hut repulsion.
+
+    Parameters
+    ----------
+    pos_np : np.ndarray
+        Node positions with shape ``[N, 2]``.
+    mass_np : np.ndarray
+        Node masses with shape ``[N]``.
+    indices : np.ndarray
+        Particle indices stored in the current cell.
+    xmin : float
+        Minimum x bound of the cell.
+    xmax : float
+        Maximum x bound of the cell.
+    ymin : float
+        Minimum y bound of the cell.
+    ymax : float
+        Maximum y bound of the cell.
+    depth : int
+        Current recursion depth.
+
+    Returns
+    -------
+    _BarnesHutNode or None
+        Quadtree node for the current cell, or ``None`` when the cell is empty.
+    """
+    if indices.size == 0:
+        return None
+
+    size = max(xmax - xmin, ymax - ymin)
+    cell_mass = float(mass_np[indices].sum())
+    if cell_mass > 0.0:
+        cx = float((pos_np[indices, 0] * mass_np[indices]).sum() / cell_mass)
+        cy = float((pos_np[indices, 1] * mass_np[indices]).sum() / cell_mass)
+    else:
+        cx = float(pos_np[indices, 0].mean())
+        cy = float(pos_np[indices, 1].mean())
+
+    if indices.size <= 1 or depth >= _BARNES_HUT_MAX_DEPTH or size <= _BARNES_HUT_MIN_SIZE:
+        return _BarnesHutNode(
+            cx=cx,
+            cy=cy,
+            mass=cell_mass,
+            size=size,
+            xmin=xmin,
+            xmax=xmax,
+            ymin=ymin,
+            ymax=ymax,
+            children=None,
+            indices=indices,
+        )
+
+    midpoint_x = 0.5 * (xmin + xmax)
+    midpoint_y = 0.5 * (ymin + ymax)
+    x = pos_np[indices, 0]
+    y = pos_np[indices, 1]
+    quadrant_masks = (
+        (x <= midpoint_x) & (y <= midpoint_y),
+        (x <= midpoint_x) & (y > midpoint_y),
+        (x > midpoint_x) & (y <= midpoint_y),
+        (x > midpoint_x) & (y > midpoint_y),
+    )
+    bounds = (
+        (xmin, midpoint_x, ymin, midpoint_y),
+        (xmin, midpoint_x, midpoint_y, ymax),
+        (midpoint_x, xmax, ymin, midpoint_y),
+        (midpoint_x, xmax, midpoint_y, ymax),
+    )
+
+    children: list[_BarnesHutNode] = []
+    for mask, (child_xmin, child_xmax, child_ymin, child_ymax) in zip(quadrant_masks, bounds):
+        child = _build_barnes_hut_tree(
+            pos_np=pos_np,
+            mass_np=mass_np,
+            indices=indices[mask],
+            xmin=child_xmin,
+            xmax=child_xmax,
+            ymin=child_ymin,
+            ymax=child_ymax,
+            depth=depth + 1,
+        )
+        if child is not None:
+            children.append(child)
+
+    if not children:
+        return _BarnesHutNode(
+            cx=cx,
+            cy=cy,
+            mass=cell_mass,
+            size=size,
+            xmin=xmin,
+            xmax=xmax,
+            ymin=ymin,
+            ymax=ymax,
+            children=None,
+            indices=indices,
+        )
+
+    return _BarnesHutNode(
+        cx=cx,
+        cy=cy,
+        mass=cell_mass,
+        size=size,
+        xmin=xmin,
+        xmax=xmax,
+        ymin=ymin,
+        ymax=ymax,
+        children=children,
+        indices=None,
+    )
+
+
+def _barnes_hut_force_for_leaf(
+    pos_np: np.ndarray,
+    mass_np: np.ndarray,
+    leaf: _BarnesHutNode,
+    index: int,
+    scaling_ratio: float,
+) -> tuple[float, float]:
+    """Compute exact repulsion between one node and a leaf cell.
+
+    Parameters
+    ----------
+    pos_np : np.ndarray
+        Node positions with shape ``[N, 2]``.
+    mass_np : np.ndarray
+        Node masses with shape ``[N]``.
+    leaf : _BarnesHutNode
+        Leaf quadtree node.
+    index : int
+        Index of the node receiving force.
+    scaling_ratio : float
+        Repulsion coefficient.
+
+    Returns
+    -------
+    tuple[float, float]
+        X and y force contributions from the leaf.
+    """
+    assert leaf.indices is not None
+
+    dx = pos_np[index, 0] - pos_np[leaf.indices, 0]
+    dy = pos_np[index, 1] - pos_np[leaf.indices, 1]
+    dist_sq = (dx * dx) + (dy * dy)
+    valid = (leaf.indices != index) & (dist_sq > 0.0)
+    if not np.any(valid):
+        return 0.0, 0.0
+
+    factor = scaling_ratio * mass_np[index] * mass_np[leaf.indices[valid]] / dist_sq[valid]
+    return float(np.sum(factor * dx[valid])), float(np.sum(factor * dy[valid]))
+
+
+def _barnes_hut_force_for_node(
+    node: Optional[_BarnesHutNode],
+    pos_np: np.ndarray,
+    mass_np: np.ndarray,
+    index: int,
+    scaling_ratio: float,
+    theta: float,
+) -> tuple[float, float]:
+    """Recursively accumulate Barnes-Hut repulsion for one node.
+
+    Parameters
+    ----------
+    node : _BarnesHutNode or None
+        Current quadtree node.
+    pos_np : np.ndarray
+        Node positions with shape ``[N, 2]``.
+    mass_np : np.ndarray
+        Node masses with shape ``[N]``.
+    index : int
+        Index of the node receiving force.
+    scaling_ratio : float
+        Repulsion coefficient.
+    theta : float
+        Barnes-Hut acceptance threshold.
+
+    Returns
+    -------
+    tuple[float, float]
+        X and y force contributions from the subtree.
+    """
+    if node is None:
+        return 0.0, 0.0
+
+    if node.children is None:
+        return _barnes_hut_force_for_leaf(
+            pos_np=pos_np,
+            mass_np=mass_np,
+            leaf=node,
+            index=index,
+            scaling_ratio=scaling_ratio,
+        )
+
+    dx = float(pos_np[index, 0] - node.cx)
+    dy = float(pos_np[index, 1] - node.cy)
+    dist_sq = (dx * dx) + (dy * dy)
+    contains_index = (
+        node.xmin <= float(pos_np[index, 0]) <= node.xmax
+        and node.ymin <= float(pos_np[index, 1]) <= node.ymax
+    )
+
+    if not contains_index and dist_sq > 0.0 and (node.size * node.size / dist_sq) < (theta * theta):
+        dist = math.sqrt(dist_sq)
+        if dist < 1e-12:
+            return 0.0, 0.0
+        factor = scaling_ratio * mass_np[index] * node.mass / dist_sq
+        return factor * dx, factor * dy
+
+    fx = 0.0
+    fy = 0.0
+    for child in node.children:
+        child_fx, child_fy = _barnes_hut_force_for_node(
+            node=child,
+            pos_np=pos_np,
+            mass_np=mass_np,
+            index=index,
+            scaling_ratio=scaling_ratio,
+            theta=theta,
+        )
+        fx += child_fx
+        fy += child_fy
+    return fx, fy
+
+
+def _barnes_hut_repulsion(
+    pos: torch.Tensor,
+    mass: torch.Tensor,
+    scaling_ratio: float,
+    theta: float,
+) -> torch.Tensor:
+    """Approximate ForceAtlas2 repulsion using a Barnes-Hut quadtree.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    mass : torch.Tensor
+        Node masses with shape ``[N]``.
+    scaling_ratio : float
+        Repulsion coefficient.
+    theta : float
+        Barnes-Hut acceptance threshold.
+
+    Returns
+    -------
+    torch.Tensor
+        Approximate repulsive displacements with shape ``[N, 2]``.
+    """
+    num_nodes = pos.shape[0]
+    if num_nodes <= 1:
+        return torch.zeros_like(pos)
+
+    pos_np = pos.detach().cpu().numpy()
+    mass_np = mass.detach().cpu().numpy()
+    force_np = np.zeros((num_nodes, 2), dtype=np.float64)
+
+    xmin = float(pos_np[:, 0].min()) - 1.0
+    xmax = float(pos_np[:, 0].max()) + 1.0
+    ymin = float(pos_np[:, 1].min()) - 1.0
+    ymax = float(pos_np[:, 1].max()) + 1.0
+    root = _build_barnes_hut_tree(
+        pos_np=pos_np,
+        mass_np=mass_np,
+        indices=np.arange(num_nodes, dtype=np.int64),
+        xmin=xmin,
+        xmax=xmax,
+        ymin=ymin,
+        ymax=ymax,
+        depth=0,
+    )
+
+    for node_index in range(num_nodes):
+        fx, fy = _barnes_hut_force_for_node(
+            node=root,
+            pos_np=pos_np,
+            mass_np=mass_np,
+            index=node_index,
+            scaling_ratio=scaling_ratio,
+            theta=theta,
+        )
+        force_np[node_index, 0] = fx
+        force_np[node_index, 1] = fy
+
+    return torch.from_numpy(force_np).to(dtype=pos.dtype, device=pos.device)
 
 
 def _adjust_speed_and_apply_forces(

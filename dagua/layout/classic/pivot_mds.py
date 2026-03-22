@@ -7,10 +7,20 @@ squared distance matrix, and recover a rank-2 embedding with SVD.
 
 from __future__ import annotations
 
-from collections import deque
 from typing import Optional
 
+import numpy as np
 import torch
+
+from dagua.layout.classic._graph_distances import (
+    bfs_distances as _shared_bfs_distances,
+)
+from dagua.layout.classic._graph_distances import (
+    build_undirected_adjacency as _shared_build_undirected_adjacency,
+)
+from dagua.layout.classic._graph_distances import (
+    dijkstra_distances as _shared_dijkstra_distances,
+)
 
 _MIN_SPAN = 1.0e-6
 
@@ -91,7 +101,11 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
     return centered * (extent / max(span, _MIN_SPAN))
 
 
-def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> list[list[int]]:
+def _build_undirected_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> list[list[tuple[int, float]]]:
     """Build an undirected adjacency list.
 
     Parameters
@@ -100,88 +114,73 @@ def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> lis
         Edge list with shape ``[2, E]``.
     num_nodes : int
         Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
 
     Returns
     -------
-    list[list[int]]
+    list[list[tuple[int, float]]]
         One neighbor list per node.
-
-    Raises
-    ------
-    ValueError
-        If the edge tensor shape or node ids are invalid.
     """
-    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
-        raise ValueError("edge_index must have shape [2, E].")
-
-    adjacency_sets = [set() for _ in range(num_nodes)]
-    if edge_index.numel() == 0:
-        return [[] for _ in range(num_nodes)]
-
-    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
-    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
-        if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
-            raise ValueError("edge_index contains a node index outside [0, num_nodes).")
-        if source == target:
-            continue
-        adjacency_sets[source].add(target)
-        adjacency_sets[target].add(source)
-
-    return [sorted(neighbors) for neighbors in adjacency_sets]
+    return _shared_build_undirected_adjacency(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
 
 
-def _bfs_distances(adjacency: list[list[int]], start: int) -> torch.Tensor:
-    """Compute unweighted shortest-path distances from one source.
+def _graph_distances(
+    adjacency: list[list[tuple[int, float]]],
+    start: int,
+    weighted: bool,
+) -> torch.Tensor:
+    """Compute graph distances from one source.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
     start : int
         Source node index.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
 
     Returns
     -------
     torch.Tensor
-        Float distances with unreachable nodes replaced by ``diameter + 1``.
+        Float distances with unreachable nodes replaced by ``max_distance + 1``.
     """
-    num_nodes = len(adjacency)
-    distances = [-1] * num_nodes
-    distances[start] = 0
-    queue: deque[int] = deque([start])
-    diameter = 0
+    if weighted:
+        raw_distances = _shared_dijkstra_distances(adjacency, start)
+        finite_mask = np.isfinite(raw_distances)
+    else:
+        raw_distances = _shared_bfs_distances(adjacency, start).astype(np.float64)
+        finite_mask = raw_distances >= 0
 
-    while queue:
-        node = queue.popleft()
-        next_distance = distances[node] + 1
-        for neighbor in adjacency[node]:
-            if distances[neighbor] == -1:
-                distances[neighbor] = next_distance
-                diameter = max(diameter, next_distance)
-                queue.append(neighbor)
-
-    fill_value = float(diameter + 1 if num_nodes > 1 else 0.0)
-    return torch.tensor(
-        [fill_value if distance < 0 else float(distance) for distance in distances],
-        dtype=torch.float32,
-    )
+    max_distance = float(raw_distances[finite_mask].max()) if bool(finite_mask.any()) else 0.0
+    fill_value = max_distance + 1.0 if len(adjacency) > 1 else 0.0
+    cleaned = np.where(finite_mask, raw_distances, fill_value)
+    return torch.tensor(cleaned, dtype=torch.float32)
 
 
 def _select_pivots(
-    adjacency: list[list[int]],
+    adjacency: list[list[tuple[int, float]]],
     n_pivots: int,
     seed: int,
+    weighted: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Select pivots with a deterministic max-min heuristic.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
         Undirected adjacency list.
     n_pivots : int
         Number of pivots to choose.
     seed : int
         Random seed for the first pivot.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
 
     Returns
     -------
@@ -200,7 +199,7 @@ def _select_pivots(
     pivot_indices.append(first_pivot)
     selected[first_pivot] = True
 
-    min_distances = _bfs_distances(adjacency, first_pivot)
+    min_distances = _graph_distances(adjacency, first_pivot, weighted=weighted)
     pivot_distances.append(min_distances)
 
     while len(pivot_indices) < n_pivots:
@@ -210,7 +209,7 @@ def _select_pivots(
             break
         selected[next_pivot] = True
         pivot_indices.append(next_pivot)
-        distances = _bfs_distances(adjacency, next_pivot)
+        distances = _graph_distances(adjacency, next_pivot, weighted=weighted)
         pivot_distances.append(distances)
         min_distances = torch.minimum(min_distances, distances)
 
@@ -258,6 +257,7 @@ def layout_pivot_mds(
     node_sizes: Optional[torch.Tensor] = None,
     n_pivots: int = 50,
     seed: int = 42,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with pivot multidimensional scaling.
 
@@ -278,6 +278,9 @@ def layout_pivot_mds(
         Maximum number of pivots.
     seed : int, default=42
         Random seed for the first pivot.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``. When provided, pivot
+        distances are computed with Dijkstra instead of BFS.
 
     Returns
     -------
@@ -295,8 +298,13 @@ def layout_pivot_mds(
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
 
-    adjacency = _build_undirected_adjacency(edge_index, num_nodes)
-    _, pivot_distances = _select_pivots(adjacency, min(n_pivots, num_nodes), seed)
+    adjacency = _build_undirected_adjacency(edge_index, num_nodes, edge_weights=edge_weights)
+    _, pivot_distances = _select_pivots(
+        adjacency,
+        min(n_pivots, num_nodes),
+        seed,
+        weighted=edge_weights is not None,
+    )
     raw_positions = _pivot_mds_coordinates(pivot_distances)
     extent = _layout_extent(num_nodes, node_sizes)
     normalized = _normalize_positions(raw_positions.to(device), extent)

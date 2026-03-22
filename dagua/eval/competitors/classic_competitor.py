@@ -1074,10 +1074,13 @@ def _quick_classic(
 
     mod = importlib.import_module(import_path)
     fn = getattr(mod, fn_name)
+    edge_index = graph.edge_index
     start = time.perf_counter()
     try:
+        if graph.edge_weights is not None:
+            extra_kwargs.setdefault("edge_weights", graph.edge_weights)
         pos = fn(
-            graph.edge_index,
+            edge_index,
             graph.num_nodes,
             node_sizes=graph.node_sizes,
             seed=seed,
