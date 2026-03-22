@@ -449,16 +449,31 @@ def _tee(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build an open vee head with two explicit chevron arms."""
+    """Build a filled vee/chevron head matching Graphviz's vee style.
+
+    The vee is a filled V-shape: wide at the back, pointed at the tip,
+    with a notch cut out of the back (creating the V shape). This matches
+    Graphviz's filled vee rather than matplotlib's stroked-only vee.
+    """
     overlap = _join_overlap(length, body_width)
     join_x = max(length - overlap, length * 0.58)
     outer_half_width = _ornament_half_width(width, body_width)
-    return ArrowheadResult(
-        filled_paths=[],
-        stroked_paths=[
-            _local_path([(join_x, outer_half_width), (0.0, 0.0)], closed=False),
-            _local_path([(join_x, -outer_half_width), (0.0, 0.0)], closed=False),
+    neck_half = max(body_width * 0.5, FLOAT_EPSILON)
+    # Filled V-shape: tip at (0,0), wide arms at back, notch at ~60% back
+    notch_x = join_x * 0.55
+    path = _local_path(
+        [
+            (0.0, 0.0),  # tip
+            (join_x, outer_half_width),  # top-right arm
+            (notch_x, neck_half * 0.4),  # top notch
+            (notch_x, -neck_half * 0.4),  # bottom notch
+            (join_x, -outer_half_width),  # bottom-right arm
         ],
+        closed=True,
+    )
+    return ArrowheadResult(
+        filled_paths=[path],
+        stroked_paths=[],
         trim_contour=_local_trim_contour(join_x, body_width),
         stroke_width_scale=_open_head_stroke_scale(body_width),
     )
