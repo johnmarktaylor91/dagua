@@ -26,6 +26,7 @@ from dagua.eval.competitors.base import (
     CompetitorBase,
     CompetitorResult,
     get_available_competitors,
+    get_competitor,
     get_competitors,
     register,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "CompetitorBase",
     "CompetitorResult",
     "get_available_competitors",
+    "get_competitor",
     "get_competitors",
     "register",
 ]

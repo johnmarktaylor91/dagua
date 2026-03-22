@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Optional
 
 import torch
 
@@ -101,7 +101,7 @@ class _IgraphBase(CompetitorBase):
     """Base for igraph layout algorithms."""
 
     layout_algo: str = "sugiyama"
-    layout_kwargs: dict = {}
+    layout_kwargs: dict[str, Any] = {}
     accepts_seed_matrix: bool = False
     uses_igraph_rng: bool = False
 
@@ -110,6 +110,32 @@ class _IgraphBase(CompetitorBase):
         graph: DaguaGraph,
         timeout: float = 300.0,
         seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the configured igraph layout algorithm.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility timeout parameter.
+        seed : int | None, default=None
+            Random seed forwarded when the underlying igraph layout accepts a
+            stochastic starting layout or RNG override.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and timing information.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
     ) -> CompetitorResult:
         """Run the configured igraph layout algorithm.
 
@@ -137,6 +163,8 @@ class _IgraphBase(CompetitorBase):
         start = time.perf_counter()
         try:
             kwargs = dict(self.layout_kwargs)
+            if variant_params is not None:
+                kwargs.update(dict(variant_params))
             if seed is not None and self.accepts_seed_matrix:
                 # igraph FR's "seed" param is an initial position matrix, not an int.
                 # Generate random initial positions from the integer seed instead.
@@ -168,6 +196,7 @@ class IgraphSugiyama(_IgraphBase):
     max_nodes = 5_000
     layout_algo = "sugiyama"
     layout_kwargs = {}
+    variant_param_names = frozenset({"hgap", "maxiter", "vgap"})
 
 
 @register
@@ -177,6 +206,7 @@ class IgraphFR(_IgraphBase):
     layout_algo = "fruchterman_reingold"
     layout_kwargs = {"niter": 500}
     accepts_seed_matrix = True
+    variant_param_names = frozenset({"area", "grid", "niter"})
 
 
 @register
@@ -193,6 +223,7 @@ class IgraphDavidsonHarel(_IgraphBase):
     max_nodes = 500
     layout_algo = "davidson_harel"
     layout_kwargs = {}
+    variant_param_names = frozenset({"cool_fact", "fineiter", "maxiter"})
 
 
 @register
@@ -201,6 +232,7 @@ class IgraphKamadaKawai(_IgraphBase):
     max_nodes = 5_000
     layout_algo = "kamada_kawai"
     layout_kwargs = {}
+    variant_param_names = frozenset()
 
 
 @register
@@ -220,6 +252,9 @@ class IgraphGraphOpt(_IgraphBase):
     layout_algo = "graphopt"
     layout_kwargs = {"niter": 500}
     accepts_seed_matrix = True
+    variant_param_names = frozenset(
+        {"niter", "node_charge", "node_mass", "spring_constant", "spring_length"}
+    )
 
 
 @register
@@ -232,6 +267,7 @@ class IgraphDRL(_IgraphBase):
     layout_kwargs = {}
     accepts_seed_matrix = True
     uses_igraph_rng = True
+    variant_param_names = frozenset({"options", "seed", "weights"})
 
 
 @register
@@ -243,3 +279,6 @@ class IgraphLGL(_IgraphBase):
     layout_algo = "lgl"
     layout_kwargs = {}
     uses_igraph_rng = True
+    variant_param_names = frozenset(
+        {"area", "cellsize", "coolexp", "maxdelta", "maxiter", "repulserad", "root"}
+    )
