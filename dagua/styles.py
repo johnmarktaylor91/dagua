@@ -869,7 +869,7 @@ GRAPHVIZ_THEME = Theme(
 # ─── Theme Registry ──────────────────────────────────────────────────────
 
 THEME_REGISTRY: Dict[str, Theme] = {
-    "default": DEFAULT_THEME_OBJ,
+    "default": GRAPHVIZ_THEME,
     "dark": DARK_THEME,
     "minimal": MINIMAL_THEME,
     "torchlens": TORCHLENS_THEME,

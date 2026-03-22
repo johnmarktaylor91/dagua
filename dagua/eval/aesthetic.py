@@ -27,7 +27,7 @@ from dagua.layout import layout
 from dagua.metrics import compute_all_metrics
 from dagua.render import render
 from dagua.styles import (
-    DEFAULT_THEME_OBJ,
+    GRAPHVIZ_THEME,
     Theme,
 )
 
@@ -470,7 +470,7 @@ def run_aesthetic_iteration(
     output_path.mkdir(parents=True, exist_ok=True)
 
     graphs = get_representative_graphs(max_nodes=max_nodes)
-    theme = copy.deepcopy(DEFAULT_THEME_OBJ)
+    theme = copy.deepcopy(GRAPHVIZ_THEME)
     config = LayoutConfig(
         steps=steps,
         edge_opt_steps=-1,
