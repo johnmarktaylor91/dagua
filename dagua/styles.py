@@ -1399,6 +1399,89 @@ DRAWIO_THEME = Theme(
 )
 
 
+NEO4J_THEME = Theme(
+    name="neo4j",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#57C7E3",  # Neo4j signature teal
+            stroke="#23B3D7",
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#FFFFFF",
+            padding=(6.0, 6.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#8DCC93",  # Neo4j palette green
+            stroke="#6DBB73",
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#2A2C34",
+            padding=(6.0, 6.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#F16667",  # Neo4j palette coral red
+            stroke="#D14B4C",
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#FFFFFF",
+            padding=(6.0, 6.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#A5ABB6",
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#A5ABB6",
+            arrow_length=6.0,
+            arrow_width=4.0,
+            routing="straight",
+            label_font_size=8.0,
+            label_font_color="#333333",
+            label_background="#F9FCFF",
+        ),
+        "back": EdgeStyle(
+            color="#A5ABB6",
+            width=1.0,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#A5ABB6",
+            routing="straight",
+            label_font_size=8.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0F4F8",
+        stroke="#A5ABB6",
+        stroke_width=1.0,
+        corner_radius=8.0,
+        font_size=11.0,
+        font_color="#2A2C34",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.6,
+    ),
+    graph_style=GraphStyle(
+        background_color="#F9FCFF",  # Neo4j pale blue-white
+    ),
+)
+
+
 # ─── Theme Registry ──────────────────────────────────────────────────────
 
 THEME_REGISTRY: Dict[str, Theme] = {
@@ -1415,6 +1498,7 @@ THEME_REGISTRY: Dict[str, Theme] = {
     "obsidian": OBSIDIAN_THEME,
     "yed": YED_THEME,
     "drawio": DRAWIO_THEME,
+    "neo4j": NEO4J_THEME,
 }
 
 
