@@ -212,6 +212,167 @@ def measure_text(
         return measure_text_fallback(text, font_size, font_weight, font_style)
 
 
+def _estimated_max_chars(text_max_width: Optional[float], font_size: float) -> Optional[int]:
+    """Estimate how many monospace-ish characters fit within a width budget.
+
+    Parameters
+    ----------
+    text_max_width : float | None
+        Maximum label width in the same units as ``font_size``.
+    font_size : float
+        Font size used for the label.
+
+    Returns
+    -------
+    int | None
+        Estimated character budget, or ``None`` when no width limit applies.
+    """
+    if text_max_width is None or text_max_width <= 0.0 or font_size <= 0.0:
+        return None
+    average_char_width = max(float(font_size) * 0.6, 1e-9)
+    return max(int(float(text_max_width) / average_char_width), 1)
+
+
+def _wrap_text_to_chars(text: str, max_chars: int) -> str:
+    """Insert line breaks between words to respect a character budget.
+
+    Parameters
+    ----------
+    text : str
+        Plain-text label to wrap.
+    max_chars : int
+        Maximum characters allowed per output line.
+
+    Returns
+    -------
+    str
+        Wrapped label text.
+    """
+    wrapped_lines: List[str] = []
+    source_lines = text.splitlines() or [text]
+    for source_line in source_lines:
+        words = source_line.split()
+        if not words:
+            wrapped_lines.append("")
+            continue
+        current_line = words[0]
+        for word in words[1:]:
+            candidate = f"{current_line} {word}"
+            if len(candidate) > max_chars:
+                wrapped_lines.append(current_line)
+                current_line = word
+            else:
+                current_line = candidate
+        wrapped_lines.append(current_line)
+    return "\n".join(wrapped_lines)
+
+
+def _ellipsis_text_to_chars(text: str, max_chars: int) -> str:
+    """Trim each plain-text line to a character budget with an ellipsis.
+
+    Parameters
+    ----------
+    text : str
+        Plain-text label to truncate.
+    max_chars : int
+        Maximum characters allowed per output line.
+
+    Returns
+    -------
+    str
+        Truncated label text.
+    """
+    source_lines = text.splitlines() or [text]
+    if max_chars <= 3:
+        return "\n".join("." * max_chars for _ in source_lines)
+    truncated_lines: List[str] = []
+    for source_line in source_lines:
+        if len(source_line) <= max_chars:
+            truncated_lines.append(source_line)
+            continue
+        truncated_lines.append(f"{source_line[: max_chars - 3]}...")
+    return "\n".join(truncated_lines)
+
+
+def _transform_label_text(text: str, text_transform: str) -> str:
+    """Apply case transforms to a plain-text label.
+
+    Parameters
+    ----------
+    text : str
+        Plain-text label.
+    text_transform : str
+        Transform name: ``"none"``, ``"uppercase"``, or ``"lowercase"``.
+
+    Returns
+    -------
+    str
+        Transformed label text.
+
+    Raises
+    ------
+    ValueError
+        If ``text_transform`` is unsupported.
+    """
+    if text_transform == "none":
+        return text
+    if text_transform == "uppercase":
+        return text.upper()
+    if text_transform == "lowercase":
+        return text.lower()
+    raise ValueError(f"Unsupported text_transform: {text_transform!r}")
+
+
+def prepare_label_text(
+    text: str,
+    font_size: float,
+    text_wrap: str = "none",
+    text_max_width: Optional[float] = None,
+    text_transform: str = "none",
+    label_format: str = "plain",
+) -> str:
+    """Apply plain-text transform and wrapping policies before measurement/rendering.
+
+    Parameters
+    ----------
+    text : str
+        Input label text.
+    font_size : float
+        Font size in the same units as ``text_max_width``.
+    text_wrap : str, default="none"
+        Wrapping mode: ``"none"``, ``"wrap"``, or ``"ellipsis"``.
+    text_max_width : float | None, default=None
+        Maximum width before wrapping or truncation.
+    text_transform : str, default="none"
+        Case transform: ``"none"``, ``"uppercase"``, or ``"lowercase"``.
+    label_format : str, default="plain"
+        Label format. Rich labels bypass these plain-text transforms so markup
+        syntax remains intact.
+
+    Returns
+    -------
+    str
+        Prepared label text.
+
+    Raises
+    ------
+    ValueError
+        If ``text_wrap`` is unsupported.
+    """
+    if label_format != "plain":
+        return text
+
+    transformed = _transform_label_text(text, text_transform)
+    max_chars = _estimated_max_chars(text_max_width, font_size)
+    if max_chars is None or text_wrap == "none":
+        return transformed
+    if text_wrap == "wrap":
+        return _wrap_text_to_chars(transformed, max_chars)
+    if text_wrap == "ellipsis":
+        return _ellipsis_text_to_chars(transformed, max_chars)
+    raise ValueError(f"Unsupported text_wrap: {text_wrap!r}")
+
+
 def _normalize_font_style(font_style: str) -> Literal["normal", "italic", "oblique"]:
     """Clamp arbitrary font-style strings to matplotlib's supported literals.
 
@@ -507,6 +668,9 @@ def compute_node_size(
     shape: str = "roundrect",
     font_weight: str = "regular",
     font_style: str = "normal",
+    text_wrap: str = "none",
+    text_max_width: Optional[float] = None,
+    text_transform: str = "none",
     overflow_policy: str = "shrink_text",
     min_font_size: float = 5.0,
     label_format: str = "plain",
@@ -529,6 +693,12 @@ def compute_node_size(
         Font weight used for plain-text labels.
     font_style : str, default="normal"
         Font style used for plain-text labels and the base style for rich text.
+    text_wrap : str, default="none"
+        Plain-text wrapping policy applied before measurement.
+    text_max_width : float | None, default=None
+        Width limit used by ``text_wrap``.
+    text_transform : str, default="none"
+        Plain-text case transform applied before measurement.
     overflow_policy : str, default="shrink_text"
         Overflow policy for oversized labels.
     min_font_size : float, default=5.0
@@ -549,6 +719,9 @@ def compute_node_size(
         shape,
         font_weight,
         font_style,
+        text_wrap,
+        text_max_width,
+        text_transform,
         overflow_policy,
         min_font_size,
         label_format,
@@ -564,6 +737,9 @@ def _compute_node_size_cached(
     shape: str,
     font_weight: str,
     font_style: str,
+    text_wrap: str,
+    text_max_width: Optional[float],
+    text_transform: str,
     overflow_policy: str,
     min_font_size: float,
     label_format: str,
@@ -586,6 +762,12 @@ def _compute_node_size_cached(
         Font weight used for plain-text labels.
     font_style : str
         Font style used for plain-text labels and the base style for rich text.
+    text_wrap : str
+        Plain-text wrapping policy applied before measurement.
+    text_max_width : float | None
+        Width limit used by ``text_wrap``.
+    text_transform : str
+        Plain-text case transform applied before measurement.
     overflow_policy : str
         Overflow policy for oversized labels.
     min_font_size : float
@@ -602,16 +784,24 @@ def _compute_node_size_cached(
 
     def measure_label(current_font_size: float) -> Tuple[float, float]:
         """Measure the label using the requested formatting mode."""
+        prepared_label = prepare_label_text(
+            label,
+            font_size=current_font_size,
+            text_wrap=text_wrap,
+            text_max_width=text_max_width,
+            text_transform=text_transform,
+            label_format=label_format,
+        )
         if label_format == "rich":
             return measure_rich_text(
-                label,
+                prepared_label,
                 font_family,
                 current_font_size,
                 font_weight=font_weight,
                 font_style=font_style,
             )
         return measure_text(
-            label,
+            prepared_label,
             font_family,
             current_font_size,
             font_weight,
