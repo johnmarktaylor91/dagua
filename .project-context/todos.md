@@ -13,11 +13,7 @@
 ## Improvements (Nice-to-Have)
 - [ ] [MED] Add Cytoscape.js fcose as competitor layout algorithm (npm install cytoscape cytoscape-fcose, Node.js subprocess adapter, same pattern as ELK/dagre)
 - [ ] [MED] Add Gephi/YifanHu as competitor layout algorithm (Java Gephi Toolkit JAR, subprocess adapter)
-- [ ] [MED] Image/icon nodes: image files as node backgrounds (PIL + clip-to-shape). Cytoscape, yEd, Draw.io, D3.
-- [ ] [MED] External labels (xlabel): labels outside node boundary. Graphviz. Needs label placement solver.
 - [ ] [LOW] Edge jump styles at crossings (arc/gap/sharp). Draw.io. Requires crossing detection.
-- [ ] [LOW] Text rotation on node labels. Cytoscape.
-- [ ] [LOW] Border position inside/outside/center. Cytoscape.
 - [ ] [LOW] Pie chart node fills (16-slice). Cytoscape only.
 - [ ] [MED] Warm-start chain variants: benchmark FR->KK and KK->FR two-pass layouts using pos= forwarding. Does warm-starting KK from FR output beat either alone? Add as variant entries once plumbing is validated.
 - [ ] [HIGH] Pixel-unit overrides: support "2pt" syntax for fixed-size elements (Union[float, str] values in styles). Users who want pixel-based sizing for specific elements.
