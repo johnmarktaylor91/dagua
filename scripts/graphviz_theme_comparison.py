@@ -1272,9 +1272,10 @@ def render_dagua_theme(graph: DaguaGraph, theme_name: str, output_path: Path) ->
     themed_graph.compute_node_sizes()
     positions = layout_with_graphviz(themed_graph, engine="dot")
     # layout_with_graphviz negates y for dagua's y-down/TB convention.
-    # Keep the negated positions so the edge router produces correct
-    # arrowhead orientation for top-down flow. The render will be inverted
-    # (source at bottom) but we fix this by inverting the y-axis after render.
+    # Undo the negation to get Graphviz's native y-up coordinates,
+    # and set direction to BT so edge routing uses correct control points.
+    positions[:, 1] = -positions[:, 1]
+    themed_graph.direction = "BT"
 
     # Compute figsize so Graphviz's point-space positions render at the same
     # physical scale as native Graphviz (72 points = 1 inch).
@@ -1290,21 +1291,13 @@ def render_dagua_theme(graph: DaguaGraph, theme_name: str, output_path: Path) ->
     # Clamp to reasonable range
     fig_w = max(2.0, min(fig_w, 16.0))
     fig_h = max(2.0, min(fig_h, 16.0))
-    fig, ax = dagua.render(
+    dagua.render(
         themed_graph,
         positions,
+        output=str(output_path),
         figsize=(fig_w, fig_h),
         dpi=210,
     )
-    # Invert y-axis so the graph reads top-down matching Graphviz.
-    # The positions use dagua's y-down convention (negated from Graphviz),
-    # so inverting the display axis restores Graphviz's visual orientation
-    # while keeping arrowheads pointing in the correct direction.
-    ax.invert_yaxis()
-    fig.savefig(str(output_path), dpi=210, bbox_inches="tight", facecolor=fig.get_facecolor())
-    import matplotlib.pyplot as _plt
-
-    _plt.close(fig)
 
 
 def _content_crop_box(image: Image.Image) -> Optional[Tuple[int, int, int, int]]:
