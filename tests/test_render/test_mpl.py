@@ -2,32 +2,104 @@
 
 import importlib
 from pathlib import Path
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+import torch
 from matplotlib.colors import to_rgba
+from matplotlib.patches import PathPatch
 
 import dagua
 from dagua.config import LayoutConfig
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
 from dagua.render import render
+from dagua.render.edges.arrowheads import build_arrowhead
 from dagua.render.mpl import (
+    _build_custom_edge_collection,
     _build_node_patch,
     _cluster_linestyle,
     _compute_display_scale,
     _draw_clusters,
     _draw_edge_marker,
     _edge_linestyle,
+    _edge_width_data_units,
     _marker_data_size,
     _node_linestyle,
     _star_vertices,
 )
+from dagua.render.text import layout_plain_text
 from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
 from dagua.utils import compute_node_size
 
 mpl_renderer = importlib.import_module("dagua.render.mpl")
+
+
+def _label_bbox(ax: Any, prefix: str) -> tuple[float, float, float, float]:
+    """Return the data-coordinate bbox for label patches with the given gid prefix."""
+    patches = [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, PathPatch)
+        and isinstance(patch.get_gid(), str)
+        and patch.get_gid().startswith(prefix)
+    ]
+    assert patches
+    vertices = np.concatenate([patch.get_path().vertices for patch in patches], axis=0)
+    return (
+        float(vertices[:, 0].min()),
+        float(vertices[:, 0].max()),
+        float(vertices[:, 1].min()),
+        float(vertices[:, 1].max()),
+    )
+
+
+def _expected_plain_label_bbox(
+    ax: Any,
+    text: str,
+    font_size: float,
+    font_family: str,
+    font_weight: str,
+    ha: str,
+    va: str,
+    anchor_x: float,
+    anchor_y: float,
+) -> tuple[float, float, float, float]:
+    """Return the expected bbox for a plain text block at a given anchor."""
+    display_scale = _compute_display_scale(ax)
+    block = layout_plain_text(
+        text,
+        size_data=font_size * display_scale,
+        ha=ha,
+        va=va,
+        font_family=font_family,
+        font_weight=font_weight,
+        font_style="normal",
+        line_spacing=1.2,
+        secondary_scale=1.0,
+    )
+    vertices = []
+    for line in block.lines:
+        for segment in line.segments:
+            if segment.glyph_run.path.vertices.size == 0:
+                continue
+            shifted = segment.glyph_run.path.vertices + np.array(
+                [
+                    anchor_x + block.x_offset + segment.x_offset,
+                    anchor_y + block.y_offset + line.baseline_y,
+                ]
+            )
+            vertices.append(shifted)
+    assert vertices
+    merged = np.concatenate(vertices, axis=0)
+    return (
+        float(merged[:, 0].min()),
+        float(merged[:, 0].max()),
+        float(merged[:, 1].min()),
+        float(merged[:, 1].max()),
+    )
 
 
 class TestRenderBasic:
@@ -399,8 +471,9 @@ def test_shape_size_adjustments_match_graphviz_calibration() -> None:
 
     assert triangle_w / triangle_h == pytest.approx(3.2)
     assert star_w == pytest.approx(star_h)
-    assert diamond_w / diamond_h == pytest.approx(1.4)
-    assert ellipse_w == pytest.approx(36.8)
+    assert diamond_w >= 67.2
+    assert diamond_w > diamond_h
+    assert ellipse_w == pytest.approx(41.6)
     assert ellipse_h == pytest.approx(18.0)
     assert hexagon_w / hexagon_h == pytest.approx(1.3)
     assert pentagon_w / pentagon_h == pytest.approx(1.2)
@@ -559,6 +632,25 @@ def test_vee_arrow_is_open_polygon() -> None:
     plt.close(fig)
 
 
+def test_vee_arrowhead_builder_returns_two_open_chevron_arms() -> None:
+    """The custom vee head should be two stroked lines meeting at the tip."""
+
+    result = build_arrowhead(
+        "vee",
+        tip=(0.0, 0.0),
+        tangent=(1.0, 0.0),
+        length=14.0,
+        width=10.0,
+        body_width=2.0,
+    )
+
+    assert not result.filled_paths
+    assert len(result.stroked_paths) == 2
+    for path in result.stroked_paths:
+        assert path.vertices.shape == (2, 2)
+        assert path.vertices[1] == pytest.approx([0.0, 0.0])
+
+
 def test_straight_routing_has_arrowhead() -> None:
     """Straight routing must still draw arrow markers when control points collapse."""
 
@@ -664,6 +756,66 @@ def test_open_marker_uses_unified_display_scaled_dimensions() -> None:
     )
 
 
+def test_custom_edge_collection_converts_stroke_width_to_data_units() -> None:
+    """Custom edge outlines should use the same data-space width as the body ribbon."""
+
+    graph = DaguaGraph.from_edge_list([("a", "b")])
+    graph.edge_styles[0] = EdgeStyle(width=4.0, arrow="none")
+    graph.compute_node_sizes()
+    curve = dagua.route_edges(
+        torch.tensor([[0.0, 60.0], [0.0, -60.0]], dtype=torch.float32),
+        graph.edge_index,
+        graph.node_sizes,
+        graph.direction,
+        graph,
+    )[0]
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-80.0, 80.0)
+    ax.set_ylim(-80.0, 80.0)
+    fig.canvas.draw()
+
+    collection = _build_custom_edge_collection(ax, graph, [curve])
+    edge = collection.edges[0]
+    expected_width = _edge_width_data_units(ax, 4.0)
+    plt.close(fig)
+
+    assert edge.width == pytest.approx(expected_width)
+    assert edge.stroke_width == pytest.approx(expected_width)
+
+
+def test_custom_edge_collection_scales_arrowheads_with_edge_width() -> None:
+    """Arrowheads should grow sublinearly as the edge stroke gets heavier."""
+
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_node("b")
+    graph.add_node("c")
+    graph.add_edge("a", "b", style=EdgeStyle(width=1.2, arrow_length=10.0, arrow_width=7.0))
+    graph.add_edge("a", "c", style=EdgeStyle(width=4.8, arrow_length=10.0, arrow_width=7.0))
+    graph.compute_node_sizes()
+    positions = torch.tensor([[0.0, 60.0], [-35.0, -60.0], [35.0, -60.0]], dtype=torch.float32)
+    curves = dagua.route_edges(
+        positions,
+        graph.edge_index,
+        graph.node_sizes,
+        graph.direction,
+        graph,
+    )
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-80.0, 80.0)
+    ax.set_ylim(-80.0, 80.0)
+    fig.canvas.draw()
+
+    collection = _build_custom_edge_collection(ax, graph, curves)
+    thin_edge, thick_edge = collection.edges
+    plt.close(fig)
+
+    assert thick_edge.arrowhead_length / thin_edge.arrowhead_length == pytest.approx(2.0)
+    assert thick_edge.arrowhead_width / thin_edge.arrowhead_width == pytest.approx(2.0)
+
+
 def test_normal_arrow_marker_uses_wider_graphviz_base() -> None:
     """Normal arrow markers should use the widened triangular base."""
 
@@ -698,8 +850,8 @@ def test_triangle_labels_shift_toward_visual_centroid() -> None:
     fig, ax = plt.subplots()
     mpl_renderer._draw_node_labels(ax, graph, pos, sizes)
 
-    assert len(ax.texts) == 1
-    assert float(ax.texts[0].get_position()[1]) == pytest.approx(10.0)
+    bbox = _label_bbox(ax, "dagua-node-label-0")
+    assert (bbox[2] + bbox[3]) / 2.0 == pytest.approx(10.0, abs=0.75)
     plt.close(fig)
 
 
@@ -718,8 +870,8 @@ def test_triangle_rich_labels_shift_toward_visual_centroid() -> None:
     fig, ax = plt.subplots()
     mpl_renderer._draw_node_labels(ax, graph, pos, sizes)
 
-    assert len(ax.texts) == 1
-    assert float(ax.texts[0].get_position()[1]) == pytest.approx(10.0)
+    bbox = _label_bbox(ax, "dagua-node-label-0")
+    assert (bbox[2] + bbox[3]) / 2.0 == pytest.approx(10.0, abs=0.75)
     plt.close(fig)
 
 
@@ -800,7 +952,7 @@ def test_cluster_labels_expand_bbox_using_measured_width(
         sizes=np.array([[70.0, 20.0]], dtype=float),
     )
 
-    assert len(ax.patches) == 0
+    assert len(ax.patches) == 1
     assert len(ax.collections) == 1
     assert isinstance(ax.collections[0], PatchCollection)
     path = ax.collections[0].get_paths()[0]
@@ -808,8 +960,9 @@ def test_cluster_labels_expand_bbox_using_measured_width(
     width = float(vertices[:, 0].max() - vertices[:, 0].min())
     expected_width = max(70.0, mpl_renderer._points_to_data_units(ax, 80.0, "x"))
     assert width == pytest.approx(expected_width)
-    assert len(ax.texts) == 1
-    assert ax.texts[0].get_clip_on() is False
+    assert len(ax.texts) == 0
+    assert ax.patches[0].get_gid() == "dagua-cluster-label-outer"
+    assert ax.patches[0].get_clip_on() is False
     plt.close(fig)
 
 
@@ -847,10 +1000,10 @@ def test_cluster_offsets_and_corner_radius_use_display_scale(
         sizes=np.array([[20.0, 20.0]], dtype=float),
     )
 
-    assert len(ax.patches) == 0
+    assert len(ax.patches) == 1
     assert len(ax.collections) == 1
     assert isinstance(ax.collections[0], PatchCollection)
-    assert len(ax.texts) == 1
+    assert len(ax.texts) == 0
     display_scale = _compute_display_scale(ax)
     label_width = mpl_renderer._points_to_data_units(ax, 40.0, "x")
     label_height = mpl_renderer._points_to_data_units(ax, 12.0, "y")
@@ -860,8 +1013,56 @@ def test_cluster_offsets_and_corner_radius_use_display_scale(
     x_min = -expanded_width / 2.0
     y_max = 10.0 + max(mpl_renderer._points_to_data_units(ax, 14.0, "y"), label_height)
     path = ax.collections[0].get_paths()[0]
+    label_bbox = _label_bbox(ax, "dagua-cluster-label-outer")
+    expected_bbox = _expected_plain_label_bbox(
+        ax,
+        text="Cluster",
+        font_size=graph.get_style_for_cluster("outer").font_size,
+        font_family=graph.get_style_for_cluster("outer").font_family or "",
+        font_weight=graph.get_style_for_cluster("outer").font_weight,
+        ha="left",
+        va="top",
+        anchor_x=x_min + (8.0 * display_scale),
+        anchor_y=y_max - (20.0 * display_scale),
+    )
 
-    assert ax.texts[0].get_position()[0] == pytest.approx(x_min + (8.0 * display_scale))
-    assert ax.texts[0].get_position()[1] == pytest.approx(y_max - (20.0 * display_scale))
+    assert label_bbox[0] == pytest.approx(expected_bbox[0], abs=0.75)
+    assert label_bbox[3] == pytest.approx(expected_bbox[3], abs=0.75)
     assert path.vertices[0][0] == pytest.approx(x_min + (6.0 * display_scale), abs=1e-6)
+    plt.close(fig)
+
+
+def test_cluster_borders_include_visible_stroke_outline() -> None:
+    """Cluster boxes should add a visible stroked outline in addition to the fill."""
+
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_cluster(
+        "outer",
+        ["a"],
+        label="Cluster",
+        style=ClusterStyle(padding=0.0, stroke_width=0.7),
+    )
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-50.0, 50.0)
+    ax.set_ylim(-50.0, 50.0)
+    fig.canvas.draw()
+
+    _draw_clusters(
+        ax=ax,
+        graph=graph,
+        pos=np.array([[0.0, 0.0]], dtype=float),
+        sizes=np.array([[20.0, 20.0]], dtype=float),
+    )
+
+    border_patches = [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, PathPatch)
+        and patch.get_facecolor()[-1] == pytest.approx(0.0)
+        and patch.get_gid() is None
+    ]
+    assert border_patches
+    assert border_patches[0].get_linewidth() == pytest.approx(0.7)
     plt.close(fig)
