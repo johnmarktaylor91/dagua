@@ -618,7 +618,7 @@ def test_vee_arrow_is_open_polygon() -> None:
         collection
         for collection in ax.collections
         if isinstance(collection, PatchCollection)
-        and float(collection.get_zorder()) == 2.0
+        and float(collection.get_zorder()) >= 2.0
         and not (
             len(collection.get_paths()) == graph.num_nodes
             and np.allclose(collection.get_linewidths(), 0.0)
@@ -667,7 +667,7 @@ def test_straight_routing_has_arrowhead() -> None:
         collection
         for collection in ax.collections
         if isinstance(collection, PatchCollection)
-        and float(collection.get_zorder()) == 2.0
+        and float(collection.get_zorder()) >= 2.0
         and not (
             len(collection.get_paths()) == graph.num_nodes
             and np.allclose(collection.get_linewidths(), 0.0)
