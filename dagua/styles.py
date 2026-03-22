@@ -108,6 +108,13 @@ def _resolve_font() -> str:
 # Resolved at import time — avoids repeated "font not found" warnings
 RESOLVED_FONT: str = _resolve_font()
 
+_STYLE_REPR_PRIORITY_FIELDS: Dict[str, List[str]] = {
+    "NodeStyle": ["shape", "fill", "stroke", "font_size", "font_family", "font_color"],
+    "EdgeStyle": ["color", "width", "arrow", "routing", "style", "opacity"],
+    "ClusterStyle": ["fill", "stroke", "font_size", "padding", "opacity"],
+    "GraphStyle": ["background_color", "margin"],
+}
+
 
 # ─── Color Utilities ────────────────────────────────────────────────────────
 
@@ -202,6 +209,45 @@ def make_node_colors(base_hex: str) -> Tuple[str, str]:
     return fill, stroke
 
 
+def _compact_style_repr(style: Any) -> str:
+    """Build a compact repr showing only non-default fields.
+
+    Parameters
+    ----------
+    style : Any
+        Dataclass style instance to summarize.
+
+    Returns
+    -------
+    str
+        Compact repr string with at most six changed fields.
+    """
+    default = style.__class__()
+    changed: Dict[str, Any] = {}
+    for field_info in dataclass_fields(style):
+        value = getattr(style, field_info.name)
+        default_value = getattr(default, field_info.name)
+        if value != default_value:
+            changed[field_info.name] = value
+
+    class_name = style.__class__.__name__
+    if not changed:
+        return f"{class_name}()"
+
+    ordered: List[Tuple[str, Any]] = []
+    for key in _STYLE_REPR_PRIORITY_FIELDS.get(class_name, []):
+        if key in changed:
+            ordered.append((key, changed.pop(key)))
+    ordered.extend(changed.items())
+
+    shown = ordered[:6]
+    remaining = len(ordered) - len(shown)
+    parts = [f"{key}={value!r}" for key, value in shown]
+    if remaining > 0:
+        parts.append(f"...+{remaining}")
+    return f"{class_name}({', '.join(parts)})"
+
+
 # ─── Style Dataclasses ──────────────────────────────────────────────────────
 
 
@@ -278,12 +324,17 @@ class NodeStyle:
     image_opacity: float = 1.0  # render-only alpha for the image layer
 
     def __post_init__(self):
+        """Populate derived defaults after dataclass initialization."""
         if not self.fill:
             self.fill = make_fill(self.base_color)
         if not self.stroke:
             self.stroke = border_from_fill(self.base_color, darken=0.4)
         if not self.font_family:
             self.font_family = RESOLVED_FONT
+
+    def __repr__(self) -> str:
+        """Return a compact repr showing only non-default fields."""
+        return _compact_style_repr(self)
 
     @property
     def font_family_list(self) -> List[str]:
@@ -341,6 +392,10 @@ class EdgeStyle:
     color_gradient: str = "none"  # "none", "source_to_target"
     color_gradient_end: str = ""  # empty = use the edge color for both ends
 
+    def __repr__(self) -> str:
+        """Return a compact repr showing only non-default fields."""
+        return _compact_style_repr(self)
+
 
 @dataclass
 class ClusterStyle:
@@ -373,6 +428,10 @@ class ClusterStyle:
     LEVEL_FILLS = [PAPER, "#EDEDE8", "#E5E5E0"]
     LEVEL_STROKES = [LIGHT_GRAY, "#C8C8C8", "#BCBCBC"]
 
+    def __repr__(self) -> str:
+        """Return a compact repr showing only non-default fields."""
+        return _compact_style_repr(self)
+
 
 @dataclass
 class GraphStyle:
@@ -390,6 +449,10 @@ class GraphStyle:
     node_label_secondary_scale: float = 0.85
     max_figsize: Tuple[float, float] = (30.0, 40.0)
     min_figsize: Tuple[float, float] = (4.0, 3.0)
+
+    def __repr__(self) -> str:
+        """Return a compact repr showing only non-default fields."""
+        return _compact_style_repr(self)
 
 
 # ─── Theme System ───────────────────────────────────────────────────────────
