@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from functools import lru_cache
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 import torch
 
@@ -177,6 +177,7 @@ def measure_text(
     font_family: str = "",
     font_size: float = 8.5,
     font_weight: str = "regular",
+    font_style: str = "normal",
 ) -> Tuple[float, float]:
     """Measure plain-text dimensions.
 
@@ -190,6 +191,8 @@ def measure_text(
         Font size in points.
     font_weight : str, default="regular"
         Font weight passed through to matplotlib font resolution.
+    font_style : str, default="normal"
+        Font style passed through to matplotlib font resolution.
 
     Returns
     -------
@@ -204,15 +207,36 @@ def measure_text(
         except ImportError:
             font_family = "sans-serif"
     try:
-        return _measure_text_exact_cached(text, font_family, font_size, font_weight)
+        return _measure_text_exact_cached(text, font_family, font_size, font_weight, font_style)
     except Exception:
-        return measure_text_fallback(text, font_size, font_weight)
+        return measure_text_fallback(text, font_size, font_weight, font_style)
+
+
+def _normalize_font_style(font_style: str) -> Literal["normal", "italic", "oblique"]:
+    """Clamp arbitrary font-style strings to matplotlib's supported literals.
+
+    Parameters
+    ----------
+    font_style : str
+        Requested font style.
+
+    Returns
+    -------
+    Literal["normal", "italic", "oblique"]
+        Style accepted by ``FontProperties``.
+    """
+    if font_style == "italic":
+        return "italic"
+    if font_style == "oblique":
+        return "oblique"
+    return "normal"
 
 
 def measure_text_fallback(
     text: str,
     font_size: float = 8.5,
     font_weight: str = "regular",
+    font_style: str = "normal",
 ) -> Tuple[float, float]:
     """Approximate plain-text dimensions without matplotlib.
 
@@ -224,6 +248,8 @@ def measure_text_fallback(
         Font size in points.
     font_weight : str, default="regular"
         Font weight hint. Bold text is treated as slightly wider.
+    font_style : str, default="normal"
+        Font style hint. Italic text is treated as slightly wider.
 
     Returns
     -------
@@ -234,6 +260,8 @@ def measure_text_fallback(
     max_chars = max(len(line) for line in lines) if lines else 1
     char_width = font_size * 0.52
     if font_weight in ("bold", "heavy", "black"):
+        char_width *= 1.05
+    if font_style == "italic":
         char_width *= 1.05
     width = max_chars * char_width
     height = len(lines) * font_size * 1.2
@@ -246,6 +274,7 @@ def _measure_text_exact_cached(
     font_family: str,
     font_size: float,
     font_weight: str,
+    font_style: str,
 ) -> Tuple[float, float]:
     """Measure plain text exactly with matplotlib.
 
@@ -259,19 +288,40 @@ def _measure_text_exact_cached(
         Font size in points.
     font_weight : str
         Font weight name.
+    font_style : str
+        Font style name.
 
     Returns
     -------
     tuple[float, float]
-        Exact text width and height in points.
+        Exact text width and stable line height in points.
     """
     from matplotlib.font_manager import FontProperties
-    from matplotlib.textpath import TextPath
+    from matplotlib.textpath import TextToPath
 
-    fp = FontProperties(family=font_family, size=font_size, weight=font_weight)
-    tp = TextPath((0, 0), text, prop=fp)
-    bbox = tp.get_extents()
-    return max(bbox.width, 1.0), max(bbox.height, font_size)
+    line_spacing = 1.2
+    text_to_path = TextToPath()
+    fp = FontProperties(
+        family=font_family,
+        size=font_size,
+        weight=font_weight,
+        style=_normalize_font_style(font_style),
+    )
+    _, height_ref, _ = text_to_path.get_text_width_height_descent("Hg", fp, ismath=False)
+    stable_line_height = max(float(height_ref), float(font_size))
+    lines = text.split("\n")
+    if len(lines) == 1:
+        width, _, _ = text_to_path.get_text_width_height_descent(text, fp, ismath=False)
+        return max(float(width), 1.0), stable_line_height
+
+    max_width = 1.0
+    for line in lines:
+        if not line:
+            continue
+        line_width, _, _ = text_to_path.get_text_width_height_descent(line, fp, ismath=False)
+        max_width = max(max_width, float(line_width))
+    total_height = len(lines) * stable_line_height * line_spacing
+    return max_width, total_height
 
 
 def parse_rich_markup(text: str) -> List[RichSegment]:
@@ -355,10 +405,38 @@ def parse_rich_markup(text: str) -> List[RichSegment]:
     return segments or [("", dict(current))]
 
 
+def _split_rich_lines(
+    segments: Sequence[RichSegment],
+) -> List[List[RichSegment]]:
+    """Split rich-text segments into line-wise segment groups.
+
+    Parameters
+    ----------
+    segments : sequence[tuple[str, dict[str, Any]]]
+        Parsed rich-text segments.
+
+    Returns
+    -------
+    list[list[tuple[str, dict[str, Any]]]]
+        Segments grouped per output line.
+    """
+    lines: List[List[RichSegment]] = [[]]
+    for text, segment_style in segments:
+        parts = text.split("\n")
+        for part_index, part in enumerate(parts):
+            if part:
+                lines[-1].append((part, segment_style))
+            if part_index != len(parts) - 1:
+                lines.append([])
+    return lines
+
+
 def measure_rich_text(
     label: str,
     font_family: str,
     font_size: float,
+    font_weight: str = "regular",
+    font_style: str = "normal",
 ) -> Tuple[float, float]:
     """Measure the rendered size of a rich-format label.
 
@@ -370,6 +448,10 @@ def measure_rich_text(
         Base font family for non-monospace segments.
     font_size : float
         Font size in points.
+    font_weight : str, default="regular"
+        Base font weight for non-bold segments.
+    font_style : str, default="normal"
+        Base font style for non-italic segments.
 
     Returns
     -------
@@ -378,25 +460,36 @@ def measure_rich_text(
     """
     from dagua.styles import FONT_FAMILY_MONO
 
+    line_spacing = 1.2
     segments = parse_rich_markup(label)
-    line_widths: List[float] = [0.0]
-    line_heights: List[float] = [max(font_size, 1.0)]
+    lines = _split_rich_lines(segments)
+    stable_line_height = measure_text(
+        "Hg",
+        font_family=font_family,
+        font_size=font_size,
+        font_weight=font_weight,
+        font_style=font_style,
+    )[1]
+    line_widths: List[float] = []
 
-    for segment_text, segment_style in segments:
-        parts = segment_text.split("\n")
-        for part_index, part in enumerate(parts):
-            if part:
-                segment_family = FONT_FAMILY_MONO[0] if segment_style["mono"] else font_family
-                segment_weight = "bold" if segment_style["bold"] else "regular"
-                width, height = measure_text(part, segment_family, font_size, segment_weight)
-                line_widths[-1] += width
-                line_heights[-1] = max(line_heights[-1], height)
-            if part_index != len(parts) - 1:
-                line_widths.append(0.0)
-                line_heights.append(max(font_size * 1.2, 1.0))
+    for line in lines:
+        line_width = 0.0
+        for segment_text, segment_style in line:
+            segment_family = FONT_FAMILY_MONO[0] if segment_style["mono"] else font_family
+            segment_weight = "bold" if segment_style["bold"] else font_weight
+            segment_font_style = "italic" if segment_style["italic"] else font_style
+            segment_width, _ = measure_text(
+                segment_text,
+                font_family=segment_family,
+                font_size=font_size,
+                font_weight=segment_weight,
+                font_style=segment_font_style,
+            )
+            line_width += segment_width
+        line_widths.append(line_width)
 
-    total_height = sum(max(height, font_size * 1.2) for height in line_heights)
-    return max(line_widths, default=1.0), max(total_height, font_size)
+    total_height = max(len(lines), 1) * stable_line_height * line_spacing
+    return max(max(line_widths, default=0.0), 1.0), max(total_height, stable_line_height)
 
 
 # Node sizing constants
@@ -410,9 +503,10 @@ def compute_node_size(
     label: str,
     font_family: str = "",
     font_size: float = 8.5,
-    padding: Tuple[float, float] = (8.0, 5.0),
+    padding: Tuple[float, float] = (14.0, 8.0),
     shape: str = "roundrect",
     font_weight: str = "regular",
+    font_style: str = "normal",
     overflow_policy: str = "shrink_text",
     min_font_size: float = 5.0,
     label_format: str = "plain",
@@ -427,12 +521,14 @@ def compute_node_size(
         Preferred font family.
     font_size : float, default=8.5
         Font size in points.
-    padding : tuple[float, float], default=(8.0, 5.0)
+    padding : tuple[float, float], default=(14.0, 8.0)
         Horizontal and vertical padding in points.
     shape : str, default="roundrect"
         Node shape identifier.
     font_weight : str, default="regular"
         Font weight used for plain-text labels.
+    font_style : str, default="normal"
+        Font style used for plain-text labels and the base style for rich text.
     overflow_policy : str, default="shrink_text"
         Overflow policy for oversized labels.
     min_font_size : float, default=5.0
@@ -452,6 +548,7 @@ def compute_node_size(
         padding,
         shape,
         font_weight,
+        font_style,
         overflow_policy,
         min_font_size,
         label_format,
@@ -466,6 +563,7 @@ def _compute_node_size_cached(
     padding: Tuple[float, float],
     shape: str,
     font_weight: str,
+    font_style: str,
     overflow_policy: str,
     min_font_size: float,
     label_format: str,
@@ -486,6 +584,8 @@ def _compute_node_size_cached(
         Node shape identifier.
     font_weight : str
         Font weight used for plain-text labels.
+    font_style : str
+        Font style used for plain-text labels and the base style for rich text.
     overflow_policy : str
         Overflow policy for oversized labels.
     min_font_size : float
@@ -503,8 +603,20 @@ def _compute_node_size_cached(
     def measure_label(current_font_size: float) -> Tuple[float, float]:
         """Measure the label using the requested formatting mode."""
         if label_format == "rich":
-            return measure_rich_text(label, font_family, current_font_size)
-        return measure_text(label, font_family, current_font_size, font_weight)
+            return measure_rich_text(
+                label,
+                font_family,
+                current_font_size,
+                font_weight=font_weight,
+                font_style=font_style,
+            )
+        return measure_text(
+            label,
+            font_family,
+            current_font_size,
+            font_weight,
+            font_style,
+        )
 
     if overflow_policy == "shrink_text":
         text_w, text_h = measure_label(font_size)
@@ -522,7 +634,9 @@ def _compute_node_size_cached(
 
     if shape == "diamond":
         max_dim = max(w, h) * 1.42
-        w = max_dim * 1.4
+        # Diamonds lose usable interior width at the left/right corners, so
+        # keep a slightly wider final floor than rectangular nodes.
+        w = max(max_dim * 1.4, MIN_NODE_WIDTH * 2.1)
         h = max_dim
     elif shape == "triangle":
         # Graphviz triangles are wide and flat, so reserve enough width for
@@ -545,7 +659,9 @@ def _compute_node_size_cached(
         # padding) and up for long labels (where the text drives the width).
         # The factor blends from 1.15 (short text, w < 40) to 1.35 (long text, w > 80).
         factor = 1.15 + 0.20 * min(max((w - 40.0) / 40.0, 0.0), 1.0)
-        w = w * factor
+        # Ellipses also lose horizontal interior near the curved shoulders, so
+        # enforce a small extra width floor after the Graphviz-style scaling.
+        w = max(w * factor, MIN_NODE_WIDTH * 1.3)
     elif shape == "hexagon":
         # Graphviz hexagons are wider than their text box to keep the side
         # facets from crowding labels.
@@ -795,7 +911,7 @@ def _maybe_gpu_longest_path_layering(
     if num_edges > num_nodes * 10:
         if verbose:
             print(
-                f"[dagua]   GPU layering: skipped (E/N={num_edges/max(num_nodes,1):.0f}, "
+                f"[dagua]   GPU layering: skipped (E/N={num_edges / max(num_nodes, 1):.0f}, "
                 f"CSR path faster for deep graphs)",
                 flush=True,
             )

@@ -54,7 +54,7 @@ def _compute_self_loop_curve(
         Closed teardrop loop placed on the outward-facing side for the
         requested layout direction.
     """
-    loop_r = max(sw, sh) * 0.6
+    loop_r = max(sw, sh) * 1.4
 
     if direction == "BT":
         anchor_y = sy - sh / 2
