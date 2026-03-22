@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 import torch
 
@@ -115,12 +115,40 @@ class SGD2(CompetitorBase):
 
     name = "sgd2"
     max_nodes = 50_000
+    variant_param_names = frozenset({"eps", "t_max"})
 
     def layout(
         self,
         graph: DaguaGraph,
         timeout: float = 300.0,
         seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run ``s_gd2`` and convert its output to a CPU tensor.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Input graph to lay out.
+        timeout : float, optional
+            Unused adapter timeout in seconds. Included for interface
+            compatibility with the benchmark harness.
+        seed : int | None, default=None
+            Random seed forwarded to ``s_gd2`` when explicitly requested.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result with positions shaped ``[N, 2]`` on CPU, or an error
+            payload if the third-party engine fails.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
     ) -> CompetitorResult:
         """Run ``s_gd2`` and convert its output to a CPU tensor.
 
@@ -160,9 +188,11 @@ class SGD2(CompetitorBase):
                 elapsed = time.perf_counter() - start
                 return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
 
-            layout_kwargs = {}
+            layout_kwargs: dict[str, Any] = {}
             if seed is not None:
                 layout_kwargs["random_seed"] = seed
+            if variant_params is not None:
+                layout_kwargs.update(dict(variant_params))
             coordinates = s_gd2.layout(sources.tolist(), targets.tolist(), **layout_kwargs)
             pos = torch.tensor(coordinates, dtype=torch.float32) * 100.0
 
