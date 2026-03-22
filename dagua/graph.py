@@ -417,6 +417,7 @@ class DaguaGraph:
                 padding,
                 shape=style.shape,
                 font_weight=style.font_weight,
+                font_style=style.font_style,
                 overflow_policy=style.overflow_policy,
                 min_font_size=style.min_font_size,
                 label_format=style.label_format,
