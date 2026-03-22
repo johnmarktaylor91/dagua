@@ -503,7 +503,7 @@ def compute_node_size(
     label: str,
     font_family: str = "",
     font_size: float = 8.5,
-    padding: Tuple[float, float] = (14.0, 8.0),
+    padding: Tuple[float, float] = (11.0, 9.0),
     shape: str = "roundrect",
     font_weight: str = "regular",
     font_style: str = "normal",
