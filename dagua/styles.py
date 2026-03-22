@@ -737,11 +737,11 @@ GRAPHVIZ_STRICT_THEME = Theme(
     edge_styles={
         "default": EdgeStyle(
             color="#000000",
-            width=1.2,  # slightly above 1.0 for AA compensation
+            width=1.0,  # Graphviz default penwidth
             arrow="normal",
             arrow_fill="filled",
-            arrow_length=18.0,  # calibrated to Graphviz arrowsize=1.0
-            arrow_width=12.0,  # Graphviz arrow proportions (~67% of length)
+            arrow_length=10.0,  # Graphviz arrowsize=1.0 default
+            arrow_width=7.0,  # slim triangle like Graphviz
             arrow_scale=None,
             arrow_node_fraction=0.0,  # fixed size, not node-relative
             arrow_width_ratio=0.7,
