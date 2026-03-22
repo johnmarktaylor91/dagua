@@ -14,8 +14,11 @@ import gzip
 import io
 import xml.etree.ElementTree as ET
 from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 import numpy as np
 
@@ -46,6 +49,7 @@ from dagua.styles import (
 )
 from dagua.utils import (
     collect_cluster_leaves,
+    measure_external_label,
     measure_text,
 )
 
@@ -115,6 +119,86 @@ def _save_figure(fig, output: str, bg: str, dpi: int, format: Optional[str] = No
         clean_kwargs = {k: v for k, v in save_kwargs.items() if v is not None}
         target_format = {"jpg": "JPEG", "jpeg": "JPEG", "tif": "TIFF"}.get(fmt, fmt.upper())
         img.save(output, format=target_format, **clean_kwargs)
+
+
+def _expand_bounds_for_external_labels(
+    graph: Any,
+    pos: np.ndarray,
+    sizes: np.ndarray,
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+) -> Tuple[float, float, float, float]:
+    """Expand render bounds to keep external node labels visible.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing node styles.
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]``.
+    sizes : numpy.ndarray
+        Node sizes with shape ``[N, 2]``.
+    x_min : float
+        Current minimum x bound.
+    x_max : float
+        Current maximum x bound.
+    y_min : float
+        Current minimum y bound.
+    y_max : float
+        Current maximum y bound.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Expanded ``(x_min, x_max, y_min, y_max)`` bounds.
+    """
+    for i in range(graph.num_nodes):
+        style = graph.get_style_for_node(i)
+        external_label = str(getattr(style, "external_label", ""))
+        if external_label.strip() == "":
+            continue
+
+        label_width, label_height = measure_external_label(
+            external_label,
+            font_family=style.font_family_list[0],
+            font_size=float(style.external_label_font_size),
+            font_weight=style.font_weight,
+            font_style=style.font_style,
+        )
+        if label_width <= 0.0 and label_height <= 0.0:
+            continue
+
+        cx = float(pos[i, 0])
+        cy = float(pos[i, 1])
+        half_width = float(sizes[i, 0]) / 2.0
+        half_height = float(sizes[i, 1]) / 2.0
+        offset = float(style.external_label_offset)
+        position = _normalize_external_label_position(style.external_label_position)
+
+        if position == "top":
+            anchor_y = cy + half_height + offset
+            x_min = min(x_min, cx - label_width / 2.0)
+            x_max = max(x_max, cx + label_width / 2.0)
+            y_max = max(y_max, anchor_y + label_height)
+        elif position == "left":
+            anchor_x = cx - half_width - offset
+            x_min = min(x_min, anchor_x - label_width)
+            y_min = min(y_min, cy - label_height / 2.0)
+            y_max = max(y_max, cy + label_height / 2.0)
+        elif position == "right":
+            anchor_x = cx + half_width + offset
+            x_max = max(x_max, anchor_x + label_width)
+            y_min = min(y_min, cy - label_height / 2.0)
+            y_max = max(y_max, cy + label_height / 2.0)
+        else:
+            anchor_y = cy - half_height - offset
+            x_min = min(x_min, cx - label_width / 2.0)
+            x_max = max(x_max, cx + label_width / 2.0)
+            y_min = min(y_min, anchor_y - label_height)
+
+    return x_min, x_max, y_min, y_max
 
 
 def render(
@@ -214,6 +298,15 @@ def render(
     x_max = (pos[:, 0] + sizes[:, 0] / 2).max() + margin
     y_min = (pos[:, 1] - sizes[:, 1] / 2).min() - margin
     y_max = (pos[:, 1] + sizes[:, 1] / 2).max() + margin
+    x_min, x_max, y_min, y_max = _expand_bounds_for_external_labels(
+        graph,
+        pos,
+        sizes,
+        float(x_min),
+        float(x_max),
+        float(y_min),
+        float(y_max),
+    )
 
     # Expand figure bounds for cluster headers and minimum width.
     # Cluster rendering adds header space above y_max and may expand x_min/x_max
@@ -304,6 +397,9 @@ def render(
 
     # --- Layer 3: Node labels ---
     _draw_node_labels(ax, graph, pos, sizes, clip_patches, svg_hover_map=svg_hover_map)
+
+    # --- Layer 3.5: External node labels ---
+    _draw_external_labels(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
 
     # --- Layer 4: Edge labels ---
     _draw_edge_labels(
@@ -1097,6 +1193,277 @@ def _scaled_node_style(style: Any, display_scale: float) -> Any:
     )
 
 
+def _normalize_border_position(border_position: str) -> str:
+    """Return a supported node border-position mode.
+
+    Parameters
+    ----------
+    border_position : str
+        Requested border placement mode.
+
+    Returns
+    -------
+    str
+        One of ``"center"``, ``"inside"``, or ``"outside"``. Unsupported
+        values fall back to ``"center"`` to preserve rendering.
+    """
+    if border_position in {"center", "inside", "outside"}:
+        return border_position
+    return "center"
+
+
+def _normalize_external_label_position(position: str) -> str:
+    """Return a supported external-label anchor position.
+
+    Parameters
+    ----------
+    position : str
+        Requested label side.
+
+    Returns
+    -------
+    str
+        One of ``"top"``, ``"bottom"``, ``"left"``, or ``"right"``. Invalid
+        values fall back to ``"bottom"``.
+    """
+    if position in {"top", "bottom", "left", "right"}:
+        return position
+    return "bottom"
+
+
+def _expanded_shape_spec(spec: ShapeSpec, delta: float) -> ShapeSpec:
+    """Return a shape specification expanded equally on all sides.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Base node-shape geometry in data coordinates.
+    delta : float
+        Outset distance in data units.
+
+    Returns
+    -------
+    ShapeSpec
+        Expanded shape geometry. Non-positive ``delta`` returns ``spec``
+        unchanged.
+    """
+    if delta <= 0.0:
+        return spec
+    return ShapeSpec(
+        center_x=spec.center_x,
+        center_y=spec.center_y,
+        width=spec.width + 2.0 * delta,
+        height=spec.height + 2.0 * delta,
+        shape=spec.shape,
+        corner_radius=max(spec.corner_radius + delta, 0.0),
+    )
+
+
+def _node_fill_path(
+    shape_spec: ShapeSpec,
+    outer_path: Any,
+    border_width: float,
+    border_position: str,
+) -> Any:
+    """Return the node fill path for a requested border position.
+
+    Parameters
+    ----------
+    shape_spec : ShapeSpec
+        Base node-shape geometry.
+    outer_path : Any
+        Outer node-shape path.
+    border_width : float
+        Border width in data units.
+    border_position : str
+        Border placement mode.
+
+    Returns
+    -------
+    Any
+        Fill path in data coordinates.
+    """
+    if border_width <= 0.0:
+        return outer_path
+    if border_position == "inside":
+        return inset_shape_path(shape_spec, border_width)
+    if border_position == "center":
+        return outer_path
+    return outer_path
+
+
+def _solid_border_ring_paths(
+    shape_spec: ShapeSpec,
+    outer_path: Any,
+    border_width: float,
+    border_position: str,
+) -> Tuple[Any, Any]:
+    """Return the outer and inner paths for a solid node border ring.
+
+    Parameters
+    ----------
+    shape_spec : ShapeSpec
+        Base node-shape geometry.
+    outer_path : Any
+        Outer node-shape path.
+    border_width : float
+        Border width in data units.
+    border_position : str
+        Border placement mode.
+
+    Returns
+    -------
+    tuple[Any, Any]
+        Outer and inner border paths for ``annular_path`` construction.
+    """
+    if border_position == "inside":
+        return outer_path, inset_shape_path(shape_spec, border_width)
+    if border_position == "outside":
+        expanded = build_shape_path(_expanded_shape_spec(shape_spec, border_width))
+        return expanded, outer_path
+    expanded = build_shape_path(_expanded_shape_spec(shape_spec, border_width / 2.0))
+    inner = inset_shape_path(shape_spec, border_width / 2.0)
+    return expanded, inner
+
+
+def _node_border_centerline_path(
+    shape_spec: ShapeSpec,
+    outer_path: Any,
+    border_width: float,
+    border_position: str,
+) -> Any:
+    """Return the border centerline path for dashed or stroked node borders.
+
+    Parameters
+    ----------
+    shape_spec : ShapeSpec
+        Base node-shape geometry.
+    outer_path : Any
+        Outer node-shape path.
+    border_width : float
+        Border width in data units.
+    border_position : str
+        Border placement mode.
+
+    Returns
+    -------
+    Any
+        Border centerline path in data coordinates.
+    """
+    if border_position == "inside":
+        return inset_shape_path(shape_spec, border_width / 2.0)
+    if border_position == "outside":
+        return build_shape_path(_expanded_shape_spec(shape_spec, border_width / 2.0))
+    return outer_path
+
+
+@lru_cache(maxsize=128)
+def _load_node_image_rgba(image_ref: str) -> Optional[np.ndarray]:
+    """Load a node image into a normalized RGBA array.
+
+    Parameters
+    ----------
+    image_ref : str
+        Local filesystem path or URL.
+
+    Returns
+    -------
+    numpy.ndarray | None
+        RGBA image data normalized to ``[0, 1]``, or ``None`` when the image
+        cannot be loaded. The renderer falls back to the node fill in that case.
+    """
+    from PIL import Image
+
+    try:
+        parsed = urlparse(image_ref)
+        if parsed.scheme in {"http", "https"}:
+            with urlopen(image_ref, timeout=5.0) as response:
+                data = response.read()
+            with Image.open(io.BytesIO(data)) as image:
+                rgba = image.convert("RGBA")
+                return np.asarray(rgba, dtype=np.float32) / 255.0
+
+        with Image.open(Path(image_ref).expanduser()) as image:
+            rgba = image.convert("RGBA")
+            return np.asarray(rgba, dtype=np.float32) / 255.0
+    except Exception:
+        return None
+
+
+def _draw_image_node(
+    ax: Any,
+    shape_spec: ShapeSpec,
+    style: Any,
+    clip_patch: Any,
+) -> None:
+    """Render one clipped image layer inside a node shape.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    shape_spec : ShapeSpec
+        Node geometry in data coordinates.
+    style : Any
+        Node style exposing image fields.
+    clip_patch : Any
+        Clip patch matching the node shape boundary.
+    """
+    image_ref = str(getattr(style, "image", "")).strip()
+    if image_ref == "":
+        return
+
+    image_rgba = _load_node_image_rgba(image_ref)
+    if image_rgba is None:
+        return
+
+    image_height, image_width = image_rgba.shape[:2]
+    if image_height <= 0 or image_width <= 0:
+        return
+
+    cx = float(shape_spec.center_x)
+    cy = float(shape_spec.center_y)
+    width = float(shape_spec.width)
+    height = float(shape_spec.height)
+
+    fit_mode = getattr(style, "image_fit", "contain")
+    if fit_mode == "stretch":
+        display_width = width
+        display_height = height
+    else:
+        image_aspect = float(image_width) / max(float(image_height), 1.0)
+        node_aspect = width / max(height, 1e-9)
+        if fit_mode == "cover":
+            if image_aspect > node_aspect:
+                display_height = height
+                display_width = display_height * image_aspect
+            else:
+                display_width = width
+                display_height = display_width / max(image_aspect, 1e-9)
+        else:
+            if image_aspect > node_aspect:
+                display_width = width
+                display_height = display_width / max(image_aspect, 1e-9)
+            else:
+                display_height = height
+                display_width = display_height * image_aspect
+
+    image_artist = ax.imshow(
+        image_rgba,
+        extent=[
+            cx - display_width / 2.0,
+            cx + display_width / 2.0,
+            cy - display_height / 2.0,
+            cy + display_height / 2.0,
+        ],
+        aspect="auto",
+        alpha=float(getattr(style, "image_opacity", 1.0)),
+        zorder=2.025,
+        interpolation="bilinear",
+    )
+    image_artist.set_clip_path(clip_patch)
+
+
 def _node_border_pattern(style: Any, display_scale: float) -> Any:
     """Resolve a node border dash pattern in data units.
 
@@ -1232,6 +1599,7 @@ def _draw_nodes(
         style = graph.get_style_for_node(i)
         scaled_style = _scaled_node_style(style, display_scale)
         border_width = clamp_border_width(float(style.stroke_width) * display_scale, w, h)
+        border_position = _normalize_border_position(getattr(style, "border_position", "center"))
         shape_spec = ShapeSpec(
             center_x=x,
             center_y=y,
@@ -1241,7 +1609,7 @@ def _draw_nodes(
             corner_radius=float(scaled_style.corner_radius),
         )
         outer_path = build_shape_path(shape_spec)
-        fill_path = inset_shape_path(shape_spec, border_width) if border_width > 0.0 else outer_path
+        fill_path = _node_fill_path(shape_spec, outer_path, border_width, border_position)
 
         if style.shadow:
             _draw_shadow(ax, x, y, w, h, scaled_style)
@@ -1249,10 +1617,18 @@ def _draw_nodes(
         facecolor = to_rgba(style.fill, style.opacity)
         edgecolor = to_rgba(style.stroke, style.opacity * style.border_opacity)
         clip_patch = make_clip_proxy(fill_path, ax.transData)
+        image_clip_patch = make_clip_proxy(outer_path, ax.transData)
         if _requires_custom_node_rendering(style):
             _draw_node_fill(ax, fill_path, clip_patch, x, y, w, h, style, facecolor)
+            _draw_image_node(ax, shape_spec, style, image_clip_patch)
             if border_width > 0.0 and edgecolor[-1] > 0.0:
-                _draw_node_border_path(ax, outer_path, style, edgecolor)
+                border_path = _node_border_centerline_path(
+                    shape_spec,
+                    outer_path,
+                    border_width,
+                    border_position,
+                )
+                _draw_node_border_path(ax, border_path, style, edgecolor)
                 if int(style.border_count) >= 2:
                     inner_path = inset_shape_path(
                         shape_spec,
@@ -1266,12 +1642,25 @@ def _draw_nodes(
             elif style.opacity > 0.0:
                 _draw_gradient_fill(ax, clip_patch, x, y, w, h, style)
 
+            _draw_image_node(ax, shape_spec, style, image_clip_patch)
+
             if border_width > 0.0 and edgecolor[-1] > 0.0:
                 if style.stroke_dash == "solid" and style.stroke_dash_pattern is None:
-                    border_paths.append(annular_path(outer_path, fill_path))
+                    border_outer_path, border_inner_path = _solid_border_ring_paths(
+                        shape_spec,
+                        outer_path,
+                        border_width,
+                        border_position,
+                    )
+                    border_paths.append(annular_path(border_outer_path, border_inner_path))
                     border_colors.append(edgecolor)
                 else:
-                    centerline_path = inset_shape_path(shape_spec, border_width / 2.0)
+                    centerline_path = _node_border_centerline_path(
+                        shape_spec,
+                        outer_path,
+                        border_width,
+                        border_position,
+                    )
                     dash_pattern = _node_border_pattern(style, display_scale)
                     ribbons = dash_ribbon_paths(centerline_path, dash_pattern, border_width)
                     border_paths.extend(ribbons)
@@ -2018,6 +2407,7 @@ def _draw_node_labels(
                 alpha=1.0,
                 ha=style.text_align,
                 va=style.text_valign,
+                rotation=float(style.text_rotation),
                 rich=is_rich,
                 line_spacing=1.2,
                 secondary_scale=secondary,
@@ -2041,6 +2431,87 @@ def _draw_node_labels(
         )
 
     render_text(ax, specs, display_scale, svg_hover_map)
+
+
+def _draw_external_labels(
+    ax: Any,
+    graph: Any,
+    pos: np.ndarray,
+    sizes: np.ndarray,
+    svg_hover_map: Optional[Dict[str, str]] = None,
+) -> None:
+    """Draw render-only node labels anchored outside node boundaries.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    graph : Any
+        Graph exposing Dagua's node-style API.
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]``.
+    sizes : numpy.ndarray
+        Node sizes with shape ``[N, 2]``.
+    svg_hover_map : dict[str, str], optional
+        SVG hover text accumulator.
+    """
+    display_scale = _compute_display_scale(ax)
+    specs: List[DaguaText] = []
+
+    for i in range(graph.num_nodes):
+        style = graph.get_style_for_node(i)
+        external_label = str(getattr(style, "external_label", ""))
+        if external_label.strip() == "":
+            continue
+
+        cx = float(pos[i, 0])
+        cy = float(pos[i, 1])
+        half_width = float(sizes[i, 0]) / 2.0
+        half_height = float(sizes[i, 1]) / 2.0
+        offset = float(style.external_label_offset) * display_scale
+        position = _normalize_external_label_position(style.external_label_position)
+
+        if position == "top":
+            text_x = cx
+            text_y = cy + half_height + offset
+            ha = "center"
+            va = "bottom"
+        elif position == "left":
+            text_x = cx - half_width - offset
+            text_y = cy
+            ha = "right"
+            va = "center"
+        elif position == "right":
+            text_x = cx + half_width + offset
+            text_y = cy
+            ha = "left"
+            va = "center"
+        else:
+            text_x = cx
+            text_y = cy - half_height - offset
+            ha = "center"
+            va = "top"
+
+        specs.append(
+            DaguaText(
+                x=text_x,
+                y=text_y,
+                text=external_label,
+                font_size=float(style.external_label_font_size),
+                font_family=style.font_family_list[0],
+                font_weight=style.font_weight,
+                font_style=style.font_style,
+                font_color=style.external_label_font_color or style.font_color,
+                ha=ha,
+                va=va,
+                clip_on=False,
+                zorder=3.05,
+                gid=f"dagua-node-external-label-{i}",
+            )
+        )
+
+    if specs:
+        render_text(ax, specs, display_scale, svg_hover_map)
 
 
 def _draw_edge_marker(
