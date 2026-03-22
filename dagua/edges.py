@@ -54,14 +54,16 @@ def _compute_self_loop_curve(
         Closed teardrop loop placed on the outward-facing side for the
         requested layout direction.
     """
-    loop_r = max(sw, sh) * 1.4
+    loop_size = max(sw, sh)
+    loop_width = loop_size * 0.9
+    loop_height = loop_size * 2.0
 
     if direction == "BT":
         anchor_y = sy - sh / 2
         return BezierCurve(
             p0=(sx, anchor_y),
-            cp1=(sx - loop_r, anchor_y - loop_r),
-            cp2=(sx + loop_r, anchor_y - loop_r),
+            cp1=(sx - loop_width, anchor_y - loop_height),
+            cp2=(sx + loop_width, anchor_y - loop_height),
             p1=(sx, anchor_y),
         )
 
@@ -69,8 +71,8 @@ def _compute_self_loop_curve(
         anchor_x = sx - sw / 2
         return BezierCurve(
             p0=(anchor_x, sy),
-            cp1=(anchor_x - loop_r, sy + loop_r),
-            cp2=(anchor_x - loop_r, sy - loop_r),
+            cp1=(anchor_x - loop_height, sy + loop_width),
+            cp2=(anchor_x - loop_height, sy - loop_width),
             p1=(anchor_x, sy),
         )
 
@@ -78,16 +80,16 @@ def _compute_self_loop_curve(
         anchor_x = sx + sw / 2
         return BezierCurve(
             p0=(anchor_x, sy),
-            cp1=(anchor_x + loop_r, sy + loop_r),
-            cp2=(anchor_x + loop_r, sy - loop_r),
+            cp1=(anchor_x + loop_height, sy + loop_width),
+            cp2=(anchor_x + loop_height, sy - loop_width),
             p1=(anchor_x, sy),
         )
 
     anchor_y = sy + sh / 2
     return BezierCurve(
         p0=(sx, anchor_y),
-        cp1=(sx - loop_r, anchor_y + loop_r),
-        cp2=(sx + loop_r, anchor_y + loop_r),
+        cp1=(sx - loop_width, anchor_y + loop_height),
+        cp2=(sx + loop_width, anchor_y + loop_height),
         p1=(sx, anchor_y),
     )
 
