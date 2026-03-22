@@ -1150,7 +1150,7 @@ class DaguaEdgeCollection:
                 facecolors=filled_colors,
                 edgecolors="none",
                 linewidths=0.0,
-                zorder=2,
+                zorder=2.1,  # above node fills (2.0) and borders (2.05)
             )
             ax.add_collection(filled)
             artists.append(filled)
@@ -1163,7 +1163,7 @@ class DaguaEdgeCollection:
                 linewidths=stroked_widths,
                 capstyle="round",
                 joinstyle="round",
-                zorder=2,
+                zorder=2.1,  # above node fills (2.0) and borders (2.05)
             )
             ax.add_collection(stroked)
             artists.append(stroked)
