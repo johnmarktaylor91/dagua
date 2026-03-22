@@ -5,6 +5,43 @@ Typography: Helvetica/Arial sans-serif per Nature/Science figure guidelines.
 Aesthetics: publication-quality defaults — muted fills, strong borders, quiet edges.
 """
 
+# Unit system notes
+# -----------------
+# Dagua keeps layout-facing node and edge geometry in data coordinates, but many
+# cosmetic style fields are authored in display-space points so they stay
+# visually stable across zoom levels and figure sizes.
+#
+# Point-based fields (converted by the renderer when geometry is constructed):
+# - NodeStyle.stroke_width, NodeStyle.padding, NodeStyle.corner_radius
+# - NodeStyle.font_size, NodeStyle.text_outline_width, NodeStyle.shadow_offset
+# - EdgeStyle.width, EdgeStyle.arrow_length, EdgeStyle.arrow_width
+# - EdgeStyle.label_font_size, EdgeStyle.label_offset
+# - ClusterStyle.stroke_width, ClusterStyle.padding, ClusterStyle.corner_radius
+# - ClusterStyle.font_size, ClusterStyle.label_offset
+# - GraphStyle margin/title and label typography fields
+#
+# Data-coordinate fields (used directly without point conversion):
+# - Graph/node positions and computed node_sizes tensors
+# - Edge routing control points and cluster bounds
+# - Explicit scene geometry passed to the renderer
+#
+# ``dagua.render.mpl._compute_display_scale`` converts point-authored geometry
+# into data units at draw time. Matplotlib-native properties such as
+# ``linewidth`` and ``fontsize`` still receive point values directly because the
+# backend interprets those in display space on its own.
+
+# TODO: Add support for pixel-unit overrides (e.g., "2pt") for users who want
+# fixed-size elements regardless of zoom/data scale. This would require a
+# unit-aware value type like Union[float, str] where strings like "2pt" are
+# parsed as display-point values and floats remain data-coordinate values.
+#
+# TODO: Expose additional text rendering capabilities as style fields:
+# - NodeStyle.text_background (background color behind label, separate from node fill)
+# - NodeStyle.text_underline, text_strikethrough (text decorations)
+# - EdgeStyle.label_outline (outline on edge labels for readability)
+# - ClusterStyle.label_outline (outline on cluster labels)
+# These capabilities exist in dagua/render/text/ but are not yet exposed in styles.
+
 from __future__ import annotations
 
 import copy
@@ -194,7 +231,7 @@ class NodeStyle:
     text_outline: bool = False
     text_outline_color: str = "#FFFFFF"
     text_outline_width: float = 2.0
-    padding: Tuple[float, float] = (10.0, 6.0)  # horizontal, vertical
+    padding: Tuple[float, float] = (14.0, 8.0)  # horizontal, vertical
     corner_radius: float = 6.0
     opacity: float = 1.0
     gradient: str = "none"  # none, linear, radial
@@ -203,7 +240,7 @@ class NodeStyle:
     base_color: str = PALETTE["sky"]  # Wong palette color
     # New fields (Part 2)
     font_weight: str = "regular"  # Layout-affecting: changes text width
-    font_style: str = "normal"  # normal, italic — render-only
+    font_style: str = "normal"  # Layout-affecting: changes measured text width
     shadow: bool = False  # render-only decoration
     shadow_offset: Tuple[float, float] = (1.5, -1.5)  # render-only
     shadow_color: str = "#00000020"  # render-only
@@ -275,7 +312,7 @@ class ClusterStyle:
     stroke_width: float = 0.7
     stroke_dash: str = "solid"
     corner_radius: float = 8.0
-    padding: float = 25.0
+    padding: float = 45.0
     label_position: str = "top-left"  # top-left, top-center, top-right
     font_size: float = 9.5
     font_weight: str = "bold"
@@ -284,8 +321,8 @@ class ClusterStyle:
     # New fields (Part 2)
     font_family: str = ""  # empty = use FONT_FAMILY default, render-only
     label_offset: Tuple[float, float] = (
-        8.0,
-        20.0,
+        10.0,
+        12.0,
     )  # render-only (y-offset prevents nested label overlap)
     depth_fill_step: float = 0.03  # HSL lightness step per depth level
     depth_stroke_step: float = 0.05  # HSL lightness step per depth level

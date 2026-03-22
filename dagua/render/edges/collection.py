@@ -56,6 +56,54 @@ LABEL_CLEARANCE_WIDTH_RATIO = 1.6
 LABEL_CLEARANCE_FLOOR = 4.0
 
 
+def _points_to_data_units(ax: Any, points: float, axis: str) -> float:
+    """Convert a display-point distance into data units.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    points : float
+        Distance in typographic points.
+    axis : str
+        Axis selector, either ``"x"`` or ``"y"``.
+
+    Returns
+    -------
+    float
+        Distance in data coordinates.
+    """
+    pixels = points * ax.figure.dpi / 72.0
+    transformed = ax.transData.transform([(0.0, 0.0), (1.0, 1.0)])
+    scale = (
+        abs(transformed[1][0] - transformed[0][0])
+        if axis == "x"
+        else abs(transformed[1][1] - transformed[0][1])
+    )
+    if scale <= 1e-9:
+        return 0.0
+    return pixels / scale
+
+
+def _compute_display_scale(ax: Any) -> float:
+    """Compute the point-to-data conversion factor for edge-label geometry.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes with established limits and aspect ratio.
+
+    Returns
+    -------
+    float
+        Multiplicative factor such that ``data_units = points * scale``.
+    """
+    scale_x = _points_to_data_units(ax, 1.0, "x")
+    scale_y = _points_to_data_units(ax, 1.0, "y")
+    scale = min(scale_x, scale_y)
+    return scale if scale > 1e-9 else 1.0
+
+
 @dataclass
 class DaguaEdge:
     """Edge geometry and styling for the custom renderer.
@@ -919,7 +967,12 @@ class DaguaEdgeCollection:
             for body_curve, head_result, tail_result in [_trimmed_body_curve(edge, edge.curve)]
         ]
 
-    def render(self, ax: Any, label_background_alpha: float = 0.85) -> List[Any]:
+    def render(
+        self,
+        ax: Any,
+        label_background_alpha: float = 0.85,
+        svg_hover_map: Optional[Dict[str, str]] = None,
+    ) -> List[Any]:
         """Render bodies, heads, and labels in the required pass order.
 
         Parameters
@@ -928,6 +981,8 @@ class DaguaEdgeCollection:
             Matplotlib axes.
         label_background_alpha : float, default=0.85
             Label background opacity.
+        svg_hover_map : dict[str, str] | None, default=None
+            Optional SVG hover-text accumulator.
 
         Returns
         -------
@@ -937,7 +992,14 @@ class DaguaEdgeCollection:
         artists: List[Any] = []
         artists.extend(self.render_bodies(ax))
         artists.extend(self.render_heads(ax))
-        artists.extend(self.render_labels(ax, label_background_alpha=label_background_alpha))
+        artists.extend(
+            self.render_labels(
+                ax,
+                display_scale=_compute_display_scale(ax),
+                label_background_alpha=label_background_alpha,
+                svg_hover_map=svg_hover_map,
+            )
+        )
         return artists
 
     def render_bodies(self, ax: Any) -> List[Any]:
@@ -1133,47 +1195,74 @@ class DaguaEdgeCollection:
             )
         return placements
 
-    def render_labels(self, ax: Any, label_background_alpha: float = 0.85) -> List[Any]:
-        """Render labels on top of bodies and heads.
+    def render_labels(
+        self,
+        ax: Any,
+        display_scale: float,
+        label_background_alpha: float = 0.85,
+        svg_hover_map: Optional[Dict[str, str]] = None,
+    ) -> List[Any]:
+        """Render labels on top of bodies and heads with data-coordinate paths.
 
         Parameters
         ----------
         ax : Any
             Matplotlib axes.
+        display_scale : float
+            Points-to-data conversion factor.
         label_background_alpha : float, default=0.85
             Label background opacity.
+        svg_hover_map : dict[str, str] | None, default=None
+            Optional SVG hover-text accumulator.
 
         Returns
         -------
         list[Any]
-            Added text artists.
+            Added patch artists.
         """
-        artists: List[Any] = []
-        for prepared, placement in zip(self.prepared_edges, self.label_placements()):
+        from dagua.render.text import DaguaText, render_text
+
+        specs: List[DaguaText] = []
+        for edge_index, (prepared, placement) in enumerate(
+            zip(self.prepared_edges, self.label_placements())
+        ):
             if placement is None or not prepared.edge.label:
                 continue
             edge = prepared.edge
-            artist = ax.text(
-                placement.x,
-                placement.y,
-                edge.label,
-                ha="center",
-                va="center",
-                rotation=placement.angle_degrees,
-                fontsize=edge.label_font_size,
-                fontfamily=edge.label_font_family or None,
-                fontweight=edge.label_font_weight,
-                color=edge.label_font_color,
-                bbox={
-                    "boxstyle": "round,pad=0.15",
-                    "facecolor": edge.label_background,
-                    "edgecolor": "none",
-                    "alpha": label_background_alpha,
-                },
-                zorder=4,
+            label_text = edge.label
+            assert label_text is not None
+            specs.append(
+                DaguaText(
+                    x=placement.x,
+                    y=placement.y,
+                    text=label_text,
+                    font_size=edge.label_font_size,
+                    font_family=edge.label_font_family,
+                    font_weight=edge.label_font_weight,
+                    font_color=edge.label_font_color,
+                    ha="center",
+                    va="center",
+                    rotation=placement.angle_degrees if edge.label_rotate else 0.0,
+                    background=edge.label_background,
+                    background_alpha=label_background_alpha,
+                    background_padding=(
+                        edge.label_font_size * 0.15,
+                        edge.label_font_size * 0.15,
+                    ),
+                    background_corner_radius=edge.label_font_size * 0.15,
+                    clip_on=False,
+                    zorder=4.0,
+                    gid=f"dagua-edge-label-{edge_index}",
+                )
             )
-            artists.append(artist)
-        return artists
+            if svg_hover_map is not None:
+                hover_text = label_text
+                svg_hover_map.setdefault(f"dagua-edge-label-{edge_index}", hover_text)
+                svg_hover_map.setdefault(
+                    f"dagua-edge-label-{edge_index}-background",
+                    hover_text,
+                )
+        return render_text(ax, specs, display_scale, svg_hover_map)
 
 
 def render_edges(
