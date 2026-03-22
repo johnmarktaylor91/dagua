@@ -212,6 +212,46 @@ def measure_text(
         return measure_text_fallback(text, font_size, font_weight, font_style)
 
 
+def measure_external_label(
+    text: str,
+    font_family: str = "",
+    font_size: float = 8.0,
+    font_weight: str = "regular",
+    font_style: str = "normal",
+) -> Tuple[float, float]:
+    """Measure a decorative external node label in points.
+
+    Parameters
+    ----------
+    text : str
+        External label text rendered outside the node boundary.
+    font_family : str, default=""
+        Preferred font family. Empty strings use Dagua's resolved default font.
+    font_size : float, default=8.0
+        Font size in points.
+    font_weight : str, default="regular"
+        Font weight used for measurement.
+    font_style : str, default="normal"
+        Font style used for measurement.
+
+    Returns
+    -------
+    tuple[float, float]
+        External label width and height in points. Empty labels return
+        ``(0.0, 0.0)`` so render bounds can ignore them without affecting the
+        node's layout-driven size.
+    """
+    if text.strip() == "":
+        return 0.0, 0.0
+    return measure_text(
+        text,
+        font_family=font_family,
+        font_size=font_size,
+        font_weight=font_weight,
+        font_style=font_style,
+    )
+
+
 def _estimated_max_chars(text_max_width: Optional[float], font_size: float) -> Optional[int]:
     """Estimate how many monospace-ish characters fit within a width budget.
 

@@ -230,6 +230,7 @@ class NodeStyle:
     font_color: str = NEAR_BLACK
     text_align: str = "center"  # left, center, right
     text_valign: str = "center"  # top, center, bottom
+    text_rotation: float = 0.0  # render-only degrees, counter-clockwise
     text_wrap: str = "none"  # Layout-affecting: none, wrap, ellipsis
     text_max_width: Optional[float] = None  # Layout-affecting width limit before wrapping
     text_transform: str = "none"  # Layout-affecting: none, uppercase, lowercase
@@ -240,6 +241,11 @@ class NodeStyle:
     text_background_opacity: float = 0.85
     text_background_padding: Tuple[float, float] = (3.0, 2.0)
     text_background_corner_radius: float = 2.0
+    external_label: str = ""  # render-only label outside the node boundary
+    external_label_position: str = "bottom"  # render-only: top, bottom, left, right
+    external_label_font_size: float = 8.0  # render-only size in points
+    external_label_font_color: str = ""  # render-only; empty = use font_color
+    external_label_offset: float = 4.0  # render-only distance from boundary in points
     padding: Tuple[float, float] = (11.0, 9.0)  # horizontal, vertical
     corner_radius: float = 6.0
     opacity: float = 1.0
@@ -261,11 +267,15 @@ class NodeStyle:
     min_font_size: float = 5.0  # Floor for shrink_text policy
     label_format: str = "plain"  # plain, rich
     border_count: int = 1  # render-only: 1 = single border, 2 = double border
+    border_position: str = "center"  # render-only: center, inside, outside
     stroke_cap: str = "butt"  # render-only: butt, round, square
     stroke_join: str = "miter"  # render-only: miter, bevel, round
     fill_pattern: str = "solid"  # render-only: solid, striped, hatched
     fill_pattern_colors: Optional[List[str]] = None  # render-only stripe palette
     fill_pattern_angle: float = 0.0  # render-only stripe angle in degrees
+    image: str = ""  # render-only path or URL for node image content
+    image_fit: str = "contain"  # render-only: contain, cover, stretch
+    image_opacity: float = 1.0  # render-only alpha for the image layer
 
     def __post_init__(self):
         if not self.fill:
