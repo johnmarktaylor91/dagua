@@ -2,7 +2,7 @@
 
 For each edge, computes cubic bezier control points (p0, cp1, cp2, p1)
 based on the geometry of the source and target positions.
-Supports per-edge routing modes (bezier, straight, ortho) and
+Supports per-edge routing modes (bezier, straight, ortho, taxi) and
 shape-aware port positioning (ellipse, diamond, rectangle).
 """
 
@@ -522,13 +522,39 @@ def _compute_curve(
     routing: str = "bezier",
     curvature: float = 0.4,
 ) -> BezierCurve:
-    """Compute curve based on routing mode."""
+    """Compute an edge curve for the requested routing mode.
+
+    Parameters
+    ----------
+    sx : float
+        Source x-coordinate.
+    sy : float
+        Source y-coordinate.
+    tx : float
+        Target x-coordinate.
+    ty : float
+        Target y-coordinate.
+    direction : str, default="TB"
+        Layout flow direction. Supported values are ``"TB"``, ``"BT"``,
+        ``"LR"``, and ``"RL"``.
+    routing : str, default="bezier"
+        Routing mode. Supported values are ``"bezier"``, ``"straight"``,
+        ``"ortho"``, and ``"taxi"``.
+    curvature : float, default=0.4
+        Curvature factor for bezier routing.
+
+    Returns
+    -------
+    BezierCurve
+        Cubic bezier control points representing the routed edge.
+    """
     if routing == "straight":
         return _compute_straight(sx, sy, tx, ty)
-    elif routing == "ortho":
+    if routing == "ortho":
         return _compute_ortho(sx, sy, tx, ty, direction)
-    else:
-        return _compute_bezier(sx, sy, tx, ty, direction, curvature)
+    if routing == "taxi":
+        return _compute_taxi(sx, sy, tx, ty, direction)
+    return _compute_bezier(sx, sy, tx, ty, direction, curvature)
 
 
 def _compute_straight(
@@ -555,6 +581,44 @@ def _compute_ortho(
     else:
         mid_x = (sx + tx) / 2
         return BezierCurve((sx, sy), (mid_x, sy), (mid_x, ty), (tx, ty))
+
+
+def _compute_taxi(
+    sx: float,
+    sy: float,
+    tx: float,
+    ty: float,
+    direction: str = "TB",
+) -> BezierCurve:
+    """Compute a Manhattan-style taxi curve between two endpoints.
+
+    Parameters
+    ----------
+    sx : float
+        Source x-coordinate.
+    sy : float
+        Source y-coordinate.
+    tx : float
+        Target x-coordinate.
+    ty : float
+        Target y-coordinate.
+    direction : str, default="TB"
+        Layout flow direction. Vertical flows route vertical-then-horizontal;
+        horizontal flows route horizontal-then-vertical.
+
+    Returns
+    -------
+    BezierCurve
+        Degenerate cubic bezier whose control points form an L-shaped or
+        Z-shaped Manhattan route while preserving the existing bezier
+        renderer interface.
+    """
+    if direction in ("TB", "BT"):
+        mid_y = (sy + ty) / 2.0
+        return BezierCurve((sx, sy), (sx, mid_y), (tx, mid_y), (tx, ty))
+
+    mid_x = (sx + tx) / 2.0
+    return BezierCurve((sx, sy), (mid_x, sy), (mid_x, ty), (tx, ty))
 
 
 def _compute_bezier(
