@@ -19,7 +19,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from dagua.edges import BezierCurve, preferred_edge_label_position, route_edges
+from dagua.edges import (
+    BezierCurve,
+    edge_endpoint_label_position,
+    evaluate_bezier,
+    preferred_edge_label_position,
+    route_edges,
+)
 from dagua.render.borders import (
     ShapeSpec,
     add_filled_collections,
@@ -48,6 +54,8 @@ _RASTER_FORMATS = {"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"}
 _GRAPHVIZ_DASH_PATTERN: Tuple[float, float] = (5.0, 3.0)
 _GRAPHVIZ_DOT_PATTERN: Tuple[float, float] = (0.1, 3.0)
 _ARROWHEAD_REFERENCE_WIDTH_POINTS = 1.2
+_DOUBLE_BORDER_INSET_FACTOR = 2.5
+_PATTERN_FILL_RESOLUTION = 128
 
 
 def _detect_output_format(output: Optional[str], format: Optional[str]) -> Optional[str]:
@@ -816,6 +824,8 @@ def _draw_node_shape_extras(
         edgecolor=edgecolor,
         linewidth=style.stroke_width,
         linestyle=_node_linestyle(style),
+        capstyle=style.stroke_cap,
+        joinstyle=style.stroke_join,
         zorder=zorder,
     )
     ax.add_patch(rim)
@@ -845,7 +855,7 @@ def _draw_gradient_fill(
     """
     from matplotlib.colors import LinearSegmentedColormap
 
-    resolution = 128
+    resolution = _PATTERN_FILL_RESOLUTION
     grid = np.linspace(-1.0, 1.0, resolution)
     xx, yy = np.meshgrid(grid, grid)
 
@@ -869,6 +879,195 @@ def _draw_gradient_fill(
         aspect="auto",
     )
     image.set_clip_path(patch)
+
+
+def _pattern_fill_colors(style: Any) -> List[str]:
+    """Resolve the color sequence used by patterned node fills.
+
+    Parameters
+    ----------
+    style : Any
+        Node style object.
+
+    Returns
+    -------
+    list[str]
+        Pattern colors in draw order.
+    """
+    if style.fill_pattern_colors:
+        return list(style.fill_pattern_colors)
+    return [str(style.fill), darken_hex(str(style.fill), 0.18)]
+
+
+def _draw_striped_fill(
+    ax: Any,
+    clip_patch: Any,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    style: Any,
+) -> None:
+    """Draw a striped fill clipped to one node outline.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    clip_patch : Any
+        Clip patch matching the node interior.
+    x : float
+        Node center x-coordinate.
+    y : float
+        Node center y-coordinate.
+    w : float
+        Node width.
+    h : float
+        Node height.
+    style : Any
+        Node style object.
+    """
+    from matplotlib.colors import ListedColormap
+
+    colors = _pattern_fill_colors(style)
+    resolution = _PATTERN_FILL_RESOLUTION
+    grid = np.linspace(-1.0, 1.0, resolution)
+    xx, yy = np.meshgrid(grid, grid)
+    angle = np.deg2rad(float(style.fill_pattern_angle))
+    projection = xx * np.cos(angle) + yy * np.sin(angle)
+    projection_min = float(np.min(projection))
+    projection_range = max(float(np.max(projection)) - projection_min, 1e-9)
+    normalized = (projection - projection_min) / projection_range
+    stripe_count = max(len(colors), 1)
+    bands = np.minimum((normalized * stripe_count).astype(int), stripe_count - 1)
+    image = ax.imshow(
+        bands,
+        extent=(x - w / 2.0, x + w / 2.0, y - h / 2.0, y + h / 2.0),
+        origin="lower",
+        cmap=ListedColormap(colors),
+        interpolation="nearest",
+        alpha=style.opacity,
+        zorder=1.95,
+        aspect="auto",
+        vmin=0,
+        vmax=max(stripe_count - 1, 1),
+    )
+    image.set_clip_path(clip_patch)
+
+
+def _draw_node_fill(
+    ax: Any,
+    fill_path: Any,
+    clip_patch: Any,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    style: Any,
+    facecolor: Any,
+) -> None:
+    """Draw one node fill when batched collections cannot express the style.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    fill_path : Any
+        Node interior path in data coordinates.
+    clip_patch : Any
+        Clip patch matching ``fill_path``.
+    x : float
+        Node center x-coordinate.
+    y : float
+        Node center y-coordinate.
+    w : float
+        Node width.
+    h : float
+        Node height.
+    style : Any
+        Node style object.
+    facecolor : Any
+        Matplotlib-compatible fill color.
+    """
+    from matplotlib.patches import PathPatch
+
+    if style.fill_pattern == "striped":
+        _draw_striped_fill(ax, clip_patch, x, y, w, h, style)
+        return
+    if style.fill_pattern == "hatched":
+        hatch_patch = PathPatch(
+            fill_path,
+            facecolor=str(style.fill),
+            edgecolor=_pattern_fill_colors(style)[0],
+            linewidth=0.0,
+            hatch="//",
+            alpha=style.opacity,
+            zorder=2.0,
+        )
+        ax.add_patch(hatch_patch)
+        return
+    if style.gradient != "none" and style.opacity > 0.0:
+        _draw_gradient_fill(ax, clip_patch, x, y, w, h, style)
+        return
+
+    fill_patch = PathPatch(
+        fill_path,
+        facecolor=facecolor,
+        edgecolor="none",
+        linewidth=0.0,
+        zorder=2.0,
+    )
+    ax.add_patch(fill_patch)
+
+
+def _draw_node_border_path(ax: Any, path: Any, style: Any, edgecolor: Any) -> None:
+    """Stroke one node border path with the requested cap and join settings.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    path : Any
+        Border outline path in data coordinates.
+    style : Any
+        Node style object.
+    edgecolor : Any
+        Matplotlib-compatible border color.
+    """
+    from matplotlib.patches import PathPatch
+
+    border_patch = PathPatch(
+        path,
+        facecolor="none",
+        edgecolor=edgecolor,
+        linewidth=max(float(style.stroke_width), 0.0),
+        linestyle=_node_linestyle(style),
+        capstyle=style.stroke_cap,
+        joinstyle=style.stroke_join,
+        zorder=2.05,
+    )
+    ax.add_patch(border_patch)
+
+
+def _requires_custom_node_rendering(style: Any) -> bool:
+    """Return whether a node must bypass the batched fill/border collections.
+
+    Parameters
+    ----------
+    style : Any
+        Node style object.
+
+    Returns
+    -------
+    bool
+        ``True`` when per-node rendering is required for advanced cosmetics.
+    """
+    return (
+        style.fill_pattern != "solid"
+        or int(style.border_count) > 1
+        or style.stroke_cap != "butt"
+        or style.stroke_join != "miter"
+    )
 
 
 def _scaled_node_style(style: Any, display_scale: float) -> Any:
@@ -1050,25 +1249,36 @@ def _draw_nodes(
         facecolor = to_rgba(style.fill, style.opacity)
         edgecolor = to_rgba(style.stroke, style.opacity * style.border_opacity)
         clip_patch = make_clip_proxy(fill_path, ax.transData)
-        if style.gradient == "none":
-            fill_paths.append(fill_path)
-            fill_colors.append(facecolor)
-        elif style.opacity > 0.0:
-            _draw_gradient_fill(ax, clip_patch, x, y, w, h, style)
+        if _requires_custom_node_rendering(style):
+            _draw_node_fill(ax, fill_path, clip_patch, x, y, w, h, style, facecolor)
+            if border_width > 0.0 and edgecolor[-1] > 0.0:
+                _draw_node_border_path(ax, outer_path, style, edgecolor)
+                if int(style.border_count) >= 2:
+                    inner_path = inset_shape_path(
+                        shape_spec,
+                        border_width * _DOUBLE_BORDER_INSET_FACTOR,
+                    )
+                    _draw_node_border_path(ax, inner_path, style, edgecolor)
+        else:
+            if style.gradient == "none":
+                fill_paths.append(fill_path)
+                fill_colors.append(facecolor)
+            elif style.opacity > 0.0:
+                _draw_gradient_fill(ax, clip_patch, x, y, w, h, style)
 
-        if border_width > 0.0 and edgecolor[-1] > 0.0:
-            if style.stroke_dash == "solid" and style.stroke_dash_pattern is None:
-                border_paths.append(annular_path(outer_path, fill_path))
-                border_colors.append(edgecolor)
-            else:
-                centerline_path = inset_shape_path(shape_spec, border_width / 2.0)
-                dash_pattern = _node_border_pattern(style, display_scale)
-                ribbons = dash_ribbon_paths(centerline_path, dash_pattern, border_width)
-                border_paths.extend(ribbons)
-                border_colors.extend([edgecolor] * len(ribbons))
+            if border_width > 0.0 and edgecolor[-1] > 0.0:
+                if style.stroke_dash == "solid" and style.stroke_dash_pattern is None:
+                    border_paths.append(annular_path(outer_path, fill_path))
+                    border_colors.append(edgecolor)
+                else:
+                    centerline_path = inset_shape_path(shape_spec, border_width / 2.0)
+                    dash_pattern = _node_border_pattern(style, display_scale)
+                    ribbons = dash_ribbon_paths(centerline_path, dash_pattern, border_width)
+                    border_paths.extend(ribbons)
+                    border_colors.extend([edgecolor] * len(ribbons))
 
         clip_patches.append(clip_patch)
-        if style.gradient != "none":
+        if style.gradient != "none" or style.fill_pattern != "solid":
             _set_svg_hover(clip_patch, f"dagua-node-{i}", graph.node_labels[i], svg_hover_map)
         _draw_node_shape_extras(ax, x, y, w, h, style, edgecolor, zorder=2.08)
 
@@ -1293,6 +1503,332 @@ def _curve_to_render_bezier(curve: BezierCurve) -> RenderBezier:
     return RenderBezier.from_points(curve.p0, curve.cp1, curve.cp2, curve.p1)
 
 
+def _edge_requires_direct_render(style: Any) -> bool:
+    """Return whether an edge style needs direct matplotlib rendering.
+
+    Parameters
+    ----------
+    style : Any
+        Edge style object.
+
+    Returns
+    -------
+    bool
+        ``True`` when the style uses a tapered body, body color gradient, or a
+        non-default line cap/join that the custom batched renderer does not
+        expose yet.
+    """
+    return bool(
+        getattr(style, "taper", False)
+        or getattr(style, "color_gradient", "none") != "none"
+        or getattr(style, "line_cap", "butt") != "butt"
+        or getattr(style, "line_join", "miter") != "miter"
+    )
+
+
+def _curve_to_path(curve: BezierCurve) -> Any:
+    """Convert a routed bezier into a matplotlib path.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Cubic bezier edge curve.
+
+    Returns
+    -------
+    Any
+        Matplotlib ``Path`` instance containing one cubic segment.
+    """
+    from matplotlib.path import Path
+
+    return Path(
+        [curve.p0, curve.cp1, curve.cp2, curve.p1],
+        [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4],
+    )
+
+
+def _sample_curve_points(curve: BezierCurve, num_points: int = 48) -> np.ndarray:
+    """Sample evenly spaced parameter values along a bezier curve.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Cubic bezier curve to sample.
+    num_points : int, default=48
+        Number of sample points.
+
+    Returns
+    -------
+    numpy.ndarray
+        Sampled points with shape ``[num_points, 2]``.
+    """
+    sample_count = max(2, int(num_points))
+    params = np.linspace(0.0, 1.0, sample_count, dtype=float)
+    return np.array([evaluate_bezier(curve, float(t)) for t in params], dtype=float)
+
+
+def _edge_gradient_colors(style: Any) -> Tuple[Tuple[float, float, float, float], ...]:
+    """Resolve the start and end RGBA colors for an edge body gradient.
+
+    Parameters
+    ----------
+    style : Any
+        Edge style object.
+
+    Returns
+    -------
+    tuple[tuple[float, float, float, float], tuple[float, float, float, float]]
+        Start and end RGBA colors with the style opacity applied.
+    """
+    from matplotlib.colors import to_rgba
+
+    start_color = to_rgba(str(style.color), alpha=float(style.opacity))
+    end_color_value = str(style.color_gradient_end or style.color)
+    end_color = to_rgba(end_color_value, alpha=float(style.opacity))
+    return start_color, end_color
+
+
+def _interpolate_rgba(
+    start: Tuple[float, float, float, float],
+    end: Tuple[float, float, float, float],
+    fraction: float,
+) -> Tuple[float, float, float, float]:
+    """Interpolate two RGBA colors.
+
+    Parameters
+    ----------
+    start : tuple[float, float, float, float]
+        Start RGBA color.
+    end : tuple[float, float, float, float]
+        End RGBA color.
+    fraction : float
+        Interpolation amount in ``[0, 1]``.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Interpolated RGBA color.
+    """
+    clamped_fraction = min(max(float(fraction), 0.0), 1.0)
+    return tuple(
+        start[index] * (1.0 - clamped_fraction) + end[index] * clamped_fraction
+        for index in range(4)
+    )
+
+
+def _tapered_edge_outline(
+    curve_points: np.ndarray,
+    width_start: float,
+    width_end: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Build upper and lower edge outlines for a tapered ribbon.
+
+    Parameters
+    ----------
+    curve_points : numpy.ndarray
+        Sampled edge centerline with shape ``[N, 2]``.
+    width_start : float
+        Source-end width in data units.
+    width_end : float
+        Target-end width in data units.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        Upper and lower outline points, each with shape ``[N, 2]``.
+    """
+    point_count = int(curve_points.shape[0])
+    widths = np.linspace(float(width_start), float(width_end), point_count, dtype=float)
+    upper = np.zeros_like(curve_points, dtype=float)
+    lower = np.zeros_like(curve_points, dtype=float)
+
+    for index in range(point_count):
+        if point_count == 1:
+            dx, dy = 0.0, 1.0
+        elif index < point_count - 1:
+            dx = float(curve_points[index + 1, 0] - curve_points[index, 0])
+            dy = float(curve_points[index + 1, 1] - curve_points[index, 1])
+        else:
+            dx = float(curve_points[index, 0] - curve_points[index - 1, 0])
+            dy = float(curve_points[index, 1] - curve_points[index - 1, 1])
+
+        length = max(float(np.hypot(dx, dy)), 1e-6)
+        nx = -dy / length
+        ny = dx / length
+        half_width = widths[index] / 2.0
+        upper[index] = (
+            float(curve_points[index, 0]) + nx * half_width,
+            float(curve_points[index, 1]) + ny * half_width,
+        )
+        lower[index] = (
+            float(curve_points[index, 0]) - nx * half_width,
+            float(curve_points[index, 1]) - ny * half_width,
+        )
+
+    return upper, lower
+
+
+def _draw_direct_edge_body(ax: Any, curve: BezierCurve, style: Any) -> List[Any]:
+    """Draw a single edge body with direct matplotlib artists.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes receiving the edge artists.
+    curve : BezierCurve
+        Routed edge centerline.
+    style : Any
+        Edge style object.
+
+    Returns
+    -------
+    list[Any]
+        Added matplotlib artists.
+    """
+    from matplotlib.collections import LineCollection
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import PathPatch, Polygon
+
+    artists: List[Any] = []
+    linestyle = _edge_linestyle(style)
+
+    if getattr(style, "taper", False):
+        points = _sample_curve_points(curve)
+        width_start = _edge_width_data_units(ax, float(style.taper_width_start))
+        width_end = _edge_width_data_units(ax, float(style.taper_width_end))
+        upper, lower = _tapered_edge_outline(points, width_start, width_end)
+        start_color, end_color = _edge_gradient_colors(style)
+
+        if getattr(style, "color_gradient", "none") == "source_to_target":
+            for index in range(points.shape[0] - 1):
+                quad = np.array(
+                    [upper[index], upper[index + 1], lower[index + 1], lower[index]],
+                    dtype=float,
+                )
+                fraction = (index + 0.5) / max(points.shape[0] - 1, 1)
+                patch = Polygon(
+                    quad,
+                    closed=True,
+                    facecolor=_interpolate_rgba(start_color, end_color, fraction),
+                    edgecolor="none",
+                    joinstyle=str(style.line_join),
+                    zorder=1,
+                )
+                ax.add_patch(patch)
+                artists.append(patch)
+            return artists
+
+        vertices = np.vstack([upper, lower[::-1]])
+        polygon = Polygon(
+            vertices,
+            closed=True,
+            facecolor=to_rgba(str(style.color), alpha=float(style.opacity)),
+            edgecolor="none",
+            joinstyle=str(style.line_join),
+            zorder=1,
+        )
+        ax.add_patch(polygon)
+        artists.append(polygon)
+        return artists
+
+    if getattr(style, "color_gradient", "none") == "source_to_target":
+        points = _sample_curve_points(curve, num_points=50)
+        segments = np.stack([points[:-1], points[1:]], axis=1)
+        start_color, end_color = _edge_gradient_colors(style)
+        colors = [
+            _interpolate_rgba(start_color, end_color, (index + 0.5) / max(len(segments), 1))
+            for index in range(len(segments))
+        ]
+        collection = LineCollection(
+            segments,
+            colors=colors,
+            linewidths=float(style.width),
+            linestyles=linestyle,
+            capstyle=str(style.line_cap),
+            joinstyle=str(style.line_join),
+            zorder=1,
+        )
+        ax.add_collection(collection)
+        artists.append(collection)
+        return artists
+
+    patch = PathPatch(
+        _curve_to_path(curve),
+        facecolor="none",
+        edgecolor=to_rgba(str(style.color), alpha=float(style.opacity)),
+        linewidth=float(style.width),
+        linestyle=linestyle,
+        capstyle=str(style.line_cap),
+        joinstyle=str(style.line_join),
+        zorder=1,
+    )
+    ax.add_patch(patch)
+    artists.append(patch)
+    return artists
+
+
+def _draw_edges_direct(
+    ax: Any,
+    graph: Any,
+    curves: List[BezierCurve],
+) -> None:
+    """Draw all edges with direct matplotlib artists.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes receiving the edge artists.
+    graph : Any
+        Graph exposing Dagua's edge-style API.
+    curves : list[BezierCurve]
+        Routed edge curves.
+    """
+    for e_idx, curve in enumerate(curves):
+        style = graph.get_style_for_edge(e_idx)
+        _draw_direct_edge_body(ax, curve, style)
+
+        src_idx = int(graph.edge_index[0, e_idx])
+        tgt_idx = int(graph.edge_index[1, e_idx])
+        src_node_height = float(graph.node_sizes[src_idx, 1])
+        tgt_node_height = float(graph.node_sizes[tgt_idx, 1])
+        gradient_start_color = str(style.color)
+        gradient_end_color = str(style.color_gradient_end or style.color)
+
+        if getattr(style, "tail_arrow", "none") != "none":
+            tail_style = style
+            if getattr(style, "color_gradient", "none") == "source_to_target" and not getattr(
+                style, "arrow_color", ""
+            ):
+                tail_style = replace(style, color=gradient_start_color)
+            start_dx = float(curve.p0[0] - curve.cp1[0])
+            start_dy = float(curve.p0[1] - curve.cp1[1])
+            _draw_edge_marker(
+                ax=ax,
+                point=curve.p0,
+                direction=(start_dx, start_dy),
+                marker=str(style.tail_arrow),
+                style=tail_style,
+                node_height=src_node_height,
+            )
+
+        if getattr(style, "arrow", "none") != "none":
+            head_style = style
+            if getattr(style, "color_gradient", "none") == "source_to_target" and not getattr(
+                style, "arrow_color", ""
+            ):
+                head_style = replace(style, color=gradient_end_color)
+            end_dx = float(curve.p1[0] - curve.cp2[0])
+            end_dy = float(curve.p1[1] - curve.cp2[1])
+            _draw_edge_marker(
+                ax=ax,
+                point=curve.p1,
+                direction=(end_dx, end_dy),
+                marker=str(style.arrow),
+                style=head_style,
+                node_height=tgt_node_height,
+            )
+
+
 def _build_custom_edge_collection(
     ax: Any,
     graph: Any,
@@ -1487,6 +2023,9 @@ def _draw_node_labels(
                 secondary_scale=secondary,
                 max_width=max_width,
                 min_font_size=style.min_font_size,
+                text_wrap=style.text_wrap,
+                text_max_width=style.text_max_width,
+                text_transform=style.text_transform,
                 outline=style.text_outline,
                 outline_color=style.text_outline_color,
                 outline_width=style.text_outline_width,
@@ -1739,10 +2278,84 @@ def _draw_edges(
     """
     if not curves:
         return None
+    del svg_hover_map
+    if any(
+        _edge_requires_direct_render(graph.get_style_for_edge(edge_idx))
+        for edge_idx in range(len(curves))
+    ):
+        _draw_edges_direct(ax, graph, curves)
+        return None
     collection = _build_custom_edge_collection(ax, graph, curves)
     collection.render_bodies(ax)
     collection.render_heads(ax)
     return collection
+
+
+def _append_endpoint_edge_label_specs(
+    specs: List[DaguaText],
+    graph: Any,
+    curves: List[BezierCurve],
+    display_scale: float,
+    svg_hover_map: Optional[Dict[str, str]],
+) -> None:
+    """Append head and tail edge label specs for the current graph.
+
+    Parameters
+    ----------
+    specs : list[DaguaText]
+        Text specs being accumulated for the render pass.
+    graph : Any
+        Graph exposing per-edge styles and labels.
+    curves : list[BezierCurve]
+        Routed edge curves.
+    display_scale : float
+        Point-to-data conversion factor for endpoint offsets.
+    svg_hover_map : dict[str, str] | None
+        Optional SVG hover-text accumulator.
+    """
+    for e_idx, curve in enumerate(curves):
+        style = graph.get_style_for_edge(e_idx)
+        hover_text = _edge_hover_text(graph, e_idx) if svg_hover_map is not None else ""
+        endpoint_specs = (
+            (
+                "head",
+                str(getattr(style, "head_label", "")),
+                float(getattr(style, "head_label_offset", 5.0)) * display_scale,
+            ),
+            (
+                "tail",
+                str(getattr(style, "tail_label", "")),
+                float(getattr(style, "tail_label_offset", 5.0)) * display_scale,
+            ),
+        )
+        for endpoint_name, label_text, label_offset in endpoint_specs:
+            if not label_text:
+                continue
+            x, y = edge_endpoint_label_position(curve, endpoint_name, label_offset=label_offset)
+            gid = f"dagua-edge-{endpoint_name}-label-{e_idx}"
+            specs.append(
+                DaguaText(
+                    x=x,
+                    y=y,
+                    text=label_text,
+                    font_size=float(style.label_font_size) * 0.85,
+                    font_family=str(style.label_font_family or RESOLVED_FONT),
+                    font_weight=str(style.label_font_weight),
+                    font_color=str(style.label_font_color),
+                    ha="center",
+                    va="center",
+                    background=style.label_background if style.label_background else None,
+                    background_alpha=float(style.label_background_opacity),
+                    background_padding=style.label_background_padding,
+                    background_corner_radius=float(style.label_background_corner_radius),
+                    clip_on=False,
+                    zorder=4.0,
+                    gid=gid,
+                )
+            )
+            if svg_hover_map is not None:
+                svg_hover_map[gid] = hover_text
+                svg_hover_map[f"{gid}-background"] = hover_text
 
 
 def _draw_edge_labels(
@@ -1857,6 +2470,7 @@ def _draw_edge_labels(
                 svg_hover_map[f"dagua-edge-label-{e_idx}"] = hover_text
                 svg_hover_map[f"dagua-edge-label-{e_idx}-background"] = hover_text
 
+    _append_endpoint_edge_label_specs(specs, graph, curves, display_scale, svg_hover_map)
     render_text(ax, specs, display_scale, svg_hover_map)
 
 

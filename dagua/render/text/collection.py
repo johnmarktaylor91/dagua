@@ -23,6 +23,7 @@ from dagua.render.text.layout import (
     layout_rich_text,
 )
 from dagua.styles import RESOLVED_FONT
+from dagua.utils import prepare_label_text
 
 
 @dataclass
@@ -46,6 +47,9 @@ class DaguaText:
     secondary_scale: float = 1.0
     max_width: Optional[float] = None
     min_font_size: float = 5.0
+    text_wrap: str = "none"
+    text_max_width: Optional[float] = None
+    text_transform: str = "none"
     outline: bool = False
     outline_color: str = "#FFFFFF"
     outline_width: float = 2.0
@@ -278,18 +282,25 @@ def render_text(
     artists: List[Any] = []
 
     for spec in specs:
-        if spec.text.strip() == "" and spec.background is None:
-            continue
-
         font_family = spec.font_family or RESOLVED_FONT
         font_size_pts = spec.font_size if spec.font_size > 0.0 else spec.min_font_size
         font_size_pts = max(font_size_pts, 1e-9)
         size_data = max(font_size_pts * safe_scale, 1e-9)
         min_size_data = max(spec.min_font_size * safe_scale, 1e-9)
+        prepared_text = prepare_label_text(
+            spec.text,
+            font_size=size_data,
+            text_wrap=spec.text_wrap,
+            text_max_width=spec.text_max_width,
+            text_transform=spec.text_transform,
+            label_format="rich" if spec.rich else "plain",
+        )
+        if prepared_text.strip() == "" and spec.background is None:
+            continue
 
         block = (
             layout_rich_text(
-                spec.text,
+                prepared_text,
                 size_data=size_data,
                 ha=spec.ha,
                 va=spec.va,
@@ -304,7 +315,7 @@ def render_text(
             )
             if spec.rich
             else layout_plain_text(
-                spec.text,
+                prepared_text,
                 size_data=size_data,
                 ha=spec.ha,
                 va=spec.va,

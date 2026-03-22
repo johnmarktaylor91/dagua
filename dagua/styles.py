@@ -15,7 +15,9 @@ Aesthetics: publication-quality defaults — muted fills, strong borders, quiet 
 # - NodeStyle.stroke_width, NodeStyle.padding, NodeStyle.corner_radius
 # - NodeStyle.font_size, NodeStyle.text_outline_width, NodeStyle.shadow_offset
 # - EdgeStyle.width, EdgeStyle.arrow_length, EdgeStyle.arrow_width
+# - EdgeStyle.taper_width_start, EdgeStyle.taper_width_end
 # - EdgeStyle.label_font_size, EdgeStyle.label_offset
+# - EdgeStyle.head_label_offset, EdgeStyle.tail_label_offset
 # - ClusterStyle.stroke_width, ClusterStyle.padding, ClusterStyle.corner_radius
 # - ClusterStyle.font_size, ClusterStyle.label_offset
 # - GraphStyle margin/title and label typography fields
@@ -228,6 +230,9 @@ class NodeStyle:
     font_color: str = NEAR_BLACK
     text_align: str = "center"  # left, center, right
     text_valign: str = "center"  # top, center, bottom
+    text_wrap: str = "none"  # Layout-affecting: none, wrap, ellipsis
+    text_max_width: Optional[float] = None  # Layout-affecting width limit before wrapping
+    text_transform: str = "none"  # Layout-affecting: none, uppercase, lowercase
     text_outline: bool = False
     text_outline_color: str = "#FFFFFF"
     text_outline_width: float = 2.0
@@ -255,6 +260,12 @@ class NodeStyle:
     overflow_policy: str = "shrink_text"  # "shrink_text", "expand_node", "overflow"
     min_font_size: float = 5.0  # Floor for shrink_text policy
     label_format: str = "plain"  # plain, rich
+    border_count: int = 1  # render-only: 1 = single border, 2 = double border
+    stroke_cap: str = "butt"  # render-only: butt, round, square
+    stroke_join: str = "miter"  # render-only: miter, bevel, round
+    fill_pattern: str = "solid"  # render-only: solid, striped, hatched
+    fill_pattern_colors: Optional[List[str]] = None  # render-only stripe palette
+    fill_pattern_angle: float = 0.0  # render-only stripe angle in degrees
 
     def __post_init__(self):
         if not self.fill:
@@ -290,6 +301,8 @@ class EdgeStyle:
     )
     arrow_width_ratio: float = 0.7  # width = length * this ratio (for node-relative mode)
     style: str = "solid"  # solid, dashed, dotted
+    line_cap: str = "butt"  # render-only: butt, round, square
+    line_join: str = "miter"  # render-only: miter, bevel, round
     opacity: float = 0.65
     # New fields (Part 2)
     routing: str = "bezier"  # bezier, straight, ortho, taxi — post-layout
@@ -308,6 +321,15 @@ class EdgeStyle:
     curvature: float = 0.4  # Control point offset factor (0=straight, 1=max curve)
     port_style: str = "distributed"  # "distributed" or "center"
     label_avoidance: bool = True  # Whether to avoid label collisions
+    taper: bool = False  # Taper edge body from source width to target width
+    taper_width_start: float = 3.0
+    taper_width_end: float = 0.5
+    head_label: str = ""  # Label near the target endpoint
+    tail_label: str = ""  # Label near the source endpoint
+    head_label_offset: float = 5.0
+    tail_label_offset: float = 5.0
+    color_gradient: str = "none"  # "none", "source_to_target"
+    color_gradient_end: str = ""  # empty = use the edge color for both ends
 
 
 @dataclass
