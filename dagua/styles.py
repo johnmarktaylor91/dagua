@@ -2907,6 +2907,796 @@ FEYNMAN_THEME = Theme(
     graph_style=GraphStyle(background_color="#FFFFFF"),
 )
 
+BAUHAUS_THEME = Theme(
+    name="bauhaus",
+    node_styles={
+        "default": NodeStyle(
+            shape="rect",
+            fill="#FFFFFF",
+            stroke="#000000",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#000000",
+            padding=(10.0, 8.0),
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#D40000",  # Bauhaus red
+            stroke="#000000",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#FFFFFF",
+            padding=(8.0, 8.0),
+        ),
+        "output": NodeStyle(
+            shape="rect",
+            fill="#003DA5",  # Bauhaus blue
+            stroke="#000000",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#FFFFFF",
+            padding=(10.0, 8.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#000000",
+            width=2.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#000000",
+            routing="straight",
+        ),
+        "back": EdgeStyle(
+            color="#000000",
+            width=2.0,
+            style="dashed",
+            arrow="normal",
+            routing="straight",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#FFD700",  # Bauhaus yellow
+        stroke="#000000",
+        stroke_width=2.0,
+        corner_radius=0.0,
+        font_size=12.0,
+        font_color="#000000",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#F5F0E8"),
+)
+
+ART_DECO_THEME = Theme(
+    name="art_deco",
+    node_styles={
+        "default": NodeStyle(
+            shape="diamond",
+            fill="#1A1A2E",  # deep navy
+            stroke="#C9A94E",  # gold
+            stroke_width=2.0,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#C9A94E",
+            padding=(10.0, 10.0),
+            min_width=30.0,
+            min_height=30.0,
+        ),
+        "input": NodeStyle(
+            shape="hexagon",
+            fill="#1A1A2E",
+            stroke="#C9A94E",
+            stroke_width=2.0,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#C9A94E",
+            padding=(10.0, 10.0),
+        ),
+        "output": NodeStyle(
+            shape="octagon",
+            fill="#1A1A2E",
+            stroke="#C9A94E",
+            stroke_width=2.0,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#C9A94E",
+            padding=(10.0, 10.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#C9A94E",
+            width=1.5,
+            style="solid",
+            arrow="diamond",
+            arrow_fill="filled",
+            arrow_color="#C9A94E",
+            routing="straight",
+            opacity=0.8,
+        ),
+        "back": EdgeStyle(
+            color="#C9A94E",
+            width=1.0,
+            style="dashed",
+            arrow="diamond",
+            routing="straight",
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#16213E",
+        stroke="#C9A94E",
+        stroke_width=1.5,
+        corner_radius=0.0,
+        font_size=11.0,
+        font_color="#C9A94E",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#0F0F23"),
+)
+
+NEON_THEME = Theme(
+    name="neon",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#0D0D0D",
+            stroke="#00FFFF",  # cyan neon
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#00FFFF",
+            corner_radius=4.0,
+            padding=(10.0, 6.0),
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#0D0D0D",
+            stroke="#FF00FF",  # hot pink
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#FF00FF",
+            corner_radius=4.0,
+            padding=(10.0, 6.0),
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#0D0D0D",
+            stroke="#39FF14",  # neon green
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#39FF14",
+            corner_radius=4.0,
+            padding=(10.0, 6.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#00FFFF",
+            width=1.5,
+            style="solid",
+            arrow="simple",
+            arrow_fill="filled",
+            arrow_color="#00FFFF",
+            routing="bezier",
+            opacity=0.7,
+        ),
+        "back": EdgeStyle(
+            color="#FF00FF",
+            width=1.5,
+            style="dashed",
+            arrow="simple",
+            routing="bezier",
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#111111",
+        stroke="#00FFFF",
+        stroke_width=1.0,
+        corner_radius=4.0,
+        font_size=10.0,
+        font_color="#00FFFF",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#0A0A0A"),
+)
+
+TERMINAL_THEME = Theme(
+    name="terminal",
+    node_styles={
+        "default": NodeStyle(
+            shape="rect",
+            fill="#0C0C0C",
+            stroke="#33FF33",  # phosphor green
+            stroke_width=1.0,
+            font_family="DejaVu Sans Mono",
+            font_size=9.0,
+            font_color="#33FF33",
+            padding=(8.0, 4.0),
+        ),
+        "input": NodeStyle(
+            shape="rect",
+            fill="#0C0C0C",
+            stroke="#33FF33",
+            stroke_width=1.5,
+            font_family="DejaVu Sans Mono",
+            font_size=9.0,
+            font_color="#33FF33",
+            padding=(8.0, 4.0),
+        ),
+        "output": NodeStyle(
+            shape="rect",
+            fill="#0C0C0C",
+            stroke="#FFAA00",  # amber terminal
+            stroke_width=1.5,
+            font_family="DejaVu Sans Mono",
+            font_size=9.0,
+            font_color="#FFAA00",
+            padding=(8.0, 4.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#33FF33",
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#33FF33",
+            routing="straight",
+            opacity=0.6,
+        ),
+        "back": EdgeStyle(
+            color="#33FF33",
+            width=1.0,
+            style="dashed",
+            arrow="normal",
+            routing="straight",
+            opacity=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#0A0A0A",
+        stroke="#33FF33",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#33FF33",
+        padding=6.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#0C0C0C"),
+)
+
+NAPKIN_THEME = Theme(
+    name="napkin",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#FFFFFF",
+            stroke="#444444",
+            stroke_width=1.0,
+            font_family="Comic Sans MS",
+            font_size=11.0,
+            font_color="#333333",
+            corner_radius=8.0,
+            padding=(10.0, 6.0),
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#FFFFFF",
+            stroke="#2266CC",
+            stroke_width=1.5,
+            font_family="Comic Sans MS",
+            font_size=11.0,
+            font_color="#2266CC",
+            corner_radius=8.0,
+            padding=(10.0, 6.0),
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#FFFFFF",
+            stroke="#CC3333",
+            stroke_width=1.5,
+            font_family="Comic Sans MS",
+            font_size=11.0,
+            font_color="#CC3333",
+            corner_radius=8.0,
+            padding=(10.0, 6.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#444444",
+            width=1.0,
+            style="solid",
+            arrow="simple",
+            arrow_fill="filled",
+            arrow_color="#444444",
+            routing="bezier",
+            curvature=0.5,
+        ),
+        "back": EdgeStyle(
+            color="#444444",
+            width=1.0,
+            style="dashed",
+            arrow="simple",
+            routing="bezier",
+            curvature=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F8F8F8",
+        stroke="#999999",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=8.0,
+        font_size=11.0,
+        font_color="#666666",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+MOLECULAR_THEME = Theme(
+    name="molecular",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#909090",  # CPK carbon gray
+            stroke="#666666",
+            stroke_width=0.5,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#3050F8",  # CPK nitrogen blue
+            stroke="#2040D0",
+            stroke_width=0.5,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#FF0D0D",  # CPK oxygen red
+            stroke="#CC0000",
+            stroke_width=0.5,
+            font_family="Arial",
+            font_size=10.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#555555",
+            width=4.0,  # thick bond sticks
+            style="solid",
+            arrow="none",  # bonds have no direction
+            routing="straight",
+            line_cap="round",
+        ),
+        "back": EdgeStyle(
+            color="#555555",
+            width=2.0,
+            style="dashed",  # dashed = weak bond
+            arrow="none",
+            routing="straight",
+            line_cap="round",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0F0F0",
+        stroke="#CCCCCC",
+        stroke_width=0.5,
+        corner_radius=8.0,
+        font_size=9.0,
+        font_color="#666666",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+CIRCUIT_THEME = Theme(
+    name="circuit",
+    node_styles={
+        "default": NodeStyle(
+            shape="rect",
+            fill="#1A5C1A",  # PCB green
+            stroke="#C87533",  # copper
+            stroke_width=1.5,
+            font_family="DejaVu Sans Mono",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            padding=(8.0, 4.0),
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#C87533",  # copper pad
+            stroke="#A06020",
+            stroke_width=1.5,
+            font_family="DejaVu Sans Mono",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            padding=(4.0, 4.0),
+            min_width=18.0,
+            min_height=18.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#C87533",
+            stroke="#A06020",
+            stroke_width=1.5,
+            font_family="DejaVu Sans Mono",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            padding=(4.0, 4.0),
+            min_width=18.0,
+            min_height=18.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#C87533",  # copper trace
+            width=2.5,
+            style="solid",
+            arrow="none",
+            routing="ortho",  # PCB traces are orthogonal
+            line_cap="projecting",
+        ),
+        "back": EdgeStyle(
+            color="#8B5A2B",
+            width=2.0,
+            style="solid",
+            arrow="none",
+            routing="ortho",
+            line_cap="projecting",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#164016",
+        stroke="#C87533",
+        stroke_width=1.0,
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#C87533",
+        padding=8.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#1A5C1A"),
+)
+
+CONSTELLATION_THEME = Theme(
+    name="constellation",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",
+            stroke="#FFFFFF",
+            stroke_width=0.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#8899BB",
+            padding=(2.0, 2.0),
+            min_width=6.0,  # tiny star dots
+            min_height=6.0,
+            opacity=0.9,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#FFD700",  # bright star gold
+            stroke="#FFD700",
+            stroke_width=0.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#FFD700",
+            padding=(2.0, 2.0),
+            min_width=8.0,
+            min_height=8.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#FF6B6B",  # red giant
+            stroke="#FF6B6B",
+            stroke_width=0.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#FF6B6B",
+            padding=(2.0, 2.0),
+            min_width=8.0,
+            min_height=8.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#445577",
+            width=0.5,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            opacity=0.4,
+        ),
+        "back": EdgeStyle(
+            color="#445577",
+            width=0.5,
+            style="dashed",
+            arrow="none",
+            routing="straight",
+            opacity=0.2,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#0A0E1A",
+        stroke="#223355",
+        stroke_width=0.3,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#556688",
+        padding=6.0,
+        opacity=0.2,
+    ),
+    graph_style=GraphStyle(background_color="#070B14"),  # deep space
+)
+
+GENEALOGY_THEME = Theme(
+    name="genealogy",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#FFF8F0",  # warm cream
+            stroke="#8B6914",  # antique gold
+            stroke_width=1.5,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#4A3000",
+            corner_radius=4.0,
+            padding=(12.0, 8.0),
+            shadow=True,
+            shadow_color="#00000015",
+            shadow_offset=(2.0, -2.0),
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#E8F0E8",  # pale green (paternal)
+            stroke="#5C7A3A",
+            stroke_width=1.5,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#3A5020",
+            corner_radius=4.0,
+            padding=(12.0, 8.0),
+            shadow=True,
+            shadow_color="#00000015",
+            shadow_offset=(2.0, -2.0),
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#F0E8F0",  # pale lavender (maternal)
+            stroke="#7A5C7A",
+            stroke_width=1.5,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#503A50",
+            corner_radius=4.0,
+            padding=(12.0, 8.0),
+            shadow=True,
+            shadow_color="#00000015",
+            shadow_offset=(2.0, -2.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#8B7355",
+            width=1.0,
+            style="solid",
+            arrow="none",  # family trees typically no arrows
+            routing="ortho",
+        ),
+        "back": EdgeStyle(
+            color="#8B7355",
+            width=1.0,
+            style="dashed",
+            arrow="none",
+            routing="ortho",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#FFF5E6",
+        stroke="#C4A66A",
+        stroke_width=1.0,
+        corner_radius=4.0,
+        font_size=10.0,
+        font_color="#8B6914",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#FFFDF5"),
+)
+
+DARK_ACADEMIA_THEME = Theme(
+    name="dark_academia",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#2C1810",  # deep mahogany
+            stroke="#8B6914",  # antique gold trim
+            stroke_width=1.0,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#D4C5A9",  # parchment text
+            corner_radius=3.0,
+            padding=(10.0, 6.0),
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#3D1E10",  # burgundy leather
+            stroke="#8B6914",
+            stroke_width=1.0,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#D4C5A9",
+            corner_radius=3.0,
+            padding=(10.0, 6.0),
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#1A2A1A",  # dark green cloth
+            stroke="#8B6914",
+            stroke_width=1.0,
+            font_family="DejaVu Serif",
+            font_size=10.0,
+            font_color="#D4C5A9",
+            corner_radius=3.0,
+            padding=(10.0, 6.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#8B7355",
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#8B7355",
+            routing="bezier",
+            opacity=0.6,
+        ),
+        "back": EdgeStyle(
+            color="#8B7355",
+            width=1.0,
+            style="dashed",
+            arrow="normal",
+            routing="bezier",
+            opacity=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A1008",
+        stroke="#6B5530",
+        stroke_width=0.5,
+        corner_radius=3.0,
+        font_size=10.0,
+        font_color="#A0906A",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#1A1008"),
+)
+
+PASTEL_THEME = Theme(
+    name="pastel",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#E8D5F5",  # soft lavender
+            stroke="#C4A6E0",
+            stroke_width=1.5,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#6B4D8A",
+            corner_radius=12.0,  # very rounded
+            padding=(14.0, 10.0),
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#D5F5E3",  # soft mint
+            stroke="#A6E0C0",
+            stroke_width=1.5,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#4D8A6B",
+            corner_radius=12.0,
+            padding=(14.0, 10.0),
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#F5D5D5",  # soft rose
+            stroke="#E0A6A6",
+            stroke_width=1.5,
+            font_family="Arial",
+            font_size=11.0,
+            font_color="#8A4D4D",
+            corner_radius=12.0,
+            padding=(14.0, 10.0),
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#C0B0D0",
+            width=1.5,
+            style="solid",
+            arrow="simple",
+            arrow_fill="filled",
+            arrow_color="#C0B0D0",
+            routing="bezier",
+            curvature=0.4,
+        ),
+        "back": EdgeStyle(
+            color="#C0B0D0",
+            width=1.5,
+            style="dashed",
+            arrow="simple",
+            routing="bezier",
+            opacity=0.6,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F5F0FA",
+        stroke="#D0C0E0",
+        stroke_width=1.0,
+        corner_radius=12.0,
+        font_size=11.0,
+        font_color="#8A7AA0",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#FDFBFF"),
+)
+
+THEME_REGISTRY["bauhaus"] = BAUHAUS_THEME
+THEME_REGISTRY["art_deco"] = ART_DECO_THEME
+THEME_REGISTRY["neon"] = NEON_THEME
+THEME_REGISTRY["terminal"] = TERMINAL_THEME
+THEME_REGISTRY["napkin"] = NAPKIN_THEME
+THEME_REGISTRY["molecular"] = MOLECULAR_THEME
+THEME_REGISTRY["circuit"] = CIRCUIT_THEME
+THEME_REGISTRY["constellation"] = CONSTELLATION_THEME
+THEME_REGISTRY["genealogy"] = GENEALOGY_THEME
+THEME_REGISTRY["dark_academia"] = DARK_ACADEMIA_THEME
+THEME_REGISTRY["pastel"] = PASTEL_THEME
 THEME_REGISTRY["blueprint"] = BLUEPRINT_THEME
 THEME_REGISTRY["chalkboard"] = CHALKBOARD_THEME
 THEME_REGISTRY["subway"] = SUBWAY_THEME
