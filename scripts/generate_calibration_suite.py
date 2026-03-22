@@ -62,7 +62,7 @@ RAW_RENDER_DPI = 200
 COMPARISON_DPI = 170
 DEFAULT_COMPARISON_SIZE = (15.5, 5.8)
 AUTO_PANEL_FILL_FRACTION = 0.8
-AUTO_DATA_UNITS_PER_INCH = 68.0
+AUTO_DATA_UNITS_PER_INCH = 74.0
 AUTO_MIN_FIGSIZE = (1.4, 1.4)
 WHITE = "#FFFFFF"
 NODE_FILL = "#FFFFFF"
@@ -3290,8 +3290,8 @@ def _self_loop_scene() -> CalibrationScene:
             _base_edge_style(style="dotted", arrow="dot", color="#DC2626"),
         ],
         edge_labels=["solid", "dashed vee", "dotted dot"],
-        direction="RL",
-        figsize=(6.4, 3.8),
+        direction="TB",
+        figsize=(6.4, 4.2),
     )
 
 
