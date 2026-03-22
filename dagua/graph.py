@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy as _copy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
 
@@ -19,6 +19,9 @@ from dagua.styles import (
     resolve_node_style,
 )
 from dagua.utils import compute_node_size
+
+if TYPE_CHECKING:
+    from dagua.views import ClusterView, EdgeView, NodeView
 
 _DTYPE_NAME_TO_TORCH = {
     "int32": torch.int32,
@@ -79,6 +82,7 @@ class DaguaGraph:
 
     # ID mapping
     _id_to_index: Dict[Any, int] = field(default_factory=dict, repr=False)
+    _index_to_id: List[Any] = field(default_factory=list, repr=False)
     _theme: Any = field(
         default_factory=lambda: _copy.deepcopy(GRAPHVIZ_THEME), repr=False
     )  # Theme or Dict[str, NodeStyle]
@@ -153,6 +157,23 @@ class DaguaGraph:
         elif self._edge_index_tensor is not None:
             self._edge_index_tensor = self._edge_index_tensor.to(dtype=self.index_dtype)
 
+    def __repr__(self) -> str:
+        """Return a compact human-readable summary of the graph state."""
+        edge_count = self.num_edges
+        parts = [f"DaguaGraph({self.num_nodes} nodes, {edge_count} edges"]
+        if self.clusters:
+            cluster_word = "cluster" if len(self.clusters) == 1 else "clusters"
+            parts.append(f"{len(self.clusters)} {cluster_word}")
+        parts.append(f"direction={self.direction!r}")
+        status = self.layout_status
+        if status != "missing":
+            parts.append(f"layout={status}")
+        if self.edge_weights is not None:
+            parts.append("weighted=True")
+        if self.is_cyclic:
+            parts.append("cyclic=True")
+        return ", ".join(parts) + ")"
+
     @staticmethod
     def _normalize_index_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
         normalized: Optional[torch.dtype]
@@ -225,6 +246,34 @@ class DaguaGraph:
         """Bump graph revision after a user-visible mutation."""
         self.revision += 1
 
+    @property
+    def _edge_count(self) -> int:
+        """Return the current edge count without forcing finalization.
+
+        Returns
+        -------
+        int
+            Count of finalized and pending edges.
+        """
+        return self.num_edges
+
+    @property
+    def num_edges(self) -> int:
+        """Return the edge count without forcing edge tensor finalization.
+
+        Returns
+        -------
+        int
+            Total number of pending and finalized edges.
+        """
+        pending = len(self._pending_edges)
+        finalized = (
+            self._edge_index_tensor.shape[1]
+            if self._edge_index_tensor is not None and self._edge_index_tensor.numel() > 0
+            else 0
+        )
+        return pending + finalized
+
     def invalidate_layout(self) -> None:
         """Drop cached layout-derived artifacts."""
         self._layout_positions = None
@@ -289,6 +338,329 @@ class DaguaGraph:
         self._layout_label_positions = label_positions
         self._label_revision = self.revision if label_positions is not None else -1
 
+    def node(self, id_or_index: Any) -> "NodeView":
+        """Return a node view by user ID or integer index.
+
+        Parameters
+        ----------
+        id_or_index : Any
+            User-provided node identifier or integer node index.
+
+        Returns
+        -------
+        NodeView
+            View object referencing the requested node.
+
+        Raises
+        ------
+        IndexError
+            If an integer index is outside the valid range.
+        KeyError
+            If a non-index identifier is unknown.
+        """
+        from dagua.views import NodeView
+
+        if isinstance(id_or_index, int) and id_or_index not in self._id_to_index:
+            if id_or_index < 0 or id_or_index >= self.num_nodes:
+                raise IndexError(f"Node index {id_or_index} out of range [0, {self.num_nodes})")
+            return NodeView(self, id_or_index)
+        if id_or_index not in self._id_to_index:
+            raise KeyError(f"Unknown node ID: {id_or_index!r}")
+        return NodeView(self, self._id_to_index[id_or_index])
+
+    def edge(self, index: int) -> "EdgeView":
+        """Return an edge view by integer index.
+
+        Parameters
+        ----------
+        index : int
+            Zero-based edge index.
+
+        Returns
+        -------
+        EdgeView
+            View object referencing the requested edge.
+
+        Raises
+        ------
+        IndexError
+            If ``index`` is outside the valid edge range.
+        """
+        from dagua.views import EdgeView
+
+        self._finalize_edges()
+        edge_count = self._edge_index_tensor.shape[1] if self._edge_index_tensor is not None else 0
+        if index < 0 or index >= edge_count:
+            raise IndexError(f"Edge index {index} out of range [0, {edge_count})")
+        return EdgeView(self, index)
+
+    def cluster(self, name: str) -> "ClusterView":
+        """Return a cluster view by name.
+
+        Parameters
+        ----------
+        name : str
+            Cluster name.
+
+        Returns
+        -------
+        ClusterView
+            View object referencing the requested cluster.
+
+        Raises
+        ------
+        KeyError
+            If ``name`` is not a known cluster.
+        """
+        from dagua.views import ClusterView
+
+        if name not in self.clusters:
+            raise KeyError(f"Unknown cluster: {name!r}")
+        return ClusterView(self, name)
+
+    @property
+    def nodes(self) -> Iterator["NodeView"]:
+        """Iterate over all nodes as lightweight views.
+
+        Returns
+        -------
+        Iterator[NodeView]
+            Generator yielding node views in index order.
+        """
+        from dagua.views import NodeView
+
+        for index in range(self.num_nodes):
+            yield NodeView(self, index)
+
+    @property
+    def nodes_iter(self) -> Iterator["NodeView"]:
+        """Iterate over all nodes via the deprecated alias.
+
+        Returns
+        -------
+        Iterator[NodeView]
+            Generator yielding node views in index order.
+        """
+        return self.nodes
+
+    @property
+    def edges(self) -> Iterator["EdgeView"]:
+        """Iterate over all edges as lightweight views.
+
+        Returns
+        -------
+        Iterator[EdgeView]
+            Generator yielding edge views in edge order.
+        """
+        from dagua.views import EdgeView
+
+        self._finalize_edges()
+        for index in range(self.num_edges):
+            yield EdgeView(self, index)
+
+    @property
+    def edges_view(self) -> Iterator["EdgeView"]:
+        """Iterate over all edges via the compatibility alias.
+
+        Returns
+        -------
+        Iterator[EdgeView]
+            Generator yielding edge views in edge order.
+        """
+        return self.edges
+
+    @property
+    def edges_iter(self) -> Iterator["EdgeView"]:
+        """Iterate over all edges via the deprecated alias.
+
+        Returns
+        -------
+        Iterator[EdgeView]
+            Generator yielding edge views in edge order.
+        """
+        return self.edges
+
+    @property
+    def clusters_view(self) -> Iterator["ClusterView"]:
+        """Iterate over all clusters as lightweight views.
+
+        Returns
+        -------
+        Iterator[ClusterView]
+            Generator yielding cluster views in insertion order.
+        """
+        from dagua.views import ClusterView
+
+        for name in self.clusters:
+            yield ClusterView(self, name)
+
+    @property
+    def clusters_iter(self) -> Iterator["ClusterView"]:
+        """Iterate over all clusters via the deprecated alias.
+
+        Returns
+        -------
+        Iterator[ClusterView]
+            Generator yielding cluster views in insertion order.
+        """
+        return self.clusters_view
+
+    def __contains__(self, node_id: Any) -> bool:
+        """Return whether a node ID exists in the graph.
+
+        Parameters
+        ----------
+        node_id : Any
+            User-facing node identifier to check.
+
+        Returns
+        -------
+        bool
+            ``True`` when ``node_id`` resolves to a graph node.
+        """
+        return node_id in self._id_to_index
+
+    def __len__(self) -> int:
+        """Return the number of nodes in the graph.
+
+        Returns
+        -------
+        int
+            Current node count.
+        """
+        return self.num_nodes
+
+    def __getitem__(self, key: Any) -> "NodeView":
+        """Return a node view for ``graph[key]`` access.
+
+        Parameters
+        ----------
+        key : Any
+            Node identifier or integer node index.
+
+        Returns
+        -------
+        NodeView
+            Node view referencing the selected node.
+        """
+        return self.node(key)
+
+    def node_id(self, index: int) -> Any:
+        """Return the user-provided ID for a node index.
+
+        Parameters
+        ----------
+        index : int
+            Integer node index.
+
+        Returns
+        -------
+        Any
+            Original user-provided node ID, or ``index`` if no reverse mapping
+            exists for that slot.
+        """
+        if index < len(self._index_to_id):
+            return self._index_to_id[index]
+        return index
+
+    def edges_for_node(self, node: Any) -> list["EdgeView"]:
+        """Return all edges incident to a node.
+
+        Parameters
+        ----------
+        node : Any
+            Node identifier or integer node index.
+
+        Returns
+        -------
+        list[EdgeView]
+            Incoming and outgoing edges touching the node.
+        """
+        return self.node(node).edges
+
+    def edges_between(self, source: Any, target: Any) -> list["EdgeView"]:
+        """Return all directed edges from ``source`` to ``target``.
+
+        Parameters
+        ----------
+        source : Any
+            Source node identifier or integer node index.
+        target : Any
+            Target node identifier or integer node index.
+
+        Returns
+        -------
+        list[EdgeView]
+            Edge views whose endpoints match the requested direction.
+        """
+        from dagua.views import EdgeView
+
+        src_idx = self._id_to_index.get(source, source if isinstance(source, int) else None)
+        tgt_idx = self._id_to_index.get(target, target if isinstance(target, int) else None)
+        if src_idx is None or tgt_idx is None:
+            return []
+        edge_index = self.edge_index
+        mask = (edge_index[0] == src_idx) & (edge_index[1] == tgt_idx)
+        indices = mask.nonzero(as_tuple=True)[0].tolist()
+        return [EdgeView(self, edge_idx) for edge_idx in indices]
+
+    def clusters_for_node(self, node: Any) -> list["ClusterView"]:
+        """Return all clusters containing a node.
+
+        Parameters
+        ----------
+        node : Any
+            Node identifier or integer node index.
+
+        Returns
+        -------
+        list[ClusterView]
+            Clusters containing the requested node.
+        """
+        return self.node(node).clusters
+
+    @property
+    def summary(self) -> str:
+        """Return a multi-line human-readable graph summary.
+
+        Returns
+        -------
+        str
+            Summary including topology, style-relevant distributions, clusters,
+            and cached layout state.
+        """
+        from collections import Counter
+
+        lines = [repr(self)]
+        type_counts = Counter(self.node_types)
+        if len(type_counts) > 1 or (len(type_counts) == 1 and "default" not in type_counts):
+            types_str = ", ".join(
+                f"{node_type}: {count}" for node_type, count in type_counts.most_common()
+            )
+            lines.append(f"  Node types: {types_str}")
+        edge_count = self.edge_index.shape[1]
+        if edge_count > 0 and self.edge_weights is not None:
+            weights = self.edge_weights
+            assert weights is not None
+            lines.append(
+                "  Edge weights: "
+                f"min={float(weights.min().item()):.2g}, "
+                f"max={float(weights.max().item()):.2g}, "
+                f"mean={float(weights.mean().item()):.2g}"
+            )
+        if self.clusters:
+            for name in self.clusters:
+                cluster_view = self.cluster(name)
+                indent = "  " * (cluster_view.depth + 1)
+                lines.append(f"{indent}Cluster {name!r}: {cluster_view.member_count} members")
+        lines.append(f"  Layout: {self.layout_status}")
+        if self.has_cycles:
+            back_count = (
+                int(self.back_edge_mask.sum().item()) if self.back_edge_mask is not None else 0
+            )
+            lines.append(f"  Cycles: {back_count} back edges")
+        return "\n".join(lines)
+
     def add_node(
         self,
         node_id: Any,
@@ -302,6 +674,7 @@ class DaguaGraph:
 
         idx = self.num_nodes
         self._id_to_index[node_id] = idx
+        self._index_to_id.append(node_id)
         self.num_nodes += 1
         self.node_labels.append(label if label is not None else str(node_id))
         self.node_types.append(type)
@@ -734,6 +1107,17 @@ class DaguaGraph:
         return bool(mask is not None and bool(mask.any().item()))
 
     @property
+    def is_cyclic(self) -> bool:
+        """Return whether the graph contains one or more cycles.
+
+        Returns
+        -------
+        bool
+            ``True`` when cycle detection found any back edges.
+        """
+        return self.has_cycles
+
+    @property
     def back_edge_mask(self) -> Optional[torch.Tensor]:
         """BoolTensor[E] marking back edges, or None for DAGs.
 
@@ -1017,6 +1401,7 @@ class DaguaGraph:
         g.edge_types = ["normal"] * edge_index.shape[1]
         g.edge_styles = [None] * edge_index.shape[1]
         g._id_to_index = {i: i for i in range(num_nodes)}
+        g._index_to_id = list(range(num_nodes))
         if edge_weights is not None:
             if edge_weights.shape[0] != edge_index.shape[1]:
                 raise ValueError(
