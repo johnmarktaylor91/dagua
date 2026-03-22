@@ -99,9 +99,9 @@ class TestClusterStyleNewFields:
 
     def test_defaults(self):
         s = ClusterStyle()
-        assert s.padding == 35.0
+        assert s.padding == 38.0
         assert s.font_family == ""
-        assert s.label_offset == (8.0, 20.0)
+        assert s.label_offset == (10.0, 12.0)
         assert s.depth_fill_step == 0.03
         assert s.depth_stroke_step == 0.05
 
