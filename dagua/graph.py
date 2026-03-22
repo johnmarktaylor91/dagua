@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 
 from dagua.styles import (
-    DEFAULT_THEME_OBJ,
+    GRAPHVIZ_THEME,
     ClusterStyle,
     EdgeStyle,
     GraphStyle,
@@ -79,7 +79,7 @@ class DaguaGraph:
     # ID mapping
     _id_to_index: Dict[Any, int] = field(default_factory=dict, repr=False)
     _theme: Any = field(
-        default_factory=lambda: _copy.deepcopy(DEFAULT_THEME_OBJ), repr=False
+        default_factory=lambda: _copy.deepcopy(GRAPHVIZ_THEME), repr=False
     )  # Theme or Dict[str, NodeStyle]
 
     # Internal edge storage — not part of the public API
