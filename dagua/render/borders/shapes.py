@@ -11,6 +11,7 @@ from matplotlib.path import Path
 from numpy.typing import NDArray
 
 FloatArray = NDArray[np.float64]
+ELLIPSE_KAPPA = 0.5522847498
 
 
 @dataclass(frozen=True)
@@ -240,6 +241,158 @@ def closed_path_from_vertices(vertices: FloatArray) -> Path:
     return Path(closed_vertices, codes)
 
 
+def open_path_from_vertices(vertices: FloatArray) -> Path:
+    """Build an open linear path from ordered vertices.
+
+    Parameters
+    ----------
+    vertices : numpy.ndarray
+        Polyline vertices with shape ``[N, 2]``.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Open path with one subpath.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two vertices are provided.
+    """
+
+    if vertices.shape[0] < 2:
+        raise ValueError("An open path requires at least two vertices.")
+    codes = [Path.MOVETO] + [Path.LINETO] * (vertices.shape[0] - 1)
+    return Path(vertices, codes)
+
+
+def _normalize_vector(vector: FloatArray) -> FloatArray:
+    """Return a unit-length copy of one 2D vector.
+
+    Parameters
+    ----------
+    vector : numpy.ndarray
+        Vector with shape ``[2]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Unit-length vector with shape ``[2]``. Degenerate vectors return
+        ``[0.0, 0.0]``.
+    """
+
+    magnitude = float(np.linalg.norm(vector))
+    if magnitude <= np.finfo(np.float64).eps:
+        return np.zeros(2, dtype=np.float64)
+    return (vector / magnitude).astype(np.float64)
+
+
+def _ellipse_anchor(
+    center_x: float, center_y: float, radius_x: float, radius_y: float, angle: float
+) -> FloatArray:
+    """Return one point on an axis-aligned ellipse.
+
+    Parameters
+    ----------
+    center_x : float
+        Ellipse center x-coordinate.
+    center_y : float
+        Ellipse center y-coordinate.
+    radius_x : float
+        Horizontal radius.
+    radius_y : float
+        Vertical radius.
+    angle : float
+        Parametric angle in radians.
+
+    Returns
+    -------
+    numpy.ndarray
+        Anchor point with shape ``[2]``.
+    """
+
+    return np.array(
+        [
+            center_x + radius_x * np.cos(angle),
+            center_y + radius_y * np.sin(angle),
+        ],
+        dtype=np.float64,
+    )
+
+
+def _ellipse_outward_normal(radius_x: float, radius_y: float, angle: float) -> FloatArray:
+    """Return the outward unit normal on an axis-aligned ellipse.
+
+    Parameters
+    ----------
+    radius_x : float
+        Horizontal radius.
+    radius_y : float
+        Vertical radius.
+    angle : float
+        Parametric angle in radians.
+
+    Returns
+    -------
+    numpy.ndarray
+        Outward-facing unit vector with shape ``[2]``.
+    """
+
+    normal = np.array(
+        [
+            np.cos(angle) / max(radius_x, np.finfo(np.float64).eps),
+            np.sin(angle) / max(radius_y, np.finfo(np.float64).eps),
+        ],
+        dtype=np.float64,
+    )
+    return _normalize_vector(normal)
+
+
+def ellipse_cubic_path(center_x: float, center_y: float, radius_x: float, radius_y: float) -> Path:
+    """Approximate one ellipse using four cubic Bezier arcs.
+
+    Parameters
+    ----------
+    center_x : float
+        Ellipse center x-coordinate.
+    center_y : float
+        Ellipse center y-coordinate.
+    radius_x : float
+        Horizontal radius.
+    radius_y : float
+        Vertical radius.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed ellipse path.
+    """
+
+    handle_x = ELLIPSE_KAPPA * radius_x
+    handle_y = ELLIPSE_KAPPA * radius_y
+    vertices = np.array(
+        [
+            [center_x + radius_x, center_y],
+            [center_x + radius_x, center_y + handle_y],
+            [center_x + handle_x, center_y + radius_y],
+            [center_x, center_y + radius_y],
+            [center_x - handle_x, center_y + radius_y],
+            [center_x - radius_x, center_y + handle_y],
+            [center_x - radius_x, center_y],
+            [center_x - radius_x, center_y - handle_y],
+            [center_x - handle_x, center_y - radius_y],
+            [center_x, center_y - radius_y],
+            [center_x + handle_x, center_y - radius_y],
+            [center_x + radius_x, center_y - handle_y],
+            [center_x + radius_x, center_y],
+            [center_x + radius_x, center_y],
+        ],
+        dtype=np.float64,
+    )
+    codes = [Path.MOVETO] + [Path.CURVE4] * 12 + [Path.CLOSEPOLY]
+    return Path(vertices, codes)
+
+
 def cylinder_path(spec: ShapeSpec) -> Path:
     """Return the native cylinder outline path.
 
@@ -283,6 +436,356 @@ def cylinder_path(spec: ShapeSpec) -> Path:
         Path.CLOSEPOLY,
     ]
     return Path(vertices, codes)
+
+
+def double_circle_path(spec: ShapeSpec) -> Path:
+    """Return a compound path containing two concentric ellipses.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Compound path with outer and inner closed ellipse subpaths.
+    """
+
+    radius_x = spec.width / 2.0
+    radius_y = spec.height / 2.0
+    gap = min(radius_x, radius_y) * 0.15
+    inner_radius_x = max(radius_x - gap, 0.0)
+    inner_radius_y = max(radius_y - gap, 0.0)
+    outer_path = ellipse_cubic_path(spec.center_x, spec.center_y, radius_x, radius_y)
+    inner_path = ellipse_cubic_path(spec.center_x, spec.center_y, inner_radius_x, inner_radius_y)
+    return Path.make_compound_path(outer_path, inner_path)
+
+
+def cloud_path(spec: ShapeSpec) -> Path:
+    """Return an organic cloud outline built from outward-bulging cubic arcs.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed cloud path.
+    """
+
+    radius_x = spec.width / 2.0
+    radius_y = spec.height / 2.0
+    anchor_angles = np.linspace(np.pi / 6.0, 2.0 * np.pi + np.pi / 6.0, 7, dtype=np.float64)
+    bulge_factors = np.array([0.21, 0.17, 0.24, 0.18, 0.23, 0.19], dtype=np.float64)
+    start = _ellipse_anchor(
+        spec.center_x, spec.center_y, radius_x, radius_y, float(anchor_angles[0])
+    )
+    vertices: List[List[float]] = [start.tolist()]
+    codes: List[int] = [Path.MOVETO]
+
+    for index in range(6):
+        start_angle = float(anchor_angles[index])
+        end_angle = float(anchor_angles[index + 1])
+        start_anchor = _ellipse_anchor(
+            spec.center_x, spec.center_y, radius_x, radius_y, start_angle
+        )
+        end_anchor = _ellipse_anchor(spec.center_x, spec.center_y, radius_x, radius_y, end_angle)
+        mid_angle = (start_angle + end_angle) / 2.0
+        chord = end_anchor - start_anchor
+        control_distance = float(np.linalg.norm(chord)) * 0.32
+        tangent_start = _normalize_vector(
+            np.array(
+                [-radius_x * np.sin(start_angle), radius_y * np.cos(start_angle)],
+                dtype=np.float64,
+            )
+        )
+        tangent_end = _normalize_vector(
+            np.array(
+                [-radius_x * np.sin(end_angle), radius_y * np.cos(end_angle)],
+                dtype=np.float64,
+            )
+        )
+        outward = _ellipse_outward_normal(radius_x, radius_y, mid_angle)
+        bulge = radius_x * float(bulge_factors[index])
+        control_1 = start_anchor + tangent_start * control_distance + outward * bulge
+        control_2 = end_anchor - tangent_end * control_distance + outward * bulge
+        vertices.extend([control_1.tolist(), control_2.tolist(), end_anchor.tolist()])
+        codes.extend([Path.CURVE4, Path.CURVE4, Path.CURVE4])
+
+    vertices.append(start.tolist())
+    codes.append(Path.CLOSEPOLY)
+    return Path(np.asarray(vertices, dtype=np.float64), codes)
+
+
+def stadium_path(spec: ShapeSpec) -> Path:
+    """Return a capsule outline with semicircular left and right ends.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed stadium path.
+    """
+
+    center_x = spec.center_x
+    center_y = spec.center_y
+    radius = spec.height / 2.0
+    straight_half_width = max(spec.width / 2.0 - radius, 0.0)
+    left_center_x = center_x - straight_half_width
+    right_center_x = center_x + straight_half_width
+    handle = ELLIPSE_KAPPA * radius
+    vertices = np.array(
+        [
+            [left_center_x, center_y + radius],
+            [right_center_x, center_y + radius],
+            [right_center_x + handle, center_y + radius],
+            [right_center_x + radius, center_y + handle],
+            [right_center_x + radius, center_y],
+            [right_center_x + radius, center_y - handle],
+            [right_center_x + handle, center_y - radius],
+            [right_center_x, center_y - radius],
+            [left_center_x, center_y - radius],
+            [left_center_x - handle, center_y - radius],
+            [left_center_x - radius, center_y - handle],
+            [left_center_x - radius, center_y],
+            [left_center_x - radius, center_y + handle],
+            [left_center_x - handle, center_y + radius],
+            [left_center_x, center_y + radius],
+            [left_center_x, center_y + radius],
+        ],
+        dtype=np.float64,
+    )
+    codes = [
+        Path.MOVETO,
+        Path.LINETO,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.LINETO,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CLOSEPOLY,
+    ]
+    return Path(vertices, codes)
+
+
+def tab_path(spec: ShapeSpec) -> Path:
+    """Return a rectangle with a small top-left tab.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed tab path.
+    """
+
+    half_width = spec.width / 2.0
+    half_height = spec.height / 2.0
+    left = spec.center_x - half_width
+    right = spec.center_x + half_width
+    bottom = spec.center_y - half_height
+    top = spec.center_y + half_height
+    tab_width = spec.width * 0.30
+    tab_height = spec.height * 0.20
+    vertices = np.array(
+        [
+            [left, bottom],
+            [right, bottom],
+            [right, top],
+            [left + tab_width, top],
+            [left + tab_width, top + tab_height],
+            [left, top + tab_height],
+        ],
+        dtype=np.float64,
+    )
+    return closed_path_from_vertices(vertices)
+
+
+def note_path(spec: ShapeSpec) -> Path:
+    """Return a note outline with a folded top-right corner.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Compound path with an outer outline and inner fold line.
+    """
+
+    half_width = spec.width / 2.0
+    half_height = spec.height / 2.0
+    left = spec.center_x - half_width
+    right = spec.center_x + half_width
+    bottom = spec.center_y - half_height
+    top = spec.center_y + half_height
+    fold = min(half_width, half_height) * 0.30
+    outer = closed_path_from_vertices(
+        np.array(
+            [
+                [left, bottom],
+                [right, bottom],
+                [right, top - fold],
+                [right - fold, top],
+                [left, top],
+            ],
+            dtype=np.float64,
+        )
+    )
+    fold_line = open_path_from_vertices(
+        np.array(
+            [
+                [right - fold, top],
+                [right - fold, top - fold],
+                [right, top - fold],
+            ],
+            dtype=np.float64,
+        )
+    )
+    return Path.make_compound_path(outer, fold_line)
+
+
+def document_path(spec: ShapeSpec) -> Path:
+    """Return a document outline with a single wavy bottom edge.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed document path.
+    """
+
+    half_width = spec.width / 2.0
+    half_height = spec.height / 2.0
+    left = spec.center_x - half_width
+    right = spec.center_x + half_width
+    bottom = spec.center_y - half_height
+    top = spec.center_y + half_height
+    mid_x = spec.center_x
+    amplitude = spec.height * 0.12
+    vertices = np.array(
+        [
+            [left, top],
+            [right, top],
+            [right, bottom],
+            [right - spec.width * 0.18, bottom - amplitude * 0.20],
+            [mid_x + spec.width * 0.16, bottom - amplitude * 1.10],
+            [mid_x, bottom - amplitude],
+            [mid_x - spec.width * 0.16, bottom - amplitude * 0.90],
+            [left + spec.width * 0.18, bottom + amplitude * 0.20],
+            [left, bottom],
+            [left, top],
+            [left, top],
+        ],
+        dtype=np.float64,
+    )
+    codes = [
+        Path.MOVETO,
+        Path.LINETO,
+        Path.LINETO,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.LINETO,
+        Path.CLOSEPOLY,
+    ]
+    return Path(vertices, codes)
+
+
+def box3d_path(spec: ShapeSpec) -> Path:
+    """Return an isometric box outline with top and right face dividers.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Compound path containing the outer box silhouette and interior divider
+        lines for the front, top, and right faces.
+    """
+
+    half_width = spec.width / 2.0
+    half_height = spec.height / 2.0
+    left = spec.center_x - half_width
+    right = spec.center_x + half_width
+    bottom = spec.center_y - half_height
+    top = spec.center_y + half_height
+    depth = min(half_width, half_height) * 0.25
+    offset_x = depth
+    offset_y = depth * 0.70
+
+    silhouette = closed_path_from_vertices(
+        np.array(
+            [
+                [left, bottom],
+                [right, bottom],
+                [right + offset_x, bottom + offset_y],
+                [right + offset_x, top + offset_y],
+                [left + offset_x, top + offset_y],
+                [left, top],
+            ],
+            dtype=np.float64,
+        )
+    )
+    front_edges = open_path_from_vertices(
+        np.array(
+            [
+                [left, top],
+                [right, top],
+                [right, bottom],
+            ],
+            dtype=np.float64,
+        )
+    )
+    top_edge = open_path_from_vertices(
+        np.array(
+            [
+                [right, top],
+                [right + offset_x, top + offset_y],
+            ],
+            dtype=np.float64,
+        )
+    )
+    right_edge = open_path_from_vertices(
+        np.array(
+            [
+                [right, bottom],
+                [right + offset_x, bottom + offset_y],
+            ],
+            dtype=np.float64,
+        )
+    )
+    return Path.make_compound_path(silhouette, front_edges, top_edge, right_edge)
 
 
 def extract_patch_path(patch: object) -> Path:
@@ -338,6 +841,20 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         return extract_patch_path(Circle((spec.center_x, spec.center_y), diameter / 2.0))
     if shape == "cylinder":
         return cylinder_path(spec)
+    if shape == "double_circle":
+        return double_circle_path(spec)
+    if shape == "cloud":
+        return cloud_path(spec)
+    if shape == "stadium":
+        return stadium_path(spec)
+    if shape == "tab":
+        return tab_path(spec)
+    if shape == "note":
+        return note_path(spec)
+    if shape == "document":
+        return document_path(spec)
+    if shape == "box3d":
+        return box3d_path(spec)
     if shape in {
         "diamond",
         "triangle",

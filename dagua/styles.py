@@ -36,7 +36,6 @@ Aesthetics: publication-quality defaults — muted fills, strong borders, quiet 
 # parsed as display-point values and floats remain data-coordinate values.
 #
 # TODO: Expose additional text rendering capabilities as style fields:
-# - NodeStyle.text_background (background color behind label, separate from node fill)
 # - NodeStyle.text_underline, text_strikethrough (text decorations)
 # - EdgeStyle.label_outline (outline on edge labels for readability)
 # - ClusterStyle.label_outline (outline on cluster labels)
@@ -213,7 +212,8 @@ class NodeStyle:
     Supported ``shape`` values are ``"rect"``, ``"roundrect"``, ``"ellipse"``,
     ``"diamond"``, ``"circle"``, ``"triangle"``, ``"hexagon"``,
     ``"parallelogram"``, ``"pentagon"``, ``"octagon"``, ``"star"``,
-    ``"cylinder"``, and ``"trapezoid"``.
+    ``"cylinder"``, ``"trapezoid"``, ``"double_circle"``, ``"cloud"``,
+    ``"stadium"``, ``"tab"``, ``"note"``, ``"document"``, and ``"box3d"``.
     """
 
     shape: str = "roundrect"
@@ -231,6 +231,10 @@ class NodeStyle:
     text_outline: bool = False
     text_outline_color: str = "#FFFFFF"
     text_outline_width: float = 2.0
+    text_background: str = ""  # Background color behind node label (empty = none)
+    text_background_opacity: float = 0.85
+    text_background_padding: Tuple[float, float] = (3.0, 2.0)
+    text_background_corner_radius: float = 2.0
     padding: Tuple[float, float] = (11.0, 9.0)  # horizontal, vertical
     corner_radius: float = 6.0
     opacity: float = 1.0
@@ -288,10 +292,13 @@ class EdgeStyle:
     style: str = "solid"  # solid, dashed, dotted
     opacity: float = 0.65
     # New fields (Part 2)
-    routing: str = "bezier"  # bezier, straight, ortho — post-layout
+    routing: str = "bezier"  # bezier, straight, ortho, taxi — post-layout
     label_font_size: float = 7.0  # render-only
     label_font_color: str = NEAR_BLACK  # render-only
     label_background: str = WARM_WHITE  # render-only
+    label_background_opacity: float = 0.85
+    label_background_padding: Tuple[float, float] = (3.0, 2.0)
+    label_background_corner_radius: float = 2.0
     label_font_family: str = ""  # empty = use default
     label_font_weight: str = "regular"  # regular, bold
     # New fields (Part 3) — edge aesthetics
