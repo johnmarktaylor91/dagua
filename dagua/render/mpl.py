@@ -32,18 +32,22 @@ from dagua.render.borders import (
 )
 from dagua.render.edges import CubicBezier as RenderBezier
 from dagua.render.edges import DaguaEdge, DaguaEdgeCollection
+from dagua.render.text import DaguaText, render_text
 from dagua.styles import (
     FONT_FAMILY,
-    FONT_FAMILY_MONO,
     RESOLVED_FONT,
     darken_hex,
 )
-from dagua.utils import collect_cluster_leaves, measure_text, parse_rich_markup
+from dagua.utils import (
+    collect_cluster_leaves,
+    measure_text,
+)
 
 _VECTOR_FORMATS = {"pdf", "ps", "eps", "svg", "svgz"}
 _RASTER_FORMATS = {"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"}
 _GRAPHVIZ_DASH_PATTERN: Tuple[float, float] = (5.0, 3.0)
 _GRAPHVIZ_DOT_PATTERN: Tuple[float, float] = (0.1, 3.0)
+_ARROWHEAD_REFERENCE_WIDTH_POINTS = 1.2
 
 
 def _detect_output_format(output: Optional[str], format: Optional[str]) -> Optional[str]:
@@ -202,6 +206,37 @@ def render(
     x_max = (pos[:, 0] + sizes[:, 0] / 2).max() + margin
     y_min = (pos[:, 1] - sizes[:, 1] / 2).min() - margin
     y_max = (pos[:, 1] + sizes[:, 1] / 2).max() + margin
+
+    # Expand figure bounds for cluster headers and minimum width.
+    # Cluster rendering adds header space above y_max and may expand x_min/x_max
+    # for minimum width. Account for this so labels are not clipped.
+    if graph.clusters:
+        for cname in graph.clusters:
+            cstyle = graph.get_style_for_cluster(cname)
+            cindices = graph.leaf_cluster_members(cname)
+            if not cindices:
+                continue
+            ci = np.array(cindices)
+            cp = pos[ci]
+            cs = sizes[ci]
+            cpad = cstyle.padding
+            cy_max_member = (cp[:, 1] + cs[:, 1] / 2).max()
+            # Header expansion: at least 14pt + label height
+            header = max(14.0, cstyle.font_size * 1.2) * 2.0
+            cy_max = cy_max_member + cpad + header
+            cx_min = (cp[:, 0] - cs[:, 0] / 2).min() - cpad
+            cx_max = (cp[:, 0] + cs[:, 0] / 2).max() + cpad
+            # Minimum width
+            ch = cy_max - ((cp[:, 1] - cs[:, 1] / 2).min() - cpad)
+            min_cw = ch * 0.8
+            cw = cx_max - cx_min
+            if cw < min_cw:
+                expand_cw = (min_cw - cw) / 2.0
+                cx_min -= expand_cw
+                cx_max += expand_cw
+            x_min = min(x_min, cx_min - margin)
+            x_max = max(x_max, cx_max + margin)
+            y_max = max(y_max, cy_max + margin)
 
     width = x_max - x_min
     height = y_max - y_min
@@ -1168,6 +1203,37 @@ def _marker_data_size(
     return length * scale, width * scale
 
 
+def _scaled_arrowhead_dimensions(
+    length_points: float,
+    width_points: float,
+    edge_width_points: float,
+    reference_width_points: float = _ARROWHEAD_REFERENCE_WIDTH_POINTS,
+) -> Tuple[float, float]:
+    """Scale arrowhead dimensions sublinearly with the edge stroke weight.
+
+    Parameters
+    ----------
+    length_points : float
+        Base arrowhead length in typographic points.
+    width_points : float
+        Base arrowhead width in typographic points.
+    edge_width_points : float
+        Edge stroke width in typographic points.
+    reference_width_points : float, default=1.2
+        Width treated as the unscaled baseline.
+
+    Returns
+    -------
+    tuple[float, float]
+        Scaled ``(length, width)`` in points.
+    """
+
+    safe_reference = max(reference_width_points, 1e-6)
+    width_ratio = max(edge_width_points, 0.0) / safe_reference
+    scale = max(width_ratio, 1e-6) ** 0.5
+    return length_points * scale, width_points * scale
+
+
 def _edge_width_data_units(ax: Any, width_points: float) -> float:
     """Convert an edge body width from points to data units.
 
@@ -1233,18 +1299,23 @@ def _build_custom_edge_collection(
         tgt_idx = int(graph.edge_index[1, e_idx])
         src_node_height = float(graph.node_sizes[src_idx, 1])
         tgt_node_height = float(graph.node_sizes[tgt_idx, 1])
+        scaled_head_length, scaled_head_width = _scaled_arrowhead_dimensions(
+            float(style.arrow_length),
+            float(style.arrow_width),
+            float(style.width),
+        )
         head_length, head_width = _marker_data_size(
             ax,
             style,
-            float(style.arrow_length),
-            float(style.arrow_width),
+            scaled_head_length,
+            scaled_head_width,
             node_height=tgt_node_height,
         )
         tail_length, tail_width = _marker_data_size(
             ax,
             style,
-            float(style.arrow_length),
-            float(style.arrow_width),
+            scaled_head_length,
+            scaled_head_width,
             node_height=src_node_height,
         )
         label = graph.edge_labels[e_idx] if e_idx < len(graph.edge_labels) else None
@@ -1263,7 +1334,7 @@ def _build_custom_edge_collection(
                 tail_arrow_width=tail_width,
                 arrow_fill=str(style.arrow_fill),
                 arrow_color=str(style.arrow_color) if style.arrow_color else None,
-                stroke_width=float(style.width),
+                stroke_width=_edge_width_data_units(ax, float(style.width)),
                 label=label,
                 label_position=float(style.label_position),
                 label_offset=float(style.label_offset),
@@ -1280,62 +1351,6 @@ def _build_custom_edge_collection(
             )
         )
     return DaguaEdgeCollection(edges)
-
-
-def _label_anchor_x(align: str, x: float, w: float, pad_x: float, line_width: float) -> float:
-    """Resolve the x anchor for a label line.
-
-    Parameters
-    ----------
-    align : str
-        Horizontal alignment value.
-    x : float
-        Node center x-coordinate.
-    w : float
-        Node width.
-    pad_x : float
-        Horizontal padding in data units.
-    line_width : float
-        Line width in data units.
-
-    Returns
-    -------
-    float
-        X coordinate for the line anchor.
-    """
-    if align == "left":
-        return x - w / 2 + pad_x
-    if align == "right":
-        return x + w / 2 - pad_x - line_width
-    return x - line_width / 2
-
-
-def _label_anchor_y(valign: str, y: float, h: float, pad_y: float, block_height: float) -> float:
-    """Resolve the top of a multi-line label block.
-
-    Parameters
-    ----------
-    valign : str
-        Vertical alignment value.
-    y : float
-        Node center y-coordinate.
-    h : float
-        Node height.
-    pad_y : float
-        Vertical padding in data units.
-    block_height : float
-        Total block height in data units.
-
-    Returns
-    -------
-    float
-        Top edge of the laid-out text block.
-    """
-    if valign == "top":
-        return y + h / 2 - pad_y
-    if valign == "bottom":
-        return y - h / 2 + pad_y + block_height
-    return y + block_height / 2
 
 
 def _label_reference_y(y: float, h: float, shape: str) -> float:
@@ -1360,226 +1375,6 @@ def _label_reference_y(y: float, h: float, shape: str) -> float:
         # so shift labels toward the centroid to match Graphviz.
         return y - h / 6
     return y
-
-
-def _segment_font_properties(
-    segment_style: Dict[str, Any], style: Any
-) -> Tuple[str, str, str, str]:
-    """Resolve font properties for one rich-text segment.
-
-    Parameters
-    ----------
-    segment_style : dict[str, Any]
-        Parsed rich-text formatting flags.
-    style : Any
-        Base node style.
-
-    Returns
-    -------
-    tuple[str, str, str, str]
-        Font family, font weight, font style, and color.
-    """
-    font_family = FONT_FAMILY_MONO[0] if segment_style.get("mono") else style.font_family_list[0]
-    font_weight = "bold" if segment_style.get("bold") else style.font_weight
-    font_style = "italic" if segment_style.get("italic") else style.font_style
-    color = str(segment_style.get("color") or style.font_color)
-    return font_family, font_weight, font_style, color
-
-
-def _split_rich_lines(
-    segments: Sequence[Tuple[str, Dict[str, Any]]],
-) -> List[List[Tuple[str, Dict[str, Any]]]]:
-    """Split rich-text segments into line-wise segment groups.
-
-    Parameters
-    ----------
-    segments : sequence[tuple[str, dict[str, Any]]]
-        Parsed rich-text segments.
-
-    Returns
-    -------
-    list[list[tuple[str, dict[str, Any]]]]
-        Segments grouped per output line.
-    """
-    lines: List[List[Tuple[str, Dict[str, Any]]]] = [[]]
-    for text, segment_style in segments:
-        parts = text.split("\n")
-        for part_index, part in enumerate(parts):
-            if part:
-                lines[-1].append((part, segment_style))
-            if part_index != len(parts) - 1:
-                lines.append([])
-    return lines
-
-
-def _apply_text_effects(text_artist: Any, style: Any) -> None:
-    """Apply optional outline effects to a text artist.
-
-    Parameters
-    ----------
-    text_artist : Any
-        Matplotlib text artist.
-    style : Any
-        Node style object.
-    """
-    if not style.text_outline:
-        return
-
-    import matplotlib.patheffects as pe
-
-    text_artist.set_path_effects(
-        [
-            pe.withStroke(
-                linewidth=style.text_outline_width,
-                foreground=style.text_outline_color,
-            )
-        ]
-    )
-
-
-def _draw_text_decoration(
-    ax: Any,
-    x0: float,
-    x1: float,
-    y: float,
-    color: str,
-    clip_patch: Optional[Any],
-    zorder: float,
-) -> None:
-    """Draw an underline or strike-through for a rich-text segment.
-
-    Parameters
-    ----------
-    ax : Any
-        Matplotlib axes.
-    x0 : float
-        Decoration start x-coordinate.
-    x1 : float
-        Decoration end x-coordinate.
-    y : float
-        Decoration y-coordinate.
-    color : str
-        Decoration color.
-    clip_patch : Any, optional
-        Clip patch for keeping the decoration inside the node.
-    zorder : float
-        Artist z-order.
-    """
-    from matplotlib.lines import Line2D
-
-    line = Line2D([x0, x1], [y, y], color=color, linewidth=1.0, zorder=zorder)
-    if clip_patch is not None:
-        line.set_clip_path(clip_patch)
-    ax.add_line(line)
-
-
-def _render_rich_label(
-    ax: Any,
-    label: str,
-    x: float,
-    y: float,
-    w: float,
-    h: float,
-    font_size: float,
-    style: Any,
-    clip_patch: Optional[Any],
-    base_gid: str,
-    svg_hover_map: Optional[Dict[str, str]],
-) -> None:
-    """Render mixed-format node labels as per-segment text artists.
-
-    Parameters
-    ----------
-    ax : Any
-        Matplotlib axes.
-    label : str
-        Rich-format label text.
-    x : float
-        Node center x-coordinate.
-    y : float
-        Node center y-coordinate.
-    w : float
-        Node width.
-    h : float
-        Node height.
-    font_size : float
-        Base font size in points.
-    style : Any
-        Node style object.
-    clip_patch : Any, optional
-        Clip patch for label rendering.
-    base_gid : str
-        SVG hover identifier prefix.
-    svg_hover_map : dict[str, str], optional
-        SVG hover text accumulator.
-    """
-    segments = parse_rich_markup(label)
-    lines = _split_rich_lines(segments)
-    pad_x = _points_to_data_units(ax, style.padding[0], "x")
-    pad_y = _points_to_data_units(ax, style.padding[1], "y")
-    line_height = _points_to_data_units(ax, font_size * 1.2, "y")
-    total_height = max(line_height * len(lines), line_height)
-    label_y = _label_reference_y(y, h, style.shape)
-    block_top = _label_anchor_y(style.text_valign, label_y, h, pad_y, total_height)
-
-    for line_index, line_segments in enumerate(lines):
-        segment_widths: List[float] = []
-        for segment_text, segment_style in line_segments:
-            family, weight, _, _ = _segment_font_properties(segment_style, style)
-            width_pt, _ = measure_text(segment_text, family, font_size, weight)
-            segment_widths.append(_points_to_data_units(ax, width_pt, "x"))
-
-        line_width = sum(segment_widths)
-        current_x = _label_anchor_x(style.text_align, x, w, pad_x, line_width)
-        line_y = block_top - (line_index + 0.5) * line_height
-
-        for segment_index, (segment, segment_style) in enumerate(line_segments):
-            family, weight, font_style, color = _segment_font_properties(segment_style, style)
-            text_artist = ax.text(
-                current_x,
-                line_y,
-                segment,
-                ha="left",
-                va="center",
-                fontsize=font_size,
-                fontfamily=family,
-                fontweight=weight,
-                fontstyle=font_style,
-                color=color,
-                zorder=3,
-                clip_on=True,
-            )
-            if clip_patch is not None:
-                text_artist.set_clip_path(clip_patch)
-            _apply_text_effects(text_artist, style)
-            _set_svg_hover(
-                text_artist, f"{base_gid}-{line_index}-{segment_index}", label, svg_hover_map
-            )
-
-            segment_width = segment_widths[segment_index]
-            if segment_style.get("underline"):
-                underline_y = line_y - _points_to_data_units(ax, font_size * 0.32, "y")
-                _draw_text_decoration(
-                    ax,
-                    current_x,
-                    current_x + segment_width,
-                    underline_y,
-                    color,
-                    clip_patch,
-                    zorder=3.05,
-                )
-            if segment_style.get("strike"):
-                strike_y = line_y + _points_to_data_units(ax, font_size * 0.08, "y")
-                _draw_text_decoration(
-                    ax,
-                    current_x,
-                    current_x + segment_width,
-                    strike_y,
-                    color,
-                    clip_patch,
-                    zorder=3.05,
-                )
-            current_x += segment_width
 
 
 def _draw_node_labels(
@@ -1610,13 +1405,18 @@ def _draw_node_labels(
         SVG hover text accumulator.
     """
     gs = graph.graph_style
+    display_scale = _compute_display_scale(ax)
     clip_patch_seq: Sequence[Any] = clip_patches or []
+    specs: List[DaguaText] = []
 
     for i in range(graph.num_nodes):
+        label = graph.node_labels[i]
+        if not label:
+            continue
+
         x, y = float(pos[i, 0]), float(pos[i, 1])
         w, h = float(sizes[i, 0]), float(sizes[i, 1])
         style = graph.get_style_for_node(i)
-        label = graph.node_labels[i]
         clip_patch = clip_patch_seq[i] if i < len(clip_patch_seq) else None
         label_y = _label_reference_y(y, h, style.shape)
 
@@ -1625,92 +1425,57 @@ def _draw_node_labels(
         else:
             fontsize = float(style.font_size)
 
-        if style.label_format == "rich":
-            _render_rich_label(
-                ax,
-                label,
-                x,
-                y,
-                w,
-                h,
-                fontsize,
-                style,
-                clip_patch,
-                f"dagua-node-label-{i}",
-                svg_hover_map,
-            )
-            continue
+        pad_x = float(style.padding[0]) * display_scale
+        pad_y = float(style.padding[1]) * display_scale
+        max_width: Optional[float] = None
+        if style.overflow_policy == "shrink_text":
+            max_width = w - 2.0 * pad_x
 
-        font_family = style.font_family_list[0]
-        pad_x = _points_to_data_units(ax, style.padding[0], "x")
-        pad_y = _points_to_data_units(ax, style.padding[1], "y")
-        if "\n" not in label:
-            text_x = _label_anchor_x(style.text_align, x, w, pad_x, 0.0)
-            if style.text_align == "center":
-                text_x = x
-            elif style.text_align == "right":
-                text_x = x + w / 2 - pad_x
+        if style.text_align == "left":
+            text_x = x - w / 2.0 + pad_x
+        elif style.text_align == "right":
+            text_x = x + w / 2 - pad_x
+        else:
+            text_x = x
 
-            if style.text_valign == "top":
-                text_y = label_y + h / 2 - pad_y
-            elif style.text_valign == "bottom":
-                text_y = label_y - h / 2 + pad_y
-            else:
-                text_y = label_y
+        if style.text_valign == "top":
+            text_y = label_y + h / 2.0 - pad_y
+        elif style.text_valign == "bottom":
+            text_y = label_y - h / 2.0 + pad_y
+        else:
+            text_y = label_y
 
-            text_artist = ax.text(
-                text_x,
-                text_y,
-                label,
+        is_rich = style.label_format == "rich"
+        secondary = gs.node_label_secondary_scale if not is_rich else 1.0
+        specs.append(
+            DaguaText(
+                x=text_x,
+                y=text_y,
+                text=label,
+                font_size=fontsize,
+                font_family=style.font_family_list[0],
+                font_weight=style.font_weight,
+                font_style=style.font_style,
+                font_color=style.font_color,
+                alpha=1.0,
                 ha=style.text_align,
                 va=style.text_valign,
-                fontsize=fontsize,
-                fontfamily=font_family,
-                color=style.font_color,
-                fontweight=style.font_weight,
-                fontstyle=style.font_style,
-                zorder=3,
+                rich=is_rich,
+                line_spacing=1.2,
+                secondary_scale=secondary,
+                max_width=max_width,
+                min_font_size=style.min_font_size,
+                outline=style.text_outline,
+                outline_color=style.text_outline_color,
+                outline_width=style.text_outline_width,
+                clip_patch=clip_patch,
                 clip_on=True,
+                zorder=3.0,
+                gid=f"dagua-node-label-{i}",
             )
-            if clip_patch is not None:
-                text_artist.set_clip_path(clip_patch)
-            _apply_text_effects(text_artist, style)
-            _set_svg_hover(text_artist, f"dagua-node-label-{i}", label, svg_hover_map)
-            continue
-
-        lines = label.split("\n")
-        line_height = _points_to_data_units(ax, fontsize * 1.2, "y")
-        total_height = line_height * len(lines)
-        block_top = _label_anchor_y(style.text_valign, label_y, h, pad_y, total_height)
-        text_x = (
-            x
-            if style.text_align == "center"
-            else _label_anchor_x(style.text_align, x, w, pad_x, 0.0)
         )
-        if style.text_align == "right":
-            text_x = x + w / 2 - pad_x
 
-        for j, line in enumerate(lines):
-            line_y = block_top - (j + 0.5) * line_height
-            line_font_size = fontsize if j == 0 else fontsize * gs.node_label_secondary_scale
-            text_artist = ax.text(
-                text_x,
-                line_y,
-                line,
-                ha=style.text_align,
-                va="center",
-                fontsize=line_font_size,
-                fontfamily=font_family,
-                color=style.font_color,
-                fontweight=style.font_weight,
-                fontstyle=style.font_style,
-                zorder=3,
-                clip_on=True,
-            )
-            if clip_patch is not None:
-                text_artist.set_clip_path(clip_patch)
-            _apply_text_effects(text_artist, style)
-            _set_svg_hover(text_artist, f"dagua-node-label-{i}-{j}", label, svg_hover_map)
+    render_text(ax, specs, display_scale, svg_hover_map)
 
 
 def _draw_edge_marker(
@@ -1980,21 +1745,25 @@ def _draw_edge_labels(
         Prepared collection whose label geometry should be reused.
     """
     gs = graph.graph_style
+    display_scale = _compute_display_scale(ax)
 
     if edge_collection is not None and label_positions is None:
-        for e_idx, artist in enumerate(
-            edge_collection.render_labels(
-                ax, label_background_alpha=gs.edge_label_background_opacity
-            )
-        ):
-            _set_svg_hover(
-                artist,
-                f"dagua-edge-label-{e_idx}",
-                _edge_hover_text(graph, e_idx),
-                svg_hover_map,
-            )
+        if svg_hover_map is not None:
+            for e_idx, prepared in enumerate(edge_collection.prepared_edges):
+                if not prepared.edge.label:
+                    continue
+                hover_text = _edge_hover_text(graph, e_idx)
+                svg_hover_map[f"dagua-edge-label-{e_idx}"] = hover_text
+                svg_hover_map[f"dagua-edge-label-{e_idx}-background"] = hover_text
+        edge_collection.render_labels(
+            ax,
+            display_scale=display_scale,
+            label_background_alpha=gs.edge_label_background_opacity,
+            svg_hover_map=svg_hover_map,
+        )
         return
 
+    specs: List[DaguaText] = []
     for e_idx, curve in enumerate(curves):
         if e_idx >= len(graph.edge_labels):
             break
@@ -2019,28 +1788,34 @@ def _draw_edge_labels(
                 label_side=style.label_side,
             )
 
-        font_family = style.label_font_family or RESOLVED_FONT
-        text_artist = ax.text(
-            lx,
-            ly,
-            label,
-            ha="center",
-            va="center",
-            fontsize=style.label_font_size,
-            fontweight=style.label_font_weight,
-            fontfamily=font_family,
-            color=style.label_font_color,
-            bbox=dict(
-                boxstyle="round,pad=0.15",
-                facecolor=style.label_background,
-                edgecolor="none",
-                alpha=gs.edge_label_background_opacity,
-            ),
-            zorder=4,
+        specs.append(
+            DaguaText(
+                x=lx,
+                y=ly,
+                text=label,
+                font_size=float(style.label_font_size),
+                font_family=str(style.label_font_family or RESOLVED_FONT),
+                font_weight=str(style.label_font_weight),
+                font_color=str(style.label_font_color),
+                ha="center",
+                va="center",
+                background=str(style.label_background),
+                background_alpha=float(gs.edge_label_background_opacity),
+                background_padding=(
+                    float(style.label_font_size) * 0.15,
+                    float(style.label_font_size) * 0.15,
+                ),
+                background_corner_radius=float(style.label_font_size) * 0.15,
+                clip_on=False,
+                zorder=4.0,
+                gid=f"dagua-edge-label-{e_idx}",
+            )
         )
-        _set_svg_hover(
-            text_artist, f"dagua-edge-label-{e_idx}", _edge_hover_text(graph, e_idx), svg_hover_map
-        )
+        if svg_hover_map is not None:
+            svg_hover_map[f"dagua-edge-label-{e_idx}"] = _edge_hover_text(graph, e_idx)
+            svg_hover_map[f"dagua-edge-label-{e_idx}-background"] = _edge_hover_text(graph, e_idx)
+
+    render_text(ax, specs, display_scale, svg_hover_map)
 
 
 def _draw_clusters(
@@ -2084,6 +1859,10 @@ def _draw_clusters(
     fill_colors_by_depth: Dict[int, List[Any]] = {}
     border_paths_by_depth: Dict[int, List[Any]] = {}
     border_colors_by_depth: Dict[int, List[Any]] = {}
+    border_outline_patches_by_depth: Dict[int, List[Any]] = {}
+    cluster_label_specs: List[DaguaText] = []
+
+    from matplotlib.patches import PathPatch
 
     for name in ordered_clusters:
         members = graph.clusters[name]
@@ -2125,6 +1904,16 @@ def _draw_clusters(
             )
         )
 
+        # Enforce minimum cluster width: at least 60% of height so vertical
+        # column layouts get reasonable horizontal breathing room.
+        cluster_height = y_max - y_min
+        cluster_width = x_max - x_min
+        min_cluster_width = cluster_height * 0.8
+        if cluster_width < min_cluster_width:
+            expand_w = (min_cluster_width - cluster_width) / 2.0
+            x_min -= expand_w
+            x_max += expand_w
+
         # Cluster labels are few and measure_text is cached, so use the actual
         # measured width instead of a character-count heuristic.
         est_label_width = label_width + label_ox * 2
@@ -2140,7 +1929,9 @@ def _draw_clusters(
 
         fill_alpha = style.opacity * (1.0 - depth * 0.15 / max(max_depth, 1))
         fill_alpha = max(fill_alpha, 0.08)
-        border_alpha = style.opacity * (1.0 - depth * 0.15 / max(max_depth, 1))
+        border_alpha = min(
+            max(style.opacity * 2.5, 0.6) * (1.0 - depth * 0.15 / max(max_depth, 1)), 1.0
+        )
 
         width = x_max - x_min
         height = y_max - y_min
@@ -2168,6 +1959,17 @@ def _draw_clusters(
             border_colors_by_depth.setdefault(depth, []).extend(
                 [to_rgba(stroke_color, border_alpha)] * len(border_paths)
             )
+            border_outline_patches_by_depth.setdefault(depth, []).append(
+                PathPatch(
+                    outer_path,
+                    facecolor="none",
+                    edgecolor=to_rgba(stroke_color, border_alpha),
+                    linewidth=max(float(style.stroke_width), 0.7),
+                    linestyle=_cluster_linestyle(style.stroke_dash),
+                    joinstyle="round",
+                    zorder=0.075 + depth * 0.01,
+                )
+            )
 
         # Cluster label: position from style (label, label_fontsize already computed above)
         if style.label_position == "top-center":
@@ -2183,25 +1985,30 @@ def _draw_clusters(
         depth_label_offset = depth * (_points_to_data_units(ax, label_fontsize, "y")) * 1.4
         ly = y_max - label_oy - depth_label_offset
 
-        text_artist = ax.text(
-            lx,
-            ly,
-            label,
-            fontsize=label_fontsize,
-            fontweight=style.font_weight,
-            fontfamily=label_ff,
-            color=style.font_color,
-            va="top",
-            ha=ha,
-            zorder=0.1 + depth * 0.01,
-            clip_on=False,
-        )
-        _set_svg_hover(
-            text_artist,
-            f"dagua-cluster-label-{name}",
-            _cluster_hover_text(name, graph, indices),
-            svg_hover_map,
-        )
+        if label:
+            cluster_label_specs.append(
+                DaguaText(
+                    x=lx,
+                    y=ly,
+                    text=label,
+                    font_size=label_fontsize,
+                    font_family=label_ff,
+                    font_weight=style.font_weight,
+                    font_color=style.font_color,
+                    alpha=1.0,
+                    ha=ha,
+                    va="top",
+                    clip_on=False,
+                    zorder=0.1 + depth * 0.01,
+                    gid=f"dagua-cluster-label-{name}",
+                )
+            )
+            if svg_hover_map is not None:
+                svg_hover_map[f"dagua-cluster-label-{name}"] = _cluster_hover_text(
+                    name,
+                    graph,
+                    indices,
+                )
 
     for depth in sorted(fill_paths_by_depth):
         add_filled_collections(
@@ -2213,3 +2020,8 @@ def _draw_clusters(
             fill_zorder=0.0 + depth * 0.01,
             border_zorder=0.05 + depth * 0.01,
         )
+        for border_patch in border_outline_patches_by_depth.get(depth, []):
+            ax.add_patch(border_patch)
+
+    if cluster_label_specs:
+        render_text(ax, cluster_label_specs, display_scale, svg_hover_map)

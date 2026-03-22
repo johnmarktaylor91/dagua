@@ -7,8 +7,13 @@
 - **graphviz.py**: imports graphviz only (lazy import, fails gracefully if missing)
 - **__init__.py**: re-exports, dispatches to correct backend
 
-No module in this package imports from dagua except types/dataclasses from `elements.py`
-and `style.py` (pure data, no side effects).
+No module in this package imports from dagua except:
+- types/dataclasses from `elements.py`
+- pure data/constants from `styles.py`
+- pure utility functions from `utils.py`
+
+Renderer modules must not import from `dagua.render.mpl` unless they are part of
+the `mpl.py` implementation itself.
 
 ## Conventions
 

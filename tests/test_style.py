@@ -30,6 +30,7 @@ class TestNodeStyleNewFields:
 
     def test_defaults(self):
         s = NodeStyle()
+        assert s.padding == (14.0, 8.0)
         assert s.font_weight == "regular"
         assert s.font_style == "normal"
         assert s.shadow is False
@@ -98,6 +99,7 @@ class TestClusterStyleNewFields:
 
     def test_defaults(self):
         s = ClusterStyle()
+        assert s.padding == 35.0
         assert s.font_family == ""
         assert s.label_offset == (8.0, 20.0)
         assert s.depth_fill_step == 0.03

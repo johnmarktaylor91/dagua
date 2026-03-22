@@ -449,33 +449,17 @@ def _tee(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build an open vee head whose arms start on the ribbon edges."""
+    """Build an open vee head with two explicit chevron arms."""
     overlap = _join_overlap(length, body_width)
-    neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
+    join_x = max(length - overlap, length * 0.58)
     outer_half_width = _ornament_half_width(width, body_width)
-    path = _local_path(
-        [
-            (length, neck_half_width),
-            (0.0, 0.0),
-            (length, -neck_half_width),
-        ],
-        closed=False,
-    )
-    if outer_half_width > neck_half_width + FLOAT_EPSILON:
-        path = _local_path(
-            [
-                (length, neck_half_width),
-                (length * 0.28, outer_half_width),
-                (0.0, 0.0),
-                (length * 0.28, -outer_half_width),
-                (length, -neck_half_width),
-            ],
-            closed=False,
-        )
     return ArrowheadResult(
         filled_paths=[],
-        stroked_paths=[path],
-        trim_contour=_local_trim_contour(length - overlap, body_width),
+        stroked_paths=[
+            _local_path([(join_x, outer_half_width), (0.0, 0.0)], closed=False),
+            _local_path([(join_x, -outer_half_width), (0.0, 0.0)], closed=False),
+        ],
+        trim_contour=_local_trim_contour(join_x, body_width),
         stroke_width_scale=_open_head_stroke_scale(body_width),
     )
 
