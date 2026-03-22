@@ -203,6 +203,20 @@ class TestRouteEdges:
         else:
             assert (curve.cp1[0] > curve.p0[0], curve.cp2[0] > curve.p0[0]) == expected_outward
 
+    def test_tb_self_loop_is_taller_than_it_is_wide(self) -> None:
+        """Top-bottom self-loops should read as node-owned top loops, not side arcs."""
+        pos = torch.tensor([[50.0, 50.0]])
+        ei = torch.tensor([[0], [0]])
+        ns = torch.tensor([[40.0, 20.0]])
+
+        curve = route_edges(pos, ei, ns, direction="TB")[0]
+        vertical_rise = curve.cp1[1] - curve.p0[1]
+        horizontal_offset = abs(curve.cp1[0] - curve.p0[0])
+
+        assert curve.p0 == pytest.approx((50.0, 60.0))
+        assert curve.cp1[1] == pytest.approx(curve.cp2[1])
+        assert vertical_rise > horizontal_offset
+
 
 class TestEvaluateBezier:
     def test_endpoints(self) -> None:
