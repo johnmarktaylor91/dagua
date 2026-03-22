@@ -1275,7 +1275,28 @@ def render_dagua_theme(graph: DaguaGraph, theme_name: str, output_path: Path) ->
     # rendering at fixed positions we need Graphviz's original y-up orientation
     # so the graph reads top-to-bottom like the Graphviz native reference.
     positions[:, 1] = -positions[:, 1]
-    dagua.render(themed_graph, positions, output=str(output_path), dpi=210)
+
+    # Compute figsize so Graphviz's point-space positions render at the same
+    # physical scale as native Graphviz (72 points = 1 inch).
+    sizes_np = themed_graph.node_sizes.detach().cpu().numpy()
+    margin = 18.0  # points
+    x_min = float((positions[:, 0] - sizes_np[:, 0] / 2).min()) - margin
+    x_max = float((positions[:, 0] + sizes_np[:, 0] / 2).max()) + margin
+    y_min = float((positions[:, 1] - sizes_np[:, 1] / 2).min()) - margin
+    y_max = float((positions[:, 1] + sizes_np[:, 1] / 2).max()) + margin
+    # 72 points per inch (Graphviz convention)
+    fig_w = (x_max - x_min) / 72.0
+    fig_h = (y_max - y_min) / 72.0
+    # Clamp to reasonable range
+    fig_w = max(2.0, min(fig_w, 16.0))
+    fig_h = max(2.0, min(fig_h, 16.0))
+    dagua.render(
+        themed_graph,
+        positions,
+        output=str(output_path),
+        figsize=(fig_w, fig_h),
+        dpi=210,
+    )
 
 
 def _content_crop_box(image: Image.Image) -> Optional[Tuple[int, int, int, int]]:
