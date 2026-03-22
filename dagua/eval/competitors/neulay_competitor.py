@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import time
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
 
@@ -64,12 +64,38 @@ class NeuLayReference(CompetitorBase):
 
     name = "neulay"
     max_nodes = 20_000
+    variant_param_names = frozenset({"gcn_steps", "lr", "radius", "steps", "use_gcn"})
 
     def layout(
         self,
         graph: DaguaGraph,
         timeout: float = 300.0,
         seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the upstream NeuLay reference implementation.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility parameter for the benchmark interface.
+        seed : int | None, default=None
+            Random seed for the stochastic solver.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime metadata.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
     ) -> CompetitorResult:
         """Run the upstream NeuLay reference implementation.
 
@@ -101,14 +127,20 @@ class NeuLayReference(CompetitorBase):
             )
 
         try:
+            layout_kwargs: dict[str, Any] = {
+                "seed": 42 if seed is None else seed,
+                "steps": 20_000,
+                "gcn_steps": 2_000,
+                "use_gcn": True,
+            }
+            if variant_params is not None:
+                layout_kwargs.update(dict(variant_params))
+
             pos = upstream_layout(
                 graph.edge_index,
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
-                seed=42 if seed is None else seed,
-                steps=20_000,
-                gcn_steps=2_000,
-                use_gcn=True,
+                **layout_kwargs,
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)

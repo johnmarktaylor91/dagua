@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Mapping, Optional
 
 import torch
 
@@ -61,12 +61,41 @@ class TSNEGraph(CompetitorBase):
 
     name = "tsne_graph"
     max_nodes = 5_000
+    variant_param_names = frozenset({"learning_rate", "max_iter", "perplexity"})
 
     def layout(
         self,
         graph: DaguaGraph,
         timeout: float = 300.0,
         seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run sklearn t-SNE on all-pairs graph shortest-path distances.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Input graph to lay out.
+        timeout : float, optional
+            Unused adapter timeout in seconds. Included for interface
+            compatibility with the benchmark harness.
+        seed : int | None, default=None
+            Random seed for t-SNE initialization. ``None`` preserves the
+            adapter's historical default of ``42``.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result with positions shaped ``[N, 2]`` on CPU, or an error
+            payload if sklearn or SciPy fails.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, object]] = None,
     ) -> CompetitorResult:
         """Run sklearn t-SNE on all-pairs graph shortest-path distances.
 
@@ -103,13 +132,18 @@ class TSNEGraph(CompetitorBase):
                 return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
 
             distances = _distance_matrix(graph)
-            tsne = TSNE(
-                n_components=2,
-                metric="precomputed",
-                init="random",
-                random_state=seed if seed is not None else 42,
-                perplexity=min(30.0, float(num_nodes - 1)),
-            )
+            tsne_kwargs: dict[str, object] = {
+                "n_components": 2,
+                "metric": "precomputed",
+                "init": "random",
+                "random_state": seed if seed is not None else 42,
+                "perplexity": min(30.0, float(num_nodes - 1)),
+            }
+            if variant_params is not None:
+                tsne_kwargs.update(dict(variant_params))
+                perplexity = float(tsne_kwargs.get("perplexity", 30.0))
+                tsne_kwargs["perplexity"] = min(perplexity, float(num_nodes - 1))
+            tsne = TSNE(**tsne_kwargs)
             coordinates = tsne.fit_transform(distances)
             pos = torch.tensor(coordinates, dtype=torch.float32)
 
