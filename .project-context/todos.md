@@ -11,6 +11,15 @@
 - [ ] [LOW] Arrowhead sizing still slightly smaller than Graphviz's chunky triangles. Current graphviz_strict uses arrow_length=7, arrow_width=4.5 -- may need to increase to ~10x7 once the placement bug is fixed.
 
 ## Improvements (Nice-to-Have)
+- [ ] [MED] Add Cytoscape.js fcose as competitor layout algorithm (npm install cytoscape cytoscape-fcose, Node.js subprocess adapter, same pattern as ELK/dagre)
+- [ ] [MED] Add Gephi/YifanHu as competitor layout algorithm (Java Gephi Toolkit JAR, subprocess adapter)
+- [ ] [MED] Image/icon nodes: image files as node backgrounds (PIL + clip-to-shape). Cytoscape, yEd, Draw.io, D3.
+- [ ] [MED] External labels (xlabel): labels outside node boundary. Graphviz. Needs label placement solver.
+- [ ] [LOW] Edge jump styles at crossings (arc/gap/sharp). Draw.io. Requires crossing detection.
+- [ ] [LOW] Text rotation on node labels. Cytoscape.
+- [ ] [LOW] Border position inside/outside/center. Cytoscape.
+- [ ] [LOW] Pie chart node fills (16-slice). Cytoscape only.
+- [ ] [MED] Warm-start chain variants: benchmark FR->KK and KK->FR two-pass layouts using pos= forwarding. Does warm-starting KK from FR output beat either alone? Add as variant entries once plumbing is validated.
 - [ ] [HIGH] Pixel-unit overrides: support "2pt" syntax for fixed-size elements (Union[float, str] values in styles). Users who want pixel-based sizing for specific elements.
 - [ ] [HIGH] Expose text rendering capabilities in style fields: NodeStyle.text_background, text_underline, text_strikethrough, EdgeStyle.label_outline, ClusterStyle.label_outline. Capabilities exist in dagua/render/text/ but not exposed in styles.
 - [ ] [MED] Graphviz comparison pipeline: fix DOT generation for multi-variant grid tests (Graphviz flattens grids to strips). May need separate DOT sources per grid cell.
