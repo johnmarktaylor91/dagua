@@ -312,7 +312,7 @@ class ClusterStyle:
     stroke_width: float = 0.7
     stroke_dash: str = "solid"
     corner_radius: float = 8.0
-    padding: float = 45.0
+    padding: float = 38.0
     label_position: str = "top-left"  # top-left, top-center, top-right
     font_size: float = 9.5
     font_weight: str = "bold"
