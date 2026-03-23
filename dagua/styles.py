@@ -316,9 +316,11 @@ class NodeStyle:
     border_position: str = "center"  # render-only: center, inside, outside
     stroke_cap: str = "butt"  # render-only: butt, round, square
     stroke_join: str = "miter"  # render-only: miter, bevel, round
-    fill_pattern: str = "solid"  # render-only: solid, striped, hatched
-    fill_pattern_colors: Optional[List[str]] = None  # render-only stripe palette
+    fill_pattern: str = "solid"  # render-only: solid, striped, hatched, pie
+    fill_pattern_colors: Optional[List[str]] = None  # render-only palette for stripes/pie slices
+    fill_pattern_values: Optional[List[float]] = None  # render-only pie slice proportions
     fill_pattern_angle: float = 0.0  # render-only stripe angle in degrees
+    fill_pattern_hole: float = 0.0  # render-only inner radius fraction for donut pies
     image: str = ""  # render-only path or URL for node image content
     image_fit: str = "contain"  # render-only: contain, cover, stretch
     image_opacity: float = 1.0  # render-only alpha for the image layer
@@ -391,6 +393,8 @@ class EdgeStyle:
     tail_label_offset: float = 5.0
     color_gradient: str = "none"  # "none", "source_to_target"
     color_gradient_end: str = ""  # empty = use the edge color for both ends
+    crossing_style: str = "none"  # none, arc, gap, sharp
+    crossing_size: float = 6.0  # jump marker size in points
 
     def __repr__(self) -> str:
         """Return a compact repr showing only non-default fields."""

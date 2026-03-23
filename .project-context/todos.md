@@ -15,8 +15,8 @@
 - [ ] [MED] 3D graph rendering: z-coordinate support, 3D force-directed layout, perspective/orthographic projection. Consider Three.js export or matplotlib 3D axes.
 - [ ] [MED] Add Cytoscape.js fcose as competitor layout algorithm (npm install cytoscape cytoscape-fcose, Node.js subprocess adapter, same pattern as ELK/dagre)
 - [ ] [MED] Add Gephi/YifanHu as competitor layout algorithm (Java Gephi Toolkit JAR, subprocess adapter)
-- [ ] [LOW] Edge jump styles at crossings (arc/gap/sharp). Draw.io. Requires crossing detection.
-- [ ] [LOW] Pie chart node fills (16-slice). Cytoscape only.
+- [x] [DONE] Edge jump styles at crossings (arc/gap/sharp). Implemented with detection + rendering.
+- [x] [DONE] Pie chart node fills. Implemented with donut hole support.
 - [ ] [MED] Import adapters for workflow/pipeline tools: parse native file formats into DaguaGraph. n8n (.json workflows), Airflow (DAG .py -> task graph), dbt (manifest.json -> model lineage), Dagster (asset graph), GitHub Actions (.yml -> job/step DAG), AWS Step Functions (ASL .json -> state machine), Terraform (.tfstate -> resource graph), Argo Workflows (workflow .yaml -> DAG). Each adapter: read file -> extract nodes/edges/metadata -> return DaguaGraph with appropriate theme auto-applied.
 - [ ] [MED] Warm-start chain variants: benchmark FR->KK and KK->FR two-pass layouts using pos= forwarding. Does warm-starting KK from FR output beat either alone? Add as variant entries once plumbing is validated.
 - [ ] [HIGH] Pixel-unit overrides: support "2pt" syntax for fixed-size elements (Union[float, str] values in styles). Users who want pixel-based sizing for specific elements.
