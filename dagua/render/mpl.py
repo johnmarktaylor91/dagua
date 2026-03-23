@@ -67,21 +67,21 @@ from dagua.utils import (
 _VECTOR_FORMATS = {"pdf", "ps", "eps", "svg", "svgz"}
 _RASTER_FORMATS = {"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"}
 _GRAPHVIZ_DASH_PATTERN: Tuple[float, float] = (5.0, 3.0)
-_GRAPHVIZ_DOT_PATTERN: Tuple[float, float] = (0.1, 3.0)
+_GRAPHVIZ_DOT_PATTERN: Tuple[float, float] = (1.2, 3.0)
 _ARROWHEAD_REFERENCE_WIDTH_POINTS = 1.2
 _DOUBLE_BORDER_INSET_FACTOR = 2.5
 _PATTERN_FILL_RESOLUTION = 128
 _HATCH_PATTERN = "////"
 _MIN_HATCH_LINEWIDTH_POINTS = 0.8
-_CROSSING_CLEARANCE_PADDING_POINTS = 2.0
-_CROSSING_MIN_SPAN_WIDTH_FACTOR = 3.0
-_CROSSING_MIN_SPAN_POINTS = 10.0
-_CROSSING_MIN_SPAN_DATA_UNITS = 16.0
-_CROSSING_SHARP_HEIGHT_WIDTH_FACTOR = 2.0
-_CROSSING_SHARP_SPAN_WIDTH_FACTOR = 3.0
+_CROSSING_CLEARANCE_PADDING_POINTS = 3.0
+_CROSSING_MIN_SPAN_WIDTH_FACTOR = 4.0
+_CROSSING_MIN_SPAN_POINTS = 14.0
+_CROSSING_MIN_SPAN_DATA_UNITS = 22.0
+_CROSSING_SHARP_HEIGHT_WIDTH_FACTOR = 2.5
+_CROSSING_SHARP_SPAN_WIDTH_FACTOR = 4.0
 _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
-_SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION = 0.25
-_SELF_LOOP_ARROWHEAD_MAX_WIDTH_RATIO = 0.7
+_SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION = 0.18
+_SELF_LOOP_ARROWHEAD_MAX_WIDTH_RATIO = 0.55
 _CLUSTER_LABEL_VERTICAL_GAP_POINTS = 2.0
 _DEFAULT_NODE_LABEL_FONT_POINTS = 8.5
 _DEFAULT_EXTERNAL_LABEL_FONT_POINTS = 8.0
@@ -95,7 +95,7 @@ _NODE_LABEL_MIN_HEIGHT_FRACTION = 0.1
 _NODE_LABEL_MAX_HEIGHT_FRACTION = 0.6
 _ELLIPSE_VERTICAL_LABEL_INSET_FRACTION = 0.15
 _MULTILINE_LABEL_REDUCTION = 0.5
-_EDGE_LABEL_HEIGHT_FRACTION = 0.25
+_EDGE_LABEL_HEIGHT_FRACTION = 0.18
 _CLUSTER_LABEL_HEIGHT_FRACTION = 0.06
 
 
@@ -1676,6 +1676,53 @@ def _draw_node_shape_extras(
         Artist z-order.
     """
     from matplotlib.patches import Ellipse
+
+    if style.shape == "box3d":
+        # Overlay darker tints on the top and right extrusion faces so the
+        # 3D illusion reads at a glance.
+        from matplotlib.patches import Polygon as MplPolygon
+
+        half_w = w / 2.0
+        half_h = h / 2.0
+        left = x - half_w
+        right = x + half_w
+        bottom = y - half_h
+        top = y + half_h
+        depth = min(half_w, half_h) * 0.25
+        offset_x = depth
+        offset_y = depth * 0.70
+        front_right = right - offset_x
+        front_top = top - offset_y
+
+        top_face = MplPolygon(
+            [
+                (left, front_top),
+                (left + offset_x, top),
+                (front_right + offset_x, top),
+                (front_right, front_top),
+            ],
+            closed=True,
+            facecolor=(0.0, 0.0, 0.0, 0.12),
+            edgecolor="none",
+            linewidth=0.0,
+            zorder=zorder - 0.01,
+        )
+        right_face = MplPolygon(
+            [
+                (front_right, bottom),
+                (right, bottom + offset_y),
+                (right, top),
+                (front_right, front_top),
+            ],
+            closed=True,
+            facecolor=(0.0, 0.0, 0.0, 0.18),
+            edgecolor="none",
+            linewidth=0.0,
+            zorder=zorder - 0.01,
+        )
+        ax.add_patch(top_face)
+        ax.add_patch(right_face)
+        return
 
     if style.shape == "double_circle":
         # Draw the inner concentric circle as a stroke-only ellipse.
@@ -5166,6 +5213,21 @@ def _draw_node_labels(
 
         is_rich = style.label_format == "rich"
         secondary = gs.node_label_secondary_scale if not is_rich else 1.0
+
+        # Auto-add text background for patterned fills where text would
+        # otherwise be unreadable against multi-colored segments.
+        text_bg = style.text_background if style.text_background else None
+        text_bg_alpha = style.text_background_opacity
+        if text_bg is None and style.fill_pattern in ("pie", "striped"):
+            text_bg = "#FFFFFF"
+            text_bg_alpha = 0.92
+        elif text_bg is None and style.fill_pattern == "hatched":
+            text_bg = gs.background_color or "#FAFAFA"
+            text_bg_alpha = 0.75
+        elif text_bg is None and style.gradient != "none":
+            text_bg = "#FFFFFF"
+            text_bg_alpha = 0.85
+
         specs.append(
             DaguaText(
                 x=text_x,
@@ -5192,8 +5254,8 @@ def _draw_node_labels(
                 outline=style.text_outline,
                 outline_color=style.text_outline_color,
                 outline_width=style.text_outline_width,
-                background=style.text_background if style.text_background else None,
-                background_alpha=style.text_background_opacity,
+                background=text_bg,
+                background_alpha=text_bg_alpha,
                 background_padding=style.text_background_padding,
                 background_corner_radius=style.text_background_corner_radius,
                 clip_patch=clip_patch if style.overflow_policy != "overflow" else None,

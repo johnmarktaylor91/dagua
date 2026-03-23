@@ -1034,6 +1034,16 @@ def test_text_to_glyphs_italic() -> None:
     assert glyph_run.path.vertices.shape[0] > 0
 
 
+def test_text_to_glyphs_synthesizes_italic_when_family_has_no_distinct_italic_face() -> None:
+    """Italic requests should still slant when matplotlib resolves to the normal face."""
+    normal = text_to_glyphs("Shift", 12.0, font_family="cmss10", font_style="normal")
+    italic = text_to_glyphs("Shift", 12.0, font_family="cmss10", font_style="italic")
+
+    assert italic.path.vertices.shape == normal.path.vertices.shape
+    assert not np.allclose(italic.path.vertices, normal.path.vertices)
+    assert np.ptp(italic.path.vertices[:, 0]) > np.ptp(normal.path.vertices[:, 0])
+
+
 def test_advance_width_vs_bbox() -> None:
     """Advance widths must differ from glyph extents for italic overhang cases."""
     glyph_run = text_to_glyphs("office", 12.0, font_family="DejaVu Serif", font_style="italic")
