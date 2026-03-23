@@ -489,6 +489,7 @@ class Theme:
     """Unified theme bundling all style defaults for a graph."""
 
     name: str = "default"
+    category: str = "creative"
     node_styles: Dict[str, NodeStyle] = field(default_factory=dict)
     edge_styles: Dict[str, EdgeStyle] = field(default_factory=dict)
     cluster_style: ClusterStyle = field(default_factory=ClusterStyle)
@@ -588,6 +589,7 @@ GRAPHVIZ_MATCH_DEFAULTS: Dict[str, Any] = {
 
 DEFAULT_THEME_OBJ = Theme(
     name="default",
+    category="core",
     node_styles=dict(DEFAULT_NODE_STYLES),
     edge_styles={
         "default": EdgeStyle(),
@@ -602,6 +604,7 @@ DEFAULT_THEME_OBJ = Theme(
 
 DARK_THEME = Theme(
     name="dark",
+    category="core",
     node_styles={
         "default": NodeStyle(
             base_color=PALETTE["sky"],
@@ -662,6 +665,7 @@ DARK_THEME = Theme(
 
 MINIMAL_THEME = Theme(
     name="minimal",
+    category="core",
     node_styles={
         "default": NodeStyle(
             shape="rect",
@@ -709,6 +713,7 @@ MINIMAL_THEME = Theme(
 
 TORCHLENS_THEME = Theme(
     name="torchlens",
+    category="core",
     node_styles={
         "default": NodeStyle(
             base_color="#5E6C84",
@@ -857,6 +862,7 @@ _GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
 
 GRAPHVIZ_STRICT_THEME = Theme(
     name="graphviz_strict",
+    category="core",
     node_styles={
         "default": copy.deepcopy(_GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE),
         "input": copy.deepcopy(_GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE),
@@ -907,6 +913,7 @@ GRAPHVIZ_STRICT_THEME = Theme(
 
 GRAPHVIZ_THEME = Theme(
     name="graphviz",
+    category="core",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -995,6 +1002,7 @@ GRAPHVIZ_THEME = Theme(
 
 MERMAID_THEME = Theme(
     name="mermaid",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -1069,6 +1077,7 @@ MERMAID_THEME = Theme(
 
 D3_THEME = Theme(
     name="d3",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -1136,6 +1145,7 @@ D3_THEME = Theme(
 
 CYTOSCAPE_THEME = Theme(
     name="cytoscape",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -1203,6 +1213,7 @@ CYTOSCAPE_THEME = Theme(
 
 GEPHI_THEME = Theme(
     name="gephi",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -1287,6 +1298,7 @@ GEPHI_THEME = Theme(
 
 OBSIDIAN_THEME = Theme(
     name="obsidian",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -1357,6 +1369,7 @@ OBSIDIAN_THEME = Theme(
 
 YED_THEME = Theme(
     name="yed",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -1438,6 +1451,7 @@ YED_THEME = Theme(
 
 DRAWIO_THEME = Theme(
     name="drawio",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -1522,6 +1536,7 @@ DRAWIO_THEME = Theme(
 
 NEO4J_THEME = Theme(
     name="neo4j",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -1605,6 +1620,7 @@ NEO4J_THEME = Theme(
 
 NETWORKX_THEME = Theme(
     name="networkx",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -1672,6 +1688,7 @@ NETWORKX_THEME = Theme(
 
 TIKZ_THEME = Theme(
     name="tikz",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -1743,6 +1760,7 @@ TIKZ_THEME = Theme(
 
 SIGMA_THEME = Theme(
     name="sigma",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -1810,6 +1828,7 @@ SIGMA_THEME = Theme(
 
 VISJS_THEME = Theme(
     name="visjs",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -1878,6 +1897,7 @@ VISJS_THEME = Theme(
 
 GRAPHISTRY_THEME = Theme(
     name="graphistry",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -1957,6 +1977,7 @@ GRAPHISTRY_THEME = Theme(
 
 IGRAPH_R_THEME = Theme(
     name="igraph_r",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -2023,6 +2044,7 @@ IGRAPH_R_THEME = Theme(
 
 GRAPH_TOOL_THEME = Theme(
     name="graph_tool",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -2094,6 +2116,7 @@ GRAPH_TOOL_THEME = Theme(
 
 EXCALIDRAW_THEME = Theme(
     name="excalidraw",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -2164,6 +2187,7 @@ EXCALIDRAW_THEME = Theme(
 
 GITHUB_THEME = Theme(
     name="github",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -2232,6 +2256,7 @@ GITHUB_THEME = Theme(
 
 LINEAR_THEME = Theme(
     name="linear",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -2305,6 +2330,7 @@ LINEAR_THEME = Theme(
 
 N8N_THEME = Theme(
     name="n8n",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -2383,6 +2409,7 @@ N8N_THEME = Theme(
 
 AIRFLOW_THEME = Theme(
     name="airflow",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -2452,6 +2479,7 @@ AIRFLOW_THEME = Theme(
 
 DAGSTER_THEME = Theme(
     name="dagster",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -2553,6 +2581,7 @@ THEME_REGISTRY: Dict[str, Theme] = {
 
 NEURON_THEME = Theme(
     name="neuron",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -2636,6 +2665,7 @@ NEURON_THEME = Theme(
 
 BLUEPRINT_THEME = Theme(
     name="blueprint",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -2708,6 +2738,7 @@ BLUEPRINT_THEME = Theme(
 
 CHALKBOARD_THEME = Theme(
     name="chalkboard",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -2780,6 +2811,7 @@ CHALKBOARD_THEME = Theme(
 
 SUBWAY_THEME = Theme(
     name="subway",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -2848,6 +2880,7 @@ SUBWAY_THEME = Theme(
 
 VINTAGE_TEXTBOOK_THEME = Theme(
     name="vintage_textbook",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -2922,6 +2955,7 @@ VINTAGE_TEXTBOOK_THEME = Theme(
 
 FEYNMAN_THEME = Theme(
     name="feynman",
+    category="thinker",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -2998,6 +3032,7 @@ FEYNMAN_THEME = Theme(
 
 BAUHAUS_THEME = Theme(
     name="bauhaus",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="rect",
@@ -3064,6 +3099,7 @@ BAUHAUS_THEME = Theme(
 
 ART_DECO_THEME = Theme(
     name="art_deco",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="diamond",
@@ -3134,6 +3170,7 @@ ART_DECO_THEME = Theme(
 
 NEON_THEME = Theme(
     name="neon",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -3204,6 +3241,7 @@ NEON_THEME = Theme(
 
 TERMINAL_THEME = Theme(
     name="terminal",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rect",
@@ -3272,6 +3310,7 @@ TERMINAL_THEME = Theme(
 
 NAPKIN_THEME = Theme(
     name="napkin",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -3343,6 +3382,7 @@ NAPKIN_THEME = Theme(
 
 MOLECULAR_THEME = Theme(
     name="molecular",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -3417,6 +3457,7 @@ MOLECULAR_THEME = Theme(
 
 CIRCUIT_THEME = Theme(
     name="circuit",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="rect",
@@ -3486,6 +3527,7 @@ CIRCUIT_THEME = Theme(
 
 CONSTELLATION_THEME = Theme(
     name="constellation",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -3559,6 +3601,7 @@ CONSTELLATION_THEME = Theme(
 
 GENEALOGY_THEME = Theme(
     name="genealogy",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -3635,6 +3678,7 @@ GENEALOGY_THEME = Theme(
 
 DARK_ACADEMIA_THEME = Theme(
     name="dark_academia",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -3706,6 +3750,7 @@ DARK_ACADEMIA_THEME = Theme(
 
 PASTEL_THEME = Theme(
     name="pastel",
+    category="core",
     node_styles={
         "default": NodeStyle(
             shape="roundrect",
@@ -3805,6 +3850,7 @@ THEME_REGISTRY["dagster"] = DAGSTER_THEME
 # (flat colored region boxes, hierarchical connectivity, warm earth palette)
 VAN_ESSEN_THEME = Theme(
     name="van_essen",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -3897,6 +3943,7 @@ VAN_ESSEN_THEME = Theme(
 # feel with delicate branching structures
 CAJAL_THEME = Theme(
     name="cajal",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -3986,6 +4033,7 @@ CAJAL_THEME = Theme(
 # glowing edges, modern clinical neuroimaging aesthetic
 CONNECTOME_THEME = Theme(
     name="connectome",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -4078,6 +4126,7 @@ CONNECTOME_THEME = Theme(
 # orange, warm off-white textbook paper background
 PATHWAY_THEME = Theme(
     name="pathway",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",  # metabolite ovals (citrate, malate, etc.)
@@ -4167,6 +4216,7 @@ PATHWAY_THEME = Theme(
 # width, muted cartographic palette, subtle terrain background
 ROADMAP_THEME = Theme(
     name="roadmap",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -4256,6 +4306,7 @@ ROADMAP_THEME = Theme(
 # as the focus, clean academic journal aesthetic
 PHYLOGENY_THEME = Theme(
     name="phylogeny",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="none",  # taxa are just labels, no box
@@ -4338,6 +4389,7 @@ PHYLOGENY_THEME = Theme(
 # dappled sunlight background
 BRANCHES_THEME = Theme(
     name="branches",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -4416,6 +4468,7 @@ BRANCHES_THEME = Theme(
 # nodes glistening at intersections, gossamer connections
 SPIDERWEB_THEME = Theme(
     name="spiderweb",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -4497,6 +4550,7 @@ SPIDERWEB_THEME = Theme(
 # Coral -- deep ocean reef: bioluminescent nodes, dark abyssal water
 CORAL_THEME = Theme(
     name="coral",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -4582,6 +4636,7 @@ CORAL_THEME = Theme(
 # Autumn -- fall foliage: warm reds, burnt orange, gold on woody brown
 AUTUMN_THEME = Theme(
     name="autumn",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -4657,6 +4712,7 @@ AUTUMN_THEME = Theme(
 # Aurora -- northern lights on arctic night sky
 AURORA_THEME = Theme(
     name="aurora",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -4742,6 +4798,7 @@ AURORA_THEME = Theme(
 # Cave -- Lascaux cave paintings: ochre and charcoal on dark stone
 CAVE_THEME = Theme(
     name="cave",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -4820,6 +4877,7 @@ CAVE_THEME = Theme(
 # Stained glass -- cathedral jewel tones, thick black lead came
 STAINED_GLASS_THEME = Theme(
     name="stained_glass",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -4908,6 +4966,7 @@ STAINED_GLASS_THEME = Theme(
 # Watercolor -- soft translucent washes on textured paper
 WATERCOLOR_THEME = Theme(
     name="watercolor",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -4996,6 +5055,7 @@ WATERCOLOR_THEME = Theme(
 # Ukiyo-e -- Japanese woodblock print: indigo, vermillion, gold
 UKIYO_E_THEME = Theme(
     name="ukiyo_e",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -5083,6 +5143,7 @@ UKIYO_E_THEME = Theme(
 # Illuminated -- medieval manuscript: gold leaf, lapis blue, vellum
 ILLUMINATED_THEME = Theme(
     name="illuminated",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -5173,6 +5234,7 @@ ILLUMINATED_THEME = Theme(
 # Matrix -- green phosphor on black, digital rain
 MATRIX_THEME = Theme(
     name="matrix",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -5261,6 +5323,7 @@ MATRIX_THEME = Theme(
 # Tron -- neon cyan grid on pure black
 TRON_THEME = Theme(
     name="tron",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -5350,6 +5413,7 @@ TRON_THEME = Theme(
 # Steampunk -- brass/copper nodes, Victorian riveted edges
 STEAMPUNK_THEME = Theme(
     name="steampunk",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -5435,6 +5499,7 @@ STEAMPUNK_THEME = Theme(
 # Pixel -- 8-bit retro game aesthetic
 PIXEL_THEME = Theme(
     name="pixel",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -5525,6 +5590,7 @@ PIXEL_THEME = Theme(
 # X-ray -- radiograph: blue-white on black, translucent
 XRAY_THEME = Theme(
     name="xray",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -5613,6 +5679,7 @@ XRAY_THEME = Theme(
 # Thermal -- infrared heat map: cool blue to hot red
 THERMAL_THEME = Theme(
     name="thermal",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -5699,6 +5766,7 @@ THERMAL_THEME = Theme(
 # Microscopy -- electron microscope: grayscale with false-color accents
 MICROSCOPY_THEME = Theme(
     name="microscopy",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -5784,6 +5852,7 @@ MICROSCOPY_THEME = Theme(
 # Topographic -- contour map: earth tones, elevation feel
 TOPOGRAPHIC_THEME = Theme(
     name="topographic",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -5866,6 +5935,7 @@ TOPOGRAPHIC_THEME = Theme(
 # Hieroglyph -- Egyptian: papyrus, gold, lapis blue
 HIEROGLYPH_THEME = Theme(
     name="hieroglyph",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -5954,6 +6024,7 @@ HIEROGLYPH_THEME = Theme(
 # Roman mosaic -- tessellated earth tones, stone texture feel
 ROMAN_MOSAIC_THEME = Theme(
     name="roman_mosaic",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -6044,6 +6115,7 @@ ROMAN_MOSAIC_THEME = Theme(
 # Catan -- Settlers of Catan: hex terrain colors, roads, settlements
 CATAN_THEME = Theme(
     name="catan",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="hexagon",
@@ -6122,6 +6194,7 @@ CATAN_THEME = Theme(
 # Archipelago -- islands and bridges: sandy nodes, blue water, bridge edges
 ARCHIPELAGO_THEME = Theme(
     name="archipelago",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -6198,6 +6271,7 @@ ARCHIPELAGO_THEME = Theme(
 # castle nodes, bright Nintendo palette on sky blue
 MARIO_THEME = Theme(
     name="mario",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -6277,6 +6351,7 @@ MARIO_THEME = Theme(
 # through dark soil, fruiting body nodes, organic branching
 MYCELIUM_THEME = Theme(
     name="mycelium",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -6355,6 +6430,7 @@ MYCELIUM_THEME = Theme(
 # simple black-on-white, Comic Sans (sorry not sorry)
 XKCD_THEME = Theme(
     name="xkcd",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -6439,6 +6515,7 @@ XKCD_THEME = Theme(
 # plasmodium threads on dark agar, pulsating network
 SLIME_MOLD_THEME = Theme(
     name="slime_mold",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -6517,6 +6594,7 @@ SLIME_MOLD_THEME = Theme(
 # limestone passages, headlamp glow
 CAVERN_THEME = Theme(
     name="cavern",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -6601,6 +6679,7 @@ CAVERN_THEME = Theme(
 # arcs, hub airports larger, classic SkyTeam / in-flight magazine feel
 FLIGHT_MAP_THEME = Theme(
     name="flight_map",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -6679,6 +6758,7 @@ FLIGHT_MAP_THEME = Theme(
 # copper/fiber trunk lines, technical blue palette
 TELECOM_THEME = Theme(
     name="telecom",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -6764,6 +6844,7 @@ TELECOM_THEME = Theme(
 # edges, Facebook/LinkedIn blue tones, clean modern
 SOCIAL_THEME = Theme(
     name="social",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -6843,6 +6924,7 @@ SOCIAL_THEME = Theme(
 # amber pheromone paths of varying intensity, nest chambers
 ANT_COLONY_THEME = Theme(
     name="ant_colony",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -6921,6 +7003,7 @@ ANT_COLONY_THEME = Theme(
 # Noir -- black & white film noir: high contrast, deep shadows
 NOIR_THEME = Theme(
     name="noir",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -7008,6 +7091,7 @@ NOIR_THEME = Theme(
 # Cyberpunk -- neon pink/cyan on dark rainy city
 CYBERPUNK_THEME = Theme(
     name="cyberpunk",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -7096,6 +7180,7 @@ CYBERPUNK_THEME = Theme(
 # Vascular -- arterial red / venous blue on anatomy beige
 VASCULAR_THEME = Theme(
     name="vascular",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -7179,6 +7264,7 @@ VASCULAR_THEME = Theme(
 # Nebula -- deep space gas clouds, purple/teal wisps
 NEBULA_THEME = Theme(
     name="nebula",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -7256,6 +7342,7 @@ NEBULA_THEME = Theme(
 # Lava -- volcanic obsidian with glowing orange cracks
 LAVA_THEME = Theme(
     name="lava",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -7342,6 +7429,7 @@ LAVA_THEME = Theme(
 # Frost -- ice crystals, cold blue-white on steel gray
 FROST_THEME = Theme(
     name="frost",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="diamond",
@@ -7427,6 +7515,7 @@ FROST_THEME = Theme(
 # Treasure map -- pirate cartography, parchment, X marks the spot
 TREASURE_MAP_THEME = Theme(
     name="treasure_map",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -7511,6 +7600,7 @@ TREASURE_MAP_THEME = Theme(
 # Propaganda -- Soviet constructivist: bold red/black/cream, angular
 PROPAGANDA_THEME = Theme(
     name="propaganda",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -7599,6 +7689,7 @@ PROPAGANDA_THEME = Theme(
 # Gothic -- dark cathedral stone, pointed shapes, gargoyle gray
 GOTHIC_THEME = Theme(
     name="gothic",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="diamond",  # pointed arch evocation
@@ -7682,6 +7773,7 @@ GOTHIC_THEME = Theme(
 # Graffiti -- spray paint on concrete wall, neon tags
 GRAFFITI_THEME = Theme(
     name="graffiti",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -7771,6 +7863,7 @@ GRAFFITI_THEME = Theme(
 # thick pipe edges, utility basement feel
 PLUMBING_THEME = Theme(
     name="plumbing",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -7858,6 +7951,7 @@ PLUMBING_THEME = Theme(
 # rectangle processes, clean corporate palette
 FLOWCHART_THEME = Theme(
     name="flowchart",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -7944,6 +8038,7 @@ FLOWCHART_THEME = Theme(
 # page-number nodes, narrative edges
 ADVENTURE_THEME = Theme(
     name="adventure",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -8032,6 +8127,7 @@ ADVENTURE_THEME = Theme(
 # classical Mediterranean palette
 AQUEDUCT_THEME = Theme(
     name="aqueduct",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -8120,6 +8216,7 @@ AQUEDUCT_THEME = Theme(
 # DNA -- genetic network: double helix colors, nucleotide base pairs
 DNA_THEME = Theme(
     name="dna",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -8197,6 +8294,7 @@ DNA_THEME = Theme(
 # Origami -- Japanese paper folds: crisp edges, pastel paper colors
 ORIGAMI_THEME = Theme(
     name="origami",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="diamond",  # folded paper shape
@@ -8280,6 +8378,7 @@ ORIGAMI_THEME = Theme(
 # Clockwork -- precision watch mechanism: brass gears, jewel bearings
 CLOCKWORK_THEME = Theme(
     name="clockwork",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -8365,6 +8464,7 @@ CLOCKWORK_THEME = Theme(
 # Tapestry -- medieval woven threads, rich textile colors
 TAPESTRY_THEME = Theme(
     name="tapestry",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -8454,6 +8554,7 @@ TAPESTRY_THEME = Theme(
 # signal colors, infrastructure gray
 RAILWAY_THEME = Theme(
     name="railway",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -8533,6 +8634,7 @@ RAILWAY_THEME = Theme(
 # edges, flower-bright nodes, dense humid atmosphere
 JUNGLE_THEME = Theme(
     name="jungle",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -8611,6 +8713,7 @@ JUNGLE_THEME = Theme(
 # substation clusters, utility infrastructure palette
 POWER_GRID_THEME = Theme(
     name="power_grid",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -8698,6 +8801,7 @@ POWER_GRID_THEME = Theme(
 # flickering torchlight amber, skull alcove nodes, narrow passages
 CATACOMBS_THEME = Theme(
     name="catacombs",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -8782,6 +8886,7 @@ CATACOMBS_THEME = Theme(
 # curtain wall edges, crenellated battlements, castle keep palette
 FORTRESS_THEME = Theme(
     name="fortress",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -8863,6 +8968,7 @@ FORTRESS_THEME = Theme(
 # Solarized Light -- Ethan Schoonover's famous warm light palette
 SOLARIZED_LIGHT_THEME = Theme(
     name="solarized_light",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -8949,6 +9055,7 @@ SOLARIZED_LIGHT_THEME = Theme(
 # Solarized Dark
 SOLARIZED_DARK_THEME = Theme(
     name="solarized_dark",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -9035,6 +9142,7 @@ SOLARIZED_DARK_THEME = Theme(
 # Monokai -- Sublime Text classic
 MONOKAI_THEME = Theme(
     name="monokai",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -9121,6 +9229,7 @@ MONOKAI_THEME = Theme(
 # Dracula
 DRACULA_THEME = Theme(
     name="dracula",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -9207,6 +9316,7 @@ DRACULA_THEME = Theme(
 # Nord -- Arctic north-bluish
 NORD_THEME = Theme(
     name="nord",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -9293,6 +9403,7 @@ NORD_THEME = Theme(
 # Gruvbox Dark -- retro groove
 GRUVBOX_THEME = Theme(
     name="gruvbox",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -9379,6 +9490,7 @@ GRUVBOX_THEME = Theme(
 # One Dark -- Atom editor default
 ONE_DARK_THEME = Theme(
     name="one_dark",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -9465,6 +9577,7 @@ ONE_DARK_THEME = Theme(
 # Catppuccin Mocha -- soothing pastels on dark
 CATPPUCCIN_THEME = Theme(
     name="catppuccin",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -9551,6 +9664,7 @@ CATPPUCCIN_THEME = Theme(
 # Tokyo Night
 TOKYO_NIGHT_THEME = Theme(
     name="tokyo_night",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -9638,6 +9752,7 @@ TOKYO_NIGHT_THEME = Theme(
 # delicate tendrils connecting beneath
 LILYPAD_THEME = Theme(
     name="lilypad",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -9715,6 +9830,7 @@ LILYPAD_THEME = Theme(
 # Garden -- flower garden: bright blooms, green stems, earthy beds
 GARDEN_THEME = Theme(
     name="garden",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -9790,6 +9906,7 @@ GARDEN_THEME = Theme(
 # River -- waterways connecting pools: blue currents, sandy banks
 RIVER_THEME = Theme(
     name="river",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -9874,6 +9991,7 @@ RIVER_THEME = Theme(
 # pressure system nodes, stratospheric palette
 JETSTREAM_THEME = Theme(
     name="jetstream",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -9960,6 +10078,7 @@ JETSTREAM_THEME = Theme(
 # Weather -- TV weather map: isobars, fronts, radar palette
 WEATHER_THEME = Theme(
     name="weather",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -10046,6 +10165,7 @@ WEATHER_THEME = Theme(
 # thin rules, old-paper dignity
 NYT_THEME = Theme(
     name="nyt",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -10132,6 +10252,7 @@ NYT_THEME = Theme(
 # Economist -- The Economist: distinctive red/navy, clean sans-serif
 ECONOMIST_THEME = Theme(
     name="economist",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -10218,6 +10339,7 @@ ECONOMIST_THEME = Theme(
 # FT -- Financial Times: salmon pink, dark text, authoritative
 FT_THEME = Theme(
     name="ft",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -10305,6 +10427,7 @@ FT_THEME = Theme(
 # dry riverbeds, mesa plateaus
 CANYON_THEME = Theme(
     name="canyon",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -10393,6 +10516,7 @@ CANYON_THEME = Theme(
 # ghost colors, black maze background
 PACMAN_THEME = Theme(
     name="pacman",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -10471,6 +10595,7 @@ PACMAN_THEME = Theme(
 # glowing stress lines on dark surface, hot fissure edges
 FRACTURE_THEME = Theme(
     name="fracture",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="diamond",
@@ -10551,6 +10676,7 @@ FRACTURE_THEME = Theme(
 # Yale -- blue and white
 YALE_THEME = Theme(
     name="yale",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -10638,6 +10764,7 @@ YALE_THEME = Theme(
 # Harvard -- crimson and black
 HARVARD_THEME = Theme(
     name="harvard",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -10725,6 +10852,7 @@ HARVARD_THEME = Theme(
 # Princeton -- orange and black
 PRINCETON_THEME = Theme(
     name="princeton",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -10812,6 +10940,7 @@ PRINCETON_THEME = Theme(
 # Lakers -- purple and gold
 LAKERS_THEME = Theme(
     name="lakers",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -10896,6 +11025,7 @@ LAKERS_THEME = Theme(
 # Yankees -- navy pinstripe and white
 YANKEES_THEME = Theme(
     name="yankees",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -10983,6 +11113,7 @@ YANKEES_THEME = Theme(
 # Celtics -- green and white (parquet)
 CELTICS_THEME = Theme(
     name="celtics",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -11068,6 +11199,7 @@ CELTICS_THEME = Theme(
 # Ferrari -- racing red, Italian motorsport
 FERRARI_THEME = Theme(
     name="ferrari",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -11153,6 +11285,7 @@ FERRARI_THEME = Theme(
 # Seaborn -- muted pastels, white grid, statistical plotting feel
 SEABORN_THEME = Theme(
     name="seaborn",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -11237,6 +11370,7 @@ SEABORN_THEME = Theme(
 # Matplotlib -- classic matplotlib defaults: tab10 colors, white bg
 MATPLOTLIB_THEME = Theme(
     name="matplotlib",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -11320,6 +11454,7 @@ MATPLOTLIB_THEME = Theme(
 # ggplot -- R's ggplot2: gray panel background, subtle gridlines feel
 GGPLOT_THEME = Theme(
     name="ggplot",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -11403,6 +11538,7 @@ GGPLOT_THEME = Theme(
 # Apple -- clean Cupertino: SF Pro feel, space gray, accent blue
 APPLE_THEME = Theme(
     name="apple",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -11489,6 +11625,7 @@ APPLE_THEME = Theme(
 # Google Material -- Material Design: shadow cards, vibrant primaries
 MATERIAL_THEME = Theme(
     name="material",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -11576,6 +11713,7 @@ MATERIAL_THEME = Theme(
 # Spotify -- dark green/black, vibrant green accent
 SPOTIFY_THEME = Theme(
     name="spotify",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -11662,6 +11800,7 @@ SPOTIFY_THEME = Theme(
 # Slack -- purple workspace, vibrant accents
 SLACK_THEME = Theme(
     name="slack",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -11749,6 +11888,7 @@ SLACK_THEME = Theme(
 # Coca-Cola -- classic red and white, Spencerian script energy
 COLA_THEME = Theme(
     name="cola",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -11834,6 +11974,7 @@ COLA_THEME = Theme(
 
 ZEN_THEME = Theme(
     name="zen",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -11910,6 +12051,7 @@ ZEN_THEME = Theme(
 
 HONEYCOMB_THEME = Theme(
     name="honeycomb",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="hexagon",
@@ -11986,6 +12128,7 @@ HONEYCOMB_THEME = Theme(
 
 CAMPFIRE_THEME = Theme(
     name="campfire",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -12062,6 +12205,7 @@ CAMPFIRE_THEME = Theme(
 
 RUST_THEME = Theme(
     name="rust",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -12148,6 +12292,7 @@ RUST_THEME = Theme(
 
 SYNTHWAVE_THEME = Theme(
     name="synthwave",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -12235,6 +12380,7 @@ SYNTHWAVE_THEME = Theme(
 
 PRIDE_THEME = Theme(
     name="pride",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -12319,6 +12465,7 @@ PRIDE_THEME = Theme(
 
 RETRO_DINER_THEME = Theme(
     name="retro_diner",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -12403,6 +12550,7 @@ RETRO_DINER_THEME = Theme(
 
 TAROT_THEME = Theme(
     name="tarot",
+    category="thinker",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -12489,6 +12637,7 @@ TAROT_THEME = Theme(
 
 BOB_ROSS_THEME = Theme(
     name="bob_ross",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -12563,6 +12712,7 @@ BOB_ROSS_THEME = Theme(
 
 MINECRAFT_THEME = Theme(
     name="minecraft",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -12650,6 +12800,7 @@ MINECRAFT_THEME = Theme(
 
 TETRIS_THEME = Theme(
     name="tetris",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -12737,6 +12888,7 @@ TETRIS_THEME = Theme(
 
 BUBBLEGUM_THEME = Theme(
     name="bubblegum",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -12820,6 +12972,7 @@ BUBBLEGUM_THEME = Theme(
 
 POLAROID_THEME = Theme(
     name="polaroid",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -12905,6 +13058,7 @@ POLAROID_THEME = Theme(
 
 ART_NOUVEAU_THEME = Theme(
     name="art_nouveau",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -12990,6 +13144,7 @@ ART_NOUVEAU_THEME = Theme(
 
 TIM_BURTON_THEME = Theme(
     name="tim_burton",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -13074,6 +13229,7 @@ TIM_BURTON_THEME = Theme(
 
 DISNEY_THEME = Theme(
     name="disney",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -13158,6 +13314,7 @@ DISNEY_THEME = Theme(
 
 GHIBLI_THEME = Theme(
     name="ghibli",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -13235,6 +13392,7 @@ GHIBLI_THEME = Theme(
 # Picasso -- cubism: angular fragments, muted blues/browns/terra cotta
 PICASSO_THEME = Theme(
     name="picasso",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="diamond",
@@ -13319,6 +13477,7 @@ PICASSO_THEME = Theme(
 # Pollock -- abstract expressionism: chaotic splatters on beige canvas
 POLLOCK_THEME = Theme(
     name="pollock",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -13390,6 +13549,7 @@ POLLOCK_THEME = Theme(
 # Riley -- Bridget Riley op art: vivid parallel stripes, high contrast
 RILEY_THEME = Theme(
     name="riley",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -13478,6 +13638,7 @@ RILEY_THEME = Theme(
 # Renoir -- impressionist warmth: soft golden light, lush colors
 RENOIR_THEME = Theme(
     name="renoir",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -13566,6 +13727,7 @@ RENOIR_THEME = Theme(
 # Da Vinci -- technical diagrams: sepia ink, anatomical precision
 DA_VINCI_THEME = Theme(
     name="da_vinci",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -13652,6 +13814,7 @@ DA_VINCI_THEME = Theme(
 # Mondrian -- primary color grid: red/blue/yellow blocks, black lines
 MONDRIAN_THEME = Theme(
     name="mondrian",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -13722,6 +13885,7 @@ MONDRIAN_THEME = Theme(
 # Van Gogh -- swirling post-impressionism: bold brushstrokes, starry night
 VAN_GOGH_THEME = Theme(
     name="van_gogh",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -13788,6 +13952,7 @@ VAN_GOGH_THEME = Theme(
 # Klimt -- gold leaf, decorative patterns, Viennese secession
 KLIMT_THEME = Theme(
     name="klimt",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -13875,6 +14040,7 @@ KLIMT_THEME = Theme(
 # Warhol -- pop art: screen-print brights, repetition
 WARHOL_THEME = Theme(
     name="warhol",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -13965,6 +14131,7 @@ WARHOL_THEME = Theme(
 # Crystal -- gemstone facets: prismatic refractions, transparent geometry
 CRYSTAL_THEME = Theme(
     name="crystal",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="diamond",
@@ -14045,6 +14212,7 @@ CRYSTAL_THEME = Theme(
 # Neon sign -- bent glass tubes: glowing colored tubes on dark brick
 NEON_SIGN_THEME = Theme(
     name="neon_sign",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -14124,6 +14292,7 @@ NEON_SIGN_THEME = Theme(
 # Fantasy map -- Tolkien/GoT cartography: parchment, hand-drawn mountains
 FANTASY_MAP_THEME = Theme(
     name="fantasy_map",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -14202,6 +14371,7 @@ FANTASY_MAP_THEME = Theme(
 # Tech tree -- video game research/skill tree: locked/unlocked nodes
 TECH_TREE_THEME = Theme(
     name="tech_tree",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -14289,6 +14459,7 @@ TECH_TREE_THEME = Theme(
 # blue commercial, yellow industrial), road grid, isometric feel
 SIMCITY_THEME = Theme(
     name="simcity",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -14360,6 +14531,7 @@ SIMCITY_THEME = Theme(
 
 USA_THEME = Theme(
     name="usa",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -14448,6 +14620,7 @@ USA_THEME = Theme(
 # Brazil -- verde e amarelo
 BRAZIL_THEME = Theme(
     name="brazil",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="diamond",
@@ -14533,6 +14706,7 @@ BRAZIL_THEME = Theme(
 # Japan -- hinomaru: clean white, rising sun red, elegant restraint
 JAPAN_THEME = Theme(
     name="japan",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -14616,6 +14790,7 @@ JAPAN_THEME = Theme(
 # India -- saffron/white/green with Ashoka Chakra navy
 INDIA_THEME = Theme(
     name="india",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -14705,6 +14880,7 @@ INDIA_THEME = Theme(
 # Tournament bracket
 BRACKET_THEME = Theme(
     name="bracket",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -14773,6 +14949,7 @@ BRACKET_THEME = Theme(
 # Fantasy football -- draft board / matchup card feel
 FANTASY_FOOTBALL_THEME = Theme(
     name="fantasy_football",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -14861,6 +15038,7 @@ FANTASY_FOOTBALL_THEME = Theme(
 # Seahawks -- action green / navy / wolf gray
 SEAHAWKS_THEME = Theme(
     name="seahawks",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -14949,6 +15127,7 @@ SEAHAWKS_THEME = Theme(
 # labeled morphism arrows, mathematical typesetting feel
 CATEGORY_THEORY_THEME = Theme(
     name="category_theory",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="none",
@@ -15036,6 +15215,7 @@ CATEGORY_THEORY_THEME = Theme(
 # clean academic, part-of-speech categories
 SYNTAX_TREE_THEME = Theme(
     name="syntax_tree",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="none",
@@ -15113,6 +15293,7 @@ SYNTAX_TREE_THEME = Theme(
 # null terminators, academic clean
 DATA_STRUCTURE_THEME = Theme(
     name="data_structure",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -15198,6 +15379,7 @@ DATA_STRUCTURE_THEME = Theme(
 
 OLYMPIC_THEME = Theme(
     name="olympic",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -15269,6 +15451,7 @@ OLYMPIC_THEME = Theme(
 
 CARVED_THEME = Theme(
     name="carved",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -15355,6 +15538,7 @@ CARVED_THEME = Theme(
 
 CHUTES_LADDERS_THEME = Theme(
     name="chutes_ladders",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -15442,6 +15626,7 @@ CHUTES_LADDERS_THEME = Theme(
 
 BARK_CARVING_THEME = Theme(
     name="bark_carving",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -15507,6 +15692,7 @@ BARK_CARVING_THEME = Theme(
 
 CHISEL_THEME = Theme(
     name="chisel",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -15593,6 +15779,7 @@ CHISEL_THEME = Theme(
 
 CHECKERS_THEME = Theme(
     name="checkers",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -15677,6 +15864,7 @@ CHECKERS_THEME = Theme(
 
 CHESS_THEME = Theme(
     name="chess",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -15764,6 +15952,7 @@ CHESS_THEME = Theme(
 
 GO_BOARD_THEME = Theme(
     name="go",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -15838,6 +16027,7 @@ GO_BOARD_THEME = Theme(
 
 SCRABBLE_THEME = Theme(
     name="scrabble",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -15907,6 +16097,7 @@ SCRABBLE_THEME = Theme(
 
 PINBALL_THEME = Theme(
     name="pinball",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -15978,6 +16169,7 @@ PINBALL_THEME = Theme(
 
 KALEIDOSCOPE_THEME = Theme(
     name="kaleidoscope",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="diamond",
@@ -16054,6 +16246,7 @@ KALEIDOSCOPE_THEME = Theme(
 
 MORSE_CODE_THEME = Theme(
     name="morse_code",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -16130,6 +16323,7 @@ MORSE_CODE_THEME = Theme(
 
 EMBROIDERY_THEME = Theme(
     name="embroidery",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -16204,6 +16398,7 @@ EMBROIDERY_THEME = Theme(
 
 DOMINO_THEME = Theme(
     name="domino",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -16283,6 +16478,7 @@ DOMINO_THEME = Theme(
 
 NEWSPAPER_THEME = Theme(
     name="newspaper",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -16377,6 +16573,7 @@ THEME_REGISTRY["domino"] = DOMINO_THEME
 # connections crisscrossing everywhere, cork board background
 CONSPIRACY_THEME = Theme(
     name="conspiracy",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -16454,6 +16651,7 @@ CONSPIRACY_THEME = Theme(
 
 HOME_ASSISTANT_THEME = Theme(
     name="home_assistant",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -16538,6 +16736,7 @@ HOME_ASSISTANT_THEME = Theme(
 )
 MOLESKINE_THEME = Theme(
     name="moleskine",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -16622,6 +16821,7 @@ MOLESKINE_THEME = Theme(
 )
 YELLOW_LEGAL_THEME = Theme(
     name="yellow_legal",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -16706,6 +16906,7 @@ YELLOW_LEGAL_THEME = Theme(
 )
 NOTEBOOK_THEME = Theme(
     name="notebook",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -16790,6 +16991,7 @@ NOTEBOOK_THEME = Theme(
 )
 CHRISTMAS_THEME = Theme(
     name="christmas",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -16860,6 +17062,7 @@ CHRISTMAS_THEME = Theme(
 )
 ETCH_A_SKETCH_THEME = Theme(
     name="etch_a_sketch",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -16926,6 +17129,7 @@ ETCH_A_SKETCH_THEME = Theme(
 )
 REDDIT_THEME = Theme(
     name="reddit",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -17011,6 +17215,7 @@ REDDIT_THEME = Theme(
 )
 CLOUDS_THEME = Theme(
     name="clouds",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -17089,6 +17294,7 @@ CLOUDS_THEME = Theme(
 )
 TWITTER_THEME = Theme(
     name="twitter",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -17170,6 +17376,7 @@ TWITTER_THEME = Theme(
 )
 HERALDRY_THEME = Theme(
     name="heraldry",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="pentagon",
@@ -17253,6 +17460,7 @@ HERALDRY_THEME = Theme(
 )
 MAZE_THEME = Theme(
     name="maze",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -17317,6 +17525,7 @@ MAZE_THEME = Theme(
 )
 CROP_CIRCLES_THEME = Theme(
     name="crop_circles",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -17392,6 +17601,7 @@ CROP_CIRCLES_THEME = Theme(
 )
 SHEET_MUSIC_THEME = Theme(
     name="sheet_music",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -17460,6 +17670,7 @@ SHEET_MUSIC_THEME = Theme(
 )
 MARKOV_THEME = Theme(
     name="markov",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -17544,6 +17755,7 @@ MARKOV_THEME = Theme(
 )
 CALLIGRAPHY_THEME = Theme(
     name="calligraphy",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -17628,6 +17840,7 @@ CALLIGRAPHY_THEME = Theme(
 )
 BALDERDASH_THEME = Theme(
     name="balderdash",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -17714,6 +17927,7 @@ BALDERDASH_THEME = Theme(
 )
 BALLOONS_THEME = Theme(
     name="balloons",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -17779,6 +17993,7 @@ BALLOONS_THEME = Theme(
 )
 CHAIN_LINK_THEME = Theme(
     name="chain_link",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -17854,6 +18069,7 @@ CHAIN_LINK_THEME = Theme(
 )
 MYSPACE_THEME = Theme(
     name="myspace",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -17938,6 +18154,7 @@ MYSPACE_THEME = Theme(
 )
 AOL_THEME = Theme(
     name="aol",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -18023,6 +18240,7 @@ AOL_THEME = Theme(
 )
 INSTAGRAM_THEME = Theme(
     name="instagram",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -18108,6 +18326,7 @@ INSTAGRAM_THEME = Theme(
 )
 TIKTOK_THEME = Theme(
     name="tiktok",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -18193,6 +18412,7 @@ TIKTOK_THEME = Theme(
 )
 OREGON_TRAIL_THEME = Theme(
     name="oregon_trail",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -18277,6 +18497,7 @@ OREGON_TRAIL_THEME = Theme(
 )
 SPRING_MASS_THEME = Theme(
     name="spring_mass",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -18352,6 +18573,7 @@ SPRING_MASS_THEME = Theme(
 )
 GOOGLE_MAPS_THEME = Theme(
     name="google_maps",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -18447,6 +18669,7 @@ THEME_REGISTRY["oregon_trail"] = OREGON_TRAIL_THEME
 THEME_REGISTRY["spring_mass"] = SPRING_MASS_THEME
 WIKIPEDIA_THEME = Theme(
     name="wikipedia",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -18531,6 +18754,7 @@ WIKIPEDIA_THEME = Theme(
 )
 NATURE_JOURNAL_THEME = Theme(
     name="nature_journal",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -18616,6 +18840,7 @@ NATURE_JOURNAL_THEME = Theme(
 
 BRUTALIST_THEME = Theme(
     name="brutalist",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -18702,6 +18927,7 @@ BRUTALIST_THEME = Theme(
 )
 LOVECRAFT_THEME = Theme(
     name="lovecraft",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -18788,6 +19014,7 @@ LOVECRAFT_THEME = Theme(
 )
 SATELLITE_THEME = Theme(
     name="satellite",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -18863,6 +19090,7 @@ SATELLITE_THEME = Theme(
 )
 NAUTICAL_THEME = Theme(
     name="nautical",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -18946,6 +19174,7 @@ NAUTICAL_THEME = Theme(
 )
 WINE_LABEL_THEME = Theme(
     name="wine_label",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -19032,6 +19261,7 @@ WINE_LABEL_THEME = Theme(
 )
 MARBLE_THEME = Theme(
     name="marble",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -19116,6 +19346,7 @@ MARBLE_THEME = Theme(
 )
 VALENTINE_THEME = Theme(
     name="valentine",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -19198,6 +19429,7 @@ VALENTINE_THEME = Theme(
 )
 HALLOWEEN_THEME = Theme(
     name="halloween",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -19281,6 +19513,7 @@ HALLOWEEN_THEME = Theme(
 )
 LETTERPRESS_THEME = Theme(
     name="letterpress",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -19365,6 +19598,7 @@ LETTERPRESS_THEME = Theme(
 )
 RISOGRAPH_THEME = Theme(
     name="risograph",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -19450,6 +19684,7 @@ RISOGRAPH_THEME = Theme(
 )
 JAZZ_THEME = Theme(
     name="jazz",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -19535,6 +19770,7 @@ JAZZ_THEME = Theme(
 
 HOLLYWOOD_THEME = Theme(
     name="hollywood",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="star",
@@ -19619,6 +19855,7 @@ HOLLYWOOD_THEME = Theme(
 
 FROSTED_THEME = Theme(
     name="frosted",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -19698,6 +19935,7 @@ FROSTED_THEME = Theme(
 
 FROSTING_THEME = Theme(
     name="frosting",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -19768,6 +20006,7 @@ FROSTING_THEME = Theme(
 )
 LEGO_THEME = Theme(
     name="lego",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -19836,6 +20075,7 @@ LEGO_THEME = Theme(
 )
 CRAYON_THEME = Theme(
     name="crayon",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -19919,6 +20159,7 @@ CRAYON_THEME = Theme(
 )
 QUILT_THEME = Theme(
     name="quilt",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -19995,6 +20236,7 @@ QUILT_THEME = Theme(
 )
 FIREWORKS_THEME = Theme(
     name="fireworks",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -20072,6 +20314,7 @@ FIREWORKS_THEME = Theme(
 )
 TATTOO_THEME = Theme(
     name="tattoo",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -20155,6 +20398,7 @@ TATTOO_THEME = Theme(
 )
 KNITTING_THEME = Theme(
     name="knitting",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -20223,6 +20467,7 @@ KNITTING_THEME = Theme(
 )
 BUBBLE_BATH_THEME = Theme(
     name="bubble_bath",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -20301,6 +20546,7 @@ BUBBLE_BATH_THEME = Theme(
 )
 SAND_CASTLE_THEME = Theme(
     name="sand_castle",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -20377,6 +20623,7 @@ SAND_CASTLE_THEME = Theme(
 )
 BLACKLIGHT_THEME = Theme(
     name="blacklight",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -20454,6 +20701,7 @@ BLACKLIGHT_THEME = Theme(
 )
 SPAGHETTI_THEME = Theme(
     name="spaghetti",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -20520,6 +20768,7 @@ SPAGHETTI_THEME = Theme(
 
 FIVETHIRTYEIGHT_THEME = Theme(
     name="fivethirtyeight",
+    category="brand",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -20606,6 +20855,7 @@ FIVETHIRTYEIGHT_THEME = Theme(
 # nodes, predator red at top, energy flow arrows
 FOOD_WEB_THEME = Theme(
     name="food_web",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -20691,6 +20941,7 @@ FOOD_WEB_THEME = Theme(
 # operation boxes, inspection diamonds, precise technical
 PROCESS_THEME = Theme(
     name="process",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -20777,6 +21028,7 @@ PROCESS_THEME = Theme(
 # steps, minimal color, functional clarity
 INSTRUCTION_THEME = Theme(
     name="instruction",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -20863,6 +21115,7 @@ INSTRUCTION_THEME = Theme(
 # interaction arrows, field notebook feel
 ECOLOGY_THEME = Theme(
     name="ecology",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -20949,6 +21202,7 @@ ECOLOGY_THEME = Theme(
 # processing boxes, labeled arrows, Broadbent/Treisman/Baddeley feel
 COG_SCI_THEME = Theme(
     name="cog_sci",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -21035,6 +21289,7 @@ COG_SCI_THEME = Theme(
 # white on colored background, conversational
 SPEECH_BUBBLE_THEME = Theme(
     name="speech_bubble",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -21118,6 +21373,7 @@ SPEECH_BUBBLE_THEME = Theme(
 
 ENGINEERING_THEME = Theme(
     name="engineering",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -21203,6 +21459,7 @@ ENGINEERING_THEME = Theme(
 
 TRADE_THEME = Theme(
     name="trade",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -21289,6 +21546,7 @@ TRADE_THEME = Theme(
 
 ASSEMBLY_LINE_THEME = Theme(
     name="assembly_line",
+    category="infra",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -21375,6 +21633,7 @@ ASSEMBLY_LINE_THEME = Theme(
 )
 FOREST_PATH_THEME = Theme(
     name="forest_path",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -21444,6 +21703,7 @@ FOREST_PATH_THEME = Theme(
 
 RUBE_GOLDBERG_THEME = Theme(
     name="rube_goldberg",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -21529,6 +21789,7 @@ RUBE_GOLDBERG_THEME = Theme(
 
 HOPFIELD_THEME = Theme(
     name="hopfield",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -21606,6 +21867,7 @@ HOPFIELD_THEME = Theme(
 )
 NEUROMORPHIC_THEME = Theme(
     name="neuromorphic",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -21689,6 +21951,7 @@ NEUROMORPHIC_THEME = Theme(
 )
 CONNECT_DOTS_THEME = Theme(
     name="connect_dots",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -21765,6 +22028,7 @@ CONNECT_DOTS_THEME = Theme(
 )
 PLAYING_CARDS_THEME = Theme(
     name="playing_cards",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -21852,6 +22116,7 @@ PLAYING_CARDS_THEME = Theme(
 
 CASINO_THEME = Theme(
     name="casino",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -21936,6 +22201,7 @@ CASINO_THEME = Theme(
 
 DANTE_THEME = Theme(
     name="dante",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -22022,6 +22288,7 @@ DANTE_THEME = Theme(
 )
 ABACUS_THEME = Theme(
     name="abacus",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -22096,6 +22363,7 @@ ABACUS_THEME = Theme(
 )
 PENDULUM_THEME = Theme(
     name="pendulum",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -22165,6 +22433,7 @@ PENDULUM_THEME = Theme(
 )
 DOMINOS_FALLING_THEME = Theme(
     name="dominos_falling",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -22250,6 +22519,7 @@ DOMINOS_FALLING_THEME = Theme(
 )
 TERRARIUM_THEME = Theme(
     name="terrarium",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -22328,6 +22598,7 @@ TERRARIUM_THEME = Theme(
 )
 BONSAI_THEME = Theme(
     name="bonsai",
+    category="nature",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -22392,6 +22663,7 @@ BONSAI_THEME = Theme(
 
 FLATLAND_THEME = Theme(
     name="flatland",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="triangle",
@@ -22469,6 +22741,7 @@ FLATLAND_THEME = Theme(
 
 WONDERLAND_THEME = Theme(
     name="wonderland",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -22554,6 +22827,7 @@ WONDERLAND_THEME = Theme(
 # Mancala -- African stone game: wooden pits, smooth pebble nodes
 MANCALA_THEME = Theme(
     name="mancala",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -22638,6 +22912,7 @@ MANCALA_THEME = Theme(
 # data-ink ratio, no chartjunk, quiet typography, thin precise lines
 TUFTE_THEME = Theme(
     name="tufte",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="none",
@@ -22714,6 +22989,7 @@ TUFTE_THEME = Theme(
 # deep black to bright white, zone system, majestic contrast
 ANSEL_ADAMS_THEME = Theme(
     name="ansel_adams",
+    category="art",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -22802,6 +23078,7 @@ THEME_REGISTRY["rube_goldberg"] = RUBE_GOLDBERG_THEME
 
 PACHINKO_THEME = Theme(
     name="pachinko",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -22879,6 +23156,7 @@ PACHINKO_THEME = Theme(
 )
 BEADS_THEME = Theme(
     name="beads",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -22957,6 +23235,7 @@ THEME_REGISTRY["speech_bubble"] = SPEECH_BUBBLE_THEME
 
 PSEUDOCODE_THEME = Theme(
     name="pseudocode",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -23050,6 +23329,7 @@ THEME_REGISTRY["ecology"] = ECOLOGY_THEME
 # variable names in italic, unidirectional causal arrows, white
 CAUSAL_THEME = Theme(
     name="causal",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -23137,6 +23417,7 @@ CAUSAL_THEME = Theme(
 # warm educational palette
 CONCEPT_MAP_THEME = Theme(
     name="concept_map",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -23221,6 +23502,7 @@ CONCEPT_MAP_THEME = Theme(
 # shaded observed nodes, open latent nodes
 BAYESIAN_THEME = Theme(
     name="bayesian",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -23308,6 +23590,7 @@ BAYESIAN_THEME = Theme(
 # reporting lines, professional blue-gray
 ORG_CHART_THEME = Theme(
     name="org_chart",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -23377,6 +23660,7 @@ ORG_CHART_THEME = Theme(
 # typed arrows, stereotype brackets, modeling blue
 UML_THEME = Theme(
     name="uml",
+    category="tools",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -23470,6 +23754,7 @@ THEME_REGISTRY["uml"] = UML_THEME
 # bold colored vector arrows, coordinate dot nodes, i-hat/j-hat energy
 LINEAR_ALGEBRA_THEME = Theme(
     name="linear_algebra",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -23559,6 +23844,7 @@ THEME_REGISTRY["linear_algebra"] = LINEAR_ALGEBRA_THEME
 # across dark landscape, Gondor-calls-for-aid energy
 BEACONS_THEME = Theme(
     name="beacons",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -23642,6 +23928,7 @@ THEME_REGISTRY["beacons"] = BEACONS_THEME
 # cartography, river blue, bridge brown, landmass green, parchment map
 KONIGSBERG_THEME = Theme(
     name="konigsberg",
+    category="thinker",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -23714,6 +24001,7 @@ KONIGSBERG_THEME = Theme(
 # connections, nomadic, deterritorialized. Earthy but restless.
 RHIZOME_THEME = Theme(
     name="rhizome",
+    category="thinker",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -23794,6 +24082,7 @@ RHIZOME_THEME = Theme(
 # and deep blue on cosmic black, sacred geometry
 KABBALAH_THEME = Theme(
     name="kabbalah",
+    category="thinker",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -23872,6 +24161,7 @@ KABBALAH_THEME = Theme(
 # a jewel mirroring all others, luminous on void
 INDRA_NET_THEME = Theme(
     name="indra_net",
+    category="thinker",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -23953,6 +24243,7 @@ INDRA_NET_THEME = Theme(
 # on cream notebook paper, raw scientific excitement
 DARWIN_THEME = Theme(
     name="darwin",
+    category="thinker",
     node_styles={
         "default": NodeStyle(
             shape="none",
@@ -24021,6 +24312,7 @@ DARWIN_THEME = Theme(
 # ovals on a "sheet of assertion," precise academic formalism
 PEIRCE_THEME = Theme(
     name="peirce",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -24099,6 +24391,7 @@ PEIRCE_THEME = Theme(
 # Platonic solids, Renaissance astronomical diagrams, copperplate
 KEPLER_THEME = Theme(
     name="kepler",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -24172,6 +24465,7 @@ KEPLER_THEME = Theme(
 # fine crosshatching, anatomical precision on cream paper
 VESALIUS_THEME = Theme(
     name="vesalius",
+    category="science",
     node_styles={
         "default": NodeStyle(
             shape="ellipse",
@@ -24268,6 +24562,7 @@ THEME_REGISTRY["vesalius"] = VESALIUS_THEME
 # dark weathered stone, faint eldritch glow
 RUNES_THEME = Theme(
     name="runes",
+    category="thinker",
     node_styles={
         "default": NodeStyle(
             shape="diamond",
@@ -24348,6 +24643,7 @@ RUNES_THEME = Theme(
 # edges visible (very faint), deep philosophical darkness
 MONAD_THEME = Theme(
     name="monad",
+    category="thinker",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -24430,6 +24726,7 @@ THEME_REGISTRY["monad"] = MONAD_THEME
 
 EUCLID_THEME = Theme(
     name="euclid",
+    category="academic",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -24509,6 +24806,7 @@ THEME_REGISTRY["euclid"] = EUCLID_THEME
 
 SIDEWALK_CHALK_THEME = Theme(
     name="sidewalk_chalk",
+    category="whimsy",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -24579,6 +24877,7 @@ SIDEWALK_CHALK_THEME = Theme(
 )
 SAND_TRACE_THEME = Theme(
     name="sand_trace",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -24658,6 +24957,7 @@ THEME_REGISTRY["sand_trace"] = SAND_TRACE_THEME
 
 STENCIL_THEME = Theme(
     name="stencil",
+    category="texture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -24796,6 +25096,7 @@ THEME_REGISTRY["category_theory"] = CATEGORY_THEORY_THEME
 # ASCII -- monospace text art, classic green-on-black terminal
 ASCII_GREEN_THEME = Theme(
     name="ascii_green",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -24882,6 +25183,7 @@ ASCII_GREEN_THEME = Theme(
 # ASCII amber -- warm phosphor CRT
 ASCII_AMBER_THEME = Theme(
     name="ascii_amber",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -24968,6 +25270,7 @@ ASCII_AMBER_THEME = Theme(
 # ASCII white -- clean monochrome paper printout
 ASCII_WHITE_THEME = Theme(
     name="ascii_white",
+    category="code",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -25057,6 +25360,7 @@ THEME_REGISTRY["ascii_white"] = ASCII_WHITE_THEME
 
 CATS_CRADLE_THEME = Theme(
     name="cats_cradle",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="circle",
@@ -25132,6 +25436,7 @@ CATS_CRADLE_THEME = Theme(
 
 DEFUSE_THEME = Theme(
     name="defuse",
+    category="culture",
     node_styles={
         "default": NodeStyle(
             shape="rectangle",
@@ -25339,6 +25644,40 @@ def get_theme(name: str) -> Theme:
     if name not in THEME_REGISTRY:
         raise ValueError(f"Unknown theme: {name!r}. Available: {list(THEME_REGISTRY.keys())}")
     return copy.deepcopy(THEME_REGISTRY[name])
+
+
+def list_themes(category: Optional[str] = None) -> list[str]:
+    """List available theme names, optionally filtered by category.
+
+    Parameters
+    ----------
+    category : str, optional
+        Filter to themes in this category. ``None`` returns all.
+        Categories: core, tools, academic, science, art, culture,
+        nature, code, brand, thinker, creative.
+
+    Returns
+    -------
+    list[str]
+        Sorted theme names.
+    """
+    if category is None:
+        return sorted(THEME_REGISTRY.keys())
+    return sorted(name for name, theme in THEME_REGISTRY.items() if theme.category == category)
+
+
+def theme_categories() -> dict[str, int]:
+    """Return a count of themes per category.
+
+    Returns
+    -------
+    dict[str, int]
+        Category names mapped to theme counts, sorted by count descending.
+    """
+    counts: dict[str, int] = {}
+    for theme in THEME_REGISTRY.values():
+        counts[theme.category] = counts.get(theme.category, 0) + 1
+    return dict(sorted(counts.items(), key=lambda x: -x[1]))
 
 
 # ─── Style Cascade Resolution ─────────────────────────────────────────────
