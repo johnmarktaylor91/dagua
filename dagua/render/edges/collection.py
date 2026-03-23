@@ -47,6 +47,7 @@ THICK_DASH_CONNECTOR_WIDTH_RATIO = 0.22
 THICK_DASH_CONNECTOR_ALPHA = 0.24
 THICK_DASH_SEGMENT_WIDTH_RATIO = 0.9
 THICK_DOTTED_SEGMENT_WIDTH_RATIO = 0.74
+MIN_TAPER_WIDTH = 0.3
 ZERO_LENGTH_LOOP_SCALE = 1.75
 ZERO_LENGTH_LOOP_FLOOR = 6.0
 LABEL_TERMINAL_MARGIN_FRACTION = 0.55
@@ -114,6 +115,12 @@ class DaguaEdge:
         Edge centerline in data coordinates.
     width : float, default=0.75
         Body width in data units.
+    tapered : bool, default=False
+        Whether to render the body as a variable-width ribbon.
+    taper_width_start : float | None, default=None
+        Source-end body width in data units for tapered ribbons.
+    taper_width_end : float | None, default=None
+        Target-end body width in data units for tapered ribbons.
     color : str, default="#8C8C8C"
         Body fill color.
     alpha : float, default=0.7
@@ -168,6 +175,9 @@ class DaguaEdge:
 
     curve: CubicBezier
     width: float = 0.75
+    tapered: bool = False
+    taper_width_start: Optional[float] = None
+    taper_width_end: Optional[float] = None
     color: str = DEFAULT_BODY_COLOR
     alpha: float = DEFAULT_ALPHA
     linestyle: DashPattern = "solid"
@@ -223,6 +233,42 @@ class DaguaEdge:
             else max(self.width * 3.0, self.width)
         )
         return max(base_width, self.width * ARROW_WIDTH_WIDTH_FLOOR)
+
+    def uses_taper(self) -> bool:
+        """Return whether the edge body should render with tapered widths.
+
+        Returns
+        -------
+        bool
+            ``True`` when the edge has explicit taper geometry enabled.
+        """
+        return (
+            self.tapered and self.taper_width_start is not None and self.taper_width_end is not None
+        )
+
+    def resolved_taper_width_start(self) -> float:
+        """Return the effective source-end taper width.
+
+        Returns
+        -------
+        float
+            Source-end ribbon width in data units.
+        """
+        if self.taper_width_start is None:
+            return _render_width(self.width)
+        return max(float(self.taper_width_start), MIN_RENDER_WIDTH)
+
+    def resolved_taper_width_end(self) -> float:
+        """Return the effective target-end taper width.
+
+        Returns
+        -------
+        float
+            Target-end ribbon width in data units with a visibility floor.
+        """
+        if self.taper_width_end is None:
+            return max(_render_width(self.width), MIN_TAPER_WIDTH)
+        return max(float(self.taper_width_end), MIN_TAPER_WIDTH)
 
     def resolved_tail_arrow_length(self) -> float:
         """Return the effective tail arrow length.
@@ -402,6 +448,67 @@ def _segment_render_width(edge: DaguaEdge) -> float:
     if edge.linestyle in {"dashed", "dashdot"}:
         return render_width * THICK_DASH_SEGMENT_WIDTH_RATIO
     return render_width
+
+
+def _tapered_ribbon_path(
+    curve: CubicBezier,
+    width_start: float,
+    width_end: float,
+    *,
+    simplified: bool,
+) -> Any:
+    """Build a variable-width ribbon path for a tapered edge body.
+
+    Parameters
+    ----------
+    curve : CubicBezier
+        Centerline curve in data coordinates.
+    width_start : float
+        Source-end body width in data units.
+    width_end : float
+        Target-end body width in data units.
+    simplified : bool
+        Whether to approximate the ribbon from endpoints only.
+
+    Returns
+    -------
+    Any
+        Closed matplotlib path describing the tapered ribbon.
+    """
+    from matplotlib.path import Path
+
+    if simplified:
+        points = np.vstack([curve.p0, curve.p1])
+    else:
+        points = sample_curve(curve, 18)
+
+    point_count = int(points.shape[0])
+    widths = np.linspace(float(width_start), float(width_end), point_count, dtype=np.float64)
+    upper = np.zeros_like(points, dtype=np.float64)
+    lower = np.zeros_like(points, dtype=np.float64)
+
+    for index in range(point_count):
+        if point_count == 1:
+            tangent = np.array([0.0, 1.0], dtype=np.float64)
+        elif index < point_count - 1:
+            tangent = points[index + 1] - points[index]
+        else:
+            tangent = points[index] - points[index - 1]
+
+        normal = np.array([-float(tangent[1]), float(tangent[0])], dtype=np.float64)
+        normal_length = vector_norm(normal)
+        if normal_length <= FLOAT_EPSILON:
+            normal = np.array([0.0, 1.0], dtype=np.float64)
+        else:
+            normal = normal / normal_length
+
+        half_width = widths[index] * 0.5
+        upper[index] = points[index] + (normal * half_width)
+        lower[index] = points[index] - (normal * half_width)
+
+    vertices = np.vstack([upper, lower[::-1], upper[0]])
+    codes = [Path.MOVETO] + [Path.LINETO] * (vertices.shape[0] - 2) + [Path.CLOSEPOLY]
+    return Path(vertices, codes)
 
 
 def _needs_dash_connector(edge: DaguaEdge) -> bool:
@@ -1078,6 +1185,19 @@ class DaguaEdgeCollection:
                 continue
             edge = prepared.edge
             render_width = _render_width(edge.width)
+            if edge.uses_taper():
+                body_paths.append(
+                    PathPatch(
+                        _tapered_ribbon_path(
+                            prepared.body_curve,
+                            edge.resolved_taper_width_start(),
+                            edge.resolved_taper_width_end(),
+                            simplified=self.tier in {"simplified", "lines", "bundled"},
+                        )
+                    )
+                )
+                body_colors.append(to_rgba(edge.color, edge.alpha))
+                continue
             if self.tier in {"lines", "bundled"}:
                 dash_segments = dash_curve(
                     prepared.body_curve,
