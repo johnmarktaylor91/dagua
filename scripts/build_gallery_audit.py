@@ -100,9 +100,20 @@ PAIR_DEFAULT_GAP = 260.0
 PAIR_SCALAR_COMPARISON_GAP = 180.0
 PAIR_ARROW_GAP = 130.0
 CURVATURE_CARD_MARGIN = 140.0
+STRIP_CURVATURE_CARD_MARGIN = 80.0
 ARROW_DEMO_EDGE_WIDTH = 3.0
 ARROW_DEMO_NODE_FRACTION = 0.5
 ANNOTATED_SINGLE_NODE_CARD_INSET: Tuple[int, int, int, int] = (72, 96, 72, 180)
+DECORATIVE_FILL_CARD_IDS = frozenset(
+    {
+        "nodes_fills_fill_pattern_pie",
+        "nodes_fills_fill_pattern_striped",
+        "nodes_fills_gradient_linear",
+        "nodes_fills_gradient_radial",
+    }
+)
+DECORATIVE_FILL_CARD_MIN_HEIGHT = 80.0
+DECORATIVE_FILL_CARD_PADDING: Tuple[float, float] = (11.0, 12.0)
 SCALAR_NODE_COMPARISON_FEATURES = frozenset(
     {
         "font_size",
@@ -1513,6 +1524,7 @@ def _apply_reference_card_tweaks(
     item: ReferenceCardItem,
     graph: DaguaGraph,
     positions: torch.Tensor,
+    render_context: str = "reference",
 ) -> torch.Tensor:
     """Apply one-off visual tweaks that do not map cleanly to shared params.
 
@@ -1524,6 +1536,9 @@ def _apply_reference_card_tweaks(
         Styled graph to mutate in place.
     positions : torch.Tensor
         Current fixed positions with shape ``[N, 2]``.
+    render_context : str, default="reference"
+        Rendering context. ``"reference"`` keeps standalone-card framing,
+        while ``"strip"`` allows tighter strip-panel framing.
 
     Returns
     -------
@@ -1531,12 +1546,21 @@ def _apply_reference_card_tweaks(
         Updated fixed positions.
     """
 
+    if item.card_id in DECORATIVE_FILL_CARD_IDS:
+        for style in _node_styles(graph):
+            style.min_height = max(float(style.min_height), DECORATIVE_FILL_CARD_MIN_HEIGHT)
+            # Decorative fills need more vertical breathing room so the label
+            # does not read as squashed against the painted fill treatment.
+            style.padding = DECORATIVE_FILL_CARD_PADDING
     if item.spec.feature == "external_label" and item.value.slug == "top":
         styles = _node_styles(graph)
         if len(styles) >= 2:
             styles[1].external_label = ""
     if item.spec.feature == "curvature" and item.value.slug == "0_8":
-        graph.graph_style.margin = max(float(graph.graph_style.margin), CURVATURE_CARD_MARGIN)
+        margin_target = (
+            STRIP_CURVATURE_CARD_MARGIN if render_context == "strip" else CURVATURE_CARD_MARGIN
+        )
+        graph.graph_style.margin = max(float(graph.graph_style.margin), margin_target)
     # Offset the middle node for routing cards so ortho/taxi produce visible bends.
     if item.spec.feature == "routing" and item.spec.fixture == "chain":
         positions = positions.clone()
@@ -1584,13 +1608,19 @@ def _apply_arrow_demo_tweaks(
     return _pair_positions(node_gap=PAIR_ARROW_GAP)
 
 
-def _prepare_reference_render(item: ReferenceCardItem) -> Tuple[DaguaGraph, torch.Tensor]:
+def _prepare_reference_render(
+    item: ReferenceCardItem,
+    render_context: str = "reference",
+) -> Tuple[DaguaGraph, torch.Tensor]:
     """Build and tweak a reference-card graph before image rendering.
 
     Parameters
     ----------
     item : ReferenceCardItem
         Reference card metadata.
+    render_context : str, default="reference"
+        Rendering context. ``"reference"`` prepares the standalone card, while
+        ``"strip"`` prepares a tighter strip-panel variant.
 
     Returns
     -------
@@ -1604,7 +1634,7 @@ def _prepare_reference_render(item: ReferenceCardItem) -> Tuple[DaguaGraph, torc
     else:
         positions = _apply_reference_params(graph, positions, item.value.params, item.spec.fixture)
     positions = _apply_arrow_demo_tweaks(item, graph, positions)
-    positions = _apply_reference_card_tweaks(item, graph, positions)
+    positions = _apply_reference_card_tweaks(item, graph, positions, render_context)
     return graph, positions
 
 
@@ -2026,6 +2056,7 @@ def _render_reference_canvas(
     item: ReferenceCardItem,
     size_px: Tuple[int, int],
     inset: Tuple[int, int, int, int],
+    render_context: str = "reference",
 ) -> Image.Image:
     """Render a reference item onto a normalized fixed-size canvas.
 
@@ -2037,6 +2068,8 @@ def _render_reference_canvas(
         Final canvas size in pixels.
     inset : tuple[int, int, int, int]
         Left, top, right, and bottom content insets.
+    render_context : str, default="reference"
+        Rendering context used to prepare the graph.
 
     Returns
     -------
@@ -2044,7 +2077,7 @@ def _render_reference_canvas(
         Rendered RGB canvas.
     """
 
-    graph, positions = _prepare_reference_render(item)
+    graph, positions = _prepare_reference_render(item, render_context=render_context)
     with tempfile.TemporaryDirectory() as temp_dir:
         raw_path = Path(temp_dir) / "reference.png"
         _render_dagua_png(graph, positions, raw_path, size_px)
@@ -2237,6 +2270,7 @@ def _render_strip_card(item: StripCardItem, output_root: Path) -> None:
             member,
             (panel_width, body_height),
             STRIP_PANEL_INSET,
+            render_context="strip",
         )
         draw = ImageDraw.Draw(panel)
         label_box = draw.textbbox((0, 0), member.value.label, font=label_font)
