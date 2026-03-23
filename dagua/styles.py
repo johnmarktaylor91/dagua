@@ -262,6 +262,12 @@ class NodeStyle:
     ``"parallelogram"``, ``"pentagon"``, ``"octagon"``, ``"star"``,
     ``"cylinder"``, ``"trapezoid"``, ``"double_circle"``, ``"cloud"``,
     ``"stadium"``, ``"tab"``, ``"note"``, ``"document"``, and ``"box3d"``.
+
+    The ``_set_fields`` attribute tracks which fields were explicitly modified
+    after construction, allowing the style cascade to distinguish between
+    "field matches the class default" and "field was never set."  Call
+    ``style.mark_set("field_name")`` after assigning a value that matches the
+    dataclass default to ensure the cascade respects it.
     """
 
     shape: str = "roundrect"
@@ -327,12 +333,25 @@ class NodeStyle:
 
     def __post_init__(self):
         """Populate derived defaults after dataclass initialization."""
+        object.__setattr__(self, "_set_fields", set())
+        object.__setattr__(self, "_init_done", False)
         if not self.fill:
             self.fill = make_fill(self.base_color)
         if not self.stroke:
             self.stroke = border_from_fill(self.base_color, darken=0.4)
         if not self.font_family:
             self.font_family = RESOLVED_FONT
+        object.__setattr__(self, "_init_done", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Track fields explicitly set after initialization."""
+        object.__setattr__(self, name, value)
+        if getattr(self, "_init_done", False) and not name.startswith("_"):
+            self._set_fields.add(name)
+
+    def mark_set(self, field_name: str) -> None:
+        """Mark a field as explicitly set for cascade priority."""
+        self._set_fields.add(field_name)
 
     def __repr__(self) -> str:
         """Return a compact repr showing only non-default fields."""
@@ -351,22 +370,20 @@ class EdgeStyle:
     """Visual style for an edge."""
 
     color: str = "#6B7280"  # medium gray — visible but recedes behind nodes
-    width: float = 1.2
+    width: float = 1.4
     arrow: str = "normal"  # normal, vee, dot, diamond, tee, crow, circle, open, none
     tail_arrow: str = "none"
     arrow_fill: str = "filled"  # filled, hollow
     arrow_color: str = ""  # empty = use edge color
-    arrow_length: float = 10.0
-    arrow_width: float = 7.0
+    arrow_length: float = 12.0
+    arrow_width: float = 9.0
     arrow_scale: Optional[float] = None  # Legacy field; matplotlib renderer ignores it
-    arrow_node_fraction: float = (
-        0.0  # 0 = use fixed arrow_length; >0 = fraction of target node height
-    )
-    arrow_width_ratio: float = 0.7  # width = length * this ratio (for node-relative mode)
+    arrow_node_fraction: float = 0.35  # fraction of target node height (0 = use fixed arrow_length)
+    arrow_width_ratio: float = 0.85  # width = length * this ratio (for node-relative mode)
     style: str = "solid"  # solid, dashed, dotted
     line_cap: str = "butt"  # render-only: butt, round, square
     line_join: str = "miter"  # render-only: miter, bevel, round
-    opacity: float = 0.65
+    opacity: float = 0.75
     # New fields (Part 2)
     routing: str = "bezier"  # bezier, straight, ortho, taxi — post-layout
     label_font_size: float = 7.0  # render-only
@@ -424,6 +441,11 @@ class ClusterStyle:
     )  # render-only (y-offset prevents nested label overlap)
     depth_fill_step: float = 0.03  # HSL lightness step per depth level
     depth_stroke_step: float = 0.05  # HSL lightness step per depth level
+    depth_stroke_width_step: float = 0.0  # additive stroke_width change per depth (points)
+    depth_opacity_step: float = -0.05  # additive opacity change per depth level
+    depth_font_size_step: float = -0.5  # additive font_size change per depth (points)
+    depth_padding_step: float = -3.0  # additive padding change per depth (points)
+    depth_corner_radius_step: float = 0.0  # additive corner_radius change per depth (points)
     # Member style overrides — applied to all nodes/edges within this cluster
     member_node_style: Optional[NodeStyle] = None
     member_edge_style: Optional[EdgeStyle] = None
@@ -551,13 +573,13 @@ GRAPHVIZ_MATCH_NODE_STYLES: Dict[str, NodeStyle] = {
 DEFAULT_THEME: Dict[str, NodeStyle] = DEFAULT_NODE_STYLES
 GRAPHVIZ_MATCH_THEME: Dict[str, NodeStyle] = GRAPHVIZ_MATCH_NODE_STYLES
 GRAPHVIZ_MATCH_DEFAULTS: Dict[str, Any] = {
-    "stroke_width": 1.4,
+    "stroke_width": 1.6,
     "padding": (7.0, 4.0),
     "font_size": 12.0,
-    "arrow_length": 10.0,
-    "arrow_width": 7.0,
+    "arrow_length": 14.0,
+    "arrow_width": 10.0,
     "arrow_scale": 16.0,
-    "edge_width": 1.4,
+    "edge_width": 1.6,
     "edge_opacity": 1.0,
     "min_height": 22.0,
 }
@@ -935,7 +957,7 @@ GRAPHVIZ_THEME = Theme(
             arrow_length=20.0,  # points — slightly smaller than strict
             arrow_width=14.0,  # points — stocky triangle
             arrow_scale=None,  # ignored; unified display scaling handles conversion
-            arrow_node_fraction=0.24,  # slightly smaller than strict
+            arrow_node_fraction=0.35,  # keep Graphviz-like heads visually prominent
             arrow_width_ratio=0.7,
             arrow_color="#333333",  # DEPARTURE: darker arrowheads for Graphviz-like contrast
             style="solid",
@@ -3860,23 +3882,43 @@ def resolve_cluster_style(
 def _merge_style(cls, sources: List[Optional[Any]]):
     """Generic field-level merge across a cascade of style sources.
 
-    For each field, picks the first non-default value from the sources list.
-    Falls back to the class default if no source overrides a field.
+    For each field, picks the first non-default value walking the cascade.
+    The per-element source (sources[0]) is special: ALL of its non-None
+    fields win unconditionally, even if they match the class default.
+    This prevents a theme from overriding an explicit per-element choice
+    that happens to match the dataclass default value.
+
+    Lower-priority sources (theme, graph default, global default) only
+    contribute fields that differ from the class default.
     """
     import dataclasses as _dc
 
     defaults_instance = cls()
     defaults_dict = {f.name: getattr(defaults_instance, f.name) for f in _dc.fields(cls)}
 
+    # Track which fields the per-element source explicitly set.
+    # A per-element source is sources[0].  If it exists and has a
+    # _set_fields attribute, use that.  Otherwise fall back to checking
+    # non-default values for all sources uniformly.
+    per_element = sources[0] if sources else None
+    per_element_fields: set = set()
+    if per_element is not None and hasattr(per_element, "_set_fields"):
+        per_element_fields = per_element._set_fields
+
     result_kwargs = {}
     for f in _dc.fields(cls):
-        # Skip class-level constants (not constructor params)
         if f.name in ("LEVEL_FILLS", "LEVEL_STROKES"):
             continue
-        for source in sources:
+        for idx, source in enumerate(sources):
             if source is None:
                 continue
             val = getattr(source, f.name)
+            # Per-element source (idx 0): accept if it has a _set_fields
+            # tracker saying this field was explicitly assigned, OR if the
+            # value is non-default (backward compatible).
+            if idx == 0 and f.name in per_element_fields:
+                result_kwargs[f.name] = val
+                break
             if val != defaults_dict[f.name]:
                 result_kwargs[f.name] = val
                 break

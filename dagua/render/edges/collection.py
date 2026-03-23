@@ -29,12 +29,12 @@ DEFAULT_BODY_COLOR = "#8C8C8C"
 DEFAULT_ALPHA = 0.7
 DEFAULT_STROKE_WIDTH = 0.75
 MAX_SEPARATION_RETRIES = 6
-HEAD_DENSITY_ANGLE_DEGREES = 15.0
-HEAD_DENSITY_FALLBACK_COUNT = 10
-HEAD_DENSITY_HIDE_COUNT = 14
-MIN_DENSE_HEAD_SCALE = 0.45
-MIN_ARROW_LENGTH_FACTOR = 1.6
-MIN_ARROW_WIDTH_FACTOR = 1.15
+HEAD_DENSITY_ANGLE_DEGREES = 20.0
+HEAD_DENSITY_FALLBACK_COUNT = 8
+HEAD_DENSITY_HIDE_COUNT = 12
+MIN_DENSE_HEAD_SCALE = 0.3
+MIN_ARROW_LENGTH_FACTOR = 1.4
+MIN_ARROW_WIDTH_FACTOR = 1.0
 THICK_STROKED_HEAD_GAIN = 0.05
 THICK_STROKED_HEAD_CAP = 1.4
 MIN_RENDER_WIDTH = 0.5
@@ -524,12 +524,60 @@ def _tail_body_direction(curve: CubicBezier) -> np.ndarray:
     return tangent
 
 
-def _head_body_direction(curve: CubicBezier) -> np.ndarray:
-    """Return the direction from the head tip into the edge body."""
-    tangent = curve.cp2 - curve.p1
+def _orient_terminal_tangent(tangent: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    """Orient a terminal tangent toward the rest of the curve.
+
+    Parameters
+    ----------
+    tangent : numpy.ndarray
+        Candidate terminal tangent with shape ``[2]``.
+    reference : numpy.ndarray
+        Coarse chord pointing from the terminal tip toward the opposite end
+        of the curve.
+
+    Returns
+    -------
+    numpy.ndarray
+        Tangent aligned with the curve body. When the local tangent is
+        degenerate, the coarse chord is returned instead.
+    """
     if vector_norm(tangent) <= FLOAT_EPSILON:
-        tangent = curve.p0 - curve.p1
-    return tangent
+        return reference
+    if vector_norm(reference) <= FLOAT_EPSILON:
+        return tangent
+    if float(np.dot(tangent, reference)) >= 0.0:
+        return tangent
+    # When the local tangent points away from the body (common for
+    # back-edge arcs with wide lateral control points), fall back to
+    # the coarse chord direction rather than naively negating the
+    # tangent -- the negated tangent can also point wrong for arcs.
+    return reference
+
+
+def _head_body_direction(curve: CubicBezier) -> np.ndarray:
+    """Return the direction from the head tip into the edge body.
+
+    Parameters
+    ----------
+    curve : CubicBezier
+        Curve whose target terminal is being rendered.
+
+    Returns
+    -------
+    numpy.ndarray
+        Vector pointing away from the target tip and back along the visible
+        edge body.
+
+    Notes
+    -----
+    Routed curves can overshoot the target boundary near ``p1``. In those
+    cases ``cp2`` lands on the node side of the tip, so the raw endpoint
+    tangent points into the node and would build an inward-facing arrowhead.
+    The overall source-to-target chord provides the stable orientation check.
+    """
+    reference = curve.p0 - curve.p1
+    tangent = curve.cp2 - curve.p1
+    return _orient_terminal_tangent(tangent, reference)
 
 
 def _terminal_face(direction: np.ndarray) -> str:
