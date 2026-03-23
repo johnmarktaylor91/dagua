@@ -160,3 +160,28 @@ def test_layout_sugiyama_layer_sep_alias_overrides_rank_sep() -> None:
     positions = layout_sugiyama(edge_index=edge_index, num_nodes=4, rank_sep=10.0, layer_sep=2.0)
 
     torch.testing.assert_close(positions[:, 1], torch.tensor([0.0, 2.0, 4.0, 6.0]))
+
+
+def test_layout_sugiyama_edge_weights_bias_weighted_barycenters() -> None:
+    edge_index = torch.tensor([[0, 2, 1], [3, 3, 4]], dtype=torch.long)
+    edge_weights = torch.tensor([8.0, 1.0, 1.0], dtype=torch.float32)
+
+    positions = layout_sugiyama(
+        edge_index=edge_index,
+        num_nodes=5,
+        seed=0,
+        edge_weights=edge_weights,
+    )
+
+    assert positions[3, 0].item() < positions[4, 0].item()
+
+
+def test_layout_sugiyama_rejects_mismatched_edge_weights() -> None:
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="edge_weights length"):
+        layout_sugiyama(
+            edge_index=edge_index,
+            num_nodes=3,
+            edge_weights=torch.ones(1, dtype=torch.float32),
+        )

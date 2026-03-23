@@ -129,18 +129,31 @@ def test_layout_drl_respects_edge_weights() -> None:
         edge_index=edge_index,
         num_nodes=6,
         seed=31,
-        weights=uniform_weights,
+        edge_weights=uniform_weights,
         options=_fast_drl_options(),
     )
     weighted_pos = layout_drl(
         edge_index=edge_index,
         num_nodes=6,
         seed=31,
-        weights=weighted,
+        edge_weights=weighted,
         options=_fast_drl_options(),
     )
 
     assert not torch.allclose(uniform_pos, weighted_pos)
+
+
+def test_layout_drl_rejects_mismatched_edge_weights() -> None:
+    """DrL should reject edge-weight tensors that do not match ``E``."""
+    edge_index = _edge_index([(0, 1), (1, 2), (2, 3)])
+
+    with pytest.raises(ValueError, match="edge_weights length"):
+        layout_drl(
+            edge_index=edge_index,
+            num_nodes=4,
+            edge_weights=torch.ones(2, dtype=torch.float32),
+            options=_fast_drl_options(),
+        )
 
 
 def test_layout_drl_tracks_igraph_pairwise_distances() -> None:
