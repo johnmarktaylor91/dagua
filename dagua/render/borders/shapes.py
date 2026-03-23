@@ -393,6 +393,62 @@ def ellipse_cubic_path(center_x: float, center_y: float, radius_x: float, radius
     return Path(vertices, codes)
 
 
+def _ellipse_cubic_path_cw(
+    center_x: float,
+    center_y: float,
+    radius_x: float,
+    radius_y: float,
+) -> Path:
+    """Approximate one ellipse using four cubic Bezier arcs, winding clockwise.
+
+    Identical to :func:`ellipse_cubic_path` but winds in the opposite
+    direction (right -> bottom -> left -> top -> right).  Used as the
+    inner subpath of double-circle shapes so that the nonzero fill rule
+    leaves a visible ring.
+
+    Parameters
+    ----------
+    center_x : float
+        Ellipse center x-coordinate.
+    center_y : float
+        Ellipse center y-coordinate.
+    radius_x : float
+        Horizontal radius.
+    radius_y : float
+        Vertical radius.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed clockwise ellipse path.
+    """
+
+    handle_x = ELLIPSE_KAPPA * radius_x
+    handle_y = ELLIPSE_KAPPA * radius_y
+    # Same start as CCW but traverse right -> bottom -> left -> top -> right.
+    vertices = np.array(
+        [
+            [center_x + radius_x, center_y],
+            [center_x + radius_x, center_y - handle_y],
+            [center_x + handle_x, center_y - radius_y],
+            [center_x, center_y - radius_y],
+            [center_x - handle_x, center_y - radius_y],
+            [center_x - radius_x, center_y - handle_y],
+            [center_x - radius_x, center_y],
+            [center_x - radius_x, center_y + handle_y],
+            [center_x - handle_x, center_y + radius_y],
+            [center_x, center_y + radius_y],
+            [center_x + handle_x, center_y + radius_y],
+            [center_x + radius_x, center_y + handle_y],
+            [center_x + radius_x, center_y],
+            [center_x + radius_x, center_y],
+        ],
+        dtype=np.float64,
+    )
+    codes = [Path.MOVETO] + [Path.CURVE4] * 12 + [Path.CLOSEPOLY]
+    return Path(vertices, codes)
+
+
 def cylinder_path(spec: ShapeSpec) -> Path:
     """Return the native cylinder outline path.
 
@@ -441,6 +497,10 @@ def cylinder_path(spec: ShapeSpec) -> Path:
 def double_circle_path(spec: ShapeSpec) -> Path:
     """Return a compound path containing two concentric ellipses.
 
+    The inner ellipse winds clockwise (opposite to the outer) so that
+    matplotlib's nonzero fill rule leaves the gap between the two rings
+    unfilled, making the inner circle visually distinct.
+
     Parameters
     ----------
     spec : ShapeSpec
@@ -449,17 +509,16 @@ def double_circle_path(spec: ShapeSpec) -> Path:
     Returns
     -------
     matplotlib.path.Path
-        Compound path with outer and inner closed ellipse subpaths.
+        Compound path with outer CCW and inner CW ellipse subpaths.
     """
 
     radius_x = spec.width / 2.0
     radius_y = spec.height / 2.0
-    gap = min(radius_x, radius_y) * 0.15
-    inner_radius_x = max(radius_x - gap, 0.0)
-    inner_radius_y = max(radius_y - gap, 0.0)
-    outer_path = ellipse_cubic_path(spec.center_x, spec.center_y, radius_x, radius_y)
-    inner_path = ellipse_cubic_path(spec.center_x, spec.center_y, inner_radius_x, inner_radius_y)
-    return Path.make_compound_path(outer_path, inner_path)
+    # Return the outer ellipse only.  The inner ring is drawn as a
+    # separate stroke-only element by the renderer (see _draw_nodes)
+    # because matplotlib PatchCollection compound paths do not reliably
+    # preserve fill-rule ring behaviour.
+    return ellipse_cubic_path(spec.center_x, spec.center_y, radius_x, radius_y)
 
 
 def cloud_path(spec: ShapeSpec) -> Path:
@@ -743,49 +802,43 @@ def box3d_path(spec: ShapeSpec) -> Path:
     depth = min(half_width, half_height) * 0.25
     offset_x = depth
     offset_y = depth * 0.70
+    front_right = right - offset_x
+    front_top = top - offset_y
+    back_left = left + offset_x
+    back_bottom = bottom + offset_y
 
     silhouette = closed_path_from_vertices(
         np.array(
             [
                 [left, bottom],
-                [right, bottom],
-                [right + offset_x, bottom + offset_y],
-                [right + offset_x, top + offset_y],
-                [left + offset_x, top + offset_y],
-                [left, top],
-            ],
-            dtype=np.float64,
-        )
-    )
-    front_edges = open_path_from_vertices(
-        np.array(
-            [
-                [left, top],
+                [front_right, bottom],
+                [right, back_bottom],
                 [right, top],
-                [right, bottom],
+                [back_left, top],
+                [left, front_top],
             ],
             dtype=np.float64,
         )
     )
-    top_edge = open_path_from_vertices(
+    top_divider = open_path_from_vertices(
         np.array(
             [
-                [right, top],
-                [right + offset_x, top + offset_y],
+                [left, front_top],
+                [front_right, front_top],
             ],
             dtype=np.float64,
         )
     )
-    right_edge = open_path_from_vertices(
+    right_divider = open_path_from_vertices(
         np.array(
             [
-                [right, bottom],
-                [right + offset_x, bottom + offset_y],
+                [front_right, bottom],
+                [front_right, front_top],
             ],
             dtype=np.float64,
         )
     )
-    return Path.make_compound_path(silhouette, front_edges, top_edge, right_edge)
+    return Path.make_compound_path(silhouette, top_divider, right_divider)
 
 
 def extract_patch_path(patch: object) -> Path:
