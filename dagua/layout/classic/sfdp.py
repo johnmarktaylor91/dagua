@@ -155,7 +155,12 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
     return centered * (extent / max(span, _MIN_SPAN))
 
 
-def _validate_inputs(edge_index: torch.Tensor, num_nodes: int, steps: int) -> None:
+def _validate_inputs(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    steps: int,
+    edge_weights: Optional[torch.Tensor],
+) -> None:
     """Validate public SFDP arguments.
 
     Parameters
@@ -166,6 +171,8 @@ def _validate_inputs(edge_index: torch.Tensor, num_nodes: int, steps: int) -> No
         Number of graph nodes.
     steps : int
         Maximum number of force iterations per level.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
@@ -186,6 +193,11 @@ def _validate_inputs(edge_index: torch.Tensor, num_nodes: int, steps: int) -> No
         torch.uint8,
     }:
         raise ValueError("edge_index must use an integer dtype.")
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} does not match "
+            f"edge count {edge_index.shape[1]}"
+        )
     if edge_index.numel() == 0:
         return
     edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
@@ -195,7 +207,11 @@ def _validate_inputs(edge_index: torch.Tensor, num_nodes: int, steps: int) -> No
         raise ValueError("edge_index contains node indices outside num_nodes.")
 
 
-def _build_graph(edge_index: torch.Tensor, num_nodes: int) -> _GraphData:
+def _build_graph(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> _GraphData:
     """Build an undirected weighted graph from a directed edge list.
 
     Parameters
@@ -204,6 +220,8 @@ def _build_graph(edge_index: torch.Tensor, num_nodes: int) -> _GraphData:
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
@@ -213,26 +231,35 @@ def _build_graph(edge_index: torch.Tensor, num_nodes: int) -> _GraphData:
     adjacency: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
     if edge_index.numel() > 0:
         edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
-        for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+        weights_cpu = (
+            torch.ones((edge_index.shape[1],), dtype=torch.float32)
+            if edge_weights is None
+            else edge_weights.detach().to(device="cpu", dtype=torch.float32)
+        )
+        for edge_id, (source, target) in enumerate(
+            zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+        ):
             if source == target:
                 continue
             lower = min(source, target)
             upper = max(source, target)
-            adjacency[lower][upper] = adjacency[lower].get(upper, 0.0) + 1.0
+            adjacency[lower][upper] = adjacency[lower].get(upper, 0.0) + float(
+                weights_cpu[edge_id].item()
+            )
 
     edge_pairs: list[tuple[int, int]] = []
-    edge_weights: list[float] = []
+    edge_weight_values: list[float] = []
     adjacency_lists: list[list[tuple[int, float]]] = [[] for _ in range(num_nodes)]
     for source in range(num_nodes):
         for target, weight in sorted(adjacency[source].items()):
             edge_pairs.append((source, target))
-            edge_weights.append(weight)
+            edge_weight_values.append(weight)
             adjacency_lists[source].append((target, weight))
             adjacency_lists[target].append((source, weight))
 
     if edge_pairs:
         edge_tensor = torch.tensor(edge_pairs, dtype=torch.long).transpose(0, 1).contiguous()
-        weight_tensor = torch.tensor(edge_weights, dtype=torch.float32)
+        weight_tensor = torch.tensor(edge_weight_values, dtype=torch.float32)
     else:
         edge_tensor = torch.empty((2, 0), dtype=torch.long)
         weight_tensor = torch.empty((0,), dtype=torch.float32)
@@ -904,6 +931,7 @@ def layout_sfdp(
     seed: int = 123,
     theta: float = _DEFAULT_THETA,
     repulsive_exponent: float = _DEFAULT_P,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with Hu's multilevel spring-electrical SFDP algorithm.
 
@@ -924,13 +952,21 @@ def layout_sfdp(
         Barnes-Hut opening-angle threshold.
     repulsive_exponent : float, default=-1.0
         Exponent ``p`` controlling the inverse-power repulsive term.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]`` forwarded into SFDP's
+        weighted spring graph construction.
 
     Returns
     -------
     torch.Tensor
         Final positions with shape ``[N, 2]``.
     """
-    _validate_inputs(edge_index=edge_index, num_nodes=num_nodes, steps=steps)
+    _validate_inputs(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        steps=steps,
+        edge_weights=edge_weights,
+    )
 
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     if num_nodes == 0:
@@ -941,7 +977,11 @@ def layout_sfdp(
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
 
-    base_graph = _build_graph(edge_index=edge_index, num_nodes=num_nodes)
+    base_graph = _build_graph(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
     graphs: list[_GraphData] = [base_graph]
     mappings: list[torch.Tensor] = []
     current_graph = base_graph

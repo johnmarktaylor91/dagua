@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import heapq
 from collections import deque
 from math import log2
-from typing import Optional
+from typing import Optional, Union, cast
 
 import numpy as np
 import torch
@@ -100,7 +101,12 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
     return centered * (extent / max(span, _MIN_SPAN))
 
 
-def _validate_inputs(edge_index: torch.Tensor, num_nodes: int, n_neighbors: int) -> None:
+def _validate_inputs(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    n_neighbors: int,
+    edge_weights: Optional[torch.Tensor],
+) -> None:
     """Validate public UMAP layout arguments.
 
     Parameters
@@ -111,6 +117,8 @@ def _validate_inputs(edge_index: torch.Tensor, num_nodes: int, n_neighbors: int)
         Number of graph nodes.
     n_neighbors : int
         Target neighborhood size for the fuzzy simplicial set.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
@@ -131,6 +139,11 @@ def _validate_inputs(edge_index: torch.Tensor, num_nodes: int, n_neighbors: int)
         torch.uint8,
     }:
         raise ValueError("edge_index must use an integer dtype.")
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} does not match "
+            f"edge count {edge_index.shape[1]}"
+        )
     if edge_index.numel() == 0:
         return
     edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
@@ -140,7 +153,11 @@ def _validate_inputs(edge_index: torch.Tensor, num_nodes: int, n_neighbors: int)
         raise ValueError("edge_index contains node indices outside num_nodes.")
 
 
-def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> list[list[int]]:
+def _build_undirected_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> Union[list[list[int]], list[list[tuple[int, float]]]]:
     """Build an undirected adjacency list from ``edge_index``.
 
     Parameters
@@ -149,24 +166,83 @@ def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> lis
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
-    list[list[int]]
-        Sorted undirected neighbor lists.
+    list[list[int]] or list[list[tuple[int, float]]]
+        Sorted undirected neighbor lists. When ``edge_weights`` is provided,
+        the entries store ``(neighbor, cost)`` pairs where
+        ``cost = 1 / max(weight, _EPSILON)`` so stronger edges become shorter
+        graph distances during UMAP preprocessing.
     """
-    adjacency_sets = [set() for _ in range(num_nodes)]
+    if edge_weights is None:
+        adjacency_sets: list[set[int]] = [set() for _ in range(num_nodes)]
+        if edge_index.numel() == 0:
+            return [sorted(neighbors) for neighbors in adjacency_sets]
+
+        edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+        for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+            if source == target:
+                continue
+            adjacency_sets[source].add(target)
+            adjacency_sets[target].add(source)
+
+        return [sorted(neighbors) for neighbors in adjacency_sets]
+
+    adjacency_maps: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
     if edge_index.numel() == 0:
-        return [[] for _ in range(num_nodes)]
+        return [sorted(neighbors.items()) for neighbors in adjacency_maps]
 
     edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
-    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+    weights_cpu = edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
         if source == target:
             continue
-        adjacency_sets[source].add(target)
-        adjacency_sets[target].add(source)
+        cost = 1.0 / max(float(weights_cpu[edge_id].item()), _EPSILON)
+        previous = adjacency_maps[source].get(target)
+        adjacency_maps[source][target] = min(previous, cost) if previous is not None else cost
+        previous = adjacency_maps[target].get(source)
+        adjacency_maps[target][source] = min(previous, cost) if previous is not None else cost
 
-    return [sorted(neighbors) for neighbors in adjacency_sets]
+    return [sorted(neighbors.items()) for neighbors in adjacency_maps]
+
+
+def _undirected_edge_weight_lookup(
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+) -> dict[tuple[int, int], float]:
+    """Build undirected edge-weight lookup table from the input graph.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    dict[tuple[int, int], float]
+        Undirected edge-weight lookup keyed by ``(min(u, v), max(u, v))``.
+    """
+    if edge_weights is None or edge_index.numel() == 0:
+        return {}
+
+    lookup: dict[tuple[int, int], float] = {}
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    weights_cpu = edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
+        if source == target:
+            continue
+        pair = (min(source, target), max(source, target))
+        lookup[pair] = lookup.get(pair, 0.0) + float(weights_cpu[edge_id].item())
+    return lookup
 
 
 def _bfs_distances(adjacency: list[list[int]], start: int) -> torch.Tensor:
@@ -201,12 +277,46 @@ def _bfs_distances(adjacency: list[list[int]], start: int) -> torch.Tensor:
     return distances
 
 
-def _all_pairs_shortest_paths(adjacency: list[list[int]]) -> torch.Tensor:
-    """Compute all-pairs graph distances with repeated BFS.
+def _dijkstra_distances(adjacency: list[list[tuple[int, float]]], start: int) -> torch.Tensor:
+    """Compute weighted shortest-path distances from one source.
 
     Parameters
     ----------
-    adjacency : list[list[int]]
+    adjacency : list[list[tuple[int, float]]]
+        Weighted undirected adjacency list.
+    start : int
+        Source node index.
+
+    Returns
+    -------
+    torch.Tensor
+        Distance vector with shape ``[N]``.
+    """
+    num_nodes = len(adjacency)
+    distances = torch.full((num_nodes,), float("inf"), dtype=torch.float32)
+    distances[start] = 0.0
+    heap: list[tuple[float, int]] = [(0.0, start)]
+    while heap:
+        distance, node = heapq.heappop(heap)
+        if distance > float(distances[node].item()):
+            continue
+        for neighbor, cost in adjacency[node]:
+            candidate = distance + cost
+            if candidate >= float(distances[neighbor].item()):
+                continue
+            distances[neighbor] = candidate
+            heapq.heappush(heap, (candidate, neighbor))
+    return distances
+
+
+def _all_pairs_shortest_paths(
+    adjacency: Union[list[list[int]], list[list[tuple[int, float]]]],
+) -> torch.Tensor:
+    """Compute all-pairs graph distances with repeated BFS or Dijkstra.
+
+    Parameters
+    ----------
+    adjacency : list[list[int]] or list[list[tuple[int, float]]]
         Undirected adjacency list.
 
     Returns
@@ -216,7 +326,19 @@ def _all_pairs_shortest_paths(adjacency: list[list[int]]) -> torch.Tensor:
     """
     if not adjacency:
         return torch.empty((0, 0), dtype=torch.float32)
-    rows = [_bfs_distances(adjacency=adjacency, start=index) for index in range(len(adjacency))]
+    is_weighted = any(neighbors and isinstance(neighbors[0], tuple) for neighbors in adjacency)
+    if is_weighted:
+        weighted_adjacency = cast(list[list[tuple[int, float]]], adjacency)
+        rows = [
+            _dijkstra_distances(adjacency=weighted_adjacency, start=index)
+            for index in range(len(weighted_adjacency))
+        ]
+    else:
+        unweighted_adjacency = cast(list[list[int]], adjacency)
+        rows = [
+            _bfs_distances(adjacency=unweighted_adjacency, start=index)
+            for index in range(len(unweighted_adjacency))
+        ]
     distances = torch.stack(rows, dim=0)
     finite_mask = torch.isfinite(distances)
     max_finite = (
@@ -392,8 +514,8 @@ def _symmetrized_fuzzy_graph(
     weights = list(undirected.values())
     head = torch.tensor([pair[0] for pair in pairs], dtype=torch.long)
     tail = torch.tensor([pair[1] for pair in pairs], dtype=torch.long)
-    weight = torch.tensor(weights, dtype=torch.float32)
-    return head, tail, weight
+    weight_tensor = torch.tensor(weights, dtype=torch.float32)
+    return head, tail, weight_tensor
 
 
 def _curve_function(x: np.ndarray, a: float, b: float) -> np.ndarray:
@@ -731,6 +853,7 @@ def layout_umap(
     negative_sample_rate: int = _NEGATIVE_SAMPLE_RATE,
     repulsion_strength: float = 1.0,
     seed: int = 42,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with UMAP applied to shortest-path distances.
 
@@ -759,13 +882,22 @@ def layout_umap(
         Repulsive weight ``gamma`` for negative samples.
     seed : int, default=42
         Random seed for spectral noise and negative sampling.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``. Larger weights are treated
+        as stronger connectivity by shortening the corresponding graph
+        distances before the UMAP kNN graph is constructed.
 
     Returns
     -------
     torch.Tensor
         Final positions with shape ``[N, 2]``.
     """
-    _validate_inputs(edge_index=edge_index, num_nodes=num_nodes, n_neighbors=n_neighbors)
+    _validate_inputs(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        n_neighbors=n_neighbors,
+        edge_weights=edge_weights,
+    )
     if min_dist < 0.0:
         raise ValueError("min_dist must be non-negative.")
     if spread <= 0.0:
@@ -785,7 +917,11 @@ def layout_umap(
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
 
-    adjacency = _build_undirected_adjacency(edge_index=edge_index, num_nodes=num_nodes)
+    adjacency = _build_undirected_adjacency(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
     distances = _all_pairs_shortest_paths(adjacency=adjacency)
     knn_indices, knn_distances = _knn_from_distances(distances=distances, n_neighbors=n_neighbors)
     sigmas, rhos = _smooth_knn_dist(knn_distances=knn_distances, n_neighbors=n_neighbors)
@@ -795,6 +931,19 @@ def layout_umap(
         sigmas=sigmas,
         rhos=rhos,
     )
+    if edge_weights is not None and weight.numel() > 0:
+        edge_weight_lookup = _undirected_edge_weight_lookup(
+            edge_index=edge_index,
+            edge_weights=edge_weights,
+        )
+        scaled_weight = weight.clone()
+        for index in range(weight.shape[0]):
+            pair = (
+                min(int(head[index].item()), int(tail[index].item())),
+                max(int(head[index].item()), int(tail[index].item())),
+            )
+            scaled_weight[index] = scaled_weight[index] * edge_weight_lookup.get(pair, 1.0)
+        weight = scaled_weight
 
     embedding = _spectral_initialization(
         num_nodes=num_nodes,

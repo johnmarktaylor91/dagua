@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import Mapping, Optional, Protocol, Union
+from typing import Mapping, Optional, Protocol, Union, cast
 
 import torch
 
@@ -129,7 +129,7 @@ def _layout_device(
 def _validate_inputs(
     edge_index: torch.Tensor,
     num_nodes: int,
-    weights: Optional[torch.Tensor],
+    edge_weights: Optional[torch.Tensor],
 ) -> None:
     """Validate the public DrL arguments.
 
@@ -139,7 +139,7 @@ def _validate_inputs(
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
-    weights : torch.Tensor, optional
+    edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
 
     Returns
@@ -151,8 +151,11 @@ def _validate_inputs(
         raise ValueError("num_nodes must be non-negative.")
     if edge_index.ndim != 2 or edge_index.shape[0] != 2:
         raise ValueError("edge_index must have shape [2, E].")
-    if weights is not None and weights.shape != (edge_index.shape[1],):
-        raise ValueError("weights must have shape [E] when provided.")
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} does not match "
+            f"edge count {edge_index.shape[1]}"
+        )
 
     if edge_index.numel() == 0:
         return
@@ -164,8 +167,8 @@ def _validate_inputs(
         raise ValueError("edge_index cannot contain negative node indices.")
     if max_index >= num_nodes:
         raise ValueError("edge_index contains node indices outside [0, num_nodes).")
-    if weights is not None and bool(torch.any(weights <= 0.0).item()):
-        raise ValueError("weights must be strictly positive.")
+    if edge_weights is not None and bool(torch.any(edge_weights <= 0.0).item()):
+        raise ValueError("edge_weights must be strictly positive.")
 
 
 def _lookup_option(
@@ -248,7 +251,7 @@ def _resolve_drl_parameters(
     for key in tuple(values):
         override = _lookup_option(options=options, name=key)
         if override is not None:
-            values[key] = float(override)
+            values[key] = float(cast(float, override))
 
     return _DrlParameters(
         edge_cut=values["edge_cut"],
@@ -294,7 +297,7 @@ def _resolve_drl_parameters(
 def _build_undirected_adjacency(
     edge_index: torch.Tensor,
     num_nodes: int,
-    weights: Optional[torch.Tensor],
+    edge_weights: Optional[torch.Tensor],
 ) -> list[dict[int, float]]:
     """Build a symmetric weighted adjacency map.
 
@@ -304,7 +307,7 @@ def _build_undirected_adjacency(
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
-    weights : torch.Tensor, optional
+    edge_weights : torch.Tensor, optional
         Optional edge weights with shape ``[E]``.
 
     Returns
@@ -312,15 +315,15 @@ def _build_undirected_adjacency(
     list[dict[int, float]]
         One weighted neighbor dictionary per node.
     """
-    adjacency = [dict() for _ in range(num_nodes)]
+    adjacency: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
     if edge_index.numel() == 0:
         return adjacency
 
     edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
-    if weights is None:
+    if edge_weights is None:
         weights_cpu = torch.ones(edge_index.shape[1], dtype=torch.float64)
     else:
-        weights_cpu = weights.to(device="cpu", dtype=torch.float64)
+        weights_cpu = edge_weights.to(device="cpu", dtype=torch.float64)
 
     sources = edge_index_cpu[0].tolist()
     targets = edge_index_cpu[1].tolist()
@@ -692,7 +695,7 @@ def layout_drl(
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
     seed: int = 42,
-    weights: Optional[torch.Tensor] = None,
+    edge_weights: Optional[torch.Tensor] = None,
     options: Union[str, Mapping[str, object], _OptionObject] = "default",
 ) -> torch.Tensor:
     """Lay out a graph with the igraph DrL algorithm.
@@ -707,7 +710,7 @@ def layout_drl(
         Unused placeholder kept for interface compatibility.
     seed : int, default=42
         Random seed for the initial placement and stochastic node updates.
-    weights : torch.Tensor, optional
+    edge_weights : torch.Tensor, optional
         Optional positive edge weights with shape ``[E]``.
     options : str or Mapping[str, object] or _OptionObject, default="default"
         igraph DrL preset name or a mapping/object of per-phase overrides using
@@ -718,7 +721,7 @@ def layout_drl(
     torch.Tensor
         Final positions with shape ``[N, 2]`` and dtype ``float32``.
     """
-    _validate_inputs(edge_index=edge_index, num_nodes=num_nodes, weights=weights)
+    _validate_inputs(edge_index=edge_index, num_nodes=num_nodes, edge_weights=edge_weights)
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     del node_sizes
     if num_nodes == 0:
@@ -728,7 +731,7 @@ def layout_drl(
     adjacency = _build_undirected_adjacency(
         edge_index=edge_index,
         num_nodes=num_nodes,
-        weights=weights,
+        edge_weights=edge_weights,
     )
     positions = _initialize_positions(num_nodes=num_nodes, seed=seed)
     density_grid = _DensityGrid(grid_size=_GRID_SIZE, view_size=_VIEW_SIZE, radius=_GRID_RADIUS)

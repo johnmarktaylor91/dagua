@@ -62,10 +62,15 @@ DEFAULT_SEED_COUNT = 10
 DEFAULT_SEED_START = 42
 PROGRESS_INTERVAL = 25
 SAVE_INTERVAL = 100  # flush results to disk every N completions
-SUBMIT_BATCH_SIZE = 200  # submit futures in batches to avoid overwhelming the pool
+MAX_INFLIGHT_GROUPS = 200  # rolling window of concurrent futures
 RUNNING_STATUS = "running"
 POSITION_DIRNAME = "positions"
-CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD = 3
+CONSECUTIVE_FAILURE_SKIP_THRESHOLD = 3  # skip remaining seeds after N consecutive failures
+# Minimum timeout (seconds) for tiny graphs -- no layout should need more
+# than this on a graph with <100 nodes.
+MIN_TIMEOUT_SECONDS = 30.0
+# Graph size at which the full global timeout applies.
+FULL_TIMEOUT_NODE_COUNT = 500
 
 
 class _WorkerLayoutTimeoutError(TimeoutError):
@@ -568,6 +573,32 @@ def resolve_worker_count(workers_arg: str) -> int:
     return min(max_by_ram, max_by_cpu, 6)
 
 
+def scaled_timeout(global_timeout: float, num_nodes: int) -> float:
+    """Scale the per-job timeout based on graph size.
+
+    Small graphs get a reduced timeout to avoid wasting minutes when an engine
+    hangs on a trivial input.  The timeout scales linearly from
+    ``MIN_TIMEOUT_SECONDS`` up to the full ``global_timeout`` at
+    ``FULL_TIMEOUT_NODE_COUNT`` nodes.
+
+    Parameters
+    ----------
+    global_timeout : float
+        The ``--timeout`` value from the CLI.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    float
+        Effective timeout in seconds.
+    """
+    if num_nodes >= FULL_TIMEOUT_NODE_COUNT:
+        return global_timeout
+    size_ratio = max(0.15, num_nodes / FULL_TIMEOUT_NODE_COUNT)
+    return max(MIN_TIMEOUT_SECONDS, global_timeout * size_ratio)
+
+
 def graph_summary(test_graph: Any) -> GraphSummary:
     """Extract stable metadata from a ``TestGraph`` instance.
 
@@ -614,6 +645,10 @@ def select_graphs(graph_filter: Optional[str], max_nodes: int) -> list[Any]:
     from dagua.eval.graphs import get_test_graphs
 
     selected = get_test_graphs(max_nodes=max_nodes if max_nodes > 0 else None)
+    # Sort small-to-large so tiny graphs finish fast and give early feedback,
+    # while the expensive large-graph + slow-engine combos concentrate at the
+    # end where timeout skipping has the most leverage.
+    selected = sorted(selected, key=lambda tg: (tg.graph.num_nodes, tg.name))
     if graph_filter is None:
         return selected
 
@@ -1408,8 +1443,11 @@ def _run_single_work_item(work_item: WorkItem) -> dict[str, Any]:
         _disable_worker_timeout(previous_handler)
 
 
-def _is_timeout_record(record: BenchmarkRecord) -> bool:
-    """Return whether a record should count against the timeout threshold.
+def _is_failure_record(record: BenchmarkRecord) -> bool:
+    """Return whether a record should count against the consecutive failure threshold.
+
+    Timeouts and errors both count.  Successful and skipped records reset the
+    consecutive failure counter.
 
     Parameters
     ----------
@@ -1419,11 +1457,9 @@ def _is_timeout_record(record: BenchmarkRecord) -> bool:
     Returns
     -------
     bool
-        ``True`` when the record represents a timeout.
+        ``True`` when the record represents a timeout or error.
     """
-    return record.status == "timeout" or (
-        record.status == "error" and "timeout" in (record.error or "").lower()
-    )
+    return record.status in {"timeout", "error"}
 
 
 def group_work_items(work_items: Sequence[WorkItem]) -> list[list[WorkItem]]:
@@ -1477,9 +1513,10 @@ def _run_work_group(work_group: Sequence[WorkItem]) -> list[dict[str, Any]]:
         num_edges = int(edge_index.shape[1]) if edge_index.numel() > 0 else 0
 
     records: list[dict[str, Any]] = []
-    consecutive_timeouts = 0
+    consecutive_failures = 0
+    last_failure_error: str = "failures"
     for work_item in work_group:
-        if consecutive_timeouts >= CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD:
+        if consecutive_failures >= CONSECUTIVE_FAILURE_SKIP_THRESHOLD:
             records.append(
                 _record_with_pairings(
                     graph_name=work_item.graph_name,
@@ -1492,17 +1529,19 @@ def _run_work_group(work_group: Sequence[WorkItem]) -> list[dict[str, Any]]:
                     error=None,
                     positions_file=None,
                     skip_reason=(
-                        f"skipped after {CONSECUTIVE_TIMEOUT_SKIP_THRESHOLD} consecutive timeouts"
+                        f"skipped after {CONSECUTIVE_FAILURE_SKIP_THRESHOLD} "
+                        f"consecutive {last_failure_error}"
                     ),
                 ).to_dict()
             )
             continue
 
         record = BenchmarkRecord.from_dict(_run_single_work_item(work_item))
-        if _is_timeout_record(record):
-            consecutive_timeouts += 1
+        if _is_failure_record(record):
+            consecutive_failures += 1
+            last_failure_error = "timeouts" if record.status == "timeout" else "errors"
         else:
-            consecutive_timeouts = 0
+            consecutive_failures = 0
         records.append(record.to_dict())
     return records
 
@@ -2021,14 +2060,9 @@ def main() -> int:
                     graph_completion_counts[summary.name] += 1
                     continue
 
-                timeout_seconds = float(
-                    min(
-                        args.timeout,
-                        engine_timeout_cap(competitor.name)
-                        if engine_timeout_cap(competitor.name) is not None
-                        else args.timeout,
-                    )
-                )
+                graph_timeout = scaled_timeout(float(args.timeout), summary.num_nodes)
+                cap = engine_timeout_cap(competitor.name)
+                timeout_seconds = min(graph_timeout, cap) if cap is not None else graph_timeout
                 work_items.append(
                     WorkItem(
                         graph_name=summary.name,
@@ -2121,74 +2155,131 @@ def main() -> int:
                 num_edges=summary_record.num_edges,
             )
 
-    if args.resolved_workers <= 1:
-        for work_group in work_groups:
-            _mark_group_running(work_group)
-            for payload in _run_work_group(work_group):
-                _process_record(BenchmarkRecord.from_dict(payload))
-    else:
-        light_groups = [group for group in work_groups if not engine_is_heavy(group[0].engine_name)]
-        heavy_groups = [group for group in work_groups if engine_is_heavy(group[0].engine_name)]
+    # ── SIGINT handler: stop accepting new work, drain inflight, save. ──
+    _shutdown_requested = False
 
-        try:
-            executor = ProcessPoolExecutor(
-                max_workers=args.resolved_workers, mp_context=_MP_CONTEXT
-            )
-        except PermissionError:
-            print("[benchmark] ERROR: failed to start ProcessPoolExecutor")
-            return 1
-
-        # Submit light groups in batches to avoid overwhelming the executor
-        # and blocking on massive JSON serialization.
+    def _sigint_handler(signum: int, frame: Any) -> None:
+        nonlocal _shutdown_requested
+        if _shutdown_requested:
+            # Second SIGINT -- hard exit after saving.
+            print("\n[benchmark] Forced shutdown -- saving results...")
+            save_results(results_path, results)
+            sys.exit(1)
+        _shutdown_requested = True
         print(
-            f"[benchmark] Parallel: {len(light_groups)} light groups "
-            f"(batch={SUBMIT_BATCH_SIZE}), {len(heavy_groups)} heavy groups (serial)"
+            "\n[benchmark] Graceful shutdown requested (SIGINT). "
+            "Finishing inflight work, then saving..."
         )
 
-        def _drain_futures(
-            future_map: dict[Future[list[dict[str, Any]]], Sequence[WorkItem]],
-        ) -> None:
-            """Drain all completed futures from the map."""
-            for future in as_completed(future_map):
-                work_group = future_map.pop(future)
-                try:
-                    payloads = future.result()
-                except Exception as exc:
-                    payloads = [
-                        _record_with_pairings(
-                            graph_name=work_item.graph_name,
-                            engine_name=work_item.engine_name,
-                            seed=work_item.seed,
-                            num_nodes=graph_summaries[work_item.graph_name].num_nodes,
-                            num_edges=graph_summaries[work_item.graph_name].num_edges,
-                            status="error",
-                            runtime_seconds=None,
-                            error=f"{type(exc).__name__}: {exc}",
-                            positions_file=None,
-                            skip_reason=None,
-                        ).to_dict()
-                        for work_item in work_group
-                    ]
-                for payload in payloads:
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    def _collect_future(
+        future: Future[list[dict[str, Any]]],
+        work_group: Sequence[WorkItem],
+    ) -> None:
+        """Collect results from one completed future."""
+        try:
+            payloads = future.result()
+        except Exception as exc:
+            payloads = [
+                _record_with_pairings(
+                    graph_name=wi.graph_name,
+                    engine_name=wi.engine_name,
+                    seed=wi.seed,
+                    num_nodes=graph_summaries[wi.graph_name].num_nodes,
+                    num_edges=graph_summaries[wi.graph_name].num_edges,
+                    status="error",
+                    runtime_seconds=None,
+                    error=f"{type(exc).__name__}: {exc}",
+                    positions_file=None,
+                    skip_reason=None,
+                ).to_dict()
+                for wi in work_group
+            ]
+        for payload in payloads:
+            _process_record(BenchmarkRecord.from_dict(payload))
+
+    try:
+        if args.resolved_workers <= 1:
+            for work_group in work_groups:
+                if _shutdown_requested:
+                    break
+                _mark_group_running(work_group)
+                for payload in _run_work_group(work_group):
+                    _process_record(BenchmarkRecord.from_dict(payload))
+        else:
+            light_groups = [g for g in work_groups if not engine_is_heavy(g[0].engine_name)]
+            heavy_groups = [g for g in work_groups if engine_is_heavy(g[0].engine_name)]
+
+            try:
+                executor = ProcessPoolExecutor(
+                    max_workers=args.resolved_workers, mp_context=_MP_CONTEXT
+                )
+            except PermissionError:
+                print("[benchmark] ERROR: failed to start ProcessPoolExecutor")
+                return 1
+
+            print(
+                f"[benchmark] Parallel: {len(light_groups)} light groups "
+                f"(rolling window={MAX_INFLIGHT_GROUPS}), "
+                f"{len(heavy_groups)} heavy groups (serial)"
+            )
+
+            # Rolling submission: keep up to MAX_INFLIGHT_GROUPS futures alive
+            # at all times.  As each completes, immediately submit the next
+            # group.  This eliminates idle gaps between batches.
+            inflight: dict[Future[list[dict[str, Any]]], Sequence[WorkItem]] = {}
+            group_iter = iter(light_groups)
+
+            def _fill_inflight() -> None:
+                """Submit work groups until the inflight window is full."""
+                while len(inflight) < MAX_INFLIGHT_GROUPS and not _shutdown_requested:
+                    try:
+                        work_group = next(group_iter)
+                    except StopIteration:
+                        break
+                    _mark_group_running(work_group)
+                    fut = executor.submit(_run_work_group, work_group)
+                    inflight[fut] = work_group
+
+            try:
+                _fill_inflight()
+                while inflight and not _shutdown_requested:
+                    # Wait for any one future to complete, then refill.
+                    done_futures = set()
+                    for fut in as_completed(inflight):
+                        done_futures.add(fut)
+                        _collect_future(fut, inflight.pop(fut))
+                        # Refill after each completion to keep workers busy.
+                        _fill_inflight()
+                        if _shutdown_requested:
+                            break
+                        break  # Process one at a time to stay responsive.
+                    # If shutdown requested, drain remaining inflight futures.
+                    if _shutdown_requested:
+                        for fut in as_completed(inflight):
+                            _collect_future(fut, inflight.pop(fut))
+            finally:
+                executor.shutdown(wait=True, cancel_futures=False)
+
+            # Heavy groups run serially to avoid memory pressure.
+            for work_group in heavy_groups:
+                if _shutdown_requested:
+                    break
+                _mark_group_running(work_group)
+                for payload in _run_work_group(work_group):
                     _process_record(BenchmarkRecord.from_dict(payload))
 
-        try:
-            for batch_start in range(0, len(light_groups), SUBMIT_BATCH_SIZE):
-                batch = light_groups[batch_start : batch_start + SUBMIT_BATCH_SIZE]
-                future_to_group: dict[Future[list[dict[str, Any]]], Sequence[WorkItem]] = {}
-                for work_group in batch:
-                    _mark_group_running(work_group)
-                    future = executor.submit(_run_work_group, work_group)
-                    future_to_group[future] = work_group
-                _drain_futures(future_to_group)
-        finally:
-            executor.shutdown(wait=True, cancel_futures=False)
-
-        # Heavy groups run serially to avoid memory pressure
-        for work_group in heavy_groups:
-            _mark_group_running(work_group)
-            for payload in _run_work_group(work_group):
-                _process_record(BenchmarkRecord.from_dict(payload))
+    finally:
+        # Always save results on exit -- whether normal, SIGINT, or exception.
+        save_results(results_path, results)
+        signal.signal(signal.SIGINT, previous_sigint)
+        if _shutdown_requested:
+            print(
+                f"[benchmark] Saved {completed_scope}/{total_scope} results "
+                f"after graceful shutdown."
+            )
 
     current_records = list(scoped_results(results, scoped_keys).values())
     _save_json_atomic(
