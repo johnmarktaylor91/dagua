@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import math
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence, Tuple
@@ -35,6 +36,7 @@ from dagua.render.text.paths import _cached_font_metrics, _cached_glyph_data
 from dagua.styles import RESOLVED_FONT, NodeStyle
 from dagua.utils import compute_node_size, measure_text
 
+text_collection = importlib.import_module("dagua.render.text.collection")
 _IMAGE_DPI = 160
 _IMAGE_SIZE = (12.0, 8.0)
 
@@ -1323,6 +1325,62 @@ def test_render_text_background_and_outline() -> None:
     )
     plt.close(fig)
     assert len(artists) >= 3
+
+
+def test_render_text_outline_clamps_to_visible_width() -> None:
+    """Outline strokes should keep a minimum width even for tiny style values."""
+
+    fig, ax = _make_axes()
+    artists = _render_specs(
+        ax,
+        [
+            DaguaText(
+                50.0,
+                35.0,
+                "Outline",
+                font_size=12.0,
+                outline=True,
+                outline_width=0.5,
+                gid="outline-clamp",
+            )
+        ],
+    )
+    plt.close(fig)
+
+    outline_patches = [
+        artist for artist in artists if isinstance(artist, PathPatch) and artist.get_gid()
+    ]
+    assert any(
+        str(patch.get_gid()) == "outline-clamp-outline-0-0"
+        and float(patch.get_linewidth()) == pytest.approx(2.0)
+        for patch in outline_patches
+    )
+
+
+def test_render_text_bold_adds_emphasis_patch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bold labels should add a same-color emphasis stroke behind the fill."""
+
+    monkeypatch.setattr(text_collection, "_segment_needs_bold_emphasis", lambda spec, segment: True)
+    fig, ax = _make_axes()
+    artists = _render_specs(
+        ax,
+        [
+            DaguaText(
+                50.0,
+                35.0,
+                "Bold",
+                font_size=12.0,
+                font_weight="bold",
+                gid="bold-emphasis",
+            )
+        ],
+    )
+    plt.close(fig)
+
+    assert any(
+        isinstance(artist, PathPatch) and str(artist.get_gid()) == "bold-emphasis-embolden-0-0"
+        for artist in artists
+    )
 
 
 def test_render_text_clip_patch() -> None:

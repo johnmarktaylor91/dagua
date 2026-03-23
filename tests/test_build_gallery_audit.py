@@ -17,13 +17,19 @@ from scripts.build_gallery_audit import (
     DEFAULT_COMPARISON_STROKE,
     PAIR_ARROW_GAP,
     PAIR_SCALAR_COMPARISON_GAP,
+    _apply_reference_params,
+    _build_fixture,
+    _combo_flow_positions,
+    _combo_params,
     _compose_board,
     _prepare_reference_render,
     _render_reference_canvas,
     build_combo_items,
+    build_evil_items,
     build_gallery_audit,
     build_reference_items,
 )
+from scripts.generate_cosmetic_album import VARIED_EXTERNAL_LABELS
 
 
 def test_gallery_audit_inventory_matches_expected_counts() -> None:
@@ -37,9 +43,11 @@ def test_gallery_audit_inventory_matches_expected_counts() -> None:
 
     reference_items = build_reference_items()
     combo_items = build_combo_items()
+    evil_items = build_evil_items()
 
     assert len(reference_items) == 133
-    assert len(combo_items) == 38
+    assert len(combo_items) == 78
+    assert len(evil_items) == 35
     assert {
         "nodes_shapes_rect",
         "nodes_shapes_roundrect",
@@ -54,7 +62,16 @@ def test_gallery_audit_inventory_matches_expected_counts() -> None:
         "combo_shadow_gradient",
         "combo_bold_shadow_gradient",
         "combo_kitchen_sink_3",
+        "combo_pie_bold",
+        "combo_bt_cluster_rounded",
+        "combo_kitchen_sink_6",
     }.issubset({item.card_id for item in combo_items})
+    assert {
+        "evil_huge_arrows",
+        "evil_self_loop_star",
+        "evil_all_arrows_gradient",
+        "evil_contradictory_styles",
+    }.issubset({item.card_id for item in evil_items})
 
 
 def test_build_gallery_audit_writes_subset(tmp_path: Path) -> None:
@@ -81,6 +98,7 @@ def test_build_gallery_audit_writes_subset(tmp_path: Path) -> None:
         boards=True,
         comparisons=True,
         combos=True,
+        evil=True,
         index=True,
         reference_card_ids=[
             "nodes_shapes_rect",
@@ -94,11 +112,13 @@ def test_build_gallery_audit_writes_subset(tmp_path: Path) -> None:
             "combo_bold_italic",
             "combo_opacity_shadow",
         ],
+        evil_card_ids=["evil_self_loop_star"],
     )
 
     assert result.reference_count == 4
     assert result.comparison_count == 4
     assert result.combo_count == 4
+    assert result.evil_count == 1
     assert result.board_count == 2
 
     expected_paths = [
@@ -106,6 +126,7 @@ def test_build_gallery_audit_writes_subset(tmp_path: Path) -> None:
         output_dir / "cards/reference/nodes/shapes/roundrect.png",
         output_dir / "cards/comparisons/nodes/shapes/rect_vs_graphviz.png",
         output_dir / "cards/combos/2way/shadow_gradient.png",
+        output_dir / "cards/evil/evil_self_loop_star.png",
         output_dir / "boards/reference/nodes_shapes_01.png",
         output_dir / "boards/combos/2way_01.png",
         output_dir / "index.jsonl",
@@ -121,21 +142,26 @@ def test_build_gallery_audit_writes_subset(tmp_path: Path) -> None:
 
     reference_sidecar = output_dir / "cards/reference/nodes/shapes/rect.json"
     combo_sidecar = output_dir / "cards/combos/2way/shadow_gradient.json"
+    evil_sidecar = output_dir / "cards/evil/evil_self_loop_star.json"
     assert reference_sidecar.exists()
     assert combo_sidecar.exists()
+    assert evil_sidecar.exists()
 
     index_rows = [
         json.loads(line)
         for line in (output_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()
         if line
     ]
-    assert len(index_rows) == 8
+    assert len(index_rows) == 9
     rect_row = next(row for row in index_rows if row["id"] == "nodes_shapes_rect")
     combo_row = next(row for row in index_rows if row["id"] == "combo_shadow_gradient")
+    evil_row = next(row for row in index_rows if row["id"] == "evil_self_loop_star")
     assert rect_row["comparison_path"] == "cards/comparisons/nodes/shapes/rect_vs_graphviz.png"
     assert rect_row["has_comparison"] is True
     assert combo_row["category"] == "combos/2way"
     assert combo_row["has_comparison"] is False
+    assert evil_row["category"] == "evil"
+    assert evil_row["has_comparison"] is False
 
 
 def test_compose_board_reserves_gap_below_header(tmp_path: Path) -> None:
@@ -327,6 +353,122 @@ def test_prepare_reference_render_applies_gallery_demo_tweaks() -> None:
     assert graph.num_nodes == 7
     assert graph.edge_index.shape[1] == 6
     assert positions.shape == (7, 2)
+
+
+def test_combo_params_adds_new_combo_feature_defaults() -> None:
+    """Combo parameter translation should add defaults for new style features.
+
+    Returns
+    -------
+    None
+        The translated combo defaults are asserted in place.
+    """
+
+    hatched_params = _combo_params(
+        {
+            "fill_pattern": "hatched",
+            "shape": "cloud",
+            "external_label": "Queue",
+            "text_outline": True,
+        },
+        "combo_flow",
+    )
+    hatched_node = hatched_params["node"]
+
+    assert isinstance(hatched_node, dict)
+    assert hatched_node["text_background"] == "#FFFFFF"
+    assert hatched_node["text_background_opacity"] == pytest.approx(0.92)
+    assert hatched_node["text_background_padding"] == (6.0, 3.0)
+    assert hatched_node["text_background_corner_radius"] == pytest.approx(4.0)
+    assert hatched_node["external_label_font_size"] == pytest.approx(10.0)
+    assert hatched_node["external_label_offset"] == pytest.approx(8.0)
+    assert hatched_node["text_outline_color"] == "#FFFFFF"
+    assert hatched_node["text_outline_width"] == pytest.approx(2.0)
+    assert hatched_params["node_labels"] == ["Svc", "API", "Hub", "Log", "Out"]
+
+    pie_params = _combo_params({"fill_pattern": "pie", "shape": "box3d"}, "combo_flow")
+    pie_node = pie_params["node"]
+
+    assert isinstance(pie_node, dict)
+    assert pie_node["min_width"] == pytest.approx(120.0)
+    assert pie_node["min_height"] == pytest.approx(80.0)
+    assert pie_params["node_labels"] == ["DB", "Srv", "App", "Web", "Out"]
+
+    crossing_params = _combo_params({"crossing_style": "gap"}, "crossing")
+    crossing_edge = crossing_params["edge"]
+
+    assert isinstance(crossing_edge, dict)
+    assert crossing_edge["crossing_size"] == pytest.approx(20.0)
+    assert crossing_edge["width"] == pytest.approx(4.0)
+
+    outlined_params = _combo_params(
+        {
+            "text_outline": True,
+            "text_outline_color": "#333333",
+            "shadow": True,
+        },
+        "combo_flow",
+    )
+    outlined_node = outlined_params["node"]
+
+    assert isinstance(outlined_node, dict)
+    assert outlined_node["text_outline_color"] == "#333333"
+
+    endpoint_params = _combo_params(
+        {
+            "head_label": "H",
+            "tail_label": "T",
+            "head_label_offset": 12.0,
+            "tail_label_offset": 12.0,
+        },
+        "combo_flow",
+    )
+    endpoint_edge = endpoint_params["edge"]
+
+    assert isinstance(endpoint_edge, dict)
+    assert endpoint_edge["head_label_offset"] == pytest.approx(12.0)
+    assert endpoint_edge["tail_label_offset"] == pytest.approx(12.0)
+
+
+def test_apply_reference_params_varies_external_labels_per_node() -> None:
+    """Varied external-label params should assign distinct labels across nodes."""
+
+    params = _combo_params(
+        {
+            "external_label_varied": True,
+            "external_label_position": "bottom",
+            "corner_radius": 12.0,
+        },
+        "combo_flow",
+    )
+    graph, positions = _build_fixture("combo_flow")
+    _apply_reference_params(graph, positions, params, "combo_flow")
+
+    styles = graph.node_styles
+    assert styles
+    assert [style.external_label for style in styles if style is not None] == list(
+        VARIED_EXTERNAL_LABELS
+    )
+
+
+def test_combo_flow_positions_support_bt_and_rl_directions() -> None:
+    """Combo flow positions should produce stable layouts for BT and RL directions.
+
+    Returns
+    -------
+    None
+        The direction-specific node coordinates are asserted in place.
+    """
+
+    bt_positions = _combo_flow_positions("BT")
+    rl_positions = _combo_flow_positions("RL")
+
+    assert tuple(float(value) for value in bt_positions[0]) == pytest.approx((0.0, -210.0))
+    assert tuple(float(value) for value in bt_positions[-1]) == pytest.approx((170.0, 200.0))
+    assert tuple(float(value) for value in rl_positions[0]) == pytest.approx((280.0, 0.0))
+    assert tuple(float(value) for value in rl_positions[1]) == pytest.approx((120.0, 120.0))
+    assert tuple(float(value) for value in rl_positions[2]) == pytest.approx((120.0, -120.0))
+    assert tuple(float(value) for value in rl_positions[-1]) == pytest.approx((-280.0, -120.0))
 
 
 def test_render_reference_canvas_preserves_dark_graph_background() -> None:
