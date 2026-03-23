@@ -270,7 +270,7 @@ def _estimated_max_chars(text_max_width: Optional[float], font_size: float) -> O
     """
     if text_max_width is None or text_max_width <= 0.0 or font_size <= 0.0:
         return None
-    average_char_width = max(float(font_size) * 0.6, 1e-9)
+    average_char_width = max(float(font_size) * 0.52, 1e-9)
     return max(int(float(text_max_width) / average_char_width), 1)
 
 

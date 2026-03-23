@@ -4,19 +4,37 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Literal, Tuple
+from typing import Literal, Optional, Tuple
 
 import numpy as np
-from matplotlib.font_manager import FontProperties
+from matplotlib.font_manager import FontProperties, findfont
 from matplotlib.path import Path
 from matplotlib.textpath import TextToPath
 
-from dagua.styles import RESOLVED_FONT
+from dagua.styles import FONT_FAMILY, RESOLVED_FONT
 
 FONT_SCALE = 100.0
 LINE_SPACING = 1.2
 _CACHE_PRECISION = 3
 _TEXT_TO_PATH = TextToPath()
+_SYNTHETIC_ITALIC_SHEAR_DEGREES = 12.0
+
+
+@dataclass(frozen=True)
+class ResolvedFontFace:
+    """Resolved font face for one renderer text request.
+
+    Parameters
+    ----------
+    font_path : str
+        Absolute path to the font file chosen for the request.
+    synthetic_italic : bool
+        Whether italic styling must be synthesized by shearing the glyph paths
+        because the resolved font did not provide a distinct italic face.
+    """
+
+    font_path: str
+    synthetic_italic: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,12 +130,8 @@ def _build_font_properties(
     FontProperties
         Matplotlib font properties object.
     """
-    return FontProperties(
-        family=_resolve_font_family(font_family),
-        weight=_normalize_font_weight(font_weight),
-        style=_normalize_font_style(font_style),
-        size=size,
-    )
+    resolved_face = _resolve_font_face(font_family, font_weight, font_style)
+    return FontProperties(fname=resolved_face.font_path, size=size)
 
 
 def _normalize_font_weight(font_weight: str) -> str:
@@ -182,6 +196,164 @@ def _empty_path() -> Path:
         Empty path with numpy-backed vertices and codes.
     """
     return Path(np.empty((0, 2), dtype=float), np.empty((0,), dtype=np.uint8))
+
+
+def _font_family_candidates(font_family: str) -> Tuple[str, ...]:
+    """Return deterministic font-family candidates for text-path rendering.
+
+    Parameters
+    ----------
+    font_family : str
+        Requested family name.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Ordered family candidates beginning with the request and then falling
+        back through Dagua's preferred sans-serif stack.
+    """
+    ordered = [_resolve_font_family(font_family), *FONT_FAMILY, "DejaVu Sans"]
+    unique: list[str] = []
+    for family in ordered:
+        stripped_family = str(family).strip()
+        if stripped_family and stripped_family not in unique:
+            unique.append(stripped_family)
+    return tuple(unique)
+
+
+@lru_cache(maxsize=1024)
+def _find_font_path(
+    font_family: str,
+    font_weight: str,
+    font_style: str,
+) -> Optional[str]:
+    """Resolve one exact matplotlib font request to a file path.
+
+    Parameters
+    ----------
+    font_family : str
+        Requested family name.
+    font_weight : str
+        Requested weight token.
+    font_style : str
+        Requested style token.
+
+    Returns
+    -------
+    str | None
+        Matched font file path, or ``None`` when matplotlib cannot resolve the
+        request without falling back to a different default family.
+    """
+    try:
+        return str(
+            findfont(
+                FontProperties(
+                    family=font_family,
+                    weight=_normalize_font_weight(font_weight),
+                    style=_normalize_font_style(font_style),
+                ),
+                fallback_to_default=False,
+            )
+        )
+    except ValueError:
+        return None
+
+
+@lru_cache(maxsize=1024)
+def _resolve_font_face(
+    font_family: str,
+    font_weight: str,
+    font_style: str,
+) -> ResolvedFontFace:
+    """Resolve a concrete font face and italic fallback strategy.
+
+    Parameters
+    ----------
+    font_family : str
+        Requested family name.
+    font_weight : str
+        Requested weight token.
+    font_style : str
+        Requested style token.
+
+    Returns
+    -------
+    ResolvedFontFace
+        Concrete font file plus a flag indicating whether italic styling must
+        be synthesized because the resolved face collapses to the normal file.
+    """
+    normalized_style = _normalize_font_style(font_style)
+    candidates = _font_family_candidates(font_family)
+
+    if normalized_style == "normal":
+        for family in candidates:
+            normal_path = _find_font_path(family, font_weight, "normal")
+            if normal_path is not None:
+                return ResolvedFontFace(font_path=normal_path, synthetic_italic=False)
+        fallback_path = str(
+            findfont(
+                FontProperties(
+                    family=RESOLVED_FONT,
+                    weight=_normalize_font_weight(font_weight),
+                    style="normal",
+                ),
+                fallback_to_default=True,
+            )
+        )
+        return ResolvedFontFace(font_path=fallback_path, synthetic_italic=False)
+
+    requested_family = candidates[0]
+    italic_path = _find_font_path(requested_family, font_weight, normalized_style)
+    normal_path = _find_font_path(requested_family, font_weight, "normal")
+    if italic_path is not None and normal_path is not None and italic_path != normal_path:
+        return ResolvedFontFace(font_path=italic_path, synthetic_italic=False)
+    if normal_path is not None:
+        return ResolvedFontFace(font_path=normal_path, synthetic_italic=True)
+
+    for family in candidates[1:]:
+        fallback_italic_path = _find_font_path(family, font_weight, normalized_style)
+        fallback_normal_path = _find_font_path(family, font_weight, "normal")
+        if (
+            fallback_italic_path is not None
+            and fallback_normal_path is not None
+            and fallback_italic_path != fallback_normal_path
+        ):
+            return ResolvedFontFace(font_path=fallback_italic_path, synthetic_italic=False)
+        if fallback_normal_path is not None:
+            return ResolvedFontFace(font_path=fallback_normal_path, synthetic_italic=True)
+
+    fallback_path = str(
+        findfont(
+            FontProperties(
+                family=RESOLVED_FONT,
+                weight=_normalize_font_weight(font_weight),
+                style="normal",
+            ),
+            fallback_to_default=True,
+        )
+    )
+    return ResolvedFontFace(font_path=fallback_path, synthetic_italic=True)
+
+
+def _apply_synthetic_italic(vertices: np.ndarray) -> np.ndarray:
+    """Apply a deterministic oblique shear to glyph vertices.
+
+    Parameters
+    ----------
+    vertices : numpy.ndarray
+        Glyph vertices with shape ``[N, 2]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Sheared glyph vertices. Empty inputs are returned unchanged.
+    """
+    if vertices.size == 0:
+        return vertices
+    shear = np.tan(np.deg2rad(_SYNTHETIC_ITALIC_SHEAR_DEGREES))
+    transformed = np.array(vertices, copy=True)
+    transformed[:, 0] = transformed[:, 0] + (transformed[:, 1] * shear)
+    return transformed
 
 
 def _normalize_text_path_payload(
@@ -406,9 +578,12 @@ def _cached_glyph_data(
     tuple[numpy.ndarray, numpy.ndarray, float]
         ``(vertices, codes, advance_width_ref)`` at ``FONT_SCALE``.
     """
-    font_properties = _build_font_properties(family, weight, style, FONT_SCALE)
+    resolved_face = _resolve_font_face(family, weight, style)
+    font_properties = FontProperties(fname=resolved_face.font_path, size=FONT_SCALE)
     raw_vertices, raw_codes = _TEXT_TO_PATH.get_text_path(font_properties, text, ismath=False)
     vertices, codes = _normalize_text_path_payload(raw_vertices, raw_codes)
+    if resolved_face.synthetic_italic:
+        vertices = _apply_synthetic_italic(vertices)
     advance_width_ref, _, _ = _TEXT_TO_PATH.get_text_width_height_descent(
         text,
         font_properties,
