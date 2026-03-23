@@ -103,7 +103,6 @@ CURVATURE_CARD_MARGIN = 140.0
 STRIP_CURVATURE_CARD_MARGIN = 80.0
 ARROW_DEMO_EDGE_WIDTH = 3.0
 ARROW_DEMO_NODE_FRACTION = 0.5
-ANNOTATED_SINGLE_NODE_CARD_INSET: Tuple[int, int, int, int] = (72, 96, 72, 180)
 DECORATIVE_FILL_CARD_IDS = frozenset(
     {
         "nodes_fills_fill_pattern_pie",
@@ -999,7 +998,7 @@ def _build_cluster_nested_fixture() -> Tuple[DaguaGraph, torch.Tensor]:
     )
     _configure_fixture_defaults(graph)
     positions = torch.tensor(
-        [[-140.0, 160.0], [-30.0, 30.0], [30.0, -30.0], [140.0, -170.0]],
+        [[-140.0, 160.0], [-60.0, 40.0], [60.0, -40.0], [140.0, -170.0]],
         dtype=torch.float32,
     )
     return graph, positions
@@ -2103,8 +2102,6 @@ def _reference_card_inset(item: ReferenceCardItem) -> Tuple[int, int, int, int]:
         Card content inset.
     """
 
-    if item.spec.feature == "stroke_width":
-        return ANNOTATED_SINGLE_NODE_CARD_INSET
     return CARD_CONTENT_INSET
 
 
@@ -2122,8 +2119,6 @@ def _reference_card_annotation(item: ReferenceCardItem) -> Optional[str]:
         Footer annotation text when the card benefits from one.
     """
 
-    if item.spec.feature == "stroke_width":
-        return f"stroke_width={item.value.label}"
     return None
 
 
