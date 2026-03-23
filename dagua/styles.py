@@ -20602,6 +20602,87 @@ FIVETHIRTYEIGHT_THEME = Theme(
     graph_style=GraphStyle(background_color="#F0F0F0"),
 )
 
+# Beacons -- hilltop signal fires connected by beams of light
+# across dark landscape, Gondor-calls-for-aid energy
+BEACONS_THEME = Theme(
+    name="beacons",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#F0A020",
+            stroke="#E88010",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#FFE8A0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#F8D040",
+            stroke="#E0B828",
+            stroke_width=3.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#3A2808",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#C07818",
+            stroke="#A06010",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#F0D898",
+            padding=(4.0, 4.0),
+            min_width=16.0,
+            min_height=16.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#F0C040",
+            width=1.0,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+            opacity=0.5,
+        ),
+        "back": EdgeStyle(
+            color="#C09828",
+            width=0.5,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+            opacity=0.25,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#0A1018",
+        stroke="#1A2028",
+        stroke_width=0.5,
+        stroke_dash="solid",
+        corner_radius=6.0,
+        font_size=7.5,
+        font_color="#A08840",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#0A1018"),
+)
+
+THEME_REGISTRY["beacons"] = BEACONS_THEME
+
 # ── Great thinkers themes ─────────────────────────────────────────────
 
 # Euler / Konigsberg -- where graph theory was born (1736): 18th century
