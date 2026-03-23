@@ -15,6 +15,8 @@ from scripts.build_gallery_audit import (
     BOARD_GRID_TOP,
     CURVATURE_CARD_MARGIN,
     DEFAULT_COMPARISON_STROKE,
+    LABEL_BAR_DARK,
+    LABEL_TEXT_DARK,
     PAIR_ARROW_GAP,
     PAIR_SCALAR_COMPARISON_GAP,
     STRIP_PANEL_DIVIDER_WIDTH,
@@ -23,6 +25,9 @@ from scripts.build_gallery_audit import (
     _combo_flow_positions,
     _combo_params,
     _compose_board,
+    _draw_header,
+    _draw_strip_header,
+    _is_dark_background,
     _panel_widths,
     _prepare_reference_render,
     _render_reference_canvas,
@@ -192,6 +197,34 @@ def test_compose_board_reserves_gap_below_header(tmp_path: Path) -> None:
     with Image.open(output_path) as board:
         assert board.getpixel((64, 110)) == (255, 255, 255)
         assert board.getpixel((64, BOARD_GRID_TOP + 16)) == (255, 0, 0)
+
+
+def test_dark_background_headers_switch_to_dark_palette() -> None:
+    """Header helpers should adapt banner and text colors for dark graph cards."""
+
+    image = Image.new("RGB", (400, 160), "#FFFFFF")
+    strip = Image.new("RGB", (400, 120), "#FFFFFF")
+
+    _draw_header(image, title="Title", subtitle="Subtitle", dark=True)
+    _draw_strip_header(strip, title="Strip", dark=True)
+
+    assert image.getpixel((10, 10)) == ImageColor.getrgb(LABEL_BAR_DARK)
+    assert strip.getpixel((10, 10)) == ImageColor.getrgb(LABEL_BAR_DARK)
+
+    header_colors = image.crop((0, 0, image.width, 88)).getcolors(maxcolors=50000)
+    strip_colors = strip.crop((0, 0, strip.width, 56)).getcolors(maxcolors=50000)
+    assert header_colors is not None
+    assert strip_colors is not None
+    assert ImageColor.getrgb(LABEL_TEXT_DARK) in {color for _count, color in header_colors}
+    assert ImageColor.getrgb(LABEL_TEXT_DARK) in {color for _count, color in strip_colors}
+
+
+def test_is_dark_background_uses_graph_background_luminance() -> None:
+    """Dark-header detection should track the configured graph background color."""
+
+    assert _is_dark_background({"graph": {"background_color": "#05070B"}}) is True
+    assert _is_dark_background({"graph": {"background_color": "#FAFAFA"}}) is False
+    assert _is_dark_background({"node": {"fill": "#05070B"}}) is False
 
 
 def test_prepare_reference_render_scales_arrow_demo_cards() -> None:

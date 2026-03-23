@@ -505,7 +505,7 @@ def test_node_label_bottom_align() -> None:
 
 
 def test_triangle_label_y() -> None:
-    """Triangle labels should shift downward by one sixth of node height."""
+    """Triangle labels should shift downward by one eighth of node height."""
     rect_graph, positions = _single_node_graph("Node", NodeStyle(shape="roundrect"))
     triangle_graph, _ = _single_node_graph("Node", NodeStyle(shape="triangle"))
     rect_fig, rect_ax = _render_graph(rect_graph, positions)
@@ -515,7 +515,7 @@ def test_triangle_label_y() -> None:
     rect_center_y = (rect_bbox[2] + rect_bbox[3]) / 2.0
     triangle_center_y = (triangle_bbox[2] + triangle_bbox[3]) / 2.0
 
-    assert triangle_center_y - rect_center_y == pytest.approx(-(20.0 / 6.0), abs=0.5)
+    assert triangle_center_y - rect_center_y == pytest.approx(-(20.0 / 8.0), abs=0.5)
     plt.close(rect_fig)
     plt.close(triangle_fig)
 
