@@ -746,6 +746,219 @@ def _rotated_text_bounds(width: float, height: float, angle_degrees: float) -> T
     return rotated_w, rotated_h
 
 
+def _measure_label_bounds(
+    label: str,
+    font_family: str,
+    font_size: float,
+    font_weight: str,
+    font_style: str,
+    text_wrap: str,
+    text_max_width: Optional[float],
+    text_transform: str,
+    label_format: str,
+    text_rotation: float,
+) -> Tuple[float, float]:
+    """Measure a label after Dagua's text preprocessing has been applied.
+
+    Parameters
+    ----------
+    label : str
+        Raw label text.
+    font_family : str
+        Preferred font family.
+    font_size : float
+        Label font size in points.
+    font_weight : str
+        Font weight used for measurement.
+    font_style : str
+        Font style used for measurement.
+    text_wrap : str
+        Plain-text wrapping policy applied before measurement.
+    text_max_width : float | None
+        Width budget used by ``text_wrap``.
+    text_transform : str
+        Plain-text case transform applied before measurement.
+    label_format : str
+        Label format, either ``"plain"`` or ``"rich"``.
+    text_rotation : float
+        Counter-clockwise label rotation in degrees.
+
+    Returns
+    -------
+    tuple[float, float]
+        Rotated axis-aligned label bounds in points.
+    """
+    prepared_label = prepare_label_text(
+        label,
+        font_size=font_size,
+        text_wrap=text_wrap,
+        text_max_width=text_max_width,
+        text_transform=text_transform,
+        label_format=label_format,
+    )
+    if label_format == "rich":
+        measured_w, measured_h = measure_rich_text(
+            prepared_label,
+            font_family,
+            font_size,
+            font_weight=font_weight,
+            font_style=font_style,
+        )
+    else:
+        measured_w, measured_h = measure_text(
+            prepared_label,
+            font_family,
+            font_size,
+            font_weight,
+            font_style,
+        )
+    return _rotated_text_bounds(measured_w, measured_h, text_rotation)
+
+
+def _shape_text_capacity(
+    width: float,
+    height: float,
+    padding: Tuple[float, float],
+    shape: str,
+) -> Tuple[float, float]:
+    """Return the text box available inside a node after shape losses.
+
+    Parameters
+    ----------
+    width : float
+        Node width in points.
+    height : float
+        Node height in points.
+    padding : tuple[float, float]
+        Horizontal and vertical padding in points.
+    shape : str
+        Node shape identifier.
+
+    Returns
+    -------
+    tuple[float, float]
+        Available text width and height in points after accounting for the
+        node's interior geometry and padding.
+    """
+    padded_width = max(float(width), 0.0)
+    padded_height = max(float(height), 0.0)
+
+    if shape in {"ellipse", "circle", "double_circle"}:
+        padded_width /= CURVED_SHAPE_INSCRIBE_FACTOR
+        padded_height /= CURVED_SHAPE_INSCRIBE_FACTOR
+    elif shape == "stadium":
+        padded_width = max(padded_width - padded_height, 0.0)
+    elif shape == "diamond":
+        padded_width *= 0.5
+        padded_height *= 0.5
+    elif shape == "triangle":
+        padded_width /= TRIANGLE_INTERIOR_WIDTH_FACTOR
+        padded_height /= TRIANGLE_INTERIOR_HEIGHT_FACTOR
+    elif shape == "star":
+        padded_width /= STAR_INTERIOR_FACTOR
+        padded_height /= STAR_INTERIOR_FACTOR
+    elif shape == "hexagon":
+        padded_width *= HEXAGON_INSCRIBE_WIDTH_FACTOR
+    elif shape == "tab":
+        padded_width /= TAB_INTERIOR_WIDTH_FACTOR
+    elif shape in {"pentagon", "octagon"}:
+        padded_width /= ANGLED_SHAPE_INTERIOR_WIDTH_FACTOR
+    elif shape == "parallelogram":
+        padded_width /= PARALLELOGRAM_INTERIOR_WIDTH_FACTOR
+    elif shape == "trapezoid":
+        padded_width /= TRAPEZOID_INTERIOR_WIDTH_FACTOR
+    elif shape == "box3d":
+        padded_width /= BOX3D_INTERIOR_WIDTH_FACTOR
+        padded_height /= BOX3D_INTERIOR_HEIGHT_FACTOR
+
+    text_width = max(padded_width - padding[0] * 2.0, 0.0)
+    text_height = max(padded_height - padding[1] * 2.0, 0.0)
+    return text_width, text_height
+
+
+def fit_font_size_to_node(
+    label: str,
+    width: float,
+    height: float,
+    font_family: str = "",
+    font_size: float = 8.5,
+    padding: Tuple[float, float] = (11.0, 9.0),
+    shape: str = "roundrect",
+    font_weight: str = "regular",
+    font_style: str = "normal",
+    text_wrap: str = "none",
+    text_max_width: Optional[float] = None,
+    text_transform: str = "none",
+    min_font_size: float = 5.0,
+    label_format: str = "plain",
+    text_rotation: float = 0.0,
+) -> float:
+    """Return the largest font size that fits inside a fixed node box.
+
+    Parameters
+    ----------
+    label : str
+        Raw label text.
+    width : float
+        Node width in points.
+    height : float
+        Node height in points.
+    font_family : str, default=""
+        Preferred font family.
+    font_size : float, default=8.5
+        Requested label font size in points.
+    padding : tuple[float, float], default=(11.0, 9.0)
+        Horizontal and vertical padding in points.
+    shape : str, default="roundrect"
+        Node shape identifier.
+    font_weight : str, default="regular"
+        Font weight used for measurement.
+    font_style : str, default="normal"
+        Font style used for measurement.
+    text_wrap : str, default="none"
+        Plain-text wrapping policy applied before measurement.
+    text_max_width : float | None, default=None
+        Width budget used by ``text_wrap``.
+    text_transform : str, default="none"
+        Plain-text case transform applied before measurement.
+    min_font_size : float, default=5.0
+        Minimum font size allowed for shrink-to-fit behavior.
+    label_format : str, default="plain"
+        Label format, either ``"plain"`` or ``"rich"``.
+    text_rotation : float, default=0.0
+        Counter-clockwise label rotation in degrees.
+
+    Returns
+    -------
+    float
+        Largest font size that fits inside the requested node bounds.
+    """
+    available_width, available_height = _shape_text_capacity(width, height, padding, shape)
+    fitted_font_size = float(font_size)
+    minimum_font_size = max(float(min_font_size), 0.0)
+    if available_width <= 0.0 or available_height <= 0.0:
+        return minimum_font_size
+
+    while fitted_font_size > minimum_font_size:
+        text_width, text_height = _measure_label_bounds(
+            label,
+            font_family,
+            fitted_font_size,
+            font_weight,
+            font_style,
+            text_wrap,
+            text_max_width,
+            text_transform,
+            label_format,
+            text_rotation,
+        )
+        if text_width <= available_width and text_height <= available_height:
+            return fitted_font_size
+        fitted_font_size = max(fitted_font_size - 0.5, minimum_font_size)
+
+    return minimum_font_size
+
+
 def compute_node_size(
     label: str,
     font_family: str = "",
@@ -876,41 +1089,46 @@ def _compute_node_size_cached(
     """
     effective_font_size = font_size
 
-    def measure_label(current_font_size: float) -> Tuple[float, float]:
-        """Measure the label using the requested formatting mode."""
-        prepared_label = prepare_label_text(
-            label,
-            font_size=current_font_size,
-            text_wrap=text_wrap,
-            text_max_width=text_max_width,
-            text_transform=text_transform,
-            label_format=label_format,
-        )
-        if label_format == "rich":
-            measured_w, measured_h = measure_rich_text(
-                prepared_label,
-                font_family,
-                current_font_size,
-                font_weight=font_weight,
-                font_style=font_style,
-            )
-        else:
-            measured_w, measured_h = measure_text(
-                prepared_label,
-                font_family,
-                current_font_size,
-                font_weight,
-                font_style,
-            )
-        return _rotated_text_bounds(measured_w, measured_h, text_rotation)
-
     if overflow_policy == "shrink_text":
-        text_w, text_h = measure_label(font_size)
+        text_w, text_h = _measure_label_bounds(
+            label,
+            font_family,
+            font_size,
+            font_weight,
+            font_style,
+            text_wrap,
+            text_max_width,
+            text_transform,
+            label_format,
+            text_rotation,
+        )
         while text_w > MAX_LABEL_WIDTH and effective_font_size > min_font_size:
             effective_font_size -= 0.5
-            text_w, text_h = measure_label(effective_font_size)
+            text_w, text_h = _measure_label_bounds(
+                label,
+                font_family,
+                effective_font_size,
+                font_weight,
+                font_style,
+                text_wrap,
+                text_max_width,
+                text_transform,
+                label_format,
+                text_rotation,
+            )
     else:
-        text_w, text_h = measure_label(font_size)
+        text_w, text_h = _measure_label_bounds(
+            label,
+            font_family,
+            font_size,
+            font_weight,
+            font_style,
+            text_wrap,
+            text_max_width,
+            text_transform,
+            label_format,
+            text_rotation,
+        )
 
     padded_text_w = text_w + padding[0] * 2
     padded_text_h = text_h + padding[1] * 2

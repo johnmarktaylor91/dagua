@@ -22,8 +22,13 @@ from dagua.render.text.layout import (
     layout_plain_text,
     layout_rich_text,
 )
+from dagua.render.text.paths import text_to_glyphs
 from dagua.styles import RESOLVED_FONT
 from dagua.utils import prepare_label_text
+
+_MIN_VISIBLE_OUTLINE_WIDTH_POINTS = 2.0
+_BOLD_EMPHASIS_WIDTH_RATIO = 0.08
+_MIN_BOLD_EMPHASIS_WIDTH_POINTS = 0.75
 
 
 @dataclass
@@ -254,6 +259,107 @@ def _add_patch(ax: Any, patch: PathPatch, spec: DaguaText, artists: List[Any]) -
     artists.append(patch)
 
 
+def _is_bold_weight(font_weight: str) -> bool:
+    """Return whether a font-weight token requests a bold face.
+
+    Parameters
+    ----------
+    font_weight : str
+        Requested weight token.
+
+    Returns
+    -------
+    bool
+        ``True`` when the token maps to a visibly bold weight.
+    """
+    return font_weight.strip().lower() in {
+        "bold",
+        "demibold",
+        "semibold",
+        "heavy",
+        "black",
+        "extrabold",
+    }
+
+
+def _segment_needs_bold_emphasis(spec: DaguaText, segment: LayoutSegment) -> bool:
+    """Return whether one rendered segment should receive synthetic emboldening.
+
+    Parameters
+    ----------
+    spec : DaguaText
+        Source render specification.
+    segment : LayoutSegment
+        Laid-out text segment.
+
+    Returns
+    -------
+    bool
+        ``True`` when the segment should receive a same-color stroke behind the
+        fill so bold text stays visibly heavier even with fallback fonts.
+    """
+    resolved_weight = "bold" if segment.is_bold else spec.font_weight
+    if not _is_bold_weight(resolved_weight):
+        return False
+
+    resolved_family = spec.font_family or RESOLVED_FONT
+    resolved_style = "italic" if segment.is_italic else spec.font_style
+    regular_run = text_to_glyphs(
+        segment.glyph_run.text,
+        segment.glyph_run.size_data,
+        font_family=resolved_family,
+        font_weight="normal",
+        font_style=resolved_style,
+    )
+    width_delta = abs(float(segment.glyph_run.advance_width) - float(regular_run.advance_width))
+    if width_delta > max(float(regular_run.advance_width) * 0.02, 1e-3):
+        return False
+    if segment.glyph_run.path.vertices.shape != regular_run.path.vertices.shape:
+        return False
+    return bool(
+        np.allclose(
+            segment.glyph_run.path.vertices,
+            regular_run.path.vertices,
+            atol=1e-3,
+        )
+    )
+
+
+def _outline_linewidth(spec: DaguaText) -> float:
+    """Return a visible outline width for one text specification.
+
+    Parameters
+    ----------
+    spec : DaguaText
+        Text render specification.
+
+    Returns
+    -------
+    float
+        Outline stroke width in typographic points.
+    """
+    return max(float(spec.outline_width), _MIN_VISIBLE_OUTLINE_WIDTH_POINTS)
+
+
+def _bold_emphasis_linewidth(spec: DaguaText) -> float:
+    """Return the synthetic stroke width used to reinforce bold glyphs.
+
+    Parameters
+    ----------
+    spec : DaguaText
+        Text render specification.
+
+    Returns
+    -------
+    float
+        Stroke width in typographic points.
+    """
+    return max(
+        float(spec.font_size) * _BOLD_EMPHASIS_WIDTH_RATIO,
+        _MIN_BOLD_EMPHASIS_WIDTH_POINTS,
+    )
+
+
 def render_text(
     ax: Any,
     specs: Sequence[DaguaText],
@@ -366,9 +472,11 @@ def render_text(
                         _segment_path(spec, block, line, segment),
                         facecolor="none",
                         edgecolor=spec.outline_color,
-                        linewidth=spec.outline_width,
+                        linewidth=_outline_linewidth(spec),
                         alpha=spec.alpha,
                         zorder=spec.zorder - 0.02,
+                        capstyle="round",
+                        joinstyle="round",
                     )
                     outline_gid = _patch_gid(spec, "outline", line_index, segment_index)
                     if outline_gid is not None:
@@ -380,6 +488,22 @@ def render_text(
             for segment_index, segment in enumerate(line.segments):
                 if _path_is_empty(segment.glyph_run.path):
                     continue
+                if _segment_needs_bold_emphasis(spec, segment):
+                    emphasis_patch = PathPatch(
+                        _segment_path(spec, block, line, segment),
+                        facecolor="none",
+                        edgecolor=segment.color,
+                        linewidth=_bold_emphasis_linewidth(spec),
+                        alpha=spec.alpha,
+                        zorder=spec.zorder - 0.01,
+                        capstyle="round",
+                        joinstyle="round",
+                    )
+                    emphasis_gid = _patch_gid(spec, "embolden", line_index, segment_index)
+                    if emphasis_gid is not None:
+                        emphasis_patch.set_gid(emphasis_gid)
+                    _register_hover(svg_hover_map, emphasis_gid, spec.text)
+                    _add_patch(ax, emphasis_patch, spec, artists)
                 fill_patch = PathPatch(
                     _segment_path(spec, block, line, segment),
                     facecolor=segment.color,
