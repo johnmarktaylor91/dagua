@@ -21442,6 +21442,93 @@ FOREST_PATH_THEME = Theme(
     graph_style=GraphStyle(background_color="#1A3010"),
 )
 
+RUBE_GOLDBERG_THEME = Theme(
+    name="rube_goldberg",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#E8D8B0",
+            stroke="#8B7355",
+            stroke_width=2.0,
+            font_family="Courier New",
+            font_size=7.5,
+            font_color="#3A2A18",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=28.0,
+            min_height=22.0,
+            corner_radius=2.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#CC2020",
+            stroke="#A01010",
+            stroke_width=3.0,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="diamond",
+            fill="#2878C8",
+            stroke="#1860A8",
+            stroke_width=2.0,
+            font_family="Courier New",
+            font_size=7.5,
+            font_color="#D0E8FF",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#5A4A30",
+            width=2.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#5A4A30",
+            arrow_length=6.0,
+            arrow_width=4.5,
+            routing="ortho",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#A09070",
+            width=1.2,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#A09070",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0E8D0",
+        stroke="#8B7355",
+        stroke_width=2.0,
+        stroke_dash="dashed",
+        corner_radius=4.0,
+        font_size=8.5,
+        font_color="#5A4A30",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#F0E8D0"),
+)
+
+THEME_REGISTRY["rube_goldberg"] = RUBE_GOLDBERG_THEME
+
 PACHINKO_THEME = Theme(
     name="pachinko",
     node_styles={
