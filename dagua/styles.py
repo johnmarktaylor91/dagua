@@ -20945,6 +20945,92 @@ ECOLOGY_THEME = Theme(
     graph_style=GraphStyle(background_color="#F1F8E9"),
 )
 
+PSEUDOCODE_THEME = Theme(
+    name="pseudocode",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#FFFFFF",
+            stroke="#CCCCCC",
+            stroke_width=0.5,
+            font_family="Courier New",
+            font_size=8.5,
+            font_color="#000080",
+            padding=(6.0, 3.0),
+            min_width=38.0,
+            min_height=18.0,
+            corner_radius=0.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#FFFFFF",
+            stroke="#CCCCCC",
+            stroke_width=1.0,
+            font_family="Courier New",
+            font_size=8.5,
+            font_color="#800000",
+            font_weight="bold",
+            padding=(6.0, 3.0),
+            min_width=40.0,
+            min_height=20.0,
+            corner_radius=0.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#FFFFFF",
+            stroke="#CCCCCC",
+            stroke_width=0.5,
+            font_family="Courier New",
+            font_size=8.5,
+            font_color="#006400",
+            padding=(6.0, 3.0),
+            min_width=38.0,
+            min_height=18.0,
+            corner_radius=0.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#333333",
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#333333",
+            arrow_length=5.0,
+            arrow_width=3.0,
+            routing="ortho",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#999999",
+            width=0.5,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#999999",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="ortho",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F8F8F8",
+        stroke="#CCCCCC",
+        stroke_width=0.5,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#333333",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+THEME_REGISTRY["pseudocode"] = PSEUDOCODE_THEME
 THEME_REGISTRY["food_web"] = FOOD_WEB_THEME
 THEME_REGISTRY["process"] = PROCESS_THEME
 THEME_REGISTRY["instruction"] = INSTRUCTION_THEME
