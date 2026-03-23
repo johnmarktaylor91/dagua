@@ -2,6 +2,12 @@
 
 ## Active Tasks
 - [ ] [HIGH] Benchmark analysis: when benchmark finishes, run compare_reimpl_vs_original.py for fidelity report
+- [ ] [HIGH] Monitor current benchmark run (97 variants x 91 graphs x 30 seeds, ~10.6% at 7hrs)
+- [ ] [MED] Add edge weights to remaining 8 algos: sfdp, fmmm, gem, drl, davidson_harel, sugiyama, neulay, umap (AFTER current run)
+- [ ] [MED] Warm-start chain variants FR->KK, KK->FR (AFTER current run)
+- [x] [DONE] Gallery audit Phase 1: 133/133 individual cards at 9+ critic score
+- [x] [DONE] Gallery audit Phase 2: 38/38 combo cards at 9+ critic score
+- [ ] [HIGH] Gallery audit expansion: add 40 more non-evil combos + 20 more evil combos, iterate to 9+
 - [ ] [HIGH] Continue Graphviz theme calibration until critics reach min>=8, mean>=9
 
 ## Bugs
@@ -11,6 +17,9 @@
 - [ ] [LOW] Arrowhead sizing still slightly smaller than Graphviz's chunky triangles. Current graphviz_strict uses arrow_length=7, arrow_width=4.5 -- may need to increase to ~10x7 once the placement bug is fixed.
 
 ## Improvements (Nice-to-Have)
+- [ ] [MED] Image galleries via GitHub Pages: build_gallery.py generates PNGs, pushes to gh-pages branch. Keep images out of main branch. Milestone snapshots as GitHub Releases.
+
+- [ ] [LOW] Add semicircle node shape (flat bottom, curved top -- useful for state machines, architectural diagrams)
 - [ ] [MED] Interactive graph rendering: pan/zoom, hover tooltips, click handlers, collapsible nodes/clusters (expand/collapse subgraphs). WebGL or HTML5 Canvas backend alongside matplotlib.
 - [ ] [MED] 3D graph rendering: z-coordinate support, 3D force-directed layout, perspective/orthographic projection. Consider Three.js export or matplotlib 3D axes.
 - [ ] [MED] Add Cytoscape.js fcose as competitor layout algorithm (npm install cytoscape cytoscape-fcose, Node.js subprocess adapter, same pattern as ELK/dagre)

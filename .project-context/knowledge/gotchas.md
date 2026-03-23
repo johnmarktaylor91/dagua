@@ -18,6 +18,13 @@
 - [LAYOUT] Multilevel/coarsening path is the most fragile layout code. Recent hardening with checkpoint validation, but needs smoke test coverage for each failure mode fixed.
 - [RENDER] Multi-line node labels: secondary line font scaling is hardcoded (0.8x).
 - [RENDER] Edge arrowheads: mutation_scale=1 makes heads very small at some zoom levels.
+- [RENDER] Font sizing: use data coordinates directly (font_size_data = font_size_points). The old height-based heuristic (_node_relative_font_size_data) caused overflow/shrink/wrap bugs. compute_node_size already returns the correct font in layout units = data units.
+- [RENDER] Stripe fill anti-aliasing: imshow extent must be inset by ~3% of min(w,h) to prevent pattern bleed at clip boundaries.
+- [RENDER] Back-edge curvature: control points must be perpendicular to chord (not lateral). Lateral placement causes degenerate bezier shapes at high curvature.
+- [RENDER] Arrowhead tangent for back edges: when local tangent disagrees with chord direction, use the chord (not negated tangent). Negated tangent points wrong for wide arcs.
+- [RENDER] Non-convex shapes (star): clip text to bounding rectangle, not shape path. Shape concavities clip through glyph interiors.
+- [RENDER] Polygon edge routing: ray_polygon_intersection in intersection.py handles 8 shapes (triangle, hexagon, pentagon, octagon, star, parallelogram, trapezoid, diamond). Also update _adjust_port_for_shape in edges.py when adding new polygon shapes.
+- [RENDER] Double circle: render inner ring as a separate stroke-only Ellipse in _draw_node_shape_extras, not as a compound path (matplotlib fill rule doesn't reliably create rings).
 - [RENDER] Cluster label position is hardcoded (top-left) — should respect ClusterStyle.label_position.
 - [EVAL] Non-Dagua competitor results are cached between benchmark rounds. If you change competitor adapter code, delete cached results.
 - [EVAL] Long benchmark runs write `progress.json` alongside `results.partial.json` — check status with `dagua benchmark-status`.

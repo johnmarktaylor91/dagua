@@ -23,6 +23,7 @@ OPEN_HEAD_WIDTH_GAIN = 1.12
 HOLLOW_HEAD_DIMENSION_SCALE = 1.3
 COMPOUND_HEAD_GAP_RATIO = 0.42
 COMPOUND_HEAD_GAP_FLOOR = 0.6
+THIN_TRIANGLE_BODY_WIDTH_RATIO = 0.15
 CROWS_FOOT_ONE_BAR_X_RATIO = 0.15
 CROWS_FOOT_ONE_TRIM_RATIO = 0.3
 CROWS_FOOT_ONE_HALF_WIDTH_RATIO = 0.4
@@ -353,7 +354,42 @@ def _joined_polygon_points(
 
 
 def _triangle(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build a standard triangular head with a ribbon-width neck."""
+    """Build a standard triangular head.
+
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    width : float
+        Arrowhead width in local coordinates.
+    body_width : float
+        Ribbon body width at the body/head junction.
+
+    Returns
+    -------
+    ArrowheadResult
+        Filled triangle geometry and the contour used to trim the edge body.
+
+    Notes
+    -----
+    Thin edges render more cleanly with a plain three-point triangle because a
+    ribbon-width neck collapses into a kite at typical display sizes. Wider
+    ribbons keep the joined geometry so the shaft/head transition remains
+    continuous.
+    """
+    if body_width < (width * THIN_TRIANGLE_BODY_WIDTH_RATIO):
+        half_width = width * 0.5
+        return ArrowheadResult(
+            filled_paths=[
+                _local_path(
+                    [(0.0, 0.0), (length, half_width), (length, -half_width)],
+                    closed=True,
+                )
+            ],
+            stroked_paths=[],
+            trim_contour=_local_trim_contour(length, body_width),
+        )
+
     shoulder_x = max(length * JOIN_SHOULDER_RATIO, body_width * 0.75)
     return ArrowheadResult(
         filled_paths=[
@@ -457,7 +493,8 @@ def _tee(length: float, width: float, body_width: float) -> ArrowheadResult:
     """Build a tee/bar head as a weighted stroked mark."""
     overlap = _join_overlap(length, body_width)
     bar_x = max(length - overlap, length * 0.35)
-    neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
+    # Ensure the crossbar is clearly visible even on thin edges.
+    neck_half_width = max(width * 0.55, body_width * 0.75, length * 0.65, FLOAT_EPSILON)
     path = _local_path([(bar_x, neck_half_width), (bar_x, -neck_half_width)], closed=False)
     return ArrowheadResult(
         filled_paths=[],
@@ -499,33 +536,52 @@ def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build a crow-foot head whose tines emerge from the shaft edges."""
-    neck_half_width = max(body_width * 0.5, FLOAT_EPSILON)
-    tine_half_width = _ornament_half_width(width * 0.62, body_width)
-    center = _local_path([(length, 0.0), (0.0, 0.0)], closed=False)
-    left = _local_path(
-        [
-            (length, neck_half_width),
-            (0.0, tine_half_width),
-        ],
-        closed=False,
+    """Build a crow-foot head with three filled tines fanning from the shaft.
+
+    Each tine is a narrow filled triangle radiating from the shaft neck
+    toward the tip, matching the ER-diagram "many" convention.
+    """
+    neck_half = max(body_width * 0.5, FLOAT_EPSILON)
+    tine_half = max(
+        _ornament_half_width(width * 1.24, body_width),
+        length * 0.7,
     )
-    right = _local_path(
+    tine_thickness = max(body_width * 0.3, length * 0.08)
+    # Center tine
+    center = _local_path(
         [
-            (length, -neck_half_width),
-            (0.0, -tine_half_width),
+            (length, tine_thickness),
+            (0.0, tine_thickness * 0.4),
+            (0.0, -tine_thickness * 0.4),
+            (length, -tine_thickness),
         ],
-        closed=False,
+        closed=True,
+    )
+    # Upper tine
+    upper = _local_path(
+        [
+            (length, neck_half),
+            (0.0, tine_half + tine_thickness),
+            (0.0, tine_half - tine_thickness),
+            (length, neck_half - tine_thickness * 0.5),
+        ],
+        closed=True,
+    )
+    # Lower tine
+    lower = _local_path(
+        [
+            (length, -neck_half),
+            (0.0, -tine_half - tine_thickness),
+            (0.0, -tine_half + tine_thickness),
+            (length, -neck_half + tine_thickness * 0.5),
+        ],
+        closed=True,
     )
     overlap = _join_overlap(length, body_width)
     return ArrowheadResult(
-        filled_paths=[],
-        stroked_paths=[center, left, right],
+        filled_paths=[center, upper, lower],
+        stroked_paths=[],
         trim_contour=_local_trim_contour(length - overlap, body_width),
-        stroke_width_scale=_open_head_stroke_scale(
-            body_width,
-            base_scale=OPEN_HEAD_STROKE_SCALE + 0.05,
-        ),
     )
 
 
