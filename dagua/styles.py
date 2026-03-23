@@ -22551,6 +22551,240 @@ WONDERLAND_THEME = Theme(
     graph_style=GraphStyle(background_color="#F8F0F4"),
 )
 
+# Mancala -- African stone game: wooden pits, smooth pebble nodes
+MANCALA_THEME = Theme(
+    name="mancala",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#A89070",
+            stroke="#887050",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#3A2A18",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="ellipse",
+            fill="#6B4C33",
+            stroke="#4A3420",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#E0D0B0",
+            font_weight="bold",
+            padding=(8.0, 5.0),
+            min_width=40.0,
+            min_height=24.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#C8B090",
+            stroke="#A89070",
+            stroke_width=1.0,
+            font_family="Georgia",
+            font_size=7.0,
+            font_color="#4A3A20",
+            padding=(3.0, 3.0),
+            min_width=16.0,
+            min_height=16.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#6B4C33",
+            width=0.6,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#6B4C33",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.3,
+        ),
+        "back": EdgeStyle(
+            color="#A89070",
+            width=0.4,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#A89070",
+            arrow_length=3.5,
+            arrow_width=2.0,
+            routing="bezier",
+            curvature=0.35,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#5A3E28",
+        stroke="#6B4C33",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=12.0,
+        font_size=8.0,
+        font_color="#C8B090",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#5A3E28"),
+)
+
+# Tufte -- Edward Tufte's data visualization philosophy: maximum
+# data-ink ratio, no chartjunk, quiet typography, thin precise lines
+TUFTE_THEME = Theme(
+    name="tufte",
+    node_styles={
+        "default": NodeStyle(
+            shape="none",
+            fill="transparent",
+            stroke="transparent",
+            stroke_width=0.0,
+            font_family="Georgia",
+            font_size=8.5,
+            font_color="#333333",
+            padding=(2.0, 1.0),
+            min_width=0.0,
+            min_height=0.0,
+        ),
+        "input": NodeStyle(
+            shape="none",
+            fill="transparent",
+            stroke="transparent",
+            stroke_width=0.0,
+            font_family="Georgia",
+            font_size=9.0,
+            font_color="#333333",
+            font_weight="bold",
+            padding=(2.0, 1.0),
+            min_width=0.0,
+            min_height=0.0,
+        ),
+        "output": NodeStyle(
+            shape="none",
+            fill="transparent",
+            stroke="transparent",
+            stroke_width=0.0,
+            font_family="Georgia",
+            font_size=8.5,
+            font_color="#666666",
+            padding=(2.0, 1.0),
+            min_width=0.0,
+            min_height=0.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#999999",
+            width=0.5,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#CCCCCC",
+            width=0.3,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="transparent",
+        stroke="#CCCCCC",
+        stroke_width=0.3,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#999999",
+        font_weight="normal",
+        padding=6.0,
+        opacity=0.15,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+# Ansel Adams -- dramatic B&W landscape: full tonal range from
+# deep black to bright white, zone system, majestic contrast
+ANSEL_ADAMS_THEME = Theme(
+    name="ansel_adams",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#D0D0D0",
+            stroke="#808080",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#1A1A1A",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",
+            stroke="#333333",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.5,
+            font_color="#000000",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#1A1A1A",
+            stroke="#4A4A4A",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#D0D0D0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#4A4A4A",
+            width=1.2,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.15,
+        ),
+        "back": EdgeStyle(
+            color="#A0A0A0", width=0.6, style="solid", arrow="none", routing="bezier", curvature=0.2
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#E8E8E8",
+        stroke="#808080",
+        stroke_width=0.8,
+        stroke_dash="solid",
+        corner_radius=4.0,
+        font_size=8.5,
+        font_color="#333333",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.35,
+    ),
+    graph_style=GraphStyle(background_color="#E8E8E8"),
+)
+
+THEME_REGISTRY["mancala"] = MANCALA_THEME
+THEME_REGISTRY["tufte"] = TUFTE_THEME
+THEME_REGISTRY["ansel_adams"] = ANSEL_ADAMS_THEME
 THEME_REGISTRY["wonderland"] = WONDERLAND_THEME
 THEME_REGISTRY["flatland"] = FLATLAND_THEME
 THEME_REGISTRY["dante"] = DANTE_THEME
