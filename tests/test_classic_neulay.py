@@ -81,3 +81,40 @@ def test_layout_neulay_avoids_collapse_on_path_graph() -> None:
 
     pairwise = torch.cdist(positions, positions)
     assert float(pairwise.max().item()) > 0.1
+
+
+def test_layout_neulay_accepts_edge_weights_without_gcn_support() -> None:
+    """NeuLay should accept edge weights even though the current port ignores them."""
+    edge_index = _cycle_edge_index(5)
+
+    positions = layout_neulay(
+        edge_index=edge_index,
+        num_nodes=5,
+        seed=11,
+        steps=64,
+        gcn_steps=0,
+        use_gcn=False,
+        edge_weights=torch.ones(edge_index.shape[1], dtype=torch.float32),
+    )
+
+    assert positions.shape == (5, 2)
+    assert torch.isfinite(positions).all()
+
+
+def test_layout_neulay_rejects_mismatched_edge_weights() -> None:
+    """NeuLay should reject edge-weight tensors that do not match ``E``."""
+    edge_index = _cycle_edge_index(4)
+
+    try:
+        layout_neulay(
+            edge_index=edge_index,
+            num_nodes=4,
+            steps=16,
+            gcn_steps=0,
+            use_gcn=False,
+            edge_weights=torch.ones(3, dtype=torch.float32),
+        )
+    except ValueError as exc:
+        assert "edge_weights length" in str(exc)
+    else:
+        raise AssertionError("layout_neulay accepted mismatched edge_weights")

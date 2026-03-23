@@ -173,8 +173,12 @@ def _degree_weights(
     return degrees / 2.5 + 1.0
 
 
-def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> list[list[int]]:
-    """Build a symmetric adjacency list for GEM attraction.
+def _build_undirected_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> list[list[tuple[int, float]]]:
+    """Build a symmetric weighted adjacency list for GEM attraction.
 
     Parameters
     ----------
@@ -182,23 +186,34 @@ def _build_undirected_adjacency(edge_index: torch.Tensor, num_nodes: int) -> lis
         Edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge attraction weights with shape ``[E]``.
 
     Returns
     -------
-    list[list[int]]
-        One sorted undirected neighbor list per node.
+    list[list[tuple[int, float]]]
+        One sorted undirected neighbor list per node storing
+        ``(neighbor, edge_weight)`` pairs.
     """
-    adjacency_sets = [set() for _ in range(num_nodes)]
+    adjacency_maps: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
     if edge_index.numel() == 0:
         return [[] for _ in range(num_nodes)]
 
     edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
-    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+    weights_cpu = (
+        torch.ones((edge_index.shape[1],), dtype=torch.float32)
+        if edge_weights is None
+        else edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
         if source == target:
             continue
-        adjacency_sets[source].add(target)
-        adjacency_sets[target].add(source)
-    return [sorted(neighbors) for neighbors in adjacency_sets]
+        weight = float(weights_cpu[edge_id].item())
+        adjacency_maps[source][target] = adjacency_maps[source].get(target, 0.0) + weight
+        adjacency_maps[target][source] = adjacency_maps[target].get(source, 0.0) + weight
+    return [sorted(neighbors.items()) for neighbors in adjacency_maps]
 
 
 def _node_diagonals(num_nodes: int, node_sizes: Optional[torch.Tensor]) -> torch.Tensor:
@@ -359,6 +374,7 @@ def _attractive_force(
     edge_index: torch.Tensor,
     ideal_distance: float,
     degree_weights: Optional[torch.Tensor] = None,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute the legacy exact spring attraction along graph edges.
 
@@ -372,6 +388,8 @@ def _attractive_force(
         Scalar desired length used by the helper.
     degree_weights : torch.Tensor, optional
         Degree-based OGDF node weights with shape ``[N]``.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge attraction weights with shape ``[E]``.
 
     Returns
     -------
@@ -394,6 +412,13 @@ def _attractive_force(
     denominator = max(ideal_distance, _MIN_DISTANCE)
     source_force = -delta * (distances / (denominator * source_weights)).unsqueeze(1)
     target_force = delta * (distances / (denominator * target_weights)).unsqueeze(1)
+    if edge_weights is not None:
+        edge_weight_tensor = edge_weights.to(
+            device=positions.device,
+            dtype=positions.dtype,
+        ).unsqueeze(1)
+        source_force = source_force * edge_weight_tensor
+        target_force = target_force * edge_weight_tensor
     forces.index_add_(0, src, source_force)
     forces.index_add_(0, dst, target_force)
     return forces
@@ -404,6 +429,7 @@ def _attractive_force_batch(
     edge_index: torch.Tensor,
     node_desired_lengths: torch.Tensor,
     degree_weights: torch.Tensor,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute batched OGDF GEM attraction with per-node desired lengths.
 
@@ -417,6 +443,8 @@ def _attractive_force_batch(
         Per-node desired lengths with shape ``[N]``.
     degree_weights : torch.Tensor
         Degree-based OGDF node weights with shape ``[N]``.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge attraction weights with shape ``[E]``.
 
     Returns
     -------
@@ -447,6 +475,14 @@ def _attractive_force_batch(
         target_force = delta * (
             distance_square / (target_desired.square() * target_weights)
         ).unsqueeze(1)
+
+    if edge_weights is not None:
+        edge_weight_tensor = edge_weights.to(
+            device=positions.device,
+            dtype=positions.dtype,
+        ).unsqueeze(1)
+        source_force = source_force * edge_weight_tensor
+        target_force = target_force * edge_weight_tensor
 
     forces.index_add_(0, src, source_force)
     forces.index_add_(0, dst, target_force)
@@ -585,7 +621,7 @@ def _compute_impulse_sequential(
     node_index: int,
     positions: torch.Tensor,
     barycenter: torch.Tensor,
-    adjacency: list[list[int]],
+    adjacency: list[list[tuple[int, float]]],
     node_desired_lengths: torch.Tensor,
     degree_weights: torch.Tensor,
 ) -> torch.Tensor:
@@ -599,8 +635,8 @@ def _compute_impulse_sequential(
         Current position tensor with shape ``[N, 2]`` on CPU.
     barycenter : torch.Tensor
         Weighted coordinate sum with shape ``[2]``.
-    adjacency : list[list[int]]
-        Undirected adjacency list.
+    adjacency : list[list[tuple[int, float]]]
+        Undirected weighted adjacency list.
     node_desired_lengths : torch.Tensor
         Per-node desired lengths with shape ``[N]``.
     degree_weights : torch.Tensor
@@ -639,17 +675,17 @@ def _compute_impulse_sequential(
             impulse_y += delta_y * desired_square / distance_square
 
     node_weight = float(degree_weights[node_index].item())
-    for neighbor_index in adjacency[node_index]:
+    for neighbor_index, edge_weight in adjacency[node_index]:
         delta_x = x_coord - float(positions[neighbor_index, 0].item())
         delta_y = y_coord - float(positions[neighbor_index, 1].item())
         distance = math.hypot(delta_x, delta_y)
         if _ATTRACTION_FORMULA == 1:
-            impulse_x -= delta_x * distance / (desired_length * node_weight)
-            impulse_y -= delta_y * distance / (desired_length * node_weight)
+            impulse_x -= edge_weight * delta_x * distance / (desired_length * node_weight)
+            impulse_y -= edge_weight * delta_y * distance / (desired_length * node_weight)
         else:
             distance_square = distance * distance
-            impulse_x -= delta_x * distance_square / (desired_square * node_weight)
-            impulse_y -= delta_y * distance_square / (desired_square * node_weight)
+            impulse_x -= edge_weight * delta_x * distance_square / (desired_square * node_weight)
+            impulse_y -= edge_weight * delta_y * distance_square / (desired_square * node_weight)
 
     return torch.tensor([impulse_x, impulse_y], dtype=positions.dtype)
 
@@ -746,6 +782,7 @@ def _layout_gem_sequential(
     node_sizes: Optional[torch.Tensor],
     max_iters: int,
     seed: int,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Run the OGDF-like sequential GEM update schedule on CPU.
 
@@ -761,6 +798,8 @@ def _layout_gem_sequential(
         Maximum number of OGDF node updates.
     seed : int
         Seed for the random node permutations.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge attraction weights with shape ``[E]``.
 
     Returns
     -------
@@ -776,7 +815,7 @@ def _layout_gem_sequential(
     node_desired_lengths = (
         _node_diagonals(num_nodes, node_sizes).to(dtype=torch.float64) + _DESIRED_LENGTH
     )
-    adjacency = _build_undirected_adjacency(edge_index, num_nodes)
+    adjacency = _build_undirected_adjacency(edge_index, num_nodes, edge_weights=edge_weights)
     local_temperatures = torch.full((num_nodes,), _INITIAL_TEMPERATURE, dtype=torch.float64)
     previous_impulse = torch.zeros((num_nodes, 2), dtype=torch.float64)
     skew_gauge = torch.zeros((num_nodes,), dtype=torch.float64)
@@ -822,6 +861,7 @@ def layout_gem(
     node_sizes: Optional[torch.Tensor] = None,
     max_iters: int = 500,
     seed: int = 42,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with an OGDF-style GEM simulation.
 
@@ -842,6 +882,9 @@ def layout_gem(
         Maximum number of OGDF node updates.
     seed : int, default=42
         Random seed for initialization and node permutations.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``. These scale the GEM
+        attraction term for connected nodes.
 
     Returns
     -------
@@ -858,6 +901,11 @@ def layout_gem(
         raise ValueError("num_nodes must be non-negative.")
     if max_iters < 0:
         raise ValueError("max_iters must be non-negative.")
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} does not match "
+            f"edge count {edge_index.shape[1]}"
+        )
 
     device = _layout_device(edge_index, node_sizes)
     if num_nodes == 0:
@@ -875,6 +923,7 @@ def layout_gem(
             node_sizes=node_sizes,
             max_iters=capped_iters,
             seed=seed,
+            edge_weights=edge_weights,
         )
         return _normalize_positions(sequential_positions, extent).to(
             dtype=torch.float32,
@@ -909,6 +958,7 @@ def layout_gem(
             edge_index=edge_index,
             node_desired_lengths=node_desired_lengths,
             degree_weights=degree_weights,
+            edge_weights=edge_weights,
         )
         gravity = _gravity_force(positions, degree_weights)
         impulse = repulsive + attractive + gravity

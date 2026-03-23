@@ -51,6 +51,9 @@ class _LevelGraph:
     edge_index: torch.Tensor
     edge_lengths: torch.Tensor
     num_nodes: int
+    edge_weights: torch.Tensor = field(
+        default_factory=lambda: torch.empty((0,), dtype=torch.float32)
+    )
 
 
 @dataclass
@@ -304,8 +307,9 @@ def _fr_ideal_length(area: float, num_nodes: int) -> float:
 def _unique_edges_with_lengths(
     edge_index: torch.Tensor,
     num_nodes: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Convert an edge tensor into unique undirected edges with default lengths.
+    edge_weights: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Convert an edge tensor into unique undirected edges with lengths and weights.
 
     Parameters
     ----------
@@ -313,38 +317,60 @@ def _unique_edges_with_lengths(
         Edge list with shape ``[2, E]``.
     num_nodes : int
         Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
 
     Returns
     -------
-    tuple[torch.Tensor, torch.Tensor]
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         Unique undirected edges with shape ``[2, E_u]`` and their desired
-        lengths with shape ``[E_u]``.
+        lengths and attraction weights with shape ``[E_u]``.
     """
     if edge_index.ndim != 2 or edge_index.shape[0] != 2:
         raise ValueError("edge_index must have shape [2, E].")
 
-    seen: dict[tuple[int, int], tuple[float, int]] = {}
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} does not match "
+            f"edge count {edge_index.shape[1]}"
+        )
+
+    seen: dict[tuple[int, int], tuple[float, int, float]] = {}
     edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
-    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+    weights_cpu = (
+        torch.ones((edge_index.shape[1],), dtype=torch.float32)
+        if edge_weights is None
+        else edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
         if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
             raise ValueError("edge_index contains a node index outside [0, num_nodes).")
         if source == target:
             continue
         pair = (min(source, target), max(source, target))
-        length_sum, count = seen.get(pair, (0.0, 0))
-        seen[pair] = (length_sum + 1.0, count + 1)
+        length_sum, count, weight_sum = seen.get(pair, (0.0, 0, 0.0))
+        seen[pair] = (
+            length_sum + 1.0,
+            count + 1,
+            weight_sum + float(weights_cpu[edge_id].item()),
+        )
 
     if not seen:
         return (
             torch.empty((2, 0), dtype=torch.long),
             torch.empty((0,), dtype=torch.float32),
+            torch.empty((0,), dtype=torch.float32),
         )
 
     ordered_pairs = sorted(seen)
     lengths = [seen[pair][0] / seen[pair][1] for pair in ordered_pairs]
+    weights = [seen[pair][2] for pair in ordered_pairs]
     return (
         torch.tensor(ordered_pairs, dtype=torch.long).transpose(0, 1).contiguous(),
         torch.tensor(lengths, dtype=torch.float32),
+        torch.tensor(weights, dtype=torch.float32),
     )
 
 
@@ -363,7 +389,7 @@ def _unique_edges(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
     torch.Tensor
         Unique undirected edge tensor with shape ``[2, E_u]``.
     """
-    unique_edges, _ = _unique_edges_with_lengths(edge_index, num_nodes)
+    unique_edges, _, _ = _unique_edges_with_lengths(edge_index, num_nodes)
     return unique_edges
 
 
@@ -385,7 +411,7 @@ def _build_weighted_adjacency(
     list[list[tuple[int, int]]]
         One sorted ``(neighbor, edge_id)`` list per node.
     """
-    adjacency = [[] for _ in range(num_nodes)]
+    adjacency: list[list[tuple[int, int]]] = [[] for _ in range(num_nodes)]
     if edge_index.numel() == 0:
         return adjacency
 
@@ -467,15 +493,20 @@ def _coarsen_level(
     num_nodes = level_graph.num_nodes
     adjacency = _build_weighted_adjacency(level_graph.edge_index, num_nodes)
     edge_lengths_cpu = level_graph.edge_lengths.to(device="cpu", dtype=torch.float32)
+    edge_weights_cpu = (
+        level_graph.edge_weights.to(device="cpu", dtype=torch.float32)
+        if level_graph.edge_weights.numel() > 0
+        else torch.ones((level_graph.edge_index.shape[1],), dtype=torch.float32)
+    )
     selectable_nodes = _RandomNodeSet.from_star_masses(_star_masses(node_masses, adjacency))
 
     mapping = torch.full((num_nodes,), fill_value=-1, dtype=torch.long)
     node_types = [0 for _ in range(num_nodes)]
     dedicated_sun = [-1 for _ in range(num_nodes)]
     dedicated_sun_distance = [0.0 for _ in range(num_nodes)]
-    lambda_values = [[] for _ in range(num_nodes)]
-    neighbor_suns = [[] for _ in range(num_nodes)]
-    moon_children = [[] for _ in range(num_nodes)]
+    lambda_values: list[list[float]] = [[] for _ in range(num_nodes)]
+    neighbor_suns: list[list[int]] = [[] for _ in range(num_nodes)]
+    moon_children: list[list[int]] = [[] for _ in range(num_nodes)]
     sun_to_coarse: dict[int, int] = {}
 
     while not selectable_nodes.empty():
@@ -553,6 +584,7 @@ def _coarsen_level(
 
     pair_sums: dict[tuple[int, int], float] = {}
     pair_counts: dict[tuple[int, int], int] = {}
+    pair_weight_sums: dict[tuple[int, int], float] = {}
     edge_index_cpu = level_graph.edge_index.to(device="cpu", dtype=torch.long)
     for edge_id, (source, target) in enumerate(
         zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
@@ -566,9 +598,11 @@ def _coarsen_level(
         coarse_target = sun_to_coarse[target_sun]
         pair = (min(coarse_source, coarse_target), max(coarse_source, coarse_target))
         edge_length = float(edge_lengths_cpu[edge_id].item())
+        edge_weight = float(edge_weights_cpu[edge_id].item())
         new_length = dedicated_sun_distance[source] + edge_length + dedicated_sun_distance[target]
         pair_sums[pair] = pair_sums.get(pair, 0.0) + new_length
         pair_counts[pair] = pair_counts.get(pair, 0) + 1
+        pair_weight_sums[pair] = pair_weight_sums.get(pair, 0.0) + edge_weight
 
         source_lambda = dedicated_sun_distance[source] / max(new_length, _MIN_DISTANCE)
         target_lambda = dedicated_sun_distance[target] / max(new_length, _MIN_DISTANCE)
@@ -586,9 +620,14 @@ def _coarsen_level(
             [pair_sums[pair] / pair_counts[pair] for pair in ordered_pairs],
             dtype=torch.float32,
         )
+        coarse_edge_weights = torch.tensor(
+            [pair_weight_sums[pair] for pair in ordered_pairs],
+            dtype=torch.float32,
+        )
     else:
         coarse_edge_index = torch.empty((2, 0), dtype=torch.long)
         coarse_edge_lengths = torch.empty((0,), dtype=torch.float32)
+        coarse_edge_weights = torch.empty((0,), dtype=torch.float32)
 
     return (
         _HierarchyStep(
@@ -605,6 +644,7 @@ def _coarsen_level(
             edge_index=coarse_edge_index,
             edge_lengths=coarse_edge_lengths,
             num_nodes=len(sun_to_coarse),
+            edge_weights=coarse_edge_weights,
         ),
         coarse_masses,
     )
@@ -635,6 +675,7 @@ def _build_hierarchy(
     edge_index: torch.Tensor,
     num_nodes: int,
     seed: int,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> tuple[list[_LevelGraph], list[_HierarchyStep]]:
     """Build the FM^3 hierarchy with OGDF-style coarsening metadata.
 
@@ -646,6 +687,8 @@ def _build_hierarchy(
         Number of nodes.
     seed : int
         Random seed used for sun selection.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge attraction weights with shape ``[E]``.
 
     Returns
     -------
@@ -653,8 +696,19 @@ def _build_hierarchy(
         Hierarchy levels from fine to coarse and prolongation metadata for each
         fine-to-coarse transition.
     """
-    base_edges, base_lengths = _unique_edges_with_lengths(edge_index, num_nodes)
-    levels = [_LevelGraph(edge_index=base_edges, edge_lengths=base_lengths, num_nodes=num_nodes)]
+    base_edges, base_lengths, base_weights = _unique_edges_with_lengths(
+        edge_index,
+        num_nodes,
+        edge_weights=edge_weights,
+    )
+    levels = [
+        _LevelGraph(
+            edge_index=base_edges,
+            edge_lengths=base_lengths,
+            num_nodes=num_nodes,
+            edge_weights=base_weights,
+        )
+    ]
     steps: list[_HierarchyStep] = []
     current_nodes = num_nodes
     current_masses = torch.ones((num_nodes,), dtype=torch.long)
@@ -750,7 +804,7 @@ def _build_quadtree(
         (x_min, x_mid, y_mid, y_max),
         (x_mid, x_max, y_mid, y_max),
     ]
-    buckets = [[] for _ in range(4)]
+    buckets: list[list[int]] = [[] for _ in range(4)]
     for index in indices:
         x = float(positions[index, 0].item())
         y = float(positions[index, 1].item())
@@ -889,6 +943,7 @@ def _attractive_force(
     positions: torch.Tensor,
     edge_index: torch.Tensor,
     ideal_length: float,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute exact attractive forces along graph edges.
 
@@ -900,6 +955,8 @@ def _attractive_force(
         Unique undirected edges with shape ``[2, E]``.
     ideal_length : float
         FR ideal edge length ``k`` for the current level.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge attraction weights with shape ``[E]``.
 
     Returns
     -------
@@ -916,6 +973,11 @@ def _attractive_force(
     distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
     denominator = max(ideal_length**3, _MIN_DISTANCE)
     edge_force = delta * (distances / denominator).unsqueeze(1)
+    if edge_weights is not None:
+        edge_force = edge_force * edge_weights.to(
+            device=positions.device,
+            dtype=positions.dtype,
+        ).unsqueeze(1)
     forces.index_add_(0, src, edge_force)
     forces.index_add_(0, dst, -edge_force)
     return forces
@@ -925,6 +987,7 @@ def _attractive_force_with_lengths(
     positions: torch.Tensor,
     edge_index: torch.Tensor,
     edge_lengths: torch.Tensor,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute OGDF-style attractive forces using per-edge desired lengths.
 
@@ -936,6 +999,8 @@ def _attractive_force_with_lengths(
         Unique undirected edges with shape ``[2, E]``.
     edge_lengths : torch.Tensor
         Desired edge lengths with shape ``[E]``.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge attraction weights with shape ``[E]``.
 
     Returns
     -------
@@ -954,6 +1019,11 @@ def _attractive_force_with_lengths(
     delta = positions[dst] - positions[src]
     distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
     edge_force = delta * (distances / desired_lengths.pow(3)).unsqueeze(1)
+    if edge_weights is not None:
+        edge_force = edge_force * edge_weights.to(
+            device=positions.device,
+            dtype=positions.dtype,
+        ).unsqueeze(1)
     forces.index_add_(0, src, edge_force)
     forces.index_add_(0, dst, -edge_force)
     return forces
@@ -965,6 +1035,7 @@ def _refine_level(
     steps: int,
     theta: float,
     area: float,
+    edge_weights: Optional[torch.Tensor] = None,
     cooling_factor: float = _COOLING_FACTOR,
 ) -> torch.Tensor:
     """Run Barnes-Hut force refinement on one hierarchy level.
@@ -981,6 +1052,8 @@ def _refine_level(
         Barnes-Hut opening angle threshold.
     area : float
         Target drawing area for the current level.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge attraction weights with shape ``[E]``.
     cooling_factor : float, default=0.9
         Multiplicative temperature decay applied after each refinement step.
 
@@ -1002,7 +1075,12 @@ def _refine_level(
             if use_exact
             else _barnes_hut_repulsion(refined, theta, ideal_length)
         )
-        attractive = _attractive_force(refined, edge_index, ideal_length)
+        attractive = _attractive_force(
+            refined,
+            edge_index,
+            ideal_length,
+            edge_weights=edge_weights,
+        )
         displacement = repulsive + attractive
         norm = torch.linalg.norm(displacement, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
         limited_step = torch.minimum(norm, torch.full_like(norm, temperature))
@@ -1018,6 +1096,7 @@ def _refine_level_with_edge_lengths(
     steps: int,
     theta: float,
     area: float,
+    edge_weights: Optional[torch.Tensor] = None,
     cooling_factor: float = _COOLING_FACTOR,
 ) -> torch.Tensor:
     """Run Barnes-Hut force refinement using individual desired edge lengths.
@@ -1036,6 +1115,8 @@ def _refine_level_with_edge_lengths(
         Barnes-Hut opening angle threshold.
     area : float
         Target drawing area for the current level.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge attraction weights with shape ``[E]``.
     cooling_factor : float, default=0.99
         Multiplicative temperature decay applied after each refinement step.
 
@@ -1057,7 +1138,12 @@ def _refine_level_with_edge_lengths(
             if use_exact
             else _barnes_hut_repulsion(refined, theta, ideal_length)
         )
-        attractive = _attractive_force_with_lengths(refined, edge_index, edge_lengths)
+        attractive = _attractive_force_with_lengths(
+            refined,
+            edge_index,
+            edge_lengths,
+            edge_weights=edge_weights,
+        )
         displacement = repulsive + attractive
         norm = torch.linalg.norm(displacement, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
         limited_step = torch.minimum(norm, torch.full_like(norm, temperature))
@@ -1258,6 +1344,7 @@ def layout_fmmm(
     node_sizes: Optional[torch.Tensor] = None,
     steps: int = 100,
     seed: int = 42,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with an FM^3-style multilevel force-directed scheme.
 
@@ -1278,6 +1365,9 @@ def layout_fmmm(
         Total refinement budget across hierarchy levels.
     seed : int, default=42
         Random seed for coarse initialization and uncoarsening jitter.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``. These scale the FM^3
+        attraction forces across the hierarchy.
 
     Returns
     -------
@@ -1288,6 +1378,11 @@ def layout_fmmm(
         raise ValueError("num_nodes must be non-negative.")
     if steps < 0:
         raise ValueError("steps must be non-negative.")
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} does not match "
+            f"edge count {edge_index.shape[1]}"
+        )
 
     device = _layout_device(edge_index, node_sizes)
     if num_nodes == 0:
@@ -1297,16 +1392,26 @@ def layout_fmmm(
 
     extent = _layout_extent(num_nodes, node_sizes)
     refinement_area = (2.0 * extent) ** 2
-    levels, steps_per_level = _build_hierarchy(edge_index, num_nodes, seed=seed)
+    levels, steps_per_level = _build_hierarchy(
+        edge_index,
+        num_nodes,
+        seed=seed,
+        edge_weights=edge_weights,
+    )
     coarsest_level = levels[-1]
     coarsest_nodes = coarsest_level.num_nodes
-    positions = layout_fr(
+    coarse_positions = layout_fr(
         coarsest_level.edge_index,
         coarsest_nodes,
         node_sizes=None,
         steps=max(50, steps),
         seed=seed,
-    ).to(dtype=torch.float32)
+        edge_weights=coarsest_level.edge_weights,
+    )
+    if isinstance(coarse_positions, tuple):
+        positions = coarse_positions[0].to(dtype=torch.float32)
+    else:
+        positions = coarse_positions.to(dtype=torch.float32)
 
     rng = random.Random(seed)
     level_budget = max(10, steps // max(len(levels), 1))
@@ -1319,6 +1424,7 @@ def layout_fmmm(
             level_budget,
             theta=1.0,
             area=refinement_area,
+            edge_weights=coarsest_level.edge_weights,
         )
 
     for level in range(len(steps_per_level) - 1, -1, -1):
@@ -1330,6 +1436,7 @@ def layout_fmmm(
             level_budget,
             theta=1.0,
             area=refinement_area,
+            edge_weights=levels[level].edge_weights,
         )
 
     if not steps_per_level:
@@ -1339,6 +1446,7 @@ def layout_fmmm(
             level_budget,
             theta=1.0,
             area=refinement_area,
+            edge_weights=levels[0].edge_weights,
         )
 
     return _normalize_positions(positions.to(device), extent).to(dtype=torch.float32, device=device)

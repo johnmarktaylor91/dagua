@@ -7,10 +7,12 @@ import inspect
 import sys
 import types
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Optional
 
-from dagua.eval.competitors.base import get_competitor
-from dagua.eval.competitors.classic_competitor import _CLASSIC_LAYOUT_SPECS
+import torch
+
+from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, get_competitor
+from dagua.eval.competitors.classic_competitor import _CLASSIC_LAYOUT_SPECS, ChainCompetitor
 from dagua.eval.variants import (
     VARIANT_REGISTRY,
     engine_is_stochastic,
@@ -21,20 +23,120 @@ from dagua.graph import DaguaGraph
 from scripts import run_benchmark
 from scripts.run_benchmark import BenchmarkRecord, WorkItem
 
+_PLANNED_BASE_ENGINES = frozenset({"cytoscape_fcose", "gephi_yifanhu"})
+
+
+class _FakeCompetitor(CompetitorBase):
+    """Test double for validating chained-competitor warm starts."""
+
+    def __init__(
+        self,
+        name: str,
+        pos: Optional[torch.Tensor],
+        max_nodes: int,
+        error: Optional[str] = None,
+    ) -> None:
+        """Initialize the fake competitor.
+
+        Parameters
+        ----------
+        name : str
+            Synthetic competitor name.
+        pos : torch.Tensor | None
+            Position tensor returned by the fake layout call.
+        max_nodes : int
+            Maximum graph size reported by the fake adapter.
+        error : str | None, default=None
+            Optional error message returned by the fake layout call.
+        """
+        self.name = name
+        self.max_nodes = max_nodes
+        self._pos = pos
+        self._error = error
+        self.calls: list[dict[str, Any]] = []
+
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Delegate to ``layout_with_variant`` for this test double.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime in seconds.
+        seed : int | None, default=None
+            Optional benchmark seed.
+
+        Returns
+        -------
+        CompetitorResult
+            Synthetic layout result.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
+    ) -> CompetitorResult:
+        """Record the call parameters and return the configured result.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime in seconds.
+        seed : int | None, default=None
+            Optional benchmark seed.
+        variant_params : Mapping[str, Any] | None, default=None
+            Variant overrides supplied by the caller.
+
+        Returns
+        -------
+        CompetitorResult
+            Synthetic layout result with the configured position or error.
+        """
+        del graph
+        self.calls.append(
+            {
+                "timeout": timeout,
+                "seed": seed,
+                "variant_params": None if variant_params is None else dict(variant_params),
+            }
+        )
+        return CompetitorResult(
+            name=self.name,
+            pos=self._pos,
+            runtime_seconds=0.0,
+            error=self._error,
+        )
+
 
 def _callable_param_names(base_engine: str) -> set[str]:
-    """Return supported keyword parameter names for one classic layout.
+    """Return supported keyword parameter names for one variant-capable base.
 
     Parameters
     ----------
     base_engine : str
-        Base classic competitor name.
+        Base competitor name.
 
     Returns
     -------
     set[str]
         Supported layout keyword names excluding the common graph inputs.
     """
+    competitor = get_competitor(base_engine)
+    if competitor is not None and base_engine not in _CLASSIC_LAYOUT_SPECS:
+        return set(competitor.variant_param_names)
+
     spec = _CLASSIC_LAYOUT_SPECS[base_engine]
     module = importlib.import_module(spec.import_path)
     function = getattr(module, spec.function_name)
@@ -60,16 +162,22 @@ def _test_graph() -> DaguaGraph:
 
 
 def test_all_variants_have_valid_base_engine() -> None:
-    """Every registry entry should point at a registered classic base engine."""
-    assert len(VARIANT_REGISTRY) == 97
+    """Every registry entry should point at a usable or planned base engine."""
+    assert len(VARIANT_REGISTRY) == 104
     for variant in VARIANT_REGISTRY:
-        assert variant.base_engine in _CLASSIC_LAYOUT_SPECS
+        assert (
+            variant.base_engine in _CLASSIC_LAYOUT_SPECS
+            or get_competitor(variant.base_engine) is not None
+            or variant.base_engine in _PLANNED_BASE_ENGINES
+        )
         assert get_variant(variant.variant_id) == variant
 
 
 def test_variant_params_are_valid_for_reimpl() -> None:
     """Reimplementation variant params should match callable signatures."""
     for variant in VARIANT_REGISTRY:
+        if variant.base_engine in _PLANNED_BASE_ENGINES:
+            continue
         allowed_param_names = _callable_param_names(variant.base_engine)
         assert set(variant.reimpl_params).issubset(allowed_param_names)
 
@@ -95,6 +203,44 @@ def test_stochastic_flag_consistency() -> None:
             assert engine_is_stochastic(original_name) is engine_is_stochastic(
                 variant.original_engine or ""
             )
+
+
+def test_planned_variant_bases_remain_unpaired() -> None:
+    """Placeholder variant bases should not advertise original pairings."""
+    for variant in VARIANT_REGISTRY:
+        if variant.base_engine in _PLANNED_BASE_ENGINES:
+            assert variant.original_engine is None
+
+
+def test_chain_competitor_warmstarts_second_pass() -> None:
+    """Chain competitors should forward first-pass positions into ``pos``."""
+    graph = _test_graph()
+    first_pos = torch.tensor([[0.0, 1.0], [1.0, 0.0], [2.0, 1.0]], dtype=torch.float32)
+    second_pos = torch.tensor([[2.0, 2.0], [3.0, 3.0], [4.0, 4.0]], dtype=torch.float32)
+    first = _FakeCompetitor(name="first", pos=first_pos, max_nodes=12)
+    second = _FakeCompetitor(name="second", pos=second_pos, max_nodes=5)
+    competitor = ChainCompetitor(
+        first_competitor=first,
+        second_competitor=second,
+        name="chain",
+        first_params={"steps": 50},
+        second_params={"steps": 300},
+    )
+
+    result = competitor.layout_with_variant(
+        graph,
+        timeout=120.0,
+        seed=11,
+        variant_params={"steps": 125},
+    )
+
+    assert competitor.max_nodes == 5
+    assert result.pos is second_pos
+    assert first.calls == [{"timeout": 60.0, "seed": 11, "variant_params": {"steps": 50}}]
+    assert len(second.calls) == 1
+    assert 10.0 <= second.calls[0]["timeout"] <= 120.0
+    assert second.calls[0]["seed"] == 11
+    assert second.calls[0]["variant_params"] == {"steps": 125, "pos": first_pos}
 
 
 def test_skip_after_timeout_serial(monkeypatch: Any, tmp_path: Path) -> None:
