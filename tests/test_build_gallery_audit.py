@@ -391,12 +391,34 @@ def test_prepare_reference_render_applies_gallery_demo_tweaks() -> None:
     )
     graph, _ = _prepare_reference_render(item)
     assert graph.node_labels == ["A", "B"]
+    assert graph.node_styles
+    for style in graph.node_styles:
+        assert style is not None
+        assert style.padding == pytest.approx((11.0, 12.0))
+    assert graph.node_styles[0].min_height == pytest.approx(112.0)
+
+    for card_id in (
+        "nodes_fills_fill_pattern_striped",
+        "nodes_fills_gradient_linear",
+        "nodes_fills_gradient_radial",
+    ):
+        item = next(item for item in build_reference_items() if item.card_id == card_id)
+        graph, _ = _prepare_reference_render(item)
+        assert graph.node_styles
+        for style in graph.node_styles:
+            assert style is not None
+            assert style.min_height == pytest.approx(80.0)
+            assert style.padding == pytest.approx((11.0, 12.0))
 
     item = next(
         item for item in build_reference_items() if item.card_id == "edges_routing_curvature_0_8"
     )
     graph, _ = _prepare_reference_render(item)
     assert graph.graph_style.margin == pytest.approx(CURVATURE_CARD_MARGIN)
+
+    strip_graph, _ = _prepare_reference_render(item, render_context="strip")
+    assert strip_graph.graph_style.margin < graph.graph_style.margin
+    assert strip_graph.graph_style.margin == pytest.approx(80.0)
 
     item = next(
         item
