@@ -185,11 +185,8 @@ def test_arrowhead_result_separates_filled_and_stroked_geometry(spec: str) -> No
     result = build_arrowhead(spec, tip=(0.0, 0.0), tangent=(-1.0, 0.0), length=8.0, width=5.0)
 
     assert result.trim_contour.vertices.shape[0] >= 2
-    if spec in {"vee", "crow"}:
-        assert result.filled_paths == []
-        assert len(result.stroked_paths) >= 1
-    else:
-        assert len(result.filled_paths) >= 1
+    # All standard arrowheads produce filled geometry.
+    assert len(result.filled_paths) >= 1
 
 
 def test_open_arrowhead_becomes_stroked() -> None:
@@ -274,8 +271,8 @@ def test_open_and_hollow_arrowheads_increase_stroke_weight() -> None:
     assert hollow.stroke_width_scale > 1.0
 
 
-def test_open_arrowhead_seats_on_full_body_width() -> None:
-    """Open heads should start on the full ribbon width instead of pinching at the join."""
+def test_vee_arrowhead_seats_on_full_body_width() -> None:
+    """Filled vee heads should still anchor on the full ribbon width."""
     result = build_arrowhead(
         "vee",
         tip=(0.0, 0.0),
@@ -285,15 +282,18 @@ def test_open_arrowhead_seats_on_full_body_width() -> None:
         body_width=6.0,
     )
 
-    body_side_span = np.linalg.norm(
-        result.stroked_paths[0].vertices[0] - result.stroked_paths[0].vertices[-1]
+    vertices = result.filled_paths[0].vertices
+    max_x = float(np.max(vertices[:, 0]))
+    anchor_values = sorted(
+        float(vertex[1]) for vertex in vertices if vertex[0] == pytest.approx(max_x)
     )
 
-    assert body_side_span == pytest.approx(6.0)
+    assert anchor_values[0] == pytest.approx(-anchor_values[1])
+    assert abs(anchor_values[0]) > 3.0
 
 
-def test_tee_arrowhead_spans_exact_body_width() -> None:
-    """Tee heads should match the ribbon width exactly at the junction."""
+def test_tee_arrowhead_uses_bolder_crossbar_than_the_ribbon_body() -> None:
+    """Tee heads should read as a wide bar instead of disappearing into the edge."""
     result = build_arrowhead(
         "tee",
         tip=(0.0, 0.0),
@@ -307,14 +307,13 @@ def test_tee_arrowhead_spans_exact_body_width() -> None:
     trim_vertices = result.trim_contour.vertices[:2]
 
     assert np.allclose(bar[:, 0], trim_vertices[0, 0])
-    assert np.linalg.norm(bar[0] - bar[1]) == pytest.approx(6.0)
+    assert np.linalg.norm(bar[0] - bar[1]) == pytest.approx(11.0)
 
 
 @pytest.mark.parametrize(
     ("spec", "expected_anchors"),
     [
-        ("vee", np.array([-3.0, 3.0], dtype=np.float64)),
-        ("crow", np.array([-3.0, 0.0, 3.0], dtype=np.float64)),
+        # crow uses filled tines (not stroked), tested separately.
         ("bracket", np.array([-3.0, 3.0], dtype=np.float64)),
         ("curve", np.array([3.0], dtype=np.float64)),
         ("icurve", np.array([-3.0], dtype=np.float64)),
@@ -500,7 +499,7 @@ def test_collection_renders_bodies_and_heads_in_two_passes() -> None:
     assert any(isinstance(artist, PatchCollection) for artist in body_artists)
     assert any(isinstance(artist, PatchCollection) for artist in head_artists)
     assert all(float(artist.get_zorder()) == 1.0 for artist in body_artists)
-    assert all(float(artist.get_zorder()) == 2.0 for artist in head_artists)
+    assert all(float(artist.get_zorder()) == pytest.approx(2.1) for artist in head_artists)
     plt.close(fig)
 
 

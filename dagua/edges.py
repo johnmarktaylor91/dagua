@@ -10,19 +10,170 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
 
 @dataclass
 class BezierCurve:
-    """A cubic bezier curve defined by 4 control points."""
+    """A routed edge centerline.
+
+    Parameters
+    ----------
+    p0 : tuple[float, float]
+        Start point.
+    cp1 : tuple[float, float]
+        First cubic control point or first bend anchor for waypoint routes.
+    cp2 : tuple[float, float]
+        Second cubic control point or last bend anchor for waypoint routes.
+    p1 : tuple[float, float]
+        End point.
+    waypoints : tuple[tuple[float, float], ...] | None, default=None
+        Optional polyline vertices for routing modes such as ``"ortho"`` and
+        ``"taxi"`` that need hard bends. When present, evaluation and tangents
+        follow the waypoint polyline instead of the cubic control points.
+    """
 
     p0: Tuple[float, float]
     cp1: Tuple[float, float]
     cp2: Tuple[float, float]
     p1: Tuple[float, float]
+    waypoints: Optional[Tuple[Tuple[float, float], ...]] = None
+
+
+def _polyline_curve(points: Sequence[Tuple[float, float]]) -> BezierCurve:
+    """Build a routed curve backed by explicit polyline waypoints.
+
+    Parameters
+    ----------
+    points : sequence[tuple[float, float]]
+        Polyline vertices in draw order.
+
+    Returns
+    -------
+    BezierCurve
+        Curve whose endpoints and bend anchors mirror the supplied polyline.
+    """
+    deduped: List[Tuple[float, float]] = []
+    for point in points:
+        normalized_point = (float(point[0]), float(point[1]))
+        same_x = deduped and math.isclose(deduped[-1][0], normalized_point[0], abs_tol=1e-9)
+        same_y = deduped and math.isclose(deduped[-1][1], normalized_point[1], abs_tol=1e-9)
+        if same_x and same_y:
+            continue
+        deduped.append(normalized_point)
+
+    if not deduped:
+        raise ValueError("Polyline routes require at least one point.")
+    if len(deduped) == 1:
+        point = deduped[0]
+        return BezierCurve(point, point, point, point, waypoints=(point,))
+
+    first_bend = deduped[1] if len(deduped) > 2 else deduped[0]
+    last_bend = deduped[-2] if len(deduped) > 2 else deduped[-1]
+    return BezierCurve(
+        deduped[0],
+        first_bend,
+        last_bend,
+        deduped[-1],
+        waypoints=tuple(deduped),
+    )
+
+
+def _polyline_point_at(points: Sequence[Tuple[float, float]], t: float) -> Tuple[float, float]:
+    """Evaluate a waypoint polyline at normalized arc-length ``t``.
+
+    Parameters
+    ----------
+    points : sequence[tuple[float, float]]
+        Ordered polyline vertices.
+    t : float
+        Normalized distance in ``[0, 1]``.
+
+    Returns
+    -------
+    tuple[float, float]
+        Interpolated point on the polyline.
+    """
+    if len(points) <= 1:
+        point = points[0]
+        return float(point[0]), float(point[1])
+
+    clamped_t = min(max(float(t), 0.0), 1.0)
+    segment_lengths: List[float] = []
+    total_length = 0.0
+    for start, stop in zip(points, points[1:]):
+        segment_length = math.hypot(stop[0] - start[0], stop[1] - start[1])
+        segment_lengths.append(segment_length)
+        total_length += segment_length
+    if total_length <= 1e-9:
+        point = points[0]
+        return float(point[0]), float(point[1])
+
+    target_length = clamped_t * total_length
+    traversed = 0.0
+    for index, segment_length in enumerate(segment_lengths):
+        if segment_length <= 1e-9:
+            continue
+        next_traversed = traversed + segment_length
+        if target_length <= next_traversed or index == len(segment_lengths) - 1:
+            local_t = (target_length - traversed) / segment_length
+            start = points[index]
+            stop = points[index + 1]
+            return (
+                float(start[0] + (stop[0] - start[0]) * local_t),
+                float(start[1] + (stop[1] - start[1]) * local_t),
+            )
+        traversed = next_traversed
+
+    point = points[-1]
+    return float(point[0]), float(point[1])
+
+
+def _polyline_tangent_at(points: Sequence[Tuple[float, float]], t: float) -> Tuple[float, float]:
+    """Return the local tangent vector for a waypoint polyline.
+
+    Parameters
+    ----------
+    points : sequence[tuple[float, float]]
+        Ordered polyline vertices.
+    t : float
+        Normalized distance in ``[0, 1]``.
+
+    Returns
+    -------
+    tuple[float, float]
+        Tangent vector along the active polyline segment.
+    """
+    if len(points) <= 1:
+        return (0.0, 0.0)
+
+    clamped_t = min(max(float(t), 0.0), 1.0)
+    segment_lengths: List[float] = []
+    total_length = 0.0
+    for start, stop in zip(points, points[1:]):
+        segment_length = math.hypot(stop[0] - start[0], stop[1] - start[1])
+        segment_lengths.append(segment_length)
+        total_length += segment_length
+    if total_length <= 1e-9:
+        return (0.0, 0.0)
+
+    target_length = clamped_t * total_length
+    traversed = 0.0
+    for index, segment_length in enumerate(segment_lengths):
+        if segment_length <= 1e-9:
+            continue
+        next_traversed = traversed + segment_length
+        if target_length <= next_traversed or index == len(segment_lengths) - 1:
+            start = points[index]
+            stop = points[index + 1]
+            return (float(stop[0] - start[0]), float(stop[1] - start[1]))
+        traversed = next_traversed
+
+    last_start = points[-2]
+    last_stop = points[-1]
+    return (float(last_stop[0] - last_start[0]), float(last_stop[1] - last_start[1]))
 
 
 def _compute_self_loop_curve(
@@ -510,6 +661,47 @@ def _adjust_port_for_shape(
 
         return cx + dx / scale, cy + dy / scale
 
+    # For all other polygon shapes (triangle, hexagon, pentagon, octagon,
+    # star, parallelogram, trapezoid), use ray-polygon intersection to
+    # project the port onto the actual shape boundary.
+    _POLYGON_SHAPES = {
+        "triangle",
+        "hexagon",
+        "pentagon",
+        "octagon",
+        "star",
+        "parallelogram",
+        "trapezoid",
+    }
+    # Non-convex shapes where arrowheads can enter concavities.
+    _CONCAVE_SHAPES = {"star"}
+    if shape in _POLYGON_SHAPES:
+        from dagua.render.edges.intersection import ray_polygon_intersection
+
+        dx = port_x - cx
+        dy = port_y - cy
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return cx, cy + (h / 2 if is_source else -h / 2)
+
+        hit = ray_polygon_intersection(
+            center=[cx, cy],
+            half_size=[w / 2, h / 2],
+            shape=shape,
+            ray_origin=[cx, cy],
+            ray_direction=[dx, dy],
+        )
+        hx, hy = float(hit[0]), float(hit[1])
+        # For concave shapes, push the port slightly outward so arrowheads
+        # don't extend into interior concavities.
+        if shape in _CONCAVE_SHAPES:
+            bdx, bdy = hx - cx, hy - cy
+            dist = math.sqrt(bdx * bdx + bdy * bdy)
+            if dist > 1e-6:
+                outward = min(w, h) * 0.06
+                hx += bdx / dist * outward
+                hy += bdy / dist * outward
+        return hx, hy
+
     return port_x, port_y
 
 
@@ -574,13 +766,13 @@ def _compute_ortho(
     ty: float,
     direction: str = "TB",
 ) -> BezierCurve:
-    """Right-angle routing via midpoint control points."""
+    """Route an edge through one Manhattan elbow corridor."""
     if direction in ("TB", "BT"):
         mid_y = (sy + ty) / 2
-        return BezierCurve((sx, sy), (sx, mid_y), (tx, mid_y), (tx, ty))
-    else:
-        mid_x = (sx + tx) / 2
-        return BezierCurve((sx, sy), (mid_x, sy), (mid_x, ty), (tx, ty))
+        return _polyline_curve([(sx, sy), (sx, mid_y), (tx, mid_y), (tx, ty)])
+
+    mid_x = (sx + tx) / 2
+    return _polyline_curve([(sx, sy), (mid_x, sy), (mid_x, ty), (tx, ty)])
 
 
 def _compute_taxi(
@@ -613,12 +805,38 @@ def _compute_taxi(
         Z-shaped Manhattan route while preserving the existing bezier
         renderer interface.
     """
-    if direction in ("TB", "BT"):
-        mid_y = (sy + ty) / 2.0
-        return BezierCurve((sx, sy), (sx, mid_y), (tx, mid_y), (tx, ty))
+    if math.isclose(sx, tx, abs_tol=1e-9) and math.isclose(sy, ty, abs_tol=1e-9):
+        return _polyline_curve([(sx, sy)])
 
-    mid_x = (sx + tx) / 2.0
-    return BezierCurve((sx, sy), (mid_x, sy), (mid_x, ty), (tx, ty))
+    step_fraction = 0.35
+    if direction in ("TB", "BT"):
+        first_y = sy + (ty - sy) * step_fraction
+        second_y = sy + (ty - sy) * (1.0 - step_fraction)
+        mid_x = (sx + tx) / 2.0
+        return _polyline_curve(
+            [
+                (sx, sy),
+                (sx, first_y),
+                (mid_x, first_y),
+                (mid_x, second_y),
+                (tx, second_y),
+                (tx, ty),
+            ]
+        )
+
+    first_x = sx + (tx - sx) * step_fraction
+    second_x = sx + (tx - sx) * (1.0 - step_fraction)
+    mid_y = (sy + ty) / 2.0
+    return _polyline_curve(
+        [
+            (sx, sy),
+            (first_x, sy),
+            (first_x, mid_y),
+            (second_x, mid_y),
+            (second_x, ty),
+            (tx, ty),
+        ]
+    )
 
 
 def _compute_bezier(
@@ -656,12 +874,15 @@ def _compute_bezier(
             cp1 = (sx, sy + offset_y)
             cp2 = (tx, ty - offset_y)
         else:
-            # Back edge (upward): wide arc to the side
-            arc_width = abs_dy * curvature * 1.25 + abs_dx * 0.3 + 30
-            side = 1 if dx >= 0 else -1
-            mid_y = (sy + ty) / 2
-            cp1 = (sx + side * arc_width, mid_y)
-            cp2 = (tx + side * arc_width, mid_y)
+            # Back edge (upward): arc perpendicular to the chord so
+            # the curve is visibly bowed even at high curvature values.
+            perp_x = -dy / dist  # perpendicular unit vector
+            perp_y = dx / dist
+            # Choose the side that arcs away from the main flow.
+            side = 1.0 if perp_x >= 0 else -1.0
+            offset = dist * min(curvature, 2.0) * 0.45 + 30.0
+            cp1 = (sx + side * perp_x * offset, sy + side * perp_y * offset)
+            cp2 = (tx + side * perp_x * offset, ty + side * perp_y * offset)
     else:
         # Horizontal flow (LR/RL)
         if abs_dy < abs_dx * 0.3:
@@ -677,7 +898,9 @@ def _compute_bezier(
 
 
 def evaluate_bezier(curve: BezierCurve, t: float) -> Tuple[float, float]:
-    """Evaluate cubic bezier at parameter t in [0, 1]."""
+    """Evaluate a routed curve at parameter ``t`` in ``[0, 1]``."""
+    if curve.waypoints is not None:
+        return _polyline_point_at(curve.waypoints, t)
     p0, p1, p2, p3 = curve.p0, curve.cp1, curve.cp2, curve.p1
     u = 1 - t
     x = u**3 * p0[0] + 3 * u**2 * t * p1[0] + 3 * u * t**2 * p2[0] + t**3 * p3[0]
@@ -686,7 +909,9 @@ def evaluate_bezier(curve: BezierCurve, t: float) -> Tuple[float, float]:
 
 
 def bezier_tangent(curve: BezierCurve, t: float) -> Tuple[float, float]:
-    """Compute tangent vector at parameter t."""
+    """Compute the local tangent vector at parameter ``t``."""
+    if curve.waypoints is not None:
+        return _polyline_tangent_at(curve.waypoints, t)
     p0, p1, p2, p3 = curve.p0, curve.cp1, curve.cp2, curve.p1
     u = 1 - t
     dx = 3 * u**2 * (p1[0] - p0[0]) + 6 * u * t * (p2[0] - p1[0]) + 3 * t**2 * (p3[0] - p2[0])
@@ -709,6 +934,9 @@ def _deflect_around_clusters(
     For each foreign cluster whose bbox the straight-line path would cross,
     push the control points to route around the nearest side of the bbox.
     """
+    if curve.waypoints is not None:
+        return curve
+
     src_clusters = node_cluster_set.get(src_idx, set())
     tgt_clusters = node_cluster_set.get(tgt_idx, set())
     own_clusters = src_clusters | tgt_clusters

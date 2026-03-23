@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Iterable, List, Optional, Sequence
 
 import numpy as np
@@ -125,6 +126,8 @@ def ray_ellipse_intersection(
 def _polygon_vertices(shape: str, half_size: Point) -> np.ndarray:
     """Return polygon vertices for supported polygonal node shapes.
 
+    All vertices are in center-relative coordinates (center at origin).
+
     Parameters
     ----------
     shape : str
@@ -135,14 +138,73 @@ def _polygon_vertices(shape: str, half_size: Point) -> np.ndarray:
     Returns
     -------
     numpy.ndarray
-        Vertices with shape ``[N, 2]``.
+        Vertices with shape ``[N, 2]``, wound counter-clockwise.
     """
-    if shape != "diamond":
-        raise ValueError(f"Unsupported polygon shape: {shape!r}.")
-    return np.array(
-        [[0.0, half_size[1]], [half_size[0], 0.0], [0.0, -half_size[1]], [-half_size[0], 0.0]],
-        dtype=np.float64,
-    )
+    hw = float(half_size[0])
+    hh = float(half_size[1])
+    if shape == "diamond":
+        return np.array(
+            [[0.0, hh], [hw, 0.0], [0.0, -hh], [-hw, 0.0]],
+            dtype=np.float64,
+        )
+    if shape == "triangle":
+        # Upward-pointing triangle: apex at top, base at bottom.
+        return np.array(
+            [[0.0, hh], [hw, -hh], [-hw, -hh]],
+            dtype=np.float64,
+        )
+    if shape == "hexagon":
+        # Regular hexagon inscribed in bounding box.
+        qw = hw * 0.5  # quarter width for hexagon facets
+        return np.array(
+            [[qw, hh], [hw, 0.0], [qw, -hh], [-qw, -hh], [-hw, 0.0], [-qw, hh]],
+            dtype=np.float64,
+        )
+    if shape == "pentagon":
+        # Regular pentagon inscribed in bounding box.
+        angles = [math.pi / 2 + i * 2 * math.pi / 5 for i in range(5)]
+        return np.array(
+            [[hw * math.cos(a), hh * math.sin(a)] for a in angles],
+            dtype=np.float64,
+        )
+    if shape == "octagon":
+        # Clipped-corner rectangle.
+        clip = min(hw, hh) * 0.3
+        return np.array(
+            [
+                [hw - clip, hh],
+                [hw, hh - clip],
+                [hw, -(hh - clip)],
+                [hw - clip, -hh],
+                [-(hw - clip), -hh],
+                [-hw, -(hh - clip)],
+                [-hw, hh - clip],
+                [-(hw - clip), hh],
+            ],
+            dtype=np.float64,
+        )
+    if shape == "parallelogram":
+        skew = hw * 0.25
+        return np.array(
+            [[-hw + skew, hh], [hw + skew, hh], [hw - skew, -hh], [-hw - skew, -hh]],
+            dtype=np.float64,
+        )
+    if shape == "trapezoid":
+        inset = hw * 0.25
+        return np.array(
+            [[-hw + inset, hh], [hw - inset, hh], [hw, -hh], [-hw, -hh]],
+            dtype=np.float64,
+        )
+    if shape == "star":
+        # 5-pointed star: alternating outer and inner vertices.
+        inner_ratio = 0.32
+        verts = []
+        for i in range(10):
+            angle = math.pi / 2 + i * math.pi / 5
+            r = 1.0 if i % 2 == 0 else inner_ratio
+            verts.append([hw * r * math.cos(angle), hh * r * math.sin(angle)])
+        return np.array(verts, dtype=np.float64)
+    raise ValueError(f"Unsupported polygon shape: {shape!r}.")
 
 
 def _ray_segment_intersection(
@@ -178,20 +240,27 @@ def _ray_segment_intersection(
     return t
 
 
-def ray_diamond_intersection(
+def ray_polygon_intersection(
     center: Sequence[float],
     half_size: Sequence[float],
+    shape: str,
     ray_origin: Sequence[float],
     ray_direction: Sequence[float],
 ) -> Point:
-    """Intersect a ray with a diamond node.
+    """Intersect a ray with a polygonal node shape.
+
+    Works for any shape supported by :func:`_polygon_vertices`:
+    diamond, triangle, hexagon, pentagon, octagon, parallelogram,
+    trapezoid, and star.
 
     Parameters
     ----------
     center : Sequence[float]
-        Diamond center.
+        Node center.
     half_size : Sequence[float]
         Half-width and half-height.
+    shape : str
+        Polygon shape name.
     ray_origin : Sequence[float]
         Ray origin.
     ray_direction : Sequence[float]
@@ -205,7 +274,7 @@ def ray_diamond_intersection(
     center_point = as_point(center)
     origin = as_point(ray_origin) - center_point
     direction = as_point(ray_direction)
-    vertices = _polygon_vertices("diamond", as_point(half_size))
+    vertices = _polygon_vertices(shape, as_point(half_size))
     candidates: List[float] = []
     for start, end in zip(vertices, np.vstack([vertices[1:], vertices[:1]])):
         hit = _ray_segment_intersection(origin, direction, start, end)
@@ -215,6 +284,16 @@ def ray_diamond_intersection(
     if t_hit is None:
         return center_point
     return center_point + origin + direction * t_hit
+
+
+def ray_diamond_intersection(
+    center: Sequence[float],
+    half_size: Sequence[float],
+    ray_origin: Sequence[float],
+    ray_direction: Sequence[float],
+) -> Point:
+    """Intersect a ray with a diamond node (backward-compatible wrapper)."""
+    return ray_polygon_intersection(center, half_size, "diamond", ray_origin, ray_direction)
 
 
 def ray_roundrect_intersection(
@@ -333,8 +412,19 @@ def intersect_node_boundary(
         return ray_roundrect_intersection(
             center, half_size, corner_radius, ray_origin, ray_direction
         )
-    if shape in {"ellipse", "circle"}:
+    if shape in {"ellipse", "circle", "double_circle"}:
         return ray_ellipse_intersection(center, half_size, ray_origin, ray_direction)
-    if shape == "diamond":
-        return ray_diamond_intersection(center, half_size, ray_origin, ray_direction)
+    # All polygon-based shapes use the generic polygon intersection.
+    _POLYGON_SHAPES = {
+        "diamond",
+        "triangle",
+        "hexagon",
+        "pentagon",
+        "octagon",
+        "parallelogram",
+        "trapezoid",
+        "star",
+    }
+    if shape in _POLYGON_SHAPES:
+        return ray_polygon_intersection(center, half_size, shape, ray_origin, ray_direction)
     return ray_rect_intersection(center, half_size, ray_origin, ray_direction)

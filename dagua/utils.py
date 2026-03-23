@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
@@ -323,14 +324,17 @@ def _ellipsis_text_to_chars(text: str, max_chars: int) -> str:
         Truncated label text.
     """
     source_lines = text.splitlines() or [text]
-    if max_chars <= 3:
-        return "\n".join("." * max_chars for _ in source_lines)
+    minimum_visible_prefix = 5
     truncated_lines: List[str] = []
     for source_line in source_lines:
         if len(source_line) <= max_chars:
             truncated_lines.append(source_line)
             continue
-        truncated_lines.append(f"{source_line[: max_chars - 3]}...")
+        prefix_length = max(max_chars - 3, minimum_visible_prefix)
+        if len(source_line) <= prefix_length + 3:
+            truncated_lines.append(source_line)
+            continue
+        truncated_lines.append(f"{source_line[:prefix_length]}...")
     return "\n".join(truncated_lines)
 
 
@@ -698,6 +702,48 @@ MIN_NODE_WIDTH = 32.0
 MIN_NODE_HEIGHT = 18.0
 MAX_NODE_ASPECT_RATIO = 6.0
 MAX_LABEL_WIDTH = 200.0
+# Real glyph paths and clip masks need a small margin beyond the ideal
+# mathematical inscribed rectangle, especially for ellipses.
+CURVED_SHAPE_INSCRIBE_FACTOR = 1.5
+MAX_EXPANDED_ELLIPSE_ASPECT_RATIO = 3.5
+HEXAGON_INSCRIBE_WIDTH_FACTOR = 0.866
+STAR_INTERIOR_FACTOR = 3.5
+TAB_INTERIOR_WIDTH_FACTOR = 1.25
+ANGLED_SHAPE_INTERIOR_WIDTH_FACTOR = 1.15
+TRIANGLE_INTERIOR_WIDTH_FACTOR = 2.8
+TRIANGLE_INTERIOR_HEIGHT_FACTOR = 2.4
+PARALLELOGRAM_INTERIOR_WIDTH_FACTOR = 1.6
+TRAPEZOID_INTERIOR_WIDTH_FACTOR = 1.5
+BOX3D_INTERIOR_WIDTH_FACTOR = 1.6
+BOX3D_INTERIOR_HEIGHT_FACTOR = 1.5
+
+
+def _rotated_text_bounds(width: float, height: float, angle_degrees: float) -> Tuple[float, float]:
+    """Return the axis-aligned bounds of a rotated text box.
+
+    Parameters
+    ----------
+    width : float
+        Unrotated text width.
+    height : float
+        Unrotated text height.
+    angle_degrees : float
+        Counter-clockwise rotation angle in degrees.
+
+    Returns
+    -------
+    tuple[float, float]
+        Axis-aligned ``(width, height)`` after rotation.
+    """
+    if angle_degrees == 0.0:
+        return width, height
+
+    angle_rad = math.radians(angle_degrees)
+    cos_a = abs(math.cos(angle_rad))
+    sin_a = abs(math.sin(angle_rad))
+    rotated_w = width * cos_a + height * sin_a
+    rotated_h = width * sin_a + height * cos_a
+    return rotated_w, rotated_h
 
 
 def compute_node_size(
@@ -714,6 +760,7 @@ def compute_node_size(
     overflow_policy: str = "shrink_text",
     min_font_size: float = 5.0,
     label_format: str = "plain",
+    text_rotation: float = 0.0,
 ) -> Tuple[float, float, float]:
     """Compute a node bounding box from its label.
 
@@ -745,6 +792,9 @@ def compute_node_size(
         Minimum font size for the shrink-to-fit policy.
     label_format : str, default="plain"
         Label format, either ``"plain"`` or ``"rich"``.
+    text_rotation : float, default=0.0
+        Counter-clockwise label rotation in degrees. Sizing uses the rotated
+        axis-aligned text bounds so rendered labels stay inside the node.
 
     Returns
     -------
@@ -765,6 +815,7 @@ def compute_node_size(
         overflow_policy,
         min_font_size,
         label_format,
+        text_rotation,
     )
 
 
@@ -783,6 +834,7 @@ def _compute_node_size_cached(
     overflow_policy: str,
     min_font_size: float,
     label_format: str,
+    text_rotation: float,
 ) -> Tuple[float, float, float]:
     """Cached implementation of :func:`compute_node_size`.
 
@@ -814,6 +866,8 @@ def _compute_node_size_cached(
         Minimum font size when shrinking labels.
     label_format : str
         Label format, either ``"plain"`` or ``"rich"``.
+    text_rotation : float
+        Counter-clockwise label rotation in degrees.
 
     Returns
     -------
@@ -833,20 +887,22 @@ def _compute_node_size_cached(
             label_format=label_format,
         )
         if label_format == "rich":
-            return measure_rich_text(
+            measured_w, measured_h = measure_rich_text(
                 prepared_label,
                 font_family,
                 current_font_size,
                 font_weight=font_weight,
                 font_style=font_style,
             )
-        return measure_text(
-            prepared_label,
-            font_family,
-            current_font_size,
-            font_weight,
-            font_style,
-        )
+        else:
+            measured_w, measured_h = measure_text(
+                prepared_label,
+                font_family,
+                current_font_size,
+                font_weight,
+                font_style,
+            )
+        return _rotated_text_bounds(measured_w, measured_h, text_rotation)
 
     if overflow_policy == "shrink_text":
         text_w, text_h = measure_label(font_size)
@@ -856,33 +912,56 @@ def _compute_node_size_cached(
     else:
         text_w, text_h = measure_label(font_size)
 
-    w = text_w + padding[0] * 2
-    h = text_h + padding[1] * 2
+    padded_text_w = text_w + padding[0] * 2
+    padded_text_h = text_h + padding[1] * 2
+    w = padded_text_w
+    h = padded_text_h
 
     w = max(w, MIN_NODE_WIDTH)
     h = max(h, MIN_NODE_HEIGHT)
 
+    if overflow_policy == "expand_node":
+        if shape in ("ellipse", "circle", "double_circle"):
+            # Curved outlines only guarantee the inscribed rectangle, so expand
+            # the axes until that inner rectangle can fully contain the padded text.
+            required_w = padded_text_w * CURVED_SHAPE_INSCRIBE_FACTOR
+            required_h = padded_text_h * CURVED_SHAPE_INSCRIBE_FACTOR
+            w = max(w, required_w)
+            h = max(h, required_h)
+            # Very long labels can turn ellipses into flat "pancakes". Preserve
+            # the text-containing width, but raise the height to keep a readable
+            # silhouette instead of silently changing the node shape.
+            if w / max(h, 1.0) > MAX_EXPANDED_ELLIPSE_ASPECT_RATIO:
+                h = w / MAX_EXPANDED_ELLIPSE_ASPECT_RATIO
+        elif shape == "stadium":
+            # Stadium endcaps consume one full node height of horizontal interior.
+            # Reserve that span in addition to the padded text box.
+            w = max(w, padded_text_w + h)
+
     if shape == "diamond":
-        max_dim = max(w, h) * 1.42
+        max_dim = max(w, h) * 2.0
         # Diamonds lose usable interior width at the left/right corners, so
-        # keep a slightly wider final floor than rectangular nodes.
-        w = max(max_dim * 1.15, MIN_NODE_WIDTH * 1.8)
+        # keep a wider final floor than rectangular nodes.  The inscribed
+        # rectangle of a diamond is only half its bounding box in each axis.
+        w = max(max_dim * 1.3, MIN_NODE_WIDTH * 2.5)
         h = max_dim
     elif shape == "triangle":
-        # Graphviz triangles are wide and flat, so reserve enough width for
-        # labels in the lower body.
+        # Graphviz triangles only have a usable label box in the lower body,
+        # so enlarge both axes before enforcing the characteristic silhouette.
+        w *= TRIANGLE_INTERIOR_WIDTH_FACTOR
+        h *= TRIANGLE_INTERIOR_HEIGHT_FACTOR
         min_ratio = 3.2
         if w < h * min_ratio:
             w = h * min_ratio
     elif shape == "star":
         # Star points consume much of the bounds, so enlarge the square body
         # to keep the label readable in the center.
-        w = max(w, h) * 1.8
+        w = max(w, h) * 2.2
         h = w
     elif shape == "circle":
         r = max(w, h)
         w = h = r
-    elif shape == "ellipse":
+    elif shape == "ellipse" and overflow_policy != "expand_node":
         # Graphviz inscribes the text bbox inside the ellipse, making it sqrt(2)
         # wider. We approximate this with a multiplicative factor that scales
         # down for short labels (where the minimum width already provides adequate
@@ -907,6 +986,26 @@ def _compute_node_size_cached(
         # corners are accounted for.
         if w < h * 1.15:
             w = h * 1.15
+
+    # Non-rectangular outlines only guarantee an inscribed central box, so
+    # reserve extra width for the actual label area after the coarse shape
+    # calibration above has run.
+    if shape == "hexagon":
+        w = max(w, padded_text_w / HEXAGON_INSCRIBE_WIDTH_FACTOR)
+    elif shape == "star":
+        w = max(w, padded_text_w * STAR_INTERIOR_FACTOR)
+        h = max(h, padded_text_h * STAR_INTERIOR_FACTOR)
+    elif shape == "tab":
+        w = max(w, padded_text_w * TAB_INTERIOR_WIDTH_FACTOR)
+    elif shape in ("pentagon", "octagon"):
+        w = max(w, padded_text_w * ANGLED_SHAPE_INTERIOR_WIDTH_FACTOR)
+    elif shape == "parallelogram":
+        w = max(w, padded_text_w * PARALLELOGRAM_INTERIOR_WIDTH_FACTOR)
+    elif shape == "trapezoid":
+        w = max(w, padded_text_w * TRAPEZOID_INTERIOR_WIDTH_FACTOR)
+    elif shape == "box3d":
+        w = max(w, padded_text_w * BOX3D_INTERIOR_WIDTH_FACTOR)
+        h = max(h, padded_text_h * BOX3D_INTERIOR_HEIGHT_FACTOR)
 
     max_ratio = 10.0 if overflow_policy == "expand_node" else MAX_NODE_ASPECT_RATIO
     if w / h > max_ratio:
