@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
+    from dagua.render.crossings import EdgeCrossing
     from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
 
 
@@ -453,6 +454,25 @@ class EdgeView:
         if mask is not None and self._index < mask.shape[0]:
             return bool(mask[self._index].item())
         return False
+
+    @property
+    def crossings(self) -> list["EdgeCrossing"]:
+        """Return cached crossings touching this edge.
+
+        Returns
+        -------
+        list[EdgeCrossing]
+            Crossing records involving this edge. Returns an empty list when
+            the renderer has not computed crossings for the current graph state.
+        """
+        cached = self._graph._cached_crossings
+        if cached is None:
+            return []
+        return [
+            crossing
+            for crossing in cached
+            if crossing.edge_a == self._index or crossing.edge_b == self._index
+        ]
 
     def __repr__(self) -> str:
         """Return a concise edge summary for interactive use."""
