@@ -66,8 +66,12 @@ def _layout_extent(num_nodes: int, node_sizes: Optional[torch.Tensor]) -> float:
     return max(max_size * max(float(max(num_nodes, 1)) ** 0.5, 1.0) * 2.0, 1.0)
 
 
-def _unique_edges(edge_index: torch.Tensor, num_nodes: int) -> list[tuple[int, int]]:
-    """Convert an edge tensor into unique undirected edges.
+def _unique_edges(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> tuple[list[tuple[int, int]], torch.Tensor]:
+    """Convert an edge tensor into unique undirected edges and weights.
 
     Parameters
     ----------
@@ -75,24 +79,42 @@ def _unique_edges(edge_index: torch.Tensor, num_nodes: int) -> list[tuple[int, i
         Edge list with shape ``[2, E]``.
     num_nodes : int
         Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
 
     Returns
     -------
-    list[tuple[int, int]]
-        Unique undirected edges.
+    tuple[list[tuple[int, int]], torch.Tensor]
+        Unique undirected edges and their aggregated weights with shape
+        ``[E_unique]``. Parallel or mirrored edges are summed so the collapsed
+        undirected energy term preserves total attraction strength.
     """
     if edge_index.ndim != 2 or edge_index.shape[0] != 2:
         raise ValueError("edge_index must have shape [2, E].")
 
-    seen: set[tuple[int, int]] = set()
+    seen: dict[tuple[int, int], float] = {}
     edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
-    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+    if edge_weights is None:
+        weights_cpu = torch.ones((edge_index.shape[1],), dtype=torch.float32)
+    else:
+        weights_cpu = edge_weights.detach().to(device="cpu", dtype=torch.float32)
+
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
         if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
             raise ValueError("edge_index contains a node index outside [0, num_nodes).")
         if source == target:
             continue
-        seen.add((min(source, target), max(source, target)))
-    return sorted(seen)
+        pair = (min(source, target), max(source, target))
+        seen[pair] = seen.get(pair, 0.0) + float(weights_cpu[edge_id].item())
+
+    ordered_edges = sorted(seen)
+    ordered_weights = torch.tensor(
+        [seen[edge] for edge in ordered_edges],
+        dtype=torch.float32,
+    )
+    return ordered_edges, ordered_weights
 
 
 def _initialize_positions(
@@ -212,7 +234,12 @@ def _scale_denominator(numerator_count: int) -> float:
     return float(max(numerator_count, 1))
 
 
-def _energy(positions: torch.Tensor, edges: list[tuple[int, int]], extent: float) -> torch.Tensor:
+def _energy(
+    positions: torch.Tensor,
+    edges: list[tuple[int, int]],
+    extent: float,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """Evaluate the Davidson-Harel layout energy.
 
     Parameters
@@ -223,6 +250,8 @@ def _energy(positions: torch.Tensor, edges: list[tuple[int, int]], extent: float
         Unique undirected edges.
     extent : float
         Half-width of the drawing box.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights aligned with ``edges`` and shape ``[E]``.
 
     Returns
     -------
@@ -257,9 +286,15 @@ def _energy(positions: torch.Tensor, edges: list[tuple[int, int]], extent: float
 
     edge_length = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
     if edges:
+        edge_weight_tensor = (
+            torch.ones((len(edges),), dtype=positions.dtype, device=positions.device)
+            if edge_weights is None
+            else edge_weights.to(device=positions.device, dtype=positions.dtype)
+        )
         edge_lengths = [
             torch.linalg.norm(positions[source] - positions[target]).square()
-            for source, target in edges
+            * edge_weight_tensor[index]
+            for index, (source, target) in enumerate(edges)
         ]
         edge_length = torch.stack(edge_lengths).sum()
 
@@ -307,6 +342,7 @@ def layout_davidson_harel(
     node_sizes: Optional[torch.Tensor] = None,
     rounds: int = 100,
     seed: int = 42,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with Davidson-Harel simulated annealing.
 
@@ -326,6 +362,10 @@ def layout_davidson_harel(
         Number of annealing rounds.
     seed : int, default=42
         Random seed.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``. The edge-length energy term
+        is scaled by these weights after collapsing mirrored edges into a
+        unique undirected edge set.
 
     Returns
     -------
@@ -343,6 +383,11 @@ def layout_davidson_harel(
         raise ValueError("num_nodes must be non-negative.")
     if rounds < 0:
         raise ValueError("rounds must be non-negative.")
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} does not match "
+            f"edge count {edge_index.shape[1]}"
+        )
 
     device = _layout_device(edge_index, node_sizes)
     if num_nodes == 0:
@@ -352,8 +397,11 @@ def layout_davidson_harel(
 
     extent = _layout_extent(num_nodes, node_sizes)
     positions = _initialize_positions(num_nodes, extent, device, seed)
-    edges = _unique_edges(edge_index, num_nodes)
-    current_energy = _energy(positions, edges, extent)
+    edges, unique_edge_weights = _unique_edges(edge_index, num_nodes, edge_weights=edge_weights)
+    if edge_weights is None:
+        current_energy = _energy(positions, edges, extent)
+    else:
+        current_energy = _energy(positions, edges, extent, unique_edge_weights)
     initial_temperature = max(0.1 * float(current_energy.item()), _MIN_DISTANCE)
     temperature = initial_temperature
 
@@ -368,7 +416,10 @@ def layout_davidson_harel(
             delta = ((torch.rand((2,), generator=generator) * 2.0) - 1.0).to(device) * (move_scale)
             candidate = positions.clone()
             candidate[node] = (candidate[node] + delta).clamp(min=-extent, max=extent)
-            candidate_energy = _energy(candidate, edges, extent)
+            if edge_weights is None:
+                candidate_energy = _energy(candidate, edges, extent)
+            else:
+                candidate_energy = _energy(candidate, edges, extent, unique_edge_weights)
             delta_energy = candidate_energy - current_energy
             if delta_energy <= 0:
                 positions = candidate

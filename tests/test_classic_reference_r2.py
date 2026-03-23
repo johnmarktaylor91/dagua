@@ -1309,3 +1309,78 @@ def test_fmmm_produces_reasonable_layout(
     assert fmmm_stress <= min(fr_stress, kk_stress) * 1.3, graph_name
     assert fmmm_crossings <= max(2 * fr_crossings, 2), graph_name
     assert fmmm_edge_cv <= baseline_edge_cv + 0.1, graph_name
+
+
+def test_layout_gem_edge_weights_change_the_layout() -> None:
+    """GEM should respond to weighted attraction changes."""
+    edge_index = torch.tensor([[0, 1, 2, 1], [1, 2, 3, 4]], dtype=torch.long)
+    uniform_weights = torch.ones(edge_index.shape[1], dtype=torch.float32)
+    weighted = uniform_weights.clone()
+    weighted[1] = 8.0
+
+    uniform_pos = layout_gem(edge_index, 5, max_iters=120, seed=7, edge_weights=uniform_weights)
+    weighted_pos = layout_gem(edge_index, 5, max_iters=120, seed=7, edge_weights=weighted)
+
+    assert not torch.allclose(uniform_pos, weighted_pos)
+
+
+def test_layout_gem_rejects_mismatched_edge_weights() -> None:
+    """GEM should reject edge-weight tensors that do not match ``E``."""
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="edge_weights length"):
+        layout_gem(edge_index, 4, edge_weights=torch.ones(2, dtype=torch.float32))
+
+
+def test_layout_davidson_harel_edge_weights_change_the_layout() -> None:
+    """Davidson-Harel should weight the edge-length energy term."""
+    edge_index = torch.tensor([[0, 1, 2, 1], [1, 2, 3, 4]], dtype=torch.long)
+    uniform_weights = torch.ones(edge_index.shape[1], dtype=torch.float32)
+    weighted = uniform_weights.clone()
+    weighted[1] = 8.0
+
+    uniform_pos = layout_davidson_harel(
+        edge_index,
+        5,
+        rounds=40,
+        seed=13,
+        edge_weights=uniform_weights,
+    )
+    weighted_pos = layout_davidson_harel(
+        edge_index,
+        5,
+        rounds=40,
+        seed=13,
+        edge_weights=weighted,
+    )
+
+    assert not torch.allclose(uniform_pos, weighted_pos)
+
+
+def test_layout_davidson_harel_rejects_mismatched_edge_weights() -> None:
+    """Davidson-Harel should reject edge-weight tensors that do not match ``E``."""
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="edge_weights length"):
+        layout_davidson_harel(edge_index, 4, edge_weights=torch.ones(2, dtype=torch.float32))
+
+
+def test_layout_fmmm_edge_weights_change_the_layout() -> None:
+    """FM^3 should scale its spring forces when weights are supplied."""
+    edge_index = torch.tensor([[0, 1, 2, 1], [1, 2, 3, 4]], dtype=torch.long)
+    uniform_weights = torch.ones(edge_index.shape[1], dtype=torch.float32)
+    weighted = uniform_weights.clone()
+    weighted[1] = 8.0
+
+    uniform_pos = layout_fmmm(edge_index, 5, steps=80, seed=5, edge_weights=uniform_weights)
+    weighted_pos = layout_fmmm(edge_index, 5, steps=80, seed=5, edge_weights=weighted)
+
+    assert not torch.allclose(uniform_pos, weighted_pos)
+
+
+def test_layout_fmmm_rejects_mismatched_edge_weights() -> None:
+    """FM^3 should reject edge-weight tensors that do not match ``E``."""
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="edge_weights length"):
+        layout_fmmm(edge_index, 4, edge_weights=torch.ones(2, dtype=torch.float32))

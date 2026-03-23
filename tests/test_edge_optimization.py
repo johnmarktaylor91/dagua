@@ -1,10 +1,14 @@
 """Smoke tests for edge optimization, label placement, and new metrics."""
 
+import math
+
+import numpy as np
 import pytest
 import torch
 
+import dagua.utils as dagua_utils
 from dagua.config import LayoutConfig
-from dagua.edges import BezierCurve, place_edge_labels, route_edges
+from dagua.edges import BezierCurve, _compute_curve, evaluate_bezier, place_edge_labels, route_edges
 from dagua.graph import DaguaGraph
 from dagua.styles import EdgeStyle, NodeStyle
 
@@ -106,6 +110,100 @@ def test_expand_node_policy():
 
 
 @pytest.mark.smoke
+def test_expand_node_ellipse_aspect_ratio_capped() -> None:
+    """expand_node should keep ellipses below a reasonable max aspect ratio."""
+    from dagua.utils import compute_node_size
+
+    label = "BatchNormalization2d(128, eps=1e-05, momentum=0.1, affine=True)"
+    width, height, _ = compute_node_size(
+        label,
+        shape="ellipse",
+        overflow_policy="expand_node",
+    )
+
+    assert width / height <= 4.0
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("shape", ["ellipse", "circle", "double_circle"])
+def test_expand_node_curved_shapes_contain_padded_text(shape: str) -> None:
+    """expand_node should enlarge curved shapes to fit the full padded label box."""
+    from dagua.utils import compute_node_size, measure_text
+
+    label = "BatchNormalization2d(128, eps=1e-05, momentum=0.1)"
+    padding = (11.0, 9.0)
+    text_w, text_h = measure_text(label, "", 8.5, "regular", "normal")
+    required_w = (text_w + padding[0] * 2) * 1.5
+    required_h = (text_h + padding[1] * 2) * 1.5
+
+    width, height, _ = compute_node_size(
+        label,
+        padding=padding,
+        shape=shape,
+        overflow_policy="expand_node",
+    )
+
+    assert width >= required_w
+    assert height >= required_h
+
+
+@pytest.mark.smoke
+def test_expand_node_stadium_reserves_endcaps() -> None:
+    """expand_node should reserve horizontal room for stadium endcaps."""
+    from dagua.utils import compute_node_size, measure_text
+
+    label = "BatchNormalization2d(128, eps=1e-05, momentum=0.1)"
+    padding = (11.0, 9.0)
+    text_w, _ = measure_text(label, "", 8.5, "regular", "normal")
+    padded_text_w = text_w + padding[0] * 2
+
+    width, height, _ = compute_node_size(
+        label,
+        padding=padding,
+        shape="stadium",
+        overflow_policy="expand_node",
+    )
+
+    assert width >= padded_text_w + height
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("angle", [45.0, 90.0])
+def test_compute_node_sizes_accounts_for_text_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+    angle: float,
+) -> None:
+    """Graph node sizing should reserve the rotated label bbox from style.text_rotation."""
+
+    monkeypatch.setattr(dagua_utils, "measure_text", lambda *args, **kwargs: (80.0, 20.0))
+    dagua_utils._compute_node_size_cached.cache_clear()
+
+    try:
+        graph = DaguaGraph()
+        style = NodeStyle(shape="rect", text_rotation=angle)
+        style.padding = (13.0, 7.0)
+        graph.add_node(
+            "rotated",
+            label="rotation-aware",
+            style=style,
+        )
+        graph.compute_node_sizes()
+    finally:
+        dagua_utils._compute_node_size_cached.cache_clear()
+
+    assert graph.node_sizes is not None
+    width, height = graph.node_sizes[0].tolist()
+    angle_rad = math.radians(angle)
+    cos_a = abs(math.cos(angle_rad))
+    sin_a = abs(math.sin(angle_rad))
+    expected_width = max((80.0 * cos_a) + (20.0 * sin_a) + 26.0, 32.0)
+    expected_height = max((80.0 * sin_a) + (20.0 * cos_a) + 14.0, 18.0)
+
+    assert width == pytest.approx(expected_width)
+    assert height == pytest.approx(expected_height)
+
+
+@pytest.mark.smoke
 def test_node_font_sizes_tensor(simple_graph):
     """compute_node_sizes populates node_font_sizes tensor."""
     assert simple_graph.node_font_sizes is not None
@@ -128,6 +226,44 @@ def test_curvature_zero_gives_straight(simple_graph, simple_positions):
     for c in curves:
         # Control points should equal endpoints (degenerate bezier)
         assert c.cp1 == c.p0 or (abs(c.cp1[0] - c.p0[0]) < 1e-6 and abs(c.cp1[1] - c.p0[1]) < 1e-6)
+
+
+@pytest.mark.smoke
+def test_ortho_routing_uses_manhattan_waypoints() -> None:
+    """Orthogonal routing should retain explicit right-angle waypoints."""
+
+    curve = _compute_curve(0.0, 0.0, 100.0, -100.0, "TB", "ortho", 0.4)
+
+    assert curve.waypoints is not None
+    assert np.allclose(
+        np.asarray(curve.waypoints, dtype=float),
+        np.asarray(((0.0, 0.0), (0.0, -50.0), (100.0, -50.0), (100.0, -100.0)), dtype=float),
+    )
+    assert evaluate_bezier(curve, 0.5) == pytest.approx((50.0, -50.0))
+
+
+@pytest.mark.smoke
+def test_taxi_routing_uses_staircase_waypoints() -> None:
+    """Taxi routing should produce a stepped middle corridor instead of a cubic bow."""
+
+    curve = _compute_curve(0.0, 0.0, 100.0, -100.0, "TB", "taxi", 0.4)
+
+    assert curve.waypoints is not None
+    assert np.allclose(
+        np.asarray(curve.waypoints, dtype=float),
+        np.asarray(
+            (
+                (0.0, 0.0),
+                (0.0, -35.0),
+                (50.0, -35.0),
+                (50.0, -65.0),
+                (100.0, -65.0),
+                (100.0, -100.0),
+            ),
+            dtype=float,
+        ),
+    )
+    assert evaluate_bezier(curve, 0.5) == pytest.approx((50.0, -50.0))
 
 
 @pytest.mark.smoke
