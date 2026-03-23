@@ -44,6 +44,8 @@ DEFAULT_COMPARISON_STROKE = "#222222"
 TEXT_COLOR = "#17212B"
 MUTED_TEXT_COLOR = "#4A5868"
 LABEL_BAR = "#F4F6F8"
+LABEL_BAR_DARK = "#1A2332"
+LABEL_TEXT_DARK = "#E8ECF0"
 NODE_FILL = "#DCEBFA"
 NODE_STROKE = "#4C77A3"
 EDGE_COLOR = "#5F6C7B"
@@ -1917,6 +1919,7 @@ def _draw_header(
     title: str,
     subtitle: str,
     right_label: Optional[str] = None,
+    dark: bool = False,
 ) -> None:
     """Draw a simple audit header on an image.
 
@@ -1930,6 +1933,8 @@ def _draw_header(
         Secondary subtitle.
     right_label : str | None, optional
         Optional right-aligned label.
+    dark : bool, default=False
+        Whether to use the dark-background header palette.
 
     Returns
     -------
@@ -1937,22 +1942,29 @@ def _draw_header(
         The image is annotated in place.
     """
 
+    bar_color = LABEL_BAR_DARK if dark else LABEL_BAR
+    title_color = LABEL_TEXT_DARK if dark else TEXT_COLOR
+    secondary_color = LABEL_TEXT_DARK if dark else MUTED_TEXT_COLOR
+
     draw = ImageDraw.Draw(image)
-    draw.rectangle((0, 0, image.width, HEADER_HEIGHT), fill=LABEL_BAR)
+    draw.rectangle((0, 0, image.width, HEADER_HEIGHT), fill=bar_color)
     draw.line((0, HEADER_HEIGHT, image.width, HEADER_HEIGHT), fill="#D7DDE3", width=2)
     title_font = _load_font(34, bold=True)
     subtitle_font = _load_font(22, bold=False)
-    draw.text((42, 18), title, fill=TEXT_COLOR, font=title_font)
-    draw.text((42, 54), subtitle, fill=MUTED_TEXT_COLOR, font=subtitle_font)
+    draw.text((42, 18), title, fill=title_color, font=title_font)
+    draw.text((42, 54), subtitle, fill=secondary_color, font=subtitle_font)
     if right_label:
         right_font = _load_font(20, bold=True)
         width = draw.textbbox((0, 0), right_label, font=right_font)[2]
         draw.text(
-            (image.width - width - 42, 30), right_label, fill=MUTED_TEXT_COLOR, font=right_font
+            (image.width - width - 42, 30),
+            right_label,
+            fill=secondary_color,
+            font=right_font,
         )
 
 
-def _draw_strip_header(image: Image.Image, title: str) -> None:
+def _draw_strip_header(image: Image.Image, title: str, dark: bool = False) -> None:
     """Draw a compact header for a strip card.
 
     Parameters
@@ -1961,6 +1973,8 @@ def _draw_strip_header(image: Image.Image, title: str) -> None:
         Strip card image to annotate in place.
     title : str
         Primary strip title.
+    dark : bool, default=False
+        Whether to use the dark-background header palette.
 
     Returns
     -------
@@ -1968,15 +1982,44 @@ def _draw_strip_header(image: Image.Image, title: str) -> None:
         The image is annotated in place.
     """
 
+    bar_color = LABEL_BAR_DARK if dark else LABEL_BAR
+    title_color = LABEL_TEXT_DARK if dark else TEXT_COLOR
+
     draw = ImageDraw.Draw(image)
-    draw.rectangle((0, 0, image.width, STRIP_HEADER_HEIGHT), fill=LABEL_BAR)
+    draw.rectangle((0, 0, image.width, STRIP_HEADER_HEIGHT), fill=bar_color)
     draw.line(
         (0, STRIP_HEADER_HEIGHT, image.width, STRIP_HEADER_HEIGHT),
         fill="#D7DDE3",
         width=2,
     )
     title_font = _load_font(26, bold=True)
-    draw.text((28, 14), title, fill=TEXT_COLOR, font=title_font)
+    draw.text((28, 14), title, fill=title_color, font=title_font)
+
+
+def _is_dark_background(params: Mapping[str, object]) -> bool:
+    """Return whether the configured graph background is visually dark.
+
+    Parameters
+    ----------
+    params : Mapping[str, object]
+        Reference or combo parameter mapping.
+
+    Returns
+    -------
+    bool
+        ``True`` when the configured background luminance is below the audit threshold.
+    """
+    graph_params = params.get("graph", {})
+    if not isinstance(graph_params, Mapping):
+        return False
+    background = graph_params.get("background_color", "#FAFAFA")
+    if not isinstance(background, str) or not background.startswith("#") or len(background) != 7:
+        return False
+    red = int(background[1:3], 16)
+    green = int(background[3:5], 16)
+    blue = int(background[5:7], 16)
+    luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255.0
+    return luminance < 0.45
 
 
 def _render_reference_canvas(
@@ -2127,6 +2170,7 @@ def _render_reference_card(item: ReferenceCardItem, output_root: Path) -> None:
         card,
         title=f"{item.spec.feature}: {item.value.label}",
         subtitle=f"fixture: {item.spec.fixture}",
+        dark=_is_dark_background(item.value.params),
     )
     annotation = _reference_card_annotation(item)
     if annotation is not None:
@@ -2175,7 +2219,11 @@ def _render_strip_card(item: StripCardItem, output_root: Path) -> None:
     destination = output_root / item.relative_path
     destination.parent.mkdir(parents=True, exist_ok=True)
     strip = Image.new("RGB", STRIP_CARD_SIZE, WHITE)
-    _draw_strip_header(strip, title=f"{item.spec.feature}: strip")
+    _draw_strip_header(
+        strip,
+        title=f"{item.spec.feature}: strip",
+        dark=any(_is_dark_background(member.value.params) for member in item.members),
+    )
 
     body_height = STRIP_CARD_SIZE[1] - STRIP_HEADER_HEIGHT
     label_font = _load_font(24, bold=True)
@@ -2262,6 +2310,7 @@ def _render_comparison_card(item: ReferenceCardItem, output_root: Path) -> None:
         canvas,
         title=f"{item.spec.feature}: {item.value.label}",
         subtitle="dagua | Graphviz dot",
+        dark=_is_dark_background(item.value.params),
     )
     draw = ImageDraw.Draw(canvas)
     draw.line((PANEL_SIZE[0], 0, PANEL_SIZE[0], COMPARISON_SIZE[1]), fill="#D7DDE3", width=2)
@@ -2747,6 +2796,7 @@ def _render_combo_card(item: ComboCardItem, output_root: Path) -> None:
         title=item.spec.title,
         subtitle=f"fixture: {fixture} | features: {features}",
         right_label=f"combo {item.spec.combo_kind}",
+        dark=_is_dark_background(params),
     )
     _save_image(card, destination)
     sidecar = {
@@ -2788,6 +2838,9 @@ def _render_evil_card(item: EvilCardItem, output_root: Path) -> None:
         title=item.spec.title,
         subtitle="stress test",
         right_label="evil",
+        dark=_is_dark_background(
+            {"graph": {"background_color": _graph_background_color(item.spec.graph)}}
+        ),
     )
     _save_image(card, destination)
     sidecar = {
@@ -2825,6 +2878,7 @@ def _compose_board(
     image_paths: Sequence[Path],
     output_path: Path,
     title: str,
+    dark: bool = False,
 ) -> None:
     """Compose a 2x2 navigation board from up to four card images.
 
@@ -2836,6 +2890,8 @@ def _compose_board(
         Final board image path.
     title : str
         Board title.
+    dark : bool, default=False
+        Whether to use the dark-background header palette.
 
     Returns
     -------
@@ -2856,7 +2912,7 @@ def _compose_board(
         x_offset = 0 if slot_index % 2 == 0 else BOARD_CELL_SIZE[0]
         y_offset = BOARD_GRID_TOP + (0 if slot_index < 2 else BOARD_CELL_SIZE[1])
         canvas.paste(tile, (x_offset, y_offset))
-    _draw_header(canvas, title=title, subtitle="2x2 board", right_label=None)
+    _draw_header(canvas, title=title, subtitle="2x2 board", right_label=None, dark=dark)
     _save_image(canvas, output_path)
 
 
