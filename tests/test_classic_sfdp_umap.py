@@ -116,6 +116,49 @@ def test_layout_sfdp_connected_nodes_are_closer_than_average_pair() -> None:
     assert connected.mean() < _pairwise_distances(pos).mean()
 
 
+def test_layout_sfdp_edge_weights_pull_heavier_edges_closer() -> None:
+    """SFDP should tighten edges with larger spring weights."""
+    edge_index, num_nodes = _path_graph(num_nodes=5)
+    uniform_weights = torch.ones(edge_index.shape[1], dtype=torch.float32)
+    weighted = uniform_weights.clone()
+    weighted[1] = 8.0
+
+    uniform_pos = layout_sfdp(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        steps=70,
+        seed=9,
+        edge_weights=uniform_weights,
+    )
+    weighted_pos = layout_sfdp(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        steps=70,
+        seed=9,
+        edge_weights=weighted,
+    )
+
+    uniform_distance = torch.linalg.vector_norm(uniform_pos[1] - uniform_pos[2]).item()
+    weighted_distance = torch.linalg.vector_norm(weighted_pos[1] - weighted_pos[2]).item()
+    assert weighted_distance < uniform_distance
+
+
+def test_layout_sfdp_rejects_mismatched_edge_weights() -> None:
+    """SFDP should reject edge-weight tensors that do not match ``E``."""
+    edge_index, num_nodes = _path_graph(num_nodes=4)
+
+    try:
+        layout_sfdp(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            edge_weights=torch.ones(1, dtype=torch.float32),
+        )
+    except ValueError as exc:
+        assert "edge_weights length" in str(exc)
+    else:
+        raise AssertionError("layout_sfdp accepted mismatched edge_weights")
+
+
 def test_layout_umap_returns_finite_positions_with_expected_shape() -> None:
     """Graph UMAP returns a finite ``[N, 2]`` position tensor."""
     edge_index, num_nodes = _cluster_bridge_graph()
@@ -179,3 +222,50 @@ def test_layout_umap_connected_nodes_are_closer_than_average_pair() -> None:
     connected = torch.linalg.vector_norm(pos[edge_index[1]] - pos[edge_index[0]], dim=1)
 
     assert connected.mean() < _pairwise_distances(pos).mean()
+
+
+def test_layout_umap_edge_weights_shorten_heavier_edges() -> None:
+    """UMAP should treat larger edge weights as stronger local connectivity."""
+    edge_index, num_nodes = _path_graph(num_nodes=5)
+    uniform_weights = torch.ones(edge_index.shape[1], dtype=torch.float32)
+    weighted = uniform_weights.clone()
+    weighted[1] = 8.0
+
+    uniform_pos = layout_umap(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        n_neighbors=3,
+        n_epochs=100,
+        seed=21,
+        edge_weights=uniform_weights,
+    )
+    weighted_pos = layout_umap(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        n_neighbors=3,
+        n_epochs=100,
+        seed=21,
+        edge_weights=weighted,
+    )
+
+    uniform_distance = torch.linalg.vector_norm(uniform_pos[1] - uniform_pos[2]).item()
+    weighted_distance = torch.linalg.vector_norm(weighted_pos[1] - weighted_pos[2]).item()
+    assert weighted_distance < uniform_distance
+
+
+def test_layout_umap_rejects_mismatched_edge_weights() -> None:
+    """UMAP should reject edge-weight tensors that do not match ``E``."""
+    edge_index, num_nodes = _path_graph(num_nodes=4)
+
+    try:
+        layout_umap(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            n_neighbors=2,
+            n_epochs=10,
+            edge_weights=torch.ones(1, dtype=torch.float32),
+        )
+    except ValueError as exc:
+        assert "edge_weights length" in str(exc)
+    else:
+        raise AssertionError("layout_umap accepted mismatched edge_weights")

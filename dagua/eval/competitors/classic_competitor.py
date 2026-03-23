@@ -322,6 +322,184 @@ class VariantCompetitor(CompetitorBase):
         return self._base.available()
 
 
+class ChainCompetitor(CompetitorBase):
+    """Run two competitor layouts sequentially with a warm-start handoff.
+
+    The first competitor produces an initial placement. That placement is then
+    forwarded to the second competitor as its ``pos`` override so the second
+    pass refines rather than reinitializes.
+    """
+
+    def __init__(
+        self,
+        first_competitor: CompetitorBase,
+        second_competitor: CompetitorBase,
+        name: str,
+        first_params: dict[str, Any] | None = None,
+        second_params: dict[str, Any] | None = None,
+    ) -> None:
+        """Initialize the chained competitor.
+
+        Parameters
+        ----------
+        first_competitor : CompetitorBase
+            Competitor used for the warm-start placement.
+        second_competitor : CompetitorBase
+            Competitor used for the refinement pass.
+        name : str
+            Registered competitor name for the chained adapter.
+        first_params : dict[str, Any] | None, default=None
+            Fixed variant-style overrides for the first pass.
+        second_params : dict[str, Any] | None, default=None
+            Fixed variant-style overrides for the second pass.
+        """
+        self._first = first_competitor
+        self._second = second_competitor
+        self.name = name
+        self.max_nodes = min(self._first.max_nodes, self._second.max_nodes)
+        self.supports_clusters = self._first.supports_clusters and self._second.supports_clusters
+        self._first_params = {} if first_params is None else dict(first_params)
+        self._second_params = {} if second_params is None else dict(second_params)
+
+    def available(self) -> bool:
+        """Return whether both chained competitors are available.
+
+        Returns
+        -------
+        bool
+            ``True`` when both passes can run in the current environment.
+        """
+        return self._first.available() and self._second.available()
+
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run both chained layout passes.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime budget shared across both passes.
+        seed : int | None, default=None
+            Benchmark seed forwarded to both passes.
+
+        Returns
+        -------
+        CompetitorResult
+            Final second-pass result, or an error payload if either pass fails.
+        """
+        return self._layout_chain(
+            graph=graph,
+            timeout=timeout,
+            seed=seed,
+            first_params=self._first_params,
+            second_params=self._second_params,
+        )
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
+    ) -> CompetitorResult:
+        """Run the chain with extra second-pass parameter overrides.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime budget shared across both passes.
+        seed : int | None, default=None
+            Benchmark seed forwarded to both passes.
+        variant_params : Mapping[str, Any] | None, default=None
+            Additional overrides merged onto the second-pass parameters.
+
+        Returns
+        -------
+        CompetitorResult
+            Final second-pass result, or an error payload if either pass fails.
+        """
+        second_params = dict(self._second_params)
+        if variant_params is not None:
+            second_params.update(dict(variant_params))
+        return self._layout_chain(
+            graph=graph,
+            timeout=timeout,
+            seed=seed,
+            first_params=self._first_params,
+            second_params=second_params,
+        )
+
+    def _layout_chain(
+        self,
+        graph: DaguaGraph,
+        timeout: float,
+        seed: Optional[int],
+        first_params: Mapping[str, Any],
+        second_params: Mapping[str, Any],
+    ) -> CompetitorResult:
+        """Execute the warm-start chain.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float
+            Maximum runtime budget shared across both passes.
+        seed : int | None
+            Benchmark seed forwarded to both passes.
+        first_params : Mapping[str, Any]
+            Resolved first-pass parameters.
+        second_params : Mapping[str, Any]
+            Resolved second-pass parameters before warm-start injection.
+
+        Returns
+        -------
+        CompetitorResult
+            Final chained layout result.
+        """
+        start = time.perf_counter()
+        result1 = self._first.layout_with_variant(
+            graph,
+            timeout=timeout / 2.0,
+            seed=seed,
+            variant_params=first_params,
+        )
+        if result1.pos is None:
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=time.perf_counter() - start,
+                error=f"first pass failed: {result1.error}",
+            )
+
+        refined_params = dict(second_params)
+        refined_params["pos"] = result1.pos
+        remaining_timeout = max(10.0, timeout - (time.perf_counter() - start))
+        result2 = self._second.layout_with_variant(
+            graph,
+            timeout=remaining_timeout,
+            seed=seed,
+            variant_params=refined_params,
+        )
+        elapsed = time.perf_counter() - start
+        if result2.pos is None:
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=elapsed,
+                error=f"second pass failed: {result2.error}",
+            )
+        return CompetitorResult(name=self.name, pos=result2.pos, runtime_seconds=elapsed)
+
+
 @register
 class ClassicFR(_ClassicBase):
     """Competitor wrapper for the classic Fruchterman-Reingold reimplementation."""
@@ -430,6 +608,114 @@ class ClassicKK(_ClassicBase):
                 runtime_seconds=elapsed,
                 error=str(exc),
             )
+
+
+@register
+class ClassicFrKk(ChainCompetitor):
+    """FR warm-start followed by KK refinement."""
+
+    variant_param_names = frozenset({"first_steps", "second_steps"})
+
+    def __init__(self) -> None:
+        """Initialize the FR-to-KK warm-start chain."""
+        super().__init__(
+            first_competitor=ClassicFR(),
+            second_competitor=ClassicKK(),
+            name="classic_fr_kk",
+            first_params={"steps": 50},
+            second_params={"steps": 300},
+        )
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
+    ) -> CompetitorResult:
+        """Run the FR-to-KK chain with step-count overrides.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime budget shared across both passes.
+        seed : int | None, default=None
+            Benchmark seed forwarded to both passes.
+        variant_params : Mapping[str, Any] | None, default=None
+            Optional ``first_steps`` and ``second_steps`` overrides.
+
+        Returns
+        -------
+        CompetitorResult
+            Final chained layout result.
+        """
+        params = {} if variant_params is None else dict(variant_params)
+        first_steps = int(params.pop("first_steps", self._first_params.get("steps", 50)))
+        second_steps = int(params.pop("second_steps", self._second_params.get("steps", 300)))
+        second_params = {"steps": second_steps, **params}
+        return self._layout_chain(
+            graph=graph,
+            timeout=timeout,
+            seed=seed,
+            first_params={"steps": first_steps},
+            second_params=second_params,
+        )
+
+
+@register
+class ClassicKkFr(ChainCompetitor):
+    """KK warm-start followed by FR refinement."""
+
+    variant_param_names = frozenset({"first_steps", "second_steps"})
+
+    def __init__(self) -> None:
+        """Initialize the KK-to-FR warm-start chain."""
+        super().__init__(
+            first_competitor=ClassicKK(),
+            second_competitor=ClassicFR(),
+            name="classic_kk_fr",
+            first_params={"steps": 300},
+            second_params={"steps": 50},
+        )
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
+    ) -> CompetitorResult:
+        """Run the KK-to-FR chain with step-count overrides.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Maximum runtime budget shared across both passes.
+        seed : int | None, default=None
+            Benchmark seed forwarded to both passes.
+        variant_params : Mapping[str, Any] | None, default=None
+            Optional ``first_steps`` and ``second_steps`` overrides.
+
+        Returns
+        -------
+        CompetitorResult
+            Final chained layout result.
+        """
+        params = {} if variant_params is None else dict(variant_params)
+        first_steps = int(params.pop("first_steps", self._first_params.get("steps", 300)))
+        second_steps = int(params.pop("second_steps", self._second_params.get("steps", 50)))
+        second_params = {"steps": second_steps, **params}
+        return self._layout_chain(
+            graph=graph,
+            timeout=timeout,
+            seed=seed,
+            first_params={"steps": first_steps},
+            second_params=second_params,
+        )
 
 
 @register

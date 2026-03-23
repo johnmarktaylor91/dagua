@@ -64,6 +64,127 @@ def _compat_reduce_lr_on_plateau() -> Any:
         lr_scheduler.ReduceLROnPlateau = reduce_lr_cls
 
 
+@contextmanager
+def _compat_criteria_patches() -> Any:
+    """Patch upstream GD2 criteria functions for modern NetworkX and PyTorch.
+
+    Fixes two classes of bugs in the reference ``criteria.py``:
+
+    1. ``ideal_edge_length`` calls ``random.sample(G.edges, sampleSize)`` but
+       modern NetworkX returns an EdgeView which ``random.sample`` rejects
+       (requires a sequence).
+    2. ``stress`` (and ``ideal_edge_length``) use
+       ``torch.tensor([D[i,j] for ...])`` to build tensors from lists of 0-d
+       tensors.  This breaks when TorchLens decorates torch functions (the
+       wrapped ``__len__`` path rejects 0-d tensors).  Fixed by using
+       ``torch.stack`` / ``.item()`` instead.
+
+    Yields
+    ------
+    Any
+        Context manager that patches and restores both criteria functions.
+    """
+    import importlib
+    import random as _random
+
+    import numpy as _np
+
+    repo_str = str(_SGD2_REPO)
+    if repo_str not in sys.path:
+        sys.path.insert(0, repo_str)
+
+    criteria = importlib.import_module("criteria")
+    _orig_ideal_edge_length = criteria.ideal_edge_length
+    _orig_stress = criteria.stress
+
+    # -- patched ideal_edge_length -----------------------------------------
+
+    def _patched_ideal_edge_length(
+        pos: Any,
+        G: Any,
+        k2i: Any,
+        targetLengths: Any = None,
+        sampleSize: Any = None,
+        sample: Any = None,
+        reduce: str = "mean",
+    ) -> Any:
+        """ideal_edge_length with EdgeView and 0-d tensor fixes."""
+        import torch as _torch
+
+        if targetLengths is None:
+            targetLengths = {e: 1 for e in G.edges}
+
+        if sample is not None:
+            edges = sample
+        elif sampleSize is not None:
+            edges = _random.sample(list(G.edges), min(sampleSize, len(G.edges)))
+        else:
+            edges = list(G.edges)
+
+        sourceIndices, targetIndices = zip(*[[k2i[e0], k2i[e1]] for e0, e1 in edges])
+        source = pos[list(sourceIndices), :]
+        target = pos[list(targetIndices), :]
+        edgeLengths = (source - target).norm(dim=1)
+        tl = _torch.tensor([float(targetLengths[e]) for e in edges])
+
+        eu = ((edgeLengths - tl) / tl).pow(2)
+
+        if reduce == "sum":
+            return eu.sum()
+        return eu.mean()
+
+    # -- patched stress ----------------------------------------------------
+
+    def _patched_stress(
+        pos: Any,
+        D: Any,
+        W: Any,
+        sampleSize: Any = None,
+        sample: Any = None,
+        reduce: str = "mean",
+    ) -> Any:
+        """stress with torch.stack instead of torch.tensor on 0-d tensors."""
+        import torch as _torch
+        from torch import nn as _nn
+
+        if sample is None:
+            n, m = pos.shape[0], pos.shape[1]
+            if sampleSize is not None:
+                i0 = _np.random.choice(n, sampleSize)
+                i1 = _np.random.choice(n, sampleSize)
+                x0 = pos[i0, :]
+                x1 = pos[i1, :]
+                # Use advanced indexing instead of torch.tensor on 0-d list
+                D = D[_torch.from_numpy(i0).long(), _torch.from_numpy(i1).long()]
+                W = W[_torch.from_numpy(i0).long(), _torch.from_numpy(i1).long()]
+            else:
+                x0 = pos.repeat(1, n).view(-1, m)
+                x1 = pos.repeat(n, 1)
+                D = D.view(-1)
+                W = W.view(-1)
+        else:
+            x0 = pos[sample[:, 0], :]
+            x1 = pos[sample[:, 1], :]
+            # Use advanced indexing instead of torch.tensor on 0-d list
+            D = D[sample[:, 0], sample[:, 1]]
+            W = W[sample[:, 0], sample[:, 1]]
+
+        pdist = _nn.PairwiseDistance()(x0, x1)
+        res = W * (pdist - D) ** 2
+
+        if reduce == "sum":
+            return res.sum()
+        return res.mean()
+
+    criteria.ideal_edge_length = _patched_ideal_edge_length
+    criteria.stress = _patched_stress
+    try:
+        yield
+    finally:
+        criteria.ideal_edge_length = _orig_ideal_edge_length
+        criteria.stress = _orig_stress
+
+
 @register
 class SGD2MultiRef(CompetitorBase):
     """Reference adapter for the (SGD)^2 multicriteria layout engine."""
@@ -191,10 +312,20 @@ class SGD2MultiRef(CompetitorBase):
                 {criterion_name: 128 for criterion_name in criteria_weights},
             )
 
+            # Disable visualization -- the upstream optimize() has a broken
+            # V.plot() call that is missing required positional args, and we
+            # never want interactive plots during benchmarks anyway.
+            optimize_kwargs["vis_interval"] = 0
+            # Evaluate once at the very end so get_result_dict() can access
+            # qualities_by_time[-1] without crashing.
+            max_iter = int(optimize_kwargs.get("max_iter", 2000))
+            optimize_kwargs.setdefault("evaluate_interval", max_iter)
+            optimize_kwargs.setdefault("evaluate", {"stress"})
+
             gd2 = GD2(G_nx)
-            with _compat_reduce_lr_on_plateau():
+            with _compat_reduce_lr_on_plateau(), _compat_criteria_patches():
                 gd2.optimize(**optimize_kwargs)
-            positions = gd2.X.detach().cpu()
+            positions = gd2.pos.detach().cpu()
 
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=positions, runtime_seconds=elapsed)

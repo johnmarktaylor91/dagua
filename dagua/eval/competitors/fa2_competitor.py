@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import time
-from typing import TYPE_CHECKING, Any, Mapping, Optional, Type
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Set, Type
 
 import torch
 
@@ -36,6 +37,26 @@ def _load_forceatlas2() -> Type[Any]:
         return ForceAtlas2
 
 
+def _accepted_init_params(cls: Type[Any]) -> Set[str]:
+    """Return the set of parameter names accepted by a class __init__.
+
+    Parameters
+    ----------
+    cls : type
+        Class whose ``__init__`` signature to inspect.
+
+    Returns
+    -------
+    set[str]
+        Parameter names excluding ``self``.
+    """
+    try:
+        sig = inspect.signature(cls.__init__)
+        return {name for name in sig.parameters if name != "self"}
+    except (ValueError, TypeError):
+        return set()
+
+
 def _fa2_available() -> bool:
     """Return whether the ForceAtlas2 reference dependency is usable.
 
@@ -64,7 +85,6 @@ class FA2Reference(CompetitorBase):
         {
             "barnesHutOptimize",
             "barnesHutTheta",
-            "dissuadeHubs",
             "gravity",
             "iterations",
             "linLogMode",
@@ -179,6 +199,15 @@ class FA2Reference(CompetitorBase):
                         layout_kwargs["iterations"] = value
                     else:
                         engine_kwargs[key] = value
+
+            # Filter engine_kwargs to only parameters the library actually
+            # accepts.  This guards against variant definitions that reference
+            # params the installed library version does not support (e.g.
+            # dissuadeHubs was never in fa2_modified despite appearing in some
+            # FA2 documentation).
+            accepted = _accepted_init_params(forceatlas2_cls)
+            if accepted:
+                engine_kwargs = {k: v for k, v in engine_kwargs.items() if k in accepted}
 
             layout_engine = forceatlas2_cls(**engine_kwargs)
             positions = layout_engine.forceatlas2_networkx_layout(
