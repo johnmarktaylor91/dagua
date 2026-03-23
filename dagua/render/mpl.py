@@ -71,16 +71,25 @@ _GRAPHVIZ_DOT_PATTERN: Tuple[float, float] = (0.1, 3.0)
 _ARROWHEAD_REFERENCE_WIDTH_POINTS = 1.2
 _DOUBLE_BORDER_INSET_FACTOR = 2.5
 _PATTERN_FILL_RESOLUTION = 128
+_HATCH_PATTERN = "////"
+_MIN_HATCH_LINEWIDTH_POINTS = 0.8
 _CROSSING_CLEARANCE_PADDING_POINTS = 2.0
-_CROSSING_MIN_SPAN_WIDTH_FACTOR = 2.0
-_CROSSING_SHARP_HEIGHT_RATIO = 0.55
+_CROSSING_MIN_SPAN_WIDTH_FACTOR = 3.0
+_CROSSING_MIN_SPAN_POINTS = 10.0
+_CROSSING_MIN_SPAN_DATA_UNITS = 16.0
+_CROSSING_SHARP_HEIGHT_WIDTH_FACTOR = 2.0
+_CROSSING_SHARP_SPAN_WIDTH_FACTOR = 3.0
 _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
+_SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION = 0.25
+_SELF_LOOP_ARROWHEAD_MAX_WIDTH_RATIO = 0.7
 _CLUSTER_LABEL_VERTICAL_GAP_POINTS = 2.0
 _DEFAULT_NODE_LABEL_FONT_POINTS = 8.5
 _DEFAULT_EXTERNAL_LABEL_FONT_POINTS = 8.0
 _DEFAULT_EDGE_LABEL_FONT_POINTS = 7.0
 _DEFAULT_CLUSTER_LABEL_FONT_POINTS = 9.5
 _DEFAULT_TITLE_FONT_POINTS = 10.0
+_BOLD_NODE_LABEL_SIZE_MULTIPLIER = 1.05
+_PIE_GRADIENT_OVERLAY_ALPHA_MULTIPLIER = 0.4
 _NODE_LABEL_HEIGHT_FRACTION = 0.35
 _NODE_LABEL_MIN_HEIGHT_FRACTION = 0.1
 _NODE_LABEL_MAX_HEIGHT_FRACTION = 0.6
@@ -106,6 +115,50 @@ def _text_font_family(style: Any) -> str:
     """
     requested_family = str(getattr(style, "font_family", "")).strip()
     return requested_family or RESOLVED_FONT
+
+
+def _normalize_text_font_weight(font_weight: Any) -> str:
+    """Return a stable renderer font-weight token.
+
+    Parameters
+    ----------
+    font_weight : Any
+        Requested font-weight token or numeric value.
+
+    Returns
+    -------
+    str
+        Normalized weight. Bold-like numeric tokens are converted to
+        ``"bold"`` so all node-label paths request the heavy face explicitly.
+    """
+    raw_weight = str(font_weight).strip().lower()
+    if raw_weight == "":
+        return "regular"
+    try:
+        numeric_weight = float(raw_weight)
+    except ValueError:
+        return "bold" if raw_weight == "700" else raw_weight
+    if numeric_weight >= 600.0:
+        return "bold"
+    if numeric_weight <= 400.0:
+        return "regular"
+    return str(int(numeric_weight)) if numeric_weight.is_integer() else raw_weight
+
+
+def _is_bold_font_weight(font_weight: Any) -> bool:
+    """Return whether a renderer weight token requests bold text.
+
+    Parameters
+    ----------
+    font_weight : Any
+        Requested font-weight token or numeric value.
+
+    Returns
+    -------
+    bool
+        ``True`` when the weight should render as bold.
+    """
+    return _normalize_text_font_weight(font_weight) == "bold"
 
 
 _CLUSTER_LABEL_MIN_NODE_HEIGHT_FRACTION = 0.3
@@ -168,6 +221,7 @@ def _node_relative_font_size_data(
     node_height: float,
     font_size_points: float,
     baseline_points: float,
+    font_weight: Any = "regular",
 ) -> float:
     """Compute a node-relative label size in data coordinates.
 
@@ -181,6 +235,8 @@ def _node_relative_font_size_data(
         User-facing font size in points.
     baseline_points : float
         Default point size for relative scaling.
+    font_weight : Any, default="regular"
+        Font-weight token used to apply the node-label bold visibility bump.
 
     Returns
     -------
@@ -192,6 +248,8 @@ def _node_relative_font_size_data(
     font_size_data = (
         clamped_height * _NODE_LABEL_HEIGHT_FRACTION * _multiline_label_scale(text) * user_scale
     )
+    if _is_bold_font_weight(font_weight):
+        font_size_data *= _BOLD_NODE_LABEL_SIZE_MULTIPLIER
     font_size_data = max(font_size_data, clamped_height * _NODE_LABEL_MIN_HEIGHT_FRACTION)
     return min(font_size_data, clamped_height * _NODE_LABEL_MAX_HEIGHT_FRACTION)
 
@@ -816,11 +874,12 @@ def _expand_bounds_for_external_labels(
             float(sizes[i, 1]),
             float(style.external_label_font_size),
             _DEFAULT_EXTERNAL_LABEL_FONT_POINTS,
+            font_weight=style.font_weight,
         )
         label_width, label_height = measure_text_data(
             external_label,
             font_family=_text_font_family(style),
-            font_weight=style.font_weight,
+            font_weight=_normalize_text_font_weight(style.font_weight),
             font_style=style.font_style,
             size_data=label_size_data,
         )
@@ -971,7 +1030,15 @@ def render(
     # Cluster rendering adds header space above y_max and may expand x_min/x_max
     # for minimum width. Account for this so labels are not clipped.
     if graph.clusters:
-        min_node_height = float(sizes[:, 1].min()) if sizes.size else 0.0
+        ordered_clusters = _cluster_render_order(graph)
+        cluster_depths = _cluster_depths(graph, ordered_clusters)
+        cluster_y_maxes = _compute_cluster_y_maxes(
+            graph,
+            pos,
+            sizes,
+            ordered_clusters,
+            cluster_depths,
+        )
         for cname in graph.clusters:
             cstyle = _cluster_style_for_render(graph, cname)
             cindices = graph.leaf_cluster_members(cname)
@@ -981,28 +1048,12 @@ def render(
             cp = pos[ci]
             cs = sizes[ci]
             cpad = cstyle.padding
-            cy_max_member = (cp[:, 1] + cs[:, 1] / 2).max()
-            cluster_y_min = (cp[:, 1] - cs[:, 1] / 2).min() - cpad
-            cluster_height = cy_max_member - cluster_y_min + cpad
-            label_font_points = float(cstyle.font_size)
-            label_text = graph.cluster_labels.get(cname, cname)
-            label_height = measure_text_data(
-                label_text,
-                size_data=_cluster_font_size_data(
-                    label_text,
-                    float(cluster_height),
-                    min_node_height,
-                    label_font_points,
-                ),
-                font_family=str(cstyle.font_family or RESOLVED_FONT),
-                font_weight=str(cstyle.font_weight),
-            )[1]
-            header = label_height + cpad
-            cy_max = cy_max_member + cpad + header
+            cy_min = (cp[:, 1] - cs[:, 1] / 2).min() - cpad
+            cy_max = cluster_y_maxes.get(cname, (cp[:, 1] + cs[:, 1] / 2).max() + cpad)
             cx_min = (cp[:, 0] - cs[:, 0] / 2).min() - cpad
             cx_max = (cp[:, 0] + cs[:, 0] / 2).max() + cpad
             # Minimum width
-            ch = cy_max - ((cp[:, 1] - cs[:, 1] / 2).min() - cpad)
+            ch = cy_max - cy_min
             min_cw = ch * 0.8
             cw = cx_max - cx_min
             if cw < min_cw:
@@ -1011,6 +1062,7 @@ def render(
                 cx_max += expand_cw
             x_min = min(x_min, cx_min - margin)
             x_max = max(x_max, cx_max + margin)
+            y_min = min(y_min, cy_min - margin)
             y_max = max(y_max, cy_max + margin)
         content_y_max = max(content_y_max, float(y_max))
 
@@ -1065,6 +1117,7 @@ def render(
     ax.set_ylim(y_min, y_max)
     ax.set_aspect("equal")
     ax.axis("off")
+    _expand_axes_for_clusters(ax, graph, pos, sizes, margin)
 
     # --- Layer 0: Cluster backgrounds ---
     _draw_clusters(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
@@ -1664,7 +1717,16 @@ def _draw_node_shape_extras(
 
 
 def _draw_gradient_fill(
-    ax: Any, patch: Any, x: float, y: float, w: float, h: float, style: Any
+    ax: Any,
+    patch: Any,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    style: Any,
+    *,
+    alpha_multiplier: float = 1.0,
+    zorder: float = 1.95,
 ) -> None:
     """Draw a gradient image clipped to a node patch.
 
@@ -1684,6 +1746,11 @@ def _draw_gradient_fill(
         Node height.
     style : Any
         Node style object.
+    alpha_multiplier : float, keyword-only, default=1.0
+        Additional opacity multiplier used when the gradient is rendered as an
+        overlay on top of another fill style.
+    zorder : float, keyword-only, default=1.95
+        Artist z-order for the gradient image.
     """
     from matplotlib.colors import LinearSegmentedColormap
 
@@ -1706,8 +1773,8 @@ def _draw_gradient_fill(
         origin="lower",
         cmap=cmap,
         interpolation="bicubic",
-        alpha=style.opacity,
-        zorder=1.95,
+        alpha=float(style.opacity) * float(alpha_multiplier),
+        zorder=zorder,
         aspect="auto",
     )
     image.set_clip_path(patch)
@@ -1729,6 +1796,32 @@ def _pattern_fill_colors(style: Any) -> List[str]:
     if style.fill_pattern_colors:
         return list(style.fill_pattern_colors)
     return [str(style.fill), darken_hex(str(style.fill), 0.18)]
+
+
+def _hatched_overlay_color(style: Any) -> str:
+    """Return a visible stroke color for hatched pattern overlays.
+
+    Parameters
+    ----------
+    style : Any
+        Node style object.
+
+    Returns
+    -------
+    str
+        Dark contrasting hatch color. When the pattern palette does not provide
+        a distinct second tone, fall back to the node stroke color or a darker
+        fill-derived shade.
+    """
+    colors = _pattern_fill_colors(style)
+    fill_color = str(style.fill)
+    for candidate in colors[1:]:
+        if not _colors_match(candidate, fill_color):
+            return str(candidate)
+    stroke_color = str(getattr(style, "stroke", "") or "")
+    if stroke_color and not _colors_match(stroke_color, fill_color):
+        return stroke_color
+    return darken_hex(fill_color, 0.32)
 
 
 def _draw_striped_fill(
@@ -1908,19 +2001,41 @@ def _draw_node_fill(
         )
         ax.add_patch(fill_patch)
         _draw_pie_fill(ax, shape_spec, style, clip_patch)
+        if style.gradient != "none" and style.opacity > 0.0:
+            # Pie wedges fully cover the base fill, so the gradient must be
+            # layered afterward to remain visible in combo renders.
+            _draw_gradient_fill(
+                ax,
+                clip_patch,
+                x,
+                y,
+                w,
+                h,
+                style,
+                alpha_multiplier=_PIE_GRADIENT_OVERLAY_ALPHA_MULTIPLIER,
+                zorder=2.02,
+            )
         return
     if style.fill_pattern == "striped":
         _draw_striped_fill(ax, clip_patch, x, y, w, h, style)
         return
     if style.fill_pattern == "hatched":
+        fill_patch = PathPatch(
+            fill_path,
+            facecolor=facecolor,
+            edgecolor="none",
+            linewidth=0.0,
+            zorder=2.0,
+        )
+        ax.add_patch(fill_patch)
         hatch_patch = PathPatch(
             fill_path,
-            facecolor=str(style.fill),
-            edgecolor=_pattern_fill_colors(style)[0],
-            linewidth=0.0,
-            hatch="//",
+            facecolor="none",
+            edgecolor=_hatched_overlay_color(style),
+            linewidth=_MIN_HATCH_LINEWIDTH_POINTS,
+            hatch=_HATCH_PATTERN,
             alpha=style.opacity,
-            zorder=2.0,
+            zorder=2.01,
         )
         ax.add_patch(hatch_patch)
         return
@@ -2629,6 +2744,195 @@ class _ClusterLabelPlacement:
     parent_name: Optional[str]
 
 
+def _compute_cluster_y_maxes(
+    graph: Any,
+    pos: np.ndarray,
+    sizes: np.ndarray,
+    ordered_clusters: Sequence[str],
+    cluster_depths: Dict[str, int],
+    label_gap: float = 0.0,
+) -> Dict[str, float]:
+    """Return cluster top bounds after reserving nested header bands.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing cluster membership, labels, parents, and styles.
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]`` in data coordinates.
+    sizes : numpy.ndarray
+        Node sizes with shape ``[N, 2]`` in data coordinates.
+    ordered_clusters : sequence[str]
+        Cluster render order.
+    cluster_depths : dict[str, int]
+        Nesting depth per cluster name.
+    label_gap : float, default=0.0
+        Extra vertical gap in data units reserved below the cluster label.
+
+    Returns
+    -------
+    dict[str, float]
+        Top ``y`` bound for each cluster after accounting for descendant label
+        bands. Parents are computed after children so deep headers remain
+        visible inside the axes limits.
+    """
+    cluster_parents = getattr(graph, "cluster_parents", {}) or {}
+    min_node_height = float(sizes[:, 1].min()) if sizes.size else 0.0
+    cluster_y_maxes: Dict[str, float] = {}
+
+    for name in reversed(ordered_clusters):
+        members = graph.clusters[name]
+        indices = collect_cluster_leaves(members) if isinstance(members, dict) else members
+        if not indices:
+            continue
+
+        style = _cluster_style_for_render(graph, name)
+        depth = cluster_depths.get(name, 0)
+        padding = float(style.padding)
+        label_text = graph.cluster_labels.get(name, name)
+        member_pos = pos[indices]
+        member_sizes = sizes[indices]
+        raw_y_max = float((member_pos[:, 1] + member_sizes[:, 1] / 2).max())
+        raw_y_min = float((member_pos[:, 1] - member_sizes[:, 1] / 2).min()) - padding
+
+        for child_name, parent_name in cluster_parents.items():
+            if parent_name == name and child_name in cluster_y_maxes:
+                raw_y_max = max(raw_y_max, cluster_y_maxes[child_name])
+
+        cluster_height = max(raw_y_max - raw_y_min, 0.0)
+        label_font_points = max(
+            float(style.font_size) + depth * float(getattr(style, "depth_font_size_step", -0.5)),
+            5.0,
+        )
+        label_height = measure_text_data(
+            label_text,
+            size_data=_cluster_font_size_data(
+                label_text,
+                cluster_height,
+                min_node_height,
+                label_font_points,
+            ),
+            font_family=str(style.font_family or RESOLVED_FONT),
+            font_weight=str(style.font_weight),
+        )[1]
+        cluster_y_maxes[name] = raw_y_max + padding + label_height + label_gap
+
+    return cluster_y_maxes
+
+
+def _expand_axes_for_clusters(
+    ax: Any,
+    graph: Any,
+    pos: np.ndarray,
+    sizes: np.ndarray,
+    margin: float,
+) -> None:
+    """Expand axes limits so cluster geometry fits after display scaling.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes whose limits will be updated in place.
+    graph : Any
+        Graph exposing cluster membership, labels, and styles.
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]`` in data coordinates.
+    sizes : numpy.ndarray
+        Node sizes with shape ``[N, 2]`` in data coordinates.
+    margin : float
+        Extra outer padding reserved around the cluster bounds.
+
+    Returns
+    -------
+    None
+        Mutates ``ax`` in place.
+    """
+    if not graph.clusters:
+        return
+
+    ordered_clusters = _cluster_render_order(graph)
+    cluster_depths = _cluster_depths(graph, ordered_clusters)
+    min_node_height = float(sizes[:, 1].min()) if sizes.size else 0.0
+
+    # The point-to-data conversion depends on the axes limits themselves, so a
+    # short second pass keeps deep cluster headers from being clipped after the
+    # first expansion changes the display scale.
+    for _ in range(2):
+        display_scale = _compute_display_scale(ax)
+        cluster_y_maxes = _compute_cluster_y_maxes(
+            graph,
+            pos,
+            sizes,
+            ordered_clusters,
+            cluster_depths,
+            label_gap=_points_to_data_units(ax, _CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y"),
+        )
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+
+        for name in ordered_clusters:
+            members = graph.clusters[name]
+            indices = collect_cluster_leaves(members) if isinstance(members, dict) else members
+            if not indices:
+                continue
+
+            style = _cluster_style_for_render(graph, name)
+            depth = cluster_depths.get(name, 0)
+            depth_padding_step = getattr(style, "depth_padding_step", -3.0)
+            padding = max(style.padding + depth * depth_padding_step, 5.0)
+            member_pos = pos[indices]
+            member_sizes = sizes[indices]
+            cx_min = (member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding
+            cx_max = (member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding
+            cy_min = (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding
+            cy_max = cluster_y_maxes.get(
+                name,
+                (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding,
+            )
+
+            label = graph.cluster_labels.get(name, name)
+            label_font_points = max(
+                float(style.font_size)
+                + depth * float(getattr(style, "depth_font_size_step", -0.5)),
+                5.0,
+            )
+            cluster_height = max(cy_max - cy_min, 0.0)
+            label_font_data = _cluster_font_size_data(
+                label,
+                float(cluster_height),
+                min_node_height,
+                label_font_points,
+            )
+            label_width = measure_text_data(
+                label,
+                size_data=label_font_data,
+                font_family=str(style.font_family or RESOLVED_FONT),
+                font_weight=str(style.font_weight),
+            )[0]
+            cluster_width = cx_max - cx_min
+            min_cluster_width = cluster_height * 0.65
+            if cluster_width < min_cluster_width:
+                expand_width = (min_cluster_width - cluster_width) / 2.0
+                cx_min -= expand_width
+                cx_max += expand_width
+
+            label_offset_x = float(style.label_offset[0]) * display_scale
+            required_label_width = label_width + label_offset_x * 2.0
+            current_width = cx_max - cx_min
+            if required_label_width > current_width:
+                expand_width = (required_label_width - current_width) / 2.0
+                cx_min -= expand_width
+                cx_max += expand_width
+
+            x_min = min(x_min, float(cx_min) - margin)
+            x_max = max(x_max, float(cx_max) + margin)
+            y_min = min(y_min, float(cy_min) - margin)
+            y_max = max(y_max, float(cy_max) + margin)
+
+        ax.set_xlim(float(x_min), float(x_max))
+        ax.set_ylim(float(y_min), float(y_max))
+
+
 def _cluster_label_bounds(
     spec: DaguaText,
     width: float,
@@ -2911,23 +3215,35 @@ def _draw_shadow(ax: Any, x: float, y: float, w: float, h: float, style: Any) ->
         Node style object.
     """
     from matplotlib.colors import to_rgba
+    from matplotlib.patches import PathPatch
 
     ox, oy = style.shadow_offset
     base_r, base_g, base_b, base_a = to_rgba(style.shadow_color)
     steps = 1 if style.shadow_blur <= 0 else min(max(int(np.ceil(style.shadow_blur)), 2), 6)
+    base_shape_spec = ShapeSpec(
+        center_x=x,
+        center_y=y,
+        width=w,
+        height=h,
+        shape=str(style.shape),
+        corner_radius=float(getattr(style, "corner_radius", 0.0)),
+    )
     for idx in range(steps, 0, -1):
         scale = 1.0 + (0.01 * style.shadow_blur * idx)
         alpha = base_a / (idx + 1) if steps > 1 else base_a
-        shadow = _build_node_patch(
-            x + ox,
-            y + oy,
-            w * scale,
-            h * scale,
-            style,
-            (base_r, base_g, base_b, alpha),
-            "none",
-            0.0,
-            "-",
+        shadow_spec = ShapeSpec(
+            center_x=float(base_shape_spec.center_x) + ox,
+            center_y=float(base_shape_spec.center_y) + oy,
+            width=float(base_shape_spec.width) * scale,
+            height=float(base_shape_spec.height) * scale,
+            shape=base_shape_spec.shape,
+            corner_radius=float(base_shape_spec.corner_radius) * scale,
+        )
+        shadow = PathPatch(
+            build_shape_path(shadow_spec),
+            facecolor=(base_r, base_g, base_b, alpha),
+            edgecolor="none",
+            linewidth=0.0,
             zorder=1.4 - idx * 0.01,
         )
         ax.add_patch(shadow)
@@ -3062,6 +3378,69 @@ def _scaled_arrowhead_dimensions(
     width_ratio = max(edge_width_points, 0.0) / safe_reference
     scale = max(width_ratio, 1e-6) ** 0.5
     return length_points * scale, width_points * scale
+
+
+def _resolved_marker_dimensions(
+    ax: Any,
+    style: Any,
+    node_width: float,
+    node_height: float,
+    *,
+    is_self_loop: bool,
+    scale_with_edge_width: bool,
+) -> Tuple[float, float]:
+    """Resolve one terminal's marker dimensions in data units.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes used for point-to-data conversion.
+    style : Any
+        Edge style object providing arrowhead sizing fields.
+    node_width : float
+        Width of the connected node in data units.
+    node_height : float
+        Height of the connected node in data units.
+    is_self_loop : bool
+        Whether the edge source and target are the same node.
+    scale_with_edge_width : bool
+        Whether to apply the renderer's sublinear edge-width scaling before
+        converting the style dimensions into data units.
+
+    Returns
+    -------
+    tuple[float, float]
+        Resolved ``(length, width)`` in data units.
+    """
+
+    length_points = float(style.arrow_length)
+    width_points = float(style.arrow_width)
+    if scale_with_edge_width:
+        length_points, width_points = _scaled_arrowhead_dimensions(
+            length_points,
+            width_points,
+            float(style.width),
+        )
+
+    length_data, width_data = _marker_data_size(
+        ax,
+        style,
+        length_points,
+        width_points,
+        node_height=node_height,
+    )
+
+    if is_self_loop:
+        node_min_dimension = min(max(node_width, 0.0), max(node_height, 0.0))
+        max_terminal_extent = node_min_dimension * _SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION
+        if max_terminal_extent > 0.0:
+            length_data = min(length_data, max_terminal_extent)
+            width_data = min(
+                width_data,
+                max_terminal_extent * _SELF_LOOP_ARROWHEAD_MAX_WIDTH_RATIO,
+            )
+
+    return length_data, width_data
 
 
 def _edge_width_data_units(ax: Any, width_points: float) -> float:
@@ -3493,6 +3872,12 @@ def _add_filled_ribbon_patch(
         edgecolor="none",
         linewidth=0.0,
         zorder=zorder,
+        capstyle=(
+            _mpl_capstyle(resolved_cap_start)
+            if resolved_cap_start == resolved_cap_end
+            else _mpl_capstyle("butt")
+        ),
+        joinstyle=join_style,
     )
     ax.add_patch(patch)
     return patch
@@ -3592,9 +3977,31 @@ def _crossing_span_data_units(ax: Any, style: Any) -> float:
     float
         Crossing span in data units.
     """
-    display_span = float(getattr(style, "crossing_size", 6.0)) * _compute_display_scale(ax)
+    display_scale = _compute_display_scale(ax)
+    display_span = (
+        max(float(getattr(style, "crossing_size", 6.0)), _CROSSING_MIN_SPAN_POINTS) * display_scale
+    )
     stroke_span = _edge_width_data_units(ax, float(style.width)) * _CROSSING_MIN_SPAN_WIDTH_FACTOR
-    return max(display_span, stroke_span)
+    return max(display_span, stroke_span, _CROSSING_MIN_SPAN_DATA_UNITS)
+
+
+def _sharp_crossing_span_data_units(ax: Any, style: Any) -> float:
+    """Return the centerline width for a sharp crossing bridge.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes receiving the crossing patch.
+    style : Any
+        Edge style object.
+
+    Returns
+    -------
+    float
+        Sharp crossing bridge span in data units.
+    """
+    edge_width = _edge_width_data_units(ax, float(style.width))
+    return edge_width * _CROSSING_SHARP_SPAN_WIDTH_FACTOR
 
 
 def _draw_crossing_clearance(
@@ -3768,14 +4175,18 @@ def _draw_sharp_crossing(
     style : Any
         Top-edge style object.
     span : float
-        Crossing span in data units.
+        Crossing span in data units. Sharp crossings size their bridge from the
+        edge width, so the span is only used by the caller for under-edge
+        clearance.
     """
     from matplotlib.colors import to_rgba
 
     ux, uy = _normalized_curve_tangent(curve, t)
     nx, ny = -uy, ux
-    half_span = span / 2.0
-    peak_height = span * _CROSSING_SHARP_HEIGHT_RATIO
+    del span
+    edge_width = _edge_width_data_units(ax, float(style.width))
+    half_span = edge_width * (_CROSSING_SHARP_SPAN_WIDTH_FACTOR / 2.0)
+    peak_height = edge_width * _CROSSING_SHARP_HEIGHT_WIDTH_FACTOR
     _add_filled_ribbon_patch(
         ax=ax,
         points=np.array(
@@ -3826,7 +4237,11 @@ def _draw_edge_crossings(
         if crossing_style == "none":
             continue
 
-        span = _crossing_span_data_units(ax, top_style)
+        span = (
+            _sharp_crossing_span_data_units(ax, top_style)
+            if crossing_style == "sharp"
+            else _crossing_span_data_units(ax, top_style)
+        )
         under_style = _edge_style_for_render(graph, under_edge_index)
         _draw_crossing_clearance(
             ax=ax,
@@ -4186,7 +4601,10 @@ def _draw_direct_edge_markers(
         style = _edge_style_for_render(graph, e_idx)
         src_idx = int(graph.edge_index[0, e_idx])
         tgt_idx = int(graph.edge_index[1, e_idx])
+        is_self_loop = src_idx == tgt_idx
+        src_node_width = float(graph.node_sizes[src_idx, 0])
         src_node_height = float(graph.node_sizes[src_idx, 1])
+        tgt_node_width = float(graph.node_sizes[tgt_idx, 0])
         tgt_node_height = float(graph.node_sizes[tgt_idx, 1])
         gradient_start_color = str(style.color)
         gradient_end_color = str(style.color_gradient_end or style.color)
@@ -4206,7 +4624,9 @@ def _draw_direct_edge_markers(
                 direction=(start_dx, start_dy),
                 marker=str(style.tail_arrow),
                 style=tail_style,
+                node_width=src_node_width,
                 node_height=src_node_height,
+                is_self_loop=is_self_loop,
             )
 
         if getattr(style, "arrow", "none") != "none":
@@ -4224,7 +4644,9 @@ def _draw_direct_edge_markers(
                 direction=(end_dx, end_dy),
                 marker=str(style.arrow),
                 style=head_style,
+                node_width=tgt_node_width,
                 node_height=tgt_node_height,
+                is_self_loop=is_self_loop,
             )
 
 
@@ -4388,13 +4810,15 @@ def _trim_curve_for_arrows(
 
         if getattr(style, "tail_arrow", "none") != "none":
             src_idx = int(graph.edge_index[0, edge_idx])
+            src_width = float(node_sizes[src_idx, 0]) if node_sizes is not None else 0.0
             src_height = float(node_sizes[src_idx, 1]) if node_sizes is not None else 0.0
-            tail_length, _ = _marker_data_size(
+            tail_length, _ = _resolved_marker_dimensions(
                 ax,
                 style,
-                float(style.arrow_length),
-                float(style.arrow_width),
-                node_height=src_height,
+                src_width,
+                src_height,
+                is_self_loop=src_idx == int(graph.edge_index[1, edge_idx]),
+                scale_with_edge_width=False,
             )
             start_trim = min(
                 tail_length,
@@ -4403,13 +4827,15 @@ def _trim_curve_for_arrows(
 
         if getattr(style, "arrow", "none") != "none":
             tgt_idx = int(graph.edge_index[1, edge_idx])
+            tgt_width = float(node_sizes[tgt_idx, 0]) if node_sizes is not None else 0.0
             tgt_height = float(node_sizes[tgt_idx, 1]) if node_sizes is not None else 0.0
-            head_length, _ = _marker_data_size(
+            head_length, _ = _resolved_marker_dimensions(
                 ax,
                 style,
-                float(style.arrow_length),
-                float(style.arrow_width),
-                node_height=tgt_height,
+                tgt_width,
+                tgt_height,
+                is_self_loop=tgt_idx == int(graph.edge_index[0, edge_idx]),
+                scale_with_edge_width=False,
             )
             end_trim = min(
                 head_length,
@@ -4447,13 +4873,15 @@ def _trim_curve_for_arrows(
 
     if getattr(style, "tail_arrow", "none") != "none":
         src_idx = int(graph.edge_index[0, edge_idx])
+        src_width = float(node_sizes[src_idx, 0]) if node_sizes is not None else 0.0
         src_height = float(node_sizes[src_idx, 1]) if node_sizes is not None else 0.0
-        tail_length, _ = _marker_data_size(
+        tail_length, _ = _resolved_marker_dimensions(
             ax,
             style,
-            float(style.arrow_length),
-            float(style.arrow_width),
-            node_height=src_height,
+            src_width,
+            src_height,
+            is_self_loop=src_idx == int(graph.edge_index[1, edge_idx]),
+            scale_with_edge_width=False,
         )
         tail_dx = cp1x - p0x
         tail_dy = cp1y - p0y
@@ -4468,13 +4896,15 @@ def _trim_curve_for_arrows(
 
     if getattr(style, "arrow", "none") != "none":
         tgt_idx = int(graph.edge_index[1, edge_idx])
+        tgt_width = float(node_sizes[tgt_idx, 0]) if node_sizes is not None else 0.0
         tgt_height = float(node_sizes[tgt_idx, 1]) if node_sizes is not None else 0.0
-        head_length, _ = _marker_data_size(
+        head_length, _ = _resolved_marker_dimensions(
             ax,
             style,
-            float(style.arrow_length),
-            float(style.arrow_width),
-            node_height=tgt_height,
+            tgt_width,
+            tgt_height,
+            is_self_loop=tgt_idx == int(graph.edge_index[0, edge_idx]),
+            scale_with_edge_width=False,
         )
         head_dx = cp2x - p1x
         head_dy = cp2y - p1y
@@ -4559,26 +4989,26 @@ def _build_custom_edge_collection(
         style = _edge_style_for_render(graph, e_idx)
         src_idx = int(graph.edge_index[0, e_idx])
         tgt_idx = int(graph.edge_index[1, e_idx])
+        is_self_loop = src_idx == tgt_idx
+        src_node_width = float(graph.node_sizes[src_idx, 0])
         src_node_height = float(graph.node_sizes[src_idx, 1])
+        tgt_node_width = float(graph.node_sizes[tgt_idx, 0])
         tgt_node_height = float(graph.node_sizes[tgt_idx, 1])
-        scaled_head_length, scaled_head_width = _scaled_arrowhead_dimensions(
-            float(style.arrow_length),
-            float(style.arrow_width),
-            float(style.width),
-        )
-        head_length, head_width = _marker_data_size(
+        head_length, head_width = _resolved_marker_dimensions(
             ax,
             style,
-            scaled_head_length,
-            scaled_head_width,
-            node_height=tgt_node_height,
+            tgt_node_width,
+            tgt_node_height,
+            is_self_loop=is_self_loop,
+            scale_with_edge_width=True,
         )
-        tail_length, tail_width = _marker_data_size(
+        tail_length, tail_width = _resolved_marker_dimensions(
             ax,
             style,
-            scaled_head_length,
-            scaled_head_width,
-            node_height=src_node_height,
+            src_node_width,
+            src_node_height,
+            is_self_loop=is_self_loop,
+            scale_with_edge_width=True,
         )
         label = graph.edge_labels[e_idx] if e_idx < len(graph.edge_labels) else None
         edges.append(
@@ -4686,6 +5116,7 @@ def _draw_node_labels(
         x, y = float(pos[i, 0]), float(pos[i, 1])
         w, h = float(sizes[i, 0]), float(sizes[i, 1])
         style = _node_style_for_render(graph, i)
+        font_weight = _normalize_text_font_weight(style.font_weight)
         clip_patch = clip_patch_seq[i] if i < len(clip_patch_seq) else None
         label_y = _label_reference_y(y, h, style.shape)
 
@@ -4699,6 +5130,8 @@ def _draw_node_labels(
         # to contain it.  Use that font directly -- no height-based
         # rescaling needed.
         font_size_data = font_size_points
+        if _is_bold_font_weight(font_weight):
+            font_size_data *= _BOLD_NODE_LABEL_SIZE_MULTIPLIER
 
         pad_x = float(style.padding[0]) * display_scale
         pad_y = float(style.padding[1]) * display_scale
@@ -4741,7 +5174,7 @@ def _draw_node_labels(
                 # ``render_text`` multiplies by display_scale to recover data units.
                 font_size=_effective_font_size_points(font_size_data, display_scale),
                 font_family=_text_font_family(style),
-                font_weight=style.font_weight,
+                font_weight=font_weight,
                 font_style=style.font_style,
                 font_color=style.font_color,
                 alpha=1.0,
@@ -4810,11 +5243,13 @@ def _draw_external_labels(
         half_height = float(sizes[i, 1]) / 2.0
         offset = float(style.external_label_offset) * display_scale
         position = _normalize_external_label_position(style.external_label_position)
+        font_weight = _normalize_text_font_weight(style.font_weight)
         font_size_data = _node_relative_font_size_data(
             external_label,
             float(sizes[i, 1]),
             float(style.external_label_font_size),
             _DEFAULT_EXTERNAL_LABEL_FONT_POINTS,
+            font_weight=font_weight,
         )
 
         if position == "top":
@@ -4845,7 +5280,7 @@ def _draw_external_labels(
                 text=external_label,
                 font_size=_effective_font_size_points(font_size_data, display_scale),
                 font_family=_text_font_family(style),
-                font_weight=style.font_weight,
+                font_weight=font_weight,
                 font_style=style.font_style,
                 font_color=style.external_label_font_color or style.font_color,
                 ha=ha,
@@ -4866,7 +5301,9 @@ def _draw_edge_marker(
     direction: Tuple[float, float],
     marker: str,
     style: Any,
+    node_width: float = 0.0,
     node_height: float = 0.0,
+    is_self_loop: bool = False,
 ) -> None:
     """Draw a custom edge endpoint marker.
 
@@ -4882,9 +5319,13 @@ def _draw_edge_marker(
         Marker name such as ``"normal"`` or ``"diamond"``.
     style : Any
         Edge style object providing arrow geometry and color settings.
+    node_width : float, default=0.0
+        Width of the connected node in data units.
     node_height : float, default=0.0
         Height of the connected node in data units. Used only when the style
         enables node-relative arrow sizing.
+    is_self_loop : bool, default=False
+        Whether the marker belongs to a self-loop edge.
 
     Returns
     -------
@@ -4901,14 +5342,13 @@ def _draw_edge_marker(
 
     ux, uy = dx / dist, dy / dist
     px, py = -uy, ux
-    length = float(style.arrow_length)
-    width = float(style.arrow_width)
-    manual_length, manual_width = _marker_data_size(
+    manual_length, manual_width = _resolved_marker_dimensions(
         ax,
         style,
-        length,
-        width,
-        node_height=node_height,
+        node_width,
+        node_height,
+        is_self_loop=is_self_loop,
+        scale_with_edge_width=False,
     )
     # Graphviz-style calibration expects arrowheads to read slightly heavier
     # than the edge stroke, so keep marker fill/outline fully opaque.
@@ -5151,6 +5591,54 @@ def _draw_edges(
     return collection
 
 
+def _endpoint_label_offset_data(
+    style: Any,
+    endpoint_name: str,
+    avg_node_height: float,
+    display_scale: float,
+) -> float:
+    """Return an endpoint-label offset that clears the terminal marker.
+
+    Parameters
+    ----------
+    style : Any
+        Edge style object.
+    endpoint_name : str
+        Endpoint selector. Supported values are ``"head"`` and ``"tail"``.
+    avg_node_height : float
+        Average node height in data units. Used when arrowheads scale relative
+        to connected node size.
+    display_scale : float
+        Point-to-data conversion factor for the active axes.
+
+    Returns
+    -------
+    float
+        Endpoint label offset in data units.
+    """
+    label_font_points = (
+        float(getattr(style, "label_font_size", _DEFAULT_EDGE_LABEL_FONT_POINTS)) * 0.85
+    )
+    if endpoint_name == "head":
+        user_offset_points = float(getattr(style, "head_label_offset", 5.0))
+        arrow_length_points = float(getattr(style, "arrow_length", 0.0))
+    else:
+        user_offset_points = float(getattr(style, "tail_label_offset", 5.0))
+        tail_arrow_length = getattr(style, "tail_arrow_length", None)
+        arrow_length_points = (
+            float(tail_arrow_length)
+            if tail_arrow_length is not None
+            else float(getattr(style, "arrow_length", 0.0))
+        )
+
+    fraction = float(getattr(style, "arrow_node_fraction", 0.0))
+    if fraction > 0.0 and avg_node_height > 0.0 and display_scale > 0.0:
+        arrow_length_points = max(arrow_length_points, (avg_node_height * fraction) / display_scale)
+
+    minimum_offset_points = arrow_length_points + (label_font_points / 2.0)
+    return max(user_offset_points, minimum_offset_points) * display_scale
+
+
 def _append_endpoint_edge_label_specs(
     specs: List[DaguaText],
     graph: Any,
@@ -5183,12 +5671,22 @@ def _append_endpoint_edge_label_specs(
             (
                 "head",
                 str(getattr(style, "head_label", "")),
-                float(getattr(style, "head_label_offset", 5.0)) * display_scale,
+                _endpoint_label_offset_data(
+                    style,
+                    "head",
+                    avg_node_height,
+                    display_scale,
+                ),
             ),
             (
                 "tail",
                 str(getattr(style, "tail_label", "")),
-                float(getattr(style, "tail_label_offset", 5.0)) * display_scale,
+                _endpoint_label_offset_data(
+                    style,
+                    "tail",
+                    avg_node_height,
+                    display_scale,
+                ),
             ),
         )
         for endpoint_name, label_text, label_offset in endpoint_specs:
@@ -5417,47 +5915,14 @@ def _draw_clusters(
     cluster_label_placements: List[_ClusterLabelPlacement] = []
     min_node_height = float(sizes[:, 1].min()) if sizes.size else 0.0
 
-    # Pre-compute cluster y_max bounds in CHILD-FIRST order so parents
-    # can extend above children's headers (prevents label overlap).
-    cluster_y_maxes: Dict[str, float] = {}
-    for name in reversed(ordered_clusters):
-        members = graph.clusters[name]
-        indices_pre = collect_cluster_leaves(members) if isinstance(members, dict) else members
-        if not indices_pre:
-            continue
-        cstyle = _cluster_style_for_render(graph, name)
-        depth_pre = cluster_depths.get(name, 0)
-        cpad = cstyle.padding
-        label_text = graph.cluster_labels.get(name, name)
-        raw_y_max_pre = (pos[indices_pre][:, 1] + sizes[indices_pre][:, 1] / 2).max()
-        raw_y_min_pre = (pos[indices_pre][:, 1] - sizes[indices_pre][:, 1] / 2).min() - cpad
-        # Extend above any child cluster headers
-        for child_name, parent_name in cluster_parents.items():
-            if parent_name == name and child_name in cluster_y_maxes:
-                raw_y_max_pre = max(raw_y_max_pre, cluster_y_maxes[child_name])
-        cluster_height_pre = float(raw_y_max_pre - raw_y_min_pre)
-        label_font_points_pre = max(
-            float(cstyle.font_size)
-            + depth_pre * float(getattr(cstyle, "depth_font_size_step", -0.5)),
-            5.0,
-        )
-        label_height = measure_text_data(
-            label_text,
-            size_data=_cluster_font_size_data(
-                label_text,
-                cluster_height_pre,
-                min_node_height,
-                label_font_points_pre,
-            ),
-            font_family=str(cstyle.font_family or RESOLVED_FONT),
-            font_weight=str(cstyle.font_weight),
-        )[1]
-        cluster_y_maxes[name] = (
-            raw_y_max_pre
-            + cpad
-            + label_height
-            + _points_to_data_units(ax, _CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y")
-        )
+    cluster_y_maxes = _compute_cluster_y_maxes(
+        graph,
+        pos,
+        sizes,
+        ordered_clusters,
+        cluster_depths,
+        label_gap=_points_to_data_units(ax, _CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y"),
+    )
 
     for name in ordered_clusters:
         members = graph.clusters[name]
