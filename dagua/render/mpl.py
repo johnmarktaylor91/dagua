@@ -24,6 +24,7 @@ import numpy as np
 
 from dagua.edges import (
     BezierCurve,
+    bezier_tangent,
     edge_endpoint_label_position,
     evaluate_bezier,
     preferred_edge_label_position,
@@ -39,6 +40,7 @@ from dagua.render.borders import (
     inset_shape_path,
     make_clip_proxy,
 )
+from dagua.render.crossings import EdgeCrossing, detect_crossings
 from dagua.render.edges import CubicBezier as RenderBezier
 from dagua.render.edges import DaguaEdge, DaguaEdgeCollection
 from dagua.render.text import DaguaText, render_text
@@ -60,6 +62,9 @@ _GRAPHVIZ_DOT_PATTERN: Tuple[float, float] = (0.1, 3.0)
 _ARROWHEAD_REFERENCE_WIDTH_POINTS = 1.2
 _DOUBLE_BORDER_INSET_FACTOR = 2.5
 _PATTERN_FILL_RESOLUTION = 128
+_CROSSING_CLEARANCE_PADDING_POINTS = 2.0
+_CROSSING_MIN_SPAN_WIDTH_FACTOR = 2.0
+_CROSSING_SHARP_HEIGHT_RATIO = 0.55
 
 
 def _detect_output_format(output: Optional[str], format: Optional[str]) -> Optional[str]:
@@ -1051,8 +1056,67 @@ def _draw_striped_fill(
     image.set_clip_path(clip_patch)
 
 
+def _draw_pie_fill(ax: Any, shape_spec: ShapeSpec, style: Any, clip_patch: Any) -> None:
+    """Draw a pie or donut fill clipped to one node outline.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    shape_spec : ShapeSpec
+        Node geometry in data coordinates.
+    style : Any
+        Node style object.
+    clip_patch : Any
+        Clip patch matching the node interior.
+    """
+    from matplotlib.patches import Wedge
+
+    values = getattr(style, "fill_pattern_values", None)
+    if values is None or len(values) == 0:
+        return
+
+    slice_values = [max(float(value), 0.0) for value in values]
+    total = sum(slice_values)
+    if total <= 0.0:
+        return
+
+    colors = list(getattr(style, "fill_pattern_colors", None) or [str(style.fill)])
+    radius = min(float(shape_spec.width), float(shape_spec.height)) / 2.0
+    if radius <= 0.0:
+        return
+
+    hole_fraction = min(max(float(getattr(style, "fill_pattern_hole", 0.0)), 0.0), 0.99)
+    hole_radius = radius * hole_fraction
+    wedge_width = None if hole_radius <= 0.0 else radius - hole_radius
+    current_angle = 90.0 - float(getattr(style, "fill_pattern_angle", 0.0))
+
+    for index, value in enumerate(slice_values):
+        if value <= 0.0:
+            continue
+
+        sweep = (value / total) * 360.0
+        wedge_kwargs: Dict[str, Any] = {
+            "center": (float(shape_spec.center_x), float(shape_spec.center_y)),
+            "r": radius,
+            "theta1": current_angle - sweep,
+            "theta2": current_angle,
+            "facecolor": colors[index % len(colors)],
+            "edgecolor": "none",
+            "alpha": float(style.opacity),
+            "zorder": 2.01,
+        }
+        if wedge_width is not None:
+            wedge_kwargs["width"] = wedge_width
+        wedge = Wedge(**wedge_kwargs)
+        wedge.set_clip_path(clip_patch)
+        ax.add_patch(wedge)
+        current_angle -= sweep
+
+
 def _draw_node_fill(
     ax: Any,
+    shape_spec: ShapeSpec,
     fill_path: Any,
     clip_patch: Any,
     x: float,
@@ -1068,6 +1132,8 @@ def _draw_node_fill(
     ----------
     ax : Any
         Matplotlib axes.
+    shape_spec : ShapeSpec
+        Node geometry in data coordinates.
     fill_path : Any
         Node interior path in data coordinates.
     clip_patch : Any
@@ -1087,6 +1153,17 @@ def _draw_node_fill(
     """
     from matplotlib.patches import PathPatch
 
+    if style.fill_pattern == "pie":
+        fill_patch = PathPatch(
+            fill_path,
+            facecolor=facecolor,
+            edgecolor="none",
+            linewidth=0.0,
+            zorder=2.0,
+        )
+        ax.add_patch(fill_patch)
+        _draw_pie_fill(ax, shape_spec, style, clip_patch)
+        return
     if style.fill_pattern == "striped":
         _draw_striped_fill(ax, clip_patch, x, y, w, h, style)
         return
@@ -1619,7 +1696,7 @@ def _draw_nodes(
         clip_patch = make_clip_proxy(fill_path, ax.transData)
         image_clip_patch = make_clip_proxy(outer_path, ax.transData)
         if _requires_custom_node_rendering(style):
-            _draw_node_fill(ax, fill_path, clip_patch, x, y, w, h, style, facecolor)
+            _draw_node_fill(ax, shape_spec, fill_path, clip_patch, x, y, w, h, style, facecolor)
             _draw_image_node(ax, shape_spec, style, image_clip_patch)
             if border_width > 0.0 and edgecolor[-1] > 0.0:
                 border_path = _node_border_centerline_path(
@@ -1904,14 +1981,15 @@ def _edge_requires_direct_render(style: Any) -> bool:
     -------
     bool
         ``True`` when the style uses a tapered body, body color gradient, or a
-        non-default line cap/join that the custom batched renderer does not
-        expose yet.
+        non-default line cap/join or crossing jump style that the custom
+        batched renderer does not expose yet.
     """
     return bool(
         getattr(style, "taper", False)
         or getattr(style, "color_gradient", "none") != "none"
         or getattr(style, "line_cap", "butt") != "butt"
         or getattr(style, "line_join", "miter") != "miter"
+        or getattr(style, "crossing_style", "none") != "none"
     )
 
 
@@ -1954,6 +2032,293 @@ def _sample_curve_points(curve: BezierCurve, num_points: int = 48) -> np.ndarray
     sample_count = max(2, int(num_points))
     params = np.linspace(0.0, 1.0, sample_count, dtype=float)
     return np.array([evaluate_bezier(curve, float(t)) for t in params], dtype=float)
+
+
+def _normalized_curve_tangent(curve: BezierCurve, t: float) -> Tuple[float, float]:
+    """Return a unit tangent vector for a curve at parameter ``t``.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Routed edge curve.
+    t : float
+        Parameter in ``[0, 1]`` along the curve.
+
+    Returns
+    -------
+    tuple[float, float]
+        Unit tangent vector in data coordinates.
+    """
+    clamped_t = min(max(float(t), 0.0), 1.0)
+    dx, dy = bezier_tangent(curve, clamped_t)
+    length = float(np.hypot(dx, dy))
+    if length > 1e-9:
+        return dx / length, dy / length
+
+    sample_start = evaluate_bezier(curve, max(clamped_t - 1e-3, 0.0))
+    sample_end = evaluate_bezier(curve, min(clamped_t + 1e-3, 1.0))
+    fallback_dx = float(sample_end[0] - sample_start[0])
+    fallback_dy = float(sample_end[1] - sample_start[1])
+    fallback_length = float(np.hypot(fallback_dx, fallback_dy))
+    if fallback_length > 1e-9:
+        return fallback_dx / fallback_length, fallback_dy / fallback_length
+    return (1.0, 0.0)
+
+
+def _crossing_span_data_units(ax: Any, style: Any) -> float:
+    """Return the data-space span used for one crossing jump.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    style : Any
+        Edge style object.
+
+    Returns
+    -------
+    float
+        Crossing span in data units.
+    """
+    display_span = float(getattr(style, "crossing_size", 6.0)) * _compute_display_scale(ax)
+    stroke_span = _edge_width_data_units(ax, float(style.width)) * _CROSSING_MIN_SPAN_WIDTH_FACTOR
+    return max(display_span, stroke_span)
+
+
+def _draw_crossing_clearance(
+    ax: Any,
+    crossing: EdgeCrossing,
+    curve: BezierCurve,
+    t: float,
+    background_color: str,
+    style: Any,
+    span: float,
+) -> None:
+    """Erase a short segment of the under-edge at one crossing.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    crossing : EdgeCrossing
+        Crossing record being rendered.
+    curve : BezierCurve
+        Under-edge curve.
+    t : float
+        Parameter along ``curve`` where the crossing occurs.
+    background_color : str
+        Graph background color used as the eraser.
+    style : Any
+        Under-edge style object.
+    span : float
+        Crossing span in data units.
+    """
+    from matplotlib.lines import Line2D
+
+    ux, uy = _normalized_curve_tangent(curve, t)
+    half_span = span / 2.0
+    line = Line2D(
+        [crossing.x - ux * half_span, crossing.x + ux * half_span],
+        [crossing.y - uy * half_span, crossing.y + uy * half_span],
+        color=background_color,
+        linewidth=max(float(style.width) + _CROSSING_CLEARANCE_PADDING_POINTS, 0.0),
+        solid_capstyle="round",
+        zorder=1.6,
+    )
+    ax.add_line(line)
+
+
+def _draw_gap_crossing(
+    ax: Any,
+    crossing: EdgeCrossing,
+    curve: BezierCurve,
+    t: float,
+    style: Any,
+    span: float,
+) -> None:
+    """Redraw a straight segment across a cleared crossing.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    crossing : EdgeCrossing
+        Crossing record being rendered.
+    curve : BezierCurve
+        Top-edge curve.
+    t : float
+        Parameter along ``curve`` where the crossing occurs.
+    style : Any
+        Top-edge style object.
+    span : float
+        Crossing span in data units.
+    """
+    from matplotlib.colors import to_rgba
+    from matplotlib.lines import Line2D
+
+    ux, uy = _normalized_curve_tangent(curve, t)
+    half_span = span / 2.0
+    line = Line2D(
+        [crossing.x - ux * half_span, crossing.x + ux * half_span],
+        [crossing.y - uy * half_span, crossing.y + uy * half_span],
+        color=to_rgba(str(style.color), alpha=float(style.opacity)),
+        linewidth=float(style.width),
+        solid_capstyle=str(getattr(style, "line_cap", "round")),
+        zorder=1.7,
+    )
+    ax.add_line(line)
+
+
+def _draw_arc_crossing(
+    ax: Any,
+    crossing: EdgeCrossing,
+    curve: BezierCurve,
+    t: float,
+    style: Any,
+    span: float,
+) -> None:
+    """Draw a semicircular jump arc over a crossing.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    crossing : EdgeCrossing
+        Crossing record being rendered.
+    curve : BezierCurve
+        Top-edge curve.
+    t : float
+        Parameter along ``curve`` where the crossing occurs.
+    style : Any
+        Top-edge style object.
+    span : float
+        Crossing span in data units.
+    """
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import Arc
+
+    ux, uy = _normalized_curve_tangent(curve, t)
+    angle = float(np.degrees(np.arctan2(uy, ux)))
+    arc = Arc(
+        (crossing.x, crossing.y),
+        span,
+        span,
+        angle=angle,
+        theta1=0.0,
+        theta2=180.0,
+        edgecolor=to_rgba(str(style.color), alpha=float(style.opacity)),
+        linewidth=float(style.width),
+        zorder=1.7,
+    )
+    ax.add_patch(arc)
+
+
+def _draw_sharp_crossing(
+    ax: Any,
+    crossing: EdgeCrossing,
+    curve: BezierCurve,
+    t: float,
+    style: Any,
+    span: float,
+) -> None:
+    """Draw a triangular jump over a crossing.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    crossing : EdgeCrossing
+        Crossing record being rendered.
+    curve : BezierCurve
+        Top-edge curve.
+    t : float
+        Parameter along ``curve`` where the crossing occurs.
+    style : Any
+        Top-edge style object.
+    span : float
+        Crossing span in data units.
+    """
+    from matplotlib.colors import to_rgba
+    from matplotlib.lines import Line2D
+
+    ux, uy = _normalized_curve_tangent(curve, t)
+    nx, ny = -uy, ux
+    half_span = span / 2.0
+    peak_height = span * _CROSSING_SHARP_HEIGHT_RATIO
+    line = Line2D(
+        [
+            crossing.x - ux * half_span,
+            crossing.x + nx * peak_height,
+            crossing.x + ux * half_span,
+        ],
+        [
+            crossing.y - uy * half_span,
+            crossing.y + ny * peak_height,
+            crossing.y + uy * half_span,
+        ],
+        color=to_rgba(str(style.color), alpha=float(style.opacity)),
+        linewidth=float(style.width),
+        solid_capstyle="round",
+        solid_joinstyle="round",
+        zorder=1.7,
+    )
+    ax.add_line(line)
+
+
+def _draw_edge_crossings(
+    ax: Any,
+    graph: Any,
+    curves: List[BezierCurve],
+    crossings: List[EdgeCrossing],
+) -> None:
+    """Render jump-style edge crossings for the current edge set.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    graph : Any
+        Graph exposing per-edge style lookups.
+    curves : list[BezierCurve]
+        Routed edge curves.
+    crossings : list[EdgeCrossing]
+        Crossing records to render.
+    """
+    if not crossings:
+        return
+
+    background_color = str(graph.graph_style.background_color)
+    for crossing in crossings:
+        top_edge_index = int(crossing.edge_b)
+        under_edge_index = int(crossing.edge_a)
+        top_style = graph.get_style_for_edge(top_edge_index)
+        crossing_style = str(getattr(top_style, "crossing_style", "none")).lower()
+        if crossing_style == "none":
+            continue
+
+        span = _crossing_span_data_units(ax, top_style)
+        under_style = graph.get_style_for_edge(under_edge_index)
+        _draw_crossing_clearance(
+            ax=ax,
+            crossing=crossing,
+            curve=curves[under_edge_index],
+            t=float(crossing.t_a),
+            background_color=background_color,
+            style=under_style,
+            span=span,
+        )
+        if crossing_style == "gap":
+            _draw_gap_crossing(
+                ax, crossing, curves[top_edge_index], float(crossing.t_b), top_style, span
+            )
+        elif crossing_style == "arc":
+            _draw_arc_crossing(
+                ax, crossing, curves[top_edge_index], float(crossing.t_b), top_style, span
+            )
+        elif crossing_style == "sharp":
+            _draw_sharp_crossing(
+                ax, crossing, curves[top_edge_index], float(crossing.t_b), top_style, span
+            )
 
 
 def _edge_gradient_colors(style: Any) -> Tuple[Tuple[float, float, float, float], ...]:
@@ -2156,26 +2521,24 @@ def _draw_direct_edge_body(ax: Any, curve: BezierCurve, style: Any) -> List[Any]
     return artists
 
 
-def _draw_edges_direct(
+def _draw_direct_edge_markers(
     ax: Any,
     graph: Any,
     curves: List[BezierCurve],
 ) -> None:
-    """Draw all edges with direct matplotlib artists.
+    """Draw edge endpoint markers after edge bodies are in place.
 
     Parameters
     ----------
     ax : Any
-        Matplotlib axes receiving the edge artists.
+        Matplotlib axes receiving the marker artists.
     graph : Any
-        Graph exposing Dagua's edge-style API.
+        Graph exposing edge styles and node sizes.
     curves : list[BezierCurve]
         Routed edge curves.
     """
     for e_idx, curve in enumerate(curves):
         style = graph.get_style_for_edge(e_idx)
-        _draw_direct_edge_body(ax, curve, style)
-
         src_idx = int(graph.edge_index[0, e_idx])
         tgt_idx = int(graph.edge_index[1, e_idx])
         src_node_height = float(graph.node_sizes[src_idx, 1])
@@ -2216,6 +2579,34 @@ def _draw_edges_direct(
                 style=head_style,
                 node_height=tgt_node_height,
             )
+
+
+def _draw_edges_direct(
+    ax: Any,
+    graph: Any,
+    curves: List[BezierCurve],
+    crossings: Optional[List[EdgeCrossing]] = None,
+) -> None:
+    """Draw all edges with direct matplotlib artists.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes receiving the edge artists.
+    graph : Any
+        Graph exposing Dagua's edge-style API.
+    curves : list[BezierCurve]
+        Routed edge curves.
+    crossings : list[EdgeCrossing], optional
+        Crossing records that should receive jump rendering.
+    """
+    for e_idx, curve in enumerate(curves):
+        style = graph.get_style_for_edge(e_idx)
+        _draw_direct_edge_body(ax, curve, style)
+
+    if crossings:
+        _draw_edge_crossings(ax, graph, curves, crossings)
+    _draw_direct_edge_markers(ax, graph, curves)
 
 
 def _build_custom_edge_collection(
@@ -2748,13 +3139,23 @@ def _draw_edges(
         The prepared custom collection so the label pass can reuse it.
     """
     if not curves:
+        if hasattr(graph, "_cached_crossings"):
+            graph._cached_crossings = []
         return None
     del svg_hover_map
+    crossings: List[EdgeCrossing] = []
+    if any(
+        getattr(graph.get_style_for_edge(edge_idx), "crossing_style", "none") != "none"
+        for edge_idx in range(len(curves))
+    ):
+        crossings = detect_crossings(curves, edge_count=len(curves))
+    if hasattr(graph, "_cached_crossings"):
+        graph._cached_crossings = crossings
     if any(
         _edge_requires_direct_render(graph.get_style_for_edge(edge_idx))
         for edge_idx in range(len(curves))
     ):
-        _draw_edges_direct(ax, graph, curves)
+        _draw_edges_direct(ax, graph, curves, crossings=crossings)
         return None
     collection = _build_custom_edge_collection(ax, graph, curves)
     collection.render_bodies(ax)
