@@ -537,7 +537,7 @@ def _tee(length: float, width: float, body_width: float) -> ArrowheadResult:
         Stroke-only crossbar geometry trimmed at the bar centerline.
     """
     overlap = _join_overlap(length, body_width)
-    bar_x = max(length - overlap, length * 0.15)
+    bar_x = max(length - overlap, length * 0.10)
     # Ensure the crossbar is clearly visible even on thin edges.
     neck_half_width = max(width * 0.55, body_width * 0.75, length * 0.65, FLOAT_EPSILON)
     path = _local_path([(bar_x, neck_half_width), (bar_x, -neck_half_width)], closed=False)

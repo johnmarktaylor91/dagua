@@ -13,6 +13,7 @@ from scripts.build_gallery_audit import (
     ARROW_DEMO_EDGE_WIDTH,
     ARROW_DEMO_NODE_FRACTION,
     BOARD_GRID_TOP,
+    CARD_CONTENT_INSET,
     CURVATURE_CARD_MARGIN,
     DEFAULT_COMPARISON_STROKE,
     LABEL_BAR_DARK,
@@ -30,6 +31,8 @@ from scripts.build_gallery_audit import (
     _is_dark_background,
     _panel_widths,
     _prepare_reference_render,
+    _reference_card_annotation,
+    _reference_card_inset,
     _render_reference_canvas,
     build_combo_items,
     build_evil_items,
@@ -295,6 +298,23 @@ def test_prepare_reference_render_adds_scalar_default_context() -> None:
     assert float(positions[1, 1]) == pytest.approx(0.0)
 
 
+def test_stroke_width_reference_cards_use_standard_inset_without_footer_annotation() -> None:
+    """Stroke-width cards should use the standard crop inset and no footer text.
+
+    Returns
+    -------
+    None
+        The stroke-width card metadata is asserted in place.
+    """
+
+    item = next(
+        item for item in build_reference_items() if item.card_id == "nodes_borders_stroke_width_3_0"
+    )
+
+    assert _reference_card_inset(item) == CARD_CONTENT_INSET
+    assert _reference_card_annotation(item) is None
+
+
 def test_prepare_reference_render_strengthens_subtle_border_comparisons() -> None:
     """Border comparison cards should use explicit baseline styling for contrast.
 
@@ -429,6 +449,20 @@ def test_prepare_reference_render_applies_gallery_demo_tweaks() -> None:
     assert graph.num_nodes == 7
     assert graph.edge_index.shape[1] == 6
     assert positions.shape == (7, 2)
+
+
+def test_cluster_nested_fixture_keeps_inner_nodes_far_enough_apart() -> None:
+    """The nested-cluster fixture should leave visible space between inner members.
+
+    Returns
+    -------
+    None
+        The inner-node spacing is asserted in place.
+    """
+
+    _graph, positions = _build_fixture("cluster_nested")
+
+    assert float(positions[2, 0] - positions[1, 0]) == pytest.approx(120.0)
 
 
 def test_cluster_dotted_reference_cards_keep_visible_stroke_width() -> None:
