@@ -7,7 +7,8 @@
 - [ ] [MED] Warm-start chain variants FR->KK, KK->FR (AFTER current run)
 - [x] [DONE] Gallery audit Phase 1: 133/133 individual cards at 9+ critic score
 - [x] [DONE] Gallery audit Phase 2: 38/38 combo cards at 9+ critic score
-- [ ] [HIGH] Gallery audit expansion: add 40 more non-evil combos + 20 more evil combos, iterate to 9+
+- [x] [DONE] Gallery audit expansion: 40 combos + 20 evil cards added and iterated to 9+/7+
+- [x] [DONE] Cosmetic polish sprint: 7 rounds, 113 below-9 -> 32, 17 new 10/10s, 900 LOC across 3 commits
 - [ ] [HIGH] Continue Graphviz theme calibration until critics reach min>=8, mean>=9
 
 ## Bugs
@@ -15,6 +16,24 @@
 - [ ] [MED] Cluster label collision: sibling cluster labels ("Right Branch", "Left Branch") merge into unreadable text in nested_clusters test graph. Labels need spacing or collision detection.
 - [ ] [MED] Long label text overflow: nodes with long labels (e.g., "BatchNormalization2d(128, eps=1e-05, momentum=0.1)") show text extending beyond ellipse boundary. overflow_policy="expand_node" should expand the ellipse to contain text, but ellipse aspect ratio may not be adjusting correctly for very wide text.
 - [ ] [LOW] Arrowhead sizing still slightly smaller than Graphviz's chunky triangles. Current graphviz_strict uses arrow_length=7, arrow_width=4.5 -- may need to increase to ~10x7 once the placement bug is fixed.
+
+## Cosmetic Polish (Maybe)
+- [ ] [MAYBE] Text background corners: round text bg corners to match node corner_radius on rounded shapes
+- [ ] [MAYBE] Cloud/organic shape text bg: shape text backgrounds to follow cloud/hexagon contour instead of rectangular
+- [ ] [MAYBE] Dash spacing on curved surfaces: adapt dash pattern spacing to curvature (cylinder caps, high-curvature edges)
+- [ ] [MAYBE] Hub arrowhead distribution: when many edges converge on one node, distribute arrowheads around the perimeter instead of stacking
+- [ ] [MAYBE] Graphviz font size matching: increase default font size in comparison cards to better match Graphviz's chunkier proportions
+- [ ] [MAYBE] External label font scaling: reduce external label font size relative to node labels (currently dominates)
+- [ ] [MAYBE] Shadow contour matching: shadow blur should follow elliptical/rounded node contour precisely
+- [ ] [MAYBE] Crossing sharp style: make the angular kink more dramatic for better visual distinction
+- [ ] [MAYBE] Gradient center smoothing: lighten the radial gradient center hotspot slightly for less concentration
+- [ ] [MAYBE] Star point sharpening: slightly sharper star points for a more iconic look
+- [ ] [MAYBE] Tab protrusion sizing: make the tab shape's protrusion taller/wider so it reads as a file tab at small sizes
+- [ ] [MAYBE] Overflow/shrink demo labels: use longer test labels that actually trigger the overflow/shrink policies visibly
+- [ ] [MAYBE] Fill-pattern card node proportions: fix extreme width:height ratio on striped/gradient reference cards (deep layout issue)
+- [ ] [MAYBE] Self-loop arc height: tighten self-loop radius so loops don't extend 2x node height above the shape
+- [ ] [MAYBE] Taxi self-loop routing: implement orthogonal segments for self-loops (currently falls back to smooth arc)
+- [ ] [MAYBE] Italic shear angle: increase synthetic italic shear by 1-2 degrees for demo/reference cards where the point is to showcase italic
 
 ## Improvements (Nice-to-Have)
 - [ ] [MED] Image galleries via GitHub Pages: build_gallery.py generates PNGs, pushes to gh-pages branch. Keep images out of main branch. Milestone snapshots as GitHub Releases.

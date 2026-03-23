@@ -9,6 +9,7 @@ import torch
 from matplotlib.collections import LineCollection, PatchCollection
 
 from dagua.graph import DaguaGraph
+from dagua.render.borders.shapes import NOTE_FOLD_SIZE_RATIO, ShapeSpec, note_path
 from dagua.render.edges import available_arrowheads, build_arrowhead
 from dagua.render.edges.collection import (
     MIN_TAPER_WIDTH,
@@ -353,6 +354,25 @@ def test_tee_arrowhead_uses_bolder_crossbar_than_the_ribbon_body() -> None:
 
     assert np.allclose(bar[:, 0], trim_vertices[0, 0])
     assert np.linalg.norm(bar[0] - bar[1]) == pytest.approx(11.0)
+
+
+def test_note_shape_fold_is_large_enough_to_read_after_downscaling() -> None:
+    """Note cards should keep a visible fold line and clipped corner.
+
+    Returns
+    -------
+    None
+        The folded-corner geometry is asserted in place.
+    """
+
+    spec = ShapeSpec(center_x=0.0, center_y=0.0, width=20.0, height=10.0, shape="note")
+
+    path = note_path(spec)
+
+    assert NOTE_FOLD_SIZE_RATIO == pytest.approx(0.45)
+    assert [7.75, 5.0] in path.vertices.tolist()
+    assert [7.75, 2.75] in path.vertices.tolist()
+    assert [10.0, 2.75] in path.vertices.tolist()
 
 
 def test_crow_arrowhead_tines_merge_at_the_neck() -> None:
