@@ -18,7 +18,7 @@ from dagua.styles import (
     resolve_edge_style,
     resolve_node_style,
 )
-from dagua.utils import compute_node_size
+from dagua.utils import compute_node_size, fit_font_size_to_node
 
 if TYPE_CHECKING:
     from dagua.render.crossings import EdgeCrossing
@@ -880,6 +880,24 @@ class DaguaGraph:
                     w = max(w, style.min_width)
                 if style.min_height is not None:
                     h = max(h, style.min_height)
+            if style.overflow_policy == "shrink_text":
+                efs = fit_font_size_to_node(
+                    label,
+                    w,
+                    h,
+                    font_family=ff,
+                    font_size=fs,
+                    padding=padding,
+                    shape=style.shape,
+                    font_weight=style.font_weight,
+                    font_style=style.font_style,
+                    text_wrap=style.text_wrap,
+                    text_max_width=style.text_max_width,
+                    text_transform=style.text_transform,
+                    min_font_size=style.min_font_size,
+                    label_format=style.label_format,
+                    text_rotation=style.text_rotation,
+                )
             sizes.append([w, h])
             font_sizes.append(efs)
 

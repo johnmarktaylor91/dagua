@@ -28,10 +28,13 @@ from dagua.render.mpl import (
     _build_node_patch,
     _cluster_linestyle,
     _compute_display_scale,
+    _crossing_span_data_units,
     _draw_clusters,
     _draw_edge_marker,
     _draw_edges_direct,
+    _draw_node_fill,
     _draw_pie_fill,
+    _draw_sharp_crossing,
     _edge_linestyle,
     _edge_width_data_units,
     _marker_data_size,
@@ -42,6 +45,7 @@ from dagua.render.mpl import (
 from dagua.render.text import layout_plain_text
 from dagua.styles import RESOLVED_FONT, ClusterStyle, EdgeStyle, NodeStyle
 from dagua.utils import compute_node_size, prepare_label_text
+from scripts.generate_cosmetic_album import build_case_catalog
 
 mpl_renderer = importlib.import_module("dagua.render.mpl")
 
@@ -489,6 +493,119 @@ def test_graphviz_dash_patterns_are_explicit() -> None:
     assert _cluster_linestyle("dotted") == (0, (0.1, 3.0))
 
 
+@pytest.mark.parametrize(("shape", "min_vertices"), [("cloud", 18), ("stadium", 14)])
+def test_shape_shadows_follow_custom_node_contours(shape: str, min_vertices: int) -> None:
+    """Shadow artists should reuse the rendered shape path for non-rect nodes."""
+
+    graph = DaguaGraph()
+    graph.add_node("A", label="", style=NodeStyle(shape=shape, shadow=True))
+    graph.compute_node_sizes()
+    positions = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+
+    fig, ax = render(graph, positions=positions, show=False)
+    shadow_patches = [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, PathPatch) and float(patch.get_zorder()) < 1.5
+    ]
+
+    assert shadow_patches
+    assert shadow_patches[0].get_path().vertices.shape[0] >= min_vertices
+    plt.close(fig)
+
+
+def test_hatched_nodes_render_visible_overlay() -> None:
+    """Hatched fills should add a contrasting hatch overlay on top of the base fill."""
+
+    graph = DaguaGraph()
+    graph.add_node("A", label="", style=NodeStyle(fill_pattern="hatched", fill="#E8EEF6"))
+    graph.compute_node_sizes()
+    positions = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+
+    fig, ax = render(graph, positions=positions, show=False)
+    hatch_patches = [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, PathPatch) and patch.get_hatch() == "////"
+    ]
+
+    assert hatch_patches
+    hatch_patch = hatch_patches[0]
+    assert float(hatch_patch.get_linewidth()) >= 0.8
+    assert to_rgba(hatch_patch.get_edgecolor()) != to_rgba(hatch_patch.get_facecolor())
+    plt.close(fig)
+
+
+def test_crossing_span_uses_visible_minimum() -> None:
+    """Crossing jumps should keep a large enough data-space span for combo cards."""
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-20.0, 20.0)
+    ax.set_ylim(-20.0, 20.0)
+    fig.canvas.draw()
+
+    style = EdgeStyle(crossing_style="gap", crossing_size=6.0, width=1.0)
+    span = _crossing_span_data_units(ax, style)
+
+    assert span >= 16.0
+    plt.close(fig)
+
+
+def test_sharp_crossing_uses_edge_width_relative_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sharp crossings should stay centered and scale directly with edge width."""
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-25.0, 25.0)
+    ax.set_ylim(-25.0, 25.0)
+    ax.set_aspect("equal")
+    fig.canvas.draw()
+
+    captured: dict[str, Any] = {}
+
+    def _capture_ribbon(
+        ax: Any,
+        points: np.ndarray,
+        width: float,
+        color: Any,
+        zorder: float,
+        cap_start: str = "round",
+        cap_end: str = "round",
+        join_style: str = "miter",
+    ) -> None:
+        """Capture the bridge polyline without drawing a real patch."""
+        del ax, color, zorder, cap_start, cap_end, join_style
+        captured["points"] = points
+        captured["width"] = width
+
+    monkeypatch.setattr(mpl_renderer, "_add_filled_ribbon_patch", _capture_ribbon)
+
+    crossing = EdgeCrossing(edge_a=0, edge_b=1, x=0.0, y=0.0, t_a=0.5, t_b=0.5)
+    curve = BezierCurve(
+        p0=(-20.0, 0.0),
+        cp1=(-10.0, 0.0),
+        cp2=(10.0, 0.0),
+        p1=(20.0, 0.0),
+    )
+    style = EdgeStyle(crossing_style="sharp", width=2.0)
+    _draw_sharp_crossing(ax, crossing, curve, 0.5, style, span=16.0)
+
+    edge_width = _edge_width_data_units(ax, float(style.width))
+    expected_half_span = edge_width * 1.5
+    expected_height = edge_width * 2.0
+    points = captured["points"]
+
+    assert captured["width"] == pytest.approx(edge_width)
+    assert points[0][0] == pytest.approx(-expected_half_span)
+    assert points[0][1] == pytest.approx(0.0)
+    assert points[1][0] == pytest.approx(0.0)
+    assert points[1][1] == pytest.approx(expected_height)
+    assert points[2][0] == pytest.approx(expected_half_span)
+    assert points[2][1] == pytest.approx(0.0)
+    plt.close(fig)
+
+
 def test_triangle_patch_uses_graphviz_like_wide_proportions() -> None:
     """Triangle nodes should fill a wide, flat bounding box."""
 
@@ -552,6 +669,48 @@ def test_pie_fill_uses_full_ellipse_bounds() -> None:
     assert float(vertices[:, 0].mean()) == pytest.approx(shape_spec.center_x, abs=1.5)
     assert float(vertices[:, 1].mean()) == pytest.approx(shape_spec.center_y, abs=1.5)
 
+    plt.close(fig)
+
+
+def test_pie_fill_gradient_renders_overlay_after_wedges() -> None:
+    """Pie fills should keep a visible gradient overlay when both styles are enabled."""
+
+    fig, ax = plt.subplots()
+    shape_spec = ShapeSpec(
+        center_x=0.0,
+        center_y=0.0,
+        width=120.0,
+        height=60.0,
+        shape="ellipse",
+    )
+    fill_path = build_shape_path(shape_spec)
+    clip_patch = make_clip_proxy(fill_path, ax.transData)
+    style = NodeStyle(
+        fill="#DCEBFA",
+        gradient="linear",
+        gradient_color="#FF9800",
+        fill_pattern="pie",
+        fill_pattern_colors=["#FF6384", "#36A2EB", "#FFCE56"],
+        fill_pattern_values=[2.0, 1.0, 1.0],
+    )
+
+    _draw_node_fill(
+        ax,
+        shape_spec,
+        fill_path,
+        clip_patch,
+        0.0,
+        0.0,
+        120.0,
+        60.0,
+        style,
+        to_rgba(style.fill, style.opacity),
+    )
+
+    assert len(ax.images) == 1
+    pie_patches = [patch for patch in ax.patches if isinstance(patch, PathPatch)]
+    assert len(pie_patches) >= 4
+    assert ax.images[0].get_zorder() > max(float(patch.get_zorder()) for patch in pie_patches)
     plt.close(fig)
 
 
@@ -1166,9 +1325,12 @@ def test_direct_edge_markers_place_tip_at_node_boundary(
         direction: tuple[float, float],
         marker: str,
         style: Any,
+        node_width: float = 0.0,
         node_height: float = 0.0,
+        is_self_loop: bool = False,
+        **kwargs: Any,
     ) -> None:
-        del ax, direction, marker, style, node_height
+        del ax, direction, marker, style, node_width, node_height, is_self_loop, kwargs
         captured_points.append(point)
 
     monkeypatch.setattr(mpl_renderer, "_draw_edge_marker", _capture_marker)
@@ -1482,6 +1644,43 @@ def test_custom_edge_collection_scales_arrowheads_with_edge_width() -> None:
     assert 1.1 < ratio < 2.1, f"Arrow scaling ratio {ratio} out of expected range"
 
 
+def test_custom_edge_collection_caps_self_loop_arrowheads() -> None:
+    """Self-loop arrowheads should stay below the configured node-fraction cap."""
+
+    graph = DaguaGraph()
+    graph.add_node(
+        "loop",
+        style=NodeStyle(shape="star", min_width=120.0, min_height=120.0),
+    )
+    graph.add_edge(
+        "loop",
+        "loop",
+        style=EdgeStyle(width=2.0, arrow="normal", arrow_length=48.0, arrow_width=36.0),
+    )
+    graph.compute_node_sizes()
+    positions = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+    curve = dagua.route_edges(
+        positions,
+        graph.edge_index,
+        graph.node_sizes,
+        graph.direction,
+        graph,
+    )[0]
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-80.0, 80.0)
+    ax.set_ylim(-80.0, 80.0)
+    fig.canvas.draw()
+
+    collection = _build_custom_edge_collection(ax, graph, [curve])
+    edge = collection.edges[0]
+    max_length = float(min(graph.node_sizes[0, 0], graph.node_sizes[0, 1])) * 0.25
+    plt.close(fig)
+
+    assert edge.arrowhead_length == pytest.approx(max_length)
+    assert edge.arrowhead_width == pytest.approx(max_length * 0.7)
+
+
 def test_normal_arrow_marker_uses_wider_graphviz_base() -> None:
     """Normal arrow markers should use the widened triangular base."""
 
@@ -1675,6 +1874,54 @@ def test_node_and_external_label_font_sizes_use_data_coordinate_scaling(
     plt.close(fig)
 
 
+def test_bold_node_and_external_labels_normalize_weight_and_gain_size_boost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bold node-label paths should request a heavy face and slightly larger size."""
+
+    captured = _capture_render_calls(monkeypatch)
+    graph = DaguaGraph()
+    graph.add_node(
+        "a",
+        label="Bold Here",
+        style=NodeStyle(
+            font_size=16.0,
+            font_weight="700",
+            external_label="Outside",
+            external_label_font_size=10.0,
+        ),
+    )
+    pos = np.array([[0.0, 0.0]], dtype=float)
+    sizes = np.array([[40.0, 20.0]], dtype=float)
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-50.0, 50.0)
+    ax.set_ylim(-50.0, 50.0)
+    ax.set_aspect("equal")
+    fig.canvas.draw()
+
+    mpl_renderer._draw_node_labels(ax, graph, pos, sizes)
+    mpl_renderer._draw_external_labels(ax, graph, pos, sizes)
+
+    node_specs, node_display_scale = captured[0]
+    external_specs, external_display_scale = captured[1]
+    node_spec = next(spec for spec in node_specs if spec.gid == "dagua-node-label-0")
+    external_spec = next(
+        spec for spec in external_specs if spec.gid == "dagua-node-external-label-0"
+    )
+
+    baseline_external = max(20.0 * 0.35 * (10.0 / 8.0), 20.0 * 0.1)
+    baseline_external = min(baseline_external, 20.0 * 0.6)
+
+    assert node_spec.font_weight == "bold"
+    assert external_spec.font_weight == "bold"
+    assert node_spec.font_size * node_display_scale == pytest.approx(16.0 * 1.05)
+    assert external_spec.font_size * external_display_scale == pytest.approx(
+        baseline_external * 1.05
+    )
+    plt.close(fig)
+
+
 def test_node_label_wrap_budget_uses_display_scaled_width(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1760,6 +2007,27 @@ def test_edge_label_font_sizes_use_average_node_height(
     assert tail_spec.font_size * display_scale == pytest.approx(
         avg_node_height * 0.25 * ((14.0 * 0.85) / 7.0)
     )
+    edge_style = mpl_renderer._edge_style_for_render(graph, 0)
+    minimum_requested_offset = (12.0 + ((14.0 * 0.85) / 2.0)) * display_scale
+    expected_offset = mpl_renderer._endpoint_label_offset_data(
+        edge_style,
+        "head",
+        avg_node_height,
+        display_scale,
+    )
+    expected_head = mpl_renderer.edge_endpoint_label_position(
+        curves[0],
+        "head",
+        label_offset=expected_offset,
+    )
+    expected_tail = mpl_renderer.edge_endpoint_label_position(
+        curves[0],
+        "tail",
+        label_offset=expected_offset,
+    )
+    assert expected_offset >= minimum_requested_offset
+    assert (head_spec.x, head_spec.y) == pytest.approx(expected_head)
+    assert (tail_spec.x, tail_spec.y) == pytest.approx(expected_tail)
     plt.close(fig)
 
 
@@ -2078,4 +2346,26 @@ def test_cluster_borders_include_visible_stroke_outline() -> None:
     assert not border_patches
     assert ax.collections
     assert sum(len(collection.get_paths()) for collection in ax.collections) >= 2
+    plt.close(fig)
+
+
+def test_deep_cluster_bounds_stay_inside_render_axes() -> None:
+    """Deep nested cluster boxes should stay inside the computed viewport."""
+
+    case = {case.case_id: case for case in build_case_catalog()}["evil_8_deep_clusters"]
+    fig, ax = render(case.graph, case.positions)
+    x_min, x_max = ax.get_xlim()
+    y_min, y_max = ax.get_ylim()
+    cluster_collections = [
+        collection for collection in ax.collections if collection.get_zorder() < 0.1
+    ]
+    tolerance = 1e-6
+
+    assert len(cluster_collections) >= 10
+    for collection in cluster_collections:
+        vertices = np.concatenate([path.vertices for path in collection.get_paths()], axis=0)
+        assert float(vertices[:, 0].min()) >= x_min - tolerance
+        assert float(vertices[:, 0].max()) <= x_max + tolerance
+        assert float(vertices[:, 1].min()) >= y_min - tolerance
+        assert float(vertices[:, 1].max()) <= y_max + tolerance
     plt.close(fig)

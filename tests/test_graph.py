@@ -224,12 +224,20 @@ class TestNodeSizes:
 
     def test_sizes_reflect_label_width(self):
         g = DaguaGraph.from_edge_list([("short", "a_very_long_label_here")])
+        g.node_styles = [
+            NodeStyle(overflow_policy="expand_node"),
+            NodeStyle(overflow_policy="expand_node"),
+        ]
         g.compute_node_sizes()
         # Longer label should produce wider node
         assert g.node_sizes[1, 0] > g.node_sizes[0, 0]
 
     def test_size_cache_invalidates_when_label_changes(self):
         g = DaguaGraph.from_edge_list([("a", "b")])
+        g.node_styles = [
+            NodeStyle(overflow_policy="expand_node"),
+            NodeStyle(overflow_policy="expand_node"),
+        ]
         g.compute_node_sizes()
         width_before = g.node_sizes[0, 0].item()
         g.node_labels[0] = "a much longer label"
@@ -243,6 +251,88 @@ class TestNodeSizes:
         g.node_styles[0] = NodeStyle(min_height=48.0)
         g.compute_node_sizes()
         assert g.node_sizes[0, 1].item() >= 48.0
+
+    def test_shrink_text_fits_constrained_ellipse(self) -> None:
+        """shrink_text should reduce the font until ellipse text fits the fixed node."""
+        from dagua.utils import CURVED_SHAPE_INSCRIBE_FACTOR, measure_text
+
+        graph = DaguaGraph()
+        graph.add_node(
+            "a",
+            label="Shrink this ellipse label aggressively",
+            style=NodeStyle(
+                shape="ellipse",
+                font_size=18.0,
+                padding=(6.0, 6.0),
+                min_width=150.0,
+                min_height=56.0,
+                overflow_policy="shrink_text",
+                min_font_size=3.0,
+            ),
+        )
+
+        graph.compute_node_sizes()
+
+        style = graph.get_style_for_node(0)
+        node_width = float(graph.node_sizes[0, 0].item())
+        node_height = float(graph.node_sizes[0, 1].item())
+        fitted_font_size = float(graph.node_font_sizes[0].item())
+        text_width, text_height = measure_text(
+            graph.node_labels[0],
+            style.font_family,
+            fitted_font_size,
+            style.font_weight,
+            style.font_style,
+        )
+
+        assert fitted_font_size < style.font_size
+        assert (text_width + style.padding[0] * 2.0) * CURVED_SHAPE_INSCRIBE_FACTOR <= (
+            node_width + 1e-6
+        )
+        assert (text_height + style.padding[1] * 2.0) * CURVED_SHAPE_INSCRIBE_FACTOR <= (
+            node_height + 1e-6
+        )
+
+    def test_expand_node_grows_ellipse_for_full_size_text(self) -> None:
+        """expand_node should enlarge ellipse bounds instead of shrinking the label."""
+        from dagua.utils import CURVED_SHAPE_INSCRIBE_FACTOR, measure_text
+
+        graph = DaguaGraph()
+        graph.add_node(
+            "a",
+            label="Expand this ellipse label without shrinking",
+            style=NodeStyle(
+                shape="ellipse",
+                font_size=16.0,
+                padding=(6.0, 6.0),
+                min_width=90.0,
+                min_height=42.0,
+                overflow_policy="expand_node",
+            ),
+        )
+
+        graph.compute_node_sizes()
+
+        style = graph.get_style_for_node(0)
+        node_width = float(graph.node_sizes[0, 0].item())
+        node_height = float(graph.node_sizes[0, 1].item())
+        fitted_font_size = float(graph.node_font_sizes[0].item())
+        text_width, text_height = measure_text(
+            graph.node_labels[0],
+            style.font_family,
+            fitted_font_size,
+            style.font_weight,
+            style.font_style,
+        )
+
+        assert fitted_font_size == pytest.approx(style.font_size)
+        assert node_width > float(style.min_width or 0.0)
+        assert (text_width + style.padding[0] * 2.0) * CURVED_SHAPE_INSCRIBE_FACTOR <= (
+            node_width + 1e-6
+        )
+        assert (text_height + style.padding[1] * 2.0) * CURVED_SHAPE_INSCRIBE_FACTOR <= (
+            node_height + 1e-6
+        )
 
 
 class TestStyles:
