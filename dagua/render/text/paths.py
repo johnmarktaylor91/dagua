@@ -60,6 +60,8 @@ class GlyphRun:
         Original text content.
     font_size_pts : float
         Original font size in typographic points.
+    size_data : float
+        Font size in renderer data units.
     """
 
     path: Path
@@ -67,6 +69,7 @@ class GlyphRun:
     metrics: FontMetrics
     text: str
     font_size_pts: float
+    size_data: float
 
 
 def _resolve_font_family(font_family: str) -> str:
@@ -111,10 +114,43 @@ def _build_font_properties(
     """
     return FontProperties(
         family=_resolve_font_family(font_family),
-        weight=font_weight,
+        weight=_normalize_font_weight(font_weight),
         style=_normalize_font_style(font_style),
         size=size,
     )
+
+
+def _normalize_font_weight(font_weight: str) -> str:
+    """Clamp font-weight tokens to matplotlib-friendly names.
+
+    Parameters
+    ----------
+    font_weight : str
+        Requested font-weight token.
+
+    Returns
+    -------
+    str
+        Normalized matplotlib weight name.
+    """
+    normalized = font_weight.strip().lower()
+    try:
+        numeric_weight = float(normalized)
+    except ValueError:
+        numeric_weight = None
+    if numeric_weight is not None:
+        if numeric_weight >= 600.0:
+            return "bold"
+        if numeric_weight <= 400.0:
+            return "normal"
+        normalized = str(int(numeric_weight)) if numeric_weight.is_integer() else normalized
+    if normalized in {"", "regular"}:
+        return "normal"
+    if normalized in {"demibold", "semi-bold"}:
+        return "semibold"
+    if normalized in {"extra-bold", "ultrabold"}:
+        return "extrabold"
+    return normalized
 
 
 def _normalize_font_style(font_style: str) -> Literal["normal", "italic", "oblique"]:
@@ -341,6 +377,7 @@ def text_to_glyphs(
         metrics=metrics,
         text=text,
         font_size_pts=float(font_size_pts),
+        size_data=safe_size,
     )
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -70,6 +71,7 @@ COMBO_TEXT_MAX_WIDTH = 92.0
 COMBO_MIN_NODE_WIDTH = 96.0
 COMBO_PAIR_VERTICAL_GAP = 120.0
 COMBO_DIAMOND_PAIR_VERTICAL_GAP = 140.0
+VARIED_EXTERNAL_LABELS: Tuple[str, ...] = ("v1.2", "stable", "beta", "new", "legacy")
 
 
 @dataclass
@@ -472,6 +474,31 @@ def _set_all_node_styles(graph: DaguaGraph, style: NodeStyle) -> None:
     """
 
     graph.node_styles = [style for _ in range(graph.num_nodes)]
+
+
+def _set_varied_external_label_styles(graph: DaguaGraph, **overrides: Any) -> None:
+    """Assign per-node styles with distinct external labels.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph to mutate.
+    **overrides : Any
+        ``NodeStyle`` overrides passed through ``_combo_node_style``.
+
+    Returns
+    -------
+    None
+        The graph is mutated in place.
+    """
+
+    graph.node_styles = [
+        _combo_node_style(
+            external_label=VARIED_EXTERNAL_LABELS[index % len(VARIED_EXTERNAL_LABELS)],
+            **overrides,
+        )
+        for index in range(graph.num_nodes)
+    ]
 
 
 def _set_all_edge_styles(graph: DaguaGraph, style: EdgeStyle) -> None:
@@ -2462,6 +2489,20 @@ def _combo_2way_cases() -> List[AlbumCase]:
         )
     )
 
+    graph, positions = _crossing_edges_graph()
+    _set_all_node_styles(graph, _combo_node_style(fill="#F4F7FA"))
+    _set_all_edge_styles(graph, _combo_edge_style(crossing_style="sharp", style="dashed"))
+    cases.append(
+        _combo_case(
+            "crossing_sharp_dashed",
+            "combo_2way",
+            "Crossing Sharp + Dashed",
+            graph,
+            positions,
+            {"combo": "2way", "crossing_style": "sharp", "edge_style": "dashed"},
+        )
+    )
+
     graph, positions = _combo_pair_graph(["Hexagon source", "Gradient target"])
     _set_all_node_styles(graph, _combo_node_style(shape="hexagon", gradient="linear"))
     cases.append(
@@ -2565,6 +2606,7 @@ def _combo_2way_cases() -> List[AlbumCase]:
         graph,
         _combo_node_style(corner_radius=10.0, stroke_dash="dashed", shadow=True),
     )
+    _set_all_edge_styles(graph, _combo_edge_style())
     cases.append(
         _combo_case(
             "rounded_dashed_shadow",
@@ -2573,6 +2615,395 @@ def _combo_2way_cases() -> List[AlbumCase]:
             graph,
             positions,
             {"combo": "2way", "corner_radius": 10, "stroke_dash": "dashed", "shadow": True},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Alpha", "Beta"])
+    _set_all_node_styles(graph, _combo_node_style())
+    _set_all_edge_styles(
+        graph,
+        _combo_edge_style(routing="bezier", color_gradient="source_to_target"),
+    )
+    cases.append(
+        _combo_case(
+            "taxi_gradient_edge",
+            "combo_2way",
+            "Bezier + Edge Gradient",
+            graph,
+            positions,
+            {"combo": "2way", "routing": "bezier", "color_gradient": "source_to_target"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Input", "Output"])
+    _set_all_node_styles(graph, _combo_node_style(shadow=True))
+    _set_all_edge_styles(graph, _combo_edge_style(routing="straight"))
+    cases.append(
+        _combo_case(
+            "straight_shadow",
+            "combo_2way",
+            "Straight + Shadow",
+            graph,
+            positions,
+            {"combo": "2way", "routing": "straight", "shadow": True},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(
+        ["In", "Out"],
+        vertical_gap=COMBO_DIAMOND_PAIR_VERTICAL_GAP,
+    )
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(
+            fill_pattern="pie",
+            fill_pattern_colors=["#56B4E9", "#D55E00", "#009E73"],
+            fill_pattern_values=[3, 2, 1],
+            font_weight="bold",
+            min_width=130.0,
+        ),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "pie_bold",
+            "combo_2way",
+            "Pie Fill + Bold",
+            graph,
+            positions,
+            {
+                "combo": "2way",
+                "fill_pattern": "pie",
+                "fill_pattern_colors": ["#56B4E9", "#D55E00", "#009E73"],
+                "fill_pattern_values": [3, 2, 1],
+                "font_weight": "bold",
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(
+        ["In", "Out"],
+        vertical_gap=COMBO_DIAMOND_PAIR_VERTICAL_GAP,
+    )
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(
+            fill_pattern="pie",
+            fill_pattern_colors=["#56B4E9", "#D55E00", "#009E73"],
+            fill_pattern_values=[3, 2, 1],
+            fill_pattern_hole=0.4,
+            shadow=True,
+            min_width=130.0,
+        ),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "donut_shadow",
+            "combo_2way",
+            "Donut + Shadow",
+            graph,
+            positions,
+            {
+                "combo": "2way",
+                "fill_pattern": "pie",
+                "fill_pattern_colors": ["#56B4E9", "#D55E00", "#009E73"],
+                "fill_pattern_values": [3, 2, 1],
+                "fill_pattern_hole": 0.4,
+                "shadow": True,
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Node", "Info"])
+    _set_varied_external_label_styles(
+        graph,
+        external_label_position="bottom",
+        corner_radius=12.0,
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "external_label_rounded",
+            "combo_2way",
+            "External Label + Rounded",
+            graph,
+            positions,
+            {
+                "combo": "2way",
+                "external_label_varied": True,
+                "external_label_position": "bottom",
+                "corner_radius": 12,
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Text", "Glow"])
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(
+            text_outline=True,
+            text_outline_color="#FFFFFF",
+            text_outline_width=2.0,
+            gradient="linear",
+        ),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "text_outline_gradient",
+            "combo_2way",
+            "Text Outline + Gradient",
+            graph,
+            positions,
+            {
+                "combo": "2way",
+                "text_outline": True,
+                "text_outline_color": "#FFFFFF",
+                "text_outline_width": 2.0,
+                "gradient": "linear",
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Store", "Sink"])
+    _set_all_node_styles(graph, _combo_node_style(shape="cylinder", stroke_dash="dashed"))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "cylinder_dashed",
+            "combo_2way",
+            "Cylinder + Dashed",
+            graph,
+            positions,
+            {"combo": "2way", "shape": "cylinder", "stroke_dash": "dashed"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Sky", "Rain"])
+    _set_all_node_styles(graph, _combo_node_style(shape="cloud", shadow=True))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "cloud_shadow",
+            "combo_2way",
+            "Cloud + Shadow",
+            graph,
+            positions,
+            {"combo": "2way", "shape": "cloud", "shadow": True},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Run", "Done"])
+    _set_all_node_styles(graph, _combo_node_style(shape="stadium", gradient="linear"))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "stadium_gradient",
+            "combo_2way",
+            "Stadium + Gradient",
+            graph,
+            positions,
+            {"combo": "2way", "shape": "stadium", "gradient": "linear"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Tab", "Pane"])
+    _set_all_node_styles(graph, _combo_node_style(shape="tab", font_weight="bold"))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "tab_bold",
+            "combo_2way",
+            "Tab + Bold",
+            graph,
+            positions,
+            {"combo": "2way", "shape": "tab", "font_weight": "bold"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Note", "Memo"])
+    _set_all_node_styles(graph, _combo_node_style(shape="note", font_style="italic"))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "note_italic",
+            "combo_2way",
+            "Note + Italic",
+            graph,
+            positions,
+            {"combo": "2way", "shape": "note", "font_style": "italic"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Doc", "File"])
+    _set_all_node_styles(graph, _combo_node_style(shape="document", shadow=True))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "document_shadow",
+            "combo_2way",
+            "Document + Shadow",
+            graph,
+            positions,
+            {"combo": "2way", "shape": "document", "shadow": True},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["3D", "Box"])
+    _set_all_node_styles(graph, _combo_node_style(shape="box3d", gradient="linear"))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "box3d_gradient",
+            "combo_2way",
+            "Box3D + Gradient",
+            graph,
+            positions,
+            {"combo": "2way", "shape": "box3d", "gradient": "linear"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["In", "Out"])
+    _set_all_node_styles(graph, _combo_node_style(shape="parallelogram"))
+    _set_all_edge_styles(graph, _combo_edge_style(style="dotted"))
+    cases.append(
+        _combo_case(
+            "parallelogram_dotted",
+            "combo_2way",
+            "Parallelogram + Dotted",
+            graph,
+            positions,
+            {"combo": "2way", "shape": "parallelogram", "edge_style": "dotted"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Trap", "Flow"])
+    _set_all_node_styles(graph, _combo_node_style(shape="trapezoid", gradient="radial"))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "trapezoid_gradient",
+            "combo_2way",
+            "Trapezoid + Gradient",
+            graph,
+            positions,
+            {"combo": "2way", "shape": "trapezoid", "gradient": "radial"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Pent", "Node"])
+    _set_all_node_styles(graph, _combo_node_style(shape="pentagon", shadow=True))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "pentagon_shadow",
+            "combo_2way",
+            "Pentagon + Shadow",
+            graph,
+            positions,
+            {"combo": "2way", "shape": "pentagon", "shadow": True},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Oct", "Mark"])
+    _set_all_node_styles(graph, _combo_node_style(shape="octagon", border_count=2))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "octagon_double_border",
+            "combo_2way",
+            "Octagon + Double Border",
+            graph,
+            positions,
+            {"combo": "2way", "shape": "octagon", "border_count": 2},
+        )
+    )
+
+    graph, positions = _crossing_edges_graph()
+    _set_all_node_styles(graph, _combo_node_style(fill="#F4F7FA"))
+    _set_all_edge_styles(
+        graph,
+        _combo_edge_style(
+            routing="straight",
+            crossing_style="gap",
+            crossing_size=20.0,
+            width=3.5,
+        ),
+    )
+    cases.append(
+        _combo_case(
+            "crossing_gap_thick",
+            "combo_2way",
+            "Crossing Gap + Thick",
+            graph,
+            positions,
+            {
+                "combo": "2way",
+                "routing": "straight",
+                "crossing_style": "gap",
+                "crossing_size": 20.0,
+                "width": 3.5,
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Input", "Output"])
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(fill_pattern="hatched", gradient="linear"),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "hatched_gradient",
+            "combo_2way",
+            "Hatched + Gradient",
+            graph,
+            positions,
+            {"combo": "2way", "fill_pattern": "hatched", "gradient": "linear"},
+        )
+    )
+
+    graph, positions = _direction_graph("BT")
+    _set_all_node_styles(graph, _combo_node_style(shadow=True, min_width=140.0))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "bt_direction_shadow",
+            "combo_2way",
+            "BT + Shadow",
+            graph,
+            positions,
+            {"combo": "2way", "direction": "BT", "shadow": True},
+        )
+    )
+
+    graph, positions = _direction_graph("RL")
+    _set_all_node_styles(graph, _combo_node_style(gradient="linear", min_width=140.0))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "rl_direction_gradient",
+            "combo_2way",
+            "RL + Gradient",
+            graph,
+            positions,
+            {"combo": "2way", "direction": "RL", "gradient": "linear"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Src", "Dst"])
+    _set_all_node_styles(graph, _combo_node_style(font_weight="bold", font_size=12.0))
+    _set_all_edge_styles(graph, _combo_edge_style(arrow="crow"))
+    cases.append(
+        _combo_case(
+            "crow_arrow_bold",
+            "combo_2way",
+            "Crow Arrow + Bold",
+            graph,
+            positions,
+            {"combo": "2way", "arrow": "crow", "font_weight": "bold", "font_size": 12.0},
         )
     )
 
@@ -2770,6 +3201,228 @@ def _combo_3way_cases() -> List[AlbumCase]:
         )
     )
 
+    graph, positions = _combo_pair_graph(["A", "B"])
+    _set_all_node_styles(graph, _combo_node_style(shadow=True, gradient="linear"))
+    _set_all_edge_styles(graph, _combo_edge_style(routing="taxi"))
+    cases.append(
+        _combo_case(
+            "taxi_shadow_gradient",
+            "combo_3way",
+            "Taxi + Shadow + Gradient",
+            graph,
+            positions,
+            {"combo": "3way", "routing": "taxi", "shadow": True, "gradient": "linear"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(
+        ["In", "Out"],
+        vertical_gap=COMBO_DIAMOND_PAIR_VERTICAL_GAP,
+    )
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(
+            fill_pattern="pie",
+            fill_pattern_colors=["#56B4E9", "#D55E00", "#009E73"],
+            fill_pattern_values=[3, 2, 1],
+            gradient="linear",
+            font_weight="bold",
+            min_width=130.0,
+        ),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "pie_gradient_bold",
+            "combo_3way",
+            "Pie + Gradient + Bold",
+            graph,
+            positions,
+            {
+                "combo": "3way",
+                "fill_pattern": "pie",
+                "fill_pattern_colors": ["#56B4E9", "#D55E00", "#009E73"],
+                "fill_pattern_values": [3, 2, 1],
+                "gradient": "linear",
+                "font_weight": "bold",
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(
+        ["Dia", "Tag"],
+        vertical_gap=COMBO_DIAMOND_PAIR_VERTICAL_GAP,
+    )
+    _set_varied_external_label_styles(
+        graph,
+        external_label_position="bottom",
+        shape="diamond",
+        shadow=True,
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "external_label_diamond_shadow",
+            "combo_3way",
+            "Ext Label + Diamond + Shadow",
+            graph,
+            positions,
+            {
+                "combo": "3way",
+                "external_label_varied": True,
+                "external_label_position": "bottom",
+                "shape": "diamond",
+                "shadow": True,
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Cld", "Txt"])
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(shape="cloud", gradient="linear", font_style="italic"),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "cloud_gradient_italic",
+            "combo_3way",
+            "Cloud + Gradient + Italic",
+            graph,
+            positions,
+            {"combo": "3way", "shape": "cloud", "gradient": "linear", "font_style": "italic"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Run", "Stop"])
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(shape="stadium", fill_pattern="striped", shadow=True),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "stadium_striped_shadow",
+            "combo_3way",
+            "Stadium + Striped + Shadow",
+            graph,
+            positions,
+            {"combo": "3way", "shape": "stadium", "fill_pattern": "striped", "shadow": True},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Hat", "Ink"])
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(fill_pattern="hatched", shadow=True, font_weight="bold"),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "hatched_shadow_bold",
+            "combo_3way",
+            "Hatched + Shadow + Bold",
+            graph,
+            positions,
+            {"combo": "3way", "fill_pattern": "hatched", "shadow": True, "font_weight": "bold"},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Src", "Dst"])
+    _set_all_node_styles(graph, _combo_node_style())
+    _set_all_edge_styles(
+        graph,
+        _combo_edge_style(
+            head_label="H",
+            tail_label="T",
+            head_label_offset=18.0,
+            tail_label_offset=18.0,
+            routing="ortho",
+            arrow="none",
+        ),
+    )
+    cases.append(
+        _combo_case(
+            "head_tail_labels_ortho",
+            "combo_3way",
+            "Head/Tail Labels + Ortho",
+            graph,
+            positions,
+            {
+                "combo": "3way",
+                "head_label": "H",
+                "tail_label": "T",
+                "head_label_offset": 18.0,
+                "tail_label_offset": 18.0,
+                "routing": "ortho",
+                "arrow": "none",
+            },
+        )
+    )
+
+    graph, positions = _basic_cluster_graph()
+    graph.direction = "BT"
+    _set_all_node_styles(graph, _combo_node_style(corner_radius=10.0))
+    _set_all_edge_styles(graph, _combo_edge_style())
+    graph.cluster_styles["group"] = _base_cluster_style(fill="#E6EEF7", opacity=0.55)
+    cases.append(
+        _combo_case(
+            "bt_cluster_rounded",
+            "combo_3way",
+            "BT + Cluster + Rounded",
+            graph,
+            positions,
+            {"combo": "3way", "direction": "BT", "cluster": True, "corner_radius": 10},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Txt", "Out"])
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(
+            text_outline=True,
+            text_outline_color="#333333",
+            text_outline_width=2.0,
+            shadow=True,
+            font_weight="bold",
+        ),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "text_outline_shadow_bold",
+            "combo_3way",
+            "Text Outline + Shadow + Bold",
+            graph,
+            positions,
+            {
+                "combo": "3way",
+                "text_outline": True,
+                "text_outline_color": "#333333",
+                "text_outline_width": 2.0,
+                "shadow": True,
+                "font_weight": "bold",
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["A", "B"])
+    _set_all_node_styles(graph, _combo_node_style())
+    _set_all_edge_styles(
+        graph,
+        _combo_edge_style(color_gradient="source_to_target", taper=True, width=4.0),
+    )
+    cases.append(
+        _combo_case(
+            "color_gradient_taper_thick",
+            "combo_3way",
+            "Edge Gradient + Taper + Thick",
+            graph,
+            positions,
+            {"combo": "3way", "color_gradient": "source_to_target", "taper": True, "width": 4.0},
+        )
+    )
+
     return cases
 
 
@@ -2913,6 +3566,145 @@ def _combo_4way_cases() -> List[AlbumCase]:
         )
     )
 
+    graph, positions = _combo_pair_graph(
+        ["In", "Out"],
+        vertical_gap=COMBO_DIAMOND_PAIR_VERTICAL_GAP,
+    )
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(
+            fill_pattern="pie",
+            fill_pattern_colors=["#56B4E9", "#D55E00", "#009E73"],
+            fill_pattern_values=[3, 2, 1],
+            shadow=True,
+            gradient="linear",
+            font_weight="bold",
+            min_width=130.0,
+        ),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "pie_shadow_gradient_bold",
+            "combo_4way",
+            "Pie + Shadow + Gradient + Bold",
+            graph,
+            positions,
+            {
+                "combo": "4way",
+                "fill_pattern": "pie",
+                "fill_pattern_colors": ["#56B4E9", "#D55E00", "#009E73"],
+                "fill_pattern_values": [3, 2, 1],
+                "shadow": True,
+                "gradient": "linear",
+                "font_weight": "bold",
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["DB", "ET"])
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(
+            shape="cylinder",
+            stroke_dash="dashed",
+            shadow=True,
+            gradient="linear",
+        ),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "cylinder_dashed_shadow_gradient",
+            "combo_4way",
+            "Cylinder + Dashed + Shadow + Gradient",
+            graph,
+            positions,
+            {
+                "combo": "4way",
+                "shape": "cylinder",
+                "stroke_dash": "dashed",
+                "shadow": True,
+                "gradient": "linear",
+            },
+        )
+    )
+
+    graph, positions = _crossing_edges_graph()
+    _set_all_node_styles(graph, _combo_node_style(fill="#F4F7FA", shadow=True, gradient="linear"))
+    _set_all_edge_styles(graph, _combo_edge_style(routing="taxi", crossing_style="gap"))
+    cases.append(
+        _combo_case(
+            "taxi_crossing_gap_gradient",
+            "combo_4way",
+            "Taxi + Crossing Gap + Gradient + Shadow",
+            graph,
+            positions,
+            {
+                "combo": "4way",
+                "routing": "taxi",
+                "crossing_style": "gap",
+                "gradient": "linear",
+                "shadow": True,
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["CL", "IT"])
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(
+            shape="cloud",
+            fill_pattern="striped",
+            shadow=True,
+            font_style="italic",
+        ),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "cloud_striped_shadow_italic",
+            "combo_4way",
+            "Cloud + Striped + Shadow + Italic",
+            graph,
+            positions,
+            {
+                "combo": "4way",
+                "shape": "cloud",
+                "fill_pattern": "striped",
+                "shadow": True,
+                "font_style": "italic",
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["HX", "MD"])
+    _set_varied_external_label_styles(
+        graph,
+        external_label_position="bottom",
+        shape="hexagon",
+        gradient="linear",
+        font_weight="bold",
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "ext_label_hexagon_gradient_bold",
+            "combo_4way",
+            "Ext Label + Hexagon + Gradient + Bold",
+            graph,
+            positions,
+            {
+                "combo": "4way",
+                "external_label_varied": True,
+                "external_label_position": "bottom",
+                "shape": "hexagon",
+                "gradient": "linear",
+                "font_weight": "bold",
+            },
+        )
+    )
+
     return cases
 
 
@@ -3007,6 +3799,102 @@ def _combo_5way_cases() -> List[AlbumCase]:
                 "taper": True,
                 "crossing_style": "arc",
                 "color_gradient": "source_to_target",
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["B3D", "EG"])
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(
+            shape="box3d",
+            shadow=True,
+            text_outline=True,
+            text_outline_color="#FFFFFF",
+            text_outline_width=2.0,
+        ),
+    )
+    _set_all_edge_styles(
+        graph,
+        _combo_edge_style(taper=True, color_gradient="source_to_target"),
+    )
+    cases.append(
+        _combo_case(
+            "kitchen_sink_4",
+            "combo_5way",
+            "Box3D + Shadow + Outline + Taper + Edge Gradient",
+            graph,
+            positions,
+            {
+                "combo": "5way",
+                "shape": "box3d",
+                "shadow": True,
+                "text_outline": True,
+                "text_outline_color": "#FFFFFF",
+                "text_outline_width": 2.0,
+                "taper": True,
+                "color_gradient": "source_to_target",
+            },
+        )
+    )
+
+    graph, positions = _combo_pair_graph(
+        ["Pie", "Lbl"],
+        vertical_gap=COMBO_DIAMOND_PAIR_VERTICAL_GAP,
+    )
+    _set_varied_external_label_styles(
+        graph,
+        fill_pattern="pie",
+        fill_pattern_colors=["#56B4E9", "#D55E00", "#009E73"],
+        fill_pattern_values=[3, 2, 1],
+        fill_pattern_hole=0.3,
+        gradient="linear",
+        font_weight="bold",
+        external_label_position="bottom",
+        min_width=140.0,
+    )
+    _set_all_edge_styles(graph, _combo_edge_style())
+    cases.append(
+        _combo_case(
+            "kitchen_sink_5",
+            "combo_5way",
+            "Pie Donut + Gradient + Bold + Ext Label",
+            graph,
+            positions,
+            {
+                "combo": "5way",
+                "fill_pattern": "pie",
+                "fill_pattern_colors": ["#56B4E9", "#D55E00", "#009E73"],
+                "fill_pattern_values": [3, 2, 1],
+                "fill_pattern_hole": 0.3,
+                "gradient": "linear",
+                "font_weight": "bold",
+                "external_label_varied": True,
+                "external_label_position": "bottom",
+            },
+        )
+    )
+
+    graph, positions = _crossing_edges_graph()
+    _set_all_node_styles(
+        graph,
+        _combo_node_style(shape="stadium", shadow=True, gradient="linear", fill="#F4F7FA"),
+    )
+    _set_all_edge_styles(graph, _combo_edge_style(routing="taxi", crossing_style="gap"))
+    cases.append(
+        _combo_case(
+            "kitchen_sink_6",
+            "combo_5way",
+            "Stadium + Taxi + Shadow + Gradient + Crossing Gap",
+            graph,
+            positions,
+            {
+                "combo": "5way",
+                "shape": "stadium",
+                "routing": "taxi",
+                "shadow": True,
+                "gradient": "linear",
+                "crossing_style": "gap",
             },
         )
     )
@@ -3435,6 +4323,682 @@ def _evil_combo_cases() -> List[AlbumCase]:
                 "variant": "all_at_once",
                 "node_shape": "hexagon",
                 "edge_arrow": "diamond",
+            },
+        )
+    )
+
+    graph, positions = _self_loop_graph()
+    _set_all_node_styles(graph, _base_node_style(shape="star", min_width=120.0, min_height=120.0))
+    _set_all_edge_styles(
+        graph,
+        _base_edge_style(width=2.0, arrow="normal", arrow_length=5.0, arrow_width=3.5),
+    )
+    cases.append(
+        AlbumCase(
+            case_id="evil_self_loop_star",
+            category="evil_combos",
+            filename="evil_self_loop_star_dagua.png",
+            title="Evil Combo: Self Loop Star - dagua",
+            graph=graph,
+            positions=positions,
+            settings={"kind": "evil_combo", "variant": "self_loop_star", "shape": "star"},
+        )
+    )
+
+    graph, positions = _self_loop_graph()
+    _set_all_node_styles(
+        graph,
+        _base_node_style(shape="diamond", min_width=120.0, min_height=120.0),
+    )
+    _set_all_edge_styles(
+        graph,
+        _base_edge_style(width=2.0, arrow="normal", arrow_length=5.0, arrow_width=3.5),
+    )
+    cases.append(
+        AlbumCase(
+            case_id="evil_self_loop_diamond",
+            category="evil_combos",
+            filename="evil_self_loop_diamond_dagua.png",
+            title="Evil Combo: Self Loop Diamond - dagua",
+            graph=graph,
+            positions=positions,
+            settings={"kind": "evil_combo", "variant": "self_loop_diamond", "shape": "diamond"},
+        )
+    )
+
+    graph, positions = _self_loop_graph()
+    _set_all_node_styles(
+        graph,
+        _base_node_style(shape="triangle", min_width=120.0, min_height=120.0),
+    )
+    _set_all_edge_styles(
+        graph,
+        _base_edge_style(width=2.0, arrow="normal", arrow_length=5.0, arrow_width=3.5),
+    )
+    cases.append(
+        AlbumCase(
+            case_id="evil_self_loop_triangle",
+            category="evil_combos",
+            filename="evil_self_loop_triangle_dagua.png",
+            title="Evil Combo: Self Loop Triangle - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "self_loop_triangle",
+                "shape": "triangle",
+            },
+        )
+    )
+
+    graph, positions = _single_node_graph("Long text wrapping inside concave shape")
+    _set_all_node_styles(
+        graph,
+        _base_node_style(
+            shape="star",
+            text_wrap="wrap",
+            text_max_width=80.0,
+            min_width=100.0,
+            min_height=100.0,
+            font_size=7.0,
+            overflow_policy="shrink_text",
+            min_font_size=4.0,
+        ),
+    )
+    cases.append(
+        AlbumCase(
+            case_id="evil_long_wrap_star",
+            category="evil_combos",
+            filename="evil_long_wrap_star_dagua.png",
+            title="Evil Combo: Long Wrap Star - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "long_wrap_star",
+                "shape": "star",
+                "text_wrap": "wrap",
+            },
+        )
+    )
+
+    graph, positions = _single_node_graph("Long text wrapping inside concave shape")
+    _set_all_node_styles(
+        graph,
+        _base_node_style(
+            shape="triangle",
+            text_wrap="wrap",
+            text_max_width=80.0,
+            min_width=100.0,
+            min_height=100.0,
+            font_size=7.0,
+            overflow_policy="shrink_text",
+            min_font_size=4.0,
+        ),
+    )
+    cases.append(
+        AlbumCase(
+            case_id="evil_long_wrap_triangle",
+            category="evil_combos",
+            filename="evil_long_wrap_triangle_dagua.png",
+            title="Evil Combo: Long Wrap Triangle - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "long_wrap_triangle",
+                "shape": "triangle",
+                "text_wrap": "wrap",
+            },
+        )
+    )
+
+    graph = DaguaGraph()
+    _apply_graph_style(graph)
+    graph.add_node("hub", label="Hub")
+    for index in range(24):
+        graph.add_node(f"s{index}", label=f"S{index}")
+        graph.add_edge(f"s{index}", "hub")
+    spoke_positions: List[List[float]] = []
+    for index in range(24):
+        angle = 2.0 * math.pi * index / 24.0
+        spoke_positions.append([220.0 * math.cos(angle), 220.0 * math.sin(angle)])
+    positions = torch.tensor([[0.0, 0.0]] + spoke_positions, dtype=torch.float32)
+    _set_all_node_styles(graph, _base_node_style(min_width=40.0, font_size=8.0))
+    _set_all_edge_styles(graph, _base_edge_style(width=1.0))
+    cases.append(
+        AlbumCase(
+            case_id="evil_mega_hub",
+            category="evil_combos",
+            filename="evil_mega_hub_dagua.png",
+            title="Evil Combo: Mega Hub - dagua",
+            graph=graph,
+            positions=positions,
+            settings={"kind": "evil_combo", "variant": "mega_hub", "edge_count": 24},
+        )
+    )
+
+    graph, positions = _combo_pair_graph(["Src", "Dst"])
+    _set_all_node_styles(graph, _base_node_style())
+    _set_all_edge_styles(
+        graph,
+        _base_edge_style(width=0.1, arrow_length=25.0, arrow_width=18.0),
+    )
+    cases.append(
+        AlbumCase(
+            case_id="evil_zero_width_big_arrow",
+            category="evil_combos",
+            filename="evil_zero_width_big_arrow_dagua.png",
+            title="Evil Combo: Zero Width Big Arrow - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "zero_width_big_arrow",
+                "width": 0.1,
+                "arrow_length": 25,
+            },
+        )
+    )
+
+    graph = DaguaGraph()
+    _apply_graph_style(graph)
+    labels = ["Overflow text here", "Shrink me down", "Expand to fit"]
+    policies = ["overflow", "shrink_text", "expand_node"]
+    for index, label in enumerate(labels):
+        graph.add_node(f"n{index}", label=label)
+    for index in range(2):
+        graph.add_edge(f"n{index}", f"n{index + 1}")
+    positions = torch.tensor(
+        [[0.0, 150.0], [0.0, 0.0], [0.0, -150.0]],
+        dtype=torch.float32,
+    )
+    graph.node_styles = [
+        _base_node_style(
+            overflow_policy=policy,
+            shape="rect",
+            min_width=180.0,
+            font_size=10.0,
+            text_wrap="wrap",
+            text_max_width=150.0,
+        )
+        for policy in policies
+    ]
+    _set_all_edge_styles(graph, _base_edge_style())
+    cases.append(
+        AlbumCase(
+            case_id="evil_mixed_overflow",
+            category="evil_combos",
+            filename="evil_mixed_overflow_dagua.png",
+            title="Evil Combo: Mixed Overflow - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "mixed_overflow",
+                "policies": policies,
+            },
+        )
+    )
+
+    graph = DaguaGraph()
+    _apply_graph_style(graph)
+    for index in range(4):
+        graph.add_node(f"n{index}", label="")
+    graph.add_edge("n0", "n1")
+    graph.add_edge("n2", "n3")
+    positions = torch.tensor(
+        [[-80.0, 60.0], [80.0, 60.0], [-80.0, -60.0], [80.0, -60.0]],
+        dtype=torch.float32,
+    )
+    _set_all_node_styles(
+        graph,
+        _base_node_style(
+            shadow=True,
+            gradient="linear",
+            gradient_color="#9FC7EE",
+            border_count=2,
+            min_width=80.0,
+        ),
+    )
+    _set_all_edge_styles(
+        graph,
+        _base_edge_style(
+            taper=True,
+            color_gradient="source_to_target",
+            color_gradient_end="#D55E00",
+        ),
+    )
+    cases.append(
+        AlbumCase(
+            case_id="evil_empty_labels",
+            category="evil_combos",
+            filename="evil_empty_labels_dagua.png",
+            title="Evil Combo: Empty Labels - dagua",
+            graph=graph,
+            positions=positions,
+            settings={"kind": "evil_combo", "variant": "empty_labels", "labels": ""},
+        )
+    )
+
+    graph = DaguaGraph()
+    _apply_graph_style(graph)
+    unicode_labels = ["Cafe\u0301", "\u03b1\u2192\u03b2", "\u00fcber", "2\u00b2+3\u00b2=13"]
+    for index, label in enumerate(unicode_labels):
+        graph.add_node(f"n{index}", label=label)
+    graph.add_edge("n0", "n1")
+    graph.add_edge("n2", "n3")
+    positions = torch.tensor(
+        [[-80.0, 60.0], [80.0, 60.0], [-80.0, -60.0], [80.0, -60.0]],
+        dtype=torch.float32,
+    )
+    _set_all_node_styles(graph, _base_node_style(min_width=90.0))
+    _set_all_edge_styles(graph, _base_edge_style())
+    cases.append(
+        AlbumCase(
+            case_id="evil_unicode_labels",
+            category="evil_combos",
+            filename="evil_unicode_labels_dagua.png",
+            title="Evil Combo: Unicode Labels - dagua",
+            graph=graph,
+            positions=positions,
+            settings={"kind": "evil_combo", "variant": "unicode_labels"},
+        )
+    )
+
+    graph = DaguaGraph()
+    _apply_graph_style(graph)
+    graph.add_node("A", label="Neg Curve A")
+    graph.add_node("B", label="Neg Curve B")
+    graph.add_edge("A", "B")
+    positions = torch.tensor([[-90.0, 60.0], [90.0, -60.0]], dtype=torch.float32)
+    _set_all_node_styles(graph, _base_node_style(min_width=120.0))
+    _set_all_edge_styles(graph, _base_edge_style(curvature=-1.5, width=3.0))
+    cases.append(
+        AlbumCase(
+            case_id="evil_negative_curvature",
+            category="evil_combos",
+            filename="evil_negative_curvature_dagua.png",
+            title="Evil Combo: Negative Curvature - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "negative_curvature",
+                "curvature": -1.5,
+            },
+        )
+    )
+
+    graph = DaguaGraph()
+    _apply_graph_style(graph)
+    for row in range(10):
+        for col in range(10):
+            graph.add_node(f"n{row}_{col}", label=f"{row},{col}")
+    for row in range(10):
+        for col in range(10):
+            if col < 9:
+                graph.add_edge(f"n{row}_{col}", f"n{row}_{col + 1}")
+            if row < 9:
+                graph.add_edge(f"n{row}_{col}", f"n{row + 1}_{col}")
+    positions = torch.tensor(
+        [[col * 60.0 - 270.0, row * 60.0 - 270.0] for row in range(10) for col in range(10)],
+        dtype=torch.float32,
+    )
+    _set_all_node_styles(
+        graph,
+        _base_node_style(
+            min_width=40.0,
+            min_height=28.0,
+            font_size=7.0,
+            gradient="linear",
+            gradient_color="#B0D4F1",
+            shadow=True,
+            shadow_blur=2.0,
+        ),
+    )
+    _set_all_edge_styles(graph, _base_edge_style(width=1.0, arrow="normal"))
+    cases.append(
+        AlbumCase(
+            case_id="evil_hundred_nodes",
+            category="evil_combos",
+            filename="evil_hundred_nodes_dagua.png",
+            title="Evil Combo: Hundred Nodes - dagua",
+            graph=graph,
+            positions=positions,
+            settings={"kind": "evil_combo", "variant": "hundred_nodes", "node_count": 100},
+        )
+    )
+
+    graph = DaguaGraph()
+    _apply_graph_style(graph)
+    for index in range(8):
+        graph.add_node(f"n{index}", label=f"N{index}")
+    for index in range(7):
+        graph.add_edge(f"n{index}", f"n{index + 1}")
+    graph.add_cluster("L1", [f"n{index}" for index in range(8)], label="Level 1")
+    graph.add_cluster("L2", [f"n{index}" for index in range(1, 7)], label="Level 2", parent="L1")
+    graph.add_cluster("L3", [f"n{index}" for index in range(2, 6)], label="Level 3", parent="L2")
+    graph.add_cluster("L4", [f"n{index}" for index in range(3, 5)], label="Level 4", parent="L3")
+    graph.add_cluster("L5", ["n3", "n4"], label="Level 5", parent="L4")
+    positions = torch.tensor(
+        [
+            [-120.0, 60.0],
+            [0.0, 60.0],
+            [120.0, 60.0],
+            [240.0, 60.0],
+            [-120.0, -60.0],
+            [0.0, -60.0],
+            [120.0, -60.0],
+            [240.0, -60.0],
+        ],
+        dtype=torch.float32,
+    )
+    _set_all_node_styles(graph, _base_node_style(min_width=50.0, font_size=9.0))
+    _set_all_edge_styles(graph, _base_edge_style(width=1.5))
+    blues = [
+        "#F0F5FA",
+        "#E0EAF4",
+        "#D0DFF0",
+        "#C0D4EA",
+        "#B0C9E4",
+    ]
+    for depth, fill in enumerate(blues, start=1):
+        graph.cluster_styles[f"L{depth}"] = _base_cluster_style(
+            fill=fill,
+            stroke="#6A8CAF",
+            stroke_width=2.0,
+            opacity=0.7,
+            font_size=10.0,
+            padding=35.0,
+        )
+    cases.append(
+        AlbumCase(
+            case_id="evil_8_deep_clusters",
+            category="evil_combos",
+            filename="evil_8_deep_clusters_dagua.png",
+            title="Evil Combo: 5 Deep Clusters - dagua",
+            graph=graph,
+            positions=positions,
+            settings={"kind": "evil_combo", "variant": "5_deep_clusters", "cluster_depth": 5},
+        )
+    )
+
+    graph, positions = _single_node_graph("Pie")
+    _set_all_node_styles(
+        graph,
+        _base_node_style(
+            shape="star",
+            fill_pattern="pie",
+            fill_pattern_colors=["#56B4E9", "#D55E00", "#009E73", "#E69F00"],
+            fill_pattern_values=[4.0, 3.0, 2.0, 1.0],
+            min_width=160.0,
+            min_height=160.0,
+        ),
+    )
+    cases.append(
+        AlbumCase(
+            case_id="evil_pie_star",
+            category="evil_combos",
+            filename="evil_pie_star_dagua.png",
+            title="Evil Combo: Pie Star - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "pie_star",
+                "shape": "star",
+                "fill_pattern": "pie",
+            },
+        )
+    )
+
+    graph, positions = _single_node_graph("Donut")
+    _set_all_node_styles(
+        graph,
+        _base_node_style(
+            shape="diamond",
+            fill_pattern="pie",
+            fill_pattern_colors=["#56B4E9", "#D55E00", "#009E73"],
+            fill_pattern_values=[3.0, 2.0, 1.0],
+            fill_pattern_hole=0.4,
+            min_width=150.0,
+            min_height=150.0,
+        ),
+    )
+    cases.append(
+        AlbumCase(
+            case_id="evil_donut_diamond",
+            category="evil_combos",
+            filename="evil_donut_diamond_dagua.png",
+            title="Evil Combo: Donut Diamond - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "donut_diamond",
+                "shape": "diamond",
+                "fill_pattern": "pie",
+                "fill_pattern_hole": 0.4,
+            },
+        )
+    )
+
+    graph, positions = _self_loop_graph()
+    _set_all_node_styles(graph, _base_node_style(min_width=100.0, min_height=70.0))
+    _set_all_edge_styles(graph, _base_edge_style(routing="taxi", width=2.0, arrow="vee"))
+    cases.append(
+        AlbumCase(
+            case_id="evil_taxi_self_loop",
+            category="evil_combos",
+            filename="evil_taxi_self_loop_dagua.png",
+            title="Evil Combo: Taxi Self Loop - dagua",
+            graph=graph,
+            positions=positions,
+            settings={"kind": "evil_combo", "variant": "taxi_self_loop", "routing": "taxi"},
+        )
+    )
+
+    graph = DaguaGraph()
+    _apply_graph_style(graph)
+    graph.add_node("hub", label="Hub")
+    arrows = [
+        "normal",
+        "vee",
+        "dot",
+        "diamond",
+        "tee",
+        "crow",
+        "curve",
+        "bracket",
+        "inv",
+        "box",
+        "simple",
+        "fancy",
+    ]
+    for index, arrow in enumerate(arrows):
+        graph.add_node(f"s{index}", label=arrow[:4])
+        graph.add_edge(f"s{index}", "hub")
+    spoke_positions = [
+        [
+            180.0 * math.cos(2.0 * math.pi * index / 12.0),
+            180.0 * math.sin(2.0 * math.pi * index / 12.0),
+        ]
+        for index in range(12)
+    ]
+    positions = torch.tensor([[0.0, 0.0]] + spoke_positions, dtype=torch.float32)
+    _set_all_node_styles(graph, _base_node_style(min_width=50.0, font_size=8.0))
+    graph.edge_styles = [
+        _base_edge_style(
+            arrow=arrow,
+            color_gradient="source_to_target",
+            color_gradient_end="#D55E00",
+            width=2.0,
+            arrow_length=12.0,
+            arrow_width=8.0,
+        )
+        for arrow in arrows
+    ]
+    cases.append(
+        AlbumCase(
+            case_id="evil_all_arrows_gradient",
+            category="evil_combos",
+            filename="evil_all_arrows_gradient_dagua.png",
+            title="Evil Combo: All Arrows Gradient - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "all_arrows_gradient",
+                "arrow_count": 12,
+            },
+        )
+    )
+
+    graph, positions = _single_node_graph("Ghost Gradient")
+    _set_all_node_styles(
+        graph,
+        _base_node_style(
+            fill=WHITE,
+            gradient="linear",
+            gradient_color=WHITE,
+            stroke="#EEEEEE",
+            font_color="#DDDDDD",
+            min_width=140.0,
+        ),
+    )
+    cases.append(
+        AlbumCase(
+            case_id="evil_white_gradient",
+            category="evil_combos",
+            filename="evil_white_gradient_dagua.png",
+            title="Evil Combo: White Gradient - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "white_gradient",
+                "fill": WHITE,
+                "gradient_color": WHITE,
+            },
+        )
+    )
+
+    graph, positions = _crossing_edges_graph()
+    _set_all_node_styles(graph, _base_node_style(fill="#F4F7FA"))
+    _set_all_edge_styles(
+        graph,
+        _base_edge_style(taper=True, crossing_style="arc", width=6.0),
+    )
+    for edge_style in graph.edge_styles:
+        if edge_style is not None:
+            edge_style.taper_width_start = 10.0
+            edge_style.taper_width_end = 0.3
+    cases.append(
+        AlbumCase(
+            case_id="evil_extreme_taper_crossing",
+            category="evil_combos",
+            filename="evil_extreme_taper_crossing_dagua.png",
+            title="Evil Combo: Extreme Taper Crossing - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "extreme_taper_crossing",
+                "taper_width_start": 10,
+                "crossing_style": "arc",
+            },
+        )
+    )
+
+    graph = DaguaGraph()
+    _apply_graph_style(graph)
+    specs = [
+        (
+            "n0",
+            "Tiny",
+            _base_node_style(
+                shape="circle",
+                min_width=30.0,
+                min_height=30.0,
+                font_size=6.0,
+                fill="#FF6B6B",
+            ),
+        ),
+        (
+            "n1",
+            "HUGE",
+            _base_node_style(
+                shape="rect",
+                min_width=200.0,
+                min_height=120.0,
+                font_size=20.0,
+                fill="#4ECDC4",
+                font_weight="bold",
+            ),
+        ),
+        (
+            "n2",
+            "Star",
+            _base_node_style(
+                shape="star",
+                min_width=140.0,
+                min_height=140.0,
+                fill="#FFE66D",
+                shadow=True,
+                gradient="radial",
+                gradient_color="#FFA07A",
+            ),
+        ),
+        (
+            "n3",
+            "",
+            _base_node_style(
+                shape="diamond",
+                min_width=80.0,
+                min_height=80.0,
+                fill="#95E1D3",
+                border_count=2,
+                opacity=0.6,
+            ),
+        ),
+        (
+            "n4",
+            "Cylinder\nDouble",
+            _base_node_style(
+                shape="cylinder",
+                min_width=90.0,
+                min_height=70.0,
+                fill="#F8B4B4",
+                stroke_dash="dashed",
+            ),
+        ),
+    ]
+    for node_id, label, _style in specs:
+        graph.add_node(node_id, label=label)
+    graph.add_edge("n0", "n1")
+    graph.add_edge("n1", "n2")
+    graph.add_edge("n2", "n3")
+    graph.add_edge("n3", "n4")
+    graph.add_edge("n4", "n0")
+    positions = torch.tensor(
+        [[-120.0, 80.0], [120.0, 80.0], [180.0, -40.0], [0.0, -120.0], [-180.0, -40.0]],
+        dtype=torch.float32,
+    )
+    graph.node_styles = [style for _, _, style in specs]
+    _set_all_edge_styles(graph, _base_edge_style(width=2.0))
+    cases.append(
+        AlbumCase(
+            case_id="evil_contradictory_styles",
+            category="evil_combos",
+            filename="evil_contradictory_styles_dagua.png",
+            title="Evil Combo: Contradictory Styles - dagua",
+            graph=graph,
+            positions=positions,
+            settings={
+                "kind": "evil_combo",
+                "variant": "contradictory_styles",
+                "node_count": 5,
             },
         )
     )
