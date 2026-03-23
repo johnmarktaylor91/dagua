@@ -46,7 +46,7 @@ def test_gallery_audit_inventory_matches_expected_counts() -> None:
     evil_items = build_evil_items()
 
     assert len(reference_items) == 133
-    assert len(combo_items) == 78
+    assert len(combo_items) == 79
     assert len(evil_items) == 35
     assert {
         "nodes_shapes_rect",
