@@ -249,3 +249,55 @@ class TestTextBackgroundRendering:
         assert spec.background_alpha == pytest.approx(0.35)
         assert spec.background_padding == pytest.approx((5.0, 6.0))
         assert spec.background_corner_radius == pytest.approx(7.0)
+
+    def test_gradient_node_labels_use_soft_white_auto_background(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Gradient node labels should use a higher-opacity white auto background.
+
+        Parameters
+        ----------
+        monkeypatch : pytest.MonkeyPatch
+            Pytest monkeypatch fixture.
+
+        Returns
+        -------
+        None
+        """
+        graph, positions = _single_node_graph(NodeStyle(gradient="linear"))
+
+        specs = _capture_text_specs(monkeypatch, graph, positions)
+        spec = _find_spec(specs, "dagua-node-label-0")
+
+        assert spec.background == "#FFFFFF"
+        assert spec.background_alpha == pytest.approx(0.85)
+
+    @pytest.mark.parametrize("fill_pattern", ["pie", "striped"])
+    def test_patterned_node_labels_use_opaque_white_auto_background(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fill_pattern: str,
+    ) -> None:
+        """Pie and striped node labels should ignore the graph background color.
+
+        Parameters
+        ----------
+        monkeypatch : pytest.MonkeyPatch
+            Pytest monkeypatch fixture.
+        fill_pattern : str
+            Patterned node fill that requires a neutral text pill.
+
+        Returns
+        -------
+        None
+            The generated text background is asserted in place.
+        """
+        graph, positions = _single_node_graph(NodeStyle(fill_pattern=fill_pattern))
+        graph.graph_style.background_color = "#0F172A"
+
+        specs = _capture_text_specs(monkeypatch, graph, positions)
+        spec = _find_spec(specs, "dagua-node-label-0")
+
+        assert spec.background == "#FFFFFF"
+        assert spec.background_alpha == pytest.approx(0.92)
