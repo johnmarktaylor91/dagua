@@ -19617,6 +19617,86 @@ HOLLYWOOD_THEME = Theme(
     graph_style=GraphStyle(background_color="#1A1A1A"),
 )
 
+FROSTED_THEME = Theme(
+    name="frosted",
+    node_styles={
+        "default": NodeStyle(
+            shape="ellipse",
+            fill="#D8E8F0",
+            stroke="#B0C8D8",
+            stroke_width=0.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#4A6878",
+            padding=(5.0, 4.0),
+            min_width=28.0,
+            min_height=20.0,
+            opacity=0.6,
+        ),
+        "input": NodeStyle(
+            shape="ellipse",
+            fill="#C0D8E8",
+            stroke="#90B0C8",
+            stroke_width=1.0,
+            font_family="Helvetica",
+            font_size=8.5,
+            font_color="#2A4858",
+            font_weight="bold",
+            padding=(5.0, 4.0),
+            min_width=32.0,
+            min_height=24.0,
+            opacity=0.7,
+        ),
+        "output": NodeStyle(
+            shape="ellipse",
+            fill="#E0EAF0",
+            stroke="#C0D0D8",
+            stroke_width=0.3,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#6A8898",
+            padding=(5.0, 3.0),
+            min_width=26.0,
+            min_height=18.0,
+            opacity=0.5,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#8AA8B8",
+            width=1.5,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.2,
+            opacity=0.5,
+        ),
+        "back": EdgeStyle(
+            color="#A0B8C8",
+            width=0.8,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#C8D8E0",
+        stroke="#A0B8C8",
+        stroke_width=0.3,
+        stroke_dash="solid",
+        corner_radius=12.0,
+        font_size=8.0,
+        font_color="#5A7888",
+        font_weight="normal",
+        padding=10.0,
+        opacity=0.2,
+    ),
+    graph_style=GraphStyle(background_color="#C8D8E0"),
+)
+
+THEME_REGISTRY["frosted"] = FROSTED_THEME
 THEME_REGISTRY["hollywood"] = HOLLYWOOD_THEME
 THEME_REGISTRY["brutalist"] = BRUTALIST_THEME
 THEME_REGISTRY["lovecraft"] = LOVECRAFT_THEME
