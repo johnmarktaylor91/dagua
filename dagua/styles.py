@@ -16373,6 +16373,86 @@ THEME_REGISTRY["kaleidoscope"] = KALEIDOSCOPE_THEME
 THEME_REGISTRY["morse_code"] = MORSE_CODE_THEME
 THEME_REGISTRY["embroidery"] = EMBROIDERY_THEME
 THEME_REGISTRY["domino"] = DOMINO_THEME
+# Conspiracy -- Pepe Silvia bulletin board: pushpin nodes, red string
+# connections crisscrossing everywhere, cork board background
+CONSPIRACY_THEME = Theme(
+    name="conspiracy",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#FFFFF0",
+            stroke="#C8C0A8",
+            stroke_width=0.5,
+            font_family="Courier New",
+            font_size=7.5,
+            font_color="#1A1A1A",
+            padding=(5.0, 3.0),
+            min_width=34.0,
+            min_height=20.0,
+            corner_radius=0.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#CC2020",
+            stroke="#AA1010",
+            stroke_width=1.0,
+            font_family="Courier New",
+            font_size=6.0,
+            font_color="#CC2020",
+            padding=(2.0, 2.0),
+            min_width=10.0,
+            min_height=10.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#F8F0D0",
+            stroke="#B0A880",
+            stroke_width=0.5,
+            font_family="Courier New",
+            font_size=7.5,
+            font_color="#333333",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=34.0,
+            min_height=20.0,
+            corner_radius=0.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#CC2020",
+            width=0.8,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#CC2020",
+            width=0.5,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#C8A868",
+        stroke="#A88848",
+        stroke_width=0.5,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#4A3818",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#C8A868"),
+)
+
+THEME_REGISTRY["conspiracy"] = CONSPIRACY_THEME
 THEME_REGISTRY["newspaper"] = NEWSPAPER_THEME
 THEME_REGISTRY["go"] = GO_BOARD_THEME
 THEME_REGISTRY["chess"] = CHESS_THEME
