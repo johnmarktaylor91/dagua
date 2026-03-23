@@ -20602,6 +20602,85 @@ FIVETHIRTYEIGHT_THEME = Theme(
     graph_style=GraphStyle(background_color="#F0F0F0"),
 )
 
+EUCLID_THEME = Theme(
+    name="euclid",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",
+            stroke="#1A1A1A",
+            stroke_width=1.0,
+            font_family="Times New Roman",
+            font_size=9.0,
+            font_color="#1A1A1A",
+            font_style="italic",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",
+            stroke="#1A1A1A",
+            stroke_width=1.5,
+            font_family="Times New Roman",
+            font_size=9.0,
+            font_color="#1A1A1A",
+            font_style="italic",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",
+            stroke="#1A1A1A",
+            stroke_width=1.0,
+            font_family="Times New Roman",
+            font_size=9.0,
+            font_color="#1A1A1A",
+            font_style="italic",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#1A1A1A",
+            width=0.8,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#1A1A1A",
+            width=0.5,
+            style="dashed",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#FFFFFF",
+        stroke="#1A1A1A",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#1A1A1A",
+        font_weight="normal",
+        padding=8.0,
+        opacity=0.2,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+THEME_REGISTRY["euclid"] = EUCLID_THEME
+
 SIDEWALK_CHALK_THEME = Theme(
     name="sidewalk_chalk",
     node_styles={
