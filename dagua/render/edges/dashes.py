@@ -19,8 +19,8 @@ DashPattern = Union[str, Sequence[float]]
 MIN_BODY_LENGTH = 0.5
 # Round caps add one full line width to the visible dot diameter, so the
 # centerline span stays near zero for dotted marks that should read as circles.
-DOTTED_ON_RATIO = 0.01
-DOTTED_OFF_RATIO = 2.0
+DOTTED_ON_RATIO = 0.15
+DOTTED_OFF_RATIO = 1.8
 DASHED_ON_RATIO = 4.0
 DASHED_OFF_RATIO = 2.75
 DASHDOT_ON_RATIO = 5.0

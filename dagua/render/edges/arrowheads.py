@@ -489,10 +489,55 @@ def _dot(length: float, width: float, body_width: float) -> ArrowheadResult:
     )
 
 
-def _tee(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build a tee/bar head as a weighted stroked mark."""
+def _open(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build Graphviz's open arrowhead as a stroked V.
+
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    width : float
+        Arrowhead width in local coordinates.
+    body_width : float
+        Ribbon body width at the body/head junction.
+
+    Returns
+    -------
+    ArrowheadResult
+        Stroke-only chevron geometry with two tines meeting at the tip.
+    """
     overlap = _join_overlap(length, body_width)
-    bar_x = max(length - overlap, length * 0.35)
+    join_x = max(length - overlap, length * 0.58)
+    outer_half_width = _ornament_half_width(width * OPEN_HEAD_WIDTH_GAIN, body_width)
+    upper = _local_path([(0.0, 0.0), (join_x, outer_half_width)], closed=False)
+    lower = _local_path([(0.0, 0.0), (join_x, -outer_half_width)], closed=False)
+    return ArrowheadResult(
+        filled_paths=[],
+        stroked_paths=[upper, lower],
+        trim_contour=_local_trim_contour(join_x, body_width),
+        stroke_width_scale=_open_head_stroke_scale(body_width),
+    )
+
+
+def _tee(length: float, width: float, body_width: float) -> ArrowheadResult:
+    """Build a tee/bar head as a weighted stroked mark.
+
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    width : float
+        Arrowhead width in local coordinates.
+    body_width : float
+        Ribbon body width at the body/head junction.
+
+    Returns
+    -------
+    ArrowheadResult
+        Stroke-only crossbar geometry trimmed at the bar centerline.
+    """
+    overlap = _join_overlap(length, body_width)
+    bar_x = max(length - overlap, length * 0.15)
     # Ensure the crossbar is clearly visible even on thin edges.
     neck_half_width = max(width * 0.55, body_width * 0.75, length * 0.65, FLOAT_EPSILON)
     path = _local_path([(bar_x, neck_half_width), (bar_x, -neck_half_width)], closed=False)
@@ -538,42 +583,58 @@ def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
 def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
     """Build a crow-foot head with three filled tines fanning from the shaft.
 
+    Parameters
+    ----------
+    length : float
+        Arrowhead length in local coordinates.
+    width : float
+        Arrowhead width in local coordinates.
+    body_width : float
+        Ribbon body width at the body/head junction.
+
+    Returns
+    -------
+    ArrowheadResult
+        Filled tine geometry sized for ER-style cardinality markers.
+
     Each tine is a narrow filled triangle radiating from the shaft neck
     toward the tip, matching the ER-diagram "many" convention.
     """
     neck_half = max(body_width * 0.5, FLOAT_EPSILON)
     tine_half = max(
-        _ornament_half_width(width * 1.24, body_width),
-        length * 0.7,
+        _ornament_half_width(width * 1.8, body_width),
+        length * 1.0,
     )
-    tine_thickness = max(body_width * 0.3, length * 0.08)
+    tine_thickness = max(body_width * 0.5, length * 0.15)
+    center_neck_half = max(neck_half + (tine_thickness * 0.35), body_width * 0.7)
+    merged_neck_half = max(center_neck_half - (tine_thickness * 0.25), neck_half * 0.95)
     # Center tine
     center = _local_path(
         [
-            (length, tine_thickness),
-            (0.0, tine_thickness * 0.4),
-            (0.0, -tine_thickness * 0.4),
-            (length, -tine_thickness),
+            (length, center_neck_half),
+            (0.0, tine_thickness * 0.55),
+            (0.0, -tine_thickness * 0.55),
+            (length, -center_neck_half),
         ],
         closed=True,
     )
     # Upper tine
     upper = _local_path(
         [
-            (length, neck_half),
+            (length, neck_half + tine_thickness * 0.85),
             (0.0, tine_half + tine_thickness),
             (0.0, tine_half - tine_thickness),
-            (length, neck_half - tine_thickness * 0.5),
+            (length, merged_neck_half),
         ],
         closed=True,
     )
     # Lower tine
     lower = _local_path(
         [
-            (length, -neck_half),
+            (length, -neck_half - tine_thickness * 0.85),
             (0.0, -tine_half - tine_thickness),
             (0.0, -tine_half + tine_thickness),
-            (length, -neck_half + tine_thickness * 0.5),
+            (length, -merged_neck_half),
         ],
         closed=True,
     )
@@ -929,6 +990,7 @@ def _none(length: float, width: float, body_width: float) -> ArrowheadResult:
 ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
     "normal": PrimitiveSpec("normal", _triangle),
     "inv": PrimitiveSpec("inv", _inverted_triangle),
+    "open": PrimitiveSpec("open", _open, stroke_only=True),
     "dot": PrimitiveSpec("dot", _dot),
     "diamond": PrimitiveSpec("diamond", _diamond),
     "box": PrimitiveSpec("box", _box),
@@ -973,11 +1035,13 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
 
 ARROWHEAD_ALIASES: Dict[str, str] = {
     "circle": "odot",
-    "open": "onormal",
+    "open": "open",
     "odot": "odot",
     "obox": "obox",
     "odiamond": "odiamond",
 }
+
+ARROW_REGISTRY = ARROWHEAD_REGISTRY
 
 PRIMITIVE_NAMES = sorted(ARROWHEAD_REGISTRY.keys(), key=len, reverse=True)
 
@@ -1035,6 +1099,8 @@ def parse_arrowhead_spec(spec: str) -> List[ParsedPrimitive]:
         Parsed primitives from tip to body.
     """
     normalized = ARROWHEAD_ALIASES.get(spec, spec)
+    if normalized == "open":
+        return [ParsedPrimitive(shape="open", open_fill=False, side="both")]
     if normalized in {"odot", "obox", "odiamond"}:
         return [ParsedPrimitive(shape=normalized[1:], open_fill=True, side="both")]
     if normalized == "none":
