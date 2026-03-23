@@ -271,7 +271,7 @@ class TestTextBackgroundRendering:
         spec = _find_spec(specs, "dagua-node-label-0")
 
         assert spec.background == "#FFFFFF"
-        assert spec.background_alpha == pytest.approx(0.85)
+        assert spec.background_alpha == pytest.approx(0.90)
 
     @pytest.mark.parametrize("fill_pattern", ["pie", "striped"])
     def test_patterned_node_labels_use_opaque_white_auto_background(
