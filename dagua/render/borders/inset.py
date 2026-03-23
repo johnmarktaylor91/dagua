@@ -245,7 +245,20 @@ def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
             corner_radius=spec.corner_radius,
         )
         return build_shape_path(inner_spec)
-    vertices = polygon_vertices(spec)
+    try:
+        vertices = polygon_vertices(spec)
+    except ValueError:
+        # Curved and compound shapes do not expose polygon vertices, so inset
+        # them by rebuilding the same shape against the smaller inner bounds.
+        inner_spec = ShapeSpec(
+            center_x=spec.center_x,
+            center_y=spec.center_y,
+            width=inner_width,
+            height=inner_height,
+            shape=spec.shape,
+            corner_radius=spec.corner_radius,
+        )
+        return build_shape_path(inner_spec)
     if spec.shape == "star":
         return closed_path_from_vertices(inset_star(vertices, inset))
     return closed_path_from_vertices(inset_convex_polygon(vertices, inset))

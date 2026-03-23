@@ -102,6 +102,25 @@ def test_dash_ribbon_paths_follow_closed_perimeter() -> None:
     assert all(path.codes[-1] == path.CLOSEPOLY for path in ribbons)
 
 
+def test_inset_shape_path_handles_non_polygon_shapes() -> None:
+    """Non-polygon shapes should produce an inset path without crashing."""
+
+    for shape in ("cloud", "stadium", "document", "tab", "note", "box3d"):
+        spec = ShapeSpec(
+            center_x=0.0,
+            center_y=0.0,
+            width=100.0,
+            height=80.0,
+            shape=shape,
+            corner_radius=0.0,
+        )
+
+        path = inset_shape_path(spec, 5.0)
+
+        assert path is not None
+        assert len(path.vertices) > 0
+
+
 def test_scaled_node_style_converts_corner_radius_and_shadow_offset() -> None:
     """Node rounded corners and shadows should use the axes display scale."""
 

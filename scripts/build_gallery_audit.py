@@ -37,7 +37,7 @@ logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 from dagua import DaguaGraph, render
 from dagua.styles import ClusterStyle, EdgeStyle, GraphStyle, NodeStyle
-from scripts.generate_cosmetic_album import build_case_catalog
+from scripts.generate_cosmetic_album import VARIED_EXTERNAL_LABELS, build_case_catalog
 
 WHITE = "#FFFFFF"
 DEFAULT_COMPARISON_STROKE = "#222222"
@@ -274,6 +274,50 @@ class ComboCardItem:
 
 
 @dataclass(frozen=True)
+class EvilCardSpec:
+    """Specification for one evil stress-test card.
+
+    Parameters
+    ----------
+    case_id : str
+        Stable evil-case identifier.
+    title : str
+        Human-readable case title imported from the cosmetic album catalog.
+    settings : dict[str, object]
+        JSON-serializable cosmetic settings imported from the source catalog.
+    graph : DaguaGraph
+        Pre-built stress graph to render.
+    positions : torch.Tensor
+        Fixed node positions with shape ``[N, 2]``.
+    """
+
+    case_id: str
+    title: str
+    settings: Dict[str, object]
+    graph: DaguaGraph
+    positions: torch.Tensor
+
+
+@dataclass(frozen=True)
+class EvilCardItem:
+    """Resolved evil card ready for rendering.
+
+    Parameters
+    ----------
+    card_id : str
+        Stable identifier used in the index and tests.
+    spec : EvilCardSpec
+        Parent evil-card specification.
+    relative_path : str
+        Relative PNG path below the gallery audit root.
+    """
+
+    card_id: str
+    spec: EvilCardSpec
+    relative_path: str
+
+
+@dataclass(frozen=True)
 class StripCardItem:
     """One resolved strip card to render.
 
@@ -311,6 +355,8 @@ class GalleryAuditResult:
         Number of comparison cards written.
     combo_count : int
         Number of combo cards written.
+    evil_count : int
+        Number of evil stress cards written.
     board_count : int
         Number of board images written.
     """
@@ -320,6 +366,7 @@ class GalleryAuditResult:
     reference_count: int
     comparison_count: int
     combo_count: int
+    evil_count: int
     board_count: int
 
 
@@ -726,18 +773,18 @@ def _combo_flow_positions(direction: str = "TB") -> torch.Tensor:
     elif direction == "LR":
         coords = [
             (-280.0, 0.0),
-            (-80.0, 120.0),
-            (-80.0, -120.0),
+            (-120.0, 120.0),
+            (-120.0, -120.0),
             (120.0, 120.0),
-            (280.0, -40.0),
+            (280.0, -120.0),
         ]
     elif direction == "RL":
         coords = [
             (280.0, 0.0),
-            (80.0, 120.0),
-            (80.0, -120.0),
+            (120.0, 120.0),
+            (120.0, -120.0),
             (-120.0, 120.0),
-            (-280.0, -40.0),
+            (-280.0, -120.0),
         ]
     else:
         raise ValueError(f"Unsupported direction: {direction}")
@@ -1204,6 +1251,11 @@ def _apply_reference_params(
             graph.node_labels,
             graph.num_nodes,
         )
+
+    varied_external_labels = params.get("varied_external_labels")
+    if isinstance(varied_external_labels, list):
+        for index, style in enumerate(_node_styles(graph)):
+            style.external_label = str(varied_external_labels[index % len(varied_external_labels)])
 
     if "edge_labels" in params:
         graph.edge_labels = _apply_label_values(
@@ -2401,6 +2453,53 @@ def build_combo_items() -> Tuple[ComboCardItem, ...]:
     return tuple(items)
 
 
+def build_evil_specs() -> Tuple[EvilCardSpec, ...]:
+    """Import evil case definitions from the cosmetic album catalog.
+
+    Returns
+    -------
+    tuple[EvilCardSpec, ...]
+        Ordered evil-card specs copied from the album case catalog.
+    """
+
+    specs: List[EvilCardSpec] = []
+    for case in build_case_catalog():
+        if case.category != "evil_combos":
+            continue
+        specs.append(
+            EvilCardSpec(
+                case_id=case.case_id,
+                title=case.title,
+                settings=dict(case.settings),
+                graph=case.graph,
+                positions=case.positions,
+            )
+        )
+    return tuple(specs)
+
+
+def build_evil_items() -> Tuple[EvilCardItem, ...]:
+    """Build the resolved evil card inventory.
+
+    Returns
+    -------
+    tuple[EvilCardItem, ...]
+        Ordered evil card items.
+    """
+
+    items: List[EvilCardItem] = []
+    for spec in build_evil_specs():
+        stem = spec.case_id
+        items.append(
+            EvilCardItem(
+                card_id=spec.case_id,
+                spec=spec,
+                relative_path=f"cards/evil/{stem}.png",
+            )
+        )
+    return tuple(items)
+
+
 def _choose_combo_fixture(settings: Mapping[str, object]) -> str:
     """Choose the best canonical fixture for a combo case.
 
@@ -2447,6 +2546,10 @@ def _combo_params(settings: Mapping[str, object], fixture: str) -> Dict[str, obj
     edge_fields = _style_field_names(EdgeStyle)
     for name, value in settings.items():
         if name == "combo" or name == "cluster":
+            continue
+        if name == "external_label_varied":
+            if bool(value):
+                params["varied_external_labels"] = list(VARIED_EXTERNAL_LABELS)
             continue
         if name == "edge_style":
             edge_block = params["edge"]
@@ -2497,6 +2600,16 @@ def _combo_params(settings: Mapping[str, object], fixture: str) -> Dict[str, obj
         node_block.setdefault("text_background_opacity", 0.92)
         node_block.setdefault("text_background_padding", (6.0, 3.0))
         node_block.setdefault("text_background_corner_radius", 4.0)
+    if str(node_block.get("fill_pattern", "solid")) == "hatched":
+        # Hatched fills also hurt label readability -- add text background.
+        node_block.setdefault("text_background", "#FFFFFF")
+        node_block.setdefault("text_background_opacity", 0.92)
+        node_block.setdefault("text_background_padding", (6.0, 3.0))
+        node_block.setdefault("text_background_corner_radius", 4.0)
+    if str(node_block.get("fill_pattern", "solid")) == "pie":
+        # Pie charts need enough space to show slices clearly.
+        node_block.setdefault("min_width", 120.0)
+        node_block.setdefault("min_height", 80.0)
     if "opacity" in node_block:
         node_block.setdefault("border_opacity", float(node_block["opacity"]))
     if str(edge_block.get("color_gradient", "none")) == "source_to_target":
@@ -2508,8 +2621,10 @@ def _combo_params(settings: Mapping[str, object], fixture: str) -> Dict[str, obj
         edge_block.setdefault("taper_width_start", 4.5)
         edge_block.setdefault("taper_width_end", 1.0)
     if "crossing_style" in edge_block:
-        edge_block.setdefault("crossing_size", 10.0)
-        edge_block.setdefault("width", max(float(settings.get("width", 3.0)), 3.5))
+        edge_block.setdefault("crossing_size", 20.0)
+        # Crossing demos need slightly heavier strokes so the jump treatment
+        # remains visible after the audit card is downscaled.
+        edge_block.setdefault("width", max(float(settings.get("width", 4.0)), 4.0))
     if "width" in edge_block:
         edge_block["width"] = float(edge_block["width"])
     if "text_background" in node_block and node_block["text_background"]:
@@ -2549,6 +2664,26 @@ def _combo_params(settings: Mapping[str, object], fixture: str) -> Dict[str, obj
             "node_labels",
             ["In", "Val", "Rev", "OK", "Out"],
         )
+    # Cloud shapes have irregular boundaries -- use short labels.
+    if str(node_block.get("shape", "")) == "cloud":
+        params.setdefault(
+            "node_labels",
+            ["Svc", "API", "Hub", "Log", "Out"],
+        )
+    # Box3D visible face is smaller than full bounds -- use short labels.
+    if str(node_block.get("shape", "")) == "box3d":
+        params.setdefault(
+            "node_labels",
+            ["DB", "Srv", "App", "Web", "Out"],
+        )
+    # External labels need a reasonable offset from the node edge.
+    if node_block.get("external_label") or "varied_external_labels" in params:
+        node_block.setdefault("external_label_font_size", 10.0)
+        node_block.setdefault("external_label_offset", 8.0)
+    # Text outlines need a visible color and width to show clearly.
+    if bool(node_block.get("text_outline")):
+        node_block.setdefault("text_outline_color", "#FFFFFF")
+        node_block.setdefault("text_outline_width", 2.0)
     # Increase taper range so the width change is clearly visible.
     if bool(edge_block.get("taper")):
         edge_block.setdefault("taper_width_start", 4.0)
@@ -2602,6 +2737,46 @@ def _render_combo_card(item: ComboCardItem, output_root: Path) -> None:
         "feature": "combo",
         "value": item.spec.title,
         "fixture": fixture,
+        "settings": item.spec.settings,
+    }
+    _write_json(destination.with_suffix(".json"), sidecar)
+
+
+def _render_evil_card(item: EvilCardItem, output_root: Path) -> None:
+    """Render one evil stress-test card using its pre-built graph.
+
+    Parameters
+    ----------
+    item : EvilCardItem
+        Evil-card metadata.
+    output_root : Path
+        Gallery audit root directory.
+
+    Returns
+    -------
+    None
+        The evil PNG and JSON sidecar are written to disk.
+    """
+
+    destination = output_root / item.relative_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        raw_path = Path(temp_dir) / "evil.png"
+        _render_dagua_png(item.spec.graph, item.spec.positions, raw_path, CARD_SIZE)
+        card = _place_render_on_canvas(raw_path, CARD_SIZE, CARD_CONTENT_INSET)
+    _draw_header(
+        card,
+        title=item.spec.title,
+        subtitle="stress test",
+        right_label="evil",
+    )
+    _save_image(card, destination)
+    sidecar = {
+        "id": item.card_id,
+        "kind": "evil",
+        "category": "evil",
+        "feature": "stress_test",
+        "value": item.spec.title,
         "settings": item.spec.settings,
     }
     _write_json(destination.with_suffix(".json"), sidecar)
@@ -2711,6 +2886,7 @@ def _write_index(
     strip_items: Sequence[StripCardItem],
     reference_items: Sequence[ReferenceCardItem],
     combo_items: Sequence[ComboCardItem],
+    evil_items: Sequence[EvilCardItem],
     comparison_lookup: Mapping[str, str],
 ) -> Path:
     """Write the machine-readable JSONL card index.
@@ -2725,6 +2901,8 @@ def _write_index(
         Reference cards rendered in the current run.
     combo_items : Sequence[ComboCardItem]
         Combo cards rendered in the current run.
+    evil_items : Sequence[EvilCardItem]
+        Evil cards rendered in the current run.
     comparison_lookup : Mapping[str, str]
         Comparison path lookup keyed by reference card ID.
 
@@ -2780,6 +2958,19 @@ def _write_index(
             "has_comparison": False,
             "comparison_path": None,
             "combo_features": item.spec.settings,
+        }
+        lines.append(json.dumps(entry, sort_keys=True))
+    for item in evil_items:
+        entry = {
+            "id": item.card_id,
+            "kind": "evil",
+            "path": item.relative_path,
+            "category": "evil",
+            "feature": "stress_test",
+            "value": item.spec.title,
+            "has_comparison": False,
+            "comparison_path": None,
+            "settings": item.spec.settings,
         }
         lines.append(json.dumps(entry, sort_keys=True))
     index_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
@@ -4045,9 +4236,11 @@ def build_gallery_audit(
     boards: bool = True,
     comparisons: bool = True,
     combos: bool = True,
+    evil: bool = True,
     index: bool = True,
     reference_card_ids: Optional[Sequence[str]] = None,
     combo_card_ids: Optional[Sequence[str]] = None,
+    evil_card_ids: Optional[Sequence[str]] = None,
 ) -> GalleryAuditResult:
     """Build the gallery audit artifact tree.
 
@@ -4063,12 +4256,16 @@ def build_gallery_audit(
         Whether to build Graphviz comparison cards.
     combos : bool, default=True
         Whether to build combo cards.
+    evil : bool, default=True
+        Whether to build evil stress cards.
     index : bool, default=True
         Whether to write ``index.jsonl``.
     reference_card_ids : Sequence[str] | None, optional
         Optional subset of reference card IDs for tests.
     combo_card_ids : Sequence[str] | None, optional
         Optional subset of combo card IDs for tests.
+    evil_card_ids : Sequence[str] | None, optional
+        Optional subset of evil card IDs for tests.
 
     Returns
     -------
@@ -4088,10 +4285,15 @@ def build_gallery_audit(
     if combo_card_ids is not None:
         selected_combo = set(combo_card_ids)
         combo_items = [item for item in combo_items if item.card_id in selected_combo]
+    evil_items = list(build_evil_items())
+    if evil_card_ids is not None:
+        selected_evil = set(evil_card_ids)
+        evil_items = [item for item in evil_items if item.card_id in selected_evil]
 
     written_reference_items: List[ReferenceCardItem] = []
     written_strip_items: List[StripCardItem] = []
     written_combo_items: List[ComboCardItem] = []
+    written_evil_items: List[EvilCardItem] = []
     comparison_lookup: Dict[str, str] = {}
     reference_pairs: List[Tuple[str, Path]] = []
     combo_pairs: List[Tuple[str, Path]] = []
@@ -4123,6 +4325,12 @@ def build_gallery_audit(
             _render_combo_card(item, output_root)
             written_combo_items.append(item)
             combo_pairs.append((item.spec.combo_kind, output_root / item.relative_path))
+
+    if evil:
+        _reset_output_dir(output_root / "cards" / "evil")
+        for item in evil_items:
+            _render_evil_card(item, output_root)
+            written_evil_items.append(item)
 
     if boards:
         reference_grouped = _group_paths_by_category(reference_pairs)
@@ -4156,6 +4364,7 @@ def build_gallery_audit(
             written_strip_items,
             written_reference_items,
             written_combo_items,
+            written_evil_items,
             comparison_lookup,
         )
 
@@ -4165,6 +4374,7 @@ def build_gallery_audit(
         reference_count=len(written_reference_items),
         comparison_count=len(comparison_lookup),
         combo_count=len(written_combo_items),
+        evil_count=len(written_evil_items),
         board_count=board_count,
     )
 
@@ -4184,15 +4394,19 @@ def main() -> int:
     parser.add_argument("--boards", action="store_true")
     parser.add_argument("--comparisons", action="store_true")
     parser.add_argument("--combos", action="store_true")
+    parser.add_argument("--evil", action="store_true")
     parser.add_argument("--index", action="store_true")
     parser.add_argument("--all", action="store_true")
     args = parser.parse_args()
 
-    if args.all or not any([args.cards, args.boards, args.comparisons, args.combos, args.index]):
+    if args.all or not any(
+        [args.cards, args.boards, args.comparisons, args.combos, args.evil, args.index]
+    ):
         args.cards = True
         args.boards = True
         args.comparisons = True
         args.combos = True
+        args.evil = True
         args.index = True
 
     result = build_gallery_audit(
@@ -4201,12 +4415,14 @@ def main() -> int:
         boards=args.boards,
         comparisons=args.comparisons,
         combos=args.combos,
+        evil=args.evil,
         index=args.index,
     )
     print(result.output_dir)
     print(f"reference_cards={result.reference_count}")
     print(f"comparison_cards={result.comparison_count}")
     print(f"combo_cards={result.combo_count}")
+    print(f"evil_cards={result.evil_count}")
     print(f"boards={result.board_count}")
     if result.index_path:
         print(result.index_path)
