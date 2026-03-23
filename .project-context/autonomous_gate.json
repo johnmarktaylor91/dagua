@@ -1,0 +1,35 @@
+{
+  "mode": "autonomous",
+  "started": "2026-03-23T22:00:00",
+  "user_directive": "do NOT STOP till all done",
+  "exit_criteria": [
+    {
+      "criterion": "Phase 1 individual sweeps critic mean",
+      "target": ">= 9.0",
+      "status": "pass",
+      "measured_value": "133/133 cards at 9+ (v25 gallery)",
+      "measurement_source": "v25 gallery multi-round LLM critic review"
+    },
+    {
+      "criterion": "Phase 2 combo critic mean",
+      "target": ">= 9.0",
+      "status": "pass",
+      "measured_value": "38/38 combo cards at 9+ (v31 gallery)",
+      "measurement_source": "v31 gallery multi-round LLM critic review"
+    },
+    {
+      "criterion": "Phase 3 evil cases zero crashes + reasonable",
+      "target": "0 crashes, mean >= 6.0",
+      "status": "pass",
+      "measured_value": "0 crashes, 15/15 rendered. Mean 6.5. 9 cards at 7+, 3 at 5-6 (expected for pathological), 3 at 3-4 (extreme edge cases). Improved: double_border_striped 6->7, many_arrows 6->7, opacity_stack 6->7.",
+      "measurement_source": "evil_cases_v2 LLM critic review"
+    },
+    {
+      "criterion": "Phase 4 reference gallery exists",
+      "target": "index.html + images",
+      "status": "pass",
+      "measured_value": "106 images + index.html",
+      "measurement_source": "build_feature_reference.py output"
+    }
+  ]
+}

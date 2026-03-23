@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from dagua.render.edges.arrowheads import ARROWHEAD_REGISTRY, ArrowheadResult
+from dagua.styles import EdgeStyle, get_theme
 
 NEW_ARROWS = [
     "crows_foot_one",
@@ -211,3 +213,53 @@ def test_existing_arrowheads_still_build(name: str) -> None:
     result = _build_local_arrow(name, 10.0, 6.0, 2.0)
     assert result.trim_contour is not None
     assert result is not None
+
+
+def test_normal_arrowhead_uses_simple_triangle_for_thin_edges() -> None:
+    """Thin normal arrows should fall back to a plain three-point triangle.
+
+    Returns
+    -------
+    None
+        This test only performs assertions.
+    """
+    result = _build_local_arrow("normal", 10.0, 6.0, 0.8)
+
+    assert len(result.filled_paths) == 1
+    assert result.stroked_paths == []
+    assert np.allclose(
+        result.filled_paths[0].vertices,
+        np.array(
+            [
+                [0.0, 0.0],
+                [10.0, 3.0],
+                [10.0, -3.0],
+                [0.0, 0.0],
+            ]
+        ),
+    )
+    assert np.allclose(
+        result.trim_contour.vertices,
+        np.array(
+            [
+                [10.0, 0.4],
+                [10.0, -0.4],
+            ]
+        ),
+    )
+
+
+def test_graphviz_theme_keeps_node_relative_arrowheads() -> None:
+    """The improved Graphviz theme should not shrink node-relative arrowheads.
+
+    Returns
+    -------
+    None
+        This test only performs assertions.
+    """
+    theme = get_theme("graphviz")
+    edge_style = theme.get_edge_style("default")
+
+    assert EdgeStyle().arrow_node_fraction == pytest.approx(0.35)
+    assert edge_style.arrow_node_fraction >= 0.3
+    assert edge_style.arrow_node_fraction == pytest.approx(0.35)
