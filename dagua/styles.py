@@ -3799,6 +3799,5045 @@ THEME_REGISTRY["n8n"] = N8N_THEME
 THEME_REGISTRY["airflow"] = AIRFLOW_THEME
 THEME_REGISTRY["dagster"] = DAGSTER_THEME
 
+# ── Neuroscience & biology themes ────────────────────────────────────────
+
+# Van Essen -- inspired by David Van Essen's cortical wiring diagrams
+# (flat colored region boxes, hierarchical connectivity, warm earth palette)
+VAN_ESSEN_THEME = Theme(
+    name="van_essen",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#E8D5B7",  # tan cortical region
+            stroke="#5C4033",  # dark brown border
+            stroke_width=1.8,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#3B2716",
+            font_weight="bold",
+            padding=(6.0, 3.0),
+            min_width=36.0,
+            min_height=18.0,
+            corner_radius=2.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#A8C6E0",  # cool blue (primary sensory)
+            stroke="#3B5E80",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#1E3448",
+            font_weight="bold",
+            padding=(6.0, 3.0),
+            min_width=36.0,
+            min_height=18.0,
+            corner_radius=2.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#D4A0A0",  # muted red (motor cortex)
+            stroke="#804040",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#4A2020",
+            font_weight="bold",
+            padding=(6.0, 3.0),
+            min_width=36.0,
+            min_height=18.0,
+            corner_radius=2.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#6B5344",  # warm brown fiber tract
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#6B5344",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.25,
+        ),
+        "back": EdgeStyle(
+            color="#9B8B7B",  # lighter feedback connection
+            width=0.8,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#9B8B7B",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.35,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F5ECD8",  # light parchment lobe boundary
+        stroke="#8B7B68",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=4.0,
+        font_size=9.0,
+        font_color="#5C4033",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(
+        background_color="#FEFCF5",  # off-white paper
+    ),
+)
+
+# Ramon y Cajal -- inspired by Santiago Ramon y Cajal's histological ink
+# drawings (1890s): fine sepia pen strokes on aged parchment, hand-drawn
+# feel with delicate branching structures
+CAJAL_THEME = Theme(
+    name="cajal",
+    node_styles={
+        "default": NodeStyle(
+            shape="ellipse",
+            fill="#E6D5BC",  # parchment soma body
+            stroke="#1A0E07",  # near-black india ink
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#1A0E07",
+            font_style="italic",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="ellipse",
+            fill="#C7B897",  # darker parchment (sensory neuron)
+            stroke="#1A0E07",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#1A0E07",
+            font_style="italic",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=20.0,
+        ),
+        "output": NodeStyle(
+            shape="ellipse",
+            fill="#D8C4A8",  # warm parchment (motor neuron)
+            stroke="#1A0E07",
+            stroke_width=2.5,  # heavier ink for emphasis
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#1A0E07",
+            font_style="italic",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=20.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#2C1A0E",  # dark sepia ink -- axon fibers
+            width=0.8,  # thin pen strokes
+            style="solid",
+            arrow="vee",  # fine pointed tip
+            arrow_fill="filled",
+            arrow_color="#2C1A0E",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.35,  # organic curves
+        ),
+        "back": EdgeStyle(
+            color="#6B5038",  # lighter sepia -- recurrent collaterals
+            width=0.6,
+            style="solid",
+            arrow="vee",
+            arrow_fill="filled",
+            arrow_color="#6B5038",
+            arrow_length=3.5,
+            arrow_width=2.0,
+            routing="bezier",
+            curvature=0.45,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0E6D2",  # light parchment
+        stroke="#8B7355",
+        stroke_width=0.3,  # barely-there boundary
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#6B5038",
+        font_weight="normal",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(
+        background_color="#F7EDD8",  # aged yellowed paper
+    ),
+)
+
+# Connectome -- inspired by fMRI connectome matrices and circular
+# connectivity diagrams: saturated jewel tones on dark background,
+# glowing edges, modern clinical neuroimaging aesthetic
+CONNECTOME_THEME = Theme(
+    name="connectome",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#2A5F8F",  # deep cortical blue
+            stroke="#60B0FF",  # bright MRI highlight
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#C0DCFF",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#2D8B57",  # temporal lobe green
+            stroke="#50E890",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#B0F0C8",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#8B2D5E",  # frontal lobe magenta
+            stroke="#E850A0",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#F0B0D0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#4090D0",  # tract blue with glow feel
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#4090D0",
+            arrow_length=4.5,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.7,
+        ),
+        "back": EdgeStyle(
+            color="#D06040",  # warm orange-red for feedback
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#D06040",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.4,
+            opacity=0.6,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A2840",  # dark cluster region
+        stroke="#3070A0",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=8.0,
+        font_size=9.0,
+        font_color="#80B0E0",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(
+        background_color="#0D1520",  # dark MRI void
+    ),
+)
+
+# Pathway -- inspired by textbook biochemical pathway diagrams (Krebs
+# cycle, glycolysis, electron transport chain): curved reaction arrows
+# connecting metabolite ovals, enzyme names in green, cofactors in
+# orange, warm off-white textbook paper background
+PATHWAY_THEME = Theme(
+    name="pathway",
+    node_styles={
+        "default": NodeStyle(
+            shape="ellipse",  # metabolite ovals (citrate, malate, etc.)
+            fill="#FEFEFE",
+            stroke="#3B6EA5",  # textbook blue
+            stroke_width=1.8,
+            font_family="Palatino",
+            font_size=8.0,
+            font_color="#2C3E50",
+            padding=(6.0, 3.0),
+            min_width=38.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",  # enzymes as rounded rectangles
+            fill="#E6F4E6",  # light enzyme green
+            stroke="#2D8B47",  # classic enzyme green
+            stroke_width=1.8,
+            font_family="Palatino",
+            font_size=7.5,
+            font_color="#1A5C2E",
+            font_style="italic",  # enzyme names always italic
+            padding=(6.0, 3.0),
+            min_width=38.0,
+            min_height=18.0,
+            corner_radius=3.0,
+        ),
+        "output": NodeStyle(
+            shape="ellipse",  # cofactors / products (NAD+, ATP, CO2)
+            fill="#FFF5E6",  # warm cofactor cream
+            stroke="#D4851F",  # amber cofactor border
+            stroke_width=1.5,
+            font_family="Palatino",
+            font_size=7.5,
+            font_color="#8B5A1A",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=18.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#444444",  # dark gray reaction arrow
+            width=1.4,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#444444",
+            arrow_length=6.0,
+            arrow_width=4.0,
+            routing="bezier",  # curved like Krebs cycle arrows
+            curvature=0.25,
+        ),
+        "back": EdgeStyle(
+            color="#B03030",  # red feedback / inhibition
+            width=1.0,
+            style="dashed",
+            arrow="tee",  # inhibition bar
+            arrow_fill="filled",
+            arrow_color="#B03030",
+            arrow_length=5.0,
+            arrow_width=6.0,
+            routing="bezier",
+            curvature=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F5F0E8",  # warm parchment compartment (mitochondria, cytosol)
+        stroke="#C0B090",
+        stroke_width=1.5,
+        stroke_dash="dashed",  # dashed membrane boundary
+        corner_radius=8.0,
+        font_size=9.0,
+        font_color="#7A6B55",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(
+        background_color="#FDFAF3",  # textbook off-white
+    ),
+)
+
+# Roadmap -- inspired by highway maps and route planning diagrams:
+# nodes as map pins/junctions, edges as road segments with varying
+# width, muted cartographic palette, subtle terrain background
+ROADMAP_THEME = Theme(
+    name="roadmap",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",  # white junction marker
+            stroke="#3D3D3D",  # dark road gray
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#2C2C2C",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="diamond",  # origin marker
+            fill="#2E7D32",  # highway green
+            stroke="#1B5E20",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="diamond",  # destination marker
+            fill="#C62828",  # exit red
+            stroke="#8E0000",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#F9A825",  # highway yellow-orange
+            width=2.5,  # thick road
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#F9A825",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",  # gentle road curves
+            curvature=0.2,
+        ),
+        "back": EdgeStyle(
+            color="#90A4AE",  # secondary road gray-blue
+            width=1.2,  # thinner side road
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#90A4AE",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#E8EAE6",  # muted terrain region
+        stroke="#A0A898",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=6.0,
+        font_size=9.0,
+        font_color="#5D6458",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(
+        background_color="#F0EDE4",  # parchment map background
+    ),
+)
+
+# Phylogeny -- inspired by evolutionary cladograms and phylogenetic
+# trees: minimal decoration, thin precise branching lines, taxa names
+# as the focus, clean academic journal aesthetic
+PHYLOGENY_THEME = Theme(
+    name="phylogeny",
+    node_styles={
+        "default": NodeStyle(
+            shape="none",  # taxa are just labels, no box
+            fill="transparent",
+            stroke="transparent",
+            stroke_width=0.0,
+            font_family="Times New Roman",
+            font_size=8.5,
+            font_color="#1A1A1A",
+            font_style="italic",  # species names in italic
+            padding=(2.0, 1.0),
+            min_width=0.0,
+            min_height=0.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",  # root / ancestral node
+            fill="#2C2C2C",
+            stroke="#2C2C2C",
+            stroke_width=1.0,
+            font_family="Times New Roman",
+            font_size=8.5,
+            font_color="#1A1A1A",
+            font_weight="bold",
+            padding=(3.0, 3.0),
+            min_width=6.0,  # small dot
+            min_height=6.0,
+        ),
+        "output": NodeStyle(
+            shape="none",  # extant taxa -- label only
+            fill="transparent",
+            stroke="transparent",
+            stroke_width=0.0,
+            font_family="Times New Roman",
+            font_size=8.5,
+            font_color="#1A1A1A",
+            font_style="italic",
+            font_weight="bold",
+            padding=(2.0, 1.0),
+            min_width=0.0,
+            min_height=0.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#1A1A1A",  # crisp black branch
+            width=1.0,
+            style="solid",
+            arrow="none",  # cladograms have no arrowheads
+            routing="ortho",  # right-angle branching
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#999999",  # gray for horizontal transfer / reticulation
+            width=0.7,
+            style="dashed",
+            arrow="none",
+            routing="bezier",
+            curvature=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="transparent",
+        stroke="#AAAAAA",
+        stroke_width=0.5,
+        stroke_dash="dashed",  # subtle clade grouping
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#666666",
+        font_weight="normal",
+        padding=6.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(
+        background_color="#FFFFFF",  # clean journal white
+    ),
+)
+
+# Branches -- inspired by botanical tree branching: bark brown edges
+# that taper outward, leaf-green terminal nodes, bud nodes at forks,
+# dappled sunlight background
+BRANCHES_THEME = Theme(
+    name="branches",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#6B8E4E",  # muted leaf green
+            stroke="#3E5427",  # darker leaf edge
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#2A3B1A",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#8B6944",  # heartwood brown (trunk / root)
+            stroke="#5C4030",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#F5EDD8",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#A8C96A",  # bright new-leaf green
+            stroke="#6B8E4E",
+            stroke_width=1.0,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#2A3B1A",
+            padding=(3.0, 3.0),
+            min_width=16.0,
+            min_height=16.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#6B5038",  # bark brown
+            width=2.0,
+            style="solid",
+            arrow="none",  # branches don't have arrows
+            routing="bezier",  # organic curves
+            curvature=0.35,
+        ),
+        "back": EdgeStyle(
+            color="#A09070",  # lighter deadwood
+            width=1.0,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.45,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#D5E8B8",  # canopy green
+        stroke="#8BA86A",
+        stroke_width=0.8,
+        stroke_dash="solid",
+        corner_radius=12.0,  # soft organic shape
+        font_size=8.5,
+        font_color="#4A6030",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(
+        background_color="#F2EDE0",  # warm sunlit parchment
+    ),
+)
+
+# Spiderweb -- radial silk threads on dark night background, dew-drop
+# nodes glistening at intersections, gossamer connections
+SPIDERWEB_THEME = Theme(
+    name="spiderweb",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#C8D8E8",  # dewdrop pale blue
+            stroke="#E8F0F8",  # bright glint
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.0,
+            font_color="#D0D8E0",
+            padding=(3.0, 3.0),
+            min_width=12.0,  # small dewdrops
+            min_height=12.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#E0E8F0",  # larger central dewdrop
+            stroke="#F0F4F8",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#D0D8E0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#A0B8D0",  # slightly darker outer dewdrop
+            stroke="#C0D0E0",
+            stroke_width=1.0,
+            font_family="Helvetica",
+            font_size=7.0,
+            font_color="#B0C0D0",
+            padding=(3.0, 3.0),
+            min_width=10.0,
+            min_height=10.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#8090A0",  # silver silk thread
+            width=0.6,  # gossamer thin
+            style="solid",
+            arrow="none",  # webs don't have direction
+            routing="straight",
+            curvature=0.0,
+            opacity=0.7,
+        ),
+        "back": EdgeStyle(
+            color="#607080",  # deeper silk for spiral threads
+            width=0.4,
+            style="solid",
+            arrow="none",
+            routing="bezier",  # gentle spiral curve
+            curvature=0.5,
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A2030",  # dark night pocket
+        stroke="#3A4858",
+        stroke_width=0.5,
+        stroke_dash="solid",
+        corner_radius=20.0,  # soft circular web region
+        font_size=7.5,
+        font_color="#607888",
+        font_weight="normal",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(
+        background_color="#0E141E",  # deep night sky
+    ),
+)
+
+# ── Nature themes ─────────────────────────────────────────────────────
+
+# Coral -- deep ocean reef: bioluminescent nodes, dark abyssal water
+CORAL_THEME = Theme(
+    name="coral",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#E87461",  # living coral
+            stroke="#C0504D",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#FFE8E0",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#40C9A2",  # sea anemone teal
+            stroke="#2A9D78",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#E0FFF4",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#F4A940",  # clownfish orange
+            stroke="#D08820",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#FFF0D0",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#60B8D0",  # bioluminescent blue
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#60B8D0",
+            arrow_length=4.5,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.35,
+            opacity=0.75,
+        ),
+        "back": EdgeStyle(
+            color="#8860B0",  # deep purple current
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#8860B0",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.4,
+            opacity=0.6,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#0C2840",
+        stroke="#2080A0",
+        stroke_width=1.0,
+        stroke_dash="solid",
+        corner_radius=10.0,
+        font_size=8.0,
+        font_color="#60A8C0",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#081828"),
+)
+
+# Autumn -- fall foliage: warm reds, burnt orange, gold on woody brown
+AUTUMN_THEME = Theme(
+    name="autumn",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#D4763A",  # burnt orange leaf
+            stroke="#A05020",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#3A1E0A",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#C0272D",  # deep maple red
+            stroke="#8B1A1A",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#FFE0D0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#E8B830",  # golden aspen
+            stroke="#B89020",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#3A2A0A",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#6B4226",  # bare branch brown
+            width=1.5,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.3,
+        ),
+        "back": EdgeStyle(
+            color="#8B7355",
+            width=0.8,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0D8A0",
+        stroke="#C0A060",
+        stroke_width=1.0,
+        stroke_dash="solid",
+        corner_radius=8.0,
+        font_size=8.5,
+        font_color="#6B4226",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.35,
+    ),
+    graph_style=GraphStyle(background_color="#F5ECD0"),
+)
+
+# Aurora -- northern lights on arctic night sky
+AURORA_THEME = Theme(
+    name="aurora",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#30A878",  # aurora green
+            stroke="#50E0A0",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#C0FFD8",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#6838B0",  # aurora purple
+            stroke="#A060E8",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#D8C0F8",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#C83880",  # aurora pink
+            stroke="#E860A8",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#FFD0E8",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#40D890",
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#40D890",
+            arrow_length=4.5,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.65,
+        ),
+        "back": EdgeStyle(
+            color="#9050D0",
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#9050D0",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.4,
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#102030",
+        stroke="#305050",
+        stroke_width=1.0,
+        stroke_dash="solid",
+        corner_radius=12.0,
+        font_size=8.0,
+        font_color="#60A088",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.35,
+    ),
+    graph_style=GraphStyle(background_color="#080E18"),
+)
+
+# Cave -- Lascaux cave paintings: ochre and charcoal on dark stone
+CAVE_THEME = Theme(
+    name="cave",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#C4883C",  # ochre pigment
+            stroke="#8B6020",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#2A1A0A",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#B03020",  # red ochre
+            stroke="#801810",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#F0D8C0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#E0C878",  # yellow ochre
+            stroke="#B0A050",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#2A1A0A",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#3A2A1A",  # charcoal
+            width=1.8,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.4,
+        ),
+        "back": EdgeStyle(
+            color="#5A4A38",
+            width=1.0,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#3A3028",
+        stroke="#5A4838",
+        stroke_width=1.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.5,
+        font_color="#A08860",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#2A221A"),
+)
+
+# ── Art & design themes ──────────────────────────────────────────────
+
+# Stained glass -- cathedral jewel tones, thick black lead came
+STAINED_GLASS_THEME = Theme(
+    name="stained_glass",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#2860A8",  # cobalt blue glass
+            stroke="#1A1A1A",  # lead came
+            stroke_width=3.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#D0E0F8",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=22.0,
+            corner_radius=2.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#C82030",  # ruby red glass
+            stroke="#1A1A1A",
+            stroke_width=3.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#FFD0D0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=22.0,
+            corner_radius=2.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#D4A010",  # amber gold glass
+            stroke="#1A1A1A",
+            stroke_width=3.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#3A2A00",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=22.0,
+            corner_radius=2.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#1A1A1A",  # lead came
+            width=2.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#1A1A1A",
+            arrow_length=5.0,
+            arrow_width=4.0,
+            routing="straight",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#3A3A3A",
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#3A3A3A",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="straight",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#182028",
+        stroke="#1A1A1A",
+        stroke_width=3.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#C0B080",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#101418"),
+)
+
+# Watercolor -- soft translucent washes on textured paper
+WATERCOLOR_THEME = Theme(
+    name="watercolor",
+    node_styles={
+        "default": NodeStyle(
+            shape="ellipse",
+            fill="#88B8D8",  # cerulean wash
+            stroke="#5090B0",
+            stroke_width=0.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#2A3A4A",
+            padding=(5.0, 4.0),
+            min_width=28.0,
+            min_height=22.0,
+            opacity=0.7,
+        ),
+        "input": NodeStyle(
+            shape="ellipse",
+            fill="#D88888",  # alizarin wash
+            stroke="#B06060",
+            stroke_width=0.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#4A2020",
+            font_weight="bold",
+            padding=(5.0, 4.0),
+            min_width=28.0,
+            min_height=22.0,
+            opacity=0.7,
+        ),
+        "output": NodeStyle(
+            shape="ellipse",
+            fill="#C8C878",  # yellow ochre wash
+            stroke="#A0A050",
+            stroke_width=0.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#3A3A1A",
+            padding=(5.0, 4.0),
+            min_width=28.0,
+            min_height=22.0,
+            opacity=0.7,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#6888A0",
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#6888A0",
+            arrow_length=4.5,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.5,
+        ),
+        "back": EdgeStyle(
+            color="#A08888",
+            width=0.7,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#A08888",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.4,
+            opacity=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#D0D8C8",
+        stroke="#A0A890",
+        stroke_width=0.3,
+        stroke_dash="solid",
+        corner_radius=12.0,
+        font_size=8.5,
+        font_color="#607058",
+        font_weight="normal",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#F5F0E5"),
+)
+
+# Ukiyo-e -- Japanese woodblock print: indigo, vermillion, gold
+UKIYO_E_THEME = Theme(
+    name="ukiyo_e",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#2B4570",  # deep indigo
+            stroke="#1A2A40",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#E8D8C0",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=20.0,
+            corner_radius=1.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#C03020",  # vermillion
+            stroke="#801810",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#FFE8D0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=20.0,
+            corner_radius=1.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#C8A028",  # gold leaf
+            stroke="#987818",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#2A2008",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=20.0,
+            corner_radius=1.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#1A2A40",  # sumi ink
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#1A2A40",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.25,
+        ),
+        "back": EdgeStyle(
+            color="#506880",
+            width=0.8,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#506880",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.35,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#E8D8C0",
+        stroke="#8B7355",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#3A2A1A",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#F0E4D0"),  # rice paper
+)
+
+# Illuminated -- medieval manuscript: gold leaf, lapis blue, vellum
+ILLUMINATED_THEME = Theme(
+    name="illuminated",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#1A3C6E",  # lapis lazuli blue
+            stroke="#C8A030",  # gold leaf border
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#E8D8A0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=22.0,
+            corner_radius=2.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#8B1A2B",  # deep carmine
+            stroke="#C8A030",
+            stroke_width=3.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#F0D8A0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=22.0,
+            corner_radius=2.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#C8A030",  # gold leaf fill
+            stroke="#8B6D18",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#2A1A08",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=22.0,
+            corner_radius=2.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#C8A030",  # gold ink
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#C8A030",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.25,
+        ),
+        "back": EdgeStyle(
+            color="#6B5028",  # dark gold
+            width=1.0,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#6B5028",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.35,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#2A1E30",
+        stroke="#C8A030",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=3.0,
+        font_size=9.0,
+        font_color="#C8A030",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#E8D8B8"),  # vellum
+)
+
+# ── Sci-fi & pop culture themes ──────────────────────────────────────
+
+# Matrix -- green phosphor on black, digital rain
+MATRIX_THEME = Theme(
+    name="matrix",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#0A1A0A",
+            stroke="#00CC00",  # terminal green
+            stroke_width=1.5,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#00FF00",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=18.0,
+            corner_radius=0.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#003300",
+            stroke="#00FF00",
+            stroke_width=2.0,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#00FF00",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=18.0,
+            corner_radius=0.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#0A1A0A",
+            stroke="#00AA00",
+            stroke_width=1.5,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#00DD00",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=18.0,
+            corner_radius=0.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#00AA00",
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#00AA00",
+            arrow_length=5.0,
+            arrow_width=3.0,
+            routing="straight",
+            curvature=0.0,
+            opacity=0.7,
+        ),
+        "back": EdgeStyle(
+            color="#006600",
+            width=0.6,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#006600",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="straight",
+            curvature=0.0,
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#001A00",
+        stroke="#004400",
+        stroke_width=1.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#008800",
+        font_weight="bold",
+        padding=8.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#000000"),
+)
+
+# Tron -- neon cyan grid on pure black
+TRON_THEME = Theme(
+    name="tron",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#0A0A14",
+            stroke="#00D4FF",  # neon cyan
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#00D4FF",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=20.0,
+            corner_radius=1.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#0A0A14",
+            stroke="#FF6600",  # orange program
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#FF8830",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=20.0,
+            corner_radius=1.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#0A0A14",
+            stroke="#FFFFFF",  # white user
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=20.0,
+            corner_radius=1.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#00D4FF",
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#00D4FF",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="ortho",  # grid lines
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#0088AA",
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#0088AA",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="ortho",
+            curvature=0.0,
+            opacity=0.6,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#0A0A14",
+        stroke="#00688B",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#00A0CC",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#000000"),
+)
+
+# Steampunk -- brass/copper nodes, Victorian riveted edges
+STEAMPUNK_THEME = Theme(
+    name="steampunk",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#B8860B",  # dark goldenrod brass
+            stroke="#8B6914",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#2A1A08",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#B87333",  # copper
+            stroke="#8B5A2B",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#FFE8D0",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#708090",  # steel gray
+            stroke="#4A5A68",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#E8E8E8",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#5A4020",  # dark brass pipe
+            width=2.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#5A4020",
+            arrow_length=5.0,
+            arrow_width=4.0,
+            routing="ortho",  # rigid pipes
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#786040",
+            width=1.2,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#786040",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="ortho",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#3A3028",
+        stroke="#8B7355",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=4.0,
+        font_size=9.0,
+        font_color="#B8960B",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#2A2218"),
+)
+
+# Pixel -- 8-bit retro game aesthetic
+PIXEL_THEME = Theme(
+    name="pixel",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#5B6EE1",  # NES blue
+            stroke="#222034",
+            stroke_width=2.0,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(4.0, 2.0),
+            min_width=28.0,
+            min_height=18.0,
+            corner_radius=0.0,  # sharp pixel edges
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#AC3232",  # NES red
+            stroke="#222034",
+            stroke_width=2.0,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(4.0, 2.0),
+            min_width=28.0,
+            min_height=18.0,
+            corner_radius=0.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#6ABE30",  # NES green
+            stroke="#222034",
+            stroke_width=2.0,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(4.0, 2.0),
+            min_width=28.0,
+            min_height=18.0,
+            corner_radius=0.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#FBFB36",  # NES yellow
+            width=2.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#FBFB36",
+            arrow_length=5.0,
+            arrow_width=4.0,
+            routing="ortho",  # pixel-perfect right angles
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#76428A",  # NES purple
+            width=1.5,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#76428A",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="ortho",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#222034",
+        stroke="#524B6B",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#CBDBFC",
+        font_weight="bold",
+        padding=8.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#222034"),
+)
+
+# ── Science visualization themes ─────────────────────────────────────
+
+# X-ray -- radiograph: blue-white on black, translucent
+XRAY_THEME = Theme(
+    name="xray",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#C0D8E8",
+            stroke="#E0F0FF",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#E0F0FF",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+            opacity=0.7,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#E8F0FF",
+            stroke="#FFFFFF",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+            opacity=0.85,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#8098B0",
+            stroke="#A0B8D0",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#C0D8E8",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+            opacity=0.6,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#80A8C8",
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#80A8C8",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="straight",
+            curvature=0.0,
+            opacity=0.5,
+        ),
+        "back": EdgeStyle(
+            color="#506878",
+            width=0.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#506878",
+            arrow_length=3.5,
+            arrow_width=2.0,
+            routing="straight",
+            curvature=0.0,
+            opacity=0.35,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#101820",
+        stroke="#304050",
+        stroke_width=0.5,
+        stroke_dash="solid",
+        corner_radius=6.0,
+        font_size=7.5,
+        font_color="#607888",
+        font_weight="normal",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#000000"),
+)
+
+# Thermal -- infrared heat map: cool blue to hot red
+THERMAL_THEME = Theme(
+    name="thermal",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#E8C020",  # warm yellow
+            stroke="#D0A010",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#1A1A1A",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#E03030",  # hot red
+            stroke="#B02020",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#FFE0D0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#3060C0",  # cool blue
+            stroke="#2048A0",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#D0E0FF",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#D08020",  # warm orange
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#D08020",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.2,
+            opacity=0.7,
+        ),
+        "back": EdgeStyle(
+            color="#4070A0",
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#4070A0",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A1018",
+        stroke="#403028",
+        stroke_width=1.0,
+        stroke_dash="solid",
+        corner_radius=4.0,
+        font_size=8.0,
+        font_color="#A08060",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#0A0808"),
+)
+
+# Microscopy -- electron microscope: grayscale with false-color accents
+MICROSCOPY_THEME = Theme(
+    name="microscopy",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#A0A0A0",  # mid-gray specimen
+            stroke="#C8C8C8",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#E0E0E0",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#30A060",  # false-color green (fluorescence)
+            stroke="#20C070",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#D0FFE0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#C030A0",  # false-color magenta
+            stroke="#E050C0",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#FFD0F0",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#888888",
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#888888",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.2,
+            opacity=0.6,
+        ),
+        "back": EdgeStyle(
+            color="#555555",
+            width=0.5,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#555555",
+            arrow_length=3.5,
+            arrow_width=2.0,
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A1A1A",
+        stroke="#404040",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=6.0,
+        font_size=7.5,
+        font_color="#808080",
+        font_weight="normal",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#0A0A0A"),
+)
+
+# Topographic -- contour map: earth tones, elevation feel
+TOPOGRAPHIC_THEME = Theme(
+    name="topographic",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#8B7E6A",  # earth brown
+            stroke="#6B5E4A",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#2A2218",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="triangle",  # peak marker
+            fill="#4A7848",  # forest green
+            stroke="#3A5838",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#E0F0E0",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#4878A8",  # lake blue
+            stroke="#305880",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#D0E0F0",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#8B6844",  # trail brown
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#8B6844",
+            arrow_length=4.5,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+        ),
+        "back": EdgeStyle(
+            color="#A09880",  # contour line
+            width=0.6,
+            style="dashed",
+            arrow="none",
+            routing="bezier",
+            curvature=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#D8D0B8",
+        stroke="#A09878",
+        stroke_width=0.8,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#6B5E4A",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.35,
+    ),
+    graph_style=GraphStyle(background_color="#E8E0D0"),
+)
+
+# ── History themes ───────────────────────────────────────────────────
+
+# Hieroglyph -- Egyptian: papyrus, gold, lapis blue
+HIEROGLYPH_THEME = Theme(
+    name="hieroglyph",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#C8A040",  # gold cartouche
+            stroke="#8B6D18",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#1A1208",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=22.0,
+            corner_radius=3.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#1A3868",  # lapis lazuli
+            stroke="#C8A040",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#D8C898",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=22.0,
+            corner_radius=3.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#A82818",  # carnelian red
+            stroke="#C8A040",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#F0D8A0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=22.0,
+            corner_radius=3.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#8B6D18",  # dark gold
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#8B6D18",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="ortho",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#A09060",
+            width=1.0,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#A09060",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="ortho",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#D8C898",
+        stroke="#8B6D18",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#4A3A18",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#E8D8B0"),  # papyrus
+)
+
+# Roman mosaic -- tessellated earth tones, stone texture feel
+ROMAN_MOSAIC_THEME = Theme(
+    name="roman_mosaic",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#C8B898",  # limestone tesserae
+            stroke="#8B7E68",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#3A3028",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=28.0,
+            min_height=22.0,
+            corner_radius=1.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#8B3020",  # terracotta red
+            stroke="#6B2018",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#F0D8C0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=28.0,
+            min_height=22.0,
+            corner_radius=1.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#2A5060",  # dark teal tesserae
+            stroke="#1A3A48",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#C0D8E0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=28.0,
+            min_height=22.0,
+            corner_radius=1.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#5A4A38",  # grout line
+            width=2.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#5A4A38",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="straight",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#7A6A58",
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#7A6A58",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="straight",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#B8A888",
+        stroke="#8B7E68",
+        stroke_width=2.5,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#4A3828",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#D8C8A8"),
+)
+
+# ── Game & geography themes ──────────────────────────────────────────
+
+# Catan -- Settlers of Catan: hex terrain colors, roads, settlements
+CATAN_THEME = Theme(
+    name="catan",
+    node_styles={
+        "default": NodeStyle(
+            shape="hexagon",
+            fill="#C8A848",  # wheat/grain hex
+            stroke="#8B7428",
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#3A2A08",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "input": NodeStyle(
+            shape="pentagon",  # settlement
+            fill="#CC4422",  # brick red settlement
+            stroke="#8B2E15",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#FFE0D0",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",  # city
+            fill="#4A6E8B",  # ore blue-gray city
+            stroke="#2A4A68",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#D0E0F0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=24.0,
+            corner_radius=2.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#8B6020",  # dirt road
+            width=2.5,
+            style="solid",
+            arrow="none",  # roads don't have direction
+            routing="straight",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#607850",  # forest path
+            width=1.5,
+            style="dashed",
+            arrow="none",
+            routing="bezier",
+            curvature=0.2,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#B8D080",  # sheep pasture green
+        stroke="#80A048",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=6.0,
+        font_size=9.0,
+        font_color="#4A5828",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#70A0C8"),  # ocean blue
+)
+
+# Archipelago -- islands and bridges: sandy nodes, blue water, bridge edges
+ARCHIPELAGO_THEME = Theme(
+    name="archipelago",
+    node_styles={
+        "default": NodeStyle(
+            shape="ellipse",
+            fill="#E8D8A0",  # sandy island
+            stroke="#C0A868",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#4A3A18",
+            padding=(6.0, 4.0),
+            min_width=32.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="ellipse",
+            fill="#68A860",  # lush main island
+            stroke="#488840",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#1A3A10",
+            font_weight="bold",
+            padding=(6.0, 4.0),
+            min_width=36.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="ellipse",
+            fill="#D0B880",  # atoll sand
+            stroke="#A89060",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#5A4A28",
+            padding=(5.0, 3.0),
+            min_width=28.0,
+            min_height=18.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#8B7040",  # wooden bridge / rope bridge
+            width=2.0,
+            style="solid",
+            arrow="none",  # bridges are bidirectional
+            routing="bezier",
+            curvature=0.2,
+        ),
+        "back": EdgeStyle(
+            color="#5088A0",  # sea route (lighter)
+            width=1.0,
+            style="dashed",  # dotted sea lane
+            arrow="none",
+            routing="bezier",
+            curvature=0.35,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#90C8B0",  # shallow lagoon
+        stroke="#60A088",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=14.0,  # organic lagoon shape
+        font_size=8.5,
+        font_color="#2A5040",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.35,
+    ),
+    graph_style=GraphStyle(background_color="#3878A8"),  # deep ocean
+)
+
+# Mario overworld -- Super Mario World map: green pipes, brick paths,
+# castle nodes, bright Nintendo palette on sky blue
+MARIO_THEME = Theme(
+    name="mario",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#E8B830",  # ? block gold
+            stroke="#C09020",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#3A2A08",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",  # castle
+            fill="#B83830",  # castle brick red
+            stroke="#882020",
+            stroke_width=3.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#FFE0D0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=24.0,
+            corner_radius=0.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#30A830",  # warp pipe green
+            stroke="#208020",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#E0FFE0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#C8A060",  # dirt path
+            width=3.0,  # chunky overworld road
+            style="solid",
+            arrow="none",  # paths don't have arrows
+            routing="straight",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#68A830",  # grass path shortcut
+            width=1.5,
+            style="dashed",
+            arrow="none",
+            routing="bezier",
+            curvature=0.25,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#68B838",  # grass world
+        stroke="#488828",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=8.0,
+        font_size=9.0,
+        font_color="#1A4A08",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#6898F8"),  # sky blue
+)
+
+# Mycelium -- underground fungal network: pale filaments radiating
+# through dark soil, fruiting body nodes, organic branching
+MYCELIUM_THEME = Theme(
+    name="mycelium",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#D8C8A8",  # pale hyphal knot
+            stroke="#C0A878",
+            stroke_width=1.0,
+            font_family="Georgia",
+            font_size=7.0,
+            font_color="#E8D8C0",
+            padding=(3.0, 3.0),
+            min_width=14.0,  # small junction points
+            min_height=14.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#C89060",  # mushroom cap brown
+            stroke="#A87040",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#F0E0C8",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,  # fruiting body
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#E0D0B0",  # pale mycelium tip
+            stroke="#C8B890",
+            stroke_width=0.8,
+            font_family="Georgia",
+            font_size=7.0,
+            font_color="#D0C0A0",
+            padding=(2.0, 2.0),
+            min_width=10.0,
+            min_height=10.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#C8B890",  # pale filament
+            width=0.7,  # gossamer hyphae
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.4,  # organic branching
+            opacity=0.6,
+        ),
+        "back": EdgeStyle(
+            color="#A09870",  # deeper filament
+            width=0.4,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.55,
+            opacity=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A1810",
+        stroke="#302818",
+        stroke_width=0.5,
+        stroke_dash="solid",
+        corner_radius=10.0,
+        font_size=7.5,
+        font_color="#807050",
+        font_weight="normal",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#100E08"),  # dark soil
+)
+
+# xkcd -- Randall Munroe stick-figure style: wobbly hand-drawn feel,
+# simple black-on-white, Comic Sans (sorry not sorry)
+XKCD_THEME = Theme(
+    name="xkcd",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",
+            stroke="#000000",
+            stroke_width=1.5,
+            font_family="Comic Sans MS",
+            font_size=9.0,
+            font_color="#000000",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",
+            stroke="#000000",
+            stroke_width=2.5,
+            font_family="Comic Sans MS",
+            font_size=9.0,
+            font_color="#000000",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#DDDDDD",
+            stroke="#000000",
+            stroke_width=1.5,
+            font_family="Comic Sans MS",
+            font_size=9.0,
+            font_color="#000000",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#000000",
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#000000",
+            arrow_length=6.0,
+            arrow_width=4.0,
+            routing="bezier",
+            curvature=0.15,
+        ),
+        "back": EdgeStyle(
+            color="#888888",
+            width=1.0,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#888888",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.2,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F8F8F8",
+        stroke="#000000",
+        stroke_width=1.0,
+        stroke_dash="dashed",
+        corner_radius=8.0,
+        font_size=10.0,
+        font_color="#000000",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+# Slime mold -- Physarum polycephalum solving a maze: bright yellow
+# plasmodium threads on dark agar, pulsating network
+SLIME_MOLD_THEME = Theme(
+    name="slime_mold",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#E8D020",  # bright slime yellow
+            stroke="#C8B018",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.0,
+            font_color="#1A1A08",
+            padding=(3.0, 3.0),
+            min_width=16.0,
+            min_height=16.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#F0E030",  # oat flake (food source)
+            stroke="#D0C020",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#2A2808",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#C8B020",  # fading tendril tip
+            stroke="#A89018",
+            stroke_width=1.0,
+            font_family="Helvetica",
+            font_size=7.0,
+            font_color="#303008",
+            padding=(2.0, 2.0),
+            min_width=12.0,
+            min_height=12.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#D8C020",  # plasmodium tube
+            width=1.8,
+            style="solid",
+            arrow="none",  # network is undirected
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.8,
+        ),
+        "back": EdgeStyle(
+            color="#A89818",  # thinner exploratory tube
+            width=0.6,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.5,
+            opacity=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#181810",
+        stroke="#2A2818",
+        stroke_width=0.5,
+        stroke_dash="solid",
+        corner_radius=6.0,
+        font_size=7.5,
+        font_color="#606020",
+        font_weight="normal",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#0A0A08"),  # dark agar
+)
+
+# Cavern -- underground cave system: stalactites, subterranean pools,
+# limestone passages, headlamp glow
+CAVERN_THEME = Theme(
+    name="cavern",
+    node_styles={
+        "default": NodeStyle(
+            shape="ellipse",
+            fill="#585050",  # limestone chamber
+            stroke="#787068",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#D0C8B8",
+            padding=(5.0, 4.0),
+            min_width=28.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="ellipse",
+            fill="#384858",  # underground pool
+            stroke="#5878A0",  # water glint
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#A0C0E0",
+            font_weight="bold",
+            padding=(5.0, 4.0),
+            min_width=30.0,
+            min_height=22.0,
+        ),
+        "output": NodeStyle(
+            shape="ellipse",
+            fill="#C8A858",  # headlamp-lit formation
+            stroke="#E0C870",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#2A2218",
+            padding=(5.0, 4.0),
+            min_width=26.0,
+            min_height=18.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#605848",  # passage walls
+            width=2.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#605848",
+            arrow_length=4.5,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.35,
+        ),
+        "back": EdgeStyle(
+            color="#484038",  # narrow squeeze
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#484038",
+            arrow_length=3.5,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#282420",  # cavern chamber
+        stroke="#484038",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=10.0,
+        font_size=8.0,
+        font_color="#908070",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#1A1614"),  # deep underground
+)
+
+# Flight map -- airline route map: city dots on dark globe, great-circle
+# arcs, hub airports larger, classic SkyTeam / in-flight magazine feel
+FLIGHT_MAP_THEME = Theme(
+    name="flight_map",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#E8E0D0",  # city dot
+            stroke="#C0B8A8",
+            stroke_width=1.0,
+            font_family="Helvetica",
+            font_size=7.0,
+            font_color="#D0C8B8",
+            padding=(3.0, 3.0),
+            min_width=10.0,  # small city
+            min_height=10.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#FFFFFF",  # major hub
+            stroke="#E83030",  # airline red
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=22.0,  # hub airport
+            min_height=22.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#D0C8B8",
+            stroke="#A09888",
+            stroke_width=1.0,
+            font_family="Helvetica",
+            font_size=7.0,
+            font_color="#C0B8A0",
+            padding=(3.0, 3.0),
+            min_width=8.0,  # small destination
+            min_height=8.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#E83030",  # airline red route
+            width=0.8,
+            style="solid",
+            arrow="none",  # routes are bidirectional
+            routing="bezier",  # great-circle arc
+            curvature=0.3,
+            opacity=0.5,
+        ),
+        "back": EdgeStyle(
+            color="#F8A828",  # secondary route orange
+            width=0.5,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.35,
+            opacity=0.35,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A2030",
+        stroke="#304050",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=8.0,
+        font_size=7.5,
+        font_color="#607080",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#141E28"),  # dark globe
+)
+
+# Telecom -- phone/telecom network: cell towers, signal paths,
+# copper/fiber trunk lines, technical blue palette
+TELECOM_THEME = Theme(
+    name="telecom",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#E8E8E8",  # equipment gray
+            stroke="#3070A0",  # telco blue
+            stroke_width=1.5,
+            font_family="Arial",
+            font_size=7.5,
+            font_color="#1A3050",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=18.0,
+            corner_radius=2.0,
+        ),
+        "input": NodeStyle(
+            shape="triangle",  # cell tower
+            fill="#3070A0",
+            stroke="#1A4878",
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#D0E0F0",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#F0F0F0",  # endpoint device
+            stroke="#3070A0",
+            stroke_width=1.5,
+            font_family="Arial",
+            font_size=7.5,
+            font_color="#1A3050",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#3070A0",  # fiber trunk
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#3070A0",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="ortho",  # structured cable runs
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#90B0D0",  # wireless link
+            width=0.8,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#90B0D0",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="straight",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#E0E8F0",
+        stroke="#3070A0",
+        stroke_width=1.0,
+        stroke_dash="dashed",
+        corner_radius=4.0,
+        font_size=8.0,
+        font_color="#2050A0",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.35,
+    ),
+    graph_style=GraphStyle(background_color="#F8F8FC"),
+)
+
+# Social -- social network graph: profile-pic circles, relationship
+# edges, Facebook/LinkedIn blue tones, clean modern
+SOCIAL_THEME = Theme(
+    name="social",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#4267B2",  # Facebook blue
+            stroke="#365899",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#E44D26",  # influencer / high-degree orange-red
+            stroke="#C03018",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=30.0,
+            min_height=30.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#7FB3D8",  # casual connection light blue
+            stroke="#5A9BC0",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#FFFFFF",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#8B9DC3",  # friendship line
+            width=1.0,
+            style="solid",
+            arrow="none",  # friendships are mutual
+            routing="bezier",
+            curvature=0.2,
+            opacity=0.5,
+        ),
+        "back": EdgeStyle(
+            color="#DFE3EE",  # weak tie
+            width=0.5,
+            style="dashed",
+            arrow="none",
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.35,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#E9EBEE",  # group background
+        stroke="#8B9DC3",
+        stroke_width=1.0,
+        stroke_dash="solid",
+        corner_radius=10.0,
+        font_size=8.5,
+        font_color="#4267B2",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+# Ant colony -- pheromone trails on sandy earth: dark ant nodes,
+# amber pheromone paths of varying intensity, nest chambers
+ANT_COLONY_THEME = Theme(
+    name="ant_colony",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#2A1A0E",  # dark ant body
+            stroke="#4A3020",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.0,
+            font_color="#D0B888",
+            padding=(3.0, 3.0),
+            min_width=14.0,
+            min_height=14.0,
+        ),
+        "input": NodeStyle(
+            shape="ellipse",  # nest chamber
+            fill="#5A4030",  # packed earth
+            stroke="#8B6844",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#E0C8A0",
+            font_weight="bold",
+            padding=(6.0, 4.0),
+            min_width=32.0,
+            min_height=22.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#608838",  # food source leaf green
+            stroke="#487028",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#E0F0D0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#C89838",  # strong pheromone trail (amber)
+            width=1.8,
+            style="solid",
+            arrow="none",  # trails are bidirectional
+            routing="bezier",
+            curvature=0.25,
+            opacity=0.7,
+        ),
+        "back": EdgeStyle(
+            color="#A08030",  # fading pheromone
+            width=0.6,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.4,
+            opacity=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#2A2018",  # tunnel chamber
+        stroke="#4A3828",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=8.0,
+        font_size=7.5,
+        font_color="#907850",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#18140E"),  # underground earth
+)
+
+# Noir -- black & white film noir: high contrast, deep shadows
+NOIR_THEME = Theme(
+    name="noir",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#1A1A1A",
+            stroke="#E0E0E0",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#E0E0E0",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=20.0,
+            corner_radius=1.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#F0F0F0",  # bright under the streetlamp
+            stroke="#1A1A1A",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#1A1A1A",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=22.0,
+            corner_radius=1.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#3A3A3A",  # deep shadow
+            stroke="#A0A0A0",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#C0C0C0",
+            font_style="italic",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=20.0,
+            corner_radius=1.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#C0C0C0",
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#C0C0C0",
+            arrow_length=5.0,
+            arrow_width=3.0,
+            routing="straight",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#606060",
+            width=0.6,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#606060",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="straight",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#0A0A0A",
+        stroke="#404040",
+        stroke_width=1.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#808080",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#000000"),
+)
+
+# Cyberpunk -- neon pink/cyan on dark rainy city
+CYBERPUNK_THEME = Theme(
+    name="cyberpunk",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#1A0A20",
+            stroke="#FF2D95",  # hot pink neon
+            stroke_width=2.0,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#FF2D95",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=18.0,
+            corner_radius=1.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#1A0A20",
+            stroke="#00FFF0",  # electric cyan
+            stroke_width=2.5,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#00FFF0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=20.0,
+            corner_radius=1.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#1A0A20",
+            stroke="#B030FF",  # purple neon
+            stroke_width=2.0,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#C060FF",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=18.0,
+            corner_radius=1.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#FF2D95",
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#FF2D95",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.2,
+            opacity=0.7,
+        ),
+        "back": EdgeStyle(
+            color="#00FFF0",
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#00FFF0",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#0A0418",
+        stroke="#402060",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=2.0,
+        font_size=8.0,
+        font_color="#8040C0",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#0A0410"),
+)
+
+# Vascular -- arterial red / venous blue on anatomy beige
+VASCULAR_THEME = Theme(
+    name="vascular",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#E0D0C0",  # tissue beige
+            stroke="#A08878",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#4A3828",
+            padding=(4.0, 4.0),
+            min_width=18.0,
+            min_height=18.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#CC2020",  # arterial red (heart)
+            stroke="#991010",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#FFD0D0",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#3060A0",  # venous blue
+            stroke="#204080",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#C0D0E8",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#CC2020",  # artery
+            width=1.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#CC2020",
+            arrow_length=4.5,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+        ),
+        "back": EdgeStyle(
+            color="#3060A0",  # vein
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#3060A0",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.35,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0E0D0",
+        stroke="#C0A890",
+        stroke_width=1.0,
+        stroke_dash="dashed",
+        corner_radius=10.0,
+        font_size=8.0,
+        font_color="#806050",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.35,
+    ),
+    graph_style=GraphStyle(background_color="#F8EEE0"),
+)
+
+# Nebula -- deep space gas clouds, purple/teal wisps
+NEBULA_THEME = Theme(
+    name="nebula",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#D0D8F8",  # star white-blue
+            stroke="#E8E8FF",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#E0E8FF",
+            padding=(3.0, 3.0),
+            min_width=16.0,
+            min_height=16.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#F8E8A0",  # bright star gold
+            stroke="#FFE860",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#FFF0C0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#8070B0",  # dim purple star
+            stroke="#A090D0",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#C0B8E0",
+            padding=(3.0, 3.0),
+            min_width=14.0,
+            min_height=14.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#6050A0",  # purple gas wisp
+            width=1.0,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.4,
+            opacity=0.45,
+        ),
+        "back": EdgeStyle(
+            color="#307880",  # teal gas wisp
+            width=0.6,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.5,
+            opacity=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A1030",
+        stroke="#302050",
+        stroke_width=0.5,
+        stroke_dash="solid",
+        corner_radius=16.0,
+        font_size=7.5,
+        font_color="#605088",
+        font_weight="normal",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#08060E"),
+)
+
+# Lava -- volcanic obsidian with glowing orange cracks
+LAVA_THEME = Theme(
+    name="lava",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#1A1A1A",  # obsidian
+            stroke="#E85020",  # magma glow
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#F0A040",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#E83010",  # molten core
+            stroke="#FF6030",
+            stroke_width=3.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#FFE0A0",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#2A2020",  # cooled basalt
+            stroke="#803020",
+            stroke_width=1.5,
+            font_family="Arial",
+            font_size=7.5,
+            font_color="#C08060",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#E05018",  # lava flow
+            width=2.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#E05018",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.8,
+        ),
+        "back": EdgeStyle(
+            color="#803010",  # cooling flow
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#803010",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.4,
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A0A08",
+        stroke="#402010",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=4.0,
+        font_size=8.0,
+        font_color="#C06030",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#0A0606"),
+)
+
+# Frost -- ice crystals, cold blue-white on steel gray
+FROST_THEME = Theme(
+    name="frost",
+    node_styles={
+        "default": NodeStyle(
+            shape="diamond",
+            fill="#D8E8F8",  # ice crystal
+            stroke="#A0C0E0",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#2A4060",
+            padding=(5.0, 5.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="diamond",
+            fill="#FFFFFF",  # bright ice
+            stroke="#80B0D8",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#1A3050",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="diamond",
+            fill="#B0C8E0",  # deep ice blue
+            stroke="#7898B8",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#E0E8F0",
+            padding=(5.0, 5.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#88B0D0",
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#88B0D0",
+            arrow_length=4.5,
+            arrow_width=3.0,
+            routing="straight",  # crystalline straight lines
+            curvature=0.0,
+            opacity=0.6,
+        ),
+        "back": EdgeStyle(
+            color="#6080A0",
+            width=0.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#6080A0",
+            arrow_length=3.5,
+            arrow_width=2.5,
+            routing="straight",
+            curvature=0.0,
+            opacity=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#C0D0E0",
+        stroke="#90A8C0",
+        stroke_width=0.5,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#4A6880",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.25,
+    ),
+    graph_style=GraphStyle(background_color="#D8E0E8"),
+)
+
+# Treasure map -- pirate cartography, parchment, X marks the spot
+TREASURE_MAP_THEME = Theme(
+    name="treasure_map",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#C8A060",  # map marker
+            stroke="#6B4226",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#3A2010",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="star",  # X marks the spot
+            fill="#C82020",  # red X
+            stroke="#8B1010",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#FFE0C0",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#4878A0",  # port town blue
+            stroke="#305878",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#D0E0F0",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#6B4226",  # ink route
+            width=1.5,
+            style="dashed",  # dotted treasure route
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#6B4226",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.2,
+        ),
+        "back": EdgeStyle(
+            color="#8B7355",
+            width=0.8,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#8B7355",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#E0C890",
+        stroke="#8B7355",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#4A3218",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#E8D8B0"),
+)
+
+# Propaganda -- Soviet constructivist: bold red/black/cream, angular
+PROPAGANDA_THEME = Theme(
+    name="propaganda",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#CC1818",  # bold red
+            stroke="#000000",
+            stroke_width=3.0,
+            font_family="Arial",
+            font_size=9.0,
+            font_color="#F0E0C0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=34.0,
+            min_height=22.0,
+            corner_radius=0.0,  # sharp angles
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#000000",
+            stroke="#CC1818",
+            stroke_width=3.5,
+            font_family="Arial",
+            font_size=9.0,
+            font_color="#F0E0C0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=36.0,
+            min_height=24.0,
+            corner_radius=0.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#F0E0C0",  # cream poster paper
+            stroke="#000000",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=9.0,
+            font_color="#000000",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=34.0,
+            min_height=22.0,
+            corner_radius=0.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#000000",
+            width=2.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#000000",
+            arrow_length=6.0,
+            arrow_width=5.0,
+            routing="straight",  # bold direct lines
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#CC1818",
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#CC1818",
+            arrow_length=5.0,
+            arrow_width=4.0,
+            routing="straight",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0E0C0",
+        stroke="#000000",
+        stroke_width=3.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=10.0,
+        font_color="#CC1818",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#E8D8B8"),
+)
+
+# Gothic -- dark cathedral stone, pointed shapes, gargoyle gray
+GOTHIC_THEME = Theme(
+    name="gothic",
+    node_styles={
+        "default": NodeStyle(
+            shape="diamond",  # pointed arch evocation
+            fill="#3A3840",  # dark stone
+            stroke="#5A5860",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#C0B8B0",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "input": NodeStyle(
+            shape="diamond",
+            fill="#4A2838",  # deep burgundy stone
+            stroke="#6A4858",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#D8C0C8",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "output": NodeStyle(
+            shape="diamond",
+            fill="#2A3038",  # blue-black stone
+            stroke="#4A5060",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#A0A8B0",
+            padding=(5.0, 5.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#686068",  # iron fitting
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#686068",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.2,
+        ),
+        "back": EdgeStyle(
+            color="#484048",
+            width=0.8,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#484048",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A181C",
+        stroke="#3A3840",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#706868",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#121014"),
+)
+
+# Graffiti -- spray paint on concrete wall, neon tags
+GRAFFITI_THEME = Theme(
+    name="graffiti",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#E82878",  # hot pink tag
+            stroke="#1A1A1A",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=9.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=20.0,
+            corner_radius=3.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#20D0E0",  # cyan spray
+            stroke="#1A1A1A",
+            stroke_width=3.0,
+            font_family="Arial",
+            font_size=9.0,
+            font_color="#1A1A1A",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=22.0,
+            corner_radius=3.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#A0E828",  # lime green
+            stroke="#1A1A1A",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=9.0,
+            font_color="#1A1A1A",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=20.0,
+            corner_radius=3.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#F8D030",  # yellow drip line
+            width=2.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#F8D030",
+            arrow_length=6.0,
+            arrow_width=4.5,
+            routing="bezier",
+            curvature=0.25,
+        ),
+        "back": EdgeStyle(
+            color="#FF6020",  # orange
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#FF6020",
+            arrow_length=5.0,
+            arrow_width=4.0,
+            routing="bezier",
+            curvature=0.35,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#484848",
+        stroke="#1A1A1A",
+        stroke_width=2.5,
+        stroke_dash="solid",
+        corner_radius=4.0,
+        font_size=10.0,
+        font_color="#E0E0E0",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#606060"),  # concrete wall
+)
+
+# Plumbing -- pipe network: copper/PVC joints, valve nodes,
+# thick pipe edges, utility basement feel
+PLUMBING_THEME = Theme(
+    name="plumbing",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#B87333",  # copper fitting
+            stroke="#8B5A2B",
+            stroke_width=2.5,
+            font_family="Arial",
+            font_size=7.5,
+            font_color="#FFE8D0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",  # valve/shutoff
+            fill="#CC2020",  # red shutoff valve
+            stroke="#991010",
+            stroke_width=3.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#FFE0D0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=28.0,
+            min_height=22.0,
+            corner_radius=2.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#E0E0E0",  # PVC white joint
+            stroke="#A0A0A0",
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=7.5,
+            font_color="#3A3A3A",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#6B5040",  # copper pipe
+            width=3.5,  # thicc pipe
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#6B5040",
+            arrow_length=5.0,
+            arrow_width=5.0,
+            routing="ortho",  # right-angle pipe runs
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#808080",  # PVC drain pipe
+            width=2.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#808080",
+            arrow_length=4.0,
+            arrow_width=4.0,
+            routing="ortho",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#E8E0D0",  # concrete wall
+        stroke="#A09080",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.5,
+        font_color="#5A4A38",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#D8D0C0"),  # basement concrete
+)
+
+# Flowchart -- classic business flowchart: diamond decisions,
+# rectangle processes, clean corporate palette
+FLOWCHART_THEME = Theme(
+    name="flowchart",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#D6EAF8",  # process light blue
+            stroke="#2980B9",
+            stroke_width=1.5,
+            font_family="Arial",
+            font_size=8.5,
+            font_color="#1A3C5E",
+            padding=(6.0, 4.0),
+            min_width=40.0,
+            min_height=22.0,
+            corner_radius=3.0,
+        ),
+        "input": NodeStyle(
+            shape="diamond",  # decision diamond
+            fill="#FDEBD0",  # decision amber
+            stroke="#E67E22",
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=8.0,
+            font_color="#7E5109",
+            font_weight="bold",
+            padding=(8.0, 6.0),
+            min_width=36.0,
+            min_height=36.0,
+        ),
+        "output": NodeStyle(
+            shape="ellipse",  # terminator oval
+            fill="#D5F5E3",  # terminal green
+            stroke="#27AE60",
+            stroke_width=2.0,
+            font_family="Arial",
+            font_size=8.5,
+            font_color="#1E7B40",
+            font_weight="bold",
+            padding=(6.0, 4.0),
+            min_width=36.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#2C3E50",
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#2C3E50",
+            arrow_length=6.0,
+            arrow_width=4.0,
+            routing="ortho",  # right-angle flowchart lines
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#7F8C8D",
+            width=1.0,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#7F8C8D",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="ortho",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F8F9FA",
+        stroke="#BDC3C7",
+        stroke_width=1.5,
+        stroke_dash="dashed",
+        corner_radius=4.0,
+        font_size=9.0,
+        font_color="#5D6D7E",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#FFFFFF"),
+)
+
+# Choose your own adventure -- paperback book page, branching story,
+# page-number nodes, narrative edges
+ADVENTURE_THEME = Theme(
+    name="adventure",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#FFF8E8",  # book page cream
+            stroke="#8B7355",  # aged page edge
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=8.5,
+            font_color="#2A1E10",
+            padding=(6.0, 4.0),
+            min_width=36.0,
+            min_height=22.0,
+            corner_radius=1.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#E8D0A0",  # title page gold
+            stroke="#6B4226",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=9.0,
+            font_color="#2A1E10",
+            font_weight="bold",
+            padding=(6.0, 4.0),
+            min_width=40.0,
+            min_height=24.0,
+            corner_radius=1.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#C82020",  # THE END (red)
+            stroke="#8B1010",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.5,
+            font_color="#FFE0D0",
+            font_weight="bold",
+            padding=(6.0, 4.0),
+            min_width=36.0,
+            min_height=22.0,
+            corner_radius=1.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#6B4226",  # ink brown
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#6B4226",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.2,
+        ),
+        "back": EdgeStyle(
+            color="#A08060",  # lighter pencil
+            width=0.8,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#A08060",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0E8D0",
+        stroke="#8B7355",
+        stroke_width=1.0,
+        stroke_dash="dashed",
+        corner_radius=2.0,
+        font_size=9.0,
+        font_color="#6B4226",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.35,
+    ),
+    graph_style=GraphStyle(background_color="#F8F0E0"),
+)
+
+# Aqueduct -- Roman aqueduct: stone arches, water channels,
+# classical Mediterranean palette
+AQUEDUCT_THEME = Theme(
+    name="aqueduct",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#D8CDB8",  # travertine stone
+            stroke="#9B8E78",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#3A3028",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=22.0,
+            corner_radius=0.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#4878A0",  # water source blue
+            stroke="#305878",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#D0E0F0",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=34.0,
+            min_height=24.0,
+            corner_radius=0.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#C8A060",  # golden sandstone fountain
+            stroke="#A08040",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#3A2A10",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=22.0,
+            corner_radius=0.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#5088A0",  # water channel
+            width=2.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#5088A0",
+            arrow_length=5.0,
+            arrow_width=4.0,
+            routing="ortho",  # stone channel right angles
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#9B8E78",  # dry overflow channel
+            width=1.2,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#9B8E78",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="ortho",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#E8D8C0",
+        stroke="#9B8E78",
+        stroke_width=2.5,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#5A4A38",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.45,
+    ),
+    graph_style=GraphStyle(background_color="#70A8C8"),  # Mediterranean sky
+)
+
+# DNA -- genetic network: double helix colors, nucleotide base pairs
+DNA_THEME = Theme(
+    name="dna",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#3498DB",  # adenine blue
+            stroke="#2178B8",
+            stroke_width=1.5,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#E74C3C",  # thymine red
+            stroke="#C0392B",
+            stroke_width=2.0,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#2ECC71",  # guanine green
+            stroke="#27AE60",
+            stroke_width=1.5,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#7F8C8D",  # backbone bond
+            width=1.5,
+            style="solid",
+            arrow="none",  # chemical bonds
+            routing="bezier",
+            curvature=0.3,
+        ),
+        "back": EdgeStyle(
+            color="#BDC3C7",  # hydrogen bond (weaker)
+            width=0.8,
+            style="dashed",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A2530",
+        stroke="#2C3E50",
+        stroke_width=1.0,
+        stroke_dash="dashed",
+        corner_radius=6.0,
+        font_size=8.0,
+        font_color="#5D6D7E",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.35,
+    ),
+    graph_style=GraphStyle(background_color="#0E1A28"),
+)
+
+# Origami -- Japanese paper folds: crisp edges, pastel paper colors
+ORIGAMI_THEME = Theme(
+    name="origami",
+    node_styles={
+        "default": NodeStyle(
+            shape="diamond",  # folded paper shape
+            fill="#F0C8C8",  # pink washi
+            stroke="#D0A0A0",
+            stroke_width=1.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#5A3030",
+            padding=(5.0, 5.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "input": NodeStyle(
+            shape="diamond",
+            fill="#C8D8F0",  # blue washi
+            stroke="#A0B8D0",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#2A3A5A",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="diamond",
+            fill="#D8F0C8",  # green washi
+            stroke="#B0D0A0",
+            stroke_width=1.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#2A4A2A",
+            padding=(5.0, 5.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#A09090",  # fold crease
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#A09090",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="straight",  # crisp folds
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#C0B8B0",
+            width=0.5,
+            style="dashed",  # valley fold
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#C0B8B0",
+            arrow_length=3.5,
+            arrow_width=2.0,
+            routing="straight",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F8F0E8",
+        stroke="#D0C8C0",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#908080",
+        font_weight="normal",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#FAF6F0"),
+)
+
+# Clockwork -- precision watch mechanism: brass gears, jewel bearings
+CLOCKWORK_THEME = Theme(
+    name="clockwork",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#C8B070",  # brass gear
+            stroke="#A08840",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#2A2008",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#C03038",  # ruby jewel bearing
+            stroke="#901820",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#FFD0D0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#E0E0E0",  # steel escapement
+            stroke="#A0A0A0",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#2A2A2A",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#8B7030",  # brass linkage
+            width=1.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#8B7030",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="straight",  # precise mechanical
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#606060",  # steel spring
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#606060",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="straight",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#2A2418",
+        stroke="#5A4830",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.5,
+        font_color="#B0A070",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#1A1810"),
+)
+
+# Tapestry -- medieval woven threads, rich textile colors
+TAPESTRY_THEME = Theme(
+    name="tapestry",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#8B2252",  # madder rose thread
+            stroke="#6B1842",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#F0D0D8",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=20.0,
+            corner_radius=0.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#1A4878",  # woad blue thread
+            stroke="#0A3060",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#C0D0E8",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=32.0,
+            min_height=22.0,
+            corner_radius=0.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#C8A030",  # gold thread
+            stroke="#A08020",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#2A2008",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=20.0,
+            corner_radius=0.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#4A3020",  # dark warp thread
+            width=1.5,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#4A3020",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="straight",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#7A6050",  # lighter weft
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#7A6050",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="straight",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#3A2828",
+        stroke="#5A4038",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#C8A868",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#2A2018"),
+)
+
+# Railway -- train track network: rail ties, junction switches,
+# signal colors, infrastructure gray
+RAILWAY_THEME = Theme(
+    name="railway",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#E8E0D0",  # platform marker
+            stroke="#4A4A4A",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#2A2A2A",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",  # station building
+            fill="#8B1A1A",  # classic station red
+            stroke="#5A0A0A",
+            stroke_width=2.5,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#F0D8C0",
+            font_weight="bold",
+            padding=(6.0, 3.0),
+            min_width=34.0,
+            min_height=22.0,
+            corner_radius=1.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#2A7830",  # signal green (clear)
+            stroke="#1A5820",
+            stroke_width=2.0,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#D0F0D0",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#3A3A3A",  # rail track
+            width=3.0,  # heavy rail
+            style="solid",
+            arrow="none",  # tracks are bidirectional
+            routing="bezier",
+            curvature=0.15,  # gentle curves
+        ),
+        "back": EdgeStyle(
+            color="#808080",  # siding / branch line
+            width=1.5,
+            style="dashed",
+            arrow="none",
+            routing="bezier",
+            curvature=0.25,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#E0D8C8",
+        stroke="#A09880",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=2.0,
+        font_size=8.5,
+        font_color="#4A4A4A",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#D0C8B8"),  # gravel ballast
+)
+
+# Jungle -- tropical vines and canopy: lush greens, hanging vine
+# edges, flower-bright nodes, dense humid atmosphere
+JUNGLE_THEME = Theme(
+    name="jungle",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#2D8B46",  # deep leaf green
+            stroke="#1A6830",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#E0F8E0",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#E8384F",  # hibiscus red
+            stroke="#C02040",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#FFE0D8",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#F0C830",  # tropical bird yellow
+            stroke="#C8A020",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#3A2A08",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#3A6830",  # vine green
+            width=1.8,
+            style="solid",
+            arrow="none",  # vines just connect
+            routing="bezier",
+            curvature=0.45,  # drooping vines
+        ),
+        "back": EdgeStyle(
+            color="#5A8848",  # lighter tendril
+            width=0.7,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.6,  # extra droopy
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A3818",  # dense canopy shadow
+        stroke="#2A5828",
+        stroke_width=1.0,
+        stroke_dash="solid",
+        corner_radius=12.0,
+        font_size=8.0,
+        font_color="#80B868",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.35,
+    ),
+    graph_style=GraphStyle(background_color="#0E2810"),  # deep jungle floor
+)
+
+# Power grid -- electrical power distribution: energized lines glow
+# bright, de-energized lines are dull gray. Transformer nodes,
+# substation clusters, utility infrastructure palette
+POWER_GRID_THEME = Theme(
+    name="power_grid",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#2A2A2A",  # switchgear housing
+            stroke="#F0C020",  # warning yellow
+            stroke_width=2.0,
+            font_family="Courier New",
+            font_size=7.5,
+            font_color="#F0C020",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=30.0,
+            min_height=20.0,
+            corner_radius=1.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",  # generator / power source
+            fill="#C82020",  # high voltage red
+            stroke="#F0C020",
+            stroke_width=3.0,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#FFE860",
+            font_weight="bold",
+            padding=(5.0, 3.0),
+            min_width=34.0,
+            min_height=22.0,
+            corner_radius=1.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",  # load / consumer
+            fill="#1A1A1A",
+            stroke="#606060",  # unpowered gray
+            stroke_width=1.5,
+            font_family="Courier New",
+            font_size=7.5,
+            font_color="#909090",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#F0C020",  # ENERGIZED -- bright yellow power line
+            width=2.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#F0C020",
+            arrow_length=5.0,
+            arrow_width=4.0,
+            routing="ortho",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#484848",  # DE-ENERGIZED -- dull gray, no power
+            width=1.5,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#484848",
+            arrow_length=4.0,
+            arrow_width=3.0,
+            routing="ortho",
+            curvature=0.0,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A1A1A",  # substation enclosure
+        stroke="#F0C020",
+        stroke_width=2.0,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#F0C020",
+        font_weight="bold",
+        padding=12.0,
+        opacity=0.5,
+    ),
+    graph_style=GraphStyle(background_color="#0A0A0A"),
+)
+
+# Catacombs -- Parisian ossuary tunnels: bone white on deep stone,
+# flickering torchlight amber, skull alcove nodes, narrow passages
+CATACOMBS_THEME = Theme(
+    name="catacombs",
+    node_styles={
+        "default": NodeStyle(
+            shape="ellipse",
+            fill="#C8B898",  # bone white-yellow
+            stroke="#A09070",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#2A2018",
+            padding=(5.0, 3.0),
+            min_width=26.0,
+            min_height=18.0,
+        ),
+        "input": NodeStyle(
+            shape="ellipse",
+            fill="#D8A030",  # torchlit alcove amber
+            stroke="#B08020",
+            stroke_width=2.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#1A1008",
+            font_weight="bold",
+            padding=(5.0, 4.0),
+            min_width=30.0,
+            min_height=22.0,
+        ),
+        "output": NodeStyle(
+            shape="ellipse",
+            fill="#887868",  # dark stone niche
+            stroke="#685848",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=7.5,
+            font_color="#C0B098",
+            padding=(5.0, 3.0),
+            min_width=24.0,
+            min_height=16.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#685848",  # narrow passage stone
+            width=1.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#685848",
+            arrow_length=4.5,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+        ),
+        "back": EdgeStyle(
+            color="#484038",  # deeper tunnel
+            width=0.8,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#484038",
+            arrow_length=3.5,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.45,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A1610",  # chamber darkness
+        stroke="#3A3028",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=6.0,
+        font_size=8.0,
+        font_color="#807060",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.45,
+    ),
+    graph_style=GraphStyle(background_color="#100E0A"),  # deep underground
+)
+
+THEME_REGISTRY["catacombs"] = CATACOMBS_THEME
+THEME_REGISTRY["power_grid"] = POWER_GRID_THEME
+THEME_REGISTRY["jungle"] = JUNGLE_THEME
+THEME_REGISTRY["railway"] = RAILWAY_THEME
+THEME_REGISTRY["flowchart"] = FLOWCHART_THEME
+THEME_REGISTRY["adventure"] = ADVENTURE_THEME
+THEME_REGISTRY["aqueduct"] = AQUEDUCT_THEME
+THEME_REGISTRY["dna"] = DNA_THEME
+THEME_REGISTRY["origami"] = ORIGAMI_THEME
+THEME_REGISTRY["clockwork"] = CLOCKWORK_THEME
+THEME_REGISTRY["tapestry"] = TAPESTRY_THEME
+THEME_REGISTRY["plumbing"] = PLUMBING_THEME
+THEME_REGISTRY["noir"] = NOIR_THEME
+THEME_REGISTRY["cyberpunk"] = CYBERPUNK_THEME
+THEME_REGISTRY["vascular"] = VASCULAR_THEME
+THEME_REGISTRY["nebula"] = NEBULA_THEME
+THEME_REGISTRY["lava"] = LAVA_THEME
+THEME_REGISTRY["frost"] = FROST_THEME
+THEME_REGISTRY["treasure_map"] = TREASURE_MAP_THEME
+THEME_REGISTRY["propaganda"] = PROPAGANDA_THEME
+THEME_REGISTRY["gothic"] = GOTHIC_THEME
+THEME_REGISTRY["graffiti"] = GRAFFITI_THEME
+THEME_REGISTRY["ant_colony"] = ANT_COLONY_THEME
+THEME_REGISTRY["telecom"] = TELECOM_THEME
+THEME_REGISTRY["social"] = SOCIAL_THEME
+THEME_REGISTRY["flight_map"] = FLIGHT_MAP_THEME
+THEME_REGISTRY["mario"] = MARIO_THEME
+THEME_REGISTRY["mycelium"] = MYCELIUM_THEME
+THEME_REGISTRY["xkcd"] = XKCD_THEME
+THEME_REGISTRY["slime_mold"] = SLIME_MOLD_THEME
+THEME_REGISTRY["cavern"] = CAVERN_THEME
+THEME_REGISTRY["coral"] = CORAL_THEME
+THEME_REGISTRY["autumn"] = AUTUMN_THEME
+THEME_REGISTRY["aurora"] = AURORA_THEME
+THEME_REGISTRY["cave"] = CAVE_THEME
+THEME_REGISTRY["stained_glass"] = STAINED_GLASS_THEME
+THEME_REGISTRY["watercolor"] = WATERCOLOR_THEME
+THEME_REGISTRY["ukiyo_e"] = UKIYO_E_THEME
+THEME_REGISTRY["illuminated"] = ILLUMINATED_THEME
+THEME_REGISTRY["matrix"] = MATRIX_THEME
+THEME_REGISTRY["tron"] = TRON_THEME
+THEME_REGISTRY["steampunk"] = STEAMPUNK_THEME
+THEME_REGISTRY["pixel"] = PIXEL_THEME
+THEME_REGISTRY["xray"] = XRAY_THEME
+THEME_REGISTRY["thermal"] = THERMAL_THEME
+THEME_REGISTRY["microscopy"] = MICROSCOPY_THEME
+THEME_REGISTRY["topographic"] = TOPOGRAPHIC_THEME
+THEME_REGISTRY["hieroglyph"] = HIEROGLYPH_THEME
+THEME_REGISTRY["roman_mosaic"] = ROMAN_MOSAIC_THEME
+THEME_REGISTRY["catan"] = CATAN_THEME
+THEME_REGISTRY["archipelago"] = ARCHIPELAGO_THEME
+THEME_REGISTRY["branches"] = BRANCHES_THEME
+THEME_REGISTRY["spiderweb"] = SPIDERWEB_THEME
+THEME_REGISTRY["phylogeny"] = PHYLOGENY_THEME
+THEME_REGISTRY["roadmap"] = ROADMAP_THEME
+THEME_REGISTRY["van_essen"] = VAN_ESSEN_THEME
+THEME_REGISTRY["cajal"] = CAJAL_THEME
+THEME_REGISTRY["connectome"] = CONNECTOME_THEME
+THEME_REGISTRY["pathway"] = PATHWAY_THEME
+
 
 def get_theme(name: str) -> Theme:
     """Look up a built-in theme by name. Returns a deep copy."""
