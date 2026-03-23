@@ -17,11 +17,13 @@ from scripts.build_gallery_audit import (
     DEFAULT_COMPARISON_STROKE,
     PAIR_ARROW_GAP,
     PAIR_SCALAR_COMPARISON_GAP,
+    STRIP_PANEL_DIVIDER_WIDTH,
     _apply_reference_params,
     _build_fixture,
     _combo_flow_positions,
     _combo_params,
     _compose_board,
+    _panel_widths,
     _prepare_reference_render,
     _render_reference_canvas,
     build_combo_items,
@@ -211,6 +213,24 @@ def test_prepare_reference_render_scales_arrow_demo_cards() -> None:
     assert float(positions[0, 1] - positions[1, 1]) == pytest.approx(PAIR_ARROW_GAP)
 
 
+def test_panel_widths_keep_strip_panels_equal() -> None:
+    """Strip cards should reserve divider space outside equal-width panel slots.
+
+    Returns
+    -------
+    None
+        The left inset and equal panel widths are asserted in place.
+    """
+    left_inset, panel_widths = _panel_widths(1568, 3, divider_width=STRIP_PANEL_DIVIDER_WIDTH)
+
+    assert left_inset == 0
+    assert panel_widths == [521, 521, 521]
+    assert (
+        left_inset + sum(panel_widths) + (STRIP_PANEL_DIVIDER_WIDTH * (len(panel_widths) - 1))
+        <= 1568
+    )
+
+
 def test_prepare_reference_render_adds_scalar_default_context() -> None:
     """Scalar node sweeps should compare the default node against the swept value.
 
@@ -293,6 +313,7 @@ def test_prepare_reference_render_strengthens_subtle_border_comparisons() -> Non
     assert right_style is not None
     assert left_style.stroke_width == pytest.approx(50.0)
     assert right_style.stroke_width == pytest.approx(50.0)
+    assert graph.node_labels == ["Center", "Outside"]
 
     item = next(
         item
@@ -353,6 +374,25 @@ def test_prepare_reference_render_applies_gallery_demo_tweaks() -> None:
     assert graph.num_nodes == 7
     assert graph.edge_index.shape[1] == 6
     assert positions.shape == (7, 2)
+
+
+def test_cluster_dotted_reference_cards_keep_visible_stroke_width() -> None:
+    """Dotted cluster cards should enforce a minimum stroke width for readability.
+
+    Returns
+    -------
+    None
+        The rendered cluster styles are asserted in place.
+    """
+    item = next(
+        item for item in build_reference_items() if item.card_id == "clusters_stroke_dash_dotted"
+    )
+    graph, _ = _prepare_reference_render(item)
+
+    assert graph.cluster_styles
+    for style in graph.cluster_styles.values():
+        assert style.stroke_dash == "dotted"
+        assert style.stroke_width >= 1.5
 
 
 def test_combo_params_adds_new_combo_feature_defaults() -> None:
