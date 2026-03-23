@@ -1704,6 +1704,38 @@ def test_normal_arrow_marker_uses_wider_graphviz_base() -> None:
     plt.close(fig)
 
 
+def test_normal_arrow_marker_scales_with_edge_width() -> None:
+    """Direct marker rendering should match the collection's width-aware sizing."""
+
+    fig, ax = plt.subplots()
+    thin_style = EdgeStyle(arrow="normal", width=0.5, arrow_width=10.0, arrow_length=14.0)
+    thick_style = EdgeStyle(arrow="normal", width=5.0, arrow_width=10.0, arrow_length=14.0)
+    fig.canvas.draw()
+
+    _draw_edge_marker(
+        ax=ax,
+        point=(0.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="normal",
+        style=thin_style,
+    )
+    _draw_edge_marker(
+        ax=ax,
+        point=(20.0, 0.0),
+        direction=(0.0, -1.0),
+        marker="normal",
+        style=thick_style,
+    )
+
+    thin_vertices = ax.patches[0].get_xy()
+    thick_vertices = ax.patches[1].get_xy()
+    thin_base_width = abs(float(thin_vertices[1][0] - thin_vertices[2][0]))
+    thick_base_width = abs(float(thick_vertices[1][0] - thick_vertices[2][0]))
+
+    assert thick_base_width / thin_base_width == pytest.approx(np.sqrt(10.0), rel=0.05)
+    plt.close(fig)
+
+
 def test_triangle_labels_shift_toward_visual_centroid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1730,7 +1762,7 @@ def test_triangle_labels_shift_toward_visual_centroid(
         ha=spec.ha,
         va=spec.va,
         anchor_x=10.0,
-        anchor_y=10.0,
+        anchor_y=12.5,
     )
     assert (bbox[2] + bbox[3]) / 2.0 == pytest.approx(
         (expected_bbox[2] + expected_bbox[3]) / 2.0,
@@ -1770,7 +1802,7 @@ def test_triangle_rich_labels_shift_toward_visual_centroid(
         ha=spec.ha,
         va=spec.va,
         anchor_x=10.0,
-        anchor_y=10.0,
+        anchor_y=12.5,
     )
     assert (bbox[2] + bbox[3]) / 2.0 == pytest.approx(
         (expected_bbox[2] + expected_bbox[3]) / 2.0,
@@ -1827,6 +1859,51 @@ def test_ellipse_labels_inset_top_and_bottom_alignment(
     assert ellipse_spec.y - diamond_spec.y == pytest.approx(expected_delta)
     plt.close(ellipse_fig)
     plt.close(diamond_fig)
+
+
+@pytest.mark.parametrize("text_valign", ["top", "bottom"])
+def test_top_and_bottom_label_alignment_enforce_minimum_padding(
+    monkeypatch: pytest.MonkeyPatch,
+    text_valign: str,
+) -> None:
+    """Top and bottom node labels should clamp small padding to a 2-point inset."""
+
+    pos = np.array([[0.0, 0.0]], dtype=float)
+    sizes = np.array([[120.0, 60.0]], dtype=float)
+    graphs = [
+        DaguaGraph(),
+        DaguaGraph(),
+        DaguaGraph(),
+    ]
+    for graph, pad_y in zip(graphs, [0.0, 2.0, 4.0]):
+        graph.add_node(
+            "node",
+            label="Label",
+            style=NodeStyle(shape="roundrect", text_valign=text_valign, padding=(0.0, pad_y)),
+        )
+
+    captured = _capture_render_calls(monkeypatch)
+    figures_and_axes = [plt.subplots(figsize=(4.0, 4.0), dpi=100) for _ in graphs]
+    for fig, ax in figures_and_axes:
+        ax.set_xlim(-50.0, 50.0)
+        ax.set_ylim(-50.0, 50.0)
+        ax.set_aspect("equal")
+        fig.canvas.draw()
+    for graph, (_fig, ax) in zip(graphs, figures_and_axes):
+        mpl_renderer._draw_node_labels(ax, graph, pos, sizes)
+
+    zero_pad_spec = next(spec for spec in captured[0][0] if spec.gid == "dagua-node-label-0")
+    min_pad_spec = next(spec for spec in captured[1][0] if spec.gid == "dagua-node-label-0")
+    large_pad_spec = next(spec for spec in captured[2][0] if spec.gid == "dagua-node-label-0")
+
+    assert zero_pad_spec.y == pytest.approx(min_pad_spec.y)
+    if text_valign == "top":
+        assert large_pad_spec.y < zero_pad_spec.y
+    else:
+        assert large_pad_spec.y > zero_pad_spec.y
+
+    for fig, _ax in figures_and_axes:
+        plt.close(fig)
 
 
 def test_node_and_external_label_font_sizes_use_data_coordinate_scaling(

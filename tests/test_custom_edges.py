@@ -11,6 +11,7 @@ from matplotlib.collections import LineCollection, PatchCollection
 from dagua.graph import DaguaGraph
 from dagua.render.edges import available_arrowheads, build_arrowhead
 from dagua.render.edges.collection import (
+    MIN_TAPER_WIDTH,
     DaguaEdge,
     DaguaEdgeCollection,
     _stroked_head_linewidth,
@@ -65,6 +66,32 @@ def test_curve_ribbon_path_uses_dense_curved_sampling() -> None:
     refined = curve_ribbon_path(_curve(), width=4.0)
 
     assert refined.vertices.shape[0] >= 81
+
+
+def test_tapered_edge_collection_keeps_visible_endpoint_width() -> None:
+    """Tapered collection ribbons should floor the thin endpoint width."""
+
+    edge = DaguaEdge(
+        curve=_curve(),
+        tapered=True,
+        taper_width_start=4.0,
+        taper_width_end=0.05,
+        color="#336699",
+        alpha=1.0,
+    )
+    collection = DaguaEdgeCollection([edge], tier="full")
+    fig, ax = plt.subplots()
+
+    artists = collection.render_bodies(ax)
+
+    assert len(artists) == 1
+    patch_collection = artists[0]
+    path = patch_collection.get_paths()[0]
+    point_count = (path.vertices.shape[0] - 1) // 2
+    tip_width = float(np.linalg.norm(path.vertices[point_count - 1] - path.vertices[point_count]))
+
+    assert tip_width == pytest.approx(MIN_TAPER_WIDTH, abs=1e-6)
+    plt.close(fig)
 
 
 def test_dash_curve_uses_round_caps_per_segment() -> None:
