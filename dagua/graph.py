@@ -21,6 +21,7 @@ from dagua.styles import (
 from dagua.utils import compute_node_size
 
 if TYPE_CHECKING:
+    from dagua.render.crossings import EdgeCrossing
     from dagua.views import ClusterView, EdgeView, NodeView
 
 _DTYPE_NAME_TO_TORCH = {
@@ -107,6 +108,7 @@ class DaguaGraph:
         default=None, repr=False
     )
     _label_revision: int = field(default=-1, repr=False)
+    _cached_crossings: Optional[List["EdgeCrossing"]] = field(default=None, repr=False)
 
     @property
     def edge_index(self) -> torch.Tensor:
@@ -282,6 +284,7 @@ class DaguaGraph:
         self._routing_revision = -1
         self._layout_label_positions = None
         self._label_revision = -1
+        self._cached_crossings = None
         self._node_sizes_revision = -1
         self.node_sizes = None
         self.node_font_sizes = None
@@ -292,6 +295,7 @@ class DaguaGraph:
         self._routing_revision = -1
         self._layout_label_positions = None
         self._label_revision = -1
+        self._cached_crossings = None
 
     @property
     def has_fresh_layout(self) -> bool:
