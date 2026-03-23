@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 
 FloatArray = NDArray[np.float64]
 ELLIPSE_KAPPA = 0.5522847498
+NOTE_FOLD_SIZE_RATIO = 0.45
 
 
 @dataclass(frozen=True)
@@ -698,7 +699,8 @@ def note_path(spec: ShapeSpec) -> Path:
     right = spec.center_x + half_width
     bottom = spec.center_y - half_height
     top = spec.center_y + half_height
-    fold = min(half_width, half_height) * 0.30
+    # Oversize the fold slightly so it survives thin strokes and card downscaling.
+    fold = min(half_width, half_height) * NOTE_FOLD_SIZE_RATIO
     outer = closed_path_from_vertices(
         np.array(
             [
