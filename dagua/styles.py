@@ -20602,6 +20602,170 @@ FIVETHIRTYEIGHT_THEME = Theme(
     graph_style=GraphStyle(background_color="#F0F0F0"),
 )
 
+# Runes -- ancient mystical inscriptions: carved angular symbols on
+# dark weathered stone, faint eldritch glow
+RUNES_THEME = Theme(
+    name="runes",
+    node_styles={
+        "default": NodeStyle(
+            shape="diamond",
+            fill="#1A1820",
+            stroke="#6A8870",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.5,
+            font_color="#6A8870",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+        "input": NodeStyle(
+            shape="diamond",
+            fill="#1A1820",
+            stroke="#90C898",
+            stroke_width=3.0,
+            font_family="Georgia",
+            font_size=9.0,
+            font_color="#90C898",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=30.0,
+            min_height=30.0,
+        ),
+        "output": NodeStyle(
+            shape="diamond",
+            fill="#1A1820",
+            stroke="#4A6850",
+            stroke_width=1.5,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#4A6850",
+            padding=(5.0, 5.0),
+            min_width=24.0,
+            min_height=24.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#6A8870",
+            width=1.0,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+            opacity=0.6,
+        ),
+        "back": EdgeStyle(
+            color="#3A5840",
+            width=0.5,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+            opacity=0.35,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#10100E",
+        stroke="#3A4838",
+        stroke_width=1.5,
+        stroke_dash="solid",
+        corner_radius=0.0,
+        font_size=8.5,
+        font_color="#6A8870",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(background_color="#10100E"),
+)
+
+# Monad -- Leibniz's monads: self-contained windowless substances,
+# each reflecting the universe. Isolated circles with no connecting
+# edges visible (very faint), deep philosophical darkness
+MONAD_THEME = Theme(
+    name="monad",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#18141E",
+            stroke="#4838A0",
+            stroke_width=1.5,
+            font_family="Times New Roman",
+            font_size=8.0,
+            font_color="#6858C8",
+            font_style="italic",
+            padding=(5.0, 5.0),
+            min_width=28.0,
+            min_height=28.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#201830",
+            stroke="#6050D0",
+            stroke_width=2.5,
+            font_family="Times New Roman",
+            font_size=8.5,
+            font_color="#8878E8",
+            font_style="italic",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=32.0,
+            min_height=32.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#14101A",
+            stroke="#383068",
+            stroke_width=1.0,
+            font_family="Times New Roman",
+            font_size=8.0,
+            font_color="#504898",
+            font_style="italic",
+            padding=(5.0, 5.0),
+            min_width=26.0,
+            min_height=26.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#2A2048",
+            width=0.4,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.2,
+            opacity=0.2,
+        ),
+        "back": EdgeStyle(
+            color="#1A1830",
+            width=0.3,
+            style="solid",
+            arrow="none",
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.1,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#0A080E",
+        stroke="#201830",
+        stroke_width=0.5,
+        stroke_dash="solid",
+        corner_radius=20.0,
+        font_size=8.0,
+        font_color="#383068",
+        font_weight="normal",
+        padding=10.0,
+        opacity=0.2,
+    ),
+    graph_style=GraphStyle(background_color="#0A080E"),
+)
+
+THEME_REGISTRY["runes"] = RUNES_THEME
+THEME_REGISTRY["monad"] = MONAD_THEME
+
 EUCLID_THEME = Theme(
     name="euclid",
     node_styles={
