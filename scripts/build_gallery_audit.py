@@ -84,6 +84,7 @@ BOARD_CELL_SIZE: Tuple[int, int] = (
 )
 STRIP_HEADER_HEIGHT = 56
 STRIP_PANEL_LABEL_HEIGHT = 52
+STRIP_PANEL_DIVIDER_WIDTH = 2
 STRIP_PANEL_INSET: Tuple[int, int, int, int] = (
     24,
     STRIP_PANEL_LABEL_HEIGHT + 18,
@@ -1237,6 +1238,8 @@ def _apply_reference_params(
     if isinstance(cluster_overrides, Mapping):
         for style in _cluster_styles(graph):
             _apply_overrides(style, cluster_overrides)
+            if style.stroke_dash == "dotted":
+                style.stroke_width = max(style.stroke_width, 1.5)
 
     graph_overrides = params.get("graph")
     if isinstance(graph_overrides, Mapping):
@@ -1408,7 +1411,7 @@ def _scalar_comparison_labels(item: ReferenceCardItem) -> List[str]:
     if item.spec.feature == "corner_radius" and item.value.slug == "12":
         return ["0", "12"]
     if item.spec.feature == "border_position":
-        return ["C", item.value.label[0]]
+        return ["Center", item.value.label]
     return ["Default", item.value.label]
 
 
@@ -2048,8 +2051,12 @@ def _reference_card_annotation(item: ReferenceCardItem) -> Optional[str]:
     return None
 
 
-def _panel_widths(total_width: int, panel_count: int) -> List[int]:
-    """Split a width into strip-panel widths with stable integer rounding.
+def _panel_widths(
+    total_width: int,
+    panel_count: int,
+    divider_width: int = 0,
+) -> Tuple[int, List[int]]:
+    """Split a strip width into equal panel slots with optional dividers.
 
     Parameters
     ----------
@@ -2057,16 +2064,24 @@ def _panel_widths(total_width: int, panel_count: int) -> List[int]:
         Total width to split.
     panel_count : int
         Number of strip panels.
+    divider_width : int, default=0
+        Fixed width reserved between adjacent panels.
 
     Returns
     -------
-    list[int]
-        Per-panel widths that sum to ``total_width``.
+    tuple[int, list[int]]
+        Left inset plus equal per-panel widths. Any remainder is kept outside
+        the panels so every panel receives the same width allocation.
     """
-
-    base_width = total_width // panel_count
-    remainder = total_width - (base_width * panel_count)
-    return [base_width + (1 if index < remainder else 0) for index in range(panel_count)]
+    if panel_count <= 0:
+        raise ValueError("panel_count must be positive")
+    safe_divider_width = max(int(divider_width), 0)
+    total_divider_width = safe_divider_width * max(panel_count - 1, 0)
+    available_panel_width = max(total_width - total_divider_width, panel_count)
+    panel_width = max(available_panel_width // panel_count, 1)
+    occupied_width = (panel_width * panel_count) + total_divider_width
+    left_inset = max((total_width - occupied_width) // 2, 0)
+    return left_inset, [panel_width] * panel_count
 
 
 def _save_image(image: Image.Image, destination: Path) -> None:
@@ -2163,10 +2178,13 @@ def _render_strip_card(item: StripCardItem, output_root: Path) -> None:
     _draw_strip_header(strip, title=f"{item.spec.feature}: strip")
 
     body_height = STRIP_CARD_SIZE[1] - STRIP_HEADER_HEIGHT
-    x_offset = 0
     label_font = _load_font(24, bold=True)
-    panel_widths = _panel_widths(STRIP_CARD_SIZE[0], len(item.members))
-    for member, panel_width in zip(item.members, panel_widths):
+    x_offset, panel_widths = _panel_widths(
+        STRIP_CARD_SIZE[0],
+        len(item.members),
+        divider_width=STRIP_PANEL_DIVIDER_WIDTH,
+    )
+    for member_index, (member, panel_width) in enumerate(zip(item.members, panel_widths)):
         panel = _render_reference_canvas(
             member,
             (panel_width, body_height),
@@ -2184,9 +2202,10 @@ def _render_strip_card(item: StripCardItem, output_root: Path) -> None:
         )
         strip.paste(panel, (x_offset, STRIP_HEADER_HEIGHT))
         x_offset += panel_width
-        if x_offset < STRIP_CARD_SIZE[0]:
-            divider = Image.new("RGB", (2, body_height), "#D7DDE3")
-            strip.paste(divider, (x_offset - 1, STRIP_HEADER_HEIGHT))
+        if member_index < len(item.members) - 1:
+            divider = Image.new("RGB", (STRIP_PANEL_DIVIDER_WIDTH, body_height), "#D7DDE3")
+            strip.paste(divider, (x_offset, STRIP_HEADER_HEIGHT))
+            x_offset += STRIP_PANEL_DIVIDER_WIDTH
 
     _save_image(strip, destination)
     sidecar = {

@@ -288,7 +288,7 @@ class NodeStyle:
     text_transform: str = "none"  # Layout-affecting: none, uppercase, lowercase
     text_outline: bool = False
     text_outline_color: str = "#FFFFFF"
-    text_outline_width: float = 2.0
+    text_outline_width: float = 1.4
     text_background: str = ""  # Background color behind node label (empty = none)
     text_background_opacity: float = 0.85
     text_background_padding: Tuple[float, float] = (3.0, 2.0)
