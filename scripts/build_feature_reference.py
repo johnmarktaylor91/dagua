@@ -1,21 +1,22 @@
 #!/usr/bin/env python
 # ruff: noqa: E402
-"""Build a browsable visual reference gallery for Dagua rendering features.
+"""Build the user-facing Dagua feature reference gallery.
 
-The gallery is organized as static PNG specimens plus a local-file-friendly
-HTML index. It is intentionally structured to accept future side-by-side
-competitor renders under ``competitors/<tool>/...`` without changing the
-artifact layout.
+The gallery is a static set of PNG reference images plus an HTML index for
+local browsing. Each image is rendered at a fixed `800x600` size so the
+artifacts read consistently in documentation and release bundles.
 """
 
 from __future__ import annotations
 
 import argparse
 import html
+import logging
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -28,21 +29,35 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-from matplotlib.patches import PathPatch
 
-from dagua import DaguaGraph, EdgeStyle, NodeStyle, render
-from dagua.render.borders import ShapeSpec, build_shape_path
+logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
+
+from dagua import DaguaGraph, render
+from dagua.render.edges import available_arrowheads
+from dagua.styles import (
+    PALETTE,
+    THEME_REGISTRY,
+    ClusterStyle,
+    EdgeStyle,
+    GraphStyle,
+    NodeStyle,
+    border_from_fill,
+    get_theme,
+    make_fill,
+)
 
 INDEX_NAME = "index.html"
-OUTPUT_DIRNAME = "feature_reference"
-SPECIMEN_BACKGROUND = "#F8F8F8"
-SPECIMEN_BORDER = "#D7D7D7"
-TEXT_COLOR = "#333333"
-CAPTION_COLOR = "#666666"
-IMAGE_DPI = 150
-COMPETITOR_PLACEHOLDERS: Tuple[str, ...] = ("mermaid", "d3", "cytoscape")
-
-ALL_SHAPES: Tuple[str, ...] = (
+WHITE = "#FFFFFF"
+TEXT_COLOR = "#1F2933"
+SUBTLE_TEXT_COLOR = "#5B6670"
+CARD_BORDER = "#E5E7EB"
+IMAGE_DPI = 200
+IMAGE_SIZE_PX: Tuple[int, int] = (800, 600)
+IMAGE_SIZE_IN: Tuple[float, float] = (
+    IMAGE_SIZE_PX[0] / IMAGE_DPI,
+    IMAGE_SIZE_PX[1] / IMAGE_DPI,
+)
+SHAPE_NAMES: Tuple[str, ...] = (
     "rect",
     "roundrect",
     "ellipse",
@@ -64,90 +79,462 @@ ALL_SHAPES: Tuple[str, ...] = (
     "document",
     "box3d",
 )
-ALL_ARROWHEADS: Tuple[str, ...] = (
-    "normal",
-    "inv",
-    "dot",
-    "box",
-    "vee",
-    "tee",
-    "crow",
-    "diamond",
-    "curve",
-    "icurve",
-    "simple",
-    "fancy",
-    "wedge",
-    "bracket",
-    "none",
-    "crows_foot_one",
-    "crows_foot_many",
-    "crows_foot_one_mandatory",
-    "crows_foot_many_mandatory",
-    "crows_foot_many_optional",
-    "triangle_tee",
-    "open",
-    "circle",
+FEATURE_NAMES: Tuple[str, ...] = (
+    "borders",
+    "fills",
+    "text",
+    "edges",
+    "clusters",
+    "effects",
+    "pie_charts",
 )
-ALL_ROUTING_MODES: Tuple[str, ...] = ("bezier", "straight", "ortho", "taxi")
+NON_INSETTABLE_SHAPES = {
+    "double_circle",
+    "cloud",
+    "stadium",
+    "tab",
+    "note",
+    "document",
+    "box3d",
+}
+SHAPE_FILE_OVERRIDES: Mapping[str, str] = {
+    "rect": "rectangle",
+    "roundrect": "rounded_rectangle",
+}
+DISPLAY_NAME_OVERRIDES: Mapping[str, str] = {
+    "rect": "Rectangle",
+    "roundrect": "Rounded Rectangle",
+    "double_circle": "Double Circle",
+    "box3d": "3D Box",
+    "igraph_r": "igraph R",
+    "graph_tool": "graph-tool",
+    "n8n": "n8n",
+    "visjs": "Vis.js",
+    "drawio": "draw.io",
+    "neo4j": "Neo4j",
+}
 
 
 @dataclass(frozen=True)
-class SpecimenItem:
-    """One gallery specimen entry.
+class DemoScene:
+    """One rendered gallery scene.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph configured for rendering.
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    title : str
+        In-image title shown in the overlay card.
+    subtitle : str
+        Smaller descriptive line shown below ``title``.
+    """
+
+    graph: DaguaGraph
+    positions: torch.Tensor
+    title: str
+    subtitle: str
+
+
+@dataclass(frozen=True)
+class GalleryItem:
+    """One card in the generated HTML gallery.
+
+    Parameters
+    ----------
+    label : str
+        Human-readable card label.
+    relative_path : str
+        Image path relative to the gallery root.
+    """
+
+    label: str
+    relative_path: str
+
+
+@dataclass(frozen=True)
+class GallerySection:
+    """One logical section in the generated HTML.
+
+    Parameters
+    ----------
+    slug : str
+        Stable anchor ID.
+    title : str
+        Section heading.
+    items : tuple[GalleryItem, ...]
+        Rendered cards in display order.
+    """
+
+    slug: str
+    title: str
+    items: Tuple[GalleryItem, ...]
+
+
+@dataclass(frozen=True)
+class GalleryBuildResult:
+    """Paths and metadata emitted by the gallery builder.
+
+    Parameters
+    ----------
+    output_dir : str
+        Root output directory.
+    index_path : str
+        HTML index path.
+    sections : tuple[GallerySection, ...]
+        Rendered gallery sections in display order.
+    """
+
+    output_dir: str
+    index_path: str
+    sections: Tuple[GallerySection, ...]
+
+
+def _friendly_name(name: str) -> str:
+    """Return a human-readable display label.
 
     Parameters
     ----------
     name : str
-        Human-readable display name.
-    path : str
-        Relative image path from the gallery root.
-    """
-
-    name: str
-    path: str
-
-
-def _specimen_axes(fig: Figure) -> Axes:
-    """Return the primary axes for a rendered specimen figure.
-
-    Parameters
-    ----------
-    fig : Figure
-        Rendered matplotlib figure.
+        Internal slug such as ``"double_circle"``.
 
     Returns
     -------
-    Axes
-        First axes from the figure.
+    str
+        Display label suitable for HTML and image overlays.
     """
 
-    if not fig.axes:
-        raise ValueError("Rendered specimen figure has no axes.")
-    return fig.axes[0]
+    if name in DISPLAY_NAME_OVERRIDES:
+        return DISPLAY_NAME_OVERRIDES[name]
+    return name.replace("_", " ").title()
 
 
-def _finalize_axes(ax: Axes) -> None:
-    """Apply shared axis cosmetics for specimen renders.
+def _shape_filename(shape_name: str) -> str:
+    """Return the output filename stem for a node shape.
 
     Parameters
     ----------
-    ax : Axes
-        Matplotlib axes to update.
+    shape_name : str
+        Internal Dagua shape name.
+
+    Returns
+    -------
+    str
+        Filename stem without extension.
+    """
+
+    return SHAPE_FILE_OVERRIDES.get(shape_name, shape_name)
+
+
+def _relative_path(root: Path, target: Path) -> str:
+    """Return a POSIX relative path for HTML output.
+
+    Parameters
+    ----------
+    root : Path
+        Gallery root directory.
+    target : Path
+        Asset path below ``root``.
+
+    Returns
+    -------
+    str
+        Relative POSIX path.
+    """
+
+    return target.relative_to(root).as_posix()
+
+
+def _validate_requested_names(
+    requested: Optional[Sequence[str]],
+    allowed: Sequence[str],
+    label: str,
+) -> Tuple[str, ...]:
+    """Validate a requested subset against the supported names.
+
+    Parameters
+    ----------
+    requested : Sequence[str] | None
+        Optional user-specified subset.
+    allowed : Sequence[str]
+        Supported names in canonical order.
+    label : str
+        Error-label prefix such as ``"shape"``.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Canonical ordered subset.
+
+    Raises
+    ------
+    ValueError
+        If any requested value is unsupported.
+    """
+
+    if requested is None:
+        return tuple(allowed)
+
+    allowed_set = set(allowed)
+    unknown = [name for name in requested if name not in allowed_set]
+    if unknown:
+        raise ValueError(f"Unknown {label} names: {unknown!r}")
+
+    requested_set = set(requested)
+    return tuple(name for name in allowed if name in requested_set)
+
+
+def _clear_directory(directory: Path) -> None:
+    """Remove all existing content inside a managed output directory.
+
+    Parameters
+    ----------
+    directory : Path
+        Managed directory to clear.
 
     Returns
     -------
     None
-        The axes are modified in place.
+        The directory is recreated empty.
     """
 
-    ax.set_facecolor(SPECIMEN_BACKGROUND)
-    ax.set_aspect("equal")
-    ax.axis("off")
+    if directory.exists():
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True, exist_ok=True)
 
 
-def _save_figure(fig: Figure, output_path: Path) -> None:
-    """Persist one specimen figure with consistent raster settings.
+def _prepare_output_directory(output_dir: Path) -> Dict[str, Path]:
+    """Create and clear the gallery output tree.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Gallery root directory.
+
+    Returns
+    -------
+    dict[str, Path]
+        Named subdirectories for the generated assets.
+    """
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if (output_dir / INDEX_NAME).exists():
+        (output_dir / INDEX_NAME).unlink()
+
+    managed_dirs = {
+        "shapes": output_dir / "shapes",
+        "arrows": output_dir / "arrows",
+        "themes": output_dir / "themes",
+        "features": output_dir / "features",
+    }
+    for directory in managed_dirs.values():
+        _clear_directory(directory)
+    return managed_dirs
+
+
+def _reference_graph_style(background_color: str) -> GraphStyle:
+    """Return the fixed graph-level style used for reference demos.
+
+    Parameters
+    ----------
+    background_color : str
+        Graph background color.
+
+    Returns
+    -------
+    GraphStyle
+        Minimal graph styling with fixed canvas constraints.
+    """
+
+    return GraphStyle(
+        background_color=background_color,
+        margin=20.0,
+        min_figsize=IMAGE_SIZE_IN,
+        max_figsize=IMAGE_SIZE_IN,
+    )
+
+
+def _apply_reference_canvas(graph: DaguaGraph, background_color: str = WHITE) -> None:
+    """Force a clean render canvas for non-theme demo graphs.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph to update.
+    background_color : str, default=WHITE
+        Canvas background color.
+
+    Returns
+    -------
+    None
+        The graph theme is updated in place.
+    """
+
+    graph._theme.graph_style = _reference_graph_style(background_color)
+
+
+def _positions(points: Sequence[Tuple[float, float]]) -> torch.Tensor:
+    """Build a float32 position tensor from Python tuples.
+
+    Parameters
+    ----------
+    points : Sequence[tuple[float, float]]
+        Node positions in graph order.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    """
+
+    return torch.tensor(points, dtype=torch.float32)
+
+
+def _base_node_style(base_color: str, shape: str = "roundrect") -> NodeStyle:
+    """Return a readable node style for small documentation scenes.
+
+    Parameters
+    ----------
+    base_color : str
+        Base color used to derive fill and stroke.
+    shape : str, default="roundrect"
+        Node shape name.
+
+    Returns
+    -------
+    NodeStyle
+        Node style tuned for small gallery renders.
+    """
+
+    return NodeStyle(
+        base_color=base_color,
+        shape=shape,
+        stroke_width=1.4,
+        min_width=82.0,
+        min_height=46.0,
+        padding=(12.0, 9.0),
+        shadow=False,
+    )
+
+
+def _accent_edge_style(color: str, **overrides: object) -> EdgeStyle:
+    """Return a readable edge style for highlighted examples.
+
+    Parameters
+    ----------
+    color : str
+        Edge color.
+    **overrides : object
+        Extra ``EdgeStyle`` field overrides.
+
+    Returns
+    -------
+    EdgeStyle
+        Edge style with the requested overrides applied.
+    """
+
+    style_kwargs: Dict[str, object] = {"color": color, "width": 2.4, "opacity": 0.95}
+    style_kwargs.update(overrides)
+    return EdgeStyle(**style_kwargs)
+
+
+def _hex_luminance(hex_color: str) -> float:
+    """Estimate relative luminance for a hex color.
+
+    Parameters
+    ----------
+    hex_color : str
+        Color in ``#RRGGBB`` or ``#RRGGBBAA`` form.
+
+    Returns
+    -------
+    float
+        Relative luminance on ``[0, 1]``.
+    """
+
+    color = hex_color.lstrip("#")
+    if len(color) < 6:
+        return 1.0
+    red = int(color[0:2], 16) / 255.0
+    green = int(color[2:4], 16) / 255.0
+    blue = int(color[4:6], 16) / 255.0
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def _overlay_colors(background_color: str) -> Tuple[str, str, str]:
+    """Choose overlay colors that contrast with the render background.
+
+    Parameters
+    ----------
+    background_color : str
+        Scene background color.
+
+    Returns
+    -------
+    tuple[str, str, str]
+        Text color, box fill color, and box border color.
+    """
+
+    if _hex_luminance(background_color) < 0.45:
+        return "#F8FAFC", "#111827CC", "#E5E7EB44"
+    return TEXT_COLOR, "#FFFFFFE6", "#D1D5DB"
+
+
+def _annotate_scene(ax: Axes, title: str, subtitle: str, background_color: str) -> None:
+    """Add a compact documentation overlay to a rendered axes.
+
+    Parameters
+    ----------
+    ax : Axes
+        Matplotlib axes returned by the renderer.
+    title : str
+        Primary title line.
+    subtitle : str
+        Secondary explanatory line.
+    background_color : str
+        Scene background color used for contrast selection.
+
+    Returns
+    -------
+    None
+        The axes are annotated in place.
+    """
+
+    text_color, box_fill, box_edge = _overlay_colors(background_color)
+    ax.text(
+        0.03,
+        0.96,
+        title,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=13.0,
+        fontweight="bold",
+        color=text_color,
+        bbox={
+            "boxstyle": "round,pad=0.5",
+            "facecolor": box_fill,
+            "edgecolor": box_edge,
+            "linewidth": 0.9,
+        },
+        zorder=20,
+    )
+    ax.text(
+        0.03,
+        0.885,
+        subtitle,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=8.6,
+        color=text_color,
+        zorder=21,
+    )
+
+
+def _save_figure(fig: Figure, output_path: Path, background_color: str) -> None:
+    """Save one scene at the required fixed pixel size.
 
     Parameters
     ----------
@@ -155,552 +542,631 @@ def _save_figure(fig: Figure, output_path: Path) -> None:
         Figure to save.
     output_path : Path
         Destination PNG path.
+    background_color : str
+        Figure background color.
 
     Returns
     -------
     None
-        The file is written and the figure is closed.
+        The figure is saved and closed.
+
+    Raises
+    ------
+    ValueError
+        If the generated PNG is empty.
     """
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(
         output_path,
         dpi=IMAGE_DPI,
-        bbox_inches="tight",
-        facecolor=SPECIMEN_BACKGROUND,
-        edgecolor=SPECIMEN_BACKGROUND,
-        pad_inches=0.1,
+        facecolor=background_color,
+        edgecolor=background_color,
+        transparent=False,
     )
     plt.close(fig)
+    if output_path.stat().st_size <= 0:
+        raise ValueError(f"Generated empty PNG: {output_path}")
 
 
-def _new_specimen_figure(figsize: Tuple[float, float]) -> Tuple[Figure, Axes]:
-    """Create a background-colored figure for direct specimen drawing.
-
-    Parameters
-    ----------
-    figsize : tuple[float, float]
-        Figure size in inches.
-
-    Returns
-    -------
-    tuple[Figure, Axes]
-        Fresh figure and axes.
-    """
-
-    fig, ax = plt.subplots(figsize=figsize, dpi=IMAGE_DPI)
-    fig.patch.set_facecolor(SPECIMEN_BACKGROUND)
-    _finalize_axes(ax)
-    return fig, ax
-
-
-def _render_graph_figure(
-    graph: DaguaGraph,
-    positions: torch.Tensor,
-    figsize: Tuple[float, float],
-) -> Figure:
-    """Render a graph into a matplotlib figure.
+def _render_scene(scene: DemoScene, output_path: Path) -> None:
+    """Render and save one documentation scene.
 
     Parameters
     ----------
-    graph : DaguaGraph
-        Graph to render.
-    positions : torch.Tensor
-        Node positions with shape ``[N, 2]``.
-    figsize : tuple[float, float]
-        Output figure size in inches.
-
-    Returns
-    -------
-    Figure
-        Rendered figure.
-    """
-
-    fig, _ = render(graph, positions=positions, figsize=figsize, dpi=IMAGE_DPI, show=False)
-    fig.patch.set_facecolor(SPECIMEN_BACKGROUND)
-    _finalize_axes(_specimen_axes(fig))
-    return fig
-
-
-def _minimal_endpoint_style() -> NodeStyle:
-    """Return a nearly invisible endpoint node style for edge specimens.
-
-    Parameters
-    ----------
-    None
-
-    Returns
-    -------
-    NodeStyle
-        Style that leaves routing anchors in place without distracting from
-        the rendered edge or arrowhead.
-    """
-
-    return NodeStyle(
-        shape="circle",
-        fill=SPECIMEN_BACKGROUND,
-        stroke=SPECIMEN_BACKGROUND,
-        opacity=0.0,
-        border_opacity=0.0,
-        padding=(0.0, 0.0),
-        min_width=8.0,
-        min_height=8.0,
-    )
-
-
-def _single_node_graph(label: str, style: NodeStyle) -> DaguaGraph:
-    """Build a one-node graph for node-centric specimens.
-
-    Parameters
-    ----------
-    label : str
-        Node label.
-    style : NodeStyle
-        Per-node style override.
-
-    Returns
-    -------
-    DaguaGraph
-        Graph containing one labeled node.
-    """
-
-    graph = DaguaGraph()
-    graph.add_node("feature", label=label, style=style)
-    graph.compute_node_sizes()
-    graph.cache_layout(torch.tensor([[0.0, 0.0]], dtype=torch.float32))
-    return graph
-
-
-def _caption_figure(fig: Figure, text: str) -> None:
-    """Add a small caption beneath a specimen render.
-
-    Parameters
-    ----------
-    fig : Figure
-        Figure receiving the caption.
-    text : str
-        Caption text.
-
-    Returns
-    -------
-    None
-        The figure is modified in place.
-    """
-
-    fig.text(
-        0.5,
-        0.04,
-        text,
-        ha="center",
-        va="bottom",
-        fontsize=8,
-        family="sans-serif",
-        color=CAPTION_COLOR,
-    )
-
-
-def render_shape_specimen(shape: str, output_path: Path) -> None:
-    """Render one node shape as a labeled specimen PNG.
-
-    Parameters
-    ----------
-    shape : str
-        Node shape name.
+    scene : DemoScene
+        Scene definition to render.
     output_path : Path
         Destination PNG path.
 
     Returns
     -------
     None
-        The specimen image is written to disk.
+        The rendered scene is written to disk.
     """
 
-    fig, ax = _new_specimen_figure(figsize=(3.0, 2.0))
-    ax.set_xlim(-60.0, 60.0)
-    ax.set_ylim(-45.0, 45.0)
-
-    spec = ShapeSpec(center_x=0.0, center_y=0.0, width=88.0, height=54.0, shape=shape)
-    patch = PathPatch(
-        build_shape_path(spec),
-        facecolor="#FAFBFC",
-        edgecolor=TEXT_COLOR,
-        linewidth=1.5,
-        zorder=2,
+    figure, axes = render(
+        scene.graph,
+        positions=scene.positions,
+        figsize=IMAGE_SIZE_IN,
+        dpi=IMAGE_DPI,
+        show=False,
     )
-    ax.add_patch(patch)
-    ax.text(
-        0.0,
-        0.0,
-        shape,
-        ha="center",
-        va="center",
-        fontsize=8.5,
-        family="sans-serif",
-        color=TEXT_COLOR,
-        zorder=3,
-    )
-    _save_figure(fig, output_path)
+    background_color = scene.graph.graph_style.background_color
+    _annotate_scene(axes, scene.title, scene.subtitle, background_color)
+    _save_figure(figure, output_path, background_color)
 
 
-def render_arrowhead_specimen(name: str, output_path: Path) -> None:
-    """Render one arrowhead using Dagua's actual edge renderer.
+def _build_shape_scene(shape_name: str) -> DemoScene:
+    """Build the reference graph for one node shape.
 
     Parameters
     ----------
-    name : str
-        Arrowhead name.
-    output_path : Path
-        Destination PNG path.
+    shape_name : str
+        Supported Dagua node shape name.
 
     Returns
     -------
-    None
-        The specimen image is written to disk.
+    DemoScene
+        Render-ready scene for the requested shape.
     """
 
-    graph = DaguaGraph()
-    endpoint_style = _minimal_endpoint_style()
-    graph.add_node("src", label="", style=endpoint_style)
-    graph.add_node("tgt", label="", style=endpoint_style)
-    graph.add_edge(
-        "src",
-        "tgt",
-        style=EdgeStyle(
-            arrow=name,
-            routing="straight",
-            width=1.5,
-            color=TEXT_COLOR,
-            opacity=1.0,
-            arrow_color=TEXT_COLOR,
-            arrow_length=11.0,
-            arrow_width=8.0,
+    graph = DaguaGraph(direction="LR")
+    _apply_reference_canvas(graph)
+    graph.add_node("input", label="Input", style=_base_node_style(PALETTE["bluish_green"]))
+    stroke_width = 0.0 if shape_name in NON_INSETTABLE_SHAPES else 1.6
+    graph.add_node(
+        "feature",
+        label="Feature",
+        style=NodeStyle(
+            base_color=PALETTE["blue"],
+            shape=shape_name,
+            stroke_width=stroke_width,
+            min_width=114.0,
+            min_height=74.0,
+            padding=(14.0, 11.0),
+            shadow=True,
+            shadow_offset=(2.5, -2.5),
+            shadow_color="#00000022",
         ),
     )
-    graph.compute_node_sizes()
-    positions = torch.tensor([[-30.0, 0.0], [30.0, 0.0]], dtype=torch.float32)
-    graph.cache_layout(positions)
+    graph.add_node("output", label="Output", style=_base_node_style(PALETTE["amber"]))
+    graph.add_edge("input", "feature", style=_accent_edge_style("#6B7280", arrow="none"))
+    graph.add_edge("feature", "output", style=_accent_edge_style(PALETTE["blue"], arrow="vee"))
+    return DemoScene(
+        graph=graph,
+        positions=_positions([(-150.0, 0.0), (0.0, 0.0), (150.0, 0.0)]),
+        title=_friendly_name(shape_name),
+        subtitle="Node shape reference",
+    )
 
-    fig = _render_graph_figure(graph=graph, positions=positions, figsize=(3.0, 1.2))
-    _caption_figure(fig, name)
-    _save_figure(fig, output_path)
 
-
-def render_routing_specimen(mode: str, output_path: Path) -> None:
-    """Render a compact four-node graph using one routing mode.
+def _build_arrow_scene(arrow_name: str) -> DemoScene:
+    """Build the reference graph for one arrowhead type.
 
     Parameters
     ----------
-    mode : str
-        Edge routing mode.
-    output_path : Path
-        Destination PNG path.
+    arrow_name : str
+        Supported arrowhead name.
 
     Returns
     -------
-    None
-        The specimen image is written to disk.
+    DemoScene
+        Render-ready scene for the requested arrowhead.
     """
 
-    graph = DaguaGraph()
-    graph.default_edge_style = EdgeStyle(routing=mode, arrow="normal", opacity=0.9, width=1.35)
-    for node_id in range(4):
+    graph = DaguaGraph(direction="LR")
+    _apply_reference_canvas(graph)
+    muted_edge = _accent_edge_style("#A0AEC0", arrow="none", width=1.8, opacity=0.75)
+    highlight_edge = _accent_edge_style(
+        PALETTE["vermillion"],
+        arrow=arrow_name,
+        width=2.8,
+        curvature=0.15,
+    )
+    graph.add_node("draft", label="Draft", style=_base_node_style(PALETTE["sky"]))
+    graph.add_node("review", label="Review", style=_base_node_style(PALETTE["blue"]))
+    graph.add_node("release", label="Release", style=_base_node_style(PALETTE["bluish_green"]))
+    graph.add_edge("draft", "review", style=muted_edge)
+    graph.add_edge("review", "release", label="highlight", style=highlight_edge)
+    return DemoScene(
+        graph=graph,
+        positions=_positions([(-150.0, 25.0), (0.0, 0.0), (150.0, 25.0)]),
+        title=_friendly_name(arrow_name),
+        subtitle="Arrowhead reference",
+    )
+
+
+def _build_theme_scene(theme_name: str) -> DemoScene:
+    """Build the shared reference graph used for one theme.
+
+    Parameters
+    ----------
+    theme_name : str
+        Built-in theme registry key.
+
+    Returns
+    -------
+    DemoScene
+        Render-ready scene for the requested theme.
+    """
+
+    graph = DaguaGraph(direction="LR")
+    graph._theme = get_theme(theme_name)
+    for style in graph._theme.node_styles.values():
+        if style.shape in NON_INSETTABLE_SHAPES:
+            style.stroke_width = 0.0
+    graph.add_node("Input", label="Input", type="input")
+    graph.add_node("Process", label="Process")
+    graph.add_node("Output", label="Output", type="output")
+    graph.add_node("Cache", label="Cache", type="buffer")
+    graph.add_edge("Input", "Process")
+    graph.add_edge("Process", "Output")
+    graph.add_edge("Input", "Cache")
+    graph.add_edge("Cache", "Output")
+    return DemoScene(
+        graph=graph,
+        positions=_positions([(-150.0, 70.0), (0.0, 70.0), (150.0, 70.0), (0.0, -70.0)]),
+        title=_friendly_name(theme_name),
+        subtitle="Built-in theme",
+    )
+
+
+def _build_borders_scene() -> DemoScene:
+    """Build the border style reference scene.
+
+    Returns
+    -------
+    DemoScene
+        Render-ready border example scene.
+    """
+
+    graph = DaguaGraph(direction="LR")
+    _apply_reference_canvas(graph)
+    labels_and_dashes = (
+        ("Solid", "solid", PALETTE["blue"]),
+        ("Dashed", "dashed", PALETTE["amber"]),
+        ("Dotted", "dotted", PALETTE["vermillion"]),
+    )
+    for label, dash, color in labels_and_dashes:
         graph.add_node(
-            node_id,
-            label=str(node_id),
-            style=NodeStyle(shape="circle", min_width=24.0, min_height=24.0),
+            label.lower(),
+            label=label,
+            style=NodeStyle(
+                base_color=color,
+                stroke_dash=dash,
+                stroke_width=1.7,
+                min_width=106.0,
+                min_height=58.0,
+            ),
         )
-    graph.add_edge(0, 1)
-    graph.add_edge(0, 2)
-    graph.add_edge(1, 3)
-    graph.add_edge(2, 3)
-    graph.compute_node_sizes()
-    positions = torch.tensor(
-        [[0.0, 40.0], [-40.0, 0.0], [40.0, 0.0], [0.0, -40.0]],
-        dtype=torch.float32,
+    return DemoScene(
+        graph=graph,
+        positions=_positions([(-150.0, 0.0), (0.0, 0.0), (150.0, 0.0)]),
+        title="Border styles",
+        subtitle="Solid, dashed, and dotted node outlines",
     )
-    graph.cache_layout(positions)
-
-    fig = _render_graph_figure(graph=graph, positions=positions, figsize=(3.0, 3.0))
-    _specimen_axes(fig).set_title(f"routing={mode}", fontsize=10, color=TEXT_COLOR, pad=6)
-    _save_figure(fig, output_path)
 
 
-def render_gradient_specimen(mode: str, output_path: Path) -> None:
-    """Render a node specimen with a gradient fill.
-
-    Parameters
-    ----------
-    mode : str
-        Gradient mode, typically ``"linear"`` or ``"radial"``.
-    output_path : Path
-        Destination PNG path.
+def _build_fills_scene() -> DemoScene:
+    """Build the fill style reference scene.
 
     Returns
     -------
-    None
-        The specimen image is written to disk.
+    DemoScene
+        Render-ready fill example scene.
     """
 
-    graph = _single_node_graph(
-        label="gradient",
+    graph = DaguaGraph(direction="LR")
+    _apply_reference_canvas(graph)
+    graph.add_node("solid", label="Solid", style=_base_node_style(PALETTE["sky"]))
+    graph.add_node(
+        "gradient",
+        label="Gradient",
         style=NodeStyle(
-            shape="roundrect",
-            gradient=mode,
-            fill="#4A90D9",
-            gradient_color="#FFFFFF",
-            min_width=96.0,
-            min_height=56.0,
+            base_color=PALETTE["blue"],
+            gradient="linear",
+            gradient_color="#9FC7EE",
+            gradient_angle=90.0,
+            min_width=110.0,
+            min_height=58.0,
         ),
     )
-    fig = _render_graph_figure(
-        graph=graph,
-        positions=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
-        figsize=(3.0, 2.0),
-    )
-    _specimen_axes(fig).set_title(f"gradient={mode}", fontsize=10, color=TEXT_COLOR, pad=6)
-    _save_figure(fig, output_path)
-
-
-def render_text_background_specimen(output_path: Path) -> None:
-    """Render a node specimen showcasing label background styling.
-
-    Parameters
-    ----------
-    output_path : Path
-        Destination PNG path.
-
-    Returns
-    -------
-    None
-        The specimen image is written to disk.
-    """
-
-    graph = _single_node_graph(
-        label="text bg",
+    graph.add_node(
+        "pattern",
+        label="Pattern",
         style=NodeStyle(
-            shape="roundrect",
-            fill="#FFFFFF",
-            stroke="#9CA3AF",
-            text_background="#FDE68A",
-            text_background_opacity=0.95,
-            text_background_padding=(5.0, 3.0),
-            text_background_corner_radius=4.0,
-            min_width=96.0,
-            min_height=56.0,
+            base_color=PALETTE["amber"],
+            fill_pattern="striped",
+            fill_pattern_colors=[make_fill(PALETTE["amber"]), "#F7D88A"],
+            fill_pattern_angle=28.0,
+            min_width=110.0,
+            min_height=58.0,
         ),
     )
-    fig = _render_graph_figure(
+    return DemoScene(
         graph=graph,
-        positions=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
-        figsize=(3.0, 2.0),
+        positions=_positions([(-150.0, 0.0), (0.0, 0.0), (150.0, 0.0)]),
+        title="Fill treatments",
+        subtitle="Solid, gradient, and patterned nodes",
     )
-    _specimen_axes(fig).set_title("text background", fontsize=10, color=TEXT_COLOR, pad=6)
-    _save_figure(fig, output_path)
 
 
-def render_shadow_specimen(output_path: Path) -> None:
-    """Render a node specimen showcasing node shadow styling.
-
-    Parameters
-    ----------
-    output_path : Path
-        Destination PNG path.
+def _build_text_scene() -> DemoScene:
+    """Build the typography reference scene.
 
     Returns
     -------
-    None
-        The specimen image is written to disk.
+    DemoScene
+        Render-ready text feature scene.
     """
 
-    graph = _single_node_graph(
-        label="shadow",
+    graph = DaguaGraph(direction="TB")
+    _apply_reference_canvas(graph)
+    graph.add_node(
+        "bold",
+        label="Bold",
+        style=NodeStyle(base_color=PALETTE["blue"], font_weight="bold", min_width=92.0),
+    )
+    graph.add_node(
+        "italic",
+        label="Italic",
+        style=NodeStyle(base_color=PALETTE["amber"], font_style="italic", min_width=92.0),
+    )
+    graph.add_node(
+        "wrap",
+        label="Wrapped labels stay readable",
         style=NodeStyle(
-            shape="roundrect",
-            fill="#FAFBFC",
-            stroke="#4B5563",
+            base_color=PALETTE["bluish_green"],
+            text_wrap="wrap",
+            text_max_width=80.0,
+            min_width=98.0,
+            min_height=64.0,
+        ),
+    )
+    graph.add_node(
+        "outline",
+        label="Outline",
+        style=NodeStyle(
+            base_color=PALETTE["reddish_purple"],
+            text_transform="uppercase",
+            text_outline=True,
+            text_outline_color="#FFFFFF",
+            text_outline_width=2.2,
+            min_width=100.0,
+        ),
+    )
+    return DemoScene(
+        graph=graph,
+        positions=_positions([(-120.0, 65.0), (120.0, 65.0), (-120.0, -65.0), (120.0, -65.0)]),
+        title="Text features",
+        subtitle="Bold, italic, wrapped, and outlined labels",
+    )
+
+
+def _build_edges_scene() -> DemoScene:
+    """Build the edge feature reference scene.
+
+    Returns
+    -------
+    DemoScene
+        Render-ready edge feature scene.
+    """
+
+    graph = DaguaGraph(direction="LR")
+    _apply_reference_canvas(graph)
+    for node_id, label, color in (
+        ("input", "Input", PALETTE["bluish_green"]),
+        ("rules", "Rules", PALETTE["blue"]),
+        ("queue", "Queue", PALETTE["amber"]),
+        ("output", "Output", PALETTE["vermillion"]),
+    ):
+        graph.add_node(node_id, label=label, style=_base_node_style(color))
+    graph.add_edge(
+        "input",
+        "rules",
+        label="bezier",
+        style=_accent_edge_style(PALETTE["blue"], routing="bezier", curvature=0.42),
+    )
+    graph.add_edge(
+        "input",
+        "queue",
+        label="ortho",
+        style=_accent_edge_style(PALETTE["amber"], routing="ortho", arrow="vee"),
+    )
+    graph.add_edge(
+        "rules",
+        "output",
+        label="taper + gradient",
+        style=_accent_edge_style(
+            PALETTE["blue"],
+            taper=True,
+            taper_width_start=4.0,
+            taper_width_end=0.8,
+            color_gradient="source_to_target",
+            color_gradient_end=PALETTE["vermillion"],
+        ),
+    )
+    graph.add_edge(
+        "queue",
+        "output",
+        label="taxi",
+        style=_accent_edge_style(PALETTE["vermillion"], routing="taxi"),
+    )
+    return DemoScene(
+        graph=graph,
+        positions=_positions([(-170.0, 25.0), (-30.0, 90.0), (-30.0, -85.0), (165.0, 0.0)]),
+        title="Edge styling",
+        subtitle="Routing, tapering, and color transitions",
+    )
+
+
+def _build_clusters_scene() -> DemoScene:
+    """Build the nested cluster reference scene.
+
+    Returns
+    -------
+    DemoScene
+        Render-ready cluster feature scene.
+    """
+
+    graph = DaguaGraph(direction="LR")
+    _apply_reference_canvas(graph)
+    graph.add_node("ingest", label="Ingest", style=_base_node_style(PALETTE["sky"]))
+    graph.add_node("validate", label="Validate", style=_base_node_style(PALETTE["blue"]))
+    graph.add_node("train", label="Train", style=_base_node_style(PALETTE["amber"]))
+    graph.add_node("serve", label="Serve", style=_base_node_style(PALETTE["bluish_green"]))
+    graph.add_node("monitor", label="Monitor", style=_base_node_style(PALETTE["vermillion"]))
+    graph.add_edge("ingest", "validate", style=_accent_edge_style("#6B7280", arrow="none"))
+    graph.add_edge("validate", "train", style=_accent_edge_style(PALETTE["blue"]))
+    graph.add_edge("train", "serve", style=_accent_edge_style(PALETTE["amber"]))
+    graph.add_edge("serve", "monitor", style=_accent_edge_style(PALETTE["bluish_green"]))
+
+    platform_style = ClusterStyle(
+        fill=make_fill(PALETTE["blue"], bg_hex=WHITE, blend=0.10),
+        stroke=border_from_fill(PALETTE["blue"], darken=0.10),
+        opacity=0.28,
+        padding=44.0,
+    )
+    prep_style = ClusterStyle(
+        fill=make_fill(PALETTE["amber"], bg_hex=WHITE, blend=0.12),
+        stroke=border_from_fill(PALETTE["amber"], darken=0.18),
+        opacity=0.34,
+        padding=36.0,
+    )
+    serving_style = ClusterStyle(
+        fill=make_fill(PALETTE["bluish_green"], bg_hex=WHITE, blend=0.10),
+        stroke=border_from_fill(PALETTE["bluish_green"], darken=0.18),
+        opacity=0.32,
+        padding=36.0,
+    )
+    graph.add_cluster(
+        "platform",
+        ["ingest", "validate", "train", "serve", "monitor"],
+        label="Platform",
+        style=platform_style,
+    )
+    graph.add_cluster(
+        "prep",
+        ["ingest", "validate", "train"],
+        label="Prep",
+        style=prep_style,
+        parent="platform",
+    )
+    graph.add_cluster(
+        "serving",
+        ["serve", "monitor"],
+        label="Serving",
+        style=serving_style,
+        parent="platform",
+    )
+    return DemoScene(
+        graph=graph,
+        positions=_positions(
+            [(-170.0, 10.0), (-70.0, 10.0), (35.0, 10.0), (135.0, 65.0), (135.0, -55.0)]
+        ),
+        title="Cluster nesting",
+        subtitle="Parent and child groups with independent styling",
+    )
+
+
+def _build_effects_scene() -> DemoScene:
+    """Build the effects reference scene.
+
+    Returns
+    -------
+    DemoScene
+        Render-ready effects scene.
+    """
+
+    graph = DaguaGraph(direction="LR")
+    _apply_reference_canvas(graph)
+    graph.add_node(
+        "shadow",
+        label="Shadow",
+        style=NodeStyle(
+            base_color=PALETTE["blue"],
             shadow=True,
             shadow_offset=(3.0, -3.0),
-            shadow_color="#00000040",
-            shadow_blur=3.0,
-            min_width=96.0,
-            min_height=56.0,
+            shadow_color="#00000033",
+            min_width=98.0,
         ),
     )
-    fig = _render_graph_figure(
-        graph=graph,
-        positions=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
-        figsize=(3.0, 2.0),
+    graph.add_node("cross_a", label="Cross A", style=_base_node_style(PALETTE["sky"]))
+    graph.add_node("cross_b", label="Cross B", style=_base_node_style(PALETTE["amber"]))
+    graph.add_node(
+        "opacity",
+        label="Opacity",
+        style=NodeStyle(base_color=PALETTE["vermillion"], opacity=0.58, min_width=98.0),
     )
-    _specimen_axes(fig).set_title("shadow", fontsize=10, color=TEXT_COLOR, pad=6)
-    _save_figure(fig, output_path)
+    crossing_style = _accent_edge_style("#5F6C7B", crossing_style="arc", crossing_size=10.0)
+    graph.add_edge("shadow", "opacity", label="crossing jump", style=crossing_style)
+    graph.add_edge("cross_a", "cross_b", style=crossing_style)
+    return DemoScene(
+        graph=graph,
+        positions=_positions([(-150.0, 90.0), (120.0, 90.0), (-120.0, -90.0), (150.0, -90.0)]),
+        title="Effects",
+        subtitle="Shadow, transparency, and crossing jumps",
+    )
 
 
-def _slugify(name: str) -> str:
-    """Return a filesystem-friendly slug for a feature name.
-
-    Parameters
-    ----------
-    name : str
-        Input display name.
+def _build_pie_charts_scene() -> DemoScene:
+    """Build the pie and donut chart reference scene.
 
     Returns
     -------
-    str
-        Lowercase slug using underscores between tokens.
+    DemoScene
+        Render-ready pie chart scene.
     """
 
-    return name.strip().lower().replace(" ", "_")
+    graph = DaguaGraph(direction="LR")
+    _apply_reference_canvas(graph)
+    pie_colors = ["#4F8BC9", "#76C3A5", "#F0B35A", "#E16B5A"]
+    graph.add_node(
+        "pie",
+        label="Pie",
+        style=NodeStyle(
+            shape="circle",
+            fill_pattern="pie",
+            fill_pattern_colors=pie_colors[:3],
+            fill_pattern_values=[45.0, 35.0, 20.0],
+            min_width=90.0,
+            min_height=90.0,
+        ),
+    )
+    graph.add_node(
+        "donut",
+        label="Donut",
+        style=NodeStyle(
+            shape="circle",
+            fill_pattern="pie",
+            fill_pattern_colors=pie_colors,
+            fill_pattern_values=[35.0, 25.0, 20.0, 20.0],
+            fill_pattern_hole=0.42,
+            min_width=96.0,
+            min_height=96.0,
+        ),
+    )
+    graph.add_node(
+        "split",
+        label="Split",
+        style=NodeStyle(
+            shape="circle",
+            fill_pattern="pie",
+            fill_pattern_colors=pie_colors[:4],
+            fill_pattern_values=[1.0, 1.0, 1.0, 1.0],
+            min_width=92.0,
+            min_height=92.0,
+        ),
+    )
+    return DemoScene(
+        graph=graph,
+        positions=_positions([(-150.0, 0.0), (0.0, 0.0), (150.0, 0.0)]),
+        title="Pie charts and donuts",
+        subtitle="Categorical splits rendered directly inside nodes",
+    )
 
 
-def _ensure_output_dirs(output_dir: Path) -> Dict[str, Path]:
-    """Create the managed output directory layout for the gallery.
+FEATURE_BUILDERS: Mapping[str, Callable[[], DemoScene]] = {
+    "borders": _build_borders_scene,
+    "fills": _build_fills_scene,
+    "text": _build_text_scene,
+    "edges": _build_edges_scene,
+    "clusters": _build_clusters_scene,
+    "effects": _build_effects_scene,
+    "pie_charts": _build_pie_charts_scene,
+}
+
+
+def _write_index_html(output_dir: Path, sections: Sequence[GallerySection]) -> None:
+    """Write the gallery HTML index page.
 
     Parameters
     ----------
     output_dir : Path
-        Root output directory.
-
-    Returns
-    -------
-    dict[str, Path]
-        Named subdirectories used by the build.
-    """
-
-    directories = {
-        "shapes": output_dir / "shapes",
-        "arrowheads": output_dir / "arrowheads",
-        "routing": output_dir / "routing",
-        "effects": output_dir / "effects",
-        "competitors": output_dir / "competitors",
-    }
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for directory in directories.values():
-        directory.mkdir(parents=True, exist_ok=True)
-    for competitor_name in COMPETITOR_PLACEHOLDERS:
-        (directories["competitors"] / competitor_name).mkdir(parents=True, exist_ok=True)
-    return directories
-
-
-def write_gallery_html(
-    output_dir: Path,
-    specimens: Mapping[str, Sequence[SpecimenItem]],
-) -> None:
-    """Write the main HTML gallery index.
-
-    Parameters
-    ----------
-    output_dir : Path
-        Root output directory.
-    specimens : Mapping[str, Sequence[SpecimenItem]]
-        Section name to rendered specimen list mapping.
+        Gallery root directory.
+    sections : Sequence[GallerySection]
+        Sections to render in the index.
 
     Returns
     -------
     None
-        The HTML gallery is written to ``output_dir / "index.html"``.
+        The HTML page is written to disk.
     """
 
-    section_blocks = []
-    for section_name, items in specimens.items():
-        cards = []
-        for item in items:
-            cards.extend(
+    nav_links = "\n".join(
+        f'        <a href="#{html.escape(section.slug)}">{html.escape(section.title)}</a>'
+        for section in sections
+    )
+    section_blocks: List[str] = []
+    for section in sections:
+        cards = "\n".join(
+            (
+                '        <article class="card">'
+                f'<img src="{html.escape(item.relative_path)}" alt="{html.escape(item.label)}">'
+                f'<div class="label">{html.escape(item.label)}</div>'
+                "</article>"
+            )
+            for item in section.items
+        )
+        section_blocks.append(
+            "\n".join(
                 [
-                    '      <div class="specimen">',
-                    f'        <img src="{html.escape(item.path)}" alt="{html.escape(item.name)}">',
-                    f'        <div class="caption">{html.escape(item.name)}</div>',
+                    f'    <section id="{html.escape(section.slug)}" class="section">',
+                    f"      <h2>{html.escape(section.title)}</h2>",
+                    '      <div class="gallery">',
+                    cards,
                     "      </div>",
+                    "    </section>",
                 ]
             )
-        section_blocks.extend(
-            [
-                '    <section class="section">',
-                f"      <h2>{html.escape(section_name)}</h2>",
-                '      <div class="grid">',
-                *cards,
-                "      </div>",
-                '      <div class="competitor-placeholder">',
-                "        Competitor side-by-side renders will be added during theme sprints.",
-                "      </div>",
-                "    </section>",
-            ]
         )
 
-    competitor_names = ", ".join(COMPETITOR_PLACEHOLDERS)
     html_text = "\n".join(
         [
             "<!DOCTYPE html>",
             '<html lang="en">',
             "<head>",
             '  <meta charset="utf-8">',
+            '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
             "  <title>Dagua Feature Reference</title>",
             "  <style>",
-            "    :root {",
-            f"      --bg: {SPECIMEN_BACKGROUND};",
-            "      --page: #FFFFFF;",
-            f"      --border: {SPECIMEN_BORDER};",
-            "      --text: #111111;",
-            "      --muted: #666666;",
-            "      --accent: #2B6CB0;",
-            "      --placeholder: #FFF7D6;",
-            "      --placeholder-border: #E2B100;",
-            "    }",
-            "    body {",
-            "      margin: 0;",
-            "      background: linear-gradient(180deg, #FFFFFF 0%, #F4F5F7 100%);",
-            "      color: var(--text);",
-            '      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;',
-            "    }",
-            "    main { max-width: 1440px; margin: 0 auto; padding: 28px 24px 56px; }",
-            "    h1 { margin: 0 0 10px; font-size: 32px; }",
-            "    p.lede { max-width: 920px; color: var(--muted); line-height: 1.5; }",
-            "    .section { margin-top: 32px; }",
-            "    h2 { margin: 0 0 14px; font-size: 22px; }",
-            "    .grid {",
-            "      display: grid;",
-            "      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));",
-            "      gap: 14px;",
-            "    }",
-            "    .specimen {",
-            "      background: var(--page);",
-            "      border: 1px solid var(--border);",
-            "      border-radius: 10px;",
-            "      padding: 10px;",
-            "      text-align: center;",
-            "      box-shadow: 0 10px 24px rgba(17, 24, 39, 0.05);",
-            "    }",
-            "    .specimen img {",
-            "      display: block;",
-            "      width: 100%;",
-            "      height: auto;",
-            "      background: var(--bg);",
-            "      border-radius: 6px;",
-            "    }",
-            "    .caption { margin-top: 8px; font-size: 12px; color: var(--muted); }",
-            "    .competitor-placeholder {",
-            "      margin-top: 12px;",
-            "      padding: 14px 16px;",
-            "      background: var(--placeholder);",
-            "      border: 1px dashed var(--placeholder-border);",
-            "      border-radius: 10px;",
-            "      color: #6B5300;",
-            "      font-style: italic;",
-            "    }",
-            "    code { color: var(--accent); }",
+            "    :root { color-scheme: light; }",
+            (
+                "    body { font-family: system-ui, sans-serif; max-width: 1200px; "
+                "margin: 0 auto; padding: 24px; color: #1f2933; background: #ffffff; }"
+            ),
+            "    h1 { margin: 0 0 8px; padding-bottom: 12px; border-bottom: 2px solid #1f2933; }",
+            "    p.lede { margin: 0 0 20px; color: #5b6670; max-width: 70ch; line-height: 1.5; }",
+            "    nav { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 28px; }",
+            "    nav a { color: #24577a; text-decoration: none; font-weight: 600; }",
+            "    nav a:hover { text-decoration: underline; }",
+            "    .section { margin-bottom: 34px; }",
+            "    .section h2 { margin: 0 0 14px; }",
+            (
+                "    .gallery { display: grid; grid-template-columns: repeat(auto-fill, "
+                "minmax(300px, 1fr)); gap: 20px; }"
+            ),
+            (
+                "    .card { border: 1px solid #e0e0e0; border-radius: 8px; "
+                "overflow: hidden; background: #ffffff; "
+                "box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05); }"
+            ),
+            "    .card img { width: 100%; display: block; background: #ffffff; }",
+            "    .card .label { padding: 8px 12px; font-size: 14px; color: #333333; }",
             "  </style>",
             "</head>",
             "<body>",
-            "  <main>",
-            "    <h1>Dagua Feature Reference Gallery</h1>",
-            '    <p class="lede">',
-            "      Visual catalog of node shapes, arrowheads, routing modes, and render effects.",
+            "  <h1>Dagua Feature Reference</h1>",
             (
-                "      Placeholder competitor directories are ready under "
-                f"<code>competitors/</code> for {html.escape(competitor_names)}."
+                '  <p class="lede">A user-facing reference gallery covering supported '
+                "node shapes, arrowheads, built-in themes, and the main cosmetic "
+                "feature families available in Dagua.</p>"
             ),
-            "    </p>",
+            "  <nav>",
+            nav_links,
+            "  </nav>",
             *section_blocks,
-            "  </main>",
             "</body>",
             "</html>",
         ]
@@ -708,127 +1174,129 @@ def write_gallery_html(
     (output_dir / INDEX_NAME).write_text(html_text, encoding="utf-8")
 
 
-def build_gallery(
-    output_dir: Path,
-    shapes: Sequence[str] = ALL_SHAPES,
-    arrowheads: Sequence[str] = ALL_ARROWHEADS,
-    routing_modes: Sequence[str] = ALL_ROUTING_MODES,
-) -> Mapping[str, Sequence[SpecimenItem]]:
-    """Render the complete feature gallery into the output directory.
+def build_feature_reference(
+    output_dir: Union[str, Path],
+    shapes: Optional[Sequence[str]] = None,
+    arrowheads: Optional[Sequence[str]] = None,
+    theme_names: Optional[Sequence[str]] = None,
+    feature_names: Optional[Sequence[str]] = None,
+) -> GalleryBuildResult:
+    """Build the full documentation gallery on disk.
 
     Parameters
     ----------
-    output_dir : Path
-        Root output directory.
-    shapes : Sequence[str], default=ALL_SHAPES
-        Node shapes to render.
-    arrowheads : Sequence[str], default=ALL_ARROWHEADS
-        Arrowheads to render.
-    routing_modes : Sequence[str], default=ALL_ROUTING_MODES
-        Edge routing modes to render.
+    output_dir : str | Path
+        Destination gallery root.
+    shapes : Sequence[str] | None, default=None
+        Optional subset of node shapes to render.
+    arrowheads : Sequence[str] | None, default=None
+        Optional subset of arrowheads to render.
+    theme_names : Sequence[str] | None, default=None
+        Optional subset of themes to render.
+    feature_names : Sequence[str] | None, default=None
+        Optional subset of feature scenes to render.
 
     Returns
     -------
-    Mapping[str, Sequence[SpecimenItem]]
-        Ordered specimen mapping used to build the HTML index.
+    GalleryBuildResult
+        Output paths and section metadata.
     """
 
-    directories = _ensure_output_dirs(output_dir)
-    specimens: Dict[str, Sequence[SpecimenItem]] = {}
+    output_root = Path(output_dir)
+    directories = _prepare_output_directory(output_root)
+    selected_shapes = _validate_requested_names(shapes, SHAPE_NAMES, "shape")
+    selected_arrowheads = _validate_requested_names(
+        arrowheads,
+        tuple(available_arrowheads()),
+        "arrowhead",
+    )
+    selected_themes = _validate_requested_names(
+        theme_names,
+        tuple(THEME_REGISTRY.keys()),
+        "theme",
+    )
+    selected_features = _validate_requested_names(feature_names, FEATURE_NAMES, "feature")
 
-    shape_items = []
-    for shape in shapes:
-        output_path = directories["shapes"] / f"{_slugify(shape)}.png"
-        print(f"Rendering shape: {shape}", flush=True)
-        render_shape_specimen(shape, output_path)
-        shape_items.append(SpecimenItem(name=shape, path=f"shapes/{output_path.name}"))
-    specimens[f"Node Shapes ({len(shape_items)})"] = shape_items
+    sections: List[GallerySection] = []
 
-    arrow_items = []
-    for name in arrowheads:
-        output_path = directories["arrowheads"] / f"{_slugify(name)}.png"
-        print(f"Rendering arrowhead: {name}", flush=True)
-        render_arrowhead_specimen(name, output_path)
-        arrow_items.append(SpecimenItem(name=name, path=f"arrowheads/{output_path.name}"))
-    specimens[f"Arrowheads ({len(arrow_items)})"] = arrow_items
-
-    routing_items = []
-    for mode in routing_modes:
-        output_path = directories["routing"] / f"{_slugify(mode)}.png"
-        print(f"Rendering routing: {mode}", flush=True)
-        render_routing_specimen(mode, output_path)
-        routing_items.append(SpecimenItem(name=mode, path=f"routing/{output_path.name}"))
-    specimens[f"Edge Routing ({len(routing_items)})"] = routing_items
-
-    effect_items = []
-    gradient_modes = ("linear", "radial")
-    for mode in gradient_modes:
-        output_path = directories["effects"] / f"gradient_{mode}.png"
-        print(f"Rendering gradient: {mode}", flush=True)
-        render_gradient_specimen(mode, output_path)
-        effect_items.append(
-            SpecimenItem(name=f"gradient={mode}", path=f"effects/{output_path.name}")
+    shape_items: List[GalleryItem] = []
+    for shape_name in selected_shapes:
+        target_path = directories["shapes"] / f"{_shape_filename(shape_name)}.png"
+        _render_scene(_build_shape_scene(shape_name), target_path)
+        shape_items.append(
+            GalleryItem(
+                label=_friendly_name(shape_name),
+                relative_path=_relative_path(output_root, target_path),
+            )
         )
+    sections.append(GallerySection(slug="shapes", title="Shapes", items=tuple(shape_items)))
 
-    text_background_path = directories["effects"] / "text_background.png"
-    print("Rendering effect: text_background", flush=True)
-    render_text_background_specimen(text_background_path)
-    effect_items.append(
-        SpecimenItem(name="text_background", path=f"effects/{text_background_path.name}")
+    arrow_items: List[GalleryItem] = []
+    for arrow_name in selected_arrowheads:
+        target_path = directories["arrows"] / f"{arrow_name}.png"
+        _render_scene(_build_arrow_scene(arrow_name), target_path)
+        arrow_items.append(
+            GalleryItem(
+                label=_friendly_name(arrow_name),
+                relative_path=_relative_path(output_root, target_path),
+            )
+        )
+    sections.append(GallerySection(slug="arrows", title="Arrowheads", items=tuple(arrow_items)))
+
+    theme_items: List[GalleryItem] = []
+    for theme_name in selected_themes:
+        target_path = directories["themes"] / f"{theme_name}.png"
+        _render_scene(_build_theme_scene(theme_name), target_path)
+        theme_items.append(
+            GalleryItem(
+                label=_friendly_name(theme_name),
+                relative_path=_relative_path(output_root, target_path),
+            )
+        )
+    sections.append(GallerySection(slug="themes", title="Themes", items=tuple(theme_items)))
+
+    feature_items: List[GalleryItem] = []
+    for feature_name in selected_features:
+        target_path = directories["features"] / f"{feature_name}.png"
+        _render_scene(FEATURE_BUILDERS[feature_name](), target_path)
+        feature_items.append(
+            GalleryItem(
+                label=_friendly_name(feature_name),
+                relative_path=_relative_path(output_root, target_path),
+            )
+        )
+    sections.append(
+        GallerySection(slug="features", title="Feature Examples", items=tuple(feature_items))
     )
 
-    shadow_path = directories["effects"] / "shadow.png"
-    print("Rendering effect: shadow", flush=True)
-    render_shadow_specimen(shadow_path)
-    effect_items.append(SpecimenItem(name="shadow", path=f"effects/{shadow_path.name}"))
-
-    specimens["Visual Effects"] = effect_items
-    write_gallery_html(output_dir, specimens)
-    return specimens
-
-
-def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    """Parse CLI arguments for the gallery builder.
-
-    Parameters
-    ----------
-    argv : Sequence[str], optional
-        Explicit argument vector.
-
-    Returns
-    -------
-    argparse.Namespace
-        Parsed arguments.
-    """
-
-    parser = argparse.ArgumentParser(description="Build feature reference gallery")
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=f"eval_output/{OUTPUT_DIRNAME}",
-        help="Directory to receive the rendered gallery artifacts.",
+    _write_index_html(output_root, sections)
+    return GalleryBuildResult(
+        output_dir=str(output_root),
+        index_path=str(output_root / INDEX_NAME),
+        sections=tuple(sections),
     )
-    return parser.parse_args(argv)
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Build the feature reference gallery.
-
-    Parameters
-    ----------
-    argv : Sequence[str], optional
-        Explicit argument vector.
+def main() -> int:
+    """Parse CLI arguments and build the gallery.
 
     Returns
     -------
     int
-        Process exit status.
+        Process exit code.
     """
 
-    args = _parse_args(argv)
-    output_dir = Path(args.output_dir)
-    build_gallery(output_dir=output_dir)
-    print(f"Gallery written to {output_dir / INDEX_NAME}", flush=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", default="docs/gallery")
+    args = parser.parse_args()
+
+    result = build_feature_reference(output_dir=args.output_dir)
+    section_counts = {section.slug: len(section.items) for section in result.sections}
+    print(f"Shapes: {section_counts['shapes']}")
+    print(f"Arrowheads: {section_counts['arrows']}")
+    print(f"Themes: {section_counts['themes']}")
+    print(f"Features: {section_counts['features']}")
+    print(result.index_path)
     return 0
 
 

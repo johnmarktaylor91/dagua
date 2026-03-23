@@ -47,6 +47,7 @@ def layout_sugiyama(
     seed: int = 42,
     barycenter_passes: int = 24,
     trace_every: int = 0,
+    edge_weights: Optional[torch.Tensor] = None,
     return_edge_routes: bool = False,
 ) -> Union[
     torch.Tensor,
@@ -79,6 +80,9 @@ def layout_sugiyama(
     trace_every : int
         If greater than zero, record position snapshots during barycenter
         sweeps after every ``trace_every`` full passes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``. These weight each neighbor's
+        contribution during the barycenter crossing-minimization sweeps.
     return_edge_routes : bool, default=False
         If ``True``, also return a routed polyline for each input edge. Long
         edges are expanded through dummy nodes during ordering and coordinate
@@ -99,7 +103,12 @@ def layout_sugiyama(
         If ``edge_index`` or ``node_sizes`` have invalid shapes, or if
         ``num_nodes`` or ``trace_every`` is negative.
     """
-    _validate_layout_inputs(edge_index=edge_index, num_nodes=num_nodes, node_sizes=node_sizes)
+    _validate_layout_inputs(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        edge_weights=edge_weights,
+    )
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative")
     if layer_sep is not None:
@@ -120,20 +129,28 @@ def layout_sugiyama(
         layer_assignments=layer_assignments,
         num_nodes=num_nodes,
     )
-    expanded_graph = _expand_long_edges_with_dummy_nodes(
+    expanded_graph, expanded_edge_weights = _expand_long_edges_with_dummy_nodes(
         edge_index=acyclic_edges,
         layer_assignments=layer_assignments,
         node_sizes=resolved_sizes,
         num_original_nodes=num_nodes,
+        edge_weights=edge_weights,
     )
     parents, children = _build_neighbor_lists(
         edge_index=expanded_graph.edge_index,
         num_nodes=expanded_graph.num_nodes,
     )
+    parent_weights, child_weights = _build_neighbor_weight_maps(
+        edge_index=expanded_graph.edge_index,
+        num_nodes=expanded_graph.num_nodes,
+        edge_weights=expanded_edge_weights,
+    )
     ordered_layers, traces = _barycenter_ordering(
         layers=expanded_graph.layers,
         parents=parents,
         children=children,
+        parent_weights=parent_weights,
+        child_weights=child_weights,
         num_nodes=expanded_graph.num_nodes,
         num_passes=barycenter_passes,
         seed=seed,
@@ -176,6 +193,7 @@ def _validate_layout_inputs(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor],
+    edge_weights: Optional[torch.Tensor],
 ) -> None:
     """Validate the public Sugiyama layout inputs.
 
@@ -187,6 +205,8 @@ def _validate_layout_inputs(
         Number of nodes in the graph.
     node_sizes : torch.Tensor, optional
         Optional node size tensor expected to have shape ``[N, 2]``.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor expected to have shape ``[E]``.
 
     Raises
     ------
@@ -200,6 +220,11 @@ def _validate_layout_inputs(
     if node_sizes is not None:
         if node_sizes.ndim != 2 or node_sizes.shape != (num_nodes, 2):
             raise ValueError("node_sizes must have shape [N, 2]")
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} does not match "
+            f"edge count {edge_index.shape[1]}"
+        )
 
 
 def _resolve_node_sizes(node_sizes: Optional[torch.Tensor], num_nodes: int) -> torch.Tensor:
@@ -393,7 +418,8 @@ def _expand_long_edges_with_dummy_nodes(
     layer_assignments: torch.Tensor,
     node_sizes: torch.Tensor,
     num_original_nodes: int,
-) -> _ExpandedLayeredGraph:
+    edge_weights: Optional[torch.Tensor] = None,
+) -> "_ExpandedLayeredGraph":
     """Insert dummy nodes for edges spanning more than one layer.
 
     Parameters
@@ -419,14 +445,18 @@ def _expand_long_edges_with_dummy_nodes(
     dummy_sizes: list[list[float]] = []
     expanded_sources: list[int] = []
     expanded_targets: list[int] = []
+    expanded_weight_values: list[float] = []
     edge_paths: list[list[int]] = []
     next_dummy_index = num_original_nodes
 
-    for source, target in zip(edge_index[0].tolist(), edge_index[1].tolist()):
+    for edge_idx, (source, target) in enumerate(
+        zip(edge_index[0].tolist(), edge_index[1].tolist())
+    ):
         source_layer = int(layer_assignments[source].item())
         target_layer = int(layer_assignments[target].item())
         path = [source]
         previous = source
+        orig_weight = float(edge_weights[edge_idx].item()) if edge_weights is not None else 1.0
 
         for layer_index in range(source_layer + 1, target_layer):
             dummy_index = next_dummy_index
@@ -435,11 +465,13 @@ def _expand_long_edges_with_dummy_nodes(
             dummy_sizes.append([0.0, 0.0])
             expanded_sources.append(previous)
             expanded_targets.append(dummy_index)
+            expanded_weight_values.append(orig_weight)
             path.append(dummy_index)
             previous = dummy_index
 
         expanded_sources.append(previous)
         expanded_targets.append(target)
+        expanded_weight_values.append(orig_weight)
         path.append(target)
         edge_paths.append(path)
 
@@ -458,13 +490,16 @@ def _expand_long_edges_with_dummy_nodes(
         [expanded_sources, expanded_targets],
         dtype=torch.long,
     )
+    expanded_edge_weights: Optional[torch.Tensor] = None
+    if edge_weights is not None:
+        expanded_edge_weights = torch.tensor(expanded_weight_values, dtype=torch.float32)
     return _ExpandedLayeredGraph(
         edge_index=expanded_edge_index,
         layers=expanded_layers,
         node_sizes=expanded_node_sizes,
         edge_paths=edge_paths,
         num_nodes=next_dummy_index,
-    )
+    ), expanded_edge_weights
 
 
 def _build_edge_routes(
@@ -528,10 +563,51 @@ def _build_neighbor_lists(
     return parents, children
 
 
+def _build_neighbor_weight_maps(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor],
+) -> Tuple[List[Dict[int, float]], List[Dict[int, float]]]:
+    """Build parent and child edge-weight maps.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    tuple
+        ``(parent_weights, child_weights)`` where each entry maps a neighbor
+        node id to its accumulated edge weight.
+    """
+    parent_weights: List[Dict[int, float]] = [dict() for _ in range(num_nodes)]
+    child_weights: List[Dict[int, float]] = [dict() for _ in range(num_nodes)]
+    if edge_index.numel() == 0:
+        return parent_weights, child_weights
+
+    weights_cpu = (
+        torch.ones((edge_index.shape[1],), dtype=torch.float32)
+        if edge_weights is None
+        else edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    for edge_id, (src, dst) in enumerate(zip(edge_index[0].tolist(), edge_index[1].tolist())):
+        weight = float(weights_cpu[edge_id].item())
+        parent_weights[dst][src] = parent_weights[dst].get(src, 0.0) + weight
+        child_weights[src][dst] = child_weights[src].get(dst, 0.0) + weight
+    return parent_weights, child_weights
+
+
 def _barycenter_ordering(
     layers: List[List[int]],
     parents: List[List[int]],
     children: List[List[int]],
+    parent_weights: List[Dict[int, float]],
+    child_weights: List[Dict[int, float]],
     num_nodes: int,
     num_passes: int,
     seed: int,
@@ -551,6 +627,10 @@ def _barycenter_ordering(
         Parent adjacency for every node.
     children : list of list of int
         Child adjacency for every node.
+    parent_weights : list of dict
+        Parent edge weights for every node.
+    child_weights : list of dict
+        Child edge weights for every node.
     num_nodes : int
         Number of nodes.
     num_passes : int
@@ -587,6 +667,7 @@ def _barycenter_ordering(
             barycenters = _neighbor_barycenters(
                 nodes=ordered_layers[layer_idx],
                 neighbors_by_node=parents,
+                neighbor_weights_by_node=parent_weights,
                 order_index=order_index,
             )
             ordered_layers[layer_idx].sort(key=lambda node: barycenters[node])
@@ -596,6 +677,7 @@ def _barycenter_ordering(
             barycenters = _neighbor_barycenters(
                 nodes=ordered_layers[layer_idx],
                 neighbors_by_node=children,
+                neighbor_weights_by_node=child_weights,
                 order_index=order_index,
             )
             ordered_layers[layer_idx].sort(key=lambda node: barycenters[node])
@@ -621,6 +703,7 @@ def _barycenter_ordering(
 def _neighbor_barycenters(
     nodes: Sequence[int],
     neighbors_by_node: Sequence[Sequence[int]],
+    neighbor_weights_by_node: Sequence[Dict[int, float]],
     order_index: Dict[int, float],
 ) -> Dict[int, float]:
     """Compute barycenter values from already ordered neighboring layers.
@@ -631,6 +714,8 @@ def _neighbor_barycenters(
         Nodes in the layer currently being sorted.
     neighbors_by_node : sequence of sequence of int
         Parent or child adjacency indexed by node.
+    neighbor_weights_by_node : sequence of dict
+        Parent or child edge-weight maps indexed by node.
     order_index : dict
         Current within-layer order position for every node.
 
@@ -643,7 +728,16 @@ def _neighbor_barycenters(
     for node in nodes:
         neighbor_positions = [order_index[neighbor] for neighbor in neighbors_by_node[node]]
         if neighbor_positions:
-            barycenters[node] = sum(neighbor_positions) / float(len(neighbor_positions))
+            weighted_sum = 0.0
+            total_weight = 0.0
+            for neighbor in neighbors_by_node[node]:
+                weight = neighbor_weights_by_node[node].get(neighbor, 1.0)
+                weighted_sum += weight * order_index[neighbor]
+                total_weight += weight
+            if total_weight > 0.0:
+                barycenters[node] = weighted_sum / total_weight
+            else:
+                barycenters[node] = sum(neighbor_positions) / float(len(neighbor_positions))
         else:
             barycenters[node] = order_index[node]
     return barycenters

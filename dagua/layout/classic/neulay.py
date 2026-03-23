@@ -63,6 +63,7 @@ def _validate_inputs(
     lr: float,
     radius: float,
     magnitude: float,
+    edge_weights: Optional[torch.Tensor],
 ) -> None:
     """Validate the public NeuLay inputs.
 
@@ -84,6 +85,8 @@ def _validate_inputs(
         Gaussian repulsion radius.
     magnitude : float
         Gaussian repulsion magnitude.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
@@ -106,6 +109,11 @@ def _validate_inputs(
         raise ValueError("magnitude must be non-negative.")
     if edge_index.ndim != 2 or edge_index.shape[0] != 2:
         raise ValueError("edge_index must have shape [2, E].")
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} does not match "
+            f"edge count {edge_index.shape[1]}"
+        )
     if edge_index.numel() == 0:
         return
 
@@ -399,7 +407,7 @@ class _ResGCN(nn.Module):
         torch.Tensor
             Predicted coordinates with shape ``[N, dim]``.
         """
-        outputs = [self.latent]
+        outputs: list[torch.Tensor] = [self.latent]
         features = self.latent
         for layer in self.gcn_layers:
             features = layer(features, edge_index)
@@ -474,6 +482,7 @@ def layout_neulay(
     lr: float = 0.1,
     radius: float = 0.4,
     magnitude: float = 10.0,
+    edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with the published NeuLay objective.
 
@@ -501,6 +510,10 @@ def layout_neulay(
         Gaussian repulsion radius.
     magnitude : float, default=10.0
         Gaussian repulsion magnitude.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``. Accepted for interface
+        consistency; the current NeuLay port does not yet thread them into the
+        GCN message-passing or direct force phases.
 
     Returns
     -------
@@ -516,6 +529,7 @@ def layout_neulay(
         lr=lr,
         radius=radius,
         magnitude=magnitude,
+        edge_weights=edge_weights,
     )
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     if num_nodes == 0:
@@ -525,6 +539,7 @@ def layout_neulay(
 
     _set_seed(seed)
     cleaned_edge_index = _clean_edge_index(edge_index=edge_index, device=device)
+    # TODO: integrate edge_weights into GCN message passing and the direct loss.
     if cleaned_edge_index.numel() == 0:
         return _center_positions(_initial_positions(num_nodes=num_nodes, dim=dim, device=device))
 
