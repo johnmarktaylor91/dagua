@@ -20602,6 +20602,95 @@ FIVETHIRTYEIGHT_THEME = Theme(
     graph_style=GraphStyle(background_color="#F0F0F0"),
 )
 
+# Linear algebra -- 3Blue1Brown style: dark background, grid feel,
+# bold colored vector arrows, coordinate dot nodes, i-hat/j-hat energy
+LINEAR_ALGEBRA_THEME = Theme(
+    name="linear_algebra",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#FFFF00",
+            stroke="#E0E000",
+            stroke_width=1.5,
+            font_family="Courier New",
+            font_size=7.5,
+            font_color="#FFFF00",
+            font_weight="bold",
+            padding=(3.0, 3.0),
+            min_width=14.0,
+            min_height=14.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#FF4040",
+            stroke="#D02020",
+            stroke_width=2.0,
+            font_family="Courier New",
+            font_size=8.0,
+            font_color="#FF8080",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=18.0,
+            min_height=18.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#58C4DD",
+            stroke="#40A8C0",
+            stroke_width=1.5,
+            font_family="Courier New",
+            font_size=7.5,
+            font_color="#A0E0F0",
+            font_weight="bold",
+            padding=(3.0, 3.0),
+            min_width=14.0,
+            min_height=14.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#83C167",
+            width=2.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#83C167",
+            arrow_length=6.0,
+            arrow_width=4.0,
+            routing="straight",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#FF8080",
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#FF8080",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="straight",
+            curvature=0.0,
+            opacity=0.6,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#1A1A2E",
+        stroke="#2A2A48",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=8.0,
+        font_color="#58C4DD",
+        font_weight="bold",
+        padding=8.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#1A1A2E"),
+)
+
+THEME_REGISTRY["linear_algebra"] = LINEAR_ALGEBRA_THEME
+
 # Beacons -- hilltop signal fires connected by beams of light
 # across dark landscape, Gondor-calls-for-aid energy
 BEACONS_THEME = Theme(
