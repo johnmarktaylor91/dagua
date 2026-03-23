@@ -45,6 +45,7 @@ from dagua.render.borders import (
 from dagua.render.crossings import EdgeCrossing, detect_crossings
 from dagua.render.edges import CubicBezier as RenderBezier
 from dagua.render.edges import DaguaEdge, DaguaEdgeCollection
+from dagua.render.edges.collection import MIN_TAPER_WIDTH
 from dagua.render.edges.dashes import dash_curve, parse_dash_pattern
 from dagua.render.edges.geometry import adaptive_subdivide, polyline_from_samples
 from dagua.render.edges.ribbon import polyline_ribbon_path
@@ -4443,8 +4444,7 @@ def _draw_direct_edge_body(ax: Any, curve: BezierCurve, style: Any) -> List[Any]
         full_params = _polyline_distance_fractions(full_points)
 
         if getattr(style, "taper", False):
-            width_start = _edge_width_data_units(ax, float(style.taper_width_start))
-            width_end = _edge_width_data_units(ax, float(style.taper_width_end))
+            width_start, width_end = _resolved_taper_widths(ax, style)
             upper, lower = _tapered_edge_outline(full_points, width_start, width_end)
             start_color, end_color = _edge_gradient_colors(style)
 
@@ -4524,8 +4524,7 @@ def _draw_direct_edge_body(ax: Any, curve: BezierCurve, style: Any) -> List[Any]
 
     if getattr(style, "taper", False):
         points = _sample_curve_points(curve)
-        width_start = _edge_width_data_units(ax, float(style.taper_width_start))
-        width_end = _edge_width_data_units(ax, float(style.taper_width_end))
+        width_start, width_end = _resolved_taper_widths(ax, style)
         upper, lower = _tapered_edge_outline(points, width_start, width_end)
         start_color, end_color = _edge_gradient_colors(style)
 
@@ -5057,11 +5056,18 @@ def _build_custom_edge_collection(
             is_self_loop=is_self_loop,
             scale_with_edge_width=True,
         )
+        taper_width_start: Optional[float] = None
+        taper_width_end: Optional[float] = None
+        if getattr(style, "taper", False):
+            taper_width_start, taper_width_end = _resolved_taper_widths(ax, style)
         label = graph.edge_labels[e_idx] if e_idx < len(graph.edge_labels) else None
         edges.append(
             DaguaEdge(
                 curve=_curve_to_render_bezier(curve),
                 width=_edge_width_data_units(ax, float(style.width)),
+                tapered=bool(getattr(style, "taper", False)),
+                taper_width_start=taper_width_start,
+                taper_width_end=taper_width_end,
                 color=str(style.color or "#8C8C8C"),
                 alpha=float(style.opacity if style.opacity is not None else 0.7),
                 linestyle=style.style,
@@ -5118,9 +5124,29 @@ def _label_reference_y(y: float, h: float, shape: str) -> float:
     """
     if shape == "triangle":
         # Upright triangles read visually lower than their bounding-box center,
-        # so shift labels toward the centroid to match Graphviz.
-        return y - h / 6
+        # so bias the anchor slightly above the geometric centroid.
+        return y - h / 8
     return y
+
+
+def _resolved_taper_widths(ax: Any, style: Any) -> Tuple[float, float]:
+    """Resolve tapered edge widths in data units with a visible end-width floor.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes used for point-to-data conversion.
+    style : Any
+        Edge style object providing taper widths in display points.
+
+    Returns
+    -------
+    tuple[float, float]
+        Source-end and target-end ribbon widths in data units.
+    """
+    width_start = _edge_width_data_units(ax, float(style.taper_width_start))
+    width_end = _edge_width_data_units(ax, float(style.taper_width_end))
+    return width_start, max(width_end, MIN_TAPER_WIDTH)
 
 
 def _draw_node_labels(
@@ -5182,6 +5208,8 @@ def _draw_node_labels(
 
         pad_x = float(style.padding[0]) * display_scale
         pad_y = float(style.padding[1]) * display_scale
+        if style.text_valign in {"top", "bottom"}:
+            pad_y = max(pad_y, 2.0 * display_scale)
         max_width: Optional[float] = None
         text_max_width: Optional[float] = None
         if style.text_max_width is not None:
@@ -5226,7 +5254,7 @@ def _draw_node_labels(
             text_bg_alpha = 0.75
         elif text_bg is None and style.gradient != "none":
             text_bg = "#FFFFFF"
-            text_bg_alpha = 0.85
+            text_bg_alpha = 0.90
 
         specs.append(
             DaguaText(
@@ -5410,7 +5438,7 @@ def _draw_edge_marker(
         node_width,
         node_height,
         is_self_loop=is_self_loop,
-        scale_with_edge_width=False,
+        scale_with_edge_width=True,
     )
     # Graphviz-style calibration expects arrowheads to read slightly heavier
     # than the edge stroke, so keep marker fill/outline fully opaque.
