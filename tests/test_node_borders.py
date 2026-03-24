@@ -193,7 +193,18 @@ def test_dashed_cylinder_cap_has_shorter_segments() -> None:
 def test_inset_shape_path_handles_non_polygon_shapes() -> None:
     """Non-polygon shapes should produce an inset path without crashing."""
 
-    for shape in ("cloud", "stadium", "document", "tab", "note", "box3d"):
+    for shape in (
+        "cloud",
+        "stadium",
+        "semicircle",
+        "semicircle_down",
+        "semicircle_left",
+        "semicircle_right",
+        "document",
+        "tab",
+        "note",
+        "box3d",
+    ):
         spec = ShapeSpec(
             center_x=0.0,
             center_y=0.0,
@@ -207,6 +218,41 @@ def test_inset_shape_path_handles_non_polygon_shapes() -> None:
 
         assert path is not None
         assert len(path.vertices) > 0
+
+
+@pytest.mark.parametrize(
+    ("shape", "flat_points"),
+    [
+        ("semicircle", np.array([[-20.0, -15.0], [20.0, -15.0]], dtype=np.float64)),
+        ("semicircle_down", np.array([[-20.0, 15.0], [20.0, 15.0]], dtype=np.float64)),
+        ("semicircle_left", np.array([[20.0, 15.0], [20.0, -15.0]], dtype=np.float64)),
+        ("semicircle_right", np.array([[-20.0, 15.0], [-20.0, -15.0]], dtype=np.float64)),
+    ],
+)
+def test_semicircle_paths_place_their_flat_edge_on_the_requested_side(
+    shape: str,
+    flat_points: np.ndarray,
+) -> None:
+    """Semicircle variants should orient their flat edge on the requested side."""
+
+    path = build_shape_path(ShapeSpec(0.0, 0.0, 40.0, 30.0, shape))
+    observed = np.asarray(path.vertices[:2], dtype=np.float64)
+
+    assert observed == pytest.approx(flat_points)
+
+
+def test_semicircle_path_uses_aspect_ratio_to_shallow_the_dome() -> None:
+    """Larger semicircle aspect ratios should flatten the dome within the bounds."""
+
+    default_path = build_shape_path(
+        ShapeSpec(0.0, 0.0, 80.0, 60.0, "semicircle", aspect_ratio=None)
+    )
+    shallow_path = build_shape_path(ShapeSpec(0.0, 0.0, 80.0, 60.0, "semicircle", aspect_ratio=2.0))
+
+    default_top = float(np.max(default_path.vertices[:, 1]))
+    shallow_top = float(np.max(shallow_path.vertices[:, 1]))
+
+    assert shallow_top < default_top
 
 
 def test_scaled_node_style_converts_corner_radius_and_shadow_offset() -> None:
