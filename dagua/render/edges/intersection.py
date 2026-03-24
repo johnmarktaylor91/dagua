@@ -197,7 +197,7 @@ def _polygon_vertices(shape: str, half_size: Point) -> np.ndarray:
         )
     if shape == "star":
         # 5-pointed star: alternating outer and inner vertices.
-        inner_ratio = 0.32
+        inner_ratio = 0.25
         verts = []
         for i in range(10):
             angle = math.pi / 2 + i * math.pi / 5

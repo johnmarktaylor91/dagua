@@ -138,8 +138,8 @@ def star_vertices(center_x: float, center_y: float, width: float, height: float)
     points: List[List[float]] = []
     outer_rx = width / 2.0
     outer_ry = height / 2.0
-    inner_rx = outer_rx * 0.32
-    inner_ry = outer_ry * 0.32
+    inner_rx = outer_rx * 0.25
+    inner_ry = outer_ry * 0.25
     for index in range(10):
         angle = np.pi / 2.0 + index * np.pi / 5.0
         radius_x = outer_rx if index % 2 == 0 else inner_rx
@@ -663,8 +663,8 @@ def tab_path(spec: ShapeSpec) -> Path:
     right = spec.center_x + half_width
     bottom = spec.center_y - half_height
     top = spec.center_y + half_height
-    tab_width = spec.width * 0.30
-    tab_height = spec.height * 0.20
+    tab_width = spec.width * 0.38
+    tab_height = spec.height * 0.28
     vertices = np.array(
         [
             [left, bottom],
