@@ -125,7 +125,10 @@ def test_expand_node_ellipse_aspect_ratio_capped() -> None:
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize("shape", ["ellipse", "circle", "double_circle"])
+@pytest.mark.parametrize(
+    "shape",
+    ["ellipse", "circle", "double_circle", "semicircle", "semicircle_left"],
+)
 def test_expand_node_curved_shapes_contain_padded_text(shape: str) -> None:
     """expand_node should enlarge curved shapes to fit the full padded label box."""
     from dagua.utils import compute_node_size, measure_text

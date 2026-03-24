@@ -115,6 +115,34 @@ _STYLE_REPR_PRIORITY_FIELDS: Dict[str, List[str]] = {
     "GraphStyle": ["background_color", "margin"],
 }
 
+NODE_SHAPE_NAMES: Tuple[str, ...] = (
+    "rect",
+    "roundrect",
+    "ellipse",
+    "diamond",
+    "circle",
+    "triangle",
+    "hexagon",
+    "parallelogram",
+    "pentagon",
+    "octagon",
+    "star",
+    "cylinder",
+    "trapezoid",
+    "double_circle",
+    "cloud",
+    "stadium",
+    "semicircle",
+    "semicircle_up",
+    "semicircle_down",
+    "semicircle_left",
+    "semicircle_right",
+    "tab",
+    "note",
+    "document",
+    "box3d",
+)
+
 
 # ─── Color Utilities ────────────────────────────────────────────────────────
 
@@ -261,7 +289,9 @@ class NodeStyle:
     ``"diamond"``, ``"circle"``, ``"triangle"``, ``"hexagon"``,
     ``"parallelogram"``, ``"pentagon"``, ``"octagon"``, ``"star"``,
     ``"cylinder"``, ``"trapezoid"``, ``"double_circle"``, ``"cloud"``,
-    ``"stadium"``, ``"tab"``, ``"note"``, ``"document"``, and ``"box3d"``.
+    ``"stadium"``, ``"semicircle"``, ``"semicircle_up"``,
+    ``"semicircle_down"``, ``"semicircle_left"``, ``"semicircle_right"``,
+    ``"tab"``, ``"note"``, ``"document"``, and ``"box3d"``.
 
     The ``_set_fields`` attribute tracks which fields were explicitly modified
     after construction, allowing the style cascade to distinguish between
