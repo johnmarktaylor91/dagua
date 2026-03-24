@@ -15,7 +15,11 @@ from dagua.render.edges.collection import (
     MIN_TAPER_WIDTH,
     DaguaEdge,
     DaguaEdgeCollection,
+    _head_body_direction,
+    _redistribute_face_angles,
     _stroked_head_linewidth,
+    _terminal_angle,
+    _terminal_face,
     _trimmed_body_curve,
     choose_rendering_tier,
 )
@@ -37,6 +41,24 @@ from dagua.styles import EdgeStyle
 def _curve() -> CubicBezier:
     """Return a representative curved cubic bezier."""
     return CubicBezier.from_points((0.0, 0.0), (20.0, 25.0), (40.0, -25.0), (60.0, 0.0))
+
+
+def _minimum_angular_gap(angles: list[float]) -> float:
+    """Return the tightest circular gap between sorted angles.
+
+    Parameters
+    ----------
+    angles : list[float]
+        Angles in degrees on ``[0, 360)``.
+
+    Returns
+    -------
+    float
+        Smallest wrapped gap in degrees.
+    """
+    wrapped = np.sort(np.mod(np.asarray(angles, dtype=np.float64), 360.0))
+    extended = np.concatenate([wrapped, wrapped[:1] + 360.0])
+    return float(np.min(np.diff(extended)))
 
 
 def test_adaptive_subdivision_refines_curved_edges() -> None:
@@ -205,6 +227,40 @@ def test_thick_dash_patterns_expand_gaps_for_readability() -> None:
     assert dashdot_gap == pytest.approx(18.0)
     assert dot_on < 0.5
     assert dot_gap == pytest.approx(18.0)
+
+
+@pytest.mark.parametrize(
+    ("angle_degrees", "expected_face"),
+    [
+        (0.0, "east"),
+        (45.0, "northeast"),
+        (90.0, "north"),
+        (135.0, "northwest"),
+        (180.0, "west"),
+        (225.0, "southwest"),
+        (270.0, "south"),
+        (315.0, "southeast"),
+    ],
+)
+def test_terminal_face_returns_8_directions(angle_degrees: float, expected_face: str) -> None:
+    """Terminal faces should resolve to all eight directional sectors."""
+    angle_radians = np.deg2rad(angle_degrees)
+    direction = np.array([np.cos(angle_radians), np.sin(angle_radians)], dtype=np.float64)
+
+    assert _terminal_face(direction) == expected_face
+
+
+def test_redistribute_face_angles_spreads_evenly() -> None:
+    """Crowded faces should spread members across the interior of one sector."""
+    redistributed = _redistribute_face_angles(
+        [(0, 170.0), (1, 175.0), (2, 180.0), (3, 185.0), (4, 190.0)],
+        face_center_angle=180.0,
+    )
+
+    assert [edge_index for edge_index, _ in redistributed] == [0, 1, 2, 3, 4]
+    assert [angle for _, angle in redistributed] == pytest.approx(
+        [160.0, 170.0, 180.0, 190.0, 200.0]
+    )
 
 
 @pytest.mark.parametrize("spec", ["normal", "dot", "diamond", "vee", "crow", "box", "simple"])
@@ -650,6 +706,36 @@ def test_collection_simplifies_very_dense_terminal_heads() -> None:
     collection = DaguaEdgeCollection(edges)
 
     assert all(edge.arrowhead in {"tee", "none"} for edge in collection.edges)
+
+
+def test_hub_node_arrowheads_dont_overlap() -> None:
+    """Dense hub heads should redistribute their terminal approach angles."""
+    tip = np.array([0.0, 0.0], dtype=np.float64)
+    base_angles = np.linspace(172.0, 188.0, num=8)
+    edges = []
+    for angle_degrees in base_angles:
+        angle_radians = np.deg2rad(angle_degrees)
+        direction = np.array([np.cos(angle_radians), np.sin(angle_radians)], dtype=np.float64)
+        edges.append(
+            DaguaEdge(
+                curve=CubicBezier.from_points(
+                    tip + (direction * 36.0),
+                    tip + (direction * 24.0),
+                    tip + (direction * 8.0),
+                    tip,
+                ),
+                width=2.0,
+                arrowhead="normal",
+                target_node=1,
+            )
+        )
+
+    collection = DaguaEdgeCollection(edges)
+    redistributed_angles = [
+        _terminal_angle(_head_body_direction(edge.curve)) for edge in collection.edges
+    ]
+
+    assert _minimum_angular_gap(redistributed_angles) >= (40.0 / 7.0) - 1e-6
 
 
 def test_custom_arrow_overrides_still_respect_thick_edge_head_floors() -> None:
