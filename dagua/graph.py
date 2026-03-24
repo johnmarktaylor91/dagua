@@ -1012,6 +1012,16 @@ class DaguaGraph:
                     label_format=style.label_format,
                     text_rotation=style.text_rotation,
                 )
+            # Enforce aspect ratio: grow the smaller dimension to match.
+            # aspect_ratio = width / height, so height = width / ratio.
+            if style.aspect_ratio is not None and style.aspect_ratio > 0:
+                current_ratio = w / h if h > 0 else 1.0
+                if current_ratio < style.aspect_ratio:
+                    # Too tall -- widen to match
+                    w = h * style.aspect_ratio
+                else:
+                    # Too wide -- heighten to match
+                    h = w / style.aspect_ratio
             sizes.append([w, h])
             font_sizes.append(efs)
 
