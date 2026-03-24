@@ -316,6 +316,9 @@ class NodeStyle:
     shadow_blur: float = 0.0
     min_width: Optional[float] = None  # Layout-affecting: floor on node width
     min_height: Optional[float] = None  # Layout-affecting: floor on node height
+    aspect_ratio: Optional[float] = (
+        None  # Layout-affecting: width/height ratio, enforced after text measurement
+    )
     # New fields (Part 3) — overflow policy
     overflow_policy: str = "shrink_text"  # "shrink_text", "expand_node", "overflow"
     min_font_size: float = 5.0  # Floor for shrink_text policy
