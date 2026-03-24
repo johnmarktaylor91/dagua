@@ -47,6 +47,8 @@ THICK_DASH_CONNECTOR_WIDTH_RATIO = 0.22
 THICK_DASH_CONNECTOR_ALPHA = 0.24
 THICK_DASH_SEGMENT_WIDTH_RATIO = 0.9
 THICK_DOTTED_SEGMENT_WIDTH_RATIO = 0.74
+# Prevent tapered ribbons from collapsing to an effectively zero-width target
+# that disappears under rasterization or produces degenerate arrow joins.
 MIN_TAPER_WIDTH = 0.3
 ZERO_LENGTH_LOOP_SCALE = 1.75
 ZERO_LENGTH_LOOP_FLOOR = 6.0
@@ -69,6 +71,8 @@ _TERMINAL_FACES: Tuple[str, ...] = (
     "south",
     "southeast",
 )
+# Canonical face-center angles for the 8-way terminal bucketing used when
+# redistributing crowded arrow approaches around a node boundary.
 _FACE_CENTERS: Dict[str, float] = {
     "east": 0.0,
     "northeast": 45.0,
@@ -142,9 +146,11 @@ class DaguaEdge:
     tapered : bool, default=False
         Whether to render the body as a variable-width ribbon.
     taper_width_start : float | None, default=None
-        Source-end body width in data units for tapered ribbons.
+        Source-end body width in data units for tapered ribbons. When omitted,
+        the renderer falls back to the resolved uniform body width.
     taper_width_end : float | None, default=None
-        Target-end body width in data units for tapered ribbons.
+        Target-end body width in data units for tapered ribbons. The resolved
+        width is clamped by :data:`MIN_TAPER_WIDTH` so the tip remains visible.
     color : str, default="#8C8C8C"
         Body fill color.
     alpha : float, default=0.7
@@ -277,6 +283,12 @@ class DaguaEdge:
         -------
         float
             Source-end ribbon width in data units.
+
+        Notes
+        -----
+        Start widths use :data:`MIN_RENDER_WIDTH` rather than
+        :data:`MIN_TAPER_WIDTH` because the wide end should still follow the
+        renderer's general body-width floor, not the narrow tip floor.
         """
         if self.taper_width_start is None:
             return _render_width(self.width)
@@ -289,6 +301,11 @@ class DaguaEdge:
         -------
         float
             Target-end ribbon width in data units with a visibility floor.
+
+        Notes
+        -----
+        The target end uses :data:`MIN_TAPER_WIDTH` so a taper can sharpen to a
+        fine tip without degenerating into zero-area geometry at export time.
         """
         if self.taper_width_end is None:
             return max(_render_width(self.width), MIN_TAPER_WIDTH)
@@ -712,7 +729,7 @@ def _head_body_direction(curve: CubicBezier) -> np.ndarray:
 
 
 def _terminal_face(direction: np.ndarray) -> str:
-    """Bucket a terminal tangent into a coarse node-face label.
+    """Bucket a terminal tangent into an 8-way node-face label.
 
     Parameters
     ----------
@@ -723,6 +740,12 @@ def _terminal_face(direction: np.ndarray) -> str:
     -------
     str
         One of the eight cardinal or intercardinal face labels.
+
+    Notes
+    -----
+    The renderer previously used 4-way bucketing. The 8-way split gives dense
+    terminal groups more angular room before redistribution, which reduces
+    arrowhead stacking on diagonally approached nodes.
     """
     angle = _terminal_angle(direction)
     sector = int((angle + (TERMINAL_FACE_SECTOR_DEGREES * 0.5)) / TERMINAL_FACE_SECTOR_DEGREES) % 8
@@ -781,6 +804,11 @@ def _face_center_angle(face: str) -> float:
     -------
     float
         Face-center angle in degrees on ``[0, 360)``.
+
+    Notes
+    -----
+    These centers correspond to :data:`_FACE_CENTERS`, which anchors each
+    terminal face to the midpoint of its 45-degree sector.
     """
     return _FACE_CENTERS.get(face, 0.0)
 
@@ -802,6 +830,13 @@ def _redistribute_face_angles(
     -------
     list[tuple[int, float]]
         Original edge indexes paired with redistributed angles.
+
+    Notes
+    -----
+    Redistribution only activates once a face exceeds
+    :data:`TERMINAL_FACE_REDISTRIBUTION_THRESHOLD`. The output angles stay
+    inside a narrower span than the full 45-degree bucket so terminals retain a
+    visual association with their original face.
     """
     if len(members) <= TERMINAL_FACE_REDISTRIBUTION_THRESHOLD:
         return members
@@ -839,6 +874,12 @@ def _adjust_terminal_for_angle(
     -------
     DaguaEdge
         Edge with an updated terminal control point.
+
+    Notes
+    -----
+    Only the terminal-side control point is updated. The opposite half of the
+    cubic stays intact so lane spacing and existing bend structure are
+    preserved while the head or tail rotates into a less crowded approach.
     """
     angle_radians = float(np.deg2rad(new_angle_degrees))
     direction = np.array([np.cos(angle_radians), np.sin(angle_radians)], dtype=np.float64)
