@@ -15,6 +15,8 @@ from dagua.render.edges.ribbon import polyline_ribbon_path
 
 FloatArray = NDArray[np.float64]
 FLOAT_EPSILON = 1e-9
+_CURVATURE_DASH_SENSITIVITY = 8.0
+_MIN_CURVATURE_SCALE = 0.4
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,85 @@ def _arc_length_table(points: FloatArray) -> FloatArray:
 
     segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
     return np.concatenate([[0.0], np.cumsum(segment_lengths)])
+
+
+def _estimate_curvatures(points: FloatArray) -> FloatArray:
+    """Estimate unsigned curvature at each vertex of a closed polyline.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Closed polyline with shape ``[N, 2]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Unsigned curvature samples with shape ``[N]``.
+    """
+
+    point_count = points.shape[0]
+    curvatures = np.zeros(point_count, dtype=np.float64)
+    for index in range(1, point_count - 1):
+        edge_in = points[index] - points[index - 1]
+        edge_out = points[index + 1] - points[index]
+        cross_product = abs(edge_in[0] * edge_out[1] - edge_in[1] * edge_out[0])
+        edge_in_length = float(np.linalg.norm(edge_in))
+        edge_out_length = float(np.linalg.norm(edge_out))
+        chord_length = float(np.linalg.norm(edge_in + edge_out))
+        denominator = edge_in_length * edge_out_length * chord_length
+        if denominator > FLOAT_EPSILON:
+            curvatures[index] = 2.0 * cross_product / denominator
+    if point_count > 1:
+        curvatures[0] = curvatures[1]
+        curvatures[-1] = curvatures[-2]
+    return curvatures
+
+
+def _curvature_scale(curvature: float) -> float:
+    """Map one curvature sample to a visible dash-length multiplier.
+
+    Parameters
+    ----------
+    curvature : float
+        Unsigned local curvature in inverse data units.
+
+    Returns
+    -------
+    float
+        Multiplicative scale for the visible dash length.
+    """
+
+    return max(
+        1.0 / (1.0 + float(curvature) * _CURVATURE_DASH_SENSITIVITY),
+        _MIN_CURVATURE_SCALE,
+    )
+
+
+def _curvature_at_arc_length(
+    lengths: FloatArray,
+    curvatures: FloatArray,
+    target_length: float,
+) -> float:
+    """Return the sampled curvature nearest to one arc-length position.
+
+    Parameters
+    ----------
+    lengths : numpy.ndarray
+        Cumulative arc lengths with shape ``[N]``.
+    curvatures : numpy.ndarray
+        Vertex curvature samples with shape ``[N]``.
+    target_length : float
+        Arc-length position along the polyline.
+
+    Returns
+    -------
+    float
+        Curvature sample associated with the active segment start.
+    """
+
+    index = int(np.searchsorted(lengths, target_length, side="right") - 1)
+    index = max(0, min(index, curvatures.shape[0] - 1))
+    return float(curvatures[index])
 
 
 def _interpolate_point(points: FloatArray, lengths: FloatArray, distance: float) -> FloatArray:
@@ -180,6 +261,7 @@ def dash_segments(
         return []
     points = path_to_closed_vertices(centerline_path)
     lengths = _arc_length_table(points)
+    curvatures = _estimate_curvatures(points)
     total_length = float(lengths[-1])
     if total_length <= FLOAT_EPSILON:
         return []
@@ -189,19 +271,26 @@ def dash_segments(
     draw_segment = True
     part_index = 0
     while current_length < total_length - FLOAT_EPSILON:
-        part_length = float(normalized_pattern[part_index % len(normalized_pattern)])
+        base_part_length = float(normalized_pattern[part_index % len(normalized_pattern)])
+        part_length = (
+            base_part_length
+            if not draw_segment
+            else base_part_length
+            * _curvature_scale(_curvature_at_arc_length(lengths, curvatures, current_length))
+        )
         next_length = min(current_length + part_length, total_length)
         visible_length = next_length - current_length
         if draw_segment and visible_length > FLOAT_EPSILON:
             segment_points = _slice_polyline(points, lengths, current_length, next_length)
-            cap_start, cap_end = _segment_caps(pattern)
-            visible_segments.append(
-                PolylineDashSegment(
-                    points=segment_points,
-                    cap_start=cap_start,
-                    cap_end=cap_end,
+            if segment_points.shape[0] >= 2:
+                cap_start, cap_end = _segment_caps(pattern)
+                visible_segments.append(
+                    PolylineDashSegment(
+                        points=segment_points,
+                        cap_start=cap_start,
+                        cap_end=cap_end,
+                    )
                 )
-            )
         current_length = next_length
         draw_segment = not draw_segment
         part_index += 1
