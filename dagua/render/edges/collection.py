@@ -55,6 +55,30 @@ LABEL_TERMINAL_MARGIN_FLOOR = 0.08
 LABEL_TERMINAL_MARGIN_CAP = 0.32
 LABEL_CLEARANCE_WIDTH_RATIO = 1.6
 LABEL_CLEARANCE_FLOOR = 4.0
+TERMINAL_FACE_SECTOR_DEGREES = 45.0
+TERMINAL_FACE_REDISTRIBUTION_SPAN_DEGREES = 40.0
+TERMINAL_FACE_REDISTRIBUTION_THRESHOLD = 3
+MIN_TERMINAL_APPROACH_DISTANCE = 5.0
+_TERMINAL_FACES: Tuple[str, ...] = (
+    "east",
+    "northeast",
+    "north",
+    "northwest",
+    "west",
+    "southwest",
+    "south",
+    "southeast",
+)
+_FACE_CENTERS: Dict[str, float] = {
+    "east": 0.0,
+    "northeast": 45.0,
+    "north": 90.0,
+    "northwest": 135.0,
+    "west": 180.0,
+    "southwest": 225.0,
+    "south": 270.0,
+    "southeast": 315.0,
+}
 
 
 def _points_to_data_units(ax: Any, points: float, axis: str) -> float:
@@ -698,11 +722,11 @@ def _terminal_face(direction: np.ndarray) -> str:
     Returns
     -------
     str
-        One of ``"east"``, ``"west"``, ``"north"``, or ``"south"``.
+        One of the eight cardinal or intercardinal face labels.
     """
-    if abs(float(direction[0])) >= abs(float(direction[1])):
-        return "east" if float(direction[0]) >= 0.0 else "west"
-    return "north" if float(direction[1]) >= 0.0 else "south"
+    angle = _terminal_angle(direction)
+    sector = int((angle + (TERMINAL_FACE_SECTOR_DEGREES * 0.5)) / TERMINAL_FACE_SECTOR_DEGREES) % 8
+    return _TERMINAL_FACES[sector]
 
 
 def _fallback_terminal_key(tip: np.ndarray, direction: np.ndarray) -> Tuple[str, int, int, str]:
@@ -743,6 +767,92 @@ def _terminal_angle(direction: np.ndarray) -> float:
     """
     angle = float(np.degrees(np.arctan2(float(direction[1]), float(direction[0]))))
     return angle % 360.0
+
+
+def _face_center_angle(face: str) -> float:
+    """Return the canonical center angle for one terminal face.
+
+    Parameters
+    ----------
+    face : str
+        Terminal face label.
+
+    Returns
+    -------
+    float
+        Face-center angle in degrees on ``[0, 360)``.
+    """
+    return _FACE_CENTERS.get(face, 0.0)
+
+
+def _redistribute_face_angles(
+    members: List[Tuple[int, float]],
+    face_center_angle: float,
+) -> List[Tuple[int, float]]:
+    """Spread crowded terminal angles across one face sector.
+
+    Parameters
+    ----------
+    members : list[tuple[int, float]]
+        ``(edge_index, angle_degrees)`` pairs for one ``(node, face)`` group.
+    face_center_angle : float
+        Center of the face sector in degrees.
+
+    Returns
+    -------
+    list[tuple[int, float]]
+        Original edge indexes paired with redistributed angles.
+    """
+    if len(members) <= TERMINAL_FACE_REDISTRIBUTION_THRESHOLD:
+        return members
+
+    span = TERMINAL_FACE_REDISTRIBUTION_SPAN_DEGREES
+    step = span / max(len(members) - 1, 1)
+    start = face_center_angle - (span * 0.5)
+    redistributed: List[Tuple[int, float]] = []
+    sorted_members = sorted(
+        members,
+        key=lambda member: ((member[1] - face_center_angle + 180.0) % 360.0) - 180.0,
+    )
+    for offset, (edge_index, _old_angle) in enumerate(sorted_members):
+        redistributed.append((edge_index, (start + (offset * step)) % 360.0))
+    return redistributed
+
+
+def _adjust_terminal_for_angle(
+    edge: DaguaEdge,
+    new_angle_degrees: float,
+    terminal: str,
+) -> DaguaEdge:
+    """Adjust one edge terminal to approach from a requested angle.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge whose curve should be updated.
+    new_angle_degrees : float
+        Desired terminal approach angle in degrees.
+    terminal : str
+        ``"head"`` or ``"tail"``.
+
+    Returns
+    -------
+    DaguaEdge
+        Edge with an updated terminal control point.
+    """
+    angle_radians = float(np.deg2rad(new_angle_degrees))
+    direction = np.array([np.cos(angle_radians), np.sin(angle_radians)], dtype=np.float64)
+
+    if terminal == "head":
+        tip = np.asarray(edge.curve.p1, dtype=np.float64)
+        approach_distance = max(edge.resolved_arrow_length() * 2.0, MIN_TERMINAL_APPROACH_DISTANCE)
+        new_cp2 = tip + (direction * approach_distance)
+        return replace(edge, curve=replace(edge.curve, cp2=new_cp2))
+
+    tip = np.asarray(edge.curve.p0, dtype=np.float64)
+    approach_distance = max(edge.resolved_tail_arrow_length() * 2.0, MIN_TERMINAL_APPROACH_DISTANCE)
+    new_cp1 = tip + (direction * approach_distance)
+    return replace(edge, curve=replace(edge.curve, cp1=new_cp1))
 
 
 def _nearest_angular_separation(angles: Sequence[float], index: int) -> float:
@@ -897,10 +1007,23 @@ def _apply_terminal_density_rules(edges: Sequence[DaguaEdge]) -> List[DaguaEdge]
             )
             groups.setdefault(resolved_key, []).append((index, _terminal_angle(direction)))
 
-        for members in groups.values():
-            angles = [angle for _, angle in members]
-            count = len(members)
-            for offset, (edge_index, _) in enumerate(members):
+        for group_key, members in groups.items():
+            redistributed_members = members
+            if len(members) > TERMINAL_FACE_REDISTRIBUTION_THRESHOLD:
+                redistributed_members = _redistribute_face_angles(
+                    members,
+                    _face_center_angle(group_key[1]),
+                )
+                for edge_index, new_angle in redistributed_members:
+                    updated_edges[edge_index] = _adjust_terminal_for_angle(
+                        updated_edges[edge_index],
+                        new_angle,
+                        terminal,
+                    )
+
+            angles = [angle for _, angle in redistributed_members]
+            count = len(redistributed_members)
+            for offset, (edge_index, _) in enumerate(redistributed_members):
                 min_angle = _nearest_angular_separation(angles, offset)
                 updated_edges[edge_index] = _apply_density_rule(
                     updated_edges[edge_index],
