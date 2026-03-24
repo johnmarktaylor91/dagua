@@ -63,6 +63,7 @@ DEFAULT_SEED_START = 42
 PROGRESS_INTERVAL = 25
 SAVE_INTERVAL = 100  # flush results to disk every N completions
 MAX_INFLIGHT_GROUPS = 200  # rolling window of concurrent futures
+WATCHDOG_TIMEOUT = 300.0  # seconds to wait for any future before assuming dead worker
 RUNNING_STATUS = "running"
 POSITION_DIRNAME = "positions"
 CONSECUTIVE_FAILURE_SKIP_THRESHOLD = 3  # skip remaining seeds after N consecutive failures
@@ -2246,16 +2247,53 @@ def main() -> int:
             try:
                 _fill_inflight()
                 while inflight and not _shutdown_requested:
-                    # Wait for any one future to complete, then refill.
-                    done_futures = set()
-                    for fut in as_completed(inflight):
-                        done_futures.add(fut)
-                        _collect_future(fut, inflight.pop(fut))
-                        # Refill after each completion to keep workers busy.
+                    # Wait for any one future, with watchdog timeout.
+                    # If no future completes within WATCHDOG_TIMEOUT, a worker
+                    # likely died (C-level crash in igraph/DRL/etc.).  Record
+                    # the stuck futures as errors and rebuild the executor.
+                    got_result = False
+                    try:
+                        for fut in as_completed(inflight, timeout=WATCHDOG_TIMEOUT):
+                            _collect_future(fut, inflight.pop(fut))
+                            _fill_inflight()
+                            got_result = True
+                            if _shutdown_requested:
+                                break
+                            break  # Process one at a time to stay responsive.
+                    except TimeoutError:
+                        pass  # Watchdog fired -- handled below.
+                    if not got_result and not _shutdown_requested:
+                        # Watchdog fired -- worker pool is stuck.
+                        print(
+                            f"[benchmark] WATCHDOG: no future completed in "
+                            f"{WATCHDOG_TIMEOUT:.0f}s, recycling executor "
+                            f"({len(inflight)} stuck futures)"
+                        )
+                        save_results(results_path, results)
+                        # Record stuck futures as errors.
+                        for stuck_fut, stuck_group in list(inflight.items()):
+                            for wi in stuck_group:
+                                record = _record_with_pairings(
+                                    graph_name=wi.graph_name,
+                                    engine_name=wi.engine_name,
+                                    seed=wi.seed,
+                                    num_nodes=graph_summaries[wi.graph_name].num_nodes,
+                                    num_edges=graph_summaries[wi.graph_name].num_edges,
+                                    status="error",
+                                    runtime_seconds=None,
+                                    error="watchdog: worker pool stuck",
+                                    positions_file=None,
+                                    skip_reason=None,
+                                )
+                                _process_record(record)
+                        inflight.clear()
+                        # Kill and rebuild the executor.
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        executor = ProcessPoolExecutor(
+                            max_workers=args.resolved_workers,
+                            mp_context=_MP_CONTEXT,
+                        )
                         _fill_inflight()
-                        if _shutdown_requested:
-                            break
-                        break  # Process one at a time to stay responsive.
                     # If shutdown requested, drain remaining inflight futures.
                     if _shutdown_requested:
                         for fut in as_completed(inflight):
