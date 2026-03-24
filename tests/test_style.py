@@ -95,20 +95,30 @@ class TestEdgeStyleNewFields:
 
 @pytest.mark.smoke
 class TestClusterStyleNewFields:
-    """New fields on ClusterStyle (font_family, label_offset, depth_*_step)."""
+    """New fields on ClusterStyle (font_family, label_offset, wrap, depth_*_step)."""
 
     def test_defaults(self):
         s = ClusterStyle()
         assert s.padding == 38.0
         assert s.font_family == ""
         assert s.label_offset == (10.0, 12.0)
+        assert s.text_wrap == "none"
+        assert s.text_max_width is None
         assert s.depth_fill_step == 0.03
         assert s.depth_stroke_step == 0.05
 
     def test_custom_values(self):
-        s = ClusterStyle(font_family="monospace", label_offset=(10.0, 8.0), depth_fill_step=0.05)
+        s = ClusterStyle(
+            font_family="monospace",
+            label_offset=(10.0, 8.0),
+            text_wrap="wrap",
+            text_max_width=90.0,
+            depth_fill_step=0.05,
+        )
         assert s.font_family == "monospace"
         assert s.label_offset == (10.0, 8.0)
+        assert s.text_wrap == "wrap"
+        assert s.text_max_width == 90.0
         assert s.depth_fill_step == 0.05
 
 

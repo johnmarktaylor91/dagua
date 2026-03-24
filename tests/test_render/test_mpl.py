@@ -2308,12 +2308,246 @@ def test_cluster_offsets_and_corner_radius_use_display_scale(
         anchor_x=x_min + (8.0 * display_scale),
         anchor_y=y_max - (20.0 * display_scale),
     )
+    resolved_style = graph.get_style_for_cluster("outer")
+    expected_font_data = (
+        20.0
+        * 0.3
+        * (float(resolved_style.font_size) / mpl_renderer._DEFAULT_CLUSTER_LABEL_FONT_POINTS)
+    )
 
     path_x_min = float(path.vertices[:, 0].min())
-    assert label_spec.font_size * display_scale == pytest.approx(20.0 * 0.3)
+    assert label_spec.font_size * display_scale == pytest.approx(expected_font_data)
     assert label_bbox[3] == pytest.approx(expected_bbox[3], abs=0.75)
     assert path.vertices[0][0] == pytest.approx(path_x_min + (6.0 * display_scale), abs=0.05)
     plt.close(fig)
+
+
+def test_cluster_bottom_left_label_uses_expanded_y_min(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bottom-left cluster labels should anchor from the expanded bottom edge."""
+
+    captured = _capture_render_calls(monkeypatch)
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_cluster(
+        "outer",
+        ["a"],
+        label="Cluster",
+        style=ClusterStyle(
+            padding=0.0,
+            font_size=12.0,
+            label_position="bottom-left",
+            label_offset=(8.0, 20.0),
+            stroke_width=0.0,
+        ),
+    )
+
+    monkeypatch.setattr(mpl_renderer, "measure_text_data", lambda *args, **kwargs: (40.0, 12.0))
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-50.0, 50.0)
+    ax.set_ylim(-50.0, 50.0)
+    ax.set_aspect("equal")
+    fig.canvas.draw()
+
+    _draw_clusters(
+        ax=ax,
+        graph=graph,
+        pos=np.array([[0.0, 0.0]], dtype=float),
+        sizes=np.array([[20.0, 20.0]], dtype=float),
+    )
+
+    display_scale = _compute_display_scale(ax)
+    label_spec = next(spec for spec in captured[0][0] if spec.gid == "dagua-cluster-label-outer")
+    cluster_path = ax.collections[0].get_paths()[0]
+    expected_y_min = (
+        -10.0
+        - 12.0
+        - mpl_renderer._points_to_data_units(
+            ax, mpl_renderer._CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y"
+        )
+    )
+
+    assert label_spec.va == "bottom"
+    assert label_spec.y == pytest.approx(expected_y_min + (20.0 * display_scale))
+    assert float(cluster_path.vertices[:, 1].min()) == pytest.approx(expected_y_min, abs=0.25)
+    plt.close(fig)
+
+
+def test_cluster_outside_top_label_sits_above_box_without_expanding_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outside-top cluster labels should live above the box and leave its bounds unchanged."""
+
+    captured = _capture_render_calls(monkeypatch)
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_cluster(
+        "outer",
+        ["a"],
+        label="Cluster",
+        style=ClusterStyle(
+            padding=0.0,
+            font_size=12.0,
+            label_position="outside-top",
+            label_offset=(8.0, 20.0),
+            stroke_width=0.0,
+        ),
+    )
+
+    monkeypatch.setattr(mpl_renderer, "measure_text_data", lambda *args, **kwargs: (40.0, 12.0))
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-50.0, 50.0)
+    ax.set_ylim(-50.0, 50.0)
+    ax.set_aspect("equal")
+    fig.canvas.draw()
+
+    _draw_clusters(
+        ax=ax,
+        graph=graph,
+        pos=np.array([[0.0, 0.0]], dtype=float),
+        sizes=np.array([[20.0, 20.0]], dtype=float),
+    )
+
+    display_scale = _compute_display_scale(ax)
+    label_spec = next(spec for spec in captured[0][0] if spec.gid == "dagua-cluster-label-outer")
+    cluster_path = ax.collections[0].get_paths()[0]
+    raw_y_max = 10.0
+
+    assert label_spec.va == "bottom"
+    assert label_spec.y == pytest.approx(raw_y_max + (20.0 * display_scale))
+    assert float(cluster_path.vertices[:, 1].max()) == pytest.approx(raw_y_max, abs=0.25)
+    assert _label_bbox(ax, "dagua-cluster-label-outer")[2] > raw_y_max
+    plt.close(fig)
+
+
+def test_cluster_label_wrap_budget_uses_display_scaled_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cluster label wrap budgets should match the render-time display scale."""
+
+    captured = _capture_render_calls(monkeypatch)
+    graph = DaguaGraph()
+    graph.add_node("a")
+    graph.add_cluster(
+        "outer",
+        ["a"],
+        label="Wrap this cluster label across multiple lines",
+        style=ClusterStyle(
+            padding=0.0,
+            stroke_width=0.0,
+            text_wrap="wrap",
+            text_max_width=36.0,
+        ),
+    )
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-60.0, 60.0)
+    ax.set_ylim(-60.0, 60.0)
+    ax.set_aspect("equal")
+    fig.canvas.draw()
+
+    _draw_clusters(
+        ax=ax,
+        graph=graph,
+        pos=np.array([[0.0, 0.0]], dtype=float),
+        sizes=np.array([[20.0, 20.0]], dtype=float),
+    )
+
+    cluster_specs, display_scale = captured[0]
+    cluster_spec = next(spec for spec in cluster_specs if spec.gid == "dagua-cluster-label-outer")
+    prepared = dagua_utils.prepare_label_text(
+        cluster_spec.text,
+        font_size=cluster_spec.font_size * display_scale,
+        text_wrap=cluster_spec.text_wrap,
+        text_max_width=cluster_spec.text_max_width,
+        text_transform="none",
+        label_format="plain",
+    )
+    line_gids = {
+        str(patch.get_gid())
+        for patch in ax.patches
+        if isinstance(patch, PathPatch)
+        and isinstance(patch.get_gid(), str)
+        and patch.get_gid().startswith("dagua-cluster-label-outer-")
+    }
+
+    assert cluster_spec.text_max_width == pytest.approx(36.0 * display_scale)
+    assert "\n" in prepared
+    assert "dagua-cluster-label-outer-0" in line_gids
+    assert "dagua-cluster-label-outer-1" in line_gids
+    plt.close(fig)
+
+
+def test_cluster_box_expands_for_bottom_labels_but_not_outside_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bottom labels should grow the cluster box while outside labels should not."""
+
+    monkeypatch.setattr(mpl_renderer, "measure_text_data", lambda *args, **kwargs: (40.0, 12.0))
+
+    bottom_graph = DaguaGraph()
+    bottom_graph.add_node("a")
+    bottom_graph.add_cluster(
+        "bottom",
+        ["a"],
+        label="Bottom",
+        style=ClusterStyle(
+            padding=0.0,
+            label_position="bottom-left",
+            label_offset=(8.0, 20.0),
+            stroke_width=0.0,
+        ),
+    )
+
+    outside_graph = DaguaGraph()
+    outside_graph.add_node("a")
+    outside_graph.add_cluster(
+        "outside",
+        ["a"],
+        label="Outside",
+        style=ClusterStyle(
+            padding=0.0,
+            label_position="outside-top",
+            label_offset=(8.0, 20.0),
+            stroke_width=0.0,
+        ),
+    )
+
+    bottom_fig, bottom_ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    bottom_ax.set_xlim(-50.0, 50.0)
+    bottom_ax.set_ylim(-50.0, 50.0)
+    bottom_ax.set_aspect("equal")
+    bottom_fig.canvas.draw()
+    _draw_clusters(
+        ax=bottom_ax,
+        graph=bottom_graph,
+        pos=np.array([[0.0, 0.0]], dtype=float),
+        sizes=np.array([[20.0, 20.0]], dtype=float),
+    )
+
+    outside_fig, outside_ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    outside_ax.set_xlim(-50.0, 50.0)
+    outside_ax.set_ylim(-50.0, 50.0)
+    outside_ax.set_aspect("equal")
+    outside_fig.canvas.draw()
+    _draw_clusters(
+        ax=outside_ax,
+        graph=outside_graph,
+        pos=np.array([[0.0, 0.0]], dtype=float),
+        sizes=np.array([[20.0, 20.0]], dtype=float),
+    )
+
+    bottom_y_min = float(bottom_ax.collections[0].get_paths()[0].vertices[:, 1].min())
+    outside_y_min = float(outside_ax.collections[0].get_paths()[0].vertices[:, 1].min())
+    raw_y_min = -10.0
+
+    assert bottom_y_min < raw_y_min
+    assert outside_y_min == pytest.approx(raw_y_min, abs=0.25)
+    plt.close(bottom_fig)
+    plt.close(outside_fig)
 
 
 def test_sibling_cluster_labels_avoid_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
