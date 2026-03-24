@@ -25710,8 +25710,8 @@ def resolve_node_style(
     Cascade order (highest priority first):
     1. per_element — per-node override
     2. cluster_member_styles — deepest cluster first
-    3. theme_style — from Theme.get_node_style()
-    4. graph_default — Graph.default_node_style
+    3. graph_default — Graph.default_node_style
+    4. theme_style — from Theme.get_node_style()
     5. global_default — dagua.configure() overrides
 
     For each field, picks the first non-default value walking the cascade.
@@ -25719,8 +25719,8 @@ def resolve_node_style(
     sources: List[Optional[NodeStyle]] = [per_element]
     if cluster_member_styles:
         sources.extend(cluster_member_styles)
-    sources.append(theme_style)
     sources.append(graph_default)
+    sources.append(theme_style)
     sources.append(global_default)
 
     return _merge_style(NodeStyle, sources)
@@ -25737,8 +25737,8 @@ def resolve_edge_style(
     sources: List[Optional[EdgeStyle]] = [per_element]
     if cluster_member_styles:
         sources.extend(cluster_member_styles)
-    sources.append(theme_style)
     sources.append(graph_default)
+    sources.append(theme_style)
     sources.append(global_default)
 
     return _merge_style(EdgeStyle, sources)
@@ -25747,10 +25747,16 @@ def resolve_edge_style(
 def resolve_cluster_style(
     per_cluster: Optional[ClusterStyle],
     theme_style: ClusterStyle,
+    graph_default: Optional[ClusterStyle] = None,
     global_default: Optional[ClusterStyle] = None,
 ) -> ClusterStyle:
     """Field-level merge for cluster styles."""
-    sources: List[Optional[ClusterStyle]] = [per_cluster, theme_style, global_default]
+    sources: List[Optional[ClusterStyle]] = [
+        per_cluster,
+        graph_default,
+        theme_style,
+        global_default,
+    ]
     return _merge_style(ClusterStyle, sources)
 
 
@@ -25763,7 +25769,7 @@ def _merge_style(cls, sources: List[Optional[Any]]):
     This prevents a theme from overriding an explicit per-element choice
     that happens to match the dataclass default value.
 
-    Lower-priority sources (theme, graph default, global default) only
+    Lower-priority sources (graph default, theme, global default) only
     contribute fields that differ from the class default.
     """
     import dataclasses as _dc
