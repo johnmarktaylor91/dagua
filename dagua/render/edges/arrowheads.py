@@ -24,6 +24,9 @@ HOLLOW_HEAD_DIMENSION_SCALE = 1.3
 COMPOUND_HEAD_GAP_RATIO = 0.42
 COMPOUND_HEAD_GAP_FLOOR = 0.6
 THIN_TRIANGLE_BODY_WIDTH_RATIO = 0.15
+# Crow's-foot ratios are tuned as a set for ER markers. The sprint widened the
+# outer tine spread and adjusted the trim positions so "many" markers stay
+# readable after body tapering and high-DPI downscaling.
 CROWS_FOOT_ONE_BAR_X_RATIO = 0.15
 CROWS_FOOT_ONE_TRIM_RATIO = 0.3
 CROWS_FOOT_ONE_HALF_WIDTH_RATIO = 0.4
@@ -490,7 +493,7 @@ def _dot(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _open(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build Graphviz's open arrowhead as a stroked V.
+    """Build Graphviz's open arrowhead as a stroked V-shape.
 
     Parameters
     ----------
@@ -505,6 +508,12 @@ def _open(length: float, width: float, body_width: float) -> ArrowheadResult:
     -------
     ArrowheadResult
         Stroke-only chevron geometry with two tines meeting at the tip.
+
+    Notes
+    -----
+    This stays outline-only on purpose. Graphviz renders ``open`` as a stroked
+    V rather than a filled wedge, so matching that silhouette avoids a heavier
+    terminal than users expect from DOT output.
     """
     overlap = _join_overlap(length, body_width)
     join_x = max(length - overlap, length * 0.58)
@@ -535,6 +544,12 @@ def _tee(length: float, width: float, body_width: float) -> ArrowheadResult:
     -------
     ArrowheadResult
         Stroke-only crossbar geometry trimmed at the bar centerline.
+
+    Notes
+    -----
+    ``bar_x`` is intentionally tightened toward the tip compared with the older
+    placement so the bar reads as a terminal mark instead of a disconnected
+    mini-edge segment on short links.
     """
     overlap = _join_overlap(length, body_width)
     bar_x = max(length - overlap, length * 0.10)
@@ -596,6 +611,12 @@ def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
     -------
     ArrowheadResult
         Filled tine geometry sized for ER-style cardinality markers.
+
+    Notes
+    -----
+    The tines are deliberately larger than the legacy geometry. The wider fan
+    and thicker center tine survive gallery downscaling and keep the "many"
+    semantics legible when paired with tapered or gradient edge bodies.
 
     Each tine is a narrow filled triangle radiating from the shaft neck
     toward the tip, matching the ER-diagram "many" convention.
