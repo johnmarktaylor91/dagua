@@ -288,6 +288,8 @@ class NodeStyle:
     text_transform: str = "none"  # Layout-affecting: none, uppercase, lowercase
     text_outline: bool = False
     text_outline_color: str = "#FFFFFF"
+    # Tuned down from ``2.0`` so outlined labels stay crisp without producing
+    # oversized halos around small text or rich-text runs.
     text_outline_width: float = 1.4
     text_background: str = ""  # Background color behind node label (empty = none)
     text_background_opacity: float = 0.85

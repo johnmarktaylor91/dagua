@@ -15,7 +15,11 @@ from dagua.render.edges.ribbon import polyline_ribbon_path
 
 FloatArray = NDArray[np.float64]
 FLOAT_EPSILON = 1e-9
+# Higher values shorten visible dashes more aggressively on tight bends so the
+# dash cadence does not visually bunch up around corners.
 _CURVATURE_DASH_SENSITIVITY = 8.0
+# Floor for curvature-based shortening. Even on sharp corners the visible dash
+# should keep at least 40% of its nominal length to avoid turning into noise.
 _MIN_CURVATURE_SCALE = 0.4
 
 
@@ -91,6 +95,13 @@ def _estimate_curvatures(points: FloatArray) -> FloatArray:
     -------
     numpy.ndarray
         Unsigned curvature samples with shape ``[N]``.
+
+    Notes
+    -----
+    The estimator uses the turning angle implied by adjacent polyline segments
+    and normalizes by the local triangle area proxy. Endpoints reuse their
+    nearest interior sample because closed outlines are represented with the
+    first vertex duplicated at the end.
     """
 
     point_count = points.shape[0]
@@ -123,6 +134,12 @@ def _curvature_scale(curvature: float) -> float:
     -------
     float
         Multiplicative scale for the visible dash length.
+
+    Notes
+    -----
+    Straight runs stay near ``1.0``. As curvature rises the scale decays
+    hyperbolically until it hits :data:`_MIN_CURVATURE_SCALE`, which keeps the
+    cadence adaptive without erasing dash segments on compact shapes.
     """
 
     return max(
@@ -276,6 +293,9 @@ def dash_segments(
             base_part_length
             if not draw_segment
             else base_part_length
+            # Only shorten painted spans. Leaving the gaps untouched preserves
+            # the overall rhythm while preventing visible dashes from crowding
+            # into high-curvature corners.
             * _curvature_scale(_curvature_at_arc_length(lengths, curvatures, current_length))
         )
         next_length = min(current_length + part_length, total_length)
@@ -283,6 +303,9 @@ def dash_segments(
         if draw_segment and visible_length > FLOAT_EPSILON:
             segment_points = _slice_polyline(points, lengths, current_length, next_length)
             if segment_points.shape[0] >= 2:
+                # Recompute the polyline slice for each visible span so the
+                # ribbon builder sees the local bend geometry rather than a
+                # pre-flattened dash approximation.
                 cap_start, cap_end = _segment_caps(pattern)
                 visible_segments.append(
                     PolylineDashSegment(

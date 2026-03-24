@@ -168,6 +168,51 @@ dagua/
 └── graphs/              # 30+ YAML reference graphs for benchmarks + eval
 ```
 
+## Render Tuning Notes
+
+These constants were tuned during the cosmetic polish sprint and are easy to
+misread when editing the renderer. Preserve their visual intent unless the task
+explicitly calls for retuning:
+
+- `dagua/render/mpl.py:_GRAPHVIZ_DOT_PATTERN = (1.2, 3.0)` keeps dotted strokes
+  visibly separated after point-to-data conversion; the older near-zero on-span
+  read too solid in exported figures.
+- `dagua/render/mpl.py:_CROSSING_*` constants control crossing-jump shape:
+  padding and span floors keep thin edges readable, while
+  `_CROSSING_SHARP_HEIGHT_WIDTH_FACTOR = 3.5` sets how tall the sharp jump arch
+  appears relative to its width.
+- `dagua/render/mpl.py:_SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION = 0.18` caps
+  self-loop terminals so arrowheads do not overwhelm compact loops.
+- `dagua/render/mpl.py:_DEFAULT_EXTERNAL_LABEL_FONT_POINTS = 7.0` and
+  `_EDGE_LABEL_HEIGHT_FRACTION = 0.18` intentionally keep secondary labels
+  quieter than node labels and narrower than the older gallery sizing.
+- `dagua/render/mpl.py` node-label auto backgrounds use different opacities by
+  fill type: pie/striped `0.92`, hatched `0.75`, gradient `0.90`. These values
+  trade off readability against preserving the underlying fill treatment.
+- `dagua/render/mpl.py` box3d overlays use alpha `0.12` on the top face and
+  `0.18` on the right face to maintain a consistent faux light direction.
+- `dagua/render/edges/collection.py:MIN_TAPER_WIDTH = 0.3` prevents tapered
+  ribbons from collapsing into zero-width endpoints that rasterize poorly.
+- `dagua/render/edges/collection.py` terminal redistribution is 8-way, not
+  4-way. Keep `_FACE_CENTERS` and the redistribution span aligned with the
+  eight cardinal/intercardinal buckets.
+- `dagua/render/edges/dashes.py:DOTTED_ON_RATIO = 0.15` and
+  `DOTTED_OFF_RATIO = 1.8` are tuned so dotted edges survive antialiasing and
+  still read as a cadence rather than isolated specks.
+- `dagua/render/borders/dashes.py` curvature-adaptive dash tuning shortens only
+  visible border segments on tight bends. `_CURVATURE_DASH_SENSITIVITY = 8.0`
+  sets how quickly dash length shrinks; `_MIN_CURVATURE_SCALE = 0.4` is the
+  lower bound.
+- `dagua/render/borders/shapes.py` shape ratios are cosmetic, not geometric
+  defaults: note folds use `0.45`, star inner radii use `0.25`, and tab shapes
+  use `0.38 / 0.28` to remain legible in small cards.
+- `dagua/render/text/paths.py:_SYNTHETIC_ITALIC_SHEAR_DEGREES = 15.0` is a mild
+  oblique fallback when the chosen font family lacks an italic face.
+- `dagua/styles.py:NodeStyle.text_outline_width = 1.4`,
+  `dagua/utils.py:average_char_width = font_size * 0.52`, and
+  `dagua/edges.py:arc_height = max(sw, sh) * 1.1` are all recently retuned for
+  cleaner labels, more accurate wrapping, and more compact self-loops.
+
 ## Makefile Targets
 
 ```
