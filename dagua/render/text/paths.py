@@ -17,6 +17,8 @@ FONT_SCALE = 100.0
 LINE_SPACING = 1.2
 _CACHE_PRECISION = 3
 _TEXT_TO_PATH = TextToPath()
+# A modest oblique shear that approximates italic posture without distorting
+# glyph proportions as aggressively as a steeper synthetic slant.
 _SYNTHETIC_ITALIC_SHEAR_DEGREES = 15.0
 
 
@@ -27,10 +29,12 @@ class ResolvedFontFace:
     Parameters
     ----------
     font_path : str
-        Absolute path to the font file chosen for the request.
+        Absolute path to the font file chosen for the request after walking the
+        requested family and Dagua fallback stack.
     synthetic_italic : bool
         Whether italic styling must be synthesized by shearing the glyph paths
-        because the resolved font did not provide a distinct italic face.
+        because the resolved font did not provide a distinct italic face for
+        the selected family and weight combination.
     """
 
     font_path: str
@@ -281,6 +285,15 @@ def _resolve_font_face(
     ResolvedFontFace
         Concrete font file plus a flag indicating whether italic styling must
         be synthesized because the resolved face collapses to the normal file.
+
+    Notes
+    -----
+    Resolution prefers an exact face from the requested family first. If that
+    family lacks a distinct italic file, the function keeps the normal file and
+    requests synthetic italics rather than silently switching to a different
+    family with mismatched metrics. Only after the requested family is
+    exhausted does it walk Dagua's fallback stack and, finally, matplotlib's
+    default font resolution.
     """
     normalized_style = _normalize_font_style(font_style)
     candidates = _font_family_candidates(font_family)
@@ -347,6 +360,12 @@ def _apply_synthetic_italic(vertices: np.ndarray) -> np.ndarray:
     -------
     numpy.ndarray
         Sheared glyph vertices. Empty inputs are returned unchanged.
+
+    Notes
+    -----
+    The shear is applied in glyph-local coordinates, matching the common
+    "oblique" fallback used by layout engines when a font ships without an
+    italic face.
     """
     if vertices.size == 0:
         return vertices

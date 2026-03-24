@@ -68,6 +68,9 @@ from dagua.utils import (
 _VECTOR_FORMATS = {"pdf", "ps", "eps", "svg", "svgz"}
 _RASTER_FORMATS = {"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"}
 _GRAPHVIZ_DASH_PATTERN: Tuple[float, float] = (5.0, 3.0)
+# Tuned from ``(0.1, 3.0)`` so Graphviz-style dotted strokes still read as
+# repeated dots after point-to-data conversion instead of collapsing into a
+# nearly solid line on high-DPI exports.
 _GRAPHVIZ_DOT_PATTERN: Tuple[float, float] = (1.2, 3.0)
 _ARROWHEAD_REFERENCE_WIDTH_POINTS = 1.2
 _DOUBLE_BORDER_INSET_FACTOR = 2.5
@@ -75,16 +78,28 @@ _PATTERN_FILL_RESOLUTION = 128
 _HATCH_PATTERN = "////"
 _MIN_HATCH_LINEWIDTH_POINTS = 0.8
 _CROSSING_CLEARANCE_PADDING_POINTS = 3.0
+# Minimum crossing bridge width relative to stroke width so very thin edges
+# still produce a visibly separated jump instead of a pinched cusp.
 _CROSSING_MIN_SPAN_WIDTH_FACTOR = 4.0
+# Absolute minimum bridge width in points for small edges and dense figures.
 _CROSSING_MIN_SPAN_POINTS = 14.0
+# Data-space floor that keeps jump spans readable after axis scaling changes.
 _CROSSING_MIN_SPAN_DATA_UNITS = 22.0
+# Height multiplier for the sharp crossing style. Larger values exaggerate the
+# bridge arch; ``3.5`` was the best balance between recognizability and not
+# looking like a self-loop when the crossing span is narrow.
 _CROSSING_SHARP_HEIGHT_WIDTH_FACTOR = 3.5
+# Span multiplier for the sharp crossing footprint along the edge direction.
 _CROSSING_SHARP_SPAN_WIDTH_FACTOR = 4.0
 _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
+# Tuned down over several passes to keep self-loop terminals legible without
+# letting arrowheads consume the entire loop apex on small nodes.
 _SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION = 0.18
 _SELF_LOOP_ARROWHEAD_MAX_WIDTH_RATIO = 0.55
 _CLUSTER_LABEL_VERTICAL_GAP_POINTS = 2.0
 _DEFAULT_NODE_LABEL_FONT_POINTS = 8.5
+# Tuned down from ``8.0`` so external labels stay subordinate to node labels
+# and fit more consistently around dense gallery fixtures.
 _DEFAULT_EXTERNAL_LABEL_FONT_POINTS = 7.0
 _DEFAULT_EDGE_LABEL_FONT_POINTS = 7.0
 _DEFAULT_CLUSTER_LABEL_FONT_POINTS = 9.5
@@ -96,6 +111,8 @@ _NODE_LABEL_MIN_HEIGHT_FRACTION = 0.1
 _NODE_LABEL_MAX_HEIGHT_FRACTION = 0.6
 _ELLIPSE_VERTICAL_LABEL_INSET_FRACTION = 0.15
 _MULTILINE_LABEL_REDUCTION = 0.5
+# Tuned from ``0.25`` so edge labels claim less vertical band height and stop
+# overpowering narrow ribbons or stacked parallel edges.
 _EDGE_LABEL_HEIGHT_FRACTION = 0.18
 _CLUSTER_LABEL_HEIGHT_FRACTION = 0.06
 
@@ -1703,6 +1720,8 @@ def _draw_node_shape_extras(
                 (front_right, front_top),
             ],
             closed=True,
+            # Use a lighter alpha on the top face so it reads as a surface
+            # catching light rather than a second side wall.
             facecolor=(0.0, 0.0, 0.0, 0.12),
             edgecolor="none",
             linewidth=0.0,
@@ -1716,6 +1735,8 @@ def _draw_node_shape_extras(
                 (front_right, front_top),
             ],
             closed=True,
+            # Darken the right face more aggressively than the top face to
+            # create a stable faux-3D light direction and preserve depth cues.
             facecolor=(0.0, 0.0, 0.0, 0.18),
             edgecolor="none",
             linewidth=0.0,
@@ -3453,7 +3474,10 @@ def _resolved_marker_dimensions(
         Whether the edge source and target are the same node.
     scale_with_edge_width : bool
         Whether to apply the renderer's sublinear edge-width scaling before
-        converting the style dimensions into data units.
+        converting the style dimensions into data units. The custom collection
+        keeps this enabled so thick ribbons receive proportionally larger
+        terminals; the legacy direct-marker path leaves it disabled for
+        backward-compatible stroke sizing.
 
     Returns
     -------
@@ -3482,6 +3506,8 @@ def _resolved_marker_dimensions(
         node_min_dimension = min(max(node_width, 0.0), max(node_height, 0.0))
         max_terminal_extent = node_min_dimension * _SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION
         if max_terminal_extent > 0.0:
+            # Self-loops need a stricter cap than normal edges so the head does
+            # not eclipse the loop body or read as part of the node silhouette.
             length_data = min(length_data, max_terminal_extent)
             width_data = min(
                 width_data,
@@ -5123,8 +5149,9 @@ def _label_reference_y(y: float, h: float, shape: str) -> float:
         Shape-adjusted y-coordinate used as the label anchor reference.
     """
     if shape == "triangle":
-        # Upright triangles read visually lower than their bounding-box center,
-        # so bias the anchor slightly above the geometric centroid.
+        # Upright triangles look bottom-heavy when centered geometrically. The
+        # ``h / 8`` lift is an optical correction so text reads centered inside
+        # the visible mass of the triangle rather than its bounding box.
         return y - h / 8
     return y
 
@@ -5146,6 +5173,9 @@ def _resolved_taper_widths(ax: Any, style: Any) -> Tuple[float, float]:
     """
     width_start = _edge_width_data_units(ax, float(style.taper_width_start))
     width_end = _edge_width_data_units(ax, float(style.taper_width_end))
+    # Keep the terminal width above the renderer's visibility floor so tapered
+    # ribbons end in a crisp tip instead of disappearing into zero-width
+    # geometry that raster backends alias inconsistently.
     return width_start, max(width_end, MIN_TAPER_WIDTH)
 
 
@@ -5209,6 +5239,9 @@ def _draw_node_labels(
         pad_x = float(style.padding[0]) * display_scale
         pad_y = float(style.padding[1]) * display_scale
         if style.text_valign in {"top", "bottom"}:
+            # Reserve at least two display points vertically so top/bottom
+            # aligned labels do not kiss the stroke after scaling and outline
+            # expansion are applied.
             pad_y = max(pad_y, 2.0 * display_scale)
         max_width: Optional[float] = None
         text_max_width: Optional[float] = None
@@ -5242,8 +5275,16 @@ def _draw_node_labels(
         is_rich = style.label_format == "rich"
         secondary = gs.node_label_secondary_scale if not is_rich else 1.0
 
-        # Auto-add text background for patterned fills where text would
-        # otherwise be unreadable against multi-colored segments.
+        # Auto-add text backgrounds only when the node itself does not already
+        # request one. The cascade is tuned per fill treatment:
+        #
+        # - pie/striped -> white at 0.92 alpha because those fills can place
+        #   high-contrast color changes directly behind each glyph.
+        # - hatched -> background-colored plate at 0.75 alpha because the
+        #   underlying solid fill still provides contrast and fully opaque white
+        #   boxes looked too detached from the node body.
+        # - gradient -> white at 0.90 alpha because a slight tint from the
+        #   gradient preserves depth cues while still stabilizing readability.
         text_bg = style.text_background if style.text_background else None
         text_bg_alpha = style.text_background_opacity
         if text_bg is None and style.fill_pattern in ("pie", "striped"):
@@ -5424,6 +5465,12 @@ def _draw_edge_marker(
     -------
     None
         Mutates ``ax`` in place by adding the marker artist when applicable.
+
+    Notes
+    -----
+    Marker dimensions now scale with edge width for this path. Earlier versions
+    used a fixed point size, which made arrowheads look undersized on thick
+    rendered ribbons compared with the custom edge collection.
     """
     from matplotlib.colors import to_rgba
     from matplotlib.patches import Circle, Polygon
