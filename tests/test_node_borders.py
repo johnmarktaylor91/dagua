@@ -22,6 +22,7 @@ from dagua.render.borders import (
     reverse_closed_path,
     star_vertices,
 )
+from dagua.render.borders.dashes import _curvature_scale, _estimate_curvatures, dash_segments
 from dagua.render.mpl import _compute_display_scale, _draw_nodes, _scaled_node_style
 from dagua.styles import NodeStyle
 
@@ -42,6 +43,23 @@ def _signed_area(vertices: np.ndarray) -> float:
 
     rolled = np.roll(vertices, -1, axis=0)
     return 0.5 * float(np.sum(vertices[:, 0] * rolled[:, 1] - vertices[:, 1] * rolled[:, 0]))
+
+
+def _polyline_length(points: np.ndarray) -> float:
+    """Return the cumulative Euclidean length of one sampled polyline.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Ordered polyline vertices with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Total length of the piecewise-linear path.
+    """
+
+    return float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
 
 
 def test_reverse_closed_path_flips_winding_for_smooth_paths() -> None:
@@ -100,6 +118,76 @@ def test_dash_ribbon_paths_follow_closed_perimeter() -> None:
     assert ribbons
     assert all(path.codes[0] == path.MOVETO for path in ribbons)
     assert all(path.codes[-1] == path.CLOSEPOLY for path in ribbons)
+
+
+def test_estimate_curvatures_straight_line_returns_zeros() -> None:
+    """Collinear vertices should not report curvature."""
+
+    points = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [4.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    curvatures = _estimate_curvatures(points)
+
+    assert np.allclose(curvatures, 0.0)
+
+
+def test_estimate_curvatures_circle_returns_uniform() -> None:
+    """A regular polygon approximation of a circle should have uniform curvature."""
+
+    angles = np.linspace(0.0, 2.0 * np.pi, num=32, endpoint=False)
+    radius = 10.0
+    circle_points = np.column_stack([radius * np.cos(angles), radius * np.sin(angles)])
+    closed_points = np.vstack([circle_points, circle_points[0]])
+
+    curvatures = _estimate_curvatures(closed_points)
+
+    assert np.all(curvatures > 0.0)
+    assert np.max(curvatures) == pytest.approx(np.min(curvatures), rel=1e-6)
+
+
+def test_curvature_scale_straight_returns_one() -> None:
+    """Zero curvature should leave the dash length unchanged."""
+
+    assert _curvature_scale(0.0) == pytest.approx(1.0)
+
+
+def test_curvature_scale_tight_curve_reduces() -> None:
+    """Tight curves should shorten the visible dash length."""
+
+    assert _curvature_scale(0.5) < 1.0
+    assert _curvature_scale(10.0) == pytest.approx(0.4)
+
+
+def test_dashed_cylinder_cap_has_shorter_segments() -> None:
+    """Cylinder caps should shorten visible dashes relative to straight side walls."""
+
+    spec = ShapeSpec(0.0, 0.0, 80.0, 100.0, "cylinder")
+    centerline = inset_shape_path(spec, 2.0)
+    segments = dash_segments(centerline, "dashed", width=4.0)
+
+    side_lengths = [
+        _polyline_length(segment.points)
+        for segment in segments
+        if abs(float(np.mean(segment.points[:, 0]))) > 35.0
+        and abs(float(np.mean(segment.points[:, 1]))) < 25.0
+    ]
+    cap_lengths = [
+        _polyline_length(segment.points)
+        for segment in segments
+        if abs(float(np.mean(segment.points[:, 1]))) > 30.0
+    ]
+
+    assert side_lengths
+    assert cap_lengths
+    assert np.mean(cap_lengths) < np.mean(side_lengths) * 0.95
 
 
 def test_inset_shape_path_handles_non_polygon_shapes() -> None:
