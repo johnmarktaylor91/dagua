@@ -7,7 +7,20 @@ import pytest
 
 from dagua.render.borders.shapes import ShapeSpec, build_shape_path
 
-NEW_SHAPES = ["double_circle", "cloud", "stadium", "tab", "note", "document", "box3d"]
+NEW_SHAPES = [
+    "double_circle",
+    "cloud",
+    "stadium",
+    "semicircle",
+    "semicircle_up",
+    "semicircle_down",
+    "semicircle_left",
+    "semicircle_right",
+    "tab",
+    "note",
+    "document",
+    "box3d",
+]
 EXISTING_SHAPES = [
     "rect",
     "roundrect",
@@ -124,3 +137,26 @@ def test_existing_shapes_still_build(shape: str) -> None:
     path = build_shape_path(spec)
 
     assert path is not None
+
+
+def test_semicircle_smoke_paths_build_with_multiple_orientations() -> None:
+    """Semicircle variants should all build populated paths.
+
+    Returns
+    -------
+    None
+        The requested paths are asserted in place.
+    """
+
+    for orient in [
+        "semicircle",
+        "semicircle_up",
+        "semicircle_down",
+        "semicircle_left",
+        "semicircle_right",
+    ]:
+        spec = ShapeSpec(center_x=0.0, center_y=0.0, width=40.0, height=30.0, shape=orient)
+        path = build_shape_path(spec)
+
+        assert path is not None
+        assert len(path.vertices) > 3

@@ -618,6 +618,38 @@ def test_roundrect_intersection_hits_visible_corner_arc() -> None:
     assert hit[1] > 2.0
 
 
+def test_semicircle_intersection_hits_the_flat_edge_when_cast_straight_down() -> None:
+    """Semicircle intersections should return the flat diameter for downward rays."""
+
+    hit = intersect_node_boundary(
+        center=(0.0, 0.0),
+        half_size=(20.0, 15.0),
+        shape="semicircle",
+        corner_radius=0.0,
+        ray_origin=(0.0, 0.0),
+        ray_direction=(0.0, -10.0),
+    )
+
+    assert tuple(float(value) for value in hit) == pytest.approx((0.0, -15.0))
+
+
+def test_semicircle_intersection_hits_the_curved_dome_for_upward_rays() -> None:
+    """Semicircle intersections should stay on the dome when casting upward rays."""
+
+    hit = intersect_node_boundary(
+        center=(0.0, 0.0),
+        half_size=(20.0, 15.0),
+        shape="semicircle",
+        corner_radius=0.0,
+        ray_origin=(0.0, -10.0),
+        ray_direction=(0.0, 10.0),
+        aspect_ratio=2.0,
+    )
+
+    assert float(hit[0]) == pytest.approx(0.0)
+    assert float(hit[1]) == pytest.approx(-5.0)
+
+
 def test_label_rotation_follows_curve_tangent() -> None:
     """Rotated labels should inherit a non-zero upright tangent angle."""
     placement = place_edge_label(_curve(), label_position=0.5, label_offset=4.0, label_rotate=True)
