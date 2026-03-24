@@ -23104,6 +23104,98 @@ ANSEL_ADAMS_THEME = Theme(
     graph_style=GraphStyle(background_color="#E8E8E8"),
 )
 
+# Milgram / small world -- six degrees of separation: postal letter
+# chain aesthetic, envelope nodes, handwritten forwarding addresses,
+# each hop through a stranger's mailbox
+MILGRAM_THEME = Theme(
+    name="milgram",
+    category="thinker",
+    node_styles={
+        "default": NodeStyle(
+            shape="rectangle",
+            fill="#F8F4E8",
+            stroke="#B0A888",
+            stroke_width=1.0,
+            font_family="Georgia",
+            font_size=8.0,
+            font_color="#3A3028",
+            font_style="italic",
+            padding=(6.0, 3.0),
+            min_width=36.0,
+            min_height=22.0,
+            corner_radius=1.0,
+        ),
+        "input": NodeStyle(
+            shape="rectangle",
+            fill="#D8C8A0",
+            stroke="#8B7355",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.5,
+            font_color="#2A1A08",
+            font_weight="bold",
+            padding=(6.0, 3.0),
+            min_width=40.0,
+            min_height=26.0,
+            corner_radius=1.0,
+        ),
+        "output": NodeStyle(
+            shape="rectangle",
+            fill="#F8F4E8",
+            stroke="#CC3333",
+            stroke_width=2.0,
+            font_family="Georgia",
+            font_size=8.5,
+            font_color="#CC3333",
+            font_weight="bold",
+            padding=(6.0, 3.0),
+            min_width=38.0,
+            min_height=24.0,
+            corner_radius=1.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#8B7355",
+            width=0.8,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#8B7355",
+            arrow_length=5.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.2,
+        ),
+        "back": EdgeStyle(
+            color="#C0A878",
+            width=0.5,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#C0A878",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.25,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0E8D0",
+        stroke="#C0A878",
+        stroke_width=0.5,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=8.5,
+        font_color="#6B5038",
+        font_weight="bold",
+        padding=10.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(background_color="#F0E8D0"),
+)
+
+THEME_REGISTRY["milgram"] = MILGRAM_THEME
 THEME_REGISTRY["mancala"] = MANCALA_THEME
 THEME_REGISTRY["tufte"] = TUFTE_THEME
 THEME_REGISTRY["ansel_adams"] = ANSEL_ADAMS_THEME
