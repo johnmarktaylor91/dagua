@@ -63,6 +63,7 @@ from dagua.styles import (
 )
 from dagua.utils import (
     collect_cluster_leaves,
+    prepare_label_text,
 )
 
 _VECTOR_FORMATS = {"pdf", "ps", "eps", "svg", "svgz"}
@@ -1057,6 +1058,13 @@ def render(
             ordered_clusters,
             cluster_depths,
         )
+        cluster_y_mins = _compute_cluster_y_mins(
+            graph,
+            pos,
+            sizes,
+            ordered_clusters,
+            cluster_depths,
+        )
         for cname in graph.clusters:
             cstyle = _cluster_style_for_render(graph, cname)
             cindices = graph.leaf_cluster_members(cname)
@@ -1066,7 +1074,7 @@ def render(
             cp = pos[ci]
             cs = sizes[ci]
             cpad = cstyle.padding
-            cy_min = (cp[:, 1] - cs[:, 1] / 2).min() - cpad
+            cy_min = cluster_y_mins.get(cname, (cp[:, 1] - cs[:, 1] / 2).min() - cpad)
             cy_max = cluster_y_maxes.get(cname, (cp[:, 1] + cs[:, 1] / 2).max() + cpad)
             cx_min = (cp[:, 0] - cs[:, 0] / 2).min() - cpad
             cx_max = (cp[:, 0] + cs[:, 0] / 2).max() + cpad
@@ -1082,6 +1090,39 @@ def render(
             x_max = max(x_max, cx_max + margin)
             y_min = min(y_min, cy_min - margin)
             y_max = max(y_max, cy_max + margin)
+            if _cluster_label_is_outside(str(cstyle.label_position)):
+                label_font_data = _cluster_font_size_data(
+                    graph.cluster_labels.get(cname, cname),
+                    float(ch),
+                    float(sizes[:, 1].min()) if sizes.size else 0.0,
+                    float(cstyle.font_size),
+                )
+                label_width, label_height = _measure_cluster_label_data(
+                    graph.cluster_labels.get(cname, cname),
+                    font_size_data=label_font_data,
+                    font_family=str(cstyle.font_family or RESOLVED_FONT),
+                    font_weight=str(cstyle.font_weight),
+                    text_wrap=str(cstyle.text_wrap),
+                    text_max_width=_cluster_label_text_max_width(cstyle, 1.0),
+                )
+                label_x, label_y, label_ha, label_va = _cluster_label_anchor(
+                    str(cstyle.label_position),
+                    float(cx_min),
+                    float(cx_max),
+                    float(cy_min),
+                    float(cy_max),
+                    float(cstyle.label_offset[0]),
+                    float(cstyle.label_offset[1]),
+                )
+                label_bounds = _cluster_label_bounds(
+                    DaguaText(x=label_x, y=label_y, text="", ha=label_ha, va=label_va),
+                    label_width,
+                    label_height,
+                )
+                x_min = min(x_min, label_bounds[0] - margin)
+                x_max = max(x_max, label_bounds[2] + margin)
+                y_min = min(y_min, label_bounds[1] - margin)
+                y_max = max(y_max, label_bounds[3] + margin)
         content_y_max = max(content_y_max, float(y_max))
 
     # Expand figure bounds for self-loop arcs that extend beyond nodes.
@@ -2785,6 +2826,175 @@ def _cluster_depths(graph: Any, ordered_clusters: Sequence[str]) -> Dict[str, in
     return depths
 
 
+def _cluster_label_text_max_width(
+    style: ClusterStyle,
+    display_scale: float,
+) -> Optional[float]:
+    """Return the cluster-label wrap budget in data units.
+
+    Parameters
+    ----------
+    style : ClusterStyle
+        Cluster style providing the optional width budget in points.
+    display_scale : float
+        Point-to-data conversion for the active axes.
+
+    Returns
+    -------
+    float | None
+        Wrap width in data units, or ``None`` when wrapping is disabled.
+    """
+    if style.text_max_width is None:
+        return None
+    return float(style.text_max_width) * display_scale
+
+
+def _measure_cluster_label_data(
+    text: str,
+    font_size_data: float,
+    font_family: str,
+    font_weight: str,
+    text_wrap: str,
+    text_max_width: Optional[float],
+) -> Tuple[float, float]:
+    """Measure a cluster label after plain-text wrapping is applied.
+
+    Parameters
+    ----------
+    text : str
+        Raw cluster label text.
+    font_size_data : float
+        Label font size in data units.
+    font_family : str
+        Font family used for measurement.
+    font_weight : str
+        Font weight used for measurement.
+    text_wrap : str
+        Plain-text wrapping policy.
+    text_max_width : float | None
+        Optional width budget in data units.
+
+    Returns
+    -------
+    tuple[float, float]
+        Measured ``(width, height)`` in data units.
+    """
+    prepared_text = prepare_label_text(
+        text,
+        font_size=font_size_data,
+        text_wrap=text_wrap,
+        text_max_width=text_max_width,
+        text_transform="none",
+        label_format="plain",
+    )
+    return measure_text_data(
+        prepared_text,
+        size_data=font_size_data,
+        font_family=font_family,
+        font_weight=font_weight,
+    )
+
+
+def _cluster_label_expands_top(position: str) -> bool:
+    """Return whether a cluster label reserves space above the box interior.
+
+    Parameters
+    ----------
+    position : str
+        Cluster label position string.
+
+    Returns
+    -------
+    bool
+        ``True`` when the label sits inside the top band of the cluster.
+    """
+    return position.startswith("top-")
+
+
+def _cluster_label_expands_bottom(position: str) -> bool:
+    """Return whether a cluster label reserves space below the box interior.
+
+    Parameters
+    ----------
+    position : str
+        Cluster label position string.
+
+    Returns
+    -------
+    bool
+        ``True`` when the label sits inside the bottom band of the cluster.
+    """
+    return position.startswith("bottom-")
+
+
+def _cluster_label_is_outside(position: str) -> bool:
+    """Return whether a cluster label is rendered outside the cluster box.
+
+    Parameters
+    ----------
+    position : str
+        Cluster label position string.
+
+    Returns
+    -------
+    bool
+        ``True`` when the label is outside the cluster box.
+    """
+    return position.startswith("outside-")
+
+
+def _cluster_label_anchor(
+    position: str,
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+    label_offset_x: float,
+    label_offset_y: float,
+) -> Tuple[float, float, str, str]:
+    """Return the anchor point and alignment for one cluster label.
+
+    Parameters
+    ----------
+    position : str
+        Cluster label position string.
+    x_min : float
+        Cluster left edge in data units.
+    x_max : float
+        Cluster right edge in data units.
+    y_min : float
+        Cluster bottom edge in data units.
+    y_max : float
+        Cluster top edge in data units.
+    label_offset_x : float
+        Horizontal label inset in data units.
+    label_offset_y : float
+        Vertical label inset in data units.
+
+    Returns
+    -------
+    tuple[float, float, str, str]
+        ``(x, y, ha, va)`` anchor metadata.
+    """
+    if position in {"top-center", "bottom-center"}:
+        anchor_x = (x_min + x_max) / 2.0
+        ha = "center"
+    elif position in {"top-right", "bottom-right"}:
+        anchor_x = x_max - label_offset_x
+        ha = "right"
+    else:
+        anchor_x = x_min + label_offset_x
+        ha = "left"
+
+    if position == "outside-top":
+        return anchor_x, y_max + label_offset_y, ha, "bottom"
+    if position == "outside-bottom":
+        return anchor_x, y_min - label_offset_y, ha, "top"
+    if _cluster_label_expands_bottom(position):
+        return anchor_x, y_min + label_offset_y, ha, "bottom"
+    return anchor_x, y_max - label_offset_y, ha, "top"
+
+
 @dataclass
 class _ClusterLabelPlacement:
     """Measured placement metadata for one cluster label.
@@ -2820,6 +3030,7 @@ def _compute_cluster_y_maxes(
     ordered_clusters: Sequence[str],
     cluster_depths: Dict[str, int],
     label_gap: float = 0.0,
+    display_scale: float = 1.0,
 ) -> Dict[str, float]:
     """Return cluster top bounds after reserving nested header bands.
 
@@ -2837,6 +3048,8 @@ def _compute_cluster_y_maxes(
         Nesting depth per cluster name.
     label_gap : float, default=0.0
         Extra vertical gap in data units reserved below the cluster label.
+    display_scale : float, default=1.0
+        Point-to-data conversion used for wrapped label measurement.
 
     Returns
     -------
@@ -2873,9 +3086,9 @@ def _compute_cluster_y_maxes(
             float(style.font_size) + depth * float(getattr(style, "depth_font_size_step", -0.5)),
             5.0,
         )
-        label_height = measure_text_data(
+        label_height = _measure_cluster_label_data(
             label_text,
-            size_data=_cluster_font_size_data(
+            font_size_data=_cluster_font_size_data(
                 label_text,
                 cluster_height,
                 min_node_height,
@@ -2883,10 +3096,98 @@ def _compute_cluster_y_maxes(
             ),
             font_family=str(style.font_family or RESOLVED_FONT),
             font_weight=str(style.font_weight),
+            text_wrap=str(style.text_wrap),
+            text_max_width=_cluster_label_text_max_width(style, display_scale),
         )[1]
-        cluster_y_maxes[name] = raw_y_max + padding + label_height + label_gap
+        if _cluster_label_expands_top(str(style.label_position)):
+            cluster_y_maxes[name] = raw_y_max + padding + label_height + label_gap
+        else:
+            cluster_y_maxes[name] = raw_y_max + padding
 
     return cluster_y_maxes
+
+
+def _compute_cluster_y_mins(
+    graph: Any,
+    pos: np.ndarray,
+    sizes: np.ndarray,
+    ordered_clusters: Sequence[str],
+    cluster_depths: Dict[str, int],
+    label_gap: float = 0.0,
+    display_scale: float = 1.0,
+) -> Dict[str, float]:
+    """Return cluster bottom bounds after reserving nested footer bands.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing cluster membership, labels, parents, and styles.
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]`` in data coordinates.
+    sizes : numpy.ndarray
+        Node sizes with shape ``[N, 2]`` in data coordinates.
+    ordered_clusters : sequence[str]
+        Cluster render order.
+    cluster_depths : dict[str, int]
+        Nesting depth per cluster name.
+    label_gap : float, default=0.0
+        Extra vertical gap in data units reserved above the cluster label.
+    display_scale : float, default=1.0
+        Point-to-data conversion used for wrapped label measurement.
+
+    Returns
+    -------
+    dict[str, float]
+        Bottom ``y`` bound for each cluster after accounting for descendant
+        label bands.
+    """
+    cluster_parents = getattr(graph, "cluster_parents", {}) or {}
+    min_node_height = float(sizes[:, 1].min()) if sizes.size else 0.0
+    cluster_y_mins: Dict[str, float] = {}
+
+    for name in reversed(ordered_clusters):
+        members = graph.clusters[name]
+        indices = collect_cluster_leaves(members) if isinstance(members, dict) else members
+        if not indices:
+            continue
+
+        style = _cluster_style_for_render(graph, name)
+        depth = cluster_depths.get(name, 0)
+        padding = float(style.padding)
+        label_text = graph.cluster_labels.get(name, name)
+        member_pos = pos[indices]
+        member_sizes = sizes[indices]
+        raw_y_max = float((member_pos[:, 1] + member_sizes[:, 1] / 2).max()) + padding
+        raw_y_min = float((member_pos[:, 1] - member_sizes[:, 1] / 2).min())
+
+        for child_name, parent_name in cluster_parents.items():
+            if parent_name == name and child_name in cluster_y_mins:
+                raw_y_min = min(raw_y_min, cluster_y_mins[child_name])
+
+        cluster_height = max(raw_y_max - raw_y_min, 0.0)
+        label_font_points = max(
+            float(style.font_size) + depth * float(getattr(style, "depth_font_size_step", -0.5)),
+            5.0,
+        )
+        label_height = _measure_cluster_label_data(
+            label_text,
+            font_size_data=_cluster_font_size_data(
+                label_text,
+                cluster_height,
+                min_node_height,
+                label_font_points,
+            ),
+            font_family=str(style.font_family or RESOLVED_FONT),
+            font_weight=str(style.font_weight),
+            text_wrap=str(style.text_wrap),
+            text_max_width=_cluster_label_text_max_width(style, display_scale),
+        )[1]
+        if _cluster_label_expands_bottom(str(style.label_position)):
+            cluster_y_mins[name] = raw_y_min - padding - label_height - label_gap
+        else:
+            cluster_y_mins[name] = raw_y_min - padding
+
+    return cluster_y_mins
 
 
 def _expand_axes_for_clusters(
@@ -2935,6 +3236,16 @@ def _expand_axes_for_clusters(
             ordered_clusters,
             cluster_depths,
             label_gap=_points_to_data_units(ax, _CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y"),
+            display_scale=display_scale,
+        )
+        cluster_y_mins = _compute_cluster_y_mins(
+            graph,
+            pos,
+            sizes,
+            ordered_clusters,
+            cluster_depths,
+            label_gap=_points_to_data_units(ax, _CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y"),
+            display_scale=display_scale,
         )
         x_min, x_max = ax.get_xlim()
         y_min, y_max = ax.get_ylim()
@@ -2953,7 +3264,10 @@ def _expand_axes_for_clusters(
             member_sizes = sizes[indices]
             cx_min = (member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding
             cx_max = (member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding
-            cy_min = (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding
+            cy_min = cluster_y_mins.get(
+                name,
+                (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding,
+            )
             cy_max = cluster_y_maxes.get(
                 name,
                 (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding,
@@ -2972,12 +3286,14 @@ def _expand_axes_for_clusters(
                 min_node_height,
                 label_font_points,
             )
-            label_width = measure_text_data(
+            label_width, label_height = _measure_cluster_label_data(
                 label,
-                size_data=label_font_data,
+                font_size_data=label_font_data,
                 font_family=str(style.font_family or RESOLVED_FONT),
                 font_weight=str(style.font_weight),
-            )[0]
+                text_wrap=str(style.text_wrap),
+                text_max_width=_cluster_label_text_max_width(style, display_scale),
+            )
             cluster_width = cx_max - cx_min
             min_cluster_width = cluster_height * 0.65
             if cluster_width < min_cluster_width:
@@ -2986,17 +3302,44 @@ def _expand_axes_for_clusters(
                 cx_max += expand_width
 
             label_offset_x = float(style.label_offset[0]) * display_scale
-            required_label_width = label_width + label_offset_x * 2.0
-            current_width = cx_max - cx_min
-            if required_label_width > current_width:
-                expand_width = (required_label_width - current_width) / 2.0
-                cx_min -= expand_width
-                cx_max += expand_width
+            label_offset_y = float(style.label_offset[1]) * display_scale
+            if not _cluster_label_is_outside(str(style.label_position)):
+                required_label_width = label_width + label_offset_x * 2.0
+                current_width = cx_max - cx_min
+                if required_label_width > current_width:
+                    expand_width = (required_label_width - current_width) / 2.0
+                    cx_min -= expand_width
+                    cx_max += expand_width
 
             x_min = min(x_min, float(cx_min) - margin)
             x_max = max(x_max, float(cx_max) + margin)
             y_min = min(y_min, float(cy_min) - margin)
             y_max = max(y_max, float(cy_max) + margin)
+            if _cluster_label_is_outside(str(style.label_position)):
+                label_x, label_y, label_ha, label_va = _cluster_label_anchor(
+                    str(style.label_position),
+                    float(cx_min),
+                    float(cx_max),
+                    float(cy_min),
+                    float(cy_max),
+                    label_offset_x,
+                    label_offset_y,
+                )
+                label_bounds = _cluster_label_bounds(
+                    DaguaText(
+                        x=label_x,
+                        y=label_y,
+                        text=label,
+                        ha=label_ha,
+                        va=label_va,
+                    ),
+                    label_width,
+                    label_height,
+                )
+                x_min = min(x_min, label_bounds[0] - margin)
+                x_max = max(x_max, label_bounds[2] + margin)
+                y_min = min(y_min, label_bounds[1] - margin)
+                y_max = max(y_max, label_bounds[3] + margin)
 
         ax.set_xlim(float(x_min), float(x_max))
         ax.set_ylim(float(y_min), float(y_max))
@@ -6055,13 +6398,24 @@ def _draw_clusters(
     cluster_label_placements: List[_ClusterLabelPlacement] = []
     min_node_height = float(sizes[:, 1].min()) if sizes.size else 0.0
 
+    label_gap = _points_to_data_units(ax, _CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y")
     cluster_y_maxes = _compute_cluster_y_maxes(
         graph,
         pos,
         sizes,
         ordered_clusters,
         cluster_depths,
-        label_gap=_points_to_data_units(ax, _CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y"),
+        label_gap=label_gap,
+        display_scale=display_scale,
+    )
+    cluster_y_mins = _compute_cluster_y_mins(
+        graph,
+        pos,
+        sizes,
+        ordered_clusters,
+        cluster_depths,
+        label_gap=label_gap,
+        display_scale=display_scale,
     )
 
     for name in ordered_clusters:
@@ -6087,8 +6441,12 @@ def _draw_clusters(
         label_ff = style.font_family or RESOLVED_FONT
         label_ox = style.label_offset[0] * display_scale
         label_oy = style.label_offset[1] * display_scale
+        label_text_max_width = _cluster_label_text_max_width(style, display_scale)
 
-        y_min = (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding
+        y_min = cluster_y_mins.get(
+            name,
+            (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding,
+        )
         # Use precomputed y_max which accounts for child cluster headers
         y_max = cluster_y_maxes.get(
             name,
@@ -6105,11 +6463,13 @@ def _draw_clusters(
             min_node_height,
             float(label_font_points),
         )
-        label_width, label_height = measure_text_data(
+        label_width, label_height = _measure_cluster_label_data(
             label,
-            size_data=label_font_data,
+            font_size_data=label_font_data,
             font_family=str(label_ff),
             font_weight=str(style.font_weight),
+            text_wrap=str(style.text_wrap),
+            text_max_width=label_text_max_width,
         )
         cluster_width = x_max - x_min
         min_cluster_width = cluster_height * 0.65
@@ -6120,12 +6480,13 @@ def _draw_clusters(
 
         # Cluster labels are few and measure_text is cached, so use the actual
         # measured width instead of a character-count heuristic.
-        est_label_width = label_width + label_ox * 2
-        content_width = x_max - x_min
-        if est_label_width > content_width:
-            expand = (est_label_width - content_width) / 2
-            x_min -= expand
-            x_max += expand
+        if not _cluster_label_is_outside(str(style.label_position)):
+            est_label_width = label_width + label_ox * 2
+            content_width = x_max - x_min
+            if est_label_width > content_width:
+                expand = (est_label_width - content_width) / 2
+                x_min -= expand
+                x_max += expand
 
         # Progressive depth variation — each depth_*_step field is additive per level
         fill_color = darken_hex(style.fill, depth * style.depth_fill_step)
@@ -6170,20 +6531,17 @@ def _draw_clusters(
                 [to_rgba(stroke_color, border_alpha)] * len(border_paths)
             )
 
-        # Cluster label: position from style after the data-coordinate size is resolved.
-        if style.label_position == "top-center":
-            lx = (x_min + x_max) / 2
-            ha = "center"
-        elif style.label_position == "top-right":
-            lx = x_max - label_ox
-            ha = "right"
-        else:  # "top-left" (default)
-            lx = x_min + label_ox
-            ha = "left"
-
-        # Each cluster label sits inside its OWN container's top edge,
-        # not stacked at the outermost cluster's top-left.
-        ly = y_max - label_oy
+        # Each cluster label sits relative to its OWN container bounds rather
+        # than stacking at the outermost cluster's corner.
+        lx, ly, ha, va = _cluster_label_anchor(
+            str(style.label_position),
+            float(x_min),
+            float(x_max),
+            float(y_min),
+            float(y_max),
+            float(label_ox),
+            float(label_oy),
+        )
 
         if label:
             label_spec = DaguaText(
@@ -6196,8 +6554,10 @@ def _draw_clusters(
                 font_color=style.font_color,
                 alpha=1.0,
                 ha=ha,
-                va="top",
+                va=va,
                 clip_on=False,
+                text_wrap=style.text_wrap,
+                text_max_width=label_text_max_width,
                 zorder=0.1 + depth * 0.01,
                 gid=f"dagua-cluster-label-{name}",
             )

@@ -422,7 +422,14 @@ class EdgeStyle:
 
 @dataclass
 class ClusterStyle:
-    """Visual style for a cluster box."""
+    """Visual style for a cluster box.
+
+    Notes
+    -----
+    Supported ``label_position`` values are ``"top-left"``, ``"top-center"``,
+    ``"top-right"``, ``"bottom-left"``, ``"bottom-center"``,
+    ``"bottom-right"``, ``"outside-top"``, and ``"outside-bottom"``.
+    """
 
     fill: str = PAPER
     stroke: str = LIGHT_GRAY
@@ -430,7 +437,9 @@ class ClusterStyle:
     stroke_dash: str = "solid"
     corner_radius: float = 8.0
     padding: float = 38.0
-    label_position: str = "top-left"  # top-left, top-center, top-right
+    # inside: top-left/top-center/top-right, bottom-left/bottom-center/bottom-right
+    # outside: outside-top/outside-bottom
+    label_position: str = "top-left"
     font_size: float = 9.5
     font_weight: str = "bold"
     font_color: str = DARK_GRAY
@@ -441,6 +450,8 @@ class ClusterStyle:
         10.0,
         12.0,
     )  # render-only (y-offset prevents nested label overlap)
+    text_wrap: str = "none"  # none, wrap, ellipsis
+    text_max_width: Optional[float] = None  # width limit before wrapping
     depth_fill_step: float = 0.03  # HSL lightness step per depth level
     depth_stroke_step: float = 0.05  # HSL lightness step per depth level
     depth_stroke_width_step: float = 0.0  # additive stroke_width change per depth (points)
