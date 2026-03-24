@@ -1551,6 +1551,31 @@ def _build_node_patch(
             linestyle=linestyle,
             zorder=zorder,
         )
+    if shape in {
+        "semicircle",
+        "semicircle_up",
+        "semicircle_down",
+        "semicircle_left",
+        "semicircle_right",
+    }:
+        return PathPatch(
+            build_shape_path(
+                ShapeSpec(
+                    center_x=x,
+                    center_y=y,
+                    width=w,
+                    height=h,
+                    shape=shape,
+                    corner_radius=0.0,
+                    aspect_ratio=getattr(style, "aspect_ratio", None),
+                )
+            ),
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=zorder,
+        )
     if shape == "diamond":
         return Polygon(
             np.array(
@@ -2525,6 +2550,7 @@ def _expanded_shape_spec(spec: ShapeSpec, delta: float) -> ShapeSpec:
         height=spec.height + 2.0 * delta,
         shape=spec.shape,
         corner_radius=max(spec.corner_radius + delta, 0.0),
+        aspect_ratio=spec.aspect_ratio,
     )
 
 
@@ -3514,6 +3540,7 @@ def _draw_nodes(
             height=h,
             shape=str(style.shape),
             corner_radius=float(scaled_style.corner_radius),
+            aspect_ratio=style.aspect_ratio,
         )
         outer_path = build_shape_path(shape_spec)
         fill_path = _node_fill_path(shape_spec, outer_path, border_width, border_position)
@@ -3639,6 +3666,7 @@ def _draw_shadow(ax: Any, x: float, y: float, w: float, h: float, style: Any) ->
         height=h,
         shape=str(style.shape),
         corner_radius=float(getattr(style, "corner_radius", 0.0)),
+        aspect_ratio=getattr(style, "aspect_ratio", None),
     )
     for idx in range(steps, 0, -1):
         scale = 1.0 + (0.01 * style.shadow_blur * idx)
@@ -3650,6 +3678,7 @@ def _draw_shadow(ax: Any, x: float, y: float, w: float, h: float, style: Any) ->
             height=float(base_shape_spec.height) * scale,
             shape=base_shape_spec.shape,
             corner_radius=float(base_shape_spec.corner_radius) * scale,
+            aspect_ratio=base_shape_spec.aspect_ratio,
         )
         shadow = PathPatch(
             build_shape_path(shadow_spec),
@@ -6514,6 +6543,7 @@ def _draw_clusters(
                 0.0,
             )
             * display_scale,
+            aspect_ratio=None,
         )
         outer_path = build_shape_path(shape_spec)
         fill_path = inset_shape_path(shape_spec, border_width) if border_width > 0.0 else outer_path

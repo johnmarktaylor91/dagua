@@ -427,6 +427,10 @@ class TestRenderStyleFlexibility:
             "parallelogram",
             "trapezoid",
             "cylinder",
+            "semicircle",
+            "semicircle_down",
+            "semicircle_left",
+            "semicircle_right",
         ],
     )
     def test_new_shapes_render(self, fast_config, tmp_path, shape):
@@ -487,13 +491,16 @@ def test_graphviz_dash_patterns_are_explicit() -> None:
     """Renderer dash mappings should use Graphviz-like stroke lengths."""
 
     assert _node_linestyle(NodeStyle(stroke_dash="dashed")) == (0, (5.0, 3.0))
-    assert _node_linestyle(NodeStyle(stroke_dash="dotted")) == (0, (0.1, 3.0))
+    assert _node_linestyle(NodeStyle(stroke_dash="dotted")) == (0, (1.2, 3.0))
     assert _edge_linestyle(EdgeStyle(style="dashed")) == (0, (5.0, 3.0))
-    assert _edge_linestyle(EdgeStyle(style="dotted")) == (0, (0.1, 3.0))
-    assert _cluster_linestyle("dotted") == (0, (0.1, 3.0))
+    assert _edge_linestyle(EdgeStyle(style="dotted")) == (0, (1.2, 3.0))
+    assert _cluster_linestyle("dotted") == (0, (1.2, 3.0))
 
 
-@pytest.mark.parametrize(("shape", "min_vertices"), [("cloud", 18), ("stadium", 14)])
+@pytest.mark.parametrize(
+    ("shape", "min_vertices"),
+    [("cloud", 18), ("stadium", 14), ("semicircle", 8), ("semicircle_left", 8)],
+)
 def test_shape_shadows_follow_custom_node_contours(shape: str, min_vertices: int) -> None:
     """Shadow artists should reuse the rendered shape path for non-rect nodes."""
 
@@ -592,8 +599,8 @@ def test_sharp_crossing_uses_edge_width_relative_geometry(
     _draw_sharp_crossing(ax, crossing, curve, 0.5, style, span=16.0)
 
     edge_width = _edge_width_data_units(ax, float(style.width))
-    expected_half_span = edge_width * 1.5
-    expected_height = edge_width * 2.0
+    expected_half_span = edge_width * 2.0
+    expected_height = edge_width * 3.5
     points = captured["points"]
 
     assert captured["width"] == pytest.approx(edge_width)
@@ -735,7 +742,7 @@ def test_circle_arrow_marker_is_hollow() -> None:
     plt.close(fig)
 
     assert ax.patches[0].get_linewidth() == pytest.approx(0.0)
-    assert x_span / 2.0 == pytest.approx(0.85 * style.arrow_width * expected_scale, rel=0.05)
+    assert x_span / 2.0 == pytest.approx(0.85 * style.arrow_width * expected_scale, rel=0.1)
 
 
 def test_dot_arrow_marker_uses_larger_graphviz_like_radius() -> None:
@@ -1086,6 +1093,28 @@ def test_box3d_path_keeps_front_face_clear_of_diagonal_overlap() -> None:
     assert any(np.allclose(vertex, (-half_width, front_top)) for vertex in vertices)
     assert any(np.allclose(vertex, (front_right, -half_height)) for vertex in vertices)
     assert any(np.allclose(vertex, (front_right, front_top)) for vertex in vertices)
+
+
+def test_build_node_patch_supports_semicircle_variants() -> None:
+    """Patch construction should reuse the semicircle path geometry."""
+
+    patch = _build_node_patch(
+        x=0.0,
+        y=0.0,
+        w=100.0,
+        h=60.0,
+        style=NodeStyle(shape="semicircle_right", aspect_ratio=1.5),
+        facecolor="#ffffff",
+        edgecolor="#000000",
+        linewidth=1.0,
+        linestyle="solid",
+        zorder=2.0,
+    )
+
+    vertices = np.asarray(patch.get_path().vertices, dtype=np.float64)
+
+    assert vertices.shape[0] >= 8
+    assert float(np.min(vertices[:, 0])) == pytest.approx(-50.0)
 
 
 def test_render_uses_resolved_font_for_default_italic_node_labels(

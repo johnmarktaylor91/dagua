@@ -718,6 +718,16 @@ PARALLELOGRAM_INTERIOR_WIDTH_FACTOR = 1.6
 TRAPEZOID_INTERIOR_WIDTH_FACTOR = 1.5
 BOX3D_INTERIOR_WIDTH_FACTOR = 1.6
 BOX3D_INTERIOR_HEIGHT_FACTOR = 1.5
+CURVED_NODE_SHAPES = {
+    "ellipse",
+    "circle",
+    "double_circle",
+    "semicircle",
+    "semicircle_up",
+    "semicircle_down",
+    "semicircle_left",
+    "semicircle_right",
+}
 
 
 def _rotated_text_bounds(width: float, height: float, angle_degrees: float) -> Tuple[float, float]:
@@ -845,7 +855,7 @@ def _shape_text_capacity(
     padded_width = max(float(width), 0.0)
     padded_height = max(float(height), 0.0)
 
-    if shape in {"ellipse", "circle", "double_circle"}:
+    if shape in CURVED_NODE_SHAPES:
         padded_width /= CURVED_SHAPE_INSCRIBE_FACTOR
         padded_height /= CURVED_SHAPE_INSCRIBE_FACTOR
     elif shape == "stadium":
@@ -1141,7 +1151,7 @@ def _compute_node_size_cached(
     h = max(h, MIN_NODE_HEIGHT)
 
     if overflow_policy == "expand_node":
-        if shape in ("ellipse", "circle", "double_circle"):
+        if shape in CURVED_NODE_SHAPES:
             # Curved outlines only guarantee the inscribed rectangle, so expand
             # the axes until that inner rectangle can fully contain the padded text.
             required_w = padded_text_w * CURVED_SHAPE_INSCRIBE_FACTOR
@@ -1181,7 +1191,18 @@ def _compute_node_size_cached(
     elif shape == "circle":
         r = max(w, h)
         w = h = r
-    elif shape == "ellipse" and overflow_policy != "expand_node":
+    elif (
+        shape
+        in {
+            "ellipse",
+            "semicircle",
+            "semicircle_up",
+            "semicircle_down",
+            "semicircle_left",
+            "semicircle_right",
+        }
+        and overflow_policy != "expand_node"
+    ):
         # Graphviz inscribes the text bbox inside the ellipse, making it sqrt(2)
         # wider. We approximate this with a multiplicative factor that scales
         # down for short labels (where the minimum width already provides adequate
