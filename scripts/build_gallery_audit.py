@@ -5,7 +5,12 @@
 This script creates atomic reference cards, Graphviz comparison cards, combo
 cards, navigation boards, and a JSONL index under ``eval_output/gallery_audit``.
 The artifacts are intentionally plain and deterministic so iterative review can
-focus on one visual variable at a time.
+focus on one visual variable at a time. Recent render-polish fixtures also rely
+on three gallery-specific adaptations documented here: dark headers switch to a
+separate palette when a card's graph background is visually dark, decorative
+fill cases apply per-shape overrides so labels remain legible inside box3d,
+cloud, and patterned nodes, and strip cards allocate equal panel widths so
+side-by-side comparisons do not drift as captions or dividers change.
 """
 
 from __future__ import annotations
@@ -2038,6 +2043,12 @@ def _is_dark_background(params: Mapping[str, object]) -> bool:
     -------
     bool
         ``True`` when the configured background luminance is below the audit threshold.
+
+    Notes
+    -----
+    The dark-header adaptation keeps gallery chrome readable when the fixture
+    itself switches to dark graph backgrounds, without requiring each card
+    recipe to duplicate header color overrides.
     """
     graph_params = params.get("graph", {})
     if not isinstance(graph_params, Mapping):

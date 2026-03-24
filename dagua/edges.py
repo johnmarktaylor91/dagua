@@ -211,7 +211,7 @@ def _compute_self_loop_curve(
     # Loop exits at two separate points on the node edge, spread apart,
     # with control points creating a wide circular arc.
     spread = max(sw, sh) * 0.35  # how far apart the exit/entry points are
-    arc_height = max(sw, sh) * 1.1  # how far the loop extends from the node
+    arc_height = max(sw, sh) * 1.1  # tuned down from 1.6 to keep loops compact
 
     # Cubic bezier approximation of a semicircular arc:
     # For a semicircle of radius r, the control point offset is ~r * 1.33

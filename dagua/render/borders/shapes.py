@@ -12,6 +12,8 @@ from numpy.typing import NDArray
 
 FloatArray = NDArray[np.float64]
 ELLIPSE_KAPPA = 0.5522847498
+# Increased to ``0.45`` so the folded corner remains legible after downscaling
+# and thin strokes still separate the fold line from the outer outline.
 NOTE_FOLD_SIZE_RATIO = 0.45
 
 
@@ -138,6 +140,8 @@ def star_vertices(center_x: float, center_y: float, width: float, height: float)
     points: List[List[float]] = []
     outer_rx = width / 2.0
     outer_ry = height / 2.0
+    # Tuned down from ``0.32`` to produce slimmer inner valleys that feel more
+    # Graphviz-like and keep short labels away from the inward star points.
     inner_rx = outer_rx * 0.25
     inner_ry = outer_ry * 0.25
     for index in range(10):
@@ -197,6 +201,8 @@ def polygon_vertices(spec: ShapeSpec) -> FloatArray:
     if spec.shape == "star":
         return star_vertices(x, y, width, height)
     if spec.shape == "parallelogram":
+        # Tuned from ``0.30`` so the slant remains obvious without making the
+        # top edge look detached from the node body.
         skew = width * 0.28
         return np.array(
             [
@@ -208,6 +214,8 @@ def polygon_vertices(spec: ShapeSpec) -> FloatArray:
             dtype=np.float64,
         )
     if spec.shape == "trapezoid":
+        # Tuned from ``0.20`` so the top edge reads clearly narrower while
+        # still leaving enough interior width for labels.
         inset = width * 0.28
         return np.array(
             [
@@ -663,6 +671,8 @@ def tab_path(spec: ShapeSpec) -> Path:
     right = spec.center_x + half_width
     bottom = spec.center_y - half_height
     top = spec.center_y + half_height
+    # Tuned from ``0.30 / 0.20`` so the tab survives small-card rendering and
+    # reads as a folder tab instead of a tiny notch.
     tab_width = spec.width * 0.38
     tab_height = spec.height * 0.28
     vertices = np.array(
