@@ -618,7 +618,7 @@ def _adjust_port_for_shape(
     """Adjust port position to lie on the shape boundary.
 
     For rectangles/roundrects, ports are already on the bounding box edge — no adjustment.
-    For ellipses/circles, project onto the ellipse curve.
+    For ellipses/circles and semicircle variants, project onto the curved boundary.
     For diamonds, project onto the diamond edge.
     """
     if shape in ("rect", "roundrect"):
@@ -642,6 +642,37 @@ def _adjust_port_for_shape(
         # Parametric angle
         angle = math.atan2(dy / b, dx / a)
         return cx + a * math.cos(angle), cy + b * math.sin(angle)
+
+    if shape in {
+        "semicircle",
+        "semicircle_up",
+        "semicircle_down",
+        "semicircle_left",
+        "semicircle_right",
+    }:
+        from dagua.render.edges.intersection import ray_semicircle_intersection
+
+        dx = port_x - cx
+        dy = port_y - cy
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return cx, cy + (h / 2 if is_source else -h / 2)
+
+        orientation = "up"
+        if shape == "semicircle_down":
+            orientation = "down"
+        elif shape == "semicircle_left":
+            orientation = "left"
+        elif shape == "semicircle_right":
+            orientation = "right"
+
+        hit = ray_semicircle_intersection(
+            center=[cx, cy],
+            half_size=[w / 2, h / 2],
+            orientation=orientation,
+            ray_origin=[cx, cy],
+            ray_direction=[dx, dy],
+        )
+        return float(hit[0]), float(hit[1])
 
     if shape == "diamond":
         # Diamond edges: 4 sides connecting top/right/bottom/left

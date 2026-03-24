@@ -233,9 +233,19 @@ def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
             height=inner_height,
             shape=spec.shape,
             corner_radius=max(spec.corner_radius - inset, 0.0),
+            aspect_ratio=spec.aspect_ratio,
         )
         return build_shape_path(inner_spec)
-    if spec.shape in {"ellipse", "circle", "cylinder"}:
+    if spec.shape in {
+        "ellipse",
+        "circle",
+        "cylinder",
+        "semicircle",
+        "semicircle_up",
+        "semicircle_down",
+        "semicircle_left",
+        "semicircle_right",
+    }:
         inner_spec = ShapeSpec(
             center_x=spec.center_x,
             center_y=spec.center_y,
@@ -243,6 +253,7 @@ def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
             height=inner_height,
             shape=spec.shape,
             corner_radius=spec.corner_radius,
+            aspect_ratio=spec.aspect_ratio,
         )
         return build_shape_path(inner_spec)
     try:
@@ -257,6 +268,7 @@ def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
             height=inner_height,
             shape=spec.shape,
             corner_radius=spec.corner_radius,
+            aspect_ratio=spec.aspect_ratio,
         )
         return build_shape_path(inner_spec)
     if spec.shape == "star":
