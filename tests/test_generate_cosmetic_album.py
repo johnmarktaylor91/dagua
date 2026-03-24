@@ -45,6 +45,7 @@ def test_build_case_catalog_covers_expected_counts() -> None:
         "node_shapes": 13,
         "opacity": 4,
         "rich_labels": 2,
+        "semicircle": 4,
         "shadows": 2,
         "text_formatting": 7,
     }
@@ -384,6 +385,55 @@ def test_new_combo_cases_preserve_requested_settings_and_fixtures() -> None:
     }
     assert all(
         style is not None and style.font_style == "italic" for style in cloud_case.graph.node_styles
+    )
+
+
+def test_semicircle_cases_cover_orientations_ratios_and_adversarial_inputs() -> None:
+    """Semicircle album cards should preserve their requested showcase settings."""
+
+    cases = {case.case_id: case for case in build_case_catalog()}
+
+    orientation_case = cases["semicircle_orientations"]
+    assert orientation_case.settings == {
+        "kind": "semicircle",
+        "variant": "orientations",
+        "orientations": ["up", "down", "left", "right"],
+    }
+    assert [style.shape for style in orientation_case.graph.node_styles if style is not None] == [
+        "semicircle",
+        "semicircle_down",
+        "semicircle_left",
+        "semicircle_right",
+    ]
+
+    ratio_case = cases["semicircle_aspect_ratio"]
+    assert ratio_case.settings == {
+        "kind": "semicircle",
+        "variant": "aspect_ratio",
+        "aspect_ratios": [0.5, 1.0, 2.0],
+    }
+    assert [style.aspect_ratio for style in ratio_case.graph.node_styles if style is not None] == [
+        pytest.approx(0.5),
+        pytest.approx(1.0),
+        pytest.approx(2.0),
+    ]
+
+    combo_case = cases["semicircle_combinations"]
+    assert combo_case.graph.num_edges == 2
+    assert combo_case.settings == {
+        "kind": "semicircle",
+        "variant": "combinations",
+        "features": ["borders", "fills", "shadows", "labels"],
+    }
+
+    adversarial_case = cases["semicircle_adversarial"]
+    assert adversarial_case.settings == {
+        "kind": "semicircle",
+        "variant": "adversarial",
+        "stressors": ["long_labels", "tiny_nodes", "extreme_aspect_ratios"],
+    }
+    assert adversarial_case.graph.node_labels[0] == (
+        "Long label that should still fit inside a semicircle"
     )
 
 

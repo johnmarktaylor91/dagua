@@ -9,6 +9,9 @@ import numpy as np
 
 from dagua.render.edges.geometry import FLOAT_EPSILON, Point, as_point
 
+SEMICIRCLE_DEFAULT_CURVATURE = 1.0
+SEMICIRCLE_MIN_CURVATURE = 1e-6
+
 
 def _smallest_positive(values: Iterable[float]) -> Optional[float]:
     """Return the smallest non-negative finite value.
@@ -118,6 +121,164 @@ def ray_ellipse_intersection(
     c = (origin[0] / half[0]) ** 2 + (origin[1] / half[1]) ** 2 - 1.0
     roots = np.roots([a, b, c])
     t_hit = _smallest_positive(float(root.real) for root in roots if abs(root.imag) <= 1e-8)
+    if t_hit is None:
+        return center_point
+    return center_point + origin + direction * t_hit
+
+
+def _semicircle_curvature_ratio(aspect_ratio: Optional[float]) -> float:
+    """Return the curvature ratio for semicircle intersection geometry.
+
+    Parameters
+    ----------
+    aspect_ratio : float | None
+        Optional curvature ratio hint.
+
+    Returns
+    -------
+    float
+        Positive curvature ratio.
+    """
+
+    if aspect_ratio is None or aspect_ratio <= SEMICIRCLE_MIN_CURVATURE:
+        return SEMICIRCLE_DEFAULT_CURVATURE
+    return float(aspect_ratio)
+
+
+def _ray_offset_ellipse_candidates(
+    origin: Point,
+    direction: Point,
+    ellipse_center: Point,
+    radius_x: float,
+    radius_y: float,
+) -> List[float]:
+    """Return non-negative ray parameters for an offset ellipse.
+
+    Parameters
+    ----------
+    origin : numpy.ndarray
+        Ray origin relative to the node center.
+    direction : numpy.ndarray
+        Ray direction.
+    ellipse_center : numpy.ndarray
+        Ellipse center relative to the node center.
+    radius_x : float
+        Horizontal ellipse radius.
+    radius_y : float
+        Vertical ellipse radius.
+
+    Returns
+    -------
+    list[float]
+        Candidate ray parameters where the ray intersects the ellipse.
+    """
+
+    if radius_x <= FLOAT_EPSILON or radius_y <= FLOAT_EPSILON:
+        return []
+
+    shifted_origin = origin - ellipse_center
+    a = (direction[0] / radius_x) ** 2 + (direction[1] / radius_y) ** 2
+    b = 2.0 * (
+        (shifted_origin[0] * direction[0]) / (radius_x**2)
+        + (shifted_origin[1] * direction[1]) / (radius_y**2)
+    )
+    c = (shifted_origin[0] / radius_x) ** 2 + (shifted_origin[1] / radius_y) ** 2 - 1.0
+    roots = np.roots([a, b, c])
+    return [
+        float(root.real)
+        for root in roots
+        if abs(root.imag) <= 1e-8 and float(root.real) >= -FLOAT_EPSILON
+    ]
+
+
+def ray_semicircle_intersection(
+    center: Sequence[float],
+    half_size: Sequence[float],
+    orientation: str,
+    ray_origin: Sequence[float],
+    ray_direction: Sequence[float],
+    aspect_ratio: Optional[float] = None,
+) -> Point:
+    """Intersect a ray with a semicircle or semi-ellipse.
+
+    Parameters
+    ----------
+    center : Sequence[float]
+        Node center.
+    half_size : Sequence[float]
+        Half-width and half-height of the node bounds.
+    orientation : str
+        One of ``"up"``, ``"down"``, ``"left"``, or ``"right"``.
+    ray_origin : Sequence[float]
+        Ray origin.
+    ray_direction : Sequence[float]
+        Ray direction.
+    aspect_ratio : float | None, default=None
+        Optional curvature ratio hint used by the shape path.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boundary intersection point.
+    """
+
+    center_point = as_point(center)
+    half = as_point(half_size)
+    origin = as_point(ray_origin) - center_point
+    direction = as_point(ray_direction)
+    if half[0] <= FLOAT_EPSILON or half[1] <= FLOAT_EPSILON:
+        return center_point
+
+    curvature_ratio = _semicircle_curvature_ratio(aspect_ratio)
+    candidates: List[float] = []
+
+    if orientation in {"up", "down"}:
+        radius_x = float(half[0])
+        radius_y = max(
+            min(float(half[1] * 2.0), float(half[0]) / curvature_ratio),
+            SEMICIRCLE_MIN_CURVATURE,
+        )
+        flat_y = -float(half[1]) if orientation == "up" else float(half[1])
+        ellipse_center = np.array([0.0, flat_y], dtype=np.float64)
+        flat_start = np.array([-half[0], flat_y], dtype=np.float64)
+        flat_end = np.array([half[0], flat_y], dtype=np.float64)
+        valid_half = (
+            (lambda point: point[1] >= flat_y - FLOAT_EPSILON)
+            if orientation == "up"
+            else (lambda point: point[1] <= flat_y + FLOAT_EPSILON)
+        )
+    else:
+        radius_x = max(
+            min(float(half[0] * 2.0), float(half[1]) * curvature_ratio),
+            SEMICIRCLE_MIN_CURVATURE,
+        )
+        radius_y = float(half[1])
+        flat_x = float(half[0]) if orientation == "left" else -float(half[0])
+        ellipse_center = np.array([flat_x, 0.0], dtype=np.float64)
+        flat_start = np.array([flat_x, half[1]], dtype=np.float64)
+        flat_end = np.array([flat_x, -half[1]], dtype=np.float64)
+        valid_half = (
+            (lambda point: point[0] <= flat_x + FLOAT_EPSILON)
+            if orientation == "left"
+            else (lambda point: point[0] >= flat_x - FLOAT_EPSILON)
+        )
+
+    line_hit = _ray_segment_intersection(origin, direction, flat_start, flat_end)
+    if line_hit is not None:
+        candidates.append(line_hit)
+
+    for candidate in _ray_offset_ellipse_candidates(
+        origin=origin,
+        direction=direction,
+        ellipse_center=ellipse_center,
+        radius_x=radius_x,
+        radius_y=radius_y,
+    ):
+        point = origin + direction * candidate
+        if valid_half(point):
+            candidates.append(candidate)
+
+    t_hit = _smallest_positive(candidates)
     if t_hit is None:
         return center_point
     return center_point + origin + direction * t_hit
@@ -383,6 +544,7 @@ def intersect_node_boundary(
     corner_radius: float,
     ray_origin: Sequence[float],
     ray_direction: Sequence[float],
+    aspect_ratio: Optional[float] = None,
 ) -> Point:
     """Intersect a ray with a supported node boundary.
 
@@ -400,6 +562,8 @@ def intersect_node_boundary(
         Ray origin.
     ray_direction : Sequence[float]
         Ray direction.
+    aspect_ratio : float | None, default=None
+        Optional curvature ratio hint for semicircle variants.
 
     Returns
     -------
@@ -414,6 +578,42 @@ def intersect_node_boundary(
         )
     if shape in {"ellipse", "circle", "double_circle"}:
         return ray_ellipse_intersection(center, half_size, ray_origin, ray_direction)
+    if shape in {"semicircle", "semicircle_up"}:
+        return ray_semicircle_intersection(
+            center=center,
+            half_size=half_size,
+            orientation="up",
+            ray_origin=ray_origin,
+            ray_direction=ray_direction,
+            aspect_ratio=aspect_ratio,
+        )
+    if shape == "semicircle_down":
+        return ray_semicircle_intersection(
+            center=center,
+            half_size=half_size,
+            orientation="down",
+            ray_origin=ray_origin,
+            ray_direction=ray_direction,
+            aspect_ratio=aspect_ratio,
+        )
+    if shape == "semicircle_left":
+        return ray_semicircle_intersection(
+            center=center,
+            half_size=half_size,
+            orientation="left",
+            ray_origin=ray_origin,
+            ray_direction=ray_direction,
+            aspect_ratio=aspect_ratio,
+        )
+    if shape == "semicircle_right":
+        return ray_semicircle_intersection(
+            center=center,
+            half_size=half_size,
+            orientation="right",
+            ray_origin=ray_origin,
+            ray_direction=ray_direction,
+            aspect_ratio=aspect_ratio,
+        )
     # All polygon-based shapes use the generic polygon intersection.
     _POLYGON_SHAPES = {
         "diamond",

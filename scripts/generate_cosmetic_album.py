@@ -1722,6 +1722,216 @@ def _node_shape_cases() -> List[AlbumCase]:
     return cases
 
 
+def _semicircle_feature_cases() -> List[AlbumCase]:
+    """Build Dagua-only semicircle showcase cards.
+
+    Returns
+    -------
+    list[AlbumCase]
+        Semicircle-focused album cases.
+    """
+
+    cases: List[AlbumCase] = []
+
+    orientation_graph = DaguaGraph()
+    _apply_graph_style(orientation_graph)
+    for node_id, label in (
+        ("up", "Semicircle"),
+        ("down", "Down"),
+        ("left", "Left"),
+        ("right", "Right"),
+    ):
+        orientation_graph.add_node(node_id, label=label)
+    orientation_graph.node_styles = [
+        _base_node_style(shape="semicircle", min_width=110.0, min_height=70.0),
+        _base_node_style(shape="semicircle_down", min_width=110.0, min_height=70.0),
+        _base_node_style(shape="semicircle_left", min_width=110.0, min_height=80.0),
+        _base_node_style(shape="semicircle_right", min_width=110.0, min_height=80.0),
+    ]
+    cases.append(
+        AlbumCase(
+            case_id="semicircle_orientations",
+            category="semicircle",
+            filename="orientations_dagua.png",
+            title="Semicircle Orientations - dagua",
+            graph=orientation_graph,
+            positions=torch.tensor(
+                [[-210.0, 0.0], [-70.0, 0.0], [70.0, 0.0], [210.0, 0.0]],
+                dtype=torch.float32,
+            ),
+            settings={
+                "kind": "semicircle",
+                "variant": "orientations",
+                "orientations": ["up", "down", "left", "right"],
+            },
+        )
+    )
+
+    ratio_graph = DaguaGraph()
+    _apply_graph_style(ratio_graph)
+    for node_id, label in (
+        ("tall", "ratio=0.5"),
+        ("balanced", "ratio=1.0"),
+        ("wide", "ratio=2.0"),
+    ):
+        ratio_graph.add_node(node_id, label=label)
+    ratio_graph.node_styles = [
+        _base_node_style(
+            shape="semicircle",
+            aspect_ratio=0.5,
+            min_width=96.0,
+            min_height=140.0,
+        ),
+        _base_node_style(
+            shape="semicircle",
+            aspect_ratio=1.0,
+            min_width=110.0,
+            min_height=110.0,
+        ),
+        _base_node_style(
+            shape="semicircle",
+            aspect_ratio=2.0,
+            min_width=160.0,
+            min_height=80.0,
+        ),
+    ]
+    cases.append(
+        AlbumCase(
+            case_id="semicircle_aspect_ratio",
+            category="semicircle",
+            filename="aspect_ratio_dagua.png",
+            title="Semicircle + aspect_ratio - dagua",
+            graph=ratio_graph,
+            positions=torch.tensor(
+                [[-180.0, 0.0], [0.0, 0.0], [180.0, 0.0]],
+                dtype=torch.float32,
+            ),
+            settings={
+                "kind": "semicircle",
+                "variant": "aspect_ratio",
+                "aspect_ratios": [0.5, 1.0, 2.0],
+            },
+        )
+    )
+
+    combo_graph = DaguaGraph(direction="LR")
+    _apply_graph_style(combo_graph)
+    combo_graph.add_node("a", label="Border + fill")
+    combo_graph.add_node("b", label="Shadowed")
+    combo_graph.add_node("c", label="Label + ext")
+    combo_graph.add_edge("a", "b")
+    combo_graph.add_edge("b", "c")
+    combo_graph.node_styles = [
+        _combo_node_style(
+            shape="semicircle",
+            gradient="linear",
+            border_count=2,
+            stroke_dash="dashed",
+            min_width=132.0,
+            min_height=88.0,
+        ),
+        _combo_node_style(
+            shape="semicircle_right",
+            fill_pattern="striped",
+            shadow=True,
+            font_weight="bold",
+            min_width=136.0,
+            min_height=86.0,
+        ),
+        _combo_node_style(
+            shape="semicircle_left",
+            text_outline=True,
+            text_outline_color="#334155",
+            external_label="release",
+            external_label_position="right",
+            min_width=148.0,
+            min_height=88.0,
+        ),
+    ]
+    _set_all_edge_styles(combo_graph, _combo_edge_style())
+    cases.append(
+        AlbumCase(
+            case_id="semicircle_combinations",
+            category="semicircle",
+            filename="combinations_dagua.png",
+            title="Semicircle Combinations - dagua",
+            graph=combo_graph,
+            positions=torch.tensor(
+                [[-180.0, 0.0], [0.0, 0.0], [180.0, 0.0]],
+                dtype=torch.float32,
+            ),
+            settings={
+                "kind": "semicircle",
+                "variant": "combinations",
+                "features": ["borders", "fills", "shadows", "labels"],
+            },
+        )
+    )
+
+    adversarial_graph = DaguaGraph()
+    _apply_graph_style(adversarial_graph)
+    for node_id, label in (
+        ("wrap", "Long label that should still fit inside a semicircle"),
+        ("tiny", "tiny"),
+        ("deep", "deep arc"),
+        ("flat", "flat arc"),
+    ):
+        adversarial_graph.add_node(node_id, label=label)
+    adversarial_graph.node_styles = [
+        _base_node_style(
+            shape="semicircle",
+            min_width=94.0,
+            min_height=64.0,
+            font_size=7.0,
+            overflow_policy="shrink_text",
+            min_font_size=4.0,
+            text_wrap="wrap",
+            text_max_width=78.0,
+        ),
+        _base_node_style(
+            shape="semicircle_down",
+            min_width=58.0,
+            min_height=40.0,
+            font_size=6.0,
+            padding=(6.0, 5.0),
+        ),
+        _base_node_style(
+            shape="semicircle_left",
+            aspect_ratio=0.5,
+            min_width=94.0,
+            min_height=150.0,
+            font_size=7.0,
+        ),
+        _base_node_style(
+            shape="semicircle_right",
+            aspect_ratio=2.0,
+            min_width=170.0,
+            min_height=62.0,
+            font_size=7.0,
+        ),
+    ]
+    cases.append(
+        AlbumCase(
+            case_id="semicircle_adversarial",
+            category="semicircle",
+            filename="adversarial_dagua.png",
+            title="Adversarial Semicircle - dagua",
+            graph=adversarial_graph,
+            positions=torch.tensor(
+                [[-210.0, 60.0], [-70.0, -40.0], [90.0, 60.0], [250.0, -40.0]],
+                dtype=torch.float32,
+            ),
+            settings={
+                "kind": "semicircle",
+                "variant": "adversarial",
+                "stressors": ["long_labels", "tiny_nodes", "extreme_aspect_ratios"],
+            },
+        )
+    )
+
+    return cases
+
+
 def _arrow_type_cases() -> List[AlbumCase]:
     """Build the exhaustive arrow-type comparison cases.
 
@@ -5017,6 +5227,7 @@ def build_case_catalog() -> List[AlbumCase]:
 
     cases: List[AlbumCase] = []
     cases.extend(_node_shape_cases())
+    cases.extend(_semicircle_feature_cases())
     cases.extend(_arrow_type_cases())
     cases.extend(_border_style_cases())
     cases.extend(_edge_style_cases())

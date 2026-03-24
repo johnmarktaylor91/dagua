@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 from matplotlib.patches import Circle, Ellipse, FancyBboxPatch
@@ -15,6 +15,8 @@ ELLIPSE_KAPPA = 0.5522847498
 # Increased to ``0.45`` so the folded corner remains legible after downscaling
 # and thin strokes still separate the fold line from the outer outline.
 NOTE_FOLD_SIZE_RATIO = 0.45
+SEMICIRCLE_DEFAULT_CURVATURE = 1.0
+SEMICIRCLE_MIN_CURVATURE = 1e-6
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,9 @@ class ShapeSpec:
         Dagua shape name.
     corner_radius : float, default=0.0
         Rounded-rectangle corner radius in data units.
+    aspect_ratio : float | None, default=None
+        Optional shape-specific aspect ratio hint. Semicircle variants use
+        this to tune their dome curvature while keeping the flat edge fixed.
     """
 
     center_x: float
@@ -43,6 +48,7 @@ class ShapeSpec:
     height: float
     shape: str
     corner_radius: float = 0.0
+    aspect_ratio: Optional[float] = None
 
 
 def triangle_vertices(center_x: float, center_y: float, width: float, height: float) -> FloatArray:
@@ -552,7 +558,7 @@ def cloud_path(spec: ShapeSpec) -> Path:
         spec.center_x, spec.center_y, radius_x, radius_y, float(anchor_angles[0])
     )
     vertices: List[List[float]] = [start.tolist()]
-    codes: List[int] = [Path.MOVETO]
+    codes: List[int] = [int(Path.MOVETO)]
 
     for index in range(6):
         start_angle = float(anchor_angles[index])
@@ -581,10 +587,10 @@ def cloud_path(spec: ShapeSpec) -> Path:
         control_1 = start_anchor + tangent_start * control_distance + outward * bulge
         control_2 = end_anchor - tangent_end * control_distance + outward * bulge
         vertices.extend([control_1.tolist(), control_2.tolist(), end_anchor.tolist()])
-        codes.extend([Path.CURVE4, Path.CURVE4, Path.CURVE4])
+        codes.extend([int(Path.CURVE4), int(Path.CURVE4), int(Path.CURVE4)])
 
     vertices.append(start.tolist())
-    codes.append(Path.CLOSEPOLY)
+    codes.append(int(Path.CLOSEPOLY))
     return Path(np.asarray(vertices, dtype=np.float64), codes)
 
 
@@ -639,6 +645,165 @@ def stadium_path(spec: ShapeSpec) -> Path:
         Path.CURVE4,
         Path.CURVE4,
         Path.CURVE4,
+        Path.LINETO,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CURVE4,
+        Path.CLOSEPOLY,
+    ]
+    return Path(vertices, codes)
+
+
+def _semicircle_curvature_ratio(spec: ShapeSpec) -> float:
+    """Return the curvature ratio used by semicircle variants.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    float
+        Positive curvature ratio. ``1.0`` preserves the default half-ellipse
+        defined by the node bounds, larger values flatten the dome, and
+        smaller values deepen it when the requested bounds allow it.
+    """
+
+    if spec.aspect_ratio is None or spec.aspect_ratio <= SEMICIRCLE_MIN_CURVATURE:
+        return SEMICIRCLE_DEFAULT_CURVATURE
+    return float(spec.aspect_ratio)
+
+
+def semicircle_path(spec: ShapeSpec, orientation: str = "up") -> Path:
+    """Build a semicircle or semi-ellipse outline.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+    orientation : str, default="up"
+        Dome orientation. Supported values are ``"up"``, ``"down"``,
+        ``"left"``, and ``"right"``.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed semicircle path in data coordinates.
+    """
+
+    cx = float(spec.center_x)
+    cy = float(spec.center_y)
+    width = float(spec.width)
+    height = float(spec.height)
+    half_width = width / 2.0
+    half_height = height / 2.0
+    curvature_ratio = _semicircle_curvature_ratio(spec)
+
+    if orientation in {"up", "down"}:
+        radius_x = half_width
+        # Semicircle height is the ellipse semi-axis. When aspect_ratio is
+        # provided, interpret it as the ellipse axis ratio (rx / ry) so callers
+        # can flatten or deepen the dome independently from the node width.
+        radius_y = min(height, half_width / curvature_ratio)
+        radius_y = max(radius_y, SEMICIRCLE_MIN_CURVATURE)
+        handle_x = ELLIPSE_KAPPA * radius_x
+        handle_y = ELLIPSE_KAPPA * radius_y
+        left = cx - half_width
+        right = cx + half_width
+        if orientation == "up":
+            flat_y = cy - half_height
+            top_y = flat_y + radius_y
+            vertices = np.array(
+                [
+                    [left, flat_y],
+                    [right, flat_y],
+                    [right, flat_y + handle_y],
+                    [cx + handle_x, top_y],
+                    [cx, top_y],
+                    [cx - handle_x, top_y],
+                    [left, flat_y + handle_y],
+                    [left, flat_y],
+                    [left, flat_y],
+                ],
+                dtype=np.float64,
+            )
+        else:
+            flat_y = cy + half_height
+            bottom_y = flat_y - radius_y
+            vertices = np.array(
+                [
+                    [left, flat_y],
+                    [right, flat_y],
+                    [right, flat_y - handle_y],
+                    [cx + handle_x, bottom_y],
+                    [cx, bottom_y],
+                    [cx - handle_x, bottom_y],
+                    [left, flat_y - handle_y],
+                    [left, flat_y],
+                    [left, flat_y],
+                ],
+                dtype=np.float64,
+            )
+        codes = [
+            Path.MOVETO,
+            Path.LINETO,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.CLOSEPOLY,
+        ]
+        return Path(vertices, codes)
+
+    radius_y = half_height
+    radius_x = min(width, half_height * curvature_ratio)
+    radius_x = max(radius_x, SEMICIRCLE_MIN_CURVATURE)
+    handle_x = ELLIPSE_KAPPA * radius_x
+    handle_y = ELLIPSE_KAPPA * radius_y
+    top = cy + half_height
+    bottom = cy - half_height
+    if orientation == "left":
+        flat_x = cx + half_width
+        left_x = flat_x - radius_x
+        vertices = np.array(
+            [
+                [flat_x, top],
+                [flat_x, bottom],
+                [flat_x - handle_x, bottom],
+                [left_x, cy - handle_y],
+                [left_x, cy],
+                [left_x, cy + handle_y],
+                [flat_x - handle_x, top],
+                [flat_x, top],
+                [flat_x, top],
+            ],
+            dtype=np.float64,
+        )
+    else:
+        flat_x = cx - half_width
+        right_x = flat_x + radius_x
+        vertices = np.array(
+            [
+                [flat_x, top],
+                [flat_x, bottom],
+                [flat_x + handle_x, bottom],
+                [right_x, cy - handle_y],
+                [right_x, cy],
+                [right_x, cy + handle_y],
+                [flat_x + handle_x, top],
+                [flat_x, top],
+                [flat_x, top],
+            ],
+            dtype=np.float64,
+        )
+    codes = [
+        Path.MOVETO,
         Path.LINETO,
         Path.CURVE4,
         Path.CURVE4,
@@ -853,7 +1018,7 @@ def box3d_path(spec: ShapeSpec) -> Path:
     return Path.make_compound_path(silhouette, top_divider, right_divider)
 
 
-def extract_patch_path(patch: object) -> Path:
+def extract_patch_path(patch: Ellipse | Circle | FancyBboxPatch) -> Path:
     """Extract a patch outline path in data coordinates.
 
     Parameters
@@ -912,6 +1077,14 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         return cloud_path(spec)
     if shape == "stadium":
         return stadium_path(spec)
+    if shape in {"semicircle", "semicircle_up"}:
+        return semicircle_path(spec, "up")
+    if shape == "semicircle_down":
+        return semicircle_path(spec, "down")
+    if shape == "semicircle_left":
+        return semicircle_path(spec, "left")
+    if shape == "semicircle_right":
+        return semicircle_path(spec, "right")
     if shape == "tab":
         return tab_path(spec)
     if shape == "note":
@@ -938,6 +1111,7 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         height=spec.height,
         shape="roundrect",
         corner_radius=spec.corner_radius,
+        aspect_ratio=spec.aspect_ratio,
     )
     return build_shape_path(fallback)
 

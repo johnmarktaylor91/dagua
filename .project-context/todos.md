@@ -13,7 +13,15 @@
 
 ## Bugs
 - [ ] [HIGH] Arrowheads placed INSIDE target node boundary instead of OUTSIDE. Edge endpoint should be offset outward by arrowhead length so arrowhead fills the gap between edge body and node, matching Graphviz. Root cause: edge router computes endpoint at node boundary, arrowhead extends backward into gap but tip overlaps node surface.
-- [ ] [MED] Cluster label collision: sibling cluster labels ("Right Branch", "Left Branch") merge into unreadable text in nested_clusters test graph. Labels need spacing or collision detection.
+- [ ] [HIGH] Cluster API overhaul -- clusters as first-class members:
+  - set_cluster("eng", ["team_a", "team_b", "infra"]) where team_a/team_b are clusters
+  - System auto-detects cluster refs vs node refs in member lists
+  - Infers cluster_parents automatically from nesting (eliminates manual cluster_parents dict)
+  - Auto-propagates membership upward (parent contains all descendants)
+  - Validates strict tree (no overlapping membership), errors on Venn-style overlap
+  - Warn on node/cluster name collision (cluster wins)
+  - Goal: user specifies only innermost cluster per node, hierarchy is implicit in membership
+- [ ] [MED] Cluster label collision: sibling cluster labels merge into unreadable text. Approach: after placing all cluster labels, collect bounding boxes, detect overlaps (spatial hash or pairwise), auto-shrink font on colliding labels (simpler than nudging). ~50-100 lines. Full nudge-based solver would be 200+ lines with edge cases.
 - [ ] [MED] Long label text overflow: nodes with long labels (e.g., "BatchNormalization2d(128, eps=1e-05, momentum=0.1)") show text extending beyond ellipse boundary. overflow_policy="expand_node" should expand the ellipse to contain text, but ellipse aspect ratio may not be adjusting correctly for very wide text.
 - [ ] [LOW] Arrowhead sizing still slightly smaller than Graphviz's chunky triangles. Current graphviz_strict uses arrow_length=7, arrow_width=4.5 -- may need to increase to ~10x7 once the placement bug is fixed.
 
@@ -33,6 +41,7 @@
 - [ ] [MAYBE] Fill-pattern card node proportions: fix extreme width:height ratio on striped/gradient reference cards (deep layout issue)
 - [ ] [MAYBE] Self-loop arc height: tighten self-loop radius so loops don't extend 2x node height above the shape
 - [ ] [MAYBE] Taxi self-loop routing: implement orthogonal segments for self-loops (currently falls back to smooth arc)
+- [ ] [MAYBE] Cluster shape variants: pill/stadium, cloud, dashed-region-only (no fill), convex hull (boundary flows around member nodes like water around stones -- most distinctive, very "agua"). Would reuse existing shape path infrastructure for borders/fills/labels. Convex hull needs smooth padded contour generation (~100 lines).
 - [ ] [MAYBE] Italic shear angle: increase synthetic italic shear by 1-2 degrees for demo/reference cards where the point is to showcase italic
 
 ## Improvements (Nice-to-Have)
@@ -44,6 +53,22 @@
 - [ ] [MED] 3D graph rendering: z-coordinate support, 3D force-directed layout, perspective/orthographic projection. Consider Three.js export or matplotlib 3D axes.
 - [ ] [MED] Add Cytoscape.js fcose as competitor layout algorithm (npm install cytoscape cytoscape-fcose, Node.js subprocess adapter, same pattern as ELK/dagre)
 - [ ] [MED] Add Gephi/YifanHu as competitor layout algorithm (Java Gephi Toolkit JAR, subprocess adapter)
+- [ ] [LOW] yFiles benchmark comparison: apply for eval license (60 days), build Java or JS subprocess adapter (same pattern as Gephi/ELK competitors), run full benchmark suite. Aspirational claim: "matches yFiles quality at zero cost." Do this when layout sprint is done and we're confident in quality. Not needed for v1 launch.
+
+## Theme-Layout Coupling
+- [ ] [HIGH] Theme-suggested layout spacing: add `suggested_node_sep` and `suggested_rank_sep` to Theme dataclass as soft hints. Layout engine uses these as defaults when user hasn't set explicit LayoutConfig values. Lets theme authors say "this aesthetic needs generous spacing" without forcing it. A dense technical theme suggests tight spacing, an airy presentation theme suggests wide spacing. Override order: explicit LayoutConfig > theme suggestion > global default.
+- [ ] [MED] Theme-suggested direction: some themes imply a layout direction (e.g., a timeline theme implies LR, a hierarchy theme implies TB). Add `suggested_direction` to Theme. Same override logic.
+- [ ] [MED] Theme-aware node sizing: themes that use large fonts or heavy borders produce bigger nodes, which changes layout density. Consider a "target density" parameter on themes that auto-adjusts node_sep/rank_sep based on actual node sizes after compute_node_sizes(). This would make layouts look consistent across themes with different visual weight.
+
+## Feature Parity with yFiles (post-launch)
+- [ ] [HIGH] Port constraints: user-defined named ports on nodes ("input-left", "output-right"). Edges connect to specific ports. Essential for circuit diagrams, flowcharts, BPMN. Requires extending NodeStyle with port definitions and wiring into edge routing.
+- [ ] [HIGH] Edge label collision avoidance: auto-position edge labels to avoid overlapping nodes, other labels, and edges. Currently fixed at curve midpoint. Needs spatial index + greedy placement algorithm. ~200 lines.
+- [ ] [MED] Orthogonal edge routing with obstacle avoidance: ortho router should reroute around nodes instead of passing through them. Current ortho is geometric right-angles only. Would need a visibility graph or channel-based router.
+- [ ] [MED] Incremental layout: update positions when nodes are added/removed without full recompute. Warm-start from previous positions, only optimize the changed neighborhood. Differentiable framework makes this natural -- freeze unchanged nodes, optimize new ones.
+- [ ] [MED] Table/swimlane nodes: nodes containing rows/columns for BPMN pools and swimlane diagrams. New shape type with internal cell layout. Niche but important for business process diagrams.
+- [ ] [MED] Group node expand/collapse: click a cluster to collapse into a single summary node, expand to show members. Needs interactive backend (web/notebook widget). The layout engine already supports this conceptually -- just need the UI layer.
+- [ ] [LOW] Rich HTML node content: render arbitrary HTML/rich text inside nodes with auto-sizing. Currently support bold/italic/secondary scale. Full HTML would need a browser-based renderer or subset HTML parser.
+- [ ] [LOW] Print-quality PDF with embedded fonts: matplotlib's PDF export works but font embedding can be spotty. Consider direct PDF generation via reportlab or cairo for guaranteed font embedding and vector quality.
 - [x] [DONE] Edge jump styles at crossings (arc/gap/sharp). Implemented with detection + rendering.
 - [x] [DONE] Pie chart node fills. Implemented with donut hole support.
 - [ ] [MED] Import adapters for workflow/pipeline tools: parse native file formats into DaguaGraph. n8n (.json workflows), Airflow (DAG .py -> task graph), dbt (manifest.json -> model lineage), Dagster (asset graph), GitHub Actions (.yml -> job/step DAG), AWS Step Functions (ASL .json -> state machine), Terraform (.tfstate -> resource graph), Argo Workflows (workflow .yaml -> DAG). Each adapter: read file -> extract nodes/edges/metadata -> return DaguaGraph with appropriate theme auto-applied.

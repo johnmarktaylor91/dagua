@@ -14,6 +14,7 @@ from dagua.styles import (
     GRAPHVIZ_MATCH_THEME,
     MINIMAL_THEME,
     NEAR_BLACK,
+    NODE_SHAPE_NAMES,
     WARM_WHITE,
     ClusterStyle,
     EdgeStyle,
@@ -52,6 +53,15 @@ class TestNodeStyleNewFields:
         assert s.shadow is True
         assert s.min_width == 100.0
         assert s.min_height == 48.0
+
+    def test_shape_name_registry_includes_semicircle_variants(self):
+        assert {
+            "semicircle",
+            "semicircle_up",
+            "semicircle_down",
+            "semicircle_left",
+            "semicircle_right",
+        }.issubset(set(NODE_SHAPE_NAMES))
 
 
 @pytest.mark.smoke

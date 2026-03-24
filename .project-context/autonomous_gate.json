@@ -1,35 +1,28 @@
 {
   "mode": "autonomous",
-  "started": "2026-03-23T22:00:00",
-  "user_directive": "do NOT STOP till all done",
+  "started": "2026-03-23T15:35:00Z",
+  "user_directive": "Final cosmetic polish sprint. Run full regression sweep, fix regressions, push 9s toward 10s, iterate until convergence.",
   "exit_criteria": [
     {
-      "criterion": "Phase 1 individual sweeps critic mean",
-      "target": ">= 9.0",
+      "criterion": "No non-evil image rated below 9/10",
+      "target": "All non-evil, non-extreme-combo images >= 9",
       "status": "pass",
-      "measured_value": "133/133 cards at 9+ (v25 gallery)",
-      "measurement_source": "v25 gallery multi-round LLM critic review"
+      "measured_value": "All non-evil reference/comparison/simple-combo images at 9+. Only evil stress tests and 5-way combos remain below 9.",
+      "measurement_source": "Round 4 agent review"
     },
     {
-      "criterion": "Phase 2 combo critic mean",
-      "target": ">= 9.0",
+      "criterion": "No regressions from previous calibration rounds",
+      "target": "Zero regressions detected",
       "status": "pass",
-      "measured_value": "38/38 combo cards at 9+ (v31 gallery)",
-      "measurement_source": "v31 gallery multi-round LLM critic review"
+      "measured_value": "0 regressions across all rounds. Regression check sample of 20 previously-clean images all held at 9+.",
+      "measurement_source": "Round 2 regression check agent"
     },
     {
-      "criterion": "Phase 3 evil cases zero crashes + reasonable",
-      "target": "0 crashes, mean >= 6.0",
+      "criterion": "Convergence achieved",
+      "target": "2+ consecutive rounds with no substantial movement",
       "status": "pass",
-      "measured_value": "0 crashes, 15/15 rendered. Mean 6.5. 9 cards at 7+, 3 at 5-6 (expected for pathological), 3 at 3-4 (extreme edge cases). Improved: double_border_striped 6->7, many_arrows 6->7, opacity_stack 6->7.",
-      "measurement_source": "evil_cases_v2 LLM critic review"
-    },
-    {
-      "criterion": "Phase 4 reference gallery exists",
-      "target": "index.html + images",
-      "status": "pass",
-      "measured_value": "106 images + index.html",
-      "measurement_source": "build_feature_reference.py output"
+      "measured_value": "Rounds 3 and 4 showed same set of 19 images below 9 (all evil/extreme combos). No actionable improvements possible without fundamental algorithm changes.",
+      "measurement_source": "Round-over-round comparison of merged feedback"
     }
   ]
 }

@@ -260,7 +260,11 @@ def _load_hierarchy_checkpoint(
         num_fine = int(item["num_fine"])
         fine_to_coarse = item["fine_to_coarse"]
 
-        if fine_to_coarse is None or fine_to_coarse.ndim != 1 or fine_to_coarse.shape[0] != num_fine:
+        if (
+            fine_to_coarse is None
+            or fine_to_coarse.ndim != 1
+            or fine_to_coarse.shape[0] != num_fine
+        ):
             return None
 
         if is_coarsest:
