@@ -41,3 +41,27 @@ Context: Where should serialization and interop live?
 Decision: Standalone functions in `io.py`, thin `Graph.from_*` classmethod wrappers.
 Rationale: Keeps graph.py focused on orchestration, keeps io.py independently testable.
 Alternatives considered: Methods directly on Graph (simpler but bloats graph.py).
+
+## [2026-03] Auto Text Backgrounds for Patterned Fills
+Context: Patterned node fills reduced label readability in gallery cards.
+Decision: Use a white text background with pattern-specific opacity instead of text outlines or external labels.
+Rationale: Text outlines looked blurry, and external labels changed layout. A white background with tuned opacity keeps the fill visible while restoring readability.
+Alternatives considered: Text outline/stroke (blurred at small sizes), external labels (layout changes), fully opaque label boxes (hid too much of the fill).
+
+## [2026-03] Synthetic Italic via Affine Shear
+Context: Linux font resolution often lacks a distinct italic file for the chosen sans-serif stack.
+Decision: Apply a synthetic affine shear when a native italic font variant is unavailable.
+Rationale: Shear works with any resolved font, keeps appearance consistent across environments, and does not require shipping extra font files. The chosen 15-degree angle is visible without looking exaggerated.
+Alternatives considered: Font substitution (environment-dependent and inconsistent), skipping italic styling when unavailable (visual regression).
+
+## [2026-03] 8-Face Hub Distribution over Full Perimeter
+Context: Multiple inbound arrowheads stacked on the same node face in moderate hub cases.
+Decision: Bucket terminal placement across 8 discrete node faces instead of using continuous angular distribution.
+Rationale: This was the most conservative improvement that did not require changing the edge router. It handles moderate hubs (roughly 3-6 edges) well enough while keeping routing behavior stable.
+Alternatives considered: Continuous perimeter distribution (more flexible but coupled to router changes), router-aware fanout (better for extreme hubs but much larger scope).
+
+## [2026-03] Curvature-Adaptive Dashing
+Context: Border dashes visually merged on tight curves.
+Decision: Scale dash on-lengths with curvature while keeping gap lengths constant, with a minimum scale floor of 0.4.
+Rationale: Constant gaps preserve visual density, while shorter on-segments prevent neighboring dashes from merging on high-curvature sections. The 0.4 floor avoids over-shortening into visual noise.
+Alternatives considered: Scaling both dashes and gaps (density drift), fixed dash pattern everywhere (merging on tight curves), unconstrained scaling (dashes disappear on extreme curvature).
