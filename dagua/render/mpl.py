@@ -78,14 +78,14 @@ _CROSSING_CLEARANCE_PADDING_POINTS = 3.0
 _CROSSING_MIN_SPAN_WIDTH_FACTOR = 4.0
 _CROSSING_MIN_SPAN_POINTS = 14.0
 _CROSSING_MIN_SPAN_DATA_UNITS = 22.0
-_CROSSING_SHARP_HEIGHT_WIDTH_FACTOR = 2.5
+_CROSSING_SHARP_HEIGHT_WIDTH_FACTOR = 3.5
 _CROSSING_SHARP_SPAN_WIDTH_FACTOR = 4.0
 _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
 _SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION = 0.18
 _SELF_LOOP_ARROWHEAD_MAX_WIDTH_RATIO = 0.55
 _CLUSTER_LABEL_VERTICAL_GAP_POINTS = 2.0
 _DEFAULT_NODE_LABEL_FONT_POINTS = 8.5
-_DEFAULT_EXTERNAL_LABEL_FONT_POINTS = 8.0
+_DEFAULT_EXTERNAL_LABEL_FONT_POINTS = 7.0
 _DEFAULT_EDGE_LABEL_FONT_POINTS = 7.0
 _DEFAULT_CLUSTER_LABEL_FONT_POINTS = 9.5
 _DEFAULT_TITLE_FONT_POINTS = 10.0
@@ -1807,7 +1807,7 @@ def _draw_gradient_fill(
     xx, yy = np.meshgrid(grid, grid)
 
     if style.gradient == "radial":
-        data = np.clip(np.sqrt(xx**2 + yy**2), 0.0, 1.0)
+        data = np.clip(np.power(np.sqrt(xx**2 + yy**2), 0.7), 0.0, 1.0)
     else:
         angle = np.deg2rad(style.gradient_angle)
         projection = xx * np.cos(angle) + yy * np.sin(angle)
@@ -5255,6 +5255,9 @@ def _draw_node_labels(
         elif text_bg is None and style.gradient != "none":
             text_bg = "#FFFFFF"
             text_bg_alpha = 0.90
+        text_bg_corner_radius = style.text_background_corner_radius
+        if text_bg is not None and not style.text_background:
+            text_bg_corner_radius = max(style.corner_radius * 0.8, 2.0)
 
         specs.append(
             DaguaText(
@@ -5285,7 +5288,7 @@ def _draw_node_labels(
                 background=text_bg,
                 background_alpha=text_bg_alpha,
                 background_padding=style.text_background_padding,
-                background_corner_radius=style.text_background_corner_radius,
+                background_corner_radius=text_bg_corner_radius,
                 clip_patch=clip_patch if style.overflow_policy != "overflow" else None,
                 clip_on=style.overflow_policy != "overflow",
                 zorder=3.0,

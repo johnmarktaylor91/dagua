@@ -64,8 +64,8 @@ DARK_LABEL_BG = "#111827"
 SHADOW_COLOR = "#0000002A"
 EDGE_GRADIENT_END = "#FF9800"
 TEXT_OUTLINE_COLOR = "#FFFFFF"
-OVERFLOW_DEMO_LABEL = "Long overflow label"
-OVERFLOW_EXPAND_LABEL = "Expanded Label Text Here"
+OVERFLOW_DEMO_LABEL = "Processing validation stage output results"
+OVERFLOW_EXPAND_LABEL = "Processing validation stage output expanded"
 WRAP_DEMO_LABEL = "Process validation stage output results"
 ELLIPSIS_DEMO_LABEL = "A long label for truncation"
 CARD_DPI = 200
@@ -1548,6 +1548,7 @@ def _apply_reference_card_tweaks(
     if item.card_id in DECORATIVE_FILL_CARD_IDS:
         for style in _node_styles(graph):
             style.min_height = max(float(style.min_height), DECORATIVE_FILL_CARD_MIN_HEIGHT)
+            style.min_width = min(float(style.min_width), 80.0)
             # Decorative fills need more vertical breathing room so the label
             # does not read as squashed against the painted fill treatment.
             style.padding = DECORATIVE_FILL_CARD_PADDING
