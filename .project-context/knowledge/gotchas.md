@@ -36,3 +36,10 @@
 - [LAYOUT] `_offload_level_to_disk()` only offloads `edge_index` and `node_sizes`. `fine_to_coarse`, `fine_layer_assignments`, and `coarse_layer_assignments` stay in RAM for all hierarchy levels (~22 GB at 1B scale). Not currently a problem (72 GB peak vs 120 GB usable) but would need disk offload for 2B+ graphs.
 - [LAYOUT] Original graph offload in `multilevel_layout()` (line ~910) does `del cpu_ei, cpu_ns` but the DaguaGraph object still holds `_edge_index_tensor` and `node_sizes`, wasting 16 GB at 1B scale. Fix: null out graph references during offload.
 - [BENCH] 1B benchmark peak RAM is ~72 GB on CPU. Fits 125 GB machine with 48 GB margin. See `.project-context/tasks/1b-oom-audit.report.md` for full analysis.
+
+## Cosmetic Polish Sprint (2026-03)
+- [CRITIC] Critic calibration variance: different Claude review agents can rate the same image anywhere from 8-10 depending on calibration. Track the best known rating (max across rounds), not the latest rating, and never let a harsher critic overwrite a previously fair score.
+- [RENDER] Matplotlib font resolution on Linux: Helvetica and Helvetica Neue are macOS-only. The stack falls back to Arial when `msttcorefonts` is installed, then DejaVu Sans. Italic rendering must verify that the resolved font file differs from the upright variant; when it does not, the renderer applies synthetic shear automatically.
+- [RENDER] Gallery-card node proportions: `min_height` alone does not fix extreme aspect ratios. Constrain `min_width` as well because the layout engine and figure sizing jointly determine the final node shape.
+- [TEST] Codex pytest hang: pytest can finish successfully and then stall during teardown. Check the captured log for a `passed` summary before treating the run as failed; if the tests are green, proceed.
+- [RENDER] Auto text background cascade for patterned fills is tuned, not generic: pie/striped -> white at 0.92 alpha, hatched -> 0.75, gradient -> 0.90. Re-review all affected gallery cards before changing these opacities.
