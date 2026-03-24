@@ -15,6 +15,7 @@ from dagua.styles import (
     GraphStyle,
     NodeStyle,
     Theme,
+    resolve_cluster_style,
     resolve_edge_style,
     resolve_node_style,
 )
@@ -31,6 +32,36 @@ _DTYPE_NAME_TO_TORCH = {
     "float32": torch.float32,
     "float64": torch.float64,
 }
+
+_CLUSTER_PREFIX = "cluster_"
+
+
+def _updated_style_instance(
+    current_style: Optional[Union[NodeStyle, EdgeStyle, ClusterStyle]],
+    style_type: type[Union[NodeStyle, EdgeStyle, ClusterStyle]],
+    updates: Dict[str, Any],
+) -> Union[NodeStyle, EdgeStyle, ClusterStyle]:
+    """Return a style instance with graph-level updates applied.
+
+    Parameters
+    ----------
+    current_style : NodeStyle | EdgeStyle | ClusterStyle | None
+        Existing graph-level default style, if any.
+    style_type : type[NodeStyle] | type[EdgeStyle] | type[ClusterStyle]
+        Dataclass type to instantiate when no style exists yet.
+    updates : dict[str, Any]
+        Field names and values to assign to the style object.
+
+    Returns
+    -------
+    NodeStyle | EdgeStyle | ClusterStyle
+        Updated style object. Existing instances are deep-copied so callers do
+        not mutate shared objects by reference.
+    """
+    style = _copy.deepcopy(current_style) if current_style is not None else style_type()
+    for field_name, value in updates.items():
+        setattr(style, field_name, value)
+    return style
 
 
 @dataclass
@@ -73,6 +104,7 @@ class DaguaGraph:
     # Graph-level style defaults (cascade level 4)
     default_node_style: Optional[NodeStyle] = None
     default_edge_style: Optional[EdgeStyle] = None
+    default_cluster_style: Optional[ClusterStyle] = None
 
     # Flex layout constraints
     flex: Optional[Any] = None  # LayoutFlex — typed as Any to avoid circular import
@@ -175,6 +207,88 @@ class DaguaGraph:
         if self.is_cyclic:
             parts.append("cyclic=True")
         return ", ".join(parts) + ")"
+
+    def configure(self, **kwargs: Any) -> None:
+        """Set graph-scoped style defaults from flat keyword arguments.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Style overrides routed by field name.
+
+            Unprefixed node-style fields such as ``font_size`` or
+            ``overflow_policy`` update ``default_node_style``.
+            Prefixed edge-style fields such as ``edge_width`` update
+            ``default_edge_style``. Unprefixed edge-only field names such as
+            ``color`` and ``routing`` are also accepted.
+            Cluster-style fields must use the ``cluster_`` prefix, for example
+            ``cluster_padding``.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        TypeError
+            If any keyword cannot be routed to a supported graph-level style
+            default.
+        """
+        from dagua.defaults import (
+            _EDGE_PREFIX,
+            _EDGE_STYLE_FIELDS,
+            _NODE_STYLE_FIELDS,
+            _did_you_mean,
+        )
+
+        node_updates: Dict[str, Any] = {}
+        edge_updates: Dict[str, Any] = {}
+        cluster_updates: Dict[str, Any] = {}
+        cluster_fields = {
+            field_def.name for field_def in ClusterStyle.__dataclass_fields__.values()
+        }
+
+        for key, value in kwargs.items():
+            if key.startswith(_CLUSTER_PREFIX):
+                cluster_field = key[len(_CLUSTER_PREFIX) :]
+                if cluster_field in cluster_fields:
+                    cluster_updates[cluster_field] = value
+                    continue
+            elif key in _NODE_STYLE_FIELDS:
+                node_updates[key] = value
+                continue
+            elif key.startswith(_EDGE_PREFIX) and key[len(_EDGE_PREFIX) :] in _EDGE_STYLE_FIELDS:
+                edge_updates[key[len(_EDGE_PREFIX) :]] = value
+                continue
+            elif key in _EDGE_STYLE_FIELDS and key not in _NODE_STYLE_FIELDS:
+                edge_updates[key] = value
+                continue
+
+            hint = _did_you_mean(key)
+            raise TypeError(f"Unknown configure() option: {key!r}.{hint}")
+
+        if node_updates:
+            self.default_node_style = _updated_style_instance(
+                self.default_node_style,
+                NodeStyle,
+                node_updates,
+            )
+        if edge_updates:
+            self.default_edge_style = _updated_style_instance(
+                self.default_edge_style,
+                EdgeStyle,
+                edge_updates,
+            )
+        if cluster_updates:
+            self.default_cluster_style = _updated_style_instance(
+                self.default_cluster_style,
+                ClusterStyle,
+                cluster_updates,
+            )
+
+        if node_updates or edge_updates or cluster_updates:
+            self.invalidate_layout()
+            self._touch()
 
     @staticmethod
     def _normalize_index_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
@@ -911,8 +1025,8 @@ class DaguaGraph:
         Priority (highest first):
         1. Per-element override (node_styles[idx])
         2. Deepest cluster's member_node_style
-        3. Theme type lookup
-        4. Graph default_node_style
+        3. Graph default_node_style
+        4. Theme type lookup
         5. Global defaults (dagua.configure())
         """
         per_element = self.node_styles[idx] if idx < len(self.node_styles) else None
@@ -956,8 +1070,8 @@ class DaguaGraph:
         Priority (highest first):
         1. Per-element override (edge_styles[idx])
         2. Cluster member_edge_style (deepest cluster containing source node)
-        3. Theme type lookup (back edge > edge_type > default)
-        4. Graph default_edge_style
+        3. Graph default_edge_style
+        4. Theme type lookup (back edge > edge_type > default)
         5. Global defaults (dagua.configure())
         """
         per_element = self.edge_styles[idx] if idx < len(self.edge_styles) else None
@@ -1117,6 +1231,10 @@ class DaguaGraph:
             import dataclasses as _dc
 
             data["default_edge_style"] = _dc.asdict(self.default_edge_style)
+        if self.default_cluster_style is not None:
+            import dataclasses as _dc
+
+            data["default_cluster_style"] = _dc.asdict(self.default_cluster_style)
 
         p = Path(path)
         if p.suffix in (".yaml", ".yml"):
@@ -1212,10 +1330,28 @@ class DaguaGraph:
             self._original_edge_index = None
 
     def get_style_for_cluster(self, name: str) -> ClusterStyle:
-        """Get effective style for a cluster (per-cluster override > theme)."""
-        if name in self.cluster_styles:
-            return self.cluster_styles[name]
-        return self._theme.cluster_style
+        """Get effective style for a cluster.
+
+        Parameters
+        ----------
+        name : str
+            Cluster identifier.
+
+        Returns
+        -------
+        ClusterStyle
+            Effective cluster style using the cascade
+            ``per-cluster > graph default > theme``.
+        """
+        per_cluster = self.cluster_styles.get(name)
+        theme_style = self._theme.cluster_style
+        if per_cluster is None and self.default_cluster_style is None:
+            return theme_style
+        return resolve_cluster_style(
+            per_cluster=per_cluster,
+            theme_style=theme_style,
+            graph_default=self.default_cluster_style,
+        )
 
     # --- Cluster hierarchy methods ---
 
