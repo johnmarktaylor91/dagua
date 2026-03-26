@@ -202,6 +202,37 @@ def test_compose_board_reserves_gap_below_header(tmp_path: Path) -> None:
         assert board.getpixel((64, BOARD_GRID_TOP + 16)) == (255, 0, 0)
 
 
+def test_corner_radius_pair_demo_uses_high_contrast_values() -> None:
+    """The per-corner reference card should contrast uniform and alternating corners."""
+
+    item = next(
+        item
+        for item in build_reference_items()
+        if item.card_id == "nodes_borders_corner_radius_per_corner"
+    )
+
+    overrides = item.value.params["node_style_overrides"]
+
+    assert overrides[0]["corner_radius"] == pytest.approx(12.0)
+    assert overrides[1]["corner_radius"] == (0.0, 24.0, 0.0, 24.0)
+
+
+def test_scale_corner_radius_demo_uses_two_x_size_contrast() -> None:
+    """The scaled-corner demo should compare a node against a 2x larger peer."""
+
+    item = next(
+        item
+        for item in build_reference_items()
+        if item.card_id == "nodes_borders_scale_corner_radius"
+    )
+
+    overrides = item.value.params["node_style_overrides"]
+
+    assert overrides[0]["corner_radius"] == pytest.approx(overrides[1]["corner_radius"])
+    assert overrides[1]["min_width"] == pytest.approx(overrides[0]["min_width"] * 2.0)
+    assert overrides[1]["min_height"] == pytest.approx(overrides[0]["min_height"] * 2.0)
+
+
 def test_dark_background_headers_switch_to_dark_palette() -> None:
     """Header helpers should adapt banner and text colors for dark graph cards."""
 

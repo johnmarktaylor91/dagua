@@ -96,6 +96,15 @@ _CROSSING_SHARP_HEIGHT_WIDTH_FACTOR = 3.5
 _CROSSING_SHARP_SPAN_WIDTH_FACTOR = 4.0
 _CROSSING_BRIDGE_HEIGHT_WIDTH_FACTOR = 2.0
 _CROSSING_BRIDGE_SPAN_WIDTH_FACTOR = 3.0
+_CROSSING_BRIDGE_CORNER_RADIUS_POINTS = 1.5
+_CROSSING_BRIDGE_STROKE_WIDTH_POINTS = 0.5
+_BEVEL_BAND_COUNT = 6
+_BEVEL_REFERENCE_INTENSITY = 0.5
+_BEVEL_HIGHLIGHT_ALPHA = 0.35
+_BEVEL_SHADOW_ALPHA = 0.2
+_BEVEL_MAX_INSET_FRACTION = 0.18
+_PORT_INDICATOR_BORDER_WIDTH_POINTS = 0.5
+_PORT_INDICATOR_ZORDER = 3.55
 _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
 # Tuned down over several passes to keep self-loop terminals legible without
 # letting arrowheads consume the entire loop apex on small nodes.
@@ -3680,7 +3689,7 @@ def _draw_nodes(
         if bool(getattr(style, "bevel", False)) and (
             float(getattr(style, "bevel_intensity", 0.0)) > 0.0
         ):
-            _draw_node_bevel(ax, i, fill_path, x, y, w, h, style)
+            _draw_node_bevel(ax, i, shape_spec, style)
         _draw_node_shape_extras(ax, x, y, w, h, style, edgecolor, zorder=2.08)
 
     add_filled_collections(
@@ -3797,14 +3806,10 @@ def _rectangle_path(x_min: float, x_max: float, y_min: float, y_max: float) -> A
 def _draw_node_bevel(
     ax: Any,
     node_idx: int,
-    clip_path: Any,
-    x: float,
-    y: float,
-    w: float,
-    h: float,
+    shape_spec: ShapeSpec,
     style: Any,
 ) -> None:
-    """Draw a lightweight bevel overlay with clipped highlight and shadow bands.
+    """Draw clipped bevel bands that follow the node's outer contour.
 
     Parameters
     ----------
@@ -3812,69 +3817,68 @@ def _draw_node_bevel(
         Matplotlib axes.
     node_idx : int
         Node index used to tag the bevel artists.
-    clip_path : Any
-        Node fill path used as the bevel clipping mask.
-    x : float
-        Node center x-coordinate.
-    y : float
-        Node center y-coordinate.
-    w : float
-        Node width in data units.
-    h : float
-        Node height in data units.
+    shape_spec : ShapeSpec
+        Node geometry in data coordinates.
     style : Any
         Node style object exposing bevel settings.
     """
 
     from matplotlib.patches import PathPatch
 
-    band_count = 6
-    intensity = min(max(float(getattr(style, "bevel_intensity", 0.3)), 0.0), 1.0)
-    if intensity <= 0.0 or w <= 0.0 or h <= 0.0:
+    intensity = min(max(float(getattr(style, "bevel_intensity", 0.5)), 0.0), 1.0)
+    if intensity <= 0.0 or shape_spec.width <= 0.0 or shape_spec.height <= 0.0:
         return
 
-    clip_patch = make_clip_proxy(clip_path, ax.transData)
-    left = x - w / 2.0
-    right = x + w / 2.0
-    half_height = h / 2.0
+    alpha_scale = intensity / _BEVEL_REFERENCE_INTENSITY
+    max_inset = min(shape_spec.width, shape_spec.height) * _BEVEL_MAX_INSET_FRACTION
+    if max_inset <= 0.0:
+        return
+    inset_step = max_inset / _BEVEL_BAND_COUNT
+    left = shape_spec.center_x - shape_spec.width / 2.0
+    right = shape_spec.center_x + shape_spec.width / 2.0
+    top = shape_spec.center_y + shape_spec.height / 2.0
+    bottom = shape_spec.center_y - shape_spec.height / 2.0
 
-    for band_idx in range(band_count):
-        fraction_start = band_idx / band_count
-        fraction_end = (band_idx + 1) / band_count
-        highlight_alpha = intensity * 0.28 * (1.0 - fraction_start)
-        shadow_alpha = intensity * 0.22 * (1.0 - fraction_start)
+    highlight_clip = make_clip_proxy(
+        _rectangle_path(left, right, shape_spec.center_y, top),
+        ax.transData,
+    )
+    shadow_clip = make_clip_proxy(
+        _rectangle_path(left, right, bottom, shape_spec.center_y),
+        ax.transData,
+    )
+    outer_band_path = build_shape_path(shape_spec)
+
+    for band_idx in range(_BEVEL_BAND_COUNT):
+        inset_end = inset_step * float(band_idx + 1)
+        inner_band_path = inset_shape_path(shape_spec, inset_end)
+        band_path = annular_path(outer_band_path, inner_band_path)
+        fade = 1.0 - (float(band_idx) / float(_BEVEL_BAND_COUNT))
+        highlight_alpha = min(_BEVEL_HIGHLIGHT_ALPHA * alpha_scale * fade, 1.0)
+        shadow_alpha = min(_BEVEL_SHADOW_ALPHA * alpha_scale * fade, 1.0)
 
         highlight_patch = PathPatch(
-            _rectangle_path(
-                left,
-                right,
-                y + half_height * (1.0 - fraction_end),
-                y + half_height * (1.0 - fraction_start),
-            ),
+            band_path,
             facecolor=(1.0, 1.0, 1.0, highlight_alpha),
             edgecolor="none",
             linewidth=0.0,
             zorder=2.03,
             gid=f"dagua-node-bevel-highlight-{node_idx}-{band_idx}",
         )
-        highlight_patch.set_clip_path(clip_patch)
+        highlight_patch.set_clip_path(highlight_clip)
         ax.add_patch(highlight_patch)
 
         shadow_patch = PathPatch(
-            _rectangle_path(
-                left,
-                right,
-                y - half_height * fraction_end,
-                y - half_height * fraction_start,
-            ),
+            band_path,
             facecolor=(0.0, 0.0, 0.0, shadow_alpha),
             edgecolor="none",
             linewidth=0.0,
             zorder=2.03,
             gid=f"dagua-node-bevel-shadow-{node_idx}-{band_idx}",
         )
-        shadow_patch.set_clip_path(clip_patch)
+        shadow_patch.set_clip_path(shadow_clip)
         ax.add_patch(shadow_patch)
+        outer_band_path = inner_band_path
 
 
 def _points_to_data_units(ax: Any, points: float, axis: str) -> float:
@@ -4868,8 +4872,9 @@ def _draw_bridge_crossing(
     under_curve: BezierCurve,
     under_t: float,
     style: Any,
+    background_color: str,
 ) -> None:
-    """Draw a rectangular bridge marker over one crossing.
+    """Draw a rounded bridge marker that matches the graph background.
 
     Parameters
     ----------
@@ -4883,39 +4888,43 @@ def _draw_bridge_crossing(
         Parameter along ``under_curve`` where the crossing occurs.
     style : Any
         Top-edge style object.
+    background_color : str
+        Graph background color used to erase the under-crossing segment.
     """
 
     from matplotlib.colors import to_rgba
-    from matplotlib.patches import Polygon
+    from matplotlib.patches import PathPatch
+    from matplotlib.transforms import Affine2D
 
     ux, uy = _normalized_curve_tangent(under_curve, under_t)
     nx, ny = -uy, ux
     edge_width = _edge_width_data_units(ax, float(style.width))
     half_span = edge_width * (_CROSSING_BRIDGE_SPAN_WIDTH_FACTOR / 2.0)
     half_height = edge_width * (_CROSSING_BRIDGE_HEIGHT_WIDTH_FACTOR / 2.0)
-    patch = Polygon(
-        [
-            (
-                crossing.x - nx * half_span - ux * half_height,
-                crossing.y - ny * half_span - uy * half_height,
-            ),
-            (
-                crossing.x + nx * half_span - ux * half_height,
-                crossing.y + ny * half_span - uy * half_height,
-            ),
-            (
-                crossing.x + nx * half_span + ux * half_height,
-                crossing.y + ny * half_span + uy * half_height,
-            ),
-            (
-                crossing.x - nx * half_span + ux * half_height,
-                crossing.y - ny * half_span + uy * half_height,
-            ),
-        ],
-        closed=True,
-        facecolor=to_rgba(str(style.color), alpha=float(style.opacity)),
-        edgecolor="none",
-        linewidth=0.0,
+    corner_radius = min(
+        _points_to_data_units(ax, _CROSSING_BRIDGE_CORNER_RADIUS_POINTS, "x"),
+        _points_to_data_units(ax, _CROSSING_BRIDGE_CORNER_RADIUS_POINTS, "y"),
+        half_height * 0.9,
+        half_span * 0.9,
+    )
+    bridge_path = build_shape_path(
+        ShapeSpec(
+            center_x=0.0,
+            center_y=0.0,
+            width=half_height * 2.0,
+            height=half_span * 2.0,
+            shape="roundrect",
+            corner_radius=corner_radius,
+        )
+    )
+    patch = PathPatch(
+        bridge_path,
+        facecolor=to_rgba(background_color),
+        edgecolor=to_rgba(str(style.color), alpha=float(style.opacity)),
+        linewidth=_CROSSING_BRIDGE_STROKE_WIDTH_POINTS,
+        joinstyle="round",
+        capstyle="round",
+        transform=Affine2D().from_values(ux, uy, nx, ny, crossing.x, crossing.y) + ax.transData,
         zorder=1.7,
         gid="dagua-crossing-bridge",
     )
@@ -4988,6 +4997,7 @@ def _draw_edge_crossings(
                 curves[under_edge_index],
                 float(crossing.t_a),
                 top_style,
+                background_color,
             )
 
 
@@ -6353,27 +6363,28 @@ def _draw_port_indicators(ax: Any, graph: Any, curves: List[BezierCurve]) -> Non
         if indicator == "none":
             continue
 
-        size_points = max(float(getattr(style, "port_indicator_size", 3.0)), 0.0)
+        size_points = max(float(getattr(style, "port_indicator_size", 5.0)), 0.0)
         if size_points <= 0.0:
             continue
         half_size = min(
             _points_to_data_units(ax, size_points, "x"),
             _points_to_data_units(ax, size_points, "y"),
         )
-        color = to_rgba(
+        face_color = to_rgba(
             str(getattr(style, "port_indicator_color", "") or style.color),
             alpha=float(getattr(style, "opacity", 1.0)),
         )
+        outline_color = to_rgba(str(style.color), alpha=float(getattr(style, "opacity", 1.0)))
 
         for endpoint_name, point in (("source", curve.p0), ("target", curve.p1)):
             if indicator == "circle":
                 patch = Circle(
                     point,
                     half_size,
-                    facecolor=color,
-                    edgecolor="none",
-                    linewidth=0.0,
-                    zorder=2.95,
+                    facecolor=face_color,
+                    edgecolor=outline_color,
+                    linewidth=_PORT_INDICATOR_BORDER_WIDTH_POINTS,
+                    zorder=_PORT_INDICATOR_ZORDER,
                 )
             else:
                 tip_x, tip_y = float(point[0]), float(point[1])
@@ -6394,10 +6405,11 @@ def _draw_port_indicators(ax: Any, graph: Any, curves: List[BezierCurve]) -> Non
                 patch = Polygon(
                     vertices,
                     closed=True,
-                    facecolor=color,
-                    edgecolor="none",
-                    linewidth=0.0,
-                    zorder=2.95,
+                    facecolor=face_color,
+                    edgecolor=outline_color,
+                    linewidth=_PORT_INDICATOR_BORDER_WIDTH_POINTS,
+                    joinstyle="round",
+                    zorder=_PORT_INDICATOR_ZORDER,
                 )
             patch.set_gid(f"dagua-port-indicator-{edge_idx}-{endpoint_name}")
             ax.add_patch(patch)
