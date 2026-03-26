@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections import defaultdict
 from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
@@ -440,18 +441,120 @@ def generate_html_dashboard(
     return path
 
 
-def generate_benchmark_markdown(results: list, output_path: str) -> str:
+def _is_success_status(status: Optional[str]) -> bool:
+    """Return whether a stored benchmark status represents success.
+
+    Parameters
+    ----------
+    status : Optional[str]
+        Stored benchmark status string.
+
+    Returns
+    -------
+    bool
+        ``True`` when the status should be treated as a successful run.
+    """
+    normalized = (status or "").strip().lower()
+    return normalized in {"ok", "success"}
+
+
+def _result_failed(result: Any) -> bool:
+    """Return whether a benchmark result should be excluded from aggregates.
+
+    Parameters
+    ----------
+    result : Any
+        Flattened benchmark result object exposing ``status`` and ``error``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the run was skipped or failed.
+    """
+    return not _is_success_status(getattr(result, "status", None)) or bool(
+        getattr(result, "error", None)
+    )
+
+
+def _truncate_report_text(text: str, limit: int = 60) -> str:
+    """Truncate report text to a bounded width.
+
+    Parameters
+    ----------
+    text : str
+        Report text to shorten.
+    limit : int, default=60
+        Maximum output length in characters.
+
+    Returns
+    -------
+    str
+        Original text when already within the limit, otherwise an ellipsis-trimmed
+        version.
+    """
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
+
+
+def _failure_reason(reason: Optional[str]) -> str:
+    """Normalize a failure reason for report output.
+
+    Parameters
+    ----------
+    reason : Optional[str]
+        Stored reason string.
+
+    Returns
+    -------
+    str
+        Stored reason when present, otherwise ``"unknown"``.
+    """
+    return reason or "unknown"
+
+
+def _failure_table_display(result: Any) -> str:
+    """Build a compact failure label for the per-graph markdown table.
+
+    Parameters
+    ----------
+    result : Any
+        Flattened benchmark result object exposing ``reason`` and ``error``.
+
+    Returns
+    -------
+    str
+        Short categorical failure text with raw exception detail only when the
+        stored reason is ``"exception"``.
+    """
+    reason = _failure_reason(getattr(result, "reason", None))
+    error = cast(Optional[str], getattr(result, "error", None))
+    if reason == "exception" and error:
+        return _truncate_report_text(f"exception -- {error}")
+    if reason != "unknown":
+        return _truncate_report_text(reason)
+    return "unknown"
+
+
+def generate_benchmark_markdown(results: Sequence[Any], output_path: str) -> str:
     """Generate a GitHub-viewable markdown report from benchmark results.
 
-    Args:
-        results: List of BenchmarkResult dataclass instances.
-        output_path: Path for the output .md file.
+    Parameters
+    ----------
+    results : Sequence[Any]
+        Flattened benchmark result records. Each record must expose the
+        ``graph_name``, ``graph_nodes``, ``graph_edges``, ``competitor``,
+        ``status``, ``runtime_seconds``, ``composite_score``, ``reason``, and
+        ``error`` attributes used by the report.
+    output_path : str
+        Destination path for the markdown report.
 
-    Returns:
-        Path to the generated file.
+    Returns
+    -------
+    str
+        Path to the generated markdown file.
     """
     import platform
-    from collections import defaultdict
     from datetime import datetime
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -490,21 +593,26 @@ def generate_benchmark_markdown(results: list, output_path: str) -> str:
         runtimes: List[float] = []
         max_n = 0
         wins = 0
+        successful_runs = 0
         for gname, comp_results in by_graph.items():
             if comp not in comp_results:
                 continue
             r = comp_results[comp]
-            if r.error:
+            if _result_failed(r):
                 continue
+            successful_runs += 1
             if r.composite_score is not None:
                 scores.append(r.composite_score)
-            runtimes.append(r.runtime_seconds)
+            if r.runtime_seconds is not None:
+                runtimes.append(r.runtime_seconds)
             max_n = max(max_n, r.graph_nodes)
 
             # Check if this competitor won on this graph
             best_score = -1.0
             best_comp = ""
             for c2, r2 in comp_results.items():
+                if _result_failed(r2):
+                    continue
                 if r2.composite_score is not None and r2.composite_score > best_score:
                     best_score = r2.composite_score
                     best_comp = c2
@@ -516,8 +624,12 @@ def generate_benchmark_markdown(results: list, output_path: str) -> str:
             "avg_runtime": sum(runtimes) / len(runtimes) if runtimes else 0.0,
             "max_nodes": max_n,
             "wins": wins,
-            "n_graphs": len(runtimes),
+            "n_graphs": successful_runs,
         }
+
+    failed_results = [r for r in results if _result_failed(r)]
+    fail_count = len(failed_results)
+    total_runs = len(results)
 
     # Build markdown
     lines: List[str] = []
@@ -538,6 +650,53 @@ def generate_benchmark_markdown(results: list, output_path: str) -> str:
             f"| {comp} | {s['avg_score']:.1f} | {s['avg_runtime']:.3f}s | "
             f"{s['max_nodes']:,} | {s['wins']}/{s['n_graphs']} | {s['n_graphs']} |"
         )
+    lines.append("")
+    summary_note = "Averages computed over successful runs only."
+    if fail_count > 0:
+        summary_note += " See Failure Analysis for excluded runs."
+    lines.append(summary_note)
+    lines.append("")
+
+    lines.append("## Failure Analysis\n")
+    failure_rate = (100.0 * fail_count / total_runs) if total_runs else 0.0
+    lines.append(
+        f"{fail_count} of {total_runs} total runs failed ({failure_rate:.1f}%). "
+        "Failures are excluded from aggregate scores above.\n"
+    )
+    lines.append("### By Competitor\n")
+    failures_by_competitor: Dict[str, List[Any]] = defaultdict(list)
+    for result in failed_results:
+        failures_by_competitor[result.competitor].append(result)
+    for comp in competitor_order:
+        comp_failures = sorted(
+            failures_by_competitor.get(comp, []), key=lambda item: item.graph_name
+        )
+        comp_total = sum(1 for result in results if result.competitor == comp)
+        lines.append(f"**{comp}** ({len(comp_failures)} failures / {comp_total} graphs):")
+        for result in comp_failures:
+            reason = _failure_reason(result.reason)
+            detail = ""
+            if reason == "exception" and result.error:
+                detail = f" -- {result.error}"
+            elif reason == "exceeds known limit":
+                detail = f" (graph has {result.graph_nodes:,} nodes)"
+            lines.append(f"- {result.graph_name}: {reason}{detail}")
+        lines.append("")
+
+    lines.append("### By Reason\n")
+    lines.append("| Reason | Count | Competitors Affected |")
+    lines.append("|--------|-------|---------------------|")
+    failures_by_reason: Dict[str, List[str]] = defaultdict(list)
+    for result in failed_results:
+        failures_by_reason[_failure_reason(result.reason)].append(result.competitor)
+    for reason, competitors in sorted(
+        failures_by_reason.items(), key=lambda item: (-len(item[1]), item[0])
+    ):
+        unique_competitors = sorted(set(competitors))
+        competitor_text = ", ".join(unique_competitors[:5])
+        if len(unique_competitors) > 5:
+            competitor_text = f"{competitor_text}, ..."
+        lines.append(f"| {reason} | {len(competitors)} | {competitor_text} |")
     lines.append("")
 
     # Per-tier tables
@@ -582,8 +741,8 @@ def generate_benchmark_markdown(results: list, output_path: str) -> str:
                     row += " - |"
                 else:
                     r = comp_results[comp]
-                    if r.error:
-                        row += f" {r.error[:15]} |"
+                    if _result_failed(r):
+                        row += f" {_failure_table_display(r)} |"
                     elif r.composite_score is not None:
                         row += f" {r.composite_score:.1f} ({r.runtime_seconds:.2f}s) |"
                     else:
@@ -1502,15 +1661,50 @@ def generate_report_artifact_index(
 
 
 def _summary_statistics(combined_results: Dict[str, Any]) -> Dict[str, Any]:
-    aggregate: Dict[str, Any] = {"competitors": {}}
-    for graph_name, graph_payload in combined_results.get("graphs", {}).items():
+    """Collect aggregate benchmark statistics from merged results.
+
+    Parameters
+    ----------
+    combined_results : Dict[str, Any]
+        Merged benchmark payload keyed by graph name.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Aggregate statistics grouped by competitor plus counts of runs excluded
+        from successful-run averages.
+    """
+    aggregate: Dict[str, Any] = {
+        "competitors": {},
+        "failures_excluded": 0,
+        "successful_runs": 0,
+        "total_runs": 0,
+    }
+    for _graph_name, graph_payload in combined_results.get("graphs", {}).items():
         n_nodes = graph_payload.get("n_nodes", 0)
         for comp_name, result in graph_payload.get("competitors", {}).items():
             stats = aggregate["competitors"].setdefault(
-                comp_name, {"scores": [], "runtimes": [], "small_scores": [], "dag_consistency": []}
+                comp_name,
+                {
+                    "scores": [],
+                    "runtimes": [],
+                    "small_scores": [],
+                    "dag_consistency": [],
+                    "failures_excluded": 0,
+                    "successful_runs": 0,
+                    "total_runs": 0,
+                },
             )
-            if result.get("status") != "OK":
+            aggregate["total_runs"] += 1
+            stats["total_runs"] += 1
+            if not _is_success_status(cast(Optional[str], result.get("status"))) or bool(
+                result.get("error")
+            ):
+                aggregate["failures_excluded"] += 1
+                stats["failures_excluded"] += 1
                 continue
+            aggregate["successful_runs"] += 1
+            stats["successful_runs"] += 1
             if result.get("composite_score") is not None:
                 stats["scores"].append(float(result["composite_score"]))
                 if n_nodes <= 500:
@@ -1628,6 +1822,32 @@ def _render_latex_report(
     placement_markdown_path: Optional[str] = None,
     placement_dashboard_path: Optional[str] = None,
 ) -> str:
+    """Render the primary benchmark LaTeX report.
+
+    Parameters
+    ----------
+    report_dir : Path
+        Output directory for generated report artifacts.
+    combined_results : Dict[str, Any]
+        Merged benchmark payload across suites.
+    scaling_curve_path : str
+        Path to the generated scaling figure.
+    comparison_paths : Sequence[str]
+        Paths to per-graph comparison figures.
+    delta_markdown_path : Optional[str], optional
+        Path to the benchmark delta markdown artifact.
+    similarity_markdown_path : Optional[str], optional
+        Path to the layout similarity markdown artifact.
+    placement_markdown_path : Optional[str], optional
+        Path to the placement summary markdown artifact.
+    placement_dashboard_path : Optional[str], optional
+        Path to the placement dashboard markdown artifact.
+
+    Returns
+    -------
+    str
+        Path to the generated LaTeX source.
+    """
     summary = _summary_statistics(combined_results)
     generated_from = combined_results.get("generated_from", {})
     comp_lines = []
@@ -1666,10 +1886,14 @@ def _render_latex_report(
         "Anti-pattern flags are derived from the stored quality metrics rather "
         "than subjective post-hoc inspection."
     )
+    failure_note = (
+        "Averages are computed over successful runs only; "
+        f"{summary['failures_excluded']} failed or skipped runs were excluded."
+    )
     aggregate_caption = (
         "Aggregate stored results. Pale green/red/yellow cell coloring is reserved "
         "for richer future comparisons; the current report keeps the table "
-        "neutral when not all competitors are installed."
+        "neutral when not all competitors are installed. " + failure_note
     )
     similarity_filename = _latex_escape(
         os.path.basename(similarity_markdown_path or "layout_similarity.md")
