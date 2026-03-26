@@ -139,10 +139,25 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
         function_name="layout_spectral",
         default_params={},
     ),
+    "classic_classical_mds": _ClassicLayoutSpec(
+        import_path="dagua.layout.classic.classical_mds",
+        function_name="layout_classical_mds",
+        default_params={},
+    ),
+    "classic_stress_maj": _ClassicLayoutSpec(
+        import_path="dagua.layout.classic.stress_majorization",
+        function_name="layout_stress_majorization",
+        default_params={"iterations": 200},
+    ),
     "classic_pivot_mds": _ClassicLayoutSpec(
         import_path="dagua.layout.classic.pivot_mds",
         function_name="layout_pivot_mds",
         default_params={"n_pivots": 50},
+    ),
+    "classic_rt": _ClassicLayoutSpec(
+        import_path="dagua.layout.classic.reingold_tilford",
+        function_name="layout_reingold_tilford",
+        default_params={},
     ),
     "classic_linlog": _ClassicLayoutSpec(
         import_path="dagua.layout.classic.linlog",
@@ -937,6 +952,71 @@ class ClassicSpectral(_ClassicBase):
 
 
 @register
+class ClassicClassicalMDS(_ClassicBase):
+    """Competitor wrapper for the classical-MDS reimplementation."""
+
+    name = "classic_classical_mds"
+    max_nodes = 5_000
+
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the classical-MDS layout with benchmark defaults.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Accepted for interface compatibility. Classical MDS itself is
+            deterministic, but the adapter keeps the standard signature.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
+
+
+@register
+class ClassicStressMajorization(_ClassicBase):
+    """Competitor wrapper for the dense stress-majorization reimplementation."""
+
+    name = "classic_stress_maj"
+    max_nodes = 1_500
+
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the stress-majorization layout with benchmark defaults.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for the stochastic warm-start jitter.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
+
+
+@register
 class ClassicPivotMDS(_ClassicBase):
     """Competitor wrapper for the classic pivot-MDS reimplementation."""
 
@@ -989,6 +1069,38 @@ class ClassicPivotMDS(_ClassicBase):
                 runtime_seconds=elapsed,
                 error=str(exc),
             )
+
+
+@register
+class ClassicRT(_ClassicBase):
+    """Competitor wrapper for the tidy tree reimplementation."""
+
+    name = "classic_rt"
+    max_nodes = 500_000
+
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the Reingold-Tilford style tree layout.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Accepted for interface compatibility. This layout is deterministic.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
 
 
 @register
