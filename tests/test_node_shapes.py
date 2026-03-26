@@ -8,6 +8,7 @@ import pytest
 from dagua.render.borders.shapes import ShapeSpec, build_shape_path
 
 NEW_SHAPES = [
+    "arrow",
     "double_circle",
     "cloud",
     "stadium",
@@ -160,3 +161,27 @@ def test_semicircle_smoke_paths_build_with_multiple_orientations() -> None:
 
         assert path is not None
         assert len(path.vertices) > 3
+
+
+def test_arrow_shape_uses_expected_vertices_and_closes() -> None:
+    """Arrow nodes should use the requested pentagon outline and close cleanly.
+
+    Returns
+    -------
+    None
+        Assertions run in place.
+    """
+
+    spec = ShapeSpec(center_x=0.0, center_y=0.0, width=10.0, height=10.0, shape="arrow")
+
+    path = build_shape_path(spec)
+
+    assert path.codes[0] == path.MOVETO
+    assert path.codes[-1] == path.CLOSEPOLY
+    assert path.vertices.shape[0] == 6
+    np.testing.assert_allclose(path.vertices[0], np.array([-5.0, 5.0]))
+    np.testing.assert_allclose(path.vertices[1], np.array([2.5, 5.0]))
+    np.testing.assert_allclose(path.vertices[2], np.array([5.0, 0.0]))
+    np.testing.assert_allclose(path.vertices[3], np.array([2.5, -5.0]))
+    np.testing.assert_allclose(path.vertices[4], np.array([-5.0, -5.0]))
+    np.testing.assert_allclose(path.vertices[0], path.vertices[-1])

@@ -42,10 +42,21 @@
 ### Rendering
 - [ ] [HIGH] Port constraints: named ports on nodes for circuit/flowchart diagrams
 - [ ] [HIGH] Edge label collision avoidance
+- [ ] [HIGH] Edge-following rotated labels: rotate edge labels to curve tangent (~30 lines)
 - [ ] [MED] Orthogonal edge routing with obstacle avoidance
+- [ ] [MED] Octilinear edge routing: 45-degree angle mode between ortho and polyline (~100 lines)
+- [ ] [MED] Edge bundling: group parallel edges with configurable bundling strength (~200 lines)
+- [ ] [MED] Polyline routing with user-defined waypoints/bends (~100 lines)
+- [ ] [MED] Icons/images in labels: inline images with text (~150 lines)
+- [ ] [MED] Node badges/decorators: overlay indicators at configurable positions (~100 lines)
+- [ ] [MED] Pattern fills (tiling image): tile small image across node fill (~50 lines)
+- [ ] [MED] Tab header on cluster groups: folder-tab protrusion with label (~80 lines)
 - [ ] [MED] Table/swimlane nodes for BPMN
 - [ ] [MED] Self-loop style: configurable (semicircular vs compact side-attached)
 - [ ] [MED] Edge endpoint offset for arrowhead placement (Graphviz matching)
+- [ ] [HARD] Text wrapping to non-rectangular shapes (ellipse, diamond, triangle) (~200 lines)
+- [ ] [HARD] Rich text via HTML/markup subset in labels (~300 lines)
+- [ ] [HARD] Swimlane/table node with internal grid layout (~500 lines)
 
 ### Infrastructure
 - [ ] [MED] Image galleries via GitHub Pages

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 from matplotlib.patches import Circle, Ellipse, FancyBboxPatch
@@ -11,6 +11,7 @@ from matplotlib.path import Path
 from numpy.typing import NDArray
 
 FloatArray = NDArray[np.float64]
+CornerRadius = Union[float, Tuple[float, float, float, float]]
 ELLIPSE_KAPPA = 0.5522847498
 # Increased to ``0.45`` so the folded corner remains legible after downscaling
 # and thin strokes still separate the fold line from the outer outline.
@@ -35,8 +36,9 @@ class ShapeSpec:
         Outer height in data units.
     shape : str
         Dagua shape name.
-    corner_radius : float, default=0.0
-        Rounded-rectangle corner radius in data units.
+    corner_radius : float | tuple[float, float, float, float], default=0.0
+        Rounded-rectangle corner radius in data units. Tuples are ordered as
+        ``(top_left, top_right, bottom_right, bottom_left)``.
     aspect_ratio : float | None, default=None
         Optional shape-specific aspect ratio hint. Semicircle variants use
         this to tune their dome curvature while keeping the flat edge fixed.
@@ -47,8 +49,108 @@ class ShapeSpec:
     width: float
     height: float
     shape: str
-    corner_radius: float = 0.0
+    corner_radius: CornerRadius = 0.0
     aspect_ratio: Optional[float] = None
+
+
+def scale_corner_radius(corner_radius: CornerRadius, scale: float) -> CornerRadius:
+    """Scale one corner-radius specification.
+
+    Parameters
+    ----------
+    corner_radius : float | tuple[float, float, float, float]
+        Scalar or per-corner radius specification.
+    scale : float
+        Multiplicative scale factor.
+
+    Returns
+    -------
+    float | tuple[float, float, float, float]
+        Scaled radius specification with negative values clamped to ``0.0``.
+    """
+
+    safe_scale = max(float(scale), 0.0)
+    if isinstance(corner_radius, tuple):
+        return tuple(max(float(value), 0.0) * safe_scale for value in corner_radius)
+    return max(float(corner_radius), 0.0) * safe_scale
+
+
+def add_corner_radius(corner_radius: CornerRadius, delta: float) -> CornerRadius:
+    """Offset one corner-radius specification by a constant amount.
+
+    Parameters
+    ----------
+    corner_radius : float | tuple[float, float, float, float]
+        Scalar or per-corner radius specification.
+    delta : float
+        Additive offset in data units.
+
+    Returns
+    -------
+    float | tuple[float, float, float, float]
+        Offset radius specification with negative values clamped to ``0.0``.
+    """
+
+    if isinstance(corner_radius, tuple):
+        return tuple(max(float(value) + float(delta), 0.0) for value in corner_radius)
+    return max(float(corner_radius) + float(delta), 0.0)
+
+
+def normalize_corner_radii(
+    corner_radius: CornerRadius,
+    width: float,
+    height: float,
+) -> Tuple[float, float, float, float]:
+    """Return clamped per-corner radii for a rounded rectangle.
+
+    Parameters
+    ----------
+    corner_radius : float | tuple[float, float, float, float]
+        Scalar or per-corner radius specification.
+    width : float
+        Rounded-rectangle width in data units.
+    height : float
+        Rounded-rectangle height in data units.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Per-corner radii ordered as
+        ``(top_left, top_right, bottom_right, bottom_left)``.
+    """
+
+    if isinstance(corner_radius, tuple):
+        top_left, top_right, bottom_right, bottom_left = (
+            max(float(value), 0.0) for value in corner_radius
+        )
+    else:
+        radius = max(float(corner_radius), 0.0)
+        top_left = top_right = bottom_right = bottom_left = radius
+
+    safe_width = max(float(width), 0.0)
+    safe_height = max(float(height), 0.0)
+    if safe_width <= 0.0 or safe_height <= 0.0:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    max_radius = min(safe_width / 2.0, safe_height / 2.0)
+    top_left = min(top_left, max_radius)
+    top_right = min(top_right, max_radius)
+    bottom_right = min(bottom_right, max_radius)
+    bottom_left = min(bottom_left, max_radius)
+
+    scale_factor = min(
+        1.0,
+        safe_width
+        / max(top_left + top_right, bottom_left + bottom_right, np.finfo(np.float64).eps),
+        safe_height
+        / max(top_left + bottom_left, top_right + bottom_right, np.finfo(np.float64).eps),
+    )
+    return (
+        top_left * scale_factor,
+        top_right * scale_factor,
+        bottom_right * scale_factor,
+        bottom_left * scale_factor,
+    )
 
 
 def triangle_vertices(center_x: float, center_y: float, width: float, height: float) -> FloatArray:
@@ -232,7 +334,37 @@ def polygon_vertices(spec: ShapeSpec) -> FloatArray:
             ],
             dtype=np.float64,
         )
+    if spec.shape == "arrow":
+        half_width = width / 2.0
+        half_height = height / 2.0
+        return np.array(
+            [
+                [x - half_width, y + half_height],
+                [x + half_width * 0.5, y + half_height],
+                [x + half_width, y],
+                [x + half_width * 0.5, y - half_height],
+                [x - half_width, y - half_height],
+            ],
+            dtype=np.float64,
+        )
     raise ValueError(f"Shape {spec.shape!r} does not have polygon vertices.")
+
+
+def arrow_path(spec: ShapeSpec) -> Path:
+    """Return the rightward arrow/chevron outline path.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed arrow path.
+    """
+
+    return closed_path_from_vertices(polygon_vertices(spec))
 
 
 def closed_path_from_vertices(vertices: FloatArray) -> Path:
@@ -462,6 +594,99 @@ def _ellipse_cubic_path_cw(
     )
     codes = [Path.MOVETO] + [Path.CURVE4] * 12 + [Path.CLOSEPOLY]
     return Path(vertices, codes)
+
+
+def roundrect_path(spec: ShapeSpec) -> Path:
+    """Return a rounded-rectangle outline with optional per-corner radii.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Shape description.
+
+    Returns
+    -------
+    matplotlib.path.Path
+        Closed rounded-rectangle path.
+    """
+
+    left = float(spec.center_x) - float(spec.width) / 2.0
+    right = float(spec.center_x) + float(spec.width) / 2.0
+    bottom = float(spec.center_y) - float(spec.height) / 2.0
+    top = float(spec.center_y) + float(spec.height) / 2.0
+    top_left, top_right, bottom_right, bottom_left = normalize_corner_radii(
+        spec.corner_radius,
+        spec.width,
+        spec.height,
+    )
+    handle_factor = ELLIPSE_KAPPA
+
+    vertices: List[List[float]] = [[left + top_left, top]]
+    codes: List[int] = [int(Path.MOVETO)]
+
+    vertices.append([right - top_right, top])
+    codes.append(int(Path.LINETO))
+    if top_right > 0.0:
+        vertices.extend(
+            [
+                [right - top_right + handle_factor * top_right, top],
+                [right, top - top_right + handle_factor * top_right],
+                [right, top - top_right],
+            ]
+        )
+        codes.extend([int(Path.CURVE4), int(Path.CURVE4), int(Path.CURVE4)])
+    else:
+        vertices.append([right, top])
+        codes.append(int(Path.LINETO))
+
+    vertices.append([right, bottom + bottom_right])
+    codes.append(int(Path.LINETO))
+    if bottom_right > 0.0:
+        vertices.extend(
+            [
+                [right, bottom + bottom_right - handle_factor * bottom_right],
+                [right - bottom_right + handle_factor * bottom_right, bottom],
+                [right - bottom_right, bottom],
+            ]
+        )
+        codes.extend([int(Path.CURVE4), int(Path.CURVE4), int(Path.CURVE4)])
+    else:
+        vertices.append([right, bottom])
+        codes.append(int(Path.LINETO))
+
+    vertices.append([left + bottom_left, bottom])
+    codes.append(int(Path.LINETO))
+    if bottom_left > 0.0:
+        vertices.extend(
+            [
+                [left + bottom_left - handle_factor * bottom_left, bottom],
+                [left, bottom + bottom_left - handle_factor * bottom_left],
+                [left, bottom + bottom_left],
+            ]
+        )
+        codes.extend([int(Path.CURVE4), int(Path.CURVE4), int(Path.CURVE4)])
+    else:
+        vertices.append([left, bottom])
+        codes.append(int(Path.LINETO))
+
+    vertices.append([left, top - top_left])
+    codes.append(int(Path.LINETO))
+    if top_left > 0.0:
+        vertices.extend(
+            [
+                [left, top - top_left + handle_factor * top_left],
+                [left + top_left - handle_factor * top_left, top],
+                [left + top_left, top],
+            ]
+        )
+        codes.extend([int(Path.CURVE4), int(Path.CURVE4), int(Path.CURVE4)])
+    else:
+        vertices.append([left, top])
+        codes.append(int(Path.LINETO))
+
+    vertices.append([left + top_left, top])
+    codes.append(int(Path.CLOSEPOLY))
+    return Path(np.asarray(vertices, dtype=np.float64), codes)
 
 
 def cylinder_path(spec: ShapeSpec) -> Path:
@@ -1052,16 +1277,14 @@ def build_shape_path(spec: ShapeSpec) -> Path:
     """
 
     shape = spec.shape
-    if shape in {"roundrect", "rect"}:
-        corner_radius = float(spec.corner_radius) if shape == "roundrect" else 0.0
-        boxstyle = (
-            f"round,pad=0,rounding_size={corner_radius}" if corner_radius > 0.0 else "square,pad=0"
-        )
+    if shape == "roundrect":
+        return roundrect_path(spec)
+    if shape == "rect":
         patch = FancyBboxPatch(
             (spec.center_x - spec.width / 2.0, spec.center_y - spec.height / 2.0),
             spec.width,
             spec.height,
-            boxstyle=boxstyle,
+            boxstyle="square,pad=0",
         )
         return extract_patch_path(patch)
     if shape == "ellipse":
@@ -1093,6 +1316,8 @@ def build_shape_path(spec: ShapeSpec) -> Path:
         return document_path(spec)
     if shape == "box3d":
         return box3d_path(spec)
+    if shape == "arrow":
+        return arrow_path(spec)
     if shape in {
         "diamond",
         "triangle",
