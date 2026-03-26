@@ -368,7 +368,7 @@ class NodeStyle:
     image_fit: str = "contain"  # render-only: contain, cover, stretch
     image_opacity: float = 1.0  # render-only alpha for the image layer
     bevel: bool = False  # render-only highlight/shadow overlay
-    bevel_intensity: float = 0.3  # render-only 0-1 bevel strength
+    bevel_intensity: float = 0.5  # render-only 0-1 bevel strength
 
     def __post_init__(self):
         """Populate derived defaults after dataclass initialization."""
@@ -452,7 +452,7 @@ class EdgeStyle:
     crossing_style: str = "none"  # none, arc, gap, sharp, bridge
     crossing_size: float = 6.0  # jump marker size in points
     port_indicator: str = "none"  # none, circle, diamond, square
-    port_indicator_size: float = 3.0  # indicator radius/half-size in points
+    port_indicator_size: float = 5.0  # indicator radius/half-size in points
     port_indicator_color: str = ""  # empty = use edge color
 
     def __repr__(self) -> str:

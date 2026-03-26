@@ -545,7 +545,7 @@ def test_hatched_nodes_render_visible_overlay() -> None:
 
 
 def test_port_indicators_render_at_edge_endpoints() -> None:
-    """Port indicators should add small endpoint patches after the node pass."""
+    """Port indicators should render above edges with a visible outline."""
 
     graph = DaguaGraph()
     graph.add_node("A", label="")
@@ -554,8 +554,10 @@ def test_port_indicators_render_at_edge_endpoints() -> None:
         "A",
         "B",
         style=EdgeStyle(
+            color="#334455",
+            opacity=1.0,
             port_indicator="circle",
-            port_indicator_size=4.0,
+            port_indicator_size=5.0,
             port_indicator_color="#ff0000",
         ),
     )
@@ -573,10 +575,14 @@ def test_port_indicators_render_at_edge_endpoints() -> None:
     plt.close(fig)
 
     assert len(indicator_patches) == 2
+    assert all(float(patch.get_zorder()) >= 3.5 for patch in indicator_patches)
+    assert all(float(patch.get_linewidth()) == pytest.approx(0.5) for patch in indicator_patches)
+    assert to_rgba(indicator_patches[0].get_edgecolor()) == pytest.approx(to_rgba("#334455"))
+    assert to_rgba(indicator_patches[0].get_facecolor()) == pytest.approx(to_rgba("#ff0000"))
 
 
 def test_bevel_nodes_render_overlay_patches() -> None:
-    """Beveled nodes should add clipped highlight and shadow overlay bands."""
+    """Beveled nodes should add stronger clipped highlight and shadow bands."""
 
     graph = DaguaGraph()
     graph.add_node("A", label="", style=NodeStyle(bevel=True, bevel_intensity=0.4))
@@ -591,9 +597,26 @@ def test_bevel_nodes_render_overlay_patches() -> None:
         and isinstance(patch.get_gid(), str)
         and patch.get_gid().startswith("dagua-node-bevel-")
     ]
+    highlight_patches = [
+        patch
+        for patch in bevel_patches
+        if str(patch.get_gid()).startswith("dagua-node-bevel-highlight-")
+    ]
+    shadow_patches = [
+        patch
+        for patch in bevel_patches
+        if str(patch.get_gid()).startswith("dagua-node-bevel-shadow-")
+    ]
     plt.close(fig)
 
     assert bevel_patches
+    assert highlight_patches
+    assert shadow_patches
+    assert max(float(patch.get_facecolor()[-1]) for patch in highlight_patches) == pytest.approx(
+        0.28
+    )
+    assert max(float(patch.get_facecolor()[-1]) for patch in shadow_patches) == pytest.approx(0.16)
+    assert highlight_patches[0].get_path().vertices.shape[0] > 5
 
 
 def test_crossing_span_uses_visible_minimum() -> None:
@@ -666,8 +689,8 @@ def test_sharp_crossing_uses_edge_width_relative_geometry(
     plt.close(fig)
 
 
-def test_bridge_crossing_adds_rectangle_patch() -> None:
-    """Bridge crossings should add a rectangular patch over the cleared gap."""
+def test_bridge_crossing_adds_rounded_background_patch() -> None:
+    """Bridge crossings should add a rounded background patch with an outline."""
 
     fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
     ax.set_xlim(-20.0, 20.0)
@@ -689,17 +712,22 @@ def test_bridge_crossing_adds_rectangle_patch() -> None:
         under_curve,
         0.5,
         EdgeStyle(crossing_style="bridge", width=2.0),
+        "#fafafa",
     )
 
     bridge_patches = [
         patch
         for patch in ax.patches
-        if isinstance(patch, Polygon) and patch.get_gid() == "dagua-crossing-bridge"
+        if isinstance(patch, PathPatch) and patch.get_gid() == "dagua-crossing-bridge"
     ]
     plt.close(fig)
 
     assert len(bridge_patches) == 1
-    assert bridge_patches[0].get_xy().shape[0] == 5
+    assert float(bridge_patches[0].get_linewidth()) == pytest.approx(0.5)
+    assert to_rgba(bridge_patches[0].get_facecolor()) == pytest.approx(to_rgba("#fafafa"))
+    assert to_rgba(bridge_patches[0].get_edgecolor()) == pytest.approx(
+        to_rgba("#6B7280", alpha=0.75)
+    )
 
 
 def test_triangle_patch_uses_graphviz_like_wide_proportions() -> None:
@@ -857,8 +885,6 @@ def test_dot_arrow_marker_uses_larger_graphviz_like_radius() -> None:
 
 def test_tee_arrow_marker_uses_visible_bar_offset_and_width() -> None:
     """Tee markers should render as a wide, thin bar set back from the tip."""
-
-    from matplotlib.patches import Polygon
 
     fig, ax = plt.subplots()
     style = EdgeStyle(arrow="tee", width=1.2, arrow_width=10.0, arrow_length=14.0)
@@ -1245,7 +1271,6 @@ def test_normal_arrow_renders_polygon_with_arrow_scale() -> None:
     )
 
     assert len(ax.patches) == 1
-    from matplotlib.patches import Polygon
 
     assert isinstance(ax.patches[0], Polygon)
     plt.close(fig)
@@ -1253,8 +1278,6 @@ def test_normal_arrow_renders_polygon_with_arrow_scale() -> None:
 
 def test_direct_render_trims_edge_body_before_arrowhead() -> None:
     """Direct rendering should stop the body at the arrowhead base."""
-
-    from matplotlib.patches import Polygon
 
     graph = DaguaGraph.from_edge_list([("A", "B"), ("B", "C")], direction="TB")
     graph.edge_styles = [
@@ -1537,7 +1560,7 @@ def test_vee_arrow_is_open_polygon() -> None:
 
     import torch
     from matplotlib.collections import PatchCollection
-    from matplotlib.patches import FancyArrowPatch, Polygon
+    from matplotlib.patches import FancyArrowPatch
 
     graph = DaguaGraph()
     graph.add_node("A", label="From")
