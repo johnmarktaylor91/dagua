@@ -2609,7 +2609,7 @@ DAGSTER_THEME = Theme(
 # ─── Theme Registry ──────────────────────────────────────────────────────
 
 THEME_REGISTRY: Dict[str, Theme] = {
-    "default": GRAPHVIZ_THEME,
+    "default": DEFAULT_THEME_OBJ,
     "dark": DARK_THEME,
     "minimal": MINIMAL_THEME,
     "torchlens": TORCHLENS_THEME,
@@ -25734,6 +25734,197 @@ DEFUSE_THEME = Theme(
     graph_style=GraphStyle(background_color="#0A0A0A"),
 )
 
+# Citation -- scholarly citation network: paper nodes as rounded cards,
+# serif typography, muted blue/gray academic palette, thin directional
+# citation arrows, clusters as research areas or time periods
+CITATION_THEME = Theme(
+    name="citation",
+    category="academic",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#F7F9FC",  # pale blue-white card
+            stroke="#8BA4C4",  # muted academic blue
+            stroke_width=0.8,
+            font_family="DejaVu Serif",
+            font_size=8.0,
+            font_color="#2C3E50",  # dark scholarly blue-gray
+            padding=(8.0, 5.0),
+            min_width=60.0,
+            min_height=28.0,
+            corner_radius=4.0,
+            shadow=True,
+            shadow_offset=(1.0, -1.0),
+            shadow_color="#00000012",
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#3B5998",  # deep academic blue (seminal paper)
+            stroke="#2C4A7C",
+            stroke_width=1.2,
+            font_family="DejaVu Serif",
+            font_size=9.0,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(8.0, 5.0),
+            min_width=70.0,
+            min_height=32.0,
+            corner_radius=4.0,
+            shadow=True,
+            shadow_offset=(1.5, -1.5),
+            shadow_color="#00000020",
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#EEF1F5",  # lighter card (recent/minor paper)
+            stroke="#B0BEC5",
+            stroke_width=0.6,
+            font_family="DejaVu Serif",
+            font_size=7.5,
+            font_color="#546E7A",
+            padding=(8.0, 5.0),
+            min_width=55.0,
+            min_height=24.0,
+            corner_radius=4.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#7B98B5",  # muted steel blue citation arrow
+            width=0.7,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#7B98B5",
+            arrow_length=6.0,
+            arrow_width=4.0,
+            routing="bezier",
+            curvature=0.25,
+            opacity=0.55,
+        ),
+        "back": EdgeStyle(
+            color="#B0BEC5",  # lighter back-citation
+            width=0.5,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="hollow",
+            arrow_color="#B0BEC5",
+            arrow_length=5.0,
+            arrow_width=3.0,
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0F4F8",  # very pale blue research area
+        stroke="#C5D0DB",
+        stroke_width=0.6,
+        stroke_dash="dashed",
+        corner_radius=6.0,
+        font_size=8.5,
+        font_color="#4A6785",
+        font_weight="bold",
+        font_family="DejaVu Serif",
+        padding=30.0,
+        opacity=0.35,
+    ),
+    graph_style=GraphStyle(
+        background_color="#FFFFFF",  # clean white like a journal page
+    ),
+)
+
+# Epidemiology -- disease spread and contact tracing networks: red/orange
+# transmission chains, green recovered nodes, clinical white background,
+# urgency without panic, WHO/CDC outbreak report aesthetic
+EPIDEMIOLOGY_THEME = Theme(
+    name="epidemiology",
+    category="science",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#FFF3E0",  # warm amber -- exposed/susceptible
+            stroke="#E65100",  # deep orange border
+            stroke_width=1.0,
+            font_family="Helvetica",
+            font_size=8.0,
+            font_color="#37474F",  # dark clinical gray
+            padding=(6.0, 6.0),
+            min_width=32.0,
+            min_height=32.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#D32F2F",  # red -- infected / index case
+            stroke="#B71C1C",
+            stroke_width=1.5,
+            font_family="Helvetica",
+            font_size=8.5,
+            font_color="#FFFFFF",
+            font_weight="bold",
+            padding=(6.0, 6.0),
+            min_width=36.0,
+            min_height=36.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#C8E6C9",  # soft green -- recovered/immune
+            stroke="#388E3C",
+            stroke_width=0.8,
+            font_family="Helvetica",
+            font_size=7.5,
+            font_color="#1B5E20",
+            padding=(6.0, 6.0),
+            min_width=30.0,
+            min_height=30.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#E53935",  # red transmission arrow
+            width=1.2,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#C62828",
+            arrow_length=8.0,
+            arrow_width=5.0,
+            routing="bezier",
+            curvature=0.3,
+            opacity=0.65,
+        ),
+        "back": EdgeStyle(
+            color="#FFAB91",  # faded coral -- secondary/uncertain
+            width=0.8,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="hollow",
+            arrow_color="#FF8A65",
+            arrow_length=6.0,
+            arrow_width=4.0,
+            routing="bezier",
+            curvature=0.35,
+            opacity=0.45,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#FBE9E7",  # very pale red -- outbreak cluster
+        stroke="#EF9A9A",
+        stroke_width=0.7,
+        stroke_dash="solid",
+        corner_radius=10.0,
+        font_size=8.5,
+        font_color="#C62828",
+        font_weight="bold",
+        font_family="Helvetica",
+        padding=28.0,
+        opacity=0.3,
+    ),
+    graph_style=GraphStyle(
+        background_color="#FAFAFA",  # clinical white
+    ),
+)
+
 THEME_REGISTRY["cats_cradle"] = CATS_CRADLE_THEME
 THEME_REGISTRY["defuse"] = DEFUSE_THEME
 THEME_REGISTRY["simcity"] = SIMCITY_THEME
@@ -25862,6 +26053,8 @@ THEME_REGISTRY["van_essen"] = VAN_ESSEN_THEME
 THEME_REGISTRY["cajal"] = CAJAL_THEME
 THEME_REGISTRY["connectome"] = CONNECTOME_THEME
 THEME_REGISTRY["pathway"] = PATHWAY_THEME
+THEME_REGISTRY["citation"] = CITATION_THEME
+THEME_REGISTRY["epidemiology"] = EPIDEMIOLOGY_THEME
 
 
 def get_theme(name: str) -> Theme:
