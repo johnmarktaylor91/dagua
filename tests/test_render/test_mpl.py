@@ -575,17 +575,17 @@ def test_port_indicators_render_at_edge_endpoints() -> None:
     plt.close(fig)
 
     assert len(indicator_patches) == 2
-    assert all(float(patch.get_zorder()) >= 3.5 for patch in indicator_patches)
+    assert all(float(patch.get_zorder()) >= 4.0 for patch in indicator_patches)
     assert all(float(patch.get_linewidth()) == pytest.approx(0.5) for patch in indicator_patches)
-    assert to_rgba(indicator_patches[0].get_edgecolor()) == pytest.approx(to_rgba("#334455"))
-    assert to_rgba(indicator_patches[0].get_facecolor()) == pytest.approx(to_rgba("#ff0000"))
+    assert to_rgba(indicator_patches[0].get_edgecolor()) == pytest.approx(to_rgba("#ffffff"))
+    assert to_rgba(indicator_patches[0].get_facecolor()) == pytest.approx(to_rgba("#334455"))
 
 
 def test_bevel_nodes_render_overlay_patches() -> None:
     """Beveled nodes should add stronger clipped highlight and shadow bands."""
 
     graph = DaguaGraph()
-    graph.add_node("A", label="", style=NodeStyle(bevel=True, bevel_intensity=0.4))
+    graph.add_node("A", label="", style=NodeStyle(bevel=True, bevel_intensity=0.5))
     graph.compute_node_sizes()
     positions = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
 
@@ -613,9 +613,9 @@ def test_bevel_nodes_render_overlay_patches() -> None:
     assert highlight_patches
     assert shadow_patches
     assert max(float(patch.get_facecolor()[-1]) for patch in highlight_patches) == pytest.approx(
-        0.28
+        0.45
     )
-    assert max(float(patch.get_facecolor()[-1]) for patch in shadow_patches) == pytest.approx(0.16)
+    assert max(float(patch.get_facecolor()[-1]) for patch in shadow_patches) == pytest.approx(0.28)
     assert highlight_patches[0].get_path().vertices.shape[0] > 5
 
 
@@ -723,7 +723,8 @@ def test_bridge_crossing_adds_rounded_background_patch() -> None:
     plt.close(fig)
 
     assert len(bridge_patches) == 1
-    assert float(bridge_patches[0].get_linewidth()) == pytest.approx(0.5)
+    assert float(bridge_patches[0].get_linewidth()) == pytest.approx(1.0)
+    assert float(bridge_patches[0].get_zorder()) > 1.7
     assert to_rgba(bridge_patches[0].get_facecolor()) == pytest.approx(to_rgba("#fafafa"))
     assert to_rgba(bridge_patches[0].get_edgecolor()) == pytest.approx(
         to_rgba("#6B7280", alpha=0.75)
@@ -1116,8 +1117,8 @@ def test_crow_arrow_marker_uses_wider_graphviz_spread() -> None:
         endpoint = vertices[np.argmax(np.linalg.norm(vertices, axis=1))]
         endpoints.append(endpoint)
     outer_x_offsets = sorted(abs(float(endpoint[0])) for endpoint in endpoints[1:])
-    expected_offset = (style.arrow_width * 1.7 * expected_scale) + (
-        _edge_width_data_units(ax, max(style.width * 1.8, 2.0)) / 2.0
+    expected_offset = (style.arrow_width * 1.4 * expected_scale) + (
+        _edge_width_data_units(ax, max(style.width * 1.4, 2.0)) / 2.0
     )
     assert outer_x_offsets == pytest.approx(
         [expected_offset, expected_offset],
