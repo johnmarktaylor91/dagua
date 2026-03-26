@@ -6,6 +6,8 @@ import inspect
 from collections import Counter, defaultdict, deque
 from typing import Callable
 
+import torch
+
 from dagua.eval.graphs import (
     _expanded_structural_graphs,
     _synthetic_graphs,
@@ -115,6 +117,73 @@ def test_synthetic_graphs_cover_common_and_niche_motifs():
         "large-dense",
     }
     assert expected_tags <= tags
+
+
+def test_synthetic_graphs_include_final_structural_additions() -> None:
+    """The final synthetic additions should be registered with their intended structure."""
+    graphs = {tg.name: tg for tg in _synthetic_graphs()}
+
+    assert {"planar", "dag", "sparse"} <= graphs["outerplanar_dag_20"].tags
+    assert graphs["outerplanar_dag_20"].graph.num_nodes == 20
+
+    planar = graphs["planar_60"].graph
+    assert {"planar", "dense"} <= graphs["planar_60"].tags
+    assert planar.num_nodes == 60
+
+    regular_three = graphs["regular_3_30"].graph
+    regular_three_degree = torch.bincount(
+        regular_three.edge_index.reshape(-1),
+        minlength=regular_three.num_nodes,
+    )
+    assert regular_three.num_nodes == 30
+    assert regular_three_degree.tolist() == [3] * 30
+
+    regular_four = graphs["regular_4_40"].graph
+    regular_four_degree = torch.bincount(
+        regular_four.edge_index.reshape(-1),
+        minlength=regular_four.num_nodes,
+    )
+    assert regular_four.num_nodes == 40
+    assert regular_four_degree.tolist() == [4] * 40
+
+    triangular = graphs["triangular_lattice_36"].graph
+    hexagonal = graphs["hexagonal_lattice_42"].graph
+    assert triangular.num_nodes == 36
+    assert hexagonal.num_nodes == 42
+    assert {"grid", "lattice", "planar"} <= graphs["triangular_lattice_36"].tags
+    assert {"grid", "lattice", "planar", "sparse"} <= graphs["hexagonal_lattice_42"].tags
+
+    protein = graphs["protein_ppi_200"].graph
+    citation = graphs["citation_dag_300"].graph
+    assert protein.num_nodes == 200
+    assert citation.num_nodes == 300
+    src = citation.edge_index[0].tolist()
+    tgt = citation.edge_index[1].tolist()
+    assert all(source < target for source, target in zip(src, tgt))
+
+    assert graphs["sierpinski_42"].graph.num_nodes == 42
+    assert graphs["chung_lu_150"].graph.num_nodes == 150
+    assert _component_count(graphs["multi_component_80"].graph.edge_index, 80) == 7
+
+    bipartite = graphs["random_bipartite_60"].graph
+    src = bipartite.edge_index[0].tolist()
+    tgt = bipartite.edge_index[1].tolist()
+    assert all(source < 30 for source in src)
+    assert all(target >= 30 for target in tgt)
+
+    weighted = graphs["heavy_tail_weights_50"].graph
+    assert weighted.edge_weights is not None
+    assert weighted.edge_weights.shape[0] == weighted.edge_index.shape[1]
+    assert weighted.edge_weights.max().item() > weighted.edge_weights.min().item()
+
+    petersen = graphs["petersen_10"].graph
+    petersen_degree = torch.bincount(
+        petersen.edge_index.reshape(-1),
+        minlength=petersen.num_nodes,
+    )
+    assert graphs["petersen_10"].tags == {"regular", "famous", "small"}
+    assert petersen.num_nodes == 10
+    assert petersen_degree.tolist() == [3] * 10
 
 
 def test_synthetic_graphs_include_diverse_sizes_and_hierarchy():

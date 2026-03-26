@@ -5,10 +5,12 @@ from __future__ import annotations
 import pytest
 import torch
 
+from dagua.layout.classic.classical_mds import layout_classical_mds
 from dagua.layout.classic.kk import layout_kk
 from dagua.layout.classic.maxent_stress import layout_maxent_stress
 from dagua.layout.classic.pivot_mds import layout_pivot_mds
 from dagua.layout.classic.sgd2_multi import layout_sgd2_multi
+from dagua.layout.classic.stress_majorization import layout_stress_majorization
 from dagua.layout.classic.stress_sgd import layout_stress_sgd
 from dagua.layout.classic.tsnet import layout_tsnet
 
@@ -54,7 +56,9 @@ def _unwrap_positions(
 @pytest.mark.parametrize(
     ("layout_fn", "kwargs"),
     [
+        (layout_classical_mds, {}),
         (layout_kk, {"steps": 50}),
+        (layout_stress_majorization, {"iterations": 25}),
         (layout_stress_sgd, {"steps": 10}),
         (layout_maxent_stress, {"steps": 10}),
         (layout_pivot_mds, {}),
