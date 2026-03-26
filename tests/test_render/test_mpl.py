@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 from matplotlib.colors import to_rgba
-from matplotlib.patches import PathPatch
+from matplotlib.patches import Circle, PathPatch, Polygon
 from matplotlib.path import Path as MplPath
 
 import dagua
@@ -29,6 +29,7 @@ from dagua.render.mpl import (
     _cluster_linestyle,
     _compute_display_scale,
     _crossing_span_data_units,
+    _draw_bridge_crossing,
     _draw_clusters,
     _draw_edge_marker,
     _draw_edges_direct,
@@ -543,6 +544,58 @@ def test_hatched_nodes_render_visible_overlay() -> None:
     plt.close(fig)
 
 
+def test_port_indicators_render_at_edge_endpoints() -> None:
+    """Port indicators should add small endpoint patches after the node pass."""
+
+    graph = DaguaGraph()
+    graph.add_node("A", label="")
+    graph.add_node("B", label="")
+    graph.add_edge(
+        "A",
+        "B",
+        style=EdgeStyle(
+            port_indicator="circle",
+            port_indicator_size=4.0,
+            port_indicator_color="#ff0000",
+        ),
+    )
+    graph.compute_node_sizes()
+    positions = torch.tensor([[-20.0, 0.0], [20.0, 0.0]], dtype=torch.float32)
+
+    fig, ax = render(graph, positions=positions, show=False)
+    indicator_patches = [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, Circle)
+        and isinstance(patch.get_gid(), str)
+        and patch.get_gid().startswith("dagua-port-indicator-")
+    ]
+    plt.close(fig)
+
+    assert len(indicator_patches) == 2
+
+
+def test_bevel_nodes_render_overlay_patches() -> None:
+    """Beveled nodes should add clipped highlight and shadow overlay bands."""
+
+    graph = DaguaGraph()
+    graph.add_node("A", label="", style=NodeStyle(bevel=True, bevel_intensity=0.4))
+    graph.compute_node_sizes()
+    positions = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+
+    fig, ax = render(graph, positions=positions, show=False)
+    bevel_patches = [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, PathPatch)
+        and isinstance(patch.get_gid(), str)
+        and patch.get_gid().startswith("dagua-node-bevel-")
+    ]
+    plt.close(fig)
+
+    assert bevel_patches
+
+
 def test_crossing_span_uses_visible_minimum() -> None:
     """Crossing jumps should keep a large enough data-space span for combo cards."""
 
@@ -611,6 +664,42 @@ def test_sharp_crossing_uses_edge_width_relative_geometry(
     assert points[2][0] == pytest.approx(expected_half_span)
     assert points[2][1] == pytest.approx(0.0)
     plt.close(fig)
+
+
+def test_bridge_crossing_adds_rectangle_patch() -> None:
+    """Bridge crossings should add a rectangular patch over the cleared gap."""
+
+    fig, ax = plt.subplots(figsize=(4.0, 4.0), dpi=100)
+    ax.set_xlim(-20.0, 20.0)
+    ax.set_ylim(-20.0, 20.0)
+    ax.set_aspect("equal")
+    fig.canvas.draw()
+
+    crossing = EdgeCrossing(edge_a=0, edge_b=1, x=0.0, y=0.0, t_a=0.5, t_b=0.5)
+    under_curve = BezierCurve(
+        p0=(0.0, -20.0),
+        cp1=(0.0, -10.0),
+        cp2=(0.0, 10.0),
+        p1=(0.0, 20.0),
+    )
+
+    _draw_bridge_crossing(
+        ax,
+        crossing,
+        under_curve,
+        0.5,
+        EdgeStyle(crossing_style="bridge", width=2.0),
+    )
+
+    bridge_patches = [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, Polygon) and patch.get_gid() == "dagua-crossing-bridge"
+    ]
+    plt.close(fig)
+
+    assert len(bridge_patches) == 1
+    assert bridge_patches[0].get_xy().shape[0] == 5
 
 
 def test_triangle_patch_uses_graphviz_like_wide_proportions() -> None:

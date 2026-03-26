@@ -23,7 +23,12 @@ from dagua.render.borders import (
     star_vertices,
 )
 from dagua.render.borders.dashes import _curvature_scale, _estimate_curvatures, dash_segments
-from dagua.render.mpl import _compute_display_scale, _draw_nodes, _scaled_node_style
+from dagua.render.mpl import (
+    _compute_display_scale,
+    _draw_nodes,
+    _node_corner_radius_data,
+    _scaled_node_style,
+)
 from dagua.styles import NodeStyle
 
 
@@ -87,6 +92,33 @@ def test_annular_path_contains_both_outer_and_inner_subpaths() -> None:
 
     assert move_count == 2
     assert close_count == 2
+
+
+def test_roundrect_path_supports_per_corner_radii() -> None:
+    """Rounded rectangles should respect different radii on each corner.
+
+    Returns
+    -------
+    None
+        Assertions run in place.
+    """
+
+    spec = ShapeSpec(
+        0.0,
+        0.0,
+        40.0,
+        20.0,
+        "roundrect",
+        corner_radius=(2.0, 4.0, 6.0, 8.0),
+    )
+
+    path = build_shape_path(spec)
+
+    np.testing.assert_allclose(path.vertices[0], np.array([-18.0, 10.0]))
+    np.testing.assert_allclose(path.vertices[1], np.array([16.0, 10.0]))
+    np.testing.assert_allclose(path.vertices[5], np.array([20.0, -4.0]))
+    np.testing.assert_allclose(path.vertices[9], np.array([-12.0, -10.0]))
+    np.testing.assert_allclose(path.vertices[13], np.array([-20.0, 8.0]))
 
 
 def test_star_inset_uses_uniform_centroid_scaling() -> None:
@@ -270,6 +302,24 @@ def test_scaled_node_style_converts_corner_radius_and_shadow_offset() -> None:
 
     assert scaled.corner_radius == pytest.approx(6.0 * display_scale)
     assert scaled.shadow_offset == pytest.approx((1.5 * display_scale, -1.5 * display_scale))
+
+
+def test_scaled_corner_radius_uses_node_size_fraction() -> None:
+    """Scaled corner radii should grow with the node's minimum dimension.
+
+    Returns
+    -------
+    None
+        Assertions run in place.
+    """
+
+    style = NodeStyle(corner_radius=(0.1, 0.2, 0.3, 0.4), scale_corner_radius=True)
+
+    small = _node_corner_radius_data(style, display_scale=2.0, node_width=40.0, node_height=20.0)
+    large = _node_corner_radius_data(style, display_scale=2.0, node_width=80.0, node_height=50.0)
+
+    assert small == pytest.approx((2.0, 4.0, 6.0, 8.0))
+    assert large == pytest.approx((5.0, 10.0, 15.0, 20.0))
 
 
 def test_draw_nodes_uses_batched_fill_and_border_collections() -> None:
