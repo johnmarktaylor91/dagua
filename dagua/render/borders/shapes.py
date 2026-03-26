@@ -344,6 +344,7 @@ def polygon_vertices(spec: ShapeSpec) -> FloatArray:
                 [x + half_width, y],
                 [x + half_width * 0.5, y - half_height],
                 [x - half_width, y - half_height],
+                [x - half_width * 0.3, y],
             ],
             dtype=np.float64,
         )
