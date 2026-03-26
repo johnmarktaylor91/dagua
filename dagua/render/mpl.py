@@ -94,17 +94,17 @@ _CROSSING_MIN_SPAN_DATA_UNITS = 22.0
 _CROSSING_SHARP_HEIGHT_WIDTH_FACTOR = 3.5
 # Span multiplier for the sharp crossing footprint along the edge direction.
 _CROSSING_SHARP_SPAN_WIDTH_FACTOR = 4.0
-_CROSSING_BRIDGE_HEIGHT_WIDTH_FACTOR = 2.0
-_CROSSING_BRIDGE_SPAN_WIDTH_FACTOR = 3.0
+_CROSSING_BRIDGE_HEIGHT_WIDTH_FACTOR = 3.5
+_CROSSING_BRIDGE_SPAN_WIDTH_FACTOR = 5.0
 _CROSSING_BRIDGE_CORNER_RADIUS_POINTS = 1.5
-_CROSSING_BRIDGE_STROKE_WIDTH_POINTS = 0.5
+_CROSSING_BRIDGE_STROKE_WIDTH_POINTS = 1.0
 _BEVEL_BAND_COUNT = 6
 _BEVEL_REFERENCE_INTENSITY = 0.5
-_BEVEL_HIGHLIGHT_ALPHA = 0.35
-_BEVEL_SHADOW_ALPHA = 0.2
-_BEVEL_MAX_INSET_FRACTION = 0.18
+_BEVEL_HIGHLIGHT_ALPHA = 0.45
+_BEVEL_SHADOW_ALPHA = 0.28
+_BEVEL_MAX_INSET_FRACTION = 0.5
 _PORT_INDICATOR_BORDER_WIDTH_POINTS = 0.5
-_PORT_INDICATOR_ZORDER = 3.55
+_PORT_INDICATOR_ZORDER = 4.1
 _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
 # Tuned down over several passes to keep self-loop terminals legible without
 # letting arrowheads consume the entire loop apex on small nodes.
@@ -4925,7 +4925,7 @@ def _draw_bridge_crossing(
         joinstyle="round",
         capstyle="round",
         transform=Affine2D().from_values(ux, uy, nx, ny, crossing.x, crossing.y) + ax.transData,
-        zorder=1.7,
+        zorder=1.85,
         gid="dagua-crossing-bridge",
     )
     ax.add_patch(patch)
@@ -6323,7 +6323,8 @@ def _draw_edge_marker(
     if marker == "crow":
         back_x = tip_x - ux * manual_length
         back_y = tip_y - uy * manual_length
-        prong_spread = manual_width * 1.7
+        crow_tine_width = _edge_width_data_units(ax, max(float(style.width) * 1.4, 2.0))
+        prong_spread = manual_width * 1.4
         for end_x, end_y in (
             (back_x, back_y),
             (back_x + px * prong_spread, back_y + py * prong_spread),
@@ -6332,7 +6333,7 @@ def _draw_edge_marker(
             _add_filled_ribbon_patch(
                 ax=ax,
                 points=np.array([[tip_x, tip_y], [end_x, end_y]], dtype=float),
-                width=emphasis_width,
+                width=crow_tine_width,
                 color=color,
                 zorder=3,
                 cap_start="round",
@@ -6363,18 +6364,15 @@ def _draw_port_indicators(ax: Any, graph: Any, curves: List[BezierCurve]) -> Non
         if indicator == "none":
             continue
 
-        size_points = max(float(getattr(style, "port_indicator_size", 5.0)), 0.0)
+        size_points = max(float(getattr(style, "port_indicator_size", 5.0)), 5.0)
         if size_points <= 0.0:
             continue
         half_size = min(
             _points_to_data_units(ax, size_points, "x"),
             _points_to_data_units(ax, size_points, "y"),
         )
-        face_color = to_rgba(
-            str(getattr(style, "port_indicator_color", "") or style.color),
-            alpha=float(getattr(style, "opacity", 1.0)),
-        )
-        outline_color = to_rgba(str(style.color), alpha=float(getattr(style, "opacity", 1.0)))
+        face_color = to_rgba(str(style.color), alpha=float(getattr(style, "opacity", 1.0)))
+        outline_color = to_rgba("#ffffff")
 
         for endpoint_name, point in (("source", curve.p0), ("target", curve.p1)):
             if indicator == "circle":
