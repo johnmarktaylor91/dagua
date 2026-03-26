@@ -2009,6 +2009,172 @@ def _synthetic_graphs() -> List[TestGraph]:
         )
     )
 
+    # 41. Outerplanar DAG with a non-crossing fan
+    graphs.append(
+        TestGraph(
+            name="outerplanar_dag_20",
+            graph=_make_outerplanar_dag_graph(20),
+            tags={"planar", "dag", "sparse"},
+            description="Outerplanar DAG with a path backbone and non-crossing forward fan",
+            expected_challenges=(
+                "Preserving outer-face ordering without introducing avoidable bends"
+            ),
+        )
+    )
+
+    # 42. Dense planar graph from nested triangulated cycles
+    graphs.append(
+        TestGraph(
+            name="planar_60",
+            graph=_make_planar_nested_cycles_graph(rings=5, nodes_per_ring=12),
+            tags={"planar", "dense"},
+            description=(
+                "Planar 60-node graph built from concentric cycles with triangulated spokes"
+            ),
+            expected_challenges="Dense local structure without any true crossing requirement",
+        )
+    )
+
+    # 43. Random cubic graph
+    graphs.append(
+        TestGraph(
+            name="regular_3_30",
+            graph=_make_regular_graph(degree=3, num_nodes=30, seed=42),
+            tags={"regular", "sparse"},
+            description="Deterministic random 3-regular graph on 30 nodes",
+            expected_challenges="Uniform local degree without obvious hierarchy or hubs",
+        )
+    )
+
+    # 44. Random 4-regular graph
+    graphs.append(
+        TestGraph(
+            name="regular_4_40",
+            graph=_make_regular_graph(degree=4, num_nodes=40, seed=42),
+            tags={"regular"},
+            description="Deterministic random 4-regular graph on 40 nodes",
+            expected_challenges="Degree-uniform structure with moderate density and few landmarks",
+        )
+    )
+
+    # 45. Triangular lattice
+    graphs.append(
+        TestGraph(
+            name="triangular_lattice_36",
+            graph=_make_triangular_lattice_graph(rows=6, cols=6),
+            tags={"grid", "lattice", "planar"},
+            description="6x6 triangular lattice patch with right/down/down-right links",
+            expected_challenges="Maintaining regular spacing across a high-degree planar mesh",
+        )
+    )
+
+    # 46. Hexagonal lattice
+    graphs.append(
+        TestGraph(
+            name="hexagonal_lattice_42",
+            graph=_make_hexagonal_lattice_graph(rows=6, cols=7),
+            tags={"grid", "lattice", "planar", "sparse"},
+            description="6x7 honeycomb lattice patch with degree-3 interior structure",
+            expected_challenges="Showing the hexagonal rhythm instead of collapsing rows together",
+        )
+    )
+
+    # 47. Protein interaction network with clustered modules
+    graphs.append(
+        TestGraph(
+            name="protein_ppi_200",
+            graph=_make_protein_ppi_graph(seed=42),
+            tags={"scale-free", "clustered", "biological"},
+            description=(
+                "Protein-protein interaction graph with a scale-free core and dense modules"
+            ),
+            expected_challenges=(
+                "Separating biological modules while preserving hub-mediated bridges"
+            ),
+        )
+    )
+
+    # 48. Temporal citation DAG
+    graphs.append(
+        TestGraph(
+            name="citation_dag_300",
+            graph=_make_citation_dag_graph(layer_count=10, layer_size=30, seed=42),
+            tags={"dag", "layered", "scale-free"},
+            description="300-paper citation DAG across 10 temporal layers",
+            expected_challenges="Temporal layering with hub-like highly cited early papers",
+        )
+    )
+
+    # 49. Sierpinski triangle graph
+    graphs.append(
+        TestGraph(
+            name="sierpinski_42",
+            graph=_make_sierpinski_graph(depth=3),
+            tags={"fractal", "planar", "sparse"},
+            description="Depth-3 Sierpinski triangle graph",
+            expected_challenges="Recursive self-similarity across multiple scales",
+        )
+    )
+
+    # 50. Chung-Lu power-law random graph with extra triadic closure
+    graphs.append(
+        TestGraph(
+            name="chung_lu_150",
+            graph=_make_chung_lu_graph(num_nodes=150, seed=42),
+            tags={"scale-free", "clustered", "random"},
+            description="Chung-Lu style random graph with heavy-tailed expected degrees",
+            expected_challenges="Hub dominance combined with locally clustered neighborhoods",
+        )
+    )
+
+    # 51. Mixed disconnected components
+    graphs.append(
+        TestGraph(
+            name="multi_component_80",
+            graph=_make_multi_component_graph(),
+            tags={"disconnected", "multi-component"},
+            description="Disconnected graph with components sized 40, 20, 10, 5, 3, and 2",
+            expected_challenges=(
+                "Packing very uneven connected components without losing small ones"
+            ),
+        )
+    )
+
+    # 52. Random bipartite graph
+    graphs.append(
+        TestGraph(
+            name="random_bipartite_60",
+            graph=_make_random_bipartite_graph(left_size=30, right_size=30, num_edges=90, seed=42),
+            tags={"bipartite", "random"},
+            description="Random 30x30 bipartite graph with ninety cross-partition edges",
+            expected_challenges="Crossing minimization under dense two-layer connectivity",
+        )
+    )
+
+    # 53. Connected weighted graph with log-normal edge weights
+    graphs.append(
+        TestGraph(
+            name="heavy_tail_weights_50",
+            graph=_make_heavy_tail_weight_graph(num_nodes=50, seed=42),
+            tags={"weighted", "random"},
+            description="Connected random graph with heavy-tailed log-normal edge weights",
+            expected_challenges=(
+                "Respecting a few dominant weighted links without collapsing the graph"
+            ),
+        )
+    )
+
+    # 54. Petersen graph
+    graphs.append(
+        TestGraph(
+            name="petersen_10",
+            graph=_make_petersen_graph(),
+            tags={"regular", "famous", "small"},
+            description="Classic Petersen graph with deterministic acyclic orientation",
+            expected_challenges="Symmetry breaking on a famous small non-planar regular graph",
+        )
+    )
+
     graphs.extend(_expanded_structural_graphs())
 
     return graphs
@@ -3421,6 +3587,504 @@ def make_small_world(n: int = 100, k: int = 4, p: float = 0.1, seed: int = 42) -
             edge_set.add((node_ids[src_idx], node_ids[tgt_idx]))
 
     return _build_named_graph(node_ids, sorted(edge_set))
+
+
+def _graph_from_integer_edges(
+    num_nodes: int,
+    edges: Sequence[Tuple[int, int]],
+) -> DaguaGraph:
+    """Build a graph from integer node indices and directed edges.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes to materialize.
+    edges : Sequence[Tuple[int, int]]
+        Directed edges expressed in terms of integer node indices.
+
+    Returns
+    -------
+    DaguaGraph
+        Finalized graph with computed node sizes.
+    """
+    return _finalize_generated_graph(
+        DaguaGraph.from_edge_list(list(edges), num_nodes=max(num_nodes, 0))
+    )
+
+
+def _make_outerplanar_dag_graph(num_nodes: int = 20) -> DaguaGraph:
+    """Build an outerplanar DAG with a path backbone and non-crossing chords.
+
+    Parameters
+    ----------
+    num_nodes : int, default=20
+        Number of nodes on the outer face.
+
+    Returns
+    -------
+    DaguaGraph
+        Directed outerplanar graph with every edge oriented forward.
+    """
+    edges = [(node_idx, node_idx + 1) for node_idx in range(max(num_nodes - 1, 0))]
+    edges.extend((0, node_idx) for node_idx in range(2, max(num_nodes, 0)))
+    return _graph_from_integer_edges(num_nodes=num_nodes, edges=edges)
+
+
+def _make_planar_nested_cycles_graph(
+    rings: int = 5,
+    nodes_per_ring: int = 12,
+) -> DaguaGraph:
+    """Build a planar concentric-ring graph triangulated without crossings.
+
+    Parameters
+    ----------
+    rings : int, default=5
+        Number of concentric cycles.
+    nodes_per_ring : int, default=12
+        Nodes per ring.
+
+    Returns
+    -------
+    DaguaGraph
+        Deterministically oriented planar graph.
+    """
+    nx = _import_networkx()
+    graph = nx.Graph()
+    total_nodes = max(rings, 0) * max(nodes_per_ring, 0)
+    graph.add_nodes_from(range(total_nodes))
+
+    for ring_idx in range(max(rings, 0)):
+        ring_base = ring_idx * nodes_per_ring
+        for slot in range(max(nodes_per_ring, 0)):
+            current = ring_base + slot
+            nxt = ring_base + ((slot + 1) % nodes_per_ring)
+            graph.add_edge(current, nxt)
+            if ring_idx + 1 >= rings:
+                continue
+            lower = (ring_idx + 1) * nodes_per_ring + slot
+            lower_diag = (ring_idx + 1) * nodes_per_ring + ((slot + 1) % nodes_per_ring)
+            graph.add_edge(current, lower)
+            # Consistent diagonals triangulate each annulus while preserving planarity.
+            graph.add_edge(current, lower_diag)
+
+    return _graph_from_undirected_networkx(graph)
+
+
+def _make_regular_graph(degree: int, num_nodes: int, seed: int = 42) -> DaguaGraph:
+    """Build a deterministic random regular graph and orient it into a DAG.
+
+    Parameters
+    ----------
+    degree : int
+        Regular degree for every node.
+    num_nodes : int
+        Number of nodes in the graph.
+    seed : int, default=42
+        Random seed forwarded to NetworkX.
+
+    Returns
+    -------
+    DaguaGraph
+        Oriented regular graph.
+    """
+    nx = _import_networkx()
+    return _graph_from_undirected_networkx(nx.random_regular_graph(degree, num_nodes, seed=seed))
+
+
+def _make_triangular_lattice_graph(rows: int = 6, cols: int = 6) -> DaguaGraph:
+    """Build a triangular lattice DAG on a rectangular patch.
+
+    Parameters
+    ----------
+    rows : int, default=6
+        Number of lattice rows.
+    cols : int, default=6
+        Number of lattice columns.
+
+    Returns
+    -------
+    DaguaGraph
+        Directed triangular lattice with right, down, and down-right edges.
+    """
+    edges: list[tuple[int, int]] = []
+    for row_idx in range(max(rows, 0)):
+        for col_idx in range(max(cols, 0)):
+            node_idx = row_idx * cols + col_idx
+            if col_idx + 1 < cols:
+                edges.append((node_idx, node_idx + 1))
+            if row_idx + 1 < rows:
+                below = (row_idx + 1) * cols + col_idx
+                edges.append((node_idx, below))
+                if col_idx + 1 < cols:
+                    edges.append((node_idx, below + 1))
+    return _graph_from_integer_edges(num_nodes=rows * cols, edges=edges)
+
+
+def _make_hexagonal_lattice_graph(rows: int = 6, cols: int = 7) -> DaguaGraph:
+    """Build a honeycomb lattice patch with degree-3 interior nodes.
+
+    Parameters
+    ----------
+    rows : int, default=6
+        Number of lattice rows.
+    cols : int, default=7
+        Number of lattice columns.
+
+    Returns
+    -------
+    DaguaGraph
+        Directed honeycomb-style lattice.
+    """
+    edges: list[tuple[int, int]] = []
+    for row_idx in range(max(rows, 0)):
+        for col_idx in range(max(cols, 0)):
+            node_idx = row_idx * cols + col_idx
+            if row_idx + 1 < rows:
+                edges.append((node_idx, (row_idx + 1) * cols + col_idx))
+            if col_idx + 1 < cols and col_idx % 2 == row_idx % 2:
+                edges.append((node_idx, node_idx + 1))
+    return _graph_from_integer_edges(num_nodes=rows * cols, edges=edges)
+
+
+def _make_protein_ppi_graph(seed: int = 42) -> DaguaGraph:
+    """Build a clustered scale-free protein interaction benchmark.
+
+    Parameters
+    ----------
+    seed : int, default=42
+        Random seed for the synthetic interaction sampling.
+
+    Returns
+    -------
+    DaguaGraph
+        Oriented protein-protein interaction style graph.
+    """
+    nx = _import_networkx()
+    rng = random.Random(seed)
+    graph = nx.barabasi_albert_graph(50, 2, seed=seed)
+
+    next_node = 50
+    module_sizes = [15] * 10
+    module_node_sets: list[list[int]] = []
+
+    for module_size in module_sizes:
+        module_nodes = list(range(next_node, next_node + module_size))
+        module_node_sets.append(module_nodes)
+        graph.add_nodes_from(module_nodes)
+        for local_idx in range(module_size - 1):
+            graph.add_edge(module_nodes[local_idx], module_nodes[local_idx + 1])
+        for src_offset in range(module_size):
+            for tgt_offset in range(src_offset + 1, module_size):
+                if rng.random() < 0.32:
+                    graph.add_edge(module_nodes[src_offset], module_nodes[tgt_offset])
+        anchors = rng.sample(range(50), k=2)
+        for anchor in anchors:
+            graph.add_edge(anchor, rng.choice(module_nodes))
+            graph.add_edge(anchor, rng.choice(module_nodes))
+        for module_node in module_nodes:
+            if rng.random() < 0.2:
+                graph.add_edge(rng.choice(anchors), module_node)
+        next_node += module_size
+
+    for module_idx in range(len(module_node_sets) - 1):
+        graph.add_edge(
+            rng.choice(module_node_sets[module_idx]),
+            rng.choice(module_node_sets[module_idx + 1]),
+        )
+        if module_idx + 2 < len(module_node_sets) and rng.random() < 0.5:
+            graph.add_edge(
+                rng.choice(module_node_sets[module_idx]),
+                rng.choice(module_node_sets[module_idx + 2]),
+            )
+
+    return _graph_from_undirected_networkx(graph)
+
+
+def _make_citation_dag_graph(
+    layer_count: int = 10,
+    layer_size: int = 30,
+    seed: int = 42,
+) -> DaguaGraph:
+    """Build a temporal citation DAG with preferential future attachment.
+
+    Parameters
+    ----------
+    layer_count : int, default=10
+        Number of temporal layers.
+    layer_size : int, default=30
+        Number of papers per layer.
+    seed : int, default=42
+        Random seed for attachment sampling.
+
+    Returns
+    -------
+    DaguaGraph
+        Directed acyclic citation network.
+    """
+    rng = random.Random(seed)
+    graph = DaguaGraph()
+    attractiveness: list[float] = []
+
+    for layer_idx in range(max(layer_count, 0)):
+        for local_idx in range(max(layer_size, 0)):
+            graph.add_node(layer_idx * layer_size + local_idx)
+            attractiveness.append(1.0)
+
+    for layer_idx in range(max(layer_count, 0)):
+        layer_start = layer_idx * layer_size
+        layer_end = layer_start + layer_size
+        for node_idx in range(layer_start, layer_end):
+            candidate_sources = list(range(node_idx))
+            if not candidate_sources:
+                continue
+
+            edge_budget = 2 + rng.randrange(4)
+            chosen_sources: set[int] = set()
+            while len(chosen_sources) < edge_budget and len(chosen_sources) < len(
+                candidate_sources
+            ):
+                weighted_candidates: list[float] = []
+                for source_idx in candidate_sources:
+                    source_layer = source_idx // layer_size
+                    recency_bonus = 2.0 if layer_idx - source_layer <= 2 else 1.0
+                    weighted_candidates.append(attractiveness[source_idx] * recency_bonus)
+                source = rng.choices(candidate_sources, weights=weighted_candidates, k=1)[0]
+                if source in chosen_sources:
+                    continue
+                chosen_sources.add(source)
+                graph.add_edge(source, node_idx)
+                attractiveness[source] += 1.0
+
+            if layer_idx > 0 and node_idx > layer_start and rng.random() < 0.35:
+                intra_source = layer_start + rng.randrange(node_idx - layer_start)
+                graph.add_edge(intra_source, node_idx)
+                attractiveness[intra_source] += 0.5
+
+    return _finalize_generated_graph(graph)
+
+
+def _build_sierpinski_networkx(depth: int, prefix: str) -> tuple[Any, tuple[str, str, str]]:
+    """Recursively build one Sierpinski triangle graph in NetworkX form.
+
+    Parameters
+    ----------
+    depth : int
+        Recursion depth. ``0`` yields a single triangle.
+    prefix : str
+        Prefix used to keep recursively created node names unique.
+
+    Returns
+    -------
+    tuple[Any, tuple[str, str, str]]
+        NetworkX graph plus ``(top, left, right)`` corner node IDs.
+    """
+    nx = _import_networkx()
+    if depth <= 0:
+        top = f"{prefix}top"
+        left = f"{prefix}left"
+        right = f"{prefix}right"
+        graph = nx.Graph()
+        graph.add_edges_from(((top, left), (top, right), (left, right)))
+        return graph, (top, left, right)
+
+    top_graph, (top_top, top_left, top_right) = _build_sierpinski_networkx(depth - 1, f"{prefix}t.")
+    left_graph, (left_top, left_left, left_right) = _build_sierpinski_networkx(
+        depth - 1, f"{prefix}l."
+    )
+    right_graph, (right_top, right_left, right_right) = _build_sierpinski_networkx(
+        depth - 1, f"{prefix}r."
+    )
+
+    left_graph = nx.relabel_nodes(left_graph, {left_top: top_left}, copy=True)
+    right_graph = nx.relabel_nodes(
+        right_graph,
+        {right_top: top_right, right_left: left_right},
+        copy=True,
+    )
+    graph = nx.compose_all((top_graph, left_graph, right_graph))
+    return graph, (top_top, left_left, right_right)
+
+
+def _make_sierpinski_graph(depth: int = 3) -> DaguaGraph:
+    """Build a Sierpinski triangle graph at the requested depth.
+
+    Parameters
+    ----------
+    depth : int, default=3
+        Recursion depth for the gasket construction.
+
+    Returns
+    -------
+    DaguaGraph
+        Oriented Sierpinski graph.
+    """
+    graph, _ = _build_sierpinski_networkx(depth=depth, prefix="s.")
+    return _graph_from_undirected_networkx(graph)
+
+
+def _make_chung_lu_graph(num_nodes: int = 150, seed: int = 42) -> DaguaGraph:
+    """Build a Chung-Lu style graph with extra triadic closure.
+
+    Parameters
+    ----------
+    num_nodes : int, default=150
+        Number of nodes in the graph.
+    seed : int, default=42
+        Random seed for expected-degree sampling and closure edges.
+
+    Returns
+    -------
+    DaguaGraph
+        Oriented clustered scale-free random graph.
+    """
+    nx = _import_networkx()
+    rng = random.Random(seed)
+    raw_weights = [(node_idx + 1) ** -1.2 for node_idx in range(max(num_nodes, 1))]
+    target_volume = max(float(num_nodes) * 4.5, 1.0)
+    scale = target_volume / sum(raw_weights)
+    expected_degrees = [min(scale * weight, float(num_nodes - 1)) for weight in raw_weights]
+    graph = nx.expected_degree_graph(expected_degrees, selfloops=False, seed=seed)
+
+    for node_idx in list(graph.nodes()):
+        neighbors = list(graph.neighbors(node_idx))
+        if len(neighbors) < 2:
+            continue
+        for _ in range(min(3, len(neighbors) // 2)):
+            left, right = rng.sample(neighbors, 2)
+            if left != right and not graph.has_edge(left, right) and rng.random() < 0.25:
+                graph.add_edge(left, right)
+
+    if graph.number_of_nodes() < num_nodes:
+        graph.add_nodes_from(range(graph.number_of_nodes(), num_nodes))
+    for isolated in list(nx.isolates(graph)):
+        if isolated != 0:
+            graph.add_edge(0, isolated)
+
+    return _graph_from_undirected_networkx(graph)
+
+
+def _make_multi_component_graph() -> DaguaGraph:
+    """Build a deterministic graph with six disconnected components.
+
+    Returns
+    -------
+    DaguaGraph
+        Graph containing components of sizes 40, 20, 10, 5, 3, and 2.
+    """
+    node_ids = [f"mc_{node_idx}" for node_idx in range(80)]
+    edges: list[tuple[str, str]] = []
+
+    for node_idx in range(39):
+        edges.append((node_ids[node_idx], node_ids[node_idx + 1]))
+    for node_idx in range(0, 35, 5):
+        edges.append((node_ids[node_idx], node_ids[node_idx + 5]))
+
+    offset = 40
+    for node_idx in range(offset, offset + 19):
+        edges.append((node_ids[node_idx], node_ids[node_idx + 1]))
+    edges.append((node_ids[offset], node_ids[offset + 19]))
+
+    offset = 60
+    for node_idx in range(offset + 1, offset + 10):
+        edges.append((node_ids[offset], node_ids[node_idx]))
+
+    offset = 70
+    for node_idx in range(offset, offset + 4):
+        edges.append((node_ids[node_idx], node_ids[node_idx + 1]))
+
+    offset = 75
+    edges.extend(
+        (
+            (node_ids[offset], node_ids[offset + 1]),
+            (node_ids[offset + 1], node_ids[offset + 2]),
+        )
+    )
+
+    return _build_named_graph(node_ids, edges)
+
+
+def _make_random_bipartite_graph(
+    left_size: int = 30,
+    right_size: int = 30,
+    num_edges: int = 90,
+    seed: int = 42,
+) -> DaguaGraph:
+    """Build a random bipartite graph with edges only across the partition.
+
+    Parameters
+    ----------
+    left_size : int, default=30
+        Size of the left partition.
+    right_size : int, default=30
+        Size of the right partition.
+    num_edges : int, default=90
+        Number of cross-partition edges to sample.
+    seed : int, default=42
+        Random seed for edge sampling.
+
+    Returns
+    -------
+    DaguaGraph
+        Directed bipartite graph.
+    """
+    rng = random.Random(seed)
+    edge_set: set[tuple[int, int]] = set()
+    while len(edge_set) < num_edges:
+        edge_set.add((rng.randrange(left_size), left_size + rng.randrange(right_size)))
+    return _graph_from_integer_edges(num_nodes=left_size + right_size, edges=sorted(edge_set))
+
+
+def _make_heavy_tail_weight_graph(num_nodes: int = 50, seed: int = 42) -> DaguaGraph:
+    """Build a connected weighted graph with log-normal edge weights.
+
+    Parameters
+    ----------
+    num_nodes : int, default=50
+        Number of nodes in the graph.
+    seed : int, default=42
+        Random seed for topology and weight generation.
+
+    Returns
+    -------
+    DaguaGraph
+        Weighted connected graph.
+    """
+    rng = random.Random(seed)
+    graph = DaguaGraph()
+    for node_idx in range(max(num_nodes, 0)):
+        graph.add_node(node_idx, label=str(node_idx))
+
+    seen_edges: set[tuple[int, int]] = set()
+    for node_idx in range(1, max(num_nodes, 0)):
+        parent = rng.randrange(node_idx)
+        edge = (parent, node_idx)
+        seen_edges.add(edge)
+        graph.add_edge(*edge, weight=rng.lognormvariate(0.0, 1.2))
+
+    extra_edges = max(num_nodes // 2, 0)
+    while extra_edges > 0:
+        source = rng.randrange(max(num_nodes - 1, 1))
+        target = rng.randrange(source + 1, max(num_nodes, 1))
+        edge = (source, target)
+        if edge in seen_edges:
+            continue
+        seen_edges.add(edge)
+        graph.add_edge(*edge, weight=rng.lognormvariate(0.0, 1.2))
+        extra_edges -= 1
+
+    return _finalize_generated_graph(graph)
+
+
+def _make_petersen_graph() -> DaguaGraph:
+    """Build the classic Petersen graph and orient it acyclically.
+
+    Returns
+    -------
+    DaguaGraph
+        Oriented Petersen graph.
+    """
+    nx = _import_networkx()
+    return _graph_from_undirected_networkx(nx.petersen_graph())
 
 
 def _expanded_structural_graphs() -> List[TestGraph]:

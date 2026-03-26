@@ -767,7 +767,6 @@ def _graph_knn_preservation(
     return mean(overlaps)
 
 
-@pytest.mark.skipif(not _NETWORKX_AVAILABLE, reason="networkx not installed")
 @pytest.mark.parametrize(
     ("graph_factory", "graph_name"),
     [
@@ -775,21 +774,30 @@ def _graph_knn_preservation(
         (_make_connected_random_graph, "connected_random"),
     ],
 )
-def test_spectral_vs_networkx(
+def test_spectral_matches_symmetric_normalized_laplacian(
     graph_factory: Callable[[], tuple[torch.Tensor, int] | tuple[torch.Tensor, int, Any]],
     graph_name: str,
 ) -> None:
-    """Spectral layouts should match NetworkX up to rigid-motion invariants."""
-    nx = pytest.importorskip("networkx")
+    """Spectral layout should match the symmetric normalized Laplacian basis."""
     graph_parts = graph_factory()
     edge_index, num_nodes = graph_parts[:2]
 
-    graph = _make_networkx_graph(edge_index, num_nodes)
-    reference_mapping = nx.spectral_layout(graph, dim=2)
+    adjacency = np.zeros((num_nodes, num_nodes), dtype=np.float64)
+    for source, target in edge_index.t().tolist():
+        adjacency[source, target] = 1.0
+        adjacency[target, source] = 1.0
+    degrees = adjacency.sum(axis=1)
+    inv_sqrt = np.zeros_like(degrees)
+    nonzero_mask = degrees > 0.0
+    inv_sqrt[nonzero_mask] = 1.0 / np.sqrt(degrees[nonzero_mask])
+    normalized_laplacian = np.eye(num_nodes) - (np.diag(inv_sqrt) @ adjacency @ np.diag(inv_sqrt))
+    eigenvalues, eigenvectors = np.linalg.eigh(normalized_laplacian)
+    positive_indices = [index for index, value in enumerate(eigenvalues) if value > 1.0e-9][:2]
     reference_positions = torch.tensor(
-        np.asarray([reference_mapping[node] for node in range(num_nodes)], dtype=np.float32)
+        eigenvectors[:, positive_indices],
+        dtype=torch.float32,
     )
-    our_positions = layout_spectral(edge_index, num_nodes, seed=42)
+    our_positions = layout_spectral(edge_index, num_nodes, seed=42, normalization="symmetric")
 
     reference_distances = _upper_triangle_values(
         _pairwise_distances(_normalize_positions(reference_positions))
@@ -822,12 +830,6 @@ def test_spectral_vs_networkx(
             layout_kk,
             {"seed": 42},
         ),
-        (
-            "Spectral",
-            lambda graph: pytest.importorskip("networkx").spectral_layout(graph, scale=1),
-            layout_spectral,
-            {"seed": 42},
-        ),
     ],
 )
 def test_classic_layouts_match_networkx_procrustes(
@@ -836,7 +838,7 @@ def test_classic_layouts_match_networkx_procrustes(
     our_fn: Callable[..., torch.Tensor],
     kwargs: dict[str, int],
 ) -> None:
-    """FR, KK, and Spectral should match NetworkX on Karate Club."""
+    """FR and KK should match NetworkX on Karate Club."""
     edge_index, num_nodes, graph = _make_karate_edge_index()
 
     reference_mapping = nx_fn(graph)
