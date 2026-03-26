@@ -2301,13 +2301,65 @@ def main() -> int:
             finally:
                 executor.shutdown(wait=True, cancel_futures=False)
 
-            # Heavy groups run serially to avoid memory pressure.
-            for work_group in heavy_groups:
-                if _shutdown_requested:
-                    break
-                _mark_group_running(work_group)
-                for payload in _run_work_group(work_group):
-                    _process_record(BenchmarkRecord.from_dict(payload))
+            # Heavy groups -- run in parallel too (memory is abundant).
+            # Reuse the same rolling-window + watchdog pattern.
+            if heavy_groups and not _shutdown_requested:
+                print(
+                    f"[benchmark] Heavy phase: {len(heavy_groups)} groups "
+                    f"(parallel, rolling window={MAX_INFLIGHT_GROUPS})"
+                )
+                executor = ProcessPoolExecutor(
+                    max_workers=args.resolved_workers,
+                    mp_context=_MP_CONTEXT,
+                )
+                group_iter = iter(heavy_groups)
+                try:
+                    _fill_inflight()
+                    while inflight and not _shutdown_requested:
+                        got_result = False
+                        try:
+                            for fut in as_completed(inflight, timeout=WATCHDOG_TIMEOUT):
+                                _collect_future(fut, inflight.pop(fut))
+                                _fill_inflight()
+                                got_result = True
+                                if _shutdown_requested:
+                                    break
+                                break
+                        except TimeoutError:
+                            pass
+                        if not got_result and not _shutdown_requested:
+                            print(
+                                f"[benchmark] WATCHDOG: recycling executor "
+                                f"({len(inflight)} stuck futures)"
+                            )
+                            save_results(results_path, results)
+                            for stuck_fut, stuck_group in list(inflight.items()):
+                                for wi in stuck_group:
+                                    record = _record_with_pairings(
+                                        graph_name=wi.graph_name,
+                                        engine_name=wi.engine_name,
+                                        seed=wi.seed,
+                                        num_nodes=graph_summaries[wi.graph_name].num_nodes,
+                                        num_edges=graph_summaries[wi.graph_name].num_edges,
+                                        status="error",
+                                        runtime_seconds=None,
+                                        error="watchdog: worker pool stuck",
+                                        positions_file=None,
+                                        skip_reason=None,
+                                    )
+                                    _process_record(record)
+                            inflight.clear()
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            executor = ProcessPoolExecutor(
+                                max_workers=args.resolved_workers,
+                                mp_context=_MP_CONTEXT,
+                            )
+                            _fill_inflight()
+                        if _shutdown_requested:
+                            for fut in as_completed(inflight):
+                                _collect_future(fut, inflight.pop(fut))
+                finally:
+                    executor.shutdown(wait=True, cancel_futures=False)
 
     finally:
         # Always save results on exit -- whether normal, SIGINT, or exception.
