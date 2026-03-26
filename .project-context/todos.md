@@ -25,6 +25,13 @@
 - [ ] Self-loop arc height tightening
 - [ ] Cluster shape variants: pill, cloud, convex hull
 
+## Feature Parity Gaps (static/cosmetic, non-interactive)
+- [ ] [HIGH] Record/table nodes -- structured multi-field content inside a node (Graphviz records, yFiles table nodes, database/UML diagrams)
+- [ ] [MED] Text on path -- edge labels that curve along the edge path instead of sitting in a box (yFiles, D3)
+- [ ] [MED] Intra-node compositional layout -- sub-elements within a node (text + icon + bar chart); GoJS "panels" (horizontal, vertical, table, spot)
+- [ ] [MED] Edge bundling rendering -- visually merge parallel edges into a thick band that splits at endpoints
+- [ ] [LOW] ~20 niche node shapes from Graphviz: house, invhouse, folder, component, promoter, cds, septagon, egg, point, etc. (bio/UML-specific)
+
 ## Roadmap (Post-Benchmark)
 
 ### Architecture

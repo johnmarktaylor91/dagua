@@ -1,4 +1,4 @@
-"""Spectral layout translated from NetworkX's reference implementation."""
+"""Spectral layout with selectable Laplacian normalization."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from scipy import sparse
 from scipy.sparse import linalg as sparse_linalg
 
 SPARSE_EIGEN_THRESHOLD = 500
+_EIGENVALUE_TOLERANCE = 1.0e-9
 
 
 def _layout_device(
@@ -110,58 +111,178 @@ def _build_adjacency(
     return sparse.csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes), dtype=np.float64)
 
 
-def _spectral(adjacency: np.ndarray, dim: int = 2) -> np.ndarray:
-    """Compute the dense spectral embedding exactly like NetworkX.
-
-    Parameters
-    ----------
-    adjacency : numpy.ndarray
-        Dense adjacency matrix with shape ``[N, N]``.
-    dim : int, default=2
-        Output dimension.
-
-    Returns
-    -------
-    numpy.ndarray
-        Raw spectral coordinates with shape ``[N, dim]``.
-    """
-    num_nodes, _ = adjacency.shape
-    degree = np.identity(num_nodes, dtype=adjacency.dtype) * np.sum(adjacency, axis=1)
-    laplacian = degree - adjacency
-    eigenvalues, eigenvectors = np.linalg.eig(laplacian)
-    index = np.argsort(eigenvalues)[1 : dim + 1]
-    return np.real(eigenvectors[:, index])
-
-
-def _sparse_spectral(adjacency: sparse.csr_matrix, dim: int = 2) -> np.ndarray:
-    """Compute the sparse spectral embedding exactly like NetworkX.
+def _symmetrized_adjacency(adjacency: sparse.csr_matrix) -> sparse.csr_matrix:
+    """Build the undirected adjacency used by spectral layouts.
 
     Parameters
     ----------
     adjacency : scipy.sparse.csr_matrix
-        Sparse adjacency matrix with shape ``[N, N]``.
-    dim : int, default=2
-        Output dimension.
+        Possibly directed adjacency matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Symmetric adjacency matrix.
+    """
+    difference = adjacency - adjacency.T
+    if difference.nnz == 0:
+        return adjacency
+    return (adjacency + adjacency.T).tocsr()
+
+
+def _laplacian_matrix(
+    adjacency: sparse.csr_matrix,
+    normalization: str,
+) -> tuple[sparse.csr_matrix, bool]:
+    """Build the requested graph Laplacian.
+
+    Parameters
+    ----------
+    adjacency : scipy.sparse.csr_matrix
+        Symmetric adjacency matrix with shape ``[N, N]``.
+    normalization : str
+        One of ``"symmetric"``, ``"random_walk"``, or ``"unnormalized"``.
+
+    Returns
+    -------
+    tuple[scipy.sparse.csr_matrix, bool]
+        Laplacian matrix and whether it is symmetric.
+
+    Raises
+    ------
+    ValueError
+        If ``normalization`` is unsupported.
+    """
+    degrees = np.asarray(adjacency.sum(axis=1)).reshape(-1).astype(np.float64, copy=False)
+    degree_matrix = sparse.diags(degrees, offsets=0, format="csr")
+
+    if normalization == "unnormalized":
+        return (degree_matrix - adjacency).tocsr(), True
+    if normalization == "symmetric":
+        inv_sqrt = np.zeros_like(degrees)
+        nonzero_mask = degrees > 0.0
+        inv_sqrt[nonzero_mask] = 1.0 / np.sqrt(degrees[nonzero_mask])
+        normalized = sparse.diags(inv_sqrt, offsets=0, format="csr")
+        identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
+        return (identity - (normalized @ adjacency @ normalized)).tocsr(), True
+    if normalization == "random_walk":
+        inv_degree = np.zeros_like(degrees)
+        nonzero_mask = degrees > 0.0
+        inv_degree[nonzero_mask] = 1.0 / degrees[nonzero_mask]
+        normalized = sparse.diags(inv_degree, offsets=0, format="csr")
+        identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
+        return (identity - (normalized @ adjacency)).tocsr(), False
+    raise ValueError("normalization must be one of 'symmetric', 'random_walk', or 'unnormalized'.")
+
+
+def _select_embedding_columns(
+    eigenvalues: np.ndarray,
+    eigenvectors: np.ndarray,
+    dim: int,
+) -> np.ndarray:
+    """Select the first non-trivial spectral coordinates.
+
+    Parameters
+    ----------
+    eigenvalues : numpy.ndarray
+        Eigenvalues with shape ``[K]``.
+    eigenvectors : numpy.ndarray
+        Eigenvectors with shape ``[N, K]``.
+    dim : int
+        Requested output dimension.
 
     Returns
     -------
     numpy.ndarray
-        Raw spectral coordinates with shape ``[N, dim]``.
+        Coordinate matrix with shape ``[N, dim]``.
     """
-    num_nodes, _ = adjacency.shape
-    degree = sparse.dia_array((adjacency.sum(axis=1), 0), shape=(num_nodes, num_nodes)).tocsr()
-    laplacian = degree - adjacency
+    sorted_indices = np.argsort(np.real(eigenvalues))
+    nontrivial_indices = [
+        index
+        for index in sorted_indices
+        if abs(float(np.real(eigenvalues[index]))) > _EIGENVALUE_TOLERANCE
+    ][:dim]
 
-    eigen_count = dim + 1
+    num_nodes = eigenvectors.shape[0]
+    coordinates = np.zeros((num_nodes, dim), dtype=np.float64)
+    if nontrivial_indices:
+        coordinates[:, : len(nontrivial_indices)] = np.real(eigenvectors[:, nontrivial_indices])
+    elif num_nodes > 0:
+        coordinates[:, 0] = np.linspace(-1.0, 1.0, num_nodes, dtype=np.float64)
+    return coordinates
+
+
+def _dense_spectral_embedding(
+    laplacian: sparse.csr_matrix,
+    dim: int,
+    symmetric: bool,
+) -> np.ndarray:
+    """Compute a dense spectral embedding.
+
+    Parameters
+    ----------
+    laplacian : scipy.sparse.csr_matrix
+        Laplacian matrix with shape ``[N, N]``.
+    dim : int
+        Output dimension.
+    symmetric : bool
+        Whether ``laplacian`` is symmetric.
+
+    Returns
+    -------
+    numpy.ndarray
+        Raw coordinates with shape ``[N, dim]``.
+    """
+    dense_laplacian = laplacian.toarray()
+    if symmetric:
+        eigenvalues, eigenvectors = np.linalg.eigh(dense_laplacian)
+    else:
+        eigenvalues, eigenvectors = np.linalg.eig(dense_laplacian)
+    return _select_embedding_columns(eigenvalues=eigenvalues, eigenvectors=eigenvectors, dim=dim)
+
+
+def _sparse_spectral_embedding(
+    laplacian: sparse.csr_matrix,
+    dim: int,
+    symmetric: bool,
+) -> np.ndarray:
+    """Compute a sparse spectral embedding.
+
+    Parameters
+    ----------
+    laplacian : scipy.sparse.csr_matrix
+        Laplacian matrix with shape ``[N, N]``.
+    dim : int
+        Output dimension.
+    symmetric : bool
+        Whether ``laplacian`` is symmetric.
+
+    Returns
+    -------
+    numpy.ndarray
+        Raw coordinates with shape ``[N, dim]``.
+    """
+    num_nodes = laplacian.shape[0]
+    eigen_count = min(num_nodes - 1, max(dim + 4, dim + 1))
+    if eigen_count <= dim:
+        return _dense_spectral_embedding(laplacian=laplacian, dim=dim, symmetric=symmetric)
+
     lanczos_vectors = max((2 * eigen_count) + 1, int(np.sqrt(num_nodes)))
-    eigenvalues, eigenvectors = sparse_linalg.eigsh(
-        laplacian,
-        eigen_count,
-        which="SM",
-        ncv=lanczos_vectors,
-    )
-    index = np.argsort(eigenvalues)[1:eigen_count]
-    return np.real(eigenvectors[:, index])
+    if symmetric:
+        eigenvalues, eigenvectors = sparse_linalg.eigsh(
+            laplacian,
+            k=eigen_count,
+            which="SM",
+            ncv=min(max(lanczos_vectors, eigen_count + 2), num_nodes),
+        )
+    else:
+        eigenvalues, eigenvectors = sparse_linalg.eigs(
+            laplacian,
+            k=eigen_count,
+            which="SR",
+            ncv=min(max(lanczos_vectors, eigen_count + 2), num_nodes),
+        )
+    return _select_embedding_columns(eigenvalues=eigenvalues, eigenvectors=eigenvectors, dim=dim)
 
 
 def layout_spectral(
@@ -170,8 +291,9 @@ def layout_spectral(
     node_sizes: Optional[torch.Tensor] = None,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
+    normalization: str = "symmetric",
 ) -> torch.Tensor:
-    """Lay out a graph with the NetworkX spectral layout translation.
+    """Lay out a graph with a configurable spectral embedding.
 
     Parameters
     ----------
@@ -182,11 +304,14 @@ def layout_spectral(
     node_sizes : torch.Tensor, optional
         Unused, accepted for interface compatibility.
     seed : int, default=42
-        Accepted for interface compatibility. NetworkX's spectral layout does
-        not use a seed on the translated path.
+        Accepted for interface compatibility. The spectral path is
+        deterministic once the graph is fixed.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]`` that scales adjacency
         values before the Laplacian eigendecomposition.
+    normalization : str, default="symmetric"
+        Laplacian normalization mode: ``"symmetric"``, ``"random_walk"``, or
+        ``"unnormalized"``.
 
     Returns
     -------
@@ -196,7 +321,8 @@ def layout_spectral(
     Raises
     ------
     ValueError
-        If ``num_nodes`` is negative.
+        If ``num_nodes`` is negative, ``edge_weights`` is malformed, or
+        ``normalization`` is unsupported.
     """
     _ = seed
 
@@ -215,26 +341,30 @@ def layout_spectral(
         return torch.empty((0, 2), dtype=torch.float32, device=device)
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32, device=device)
-    if num_nodes == 2:
-        return torch.zeros((2, 2), dtype=torch.float32, device=device)
 
     adjacency = _build_adjacency(
         edge_index=edge_index,
         num_nodes=num_nodes,
         edge_weights=edge_weights,
     )
-    # Check if adjacency is already symmetric (edge_index has both directions).
-    # NX only does A+A.T for directed graphs. If our edge_index already has
-    # both (i,j) and (j,i), the adjacency is already symmetric — don't double.
-    dense_adjacency = adjacency.toarray()
-    is_symmetric = np.allclose(dense_adjacency, dense_adjacency.T)
-    if not is_symmetric:
-        dense_adjacency = dense_adjacency + dense_adjacency.T
+    symmetric_adjacency = _symmetrized_adjacency(adjacency)
+    laplacian, is_symmetric = _laplacian_matrix(
+        adjacency=symmetric_adjacency,
+        normalization=normalization,
+    )
+
     if num_nodes < SPARSE_EIGEN_THRESHOLD:
-        positions = _spectral(dense_adjacency, dim=2)
+        positions = _dense_spectral_embedding(
+            laplacian=laplacian,
+            dim=2,
+            symmetric=is_symmetric,
+        )
     else:
-        sparse_sym = sparse.csr_matrix(dense_adjacency)
-        positions = _sparse_spectral(sparse_sym, dim=2)
+        positions = _sparse_spectral_embedding(
+            laplacian=laplacian,
+            dim=2,
+            symmetric=is_symmetric,
+        )
 
     scaled = _rescale_layout(positions, scale=1.0)
     return torch.from_numpy(scaled).to(dtype=torch.float32, device=device)
