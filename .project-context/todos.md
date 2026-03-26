@@ -65,9 +65,23 @@
 - [ ] [HARD] Rich text via HTML/markup subset in labels (~300 lines)
 - [ ] [HARD] Swimlane/table node with internal grid layout (~500 lines)
 
+### Import Adapters (high star potential -- no good static diagram export exists for most)
+- [ ] [HIGH] n8n importer: `dagua.from_n8n(workflow_json)` + CLI `dagua render-n8n` (181K stars, ZERO static export)
+- [ ] [HIGH] Airflow importer: `dagua.from_airflow(dag)` -- parse DAG Python or serialized JSON
+- [ ] [HIGH] dbt importer: `dagua.from_dbt(manifest_json)` -- parse manifest.json model lineage
+- [ ] [HIGH] GitHub Actions importer: `dagua.from_github_actions(workflow_yaml)` -- parse job/step DAG
+- [ ] [MED] Terraform importer: `dagua.from_terraform(plan_json)` -- parse `terraform graph` or plan JSON
+- [ ] [MED] AWS Step Functions importer: `dagua.from_step_functions(asl_json)` -- parse ASL state machine
+- [ ] [MED] Dagster importer: `dagua.from_dagster(job)` -- parse asset/op dependency graph
+- [ ] [MED] Argo Workflows importer: `dagua.from_argo(workflow_yaml)` -- parse DAG/steps template
+- [ ] [MED] Prefect importer: `dagua.from_prefect(flow)` -- parse flow/task dependencies
+- [ ] [LOW] Kubernetes importer: `dagua.from_kubernetes(manifests)` -- parse resource dependencies
+- [ ] [LOW] Zapier importer: `dagua.from_zapier(zap_json)` -- parse trigger/action chains
+- [ ] [LOW] Luigi importer: `dagua.from_luigi(task)` -- parse task dependency graph
+- [ ] [LOW] Make.com (Integromat) importer
+
 ### Infrastructure
 - [ ] [MED] Image galleries via GitHub Pages
-- [ ] [MED] Import adapters: n8n, Airflow, dbt, Dagster, GitHub Actions, Step Functions, Terraform, Argo
 - [ ] [MED] Interactive rendering: pan/zoom, tooltips, collapsible clusters (WebGL/Canvas)
 - [ ] [MED] 3D graph rendering
 - [ ] [LOW] yFiles benchmark comparison (eval license)
