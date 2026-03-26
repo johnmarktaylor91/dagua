@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
+    "layout_classical_mds",
     "layout_drl",
     "layout_fa2",
     "layout_fr",
@@ -12,10 +13,13 @@ __all__ = [
     "layout_kk",
     "layout_lgl",
     "layout_neulay",
+    "layout_reingold_tilford",
     "layout_sgd2_multi",
     "layout_sfdp",
+    "layout_stress_majorization",
     "layout_stress_sgd",
     "layout_sugiyama",
+    "layout_spectral",
     "layout_umap",
 ]
 
@@ -42,6 +46,10 @@ def __getattr__(name: str) -> Any:
         from dagua.layout.classic.fa2 import layout_fa2
 
         return layout_fa2
+    if name == "layout_classical_mds":
+        from dagua.layout.classic.classical_mds import layout_classical_mds
+
+        return layout_classical_mds
     if name == "layout_drl":
         from dagua.layout.classic.drl import layout_drl
 
@@ -66,6 +74,10 @@ def __getattr__(name: str) -> Any:
         from dagua.layout.classic.neulay import layout_neulay
 
         return layout_neulay
+    if name == "layout_reingold_tilford":
+        from dagua.layout.classic.reingold_tilford import layout_reingold_tilford
+
+        return layout_reingold_tilford
     if name == "layout_sgd2_multi":
         from dagua.layout.classic.sgd2_multi import layout_sgd2_multi
 
@@ -74,6 +86,14 @@ def __getattr__(name: str) -> Any:
         from dagua.layout.classic.sfdp import layout_sfdp
 
         return layout_sfdp
+    if name == "layout_spectral":
+        from dagua.layout.classic.spectral import layout_spectral
+
+        return layout_spectral
+    if name == "layout_stress_majorization":
+        from dagua.layout.classic.stress_majorization import layout_stress_majorization
+
+        return layout_stress_majorization
     if name == "layout_stress_sgd":
         from dagua.layout.classic.stress_sgd import layout_stress_sgd
 
