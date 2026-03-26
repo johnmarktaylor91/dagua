@@ -34,6 +34,7 @@ from dagua.edges import (
 )
 from dagua.render.borders import (
     ShapeSpec,
+    add_corner_radius,
     add_filled_collections,
     annular_path,
     build_shape_path,
@@ -41,6 +42,7 @@ from dagua.render.borders import (
     dash_ribbon_paths,
     inset_shape_path,
     make_clip_proxy,
+    scale_corner_radius,
 )
 from dagua.render.crossings import EdgeCrossing, detect_crossings
 from dagua.render.edges import CubicBezier as RenderBezier
@@ -92,6 +94,8 @@ _CROSSING_MIN_SPAN_DATA_UNITS = 22.0
 _CROSSING_SHARP_HEIGHT_WIDTH_FACTOR = 3.5
 # Span multiplier for the sharp crossing footprint along the edge direction.
 _CROSSING_SHARP_SPAN_WIDTH_FACTOR = 4.0
+_CROSSING_BRIDGE_HEIGHT_WIDTH_FACTOR = 2.0
+_CROSSING_BRIDGE_SPAN_WIDTH_FACTOR = 3.0
 _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
 # Tuned down over several passes to keep self-loop terminals legible without
 # letting arrowheads consume the entire loop apex on small nodes.
@@ -1189,6 +1193,9 @@ def render(
     # --- Layer 2: Nodes ---
     clip_patches = _draw_nodes(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
 
+    # --- Layer 2.5: Port indicators ---
+    _draw_port_indicators(ax, graph, curves)
+
     # --- Layer 3: Node labels ---
     _draw_node_labels(ax, graph, pos, sizes, clip_patches, svg_hover_map=svg_hover_map)
 
@@ -1509,21 +1516,25 @@ def _build_node_patch(
     Any
         Matplotlib patch instance.
     """
-    from matplotlib.patches import Circle, Ellipse, FancyBboxPatch, PathPatch, Polygon
+    from matplotlib.patches import Circle, Ellipse, PathPatch, Polygon
     from matplotlib.path import Path
 
     shape = style.shape
-    if shape in ("roundrect", "rect"):
-        corner_radius = style.corner_radius if shape == "roundrect" else 0.0
-        if corner_radius > 0:
-            boxstyle = f"round,pad=0,rounding_size={corner_radius}"
-        else:
-            boxstyle = "square,pad=0"
-        return FancyBboxPatch(
-            (x - w / 2, y - h / 2),
-            w,
-            h,
-            boxstyle=boxstyle,
+    if shape in {"roundrect", "rect", "arrow"}:
+        return PathPatch(
+            build_shape_path(
+                ShapeSpec(
+                    center_x=x,
+                    center_y=y,
+                    width=w,
+                    height=h,
+                    shape=shape,
+                    corner_radius=(
+                        getattr(style, "corner_radius", 0.0) if shape == "roundrect" else 0.0
+                    ),
+                    aspect_ratio=getattr(style, "aspect_ratio", None),
+                )
+            ),
             facecolor=facecolor,
             edgecolor=edgecolor,
             linewidth=linewidth,
@@ -1715,11 +1726,17 @@ def _build_node_patch(
             linestyle=linestyle,
             zorder=zorder,
         )
-    return FancyBboxPatch(
-        (x - w / 2, y - h / 2),
-        w,
-        h,
-        boxstyle="round,pad=0,rounding_size=6",
+    return PathPatch(
+        build_shape_path(
+            ShapeSpec(
+                center_x=x,
+                center_y=y,
+                width=w,
+                height=h,
+                shape="roundrect",
+                corner_radius=6.0,
+            )
+        ),
         facecolor=facecolor,
         edgecolor=edgecolor,
         linewidth=linewidth,
@@ -2258,12 +2275,50 @@ def _scaled_node_style(style: Any, display_scale: float) -> Any:
 
     return replace(
         style,
-        corner_radius=float(style.corner_radius) * display_scale,
+        corner_radius=(
+            style.corner_radius
+            if bool(getattr(style, "scale_corner_radius", False))
+            else scale_corner_radius(getattr(style, "corner_radius", 0.0), display_scale)
+        ),
         shadow_offset=(
             float(style.shadow_offset[0]) * display_scale,
             float(style.shadow_offset[1]) * display_scale,
         ),
     )
+
+
+def _node_corner_radius_data(
+    style: Any,
+    display_scale: float,
+    node_width: float,
+    node_height: float,
+) -> Any:
+    """Return node corner radii in data units for the current node size.
+
+    Parameters
+    ----------
+    style : Any
+        Node style object exposing ``corner_radius`` and
+        ``scale_corner_radius``.
+    display_scale : float
+        Point-to-data conversion factor.
+    node_width : float
+        Node width in data units.
+    node_height : float
+        Node height in data units.
+
+    Returns
+    -------
+    Any
+        Scalar or per-corner radii in data units.
+    """
+
+    if bool(getattr(style, "scale_corner_radius", False)):
+        return scale_corner_radius(
+            getattr(style, "corner_radius", 0.0),
+            min(max(float(node_width), 0.0), max(float(node_height), 0.0)),
+        )
+    return scale_corner_radius(getattr(style, "corner_radius", 0.0), display_scale)
 
 
 def _normalize_border_position(border_position: str) -> str:
@@ -2549,7 +2604,7 @@ def _expanded_shape_spec(spec: ShapeSpec, delta: float) -> ShapeSpec:
         width=spec.width + 2.0 * delta,
         height=spec.height + 2.0 * delta,
         shape=spec.shape,
-        corner_radius=max(spec.corner_radius + delta, 0.0),
+        corner_radius=add_corner_radius(spec.corner_radius, delta),
         aspect_ratio=spec.aspect_ratio,
     )
 
@@ -3531,6 +3586,7 @@ def _draw_nodes(
         w, h = float(sizes[i, 0]), float(sizes[i, 1])
         style = _node_style_for_render(graph, i)
         scaled_style = _scaled_node_style(style, display_scale)
+        corner_radius = _node_corner_radius_data(style, display_scale, w, h)
         border_width = clamp_border_width(float(style.stroke_width) * display_scale, w, h)
         border_position = _normalize_border_position(getattr(style, "border_position", "center"))
         shape_spec = ShapeSpec(
@@ -3539,14 +3595,14 @@ def _draw_nodes(
             width=w,
             height=h,
             shape=str(style.shape),
-            corner_radius=float(scaled_style.corner_radius),
+            corner_radius=corner_radius,
             aspect_ratio=style.aspect_ratio,
         )
         outer_path = build_shape_path(shape_spec)
         fill_path = _node_fill_path(shape_spec, outer_path, border_width, border_position)
 
         if style.shadow:
-            _draw_shadow(ax, x, y, w, h, scaled_style)
+            _draw_shadow(ax, x, y, w, h, scaled_style, corner_radius)
 
         facecolor = to_rgba(style.fill, style.opacity)
         edgecolor = to_rgba(style.stroke, style.opacity * style.border_opacity)
@@ -3621,6 +3677,10 @@ def _draw_nodes(
         clip_patches.append(clip_patch)
         if style.gradient != "none" or style.fill_pattern != "solid":
             _set_svg_hover(clip_patch, f"dagua-node-{i}", graph.node_labels[i], svg_hover_map)
+        if bool(getattr(style, "bevel", False)) and (
+            float(getattr(style, "bevel_intensity", 0.0)) > 0.0
+        ):
+            _draw_node_bevel(ax, i, fill_path, x, y, w, h, style)
         _draw_node_shape_extras(ax, x, y, w, h, style, edgecolor, zorder=2.08)
 
     add_filled_collections(
@@ -3635,7 +3695,15 @@ def _draw_nodes(
     return clip_patches
 
 
-def _draw_shadow(ax: Any, x: float, y: float, w: float, h: float, style: Any) -> None:
+def _draw_shadow(
+    ax: Any,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    style: Any,
+    corner_radius: Any,
+) -> None:
     """Draw a node shadow, approximating blur with layered fills.
 
     Parameters
@@ -3652,6 +3720,8 @@ def _draw_shadow(ax: Any, x: float, y: float, w: float, h: float, style: Any) ->
         Node height.
     style : Any
         Node style object.
+    corner_radius : Any
+        Scalar or per-corner node radius in data units.
     """
     from matplotlib.colors import to_rgba
     from matplotlib.patches import PathPatch
@@ -3665,7 +3735,7 @@ def _draw_shadow(ax: Any, x: float, y: float, w: float, h: float, style: Any) ->
         width=w,
         height=h,
         shape=str(style.shape),
-        corner_radius=float(getattr(style, "corner_radius", 0.0)),
+        corner_radius=corner_radius,
         aspect_ratio=getattr(style, "aspect_ratio", None),
     )
     for idx in range(steps, 0, -1):
@@ -3677,7 +3747,7 @@ def _draw_shadow(ax: Any, x: float, y: float, w: float, h: float, style: Any) ->
             width=float(base_shape_spec.width) * scale,
             height=float(base_shape_spec.height) * scale,
             shape=base_shape_spec.shape,
-            corner_radius=float(base_shape_spec.corner_radius) * scale,
+            corner_radius=scale_corner_radius(base_shape_spec.corner_radius, scale),
             aspect_ratio=base_shape_spec.aspect_ratio,
         )
         shadow = PathPatch(
@@ -3688,6 +3758,123 @@ def _draw_shadow(ax: Any, x: float, y: float, w: float, h: float, style: Any) ->
             zorder=1.4 - idx * 0.01,
         )
         ax.add_patch(shadow)
+
+
+def _rectangle_path(x_min: float, x_max: float, y_min: float, y_max: float) -> Any:
+    """Return one closed rectangular path in data coordinates.
+
+    Parameters
+    ----------
+    x_min : float
+        Left edge.
+    x_max : float
+        Right edge.
+    y_min : float
+        Bottom edge.
+    y_max : float
+        Top edge.
+
+    Returns
+    -------
+    Any
+        Matplotlib ``Path`` instance describing the rectangle.
+    """
+
+    from matplotlib.path import Path
+
+    return Path(
+        [
+            [x_min, y_min],
+            [x_max, y_min],
+            [x_max, y_max],
+            [x_min, y_max],
+            [x_min, y_min],
+        ],
+        [Path.MOVETO, Path.LINETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY],
+    )
+
+
+def _draw_node_bevel(
+    ax: Any,
+    node_idx: int,
+    clip_path: Any,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    style: Any,
+) -> None:
+    """Draw a lightweight bevel overlay with clipped highlight and shadow bands.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    node_idx : int
+        Node index used to tag the bevel artists.
+    clip_path : Any
+        Node fill path used as the bevel clipping mask.
+    x : float
+        Node center x-coordinate.
+    y : float
+        Node center y-coordinate.
+    w : float
+        Node width in data units.
+    h : float
+        Node height in data units.
+    style : Any
+        Node style object exposing bevel settings.
+    """
+
+    from matplotlib.patches import PathPatch
+
+    band_count = 6
+    intensity = min(max(float(getattr(style, "bevel_intensity", 0.3)), 0.0), 1.0)
+    if intensity <= 0.0 or w <= 0.0 or h <= 0.0:
+        return
+
+    clip_patch = make_clip_proxy(clip_path, ax.transData)
+    left = x - w / 2.0
+    right = x + w / 2.0
+    half_height = h / 2.0
+
+    for band_idx in range(band_count):
+        fraction_start = band_idx / band_count
+        fraction_end = (band_idx + 1) / band_count
+        highlight_alpha = intensity * 0.28 * (1.0 - fraction_start)
+        shadow_alpha = intensity * 0.22 * (1.0 - fraction_start)
+
+        highlight_patch = PathPatch(
+            _rectangle_path(
+                left,
+                right,
+                y + half_height * (1.0 - fraction_end),
+                y + half_height * (1.0 - fraction_start),
+            ),
+            facecolor=(1.0, 1.0, 1.0, highlight_alpha),
+            edgecolor="none",
+            linewidth=0.0,
+            zorder=2.03,
+            gid=f"dagua-node-bevel-highlight-{node_idx}-{band_idx}",
+        )
+        highlight_patch.set_clip_path(clip_patch)
+        ax.add_patch(highlight_patch)
+
+        shadow_patch = PathPatch(
+            _rectangle_path(
+                left,
+                right,
+                y - half_height * fraction_end,
+                y - half_height * fraction_start,
+            ),
+            facecolor=(0.0, 0.0, 0.0, shadow_alpha),
+            edgecolor="none",
+            linewidth=0.0,
+            zorder=2.03,
+            gid=f"dagua-node-bevel-shadow-{node_idx}-{band_idx}",
+        )
+        shadow_patch.set_clip_path(clip_patch)
+        ax.add_patch(shadow_patch)
 
 
 def _points_to_data_units(ax: Any, points: float, axis: str) -> float:
@@ -4450,6 +4637,29 @@ def _sharp_crossing_span_data_units(ax: Any, style: Any) -> float:
     return edge_width * _CROSSING_SHARP_SPAN_WIDTH_FACTOR
 
 
+def _bridge_crossing_span_data_units(ax: Any, style: Any) -> float:
+    """Return the centerline width for a bridge crossing marker.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes receiving the crossing patch.
+    style : Any
+        Edge style object.
+
+    Returns
+    -------
+    float
+        Bridge crossing span in data units.
+    """
+
+    edge_width = _edge_width_data_units(ax, float(style.width))
+    return max(
+        _crossing_span_data_units(ax, style),
+        edge_width * _CROSSING_BRIDGE_SPAN_WIDTH_FACTOR,
+    )
+
+
 def _draw_crossing_clearance(
     ax: Any,
     crossing: EdgeCrossing,
@@ -4652,6 +4862,66 @@ def _draw_sharp_crossing(
     )
 
 
+def _draw_bridge_crossing(
+    ax: Any,
+    crossing: EdgeCrossing,
+    under_curve: BezierCurve,
+    under_t: float,
+    style: Any,
+) -> None:
+    """Draw a rectangular bridge marker over one crossing.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    crossing : EdgeCrossing
+        Crossing record being rendered.
+    under_curve : BezierCurve
+        Under-crossing curve whose tangent defines the bridge orientation.
+    under_t : float
+        Parameter along ``under_curve`` where the crossing occurs.
+    style : Any
+        Top-edge style object.
+    """
+
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import Polygon
+
+    ux, uy = _normalized_curve_tangent(under_curve, under_t)
+    nx, ny = -uy, ux
+    edge_width = _edge_width_data_units(ax, float(style.width))
+    half_span = edge_width * (_CROSSING_BRIDGE_SPAN_WIDTH_FACTOR / 2.0)
+    half_height = edge_width * (_CROSSING_BRIDGE_HEIGHT_WIDTH_FACTOR / 2.0)
+    patch = Polygon(
+        [
+            (
+                crossing.x - nx * half_span - ux * half_height,
+                crossing.y - ny * half_span - uy * half_height,
+            ),
+            (
+                crossing.x + nx * half_span - ux * half_height,
+                crossing.y + ny * half_span - uy * half_height,
+            ),
+            (
+                crossing.x + nx * half_span + ux * half_height,
+                crossing.y + ny * half_span + uy * half_height,
+            ),
+            (
+                crossing.x - nx * half_span + ux * half_height,
+                crossing.y - ny * half_span + uy * half_height,
+            ),
+        ],
+        closed=True,
+        facecolor=to_rgba(str(style.color), alpha=float(style.opacity)),
+        edgecolor="none",
+        linewidth=0.0,
+        zorder=1.7,
+        gid="dagua-crossing-bridge",
+    )
+    ax.add_patch(patch)
+
+
 def _draw_edge_crossings(
     ax: Any,
     graph: Any,
@@ -4683,12 +4953,13 @@ def _draw_edge_crossings(
         if crossing_style == "none":
             continue
 
-        span = (
-            _sharp_crossing_span_data_units(ax, top_style)
-            if crossing_style == "sharp"
-            else _crossing_span_data_units(ax, top_style)
-        )
         under_style = _edge_style_for_render(graph, under_edge_index)
+        if crossing_style == "sharp":
+            span = _sharp_crossing_span_data_units(ax, top_style)
+        elif crossing_style == "bridge":
+            span = _bridge_crossing_span_data_units(ax, top_style)
+        else:
+            span = _crossing_span_data_units(ax, top_style)
         _draw_crossing_clearance(
             ax=ax,
             crossing=crossing,
@@ -4709,6 +4980,14 @@ def _draw_edge_crossings(
         elif crossing_style == "sharp":
             _draw_sharp_crossing(
                 ax, crossing, curves[top_edge_index], float(crossing.t_b), top_style, span
+            )
+        elif crossing_style == "bridge":
+            _draw_bridge_crossing(
+                ax,
+                crossing,
+                curves[under_edge_index],
+                float(crossing.t_a),
+                top_style,
             )
 
 
@@ -6050,6 +6329,78 @@ def _draw_edge_marker(
                 cap_end="round",
                 join_style="bevel",
             )
+
+
+def _draw_port_indicators(ax: Any, graph: Any, curves: List[BezierCurve]) -> None:
+    """Draw optional source/target port indicators at edge boundary contacts.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    graph : Any
+        Graph exposing per-edge styles.
+    curves : list[BezierCurve]
+        Routed edge centerlines whose endpoints already touch node boundaries.
+    """
+
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import Circle, Polygon
+
+    for edge_idx, curve in enumerate(curves):
+        style = _edge_style_for_render(graph, edge_idx)
+        indicator = str(getattr(style, "port_indicator", "none")).lower()
+        if indicator == "none":
+            continue
+
+        size_points = max(float(getattr(style, "port_indicator_size", 3.0)), 0.0)
+        if size_points <= 0.0:
+            continue
+        half_size = min(
+            _points_to_data_units(ax, size_points, "x"),
+            _points_to_data_units(ax, size_points, "y"),
+        )
+        color = to_rgba(
+            str(getattr(style, "port_indicator_color", "") or style.color),
+            alpha=float(getattr(style, "opacity", 1.0)),
+        )
+
+        for endpoint_name, point in (("source", curve.p0), ("target", curve.p1)):
+            if indicator == "circle":
+                patch = Circle(
+                    point,
+                    half_size,
+                    facecolor=color,
+                    edgecolor="none",
+                    linewidth=0.0,
+                    zorder=2.95,
+                )
+            else:
+                tip_x, tip_y = float(point[0]), float(point[1])
+                if indicator == "diamond":
+                    vertices = [
+                        (tip_x, tip_y + half_size),
+                        (tip_x + half_size, tip_y),
+                        (tip_x, tip_y - half_size),
+                        (tip_x - half_size, tip_y),
+                    ]
+                else:
+                    vertices = [
+                        (tip_x - half_size, tip_y - half_size),
+                        (tip_x + half_size, tip_y - half_size),
+                        (tip_x + half_size, tip_y + half_size),
+                        (tip_x - half_size, tip_y + half_size),
+                    ]
+                patch = Polygon(
+                    vertices,
+                    closed=True,
+                    facecolor=color,
+                    edgecolor="none",
+                    linewidth=0.0,
+                    zorder=2.95,
+                )
+            patch.set_gid(f"dagua-port-indicator-{edge_idx}-{endpoint_name}")
+            ax.add_patch(patch)
 
 
 def _draw_edges(

@@ -308,6 +308,17 @@ def _polygon_vertices(shape: str, half_size: Point) -> np.ndarray:
             [[0.0, hh], [hw, 0.0], [0.0, -hh], [-hw, 0.0]],
             dtype=np.float64,
         )
+    if shape == "arrow":
+        return np.array(
+            [
+                [-hw, hh],
+                [hw * 0.5, hh],
+                [hw, 0.0],
+                [hw * 0.5, -hh],
+                [-hw, -hh],
+            ],
+            dtype=np.float64,
+        )
     if shape == "triangle":
         # Upward-pointing triangle: apex at top, base at bottom.
         return np.array(
@@ -616,6 +627,7 @@ def intersect_node_boundary(
         )
     # All polygon-based shapes use the generic polygon intersection.
     _POLYGON_SHAPES = {
+        "arrow",
         "diamond",
         "triangle",
         "hexagon",

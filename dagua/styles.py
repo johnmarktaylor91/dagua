@@ -49,7 +49,7 @@ import copy
 import dataclasses
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ─── Wong/Okabe-Ito Colorblind-Safe Palette ────────────────────────────────
 
@@ -118,6 +118,7 @@ _STYLE_REPR_PRIORITY_FIELDS: Dict[str, List[str]] = {
 NODE_SHAPE_NAMES: Tuple[str, ...] = (
     "rect",
     "roundrect",
+    "arrow",
     "ellipse",
     "diamond",
     "circle",
@@ -331,7 +332,8 @@ class NodeStyle:
     external_label_font_color: str = ""  # render-only; empty = use font_color
     external_label_offset: float = 4.0  # render-only distance from boundary in points
     padding: Tuple[float, float] = (11.0, 9.0)  # horizontal, vertical
-    corner_radius: float = 6.0
+    corner_radius: Union[float, Tuple[float, float, float, float]] = 6.0
+    scale_corner_radius: bool = False  # if True, use min(width, height) fraction instead of points
     opacity: float = 1.0
     gradient: str = "none"  # none, linear, radial
     gradient_color: str = ""  # empty = computed from fill
@@ -365,6 +367,8 @@ class NodeStyle:
     image: str = ""  # render-only path or URL for node image content
     image_fit: str = "contain"  # render-only: contain, cover, stretch
     image_opacity: float = 1.0  # render-only alpha for the image layer
+    bevel: bool = False  # render-only highlight/shadow overlay
+    bevel_intensity: float = 0.3  # render-only 0-1 bevel strength
 
     def __post_init__(self):
         """Populate derived defaults after dataclass initialization."""
@@ -445,8 +449,11 @@ class EdgeStyle:
     tail_label_offset: float = 5.0
     color_gradient: str = "none"  # "none", "source_to_target"
     color_gradient_end: str = ""  # empty = use the edge color for both ends
-    crossing_style: str = "none"  # none, arc, gap, sharp
+    crossing_style: str = "none"  # none, arc, gap, sharp, bridge
     crossing_size: float = 6.0  # jump marker size in points
+    port_indicator: str = "none"  # none, circle, diamond, square
+    port_indicator_size: float = 3.0  # indicator radius/half-size in points
+    port_indicator_color: str = ""  # empty = use edge color
 
     def __repr__(self) -> str:
         """Return a compact repr showing only non-default fields."""

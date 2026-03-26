@@ -84,8 +84,8 @@ class TestEdgeCrossingStyle:
 
     def test_crossing_fields(self) -> None:
         """Crossing jump styles should retain the configured settings."""
-        style = EdgeStyle(crossing_style="arc", crossing_size=8.0)
-        assert style.crossing_style == "arc"
+        style = EdgeStyle(crossing_style="bridge", crossing_size=8.0)
+        assert style.crossing_style == "bridge"
         assert style.crossing_size == 8.0
 
     def test_default_none(self) -> None:
@@ -125,7 +125,7 @@ class TestCrossingDetection:
 class TestCrossingRender:
     """Coverage for crossing-jump rendering and the edge view cache."""
 
-    @pytest.mark.parametrize("crossing_style", ["arc", "gap", "sharp"])
+    @pytest.mark.parametrize("crossing_style", ["arc", "gap", "sharp", "bridge"])
     def test_render_with_crossings(self, crossing_style: str) -> None:
         """Crossing jump styles should render and populate edge-view crossings."""
         import matplotlib.pyplot as plt
