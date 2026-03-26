@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 
 from dagua.render.borders.shapes import (
     ShapeSpec,
+    add_corner_radius,
     build_shape_path,
     closed_path_from_vertices,
     polygon_vertices,
@@ -232,7 +233,7 @@ def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
             width=inner_width,
             height=inner_height,
             shape=spec.shape,
-            corner_radius=max(spec.corner_radius - inset, 0.0),
+            corner_radius=add_corner_radius(spec.corner_radius, -inset),
             aspect_ratio=spec.aspect_ratio,
         )
         return build_shape_path(inner_spec)
