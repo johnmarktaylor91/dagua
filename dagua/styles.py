@@ -23195,6 +23195,86 @@ MILGRAM_THEME = Theme(
     graph_style=GraphStyle(background_color="#F0E8D0"),
 )
 
+# Erdos -- Paul Erdos: the itinerant mathematician who lived out of a
+# suitcase, scribbled on napkins, published 1500+ papers. Sparse,
+# austere, coffee-stained, pure mathematics on cheap paper
+ERDOS_THEME = Theme(
+    name="erdos",
+    category="thinker",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#F0E8D8",
+            stroke="#2A2218",
+            stroke_width=1.0,
+            font_family="Times New Roman",
+            font_size=9.0,
+            font_color="#2A2218",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#C8A878",
+            stroke="#2A2218",
+            stroke_width=1.5,
+            font_family="Times New Roman",
+            font_size=9.0,
+            font_color="#2A2218",
+            font_weight="bold",
+            padding=(4.0, 4.0),
+            min_width=22.0,
+            min_height=22.0,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#F0E8D8",
+            stroke="#6B5038",
+            stroke_width=1.0,
+            font_family="Times New Roman",
+            font_size=9.0,
+            font_color="#6B5038",
+            padding=(4.0, 4.0),
+            min_width=20.0,
+            min_height=20.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#2A2218",
+            width=0.5,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+        ),
+        "back": EdgeStyle(
+            color="#8B7355",
+            width=0.3,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+            opacity=0.5,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#F0E8D8",
+        stroke="#C8A878",
+        stroke_width=0.3,
+        stroke_dash="dashed",
+        corner_radius=0.0,
+        font_size=9.0,
+        font_color="#6B5038",
+        font_weight="normal",
+        padding=6.0,
+        opacity=0.2,
+    ),
+    graph_style=GraphStyle(background_color="#F0E8D8"),
+)
+
+THEME_REGISTRY["erdos"] = ERDOS_THEME
 THEME_REGISTRY["milgram"] = MILGRAM_THEME
 THEME_REGISTRY["mancala"] = MANCALA_THEME
 THEME_REGISTRY["tufte"] = TUFTE_THEME
