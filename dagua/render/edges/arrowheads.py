@@ -614,19 +614,19 @@ def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
 
     Notes
     -----
-    The tines are deliberately larger than the legacy geometry. The wider fan
-    and thicker center tine survive gallery downscaling and keep the "many"
-    semantics legible when paired with tapered or gradient edge bodies.
+    The tines are deliberately wider than the legacy geometry, but they still
+    stay compact enough that the fork reads as a terminal marker instead of
+    dominating short edge segments.
 
     Each tine is a narrow filled triangle radiating from the shaft neck
     toward the tip, matching the ER-diagram "many" convention.
     """
     neck_half = max(body_width * 0.5, FLOAT_EPSILON)
     tine_half = max(
-        _ornament_half_width(width * 1.8, body_width),
-        length * 1.0,
+        _ornament_half_width(width * 1.4, body_width),
+        length * 0.8,
     )
-    tine_thickness = max(body_width * 0.5, length * 0.15)
+    tine_thickness = max(body_width * 0.35, length * 0.10)
     center_neck_half = max(neck_half + (tine_thickness * 0.35), body_width * 0.7)
     merged_neck_half = max(center_neck_half - (tine_thickness * 0.25), neck_half * 0.95)
     # Center tine
