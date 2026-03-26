@@ -43,3 +43,7 @@
 - [RENDER] Gallery-card node proportions: `min_height` alone does not fix extreme aspect ratios. Constrain `min_width` as well because the layout engine and figure sizing jointly determine the final node shape.
 - [TEST] Codex pytest hang: pytest can finish successfully and then stall during teardown. Check the captured log for a `passed` summary before treating the run as failed; if the tests are green, proceed.
 - [RENDER] Auto text background cascade for patterned fills is tuned, not generic: pie/striped -> white at 0.92 alpha, hatched -> 0.75, gradient -> 0.90. Re-review all affected gallery cards before changing these opacities.
+
+## Port Indicator Rendering (2026-03-26)
+- [RENDER] FIXED: Port indicators used _points_to_data_units() which made them microscopic at gallery DPI. Fix: switched to ax.plot() with markersize in points (DPI-independent). Three rounds of "increase the constant" failed because the conversion pipeline was the root cause, not the size value. Lesson: when a visual element vanishes at different DPIs, check if its size is being converted to data coordinates.
+- [RENDER] Bevel effect needs intensity >= 0.5 and highlight_alpha >= 0.55 to be clearly visible. Band count 8 gives smoother gradient than 6. Subtle bevel (intensity 0.3) is indistinguishable from no bevel at typical rendering sizes.

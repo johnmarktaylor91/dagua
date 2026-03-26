@@ -94,16 +94,16 @@ _CROSSING_MIN_SPAN_DATA_UNITS = 22.0
 _CROSSING_SHARP_HEIGHT_WIDTH_FACTOR = 3.5
 # Span multiplier for the sharp crossing footprint along the edge direction.
 _CROSSING_SHARP_SPAN_WIDTH_FACTOR = 4.0
-_CROSSING_BRIDGE_HEIGHT_WIDTH_FACTOR = 3.5
-_CROSSING_BRIDGE_SPAN_WIDTH_FACTOR = 5.0
+_CROSSING_BRIDGE_HEIGHT_WIDTH_FACTOR = 4.0
+_CROSSING_BRIDGE_SPAN_WIDTH_FACTOR = 6.0
 _CROSSING_BRIDGE_CORNER_RADIUS_POINTS = 1.5
-_CROSSING_BRIDGE_STROKE_WIDTH_POINTS = 1.0
-_BEVEL_BAND_COUNT = 6
+_CROSSING_BRIDGE_STROKE_WIDTH_POINTS = 1.5
+_BEVEL_BAND_COUNT = 8
 _BEVEL_REFERENCE_INTENSITY = 0.5
-_BEVEL_HIGHLIGHT_ALPHA = 0.45
-_BEVEL_SHADOW_ALPHA = 0.28
+_BEVEL_HIGHLIGHT_ALPHA = 0.55
+_BEVEL_SHADOW_ALPHA = 0.35
 _BEVEL_MAX_INSET_FRACTION = 0.5
-_PORT_INDICATOR_BORDER_WIDTH_POINTS = 0.5
+_PORT_INDICATOR_BORDER_WIDTH_POINTS = 1.0
 _PORT_INDICATOR_ZORDER = 4.1
 _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
 # Tuned down over several passes to keep self-loop terminals legible without
@@ -6345,6 +6345,9 @@ def _draw_edge_marker(
 def _draw_port_indicators(ax: Any, graph: Any, curves: List[BezierCurve]) -> None:
     """Draw optional source/target port indicators at edge boundary contacts.
 
+    Uses ax.plot() with markersize in points so indicators are DPI-independent
+    and always visible regardless of data-coordinate scaling.
+
     Parameters
     ----------
     ax : Any
@@ -6356,7 +6359,10 @@ def _draw_port_indicators(ax: Any, graph: Any, curves: List[BezierCurve]) -> Non
     """
 
     from matplotlib.colors import to_rgba
-    from matplotlib.patches import Circle, Polygon
+
+    # Matplotlib markers keep the port glyph size in display points instead of
+    # data units, which avoids the gallery DPI shrinkage that made them vanish.
+    _MARKER_MAP = {"circle": "o", "diamond": "D", "square": "s"}
 
     for edge_idx, curve in enumerate(curves):
         style = _edge_style_for_render(graph, edge_idx)
@@ -6367,50 +6373,24 @@ def _draw_port_indicators(ax: Any, graph: Any, curves: List[BezierCurve]) -> Non
         size_points = max(float(getattr(style, "port_indicator_size", 5.0)), 5.0)
         if size_points <= 0.0:
             continue
-        half_size = min(
-            _points_to_data_units(ax, size_points, "x"),
-            _points_to_data_units(ax, size_points, "y"),
-        )
+
+        marker = _MARKER_MAP.get(indicator, "o")
         face_color = to_rgba(str(style.color), alpha=float(getattr(style, "opacity", 1.0)))
         outline_color = to_rgba("#ffffff")
 
         for endpoint_name, point in (("source", curve.p0), ("target", curve.p1)):
-            if indicator == "circle":
-                patch = Circle(
-                    point,
-                    half_size,
-                    facecolor=face_color,
-                    edgecolor=outline_color,
-                    linewidth=_PORT_INDICATOR_BORDER_WIDTH_POINTS,
-                    zorder=_PORT_INDICATOR_ZORDER,
-                )
-            else:
-                tip_x, tip_y = float(point[0]), float(point[1])
-                if indicator == "diamond":
-                    vertices = [
-                        (tip_x, tip_y + half_size),
-                        (tip_x + half_size, tip_y),
-                        (tip_x, tip_y - half_size),
-                        (tip_x - half_size, tip_y),
-                    ]
-                else:
-                    vertices = [
-                        (tip_x - half_size, tip_y - half_size),
-                        (tip_x + half_size, tip_y - half_size),
-                        (tip_x + half_size, tip_y + half_size),
-                        (tip_x - half_size, tip_y + half_size),
-                    ]
-                patch = Polygon(
-                    vertices,
-                    closed=True,
-                    facecolor=face_color,
-                    edgecolor=outline_color,
-                    linewidth=_PORT_INDICATOR_BORDER_WIDTH_POINTS,
-                    joinstyle="round",
-                    zorder=_PORT_INDICATOR_ZORDER,
-                )
-            patch.set_gid(f"dagua-port-indicator-{edge_idx}-{endpoint_name}")
-            ax.add_patch(patch)
+            ax.plot(
+                float(point[0]),
+                float(point[1]),
+                marker=marker,
+                markersize=size_points,
+                markerfacecolor=face_color,
+                markeredgecolor=outline_color,
+                markeredgewidth=_PORT_INDICATOR_BORDER_WIDTH_POINTS,
+                linestyle="none",
+                zorder=_PORT_INDICATOR_ZORDER,
+                gid=f"dagua-port-indicator-{edge_idx}-{endpoint_name}",
+            )
 
 
 def _draw_edges(
