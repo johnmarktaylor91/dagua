@@ -627,13 +627,13 @@ GRAPHVIZ_MATCH_NODE_STYLES: Dict[str, NodeStyle] = {
 DEFAULT_THEME: Dict[str, NodeStyle] = DEFAULT_NODE_STYLES
 GRAPHVIZ_MATCH_THEME: Dict[str, NodeStyle] = GRAPHVIZ_MATCH_NODE_STYLES
 GRAPHVIZ_MATCH_DEFAULTS: Dict[str, Any] = {
-    "stroke_width": 1.6,
+    "stroke_width": 1.4,
     "padding": (7.0, 4.0),
     "font_size": 12.0,
-    "arrow_length": 14.0,
-    "arrow_width": 10.0,
+    "arrow_length": 10.0,
+    "arrow_width": 7.0,
     "arrow_scale": 16.0,
-    "edge_width": 1.6,
+    "edge_width": 1.4,
     "edge_opacity": 1.0,
     "min_height": 22.0,
 }
@@ -25925,6 +25925,186 @@ EPIDEMIOLOGY_THEME = Theme(
     ),
 )
 
+# Roam Research -- networked thought graph view: small colored dots on
+# dark charcoal, thin bidirectional links, constellation of ideas,
+# knowledge garden aesthetic
+ROAM_THEME = Theme(
+    name="roam",
+    category="tools",
+    node_styles={
+        "default": NodeStyle(
+            shape="circle",
+            fill="#137CBD",  # Roam blue
+            stroke="#137CBD",
+            stroke_width=0.0,
+            font_family="Inter",
+            font_size=7.5,
+            font_color="#D4D4D4",
+            padding=(5.0, 5.0),
+            min_width=14.0,
+            min_height=14.0,
+            opacity=0.9,
+        ),
+        "input": NodeStyle(
+            shape="circle",
+            fill="#2EA043",  # green -- daily note / entry point
+            stroke="#2EA043",
+            stroke_width=0.0,
+            font_family="Inter",
+            font_size=8.0,
+            font_color="#D4D4D4",
+            font_weight="bold",
+            padding=(5.0, 5.0),
+            min_width=18.0,
+            min_height=18.0,
+            opacity=0.95,
+        ),
+        "output": NodeStyle(
+            shape="circle",
+            fill="#D29922",  # amber -- highlight / TODO
+            stroke="#D29922",
+            stroke_width=0.0,
+            font_family="Inter",
+            font_size=7.5,
+            font_color="#D4D4D4",
+            padding=(5.0, 5.0),
+            min_width=14.0,
+            min_height=14.0,
+            opacity=0.85,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#666666",  # subtle gray link
+            width=0.8,
+            style="solid",
+            arrow="none",  # bidirectional -- no arrowheads
+            routing="straight",
+            curvature=0.0,
+            opacity=0.3,
+        ),
+        "back": EdgeStyle(
+            color="#555555",
+            width=0.6,
+            style="solid",
+            arrow="none",
+            routing="straight",
+            curvature=0.0,
+            opacity=0.2,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#333333",
+        stroke="#444444",
+        stroke_width=0.4,
+        stroke_dash="dashed",
+        corner_radius=8.0,
+        font_size=7.5,
+        font_color="#999999",
+        font_weight="normal",
+        font_family="Inter",
+        padding=20.0,
+        opacity=0.25,
+    ),
+    graph_style=GraphStyle(
+        background_color="#2B2B2B",  # Roam dark charcoal
+    ),
+)
+
+# Notion -- all-in-one workspace: clean page cards with subtle borders,
+# warm neutrals, system font, organized and restrained, the anti-clutter
+# aesthetic of modern productivity tools
+NOTION_THEME = Theme(
+    name="notion",
+    category="tools",
+    node_styles={
+        "default": NodeStyle(
+            shape="roundrect",
+            fill="#FFFFFF",  # white card
+            stroke="#E3E3E1",  # Notion's subtle gray border
+            stroke_width=0.7,
+            font_family="Inter",
+            font_size=8.0,
+            font_color="#37352F",  # Notion's near-black text
+            padding=(8.0, 5.0),
+            min_width=56.0,
+            min_height=26.0,
+            corner_radius=4.0,
+        ),
+        "input": NodeStyle(
+            shape="roundrect",
+            fill="#F1F1EF",  # Notion light gray highlight
+            stroke="#D3D1CB",
+            stroke_width=0.8,
+            font_family="Inter",
+            font_size=8.5,
+            font_color="#37352F",
+            font_weight="bold",
+            padding=(8.0, 5.0),
+            min_width=60.0,
+            min_height=28.0,
+            corner_radius=4.0,
+        ),
+        "output": NodeStyle(
+            shape="roundrect",
+            fill="#FAFAFA",
+            stroke="#EBEBEA",
+            stroke_width=0.5,
+            font_family="Inter",
+            font_size=7.5,
+            font_color="#787774",  # Notion muted text
+            padding=(8.0, 5.0),
+            min_width=52.0,
+            min_height=24.0,
+            corner_radius=4.0,
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#D3D1CB",  # Notion gray
+            width=0.8,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#D3D1CB",
+            arrow_length=5.0,
+            arrow_width=3.5,
+            routing="bezier",
+            curvature=0.2,
+            opacity=0.6,
+        ),
+        "back": EdgeStyle(
+            color="#E3E3E1",
+            width=0.5,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="hollow",
+            arrow_color="#E3E3E1",
+            arrow_length=4.0,
+            arrow_width=2.5,
+            routing="bezier",
+            curvature=0.25,
+            opacity=0.4,
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#FBFBFA",  # barely-there warm white
+        stroke="#E3E3E1",
+        stroke_width=0.5,
+        stroke_dash="solid",
+        corner_radius=6.0,
+        font_size=8.0,
+        font_color="#9B9A97",  # Notion muted label
+        font_weight="bold",
+        font_family="Inter",
+        padding=24.0,
+        opacity=0.4,
+    ),
+    graph_style=GraphStyle(
+        background_color="#FFFFFF",  # clean Notion white
+    ),
+)
+
 THEME_REGISTRY["cats_cradle"] = CATS_CRADLE_THEME
 THEME_REGISTRY["defuse"] = DEFUSE_THEME
 THEME_REGISTRY["simcity"] = SIMCITY_THEME
@@ -26055,6 +26235,8 @@ THEME_REGISTRY["connectome"] = CONNECTOME_THEME
 THEME_REGISTRY["pathway"] = PATHWAY_THEME
 THEME_REGISTRY["citation"] = CITATION_THEME
 THEME_REGISTRY["epidemiology"] = EPIDEMIOLOGY_THEME
+THEME_REGISTRY["roam"] = ROAM_THEME
+THEME_REGISTRY["notion"] = NOTION_THEME
 
 
 def get_theme(name: str) -> Theme:
