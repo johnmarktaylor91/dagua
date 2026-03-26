@@ -668,6 +668,98 @@ def anomaly_section(per_graph_rows: Sequence[Mapping[str, str]]) -> str:
     return "\n".join(lines)
 
 
+def failure_patterns_section(per_graph_rows: Sequence[Mapping[str, str]]) -> str:
+    """Summarize which algorithms fail on which graph structures and why.
+
+    Groups anomalies by (algorithm_family, anomaly_reason) to surface
+    systematic patterns rather than listing individual failures.
+
+    Parameters
+    ----------
+    per_graph_rows : Sequence[Mapping[str, str]]
+        Per-graph detail rows.
+
+    Returns
+    -------
+    str
+        LaTeX section summarizing failure patterns.
+    """
+    anomalies = [row for row in per_graph_rows if str(row.get("anomaly_reason", "")).strip()]
+    if not anomalies:
+        return ""
+
+    # Group by (family, reason) and collect affected graphs
+    from collections import defaultdict
+
+    patterns: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for row in anomalies:
+        family = str(row.get("algorithm_family", "unknown"))
+        reason = str(row.get("anomaly_reason", "unknown"))
+        graph = str(row.get("graph_name", ""))
+        patterns[(family, reason)].append(graph)
+
+    # Sort by count descending
+    sorted_patterns = sorted(patterns.items(), key=lambda x: -len(x[1]))
+
+    lines = [
+        r"\section{Failure patterns}",
+        r"This section aggregates anomalies into systematic patterns,",
+        r"identifying which algorithms fail on which graph structures and why.",
+        r"",
+        r"\begin{longtable}{p{0.14\textwidth}p{0.30\textwidth}r p{0.40\textwidth}}",
+        r"\toprule",
+        r"Algorithm & Failure reason & Count & Affected graphs \\",
+        r"\midrule",
+        r"\endfirsthead",
+        r"\toprule",
+        r"Algorithm & Failure reason & Count & Affected graphs \\",
+        r"\midrule",
+        r"\endhead",
+    ]
+    for (family, reason), graphs in sorted_patterns:
+        # Truncate long graph lists
+        if len(graphs) > 5:
+            graph_str = ", ".join(graphs[:5]) + f", ... ({len(graphs)} total)"
+        else:
+            graph_str = ", ".join(graphs)
+        lines.append(
+            " & ".join(
+                [
+                    latex_escape(family),
+                    latex_escape(reason),
+                    str(len(graphs)),
+                    latex_escape(graph_str),
+                ]
+            )
+            + r" \\"
+        )
+    lines.extend([r"\bottomrule", r"\end{longtable}"])
+
+    # Add narrative summary of known structural causes
+    lines.extend(
+        [
+            r"",
+            r"\subsection*{Known structural causes}",
+            r"\begin{itemize}",
+            r"\item \textbf{Disconnected graphs:} Algorithms requiring finite "
+            r"pairwise distances (UMAP, stress-based methods) fail on graphs "
+            r"with disconnected components. This is expected behavior, not a "
+            r"reimplementation bug.",
+            r"\item \textbf{Scale-free hubs:} Force-directed algorithms may "
+            r"timeout or diverge on Barab\'asi--Albert graphs with extreme hub "
+            r"degree, producing different local minima across seeds.",
+            r"\item \textbf{Dense graphs:} Algorithms with $O(E^2)$ crossing "
+            r"detection (e.g., Davidson--Harel) timeout on graphs with high "
+            r"edge density.",
+            r"\item \textbf{Mirror layouts:} Some stochastic algorithms may "
+            r"produce reflected layouts across seeds. This is geometrically "
+            r"valid but flagged for transparency.",
+            r"\end{itemize}",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def appendix_section(per_graph_rows: Sequence[Mapping[str, str]]) -> str:
     """Render the appendix with full per-graph detail.
 
@@ -782,6 +874,7 @@ def build_report_tex(data_dir: Path, output_dir: Path) -> Path:
             family_results_section(summary_rows, per_graph_rows),
             cross_algorithm_section(summary_rows, per_graph_rows),
             anomaly_deep_dive,
+            failure_patterns_section(per_graph_rows),
             appendix_section(per_graph_rows),
             r"\end{document}",
         ]
