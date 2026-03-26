@@ -140,6 +140,7 @@ STRIP_REFERENCE_FEATURES = frozenset(
         ("edges/advanced", "taper"),
     }
 )
+COMBO_INTERNAL_FIELDS = frozenset({"combo", "preserve_crossing_width"})
 
 GRAPHVIZ_SHAPE_MAP: Dict[str, Dict[str, str]] = {
     "rect": {"shape": "box"},
@@ -1155,6 +1156,48 @@ def _apply_overrides(style: Any, overrides: Mapping[str, object]) -> None:
         setattr(style, field_name, copy.deepcopy(value))
 
 
+def _apply_indexed_overrides(
+    styles: Sequence[Any],
+    overrides: object,
+    style_kind: str,
+) -> None:
+    """Apply per-index overrides to a homogeneous style sequence.
+
+    Parameters
+    ----------
+    styles : Sequence[Any]
+        Concrete style objects in graph order.
+    overrides : object
+        Expected to be a list of mapping objects with the same length as
+        ``styles``.
+    style_kind : str
+        Readable style-family name used in validation errors.
+
+    Returns
+    -------
+    None
+        The style sequence is mutated in place.
+
+    Raises
+    ------
+    ValueError
+        Raised when the override payload shape does not match ``styles``.
+    """
+
+    if overrides is None:
+        return
+    if not isinstance(overrides, list):
+        raise ValueError(f"Expected {style_kind}_style_overrides to be a list.")
+    if len(overrides) != len(styles):
+        raise ValueError(
+            f"Expected {len(styles)} {style_kind} overrides, received {len(overrides)}"
+        )
+    for style, style_overrides in zip(styles, overrides):
+        if not isinstance(style_overrides, Mapping):
+            raise ValueError(f"Expected each {style_kind} override to be a mapping.")
+        _apply_overrides(style, style_overrides)
+
+
 def _apply_dark_palette(graph: DaguaGraph) -> None:
     """Switch fixture colors to a dark-background palette.
 
@@ -1245,11 +1288,13 @@ def _apply_reference_params(
     if isinstance(node_overrides, Mapping):
         for style in _node_styles(graph):
             _apply_overrides(style, node_overrides)
+    _apply_indexed_overrides(_node_styles(graph), params.get("node_style_overrides"), "node")
 
     edge_overrides = params.get("edge")
     if isinstance(edge_overrides, Mapping):
         for style in _edge_styles(graph):
             _apply_overrides(style, edge_overrides)
+    _apply_indexed_overrides(_edge_styles(graph), params.get("edge_style_overrides"), "edge")
 
     cluster_overrides = params.get("cluster")
     if isinstance(cluster_overrides, Mapping):
@@ -1300,9 +1345,22 @@ def _apply_reference_params(
             next_positions = _chain_positions(direction)
         elif params.get("position_variant") == "combo_flow_direction" and fixture == "combo_flow":
             next_positions = _combo_flow_positions(direction)
+    if fixture == "pair":
+        pair_layout = params.get("pair_layout")
+        pair_gap = params.get("pair_gap")
+        if isinstance(pair_layout, str):
+            resolved_gap = (
+                float(pair_gap) if isinstance(pair_gap, (float, int)) else PAIR_DEFAULT_GAP
+            )
+            next_positions = _pair_positions(node_gap=resolved_gap, layout=pair_layout)
 
     if bool(params.get("dark_background")):
         _apply_dark_palette(graph)
+    if bool(params.get("hide_edges")):
+        for style in _edge_styles(graph):
+            style.arrow = "none"
+            style.width = 0.0
+            style.opacity = 0.0
 
     return next_positions
 
@@ -2516,8 +2574,95 @@ def build_strip_items(reference_items: Sequence[ReferenceCardItem]) -> Tuple[Str
     return tuple(strip_items)
 
 
+def _gallery_extension_combo_specs() -> Tuple[ComboCardSpec, ...]:
+    """Return gallery-only combo specs not sourced from the cosmetic album.
+
+    Returns
+    -------
+    tuple[ComboCardSpec, ...]
+        Additional combo specs appended after imported album cases.
+    """
+
+    return (
+        ComboCardSpec(
+            case_id="combo_arrow_gradient",
+            combo_kind="2way",
+            title="Arrow + Linear Gradient",
+            settings={"shape": "arrow", "gradient": "linear"},
+        ),
+        ComboCardSpec(
+            case_id="combo_arrow_shadow",
+            combo_kind="2way",
+            title="Arrow + Shadow",
+            settings={"shape": "arrow", "shadow": True},
+        ),
+        ComboCardSpec(
+            case_id="combo_bevel_gradient",
+            combo_kind="2way",
+            title="Bevel + Linear Gradient",
+            settings={"bevel": True, "gradient": "linear"},
+        ),
+        ComboCardSpec(
+            case_id="combo_bevel_shadow",
+            combo_kind="2way",
+            title="Bevel + Shadow",
+            settings={"bevel": True, "shadow": True},
+        ),
+        ComboCardSpec(
+            case_id="combo_bridge_thick_edge",
+            combo_kind="2way",
+            title="Bridge Crossing + Thick Edge",
+            settings={
+                "crossing_style": "bridge",
+                "width": 3.0,
+                "preserve_crossing_width": True,
+            },
+        ),
+        ComboCardSpec(
+            case_id="combo_per_corner_gradient",
+            combo_kind="2way",
+            title="Per-Corner Radius + Gradient",
+            settings={"corner_radius": (0.0, 12.0, 12.0, 0.0), "gradient": "linear"},
+        ),
+        ComboCardSpec(
+            case_id="combo_port_circle_dashed",
+            combo_kind="2way",
+            title="Port Indicator Circle + Dashed Edge",
+            settings={"port_indicator": "circle", "edge_style": "dashed"},
+        ),
+        ComboCardSpec(
+            case_id="combo_arrow_bevel",
+            combo_kind="2way",
+            title="Arrow + Bevel",
+            settings={"shape": "arrow", "bevel": True},
+        ),
+        ComboCardSpec(
+            case_id="combo_arrow_bevel_gradient",
+            combo_kind="3way",
+            title="Arrow + Bevel + Gradient",
+            settings={"shape": "arrow", "bevel": True, "gradient": "linear"},
+        ),
+        ComboCardSpec(
+            case_id="combo_bevel_shadow_gradient",
+            combo_kind="3way",
+            title="Bevel + Shadow + Gradient",
+            settings={"bevel": True, "shadow": True, "gradient": "linear"},
+        ),
+        ComboCardSpec(
+            case_id="combo_bridge_taper_gradient_edge",
+            combo_kind="3way",
+            title="Bridge Crossing + Taper + Edge Gradient",
+            settings={
+                "crossing_style": "bridge",
+                "taper": True,
+                "color_gradient": "source_to_target",
+            },
+        ),
+    )
+
+
 def build_combo_specs() -> Tuple[ComboCardSpec, ...]:
-    """Import combo definitions from the cosmetic album catalog.
+    """Import combo definitions and append gallery-local combo extensions.
 
     Returns
     -------
@@ -2537,6 +2682,10 @@ def build_combo_specs() -> Tuple[ComboCardSpec, ...]:
                 settings=dict(case.settings),
             )
         )
+    seen_case_ids = {spec.case_id for spec in combo_specs}
+    for spec in _gallery_extension_combo_specs():
+        if spec.case_id not in seen_case_ids:
+            combo_specs.append(spec)
     return tuple(combo_specs)
 
 
@@ -2562,8 +2711,152 @@ def build_combo_items() -> Tuple[ComboCardItem, ...]:
     return tuple(items)
 
 
+def _build_local_evil_spec(
+    case_id: str,
+    title: str,
+    fixture: str,
+    params: Mapping[str, object],
+) -> EvilCardSpec:
+    """Build one gallery-local evil spec from a canonical fixture and params.
+
+    Parameters
+    ----------
+    case_id : str
+        Stable evil-case identifier.
+    title : str
+        Human-readable card title.
+    fixture : str
+        Canonical fixture name understood by ``_build_fixture``.
+    params : Mapping[str, object]
+        Reference-style parameter mapping applied to the fixture.
+
+    Returns
+    -------
+    EvilCardSpec
+        Fully prepared evil card definition.
+    """
+
+    direction = str(params.get("direction", "TB"))
+    graph, positions = _build_fixture(fixture, direction=direction)
+    positions = _apply_reference_params(graph, positions, params, fixture)
+    return EvilCardSpec(
+        case_id=case_id,
+        title=title,
+        settings=dict(params),
+        graph=graph,
+        positions=positions,
+    )
+
+
+def _gallery_extension_evil_specs() -> Tuple[EvilCardSpec, ...]:
+    """Return gallery-only evil specs for the newly added parity features.
+
+    Returns
+    -------
+    tuple[EvilCardSpec, ...]
+        Additional evil specs appended after imported album cases.
+    """
+
+    return (
+        _build_local_evil_spec(
+            case_id="evil_arrow_bevel_gradient_shadow",
+            title="Evil Combo: Arrow + Bevel + Gradient + Shadow",
+            fixture="combo_flow",
+            params={
+                "node": {
+                    "shape": "arrow",
+                    "bevel": True,
+                    "bevel_intensity": 0.35,
+                    "gradient": "linear",
+                    "fill": GRADIENT_FILL,
+                    "gradient_color": GRADIENT_COLOR,
+                    "shadow": True,
+                    "shadow_offset": (7.0, -7.0),
+                    "shadow_color": "#00000040",
+                    "shadow_blur": 5.0,
+                    "min_width": 120.0,
+                    "min_height": 66.0,
+                    "font_color": "#FFFFFF",
+                },
+                "node_labels": ["In", "Val", "Rev", "OK", "Out"],
+            },
+        ),
+        _build_local_evil_spec(
+            case_id="evil_per_corner_bevel_striped",
+            title="Evil Combo: Per-Corner + Bevel + Striped Fill",
+            fixture="combo_flow",
+            params={
+                "node": {
+                    "shape": "roundrect",
+                    "corner_radius": (0.0, 14.0, 14.0, 0.0),
+                    "bevel": True,
+                    "bevel_intensity": 0.35,
+                    "fill_pattern": "striped",
+                    "fill_pattern_colors": ["#90CAF9", "#FFAB91"],
+                    "fill_pattern_angle": 30.0,
+                    "text_background": "#FFFFFF",
+                    "text_background_opacity": 0.92,
+                    "text_background_padding": (6.0, 3.0),
+                    "text_background_corner_radius": 4.0,
+                    "min_width": 126.0,
+                    "min_height": 70.0,
+                },
+                "node_labels": ["A", "B", "C", "D", "E"],
+            },
+        ),
+        _build_local_evil_spec(
+            case_id="evil_all_new_features",
+            title="Evil Combo: All New Features",
+            fixture="crossing",
+            params={
+                "node": {"bevel": True, "bevel_intensity": 0.35},
+                "node_style_overrides": [
+                    {
+                        "shape": "arrow",
+                        "fill": "#82B1FF",
+                        "stroke": "#4E7CC4",
+                        "font_color": "#FFFFFF",
+                        "min_width": 138.0,
+                        "min_height": 72.0,
+                    },
+                    {
+                        "shape": "arrow",
+                        "fill": "#82B1FF",
+                        "stroke": "#4E7CC4",
+                        "font_color": "#FFFFFF",
+                        "min_width": 168.0,
+                        "min_height": 92.0,
+                    },
+                    {
+                        "shape": "roundrect",
+                        "scale_corner_radius": True,
+                        "corner_radius": (0.0, 0.18, 0.18, 0.0),
+                        "min_width": 108.0,
+                        "min_height": 56.0,
+                    },
+                    {
+                        "shape": "roundrect",
+                        "scale_corner_radius": True,
+                        "corner_radius": (0.0, 0.18, 0.18, 0.0),
+                        "min_width": 196.0,
+                        "min_height": 108.0,
+                    },
+                ],
+                "edge": {
+                    "crossing_style": "bridge",
+                    "crossing_size": 12.0,
+                    "width": 3.0,
+                    "port_indicator": "circle",
+                    "port_indicator_size": 4.0,
+                },
+                "node_labels": ["A", "B", "C", "D"],
+            },
+        ),
+    )
+
+
 def build_evil_specs() -> Tuple[EvilCardSpec, ...]:
-    """Import evil case definitions from the cosmetic album catalog.
+    """Import evil case definitions and append gallery-local stress cases.
 
     Returns
     -------
@@ -2584,6 +2877,10 @@ def build_evil_specs() -> Tuple[EvilCardSpec, ...]:
                 positions=case.positions,
             )
         )
+    seen_case_ids = {spec.case_id for spec in specs}
+    for spec in _gallery_extension_evil_specs():
+        if spec.case_id not in seen_case_ids:
+            specs.append(spec)
     return tuple(specs)
 
 
@@ -2654,7 +2951,7 @@ def _combo_params(settings: Mapping[str, object], fixture: str) -> Dict[str, obj
     node_fields = _style_field_names(NodeStyle)
     edge_fields = _style_field_names(EdgeStyle)
     for name, value in settings.items():
-        if name == "combo" or name == "cluster":
+        if name in COMBO_INTERNAL_FIELDS or name == "cluster":
             continue
         if name == "external_label_varied":
             if bool(value):
@@ -2719,6 +3016,18 @@ def _combo_params(settings: Mapping[str, object], fixture: str) -> Dict[str, obj
         # Pie charts need enough space to show slices clearly.
         node_block.setdefault("min_width", 120.0)
         node_block.setdefault("min_height", 80.0)
+    corner_radius_value = node_block.get("corner_radius")
+    if isinstance(corner_radius_value, (list, tuple)) and (
+        str(node_block.get("gradient", "none")) != "none"
+        or str(node_block.get("fill_pattern", "solid")) in {"pie", "striped", "hatched"}
+    ):
+        # The renderer's auto label plate assumes a scalar node radius.
+        # Provide an explicit plate here so tuple-valued corner radii remain
+        # compatible with gradient and patterned fills.
+        node_block.setdefault("text_background", "#FFFFFF")
+        node_block.setdefault("text_background_opacity", 0.92)
+        node_block.setdefault("text_background_padding", (6.0, 3.0))
+        node_block.setdefault("text_background_corner_radius", 4.0)
     if "opacity" in node_block:
         node_block.setdefault("border_opacity", float(node_block["opacity"]))
     if str(edge_block.get("color_gradient", "none")) == "source_to_target":
@@ -2731,9 +3040,13 @@ def _combo_params(settings: Mapping[str, object], fixture: str) -> Dict[str, obj
         edge_block.setdefault("taper_width_end", 1.0)
     if "crossing_style" in edge_block:
         edge_block.setdefault("crossing_size", 20.0)
-        # Crossing demos need slightly heavier strokes so the jump treatment
-        # remains visible after the audit card is downscaled.
-        edge_block.setdefault("width", max(float(settings.get("width", 4.0)), 4.0))
+        requested_width = float(edge_block.get("width", settings.get("width", 4.0)))
+        if bool(settings.get("preserve_crossing_width")):
+            edge_block["width"] = requested_width
+        else:
+            # Crossing demos need slightly heavier strokes so the jump treatment
+            # remains visible after the audit card is downscaled.
+            edge_block["width"] = max(requested_width, 4.0)
     if "width" in edge_block:
         edge_block["width"] = float(edge_block["width"])
     if "text_background" in node_block and node_block["text_background"]:
@@ -2830,7 +3143,7 @@ def _render_combo_card(item: ComboCardItem, output_root: Path) -> None:
     features = ", ".join(
         name.replace("_", " ")
         for name in item.spec.settings
-        if name not in {"combo"} and bool(item.spec.settings[name])
+        if name not in COMBO_INTERNAL_FIELDS and bool(item.spec.settings[name])
     )
     _draw_header(
         card,
@@ -3123,6 +3436,11 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                     GRAPHVIZ_SHAPE_MAP["roundrect"],
                 ),
                 _value(
+                    "arrow",
+                    "Arrow",
+                    {"node": {"shape": "arrow", "min_width": 152.0, "min_height": 78.0}},
+                ),
+                _value(
                     "ellipse",
                     "Ellipse",
                     {"node": {"shape": "ellipse", "min_width": 116.0, "min_height": 72.0}},
@@ -3354,6 +3672,74 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
         _spec(
             "node",
             "nodes/borders",
+            "corner_radius_per_corner",
+            ("corner_radius",),
+            "pair",
+            (
+                _value(
+                    "corner_radius_per_corner",
+                    "Per-Corner Radius",
+                    {
+                        "pair_layout": "horizontal",
+                        "pair_gap": 220.0,
+                        "hide_edges": True,
+                        "node_style_overrides": [
+                            {
+                                "shape": "roundrect",
+                                "corner_radius": 12.0,
+                                "min_width": 140.0,
+                                "min_height": 80.0,
+                            },
+                            {
+                                "shape": "roundrect",
+                                "corner_radius": (0.0, 24.0, 0.0, 24.0),
+                                "min_width": 140.0,
+                                "min_height": 80.0,
+                            },
+                        ],
+                        "node_labels": ["Uniform", "Per-corner"],
+                    },
+                ),
+            ),
+        ),
+        _spec(
+            "node",
+            "nodes/borders",
+            "scale_corner_radius",
+            ("corner_radius", "scale_corner_radius"),
+            "pair",
+            (
+                _value(
+                    "scale_corner_radius",
+                    "Scale Corner Radius",
+                    {
+                        "pair_layout": "horizontal",
+                        "pair_gap": 300.0,
+                        "hide_edges": True,
+                        "node_style_overrides": [
+                            {
+                                "shape": "roundrect",
+                                "scale_corner_radius": True,
+                                "corner_radius": 0.15,
+                                "min_width": 96.0,
+                                "min_height": 54.0,
+                            },
+                            {
+                                "shape": "roundrect",
+                                "scale_corner_radius": True,
+                                "corner_radius": 0.15,
+                                "min_width": 192.0,
+                                "min_height": 108.0,
+                            },
+                        ],
+                        "node_labels": ["Small", "Large"],
+                    },
+                ),
+            ),
+        ),
+        _spec(
+            "node",
+            "nodes/borders",
             "border_opacity",
             ("border_opacity",),
             "pair",
@@ -3416,6 +3802,45 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                     },
                 ),
             ),
+        ),
+        _spec(
+            "node",
+            "nodes/effects",
+            "bevel",
+            ("bevel", "bevel_intensity"),
+            "pair",
+            (
+                _value(
+                    "off",
+                    "Off",
+                    {
+                        "node": {
+                            "bevel": False,
+                            "fill": "#7FA7D2",
+                            "stroke": "#476E97",
+                            "font_color": "#FFFFFF",
+                            "min_width": 136.0,
+                            "min_height": 72.0,
+                        }
+                    },
+                ),
+                _value(
+                    "on",
+                    "On",
+                    {
+                        "node": {
+                            "bevel": True,
+                            "bevel_intensity": 0.35,
+                            "fill": "#7FA7D2",
+                            "stroke": "#476E97",
+                            "font_color": "#FFFFFF",
+                            "min_width": 136.0,
+                            "min_height": 72.0,
+                        }
+                    },
+                ),
+            ),
+            filename_prefix="bevel",
         ),
         _spec(
             "node",
@@ -4023,6 +4448,46 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
         _spec(
             "edge",
             "edges/styles",
+            "port_indicator",
+            ("port_indicator", "port_indicator_size"),
+            "pair",
+            (
+                _value(
+                    "circle",
+                    "Circle",
+                    {
+                        "pair_layout": "horizontal",
+                        "pair_gap": 260.0,
+                        "edge": {
+                            "arrow": "none",
+                            "routing": "straight",
+                            "width": 3.0,
+                            "port_indicator": "circle",
+                            "port_indicator_size": 4.0,
+                        },
+                    },
+                ),
+                _value(
+                    "diamond",
+                    "Diamond",
+                    {
+                        "pair_layout": "horizontal",
+                        "pair_gap": 260.0,
+                        "edge": {
+                            "arrow": "none",
+                            "routing": "straight",
+                            "width": 3.0,
+                            "port_indicator": "diamond",
+                            "port_indicator_size": 4.0,
+                        },
+                    },
+                ),
+            ),
+            filename_prefix="port_indicator",
+        ),
+        _spec(
+            "edge",
+            "edges/styles",
             "width",
             ("width",),
             "pair",
@@ -4114,6 +4579,11 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                     "sharp",
                     "Sharp",
                     {"edge": {"crossing_style": "sharp", "crossing_size": 10.0, "width": 3.0}},
+                ),
+                _value(
+                    "bridge",
+                    "Bridge",
+                    {"edge": {"crossing_style": "bridge", "crossing_size": 10.0, "width": 3.0}},
                 ),
             ),
             filename_prefix="crossing_style",

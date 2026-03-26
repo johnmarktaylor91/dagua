@@ -164,7 +164,7 @@ def test_semicircle_smoke_paths_build_with_multiple_orientations() -> None:
 
 
 def test_arrow_shape_uses_expected_vertices_and_closes() -> None:
-    """Arrow nodes should use the requested pentagon outline and close cleanly.
+    """Arrow nodes should use a clearly notched chevron outline and close cleanly.
 
     Returns
     -------
@@ -178,10 +178,11 @@ def test_arrow_shape_uses_expected_vertices_and_closes() -> None:
 
     assert path.codes[0] == path.MOVETO
     assert path.codes[-1] == path.CLOSEPOLY
-    assert path.vertices.shape[0] == 6
+    assert path.vertices.shape[0] == 7
     np.testing.assert_allclose(path.vertices[0], np.array([-5.0, 5.0]))
     np.testing.assert_allclose(path.vertices[1], np.array([2.5, 5.0]))
     np.testing.assert_allclose(path.vertices[2], np.array([5.0, 0.0]))
     np.testing.assert_allclose(path.vertices[3], np.array([2.5, -5.0]))
     np.testing.assert_allclose(path.vertices[4], np.array([-5.0, -5.0]))
+    np.testing.assert_allclose(path.vertices[5], np.array([-1.5, 0.0]))
     np.testing.assert_allclose(path.vertices[0], path.vertices[-1])
