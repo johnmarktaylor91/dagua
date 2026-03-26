@@ -7,6 +7,7 @@ import torch
 from dagua.eval.benchmark import (
     DEFAULT_COMPETITOR_ORDER,
     BenchmarkGraph,
+    BenchmarkResult,
     _build_results_payload,
     _competitor_signature,
     benchmark_run_status,
@@ -19,7 +20,7 @@ from dagua.eval.benchmark import (
 from dagua.eval.competitors import get_available_competitors
 from dagua.eval.competitors.dagua_competitor import DaguaCompetitor
 from dagua.eval.graphs import TestGraph
-from dagua.eval.report import generate_report
+from dagua.eval.report import generate_benchmark_markdown, generate_report
 from dagua.graph import DaguaGraph
 
 
@@ -62,7 +63,15 @@ def test_rare_suite_sizes_present():
 
 
 @pytest.mark.smoke
-def test_merge_latest_results_and_generate_report(tmp_path):
+def test_merge_latest_results_and_generate_report(tmp_path: Path) -> None:
+    """Generate the report artifacts and keep exclusion notes visible.
+
+    Returns
+    -------
+    None
+        This test asserts that the report pipeline emits the expected files and
+        aggregate exclusion note.
+    """
     output_dir = tmp_path / "eval_output"
     standard_run = output_dir / "benchmark_db" / "standard" / "2026-03-12T00:00:00+00:00"
     rare_run = output_dir / "benchmark_db" / "rare" / "2026-03-12T01:00:00+00:00"
@@ -196,6 +205,92 @@ def test_merge_latest_results_and_generate_report(tmp_path):
     assert (output_dir / "visuals" / "comparisons" / "residual_block_comparison.png").exists()
     assert (output_dir / "report" / "prose_prompt.md").exists()
     assert (output_dir / "report" / "review_round_1.json").exists()
+    tex_source = Path(artifacts["tex"]).read_text(encoding="utf-8")
+    assert (
+        "Averages are computed over successful runs only; 1 failed or skipped runs were excluded."
+        in tex_source
+    )
+
+
+@pytest.mark.smoke
+def test_generate_benchmark_markdown_includes_failure_analysis(tmp_path: Path) -> None:
+    """Benchmark markdown should list excluded runs and their recorded reasons.
+
+    Returns
+    -------
+    None
+        This test asserts that the markdown report includes failure summaries,
+        reason buckets, and useful per-cell failure labels.
+    """
+    output_path = tmp_path / "benchmark.md"
+    results = [
+        BenchmarkResult(
+            graph_name="graph_ok",
+            graph_nodes=128,
+            graph_edges=256,
+            competitor="dagua",
+            status="OK",
+            runtime_seconds=0.25,
+            metrics={"dag_consistency": 1.0},
+            composite_score=88.0,
+        ),
+        BenchmarkResult(
+            graph_name="graph_ok",
+            graph_nodes=128,
+            graph_edges=256,
+            competitor="graphviz_dot",
+            status="FAILED",
+            runtime_seconds=0.4,
+            metrics={},
+            composite_score=None,
+            reason="exception",
+            error="RuntimeError: CUDA out of memory",
+        ),
+        BenchmarkResult(
+            graph_name="graph_scale",
+            graph_nodes=5_000,
+            graph_edges=8_000,
+            competitor="graphviz_dot",
+            status="SKIPPED",
+            runtime_seconds=None,
+            metrics={},
+            composite_score=None,
+            reason="exceeds known limit",
+        ),
+        BenchmarkResult(
+            graph_name="graph_unknown",
+            graph_nodes=640,
+            graph_edges=900,
+            competitor="fruchterman_reingold",
+            status="FAILED",
+            runtime_seconds=0.7,
+            metrics={},
+            composite_score=None,
+        ),
+    ]
+
+    generate_benchmark_markdown(results, str(output_path))
+
+    report_text = output_path.read_text(encoding="utf-8")
+    assert (
+        "Averages computed over successful runs only. See Failure Analysis for excluded runs."
+        in report_text
+    )
+    assert "## Failure Analysis" in report_text
+    assert "3 of 4 total runs failed (75.0%)." in report_text
+    assert "**dagua** (0 failures / 1 graphs):" in report_text
+    assert (
+        "**graphviz_dot** (2 failures / 2 graphs):\n"
+        "- graph_ok: exception -- RuntimeError: CUDA out of memory\n"
+        "- graph_scale: exceeds known limit (graph has 5,000 nodes)"
+    ) in report_text
+    assert (
+        "**fruchterman_reingold** (1 failures / 1 graphs):\n- graph_unknown: unknown" in report_text
+    )
+    assert "| exception | 1 | graphviz_dot |" in report_text
+    assert "| exceeds known limit | 1 | graphviz_dot |" in report_text
+    assert "| unknown | 1 | fruchterman_reingold |" in report_text
+    assert "| graph_ok | 128 | 256 | 88.0 (0.25s) | - |" in report_text
 
 
 @pytest.mark.smoke
