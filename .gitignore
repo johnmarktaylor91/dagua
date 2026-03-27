@@ -97,6 +97,7 @@ dmypy.json
 /tests/test_output.log
 /benchmarks/results/
 /eval_output/
+/dagua/eval/_graph_cache/
 node_modules/
 aesthetic_review/
 
