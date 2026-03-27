@@ -12,6 +12,7 @@ import random
 import statistics
 import sys
 from collections import Counter, defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -1624,18 +1625,31 @@ def process_group(
 
     loaded_layouts: dict[str, list[LayoutRecord]] = {"orig": [], "reimpl": []}
     rejection_count = 0
+
+    # Parallel loading -- I/O bound so threads give ~4-8x speedup
+    load_tasks: list[tuple[str, Any]] = []
     for side in ("orig", "reimpl"):
         for record in sorted(
             records[side], key=lambda candidate: (candidate.seed is None, candidate.seed)
         ):
-            layout, rejection = load_layout(
+            load_tasks.append((side, record))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {
+            pool.submit(
+                load_layout,
                 record,
                 variant_id=variant.variant_id,
                 side=side,
                 input_dir=input_dir,
                 edge_index=edge_index,
                 node_sizes=node_sizes,
-            )
+            ): side
+            for side, record in load_tasks
+        }
+        for future in as_completed(futures):
+            side = futures[future]
+            layout, rejection = future.result()
             load_counter["files"] += 1
             if load_counter["files"] % PAIRWISE_PROGRESS_INTERVAL == 0:
                 print(
