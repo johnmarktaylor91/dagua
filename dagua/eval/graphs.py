@@ -13,12 +13,15 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Sequence, Set, Tuple, Union, overload
+from pathlib import Path
+from typing import Any, Callable, List, Optional, Sequence, Set, Tuple, Union, overload
 
 import torch
 
 from dagua.graph import DaguaGraph
 from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
+
+_GRAPH_CACHE_DIR = Path(__file__).with_name("_graph_cache")
 
 
 @dataclass
@@ -2201,6 +2204,88 @@ def _random_dag(n_nodes: int, n_edges: int, seed: int = 42) -> DaguaGraph:
 # ─── TorchLens Graph Extractors ──────────────────────────────────────────────
 
 
+def _load_cached_torchlens_graph(cache_path: Path) -> DaguaGraph:
+    """Load one cached TorchLens graph from disk.
+
+    Parameters
+    ----------
+    cache_path : Path
+        Cache file to deserialize.
+
+    Returns
+    -------
+    DaguaGraph
+        Cached graph instance.
+
+    Raises
+    ------
+    TypeError
+        If the cache payload is not a ``DaguaGraph``.
+    """
+    try:
+        graph = torch.load(cache_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        graph = torch.load(cache_path, map_location="cpu")
+    if not isinstance(graph, DaguaGraph):
+        raise TypeError(f"Unexpected TorchLens cache payload type: {type(graph)!r}")
+    return graph
+
+
+def _cached_torchlens_graph(name: str, graph_builder: Callable[[], DaguaGraph]) -> DaguaGraph:
+    """Load or generate a deterministic cached TorchLens graph.
+
+    Parameters
+    ----------
+    name : str
+        Stable benchmark graph name used for the cache filename.
+    graph_builder : Callable[[], DaguaGraph]
+        Callback that traces the model and constructs the graph on a cache miss.
+
+    Returns
+    -------
+    DaguaGraph
+        Cached or freshly generated graph instance.
+    """
+    cache_path = _GRAPH_CACHE_DIR / f"{name}.pt"
+    if cache_path.exists():
+        try:
+            return _load_cached_torchlens_graph(cache_path)
+        except Exception:
+            cache_path.unlink(missing_ok=True)
+
+    graph = graph_builder()
+    _GRAPH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    torch.save(graph, cache_path)
+    return graph
+
+
+def _trace_torchlens_graph(name: str, model: Any, inputs: Any, torchlens_module: Any) -> DaguaGraph:
+    """Trace a TorchLens model and cache the resulting graph.
+
+    Parameters
+    ----------
+    name : str
+        Stable graph name used for cache lookups.
+    model : Any
+        PyTorch module to trace.
+    inputs : Any
+        Input batch forwarded to the model trace.
+    torchlens_module : Any
+        Imported TorchLens module exposing ``log_forward_pass``.
+
+    Returns
+    -------
+    DaguaGraph
+        Cached graph for the traced model.
+    """
+    return _cached_torchlens_graph(
+        name,
+        lambda: DaguaGraph.from_torchlens(
+            torchlens_module.log_forward_pass(model, inputs, vis_mode="none")
+        ),
+    )
+
+
 def _torchlens_graphs() -> List[TestGraph]:
     """Extract test graphs from TorchLens model traces.
 
@@ -2224,8 +2309,7 @@ def _torchlens_graphs() -> List[TestGraph]:
             nn.Linear(10, 5),
         )
         x = torch.randn(1, 10)
-        log = tl.log_forward_pass(mlp_model, x, vis_mode="none")
-        g = DaguaGraph.from_torchlens(log)
+        g = _trace_torchlens_graph("tl_mlp_3layer", mlp_model, x, tl)
         graphs.append(
             TestGraph(
                 name="tl_mlp_3layer",
@@ -2251,8 +2335,7 @@ def _torchlens_graphs() -> List[TestGraph]:
             nn.Linear(32 * 8 * 8, 10),
         )
         x = torch.randn(1, 3, 32, 32)
-        log = tl.log_forward_pass(cnn_model, x, vis_mode="none")
-        g = DaguaGraph.from_torchlens(log)
+        g = _trace_torchlens_graph("tl_cnn_small", cnn_model, x, tl)
         graphs.append(
             TestGraph(
                 name="tl_cnn_small",
@@ -2291,8 +2374,7 @@ def _torchlens_graphs() -> List[TestGraph]:
             nn.Linear(16, 10),
         )
         x = torch.randn(1, 3, 32, 32)
-        log = tl.log_forward_pass(resnet_like_model, x, vis_mode="none")
-        g = DaguaGraph.from_torchlens(log)
+        g = _trace_torchlens_graph("tl_resnet_2block", resnet_like_model, x, tl)
         graphs.append(
             TestGraph(
                 name="tl_resnet_2block",
@@ -2312,8 +2394,7 @@ def _torchlens_graphs() -> List[TestGraph]:
         )
         transformer_model = nn.TransformerEncoder(layer, num_layers=1)
         x = torch.randn(1, 10, 64)
-        log = tl.log_forward_pass(transformer_model, x, vis_mode="none")
-        g = DaguaGraph.from_torchlens(log)
+        g = _trace_torchlens_graph("tl_transformer_1layer", transformer_model, x, tl)
         graphs.append(
             TestGraph(
                 name="tl_transformer_1layer",
@@ -2353,8 +2434,7 @@ def _torchlens_graphs() -> List[TestGraph]:
         try:
             nested_modules_model = nested_modules_cls()
             x = torch.randn(5)
-            log = tl.log_forward_pass(nested_modules_model, x, vis_mode="none")
-            g = DaguaGraph.from_torchlens(log)
+            g = _trace_torchlens_graph("tl_nested_modules", nested_modules_model, x, tl)
             graphs.append(
                 TestGraph(
                     name="tl_nested_modules",
@@ -2373,8 +2453,7 @@ def _torchlens_graphs() -> List[TestGraph]:
         try:
             branching_model = simple_branching_cls()
             x = torch.randn(5)
-            log = tl.log_forward_pass(branching_model, x, vis_mode="none")
-            g = DaguaGraph.from_torchlens(log)
+            g = _trace_torchlens_graph("tl_branching", branching_model, x, tl)
             graphs.append(
                 TestGraph(
                     name="tl_branching",
@@ -2393,8 +2472,7 @@ def _torchlens_graphs() -> List[TestGraph]:
         try:
             diamond_loop_model = diamond_loop_cls()
             x = torch.randn(5)
-            log = tl.log_forward_pass(diamond_loop_model, x, vis_mode="none")
-            g = DaguaGraph.from_torchlens(log)
+            g = _trace_torchlens_graph("tl_diamond_loop", diamond_loop_model, x, tl)
             graphs.append(
                 TestGraph(
                     name="tl_diamond_loop",
@@ -2413,8 +2491,7 @@ def _torchlens_graphs() -> List[TestGraph]:
         try:
             long_loop_model = long_loop_cls()
             x = torch.randn(5)
-            log = tl.log_forward_pass(long_loop_model, x, vis_mode="none")
-            g = DaguaGraph.from_torchlens(log)
+            g = _trace_torchlens_graph("tl_long_loop", long_loop_model, x, tl)
             graphs.append(
                 TestGraph(
                     name="tl_long_loop",
@@ -2434,8 +2511,7 @@ def _torchlens_graphs() -> List[TestGraph]:
 
         aspp_model = ASPPModel(in_channels=3, mid=8, rates=(1, 6, 12))
         x = torch.randn(2, 3, 32, 32)
-        log = tl.log_forward_pass(aspp_model, x, vis_mode="none")
-        g = DaguaGraph.from_torchlens(log)
+        g = _trace_torchlens_graph("tl_aspp", aspp_model, x, tl)
         graphs.append(
             TestGraph(
                 name="tl_aspp",
@@ -2455,8 +2531,7 @@ def _torchlens_graphs() -> List[TestGraph]:
 
         fpn_model = FeaturePyramidNet()
         x = torch.randn(2, 3, 32, 32)
-        log = tl.log_forward_pass(fpn_model, x, vis_mode="none")
-        g = DaguaGraph.from_torchlens(log)
+        g = _trace_torchlens_graph("tl_fpn", fpn_model, x, tl)
         graphs.append(
             TestGraph(
                 name="tl_fpn",
@@ -2476,8 +2551,7 @@ def _torchlens_graphs() -> List[TestGraph]:
 
         attention_model = _AttentionBlock(dim=64)
         x = torch.randn(2, 10, 64)
-        log = tl.log_forward_pass(attention_model, x, vis_mode="none")
-        g = DaguaGraph.from_torchlens(log)
+        g = _trace_torchlens_graph("tl_attention", attention_model, x, tl)
         graphs.append(
             TestGraph(
                 name="tl_attention",
@@ -2499,8 +2573,7 @@ def _torchlens_graphs() -> List[TestGraph]:
             target_nodes=50, nesting_depth=2, seed=42, branch_probability=0.3, hidden_dim=64
         )
         x = torch.randn(2, 64)
-        log = tl.log_forward_pass(random_graph_model, x, vis_mode="none")
-        g = DaguaGraph.from_torchlens(log)
+        g = _trace_torchlens_graph("tl_random_50", random_graph_model, x, tl)
         graphs.append(
             TestGraph(
                 name="tl_random_50",

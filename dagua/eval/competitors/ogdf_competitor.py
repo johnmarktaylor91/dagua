@@ -64,6 +64,44 @@ def _graph_edges(graph: DaguaGraph) -> list[list[int]]:
     ]
 
 
+def _is_connected_graph(graph: DaguaGraph) -> bool:
+    """Return whether the undirected view of ``graph`` is connected.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph to test.
+
+    Returns
+    -------
+    bool
+        ``True`` when every node is reachable from node zero.
+    """
+    if graph.num_nodes <= 1:
+        return True
+    if graph.edge_index.numel() == 0:
+        return False
+
+    adjacency: list[list[int]] = [[] for _ in range(graph.num_nodes)]
+    for source, target in zip(graph.edge_index[0].tolist(), graph.edge_index[1].tolist()):
+        adjacency[source].append(target)
+        adjacency[target].append(source)
+
+    visited = [False] * graph.num_nodes
+    queue = [0]
+    visited[0] = True
+    head = 0
+    while head < len(queue):
+        node_idx = queue[head]
+        head += 1
+        for neighbor_idx in adjacency[node_idx]:
+            if visited[neighbor_idx]:
+                continue
+            visited[neighbor_idx] = True
+            queue.append(neighbor_idx)
+    return all(visited)
+
+
 def _run_ogdf(graph: DaguaGraph, algorithm: str, timeout: float) -> torch.Tensor:
     """Run an OGDF algorithm through the standalone subprocess wrapper.
 
@@ -166,6 +204,14 @@ class _OGDFBase(CompetitorBase):
 
         start = time.perf_counter()
         try:
+            if self.algorithm == "pivot_mds" and not _is_connected_graph(graph):
+                elapsed = time.perf_counter() - start
+                return CompetitorResult(
+                    name=self.name,
+                    pos=None,
+                    runtime_seconds=elapsed,
+                    error="requires connected graph",
+                )
             pos = _run_ogdf(graph, self.algorithm, timeout)
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)

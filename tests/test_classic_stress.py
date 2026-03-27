@@ -61,18 +61,29 @@ def test_layout_stress_sgd_is_deterministic_for_same_seed() -> None:
     assert torch.allclose(positions_a, positions_b)
 
 
-def test_layout_stress_sgd_rejects_disconnected_components() -> None:
-    """Disconnected graphs should raise, matching ``s_gd2``."""
+def test_layout_stress_sgd_falls_back_on_disconnected_components() -> None:
+    """Disconnected graphs should return a deterministic fallback layout."""
     edge_index = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
 
-    with pytest.raises(ValueError, match="connected graph"):
-        layout_stress_sgd(
-            edge_index=edge_index,
-            num_nodes=4,
-            steps=180,
-            seed=11,
-            sample_size=64,
-        )
+    positions_a = layout_stress_sgd(
+        edge_index=edge_index,
+        num_nodes=4,
+        steps=180,
+        seed=11,
+        sample_size=64,
+    )
+    positions_b = layout_stress_sgd(
+        edge_index=edge_index,
+        num_nodes=4,
+        steps=180,
+        seed=11,
+        sample_size=64,
+    )
+
+    assert isinstance(positions_a, torch.Tensor)
+    assert positions_a.shape == (4, 2)
+    assert torch.isfinite(positions_a).all()
+    torch.testing.assert_close(positions_a, positions_b)
 
 
 def test_layout_stress_sgd_trace_mode_returns_snapshots() -> None:
