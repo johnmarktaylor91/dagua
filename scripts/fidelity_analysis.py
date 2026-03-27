@@ -8,6 +8,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import random
 import statistics
 import sys
@@ -2382,7 +2383,6 @@ def run_analysis(
     per_graph_rows: list[dict[str, Any]] = []
     per_seed_rows: list[dict[str, Any]] = []
     pairwise_rows: list[dict[str, Any]] = []
-    load_counter: Counter[str] = Counter()
 
     sorted_groups = sorted(
         groups.items(),
@@ -2393,25 +2393,63 @@ def run_analysis(
         ),
     )
     variant_by_id = {variant.variant_id: variant for variant in VARIANT_REGISTRY}
+
+    # Build task list for parallel execution
+    tasks = []
     for (variant_id, graph_name), grouped_records in sorted_groups:
-        variant = variant_by_id[variant_id]
-        if graph_name not in graph_registry:
+        variant = variant_by_id.get(variant_id)
+        if variant is None or graph_name not in graph_registry:
             continue
-        group_result = process_group(
+        tasks.append((variant, graph_name, grouped_records, graph_registry[graph_name]))
+
+    num_workers = min(os.cpu_count() or 1, 12)
+    print(f"[fidelity] Processing {len(tasks)} groups with {num_workers} workers", file=sys.stderr)
+
+    def _process_one(args: tuple) -> GroupResult:
+        variant, gname, records, test_graph = args
+        # Each worker gets its own dummy pvalue_buckets and load_counter
+        local_buckets = {
+            "ks": PValueBucket(),
+            "mannwhitney": PValueBucket(),
+            "tost_0_5x": PValueBucket(),
+            "tost_1x": PValueBucket(),
+            "tost_1_5x": PValueBucket(),
+            "tost_2x": PValueBucket(),
+        }
+        local_counter: Counter[str] = Counter()
+        return process_group(
             variant=variant,
-            graph_name=graph_name,
-            records=grouped_records,
+            graph_name=gname,
+            records=records,
             input_dir=input_dir,
-            test_graph=graph_registry[graph_name],
-            row_index=len(per_graph_rows),
-            pvalue_buckets=pvalue_buckets,
+            test_graph=test_graph,
+            row_index=0,
+            pvalue_buckets=local_buckets,
             bootstrap_samples=bootstrap_samples,
-            load_counter=load_counter,
+            load_counter=local_counter,
         )
-        group_result.row["_rejection_count"] = group_result.rejection_count
-        per_graph_rows.append(group_result.row)
-        per_seed_rows.extend(group_result.seed_rows)
-        pairwise_rows.extend(group_result.pairwise_rows)
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        futures = {pool.submit(_process_one, task): task for task in tasks}
+        for future in as_completed(futures):
+            group_result = future.result()
+            group_result.row["_rejection_count"] = group_result.rejection_count
+            # Re-assign row_index sequentially
+            group_result.row["_row_index"] = len(per_graph_rows)
+            per_graph_rows.append(group_result.row)
+            per_seed_rows.extend(group_result.seed_rows)
+            pairwise_rows.extend(group_result.pairwise_rows)
+            completed += 1
+            if completed % 100 == 0:
+                print(f"[fidelity] {completed}/{len(tasks)} groups done", file=sys.stderr)
+
+    # Re-accumulate p-values from per_graph_rows into the real buckets
+    for row_idx, row in enumerate(per_graph_rows):
+        for bucket_name, bucket in pvalue_buckets.items():
+            raw_key = f"{bucket_name}_pvalue_raw"
+            if raw_key in row and not math.isnan(float(row.get(raw_key, math.nan))):
+                bucket.add(row_idx, float(row[raw_key]))
 
     apply_bh_correction(per_graph_rows, pvalue_buckets)
     for row in per_graph_rows:
