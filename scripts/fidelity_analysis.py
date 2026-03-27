@@ -107,7 +107,7 @@ class LayoutRecord:
     metrics: dict[str, float]
 
 
-@dataclass(frozen=True)
+@dataclass
 class ResultRecord:
     """Minimal benchmark record used by the fidelity analysis.
 
