@@ -275,6 +275,11 @@ def parse_args() -> argparse.Namespace:
         default=POWER_SIMULATIONS,
         help="Simulation count for the Mann-Whitney minimum detectable effect estimate",
     )
+    parser.add_argument(
+        "--skip-metrics",
+        action="store_true",
+        help="Skip quality metrics computation (Procrustes + stats only, much faster)",
+    )
     return parser.parse_args()
 
 
@@ -799,15 +804,19 @@ def load_layout(
     rejection = validate_positions(positions, int(node_sizes.shape[0]))
     if rejection is not None:
         return None, rejection
-    metrics = {
-        metric_name: float(metric_value)
-        for metric_name, metric_value in quick(
-            positions,
-            edge_index,
-            node_sizes=node_sizes,
-        ).items()
-        if metric_name in QUALITY_METRICS
-    }
+    skip_metrics = getattr(load_layout, "_skip_metrics", False)
+    if skip_metrics:
+        metrics = {}
+    else:
+        metrics = {
+            metric_name: float(metric_value)
+            for metric_name, metric_value in quick(
+                positions,
+                edge_index,
+                node_sizes=node_sizes,
+            ).items()
+            if metric_name in QUALITY_METRICS
+        }
     return (
         LayoutRecord(
             graph_name=record.graph_name,
@@ -2313,6 +2322,7 @@ def run_analysis(
     max_graphs: Optional[int],
     bootstrap_samples: int,
     power_simulations: int,
+    skip_metrics: bool = False,
 ) -> None:
     """Run the end-to-end fidelity analysis.
 
@@ -2350,6 +2360,9 @@ def run_analysis(
         h5_file = h5py.File(str(h5_path), "r")
         load_layout._h5_file = h5_file  # type: ignore[attr-defined]
         print(f"[fidelity] Using HDF5 cache: {h5_path}", file=sys.stderr)
+    if skip_metrics:
+        load_layout._skip_metrics = True  # type: ignore[attr-defined]
+        print("[fidelity] Skipping quality metrics (Procrustes only)", file=sys.stderr)
     else:
         print(
             "[fidelity] No HDF5 cache found. Loading individual .pt files. "
@@ -2421,6 +2434,7 @@ def main() -> None:
         max_graphs=args.max_graphs,
         bootstrap_samples=args.bootstrap_samples,
         power_simulations=args.power_simulations,
+        skip_metrics=args.skip_metrics,
     )
 
 
