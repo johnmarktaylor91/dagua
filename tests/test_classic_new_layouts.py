@@ -205,6 +205,16 @@ def test_reingold_tilford_no_overlap() -> None:
         assert left_max < right_min, parent_idx
 
 
+def test_reingold_tilford_handles_deep_chain_iteratively() -> None:
+    """Deep trees should no longer depend on Python recursion depth."""
+    edge_index = _path_edge_index(1000)
+
+    positions = layout_reingold_tilford(edge_index=edge_index, num_nodes=1000)
+
+    assert positions.shape == (1000, 2)
+    assert torch.isfinite(positions).all()
+
+
 def test_spectral_eigenvector_correctness() -> None:
     """Default spectral output should match the symmetric normalized Laplacian basis."""
     edge_index = _path_edge_index(6)

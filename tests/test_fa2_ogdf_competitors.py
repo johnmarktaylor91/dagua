@@ -211,6 +211,18 @@ def test_ogdf_pivot_mds_layout() -> None:
     assert result.error is None
 
 
+def test_ogdf_pivot_mds_rejects_disconnected_graphs() -> None:
+    """Pivot-MDS should skip disconnected graphs before invoking OGDF."""
+    graph = DaguaGraph()
+    graph.add_node("0")
+    graph.add_node("1")
+
+    result = OGDFPivotMDS().layout(graph, timeout=30.0)
+
+    assert result.pos is None
+    assert result.error == "requires connected graph"
+
+
 @pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
 def test_ogdf_sugiyama_layout() -> None:
     """The Sugiyama adapter should return positions for a small graph.

@@ -96,6 +96,7 @@ def test_competitor_max_node_limits_match_regressions() -> None:
     competitors = {competitor.name: competitor for competitor in get_competitors()}
 
     assert competitors["classic_davidson_harel"].max_nodes == 50
+    assert competitors["classic_stress_maj"].max_nodes == 500
     assert competitors["elk_layered"].max_nodes == 15_000
 
 
