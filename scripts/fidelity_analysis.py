@@ -133,6 +133,7 @@ class ResultRecord:
     status: str
     runtime_seconds: Optional[float]
     positions_file: Optional[str]
+    result_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -417,8 +418,14 @@ def load_results(path: Path) -> dict[str, ResultRecord]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"Expected a JSON object in {path}")
+
+    def _with_key(key: str, value: Mapping[str, object]) -> ResultRecord:
+        rec = result_record_from_dict(value)
+        rec.result_key = key
+        return rec
+
     return {
-        str(key): result_record_from_dict(value)
+        str(key): _with_key(str(key), value)
         for key, value in payload.items()
         if isinstance(value, Mapping)
     }
@@ -772,14 +779,23 @@ def load_layout(
     """
     if record.positions_file is None:
         return None, "missing_positions_file"
-    path = input_dir / record.positions_file
-    try:
-        tensor = torch.load(path, map_location="cpu")
-    except Exception:
-        return None, "load_failure"
-    if not isinstance(tensor, torch.Tensor):
-        return None, "not_tensor"
-    positions = tensor.detach().to(dtype=torch.float32, device="cpu")
+    # Try HDF5 first (fast), fall back to individual .pt files
+    h5_file = getattr(load_layout, "_h5_file", None)
+    record_key = record.result_key
+    if h5_file is not None and record_key and record_key in h5_file:
+        try:
+            positions = torch.from_numpy(h5_file[record_key][:]).to(dtype=torch.float32)
+        except Exception:
+            return None, "h5_load_failure"
+    else:
+        path = input_dir / record.positions_file
+        try:
+            tensor = torch.load(path, map_location="cpu")
+        except Exception:
+            return None, "load_failure"
+        if not isinstance(tensor, torch.Tensor):
+            return None, "not_tensor"
+        positions = tensor.detach().to(dtype=torch.float32, device="cpu")
     rejection = validate_positions(positions, int(node_sizes.shape[0]))
     if rejection is not None:
         return None, rejection
@@ -810,7 +826,13 @@ def fidelity_procrustes(
     pos_a: torch.Tensor,
     pos_b: torch.Tensor,
 ) -> tuple[float, float, bool, torch.Tensor]:
-    """Align two layouts without scale normalization and without reflection.
+    """Align two layouts WITH scale normalization, without reflection.
+
+    Both layouts are centered and normalized to unit Frobenius norm before
+    alignment. This makes the RMSD measure pure shape difference, invariant
+    to the arbitrary coordinate scale each implementation uses.
+
+    Scale ratio is reported separately as a diagnostic.
 
     Parameters
     ----------
@@ -822,13 +844,20 @@ def fidelity_procrustes(
     Returns
     -------
     tuple[float, float, bool, torch.Tensor]
-        RMSD after proper-rotation alignment, scale ratio, reflection-help flag,
-        and per-node displacements.
+        RMSD after scale-normalized proper-rotation alignment, scale ratio
+        (informational), reflection-help flag, and per-node displacements.
     """
     a_centered = pos_a - pos_a.mean(dim=0, keepdim=True)
     b_centered = pos_b - pos_b.mean(dim=0, keepdim=True)
-    denom = float(a_centered.norm().item())
-    scale_ratio = float(b_centered.norm().item() / denom) if denom > 0.0 else math.nan
+    norm_a = float(a_centered.norm().item())
+    norm_b = float(b_centered.norm().item())
+    scale_ratio = (norm_b / norm_a) if norm_a > 0.0 else math.nan
+
+    # Normalize to unit Frobenius norm -- makes RMSD scale-invariant
+    if norm_a > 0.0:
+        a_centered = a_centered / norm_a
+    if norm_b > 0.0:
+        b_centered = b_centered / norm_b
 
     covariance = a_centered.t() @ b_centered
     left_singular, _, right_singular_t = torch.linalg.svd(covariance)
@@ -2311,6 +2340,22 @@ def run_analysis(
     graph_filter = selected_graph_names(records, max_graphs)
     graph_registry = load_graph_registry()
     groups = build_variant_groups(records, graph_filter)
+
+    # Use HDF5 for fast loading if available
+    h5_path = input_dir / "positions.h5"
+    h5_file = None
+    if h5_path.exists():
+        import h5py
+
+        h5_file = h5py.File(str(h5_path), "r")
+        load_layout._h5_file = h5_file  # type: ignore[attr-defined]
+        print(f"[fidelity] Using HDF5 cache: {h5_path}", file=sys.stderr)
+    else:
+        print(
+            "[fidelity] No HDF5 cache found. Loading individual .pt files. "
+            "Run scripts/consolidate_positions_hdf5.py to speed this up.",
+            file=sys.stderr,
+        )
     pvalue_buckets = {
         "ks": PValueBucket(),
         "mannwhitney": PValueBucket(),
