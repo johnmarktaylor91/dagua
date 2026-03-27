@@ -924,7 +924,9 @@ def collect_metric_values(layouts: Sequence[LayoutRecord], metric_name: str) -> 
     numpy.ndarray
         Metric values as a ``float64`` array.
     """
-    return np.asarray([layout.metrics[metric_name] for layout in layouts], dtype=np.float64)
+    return np.asarray(
+        [layout.metrics.get(metric_name, math.nan) for layout in layouts], dtype=np.float64
+    )
 
 
 def cohens_d(sample_a: np.ndarray, sample_b: np.ndarray) -> float:
@@ -1351,7 +1353,7 @@ def graph_metrics_summary(
     tuple[float, float]
         Mean and sample standard deviation.
     """
-    values = [layout.metrics[metric_name] for layout in layouts]
+    values = [layout.metrics.get(metric_name, math.nan) for layout in layouts]
     return safe_mean(values), safe_std(values)
 
 
@@ -1744,7 +1746,7 @@ def process_group(
                         "nearest_procrustes": math.nan,
                     }
                     for metric_name in QUALITY_METRICS:
-                        seed_row[metric_name] = layout.metrics[metric_name]
+                        seed_row[metric_name] = layout.metrics.get(metric_name, math.nan)
                     seed_rows.append(seed_row)
             return GroupResult(
                 row=row,
@@ -1818,7 +1820,7 @@ def process_group(
                     "nearest_procrustes": nearest_value,
                 }
                 for metric_name in QUALITY_METRICS:
-                    seed_row[metric_name] = layout.metrics[metric_name]
+                    seed_row[metric_name] = layout.metrics.get(metric_name, math.nan)
                 seed_rows.append(seed_row)
         add_metric_tests_to_row(
             row=row,
@@ -1899,17 +1901,17 @@ def process_group(
             "nearest_procrustes": nearest_value,
         }
         for metric_name in QUALITY_METRICS:
-            seed_row[metric_name] = layout.metrics[metric_name]
+            seed_row[metric_name] = layout.metrics.get(metric_name, math.nan)
             if layout.side == "orig":
-                row[f"{metric_name}_orig_mean"] = layout.metrics[metric_name]
+                row[f"{metric_name}_orig_mean"] = layout.metrics.get(metric_name, math.nan)
                 row[f"{metric_name}_orig_std"] = 0.0
             else:
-                row[f"{metric_name}_reimpl_mean"] = layout.metrics[metric_name]
+                row[f"{metric_name}_reimpl_mean"] = layout.metrics.get(metric_name, math.nan)
                 row[f"{metric_name}_reimpl_std"] = 0.0
         seed_rows.append(seed_row)
     for metric_name in QUALITY_METRICS:
-        original_value = original_layout.metrics[metric_name]
-        reimpl_value = reimpl_layout.metrics[metric_name]
+        original_value = original_layout.metrics.get(metric_name, math.nan)
+        reimpl_value = reimpl_layout.metrics.get(metric_name, math.nan)
         delta_value = reimpl_value - original_value
         row[f"{metric_name}_cohens_d"] = (
             0.0 if abs(delta_value) < 1e-12 else math.copysign(math.inf, delta_value)
