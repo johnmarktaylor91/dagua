@@ -785,10 +785,13 @@ def load_layout(
     """
     if record.positions_file is None:
         return None, "missing_positions_file"
-    # Try HDF5 first (fast), fall back to individual .pt files
+    # Try in-memory cache first, then HDF5, then individual .pt files
+    positions_cache = getattr(load_layout, "_positions_cache", None)
     h5_file = getattr(load_layout, "_h5_file", None)
     record_key = record.result_key
-    if h5_file is not None and record_key and record_key in h5_file:
+    if positions_cache is not None and record_key and record_key in positions_cache:
+        positions = positions_cache[record_key]
+    elif h5_file is not None and record_key and record_key in h5_file:
         try:
             positions = torch.from_numpy(h5_file[record_key][:]).to(dtype=torch.float32)
         except Exception:
@@ -2405,9 +2408,22 @@ def run_analysis(
     num_workers = min(os.cpu_count() or 1, 12)
     print(f"[fidelity] Processing {len(tasks)} groups with {num_workers} workers", file=sys.stderr)
 
+    # Pre-load ALL positions into memory from HDF5 (fast, ~30s for 1.4GB)
+    # Then workers just index into the dict -- no file I/O during processing
+    if h5_file is not None:
+        print("[fidelity] Pre-loading all positions from HDF5 into memory...", file=sys.stderr)
+
+        _all_positions: dict[str, torch.Tensor] = {}
+        for key in h5_file:
+            _all_positions[key] = torch.from_numpy(h5_file[key][:]).to(dtype=torch.float32)
+        print(f"[fidelity] Loaded {len(_all_positions)} positions into memory", file=sys.stderr)
+        h5_file.close()
+        # Monkey-patch load_layout to use in-memory dict
+        load_layout._h5_file = None  # type: ignore[attr-defined]
+        load_layout._positions_cache = _all_positions  # type: ignore[attr-defined]
+
     def _process_one(args: tuple) -> GroupResult:
         variant, gname, records, test_graph = args
-        # Each worker gets its own dummy pvalue_buckets and load_counter
         local_buckets = {
             "ks": PValueBucket(),
             "mannwhitney": PValueBucket(),
@@ -2430,12 +2446,13 @@ def run_analysis(
         )
 
     completed = 0
+    # Use threads -- positions are pre-loaded so no GIL contention on I/O
+    # The SVD/numpy work releases the GIL
     with ThreadPoolExecutor(max_workers=num_workers) as pool:
         futures = {pool.submit(_process_one, task): task for task in tasks}
         for future in as_completed(futures):
             group_result = future.result()
             group_result.row["_rejection_count"] = group_result.rejection_count
-            # Re-assign row_index sequentially
             group_result.row["_row_index"] = len(per_graph_rows)
             per_graph_rows.append(group_result.row)
             per_seed_rows.extend(group_result.seed_rows)
