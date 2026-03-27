@@ -989,7 +989,7 @@ class ClassicStressMajorization(_ClassicBase):
     """Competitor wrapper for the dense stress-majorization reimplementation."""
 
     name = "classic_stress_maj"
-    max_nodes = 1_500
+    max_nodes = 500
 
     def layout(
         self,

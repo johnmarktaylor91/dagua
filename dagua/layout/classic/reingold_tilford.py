@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections import deque
 from typing import Optional
 
@@ -138,17 +139,17 @@ def _bfs_forest(
 
 
 def _assign_preliminary_x(
-    node_idx: int,
+    root_idx: int,
     children: list[list[int]],
     preliminary_x: list[float],
     next_leaf_x: list[float],
 ) -> tuple[float, float]:
-    """Assign tidy x-coordinates by centering each parent over its children.
+    """Assign tidy x-coordinates using an iterative post-order traversal.
 
     Parameters
     ----------
-    node_idx : int
-        Node being laid out.
+    root_idx : int
+        Root node of the subtree being laid out.
     children : list[list[int]]
         BFS-forest child lists.
     preliminary_x : list[float]
@@ -159,21 +160,52 @@ def _assign_preliminary_x(
     Returns
     -------
     tuple[float, float]
-        Inclusive ``(min_x, max_x)`` span of the node's subtree.
+        Inclusive ``(min_x, max_x)`` span of the root subtree.
     """
-    if not children[node_idx]:
-        preliminary_x[node_idx] = next_leaf_x[0]
-        next_leaf_x[0] += 1.0
-        return preliminary_x[node_idx], preliminary_x[node_idx]
+    subtree_spans: dict[int, tuple[float, float]] = {}
+    for node_idx in _postorder_iterative(root_idx, children):
+        if not children[node_idx]:
+            preliminary_x[node_idx] = next_leaf_x[0]
+            next_leaf_x[0] += 1.0
+            subtree_spans[node_idx] = (preliminary_x[node_idx], preliminary_x[node_idx])
+            continue
 
-    child_spans = [
-        _assign_preliminary_x(child_idx, children, preliminary_x, next_leaf_x)
-        for child_idx in children[node_idx]
-    ]
-    first_child = children[node_idx][0]
-    last_child = children[node_idx][-1]
-    preliminary_x[node_idx] = 0.5 * (preliminary_x[first_child] + preliminary_x[last_child])
-    return child_spans[0][0], child_spans[-1][1]
+        first_child = children[node_idx][0]
+        last_child = children[node_idx][-1]
+        preliminary_x[node_idx] = 0.5 * (preliminary_x[first_child] + preliminary_x[last_child])
+        subtree_spans[node_idx] = (
+            subtree_spans[first_child][0],
+            subtree_spans[last_child][1],
+        )
+    return subtree_spans[root_idx]
+
+
+def _postorder_iterative(root: int, children: list[list[int]]) -> list[int]:
+    """Return an iterative post-order traversal for one rooted subtree.
+
+    Parameters
+    ----------
+    root : int
+        Root node of the subtree.
+    children : list[list[int]]
+        Child lists indexed by node id.
+
+    Returns
+    -------
+    list[int]
+        Node ids in post-order.
+    """
+    stack: list[tuple[int, bool]] = [(root, False)]
+    traversal: list[int] = []
+    while stack:
+        node_idx, processed = stack.pop()
+        if processed:
+            traversal.append(node_idx)
+            continue
+        stack.append((node_idx, True))
+        for child_idx in reversed(children[node_idx]):
+            stack.append((child_idx, False))
+    return traversal
 
 
 def layout_reingold_tilford(
@@ -227,6 +259,7 @@ def layout_reingold_tilford(
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     if num_nodes == 0:
         return torch.empty((0, 2), dtype=torch.float32, device=device)
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), num_nodes * 2))
 
     roots, children, depths = _bfs_forest(edge_index=edge_index, num_nodes=num_nodes)
     sibling_spacing = _node_spacing(node_sizes=node_sizes, axis=0, default=1.0)

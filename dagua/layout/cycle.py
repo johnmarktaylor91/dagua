@@ -87,3 +87,132 @@ def make_acyclic(edge_index: torch.Tensor, back_edge_mask: torch.Tensor) -> torc
             edge_index[0, back_edge_mask],
         )
     return result
+
+
+def _is_acyclic(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Return whether ``edge_index`` admits a topological ordering.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    bool
+        ``True`` when Kahn's algorithm can process every node.
+    """
+    if num_nodes <= 1 or edge_index.numel() == 0:
+        return True
+
+    children: list[list[int]] = [[] for _ in range(num_nodes)]
+    in_degree = [0] * num_nodes
+    for source, target in zip(edge_index[0].tolist(), edge_index[1].tolist()):
+        children[source].append(target)
+        in_degree[target] += 1
+
+    ready = [node_idx for node_idx, degree in enumerate(in_degree) if degree == 0]
+    processed = 0
+    head = 0
+    while head < len(ready):
+        node_idx = ready[head]
+        head += 1
+        processed += 1
+        for child_idx in children[node_idx]:
+            in_degree[child_idx] -= 1
+            if in_degree[child_idx] == 0:
+                ready.append(child_idx)
+    return processed == num_nodes
+
+
+def _greedy_fas(edge_index: torch.Tensor, num_nodes: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reverse a greedy feedback-arc set to force an acyclic orientation.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        ``(acyclic_edges, reversed_mask)`` where ``reversed_mask`` marks the
+        input edges flipped to align with the greedy node order.
+    """
+    num_edges = int(edge_index.shape[1])
+    if num_nodes <= 1 or num_edges == 0:
+        return edge_index.clone(), torch.zeros((num_edges,), dtype=torch.bool)
+
+    outgoing_edges: list[list[int]] = [[] for _ in range(num_nodes)]
+    incoming_edges: list[list[int]] = [[] for _ in range(num_nodes)]
+    sources = edge_index[0].tolist()
+    targets = edge_index[1].tolist()
+    for edge_idx, (source, target) in enumerate(zip(sources, targets)):
+        outgoing_edges[source].append(edge_idx)
+        incoming_edges[target].append(edge_idx)
+
+    active_nodes = [True] * num_nodes
+    active_edges = [True] * num_edges
+    order: list[int] = []
+
+    for _ in range(num_nodes):
+        best_node = -1
+        best_score: tuple[int, int] | None = None
+        for node_idx in range(num_nodes):
+            if not active_nodes[node_idx]:
+                continue
+            in_degree = sum(1 for edge_idx in incoming_edges[node_idx] if active_edges[edge_idx])
+            out_degree = sum(1 for edge_idx in outgoing_edges[node_idx] if active_edges[edge_idx])
+            score = (in_degree - out_degree, -node_idx)
+            if best_score is None or score > best_score:
+                best_node = node_idx
+                best_score = score
+
+        if best_node < 0:
+            break
+
+        order.append(best_node)
+        active_nodes[best_node] = False
+        for edge_idx in incoming_edges[best_node]:
+            active_edges[edge_idx] = False
+        for edge_idx in outgoing_edges[best_node]:
+            active_edges[edge_idx] = False
+
+    order_index = {node_idx: order_pos for order_pos, node_idx in enumerate(order)}
+    reversed_mask = torch.tensor(
+        [order_index[source] > order_index[target] for source, target in zip(sources, targets)],
+        dtype=torch.bool,
+    )
+    return make_acyclic(edge_index, reversed_mask), reversed_mask
+
+
+def make_acyclic_robust(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Break cycles with a DFS pass and a greedy fallback for residual cycles.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        ``(acyclic_edges, reversed_mask)`` aligned to the input edge order.
+    """
+    if edge_index.numel() == 0:
+        return edge_index.clone(), torch.zeros((0,), dtype=torch.bool)
+
+    back_edge_mask = detect_back_edges(edge_index, num_nodes)
+    acyclic_edges = make_acyclic(edge_index, back_edge_mask)
+    if _is_acyclic(acyclic_edges, num_nodes):
+        return acyclic_edges, back_edge_mask.to(dtype=torch.bool)
+    return _greedy_fas(acyclic_edges, num_nodes)
