@@ -117,9 +117,11 @@ def _compat_criteria_patches() -> Any:
         if sample is not None:
             edges = sample
         elif sampleSize is not None:
-            edges = _random.sample(list(G.edges), min(sampleSize, len(G.edges)))
+            edges = _random.sample(list(G.edges), min(sampleSize, max(len(G.edges), 1)))
         else:
             edges = list(G.edges)
+        if not edges:
+            return _torch.zeros((), dtype=pos.dtype, device=pos.device)
 
         sourceIndices, targetIndices = zip(*[[k2i[e0], k2i[e1]] for e0, e1 in edges])
         source = pos[list(sourceIndices), :]
@@ -321,10 +323,18 @@ class SGD2MultiRef(CompetitorBase):
             max_iter = int(optimize_kwargs.get("max_iter", 2000))
             optimize_kwargs.setdefault("evaluate_interval", max_iter)
             optimize_kwargs.setdefault("evaluate", {"stress"})
+            optimize_kwargs["grad_clamp"] = 5.0
 
             gd2 = GD2(G_nx)
             with _compat_reduce_lr_on_plateau(), _compat_criteria_patches():
                 gd2.optimize(**optimize_kwargs)
+            if torch.isnan(gd2.pos).any():
+                return CompetitorResult(
+                    name=self.name,
+                    pos=None,
+                    runtime_seconds=time.perf_counter() - start,
+                    error="optimization diverged (NaN positions)",
+                )
             positions = gd2.pos.detach().cpu()
 
             elapsed = time.perf_counter() - start

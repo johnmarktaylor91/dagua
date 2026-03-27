@@ -185,3 +185,13 @@ def test_layout_sugiyama_rejects_mismatched_edge_weights() -> None:
             num_nodes=3,
             edge_weights=torch.ones(1, dtype=torch.float32),
         )
+
+
+def test_layout_sugiyama_handles_cyclic_input_robustly() -> None:
+    """Cycle breaking should still produce a finite layered layout."""
+    edge_index = torch.tensor([[0, 1, 2, 0], [1, 2, 0, 2]], dtype=torch.long)
+
+    positions = layout_sugiyama(edge_index=edge_index, num_nodes=3)
+
+    assert positions.shape == (3, 2)
+    assert torch.isfinite(positions).all()

@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 
-from dagua.layout.cycle import detect_back_edges, make_acyclic
+from dagua.layout.cycle import make_acyclic_robust
 
 _COORDINATE_REFINEMENT_SWEEPS = 16
 
@@ -251,7 +251,7 @@ def _prepare_acyclic_edges(
     edge_index: torch.Tensor,
     num_nodes: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Return a CPU ``edge_index`` with detected back edges reversed.
+    """Return a CPU ``edge_index`` with a robust acyclic orientation.
 
     Parameters
     ----------
@@ -270,11 +270,7 @@ def _prepare_acyclic_edges(
     edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
     if edge_index_cpu.numel() == 0:
         return edge_index_cpu, torch.zeros((0,), dtype=torch.bool)
-
-    back_edge_mask = detect_back_edges(edge_index_cpu, num_nodes)
-    if back_edge_mask.any():
-        return make_acyclic(edge_index_cpu, back_edge_mask), back_edge_mask.to(dtype=torch.bool)
-    return edge_index_cpu, back_edge_mask.to(dtype=torch.bool)
+    return make_acyclic_robust(edge_index_cpu, num_nodes)
 
 
 def _longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:

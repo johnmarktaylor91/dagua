@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from dagua import DaguaGraph, LayoutConfig, draw
-from dagua.layout.cycle import detect_back_edges, make_acyclic
+from dagua.layout.cycle import _is_acyclic, detect_back_edges, make_acyclic, make_acyclic_robust
 from dagua.metrics import dag_consistency
 
 # ---------------------------------------------------------------------------
@@ -114,6 +114,16 @@ class TestMakeAcyclic:
         mask = torch.tensor([False, False, True])
         make_acyclic(ei, mask)
         assert torch.equal(ei, original)
+
+    def test_make_acyclic_robust_breaks_residual_cycles(self) -> None:
+        """The robust fallback should always return an acyclic orientation."""
+        ei = torch.tensor([[0, 1, 2, 2], [1, 2, 0, 3]], dtype=torch.long)
+
+        acyclic, reversed_mask = make_acyclic_robust(ei, 4)
+
+        assert acyclic.shape == ei.shape
+        assert reversed_mask.shape == (ei.shape[1],)
+        assert _is_acyclic(acyclic, 4) is True
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +276,7 @@ class TestBackEdgeStyle:
         _ = g.back_edge_mask  # trigger detection
         back_idx = g._back_edge_mask.nonzero(as_tuple=False).squeeze().item()
         style = g.get_style_for_edge(back_idx)
-        assert style.curvature == 0.6  # back style's curvature
+        assert style.curvature == g._theme.get_edge_style("back").curvature
 
     def test_per_edge_override_beats_back(self):
         """Per-edge style override takes priority over back edge styling."""
