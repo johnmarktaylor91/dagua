@@ -1504,6 +1504,10 @@ def add_metric_tests_to_row(
     bootstrap_samples : int
         Bootstrap sample count.
     """
+    # Skip metric analysis entirely when metrics were not computed (--skip-metrics)
+    skip = getattr(load_layout, "_skip_metrics", False)
+    if skip:
+        return
     for metric_name in QUALITY_METRICS:
         original_values = collect_metric_values(original_layouts, metric_name)
         reimpl_values = collect_metric_values(reimpl_layouts, metric_name)
