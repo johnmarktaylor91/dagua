@@ -18,7 +18,6 @@ from dagua.layout.classic._graph_distances import (
 from dagua.layout.classic._graph_distances import (
     build_undirected_adjacency as _shared_build_undirected_adjacency,
 )
-from dagua.layout.classic.pivot_mds import layout_pivot_mds
 
 _MIN_DISTANCE = 1.0e-12
 
@@ -188,7 +187,7 @@ def _row_probabilities(distances: torch.Tensor, perplexity: float) -> torch.Tens
         probabilities = weights / weights_sum
         entropy = -(probabilities[mask] * probabilities[mask].clamp(min=_MIN_DISTANCE).log()).sum()
         error = entropy - target_entropy
-        if torch.abs(error) < 1.0e-4:
+        if torch.abs(error) < 1.0e-5:
             break
         if error > 0:
             beta_min = beta
@@ -360,20 +359,21 @@ def layout_tsnet(
         min(perplexity, float(max(num_nodes - 1, 1))),
     ).to(device)
 
-    initial_positions = layout_pivot_mds(
-        edge_index,
-        num_nodes,
-        node_sizes=node_sizes,
-        n_pivots=min(32, num_nodes),
-        seed=seed,
-        edge_weights=edge_weights,
+    # Random init matching sklearn TSNE(init="random") -- the comparison target.
+    # Pivot MDS init is the tsNET paper recommendation but diverges from sklearn.
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    initial_positions = (
+        torch.randn(num_nodes, 2, generator=generator, dtype=torch.float32) * 1e-4
     ).to(device)
     positions = initial_positions.clone().requires_grad_(True)
     early_exaggeration = 12.0
     early_exaggeration_steps = min(250, steps)
     min_gain = 0.01
-    early_learning_rate = max(float(max(num_nodes, 1)) / 48.0, 200.0)
-    late_learning_rate = early_learning_rate * 4.0
+    # LR matching sklearn: max(N / early_exaggeration / 4, 50) = max(N/48, 50).
+    # Same LR for both phases (sklearn does not use a late-phase multiplier).
+    early_learning_rate = max(float(max(num_nodes, 1)) / 48.0, 50.0)
+    late_learning_rate = early_learning_rate
     update = torch.zeros_like(positions)
     gains = torch.ones_like(positions)
 
