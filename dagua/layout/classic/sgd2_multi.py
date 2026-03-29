@@ -1062,9 +1062,9 @@ def layout_sgd2_multi(
     steps: int = 10_000,
     criteria: Optional[Dict[str, float]] = None,
     criteria_schedules: Optional[Dict[str, SmoothSteps]] = None,
-    lr: float = 1.0,
+    lr: float = 0.01,
     momentum: float = 0.7,
-    grad_clamp: float = 20.0,
+    grad_clamp: float = 5.0,
     batch_size: int = 16,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -1086,7 +1086,7 @@ def layout_sgd2_multi(
         Static per-criterion weights. ``None`` defaults to pure stress.
     criteria_schedules : dict[str, SmoothSteps] | None, default=None
         Optional piecewise-smooth criterion schedules.
-    lr : float, default=1.0
+    lr : float, default=0.01
         SGD learning rate.
     momentum : float, default=0.7
         SGD momentum.

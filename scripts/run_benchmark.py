@@ -2210,8 +2210,16 @@ def main() -> int:
                 for payload in _run_work_group(work_group):
                     _process_record(BenchmarkRecord.from_dict(payload))
         else:
-            light_groups = [g for g in work_groups if not engine_is_heavy(g[0].engine_name)]
-            heavy_groups = [g for g in work_groups if engine_is_heavy(g[0].engine_name)]
+            # Treat all groups as light for parallel execution when graphs are
+            # small enough (max_nodes <= 1000).  The "heavy" designation was for
+            # GPU-memory safety on huge graphs, but CPU-only engines on small
+            # graphs are safe to parallelize.
+            if args.max_nodes and args.max_nodes <= 1000:
+                light_groups = list(work_groups)
+                heavy_groups = []
+            else:
+                light_groups = [g for g in work_groups if not engine_is_heavy(g[0].engine_name)]
+                heavy_groups = [g for g in work_groups if engine_is_heavy(g[0].engine_name)]
 
             try:
                 executor = ProcessPoolExecutor(
