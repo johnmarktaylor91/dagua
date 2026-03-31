@@ -176,23 +176,9 @@ by core dagua modules.
 - **Multilevel layout** (`layout/multilevel.py`) — Coarsening + refinement for large graphs.
   Recently hardened with checkpoint validation, but still the most fragile layout path.
 
-## Rendering Cosmetic Tuning (March 2026)
+## Render Complexity
 
-The rendering system went through a 7-commit cosmetic polish sprint in March 2026. The
-resulting gallery audit covered 335 images, reached a 9.25/10 mean score, and cleared a
-93% 9+ rate on all non-evil images. Remaining taste-level tweaks are tracked in the MAYBE
-list in `.project-context/todos.md`.
-
-Most visual tuning is intentionally centralized:
-- Top-level constants in `dagua/render/mpl.py` (around lines 67-99) control the main cosmetic parameters for the matplotlib backend. `mpl.py` is the dominant render surface at ~6.2K lines, so small constant changes can affect many card families at once.
-- Arrowhead geometry lives in `dagua/render/edges/arrowheads.py` and uses named constants rather than scattered literals.
-- Border dash behavior lives in `dagua/render/borders/dashes.py`, where dash on-lengths scale with curvature while gap lengths stay fixed.
-- Hub arrowhead distribution is handled in `dagua/render/edges/collection.py` using 8-face terminal bucketing instead of continuous perimeter placement.
-- Text rendering falls back to synthetic italic shear when font resolution does not provide a distinct italic face for the chosen font stack.
-- `scripts/build_gallery_audit.py` contains audit-specific presentation logic, including dark-header adaptation and decorative-fill card overrides used during cosmetic review.
-
-Render complexity is concentrated in a few areas:
-- `dagua/render/mpl.py`: 6188 lines
-- `dagua/render/edges/`: 4903 lines
-- `dagua/render/borders/`: 1848 lines
-- `dagua/render/text/`: 1961 lines
+Render tuning constants are documented in project AGENTS.md under "Render
+Tuning Notes." Visual tuning is centralized in top-level constants within each
+render submodule. Line counts: `mpl.py` ~6.2K, `edges/` ~4.9K, `borders/`
+~1.8K, `text/` ~2K.

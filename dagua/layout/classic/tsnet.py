@@ -181,7 +181,7 @@ def _row_probabilities(distances: torch.Tensor, perplexity: float) -> torch.Tens
     target_entropy = torch.log(torch.tensor(perplexity, dtype=torch.float32))
 
     probabilities = torch.zeros_like(distances)
-    for _ in range(50):
+    for _ in range(100):
         weights = torch.exp(-squared * beta) * mask.to(dtype=torch.float32)
         weights_sum = weights.sum().clamp(min=_MIN_DISTANCE)
         probabilities = weights / weights_sum
@@ -368,7 +368,7 @@ def layout_tsnet(
     ).to(device)
     positions = initial_positions.clone().requires_grad_(True)
     early_exaggeration = 12.0
-    early_exaggeration_steps = min(250, steps)
+    early_exaggeration_steps = 250
     min_gain = 0.01
     # LR matching sklearn: max(N / early_exaggeration / 4, 50) = max(N/48, 50).
     # Same LR for both phases (sklearn does not use a late-phase multiplier).
