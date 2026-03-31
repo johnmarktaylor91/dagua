@@ -483,8 +483,7 @@ def _attraction_force(
     delta = pos.index_select(0, source) - pos.index_select(0, target)
     if linlog:
         distance = torch.linalg.vector_norm(delta, dim=1, keepdim=True).clamp(min=1e-6)
-        direction = delta / distance
-        factor = -torch.log1p(distance).squeeze(1)
+        factor = -(float(outbound_att_compensation) * torch.log1p(distance) / distance).squeeze(1)
     else:
         factor = torch.full(
             (edge_index.shape[1],),
@@ -501,7 +500,7 @@ def _attraction_force(
         factor = factor * edge_weights.to(dtype=pos.dtype, device=pos.device)
 
     if linlog:
-        attraction = direction * factor.unsqueeze(1)
+        attraction = delta * factor.unsqueeze(1)
     else:
         attraction = delta * factor.unsqueeze(1)
     index = source.unsqueeze(1).expand_as(attraction)

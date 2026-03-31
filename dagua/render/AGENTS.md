@@ -1,5 +1,13 @@
 # Render Subpackage — Implementation Guide
 
+## Modules
+
+- **mpl.py** -- Matplotlib (default): PatchCollection, LineCollection, batched text.
+  Requires matplotlib (optional dep, lazy import)
+- **svg.py** -- Direct SVG string output. Zero deps. Jupyter `_repr_svg_` inline display.
+- **graphviz.py** -- Neato `-n2` passthrough: dagua positions + Graphviz rendering.
+  Requires graphviz (optional dep, lazy import)
+
 ## Dependency Rules
 
 - **mpl.py**: imports matplotlib only (lazy import, fails gracefully if missing)
