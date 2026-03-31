@@ -9,46 +9,32 @@ from typing import Optional, Union
 import numpy as np
 import torch
 
-_BARNES_HUT_MIN_SIZE = 1e-6
-_BARNES_HUT_MAX_DEPTH = 32
-
 
 @dataclass(slots=True)
 class _BarnesHutNode:
-    """Quadtree node used for Barnes-Hut repulsion approximation.
+    """Barnes-Hut region matching ``fa2_modified.fa2util.Region``.
 
     Parameters
     ----------
-    cx : float
-        X coordinate of the node center of mass.
-    cy : float
-        Y coordinate of the node center of mass.
+    mass_center_x : float
+        X coordinate of the region mass center.
+    mass_center_y : float
+        Y coordinate of the region mass center.
     mass : float
         Total mass contained in the node.
     size : float
-        Side length of the square cell represented by the node.
-    xmin : float
-        Minimum x bound of the cell.
-    xmax : float
-        Maximum x bound of the cell.
-    ymin : float
-        Minimum y bound of the cell.
-    ymax : float
-        Maximum y bound of the cell.
+        Region diameter, defined as twice the farthest node distance from the
+        mass center.
     children : list[_BarnesHutNode] or None
-        Child quadrants for internal nodes.
+        Child regions in the reference traversal order.
     indices : np.ndarray or None
-        Particle indices stored in a leaf node.
+        Particle indices stored in a leaf region.
     """
 
-    cx: float
-    cy: float
+    mass_center_x: float
+    mass_center_y: float
     mass: float
     size: float
-    xmin: float
-    xmax: float
-    ymin: float
-    ymax: float
     children: Optional[list["_BarnesHutNode"]]
     indices: Optional[np.ndarray]
 
@@ -67,6 +53,7 @@ def layout_fa2(
     outbound_attraction_distribution: bool = True,
     edge_weights: Optional[torch.Tensor] = None,
     dissuade_hubs: bool = False,
+    edge_weight_influence: float = 1.0,
     barnes_hut: bool = False,
     barnes_hut_theta: float = 1.2,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, list[torch.Tensor]]]:
@@ -104,6 +91,9 @@ def layout_fa2(
     dissuade_hubs : bool, default=False
         Whether to divide attraction by the source-node mass again to spread
         hub nodes.
+    edge_weight_influence : float, default=1.0
+        Exponent applied to edge weights before attraction, matching the
+        reference ``edgeWeightInfluence`` parameter.
     barnes_hut : bool, default=False
         Whether to approximate repulsion with a Barnes-Hut quadtree.
     barnes_hut_theta : float, default=1.2
@@ -187,6 +177,7 @@ def layout_fa2(
             linlog=linlog,
             edge_weights=undirected_weights,
             dissuade_hubs=dissuade_hubs,
+            edge_weight_influence=edge_weight_influence,
         )
         pos, speed, speed_efficiency = _adjust_speed_and_apply_forces(
             pos=pos,
@@ -428,7 +419,11 @@ def _gravity_force(
         Gravity displacement with shape ``[N, 2]``.
     """
     if strong_gravity:
-        factor = scaling_ratio * mass * gravity
+        factor = torch.zeros_like(mass)
+        # The reference strong-gravity helper skips nodes that lie exactly on
+        # either axis because it checks ``xDist != 0 and yDist != 0``.
+        valid = (pos[:, 0] != 0) & (pos[:, 1] != 0)
+        factor[valid] = scaling_ratio * mass[valid] * gravity
         return -pos * factor.unsqueeze(1)
 
     distance = torch.linalg.vector_norm(pos, dim=1)
@@ -447,6 +442,7 @@ def _attraction_force(
     linlog: bool = False,
     edge_weights: Optional[torch.Tensor] = None,
     dissuade_hubs: bool = False,
+    edge_weight_influence: float = 1.0,
 ) -> torch.Tensor:
     """Compute ForceAtlas2 attraction over unique undirected edges.
 
@@ -468,6 +464,8 @@ def _attraction_force(
         Per-edge weights with shape ``[E]``.
     dissuade_hubs : bool, default=False
         Whether to divide attraction by source-node mass a second time.
+    edge_weight_influence : float, default=1.0
+        Exponent applied to edge weights before attraction.
 
     Returns
     -------
@@ -497,7 +495,12 @@ def _attraction_force(
     if dissuade_hubs:
         factor = factor / mass.index_select(0, source)
     if edge_weights is not None:
-        factor = factor * edge_weights.to(dtype=pos.dtype, device=pos.device)
+        transformed_weights = edge_weights.to(dtype=pos.dtype, device=pos.device)
+        if edge_weight_influence == 0.0:
+            transformed_weights = torch.ones_like(transformed_weights)
+        elif edge_weight_influence != 1.0:
+            transformed_weights = transformed_weights.pow(edge_weight_influence)
+        factor = factor * transformed_weights
 
     if linlog:
         attraction = delta * factor.unsqueeze(1)
@@ -514,13 +517,8 @@ def _build_barnes_hut_tree(
     pos_np: np.ndarray,
     mass_np: np.ndarray,
     indices: np.ndarray,
-    xmin: float,
-    xmax: float,
-    ymin: float,
-    ymax: float,
-    depth: int,
 ) -> Optional[_BarnesHutNode]:
-    """Build a quadtree node for Barnes-Hut repulsion.
+    """Build a Barnes-Hut region tree matching ``fa2_modified``.
 
     Parameters
     ----------
@@ -529,104 +527,80 @@ def _build_barnes_hut_tree(
     mass_np : np.ndarray
         Node masses with shape ``[N]``.
     indices : np.ndarray
-        Particle indices stored in the current cell.
-    xmin : float
-        Minimum x bound of the cell.
-    xmax : float
-        Maximum x bound of the cell.
-    ymin : float
-        Minimum y bound of the cell.
-    ymax : float
-        Maximum y bound of the cell.
-    depth : int
-        Current recursion depth.
+        Particle indices stored in the current region.
 
     Returns
     -------
     _BarnesHutNode or None
-        Quadtree node for the current cell, or ``None`` when the cell is empty.
+        Region for the current subset, or ``None`` when the subset is empty.
     """
     if indices.size == 0:
         return None
 
-    size = max(xmax - xmin, ymax - ymin)
-    cell_mass = float(mass_np[indices].sum())
-    if cell_mass > 0.0:
-        cx = float((pos_np[indices, 0] * mass_np[indices]).sum() / cell_mass)
-        cy = float((pos_np[indices, 1] * mass_np[indices]).sum() / cell_mass)
-    else:
-        cx = float(pos_np[indices, 0].mean())
-        cy = float(pos_np[indices, 1].mean())
-
-    if indices.size <= 1 or depth >= _BARNES_HUT_MAX_DEPTH or size <= _BARNES_HUT_MIN_SIZE:
+    if indices.size == 1:
         return _BarnesHutNode(
-            cx=cx,
-            cy=cy,
-            mass=cell_mass,
-            size=size,
-            xmin=xmin,
-            xmax=xmax,
-            ymin=ymin,
-            ymax=ymax,
+            mass_center_x=0.0,
+            mass_center_y=0.0,
+            mass=0.0,
+            size=0.0,
             children=None,
             indices=indices,
         )
 
-    midpoint_x = 0.5 * (xmin + xmax)
-    midpoint_y = 0.5 * (ymin + ymax)
+    cell_mass = float(mass_np[indices].sum())
+    if cell_mass > 0.0:
+        mass_center_x = float((pos_np[indices, 0] * mass_np[indices]).sum() / cell_mass)
+        mass_center_y = float((pos_np[indices, 1] * mass_np[indices]).sum() / cell_mass)
+    else:
+        mass_center_x = float(pos_np[indices, 0].mean())
+        mass_center_y = float(pos_np[indices, 1].mean())
+
     x = pos_np[indices, 0]
     y = pos_np[indices, 1]
+    distance = np.sqrt(((x - mass_center_x) ** 2) + ((y - mass_center_y) ** 2))
+    size = float(2.0 * distance.max())
+
     quadrant_masks = (
-        (x <= midpoint_x) & (y <= midpoint_y),
-        (x <= midpoint_x) & (y > midpoint_y),
-        (x > midpoint_x) & (y <= midpoint_y),
-        (x > midpoint_x) & (y > midpoint_y),
-    )
-    bounds = (
-        (xmin, midpoint_x, ymin, midpoint_y),
-        (xmin, midpoint_x, midpoint_y, ymax),
-        (midpoint_x, xmax, ymin, midpoint_y),
-        (midpoint_x, xmax, midpoint_y, ymax),
+        (x < mass_center_x) & (y >= mass_center_y),
+        (x < mass_center_x) & (y < mass_center_y),
+        (x >= mass_center_x) & (y >= mass_center_y),
+        (x >= mass_center_x) & (y < mass_center_y),
     )
 
     children: list[_BarnesHutNode] = []
-    for mask, (child_xmin, child_xmax, child_ymin, child_ymax) in zip(quadrant_masks, bounds):
-        child = _build_barnes_hut_tree(
-            pos_np=pos_np,
-            mass_np=mass_np,
-            indices=indices[mask],
-            xmin=child_xmin,
-            xmax=child_xmax,
-            ymin=child_ymin,
-            ymax=child_ymax,
-            depth=depth + 1,
-        )
-        if child is not None:
-            children.append(child)
+    for mask in quadrant_masks:
+        child_indices = indices[mask]
+        if child_indices.size == 0:
+            continue
+        if child_indices.size < indices.size:
+            child = _build_barnes_hut_tree(
+                pos_np=pos_np,
+                mass_np=mass_np,
+                indices=child_indices,
+            )
+            if child is not None:
+                children.append(child)
+            continue
 
-    if not children:
-        return _BarnesHutNode(
-            cx=cx,
-            cy=cy,
-            mass=cell_mass,
-            size=size,
-            xmin=xmin,
-            xmax=xmax,
-            ymin=ymin,
-            ymax=ymax,
-            children=None,
-            indices=indices,
-        )
+        # When all nodes fall into one quadrant, the reference breaks the
+        # region into singleton leaves instead of recursing forever.
+        for child_index in child_indices:
+            children.append(
+                _BarnesHutNode(
+                    mass_center_x=0.0,
+                    mass_center_y=0.0,
+                    mass=0.0,
+                    size=0.0,
+                    children=None,
+                    indices=np.asarray([child_index], dtype=np.int64),
+                )
+            )
 
     return _BarnesHutNode(
-        cx=cx,
-        cy=cy,
+        mass_center_x=mass_center_x,
+        mass_center_y=mass_center_y,
         mass=cell_mass,
         size=size,
-        xmin=xmin,
-        xmax=xmax,
-        ymin=ymin,
-        ymax=ymax,
         children=children,
         indices=None,
     )
@@ -714,15 +688,11 @@ def _barnes_hut_force_for_node(
             scaling_ratio=scaling_ratio,
         )
 
-    dx = float(pos_np[index, 0] - node.cx)
-    dy = float(pos_np[index, 1] - node.cy)
+    dx = float(pos_np[index, 0] - node.mass_center_x)
+    dy = float(pos_np[index, 1] - node.mass_center_y)
     dist_sq = (dx * dx) + (dy * dy)
-    contains_index = (
-        node.xmin <= float(pos_np[index, 0]) <= node.xmax
-        and node.ymin <= float(pos_np[index, 1]) <= node.ymax
-    )
 
-    if not contains_index and dist_sq > 0.0 and (node.size * node.size / dist_sq) < (theta * theta):
+    if dist_sq > 0.0 and (node.size * node.size / dist_sq) < (theta * theta):
         dist = math.sqrt(dist_sq)
         if dist < 1e-12:
             return 0.0, 0.0
@@ -777,19 +747,10 @@ def _barnes_hut_repulsion(
     mass_np = mass.detach().cpu().numpy()
     force_np = np.zeros((num_nodes, 2), dtype=np.float64)
 
-    xmin = float(pos_np[:, 0].min()) - 1.0
-    xmax = float(pos_np[:, 0].max()) + 1.0
-    ymin = float(pos_np[:, 1].min()) - 1.0
-    ymax = float(pos_np[:, 1].max()) + 1.0
     root = _build_barnes_hut_tree(
         pos_np=pos_np,
         mass_np=mass_np,
         indices=np.arange(num_nodes, dtype=np.int64),
-        xmin=xmin,
-        xmax=xmax,
-        ymin=ymin,
-        ymax=ymax,
-        depth=0,
     )
 
     for node_index in range(num_nodes):

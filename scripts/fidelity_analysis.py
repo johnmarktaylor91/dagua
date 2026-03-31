@@ -51,8 +51,6 @@ METRIC_MARGIN_FLOORS: dict[str, float] = {
     "aspect_ratio": 0.05,
     "dag_consistency": 0.02,
     "edge_length_cv": 0.05,
-    "edge_length_mean": 1.0,
-    "overlap_count": 1.0,
 }
 MIN_VALID_NODE_COUNT = 3
 MIN_PROCRUSTES_NODE_COUNT = 5
@@ -1073,11 +1071,7 @@ def margin_for_metric(
         Metric-specific equivalence margin.
     """
     std_orig = float(original_values.std(ddof=1)) if original_values.size >= 2 else 0.0
-    if metric_name == "edge_length_mean":
-        mean_orig = float(original_values.mean()) if original_values.size > 0 else 0.0
-        floor = max(1.0, 0.01 * abs(mean_orig))
-    else:
-        floor = METRIC_MARGIN_FLOORS[metric_name]
+    floor = METRIC_MARGIN_FLOORS[metric_name]
     return max(factor * std_orig, floor)
 
 
@@ -1179,6 +1173,10 @@ def per_graph_fieldnames() -> list[str]:
         "scale_ratio_std",
         "reflected",
         "max_node_displacement",
+        "within_vs_between_pvalue",
+        "within_rmsd_mean",
+        "between_rmsd_mean",
+        "rmsd_ratio",
         "ks_pvalue_raw",
         "mannwhitney_pvalue_raw",
         "tost_pvalue_at_1x",
@@ -1656,6 +1654,10 @@ def process_group(
         "scale_ratio_std": math.nan,
         "reflected": False,
         "max_node_displacement": math.nan,
+        "within_vs_between_pvalue": math.nan,
+        "within_rmsd_mean": math.nan,
+        "between_rmsd_mean": math.nan,
+        "rmsd_ratio": math.nan,
         "ks_pvalue_raw": math.nan,
         "mannwhitney_pvalue_raw": math.nan,
         "tost_pvalue_at_1x": math.nan,
@@ -2357,10 +2359,14 @@ def write_readme(
         "## Methodology Notes",
         "",
         (
-            "- Procrustes alignment uses centering plus optimal proper rotation "
-            "only; scale is reported, not normalized away."
+            "- Procrustes alignment uses centering plus unit-Frobenius "
+            "normalization before the optimal fit, so RMSD is scale-invariant "
+            "while the scale ratio is still reported separately."
         ),
-        "- Reflections are detected and flagged, but never used to improve the reported RMSD.",
+        (
+            "- Procrustes fitting evaluates both proper and reflected alignments, "
+            "reports the lower RMSD, and flags when the reflected solution wins."
+        ),
         (
             "- Stochastic comparisons require at least 10 valid seeds on each "
             "side; otherwise the group is marked `insufficient_data`."
@@ -2554,16 +2560,22 @@ def run_analysis(
     # No pre-load needed: processing is serial so load_layout reads HDF5 on
     # demand via the _h5_file handle set above (no thread contention).
 
-    def _process_one(args: tuple) -> GroupResult:
+    def _process_one(args: tuple[Any, Any, Any, Any], row_index: int) -> GroupResult:
+        """Process one queued group with the live global row index.
+
+        Parameters
+        ----------
+        args : tuple[Any, Any, Any, Any]
+            Queued ``(variant, graph_name, records, test_graph)`` payload.
+        row_index : int
+            Index the group will occupy in ``per_graph_rows``.
+
+        Returns
+        -------
+        GroupResult
+            Group output with p-values already registered in the global buckets.
+        """
         variant, gname, records, test_graph = args
-        local_buckets = {
-            "ks": PValueBucket(),
-            "mannwhitney": PValueBucket(),
-            "tost_0_5x": PValueBucket(),
-            "tost_1x": PValueBucket(),
-            "tost_1_5x": PValueBucket(),
-            "tost_2x": PValueBucket(),
-        }
         local_counter: Counter[str] = Counter()
         return process_group(
             variant=variant,
@@ -2571,8 +2583,8 @@ def run_analysis(
             records=records,
             input_dir=input_dir,
             test_graph=test_graph,
-            row_index=0,
-            pvalue_buckets=local_buckets,
+            row_index=row_index,
+            pvalue_buckets=pvalue_buckets,
             bootstrap_samples=bootstrap_samples,
             load_counter=local_counter,
         )
@@ -2583,9 +2595,10 @@ def run_analysis(
 
     _t_start = _time.monotonic()
     for idx, task in enumerate(tasks):
-        group_result = _process_one(task)
+        row_index = len(per_graph_rows)
+        group_result = _process_one(task, row_index)
         group_result.row["_rejection_count"] = group_result.rejection_count
-        group_result.row["_row_index"] = len(per_graph_rows)
+        group_result.row["_row_index"] = row_index
         per_graph_rows.append(group_result.row)
         per_seed_rows.extend(group_result.seed_rows)
         pairwise_rows.extend(group_result.pairwise_rows)
@@ -2599,14 +2612,6 @@ def run_analysis(
                 f"{rate:.1f} groups/s)",
                 file=sys.stderr,
             )
-
-    # Re-accumulate p-values from per_graph_rows into the real buckets
-    for row_idx, row in enumerate(per_graph_rows):
-        for bucket_name, bucket in pvalue_buckets.items():
-            raw_key = f"{bucket_name}_pvalue_raw"
-            bh_key = f"{bucket_name}_pvalue_bh"
-            if raw_key in row and not math.isnan(float(row.get(raw_key, math.nan))):
-                bucket.entries.append((row_idx, bh_key, float(row[raw_key])))
 
     apply_bh_correction(per_graph_rows, pvalue_buckets)
     for row in per_graph_rows:

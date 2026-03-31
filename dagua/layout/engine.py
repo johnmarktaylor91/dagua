@@ -946,7 +946,9 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
                 effective_config,
                 device=device,
                 clusters=graph.clusters if hasattr(graph, "clusters") else None,
-                cluster_parents=graph.cluster_parents if hasattr(graph, "cluster_parents") else None,
+                cluster_parents=(
+                    graph.cluster_parents if hasattr(graph, "cluster_parents") else None
+                ),
                 progress_context=ProgressContext(),
                 trace=trace,
             )
@@ -965,7 +967,8 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
             relax_config.lr = config.lr * 0.5
             relax_config.relax_steps = 0  # no recursive relaxation
 
-            tensor_device_r = "cpu" if _resolve_execution_mode(relax_config, device, n) == "subset_gpu" else device
+            exec_mode = _resolve_execution_mode(relax_config, device, n)
+            tensor_device_r = "cpu" if exec_mode == "subset_gpu" else device
             edge_index_r = graph.edge_index.to(tensor_device_r)
             node_sizes_r = graph.node_sizes.to(tensor_device_r)
 
