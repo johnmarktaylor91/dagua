@@ -1,255 +1,110 @@
-NEW SESSION: Read this file first, then CLAUDE.md and AGENTS.md.
+NEW SESSION: Read this file first. Then read CLAUDE.md, AGENTS.md,
+and .project-context/knowledge/. The knowledge files contain durable
+project understanding. This baton file contains live session state.
+After reading everything, your first action should be: dispatch 10
+audit agents (5 Claude + 5 Codex) for the definitive fidelity run
+as described in the "Immediate Next Steps" section below.
 
-## Mission
+## Goal
 
-THIS IS THE LAST RUN. Fix EVERY remaining code difference between dagua's
-reimplementations and their references, re-benchmark, re-analyze, produce
-final fidelity report. No prioritization, no "medium priority" deferrals.
-Fix everything.
+Launch the DEFINITIVE fidelity benchmark run: 60 seeds, 600s timeout,
+all 97 algorithm families, completely from scratch. This replaces all
+previous 30-seed runs. The run will take ~1 week. While it runs, we
+work on other things.
 
-User directive (verbatim): "can you please stop the current run, match
-EVERY LAST THING, make sure the full pipeline beginning to end is ready
-to rerun those specific changes without deleting other progress or wasting
-time, then kick it off again? Please be 100% sure you are doing everything
-you can possibly do to make this the last time!!!"
+## Completed This Session
 
-## What's Already Done
+- Fixed ALL identified code differences across 4 reimplementation files:
+  - neulay.py: 5 fixes (cKDTree repulsion, spring dedup, lr, step budget, numpy seed, manual GCN)
+  - sgd2_multi.py: 8 fixes (centering, CrossingDetector, BFS neighborhood, angular res, vertex res, aspect ratio, scheduler offset, cyclic sampling)
+  - fa2.py: 2 fixes (LinLog double-division, outboundAttCompensation)
+  - tsnet.py: already matched, no changes needed
+- Fixed analysis methodology:
+  - Within-vs-between Procrustes (Mann-Whitney one-sided) as primary verdict signal
+  - Scale-invariant metrics only (removed edge_length_mean, overlap_count)
+  - Proportion-based family aggregation (90% threshold, not all-or-nothing)
+  - Mirror-aware Procrustes, PValueBucket.add fix
+- 30-seed results: 57 strong, 6 weak, 34 partial, 0 divergent
+- All code verified by 8 independent audit agents + adversarial Codex critic + independent Codex reviewer
+- Committed as 3af2d2e on feat/bench-and-aesthetics
+- Previous results archived to eval_output/archives/*_20260331_132440*
 
-- 97 algorithm families benchmarked (510K+ evals)
-- 77 families are strong_equivalent/identical -- DONE, don't touch
-- 20 reimpl variants have code fixes applied and were re-benchmarked
-- positions.h5 has fresh positions for all 20 variants (consolidated)
-- Existing CSVs at eval_output/fidelity_report/data/ have correct data
-  for the 77 unchanged families (from overnight run with mirror-aware
-  Procrustes)
-- The 20 changed families have BAD data in CSVs (from overnight run
-  where H5 was desynced -- positions were empty)
+## In Progress
 
-## Fixes Already Applied (verified in source)
+Nothing currently running. The definitive run needs to be set up and launched.
 
-1. FA2 linlog: `-(torch.log1p(distance) / distance).squeeze(1)` (fa2.py:487)
-2. SGD2 multi LR: `lr: float = 1.0` (sgd2_multi.py:1065)
-3. SGD2 multi BCE: `reduction='sum'` (sgd2_multi.py:886)
-4. SGD2 multi LR schedule: ExponentialLR gamma=0.993, step every iter (sgd2_multi.py:1141-1171)
-5. t-SNE early exag: `early_exaggeration_steps = 250` (tsnet.py:371)
-6. t-SNE binary search: `range(100)` (tsnet.py:184)
-7. NeuLay GCN: 3-layer residual (100->100->3, skip concat 203->2) (neulay.py:372-435)
-8. NeuLay magnitude: `100.0 * N^(1/3) * radius` (neulay.py:562-564)
-9. NeuLay optimizer: RMSprop, _GNN_LR=0.01 (neulay.py:28,350,472)
-10. Procrustes: mirror-aware, best-of-two rotations (fidelity_analysis.py:885-891)
-11. _safe_float: handles empty CSV strings (fidelity_analysis.py:2003-2011)
+## Immediate Next Steps
 
-## Remaining Fixes to Apply
+The user's explicit 7-step plan for the definitive run:
 
-### SGD2 Multi (dagua/layout/classic/sgd2_multi.py)
+1. **Dispatch 10 agents (5 Claude + 5 Codex)** for final line-by-line sweep of
+   ALL 97 families. Also audit the full pipeline for easy iteration (targeted
+   reruns, adding seeds, etc.). Ensure analysis computes BOTH within-vs-between
+   Procrustes AND TOST -- everything we could want.
 
-**S1. Batch sampling: random with replacement -> full-epoch sweep**
-- Current: `torch.randint(0, total, (batch_size,), device=device)` (~line 491)
-- Reference: iterates ALL pairs every epoch in sequential order (DataLoader-style)
-- Fix: create a permutation of all pairs at epoch start, iterate in batch chunks,
-  reshuffle when exhausted
+2. **Write combined plan** from all 10 agents' findings. Iterate with adversarial
+   Codex until zero objections.
 
-**S2. Weight function: include self-loops (d=0)**
-- Current: filters `positive_distances > 0` (~line 322)
-- Reference: includes all pairs including d=0 with epsilon handling
-- Fix: remove the `> 0` filter, add epsilon to denominator instead
+3. **Dispatch Codex workers** to implement all remaining fixes.
 
-**S3. Distance handling for disconnected graphs**
-- Current: replaces inf distances with `max_distance + 1.0` (~line 290-295)
-- Reference: rejects disconnected graphs entirely
-- Fix: add a check that raises or warns on disconnected graphs, matching
-  reference behavior. For benchmark purposes this is fine since test graphs
-  include disconnected ones that should be skipped.
+4. **Launch definitive benchmark**: 60 seeds, 600s timeout, fresh from scratch,
+   maximum parallelism. Keep "skip after 3 consecutive timeouts" behavior.
+   Save previous results safely (already done -- archived).
 
-**S4. Epsilon usage**
-- Current: `_EPS = 1.0e-6` applied to `distances.square() + _EPS` (~line 20, 322)
-- Reference: `eps=0.01` controls LR floor
-- Fix: verify these are different parameters (distance stability vs LR floor).
-  If _EPS is only for numerical stability and doesn't affect results, leave it.
-  If it changes the weight function shape, match reference value.
+5. **Report format**: per-algorithm breakdown showing % of graphs passing at each
+   threshold. Clear failure point identification. Adversarial Codex critiques
+   report format for rigor/clarity/readability, iterate until satisfied.
 
-### NeuLay (dagua/layout/classic/neulay.py)
+6. **Documentation**: careful notes for the ~week-long run so nothing gets lost.
 
-**N1. Early stopping formula**
-- Current: two rolling windows (_SHORT_STOP_WINDOW=32, _LONG_STOP_WINDOW=1000)
-  with ratio thresholds (_SHORT_STOP_RATIO=5e-4, _LONG_STOP_RATIO=1e-4) (~line 276-316)
-- Reference: different window metrics and N-scaling
-- Fix: read the upstream NeuLay reference at /tmp/neulay_pkg/neulay/core.py
-  (or pip show neulay to find it), copy the exact early stopping logic
+7. **Lessons learned**: apply everything from this iteration process.
 
-**N2. Initialization distribution**
-- Current: `torch.randn(...) * scale` where scale=sqrt(N) (~line 194)
-- Reference: may use different distribution or scale
-- Fix: read upstream init code, match exactly
+## Context the New Instance Needs
 
-**N3. Coordinate centering**
-- Current: centers positions after every optimization step (~line 364)
-- Reference: allows natural drift without forced centering
-- Fix: remove the per-step centering. Center only at the end if needed
-  for output normalization.
+- Read memory files: feedback_iteration_lessons.md, feedback_fidelity_verdicts.md,
+  project_definitive_run.md -- these contain critical lessons from this session
+- The H5 file at eval_output/variant_bench_full/positions.h5 is rebuilt and clean
+  (370K keys, perfect sync with results.json). But for the definitive run we start
+  fresh.
+- The report script (generate_fidelity_report.py) needs updating -- it still
+  expects edge_length_mean and overlap_count columns that were removed. The Codex
+  worker in step 3 should fix this.
+- Reference engines are NOT auto-included by --variants flag on run_benchmark.py.
+  Must be run explicitly or recovered from .pt files.
+- The safe_purge_variants.py script uses exact engine_name matching for results.json
+  but the H5 keys contain engine names as substrings -- be careful with substring
+  matching (it deleted reference positions in this session).
+- consolidate_positions_hdf5.py opens H5 with mode "w" (destructive replace).
+  Always write to temp file and rename atomically.
 
-**N4. Self-loop handling**
-- Current: explicitly removes self-loops in _clean_edge_index() (~line 155-173)
-- Reference: may handle differently
-- Fix: check reference, match behavior
+## Promises to User
 
-### FA2 (dagua/layout/classic/fa2.py)
+- Definitive run with 60 seeds, 600s timeout, all engines, from scratch
+- 10-agent audit before launching
+- Adversarial critique of both the plan and the final report format
+- Careful documentation so the ~week-long run doesn't get lost
+- Apply all lessons from this iteration process
 
-**F1. Gravity target**
-- Current: pulls toward centroid of current positions (~line 174-180)
-- Reference: pulls toward origin (0,0)
-- NOTE: Other FA2 variants (non-linlog) already pass as strong_equivalent.
-  This means either the gravity difference doesn't matter OR it's correct.
-  CHECK: if all non-linlog FA2 variants are strong, this difference is
-  acceptable. Only fix if it causes fa2_linlog to fail.
+## Git State
 
-### t-SNE (dagua/layout/classic/tsnet.py)
+- Branch: feat/bench-and-aesthetics
+- Uncommitted: temporary scripts (scripts/_final_run.py, _final_run_v2.py,
+  _overnight.py, _purge_h5.py, _rebuild_h5.py) -- these are one-off helpers,
+  not needed going forward
+- Latest commit: 3af2d2e feat(fidelity): match all reimplementations to references + fix analysis methodology
+- Previous commit: ae2365d feat(fidelity): complete fidelity hardening sprint
 
-**T1. No remaining differences found.** The audit confirmed tsnet.py matches
-sklearn's implementation. The two previously fixed issues (early_exag, binary
-search) were the only diffs.
+## Running Processes
 
-## Pipeline for the Final Run
+None.
 
-### Step 1: Apply all remaining fixes above
-- Read each file, make the changes
-- Clear pycache: `find dagua scripts -name '__pycache__' -type d -exec rm -rf {} +`
-- Verify fixes in source (grep for key patterns)
-- Lint: `ruff check dagua/layout/classic/sgd2_multi.py dagua/layout/classic/neulay.py`
+## START HERE
 
-### Step 2: Purge ONLY the changed variants from results.json
-Use the safe purge script:
-```bash
-python scripts/safe_purge_variants.py \
-  classic_sgd2_multi_batch128 classic_sgd2_multi_batch8 \
-  classic_sgd2_multi_default classic_sgd2_multi_lr001 \
-  classic_sgd2_multi_lr01 classic_sgd2_multi_stress_only \
-  classic_sgd2_multi_with_aspect classic_sgd2_multi_with_crossing \
-  classic_neulay_default classic_neulay_lr001 classic_neulay_lr05 \
-  classic_neulay_no_gcn classic_neulay_radius02 classic_neulay_radius08 \
-  --confirm
-```
-DO NOT purge fa2_linlog or tsnet variants -- those fixes are already
-benchmarked and have correct positions in H5.
-
-### Step 3: Re-benchmark ONLY SGD2 + NeuLay (14 engines)
-```bash
-python scripts/run_benchmark.py --resume --variants \
-  --output-dir eval_output/variant_bench_full \
-  --workers 4 --seeds 30 --timeout 120 \
-  --engines classic_sgd2_multi_batch128,classic_sgd2_multi_batch8,classic_sgd2_multi_default,classic_sgd2_multi_lr001,classic_sgd2_multi_lr01,classic_sgd2_multi_stress_only,classic_sgd2_multi_with_aspect,classic_sgd2_multi_with_crossing,classic_neulay_default,classic_neulay_lr001,classic_neulay_lr05,classic_neulay_no_gcn,classic_neulay_radius02,classic_neulay_radius08
-```
-
-### Step 4: Consolidate new .pt files into H5
-```bash
-python scripts/consolidate_positions_hdf5.py \
-  --input eval_output/variant_bench_full \
-  --output eval_output/variant_bench_full/positions.h5
-```
-
-### Step 5: Validate benchmark integrity
-```bash
-python scripts/validate_benchmark_integrity.py \
-  --data-dir eval_output/variant_bench_full
-```
-Must pass. If it fails, fix the desync before proceeding.
-
-### Step 6: Run fidelity analysis on changed families only
-Create filtered results.json with only the 20 changed families (SGD2 +
-NeuLay + FA2 linlog + t-SNE -- all 20 because the existing CSVs have
-bad data for all 20 from the desynced overnight run):
-```bash
-# Filter script already exists at /tmp/filtered_bench/
-# Re-create it with updated results.json after purge + re-benchmark
-```
-Run analysis on filtered input:
-```bash
-python scripts/fidelity_analysis.py \
-  --input /tmp/filtered_bench \
-  --output /tmp/fidelity_changed
-```
-
-### Step 7: Merge into existing CSVs
-```bash
-python scripts/merge_fidelity_csvs.py \
-  --existing eval_output/fidelity_report/data \
-  --partial /tmp/fidelity_changed \
-  --output eval_output/fidelity_report/data \
-  --families fa2_linlog,neulay_default,neulay_lr001,neulay_lr05,neulay_no_gcn,neulay_radius02,neulay_radius08,sgd2_multi_batch128,sgd2_multi_batch8,sgd2_multi_default,sgd2_multi_lr001,sgd2_multi_lr01,sgd2_multi_stress_only,sgd2_multi_with_aspect,sgd2_multi_with_crossing,tsnet_default,tsnet_perp5,tsnet_perp50,tsnet_steps200,tsnet_steps2000
-```
-
-### Step 8: Recompute verdicts
-```bash
-python scripts/fidelity_recompute_verdicts.py \
-  --data eval_output/fidelity_report/data
-```
-
-### Step 9: Validate output with delta comparison
-```bash
-python scripts/validate_fidelity_output.py \
-  --data eval_output/fidelity_report/data \
-  --previous /tmp/fidelity_previous
-```
-MUST show changes for the 20 families. If output is identical, STOP --
-something is wrong.
-
-### Step 10: Generate PDF + verdict breakdown
-```bash
-python scripts/generate_fidelity_report.py \
-  --data eval_output/fidelity_report/data \
-  --output eval_output/fidelity_report
-```
-
-### Step 11: Commit everything
-
-## Time Estimates
-
-- Step 1 (fixes): 30 min
-- Step 2 (purge): 2 min
-- Step 3 (benchmark 14 engines): ~2 hrs
-- Step 4 (consolidate): 30 min
-- Step 5 (validate): 1 min
-- Step 6 (analysis ~1800 groups): ~1-2 hrs
-- Step 7 (merge): 1 min
-- Step 8 (recompute): 12 min
-- Step 9-10 (validate + PDF): 2 min
-- **Total: ~4-5 hours**
-
-## Critical Rules
-
-1. DO NOT re-run unchanged families. The 77 unchanged families have
-   correct data in the existing CSVs.
-2. DO NOT purge positions.h5 manually. Use safe_purge_variants.py.
-3. After benchmark, ALWAYS consolidate .pt -> H5 before analysis.
-4. After analysis, ALWAYS run validate_fidelity_output.py with --previous.
-5. If ANY validation step fails, STOP and investigate. Do not proceed.
-6. Fix ALL differences, not just "critical" ones. No prioritization.
-
-## Enforcement Scripts (use them)
-
-- `scripts/validate_benchmark_integrity.py` -- results.json/H5 sync check
-- `scripts/validate_fidelity_output.py` -- output sanity + delta comparison
-- `scripts/safe_purge_variants.py` -- atomic purge of both data stores
-- `scripts/merge_fidelity_csvs.py` -- merge partial into existing CSVs
-
-## Key Files
-
-| File | What |
-|------|------|
-| dagua/layout/classic/sgd2_multi.py | SGD2 reimpl (needs S1-S4 fixes) |
-| dagua/layout/classic/neulay.py | NeuLay reimpl (needs N1-N4 fixes) |
-| dagua/layout/classic/tsnet.py | t-SNE reimpl (DONE, no remaining diffs) |
-| dagua/layout/classic/fa2.py | FA2 reimpl (DONE, check F1 if linlog still fails) |
-| scripts/fidelity_analysis.py | Main analysis (has integrity gate) |
-| scripts/fidelity_recompute_verdicts.py | Fast verdict recomputer |
-| scripts/generate_fidelity_report.py | PDF report (compact version) |
-| eval_output/fidelity_report/data/ | Current CSVs (77 families correct, 20 need replacing) |
-| eval_output/variant_bench_full/ | Benchmark data (results.json + positions/) |
-
-## Previous Verdict Breakdown (baseline to compare against)
-
-74 strong_equivalent, 11 weak_equivalent, 2 partial_match, 10 divergent
-
-The 20 non-strong families are the ones we're fixing. After this run,
-the number of strong families should INCREASE. If it doesn't, the fixes
-didn't work and further investigation is needed.
+Dispatch 10 audit agents (5 Claude + 5 Codex) covering all 97 algorithm
+families and the full pipeline. Split by algorithm group:
+- Agents 1-2: FA2 variants (11 families)
+- Agents 3-4: SGD2 + stress_sgd variants (12 families)
+- Agents 5-6: NeuLay + t-SNE + UMAP variants (16 families)
+- Agents 7-8: FR + KK + spectral + MDS + other classics (30+ families)
+- Agents 9-10: Pipeline infrastructure + report format audit
+Each agent reads both dagua code AND reference code line by line.

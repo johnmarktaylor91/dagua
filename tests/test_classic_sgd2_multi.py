@@ -158,6 +158,30 @@ def test_layout_sgd2_multi_supports_crossing_criterion() -> None:
     assert not positions.isnan().any()
 
 
+def test_crossing_angle_loss_matches_reference_tan_squared_binary_labels() -> None:
+    """Crossing-angle loss should use binary labels and the tan-squared penalty."""
+    pos = torch.tensor(
+        [
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [1.0, -1.0],
+            [2.0, 1.0],
+            [3.0, 0.0],
+            [5.0, 0.0],
+            [6.0, -1.0],
+            [7.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    left = torch.tensor([[0, 4], [1, 5]], dtype=torch.long)
+    right = torch.tensor([[2, 6], [3, 7]], dtype=torch.long)
+
+    loss = sgd2_multi_module._crossing_angle_loss(pos=pos, left=left, right=right)
+
+    expected = ((1.0 / 5.0) / (4.0 / 5.0 + sgd2_multi_module._EPS)) / 2.0
+    assert loss.item() == pytest.approx(expected)
+
+
 def test_layout_sgd2_multi_supports_aspect_ratio_criterion() -> None:
     """The sampled aspect-ratio criterion should run without producing NaNs."""
     edge_index = _cycle_edge_index(4)

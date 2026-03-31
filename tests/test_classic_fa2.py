@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 import torch
 
@@ -11,7 +12,9 @@ from dagua.layout.classic import layout_fa2
 from dagua.layout.classic.fa2 import (
     _adjust_speed_and_apply_forces,
     _attraction_force,
+    _build_barnes_hut_tree,
     _compute_degree,
+    _gravity_force,
 )
 from dagua.layout.classic.tsnet import _gradient_descent_step
 
@@ -199,6 +202,26 @@ def test_attraction_force_linlog_matches_reference_log_attraction() -> None:
     torch.testing.assert_close(force, expected_force)
 
 
+def test_attraction_force_applies_edge_weight_influence() -> None:
+    """Raise edge weights to the requested attraction exponent."""
+    pos = torch.tensor([[0.0, 0.0], [3.0, 0.0]], dtype=torch.float32)
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    mass = torch.tensor([1.0, 1.0], dtype=torch.float32)
+
+    force = _attraction_force(
+        pos=pos,
+        edge_index=edge_index,
+        mass=mass,
+        outbound_att_compensation=1.0,
+        outbound_attraction_distribution=False,
+        edge_weights=torch.tensor([4.0], dtype=torch.float32),
+        edge_weight_influence=0.5,
+    )
+
+    expected_force = torch.tensor([[6.0, 0.0], [-6.0, 0.0]], dtype=torch.float32)
+    torch.testing.assert_close(force, expected_force)
+
+
 def test_layout_fa2_strong_gravity_changes_layout() -> None:
     """Change the final layout when strong gravity is enabled."""
     edge_index, num_nodes = _cluster_bridge_graph()
@@ -213,6 +236,26 @@ def test_layout_fa2_strong_gravity_changes_layout() -> None:
     )
 
     assert not torch.allclose(default_pos, strong_pos)
+
+
+def test_gravity_force_strong_mode_skips_axis_aligned_nodes() -> None:
+    """Match the reference strong-gravity zero guard on the axes."""
+    pos = torch.tensor([[1.0, 0.0], [0.0, 2.0], [1.0, 2.0]], dtype=torch.float32)
+    mass = torch.tensor([2.0, 3.0, 4.0], dtype=torch.float32)
+
+    force = _gravity_force(
+        pos=pos,
+        mass=mass,
+        gravity=1.5,
+        strong_gravity=True,
+        scaling_ratio=2.0,
+    )
+
+    expected_force = torch.tensor(
+        [[0.0, 0.0], [0.0, 0.0], [-12.0, -24.0]],
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(force, expected_force)
 
 
 def test_layout_fa2_trace_mode_returns_snapshots() -> None:
@@ -257,6 +300,44 @@ def test_layout_fa2_gives_hubs_more_space_than_a_path() -> None:
     path_distance = (path_pos[1:] - path_pos[:-1]).norm(dim=1).mean().item()
 
     assert hub_distance > path_distance * 1.1
+
+
+def test_build_barnes_hut_tree_uses_mass_center_diameter() -> None:
+    """Size Barnes-Hut regions from the mass-center diameter."""
+    pos = np.array([[0.0, 0.0], [4.0, 0.0], [0.0, 1.0]], dtype=np.float64)
+    mass = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+
+    root = _build_barnes_hut_tree(
+        pos_np=pos,
+        mass_np=mass,
+        indices=np.array([0, 1, 2], dtype=np.int64),
+    )
+
+    assert root is not None
+    assert math.isclose(root.mass_center_x, 4.0 / 3.0)
+    assert math.isclose(root.mass_center_y, 1.0 / 3.0)
+    expected_size = 2.0 * max(
+        math.dist((4.0 / 3.0, 1.0 / 3.0), tuple(position)) for position in pos.tolist()
+    )
+    assert math.isclose(root.size, expected_size)
+
+
+def test_build_barnes_hut_tree_splits_degenerate_quadrants_into_singletons() -> None:
+    """Break all-in-one-quadrant regions into singleton leaves."""
+    pos = np.array([[2.0, 2.0], [2.0, 2.0], [2.0, 2.0]], dtype=np.float64)
+    mass = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+
+    root = _build_barnes_hut_tree(
+        pos_np=pos,
+        mass_np=mass,
+        indices=np.array([0, 1, 2], dtype=np.int64),
+    )
+
+    assert root is not None
+    assert root.children is not None
+    assert len(root.children) == 3
+    assert all(child.indices is not None for child in root.children)
+    assert [int(child.indices[0]) for child in root.children] == [0, 1, 2]
 
 
 def test_adjust_speed_and_apply_forces_matches_reference_math() -> None:

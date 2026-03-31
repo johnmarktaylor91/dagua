@@ -182,6 +182,73 @@ def test_variant_params_are_valid_for_reimpl() -> None:
         assert set(variant.reimpl_params).issubset(allowed_param_names)
 
 
+def test_classic_fa2_defaults_enable_barnes_hut() -> None:
+    """The FA2 benchmark defaults should match the reference BH mode."""
+    default_params = _CLASSIC_LAYOUT_SPECS["classic_fa2"].default_params
+
+    assert default_params["barnes_hut"] is True
+    assert default_params["barnes_hut_theta"] == 1.2
+
+
+def test_fa2_default_variants_enable_barnes_hut() -> None:
+    """All FA2 reference-matched variants should opt into Barnes-Hut."""
+    variant_ids = (
+        "classic_fa2_default",
+        "classic_fa2_gravity0",
+        "classic_fa2_gravity2",
+        "classic_fa2_scaling1",
+        "classic_fa2_scaling4",
+        "classic_fa2_strong_gravity",
+        "classic_fa2_no_outbound",
+        "classic_fa2_dissuade_hubs",
+        "classic_fa2_linlog",
+    )
+
+    for variant_id in variant_ids:
+        variant = get_variant(variant_id)
+        assert variant is not None
+        assert variant.reimpl_params["barnes_hut"] is True
+        assert variant.reimpl_params["barnes_hut_theta"] == 1.2
+
+
+def test_fa2_linlog_variant_is_not_true_original() -> None:
+    """LinLog should use the proxy path because the reference asserts."""
+    variant = get_variant("classic_fa2_linlog")
+
+    assert variant is not None
+    assert variant.is_true_original is False
+
+
+def test_classic_sgd2_multi_registry_defaults_match_benchmark_reference() -> None:
+    """Classic SGD2 defaults should include the benchmark learning rate."""
+    assert _CLASSIC_LAYOUT_SPECS["classic_sgd2_multi"].default_params == {
+        "criteria": {"stress": 1.0, "ideal_edge_length": 1.0},
+        "lr": 0.01,
+    }
+
+
+def test_sgd2_multi_variants_pin_steps_and_grad_clamp() -> None:
+    """All SGD2 variants should pin the agreed iteration and clamp settings."""
+    variant_ids = (
+        "classic_sgd2_multi_default",
+        "classic_sgd2_multi_stress_only",
+        "classic_sgd2_multi_with_crossing",
+        "classic_sgd2_multi_with_aspect",
+        "classic_sgd2_multi_lr001",
+        "classic_sgd2_multi_lr01",
+        "classic_sgd2_multi_batch8",
+        "classic_sgd2_multi_batch128",
+    )
+
+    for variant_id in variant_ids:
+        variant = get_variant(variant_id)
+        assert variant is not None
+        assert variant.reimpl_params["steps"] == 2000
+        assert variant.reimpl_params["grad_clamp"] == 5.0
+        assert variant.original_params["max_iter"] == 2000
+        assert variant.original_params["grad_clamp"] == 5.0
+
+
 def test_original_params_mappable_where_claimed() -> None:
     """Original-side params should only use adapter-supported names."""
     for variant in VARIANT_REGISTRY:
@@ -190,6 +257,26 @@ def test_original_params_mappable_where_claimed() -> None:
         competitor = get_competitor(variant.original_engine)
         assert competitor is not None
         assert set(variant.original_params).issubset(set(competitor.variant_param_names))
+
+
+def test_classic_embedding_variant_registry_matches_reference_defaults() -> None:
+    """Embedding variants should keep the reference-aligned parameter budgets."""
+    assert _CLASSIC_LAYOUT_SPECS["classic_neulay"].default_params == {
+        "steps": 20_000,
+        "gcn_steps": 2_000,
+        "use_gcn": True,
+        "lr": 0.1,
+        "radius": 0.4,
+    }
+
+    tsnet_steps200 = get_variant("classic_tsnet_steps200")
+    assert tsnet_steps200 is not None
+    assert tsnet_steps200.original_params["max_iter"] == 200
+
+    neulay_no_gcn = get_variant("classic_neulay_no_gcn")
+    assert neulay_no_gcn is not None
+    assert "gcn_steps" not in neulay_no_gcn.reimpl_params
+    assert "gcn_steps" not in neulay_no_gcn.original_params
 
 
 def test_stochastic_flag_consistency() -> None:

@@ -194,7 +194,7 @@ class SGD2MultiRef(CompetitorBase):
     name = "sgd2_multi_ref"
     max_nodes = 5_000
     variant_param_names = frozenset(
-        {"criteria_weights", "max_iter", "optimizer_kwargs", "sample_sizes"}
+        {"criteria_weights", "grad_clamp", "max_iter", "optimizer_kwargs", "sample_sizes"}
     )
 
     def layout(
@@ -323,7 +323,7 @@ class SGD2MultiRef(CompetitorBase):
             max_iter = int(optimize_kwargs.get("max_iter", 2000))
             optimize_kwargs.setdefault("evaluate_interval", max_iter)
             optimize_kwargs.setdefault("evaluate", {"stress"})
-            optimize_kwargs["grad_clamp"] = 5.0
+            optimize_kwargs.setdefault("grad_clamp", 5.0)
 
             gd2 = GD2(G_nx)
             with _compat_reduce_lr_on_plateau(), _compat_criteria_patches():

@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, Optional
+
+import numpy as np
+import pytest
 import torch
 
+from dagua.layout.classic import kk as kk_module
 from dagua.layout.classic import layout_kk
 
 
@@ -82,3 +88,39 @@ def test_layout_kk_supports_single_node_graphs() -> None:
 
     assert positions.shape == (1, 2)
     assert torch.isfinite(positions).all()
+
+
+@pytest.mark.parametrize("steps", [None, 0])
+def test_layout_kk_omits_lbfgsb_maxiter_when_steps_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Optional[int],
+) -> None:
+    """The NetworkX-matching KK path should leave ``maxiter`` unset by default."""
+    scipy = pytest.importorskip("scipy")
+    captured_kwargs: dict[str, Any] = {}
+
+    def fake_minimize(
+        objective: Any,
+        initial_vector: np.ndarray,
+        **kwargs: Any,
+    ) -> SimpleNamespace:
+        """Capture the SciPy optimizer kwargs without running L-BFGS-B."""
+        _ = objective
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(x=np.asarray(initial_vector, dtype=np.float64))
+
+    monkeypatch.setattr(scipy.optimize, "minimize", fake_minimize)
+
+    distance_matrix = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float64)
+    initial_positions = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64)
+
+    solved_positions, traces = kk_module._solve_kamada_kawai(
+        distance_matrix=distance_matrix,
+        initial_positions=initial_positions,
+        steps=steps,
+        trace_every=0,
+    )
+
+    assert "options" not in captured_kwargs
+    np.testing.assert_allclose(solved_positions, initial_positions)
+    assert traces == []

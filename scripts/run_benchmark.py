@@ -433,6 +433,12 @@ def parse_args() -> argparse.Namespace:
         help="Number of seeds for stochastic engines",
     )
     parser.add_argument(
+        "--seed-start",
+        type=int,
+        default=DEFAULT_SEED_START,
+        help="First seed for stochastic engines",
+    )
+    parser.add_argument(
         "--max-nodes",
         type=int,
         default=0,
@@ -525,7 +531,7 @@ def reverse_pairings(use_variants: bool) -> dict[str, list[str]]:
     return reversed_map
 
 
-def seeds_for_engine(engine_name: str, seed_count: int) -> list[Optional[int]]:
+def seeds_for_engine(engine_name: str, seed_count: int, seed_start: int) -> list[Optional[int]]:
     """Return the benchmark seeds for one engine.
 
     Parameters
@@ -534,15 +540,17 @@ def seeds_for_engine(engine_name: str, seed_count: int) -> list[Optional[int]]:
         Registered competitor adapter name.
     seed_count : int
         Number of seeds requested for stochastic engines.
+    seed_start : int
+        First seed in the requested stochastic range.
 
     Returns
     -------
     list[int | None]
-        One deterministic ``None`` entry or a sequence starting at 42.
+        One deterministic ``None`` entry or a contiguous stochastic seed range.
     """
     if not engine_is_stochastic(engine_name):
         return [None]
-    return list(range(DEFAULT_SEED_START, DEFAULT_SEED_START + seed_count))
+    return list(range(seed_start, seed_start + seed_count))
 
 
 def resolve_worker_count(workers_arg: str) -> int:
@@ -953,6 +961,7 @@ def recover_results_from_positions(
     graphs: Sequence[Any],
     engines: Sequence[Any],
     seed_count: int,
+    seed_start: int,
 ) -> dict[str, BenchmarkRecord]:
     """Rebuild best-effort successful records from saved position tensors.
 
@@ -966,6 +975,8 @@ def recover_results_from_positions(
         Selected competitor instances, including synthetic variants.
     seed_count : int
         Seed count requested for stochastic engines.
+    seed_start : int
+        First seed in the requested stochastic range.
 
     Returns
     -------
@@ -980,7 +991,7 @@ def recover_results_from_positions(
     for test_graph in graphs:
         summary = graph_summary(test_graph)
         for competitor in engines:
-            for seed in seeds_for_engine(competitor.name, seed_count):
+            for seed in seeds_for_engine(competitor.name, seed_count, seed_start):
                 relative_path = position_relative_path(summary.name, competitor.name, seed)
                 expected_by_filename[relative_path.name] = (
                     summary.name,
@@ -1885,6 +1896,7 @@ def manifest_payload(
             "resolved_workers": int(args.resolved_workers),
             "timeout": int(args.timeout),
             "seeds": int(args.seeds),
+            "seed_start": int(args.seed_start),
             "max_nodes": int(args.max_nodes),
             "engines": str(args.engines),
             "graphs": args.graphs,
@@ -1893,7 +1905,7 @@ def manifest_payload(
             "save_positions": not bool(args.no_positions),
             "variants": use_variants,
         },
-        "seed_values": list(range(DEFAULT_SEED_START, DEFAULT_SEED_START + int(args.seeds))),
+        "seed_values": list(range(int(args.seed_start), int(args.seed_start) + int(args.seeds))),
         "stochastic_engines": sorted(
             competitor.name for competitor in engines if engine_is_stochastic(competitor.name)
         ),
@@ -1984,6 +1996,7 @@ def main() -> int:
             graphs=selected_graphs,
             engines=selected_engines,
             seed_count=args.seeds,
+            seed_start=args.seed_start,
         )
     )
     existing_results = merge_recovered_results(disk_results, recovered_results)
@@ -2007,7 +2020,7 @@ def main() -> int:
     for test_graph in selected_graphs:
         summary = graph_summaries[test_graph.name]
         for competitor in selected_engines:
-            for seed in seeds_for_engine(competitor.name, args.seeds):
+            for seed in seeds_for_engine(competitor.name, args.seeds, args.seed_start):
                 key = build_record_key(summary.name, competitor.name, seed)
                 scoped_keys.append(key)
                 total_scope += 1
