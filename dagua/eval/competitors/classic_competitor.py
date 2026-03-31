@@ -7,6 +7,7 @@ they can be benchmarked alongside the original reference implementations.
 from __future__ import annotations
 
 import time
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping, Optional
 
@@ -78,6 +79,11 @@ class _ClassicBase(CompetitorBase):
         spec = _CLASSIC_LAYOUT_SPECS[self.name]
         layout_params = dict(spec.default_params)
         if variant_params is not None:
+            _warn_on_unrecognized_variant_params(
+                competitor_name=self.name,
+                variant_params=variant_params,
+                variant_param_names=self.variant_param_names,
+            )
             layout_params.update(dict(variant_params))
         return _quick_classic(
             self.name,
@@ -108,6 +114,40 @@ class _ClassicLayoutSpec:
     default_params: dict[str, Any]
 
 
+def _warn_on_unrecognized_variant_params(
+    competitor_name: str,
+    variant_params: Mapping[str, Any],
+    variant_param_names: frozenset[str],
+) -> None:
+    """Warn when variant overrides include unsupported keyword names.
+
+    Parameters
+    ----------
+    competitor_name : str
+        Name of the competitor receiving the override parameters.
+    variant_params : Mapping[str, Any]
+        Requested variant overrides.
+    variant_param_names : frozenset[str]
+        Supported override names for the competitor.
+
+    Returns
+    -------
+    None
+        Emits a ``UserWarning`` when unsupported parameter names are present.
+    """
+    unrecognized_param_names = sorted(set(variant_params) - set(variant_param_names))
+    if not unrecognized_param_names:
+        return
+    warnings.warn(
+        (
+            f"{competitor_name} received unrecognized variant params: "
+            f"{', '.join(unrecognized_param_names)}"
+        ),
+        UserWarning,
+        stacklevel=3,
+    )
+
+
 _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_fr": _ClassicLayoutSpec(
         import_path="dagua.layout.classic.fr",
@@ -122,7 +162,7 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_fa2": _ClassicLayoutSpec(
         import_path="dagua.layout.classic.fa2",
         function_name="layout_fa2",
-        default_params={"steps": 200},
+        default_params={"steps": 200, "barnes_hut": True, "barnes_hut_theta": 1.2},
     ),
     "classic_stress_sgd": _ClassicLayoutSpec(
         import_path="dagua.layout.classic.stress_sgd",
@@ -217,12 +257,18 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_neulay": _ClassicLayoutSpec(
         import_path="dagua.layout.classic.neulay",
         function_name="layout_neulay",
-        default_params={"steps": 20_000, "gcn_steps": 2_000, "use_gcn": True},
+        default_params={
+            "steps": 20_000,
+            "gcn_steps": 2_000,
+            "use_gcn": True,
+            "lr": 0.1,
+            "radius": 0.4,
+        },
     ),
     "classic_sgd2_multi": _ClassicLayoutSpec(
         import_path="dagua.layout.classic.sgd2_multi",
         function_name="layout_sgd2_multi",
-        default_params={"criteria": {"stress": 1.0, "ideal_edge_length": 1.0}},
+        default_params={"criteria": {"stress": 1.0, "ideal_edge_length": 1.0}, "lr": 0.01},
     ),
 }
 
@@ -1219,6 +1265,7 @@ class ClassicTsNET(_ClassicBase):
 
     name = "classic_tsnet"
     max_nodes = 10_000
+    variant_param_names = frozenset({"perplexity", "steps"})
 
     def layout(
         self,
@@ -1555,6 +1602,7 @@ class ClassicSFDP(_ClassicBase):
 class ClassicUMAP(_ClassicBase):
     name = "classic_umap"
     max_nodes = 20_000
+    variant_param_names = frozenset({"n_neighbors", "min_dist", "spread"})
 
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
@@ -1573,6 +1621,7 @@ class ClassicUMAP(_ClassicBase):
 class ClassicNeuLay(_ClassicBase):
     name = "classic_neulay"
     max_nodes = 50_000
+    variant_param_names = frozenset({"steps", "gcn_steps", "use_gcn", "lr", "radius"})
 
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
@@ -1604,6 +1653,8 @@ class ClassicNeuLay(_ClassicBase):
             steps=20_000,
             gcn_steps=2_000,
             use_gcn=True,
+            lr=0.1,
+            radius=0.4,
         )
 
 
@@ -1640,4 +1691,5 @@ class ClassicSGD2Multi(_ClassicBase):
             graph,
             self._layout_seed(seed),
             criteria={"stress": 1.0, "ideal_edge_length": 1.0},
+            lr=0.01,
         )

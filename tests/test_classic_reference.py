@@ -26,8 +26,7 @@ from dagua.layout.classic.gem import _repulsive_force_full as _gem_repulsive_for
 from dagua.layout.classic.gem import _rotate_impulse as _gem_rotate_impulse
 from dagua.layout.classic.gem import _update_temperatures as _gem_update_temperatures
 from dagua.layout.classic.linlog import _linlog_loss
-from dagua.layout.classic.linlog import _sample_non_edge_pairs as _linlog_sample_non_edge_pairs
-from dagua.layout.classic.linlog import _unique_undirected_edge_ids as _linlog_edge_ids
+from dagua.layout.classic.linlog import _sample_all_pairs as _linlog_sample_all_pairs
 from dagua.layout.classic.maxent_stress import _build_undirected_adjacency as _maxent_adjacency
 from dagua.layout.classic.maxent_stress import _full_non_edge_pairs as _maxent_full_non_edge_pairs
 from dagua.layout.classic.maxent_stress import _full_stress_terms as _maxent_full_stress_terms
@@ -36,6 +35,7 @@ from dagua.layout.classic.stress_sgd import _learning_rate as _stress_sgd_learni
 
 _NETWORKX_AVAILABLE = importlib.util.find_spec("networkx") is not None
 _PYDOT_AVAILABLE = importlib.util.find_spec("pydot") is not None
+davidson_harel_module = importlib.import_module("dagua.layout.classic.davidson_harel")
 
 
 def _path_edge_index(num_nodes: int) -> torch.Tensor:
@@ -859,12 +859,12 @@ def test_stress_sgd_learning_rate_matches_paper_schedule() -> None:
 
 
 def test_linlog_matches_noack_sum_energy() -> None:
-    """LinLog should repel only non-edge pairs in the Noack energy model."""
+    """LinLog should repel all unordered node pairs in the Noack energy model."""
     positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [0.0, 3.0]], dtype=torch.float32)
     edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
 
     distances = torch.pdist(positions, p=2)
-    expected = distances[[0, 2]].sum() - torch.log(distances[[1]]).sum()
+    expected = distances[[0, 2]].sum() - torch.log(distances).sum()
 
     actual = _linlog_loss(positions, edge_index, seed=0, step=0)
 
@@ -872,13 +872,13 @@ def test_linlog_matches_noack_sum_energy() -> None:
 
 
 def test_linlog_supports_generalized_exponents_without_gravity() -> None:
-    """Generalized LinLog exponents should repel only non-edge pairwise distances."""
+    """Generalized LinLog exponents should repel all pairwise distances."""
     positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [0.0, 3.0]], dtype=torch.float32)
     offset = torch.tensor([11.0, -7.0], dtype=torch.float32)
     edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
 
     distances = torch.pdist(positions, p=2)
-    expected = distances[[0, 2]].pow(2.0).sum() - distances[[1]].pow(1.5).sum()
+    expected = distances[[0, 2]].pow(2.0).sum() - distances.pow(1.5).sum()
 
     actual = _linlog_loss(positions, edge_index, seed=0, step=0, a=2.0, r=1.5)
     translated = _linlog_loss(positions + offset, edge_index, seed=0, step=0, a=2.0, r=1.5)
@@ -887,14 +887,12 @@ def test_linlog_supports_generalized_exponents_without_gravity() -> None:
     torch.testing.assert_close(translated, actual)
 
 
-def test_linlog_sampled_repulsion_excludes_edges() -> None:
-    """The sampled LinLog repulsion path should only draw non-edge pairs."""
+def test_linlog_sampled_repulsion_draws_from_all_pairs() -> None:
+    """The sampled LinLog repulsion path should include edge pairs as well."""
     edge_index = _path_edge_index(6)
-    edge_ids = _linlog_edge_ids(edge_index, num_nodes=6, device=torch.device("cpu"))
 
-    src, dst, total_non_edge_pairs = _linlog_sample_non_edge_pairs(
+    src, dst, total_pairs = _linlog_sample_all_pairs(
         num_nodes=6,
-        edge_ids=edge_ids,
         device=torch.device("cpu"),
         step=0,
         seed=0,
@@ -904,13 +902,34 @@ def test_linlog_sampled_repulsion_excludes_edges() -> None:
         (min(source, target), max(source, target))
         for source, target in zip(edge_index[0].tolist(), edge_index[1].tolist())
     }
+    sampled_pairs = {(int(source.item()), int(target.item())) for source, target in zip(src, dst)}
 
-    assert total_non_edge_pairs == 10
-    assert src.numel() > 0
-    assert all(
-        (int(source.item()), int(target.item())) not in edge_pairs
-        for source, target in zip(src, dst)
-    )
+    assert total_pairs == 15
+    assert src.numel() == 15
+    assert all(int(source.item()) < int(target.item()) for source, target in zip(src, dst))
+    assert edge_pairs <= sampled_pairs
+
+
+def test_davidson_harel_segments_intersect_treats_tiny_orientations_as_collinear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tiny orientation magnitudes should be treated as collinear intersections."""
+    orientations = iter((1.0e-12, 1.0, -1.0, -1.0e-12))
+
+    def fake_orientation(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        c: torch.Tensor,
+    ) -> float:
+        """Return a scripted sequence of near-collinear orientation values."""
+        _ = (a, b, c)
+        return next(orientations)
+
+    monkeypatch.setattr(davidson_harel_module, "_orientation", fake_orientation)
+
+    origin = torch.zeros(2, dtype=torch.float32)
+
+    assert davidson_harel_module._segments_intersect(origin, origin, origin, origin)
 
 
 def test_maxent_stress_includes_longer_shortest_paths() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from collections import deque
+from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
@@ -138,74 +139,426 @@ def _bfs_forest(
     return roots, children, depths
 
 
-def _assign_preliminary_x(
+@dataclass
+class _WalkerNode:
+    """Store Walker/Buchheim layout state for one rooted tree node.
+
+    Parameters
+    ----------
+    node_idx : int
+        Original graph node index.
+    depth : int
+        Depth inside the rooted BFS forest.
+    number : int
+        One-based sibling order within the parent child list.
+    parent : _WalkerNode, optional
+        Parent Walker node for the rooted tree.
+    children : list[_WalkerNode]
+        Child Walker nodes in deterministic left-to-right order.
+    prelim : float, default=0.0
+        Preliminary x coordinate from the first walk.
+    mod : float, default=0.0
+        Modifier accumulated during apportioning.
+    shift : float, default=0.0
+        Deferred shift contribution applied in ``_execute_shifts``.
+    change : float, default=0.0
+        Deferred change term used to propagate sibling adjustments.
+    thread : _WalkerNode, optional
+        Temporary contour thread linking disjoint subtree boundaries.
+    ancestor : _WalkerNode, optional
+        Current ancestor representative used for non-sibling conflict resolution.
+    _leftmost_sibling : _WalkerNode, optional
+        Cached leftmost sibling pointer used during apportioning.
+    """
+
+    node_idx: int
+    depth: int
+    number: int
+    parent: Optional["_WalkerNode"] = None
+    children: list["_WalkerNode"] = field(default_factory=list)
+    prelim: float = 0.0
+    mod: float = 0.0
+    shift: float = 0.0
+    change: float = 0.0
+    thread: Optional["_WalkerNode"] = None
+    ancestor: Optional["_WalkerNode"] = None
+    _leftmost_sibling: Optional["_WalkerNode"] = None
+
+    def __post_init__(self) -> None:
+        """Initialize the default ancestor to the node itself."""
+        self.ancestor = self
+
+    def left(self) -> Optional["_WalkerNode"]:
+        """Return the next node on the left contour.
+
+        Returns
+        -------
+        _WalkerNode, optional
+            Leftmost child when available, otherwise the thread pointer.
+        """
+        if self.thread is not None:
+            return self.thread
+        if self.children:
+            return self.children[0]
+        return None
+
+    def right(self) -> Optional["_WalkerNode"]:
+        """Return the next node on the right contour.
+
+        Returns
+        -------
+        _WalkerNode, optional
+            Rightmost child when available, otherwise the thread pointer.
+        """
+        if self.thread is not None:
+            return self.thread
+        if self.children:
+            return self.children[-1]
+        return None
+
+    def left_brother(self) -> Optional["_WalkerNode"]:
+        """Return the immediate sibling on the left.
+
+        Returns
+        -------
+        _WalkerNode, optional
+            Left sibling or ``None`` when this node is first in its sibling group.
+        """
+        if self.parent is None:
+            return None
+        previous_sibling: Optional[_WalkerNode] = None
+        for sibling in self.parent.children:
+            if sibling is self:
+                return previous_sibling
+            previous_sibling = sibling
+        return None
+
+    def leftmost_sibling(self) -> Optional["_WalkerNode"]:
+        """Return the leftmost sibling in the current sibling group.
+
+        Returns
+        -------
+        _WalkerNode, optional
+            Leftmost sibling when this node has siblings, otherwise ``None``.
+        """
+        if self._leftmost_sibling is None and self.parent is not None:
+            first_child = self.parent.children[0]
+            if first_child is not self:
+                self._leftmost_sibling = first_child
+        return self._leftmost_sibling
+
+
+def _build_walker_tree(
     root_idx: int,
     children: list[list[int]],
-    preliminary_x: list[float],
-    next_leaf_x: list[float],
-) -> tuple[float, float]:
-    """Assign tidy x-coordinates using an iterative post-order traversal.
+    depth: int,
+    number: int,
+    subtree_nodes: list[int],
+    parent: Optional[_WalkerNode] = None,
+) -> _WalkerNode:
+    """Create Walker bookkeeping nodes for one rooted subtree.
 
     Parameters
     ----------
     root_idx : int
-        Root node of the subtree being laid out.
+        Root node index in the BFS forest.
     children : list[list[int]]
         BFS-forest child lists.
-    preliminary_x : list[float]
-        Mutable x-coordinate buffer for all nodes.
-    next_leaf_x : list[float]
-        Single-item mutable counter tracking the next free leaf coordinate.
+    depth : int
+        Depth assigned to ``root_idx``.
+    number : int
+        One-based sibling order for ``root_idx``.
+    subtree_nodes : list[int]
+        Output list collecting all graph node ids inside the subtree.
+    parent : _WalkerNode, optional
+        Parent Walker node, if any.
+
+    Returns
+    -------
+    _WalkerNode
+        Root Walker state for the rooted subtree.
+    """
+    subtree_nodes.append(root_idx)
+    walker_node = _WalkerNode(
+        node_idx=root_idx,
+        depth=depth,
+        number=number,
+        parent=parent,
+    )
+    for child_number, child_idx in enumerate(children[root_idx], start=1):
+        walker_node.children.append(
+            _build_walker_tree(
+                root_idx=child_idx,
+                children=children,
+                depth=depth + 1,
+                number=child_number,
+                subtree_nodes=subtree_nodes,
+                parent=walker_node,
+            )
+        )
+    return walker_node
+
+
+def _walker_ancestor(
+    left_inner: _WalkerNode,
+    node: _WalkerNode,
+    default_ancestor: _WalkerNode,
+) -> _WalkerNode:
+    """Resolve the ancestor used to shift conflicting non-sibling subtrees.
+
+    Parameters
+    ----------
+    left_inner : _WalkerNode
+        Right contour node from the left subtree during apportioning.
+    node : _WalkerNode
+        Current subtree root being apportioned.
+    default_ancestor : _WalkerNode
+        Fallback ancestor when ``left_inner`` no longer points into the sibling set.
+
+    Returns
+    -------
+    _WalkerNode
+        Ancestor node that should receive the propagated subtree shift.
+    """
+    if node.parent is None:
+        return default_ancestor
+    candidate = left_inner.ancestor or default_ancestor
+    if candidate in node.parent.children:
+        return candidate
+    return default_ancestor
+
+
+def _move_subtree(left_subtree: _WalkerNode, right_subtree: _WalkerNode, shift: float) -> None:
+    """Move a subtree rightward and defer the shared shift to siblings.
+
+    Parameters
+    ----------
+    left_subtree : _WalkerNode
+        Ancestor on the left side receiving the balancing change term.
+    right_subtree : _WalkerNode
+        Conflicting subtree that must move right.
+    shift : float
+        Horizontal displacement measured in Walker spacing units.
+    """
+    subtree_count = right_subtree.number - left_subtree.number
+    if subtree_count <= 0:
+        return
+    shift_per_subtree = shift / float(subtree_count)
+    right_subtree.change -= shift_per_subtree
+    right_subtree.shift += shift
+    left_subtree.change += shift_per_subtree
+    right_subtree.prelim += shift
+    right_subtree.mod += shift
+
+
+def _execute_shifts(node: _WalkerNode) -> None:
+    """Apply deferred sibling shifts from right to left.
+
+    Parameters
+    ----------
+    node : _WalkerNode
+        Parent node whose child adjustments are ready to be committed.
+    """
+    shift = 0.0
+    change = 0.0
+    for child in reversed(node.children):
+        child.prelim += shift
+        child.mod += shift
+        change += child.change
+        shift += child.shift + change
+
+
+def _apportion(node: _WalkerNode, default_ancestor: _WalkerNode, distance: float) -> _WalkerNode:
+    """Resolve subtree contour conflicts for one sibling group.
+
+    Parameters
+    ----------
+    node : _WalkerNode
+        Current subtree root being inserted into its sibling group.
+    default_ancestor : _WalkerNode
+        Ancestor representative carried across previous siblings.
+    distance : float
+        Minimum spacing between adjacent sibling subtrees.
+
+    Returns
+    -------
+    _WalkerNode
+        Updated default ancestor for later siblings.
+    """
+    left_brother = node.left_brother()
+    if left_brother is None:
+        return default_ancestor
+
+    inner_right = node
+    outer_right = node
+    inner_left = left_brother
+    outer_left = node.leftmost_sibling()
+    if outer_left is None:
+        return default_ancestor
+
+    sum_inner_right = node.mod
+    sum_outer_right = node.mod
+    sum_inner_left = inner_left.mod
+    sum_outer_left = outer_left.mod
+
+    while inner_left.right() is not None and inner_right.left() is not None:
+        next_inner_left = inner_left.right()
+        next_inner_right = inner_right.left()
+        next_outer_left = outer_left.left()
+        next_outer_right = outer_right.right()
+        if (
+            next_inner_left is None
+            or next_inner_right is None
+            or next_outer_left is None
+            or next_outer_right is None
+        ):
+            break
+
+        inner_left = next_inner_left
+        inner_right = next_inner_right
+        outer_left = next_outer_left
+        outer_right = next_outer_right
+        outer_right.ancestor = node
+
+        shift = (inner_left.prelim + sum_inner_left) - (inner_right.prelim + sum_inner_right)
+        shift += distance
+        if shift > 0.0:
+            ancestor = _walker_ancestor(inner_left, node, default_ancestor)
+            _move_subtree(ancestor, node, shift)
+            sum_inner_right += shift
+            sum_outer_right += shift
+
+        sum_inner_left += inner_left.mod
+        sum_inner_right += inner_right.mod
+        sum_outer_left += outer_left.mod
+        sum_outer_right += outer_right.mod
+
+    if inner_left.right() is not None and outer_right.right() is None:
+        outer_right.thread = inner_left.right()
+        outer_right.mod += sum_inner_left - sum_outer_right
+    else:
+        if inner_right.left() is not None and outer_left.left() is None:
+            outer_left.thread = inner_right.left()
+            outer_left.mod += sum_inner_right - sum_outer_left
+        default_ancestor = node
+
+    return default_ancestor
+
+
+def _first_walk(node: _WalkerNode, distance: float) -> None:
+    """Assign preliminary coordinates and contour threads bottom-up.
+
+    Parameters
+    ----------
+    node : _WalkerNode
+        Root Walker node for the current subtree.
+    distance : float
+        Minimum spacing between neighboring sibling subtrees.
+    """
+    if not node.children:
+        left_brother = node.left_brother()
+        node.prelim = left_brother.prelim + distance if left_brother is not None else 0.0
+        return
+
+    default_ancestor = node.children[0]
+    for child in node.children:
+        _first_walk(child, distance=distance)
+        default_ancestor = _apportion(child, default_ancestor, distance=distance)
+
+    _execute_shifts(node)
+    midpoint = 0.5 * (node.children[0].prelim + node.children[-1].prelim)
+    left_brother = node.left_brother()
+    if left_brother is None:
+        node.prelim = midpoint
+        return
+
+    node.prelim = left_brother.prelim + distance
+    node.mod = node.prelim - midpoint
+
+
+def _second_walk(
+    node: _WalkerNode,
+    modifier: float,
+    coordinates: dict[int, float],
+) -> tuple[float, float]:
+    """Accumulate modifiers top-down to produce final x coordinates.
+
+    Parameters
+    ----------
+    node : _WalkerNode
+        Root Walker node for the current subtree.
+    modifier : float
+        Sum of ancestor modifiers reaching ``node``.
+    coordinates : dict[int, float]
+        Output mapping from graph node id to final x coordinate in Walker units.
 
     Returns
     -------
     tuple[float, float]
-        Inclusive ``(min_x, max_x)`` span of the root subtree.
+        Inclusive ``(min_x, max_x)`` span for the subtree.
     """
-    subtree_spans: dict[int, tuple[float, float]] = {}
-    for node_idx in _postorder_iterative(root_idx, children):
-        if not children[node_idx]:
-            preliminary_x[node_idx] = next_leaf_x[0]
-            next_leaf_x[0] += 1.0
-            subtree_spans[node_idx] = (preliminary_x[node_idx], preliminary_x[node_idx])
-            continue
-
-        first_child = children[node_idx][0]
-        last_child = children[node_idx][-1]
-        preliminary_x[node_idx] = 0.5 * (preliminary_x[first_child] + preliminary_x[last_child])
-        subtree_spans[node_idx] = (
-            subtree_spans[first_child][0],
-            subtree_spans[last_child][1],
+    x_coordinate = node.prelim + modifier
+    coordinates[node.node_idx] = x_coordinate
+    min_x = x_coordinate
+    max_x = x_coordinate
+    for child in node.children:
+        child_min, child_max = _second_walk(
+            child,
+            modifier=modifier + node.mod,
+            coordinates=coordinates,
         )
-    return subtree_spans[root_idx]
+        min_x = min(min_x, child_min)
+        max_x = max(max_x, child_max)
+    return min_x, max_x
 
 
-def _postorder_iterative(root: int, children: list[list[int]]) -> list[int]:
-    """Return an iterative post-order traversal for one rooted subtree.
+def _assign_preliminary_x(
+    root_idx: int,
+    children: list[list[int]],
+    depths: list[int],
+    preliminary_x: list[float],
+    component_offset: float,
+    component_gap: float,
+) -> float:
+    """Assign Walker x coordinates for one rooted component.
 
     Parameters
     ----------
-    root : int
-        Root node of the subtree.
+    root_idx : int
+        Root node of the component subtree.
     children : list[list[int]]
-        Child lists indexed by node id.
+        BFS-forest child lists.
+    depths : list[int]
+        BFS depth for each node.
+    preliminary_x : list[float]
+        Mutable x-coordinate buffer for all nodes.
+    component_offset : float
+        Starting x offset for the current connected component.
+    component_gap : float
+        Extra spacing inserted between laid-out components.
 
     Returns
     -------
-    list[int]
-        Node ids in post-order.
+    float
+        Starting offset for the next component in Walker spacing units.
     """
-    stack: list[tuple[int, bool]] = [(root, False)]
-    traversal: list[int] = []
-    while stack:
-        node_idx, processed = stack.pop()
-        if processed:
-            traversal.append(node_idx)
-            continue
-        stack.append((node_idx, True))
-        for child_idx in reversed(children[node_idx]):
-            stack.append((child_idx, False))
-    return traversal
+    subtree_nodes: list[int] = []
+    root = _build_walker_tree(
+        root_idx=root_idx,
+        children=children,
+        depth=depths[root_idx],
+        number=1,
+        subtree_nodes=subtree_nodes,
+    )
+    _first_walk(root, distance=1.0)
+
+    coordinates: dict[int, float] = {}
+    min_x, max_x = _second_walk(root, modifier=0.0, coordinates=coordinates)
+    normalization_shift = component_offset - min_x
+    for node_idx in subtree_nodes:
+        preliminary_x[node_idx] = coordinates[node_idx] + normalization_shift
+
+    return component_offset + (max_x - min_x) + 1.0 + component_gap
 
 
 def layout_reingold_tilford(
@@ -267,10 +620,16 @@ def layout_reingold_tilford(
     component_gap = sibling_spacing * 2.0
 
     preliminary_x = [0.0] * num_nodes
-    next_leaf_x = [0.0]
+    next_component_x = 0.0
     for root in roots:
-        _assign_preliminary_x(root, children, preliminary_x, next_leaf_x)
-        next_leaf_x[0] += component_gap
+        next_component_x = _assign_preliminary_x(
+            root_idx=root,
+            children=children,
+            depths=depths,
+            preliminary_x=preliminary_x,
+            component_offset=next_component_x,
+            component_gap=component_gap,
+        )
 
     positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
     for node_idx in range(num_nodes):

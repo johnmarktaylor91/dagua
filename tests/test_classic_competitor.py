@@ -9,7 +9,13 @@ import pytest
 import torch
 
 from dagua.eval.competitors import classic_competitor, get_available_competitors
-from dagua.eval.competitors.classic_competitor import ClassicFR, ClassicNeuLay, ClassicSGD2Multi
+from dagua.eval.competitors.classic_competitor import (
+    ClassicFR,
+    ClassicNeuLay,
+    ClassicSGD2Multi,
+    ClassicTsNET,
+    ClassicUMAP,
+)
 from dagua.eval.graphs import get_test_graphs
 from dagua.graph import DaguaGraph
 
@@ -30,6 +36,15 @@ EXPECTED_CLASSIC_NAMES = {
     "classic_maxent_stress",
     "classic_davidson_harel",
     "classic_fmmm",
+    "classic_graphopt",
+    "classic_drl",
+    "classic_lgl",
+    "classic_sfdp",
+    "classic_umap",
+    "classic_neulay",
+    "classic_sgd2_multi",
+    "classic_fr_kk",
+    "classic_kk_fr",
 }
 
 
@@ -186,7 +201,46 @@ def test_classic_neulay_uses_full_two_phase_defaults(
         "steps": 20_000,
         "gcn_steps": 2_000,
         "use_gcn": True,
+        "lr": 0.1,
+        "radius": 0.4,
     }
+
+
+def test_classic_embedding_variant_param_names_match_registry_contract() -> None:
+    """Classic embedding adapters should declare their supported override names."""
+    assert ClassicTsNET.variant_param_names == frozenset({"perplexity", "steps"})
+    assert ClassicUMAP.variant_param_names == frozenset({"n_neighbors", "min_dist", "spread"})
+    assert ClassicNeuLay.variant_param_names == frozenset(
+        {"steps", "gcn_steps", "use_gcn", "lr", "radius"}
+    )
+
+
+def test_classic_layout_with_variant_warns_on_unrecognized_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Classic variant dispatch should warn on unsupported override names."""
+    graph = _make_small_graph()
+
+    def _fake_quick_classic(
+        name: str,
+        import_path: str,
+        fn_name: str,
+        graph: DaguaGraph,
+        seed: int,
+        **extra_kwargs: Any,
+    ) -> object:
+        """Return a dummy result payload for warning validation."""
+        del name, import_path, fn_name, graph, seed, extra_kwargs
+        return object()
+
+    monkeypatch.setattr(classic_competitor, "_quick_classic", _fake_quick_classic)
+
+    with pytest.warns(
+        UserWarning, match="classic_umap received unrecognized variant params: bogus"
+    ):
+        result = ClassicUMAP().layout_with_variant(graph, seed=19, variant_params={"bogus": 1.0})
+
+    assert result is not None
 
 
 def test_classic_sgd2_multi_enables_multiple_criteria(
@@ -222,7 +276,10 @@ def test_classic_sgd2_multi_enables_multiple_criteria(
     assert observed["import_path"] == "dagua.layout.classic.sgd2_multi"
     assert observed["fn_name"] == "layout_sgd2_multi"
     assert observed["seed"] == 17
-    assert observed["extra_kwargs"] == {"criteria": {"stress": 1.0, "ideal_edge_length": 1.0}}
+    assert observed["extra_kwargs"] == {
+        "criteria": {"stress": 1.0, "ideal_edge_length": 1.0},
+        "lr": 0.01,
+    }
 
 
 def test_graphviz_dot_with_clusters() -> None:

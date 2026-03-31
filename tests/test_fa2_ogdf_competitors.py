@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-import pytest
+import random
+import sys
+import types
+from typing import Optional
 
-from dagua.eval.competitors import get_competitors
+import numpy as np
+import pytest
+import torch
+
+from dagua.eval.competitors import fa2_competitor, get_competitors
 from dagua.eval.competitors.fa2_competitor import FA2Reference
 from dagua.eval.competitors.networkx_competitor import NetworkXSpectral
 from dagua.eval.competitors.ogdf_competitor import (
@@ -88,6 +95,58 @@ def test_fa2_layout_returns_positions() -> None:
     assert result.pos is not None
     assert result.pos.shape == (6, 2)
     assert result.error is None
+
+
+def test_fa2_layout_seeds_python_random_and_numpy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Seed both RNGs so repeated FA2 reference runs are deterministic."""
+    graph = _make_small_graph()
+
+    class _FakeGraph:
+        """Minimal NetworkX-like graph for the adapter test."""
+
+        def __init__(self) -> None:
+            """Initialize an empty graph stub."""
+            self.nodes: list[int] = []
+
+        def add_nodes_from(self, nodes: range) -> None:
+            """Record nodes added by the adapter."""
+            self.nodes = list(nodes)
+
+        def add_edge(self, source: int, target: int, weight: Optional[float] = None) -> None:
+            """Accept edge insertions required by the adapter."""
+            del source, target, weight
+
+    class _FakeForceAtlas2:
+        """Generate coordinates from Python and NumPy RNGs."""
+
+        def __init__(self, **kwargs: object) -> None:
+            """Accept adapter kwargs without using them."""
+            del kwargs
+
+        def forceatlas2_networkx_layout(
+            self,
+            graph_obj: _FakeGraph,
+            **kwargs: object,
+        ) -> dict[int, tuple[float, float]]:
+            """Return positions sampled from both seeded RNGs."""
+            del kwargs
+            return {
+                node_id: (random.random(), float(np.random.random())) for node_id in graph_obj.nodes
+            }
+
+    fake_networkx = types.ModuleType("networkx")
+    fake_networkx.Graph = _FakeGraph
+    monkeypatch.setitem(sys.modules, "networkx", fake_networkx)
+    monkeypatch.setattr(fa2_competitor, "_load_forceatlas2", lambda: _FakeForceAtlas2)
+
+    result_a = FA2Reference().layout(graph, timeout=30.0, seed=42)
+    result_b = FA2Reference().layout(graph, timeout=30.0, seed=42)
+
+    assert result_a.pos is not None
+    assert result_b.pos is not None
+    assert result_a.error is None
+    assert result_b.error is None
+    assert torch.equal(result_a.pos, result_b.pos)
 
 
 def test_ogdf_available_check_returns_bool() -> None:

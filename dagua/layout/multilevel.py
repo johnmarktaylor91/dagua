@@ -2072,7 +2072,8 @@ def multilevel_layout(
                     _ctypes_restore.CDLL("libc.so.6").malloc_trim(0)
                 except OSError:
                     pass
-                _vlog(f"  Freed {len(levels) - 1} earlier levels (reload from checkpoint on demand)")
+                freed = len(levels) - 1
+                _vlog(f"  Freed {freed} earlier levels (reload on demand)")
 
             # Also free fine_to_coarse on earlier levels -- only needed during
             # refinement prolongation, dead weight during coarsening. At 1.2B
@@ -2139,7 +2140,9 @@ def multilevel_layout(
                 )
                 if extra_levels:
                     levels.extend(extra_levels)
-                    _vlog(f"  Extended hierarchy by {len(extra_levels)} levels → {levels[-1].num_nodes:,} coarsest nodes")
+                    n_ext = len(extra_levels)
+                    coarsest = levels[-1].num_nodes
+                    _vlog(f"  Extended hierarchy by {n_ext} levels -> {coarsest:,} coarsest nodes")
         else:
             _t_hier = _time.perf_counter()
             # Capture references then free the graph object's copies.
