@@ -8,6 +8,7 @@ from typing import Callable, Dict, Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from dagua.layout.classic._graph_distances import (
@@ -18,11 +19,17 @@ from dagua.layout.classic._graph_distances import (
 )
 
 _EPS = 1.0e-6
+_SEGMENT_EPS = 1.0e-9
 _CROSSING_SHARPNESS = 10.0
 _DEFAULT_IDEAL_EDGE_LENGTH = 1.0
-_DEFAULT_ASPECT_RATIO_TARGET = 0.95
-_DEFAULT_VERTEX_RESOLUTION = 1.0
+_DEFAULT_ASPECT_RATIO_TARGET = 1.0
 _DEFAULT_GRAPH_K = 8
+_VERTEX_RESOLUTION_SMOOTHNESS = 0.1
+_NEIGHBORHOOD_DEPTH_LIMIT = 2
+_NEIGHBORHOOD_NEG_SAMPLE_RATE = 0.5
+_NEIGHBORHOOD_K_DIST = 1.5
+_CROSSING_DETECTOR_TRAIN_STEPS = 2
+_CROSSING_DETECTOR_LR = 0.01
 
 
 class SmoothSteps:
@@ -103,6 +110,62 @@ class _PreparedState:
     stress_distances: Optional[torch.Tensor]
     stress_weights: Optional[torch.Tensor]
     graph_knn_mask: Optional[torch.Tensor]
+    incident_edge_pairs: Optional[torch.Tensor]
+    non_incident_edge_pairs: Optional[torch.Tensor]
+
+
+@dataclass
+class _VertexResolutionState:
+    """State carried across iterations for the vertex-resolution target."""
+
+    prev_target_dist: torch.Tensor
+    prev_weight: float
+
+
+@dataclass
+class _CrossingLossState:
+    """Persistent neural detector state for the crossing criterion."""
+
+    detector: nn.Module
+    optimizer: torch.optim.Optimizer
+    train_loss: nn.Module
+    position_loss: nn.Module
+
+
+class _CrossingDetector(nn.Module):
+    """Feed-forward crossing detector matching the reference architecture."""
+
+    def __init__(self) -> None:
+        """Initialize the detector layers."""
+        super().__init__()
+        self.main = nn.Sequential(
+            nn.Linear(8, 128),
+            nn.LayerNorm(128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 512),
+            nn.LayerNorm(512),
+            nn.LeakyReLU(),
+            nn.Linear(512, 64),
+            nn.LayerNorm(64),
+            nn.LeakyReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the detector on flattened edge-pair coordinates.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Edge-pair coordinates with shape ``[B, 8]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Crossing probabilities with shape ``[B, 1]``.
+        """
+        return self.main(x)
 
 
 def _layout_device(
@@ -316,7 +379,7 @@ def _build_stress_terms(distances: torch.Tensor) -> tuple[torch.Tensor, torch.Te
         device=distances.device,
     )
     upper_distances = distances[upper[0], upper[1]]
-    finite_mask = torch.isfinite(upper_distances) & (upper_distances > 0)
+    finite_mask = torch.isfinite(upper_distances)
     pairs = upper[:, finite_mask]
     positive_distances = upper_distances[finite_mask]
     weights = 1.0 / (positive_distances.square() + _EPS)
@@ -359,11 +422,86 @@ def _graph_knn_mask(distances: torch.Tensor, k: int) -> torch.Tensor:
     return mask
 
 
+def _build_incident_edge_pairs(
+    adjacency: list[list[tuple[int, float]]],
+    device: torch.device,
+) -> torch.Tensor:
+    """Build sampled incident-edge tuples for angular resolution.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list.
+    device : torch.device
+        Device used for the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Tuple tensor with shape ``[5, P]`` storing
+        ``(degree, node_a, neighbor_b, node_c, neighbor_d)``.
+    """
+    pairs: list[tuple[int, int, int, int, int]] = []
+    for node, neighbors in enumerate(adjacency):
+        degree = len(neighbors)
+        if degree < 2:
+            continue
+        neighbor_ids = [neighbor for neighbor, _ in neighbors]
+        for left_index in range(degree - 1):
+            for right_index in range(left_index + 1, degree):
+                pairs.append(
+                    (
+                        degree,
+                        node,
+                        neighbor_ids[left_index],
+                        node,
+                        neighbor_ids[right_index],
+                    )
+                )
+    if not pairs:
+        return torch.empty((5, 0), dtype=torch.long, device=device)
+    return torch.tensor(pairs, dtype=torch.long, device=device).transpose(0, 1).contiguous()
+
+
+def _build_non_incident_edge_pairs(edges: torch.Tensor) -> torch.Tensor:
+    """Build all non-incident undirected edge pairs.
+
+    Parameters
+    ----------
+    edges : torch.Tensor
+        Undirected edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge-pair tensor with shape ``[4, P]`` storing
+        ``(edge0_src, edge0_dst, edge1_src, edge1_dst)``.
+    """
+    edge_count = edges.shape[1]
+    if edge_count < 2:
+        return torch.empty((4, 0), dtype=torch.long, device=edges.device)
+
+    pair_indices = torch.triu_indices(edge_count, edge_count, offset=1, device=edges.device)
+    left = edges[:, pair_indices[0]]
+    right = edges[:, pair_indices[1]]
+    non_incident = (
+        (left[0] != right[0])
+        & (left[0] != right[1])
+        & (left[1] != right[0])
+        & (left[1] != right[1])
+    )
+    if not bool(non_incident.any().item()):
+        return torch.empty((4, 0), dtype=torch.long, device=edges.device)
+    return torch.cat([left[:, non_incident], right[:, non_incident]], dim=0)
+
+
 def _prepare_state(
     edge_index: torch.Tensor,
     num_nodes: int,
     device: torch.device,
     needs_distances: bool,
+    needs_incident_edge_pairs: bool,
+    needs_non_incident_edge_pairs: bool,
     edge_weights: Optional[torch.Tensor],
 ) -> _PreparedState:
     """Precompute the graph structures needed by active criteria.
@@ -378,6 +516,10 @@ def _prepare_state(
         Optimization device.
     needs_distances : bool
         Whether shortest-path-derived criteria are active.
+    needs_incident_edge_pairs : bool
+        Whether angular-resolution sampling tuples are active.
+    needs_non_incident_edge_pairs : bool
+        Whether crossing-related edge-pair batches are active.
     edge_weights : torch.Tensor, optional
         Optional per-edge weights with shape ``[E]``.
 
@@ -392,6 +534,14 @@ def _prepare_state(
         num_nodes=num_nodes,
         edge_weights=edge_weights,
     )
+    incident_edge_pairs = (
+        _build_incident_edge_pairs(adjacency=adjacency, device=device)
+        if needs_incident_edge_pairs
+        else None
+    )
+    non_incident_edge_pairs = (
+        _build_non_incident_edge_pairs(edges=edges) if needs_non_incident_edge_pairs else None
+    )
     if not needs_distances:
         return _PreparedState(
             device=device,
@@ -402,6 +552,8 @@ def _prepare_state(
             stress_distances=None,
             stress_weights=None,
             graph_knn_mask=None,
+            incident_edge_pairs=incident_edge_pairs,
+            non_incident_edge_pairs=non_incident_edge_pairs,
         )
 
     distances = _all_pairs_shortest_paths(
@@ -420,6 +572,8 @@ def _prepare_state(
         stress_distances=stress_distances,
         stress_weights=stress_weights,
         graph_knn_mask=graph_knn_mask,
+        incident_edge_pairs=incident_edge_pairs,
+        non_incident_edge_pairs=non_incident_edge_pairs,
     )
 
 
@@ -517,14 +671,14 @@ def _sample_pairs(pairs: torch.Tensor, batch_size: int) -> torch.Tensor:
     Parameters
     ----------
     pairs : torch.Tensor
-        Pair index tensor with shape ``[2, P]``.
+        Pair index tensor with shape ``[K, P]``.
     batch_size : int
         Requested sample size.
 
     Returns
     -------
     torch.Tensor
-        Sampled pair indices with shape ``[2, B]``.
+        Sampled pair indices with shape ``[K, B]``.
     """
     if pairs.numel() == 0:
         return pairs
@@ -604,6 +758,34 @@ def _sample_edge_pairs(edges: torch.Tensor, batch_size: int) -> tuple[torch.Tens
     left_cat = torch.cat(left_batches, dim=1)[:, :batch_size]
     right_cat = torch.cat(right_batches, dim=1)[:, :batch_size]
     return left_cat, right_cat
+
+
+class _CyclicSampler:
+    """Epoch-based mini-batch sampler matching the reference DataLoader.
+
+    Each epoch visits every index exactly once in shuffled order.  When the
+    epoch is exhausted a fresh permutation is drawn automatically.
+    """
+
+    __slots__ = ("_total", "_device", "_perm", "_offset")
+
+    def __init__(self, total: int, device: torch.device) -> None:
+        self._total = total
+        self._device = device
+        self._perm = torch.randperm(total, device=device)
+        self._offset = 0
+
+    def sample(self, batch_size: int) -> torch.Tensor:
+        """Return the next ``batch_size`` indices, reshuffling on epoch boundary."""
+        if self._total <= 0:
+            return torch.empty((0,), dtype=torch.long, device=self._device)
+        bs = min(batch_size, self._total)
+        if self._offset + bs > self._total:
+            self._perm = torch.randperm(self._total, device=self._device)
+            self._offset = 0
+        out = self._perm[self._offset : self._offset + bs]
+        self._offset += bs
+        return out
 
 
 def _stress_loss(
@@ -713,33 +895,164 @@ def _lovasz_hinge_flat(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tens
 def _neighborhood_preservation_loss(
     pos: torch.Tensor,
     anchor_nodes: torch.Tensor,
-    graph_knn_mask: torch.Tensor,
+    adjacency: list[list[tuple[int, float]]],
 ) -> torch.Tensor:
-    """Evaluate a Lovasz-hinge neighborhood-preservation loss.
+    """Evaluate the reference BFS-based neighborhood-preservation loss.
 
     Parameters
     ----------
     pos : torch.Tensor
         Position tensor with shape ``[N, 2]``.
     anchor_nodes : torch.Tensor
-        Anchor-node indices with shape ``[B]``.
-    graph_knn_mask : torch.Tensor
-        Binary graph-neighborhood targets with shape ``[N, N]``.
+        Root-node indices with shape ``[B]``.
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list.
 
     Returns
     -------
     torch.Tensor
         Scalar neighborhood-preservation loss.
     """
-    if anchor_nodes.numel() == 0:
+    sampled_nodes = _sample_neighborhood_nodes(
+        adjacency=adjacency,
+        root_nodes=anchor_nodes,
+        num_nodes=pos.shape[0],
+        device=pos.device,
+    )
+    if sampled_nodes.numel() == 0:
         return pos.sum() * 0.0
 
-    distances = torch.cdist(pos[anchor_nodes], pos)
-    logits = -distances
-    logits.scatter_(1, anchor_nodes.unsqueeze(1), -1.0e6)
-    labels = graph_knn_mask[anchor_nodes].to(dtype=pos.dtype)
-    row_losses = [_lovasz_hinge_flat(logits[row], labels[row]) for row in range(logits.shape[0])]
-    return torch.stack(row_losses).mean() if row_losses else pos.sum() * 0.0
+    sampled_pos = pos[sampled_nodes]
+    logits = -torch.cdist(sampled_pos, sampled_pos) + _NEIGHBORHOOD_K_DIST
+    labels = _induced_adjacency_target(
+        sampled_nodes=sampled_nodes,
+        adjacency=adjacency,
+        device=pos.device,
+        dtype=pos.dtype,
+    )
+    return _lovasz_hinge_flat(logits.reshape(-1), labels.reshape(-1))
+
+
+def _bfs_nodes(
+    adjacency: list[list[tuple[int, float]]],
+    root: int,
+    depth_limit: int,
+) -> list[int]:
+    """Collect nodes from a bounded BFS rooted at one node.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list.
+    root : int
+        Root node index.
+    depth_limit : int
+        Maximum BFS depth.
+
+    Returns
+    -------
+    list[int]
+        Visited node indices in discovery order.
+    """
+    visited = {root}
+    queue: list[tuple[int, int]] = [(root, 0)]
+    ordered = [root]
+    queue_index = 0
+    while queue_index < len(queue):
+        node, depth = queue[queue_index]
+        queue_index += 1
+        if depth >= depth_limit:
+            continue
+        for neighbor, _weight in adjacency[node]:
+            if neighbor in visited:
+                continue
+            visited.add(neighbor)
+            ordered.append(neighbor)
+            queue.append((neighbor, depth + 1))
+    return ordered
+
+
+def _sample_neighborhood_nodes(
+    adjacency: list[list[tuple[int, float]]],
+    root_nodes: torch.Tensor,
+    num_nodes: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build the sampled subgraph used by neighborhood preservation.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list.
+    root_nodes : torch.Tensor
+        Root-node indices with shape ``[B]``.
+    num_nodes : int
+        Number of graph nodes.
+    device : torch.device
+        Device used for the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Unique sampled node indices with shape ``[S]``.
+    """
+    if root_nodes.numel() == 0:
+        return torch.empty((0,), dtype=torch.long, device=device)
+
+    positive_nodes: list[int] = []
+    for root in root_nodes.tolist():
+        positive_nodes.extend(
+            _bfs_nodes(adjacency=adjacency, root=root, depth_limit=_NEIGHBORHOOD_DEPTH_LIMIT)
+        )
+    if not positive_nodes:
+        return torch.empty((0,), dtype=torch.long, device=device)
+
+    positive = torch.tensor(
+        sorted(set(positive_nodes)),
+        dtype=torch.long,
+        device=device,
+    )
+    negative_count = int(_NEIGHBORHOOD_NEG_SAMPLE_RATE * int(positive.numel()))
+    if negative_count <= 0:
+        return positive
+
+    negatives = torch.randint(0, num_nodes, (negative_count,), device=device)
+    return torch.unique(torch.cat([positive, negatives]), sorted=True)
+
+
+def _induced_adjacency_target(
+    sampled_nodes: torch.Tensor,
+    adjacency: list[list[tuple[int, float]]],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Build the induced adjacency-plus-identity target matrix.
+
+    Parameters
+    ----------
+    sampled_nodes : torch.Tensor
+        Sampled node indices with shape ``[S]``.
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list.
+    device : torch.device
+        Device used for the returned tensor.
+    dtype : torch.dtype
+        Floating dtype of the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Dense target matrix with shape ``[S, S]``.
+    """
+    size = int(sampled_nodes.numel())
+    target = torch.eye(size, dtype=dtype, device=device)
+    local_index = {int(node): offset for offset, node in enumerate(sampled_nodes.tolist())}
+    for row, node in enumerate(sampled_nodes.tolist()):
+        for neighbor, _weight in adjacency[node]:
+            column = local_index.get(neighbor)
+            if column is not None:
+                target[row, column] = 1.0
+    return target
 
 
 def _cross2d(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -758,6 +1071,109 @@ def _cross2d(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         Cross products with shape ``[B]``.
     """
     return a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]
+
+
+def _edge_pair_positions(
+    pos: torch.Tensor,
+    left: torch.Tensor,
+    right: torch.Tensor,
+) -> torch.Tensor:
+    """Gather flattened coordinates for one batch of edge pairs.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    left : torch.Tensor
+        Left edge batch with shape ``[2, B]``.
+    right : torch.Tensor
+        Right edge batch with shape ``[2, B]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Flattened edge-pair coordinates with shape ``[B, 8]``.
+    """
+    if left.numel() == 0 or right.numel() == 0:
+        return torch.empty((0, 8), dtype=pos.dtype, device=pos.device)
+    pair_indices = torch.stack([left[0], left[1], right[0], right[1]], dim=1)
+    return pos[pair_indices].reshape(-1, 8)
+
+
+def _point_on_segment(
+    point: torch.Tensor,
+    start: torch.Tensor,
+    end: torch.Tensor,
+) -> torch.Tensor:
+    """Test whether points lie on closed 2D segments.
+
+    Parameters
+    ----------
+    point : torch.Tensor
+        Query points with shape ``[B, 2]``.
+    start : torch.Tensor
+        Segment start points with shape ``[B, 2]``.
+    end : torch.Tensor
+        Segment end points with shape ``[B, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Boolean mask with shape ``[B]``.
+    """
+    min_x = torch.minimum(start[:, 0], end[:, 0]) - _SEGMENT_EPS
+    max_x = torch.maximum(start[:, 0], end[:, 0]) + _SEGMENT_EPS
+    min_y = torch.minimum(start[:, 1], end[:, 1]) - _SEGMENT_EPS
+    max_y = torch.maximum(start[:, 1], end[:, 1]) + _SEGMENT_EPS
+    return (
+        (point[:, 0] >= min_x)
+        & (point[:, 0] <= max_x)
+        & (point[:, 1] >= min_y)
+        & (point[:, 1] <= max_y)
+    )
+
+
+def _are_edge_pairs_crossed(edge_pair_pos: torch.Tensor) -> torch.Tensor:
+    """Compute exact geometric crossing labels for disjoint edge pairs.
+
+    Parameters
+    ----------
+    edge_pair_pos : torch.Tensor
+        Flattened edge-pair coordinates with shape ``[B, 8]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Boolean crossing labels with shape ``[B]``.
+    """
+    if edge_pair_pos.numel() == 0:
+        return torch.empty((0,), dtype=torch.bool, device=edge_pair_pos.device)
+
+    segments = edge_pair_pos.reshape(-1, 4, 2)
+    a = segments[:, 0]
+    b = segments[:, 1]
+    c = segments[:, 2]
+    d = segments[:, 3]
+
+    orient_abc = _cross2d(b - a, c - a)
+    orient_abd = _cross2d(b - a, d - a)
+    orient_cda = _cross2d(d - c, a - c)
+    orient_cdb = _cross2d(d - c, b - c)
+
+    proper = (
+        ((orient_abc > _SEGMENT_EPS) & (orient_abd < -_SEGMENT_EPS))
+        | ((orient_abc < -_SEGMENT_EPS) & (orient_abd > _SEGMENT_EPS))
+    ) & (
+        ((orient_cda > _SEGMENT_EPS) & (orient_cdb < -_SEGMENT_EPS))
+        | ((orient_cda < -_SEGMENT_EPS) & (orient_cdb > _SEGMENT_EPS))
+    )
+    collinear = (
+        ((orient_abc.abs() <= _SEGMENT_EPS) & _point_on_segment(c, a, b))
+        | ((orient_abd.abs() <= _SEGMENT_EPS) & _point_on_segment(d, a, b))
+        | ((orient_cda.abs() <= _SEGMENT_EPS) & _point_on_segment(a, c, d))
+        | ((orient_cdb.abs() <= _SEGMENT_EPS) & _point_on_segment(b, c, d))
+    )
+    return proper | collinear
 
 
 def _crossing_probability(
@@ -799,8 +1215,13 @@ def _crossing_probability(
     )
 
 
-def _crossings_loss(pos: torch.Tensor, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
-    """Evaluate the smooth crossing proxy loss.
+def _crossings_loss(
+    pos: torch.Tensor,
+    left: torch.Tensor,
+    right: torch.Tensor,
+    crossing_state: _CrossingLossState,
+) -> torch.Tensor:
+    """Evaluate the reference neural crossing loss.
 
     Parameters
     ----------
@@ -810,16 +1231,33 @@ def _crossings_loss(pos: torch.Tensor, left: torch.Tensor, right: torch.Tensor) 
         Left edge batch with shape ``[2, B]``.
     right : torch.Tensor
         Right edge batch with shape ``[2, B]``.
+    crossing_state : _CrossingLossState
+        Persistent detector state.
 
     Returns
     -------
     torch.Tensor
         Scalar crossing loss.
     """
-    probabilities = _crossing_probability(pos=pos, left=left, right=right)
-    if probabilities.numel() == 0:
+    edge_pair_pos = _edge_pair_positions(pos=pos, left=left, right=right)
+    if edge_pair_pos.numel() == 0:
         return pos.sum() * 0.0
-    return probabilities.mean()
+
+    labels = _are_edge_pairs_crossed(edge_pair_pos.detach()).to(
+        device=pos.device,
+        dtype=pos.dtype,
+    )
+    crossing_state.detector.train()
+    for _ in range(_CROSSING_DETECTOR_TRAIN_STEPS):
+        preds = crossing_state.detector(edge_pair_pos.detach()).view(-1)
+        train_loss = crossing_state.train_loss(preds, labels)
+        crossing_state.optimizer.zero_grad(set_to_none=True)
+        train_loss.backward()
+        crossing_state.optimizer.step()
+
+    crossing_state.detector.eval()
+    preds = crossing_state.detector(edge_pair_pos).view(-1)
+    return crossing_state.position_loss(preds, torch.zeros_like(preds))
 
 
 def _crossing_angle_loss(
@@ -879,71 +1317,52 @@ def _aspect_ratio_loss(pos: torch.Tensor, target: float) -> torch.Tensor:
         return pos.sum() * 0.0
     ratio = (singular_values[1] / singular_values[0].clamp(min=_EPS)).clamp(_EPS, 1.0 - _EPS)
     target_tensor = torch.tensor(
-        float(min(max(target, _EPS), 1.0 - _EPS)),
+        float(min(max(target, 0.0), 1.0)),
         device=pos.device,
         dtype=pos.dtype,
     )
-    return F.binary_cross_entropy(ratio, target_tensor)
+    return F.binary_cross_entropy(ratio, target_tensor, reduction="sum")
 
 
 def _angular_resolution_loss(
     pos: torch.Tensor,
-    anchor_nodes: torch.Tensor,
-    adjacency: list[list[tuple[int, float]]],
+    pair_batch: torch.Tensor,
 ) -> torch.Tensor:
-    """Evaluate the angular-resolution criterion on sampled nodes.
+    """Evaluate the reference angular-resolution criterion.
 
     Parameters
     ----------
     pos : torch.Tensor
         Position tensor with shape ``[N, 2]``.
-    anchor_nodes : torch.Tensor
-        Anchor-node indices with shape ``[B]``.
-    adjacency : list[list[tuple[int, float]]]
-        Undirected adjacency list.
+    pair_batch : torch.Tensor
+        Incident-edge tuple batch with shape ``[5, B]``.
 
     Returns
     -------
     torch.Tensor
         Scalar angular-resolution loss.
     """
-    losses: list[torch.Tensor] = []
-    for node in anchor_nodes.tolist():
-        neighbors = adjacency[node]
-        degree = len(neighbors)
-        if degree < 2:
-            continue
-        neighbor_index = torch.tensor(
-            [neighbor for neighbor, _ in neighbors],
-            dtype=torch.long,
-            device=pos.device,
-        )
-        vectors = pos[neighbor_index] - pos[node]
-        vector_count = vectors.shape[0]
-        if vector_count < 2:
-            continue
-        left = vectors.unsqueeze(1).expand(vector_count, vector_count, 2)
-        right = vectors.unsqueeze(0).expand(vector_count, vector_count, 2)
-        denom = torch.linalg.norm(left, dim=2).clamp(min=_EPS) * torch.linalg.norm(
-            right, dim=2
-        ).clamp(min=_EPS)
-        cosines = torch.clamp((left * right).sum(dim=2) / denom, -1.0 + _EPS, 1.0 - _EPS)
-        angles = torch.arccos(cosines)
-        upper = torch.triu_indices(vector_count, vector_count, offset=1, device=pos.device)
-        pair_angles = angles[upper[0], upper[1]]
-        target_angle = 2.0 * math.pi / float(degree)
-        losses.append(
-            F.relu(torch.full_like(pair_angles, target_angle) - pair_angles).square().mean()
-        )
-    return torch.stack(losses).mean() if losses else pos.sum() * 0.0
+    if pair_batch.numel() == 0:
+        return pos.sum() * 0.0
+
+    degrees = pair_batch[0].to(device=pos.device, dtype=pos.dtype)
+    a = pair_batch[1]
+    b = pair_batch[2]
+    c = pair_batch[3]
+    d = pair_batch[4]
+    similarities = F.cosine_similarity(pos[b] - pos[a], pos[d] - pos[c], dim=1)
+    angles = torch.arccos(similarities.clamp(-0.99, 0.99))
+    optimal = 2.0 * math.pi / degrees.clamp(min=1.0)
+    normalized = F.relu((-angles + optimal) / optimal.clamp(min=_EPS))
+    return F.binary_cross_entropy(normalized, torch.zeros_like(angles))
 
 
 def _vertex_resolution_loss(
     pos: torch.Tensor,
     pair_batch: torch.Tensor,
-    threshold: float,
+    state: _VertexResolutionState,
 ) -> torch.Tensor:
-    """Evaluate the vertex-resolution hinge loss.
+    """Evaluate the adaptive vertex-resolution loss.
 
     Parameters
     ----------
@@ -951,8 +1370,8 @@ def _vertex_resolution_loss(
         Position tensor with shape ``[N, 2]``.
     pair_batch : torch.Tensor
         Pair indices with shape ``[2, B]``.
-    threshold : float
-        Minimum desired pairwise distance.
+    state : _VertexResolutionState
+        Smoothed target-distance state carried across iterations.
 
     Returns
     -------
@@ -962,7 +1381,18 @@ def _vertex_resolution_loss(
     if pair_batch.numel() == 0:
         return pos.sum() * 0.0
     distances = torch.linalg.norm(pos[pair_batch[0]] - pos[pair_batch[1]], dim=1)
-    return F.relu(torch.full_like(distances, threshold) - distances).square().mean()
+    dmax = distances.max().detach()
+    target = 1.0 / math.sqrt(float(max(pos.shape[0], 1)))
+    target_dist = torch.as_tensor(target, device=pos.device, dtype=pos.dtype) * dmax
+    previous_target = state.prev_target_dist.to(device=pos.device, dtype=pos.dtype)
+    weight = state.prev_weight * _VERTEX_RESOLUTION_SMOOTHNESS + 1.0
+    smoothed_target = (
+        torch.maximum(target_dist, previous_target)
+        + torch.minimum(target_dist, previous_target) * _VERTEX_RESOLUTION_SMOOTHNESS
+    ) / weight
+    state.prev_target_dist = smoothed_target.detach()
+    state.prev_weight = weight
+    return F.relu(1.0 - distances / smoothed_target.clamp(min=_EPS)).square().mean()
 
 
 def _criterion_loss(
@@ -970,6 +1400,9 @@ def _criterion_loss(
     pos: torch.Tensor,
     state: _PreparedState,
     batch_size: int,
+    sampler: Optional[_CyclicSampler] = None,
+    vertex_resolution_state: Optional[_VertexResolutionState] = None,
+    crossing_state: Optional[_CrossingLossState] = None,
 ) -> torch.Tensor:
     """Evaluate one named criterion on a sampled mini-batch.
 
@@ -983,6 +1416,13 @@ def _criterion_loss(
         Precomputed graph state.
     batch_size : int
         Requested mini-batch size.
+    sampler : _CyclicSampler | None
+        Epoch-based cyclic sampler for this criterion.  Falls back to
+        random sampling when ``None``.
+    vertex_resolution_state : _VertexResolutionState | None
+        Stateful smoothing data for vertex resolution.
+    crossing_state : _CrossingLossState | None
+        Persistent detector state for the crossing criterion.
 
     Returns
     -------
@@ -996,11 +1436,14 @@ def _criterion_loss(
             or state.stress_weights is None
         ):
             return pos.sum() * 0.0
-        sample_index = _sample_indices(
-            total=state.stress_pairs.shape[1],
-            batch_size=batch_size,
-            device=state.device,
-        )
+        if sampler is not None:
+            sample_index = sampler.sample(batch_size)
+        else:
+            sample_index = _sample_indices(
+                total=state.stress_pairs.shape[1],
+                batch_size=batch_size,
+                device=state.device,
+            )
         return _stress_loss(
             pos=pos,
             pair_batch=state.stress_pairs[:, sample_index],
@@ -1008,48 +1451,91 @@ def _criterion_loss(
             pair_weights=state.stress_weights[sample_index],
         )
     if name == "ideal_edge_length":
+        if sampler is not None:
+            idx = sampler.sample(batch_size)
+            edge_batch = state.edges[:, idx]
+        else:
+            edge_batch = _sample_edges(state.edges, batch_size=batch_size)
         return _ideal_edge_length_loss(
             pos=pos,
-            edge_batch=_sample_edges(state.edges, batch_size=batch_size),
+            edge_batch=edge_batch,
             target=_DEFAULT_IDEAL_EDGE_LENGTH,
         )
     if name == "neighborhood_preservation":
-        if state.graph_knn_mask is None:
-            return pos.sum() * 0.0
+        if sampler is not None:
+            anchor_nodes = sampler.sample(batch_size)
+        else:
+            anchor_nodes = _sample_nodes(
+                num_nodes=pos.shape[0],
+                batch_size=batch_size,
+                device=state.device,
+            )
         return _neighborhood_preservation_loss(
             pos=pos,
-            anchor_nodes=_sample_nodes(
-                num_nodes=pos.shape[0],
-                batch_size=batch_size,
-                device=state.device,
-            ),
-            graph_knn_mask=state.graph_knn_mask,
-        )
-    if name == "crossings":
-        left, right = _sample_edge_pairs(edges=state.edges, batch_size=batch_size)
-        return _crossings_loss(pos=pos, left=left, right=right)
-    if name == "crossing_angle_maximization":
-        left, right = _sample_edge_pairs(edges=state.edges, batch_size=batch_size)
-        return _crossing_angle_loss(pos=pos, left=left, right=right)
-    if name == "aspect_ratio":
-        return _aspect_ratio_loss(pos=pos, target=_DEFAULT_ASPECT_RATIO_TARGET)
-    if name == "angular_resolution":
-        return _angular_resolution_loss(
-            pos=pos,
-            anchor_nodes=_sample_nodes(
-                num_nodes=pos.shape[0],
-                batch_size=batch_size,
-                device=state.device,
-            ),
+            anchor_nodes=anchor_nodes,
             adjacency=state.adjacency,
         )
+    if name == "crossings":
+        if crossing_state is None:
+            raise ValueError("crossing_state is required for the crossings criterion.")
+        if state.non_incident_edge_pairs is None:
+            return pos.sum() * 0.0
+        if sampler is not None:
+            idx = sampler.sample(batch_size)
+            pair_batch = state.non_incident_edge_pairs[:, idx]
+        else:
+            pair_batch = _sample_pairs(state.non_incident_edge_pairs, batch_size=batch_size)
+        left = pair_batch[:2]
+        right = pair_batch[2:]
+        return _crossings_loss(
+            pos=pos,
+            left=left,
+            right=right,
+            crossing_state=crossing_state,
+        )
+    if name == "crossing_angle_maximization":
+        if state.non_incident_edge_pairs is None:
+            left, right = _sample_edge_pairs(edges=state.edges, batch_size=batch_size)
+        elif sampler is not None:
+            idx = sampler.sample(batch_size)
+            pair_batch = state.non_incident_edge_pairs[:, idx]
+            left = pair_batch[:2]
+            right = pair_batch[2:]
+        else:
+            pair_batch = _sample_pairs(state.non_incident_edge_pairs, batch_size=batch_size)
+            left = pair_batch[:2]
+            right = pair_batch[2:]
+        return _crossing_angle_loss(pos=pos, left=left, right=right)
+    if name == "aspect_ratio":
+        if sampler is not None:
+            idx = sampler.sample(batch_size)
+            sampled_pos = pos[idx]
+        else:
+            sampled_pos = pos
+        return _aspect_ratio_loss(pos=sampled_pos, target=_DEFAULT_ASPECT_RATIO_TARGET)
+    if name == "angular_resolution":
+        if state.incident_edge_pairs is None:
+            return pos.sum() * 0.0
+        if sampler is not None:
+            idx = sampler.sample(batch_size)
+            pair_batch = state.incident_edge_pairs[:, idx]
+        else:
+            pair_batch = _sample_pairs(state.incident_edge_pairs, batch_size=batch_size)
+        return _angular_resolution_loss(pos=pos, pair_batch=pair_batch)
     if name == "vertex_resolution":
         if state.stress_pairs is None:
             return pos.sum() * 0.0
+        if vertex_resolution_state is None:
+            raise ValueError("vertex_resolution_state is required for vertex resolution.")
+        if sampler is not None:
+            idx = sampler.sample(batch_size)
+            pair_batch = state.stress_pairs[:, idx]
+        else:
+            pair_batch = _sample_pairs(state.stress_pairs, batch_size=batch_size)
         return _vertex_resolution_loss(
             pos=pos,
-            pair_batch=_sample_pairs(state.stress_pairs, batch_size=batch_size),
-            threshold=_DEFAULT_VERTEX_RESOLUTION,
+            pair_batch=pair_batch,
+            state=vertex_resolution_state,
         )
     raise ValueError(f"Unknown (SGD)^2 criterion: {name}")
 
@@ -1062,9 +1548,9 @@ def layout_sgd2_multi(
     steps: int = 10_000,
     criteria: Optional[Dict[str, float]] = None,
     criteria_schedules: Optional[Dict[str, SmoothSteps]] = None,
-    lr: float = 0.01,
+    lr: float = 1.0,
     momentum: float = 0.7,
-    grad_clamp: float = 5.0,
+    grad_clamp: float = 4.0,
     batch_size: int = 16,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -1086,11 +1572,11 @@ def layout_sgd2_multi(
         Static per-criterion weights. ``None`` defaults to pure stress.
     criteria_schedules : dict[str, SmoothSteps] | None, default=None
         Optional piecewise-smooth criterion schedules.
-    lr : float, default=0.01
+    lr : float, default=1.0
         SGD learning rate.
     momentum : float, default=0.7
         SGD momentum.
-    grad_clamp : float, default=20.0
+    grad_clamp : float, default=4.0
         Symmetric gradient clamp.
     batch_size : int, default=16
         Global mini-batch size shared by the criteria.
@@ -1120,8 +1606,10 @@ def layout_sgd2_multi(
 
     schedules = _resolve_schedules(criteria=criteria, criteria_schedules=criteria_schedules)
     active_names = set(schedules)
-    needs_distances = bool(
-        {"stress", "neighborhood_preservation", "vertex_resolution"} & active_names
+    needs_distances = bool({"stress", "vertex_resolution"} & active_names)
+    needs_incident_edge_pairs = "angular_resolution" in active_names
+    needs_non_incident_edge_pairs = bool(
+        {"crossings", "crossing_angle_maximization"} & active_names
     )
 
     _set_seed(seed)
@@ -1130,50 +1618,94 @@ def layout_sgd2_multi(
         num_nodes=num_nodes,
         device=device,
         needs_distances=needs_distances,
+        needs_incident_edge_pairs=needs_incident_edge_pairs,
+        needs_non_incident_edge_pairs=needs_non_incident_edge_pairs,
         edge_weights=edge_weights,
     )
+
+    # Build one cyclic sampler per criterion, matching the reference DataLoader
+    # pattern: each criterion iterates its pool once per epoch in shuffled order.
+    samplers: Dict[str, _CyclicSampler] = {}
+    for sname in schedules:
+        if sname in ("stress", "vertex_resolution") and state.stress_pairs is not None:
+            samplers[sname] = _CyclicSampler(state.stress_pairs.shape[1], device)
+        elif sname == "ideal_edge_length" and state.edges.shape[1] > 0:
+            samplers[sname] = _CyclicSampler(state.edges.shape[1], device)
+        elif sname in ("neighborhood_preservation", "aspect_ratio"):
+            samplers[sname] = _CyclicSampler(num_nodes, device)
+        elif sname == "angular_resolution" and state.incident_edge_pairs is not None:
+            samplers[sname] = _CyclicSampler(state.incident_edge_pairs.shape[1], device)
+        elif (
+            sname in ("crossings", "crossing_angle_maximization")
+            and state.non_incident_edge_pairs is not None
+        ):
+            samplers[sname] = _CyclicSampler(state.non_incident_edge_pairs.shape[1], device)
 
     positions = torch.nn.Parameter(
         torch.randn((num_nodes, 2), device=device, dtype=torch.float32)
         * math.sqrt(float(num_nodes))
     )
+    crossing_state = None
+    if "crossings" in active_names:
+        crossing_detector = _CrossingDetector().to(device=device)
+        crossing_state = _CrossingLossState(
+            detector=crossing_detector,
+            optimizer=torch.optim.Adam(crossing_detector.parameters(), lr=_CROSSING_DETECTOR_LR),
+            train_loss=nn.BCELoss(),
+            position_loss=nn.BCELoss(reduction="sum"),
+        )
+    vertex_resolution_state = None
+    if "vertex_resolution" in active_names:
+        vertex_resolution_state = _VertexResolutionState(
+            prev_target_dist=torch.tensor(1.0, device=device, dtype=torch.float32),
+            prev_weight=0.0,
+        )
     optimizer = torch.optim.SGD([positions], lr=lr, momentum=momentum, nesterov=True)
+    # Reference uses ReduceLROnPlateau(patience=20000), stepped every 10 iters.
+    # With 10K max iterations (= 1000 scheduler steps) and patience 20000,
+    # the lr effectively never decays.  We replicate this exactly.
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         factor=0.9,
-        patience=20_000,
+        patience=20000,
         min_lr=1.0e-5,
     )
 
-    ema_loss: Optional[float] = None
+    # EMA smoothing matching reference: half-life of 100 iterations.
+    _ema_decay = 0.5 ** (1.0 / 100.0)
+    ema_weighted_sum = 0.0
+    ema_total_weight = 0.0
+
     for step_index in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        centered = positions - positions.mean(dim=0, keepdim=True)
-        loss = centered.sum() * 0.0
+        loss = positions.sum() * 0.0
         for name, schedule in schedules.items():
             weight = schedule(step_index)
             if weight == 0.0:
                 continue
             loss = loss + weight * _criterion_loss(
                 name=name,
-                pos=centered,
+                pos=positions,
                 state=state,
                 batch_size=batch_size,
+                sampler=samplers.get(name),
+                vertex_resolution_state=vertex_resolution_state,
+                crossing_state=crossing_state,
             )
 
         loss.backward()
         if positions.grad is not None:
             positions.grad.clamp_(-grad_clamp, grad_clamp)
         optimizer.step()
-        with torch.no_grad():
-            positions.sub_(positions.mean(dim=0, keepdim=True))
 
+        # EMA + scheduler step every 10 iterations (reference pattern).
         loss_value = float(loss.detach().item())
-        ema_loss = loss_value if ema_loss is None else 0.9 * ema_loss + 0.1 * loss_value
+        ema_weighted_sum = ema_weighted_sum * _ema_decay + loss_value
+        ema_total_weight = ema_total_weight * _ema_decay + 1.0
         if step_index % 10 == 0:
-            scheduler.step(ema_loss)
+            scheduler.step(ema_weighted_sum / ema_total_weight)
         if float(optimizer.param_groups[0]["lr"]) <= 1.0e-5:
             break
 
     detached = positions.detach()
-    return (detached - detached.mean(dim=0, keepdim=True)).to(dtype=torch.float32)
+    return detached.to(dtype=torch.float32)
