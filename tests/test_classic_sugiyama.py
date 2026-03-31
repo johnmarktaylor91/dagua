@@ -195,3 +195,19 @@ def test_layout_sugiyama_handles_cyclic_input_robustly() -> None:
 
     assert positions.shape == (3, 2)
     assert torch.isfinite(positions).all()
+
+
+def test_layout_sugiyama_balances_multilayer_blocks() -> None:
+    """Brandes-Kopf should keep aligned blocks vertically compact."""
+    edge_index = torch.tensor(
+        [[0, 0, 1, 1, 2, 4, 6], [1, 4, 3, 5, 6, 6, 7]],
+        dtype=torch.long,
+    )
+
+    positions = layout_sugiyama(edge_index=edge_index, num_nodes=8)
+
+    assert positions[0, 0].item() == pytest.approx(positions[1, 0].item())
+    assert positions[2, 0].item() == pytest.approx(positions[5, 0].item())
+    assert positions[4, 0].item() == pytest.approx(positions[6, 0].item())
+    assert positions[6, 0].item() == pytest.approx(positions[7, 0].item())
+    assert positions[:, 0].min().item() < 0.0 < positions[:, 0].max().item()

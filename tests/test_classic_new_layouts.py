@@ -48,6 +48,123 @@ def _tree_edge_index() -> torch.Tensor:
     return torch.tensor(edges, dtype=torch.long).t().contiguous()
 
 
+def _unbalanced_walker_regression_tree_edge_index() -> torch.Tensor:
+    """Build a deep, asymmetric tree that benefits from contour threading.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge tensor with shape ``[2, 25]`` for a 26-node regression tree.
+    """
+    return (
+        torch.tensor(
+            [
+                (0, 1),
+                (0, 2),
+                (2, 3),
+                (1, 4),
+                (4, 5),
+                (4, 6),
+                (6, 7),
+                (4, 8),
+                (4, 9),
+                (9, 10),
+                (8, 11),
+                (11, 12),
+                (11, 13),
+                (13, 14),
+                (12, 15),
+                (12, 16),
+                (16, 17),
+                (12, 18),
+                (18, 19),
+                (18, 20),
+                (20, 21),
+                (19, 22),
+                (22, 23),
+                (22, 24),
+                (24, 25),
+            ],
+            dtype=torch.long,
+        )
+        .t()
+        .contiguous()
+    )
+
+
+def _legacy_reingold_tilford_positions(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """Recreate the previous midpoint-only tidy tree layout.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]`` for a rooted tree.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]`` using the pre-fix x assignment.
+    """
+    children = _children_from_edge_index(edge_index=edge_index, num_nodes=num_nodes)
+    depths = [0] * num_nodes
+    for source, target in edge_index.t().tolist():
+        depths[target] = depths[source] + 1
+
+    preliminary_x = [0.0] * num_nodes
+    next_leaf_x = 0.0
+    stack: list[tuple[int, bool]] = [(0, False)]
+    postorder: list[int] = []
+    while stack:
+        node_idx, processed = stack.pop()
+        if processed:
+            postorder.append(node_idx)
+            continue
+        stack.append((node_idx, True))
+        for child_idx in reversed(children[node_idx]):
+            stack.append((child_idx, False))
+
+    subtree_spans: dict[int, tuple[float, float]] = {}
+    for node_idx in postorder:
+        if not children[node_idx]:
+            preliminary_x[node_idx] = next_leaf_x
+            subtree_spans[node_idx] = (next_leaf_x, next_leaf_x)
+            next_leaf_x += 1.0
+            continue
+
+        first_child = children[node_idx][0]
+        last_child = children[node_idx][-1]
+        preliminary_x[node_idx] = 0.5 * (preliminary_x[first_child] + preliminary_x[last_child])
+        subtree_spans[node_idx] = (
+            subtree_spans[first_child][0],
+            subtree_spans[last_child][1],
+        )
+
+    positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
+    for node_idx in range(num_nodes):
+        positions[node_idx, 0] = float(preliminary_x[node_idx])
+        positions[node_idx, 1] = float(depths[node_idx])
+    positions -= positions.mean(dim=0, keepdim=True)
+    return positions
+
+
+def _layout_width(positions: torch.Tensor) -> float:
+    """Measure the horizontal span of a 2D layout.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Difference between the maximum and minimum x coordinates.
+    """
+    return float((positions[:, 0].max() - positions[:, 0].min()).item())
+
+
 def _upper_triangle_values(matrix: np.ndarray) -> np.ndarray:
     """Return the strict upper triangle of a square matrix.
 
@@ -213,6 +330,20 @@ def test_reingold_tilford_handles_deep_chain_iteratively() -> None:
 
     assert positions.shape == (1000, 2)
     assert torch.isfinite(positions).all()
+
+
+def test_reingold_tilford_threads_reduce_unbalanced_tree_width() -> None:
+    """Walker contour threading should tighten deeply unbalanced trees."""
+    edge_index = _unbalanced_walker_regression_tree_edge_index()
+    num_nodes = 26
+
+    legacy_positions = _legacy_reingold_tilford_positions(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+    )
+    walker_positions = layout_reingold_tilford(edge_index=edge_index, num_nodes=num_nodes)
+
+    assert _layout_width(walker_positions) < _layout_width(legacy_positions)
 
 
 def test_spectral_eigenvector_correctness() -> None:

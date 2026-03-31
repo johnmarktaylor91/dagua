@@ -414,7 +414,8 @@ def _smooth_knn_dist(
             rhos[index] = 0.0
             continue
 
-        rho = float(finite[0].item())
+        positive = finite[finite > 0]
+        rho = float(positive.min().item()) if positive.numel() > 0 else 0.0
         rhos[index] = rho
         mean_distance = max(float(finite.mean().item()), _MIN_SPAN)
         sigma_min = mean_distance * _MIN_SIGMA_SCALE
@@ -423,8 +424,10 @@ def _smooth_knn_dist(
 
         def _membership_sum(sigma: float) -> float:
             if sigma <= 0.0:
-                return float(finite.numel())
-            shifted = torch.clamp(finite - rho, min=0.0)
+                return float(finite[1:].numel())
+            # Reference UMAP skips j=0 here, so the self-distance does not
+            # bias the smooth-kNN bandwidth search toward undersized sigmas.
+            shifted = torch.clamp(finite[1:] - rho, min=0.0)
             values = torch.exp(-shifted / sigma)
             return float(values.sum().item())
 

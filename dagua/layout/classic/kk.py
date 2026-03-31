@@ -186,7 +186,7 @@ def _kamada_kawai_costfn(
 def _solve_kamada_kawai(
     distance_matrix: np.ndarray,
     initial_positions: np.ndarray,
-    steps: int,
+    steps: Optional[int],
     trace_every: int,
 ) -> tuple[np.ndarray, list[torch.Tensor]]:
     """Run the exact SciPy L-BFGS-B solver used by NetworkX KK.
@@ -197,8 +197,9 @@ def _solve_kamada_kawai(
         Preferred graph distances with shape ``[N, N]``.
     initial_positions : numpy.ndarray
         Initial coordinates with shape ``[N, 2]``.
-    steps : int
-        Maximum optimization iterations.
+    steps : int, optional
+        Maximum optimization iterations. ``None`` or ``0`` mirrors the
+        uncapped NetworkX behavior by leaving ``maxiter`` unset.
     trace_every : int
         Callback snapshot cadence.
 
@@ -211,9 +212,6 @@ def _solve_kamada_kawai(
         import scipy as sp
     except ImportError as error:
         raise ImportError("layout_kk requires scipy to match NetworkX exactly.") from error
-
-    if steps == 0:
-        return initial_positions.copy(), []
 
     inverse_distances = 1.0 / (
         distance_matrix + np.eye(distance_matrix.shape[0], dtype=np.float64) * DISTANCE_EPSILON
@@ -230,14 +228,19 @@ def _solve_kamada_kawai(
             snapshot = pos_vec.reshape((-1, 2)).copy()
             traces.append(torch.from_numpy(snapshot).to(dtype=torch.float32))
 
+    minimize_kwargs: dict[str, Any] = {
+        "method": "L-BFGS-B",
+        "args": (np, inverse_distances, CENTERING_WEIGHT, 2),
+        "jac": True,
+        "callback": _callback,
+    }
+    if steps not in {None, 0}:
+        minimize_kwargs["options"] = {"maxiter": steps}
+
     optresult = sp.optimize.minimize(
         _kamada_kawai_costfn,
         initial_positions.ravel(),
-        method="L-BFGS-B",
-        args=(np, inverse_distances, CENTERING_WEIGHT, 2),
-        jac=True,
-        callback=_callback,
-        options={"maxiter": steps},
+        **minimize_kwargs,
     )
     return optresult.x.reshape((-1, 2)), traces
 
@@ -246,7 +249,7 @@ def layout_kk(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
-    steps: int = 500,
+    steps: Optional[int] = None,
     seed: int = 42,
     trace_every: int = 0,
     solver: str = "auto",
@@ -263,8 +266,9 @@ def layout_kk(
         Number of graph nodes.
     node_sizes : torch.Tensor, optional
         Unused, accepted for interface compatibility.
-    steps : int, default=500
-        Maximum L-BFGS-B iterations.
+    steps : int, optional
+        Maximum L-BFGS-B iterations. ``None`` or ``0`` leaves SciPy's
+        ``maxiter`` unset to match NetworkX's default solve budget.
     seed : int, default=42
         Accepted for interface compatibility. The translated 2D NetworkX path
         uses deterministic circular initialization and does not consume a seed.
@@ -299,7 +303,7 @@ def layout_kk(
 
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
-    if steps < 0:
+    if steps is not None and steps < 0:
         raise ValueError("steps must be non-negative.")
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative.")

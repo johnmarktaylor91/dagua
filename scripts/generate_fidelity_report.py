@@ -17,8 +17,6 @@ QUALITY_METRICS: tuple[str, ...] = (
     "aspect_ratio",
     "dag_consistency",
     "edge_length_cv",
-    "edge_length_mean",
-    "overlap_count",
 )
 TOST_MARGIN_LABELS: tuple[str, ...] = ("0_5x", "1x", "1_5x", "2x")
 REQUIRED_LATEX_PACKAGES: tuple[str, ...] = (
