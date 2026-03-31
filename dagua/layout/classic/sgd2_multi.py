@@ -20,10 +20,8 @@ from dagua.layout.classic._graph_distances import (
 
 _EPS = 1.0e-6
 _SEGMENT_EPS = 1.0e-9
-_CROSSING_SHARPNESS = 10.0
 _DEFAULT_IDEAL_EDGE_LENGTH = 1.0
 _DEFAULT_ASPECT_RATIO_TARGET = 1.0
-_DEFAULT_GRAPH_K = 8
 _VERTEX_RESOLUTION_SMOOTHNESS = 0.1
 _NEIGHBORHOOD_DEPTH_LIMIT = 2
 _NEIGHBORHOOD_NEG_SAMPLE_RATE = 0.5
@@ -109,7 +107,6 @@ class _PreparedState:
     stress_pairs: Optional[torch.Tensor]
     stress_distances: Optional[torch.Tensor]
     stress_weights: Optional[torch.Tensor]
-    graph_knn_mask: Optional[torch.Tensor]
     incident_edge_pairs: Optional[torch.Tensor]
     non_incident_edge_pairs: Optional[torch.Tensor]
 
@@ -386,42 +383,6 @@ def _build_stress_terms(distances: torch.Tensor) -> tuple[torch.Tensor, torch.Te
     return pairs, positive_distances, weights
 
 
-def _graph_knn_mask(distances: torch.Tensor, k: int) -> torch.Tensor:
-    """Build a binary graph-neighborhood target mask.
-
-    Parameters
-    ----------
-    distances : torch.Tensor
-        All-pairs distance matrix with shape ``[N, N]``.
-    k : int
-        Number of graph neighbors retained per row.
-
-    Returns
-    -------
-    torch.Tensor
-        Boolean mask with shape ``[N, N]``.
-    """
-    num_nodes = distances.shape[0]
-    mask = torch.zeros((num_nodes, num_nodes), dtype=torch.bool, device=distances.device)
-    if num_nodes == 0:
-        return mask
-
-    safe_distances = distances.clone()
-    safe_distances.fill_diagonal_(float("inf"))
-    max_neighbors = min(max(k, 1), max(num_nodes - 1, 1))
-    for node in range(num_nodes):
-        row = safe_distances[node]
-        finite_mask = torch.isfinite(row)
-        if not bool(finite_mask.any().item()):
-            continue
-        candidate_indices = torch.nonzero(finite_mask, as_tuple=False).flatten()
-        candidate_distances = row[candidate_indices]
-        take = min(max_neighbors, int(candidate_indices.numel()))
-        _, order = torch.topk(candidate_distances, k=take, largest=False)
-        mask[node, candidate_indices[order]] = True
-    return mask
-
-
 def _build_incident_edge_pairs(
     adjacency: list[list[tuple[int, float]]],
     device: torch.device,
@@ -551,7 +512,6 @@ def _prepare_state(
             stress_pairs=None,
             stress_distances=None,
             stress_weights=None,
-            graph_knn_mask=None,
             incident_edge_pairs=incident_edge_pairs,
             non_incident_edge_pairs=non_incident_edge_pairs,
         )
@@ -562,7 +522,6 @@ def _prepare_state(
         weighted=edge_weights is not None,
     )
     stress_pairs, stress_distances, stress_weights = _build_stress_terms(distances)
-    graph_knn_mask = _graph_knn_mask(distances=distances, k=_DEFAULT_GRAPH_K)
     return _PreparedState(
         device=device,
         edges=edges,
@@ -571,7 +530,6 @@ def _prepare_state(
         stress_pairs=stress_pairs,
         stress_distances=stress_distances,
         stress_weights=stress_weights,
-        graph_knn_mask=graph_knn_mask,
         incident_edge_pairs=incident_edge_pairs,
         non_incident_edge_pairs=non_incident_edge_pairs,
     )
@@ -1176,45 +1134,6 @@ def _are_edge_pairs_crossed(edge_pair_pos: torch.Tensor) -> torch.Tensor:
     return proper | collinear
 
 
-def _crossing_probability(
-    pos: torch.Tensor,
-    left: torch.Tensor,
-    right: torch.Tensor,
-) -> torch.Tensor:
-    """Estimate crossing likelihood with a smooth orientation proxy.
-
-    Parameters
-    ----------
-    pos : torch.Tensor
-        Position tensor with shape ``[N, 2]``.
-    left : torch.Tensor
-        Left edge batch with shape ``[2, B]``.
-    right : torch.Tensor
-        Right edge batch with shape ``[2, B]``.
-
-    Returns
-    -------
-    torch.Tensor
-        Crossing probabilities with shape ``[B]``.
-    """
-    if left.numel() == 0 or right.numel() == 0:
-        return torch.empty((0,), dtype=pos.dtype, device=pos.device)
-
-    a = pos[left[0]]
-    b = pos[left[1]]
-    c = pos[right[0]]
-    d = pos[right[1]]
-    ab = b - a
-    cd = d - c
-    orient_abc = _cross2d(ab, c - a)
-    orient_abd = _cross2d(ab, d - a)
-    orient_cda = _cross2d(cd, a - c)
-    orient_cdb = _cross2d(cd, b - c)
-    return torch.sigmoid(-_CROSSING_SHARPNESS * orient_abc * orient_abd) * torch.sigmoid(
-        -_CROSSING_SHARPNESS * orient_cda * orient_cdb
-    )
-
-
 def _crossings_loss(
     pos: torch.Tensor,
     left: torch.Tensor,
@@ -1281,17 +1200,16 @@ def _crossing_angle_loss(
     torch.Tensor
         Scalar crossing-angle loss.
     """
-    probabilities = _crossing_probability(pos=pos, left=left, right=right)
-    if probabilities.numel() == 0:
+    edge_pair_pos = _edge_pair_positions(pos=pos, left=left, right=right)
+    if edge_pair_pos.numel() == 0:
         return pos.sum() * 0.0
 
+    labels = _are_edge_pairs_crossed(edge_pair_pos).to(device=pos.device, dtype=pos.dtype)
     left_vec = pos[left[1]] - pos[left[0]]
     right_vec = pos[right[1]] - pos[right[0]]
-    denominator = torch.linalg.norm(left_vec, dim=1).clamp(min=_EPS) * torch.linalg.norm(
-        right_vec, dim=1
-    ).clamp(min=_EPS)
-    cos_sq = (torch.sum(left_vec * right_vec, dim=1) / denominator).square()
-    return (probabilities * cos_sq).sum() / probabilities.sum().clamp(min=1.0)
+    similarities = F.cosine_similarity(left_vec, right_vec, dim=1)
+    similarity_sq = similarities.square()
+    return (labels * similarity_sq / (1.0 - similarity_sq + _EPS)).mean()
 
 
 def _aspect_ratio_loss(pos: torch.Tensor, target: float) -> torch.Tensor:

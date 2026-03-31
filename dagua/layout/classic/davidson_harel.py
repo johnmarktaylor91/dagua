@@ -17,6 +17,7 @@ _EDGE_LENGTH_WEIGHT = 0.2
 _CROSSING_WEIGHT = 2.0
 _NODE_EDGE_WEIGHT = 0.5
 _COOLING_FACTOR = 0.75
+_COLLINEAR_EPSILON = 1.0e-10
 
 
 def _layout_device(
@@ -189,7 +190,9 @@ def _segments_intersect(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, d: to
     o2 = _orientation(a, b, d)
     o3 = _orientation(c, d, a)
     o4 = _orientation(c, d, b)
-    return (o1 == 0.0 or o2 == 0.0 or o1 * o2 < 0.0) and (o3 == 0.0 or o4 == 0.0 or o3 * o4 < 0.0)
+    return (abs(o1) < _COLLINEAR_EPSILON or abs(o2) < _COLLINEAR_EPSILON or o1 * o2 < 0.0) and (
+        abs(o3) < _COLLINEAR_EPSILON or abs(o4) < _COLLINEAR_EPSILON or o3 * o4 < 0.0
+    )
 
 
 def _point_segment_distance(
