@@ -479,6 +479,10 @@ def family_results_section(
 ) -> str:
     """Render algorithm-by-algorithm results.
 
+    Strong/identical families get a single compact summary table.
+    Non-strong families get detailed per-family subsections with metric
+    tables and anomaly lists.
+
     Parameters
     ----------
     summary_rows : Sequence[Mapping[str, str]]
@@ -492,13 +496,62 @@ def family_results_section(
         Results section body.
     """
     grouped = rows_by_family(per_graph_rows)
+    strong_families = [
+        r for r in summary_rows if str(r["verdict"]) in ("strong_equivalent", "identical")
+    ]
+    non_strong = [
+        r for r in summary_rows if str(r["verdict"]) not in ("strong_equivalent", "identical")
+    ]
     sections: list[str] = [r"\section{Algorithm-by-algorithm results}"]
-    for summary_row in sorted(summary_rows, key=lambda item: str(item["algorithm_family"])):
+
+    # Compact table for strong/identical families
+    if strong_families:
+        sections.extend(
+            [
+                r"\subsection{Strong/identical families}",
+                (
+                    f"The following {len(strong_families)} families are "
+                    r"\textbf{strong\_equivalent} or \textbf{identical} and "
+                    "require no further discussion. Full per-graph data is in "
+                    r"\texttt{per\_graph\_detail.csv}."
+                ),
+                "",
+                r"\begin{longtable}{lrrrrr}",
+                r"\toprule",
+                r"Family & Paired & RMSD & Scale & Runtime Ratio & TOST @1x \\",
+                r"\midrule",
+                r"\endfirsthead",
+                r"\toprule",
+                r"Family & Paired & RMSD & Scale & Runtime Ratio & TOST @1x \\",
+                r"\midrule",
+                r"\endhead",
+            ]
+        )
+        for row in sorted(strong_families, key=lambda r: str(r["algorithm_family"])):
+            sections.append(
+                " & ".join(
+                    [
+                        latex_escape(row["algorithm_family"]),
+                        str(row["num_graphs_paired_ok"]),
+                        format_float(parse_float(row["procrustes_rmsd_mean"])),
+                        format_float(parse_float(row["scale_ratio_mean"])),
+                        format_float(parse_float(row["mean_runtime_ratio"])),
+                        format_float(parse_float(row.get("tost_pass_rate_at_1x", "nan")), digits=2),
+                    ]
+                )
+                + r" \\"
+            )
+        sections.extend([r"\bottomrule", r"\end{longtable}", ""])
+
+    # Detailed subsections only for non-strong families
+    if non_strong:
+        sections.append(rf"\subsection{{Non-strong families ({len(non_strong)})}}")
+    for summary_row in sorted(non_strong, key=lambda item: str(item["algorithm_family"])):
         family_name = str(summary_row["algorithm_family"])
         family_rows = grouped.get(family_name, [])
         sections.extend(
             [
-                rf"\subsection{{{latex_escape(family_name)}}}",
+                rf"\subsubsection{{{latex_escape(family_name)}}}",
                 rf"Verdict: \textbf{{{latex_escape(summary_row['verdict'])}}}. ",
                 (
                     "This family contributes "
@@ -640,31 +693,34 @@ def anomaly_section(per_graph_rows: Sequence[Mapping[str, str]]) -> str:
     anomalies = [row for row in per_graph_rows if str(row.get("anomaly_reason", "")).strip()]
     if not anomalies:
         return ""
+    # Count anomalies by reason type
+    reason_counts: dict[str, int] = defaultdict(int)
+    for row in anomalies:
+        for reason in str(row["anomaly_reason"]).split("; "):
+            reason = reason.strip()
+            if reason:
+                reason_counts[reason] += 1
     lines = [
         r"\section{Anomaly deep dive}",
-        r"\begin{longtable}{p{0.18\textwidth}p{0.20\textwidth}p{0.17\textwidth}p{0.35\textwidth}}",
+        f"Total anomalous per-graph rows: {len(anomalies)}.",
+        r"The full anomaly listing is in \texttt{per\_graph\_detail.csv}.",
+        "",
+        r"\begin{table}[htbp]",
+        r"\centering",
+        r"\begin{tabular}{lr}",
         r"\toprule",
-        r"Family & Variant & Graph & Reason \\",
+        r"Anomaly Type & Count \\",
         r"\midrule",
-        r"\endfirsthead",
-        r"\toprule",
-        r"Family & Variant & Graph & Reason \\",
-        r"\midrule",
-        r"\endhead",
     ]
-    for row in anomalies:
-        lines.append(
-            " & ".join(
-                [
-                    latex_escape(row["algorithm_family"]),
-                    latex_escape(row["variant_id"]),
-                    latex_escape(row["graph_name"]),
-                    latex_escape(row["anomaly_reason"]),
-                ]
-            )
-            + r" \\"
-        )
-    lines.extend([r"\bottomrule", r"\end{longtable}"])
+    for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
+        lines.append(f"{latex_escape(reason)} & {count}" + r" \\")
+    lines.extend(
+        [
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"\end{table}",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -761,7 +817,10 @@ def failure_patterns_section(per_graph_rows: Sequence[Mapping[str, str]]) -> str
 
 
 def appendix_section(per_graph_rows: Sequence[Mapping[str, str]]) -> str:
-    """Render the appendix with full per-graph detail.
+    """Render the appendix with data reference and non-strong per-graph detail.
+
+    Only includes rows for non-strong families to keep the PDF compact.
+    Full data is in the companion CSVs.
 
     Parameters
     ----------
@@ -773,44 +832,64 @@ def appendix_section(per_graph_rows: Sequence[Mapping[str, str]]) -> str:
     str
         Appendix section body.
     """
+    non_strong_verdicts = {"divergent", "partial_match", "weak_equivalent", "insufficient_data"}
+    non_strong_rows = [
+        row for row in per_graph_rows if str(row.get("verdict", "")) in non_strong_verdicts
+    ]
     lines = [
         r"\appendix",
-        r"\section{Per-graph detail}",
-        r"\begin{longtable}{p{0.16\textwidth}p{0.18\textwidth}p{0.18\textwidth}rrrrp{0.16\textwidth}}",
-        r"\toprule",
-        r"Family & Variant & Graph & Seeds O/R & RMSD & Scale & Runtime ratio & Verdict \\",
-        r"\midrule",
-        r"\endfirsthead",
-        r"\toprule",
-        r"Family & Variant & Graph & Seeds O/R & RMSD & Scale & Runtime ratio & Verdict \\",
-        r"\midrule",
-        r"\endhead",
+        r"\section{Data reference}",
+        r"The full per-graph and per-seed results are in the companion CSV files:",
+        r"\begin{itemize}",
+        r"\item \texttt{algorithm\_summary.csv} -- family-level verdicts and statistics",
+        r"\item \texttt{per\_graph\_detail.csv} -- per variant/graph "
+        r"Procrustes, TOST, and verdicts",
+        r"\item \texttt{per\_seed\_detail.csv} -- per-seed quality metrics and positions",
+        r"\item \texttt{pairwise\_similarity.csv} -- pairwise Procrustes comparisons",
+        r"\end{itemize}",
     ]
-    for row in sorted(
-        per_graph_rows,
-        key=lambda item: (
-            str(item["algorithm_family"]),
-            str(item["variant_id"]),
-            str(item["graph_name"]),
-        ),
-    ):
-        seeds_label = f"{row['num_orig_seeds']}/{row['num_reimpl_seeds']}"
-        lines.append(
-            " & ".join(
-                [
-                    latex_escape(row["algorithm_family"]),
-                    latex_escape(row["variant_id"]),
-                    latex_escape(row["graph_name"]),
-                    latex_escape(seeds_label),
-                    format_float(parse_float(row["procrustes_rmsd_mean"])),
-                    format_float(parse_float(row["scale_ratio_mean"])),
-                    format_float(parse_float(row["runtime_ratio"])),
-                    latex_escape(row["verdict"]),
-                ]
-            )
-            + r" \\"
+    if non_strong_rows:
+        lines.extend(
+            [
+                "",
+                r"\section{Non-strong per-graph detail}",
+                (f"The following {len(non_strong_rows)} rows have non-strong verdicts."),
+                "",
+                r"\begin{longtable}{p{0.14\textwidth}p{0.16\textwidth}p{0.16\textwidth}rrrp{0.14\textwidth}}",
+                r"\toprule",
+                r"Family & Variant & Graph & Seeds & RMSD & Scale & Verdict \\",
+                r"\midrule",
+                r"\endfirsthead",
+                r"\toprule",
+                r"Family & Variant & Graph & Seeds & RMSD & Scale & Verdict \\",
+                r"\midrule",
+                r"\endhead",
+            ]
         )
-    lines.extend([r"\bottomrule", r"\end{longtable}"])
+        for row in sorted(
+            non_strong_rows,
+            key=lambda item: (
+                str(item["algorithm_family"]),
+                str(item["variant_id"]),
+                str(item["graph_name"]),
+            ),
+        ):
+            seeds_label = f"{row['num_orig_seeds']}/{row['num_reimpl_seeds']}"
+            lines.append(
+                " & ".join(
+                    [
+                        latex_escape(row["algorithm_family"]),
+                        latex_escape(row["variant_id"]),
+                        latex_escape(row["graph_name"]),
+                        latex_escape(seeds_label),
+                        format_float(parse_float(row["procrustes_rmsd_mean"])),
+                        format_float(parse_float(row["scale_ratio_mean"])),
+                        latex_escape(row["verdict"]),
+                    ]
+                )
+                + r" \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
     return "\n".join(lines)
 
 

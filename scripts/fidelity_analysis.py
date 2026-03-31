@@ -39,8 +39,6 @@ QUALITY_METRICS: tuple[str, ...] = (
     "aspect_ratio",
     "dag_consistency",
     "edge_length_cv",
-    "edge_length_mean",
-    "overlap_count",
 )
 TOST_MARGIN_FACTORS: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0)
 TOST_MARGIN_LABELS: dict[float, str] = {
@@ -234,6 +232,10 @@ class PValueBucket:
     """
 
     entries: list[tuple[int, str, float]] = field(default_factory=list)
+
+    def add(self, row_idx: int, raw_pvalue: float, column: str = "") -> None:
+        """Append a raw p-value entry for later BH correction."""
+        self.entries.append((row_idx, column, raw_pvalue))
 
 
 def parse_args() -> argparse.Namespace:
@@ -838,11 +840,12 @@ def fidelity_procrustes(
     pos_a: torch.Tensor,
     pos_b: torch.Tensor,
 ) -> tuple[float, float, bool, torch.Tensor]:
-    """Align two layouts WITH scale normalization, without reflection.
+    """Align two layouts WITH scale normalization, using best-of-two rotations.
 
     Both layouts are centered and normalized to unit Frobenius norm before
-    alignment. This makes the RMSD measure pure shape difference, invariant
-    to the arbitrary coordinate scale each implementation uses.
+    alignment. Both proper rotation and reflected rotation are tested; the
+    one with lower RMSD is returned. This handles mirror matches (SVD sign
+    ambiguity) that are common in graph layout algorithms.
 
     Scale ratio is reported separately as a diagnostic.
 
@@ -884,11 +887,11 @@ def fidelity_procrustes(
 
     reflected_rotation = left_singular @ right_singular_t
     reflected_aligned = a_centered @ reflected_rotation
-    reflected_rmsd = float(
-        torch.sqrt(torch.mean(torch.norm(reflected_aligned - b_centered, dim=1).square())).item()
-    )
-    reflected = reflected_rmsd < (0.9 * rmsd)
-    return rmsd, scale_ratio, reflected, per_node
+    reflected_per_node = torch.norm(reflected_aligned - b_centered, dim=1)
+    reflected_rmsd = float(torch.sqrt(torch.mean(reflected_per_node.square())).item())
+    if reflected_rmsd < rmsd:
+        return reflected_rmsd, scale_ratio, True, reflected_per_node
+    return rmsd, scale_ratio, False, per_node
 
 
 def pairwise_statistics(values: Sequence[float]) -> dict[str, float]:
@@ -1805,6 +1808,27 @@ def process_group(
             row["scale_ratio_std"] = safe_std(scale_values)
             row["reflected"] = reflected
             row["max_node_displacement"] = max(max_displacements) if max_displacements else math.nan
+
+            # Within-vs-between Procrustes test: is between-engine RMSD
+            # significantly greater than within-engine RMSD?
+            within_rmsd = [c.procrustes_rmsd for c in pairwise_orig] + [
+                c.procrustes_rmsd for c in pairwise_reimpl
+            ]
+            between_rmsd = rmsd_values
+            if len(within_rmsd) >= 2 and len(between_rmsd) >= 2:
+                from scipy.stats import mannwhitneyu
+
+                # One-sided: is between > within?
+                _, pval = mannwhitneyu(between_rmsd, within_rmsd, alternative="greater")
+                row["within_vs_between_pvalue"] = float(pval)
+                row["within_rmsd_mean"] = safe_mean(within_rmsd)
+                row["between_rmsd_mean"] = safe_mean(between_rmsd)
+                row["rmsd_ratio"] = safe_mean(between_rmsd) / max(safe_mean(within_rmsd), 1e-12)
+            else:
+                row["within_vs_between_pvalue"] = math.nan
+                row["within_rmsd_mean"] = safe_mean(within_rmsd) if within_rmsd else math.nan
+                row["between_rmsd_mean"] = safe_mean(between_rmsd) if between_rmsd else math.nan
+                row["rmsd_ratio"] = math.nan
         nearest_orig = nearest_cross_procrustes(original_layouts, reimpl_layouts)
         nearest_reimpl = nearest_cross_procrustes(reimpl_layouts, original_layouts)
         for layouts in (original_layouts, reimpl_layouts):
@@ -1970,11 +1994,9 @@ def explainable_only(row: Mapping[str, Any]) -> bool:
     Mirror matches are explainable because most layout algorithms have
     arbitrary axis orientation (SVD sign ambiguity, etc.).  A mirrored
     layout is a valid equivalent output, not a fidelity failure.
-
-    .. note::
-       Proper fix (TODO): use reflected Procrustes RMSD when mirror is
-       detected so displacement values are correct, rather than just
-       treating the anomaly as explainable.
+    ``fidelity_procrustes`` now tests both rotations and returns the
+    better fit, so mirror_match mostly appears when the reflected
+    alignment was used.
 
     Parameters
     ----------
@@ -2126,20 +2148,26 @@ def finalize_group_row(row: dict[str, Any]) -> None:
                     return False  # identical distributions -> no difference
                 return val < 0.05
 
-            mw_anomaly = any(_mw_significant(metric_name) for metric_name in QUALITY_METRICS)
-            if mw_anomaly:
-                anomaly_reasons.append("mannwhitney_difference")
-            tost_1x = all(_tost_passes(metric_name, "1x") for metric_name in QUALITY_METRICS)
-            tost_1_5x = all(_tost_passes(metric_name, "1_5x") for metric_name in QUALITY_METRICS)
-            tost_2x = all(_tost_passes(metric_name, "2x") for metric_name in QUALITY_METRICS)
-            if tost_1x and not mw_anomaly:
+            # Within-vs-between Procrustes verdict: is the between-engine
+            # RMSD significantly greater than the within-engine RMSD?
+            wb_pval = _safe_float(row.get("within_vs_between_pvalue"))
+            rmsd_ratio = _safe_float(row.get("rmsd_ratio"))
+            if not math.isfinite(wb_pval):
+                # Not enough data for the test -- fall back to TOST
+                tost_2x = all(_tost_passes(metric_name, "2x") for metric_name in QUALITY_METRICS)
+                if tost_2x:
+                    row["verdict"] = "partial_match"
+                else:
+                    row["verdict"] = "insufficient_data"
+            elif wb_pval >= 0.05:
+                # Between is NOT significantly greater than within -> equivalent
                 row["verdict"] = "strong_equivalent"
-            elif tost_1_5x and explainable_only({"anomaly_reason": "; ".join(anomaly_reasons)}):
+            elif wb_pval >= 0.01 and rmsd_ratio < 1.5:
                 row["verdict"] = "weak_equivalent"
-            elif not tost_2x:
-                row["verdict"] = "divergent"
-            else:
+            elif rmsd_ratio < 2.0:
                 row["verdict"] = "partial_match"
+            else:
+                row["verdict"] = "divergent"
         else:
             if math.isfinite(max_displacement) and max_displacement > PROCRUSTES_ANOMALY_THRESHOLD:
                 anomaly_reasons.append("max_node_displacement")
@@ -2205,25 +2233,35 @@ def family_summary_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
         scale_values = finite_values(float(row["scale_ratio_mean"]) for row in paired_ok)
         runtime_values = finite_values(float(row["runtime_ratio"]) for row in paired_ok)
         anomalies = [row for row in paired_ok if str(row["anomaly_reason"])]
-        verdicts = {str(row["verdict"]) for row in paired_ok}
         is_stochastic = any(
             str(row["_variant_is_stochastic"]).lower() in ("true", "1") for row in family_rows
         )
-        if paired_ok and all(str(row["verdict"]) == "identical" for row in paired_ok):
-            verdict = "identical"
-        elif paired_ok and all(
-            str(row["verdict"]) in {"strong_equivalent", "identical"} for row in paired_ok
-        ):
-            verdict = "strong_equivalent"
-        elif paired_ok and all(
-            str(row["verdict"]) in {"strong_equivalent", "weak_equivalent", "identical"}
-            for row in paired_ok
-        ):
-            verdict = "weak_equivalent"
-        elif "divergent" in verdicts:
-            verdict = "divergent"
+        # Proportion-based aggregation: use the fraction of graphs that
+        # pass at each level instead of all-or-nothing.
+        n = len(paired_ok) if paired_ok else 0
+        if n == 0:
+            verdict = "insufficient_data"
         else:
-            verdict = "partial_match"
+            n_identical = sum(1 for r in paired_ok if str(r["verdict"]) == "identical")
+            n_strong = sum(
+                1 for r in paired_ok if str(r["verdict"]) in {"strong_equivalent", "identical"}
+            )
+            n_weak = sum(
+                1
+                for r in paired_ok
+                if str(r["verdict"]) in {"strong_equivalent", "weak_equivalent", "identical"}
+            )
+            n_divergent = sum(1 for r in paired_ok if str(r["verdict"]) == "divergent")
+            if n_identical == n:
+                verdict = "identical"
+            elif n_strong / n >= 0.90:
+                verdict = "strong_equivalent"
+            elif n_weak / n >= 0.90:
+                verdict = "weak_equivalent"
+            elif n_divergent / n > 0.50:
+                verdict = "divergent"
+            else:
+                verdict = "partial_match"
         summaries.append(
             {
                 "algorithm_family": family_name,
@@ -2426,6 +2464,38 @@ def run_analysis(
     if not results_path.exists():
         raise FileNotFoundError(f"Missing benchmark results: {results_path}")
 
+    # Hard gate: validate results.json/positions.h5 sync before processing.
+    # Retro 2026-03-30: 9 hours wasted on analysis with 0 positions because
+    # results.json said "done" but H5 was empty.
+    h5_path = input_dir / "positions.h5"
+    if h5_path.exists():
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from validate_benchmark_integrity import validate_sync
+
+        sync_errors = validate_sync(results_path, h5_path)
+        desync_count = sum(1 for e in sync_errors if "DESYNC" in e)
+        if sync_errors:
+            print(
+                f"[fidelity] {len(sync_errors)} results/H5 sync issues "
+                f"({desync_count} missing positions):",
+                file=sys.stderr,
+            )
+            for err in sync_errors[:20]:
+                print(f"  {err}", file=sys.stderr)
+            if desync_count > 10:
+                print(
+                    f"[fidelity] ABORT: {desync_count} engines have results "
+                    f"but missing positions. Fix the desync before running "
+                    f"analysis. Use scripts/safe_purge_variants.py to purge "
+                    f"and re-benchmark affected variants.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            print(
+                "[fidelity] Minor desync -- proceeding with available data.",
+                file=sys.stderr,
+            )
+
     output_dir.mkdir(parents=True, exist_ok=True)
     previous_hash = previous_results_hash(output_dir / "README.md")
     results_hash = compute_sha256(results_path)
@@ -2433,9 +2503,6 @@ def run_analysis(
     graph_filter = selected_graph_names(records, max_graphs)
     graph_registry = load_graph_registry()
     groups = build_variant_groups(records, graph_filter)
-
-    # Use HDF5 for fast loading if available
-    h5_path = input_dir / "positions.h5"
     h5_file = None
     if h5_path.exists():
         import h5py
@@ -2446,7 +2513,7 @@ def run_analysis(
     if skip_metrics:
         load_layout._skip_metrics = True  # type: ignore[attr-defined]
         print("[fidelity] Skipping quality metrics (Procrustes only)", file=sys.stderr)
-    else:
+    if h5_file is None:
         print(
             "[fidelity] No HDF5 cache found. Loading individual .pt files. "
             "Run scripts/consolidate_positions_hdf5.py to speed this up.",
@@ -2537,8 +2604,9 @@ def run_analysis(
     for row_idx, row in enumerate(per_graph_rows):
         for bucket_name, bucket in pvalue_buckets.items():
             raw_key = f"{bucket_name}_pvalue_raw"
+            bh_key = f"{bucket_name}_pvalue_bh"
             if raw_key in row and not math.isnan(float(row.get(raw_key, math.nan))):
-                bucket.add(row_idx, float(row[raw_key]))
+                bucket.entries.append((row_idx, bh_key, float(row[raw_key])))
 
     apply_bh_correction(per_graph_rows, pvalue_buckets)
     for row in per_graph_rows:

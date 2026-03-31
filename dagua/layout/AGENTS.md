@@ -1,5 +1,19 @@
 # Layout Subpackage — Implementation Guide
 
+## Modules
+
+- **engine.py** -- Core optimization loop: init positions as `nn.Parameter`, composite
+  loss from constraints, `loss.backward()`, `optimizer.step()`, optional projection
+- **constraints.py** -- Composable callables: `(pos, graph_data) -> scalar loss`.
+  Stateless; all structure via `graph_data` dict
+- **projection.py** -- Hard overlap + hard pin projection after each optimizer step
+- **schedule.py** -- Weight annealing for curriculum-style layout optimization
+- **init_placement.py** -- Topo sort (y) + barycenter (x); deterministic from topology
+- **layers.py** -- Layer assignment algorithms for hierarchical layout
+- **multilevel.py** -- Coarsening + refinement for large graphs (most fragile path)
+- **cycle.py** -- Detection + temporary edge reversal for DAG constraints on cyclic graphs
+- **edge_optimization.py** -- Post-layout edge-aware position refinement
+
 ## Dependency Rules
 
 - **constraints.py**: pure torch, no imports from dagua
