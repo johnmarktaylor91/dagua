@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import random
 import time
 from typing import TYPE_CHECKING, Any, Mapping, Optional, Set, Type
 
@@ -154,8 +155,9 @@ class FA2Reference(CompetitorBase):
             if seed is not None:
                 import numpy as np
 
-                # The reference library samples initial positions from NumPy's
-                # global RNG rather than accepting a seed argument directly.
+                # The maintained FA2 package initializes from both Python's
+                # RNG and NumPy's global RNG, so we must seed both for parity.
+                random.seed(seed)
                 np.random.seed(seed)
 
             if graph.num_nodes <= 1:

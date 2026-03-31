@@ -13,8 +13,59 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+
+
+def stage_json_write(path: Path, payload: dict[str, object]) -> Path:
+    """Write JSON to a temporary sibling file and return its staged path.
+
+    Parameters
+    ----------
+    path : Path
+        Final JSON destination.
+    payload : dict[str, object]
+        JSON-serializable object to persist.
+
+    Returns
+    -------
+    Path
+        Temporary file path ready to replace ``path``.
+    """
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    return temp_path
+
+
+def stage_purged_hdf5(h5_path: Path, engine_set: set[str]) -> tuple[Path, int]:
+    """Stage a rewritten ``positions.h5`` without the selected engine keys.
+
+    Parameters
+    ----------
+    h5_path : Path
+        Existing HDF5 cache path.
+    engine_set : set[str]
+        Engine names to purge.
+
+    Returns
+    -------
+    tuple[Path, int]
+        Temporary file path and number of HDF5 datasets removed.
+    """
+    import h5py
+
+    temp_path = h5_path.with_suffix(f"{h5_path.suffix}.tmp")
+    temp_path.unlink(missing_ok=True)
+    removed = 0
+    with h5py.File(h5_path, "r") as source_h5, h5py.File(temp_path, "w") as target_h5:
+        for key in source_h5.keys():
+            if "::" in key and key.split("::")[1] in engine_set:
+                removed += 1
+                continue
+            source_h5.copy(source_h5[key], target_h5, name=key)
+    return temp_path, removed
 
 
 def main() -> None:
@@ -78,20 +129,19 @@ def main() -> None:
     # Purge results.json
     for k in rj_keys:
         del data[k]
-    with open(results_path, "w") as f:
-        json.dump(data, f)
+    staged_results_path = stage_json_write(results_path, data)
+    staged_h5_path: Path | None = None
+    removed = 0
+    if h5_path.exists() and h5_count > 0:
+        staged_h5_path, removed = stage_purged_hdf5(h5_path, engine_set)
+
+    if staged_h5_path is not None:
+        os.rename(staged_h5_path, h5_path)
+    os.rename(staged_results_path, results_path)
     print(f"\nPurged {len(rj_keys)} entries from results.json")
 
     # Purge positions.h5
     if h5_path.exists() and h5_count > 0:
-        import h5py
-
-        with h5py.File(h5_path, "a") as h5f:
-            removed = 0
-            for k in list(h5f.keys()):
-                if "::" in k and k.split("::")[1] in engine_set:
-                    del h5f[k]
-                    removed += 1
         print(f"Purged {removed} keys from positions.h5")
     else:
         print("No positions.h5 keys to purge")

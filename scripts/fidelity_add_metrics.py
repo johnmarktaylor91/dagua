@@ -32,14 +32,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from dagua.eval.variants import get_variant, original_variant_name  # noqa: E402
 from dagua.metrics import quick  # noqa: E402
 
 QUALITY_METRICS = [
     "aspect_ratio",
     "dag_consistency",
     "edge_length_cv",
-    "edge_length_mean",
-    "overlap_count",
 ]
 
 
@@ -123,7 +122,45 @@ def _worker_batch(
     return results
 
 
+def reconstruct_result_key(row: dict[str, str]) -> str:
+    """Rebuild the ``results.json`` / HDF5 key for one per-seed CSV row.
+
+    Parameters
+    ----------
+    row : dict[str, str]
+        Per-seed CSV row.
+
+    Returns
+    -------
+    str
+        Stable benchmark record key.
+
+    Raises
+    ------
+    ValueError
+        Raised when an original-side row cannot be mapped to its synthetic
+        original variant engine name.
+    """
+    graph_name = row.get("graph_name", "")
+    variant_id = row.get("variant_id", "")
+    side = row.get("side", "")
+    seed = row.get("seed", "")
+
+    engine_name = variant_id
+    if side == "orig":
+        variant = get_variant(variant_id)
+        original_name = None if variant is None else original_variant_name(variant)
+        if original_name is None:
+            raise ValueError(f"Cannot resolve original engine for variant '{variant_id}'")
+        engine_name = original_name
+
+    if seed and seed != "None":
+        return f"{graph_name}::{engine_name}::seed{seed}"
+    return f"{graph_name}::{engine_name}::deterministic"
+
+
 def main() -> None:
+    """Merge quick metrics into existing fidelity-analysis CSV outputs."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input",
@@ -178,15 +215,7 @@ def main() -> None:
     work_items: list[tuple[str, str, str]] = []
     for idx, row in enumerate(seed_rows):
         graph = row.get("graph_name", "")
-        engine = row.get("engine_name", row.get("variant_id", ""))
-        seed = row.get("seed", "")
-
-        # Build the result key matching results.json format
-        if seed and seed != "None":
-            result_key = f"{graph}::{engine}::seed{seed}"
-        else:
-            result_key = f"{graph}::{engine}::deterministic"
-
+        result_key = reconstruct_result_key(row)
         work_items.append((result_key, graph, str(idx)))
 
     # Process in parallel batches

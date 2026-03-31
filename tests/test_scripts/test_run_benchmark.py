@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+from pytest import MonkeyPatch
 
 from scripts.run_benchmark import (
     BenchmarkRecord,
     is_record_complete,
+    parse_args,
     position_relative_path,
     seeds_for_engine,
 )
@@ -14,8 +18,23 @@ from scripts.run_benchmark import (
 
 def test_seeds_for_engine_respects_stochastic_registry() -> None:
     """Stochastic engines should expand into a reproducible seed range."""
-    assert seeds_for_engine("classic_fr", seed_count=3) == [42, 43, 44]
-    assert seeds_for_engine("dagua", seed_count=3) == [None]
+    assert seeds_for_engine("classic_fr", seed_count=3, seed_start=42) == [42, 43, 44]
+    assert seeds_for_engine("classic_fr", seed_count=3, seed_start=50) == [50, 51, 52]
+    assert seeds_for_engine("dagua", seed_count=3, seed_start=42) == [None]
+
+
+def test_parse_args_accepts_seed_start(monkeypatch: MonkeyPatch) -> None:
+    """The benchmark CLI should expose a configurable stochastic seed start."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_benchmark.py", "--seeds", "3", "--seed-start", "50"],
+    )
+
+    args = parse_args()
+
+    assert args.seeds == 3
+    assert args.seed_start == 50
 
 
 def test_position_relative_path_sanitizes_and_formats_seed_suffixes() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import random
 import subprocess
 import warnings
@@ -664,7 +665,7 @@ def _layout_linlog_all_pairs_baseline(
     steps: int,
     seed: int,
 ) -> torch.Tensor:
-    """Optimize the pre-fix LinLog objective with all-pairs repulsion.
+    """Optimize the all-pairs LinLog objective with an explicit reference loop.
 
     Parameters
     ----------
@@ -686,15 +687,16 @@ def _layout_linlog_all_pairs_baseline(
     generator.manual_seed(seed)
     positions = torch.randn((num_nodes, 2), generator=generator, dtype=torch.float32)
     positions = positions.requires_grad_(True)
-    learning_rate = min(0.05, 0.8 / float(max(num_nodes, 1)))
-    optimizer = torch.optim.Adam([positions], lr=learning_rate)
+    initial_lr = min(0.05, 0.8 / float(max(num_nodes, 1)))
+    final_lr = max(initial_lr * 0.1, initial_lr / math.sqrt(float(max(steps, 1))))
+    optimizer = torch.optim.Adam([positions], lr=initial_lr)
+    pair_src, pair_dst = torch.triu_indices(num_nodes, num_nodes, offset=1)
 
-    for _ in range(steps):
+    for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
         src = edge_index[0].to(dtype=torch.long)
         dst = edge_index[1].to(dtype=torch.long)
         attraction = torch.linalg.norm(positions[src] - positions[dst], dim=1).clamp(min=1.0e-3)
-        pair_src, pair_dst = torch.triu_indices(num_nodes, num_nodes, offset=1)
         pair_lengths = torch.linalg.norm(
             positions[pair_src] - positions[pair_dst],
             dim=1,
@@ -702,6 +704,10 @@ def _layout_linlog_all_pairs_baseline(
         loss = attraction.sum() - torch.log(pair_lengths).sum()
         loss.backward()
         optimizer.step()
+
+        fraction = float(step + 1) / float(max(steps, 1))
+        decay = initial_lr + (final_lr - initial_lr) * fraction
+        optimizer.param_groups[0]["lr"] = decay
 
     return _normalize_positions(positions.detach())
 
@@ -979,8 +985,8 @@ def test_linlog_reduces_energy(
     assert energies[-1] < energies[0], graph_name
 
 
-def test_linlog_non_edge_repulsion_separates_bridge_connected_communities() -> None:
-    """Non-edge repulsion should separate weakly bridged cliques more strongly."""
+def test_linlog_all_pairs_repulsion_matches_reference_optimizer() -> None:
+    """LinLog should match a transparent all-pairs reference optimizer."""
     edge_index, num_nodes, labels = _make_two_cliques_with_bridge()
     seed = 0
 
@@ -990,7 +996,7 @@ def test_linlog_non_edge_repulsion_separates_bridge_connected_communities() -> N
     updated_ratio = _community_separation_ratio(updated_positions, labels)
     baseline_ratio = _community_separation_ratio(baseline_positions, labels)
 
-    assert updated_ratio > baseline_ratio * 5.0
+    assert updated_ratio == pytest.approx(baseline_ratio, rel=0.1, abs=0.1)
 
 
 @pytest.mark.skipif(not _SKLEARN_AVAILABLE, reason="sklearn not installed")

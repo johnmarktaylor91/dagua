@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from dagua.layout.classic import layout_sfdp, layout_umap
-from dagua.layout.classic.umap_layout import _all_pairs_shortest_paths
+from dagua.layout.classic.umap_layout import _all_pairs_shortest_paths, _smooth_knn_dist
 
 
 def _edge_index(edges: list[tuple[int, int]]) -> torch.Tensor:
@@ -269,3 +269,23 @@ def test_layout_umap_rejects_mismatched_edge_weights() -> None:
         assert "edge_weights length" in str(exc)
     else:
         raise AssertionError("layout_umap accepted mismatched edge_weights")
+
+
+def test_smooth_knn_dist_uses_smallest_positive_rho() -> None:
+    """Smooth-kNN should derive ``rho`` from the smallest positive distance."""
+    knn_distances = torch.tensor([[0.0, 0.0, 1.0, 2.0]], dtype=torch.float32)
+
+    sigmas, rhos = _smooth_knn_dist(knn_distances=knn_distances, n_neighbors=4)
+
+    assert torch.allclose(rhos, torch.tensor([1.0], dtype=torch.float32))
+    assert float(sigmas[0].item()) < 0.1
+
+
+def test_smooth_knn_dist_skips_self_distance_in_membership_sum() -> None:
+    """Smooth-kNN should not include ``j=0`` when solving the bandwidth."""
+    knn_distances = torch.tensor([[0.0, 1.0, 2.0]], dtype=torch.float32)
+
+    sigmas, rhos = _smooth_knn_dist(knn_distances=knn_distances, n_neighbors=3)
+
+    assert torch.allclose(rhos, torch.tensor([1.0], dtype=torch.float32))
+    assert torch.allclose(sigmas, torch.tensor([1.8653]), atol=5.0e-3)
