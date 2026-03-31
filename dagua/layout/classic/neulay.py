@@ -10,23 +10,19 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+import numpy as np
+import scipy.sparse as sp
 import torch
 from torch import nn
 
-try:
-    from torch_geometric.nn import GCNConv as _GCNConv
-except Exception:
-    _GCNConv = None
-
-_FULL_REPULSION_THRESHOLD = 512
-_REPULSION_SAMPLE_COUNT = 8_192
-_SHORT_STOP_WINDOW = 32
-_LONG_STOP_WINDOW = 1_000
-_SHORT_STOP_RATIO = 5.0e-4
-_LONG_STOP_RATIO = 1.0e-4
+_PATIENCE = 10
+_GCN_REL_TOL = 1.0e-4
+_LINEAR_REL_TOL = 1.0e-8
 _LATENT_DIM = 10
-_GNN_LR = 0.05
+_GNN_LR = 0.01
 _EPS = 1.0e-9
+_PAIR_QUERY_RADIUS_FACTOR = 4.0
+_PAIR_REFRESH_INTERVAL = 5
 
 
 def _layout_device(
@@ -62,7 +58,7 @@ def _validate_inputs(
     dim: int,
     lr: float,
     radius: float,
-    magnitude: float,
+    magnitude: Optional[float],
     edge_weights: Optional[torch.Tensor],
 ) -> None:
     """Validate the public NeuLay inputs.
@@ -74,17 +70,18 @@ def _validate_inputs(
     num_nodes : int
         Number of nodes in the graph.
     steps : int
-        Number of direct-refinement steps.
+        Total optimization budget across the GCN and direct-refinement phases.
     gcn_steps : int
         Number of GCN reparameterization steps.
     dim : int
         Embedding dimensionality.
     lr : float
-        Adam learning rate for the direct phase.
+        RMSprop learning rate for the direct phase.
     radius : float
         Gaussian repulsion radius.
-    magnitude : float
-        Gaussian repulsion magnitude.
+    magnitude : float | None
+        Gaussian repulsion magnitude.  When ``None`` the adaptive formula
+        ``100 * N^(1/3) * radius`` is used (validated after resolution).
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
 
@@ -105,7 +102,7 @@ def _validate_inputs(
         raise ValueError("lr must be positive.")
     if radius <= 0.0:
         raise ValueError("radius must be positive.")
-    if magnitude < 0.0:
+    if magnitude is not None and magnitude < 0.0:
         raise ValueError("magnitude must be non-negative.")
     if edge_index.ndim != 2 or edge_index.shape[0] != 2:
         raise ValueError("edge_index must have shape [2, E].")
@@ -146,6 +143,7 @@ def _set_seed(seed: int) -> None:
         The global RNG state is updated in-place.
     """
     torch.manual_seed(seed)
+    np.random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
@@ -175,6 +173,8 @@ def _clean_edge_index(edge_index: torch.Tensor, device: torch.device) -> torch.T
 def _initial_positions(num_nodes: int, dim: int, device: torch.device) -> torch.Tensor:
     """Create the NeuLay random initialization.
 
+    Matches the reference ``xavier_uniform_`` with gain ``N^(1/dim)``.
+
     Parameters
     ----------
     num_nodes : int
@@ -189,8 +189,10 @@ def _initial_positions(num_nodes: int, dim: int, device: torch.device) -> torch.
     torch.Tensor
         Initial coordinates with shape ``[N, dim]``.
     """
-    scale = math.sqrt(float(max(num_nodes, 1)))
-    return torch.randn((num_nodes, dim), device=device, dtype=torch.float32) * scale
+    gain = float(max(num_nodes, 1)) ** (1.0 / float(max(dim, 1)))
+    initial = torch.empty((num_nodes, dim), device=device, dtype=torch.float32)
+    nn.init.xavier_uniform_(initial, gain=gain)
+    return initial
 
 
 def _center_positions(pos: torch.Tensor) -> torch.Tensor:
@@ -228,23 +230,57 @@ def _elastic_loss(pos: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
     """
     if edge_index.numel() == 0:
         return pos.sum() * 0.0
-    src = edge_index[0]
-    dst = edge_index[1]
-    diff = pos[src] - pos[dst]
+    # Match the reference by collapsing directed duplicates into one
+    # undirected spring before measuring the elastic energy.
+    src, dst = edge_index[0], edge_index[1]
+    low = torch.minimum(src, dst)
+    high = torch.maximum(src, dst)
+    pairs = torch.stack([low, high], dim=0)
+    unique_pairs = torch.unique(pairs, dim=1)
+    diff = pos[unique_pairs[0]] - pos[unique_pairs[1]]
     return diff.square().sum() * 0.5
 
 
-def _repulsion_loss(
-    pos: torch.Tensor,
-    radius: float,
-    magnitude: float,
-) -> torch.Tensor:
-    """Evaluate exact or sampled Gaussian repulsion.
+def _kdtree_repulsion_pairs(pos: torch.Tensor, query_radius: float) -> np.ndarray:
+    """Find nearby node pairs using SciPy's cKDTree.
 
     Parameters
     ----------
     pos : torch.Tensor
         Position tensor with shape ``[N, dim]``.
+    query_radius : float
+        cKDTree search radius.
+
+    Returns
+    -------
+    numpy.ndarray
+        Pair array with shape ``[M, 2]`` and dtype ``int64``.
+    """
+    from scipy.spatial import cKDTree
+
+    if pos.shape[0] < 2:
+        return np.empty((0, 2), dtype=np.int64)
+    tree = cKDTree(pos.detach().cpu().numpy())
+    pairs = tree.query_pairs(query_radius, output_type="ndarray")
+    if pairs.size == 0:
+        return np.empty((0, 2), dtype=np.int64)
+    return pairs.astype(np.int64)
+
+
+def _kdtree_repulsion_loss(
+    pos: torch.Tensor,
+    pairs: np.ndarray,
+    radius: float,
+    magnitude: float,
+) -> torch.Tensor:
+    """Evaluate Gaussian repulsion over cached cKDTree pairs.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, dim]``.
+    pairs : numpy.ndarray
+        Pair array with shape ``[M, 2]``.
     radius : float
         Gaussian radius.
     magnitude : float
@@ -255,64 +291,30 @@ def _repulsion_loss(
     torch.Tensor
         Scalar repulsion loss.
     """
-    num_nodes = pos.shape[0]
-    if num_nodes == 0 or magnitude == 0.0:
+    if pairs.shape[0] == 0 or magnitude == 0.0:
         return pos.sum() * 0.0
-
-    radius_term = 4.0 * radius * radius
-    if num_nodes <= _FULL_REPULSION_THRESHOLD:
-        pairwise_sq = torch.cdist(pos, pos).square()
-        return magnitude * torch.exp(-pairwise_sq / radius_term).sum()
-
-    sample_count = min(_REPULSION_SAMPLE_COUNT, max(num_nodes * 16, 1_024))
-    src = torch.randint(0, num_nodes, (sample_count,), device=pos.device)
-    dst = torch.randint(0, num_nodes, (sample_count,), device=pos.device)
-    diff = pos[src] - pos[dst]
-    kernel = torch.exp(-diff.square().sum(dim=1) / radius_term)
-    return magnitude * kernel.mean() * float(num_nodes * num_nodes)
+    idx = torch.from_numpy(pairs).to(device=pos.device)
+    sq_dist = ((pos[idx[:, 0]] - pos[idx[:, 1]]) ** 2).sum(dim=-1)
+    return magnitude * torch.exp(-sq_dist / (4.0 * radius * radius)).sum()
 
 
-def _loss_change_ratio(loss_history: list[float], window: int) -> Optional[float]:
-    """Compute the relative change between consecutive loss windows.
+def _relative_window_difference(loss_window: list[float]) -> float:
+    """Measure the reference NeuLay relative-loss window difference.
 
     Parameters
     ----------
-    loss_history : list[float]
-        Scalar loss values accumulated during optimization.
-    window : int
-        Window size used for the rolling comparison.
+    loss_window : list[float]
+        Sliding loss window of size ``_PATIENCE``.
 
     Returns
     -------
-    float | None
-        Relative mean-loss change, or ``None`` until two full windows are
-        available.
+    float
+        Relative range ``(max - min) / max``.
     """
-    if len(loss_history) < 2 * window:
-        return None
-    previous = sum(loss_history[-2 * window : -window]) / float(window)
-    current = sum(loss_history[-window:]) / float(window)
-    return abs(current - previous) / max(abs(previous), _EPS)
-
-
-def _should_stop(loss_history: list[float]) -> bool:
-    """Check the NeuLay dual-window early-stopping condition.
-
-    Parameters
-    ----------
-    loss_history : list[float]
-        Scalar loss values accumulated during optimization.
-
-    Returns
-    -------
-    bool
-        ``True`` when both the short and long windows have stabilized.
-    """
-    short_ratio = _loss_change_ratio(loss_history, _SHORT_STOP_WINDOW)
-    long_ratio = _loss_change_ratio(loss_history, _LONG_STOP_WINDOW)
-    if short_ratio is None or long_ratio is None:
-        return False
-    return short_ratio < _SHORT_STOP_RATIO and long_ratio < _LONG_STOP_RATIO
+    max_loss = max(loss_window)
+    if max_loss <= 0.0:
+        return 0.0
+    return (max_loss - min(loss_window)) / max_loss
 
 
 def _optimize_positions(
@@ -332,9 +334,9 @@ def _optimize_positions(
     edge_index : torch.Tensor
         Edge tensor with shape ``[2, E]``.
     steps : int
-        Number of Adam steps.
+        Number of RMSprop steps for the direct refinement phase.
     lr : float
-        Adam learning rate.
+        RMSprop learning rate.
     radius : float
         Gaussian repulsion radius.
     magnitude : float
@@ -346,73 +348,156 @@ def _optimize_positions(
         Refined coordinates with shape ``[N, dim]``.
     """
     pos = nn.Parameter(initial_pos.clone())
-    optimizer = torch.optim.Adam([pos], lr=lr)
-    loss_history: list[float] = []
+    optimizer = torch.optim.RMSprop([pos], lr=lr)
+    loss_window = [0.0] * _PATIENCE
+    num_nodes = initial_pos.shape[0]
+    query_radius = _PAIR_QUERY_RADIUS_FACTOR * radius
+    pairs = np.empty((0, 2), dtype=np.int64)
 
-    for _ in range(steps):
+    for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        centered = _center_positions(pos)
-        loss = _elastic_loss(centered, edge_index) + _repulsion_loss(
-            centered,
+        if step % _PAIR_REFRESH_INTERVAL == 0:
+            pairs = _kdtree_repulsion_pairs(pos, query_radius)
+        loss = _elastic_loss(pos, edge_index) + _kdtree_repulsion_loss(
+            pos,
+            pairs=pairs,
             radius=radius,
             magnitude=magnitude,
         )
         loss.backward()
         optimizer.step()
-        with torch.no_grad():
-            pos.sub_(pos.mean(dim=0, keepdim=True))
-        loss_history.append(float(loss.detach().item()))
-        if _should_stop(loss_history):
+        loss_window.append(float(loss.detach().item()))
+        loss_window.pop(0)
+        if _relative_window_difference(loss_window) < _LINEAR_REL_TOL * math.sqrt(float(num_nodes)):
             break
 
-    return _center_positions(pos.detach())
+    return pos.detach()
+
+
+def _build_normalized_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> torch.Tensor:
+    """Build ``D^(-1/2) (A+I) D^(-1/2)`` as a sparse torch tensor.
+
+    Matches the reference NeuLay normalization: make the graph undirected,
+    add self-loops, then apply symmetric degree normalization.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]`` (self-loops already removed).
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Sparse normalized adjacency with shape ``[N, N]``.
+    """
+    if edge_index.numel() == 0:
+        idx = torch.arange(num_nodes, dtype=torch.long)
+        return torch.sparse_coo_tensor(
+            torch.stack([idx, idx]),
+            torch.ones(num_nodes, dtype=torch.float32),
+            (num_nodes, num_nodes),
+        ).coalesce()
+
+    src, dst = edge_index[0].cpu(), edge_index[1].cpu()
+    pairs = np.stack(
+        [
+            np.concatenate([src.numpy(), dst.numpy()]),
+            np.concatenate([dst.numpy(), src.numpy()]),
+        ],
+        axis=0,
+    ).astype(np.int64)
+    vals = np.ones(pairs.shape[1], dtype=np.float32)
+    adj = sp.coo_matrix((vals, (pairs[0], pairs[1])), shape=(num_nodes, num_nodes))
+    adj = adj + sp.eye(num_nodes, dtype=np.float32, format="coo")
+    adj.sum_duplicates()
+    if adj.nnz > 0:
+        adj.data[:] = 1.0
+
+    degree = np.asarray(adj.sum(axis=0), dtype=np.float32).ravel()
+    inv_sqrt = np.zeros_like(degree)
+    mask = degree > 0
+    inv_sqrt[mask] = 1.0 / np.sqrt(degree[mask])
+    d_mat = sp.diags(inv_sqrt).tocsr()
+    normalized = d_mat.dot(adj.dot(d_mat)).tocoo()
+
+    indices = torch.from_numpy(np.vstack((normalized.row, normalized.col)).astype(np.int64))
+    values = torch.from_numpy(normalized.data.astype(np.float32))
+    return torch.sparse_coo_tensor(
+        indices, values, (num_nodes, num_nodes), dtype=torch.float32
+    ).coalesce()
+
+
+class _SparseGCN(nn.Module):
+    """Reference-matching GCN layer: ``A_norm @ (X @ W)``, no bias."""
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        adj_norm: torch.Tensor,
+        gain: float,
+    ) -> None:
+        super().__init__()
+        self.adj_norm = adj_norm
+        self.weight = nn.Parameter(torch.empty(in_dim, out_dim))
+        nn.init.xavier_uniform_(self.weight, gain=gain)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply ``A_norm @ (X @ W)``."""
+        support = torch.mm(x, self.weight)
+        return torch.sparse.mm(self.adj_norm, support)
 
 
 class _ResGCN(nn.Module):
-    """NeuLay residual GCN with cross-layer skip concatenation."""
+    """Reference-matching NeuLay 3-layer GCN with skip concatenation.
 
-    def __init__(self, num_nodes: int, dim: int, device: torch.device) -> None:
-        """Construct the published NeuLay encoder.
+    Architecture exactly matches the upstream NeuLay-2.py script:
+    - Direct learnable weight1 (N x 100), Xavier-initialized
+    - GCN layer 1: A_norm @ (h0 @ W_gcn1), 100 -> 100, Tanh, no bias
+    - GCN layer 2: A_norm @ (h1 @ W_gcn2), 100 -> 3, no bias
+    - Skip concatenation: [h0, h1, h2] -> N x 203
+    - Direct weight2 multiply: 203 -> output dim, no bias
+    """
 
-        Parameters
-        ----------
-        num_nodes : int
-            Number of graph nodes.
-        dim : int
-            Output dimensionality.
-        device : torch.device
-            Device used for the learnable parameters.
-        """
+    _HIDDEN = 100
+    _GCN2_OUT = 3
+
+    def __init__(
+        self,
+        num_nodes: int,
+        dim: int,
+        device: torch.device,
+        edge_index: torch.Tensor,
+    ) -> None:
         super().__init__()
-        if _GCNConv is None:
-            raise RuntimeError("PyTorch Geometric is required for the NeuLay GCN phase.")
+        gain = float(max(num_nodes, 1)) ** (1.0 / float(max(dim, 1)))
+        adj_norm = _build_normalized_adjacency(edge_index, num_nodes).to(device)
 
-        latent_scale = float(max(num_nodes, 1)) ** (1.0 / float(_LATENT_DIM))
-        self.latent = nn.Parameter(
-            torch.randn((num_nodes, _LATENT_DIM), device=device, dtype=torch.float32) * latent_scale
+        self.weight1 = nn.Parameter(
+            torch.empty((num_nodes, self._HIDDEN), device=device, dtype=torch.float32)
         )
-        self.gcn_layers = nn.ModuleList([_GCNConv(_LATENT_DIM, _LATENT_DIM)])
-        self.proj = nn.Linear(_LATENT_DIM * 2, dim)
+        nn.init.xavier_uniform_(self.weight1, gain=gain)
 
-    def forward(self, edge_index: torch.Tensor) -> torch.Tensor:
-        """Project the latent node features into coordinates.
+        self.gcn1 = _SparseGCN(self._HIDDEN, self._HIDDEN, adj_norm, gain)
+        self.gcn2 = _SparseGCN(self._HIDDEN, self._GCN2_OUT, adj_norm, gain)
 
-        Parameters
-        ----------
-        edge_index : torch.Tensor
-            Edge tensor with shape ``[2, E]``.
+        concat_dim = self._HIDDEN + self._HIDDEN + self._GCN2_OUT
+        self.weight2 = nn.Parameter(
+            torch.empty((concat_dim, dim), device=device, dtype=torch.float32)
+        )
+        nn.init.xavier_uniform_(self.weight2, gain=gain)
 
-        Returns
-        -------
-        torch.Tensor
-            Predicted coordinates with shape ``[N, dim]``.
-        """
-        outputs: list[torch.Tensor] = [self.latent]
-        features = self.latent
-        for layer in self.gcn_layers:
-            features = layer(features, edge_index)
-            outputs.append(features)
-        return self.proj(torch.cat(outputs, dim=1))
+    def forward(self) -> torch.Tensor:
+        """Generate layout coordinates."""
+        h0 = self.weight1
+        h1 = torch.tanh(self.gcn1(h0))
+        h2 = self.gcn2(h1)
+        return torch.mm(torch.cat([h0, h1, h2], dim=1), self.weight2)
 
 
 def _optimize_gcn_phase(
@@ -437,7 +522,7 @@ def _optimize_gcn_phase(
     device : torch.device
         Optimization device.
     steps : int
-        Number of GCN Adam steps.
+        Number of GCN RMSprop steps.
     radius : float
         Gaussian repulsion radius.
     magnitude : float
@@ -448,26 +533,37 @@ def _optimize_gcn_phase(
     torch.Tensor
         Coarse coordinates with shape ``[N, dim]``.
     """
-    model = _ResGCN(num_nodes=num_nodes, dim=dim, device=device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=_GNN_LR)
-    loss_history: list[float] = []
+    model = _ResGCN(
+        num_nodes=num_nodes,
+        dim=dim,
+        device=device,
+        edge_index=edge_index,
+    )
+    optimizer = torch.optim.RMSprop(model.parameters(), lr=_GNN_LR)
+    loss_window = [0.0] * _PATIENCE
+    query_radius = _PAIR_QUERY_RADIUS_FACTOR * radius
+    pairs = np.empty((0, 2), dtype=np.int64)
 
-    for _ in range(steps):
+    for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        centered = _center_positions(model(edge_index))
-        loss = _elastic_loss(centered, edge_index) + _repulsion_loss(
-            centered,
+        output = model()
+        if step % _PAIR_REFRESH_INTERVAL == 0:
+            pairs = _kdtree_repulsion_pairs(output, query_radius)
+        loss = _elastic_loss(output, edge_index) + _kdtree_repulsion_loss(
+            output,
+            pairs=pairs,
             radius=radius,
             magnitude=magnitude,
         )
         loss.backward()
         optimizer.step()
-        loss_history.append(float(loss.detach().item()))
-        if _should_stop(loss_history):
+        loss_window.append(float(loss.detach().item()))
+        loss_window.pop(0)
+        if _relative_window_difference(loss_window) < _GCN_REL_TOL * math.sqrt(float(num_nodes)):
             break
 
     with torch.no_grad():
-        return _center_positions(model(edge_index).detach())
+        return model().detach()
 
 
 def layout_neulay(
@@ -479,9 +575,9 @@ def layout_neulay(
     gcn_steps: int = 2_000,
     use_gcn: bool = True,
     dim: int = 2,
-    lr: float = 0.1,
+    lr: float = 0.01,
     radius: float = 0.4,
-    magnitude: float = 10.0,
+    magnitude: Optional[float] = None,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Lay out a graph with the published NeuLay objective.
@@ -497,19 +593,21 @@ def layout_neulay(
     seed : int, default=42
         Random seed used for the initialization and optimizer trajectory.
     steps : int, default=20000
-        Number of direct Adam refinement steps.
+        Total optimization budget across the GCN and direct phases.
     gcn_steps : int, default=2000
         Number of GCN reparameterization steps when PyG is available.
     use_gcn : bool, default=True
         Whether to run the optional GCN phase when PyG is installed.
     dim : int, default=2
         Output dimensionality.
-    lr : float, default=0.1
-        Adam learning rate for the direct phase.
+    lr : float, default=0.01
+        RMSprop learning rate for the direct phase.
     radius : float, default=0.4
         Gaussian repulsion radius.
-    magnitude : float, default=10.0
-        Gaussian repulsion magnitude.
+    magnitude : float | None, default=None
+        Gaussian repulsion magnitude.  When ``None`` (the default), an
+        adaptive value of ``100 * N^(1/3) * radius`` is used, matching
+        the reference implementation.
     edge_weights : torch.Tensor, optional
         Optional edge weights with shape ``[E]``. Accepted for interface
         consistency; the current NeuLay port does not yet thread them into the
@@ -537,13 +635,14 @@ def layout_neulay(
     if num_nodes == 1:
         return torch.zeros((1, dim), dtype=torch.float32, device=device)
 
+    # Adaptive repulsion: 100 * N^(1/3) * radius (reference formula).
+    if magnitude is None:
+        magnitude = 100.0 * (num_nodes ** (1.0 / 3.0)) * radius
+
     _set_seed(seed)
     cleaned_edge_index = _clean_edge_index(edge_index=edge_index, device=device)
-    # TODO: integrate edge_weights into GCN message passing and the direct loss.
-    if cleaned_edge_index.numel() == 0:
-        return _center_positions(_initial_positions(num_nodes=num_nodes, dim=dim, device=device))
 
-    if use_gcn and _GCNConv is not None and gcn_steps > 0:
+    if use_gcn and gcn_steps > 0:
         coarse = _optimize_gcn_phase(
             edge_index=cleaned_edge_index,
             num_nodes=num_nodes,
@@ -554,15 +653,16 @@ def layout_neulay(
             magnitude=magnitude,
         )
     else:
-        coarse = _center_positions(_initial_positions(num_nodes=num_nodes, dim=dim, device=device))
+        coarse = _initial_positions(num_nodes=num_nodes, dim=dim, device=device)
 
-    if steps == 0:
+    linear_steps = max(steps - gcn_steps, 0) if use_gcn else steps
+    if linear_steps <= 0:
         return coarse
 
     return _optimize_positions(
         initial_pos=coarse,
         edge_index=cleaned_edge_index,
-        steps=steps,
+        steps=linear_steps,
         lr=lr,
         radius=radius,
         magnitude=magnitude,

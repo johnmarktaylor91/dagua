@@ -8,7 +8,11 @@ import pytest
 import torch
 
 from dagua.layout.classic import layout_fa2
-from dagua.layout.classic.fa2 import _adjust_speed_and_apply_forces, _compute_degree
+from dagua.layout.classic.fa2 import (
+    _adjust_speed_and_apply_forces,
+    _attraction_force,
+    _compute_degree,
+)
 from dagua.layout.classic.tsnet import _gradient_descent_step
 
 
@@ -169,6 +173,30 @@ def test_layout_fa2_linlog_mode_changes_layout() -> None:
     )
 
     assert not torch.allclose(default_pos, linlog_pos)
+
+
+def test_attraction_force_linlog_matches_reference_log_attraction() -> None:
+    """Match the reference LinLog attraction scaling and raw-delta direction."""
+    pos = torch.tensor([[0.0, 0.0], [3.0, 4.0]], dtype=torch.float32)
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    mass = torch.tensor([2.0, 1.0], dtype=torch.float32)
+
+    force = _attraction_force(
+        pos=pos,
+        edge_index=edge_index,
+        mass=mass,
+        outbound_att_compensation=3.0,
+        outbound_attraction_distribution=True,
+        linlog=True,
+    )
+
+    delta = pos[0] - pos[1]
+    distance = torch.linalg.vector_norm(delta)
+    expected_factor = -(3.0 * torch.log1p(distance) / distance) / mass[0]
+    expected_attraction = delta * expected_factor
+    expected_force = torch.stack((expected_attraction, -expected_attraction))
+
+    torch.testing.assert_close(force, expected_force)
 
 
 def test_layout_fa2_strong_gravity_changes_layout() -> None:

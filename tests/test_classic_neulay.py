@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
+from dagua.layout.classic import neulay as neulay_module
 from dagua.layout.classic.neulay import layout_neulay
 
 
@@ -118,3 +120,64 @@ def test_layout_neulay_rejects_mismatched_edge_weights() -> None:
         assert "edge_weights length" in str(exc)
     else:
         raise AssertionError("layout_neulay accepted mismatched edge_weights")
+
+
+def test_elastic_loss_deduplicates_bidirectional_edges() -> None:
+    """The elastic term should count mirrored directed edges only once."""
+    pos = torch.tensor([[0.0, 0.0], [3.0, 4.0]], dtype=torch.float32)
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+
+    loss = neulay_module._elastic_loss(pos, edge_index)
+
+    assert float(loss.item()) == pytest.approx(12.5)
+
+
+def test_layout_neulay_skips_linear_phase_when_gcn_uses_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The direct phase should be skipped when the GCN phase exhausts the step budget."""
+    edge_index = _cycle_edge_index(4)
+    coarse = torch.full((4, 2), 7.0, dtype=torch.float32)
+    seen: dict[str, object] = {"optimize_called": False}
+
+    def _fake_gcn_phase(
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        dim: int,
+        device: torch.device,
+        steps: int,
+        radius: float,
+        magnitude: float,
+    ) -> torch.Tensor:
+        """Return a sentinel coarse layout for the budget-allocation regression."""
+        del edge_index, num_nodes, dim, device, radius, magnitude
+        assert steps == 20
+        return coarse.clone()
+
+    def _fake_optimize_positions(
+        initial_pos: torch.Tensor,
+        edge_index: torch.Tensor,
+        steps: int,
+        lr: float,
+        radius: float,
+        magnitude: float,
+    ) -> torch.Tensor:
+        """Fail if the linear phase runs when its budget should be zero."""
+        del initial_pos, edge_index, steps, lr, radius, magnitude
+        seen["optimize_called"] = True
+        return torch.zeros((4, 2), dtype=torch.float32)
+
+    monkeypatch.setattr(neulay_module, "_optimize_gcn_phase", _fake_gcn_phase)
+    monkeypatch.setattr(neulay_module, "_optimize_positions", _fake_optimize_positions)
+
+    positions = layout_neulay(
+        edge_index=edge_index,
+        num_nodes=4,
+        seed=5,
+        steps=20,
+        gcn_steps=20,
+        use_gcn=True,
+    )
+
+    assert seen["optimize_called"] is False
+    assert torch.equal(positions, coarse)
