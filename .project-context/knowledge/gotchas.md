@@ -8,6 +8,7 @@
 - [BENCH] External tools: subprocess always works. Don't assume Python bindings are needed — we use subprocess for Graphviz/ELK/dagre/OGDF.
 - [BENCH] Test graphs: check if weighted/directed/connected before comparing. nx.karate_club_graph() has edge weights 1-7.
 - [BENCH] Reimplementation: match the INSTALLED code (`pip show`), not the paper. Papers are ambiguous.
+- [BENCH] Authority hierarchy: (1) installed reference code, (2) upstream repo, (3) paper (only if no impl exists). Pick one, document which. Never "apply the spirit."
 - [BENCH] Results: never claim fidelity without adversarial review. Show per-graph distributions, not just means.
 - [BENCH] Stop short: if you can name a viable improvement (line-by-line translation, coarsening match, RNG fix), DO IT. Don't frame it as future work. Three rounds of "we could" → "then do it!" wasted hours.
 
