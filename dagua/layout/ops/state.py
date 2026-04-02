@@ -148,7 +148,13 @@ class LayoutProblem:
     cluster_parents: Optional[Dict[str, str]] = None
     structure: Optional[GraphStructure] = None
     flex: Optional[FlexConstraints] = None
+    edge_weights: Optional[torch.Tensor] = None
     seed: int = 42
+
+    # NOTE: LayoutProblem is intentionally NOT frozen -- some fields
+    # (structure) are lazily computed.  However, ops SHOULD treat it
+    # as read-only.  edge_weights lives here (not in config) because
+    # 15 of 25 classic algorithms consume it.
 
 
 @dataclass
@@ -190,6 +196,7 @@ class HierarchyLevel:
     fine_to_coarse: Optional[torch.Tensor] = None
     fine_layer_assignments: Optional[torch.Tensor] = None
     coarse_layer_assignments: Optional[torch.Tensor] = None
+    cluster_ids: Optional[torch.Tensor] = None
     offload_path: Optional[Path] = None
     offload_dir: Optional[Path] = None
     payload_fields: Tuple[str, ...] = ()
@@ -273,6 +280,11 @@ class SolveState:
         Per-step edge batching context.
     annealing : AnnealingSchedule | None
         Annealing schedule state.
+    optimizer : Any | None
+        Optimizer instance (e.g. ``torch.optim.Adam``). Created by an
+        init-phase op after ``pos`` is allocated. Stored here because
+        the optimizer holds a reference to ``pos`` and carries stateful
+        running averages (Adam m1/m2, SGD momentum).
     step : int
         Current optimization step.
     total_steps : int
@@ -283,6 +295,32 @@ class SolveState:
         Consecutive steps without improvement.
     ops_applied : list[str]
         Bounded provenance history of recently applied operations.
+    forces : torch.Tensor | None
+        Force accumulation buffer with shape ``[N, 2]``. Used by
+        non-differentiable force-directed layouts (FR, GEM, etc.).
+        Force ops write into this buffer; a displacement op reads it,
+        clamps, and applies to ``pos``.
+    old_forces : torch.Tensor | None
+        Previous iteration's forces with shape ``[N, 2]``. Needed by
+        FA2's adaptive speed controller which compares swinging between
+        consecutive force vectors.
+    temperature : float | None
+        Global temperature scalar for simulated-annealing-style layouts
+        (FR, SFDP, GEM, Davidson-Harel, DRL, FMMM, native engine).
+    ordering : torch.Tensor | None
+        Within-layer node ordering indices with shape ``[N]``. Used by
+        Sugiyama crossing minimization and init_placement barycenter.
+    edge_routes : Any | None
+        Polyline or Bezier curve routes per edge. Produced by Sugiyama
+        dummy-node route reconstruction or edge optimization.
+    converged : bool
+        Flag set by convergence-checking ops or ``EarlyBreak``. When
+        ``True``, ``Repeat`` stops its iteration loop.
+    extras : dict[str, Any]
+        Escape hatch for algorithm-specific transient state that does
+        not belong in the core schema. Key convention: ``algo_field``
+        (e.g., ``gem_local_temperatures``, ``tsne_velocity``,
+        ``drl_density_grid``, ``sgd2_crossing_state``).
     """
 
     pos: Optional[torch.Tensor] = None
@@ -302,16 +340,47 @@ class SolveState:
     spring_strengths: Optional[torch.Tensor] = None
     sampled_node_context: Optional[Any] = None
     edge_batch_context: Optional[Any] = None
+    # -- Optimization bookkeeping ----------------------------------------
     annealing: Optional[AnnealingSchedule] = None
+    optimizer: Optional[Any] = None
     step: int = 0
     total_steps: int = 100
     prev_loss: float = float("inf")
     stall_count: int = 0
     ops_applied: List[str] = field(default_factory=list)
 
+    # -- Force accumulation (non-differentiable force-directed layouts) ---
+    forces: Optional[torch.Tensor] = None
+    old_forces: Optional[torch.Tensor] = None
+
+    # -- Temperature (global cooling for FR, SFDP, GEM, DH, DRL, FMMM) --
+    temperature: Optional[float] = None
+
+    # -- Ordering (within-layer node ordering for Sugiyama, init, etc.) --
+    ordering: Optional[torch.Tensor] = None
+
+    # -- Edge routes (polylines/curves from Sugiyama or edge optimization)
+    edge_routes: Optional[Any] = None
+
+    # -- Convergence flag (set by EarlyBreak or convergence ops) ---------
+    converged: bool = False
+
+    # -- Escape hatch for algorithm-specific transient state -------------
+    # Guidelines:
+    #   - Use for state needed by only 1-2 algorithms
+    #   - Key convention: "algo_field" (e.g. "gem_local_temperatures")
+    #   - Ops should declare extras keys in reads/writes metadata
+    extras: Dict[str, Any] = field(default_factory=dict)
+
 
 class TraceSink(Protocol):
-    """Protocol for trace and progress sinks."""
+    """Protocol for trace and progress sinks.
+
+    Implementations receive position snapshots, log messages, and
+    operation boundary events. The ``op_start`` / ``op_end`` pair
+    fires at each ``Pipeline`` step boundary when ``trace_between``
+    is enabled, providing natural "video frame" points.
+    """
 
     def snapshot(self, pos: torch.Tensor, step: int) -> None:
         """Record a position snapshot.
@@ -336,6 +405,38 @@ class TraceSink(Protocol):
         ----------
         message : str
             Human-readable progress or diagnostic message.
+
+        Returns
+        -------
+        None
+            This method records side effects only.
+        """
+
+    def op_start(self, op_name: str, step: int) -> None:
+        """Called before an operation runs inside a Pipeline.
+
+        Parameters
+        ----------
+        op_name : str
+            Name of the operation about to execute.
+        step : int
+            Current optimization step counter.
+
+        Returns
+        -------
+        None
+            This method records side effects only.
+        """
+
+    def op_end(self, op_name: str, step: int) -> None:
+        """Called after an operation completes inside a Pipeline.
+
+        Parameters
+        ----------
+        op_name : str
+            Name of the operation that just completed.
+        step : int
+            Current optimization step counter.
 
         Returns
         -------
@@ -395,6 +496,7 @@ class ExecutionPlan:
     vram_budget_mb: float = 0.0
     ram_budget_gb: float = 0.0
     worker_threads: int = 0
+    subset_gpu_threshold: int = 10_000_000
 
 
 @dataclass
@@ -426,7 +528,7 @@ class MemoryPolicy:
 
 
 class NullTraceSink:
-    """Default trace sink that discards snapshots and logs."""
+    """Default trace sink that discards snapshots, logs, and op events."""
 
     def snapshot(self, pos: torch.Tensor, step: int) -> None:
         """Discard a position snapshot.
@@ -452,6 +554,40 @@ class NullTraceSink:
         ----------
         message : str
             Human-readable progress or diagnostic message.
+
+        Returns
+        -------
+        None
+            This sink intentionally performs no work.
+        """
+        return None
+
+    def op_start(self, op_name: str, step: int) -> None:
+        """Discard an operation start event.
+
+        Parameters
+        ----------
+        op_name : str
+            Name of the operation about to execute.
+        step : int
+            Current optimization step counter.
+
+        Returns
+        -------
+        None
+            This sink intentionally performs no work.
+        """
+        return None
+
+    def op_end(self, op_name: str, step: int) -> None:
+        """Discard an operation end event.
+
+        Parameters
+        ----------
+        op_name : str
+            Name of the operation that just completed.
+        step : int
+            Current optimization step counter.
 
         Returns
         -------
