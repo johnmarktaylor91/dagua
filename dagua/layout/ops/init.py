@@ -1,0 +1,1481 @@
+"""Initialization operations for composable layout pipelines."""
+
+from __future__ import annotations
+
+import inspect
+import random
+from collections import defaultdict
+from dataclasses import dataclass
+from math import cos, pi, sin, sqrt
+from typing import Any, Callable, DefaultDict, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+from scipy import sparse
+from scipy.sparse import linalg as sparse_linalg
+
+from dagua.layout.ops.base import Op
+from dagua.layout.ops.distance import (
+    AllPairsShortestPaths,
+    AllPairsShortestPathsConfig,
+    PivotDistanceQueries,
+    PivotSelection,
+    PivotSelectionConfig,
+)
+from dagua.layout.ops.preprocess import BuildAdjacency, BuildAdjacencyConfig
+from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.taxonomy import OpCategory, register_op
+
+_SPECTRAL_EIGEN_TOLERANCE = 1.0e-9
+
+
+def _target_device(problem: LayoutProblem, ctx: RuntimeContext) -> torch.device:
+    """Resolve the output device for initialization ops.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable layout inputs.
+    ctx : RuntimeContext
+        Execution infrastructure, optionally carrying a requested device.
+
+    Returns
+    -------
+    torch.device
+        Device for the initialized position tensor.
+    """
+    if ctx.plan.device:
+        return torch.device(ctx.plan.device)
+    if problem.edge_index.numel() > 0:
+        return problem.edge_index.device
+    if problem.node_sizes is not None:
+        return problem.node_sizes.device
+    return torch.device("cpu")
+
+
+def _scale_factor(num_nodes: int, rule: str) -> float:
+    """Compute the multiplicative factor for scaled initializations.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    rule : str
+        Scaling rule name.
+
+    Returns
+    -------
+    float
+        Multiplicative scale factor.
+
+    Raises
+    ------
+    ValueError
+        If ``rule`` is unsupported.
+    """
+    if rule in {"none", "unit"}:
+        return 1.0
+    if rule == "sqrt_n":
+        return sqrt(float(max(num_nodes, 1)))
+    raise ValueError(f"Unsupported init scale: {rule}")
+
+
+def _torch_generator(problem: LayoutProblem, ctx: RuntimeContext) -> torch.Generator:
+    """Resolve the CPU generator used by torch-backed random initializers.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable layout inputs containing the fallback seed.
+    ctx : RuntimeContext
+        Execution infrastructure, optionally carrying a shared generator.
+
+    Returns
+    -------
+    torch.Generator
+        CPU generator seeded reproducibly.
+    """
+    if ctx.generator is not None:
+        return ctx.generator
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(problem.seed)
+    return generator
+
+
+def _maybe_set_empty_or_single_positions(
+    problem: LayoutProblem,
+    state: SolveState,
+    ctx: RuntimeContext,
+    dim: int = 2,
+) -> bool:
+    """Handle ``N=0`` and ``N=1`` edge cases for init ops.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable layout inputs.
+    state : SolveState
+        Mutable solve state.
+    ctx : RuntimeContext
+        Execution infrastructure.
+    dim : int, default=2
+        Position dimensionality.
+
+    Returns
+    -------
+    bool
+        ``True`` when the edge case was handled and the caller should return.
+    """
+    if problem.num_nodes == 0:
+        state.pos = None
+        return True
+    if problem.num_nodes == 1:
+        state.pos = torch.zeros((1, dim), dtype=torch.float32, device=_target_device(problem, ctx))
+        return True
+    return False
+
+
+def _layer_groups(layers: torch.Tensor) -> Dict[int, List[int]]:
+    """Group nodes by their integer layer assignment.
+
+    Parameters
+    ----------
+    layers : torch.Tensor
+        Layer IDs with shape ``[N]``.
+
+    Returns
+    -------
+    dict[int, list[int]]
+        Nodes grouped by layer in input order.
+    """
+    groups: DefaultDict[int, List[int]] = defaultdict(list)
+    for node, layer in enumerate(layers.tolist()):
+        groups[int(layer)].append(node)
+    return dict(groups)
+
+
+def _parent_lists(edge_index: torch.Tensor, num_nodes: int) -> Dict[int, List[int]]:
+    """Build parent lists for deterministic layered initialization.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    dict[int, list[int]]
+        Parent node indices for each target.
+    """
+    parents: DefaultDict[int, List[int]] = defaultdict(list)
+    if edge_index.numel() == 0:
+        return dict(parents)
+    for source, target in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        if 0 <= source < num_nodes and 0 <= target < num_nodes:
+            parents[target].append(source)
+    return dict(parents)
+
+
+def _barycenter_ordered_groups(
+    edge_index: torch.Tensor,
+    layers: torch.Tensor,
+    num_nodes: int,
+) -> Dict[int, List[int]]:
+    """Order each layer by parent barycenter, preserving stable ties.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    layers : torch.Tensor
+        Layer IDs with shape ``[N]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    dict[int, list[int]]
+        Layer groups reordered by parent barycenter.
+    """
+    groups = _layer_groups(layers)
+    parents = _parent_lists(edge_index=edge_index, num_nodes=num_nodes)
+    current_order = {node: float(node) for node in range(num_nodes)}
+
+    for layer in sorted(groups):
+        ordered_nodes = groups[layer]
+        if layer == min(groups):
+            for index, node in enumerate(ordered_nodes):
+                current_order[node] = float(index)
+            continue
+
+        enriched = []
+        for stable_index, node in enumerate(ordered_nodes):
+            node_parents = parents.get(node, [])
+            if node_parents:
+                barycenter = sum(current_order[parent] for parent in node_parents) / float(
+                    len(node_parents)
+                )
+            else:
+                barycenter = current_order.get(node, float(stable_index))
+            enriched.append((barycenter, stable_index, node))
+
+        enriched.sort()
+        groups[layer] = [node for _, _, node in enriched]
+        for index, node in enumerate(groups[layer]):
+            current_order[node] = float(index)
+
+    return groups
+
+
+@dataclass(frozen=True)
+class RandomUniformInitConfig:
+    """Configuration for :class:`RandomUniformInit`.
+
+    Parameters
+    ----------
+    scale : str, default="sqrt_n"
+        Output scaling rule. ``"unit"`` and ``"none"`` leave the random
+        sample unchanged; ``"sqrt_n"`` multiplies by ``sqrt(max(N, 1))``.
+    range : tuple[float, float], default=(0.0, 1.0)
+        Inclusive lower bound and exclusive upper bound for the sample range.
+    rng_backend : str, default="torch"
+        Random backend: ``"torch"``, ``"python"``, or ``"numpy"``.
+    """
+
+    scale: str = "sqrt_n"
+    range: Tuple[float, float] = (0.0, 1.0)
+    rng_backend: str = "torch"
+
+
+@register_op
+class RandomUniformInit(Op):
+    """Initialize positions from a uniform distribution."""
+
+    name = "random_uniform_init"
+    category = OpCategory.INIT
+    writes = ("pos",)
+
+    def __init__(self, config: Optional[RandomUniformInitConfig] = None) -> None:
+        """Store the initialization configuration.
+
+        Parameters
+        ----------
+        config : RandomUniformInitConfig, optional
+            Uniform initialization configuration.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or RandomUniformInitConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize ``state.pos`` with uniform random samples.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with initialized positions.
+        """
+        if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
+            return state
+
+        low, high = self.config.range
+        if high < low:
+            raise ValueError("RandomUniformInit range must satisfy high >= low.")
+
+        if self.config.rng_backend == "torch":
+            positions = torch.rand(
+                (problem.num_nodes, 2),
+                generator=_torch_generator(problem=problem, ctx=ctx),
+                dtype=torch.float32,
+            )
+        elif self.config.rng_backend == "python":
+            rng = random.Random(problem.seed)
+            positions = torch.tensor(
+                [rng.random() for _ in range(problem.num_nodes * 2)],
+                dtype=torch.float32,
+            ).reshape(problem.num_nodes, 2)
+        elif self.config.rng_backend == "numpy":
+            positions = torch.from_numpy(
+                np.random.RandomState(problem.seed).rand(problem.num_nodes, 2)
+            )
+        else:
+            raise ValueError(
+                f"Unsupported RandomUniformInit rng_backend: {self.config.rng_backend}"
+            )
+
+        positions = positions * (high - low) + low
+        positions = positions * _scale_factor(num_nodes=problem.num_nodes, rule=self.config.scale)
+        state.pos = positions.to(device=_target_device(problem, ctx))
+        return state
+
+
+@dataclass(frozen=True)
+class RandomNormalInitConfig:
+    """Configuration for :class:`RandomNormalInit`.
+
+    Parameters
+    ----------
+    std : float, default=1.0e-4
+        Standard deviation of the Gaussian sample.
+    mean : float, default=0.0
+        Mean of the Gaussian sample.
+    scale : str, default="none"
+        Additional output scaling rule.
+    """
+
+    std: float = 1.0e-4
+    mean: float = 0.0
+    scale: str = "none"
+
+
+@register_op
+class RandomNormalInit(Op):
+    """Initialize positions from a normal distribution."""
+
+    name = "random_normal_init"
+    category = OpCategory.INIT
+    writes = ("pos",)
+
+    def __init__(self, config: Optional[RandomNormalInitConfig] = None) -> None:
+        """Store the normal initialization configuration.
+
+        Parameters
+        ----------
+        config : RandomNormalInitConfig, optional
+            Normal initialization configuration.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or RandomNormalInitConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize ``state.pos`` with Gaussian random samples.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with initialized positions.
+        """
+        if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
+            return state
+
+        positions = torch.randn(
+            (problem.num_nodes, 2),
+            generator=_torch_generator(problem=problem, ctx=ctx),
+            dtype=torch.float32,
+        )
+        positions = positions * self.config.std + self.config.mean
+        positions = positions * _scale_factor(num_nodes=problem.num_nodes, rule=self.config.scale)
+        state.pos = positions.to(device=_target_device(problem, ctx))
+        return state
+
+
+@dataclass(frozen=True)
+class CircularInitConfig:
+    """Configuration for :class:`CircularInit`.
+
+    Parameters
+    ----------
+    scale : float, default=1.0
+        Radius of the output circle.
+    """
+
+    scale: float = 1.0
+
+
+@register_op
+class CircularInit(Op):
+    """Place nodes uniformly on a circle."""
+
+    name = "circular_init"
+    category = OpCategory.INIT
+    writes = ("pos",)
+
+    def __init__(self, config: Optional[CircularInitConfig] = None) -> None:
+        """Store the circular initialization configuration.
+
+        Parameters
+        ----------
+        config : CircularInitConfig, optional
+            Circular initialization configuration.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or CircularInitConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize ``state.pos`` with evenly spaced circle coordinates.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with initialized positions.
+        """
+        if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
+            return state
+
+        points = []
+        for index in range(problem.num_nodes):
+            theta = (2.0 * pi * float(index)) / float(problem.num_nodes)
+            points.append([self.config.scale * cos(theta), self.config.scale * sin(theta)])
+        state.pos = torch.tensor(points, dtype=torch.float32, device=_target_device(problem, ctx))
+        return state
+
+
+@dataclass(frozen=True)
+class XavierInitConfig:
+    """Configuration for :class:`XavierInit`.
+
+    Parameters
+    ----------
+    dim : int, default=2
+        Output embedding dimensionality.
+    """
+
+    dim: int = 2
+
+
+@register_op
+class XavierInit(Op):
+    """Initialize positions with Xavier-uniform sampling."""
+
+    name = "xavier_init"
+    category = OpCategory.INIT
+    writes = ("pos",)
+
+    def __init__(self, config: Optional[XavierInitConfig] = None) -> None:
+        """Store the Xavier initialization configuration.
+
+        Parameters
+        ----------
+        config : XavierInitConfig, optional
+            Xavier initialization configuration.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or XavierInitConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize ``state.pos`` with Xavier-uniform samples.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with initialized positions.
+        """
+        if _maybe_set_empty_or_single_positions(
+            problem=problem,
+            state=state,
+            ctx=ctx,
+            dim=self.config.dim,
+        ):
+            return state
+
+        cpu_state = torch.random.get_rng_state()
+        try:
+            torch.manual_seed(problem.seed)
+            positions = torch.empty((problem.num_nodes, self.config.dim), dtype=torch.float32)
+            torch.nn.init.xavier_uniform_(positions, gain=sqrt(float(max(problem.num_nodes, 1))))
+        finally:
+            torch.random.set_rng_state(cpu_state)
+
+        state.pos = positions.to(device=_target_device(problem, ctx))
+        return state
+
+
+@dataclass(frozen=True)
+class DeterministicInitConfig:
+    """Configuration for :class:`DeterministicInit`.
+
+    Parameters
+    ----------
+    method : str, default="barycenter"
+        Deterministic ordering rule. Supported values are ``"barycenter"``
+        and ``"input"``.
+    node_sep : float, default=25.0
+        Horizontal spacing between consecutive nodes in a layer.
+    rank_sep : float, default=50.0
+        Vertical spacing between consecutive layers.
+    """
+
+    method: str = "barycenter"
+    node_sep: float = 25.0
+    rank_sep: float = 50.0
+
+
+@register_op
+class DeterministicInit(Op):
+    """Initialize positions from layered order rather than randomness."""
+
+    name = "deterministic_init"
+    category = OpCategory.INIT
+    reads = ("layers",)
+    writes = ("pos",)
+    requires = ("layers",)
+
+    def __init__(self, config: Optional[DeterministicInitConfig] = None) -> None:
+        """Store the deterministic initialization configuration.
+
+        Parameters
+        ----------
+        config : DeterministicInitConfig, optional
+            Deterministic initialization configuration.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or DeterministicInitConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize ``state.pos`` from layer assignments.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with initialized positions.
+
+        Raises
+        ------
+        ValueError
+            If layer assignments are required but missing, or if the method
+            is unsupported.
+        """
+        if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
+            return state
+        if state.layers is None:
+            raise ValueError("deterministic_init requires state.layers to be set.")
+
+        layers = state.layers.detach().to(device="cpu", dtype=torch.long)
+        if self.config.method == "barycenter":
+            groups = _barycenter_ordered_groups(
+                edge_index=problem.edge_index,
+                layers=layers,
+                num_nodes=problem.num_nodes,
+            )
+        elif self.config.method == "input":
+            groups = _layer_groups(layers)
+        else:
+            raise ValueError(f"Unsupported DeterministicInit method: {self.config.method}")
+
+        positions = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+        for layer in sorted(groups):
+            y_value = float(layer) * self.config.rank_sep
+            for index, node in enumerate(groups[layer]):
+                positions[node, 0] = float(index) * self.config.node_sep
+                positions[node, 1] = y_value
+
+        state.pos = positions.to(device=_target_device(problem, ctx))
+        return state
+
+
+def _fallback_line_coordinates(num_nodes: int, dim: int) -> np.ndarray:
+    """Build a deterministic line embedding for degenerate decompositions.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    dim : int
+        Output embedding dimensionality.
+
+    Returns
+    -------
+    numpy.ndarray
+        Coordinate matrix with shape ``[N, dim]``.
+    """
+    coordinates = np.zeros((num_nodes, dim), dtype=np.float64)
+    if num_nodes > 0 and dim > 0:
+        coordinates[:, 0] = np.linspace(-1.0, 1.0, num_nodes, dtype=np.float64)
+    return coordinates
+
+
+def _build_sparse_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor],
+) -> sparse.csr_matrix:
+    """Build a SciPy sparse adjacency matrix from an edge list.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Sparse adjacency matrix with shape ``[N, N]``.
+
+    Raises
+    ------
+    ValueError
+        If ``edge_index`` has the wrong shape or ``edge_weights`` does not
+        match the edge count.
+    """
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
+        )
+    if edge_index.numel() == 0:
+        return sparse.csr_matrix((num_nodes, num_nodes), dtype=np.float64)
+
+    edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    rows = edge_index_cpu[0].numpy()
+    cols = edge_index_cpu[1].numpy()
+    if edge_weights is None:
+        data = np.ones(rows.shape[0], dtype=np.float64)
+    else:
+        data = edge_weights.detach().to(device="cpu", dtype=torch.float64).numpy()
+    return sparse.csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes), dtype=np.float64)
+
+
+def _symmetrize_adjacency(adjacency: sparse.csr_matrix) -> sparse.csr_matrix:
+    """Convert a possibly directed adjacency into the undirected form used here.
+
+    Parameters
+    ----------
+    adjacency : scipy.sparse.csr_matrix
+        Input adjacency matrix.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Symmetric adjacency matrix.
+    """
+    if (adjacency - adjacency.T).nnz == 0:
+        return adjacency
+    return (adjacency + adjacency.T).tocsr()
+
+
+def _laplacian_matrix(
+    adjacency: sparse.csr_matrix,
+    normalization: str,
+) -> Tuple[sparse.csr_matrix, bool]:
+    """Build the requested Laplacian matrix.
+
+    Parameters
+    ----------
+    adjacency : scipy.sparse.csr_matrix
+        Symmetric adjacency matrix with shape ``[N, N]``.
+    normalization : str
+        Laplacian normalization mode.
+
+    Returns
+    -------
+    tuple[scipy.sparse.csr_matrix, bool]
+        Laplacian matrix and whether it is symmetric.
+
+    Raises
+    ------
+    ValueError
+        If ``normalization`` is unsupported.
+    """
+    degrees = np.asarray(adjacency.sum(axis=1)).reshape(-1).astype(np.float64, copy=False)
+    degree_matrix = sparse.diags(degrees, offsets=0, format="csr")
+
+    if normalization == "unnormalized":
+        return (degree_matrix - adjacency).tocsr(), True
+    if normalization == "symmetric":
+        inv_sqrt = np.zeros_like(degrees)
+        nonzero_mask = degrees > 0.0
+        inv_sqrt[nonzero_mask] = 1.0 / np.sqrt(degrees[nonzero_mask])
+        normalized = sparse.diags(inv_sqrt, offsets=0, format="csr")
+        identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
+        return (identity - (normalized @ adjacency @ normalized)).tocsr(), True
+    if normalization == "random_walk":
+        inv_degree = np.zeros_like(degrees)
+        nonzero_mask = degrees > 0.0
+        inv_degree[nonzero_mask] = 1.0 / degrees[nonzero_mask]
+        normalized = sparse.diags(inv_degree, offsets=0, format="csr")
+        identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
+        return (identity - (normalized @ adjacency)).tocsr(), False
+    raise ValueError("normalization must be one of 'symmetric', 'random_walk', or 'unnormalized'.")
+
+
+def _select_nontrivial_eigenvectors(
+    eigenvalues: np.ndarray,
+    eigenvectors: np.ndarray,
+    dim: int,
+) -> np.ndarray:
+    """Select the first non-trivial Laplacian eigenvectors.
+
+    Parameters
+    ----------
+    eigenvalues : numpy.ndarray
+        Eigenvalues with shape ``[K]``.
+    eigenvectors : numpy.ndarray
+        Eigenvectors with shape ``[N, K]``.
+    dim : int
+        Output dimensionality.
+
+    Returns
+    -------
+    numpy.ndarray
+        Coordinate matrix with shape ``[N, dim]``.
+    """
+    sorted_indices = np.argsort(np.real(eigenvalues))
+    nontrivial = [
+        index
+        for index in sorted_indices
+        if abs(float(np.real(eigenvalues[index]))) > _SPECTRAL_EIGEN_TOLERANCE
+    ][:dim]
+
+    coordinates = np.zeros((eigenvectors.shape[0], dim), dtype=np.float64)
+    if nontrivial:
+        coordinates[:, : len(nontrivial)] = np.real(eigenvectors[:, nontrivial])
+        return coordinates
+    return _fallback_line_coordinates(eigenvectors.shape[0], dim)
+
+
+def _dense_spectral_coordinates(
+    laplacian: sparse.csr_matrix,
+    dim: int,
+    symmetric: bool,
+) -> np.ndarray:
+    """Compute dense spectral coordinates.
+
+    Parameters
+    ----------
+    laplacian : scipy.sparse.csr_matrix
+        Laplacian matrix with shape ``[N, N]``.
+    dim : int
+        Output dimensionality.
+    symmetric : bool
+        Whether the Laplacian is symmetric.
+
+    Returns
+    -------
+    numpy.ndarray
+        Coordinate matrix with shape ``[N, dim]``.
+    """
+    dense_laplacian = laplacian.toarray()
+    if symmetric:
+        eigenvalues, eigenvectors = np.linalg.eigh(dense_laplacian)
+    else:
+        eigenvalues, eigenvectors = np.linalg.eig(dense_laplacian)
+    return _select_nontrivial_eigenvectors(
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        dim=dim,
+    )
+
+
+def _sparse_spectral_coordinates(
+    laplacian: sparse.csr_matrix,
+    dim: int,
+    symmetric: bool,
+) -> np.ndarray:
+    """Compute spectral coordinates with ARPACK.
+
+    Parameters
+    ----------
+    laplacian : scipy.sparse.csr_matrix
+        Laplacian matrix with shape ``[N, N]``.
+    dim : int
+        Output dimensionality.
+    symmetric : bool
+        Whether the Laplacian is symmetric.
+
+    Returns
+    -------
+    numpy.ndarray
+        Coordinate matrix with shape ``[N, dim]``.
+    """
+    num_nodes = int(laplacian.shape[0])
+    eigen_count = min(num_nodes - 1, max(dim + 4, dim + 1))
+    if eigen_count <= dim:
+        return _dense_spectral_coordinates(laplacian=laplacian, dim=dim, symmetric=symmetric)
+
+    lanczos_vectors = max((2 * eigen_count) + 1, int(np.sqrt(num_nodes)))
+    ncv = min(max(lanczos_vectors, eigen_count + 2), num_nodes)
+    if symmetric:
+        eigenvalues, eigenvectors = sparse_linalg.eigsh(
+            laplacian,
+            k=eigen_count,
+            which="SM",
+            ncv=ncv,
+        )
+    else:
+        eigenvalues, eigenvectors = sparse_linalg.eigs(
+            laplacian,
+            k=eigen_count,
+            which="SR",
+            ncv=ncv,
+        )
+    return _select_nontrivial_eigenvectors(
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        dim=dim,
+    )
+
+
+def _double_center_squared_distances(distances: np.ndarray) -> np.ndarray:
+    """Double-center a squared distance matrix into a Gram matrix.
+
+    Parameters
+    ----------
+    distances : numpy.ndarray
+        Pairwise distance matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Centered Gram matrix with shape ``[N, N]``.
+    """
+    squared = np.square(distances, dtype=np.float64)
+    row_means = squared.mean(axis=1, keepdims=True)
+    col_means = squared.mean(axis=0, keepdims=True)
+    grand_mean = float(squared.mean())
+    return -0.5 * (squared - row_means - col_means + grand_mean)
+
+
+def _positive_eigh_coordinates(gram: np.ndarray, dim: int) -> np.ndarray:
+    """Recover coordinates from a Gram matrix using positive eigenpairs.
+
+    Parameters
+    ----------
+    gram : numpy.ndarray
+        Gram matrix with shape ``[N, N]``.
+    dim : int
+        Output dimensionality.
+
+    Returns
+    -------
+    numpy.ndarray
+        Coordinate matrix with shape ``[N, dim]``.
+    """
+    eigenvalues, eigenvectors = np.linalg.eigh(gram)
+    sorted_indices = np.argsort(eigenvalues)[::-1]
+    positive = [index for index in sorted_indices if float(eigenvalues[index]) > 0.0][:dim]
+
+    coordinates = np.zeros((gram.shape[0], dim), dtype=np.float64)
+    if positive:
+        selected_values = np.clip(eigenvalues[positive], a_min=0.0, a_max=None)
+        selected_vectors = eigenvectors[:, positive]
+        coordinates[:, : len(positive)] = selected_vectors * np.sqrt(selected_values)
+        return coordinates
+    return _fallback_line_coordinates(gram.shape[0], dim)
+
+
+def _pivot_mds_coordinates(distance_matrix: torch.Tensor, dim: int) -> torch.Tensor:
+    """Recover a low-rank embedding from pivot distances with SVD.
+
+    Parameters
+    ----------
+    distance_matrix : torch.Tensor
+        Pivot-to-node distance matrix with shape ``[P, N]``.
+    dim : int
+        Output dimensionality.
+
+    Returns
+    -------
+    torch.Tensor
+        Coordinate matrix with shape ``[N, dim]`` on CPU.
+    """
+    squared = distance_matrix.detach().to(device="cpu", dtype=torch.float64).square()
+    row_means = squared.mean(dim=1, keepdim=True)
+    col_means = squared.mean(dim=0, keepdim=True)
+    grand_mean = squared.mean()
+    centered = -0.5 * (squared - row_means - col_means + grand_mean)
+
+    _, singular_values, vh = torch.linalg.svd(centered, full_matrices=False)
+    coord_dims = min(dim, int(singular_values.shape[0]))
+    if coord_dims == 0:
+        return torch.from_numpy(_fallback_line_coordinates(distance_matrix.shape[1], dim)).to(
+            dtype=torch.float32
+        )
+
+    scales = singular_values[:coord_dims].clamp_min(0.0)
+    coordinates = vh[:coord_dims].transpose(0, 1) * scales.unsqueeze(0)
+    if coord_dims < dim:
+        padding = torch.zeros((coordinates.shape[0], dim - coord_dims), dtype=coordinates.dtype)
+        coordinates = torch.cat((coordinates, padding), dim=1)
+    if float(coordinates.abs().max().item()) <= _SPECTRAL_EIGEN_TOLERANCE:
+        return torch.from_numpy(_fallback_line_coordinates(distance_matrix.shape[1], dim)).to(
+            dtype=torch.float32
+        )
+    return coordinates.to(dtype=torch.float32)
+
+
+def _resolve_layout_algorithm(algorithm: str) -> Callable[..., Any]:
+    """Resolve a classic layout function by short algorithm name.
+
+    Parameters
+    ----------
+    algorithm : str
+        Algorithm short name such as ``"fr"``.
+
+    Returns
+    -------
+    Callable[..., Any]
+        Resolved layout function.
+
+    Raises
+    ------
+    ValueError
+        If the algorithm is unknown.
+    """
+    from dagua.layout import classic as classic_layouts
+
+    function_name = f"layout_{algorithm}"
+    try:
+        return getattr(classic_layouts, function_name)
+    except AttributeError as exc:
+        raise ValueError(f"Unsupported inner layout algorithm: {algorithm!r}.") from exc
+
+
+def _call_inner_layout(
+    layout_fn: Callable[..., Any],
+    problem: LayoutProblem,
+    inner_config: Optional[Dict[str, Any]],
+    inner_steps: int,
+) -> torch.Tensor:
+    """Invoke a classic layout function with reserved arguments enforced.
+
+    Parameters
+    ----------
+    layout_fn : Callable[..., Any]
+        Layout function to invoke.
+    problem : LayoutProblem
+        Immutable layout inputs.
+    inner_config : dict[str, Any] | None
+        Optional algorithm-specific keyword arguments.
+    inner_steps : int
+        Iteration budget forwarded as ``steps`` when supported.
+
+    Returns
+    -------
+    torch.Tensor
+        Returned position tensor with shape ``[N, 2]``.
+
+    Raises
+    ------
+    TypeError
+        If the inner algorithm does not return a tensor.
+    ValueError
+        If ``inner_config`` attempts to override reserved inputs or passes
+        an unsupported keyword argument.
+    """
+    signature = inspect.signature(layout_fn)
+    accepted_parameters = set(signature.parameters)
+    reserved = {"edge_index", "num_nodes", "node_sizes", "edge_weights", "seed", "steps"}
+    call_kwargs: Dict[str, Any] = {}
+
+    base_kwargs: Dict[str, Any] = {
+        "edge_index": problem.edge_index,
+        "num_nodes": problem.num_nodes,
+        "node_sizes": problem.node_sizes,
+        "seed": problem.seed,
+        "edge_weights": problem.edge_weights,
+    }
+    for key, value in base_kwargs.items():
+        if key in accepted_parameters:
+            call_kwargs[key] = value
+    if "steps" in accepted_parameters:
+        call_kwargs["steps"] = inner_steps
+
+    if inner_config is not None:
+        for key, value in inner_config.items():
+            if key in reserved:
+                raise ValueError(
+                    f"inner_config may not override reserved argument {key!r}; "
+                    "use the top-level config fields instead."
+                )
+            if key not in accepted_parameters:
+                raise ValueError(
+                    f"Inner algorithm {layout_fn.__name__} does not accept keyword {key!r}."
+                )
+            call_kwargs[key] = value
+
+    result = layout_fn(**call_kwargs)
+    positions = result[0] if isinstance(result, tuple) else result
+    if not isinstance(positions, torch.Tensor):
+        raise TypeError(
+            f"Inner layout {layout_fn.__name__} returned {type(positions)!r}, not Tensor."
+        )
+    return positions
+
+
+@dataclass(frozen=True)
+class SpectralInitConfig:
+    """Configuration for :class:`SpectralInit`.
+
+    Parameters
+    ----------
+    normalization : str, default="symmetric"
+        Laplacian normalization mode.
+    sparse_threshold : int, default=500
+        Graph-size cutoff for switching from dense eigendecomposition to
+        sparse ARPACK.
+    k : int, default=2
+        Number of non-trivial eigenvectors to return as coordinates.
+    """
+
+    normalization: str = "symmetric"
+    sparse_threshold: int = 500
+    k: int = 2
+
+
+@register_op
+class SpectralInit(Op):
+    """Initialize positions from the graph Laplacian eigenvectors.
+
+    Notes
+    -----
+    This op is deterministic for the dense path. The sparse ARPACK path has
+    no explicit seed control because SciPy manages its internal initialization.
+    """
+
+    name = "spectral_init"
+    category = OpCategory.INIT
+    writes = ("pos", "laplacian")
+
+    def __init__(self, config: Optional[SpectralInitConfig] = None) -> None:
+        """Store the spectral initialization configuration.
+
+        Parameters
+        ----------
+        config : SpectralInitConfig, optional
+            Spectral initialization configuration.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or SpectralInitConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize ``state.pos`` from Laplacian eigenvectors.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with spectral positions and the cached Laplacian.
+
+        Raises
+        ------
+        ValueError
+            If ``k`` is not positive.
+        """
+        if self.config.k <= 0:
+            raise ValueError("SpectralInit k must be positive.")
+        if _maybe_set_empty_or_single_positions(
+            problem=problem,
+            state=state,
+            ctx=ctx,
+            dim=self.config.k,
+        ):
+            return state
+
+        adjacency = _build_sparse_adjacency(
+            edge_index=problem.edge_index,
+            num_nodes=problem.num_nodes,
+            edge_weights=problem.edge_weights,
+        )
+        laplacian, is_symmetric = _laplacian_matrix(
+            adjacency=_symmetrize_adjacency(adjacency),
+            normalization=self.config.normalization,
+        )
+        state.laplacian = laplacian
+
+        if problem.num_nodes < self.config.sparse_threshold:
+            coordinates = _dense_spectral_coordinates(
+                laplacian=laplacian,
+                dim=self.config.k,
+                symmetric=is_symmetric,
+            )
+        else:
+            coordinates = _sparse_spectral_coordinates(
+                laplacian=laplacian,
+                dim=self.config.k,
+                symmetric=is_symmetric,
+            )
+
+        state.pos = torch.from_numpy(coordinates).to(
+            dtype=torch.float32,
+            device=_target_device(problem, ctx),
+        )
+        return state
+
+
+@dataclass(frozen=True)
+class ClassicalMDSInitConfig:
+    """Configuration for :class:`ClassicalMDSInit`.
+
+    Parameters
+    ----------
+    unreachable_fill : str, default="max_plus_1"
+        Fill strategy for unreachable graph distances.
+    """
+
+    unreachable_fill: str = "max_plus_1"
+
+
+@register_op
+class ClassicalMDSInit(Op):
+    """Initialize positions with classical multidimensional scaling."""
+
+    name = "classical_mds_init"
+    category = OpCategory.INIT
+    writes = ("adjacency", "distance_matrix", "pos")
+
+    def __init__(self, config: Optional[ClassicalMDSInitConfig] = None) -> None:
+        """Store the classical-MDS configuration.
+
+        Parameters
+        ----------
+        config : ClassicalMDSInitConfig, optional
+            Classical-MDS initialization configuration.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or ClassicalMDSInitConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize ``state.pos`` from all-pairs shortest-path distances.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with APSP caches and classical-MDS positions.
+        """
+        if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
+            return state
+
+        BuildAdjacency(BuildAdjacencyConfig(weighted=problem.edge_weights is not None)).apply(
+            problem, state, ctx
+        )
+        AllPairsShortestPaths(
+            AllPairsShortestPathsConfig(unreachable_fill=self.config.unreachable_fill)
+        ).apply(problem, state, ctx)
+
+        if state.distance_matrix is None:
+            raise RuntimeError("AllPairsShortestPaths did not populate state.distance_matrix.")
+
+        distances = state.distance_matrix.detach().to(device="cpu", dtype=torch.float64).numpy()
+        gram = _double_center_squared_distances(distances)
+        coordinates = _positive_eigh_coordinates(gram=gram, dim=2)
+        state.pos = torch.from_numpy(coordinates).to(
+            dtype=torch.float32,
+            device=_target_device(problem, ctx),
+        )
+        return state
+
+
+@dataclass(frozen=True)
+class PivotMDSInitConfig:
+    """Configuration for :class:`PivotMDSInit`.
+
+    Parameters
+    ----------
+    n_pivots : int, default=50
+        Maximum number of pivots to select.
+    """
+
+    n_pivots: int = 50
+
+
+@register_op
+class PivotMDSInit(Op):
+    """Initialize positions with landmark shortest paths and SVD."""
+
+    name = "pivot_mds_init"
+    category = OpCategory.INIT
+    writes = ("adjacency", "pivot_indices", "pivot_distances", "pos")
+
+    def __init__(self, config: Optional[PivotMDSInitConfig] = None) -> None:
+        """Store the pivot-MDS configuration.
+
+        Parameters
+        ----------
+        config : PivotMDSInitConfig, optional
+            Pivot-MDS initialization configuration.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or PivotMDSInitConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize ``state.pos`` from pivot shortest-path distances.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with pivot caches and Pivot-MDS positions.
+
+        Raises
+        ------
+        ValueError
+            If ``n_pivots`` is not positive.
+        """
+        if self.config.n_pivots <= 0:
+            raise ValueError("PivotMDSInit n_pivots must be positive.")
+        if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
+            return state
+
+        BuildAdjacency(BuildAdjacencyConfig(weighted=problem.edge_weights is not None)).apply(
+            problem, state, ctx
+        )
+        PivotSelection(PivotSelectionConfig(n_pivots=self.config.n_pivots)).apply(
+            problem,
+            state,
+            ctx,
+        )
+        PivotDistanceQueries().apply(problem, state, ctx)
+
+        if state.pivot_distances is None:
+            raise RuntimeError("PivotDistanceQueries did not populate state.pivot_distances.")
+
+        state.pos = _pivot_mds_coordinates(state.pivot_distances, dim=2).to(
+            device=_target_device(problem, ctx)
+        )
+        return state
+
+
+@dataclass(frozen=True)
+class FromAlgorithmInitConfig:
+    """Configuration for :class:`FromAlgorithmInit`.
+
+    Parameters
+    ----------
+    algorithm : str, default="fr"
+        Inner classic layout algorithm short name.
+    inner_config : dict[str, Any] | None, default=None
+        Optional keyword arguments forwarded to the inner algorithm.
+    inner_steps : int, default=50
+        Iteration budget forwarded as ``steps`` when the inner algorithm
+        supports it.
+    """
+
+    algorithm: str = "fr"
+    inner_config: Optional[Dict[str, Any]] = None
+    inner_steps: int = 50
+
+
+@register_op
+class FromAlgorithmInit(Op):
+    """Initialize positions by delegating to another layout algorithm."""
+
+    name = "from_algorithm_init"
+    category = OpCategory.INIT
+    writes = ("pos",)
+
+    def __init__(self, config: Optional[FromAlgorithmInitConfig] = None) -> None:
+        """Store the delegation configuration.
+
+        Parameters
+        ----------
+        config : FromAlgorithmInitConfig, optional
+            Delegation configuration.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or FromAlgorithmInitConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize ``state.pos`` by running another layout algorithm.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with delegated initialization positions.
+
+        Raises
+        ------
+        ValueError
+            If ``inner_steps`` is negative.
+        """
+        if self.config.inner_steps < 0:
+            raise ValueError("FromAlgorithmInit inner_steps must be non-negative.")
+        if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
+            return state
+
+        layout_fn = _resolve_layout_algorithm(self.config.algorithm)
+        positions = _call_inner_layout(
+            layout_fn=layout_fn,
+            problem=problem,
+            inner_config=self.config.inner_config,
+            inner_steps=self.config.inner_steps,
+        )
+        state.pos = positions.to(dtype=torch.float32, device=_target_device(problem, ctx))
+        return state
+
+
+__all__ = [
+    "CircularInit",
+    "CircularInitConfig",
+    "ClassicalMDSInit",
+    "ClassicalMDSInitConfig",
+    "DeterministicInit",
+    "DeterministicInitConfig",
+    "FromAlgorithmInit",
+    "FromAlgorithmInitConfig",
+    "PivotMDSInit",
+    "PivotMDSInitConfig",
+    "RandomNormalInit",
+    "RandomNormalInitConfig",
+    "RandomUniformInit",
+    "RandomUniformInitConfig",
+    "SpectralInit",
+    "SpectralInitConfig",
+    "XavierInit",
+    "XavierInitConfig",
+]
