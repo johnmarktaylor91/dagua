@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 import pytest
 import torch
 
+from dagua.layout.constraints import flex_spacing_loss as reference_flex_spacing_loss
 from dagua.layout.layers import build_layer_index
 from dagua.layout.ops.base import LossGroup, LossOp
 from dagua.layout.ops.loss_engine import (
@@ -16,18 +17,30 @@ from dagua.layout.ops.loss_engine import (
     ClusterContainmentLoss,
     ClusterSeparationLoss,
     CrossingLoss,
+    CrossingLossConfig,
     DagOrderingLoss,
     EdgeAttractionLoss,
+    EdgeAttractionLossConfig,
     EdgeLengthVarianceLoss,
     EdgeStraightnessLoss,
     FanoutDistributionLoss,
+    FanoutDistributionLossConfig,
     FlexSpacingLoss,
     OverlapAvoidanceLoss,
+    OverlapAvoidanceLossConfig,
     PositionPinLoss,
     RepulsionLoss,
+    RepulsionLossConfig,
     SpacingConsistencyLoss,
+    SpacingConsistencyLossConfig,
 )
-from dagua.layout.ops.state import FlexConstraints, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.state import (
+    AnnealingSchedule,
+    FlexConstraints,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
 
 
 def _make_state_from_pos(
@@ -713,3 +726,1029 @@ def test_loss_group_combined_and_per_loss_modes_both_backpropagate() -> None:
     assert per_loss_state.pos is not None
     assert per_loss_state.pos.grad is not None
     assert torch.linalg.norm(per_loss_state.pos.grad).item() > 0.0
+
+
+@pytest.mark.parametrize(
+    ("edge_index", "pos", "expected"),
+    [
+        (
+            torch.tensor([[0], [1]], dtype=torch.long),
+            torch.tensor([[0.0, 0.0], [0.0, 40.0]], dtype=torch.float32),
+            pytest.approx(0.0, abs=1.0e-6),
+        ),
+        (
+            torch.tensor([[0], [1]], dtype=torch.long),
+            torch.tensor([[0.0, 40.0], [0.0, 0.0]], dtype=torch.float32),
+            pytest.approx(75.0, rel=1.0e-5),
+        ),
+        (
+            torch.empty((2, 0), dtype=torch.long),
+            torch.tensor([[0.0, 0.0], [0.0, 40.0]], dtype=torch.float32),
+            pytest.approx(0.0, abs=1.0e-6),
+        ),
+    ],
+    ids=["correct_order", "reversed_order", "empty_edges"],
+)
+def test_dag_ordering_loss_cases(
+    edge_index: torch.Tensor,
+    pos: torch.Tensor,
+    expected: pytest.ApproxBase,
+) -> None:
+    """Dag ordering should respect forward, reversed, and empty edge sets."""
+
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=2,
+        node_sizes=torch.full((2, 2), 10.0, dtype=torch.float32),
+    )
+
+    loss = DagOrderingLoss().evaluate(problem, _make_state_from_pos(pos), RuntimeContext())
+
+    assert loss.item() == expected
+
+
+def test_dag_ordering_loss_single_edge_matches_margin_violation() -> None:
+    """A single wrong-way edge should incur exactly one margin violation."""
+
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        num_nodes=2,
+        node_sizes=torch.full((2, 2), 10.0, dtype=torch.float32),
+    )
+    state = _make_state_from_pos(
+        torch.tensor([[0.0, 10.0], [0.0, 5.0]], dtype=torch.float32),
+    )
+
+    loss = DagOrderingLoss().evaluate(problem, state, RuntimeContext())
+
+    assert loss.item() == pytest.approx(40.0, rel=1.0e-5)
+
+
+def test_edge_attraction_loss_prefers_close_neighbors() -> None:
+    """Edge attraction should increase as connected endpoints separate."""
+
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        num_nodes=2,
+    )
+    close_loss = EdgeAttractionLoss().evaluate(
+        problem,
+        _make_state_from_pos(torch.tensor([[0.0, 0.0], [0.0, 0.0]], dtype=torch.float32)),
+        RuntimeContext(),
+    )
+    far_loss = EdgeAttractionLoss().evaluate(
+        problem,
+        _make_state_from_pos(torch.tensor([[0.0, 0.0], [4.0, 0.0]], dtype=torch.float32)),
+        RuntimeContext(),
+    )
+
+    assert close_loss.item() == pytest.approx(0.0, abs=1.0e-6)
+    assert far_loss.item() > close_loss.item()
+
+
+def test_edge_attraction_loss_x_bias_changes_horizontal_penalty() -> None:
+    """Higher x-bias should amplify purely horizontal edge displacement."""
+
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        num_nodes=2,
+    )
+    pos = torch.tensor([[0.0, 0.0], [4.0, 0.0]], dtype=torch.float32)
+    low_bias_loss = EdgeAttractionLoss(EdgeAttractionLossConfig(x_bias=1.0)).evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    )
+    high_bias_loss = EdgeAttractionLoss(EdgeAttractionLossConfig(x_bias=8.0)).evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    )
+
+    assert high_bias_loss.item() > low_bias_loss.item()
+
+
+def test_edge_attraction_loss_is_zero_without_edges() -> None:
+    """Edge attraction should vanish when the graph has no edges."""
+
+    problem = LayoutProblem(edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=2)
+    loss = EdgeAttractionLoss().evaluate(
+        problem,
+        _make_state_from_pos(torch.tensor([[0.0, 0.0], [4.0, 0.0]], dtype=torch.float32)),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+@pytest.mark.parametrize(
+    ("edge_index", "pos", "expected"),
+    [
+        (
+            torch.tensor([[0], [1]], dtype=torch.long),
+            torch.tensor([[0.0, 0.0], [0.0, 10.0]], dtype=torch.float32),
+            pytest.approx(0.0, abs=1.0e-6),
+        ),
+        (
+            torch.tensor([[0], [1]], dtype=torch.long),
+            torch.tensor([[5.0, 0.0], [-5.0, 10.0]], dtype=torch.float32),
+            pytest.approx(100.0, rel=1.0e-5),
+        ),
+        (
+            torch.empty((2, 0), dtype=torch.long),
+            torch.tensor([[0.0, 0.0], [3.0, 4.0]], dtype=torch.float32),
+            pytest.approx(0.0, abs=1.0e-6),
+        ),
+    ],
+    ids=["vertical", "angled", "empty_edges"],
+)
+def test_edge_straightness_loss_cases(
+    edge_index: torch.Tensor,
+    pos: torch.Tensor,
+    expected: pytest.ApproxBase,
+) -> None:
+    """Edge straightness should only penalize horizontal displacement."""
+
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=2)
+
+    loss = EdgeStraightnessLoss().evaluate(problem, _make_state_from_pos(pos), RuntimeContext())
+
+    assert loss.item() == expected
+
+
+@pytest.mark.parametrize(
+    ("edge_index", "pos", "expected"),
+    [
+        (
+            torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+            torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=torch.float32),
+            pytest.approx(0.0, abs=1.0e-6),
+        ),
+        (
+            torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+            torch.tensor([[0.0, 0.0], [1.0, 0.0], [4.0, 0.0]], dtype=torch.float32),
+            None,
+        ),
+        (
+            torch.tensor([[0], [1]], dtype=torch.long),
+            torch.tensor([[0.0, 0.0], [3.0, 4.0]], dtype=torch.float32),
+            pytest.approx(0.0, abs=1.0e-6),
+        ),
+    ],
+    ids=["uniform_lengths", "varied_lengths", "single_edge"],
+)
+def test_edge_length_variance_loss_cases(
+    edge_index: torch.Tensor,
+    pos: torch.Tensor,
+    expected: pytest.ApproxBase | None,
+) -> None:
+    """Edge length variance should vanish for uniform or underspecified edge sets."""
+
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=3)
+
+    loss = EdgeLengthVarianceLoss().evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    )
+
+    if expected is None:
+        assert loss.item() > 0.0
+    else:
+        assert loss.item() == expected
+
+
+def test_edge_length_variance_loss_is_zero_without_edges() -> None:
+    """Edge length variance should be zero when no edges are present."""
+
+    problem = LayoutProblem(edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=3)
+
+    loss = EdgeLengthVarianceLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [1.0, 0.0], [4.0, 0.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_repulsion_loss_penalizes_overlapping_nodes_more_than_separated_nodes() -> None:
+    """Repulsion should be strongest when nodes are nearly coincident."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 10.0, dtype=torch.float32),
+    )
+    overlapping_loss = RepulsionLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [0.1, 0.0], [0.0, 0.1]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+    separated_loss = RepulsionLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [10_000.0, 0.0], [0.0, 10_000.0]], dtype=torch.float32),
+        ),
+        RuntimeContext(),
+    )
+
+    assert overlapping_loss.item() > 1.0
+    assert separated_loss.item() < 1.0e-6
+
+
+def test_repulsion_loss_matches_two_node_exact_formula() -> None:
+    """The current engine repulsion op should use the exact two-node inverse-distance term."""
+
+    problem = LayoutProblem(edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=2)
+    state = _make_state_from_pos(torch.tensor([[0.0, 0.0], [2.0, 0.0]], dtype=torch.float32))
+
+    loss = RepulsionLoss().evaluate(problem, state, RuntimeContext())
+
+    assert loss.item() == pytest.approx(1.0 / 4.0001, rel=1.0e-5)
+
+
+def test_repulsion_loss_threshold_config_is_currently_a_no_op_for_exact_engine_path() -> None:
+    """Repulsion config thresholds should not affect the current exact-only engine op path."""
+
+    problem = LayoutProblem(edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=2)
+    pos = torch.tensor([[0.0, 0.0], [2.0, 0.0]], dtype=torch.float32)
+    low_threshold_loss = RepulsionLoss(RepulsionLossConfig(threshold=1)).evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    )
+    high_threshold_loss = RepulsionLoss(RepulsionLossConfig(threshold=10_000)).evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    )
+
+    assert low_threshold_loss.item() == pytest.approx(high_threshold_loss.item(), rel=1.0e-6)
+
+
+def test_overlap_avoidance_loss_is_zero_for_non_overlapping_boxes() -> None:
+    """Overlap avoidance should vanish once node boxes are disjoint."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=2,
+        node_sizes=torch.full((2, 2), 10.0, dtype=torch.float32),
+    )
+
+    loss = OverlapAvoidanceLoss().evaluate(
+        problem,
+        _make_state_from_pos(torch.tensor([[0.0, 0.0], [30.0, 0.0]], dtype=torch.float32)),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_overlap_avoidance_loss_is_positive_for_overlapping_boxes() -> None:
+    """Overlap avoidance should increase when boxes intersect."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=2,
+        node_sizes=torch.full((2, 2), 10.0, dtype=torch.float32),
+    )
+
+    loss = OverlapAvoidanceLoss().evaluate(
+        problem,
+        _make_state_from_pos(torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32)),
+        RuntimeContext(),
+    )
+
+    assert loss.item() > 0.0
+
+
+def test_overlap_avoidance_loss_padding_increases_penalty() -> None:
+    """More padding should require more separation between node boxes."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=2,
+        node_sizes=torch.full((2, 2), 10.0, dtype=torch.float32),
+    )
+    pos = torch.tensor([[0.0, 0.0], [12.0, 0.0]], dtype=torch.float32)
+    small_padding_loss = OverlapAvoidanceLoss(OverlapAvoidanceLossConfig(padding=0.0)).evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    )
+    large_padding_loss = OverlapAvoidanceLoss(OverlapAvoidanceLossConfig(padding=4.0)).evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    )
+
+    assert large_padding_loss.item() > small_padding_loss.item()
+
+
+def test_crossing_loss_detects_known_crossings() -> None:
+    """Crossing loss should be nonzero for a simple two-edge crossing."""
+
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [3, 2]], dtype=torch.long),
+        num_nodes=4,
+    )
+
+    loss = CrossingLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+
+    assert loss.item() > 0.9
+
+
+def test_crossing_loss_is_near_zero_for_parallel_edges() -> None:
+    """Crossing loss should stay near zero when edge endpoint order is preserved."""
+
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [3, 2]], dtype=torch.long),
+        num_nodes=4,
+    )
+
+    loss = CrossingLoss(CrossingLossConfig(alpha=20.0)).evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+
+    assert loss.item() < 1.0e-6
+
+
+def test_crossing_loss_alpha_config_changes_crossing_sharpness() -> None:
+    """Higher alpha should sharpen the crossing proxy for the same geometry."""
+
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [3, 2]], dtype=torch.long),
+        num_nodes=4,
+    )
+    pos = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], dtype=torch.float32)
+    low_alpha_loss = CrossingLoss(CrossingLossConfig(alpha=1.0)).evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    )
+    high_alpha_loss = CrossingLoss(CrossingLossConfig(alpha=20.0)).evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    )
+
+    assert high_alpha_loss.item() > low_alpha_loss.item()
+
+
+def test_cluster_compactness_loss_prefers_tight_clusters() -> None:
+    """Cluster compactness should be smaller for tightly packed members."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=4,
+        clusters={"a": [0, 1], "b": [2, 3]},
+    )
+    tight_loss = ClusterCompactnessLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [0.1, 0.0], [10.0, 0.0], [10.1, 0.0]], dtype=torch.float32),
+        ),
+        RuntimeContext(),
+    )
+    spread_loss = ClusterCompactnessLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [4.0, 0.0], [10.0, 0.0], [14.0, 0.0]], dtype=torch.float32),
+        ),
+        RuntimeContext(),
+    )
+
+    assert tight_loss.item() < spread_loss.item()
+
+
+def test_cluster_compactness_loss_is_zero_for_singleton_clusters() -> None:
+    """Singleton clusters should not contribute compactness energy."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=2,
+        clusters={"a": [0], "b": [1]},
+    )
+
+    loss = ClusterCompactnessLoss().evaluate(
+        problem,
+        _make_state_from_pos(torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float32)),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_cluster_compactness_loss_is_zero_without_clusters() -> None:
+    """Cluster compactness should vanish when no cluster metadata is present."""
+
+    problem = LayoutProblem(edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=2)
+
+    loss = ClusterCompactnessLoss().evaluate(
+        problem,
+        _make_state_from_pos(torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float32)),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_cluster_separation_loss_penalizes_overlapping_sibling_clusters() -> None:
+    """Sibling cluster bboxes should repel when they overlap."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=4,
+        node_sizes=torch.full((4, 2), 2.0, dtype=torch.float32),
+        clusters={"a": [0, 1], "b": [2, 3]},
+        cluster_parents={"a": None, "b": None},
+    )
+    overlapping_loss = ClusterSeparationLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+    separated_loss = ClusterSeparationLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [0.0, 1.0], [40.0, 0.0], [40.0, 1.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+
+    assert overlapping_loss.item() > 0.0
+    assert separated_loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_cluster_separation_loss_ignores_parent_child_pairs() -> None:
+    """Parent and child clusters should not repel each other in the separation term."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=4,
+        node_sizes=torch.full((4, 2), 2.0, dtype=torch.float32),
+        clusters={"parent": [0, 3], "child": [1, 2]},
+        cluster_parents={"parent": None, "child": "parent"},
+    )
+
+    loss = ClusterSeparationLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[-1.0, 0.0], [0.0, 0.0], [0.0, 1.0], [1.0, 0.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_cluster_containment_loss_requires_child_bbox_inside_parent_bbox() -> None:
+    """Cluster containment should distinguish contained and escaped child clusters."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=4,
+        node_sizes=torch.full((4, 2), 2.0, dtype=torch.float32),
+        clusters={"parent": [0, 3], "child": [1, 2]},
+        cluster_parents={"parent": None, "child": "parent"},
+    )
+    inside_loss = ClusterContainmentLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[-20.0, 0.0], [0.0, 0.0], [0.0, 1.0], [20.0, 0.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+    outside_loss = ClusterContainmentLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[-1.0, 0.0], [0.0, 0.0], [20.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+
+    assert inside_loss.item() == pytest.approx(0.0, abs=1.0e-6)
+    assert outside_loss.item() > 0.0
+
+
+def test_cluster_containment_loss_is_zero_without_hierarchy() -> None:
+    """Containment should be disabled when parent metadata is absent."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=4,
+        node_sizes=torch.full((4, 2), 2.0, dtype=torch.float32),
+        clusters={"parent": [0, 3], "child": [1, 2]},
+    )
+
+    loss = ClusterContainmentLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[-1.0, 0.0], [0.0, 0.0], [20.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_spacing_consistency_loss_prefers_uniform_gaps() -> None:
+    """Spacing consistency should be near zero for uniform same-layer gaps."""
+
+    layers = torch.tensor([0, 0, 0], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 10.0, dtype=torch.float32),
+    )
+    uniform_loss = SpacingConsistencyLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [35.0, 0.0], [70.0, 0.0]], dtype=torch.float32),
+            layers=layers,
+        ),
+        RuntimeContext(),
+    )
+    irregular_loss = SpacingConsistencyLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [20.0, 0.0], [70.0, 0.0]], dtype=torch.float32),
+            layers=layers,
+        ),
+        RuntimeContext(),
+    )
+
+    assert uniform_loss.item() == pytest.approx(0.0, abs=1.0e-6)
+    assert irregular_loss.item() > 0.0
+
+
+def test_spacing_consistency_loss_target_gap_config_changes_penalty() -> None:
+    """Changing the target gap should change the spacing penalty for the same geometry."""
+
+    layers = torch.tensor([0, 0, 0], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 10.0, dtype=torch.float32),
+    )
+    state = _make_state_from_pos(
+        torch.tensor([[0.0, 0.0], [35.0, 0.0], [70.0, 0.0]], dtype=torch.float32),
+        layers=layers,
+    )
+    matched_loss = SpacingConsistencyLoss().evaluate(problem, state, RuntimeContext())
+    mismatched_loss = SpacingConsistencyLoss(
+        SpacingConsistencyLossConfig(target_gap=10.0),
+    ).evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [35.0, 0.0], [70.0, 0.0]], dtype=torch.float32),
+            layers=layers,
+        ),
+        RuntimeContext(),
+    )
+
+    assert matched_loss.item() < mismatched_loss.item()
+
+
+def test_spacing_consistency_loss_is_zero_without_layer_index() -> None:
+    """Spacing consistency needs a layer index and should otherwise return zero."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 10.0, dtype=torch.float32),
+    )
+
+    loss = SpacingConsistencyLoss().evaluate(
+        problem,
+        SolveState(
+            pos=torch.tensor(
+                [[0.0, 0.0], [20.0, 0.0], [70.0, 0.0]], dtype=torch.float32, requires_grad=True
+            )
+        ),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_fanout_distribution_loss_prefers_even_angular_fans() -> None:
+    """Evenly spaced fanout should score better than a skewed fan."""
+
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 0, 0, 0, 0], [1, 2, 3, 4, 5]], dtype=torch.long),
+        num_nodes=6,
+    )
+    even_loss = FanoutDistributionLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor(
+                [
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [0.3090, 0.9511],
+                    [-0.8090, 0.5878],
+                    [-0.8090, -0.5878],
+                    [0.3090, -0.9511],
+                ],
+                dtype=torch.float32,
+            ),
+        ),
+        RuntimeContext(),
+    )
+    skewed_loss = FanoutDistributionLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor(
+                [
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [2.0, 0.0],
+                    [3.0, 0.0],
+                    [4.0, 0.0],
+                    [5.0, 0.0],
+                ],
+                dtype=torch.float32,
+            ),
+        ),
+        RuntimeContext(),
+    )
+
+    assert even_loss.item() < 1.0e-4
+    assert skewed_loss.item() > even_loss.item()
+
+
+def test_fanout_distribution_loss_degree_threshold_controls_activation() -> None:
+    """Raising the degree threshold above the hub degree should disable the loss."""
+
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 0, 0, 0, 0], [1, 2, 3, 4, 5]], dtype=torch.long),
+        num_nodes=6,
+    )
+    pos = torch.tensor(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [4.0, 0.0],
+            [5.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    active_loss = FanoutDistributionLoss(FanoutDistributionLossConfig(degree_threshold=5)).evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    )
+    disabled_loss = FanoutDistributionLoss(
+        FanoutDistributionLossConfig(degree_threshold=6)
+    ).evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    )
+
+    assert active_loss.item() > 0.0
+    assert disabled_loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_fanout_distribution_loss_is_zero_without_edges() -> None:
+    """Fanout distribution should vanish when there are no outgoing edges to examine."""
+
+    problem = LayoutProblem(edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=2)
+
+    loss = FanoutDistributionLoss().evaluate(
+        problem,
+        _make_state_from_pos(torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32)),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+@pytest.mark.parametrize(
+    ("pos", "expected"),
+    [
+        (
+            torch.tensor([[0.0, 1.0], [0.0, 0.0]], dtype=torch.float32),
+            pytest.approx(0.0, abs=1.0e-6),
+        ),
+        (
+            torch.tensor([[10.0, 1.0], [0.0, 0.0]], dtype=torch.float32),
+            pytest.approx(100.0, rel=1.0e-5),
+        ),
+        (
+            torch.tensor([[0.0, 0.0], [0.0, 1.0]], dtype=torch.float32),
+            pytest.approx(0.0, abs=1.0e-6),
+        ),
+    ],
+    ids=["vertical_back_edge", "wide_back_edge", "forward_edge"],
+)
+def test_back_edge_compactness_loss_cases(
+    pos: torch.Tensor,
+    expected: pytest.ApproxBase,
+) -> None:
+    """Back-edge compactness should only penalize horizontal span on actual back edges."""
+
+    problem = LayoutProblem(edge_index=torch.tensor([[0], [1]], dtype=torch.long), num_nodes=2)
+
+    loss = BackEdgeCompactnessLoss().evaluate(problem, _make_state_from_pos(pos), RuntimeContext())
+
+    assert loss.item() == expected
+
+
+def test_position_pin_loss_is_zero_at_target() -> None:
+    """Position pinning should vanish once the pinned node reaches its target."""
+
+    flex = FlexConstraints(
+        pin_indices=torch.tensor([0], dtype=torch.long),
+        pin_targets=torch.tensor([[5.0, 5.0]], dtype=torch.float32),
+        pin_weights=torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+        soft_pin_mask=torch.tensor([[True, True]], dtype=torch.bool),
+        hard_pin_mask=torch.zeros((1, 2), dtype=torch.bool),
+    )
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=1, flex=flex
+    )
+
+    loss = PositionPinLoss().evaluate(
+        problem,
+        _make_state_from_pos(torch.tensor([[5.0, 5.0]], dtype=torch.float32)),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_position_pin_loss_is_positive_away_from_target() -> None:
+    """Position pinning should penalize displacement from the requested pin target."""
+
+    flex = FlexConstraints(
+        pin_indices=torch.tensor([0], dtype=torch.long),
+        pin_targets=torch.tensor([[5.0, 5.0]], dtype=torch.float32),
+        pin_weights=torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+        soft_pin_mask=torch.tensor([[True, True]], dtype=torch.bool),
+        hard_pin_mask=torch.zeros((1, 2), dtype=torch.bool),
+    )
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=1, flex=flex
+    )
+
+    loss = PositionPinLoss().evaluate(
+        problem,
+        _make_state_from_pos(torch.tensor([[0.0, 0.0]], dtype=torch.float32)),
+        RuntimeContext(),
+    )
+
+    assert loss.item() > 0.0
+
+
+def test_position_pin_loss_is_zero_without_pin_constraints() -> None:
+    """Position pinning should be disabled when flex pin metadata is missing."""
+
+    problem = LayoutProblem(edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=1)
+
+    loss = PositionPinLoss().evaluate(
+        problem,
+        _make_state_from_pos(torch.tensor([[0.0, 0.0]], dtype=torch.float32)),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_alignment_loss_is_zero_for_aligned_nodes() -> None:
+    """Alignment should vanish when all nodes share the constrained coordinate."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=3,
+        flex=FlexConstraints(align_groups=[(torch.tensor([0, 1, 2], dtype=torch.long), 2.0, 0)]),
+    )
+
+    loss = AlignmentLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[1.0, 0.0], [1.0, 1.0], [1.0, 2.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_alignment_loss_is_positive_for_misaligned_nodes() -> None:
+    """Alignment should penalize variance along the constrained axis."""
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=3,
+        flex=FlexConstraints(align_groups=[(torch.tensor([0, 1, 2], dtype=torch.long), 2.0, 0)]),
+    )
+
+    loss = AlignmentLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+
+    assert loss.item() > 0.0
+
+
+def test_alignment_loss_is_zero_without_groups() -> None:
+    """Alignment should vanish when no alignment groups are configured."""
+
+    problem = LayoutProblem(edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=3)
+
+    loss = AlignmentLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], dtype=torch.float32)
+        ),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_flex_spacing_loss_matches_reference_delegate() -> None:
+    """Flex spacing should exactly delegate to the reference flex-spacing helper."""
+
+    layers = torch.tensor([0, 0, 0], dtype=torch.long)
+    layer_index = build_layer_index(layers)
+    node_sizes = torch.full((3, 2), 10.0, dtype=torch.float32)
+    pos = torch.tensor([[0.0, 0.0], [20.0, 0.0], [70.0, 0.0]], dtype=torch.float32)
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=3,
+        node_sizes=node_sizes,
+        flex=FlexConstraints(flex_node_sep=25.0, flex_node_sep_weight=1.5),
+    )
+    state = _make_state_from_pos(pos, layers=layers)
+
+    loss = FlexSpacingLoss().evaluate(problem, state, RuntimeContext())
+    reference = reference_flex_spacing_loss(
+        state.pos,
+        node_sizes,
+        layer_index,
+        target_sep=25.0,
+        weight=1.5,
+    )
+
+    assert loss.item() == pytest.approx(reference.item(), rel=1.0e-6)
+
+
+def test_flex_spacing_loss_weight_changes_result() -> None:
+    """Flex spacing should scale with the configured flex weight."""
+
+    layers = torch.tensor([0, 0, 0], dtype=torch.long)
+    pos = torch.tensor([[0.0, 0.0], [20.0, 0.0], [70.0, 0.0]], dtype=torch.float32)
+    node_sizes = torch.full((3, 2), 10.0, dtype=torch.float32)
+    low_weight_problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=3,
+        node_sizes=node_sizes,
+        flex=FlexConstraints(flex_node_sep=25.0, flex_node_sep_weight=0.5),
+    )
+    high_weight_problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=3,
+        node_sizes=node_sizes,
+        flex=FlexConstraints(flex_node_sep=25.0, flex_node_sep_weight=2.0),
+    )
+    low_weight_loss = FlexSpacingLoss().evaluate(
+        low_weight_problem,
+        _make_state_from_pos(pos, layers=layers),
+        RuntimeContext(),
+    )
+    high_weight_loss = FlexSpacingLoss().evaluate(
+        high_weight_problem,
+        _make_state_from_pos(pos, layers=layers),
+        RuntimeContext(),
+    )
+
+    assert high_weight_loss.item() > low_weight_loss.item()
+
+
+def test_flex_spacing_loss_is_zero_without_flex_data() -> None:
+    """Flex spacing should return zero when the problem does not define flex spacing."""
+
+    layers = torch.tensor([0, 0, 0], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 10.0, dtype=torch.float32),
+    )
+
+    loss = FlexSpacingLoss().evaluate(
+        problem,
+        _make_state_from_pos(
+            torch.tensor([[0.0, 0.0], [20.0, 0.0], [70.0, 0.0]], dtype=torch.float32), layers=layers
+        ),
+        RuntimeContext(),
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_loss_group_combined_mode_supports_all_engine_losses() -> None:
+    """A combined-mode loss group should evaluate and backpropagate all engine losses together."""
+
+    problem = _make_problem()
+    state = _make_state()
+
+    LossGroup(losses=_all_losses(), backward_mode="combined").apply(
+        problem, state, RuntimeContext()
+    )
+
+    assert state.prev_loss > 0.0
+    assert state.pos is not None
+    assert state.pos.grad is not None
+    assert torch.isfinite(state.pos.grad).all()
+
+
+def test_loss_group_combined_and_per_loss_modes_share_gradient_direction() -> None:
+    """Combined and per-loss backward modes should point in the same descent direction."""
+
+    problem = _make_problem()
+    combined_state = _make_state()
+    per_loss_state = _make_state()
+    losses = _all_losses()
+
+    LossGroup(losses=losses, backward_mode="combined").apply(
+        problem, combined_state, RuntimeContext()
+    )
+    LossGroup(losses=losses, backward_mode="per_loss").apply(
+        problem, per_loss_state, RuntimeContext()
+    )
+
+    assert combined_state.pos is not None
+    assert combined_state.pos.grad is not None
+    assert per_loss_state.pos is not None
+    assert per_loss_state.pos.grad is not None
+    combined_grad = combined_state.pos.grad.flatten()
+    per_loss_grad = per_loss_state.pos.grad.flatten()
+    cosine = torch.dot(combined_grad, per_loss_grad) / (
+        torch.linalg.norm(combined_grad) * torch.linalg.norm(per_loss_grad)
+    )
+
+    assert cosine.item() > 0.9999
+
+
+def test_loss_group_uses_annealing_schedule_weights() -> None:
+    """LossGroup should prefer annealed weights over loss default weights."""
+
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        num_nodes=2,
+        node_sizes=torch.full((2, 2), 10.0, dtype=torch.float32),
+    )
+    pos = torch.tensor([[0.0, 40.0], [4.0, 0.0]], dtype=torch.float32)
+    dag_loss = DagOrderingLoss()
+    attraction_loss = EdgeAttractionLoss()
+    expected_dag = dag_loss.evaluate(problem, _make_state_from_pos(pos), RuntimeContext()).item()
+    expected_attraction = attraction_loss.evaluate(
+        problem,
+        _make_state_from_pos(pos),
+        RuntimeContext(),
+    ).item()
+    state = _make_state_from_pos(pos)
+    state.annealing = AnnealingSchedule(
+        current_weights={
+            dag_loss.weight_key: 0.0,
+            attraction_loss.weight_key: 7.0,
+        },
+    )
+
+    LossGroup(losses=[dag_loss, attraction_loss], backward_mode="combined").apply(
+        problem,
+        state,
+        RuntimeContext(),
+    )
+
+    assert state.prev_loss == pytest.approx(7.0 * expected_attraction, rel=1.0e-6)
+    assert state.prev_loss != pytest.approx(
+        dag_loss.default_weight * expected_dag
+        + attraction_loss.default_weight * expected_attraction,
+        rel=1.0e-6,
+    )
