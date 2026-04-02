@@ -26974,6 +26974,85 @@ THEME_REGISTRY["argo"] = ARGO_THEME
 THEME_REGISTRY["kubernetes"] = KUBERNETES_THEME
 THEME_REGISTRY["zapier"] = ZAPIER_THEME
 
+# ---------------------------------------------------------------------------
+# File Browser -- classic OS GUI file manager aesthetic
+# ---------------------------------------------------------------------------
+FILE_BROWSER_THEME = Theme(
+    name="file_browser",
+    category="tools",
+    node_styles={
+        "default": NodeStyle(
+            shape="rect",
+            fill="#FFFFFF",
+            stroke="#868686",
+            stroke_width=1.0,
+            font_family="Segoe UI, Tahoma, Geneva, sans-serif",
+            font_size=11.0,
+            font_color="#1E1E1E",
+            corner_radius=2.0,
+            padding=(8.0, 5.0),
+            shadow={"dx": 1.0, "dy": 1.0, "blur": 2.0, "color": "#00000030"},
+        ),
+        "input": NodeStyle(
+            shape="rect",
+            fill="#FFF4B8",
+            stroke="#C4A000",
+            stroke_width=1.0,
+            font_family="Segoe UI, Tahoma, Geneva, sans-serif",
+            font_size=11.0,
+            font_color="#1E1E1E",
+            corner_radius=2.0,
+            padding=(8.0, 5.0),
+            shadow={"dx": 1.0, "dy": 1.0, "blur": 2.0, "color": "#00000030"},
+        ),
+        "output": NodeStyle(
+            shape="rect",
+            fill="#CCE8FF",
+            stroke="#3A87CE",
+            stroke_width=1.0,
+            font_family="Segoe UI, Tahoma, Geneva, sans-serif",
+            font_size=11.0,
+            font_color="#1E1E1E",
+            corner_radius=2.0,
+            padding=(8.0, 5.0),
+            shadow={"dx": 1.0, "dy": 1.0, "blur": 2.0, "color": "#00000030"},
+        ),
+    },
+    edge_styles={
+        "default": EdgeStyle(
+            color="#606060",
+            width=1.0,
+            style="solid",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#606060",
+            routing="ortho",
+        ),
+        "back": EdgeStyle(
+            color="#A0A0A0",
+            width=1.0,
+            style="dashed",
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_color="#A0A0A0",
+            routing="ortho",
+        ),
+    },
+    cluster_style=ClusterStyle(
+        fill="#ECE9D8",
+        stroke="#ACA899",
+        stroke_width=1.0,
+        corner_radius=3.0,
+        font_size=11.0,
+        font_color="#1E1E1E",
+        font_weight="bold",
+        padding=8.0,
+        opacity=0.85,
+    ),
+    graph_style=GraphStyle(background_color="#D6DBE9"),
+)
+THEME_REGISTRY["file_browser"] = FILE_BROWSER_THEME
+
 
 def get_theme(name: str) -> Theme:
     """Look up a built-in theme by name. Returns a deep copy."""
