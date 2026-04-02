@@ -25,6 +25,7 @@ import multiprocessing
 import os
 import random
 import re
+import resource
 import signal
 import statistics
 import sys
@@ -54,6 +55,24 @@ from dagua.eval.variants import (
 # Use forkserver to avoid deadlocks when torch is imported in the main process.
 # fork + torch's internal threading locks = hang on large job counts.
 _MP_CONTEXT = multiprocessing.get_context("forkserver")
+
+# Per-worker virtual memory cap (bytes).  Workers that exceed this get
+# MemoryError instead of triggering a system-wide OOM kill.  20 GB is
+# generous for any single layout -- the worst OOM we saw was 73 GB.
+_WORKER_MEM_LIMIT_BYTES = 20 * 1024**3  # 20 GB
+
+
+def _worker_init() -> None:
+    """Set per-worker resource limits (called once per pool worker)."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    # Only tighten -- never raise above existing hard limit.
+    new_hard = (
+        min(_WORKER_MEM_LIMIT_BYTES, hard)
+        if hard != resource.RLIM_INFINITY
+        else _WORKER_MEM_LIMIT_BYTES
+    )
+    resource.setrlimit(resource.RLIMIT_AS, (new_hard, new_hard))
+
 
 DEFAULT_OUTPUT_DIR = Path("eval_output/benchmark_full")
 DEFAULT_TIMEOUT = 120
@@ -2236,7 +2255,9 @@ def main() -> int:
 
             try:
                 executor = ProcessPoolExecutor(
-                    max_workers=args.resolved_workers, mp_context=_MP_CONTEXT
+                    max_workers=args.resolved_workers,
+                    mp_context=_MP_CONTEXT,
+                    initializer=_worker_init,
                 )
             except PermissionError:
                 print("[benchmark] ERROR: failed to start ProcessPoolExecutor")
@@ -2313,6 +2334,7 @@ def main() -> int:
                         executor = ProcessPoolExecutor(
                             max_workers=args.resolved_workers,
                             mp_context=_MP_CONTEXT,
+                            initializer=_worker_init,
                         )
                         _fill_inflight()
                     # If shutdown requested, drain remaining inflight futures.
@@ -2332,6 +2354,7 @@ def main() -> int:
                 executor = ProcessPoolExecutor(
                     max_workers=args.resolved_workers,
                     mp_context=_MP_CONTEXT,
+                    initializer=_worker_init,
                 )
                 group_iter = iter(heavy_groups)
                 try:
@@ -2374,6 +2397,7 @@ def main() -> int:
                             executor = ProcessPoolExecutor(
                                 max_workers=args.resolved_workers,
                                 mp_context=_MP_CONTEXT,
+                                initializer=_worker_init,
                             )
                             _fill_inflight()
                         if _shutdown_requested:
