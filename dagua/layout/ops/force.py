@@ -707,6 +707,70 @@ class InverseDistanceRepulsion(Op):
         return state
 
 
+@register_op
+class FRCombinedForce(Op):
+    """Compute the exact dense FR force update in one einsum."""
+
+    name: ClassVar[str] = "fr_combined_force"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras.fr_adjacency")
+    writes: ClassVar[Tuple[str, ...]] = ("forces",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "extras.fr_adjacency")
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Store the classic FR dense displacement in ``state.forces``.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state containing positions and FR adjacency.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with the combined FR displacement stored in ``state.forces``.
+
+        Raises
+        ------
+        ValueError
+            If ``state.extras['fr_adjacency']`` is missing or malformed.
+        """
+        del ctx
+
+        pos = _require_positions(state)
+        adjacency = state.extras.get("fr_adjacency")
+        if not isinstance(adjacency, torch.Tensor):
+            raise ValueError("FRCombinedForce requires state.extras['fr_adjacency'].")
+        if tuple(adjacency.shape) != (problem.num_nodes, problem.num_nodes):
+            raise ValueError(
+                "state.extras['fr_adjacency'] must have shape "
+                f"({problem.num_nodes}, {problem.num_nodes})."
+            )
+
+        optimal_distance = _resolve_area_k(problem=problem, state=state)
+        delta = pos[:, np.newaxis, :] - pos[np.newaxis, :, :]
+        distance = torch.linalg.norm(delta, dim=-1)
+        distance = torch.clamp(distance, min=_FR_MIN_DISTANCE)
+        adjacency = adjacency.to(device=pos.device, dtype=pos.dtype)
+        displacement = torch.einsum(
+            "ijk,ij->ik",
+            delta,
+            (optimal_distance * optimal_distance / distance.square())
+            - (adjacency * distance / optimal_distance),
+        )
+        state.forces = displacement
+        return state
+
+
 @dataclass(frozen=True)
 class InverseSquareRepulsionConfig:
     """Configuration for ``InverseSquareRepulsion``.
