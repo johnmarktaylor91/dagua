@@ -334,6 +334,76 @@ class LinearCool(Op):
 
 
 @dataclass(frozen=True)
+class InitTemperatureFromExtentConfig:
+    """Configuration for :class:`InitTemperatureFromExtent`.
+
+    Parameters
+    ----------
+    scale : float, default=0.1
+        Multiplier applied to the larger axis extent.
+    """
+
+    scale: float = 0.1
+
+
+@register_op
+@dataclass(frozen=True)
+class InitTemperatureFromExtent(Op):
+    """Initialize FR temperature from the current position extent."""
+
+    config: InitTemperatureFromExtentConfig = field(default_factory=InitTemperatureFromExtentConfig)
+
+    name: ClassVar[str] = "init_temperature_from_extent"
+    category: ClassVar[OpCategory] = OpCategory.ANNEAL
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("temperature",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Set ``state.temperature`` to ``max(x_extent, y_extent) * scale``.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable solve state containing the current positions.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with the initialized global temperature.
+
+        Raises
+        ------
+        ValueError
+            If ``state.pos`` is missing or ``scale`` is negative.
+        """
+        del problem, ctx
+
+        if self.config.scale < 0.0:
+            raise ValueError("InitTemperatureFromExtent scale must be non-negative.")
+        if state.pos is None:
+            raise ValueError("InitTemperatureFromExtent requires state.pos to be set.")
+
+        if state.pos.shape[0] == 0:
+            state.temperature = 0.0
+            return state
+
+        x_extent = float((state.pos[:, 0].max() - state.pos[:, 0].min()).item())
+        y_extent = float((state.pos[:, 1].max() - state.pos[:, 1].min()).item())
+        state.temperature = max(x_extent, y_extent) * self.config.scale
+        return state
+
+
+@dataclass(frozen=True)
 class ExponentialCoolConfig:
     """Configuration for :class:`ExponentialCool`.
 

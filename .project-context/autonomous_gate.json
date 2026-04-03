@@ -1,49 +1,40 @@
 {
   "mode": "autonomous",
-  "started": "2026-03-28T11:30:00Z",
-  "user_directive": "for every single graph/algo, either perfect match or good reason we didnt run it",
+  "started": "2026-04-02T20:20:00-04:00",
+  "completed": "2026-04-02T20:55:00-04:00",
+  "user_directive": "autonomous all the way thru ima sleep",
   "exit_criteria": [
     {
-      "criterion": "All re-benchmarks complete",
-      "target": "rebench-all dispatch status = done",
+      "criterion": "FR pipeline fidelity tests pass with torch.equal()",
+      "target": "all parametrized cases green",
       "status": "pass",
-      "measured_value": "29100/29100 complete. 24633 ok, 729 skipped, 3738 errors",
-      "measurement_source": "cat .project-context/tasks/rebench-all.status"
+      "measured_value": "10 passed in 0.75s",
+      "measurement_source": "pytest tests/test_pipeline_fr.py -x -v"
     },
     {
-      "criterion": "Full fidelity analysis run on new data",
-      "target": "fidelity_analysis.py completes successfully",
+      "criterion": "Existing op tests unbroken",
+      "target": "0 failures in test_ops_*.py",
       "status": "pass",
-      "measured_value": "9121 groups processed in 20501s",
-      "measurement_source": "scripts/fidelity_analysis.py exit code"
+      "measured_value": "105 passed in 0.67s",
+      "measurement_source": "pytest tests/test_ops_anneal.py tests/test_ops_force.py tests/test_ops_converge.py"
     },
     {
-      "criterion": "Zero unexplained non-equivalent verdicts",
-      "target": "Every family: strong_equivalent/identical OR documented reason",
+      "criterion": "Full ops+layout suite green",
+      "target": "0 failures",
       "status": "pass",
-      "measured_value": "74 strong, 11 weak, 2 partial, 10 divergent. All 23 non-strong have documented reasons: 3 near-miss (inception_block outlier), 5 NeuLay (ML-based, expected variance), 5 t-SNE (init-sensitive), 7 SGD2 (stochastic, pass at 1.5x), 2 FA2/maxent (algorithmic difference), 1 sfdp (2-graph outlier)",
-      "measurement_source": "algorithm_summary.csv audit"
+      "measured_value": "750 passed in 128s",
+      "measurement_source": "pytest tests/test_ops_*.py tests/test_pipeline_fr.py tests/test_layout/ -x"
     },
     {
-      "criterion": "Final PDF report generated",
-      "target": "report.pdf current",
+      "criterion": "No scope creep -- only specified files created/modified",
+      "target": "3 new files, 3 modified files",
       "status": "pass",
-      "measured_value": "3.2MB report.pdf generated 2026-03-29T08:18",
-      "measurement_source": "ls -la eval_output/fidelity_report/report.pdf"
-    },
-    {
-      "criterion": "Every insufficient_data row has documented reason",
-      "target": "All insufficient_data categorized as timeout/error/skip with counts",
-      "status": "pass",
-      "measured_value": "1565 insufficient_data rows. Root cause: asymmetric seed counts (orig=1 deterministic vs reimpl=30 stochastic). Verdict logic correctly routes these through Procrustes path. No unexplained gaps.",
-      "measurement_source": "per_graph_detail.csv audit"
-    },
-    {
-      "criterion": "All changes committed",
-      "target": "clean git status",
-      "status": "untested",
-      "measured_value": null,
-      "measurement_source": "git status"
+      "measured_value": "3 new (pipelines/__init__.py, pipelines/fr.py, test_pipeline_fr.py), 3 modified (anneal.py, force.py, converge.py)",
+      "measurement_source": "git diff --stat + git status"
     }
+  ],
+  "pre_existing_failures": [
+    "tests/test_animation.py::TestTourExport::test_tour_auto_scene_exports_mp4 (tifffile API change)",
+    "tests/test_bench_large.py::test_hierarchy_checkpoint_rejects_incomplete_manifest (assertion logic)"
   ]
 }
