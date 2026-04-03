@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional, Tuple
 
 import torch
 
@@ -219,6 +219,85 @@ class DisplacementThreshold(Op):
         displacement = (state.pos.detach() - previous.to(device=state.pos.device)).norm(dim=1)
         mean_displacement = float(displacement.mean().item())
         state.converged = state.converged or mean_displacement <= self.config.threshold
+        return state
+
+
+@dataclass(frozen=True)
+class FRConvergenceCheckConfig:
+    """Configuration for :class:`FRConvergenceCheck`.
+
+    Attributes
+    ----------
+    threshold : float, default=1e-4
+        Classic FR convergence threshold applied to ``||delta_pos||_F / N``.
+    """
+
+    threshold: float = 1.0e-4
+
+
+@register_op
+class FRConvergenceCheck(Op):
+    """Converge when classic FR's Frobenius displacement rule is satisfied."""
+
+    name: ClassVar[str] = "fr_convergence_check"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = ("forces", "temperature")
+    writes: ClassVar[Tuple[str, ...]] = ("converged",)
+    requires: ClassVar[Tuple[str, ...]] = ("forces", "temperature")
+
+    def __init__(self, config: Optional[FRConvergenceCheckConfig] = None) -> None:
+        """Store the frozen configuration for this op.
+
+        Parameters
+        ----------
+        config : FRConvergenceCheckConfig, optional
+            Convergence configuration. When omitted, defaults are used.
+
+        Returns
+        -------
+        None
+            This constructor stores configuration only.
+        """
+        self.config = config or FRConvergenceCheckConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Update convergence using classic FR's ``||delta_pos||_F / N`` rule.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state containing the current force buffer.
+        ctx : RuntimeContext
+            Execution context. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with an updated convergence flag.
+
+        Raises
+        ------
+        ValueError
+            If ``threshold`` is negative.
+        """
+        del ctx
+
+        if self.config.threshold < 0.0:
+            raise ValueError("FRConvergenceCheck threshold must be non-negative.")
+        if problem.num_nodes <= 0 or state.forces is None or state.temperature is None:
+            return state
+
+        length = torch.linalg.vector_norm(state.forces, dim=1).clamp(min=1.0e-2)
+        delta_pos = state.forces * (float(state.temperature) / length).unsqueeze(1)
+        mean_displacement = float(torch.linalg.norm(delta_pos).item()) / float(problem.num_nodes)
+        state.converged = state.converged or mean_displacement < self.config.threshold
         return state
 
 
