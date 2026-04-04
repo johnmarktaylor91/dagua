@@ -106,7 +106,8 @@ class _PrepareTsnetState(Op):
             problem.edge_index, problem.num_nodes, edge_weights=problem.edge_weights
         )
         distances = _all_pairs_shortest_paths(adjacency, weighted=problem.edge_weights is not None)
-        perplexity = min(30.0, float(max(problem.num_nodes - 1, 1)))
+        user_perplexity = state.extras.get("tsnet_perplexity", 30.0)
+        perplexity = min(float(user_perplexity), float(max(problem.num_nodes - 1, 1)))
         probabilities = _high_dimensional_affinities(distances, perplexity).to(device)
 
         state.extras["tsnet_probabilities"] = probabilities
@@ -405,6 +406,7 @@ def layout_tsnet_pipeline(
         seed=seed,
     )
     state = SolveState()
+    state.extras["tsnet_perplexity"] = perplexity
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
     final_state = build_tsnet_pipeline(steps=steps).apply(problem, state, ctx)
     if final_state.pos is None:
