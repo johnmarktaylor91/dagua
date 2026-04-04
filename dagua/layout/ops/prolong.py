@@ -9,7 +9,7 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 import torch
 
-from dagua.layout.classic.fmmm import (
+from dagua.layout._archive.classic.fmmm import (
     _TYPE_MOON,
     _TYPE_PLANET,
     _TYPE_SUN,
