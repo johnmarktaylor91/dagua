@@ -2,30 +2,30 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, Optional, Tuple
+import heapq
+from collections import deque
+from math import log2
+from typing import ClassVar, Optional, Tuple, Union, cast
 
+import numpy as np
 import torch
+from scipy import optimize, sparse
+from scipy.sparse import linalg as sparse_linalg
 
-from dagua.layout.classic.umap_layout import (
-    _NEGATIVE_SAMPLE_RATE,
-    _all_pairs_shortest_paths,
-    _build_undirected_adjacency,
-    _fit_ab,
-    _knn_from_distances,
-    _layout_device,
-    _layout_extent,
-    _normalize_positions,
-    _optimize_embedding,
-    _select_positive_edges,
-    _smooth_knn_dist,
-    _spectral_initialization,
-    _symmetrized_fuzzy_graph,
-    _undirected_edge_weight_lookup,
-    _validate_inputs,
+from dagua.layout.ops.base import Op, Pipeline  # noqa: E402
+from dagua.layout.ops.graph_utils import (
+    layout_device as _layout_device,
 )
-from dagua.layout.ops.base import Op, Pipeline
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.taxonomy import OpCategory
+from dagua.layout.ops.graph_utils import (
+    layout_extent as _layout_extent,
+)
+from dagua.layout.ops.state import (  # noqa: E402
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
+from dagua.layout.ops.taxonomy import OpCategory  # noqa: E402
 
 # -- extras key constants ---------------------------------------------------
 _ADJACENCY_KEY = "umap_adjacency"
@@ -45,10 +45,489 @@ _EPOCHS_PER_SAMPLE_KEY = "umap_epochs_per_sample"
 _N_EPOCHS_KEY = "umap_n_epochs"
 _N_NEIGHBORS_KEY = "umap_n_neighbors"
 _LEARNING_RATE_KEY = "umap_learning_rate"
+_NEGATIVE_SAMPLE_RATE = 5
 _NEGATIVE_SAMPLE_RATE_KEY = "umap_negative_sample_rate"
 _GAMMA_KEY = "umap_gamma"
 _MIN_DIST_KEY = "umap_min_dist"
 _SPREAD_KEY = "umap_spread"
+
+# ---------------------------------------------------------------------------
+# Constants and helper functions copied from dagua/layout/classic/umap_layout.py
+# (bit-identical to their classic counterparts)
+# ---------------------------------------------------------------------------
+
+_EPSILON = 1.0e-9
+_MIN_SPAN = 1.0e-6
+_MIN_SIGMA_SCALE = 1.0e-3
+_SMOOTH_K_TOLERANCE = 1.0e-5
+_SMOOTH_K_BINARY_SEARCH_STEPS = 64
+_SPECTRAL_SPARSE_THRESHOLD = 512
+_GRADIENT_CLIP_VALUE = 4.0
+
+
+def _build_undirected_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> Union[list[list[int]], list[list[tuple[int, float]]]]:
+    """Build an undirected adjacency list from ``edge_index``."""
+    if edge_weights is None:
+        adjacency_sets: list[set[int]] = [set() for _ in range(num_nodes)]
+        if edge_index.numel() == 0:
+            return [sorted(neighbors) for neighbors in adjacency_sets]
+
+        edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+        for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+            if source == target:
+                continue
+            adjacency_sets[source].add(target)
+            adjacency_sets[target].add(source)
+
+        return [sorted(neighbors) for neighbors in adjacency_sets]
+
+    adjacency_maps: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
+    if edge_index.numel() == 0:
+        return [sorted(neighbors.items()) for neighbors in adjacency_maps]
+
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    weights_cpu = edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
+        if source == target:
+            continue
+        cost = 1.0 / max(float(weights_cpu[edge_id].item()), _EPSILON)
+        previous = adjacency_maps[source].get(target)
+        adjacency_maps[source][target] = min(previous, cost) if previous is not None else cost
+        previous = adjacency_maps[target].get(source)
+        adjacency_maps[target][source] = min(previous, cost) if previous is not None else cost
+
+    return [sorted(neighbors.items()) for neighbors in adjacency_maps]
+
+
+def _undirected_edge_weight_lookup(
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+) -> dict[tuple[int, int], float]:
+    """Build undirected edge-weight lookup table from the input graph."""
+    if edge_weights is None or edge_index.numel() == 0:
+        return {}
+
+    lookup: dict[tuple[int, int], float] = {}
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    weights_cpu = edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
+        if source == target:
+            continue
+        pair = (min(source, target), max(source, target))
+        lookup[pair] = lookup.get(pair, 0.0) + float(weights_cpu[edge_id].item())
+    return lookup
+
+
+def _bfs_distances(adjacency: list[list[int]], start: int) -> torch.Tensor:
+    """Compute unweighted shortest-path distances from one source."""
+    num_nodes = len(adjacency)
+    distances = torch.full((num_nodes,), float("inf"), dtype=torch.float32)
+    distances[start] = 0.0
+    queue: deque[int] = deque([start])
+
+    while queue:
+        node = queue.popleft()
+        next_distance = float(distances[node].item() + 1.0)
+        for neighbor in adjacency[node]:
+            if bool(torch.isfinite(distances[neighbor]).item()):
+                continue
+            distances[neighbor] = next_distance
+            queue.append(neighbor)
+    return distances
+
+
+def _dijkstra_distances(adjacency: list[list[tuple[int, float]]], start: int) -> torch.Tensor:
+    """Compute weighted shortest-path distances from one source."""
+    num_nodes = len(adjacency)
+    distances = torch.full((num_nodes,), float("inf"), dtype=torch.float32)
+    distances[start] = 0.0
+    heap: list[tuple[float, int]] = [(0.0, start)]
+    while heap:
+        distance, node = heapq.heappop(heap)
+        if distance > float(distances[node].item()):
+            continue
+        for neighbor, cost in adjacency[node]:
+            candidate = distance + cost
+            if candidate >= float(distances[neighbor].item()):
+                continue
+            distances[neighbor] = candidate
+            heapq.heappush(heap, (candidate, neighbor))
+    return distances
+
+
+def _all_pairs_shortest_paths(
+    adjacency: Union[list[list[int]], list[list[tuple[int, float]]]],
+) -> torch.Tensor:
+    """Compute all-pairs graph distances with repeated BFS or Dijkstra."""
+    if not adjacency:
+        return torch.empty((0, 0), dtype=torch.float32)
+    is_weighted = any(neighbors and isinstance(neighbors[0], tuple) for neighbors in adjacency)
+    if is_weighted:
+        weighted_adjacency = cast(list[list[tuple[int, float]]], adjacency)
+        rows = [
+            _dijkstra_distances(adjacency=weighted_adjacency, start=index)
+            for index in range(len(weighted_adjacency))
+        ]
+    else:
+        unweighted_adjacency = cast(list[list[int]], adjacency)
+        rows = [
+            _bfs_distances(adjacency=unweighted_adjacency, start=index)
+            for index in range(len(unweighted_adjacency))
+        ]
+    distances = torch.stack(rows, dim=0)
+    finite_mask = torch.isfinite(distances)
+    max_finite = (
+        float(distances[finite_mask].max().item()) if bool(finite_mask.any().item()) else 1.0
+    )
+    fill_value = max(max_finite * 2.0, 1.0)
+    return torch.where(finite_mask, distances, torch.full_like(distances, fill_value))
+
+
+def _knn_from_distances(
+    distances: torch.Tensor,
+    n_neighbors: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Extract k-nearest neighbors from a dense distance matrix."""
+    num_nodes = distances.shape[0]
+    if num_nodes == 0:
+        empty = torch.empty((0, 0), dtype=torch.long)
+        return empty, empty.to(dtype=torch.float32)
+
+    k = min(n_neighbors, max(num_nodes - 1, 1))
+    adjusted = distances.clone()
+    diagonal = torch.eye(num_nodes, dtype=torch.bool)
+    adjusted = adjusted.masked_fill(diagonal, float("inf"))
+    knn_distances, knn_indices = torch.topk(adjusted, k=k, largest=False, dim=1)
+    return knn_indices.to(dtype=torch.long), knn_distances.to(dtype=torch.float32)
+
+
+def _smooth_knn_dist(
+    knn_distances: torch.Tensor,
+    n_neighbors: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Solve the UMAP smooth-kNN bandwidth for every graph node."""
+    num_nodes = knn_distances.shape[0]
+    if num_nodes == 0:
+        empty = torch.empty((0,), dtype=torch.float32)
+        return empty, empty
+
+    sigmas = torch.empty((num_nodes,), dtype=torch.float32)
+    rhos = torch.empty((num_nodes,), dtype=torch.float32)
+    target = log2(float(max(n_neighbors, 2)))
+
+    for index in range(num_nodes):
+        distances = knn_distances[index]
+        finite = distances[torch.isfinite(distances)]
+        if finite.numel() == 0:
+            sigmas[index] = 1.0
+            rhos[index] = 0.0
+            continue
+
+        positive = finite[finite > 0]
+        rho = float(positive.min().item()) if positive.numel() > 0 else 0.0
+        rhos[index] = rho
+        mean_distance = max(float(finite.mean().item()), _MIN_SPAN)
+        sigma_min = mean_distance * _MIN_SIGMA_SCALE
+        lower = 0.0
+        upper = 1.0
+
+        def _membership_sum(sigma: float) -> float:
+            if sigma <= 0.0:
+                return float(finite[1:].numel())
+            shifted = torch.clamp(finite[1:] - rho, min=0.0)
+            values = torch.exp(-shifted / sigma)
+            return float(values.sum().item())
+
+        while _membership_sum(upper) < target:
+            upper *= 2.0
+            if upper > 1.0e6:
+                break
+
+        sigma = upper
+        for _ in range(_SMOOTH_K_BINARY_SEARCH_STEPS):
+            sigma = 0.5 * (lower + upper)
+            estimate = _membership_sum(max(sigma, sigma_min))
+            if abs(estimate - target) <= _SMOOTH_K_TOLERANCE:
+                break
+            if estimate > target:
+                upper = sigma
+            else:
+                lower = sigma
+
+        sigmas[index] = max(sigma, sigma_min)
+
+    return sigmas, rhos
+
+
+def _symmetrized_fuzzy_graph(
+    knn_indices: torch.Tensor,
+    knn_distances: torch.Tensor,
+    sigmas: torch.Tensor,
+    rhos: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build the symmetrized fuzzy simplicial set used by graph UMAP."""
+    directed_weights: dict[tuple[int, int], float] = {}
+    num_nodes, num_neighbors = knn_indices.shape
+
+    for row in range(num_nodes):
+        sigma = float(sigmas[row].item())
+        rho = float(rhos[row].item())
+        for column in range(num_neighbors):
+            neighbor = int(knn_indices[row, column].item())
+            distance = float(knn_distances[row, column].item())
+            if not np.isfinite(distance):
+                continue
+            if distance <= rho or sigma <= 0.0:
+                weight = 1.0
+            else:
+                weight = float(np.exp(-(distance - rho) / sigma))
+            directed_weights[(row, neighbor)] = weight
+
+    undirected: dict[tuple[int, int], float] = {}
+    handled: set[tuple[int, int]] = set()
+    for source, target in directed_weights:
+        key = (min(source, target), max(source, target))
+        if key in handled or source == target:
+            continue
+        handled.add(key)
+        forward = directed_weights.get((source, target), 0.0)
+        backward = directed_weights.get((target, source), 0.0)
+        weight = forward + backward - (forward * backward)
+        if weight > 0.0:
+            undirected[key] = weight
+
+    if not undirected:
+        return (
+            torch.empty((0,), dtype=torch.long),
+            torch.empty((0,), dtype=torch.long),
+            torch.empty((0,), dtype=torch.float32),
+        )
+
+    pairs = list(undirected.keys())
+    weights = list(undirected.values())
+    head = torch.tensor([pair[0] for pair in pairs], dtype=torch.long)
+    tail = torch.tensor([pair[1] for pair in pairs], dtype=torch.long)
+    weight_tensor = torch.tensor(weights, dtype=torch.float32)
+    return head, tail, weight_tensor
+
+
+def _curve_function(x: np.ndarray, a: float, b: float) -> np.ndarray:
+    """Evaluate UMAP's smooth low-dimensional membership curve."""
+    return 1.0 / (1.0 + (a * np.power(x, 2.0 * b)))
+
+
+def _fit_ab(min_dist: float, spread: float) -> tuple[float, float]:
+    """Fit UMAP's ``a`` and ``b`` curve parameters from ``min_dist``."""
+    xv = np.linspace(0.0, 3.0 * spread, 300)
+    yv = np.where(xv < min_dist, 1.0, np.exp(-(xv - min_dist) / spread))
+    try:
+        params, _ = optimize.curve_fit(
+            _curve_function,
+            xv,
+            yv,
+            p0=(1.93, 0.79),
+            maxfev=10_000,
+        )
+        return float(params[0]), float(params[1])
+    except (RuntimeError, ValueError):
+        return 1.93, 0.79
+
+
+def _spectral_initialization(
+    num_nodes: int,
+    head: torch.Tensor,
+    tail: torch.Tensor,
+    weight: torch.Tensor,
+    seed: int,
+) -> torch.Tensor:
+    """Compute the normalized-Laplacian spectral initialization."""
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float32)
+    if num_nodes == 1:
+        return torch.zeros((1, 2), dtype=torch.float32)
+    if num_nodes == 2:
+        return torch.tensor([[-10.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+
+    if head.numel() == 0:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(seed)
+        return (torch.rand((num_nodes, 2), generator=generator, dtype=torch.float32) - 0.5) * 20.0
+
+    rows = torch.cat([head, tail]).numpy()
+    cols = torch.cat([tail, head]).numpy()
+    data = torch.cat([weight, weight]).numpy().astype(np.float64, copy=False)
+    graph = sparse.csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes), dtype=np.float64)
+
+    degree = np.asarray(graph.sum(axis=1)).reshape(-1)
+    inv_sqrt_degree = np.zeros_like(degree)
+    nonzero = degree > 0.0
+    inv_sqrt_degree[nonzero] = 1.0 / np.sqrt(degree[nonzero])
+    d_inv_sqrt = sparse.diags(inv_sqrt_degree)
+    laplacian = sparse.identity(num_nodes, dtype=np.float64) - (d_inv_sqrt @ graph @ d_inv_sqrt)
+
+    if num_nodes < _SPECTRAL_SPARSE_THRESHOLD:
+        dense_laplacian = laplacian.toarray()
+        eigenvalues, eigenvectors = np.linalg.eigh(dense_laplacian)
+    else:
+        eigenvalues, eigenvectors = sparse_linalg.eigsh(laplacian, k=3, which="SM")
+
+    order = np.argsort(eigenvalues)
+    eigenvectors = eigenvectors[:, order]
+    coordinates = np.real(eigenvectors[:, 1:3])
+    if coordinates.shape[1] == 1:
+        coordinates = np.concatenate(
+            [coordinates, np.zeros((num_nodes, 1), dtype=coordinates.dtype)],
+            axis=1,
+        )
+
+    min_value = float(coordinates.min())
+    max_value = float(coordinates.max())
+    if max_value - min_value > _MIN_SPAN:
+        coordinates = ((coordinates - min_value) / (max_value - min_value) * 20.0) - 10.0
+    else:
+        coordinates = np.zeros((num_nodes, 2), dtype=np.float32)
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    noise = torch.randn((num_nodes, 2), generator=generator, dtype=torch.float32) * 1.0e-4
+    return torch.from_numpy(coordinates.astype(np.float32, copy=False)) + noise
+
+
+def _select_positive_edges(
+    head: torch.Tensor,
+    tail: torch.Tensor,
+    weight: torch.Tensor,
+    n_epochs: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prune very weak edges and build epoch sampling intervals."""
+    if weight.numel() == 0:
+        empty_long = torch.empty((0,), dtype=torch.long)
+        empty_float = torch.empty((0,), dtype=torch.float32)
+        return empty_long, empty_long, empty_float
+
+    max_weight = float(weight.max().item())
+    min_weight = max_weight / float(max(n_epochs, 1))
+    keep = weight >= min_weight
+    kept_head = head[keep]
+    kept_tail = tail[keep]
+    kept_weight = weight[keep]
+    epochs_per_sample = max_weight / kept_weight
+    return kept_head, kept_tail, epochs_per_sample.to(dtype=torch.float32)
+
+
+def _positive_gradient(diff: torch.Tensor, distance_sq: float, a: float, b: float) -> torch.Tensor:
+    """Compute the clipped attractive UMAP gradient for one positive edge."""
+    if distance_sq <= 0.0:
+        return torch.zeros_like(diff)
+    grad_coeff = -2.0 * a * b * (distance_sq ** (b - 1.0)) / ((a * (distance_sq**b)) + 1.0)
+    return torch.clamp(grad_coeff * diff, min=-_GRADIENT_CLIP_VALUE, max=_GRADIENT_CLIP_VALUE)
+
+
+def _negative_gradient(
+    diff: torch.Tensor,
+    distance_sq: float,
+    a: float,
+    b: float,
+    gamma: float,
+) -> torch.Tensor:
+    """Compute the clipped repulsive UMAP gradient for one negative sample."""
+    if distance_sq <= 0.0:
+        return torch.zeros_like(diff)
+    grad_coeff = 2.0 * gamma * b / ((0.001 + distance_sq) * ((a * (distance_sq**b)) + 1.0))
+    return torch.clamp(grad_coeff * diff, min=-_GRADIENT_CLIP_VALUE, max=_GRADIENT_CLIP_VALUE)
+
+
+def _optimize_embedding(
+    embedding: torch.Tensor,
+    head: torch.Tensor,
+    tail: torch.Tensor,
+    epochs_per_sample: torch.Tensor,
+    n_epochs: int,
+    learning_rate: float,
+    negative_sample_rate: int,
+    gamma: float,
+    a: float,
+    b: float,
+    seed: int,
+) -> torch.Tensor:
+    """Run the UMAP cross-entropy SGD with negative sampling."""
+    if head.numel() == 0 or n_epochs <= 0:
+        return embedding
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+
+    next_sample_epoch = torch.zeros_like(epochs_per_sample)
+    epochs_per_negative_sample = epochs_per_sample / float(max(negative_sample_rate, 1))
+    next_negative_epoch = torch.zeros_like(epochs_per_negative_sample)
+    num_nodes = embedding.shape[0]
+
+    for epoch in range(n_epochs):
+        alpha = learning_rate * (1.0 - (float(epoch) / float(max(n_epochs, 1))))
+        for edge_id in range(head.shape[0]):
+            if float(next_sample_epoch[edge_id].item()) > float(epoch):
+                continue
+
+            source = int(head[edge_id].item())
+            target = int(tail[edge_id].item())
+            diff = embedding[source] - embedding[target]
+            distance_sq = float(torch.dot(diff, diff).item())
+            grad = _positive_gradient(diff=diff, distance_sq=distance_sq, a=a, b=b)
+            embedding[source] = embedding[source] + (alpha * grad)
+            embedding[target] = embedding[target] - (alpha * grad)
+            next_sample_epoch[edge_id] = next_sample_epoch[edge_id] + epochs_per_sample[edge_id]
+
+            if negative_sample_rate <= 0:
+                continue
+
+            negatives = 0
+            while float(next_negative_epoch[edge_id].item()) <= float(epoch):
+                negative = int(torch.randint(0, num_nodes, (1,), generator=generator).item())
+                negative_diff = embedding[source] - embedding[negative]
+                negative_distance_sq = float(torch.dot(negative_diff, negative_diff).item())
+                negative_grad = _negative_gradient(
+                    diff=negative_diff,
+                    distance_sq=negative_distance_sq,
+                    a=a,
+                    b=b,
+                    gamma=gamma,
+                )
+                embedding[source] = embedding[source] + (alpha * negative_grad)
+                next_negative_epoch[edge_id] = (
+                    next_negative_epoch[edge_id] + epochs_per_negative_sample[edge_id]
+                )
+                negatives += 1
+                if negatives >= negative_sample_rate:
+                    break
+
+    return embedding
+
+
+def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor:
+    """Center and scale coordinates into a deterministic bounding box."""
+    if positions.shape[0] <= 1:
+        return torch.zeros_like(positions)
+
+    centered = positions - positions.mean(dim=0, keepdim=True)
+    span = float(centered.abs().max().item())
+    if span < _MIN_SPAN:
+        centered = centered.clone()
+        centered[:, 0] = torch.linspace(
+            -1.0,
+            1.0,
+            steps=positions.shape[0],
+            device=positions.device,
+        )
+        span = float(centered.abs().max().item())
+    return centered * (extent / max(span, _MIN_SPAN))
 
 
 class _BuildUMAPAdjacency(Op):
@@ -608,6 +1087,58 @@ class _StoreUMAPHyperparameters(Op):
         state.extras[_NEGATIVE_SAMPLE_RATE_KEY] = self._negative_sample_rate
         state.extras[_GAMMA_KEY] = self._repulsion_strength
         return state
+
+
+def _validate_inputs(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    n_neighbors: int,
+    edge_weights: Optional[torch.Tensor],
+) -> None:
+    """Validate public UMAP layout arguments.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    n_neighbors : int
+        Target neighborhood size for the fuzzy simplicial set.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
+
+    Returns
+    -------
+    None
+        Raises ``ValueError`` when an input is invalid.
+    """
+    if num_nodes < 0:
+        raise ValueError("num_nodes must be non-negative.")
+    if n_neighbors <= 0:
+        raise ValueError("n_neighbors must be positive.")
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+    if edge_index.dtype not in {
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+        torch.uint8,
+    }:
+        raise ValueError("edge_index must use an integer dtype.")
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} does not match "
+            f"edge count {edge_index.shape[1]}"
+        )
+    if edge_index.numel() == 0:
+        return
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    if int(edge_index_cpu.min().item()) < 0:
+        raise ValueError("edge_index cannot contain negative node indices.")
+    if int(edge_index_cpu.max().item()) >= num_nodes:
+        raise ValueError("edge_index contains node indices outside num_nodes.")
 
 
 def build_umap_layout_pipeline(

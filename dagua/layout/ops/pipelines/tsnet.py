@@ -6,20 +6,179 @@ from typing import ClassVar, Optional, Tuple
 
 import torch
 
-from dagua.layout.classic.tsnet import (
-    _all_pairs_shortest_paths,
-    _build_undirected_adjacency,
-    _gradient_descent_step,
-    _high_dimensional_affinities,
-    _layout_device,
-    _layout_extent,
-    _normalize_positions,
-    _tsne_loss,
+from dagua.layout.ops.base import Op, Pipeline, Repeat  # noqa: E402
+from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig  # noqa: E402
+from dagua.layout.ops.graph_utils import (
+    all_pairs_shortest_paths as _all_pairs_shortest_paths,
 )
-from dagua.layout.ops.base import Op, Pipeline, Repeat
-from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.taxonomy import OpCategory
+from dagua.layout.ops.graph_utils import (
+    build_undirected_adjacency as _build_undirected_adjacency,
+)
+from dagua.layout.ops.graph_utils import (
+    layout_device as _layout_device,
+)
+from dagua.layout.ops.graph_utils import (
+    layout_extent as _layout_extent,
+)
+from dagua.layout.ops.graph_utils import (
+    normalize_positions as _normalize_positions,
+)
+from dagua.layout.ops.state import (  # noqa: E402
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
+from dagua.layout.ops.taxonomy import OpCategory  # noqa: E402
+
+_MIN_DISTANCE = 1.0e-12
+
+
+def _row_probabilities(distances: torch.Tensor, perplexity: float) -> torch.Tensor:
+    """Match one row's Gaussian bandwidth to a target perplexity.
+
+    Parameters
+    ----------
+    distances : torch.Tensor
+        Row of graph distances with shape ``[N]``.
+    perplexity : float
+        Target perplexity.
+
+    Returns
+    -------
+    torch.Tensor
+        Conditional probability row with shape ``[N]``.
+    """
+    num_nodes = int(distances.shape[0])
+    if num_nodes <= 1:
+        return torch.zeros_like(distances)
+
+    mask = torch.ones(num_nodes, dtype=torch.bool)
+    mask[int(torch.argmin(distances).item())] = False
+    squared = distances.square()
+
+    beta = torch.tensor(1.0, dtype=torch.float32)
+    beta_min = torch.tensor(float("-inf"), dtype=torch.float32)
+    beta_max = torch.tensor(float("inf"), dtype=torch.float32)
+    target_entropy = torch.log(torch.tensor(perplexity, dtype=torch.float32))
+
+    probabilities = torch.zeros_like(distances)
+    for _ in range(100):
+        weights = torch.exp(-squared * beta) * mask.to(dtype=torch.float32)
+        weights_sum = weights.sum().clamp(min=_MIN_DISTANCE)
+        probabilities = weights / weights_sum
+        entropy = -(probabilities[mask] * probabilities[mask].clamp(min=_MIN_DISTANCE).log()).sum()
+        error = entropy - target_entropy
+        if torch.abs(error) < 1.0e-5:
+            break
+        if error > 0:
+            beta_min = beta
+            beta = beta * 2.0 if torch.isinf(beta_max) else (beta + beta_max) * 0.5
+        else:
+            beta_max = beta
+            beta = beta * 0.5 if torch.isinf(beta_min) else (beta + beta_min) * 0.5
+
+    probabilities[int(torch.argmin(distances).item())] = 0.0
+    return probabilities
+
+
+def _high_dimensional_affinities(distance_matrix: torch.Tensor, perplexity: float) -> torch.Tensor:
+    """Build the symmetric t-SNE input affinity matrix.
+
+    Parameters
+    ----------
+    distance_matrix : torch.Tensor
+        Shortest-path matrix with shape ``[N, N]``.
+    perplexity : float
+        Target perplexity.
+
+    Returns
+    -------
+    torch.Tensor
+        Symmetric probability matrix ``P`` with shape ``[N, N]``.
+    """
+    rows = [
+        _row_probabilities(distance_matrix[node], perplexity)
+        for node in range(distance_matrix.shape[0])
+    ]
+    conditional = torch.stack(rows, dim=0)
+    symmetrized = (conditional + conditional.transpose(0, 1)) / (
+        2.0 * max(distance_matrix.shape[0], 1)
+    )
+    return symmetrized.clamp(min=_MIN_DISTANCE)
+
+
+def _tsne_loss(positions: torch.Tensor, probabilities: torch.Tensor) -> torch.Tensor:
+    """Evaluate the exact t-SNE KL objective.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current embedding with shape ``[N, 2]``.
+    probabilities : torch.Tensor
+        Symmetric input affinity matrix ``P``.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss value.
+    """
+    delta = positions.unsqueeze(1) - positions.unsqueeze(0)
+    squared_distances = delta.square().sum(dim=2)
+    numerators = (1.0 + squared_distances).reciprocal()
+    diagonal_mask = ~torch.eye(
+        positions.shape[0],
+        dtype=torch.bool,
+        device=positions.device,
+    )
+    numerators = numerators * diagonal_mask.to(dtype=numerators.dtype)
+    q = numerators / numerators.sum().clamp(min=_MIN_DISTANCE)
+    return (probabilities * (probabilities.log() - q.clamp(min=_MIN_DISTANCE).log())).sum()
+
+
+def _gradient_descent_step(
+    positions: torch.Tensor,
+    grad: torch.Tensor,
+    update: torch.Tensor,
+    gains: torch.Tensor,
+    learning_rate: float,
+    momentum: float,
+    min_gain: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Apply one exact t-SNE gains-plus-momentum update.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current embedding with shape ``[N, 2]``.
+    grad : torch.Tensor
+        Gradient tensor with shape ``[N, 2]``.
+    update : torch.Tensor
+        Velocity tensor with shape ``[N, 2]``.
+    gains : torch.Tensor
+        Per-parameter gain tensor with shape ``[N, 2]``.
+    learning_rate : float
+        Step size for the current optimization phase.
+    momentum : float
+        Momentum coefficient for the current optimization phase.
+    min_gain : float
+        Floor applied to every gain entry.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Updated ``(positions, update, gains)`` tensors.
+    """
+    inc = (update * grad) < 0.0
+    dec = ~inc
+    gains[inc] += 0.2
+    gains[dec] *= 0.8
+    gains.clamp_(min=min_gain)
+    grad = grad * gains
+
+    update = momentum * update - learning_rate * grad
+    positions.add_(update)
+    return positions, update, gains
 
 
 class _InitializeTsnetPositions(Op):
