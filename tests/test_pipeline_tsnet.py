@@ -10,6 +10,7 @@ import torch
 from dagua.layout.classic.tsnet import layout_tsnet
 from dagua.layout.ops.pipelines.tsnet import build_tsnet_pipeline, layout_tsnet_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.tsnet import TsnetPrepareState
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -144,6 +145,27 @@ def _run_pipeline_direct(
     final_state = build_tsnet_pipeline(steps=steps).apply(problem, state, ctx)
     assert final_state.pos is not None
     return final_state.pos
+
+
+def test_tsnet_prepare_state_populates_typed_distance_matrix() -> None:
+    """tsNET preprocessing should cache all-pairs distances on the typed field."""
+    problem = LayoutProblem(
+        edge_index=_path_edge_index(4),
+        num_nodes=4,
+        seed=42,
+    )
+    state = SolveState(extras={"tsnet_perplexity": 3.0})
+
+    prepared = TsnetPrepareState().apply(problem, state, RuntimeContext())
+
+    assert prepared.distance_matrix is not None
+    assert prepared.distance_matrix.tolist() == [
+        [0.0, 1.0, 2.0, 3.0],
+        [1.0, 0.0, 1.0, 2.0],
+        [2.0, 1.0, 0.0, 1.0],
+        [3.0, 2.0, 1.0, 0.0],
+    ]
+    assert "tsnet_probabilities" in prepared.extras
 
 
 class TestTsnetPipelineFidelity:

@@ -6,8 +6,8 @@ Three-part state model:
 - RuntimeContext: execution plan, memory policy, trace sinks
 
 Op base class, LossOp for differentiable losses, and composition
-patterns (Pipeline, Repeat, Conditional, LossGroup, EarlyBreak,
-MultilevelVCycle) for building layout workflows.
+patterns (Pipeline, Repeat, Conditional, LossGroup, EarlyBreak)
+for building layout workflows.
 
 OpCategory enum and registry for operation discovery.
 """
@@ -22,7 +22,6 @@ from dagua.layout.ops.base import (
     EarlyBreak,
     LossGroup,
     LossOp,
-    MultilevelVCycle,
     Op,
     Pipeline,
     Repeat,
@@ -175,7 +174,6 @@ __all__ = [
     "Conditional",
     "EarlyBreak",
     "LossGroup",
-    "MultilevelVCycle",
     "GEMApplyDisplacement",
     "GEMConvergenceCheck",
     "GEMComputeImpulse",
