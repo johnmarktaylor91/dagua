@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import ClassVar, Mapping, Optional, Protocol, Union, cast
+from typing import ClassVar, Mapping, Optional, Protocol, Tuple, Union, cast
 
 import torch
 
@@ -507,6 +507,257 @@ def _maybe_cut_long_edge(
         adjacency[worst_neighbor].pop(node, None)
 
 
+class DRLNodeUpdate:
+    """Update one node for a single DRL phase.
+
+    Parameters
+    ----------
+    phase_name : str
+        Name of the active DRL phase.
+    fine_density : bool
+        ``True`` for the final simmer phase, otherwise ``False``.
+    """
+
+    _phase_name: str
+    _fine_density: bool
+
+    def __init__(self, phase_name: str, fine_density: bool) -> None:
+        """Store per-node phase context for repeated updates.
+
+        Parameters
+        ----------
+        phase_name : str
+            Active phase label.
+        fine_density : bool
+            ``True`` when the phase uses fine-grained density.
+        """
+        self._phase_name = phase_name
+        self._fine_density = fine_density
+
+    def apply(
+        self,
+        node: int,
+        positions: torch.Tensor,
+        adjacency: list[dict[int, float]],
+        rng: random.Random,
+        attraction: float,
+        temperature: float,
+        damping_mult: float,
+        min_edges: float,
+        cut_end: float,
+        cut_off_length: float,
+        density_grid: _DensityGrid,
+    ) -> None:
+        """Apply the DRL best-candidate update for a single node in-place.
+
+        Parameters
+        ----------
+        node : int
+            Node index currently updated.
+        positions : torch.Tensor
+            Shared node coordinate tensor with shape ``[N, 2]``.
+        adjacency : list[dict[int, float]]
+            Mutable adjacency used for attraction and edge-cut updates.
+        rng : random.Random
+            Deterministic RNG used for node perturbation.
+        attraction : float
+            Current phase attraction weight.
+        temperature : float
+            Current phase temperature.
+        damping_mult : float
+            Current phase damping factor.
+        min_edges : float
+            Current minimum-edge threshold for candidate edge pruning.
+        cut_end : float
+            Final cut threshold scaled from graph-level edge-cut ratio.
+        cut_off_length : float
+            Current edge-cut score threshold.
+        density_grid : _DensityGrid
+            Shared density field proxy.
+
+        Notes
+        -----
+        This method intentionally mutates ``positions``, ``adjacency``, and
+        ``density_grid`` in place, matching the in-place behavior of classic DRL.
+        """
+        density_grid.remove_node(node=node)
+        current = positions[node].clone()
+        current_energy = _compute_energy(
+            node=node,
+            candidate=current,
+            positions=positions,
+            adjacency=adjacency,
+            attraction=attraction,
+            phase_name=self._phase_name,
+            density_grid=density_grid,
+            fine_density=self._fine_density,
+        )
+
+        centroid = _weighted_centroid(
+            node=node,
+            positions=positions,
+            adjacency=adjacency,
+        )
+        analytic = (positions[node] * (1.0 - damping_mult)) + (centroid * damping_mult)
+
+        if self._phase_name in {"expansion", "cooldown"} and cut_end > 0.0:
+            _maybe_cut_long_edge(
+                node=node,
+                positions=positions,
+                adjacency=adjacency,
+                min_edges=min_edges,
+                cut_off_length=cut_off_length,
+            )
+
+        jump_length = 0.01 * temperature
+        random_offset = torch.tensor(
+            [
+                rng.uniform(-0.5, 0.5) * jump_length,
+                rng.uniform(-0.5, 0.5) * jump_length,
+            ],
+            dtype=torch.float64,
+        )
+        perturbed = analytic + random_offset
+
+        analytic_energy = _compute_energy(
+            node=node,
+            candidate=analytic,
+            positions=positions,
+            adjacency=adjacency,
+            attraction=attraction,
+            phase_name=self._phase_name,
+            density_grid=density_grid,
+            fine_density=self._fine_density,
+        )
+        perturbed_energy = _compute_energy(
+            node=node,
+            candidate=perturbed,
+            positions=positions,
+            adjacency=adjacency,
+            attraction=attraction,
+            phase_name=self._phase_name,
+            density_grid=density_grid,
+            fine_density=self._fine_density,
+        )
+
+        if analytic_energy < current_energy:
+            current = analytic
+            current_energy = analytic_energy
+        if perturbed_energy < current_energy:
+            current = perturbed
+        positions[node] = current
+        density_grid.add_node(node=node, position=positions[node])
+
+
+class DRLPhaseStep:
+    """Run one DRL phase, one node update at a time.
+
+    Parameters
+    ----------
+    phase_name : str
+        Name of the phase to execute.
+    phase : _PhaseParameters
+        Phase parameter bundle controlling schedule and attraction settings.
+    """
+
+    _phase_name: str
+    _phase: _PhaseParameters
+
+    def __init__(self, phase_name: str, phase: _PhaseParameters) -> None:
+        """Store phase label and baseline parameters.
+
+        Parameters
+        ----------
+        phase_name : str
+            Active phase label.
+        phase : _PhaseParameters
+            Baseline phase parameters.
+        """
+        self._phase_name = phase_name
+        self._phase = phase
+
+    def apply(
+        self,
+        positions: torch.Tensor,
+        adjacency: list[dict[int, float]],
+        rng: random.Random,
+        density_grid: _DensityGrid,
+        cut_end: float,
+        cut_rate: float,
+        min_edges: float,
+        cut_off_length: float,
+    ) -> Tuple[float, float, float]:
+        """Execute one DRL phase and return updated edge-cut state.
+
+        Parameters
+        ----------
+        positions : torch.Tensor
+            Shared coordinates updated in place, shape ``[N, 2]``.
+        adjacency : list[dict[int, float]]
+            Mutable adjacency structure.
+        rng : random.Random
+            Deterministic RNG used by node perturbations.
+        density_grid : _DensityGrid
+            Shared density field proxy.
+        cut_end : float
+            Scaled cut threshold boundary used across all phases.
+        cut_rate : float
+            Per-iteration cooling rate for cut-off length.
+        min_edges : float
+            Current minimum-edge threshold.
+        cut_off_length : float
+            Current cut-off length at phase entry.
+
+        Returns
+        -------
+        tuple[float, float, float]
+            Updated ``(temperature, min_edges, cut_off_length)`` after this phase.
+        """
+        attraction = float(self._phase.attraction)
+        damping_mult = float(self._phase.damping_mult)
+        fine_density = self._phase_name == "simmer"
+        node_update = DRLNodeUpdate(phase_name=self._phase_name, fine_density=fine_density)
+        num_nodes = len(positions)
+
+        temperature = float(self._phase.temperature)
+        for _ in range(self._phase.iterations):
+            if self._phase_name == "expansion":
+                if attraction > 1.0:
+                    attraction = max(1.0, attraction - 0.05)
+                if min_edges > 12.0:
+                    min_edges = max(12.0, min_edges - 0.05)
+                if cut_end > 0.0:
+                    cut_off_length = max(cut_end, cut_off_length - cut_rate)
+                if damping_mult > 0.1:
+                    damping_mult = max(0.1, damping_mult - 0.005)
+            elif self._phase_name == "cooldown":
+                if temperature > 50.0:
+                    temperature = max(50.0, temperature - 10.0)
+                if cut_end > 0.0:
+                    cut_off_length = max(cut_end, cut_off_length - (2.0 * cut_rate))
+                if min_edges > 1.0:
+                    min_edges = max(1.0, min_edges - 0.2)
+            elif self._phase_name == "simmer" and temperature > 50.0:
+                temperature = max(50.0, temperature - 2.0)
+
+            for node in range(num_nodes):
+                node_update.apply(
+                    node=node,
+                    positions=positions,
+                    adjacency=adjacency,
+                    rng=rng,
+                    attraction=attraction,
+                    temperature=temperature,
+                    damping_mult=damping_mult,
+                    min_edges=min_edges,
+                    cut_end=cut_end,
+                    cut_off_length=cut_off_length,
+                    density_grid=density_grid,
+                )
+
+        return temperature, min_edges, cut_off_length
+
+
 @register_op
 class DRLPrepareState(Op):
     """Prepare DRL runtime options and precomputed adjacency."""
@@ -571,7 +822,16 @@ class DRLInitializePositions(Op):
 
 @register_op
 class DRLPhaseSolve(Op):
-    """Run all DRL phases and all node-level energy updates."""
+    """Run all DRL phases and all node-level energy updates.
+
+    The six phases intentionally run inside one coordinating op because DRL keeps
+    a single mutable density grid and prunable adjacency across all phases.  A
+    node update removes it from the density grid, samples candidates, then re-adds
+    it. This state is consumed immediately by the next node in the same phase, and
+    removed edges persist into later phases for exact edge-cut behavior. Any
+    decomposition that snapshots these structures between node updates or phases
+    would alter the optimization trajectory and break bit-identical output.
+    """
 
     name: ClassVar[str] = "drl_phase_solve"
     category: ClassVar[OpCategory] = OpCategory.FORCE
@@ -620,102 +880,17 @@ class DRLPhaseSolve(Op):
         ]
 
         for phase_name, phase in phase_specs:
-            temperature = phase.temperature
-            attraction = phase.attraction
-            damping_mult = phase.damping_mult
-            fine_density = phase_name == "simmer"
-
-            for _ in range(phase.iterations):
-                if phase_name == "expansion":
-                    if attraction > 1.0:
-                        attraction = max(1.0, attraction - 0.05)
-                    if min_edges > 12.0:
-                        min_edges = max(12.0, min_edges - 0.05)
-                    if cut_end > 0.0:
-                        cut_off_length = max(cut_end, cut_off_length - cut_rate)
-                    if damping_mult > 0.1:
-                        damping_mult = max(0.1, damping_mult - 0.005)
-                elif phase_name == "cooldown":
-                    if temperature > 50.0:
-                        temperature = max(50.0, temperature - 10.0)
-                    if cut_end > 0.0:
-                        cut_off_length = max(cut_end, cut_off_length - (2.0 * cut_rate))
-                    if min_edges > 1.0:
-                        min_edges = max(1.0, min_edges - 0.2)
-                elif phase_name == "simmer" and temperature > 50.0:
-                    temperature = max(50.0, temperature - 2.0)
-
-                for node in range(num_nodes):
-                    density_grid.remove_node(node=node)
-                    current = positions[node].clone()
-                    current_energy = _compute_energy(
-                        node=node,
-                        candidate=current,
-                        positions=positions,
-                        adjacency=adjacency,
-                        attraction=attraction,
-                        phase_name=phase_name,
-                        density_grid=density_grid,
-                        fine_density=fine_density,
-                    )
-
-                    centroid = _weighted_centroid(
-                        node=node,
-                        positions=positions,
-                        adjacency=adjacency,
-                    )
-                    analytic = (positions[node] * (1.0 - damping_mult)) + (centroid * damping_mult)
-
-                    if phase_name in {"expansion", "cooldown"} and cut_end > 0.0:
-                        _maybe_cut_long_edge(
-                            node=node,
-                            positions=positions,
-                            adjacency=adjacency,
-                            min_edges=min_edges,
-                            cut_off_length=cut_off_length,
-                        )
-
-                    jump_length = 0.01 * temperature
-                    random_offset = torch.tensor(
-                        [
-                            rng.uniform(-0.5, 0.5) * jump_length,
-                            rng.uniform(-0.5, 0.5) * jump_length,
-                        ],
-                        dtype=torch.float64,
-                    )
-                    perturbed = analytic + random_offset
-
-                    analytic_energy = _compute_energy(
-                        node=node,
-                        candidate=analytic,
-                        positions=positions,
-                        adjacency=adjacency,
-                        attraction=attraction,
-                        phase_name=phase_name,
-                        density_grid=density_grid,
-                        fine_density=fine_density,
-                    )
-                    perturbed_energy = _compute_energy(
-                        node=node,
-                        candidate=perturbed,
-                        positions=positions,
-                        adjacency=adjacency,
-                        attraction=attraction,
-                        phase_name=phase_name,
-                        density_grid=density_grid,
-                        fine_density=fine_density,
-                    )
-
-                    best_position = current
-                    best_energy = current_energy
-                    if analytic_energy < best_energy:
-                        best_position = analytic
-                        best_energy = analytic_energy
-                    if perturbed_energy < best_energy:
-                        best_position = perturbed
-
-                    positions[node] = best_position
-                    density_grid.add_node(node=node, position=positions[node])
+            phase_step = DRLPhaseStep(phase_name=phase_name, phase=phase)
+            _, min_edges, cut_off_length = phase_step.apply(
+                positions=positions,
+                adjacency=adjacency,
+                rng=rng,
+                density_grid=density_grid,
+                cut_end=cut_end,
+                cut_rate=cut_rate,
+                min_edges=min_edges,
+                cut_off_length=cut_off_length,
+            )
 
         state.pos = positions
         return state
