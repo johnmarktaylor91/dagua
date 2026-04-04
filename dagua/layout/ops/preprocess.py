@@ -10,7 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+import numpy as np
 import torch
+from scipy import sparse
 
 from dagua.layout.cycle import detect_back_edges, make_acyclic, make_acyclic_robust
 from dagua.layout.graph_classify import classify_graph as _classify_graph_reference
@@ -22,6 +24,7 @@ _ACYCLIC_EDGE_KEY = "preprocess_edge_index"
 _ADJ_FORMAT_KEY = "adjacency_format"
 _ADJ_DIRECTED_KEY = "adjacency_directed"
 _ADJ_WEIGHTED_KEY = "adjacency_weighted"
+_SYMMETRIC_FLAG_KEY = "spectral_is_symmetric"
 
 AdjacencyList = List[List[Tuple[int, float]]]
 CSRAdjacency = Dict[str, torch.Tensor]
@@ -254,6 +257,58 @@ def _aggregate_neighbor_weights(
     if dedup == "sum":
         return [float(sum(values))]
     raise ValueError(f"Unsupported dedup mode: {dedup!r}.")
+
+
+def _build_fr_adjacency_matrix(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Build the directed, dense adjacency matrix used by FR force ops.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Dense adjacency matrix with shape ``[N, N]`` and dtype ``float64``.
+
+    Raises
+    ------
+    ValueError
+        If ``edge_index`` is malformed or contains out-of-range indices.
+    """
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+
+    adjacency = torch.zeros((num_nodes, num_nodes), dtype=torch.float64)
+    if edge_index.numel() == 0:
+        return adjacency
+
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    sources = edge_index_cpu[0]
+    targets = edge_index_cpu[1]
+    if (
+        torch.any(sources < 0)
+        or torch.any(sources >= num_nodes)
+        or torch.any(targets < 0)
+        or torch.any(targets >= num_nodes)
+    ):
+        raise ValueError("edge_index contains a node index outside [0, num_nodes).")
+
+    if edge_weights is not None:
+        weights = edge_weights.detach().to(device="cpu", dtype=torch.float64)
+        adjacency[sources, targets] = weights
+    else:
+        adjacency[sources, targets] = 1.0
+    return adjacency
 
 
 def _append_edge(
@@ -773,6 +828,324 @@ class BuildAdjacency(Op):
         state.extras[_ADJ_FORMAT_KEY] = self.config.format
         state.extras[_ADJ_DIRECTED_KEY] = self.config.directed
         state.extras[_ADJ_WEIGHTED_KEY] = self.config.weighted
+        return state
+
+
+def _build_spectral_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> sparse.csr_matrix:
+    """Build a directed sparse adjacency matrix used by spectral layout.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Sparse weighted adjacency matrix with shape ``[N, N]``.
+
+    Raises
+    ------
+    ValueError
+        If ``edge_index`` has an invalid shape or out-of-range endpoints.
+    """
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+
+    if edge_index.numel() == 0:
+        return sparse.csr_matrix((num_nodes, num_nodes), dtype=np.float64)
+
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    rows = edge_index_cpu[0].numpy()
+    cols = edge_index_cpu[1].numpy()
+    if (
+        np.any(rows < 0)
+        or np.any(rows >= num_nodes)
+        or np.any(cols < 0)
+        or np.any(cols >= num_nodes)
+    ):
+        raise ValueError("edge_index contains a node index outside [0, num_nodes).")
+
+    if edge_weights is not None:
+        data = edge_weights.detach().to(device="cpu").numpy().astype(np.float64)
+    else:
+        data = np.ones(rows.shape[0], dtype=np.float64)
+
+    return sparse.csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes), dtype=np.float64)
+
+
+def _symmetrize_spectral_adjacency(adjacency: sparse.csr_matrix) -> sparse.csr_matrix:
+    """Return symmetric adjacency by mirroring directed entries when needed."""
+    difference = adjacency - adjacency.T
+    if difference.nnz == 0:
+        return adjacency
+    return (adjacency + adjacency.T).tocsr()
+
+
+def _spectral_laplacian(
+    adjacency: sparse.csr_matrix,
+    normalization: str,
+) -> tuple[sparse.csr_matrix, bool]:
+    """Build the requested graph Laplacian.
+
+    Parameters
+    ----------
+    adjacency : scipy.sparse.csr_matrix
+        Symmetric adjacency matrix with shape ``[N, N]``.
+    normalization : str
+        One of ``"symmetric"``, ``"random_walk"``, or ``"unnormalized"``.
+
+    Returns
+    -------
+    tuple[scipy.sparse.csr_matrix, bool]
+        Laplacian matrix and whether it is symmetric.
+    """
+    degrees = np.asarray(adjacency.sum(axis=1)).reshape(-1).astype(np.float64, copy=False)
+    degree_matrix = sparse.diags(degrees, offsets=0, format="csr")
+
+    if normalization == "unnormalized":
+        return (degree_matrix - adjacency).tocsr(), True
+    if normalization == "symmetric":
+        inv_sqrt = np.zeros_like(degrees)
+        nonzero_mask = degrees > 0.0
+        inv_sqrt[nonzero_mask] = 1.0 / np.sqrt(degrees[nonzero_mask])
+        normalized = sparse.diags(inv_sqrt, offsets=0, format="csr")
+        identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
+        return (identity - (normalized @ adjacency @ normalized)).tocsr(), True
+    if normalization == "random_walk":
+        inv_degree = np.zeros_like(degrees)
+        nonzero_mask = degrees > 0.0
+        inv_degree[nonzero_mask] = 1.0 / degrees[nonzero_mask]
+        normalized = sparse.diags(inv_degree, offsets=0, format="csr")
+        identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
+        return (identity - (normalized @ adjacency)).tocsr(), False
+    raise ValueError("normalization must be one of 'symmetric', 'random_walk', or 'unnormalized'.")
+
+
+@register_op
+class SpectralPrepareState(Op):
+    """Build the state required by spectral eigenpair ops."""
+
+    name = "spectral_prepare_state"
+    category = OpCategory.PREPROCESS
+    reads = ()
+    writes = ("pos", "laplacian", "extras")
+
+    def __init__(self, normalization: str) -> None:
+        """Store the spectral normalization mode.
+
+        Parameters
+        ----------
+        normalization : str
+            One of ``"symmetric"``, ``"random_walk"``, or ``"unnormalized"``.
+        """
+        self.normalization = normalization
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Build a cached Laplacian and mark symmetric eigensolve mode.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution context. Unused.
+
+        Returns
+        -------
+        SolveState
+            The updated state.
+        """
+        _ = ctx
+        if problem.num_nodes == 0:
+            state.pos = torch.empty((0, 2), dtype=torch.float32)
+            return state
+        if problem.num_nodes == 1:
+            state.pos = torch.zeros((1, 2), dtype=torch.float32)
+            return state
+
+        adjacency = _build_spectral_adjacency(
+            edge_index=problem.edge_index,
+            num_nodes=problem.num_nodes,
+            edge_weights=problem.edge_weights,
+        )
+        laplacian, is_symmetric = _spectral_laplacian(
+            adjacency=_symmetrize_spectral_adjacency(adjacency),
+            normalization=self.normalization,
+        )
+        state.laplacian = laplacian
+        state.extras[_SYMMETRIC_FLAG_KEY] = is_symmetric
+        return state
+
+
+@register_op
+class FRPrepareAdjacency(Op):
+    """Build a dense FR adjacency matrix and default force metadata."""
+
+    name = "fr_prepare_adjacency"
+    category = OpCategory.PREPROCESS
+    reads: tuple[str, ...] = ()
+    writes: tuple[str, ...] = ("extras",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Set ``state.extras`` entries required by FR force ops.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable state receiving FR cache values.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused for deterministic prep.
+
+        Returns
+        -------
+        SolveState
+            State with ``fr_adjacency`` and ``force_area`` populated.
+        """
+        _ = ctx
+        if problem.num_nodes == 0:
+            state.extras["fr_adjacency"] = torch.zeros((0, 0), dtype=torch.float64)
+        else:
+            state.extras["fr_adjacency"] = _build_fr_adjacency_matrix(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+                edge_weights=problem.edge_weights,
+            )
+        state.extras["force_area"] = 1.0
+        return state
+
+
+@dataclass(frozen=True)
+class FA2PrepareStateConfig:
+    """Configuration for :class:`FA2PrepareState`.
+
+    Parameters
+    ----------
+    outbound_attraction_distribution : bool, default=True
+        Whether FA2 should divide attraction by the source-node mass and apply
+        the matching mean-mass compensation.
+    """
+
+    outbound_attraction_distribution: bool = True
+
+
+@register_op
+class FA2PrepareState(Op):
+    """Build the cached undirected graph state required by FA2 iterations."""
+
+    name = "fa2_prepare_state"
+    category = OpCategory.PREPROCESS
+    reads = ()
+    writes = ("degree", "old_forces", "extras")
+
+    def __init__(self, config: Optional[FA2PrepareStateConfig] = None) -> None:
+        """Store the FA2 preprocessing configuration.
+
+        Parameters
+        ----------
+        config : FA2PrepareStateConfig, optional
+            FA2 preprocessing settings.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or FA2PrepareStateConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Populate FA2 adjacency, degree, mass, and speed-control caches.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable state receiving FA2 caches.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused for deterministic preprocessing.
+
+        Returns
+        -------
+        SolveState
+            State with FA2 extras populated.
+        """
+        _ = ctx
+
+        device = problem.edge_index.device
+        if problem.edge_index.numel() == 0:
+            undirected_edges = torch.empty((2, 0), dtype=torch.long, device=device)
+            undirected_weights = None
+        else:
+            source = problem.edge_index[0].to(dtype=torch.long)
+            target = problem.edge_index[1].to(dtype=torch.long)
+            non_self = source != target
+            if bool(non_self.any().item()):
+                source = source[non_self]
+                target = target[non_self]
+                lower = torch.minimum(source, target)
+                upper = torch.maximum(source, target)
+                pairs = torch.stack([lower, upper], dim=1)
+                unique_pairs, inverse = torch.unique(pairs, dim=0, return_inverse=True)
+                undirected_edges = unique_pairs.transpose(0, 1).contiguous()
+                if problem.edge_weights is None:
+                    undirected_weights = None
+                else:
+                    weights = problem.edge_weights[non_self].to(dtype=torch.float32, device=device)
+                    undirected_weights = torch.zeros(
+                        unique_pairs.shape[0],
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    undirected_weights.scatter_add_(0, inverse, weights)
+            else:
+                undirected_edges = torch.empty((2, 0), dtype=torch.long, device=device)
+                undirected_weights = None
+
+        degree = torch.zeros(problem.num_nodes, dtype=torch.float32, device=device)
+        if undirected_edges.numel() > 0:
+            ones = torch.ones(undirected_edges.shape[1], dtype=torch.float32, device=device)
+            degree.scatter_add_(0, undirected_edges[0], ones)
+            degree.scatter_add_(0, undirected_edges[1], ones)
+
+        mass = degree + 1.0
+        state.degree = degree
+        state.old_forces = torch.zeros((problem.num_nodes, 2), dtype=torch.float32, device=device)
+        state.extras["fa2_undirected_edges"] = undirected_edges
+        state.extras["fa2_undirected_weights"] = undirected_weights
+        state.extras["fa2_mass"] = mass
+        state.extras["fa2_outbound_att_compensation"] = (
+            float(mass.mean().item()) if self.config.outbound_attraction_distribution else 1.0
+        )
+        state.extras["fa2_speed"] = 1.0
+        state.extras["fa2_speed_efficiency"] = 1.0
         return state
 
 

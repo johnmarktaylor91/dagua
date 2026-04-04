@@ -14,9 +14,15 @@ from dagua.layout.ops.graph_utils import (
 )
 from dagua.layout.ops.graph_utils import bfs_distances as _reference_bfs_distances
 from dagua.layout.ops.graph_utils import (
+    build_directed_adjacency as _reference_build_directed_adjacency,
+)
+from dagua.layout.ops.graph_utils import (
     dijkstra_distances as _reference_dijkstra_distances,
 )
 from dagua.layout.ops.graph_utils import is_connected as _reference_is_connected
+from dagua.layout.ops.graph_utils import (
+    shortest_path_distances as _reference_shortest_path_distances,
+)
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
@@ -592,6 +598,160 @@ class AllPairsShortestPaths(Op):
         raw = _reference_all_pairs_shortest_paths(adjacency, weighted=weighted)
         filled = _fill_all_pairs_unreachable(raw, mode=self.config.unreachable_fill)
         state.distance_matrix = _to_torch(filled)
+        return state
+
+
+@dataclass(frozen=True)
+class KamadaKawaiAllPairsShortestPathsConfig:
+    """Configuration for :class:`KamadaKawaiAllPairsShortestPaths`.
+
+    Parameters
+    ----------
+    weighted : bool, optional
+        Optional override for weighted shortest-path computation. When ``None``,
+        the operation follows ``problem.edge_weights is not None``.
+    unreachable : float, default=1e6
+        Replacement value for unreachable node pairs.
+    """
+
+    weighted: Optional[bool] = None
+    unreachable: float = 1.0e6
+
+
+@register_op
+class KamadaKawaiAllPairsShortestPaths(Op):
+    """Compute directed shortest paths with KK-compatible unreachable fills."""
+
+    name = "kamada_kawai_all_pairs_shortest_paths"
+    category = OpCategory.DISTANCE
+    reads = ()
+    writes = ("distance_matrix",)
+    requires = ()
+
+    def __init__(self, config: Optional[KamadaKawaiAllPairsShortestPathsConfig] = None) -> None:
+        """Store the frozen configuration for KK distance computation.
+
+        Parameters
+        ----------
+        config : KamadaKawaiAllPairsShortestPathsConfig | None, optional
+            Optional KK distance configuration.
+        """
+        self.config = config or KamadaKawaiAllPairsShortestPathsConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compute all-pairs directed shortest paths for KK.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Runtime context. Unused.
+
+        Returns
+        -------
+        SolveState
+            State with ``distance_matrix`` populated in float64.
+        """
+        del ctx
+
+        num_nodes = int(problem.num_nodes)
+        if num_nodes == 0:
+            state.distance_matrix = torch.empty((0, 0), dtype=torch.float64)
+            return state
+
+        weighted = (
+            problem.edge_weights is not None
+            if self.config.weighted is None
+            else bool(self.config.weighted)
+        )
+        adjacency = _reference_build_directed_adjacency(
+            edge_index=problem.edge_index,
+            num_nodes=num_nodes,
+            edge_weights=problem.edge_weights if weighted else None,
+        )
+
+        distances = np.full(
+            (num_nodes, num_nodes), float(self.config.unreachable), dtype=np.float64
+        )
+        for source in range(num_nodes):
+            if weighted:
+                source_distances = _reference_dijkstra_distances(adjacency, source)
+                source_distances[np.isinf(source_distances)] = float(self.config.unreachable)
+                distances[source] = source_distances
+                continue
+
+            source_distances = _reference_bfs_distances(adjacency, source).astype(np.float64)
+            source_distances[source_distances < 0] = float(self.config.unreachable)
+            distances[source] = source_distances
+
+        state.distance_matrix = torch.from_numpy(distances)
+        return state
+
+
+@dataclass(frozen=True)
+class ClassicalMDSDistanceMatrixConfig:
+    """Configuration for :class:`ClassicalMDSDistanceMatrix`."""
+
+
+@register_op
+class ClassicalMDSDistanceMatrix(Op):
+    """Compute the exact graph distance matrix for classical MDS."""
+
+    name = "classical_mds_distance_matrix"
+    category = OpCategory.DISTANCE
+    reads = ()
+    writes = ("distance_matrix",)
+    requires = ()
+
+    def __init__(self, config: Optional[ClassicalMDSDistanceMatrixConfig] = None) -> None:
+        """Store optional configuration for distance calculation.
+
+        Parameters
+        ----------
+        config : ClassicalMDSDistanceMatrixConfig | None, optional
+            Currently unused placeholder config for future extensions.
+        """
+        self.config = config or ClassicalMDSDistanceMatrixConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compute and store the APSP matrix for classical MDS.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable problem definition.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Runtime context. Unused.
+
+        Returns
+        -------
+        SolveState
+            State with ``distance_matrix`` on CPU, float64.
+        """
+        del self
+        del ctx
+
+        distances = _reference_shortest_path_distances(
+            edge_index=problem.edge_index,
+            num_nodes=problem.num_nodes,
+            edge_weights=problem.edge_weights,
+        )
+        state.distance_matrix = torch.from_numpy(distances)
         return state
 
 
