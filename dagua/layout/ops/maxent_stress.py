@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, Tuple
 
 import numpy as np
@@ -330,10 +330,47 @@ class MaxentPrepareState(Op):
         return state
 
 
+@dataclass(frozen=True)
+class MaxentInitializeOptimizerConfig:
+    """Configuration for :class:`MaxentInitializeOptimizer`.
+
+    Parameters
+    ----------
+    lr_cap : float, default=0.04
+        Upper bound on the initial Adam learning rate.
+    lr_numerator : float, default=0.8
+        Numerator for the ``lr_numerator / num_nodes`` learning rate formula.
+    lr_final_ratio : float, default=0.1
+        Floor multiplier for the final learning rate relative to the initial.
+    """
+
+    lr_cap: float = 0.04
+    lr_numerator: float = 0.8
+    lr_final_ratio: float = 0.1
+
+
+@dataclass(frozen=True)
+class MaxentGradientStepConfig:
+    """Configuration for :class:`MaxentGradientStep`.
+
+    Parameters
+    ----------
+    min_batch_size : int, default=16
+        Floor for the random-pair batch size in the gradient term.
+    batch_multiplier : int, default=3
+        Multiplier applied to remaining-pair count when sizing batches.
+    """
+
+    min_batch_size: int = 16
+    batch_multiplier: int = 3
+
+
 @register_op
 @dataclass(frozen=True)
 class MaxentInitializeOptimizer(Op):
     """Create the Adam optimizer for the gradient branch."""
+
+    config: MaxentInitializeOptimizerConfig = field(default_factory=MaxentInitializeOptimizerConfig)
 
     name: ClassVar[str] = "maxent_initialize_optimizer"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
@@ -367,9 +404,12 @@ class MaxentInitializeOptimizer(Op):
 
         assert state.pos is not None
         state.pos = state.pos.requires_grad_(True)
-        initial_lr = min(0.04, 0.8 / float(max(problem.num_nodes, 1)))
+        initial_lr = min(
+            self.config.lr_cap,
+            self.config.lr_numerator / float(max(problem.num_nodes, 1)),
+        )
         final_lr = max(
-            initial_lr * 0.1,
+            initial_lr * self.config.lr_final_ratio,
             initial_lr / math.sqrt(float(max(state.total_steps, 1))),
         )
         state.optimizer = torch.optim.Adam([state.pos], lr=initial_lr)
@@ -385,6 +425,7 @@ class MaxentGradientStep(Op):
 
     alpha: float = 1.0
     use_entropy: bool = False
+    config: MaxentGradientStepConfig = field(default_factory=MaxentGradientStepConfig)
     name: ClassVar[str] = "maxent_gradient_step"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
     reads: ClassVar[Tuple[str, ...]] = ("pos", "adjacency_weighted", "extras")
@@ -506,7 +547,9 @@ class MaxentGradientStep(Op):
                     )
                     while total_non_edges_sample < sample_size:
                         remaining = sample_size - total_non_edges_sample
-                        batch_size = max(remaining * 3, 16)
+                        batch_size = max(
+                            remaining * self.config.batch_multiplier, self.config.min_batch_size
+                        )
                         candidate_sources = torch.randint(
                             0,
                             num_nodes,

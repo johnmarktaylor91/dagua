@@ -37,6 +37,11 @@ def _gem_update_temperatures(
     previous_impulse: torch.Tensor,
     skew_gauge: torch.Tensor,
     initial_temperature: float,
+    min_distance: float,
+    rotation_sine_threshold: float,
+    oscillation_cosine_threshold: float,
+    rotation_sensitivity: float,
+    oscillation_sensitivity: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Adjust per-node temperatures with OGDF's oscillation and skew rules.
 
@@ -52,6 +57,16 @@ def _gem_update_temperatures(
         Per-node rotation accumulator with shape ``[N]``.
     initial_temperature : float
         Maximum allowed per-node temperature.
+    min_distance : float
+        Safety floor applied to impulse-norm products.
+    rotation_sine_threshold : float
+        Sine threshold that triggers skew-gauge growth.
+    oscillation_cosine_threshold : float
+        Cosine threshold that triggers oscillation cooling.
+    rotation_sensitivity : float
+        Increment added to the skew gauge after a rotation event.
+    oscillation_sensitivity : float
+        Multiplier applied to temperature after an oscillation event.
 
     Returns
     -------
@@ -61,12 +76,12 @@ def _gem_update_temperatures(
     current_norm = torch.linalg.norm(current_impulse, dim=1)
     previous_norm = torch.linalg.norm(previous_impulse, dim=1)
     product = current_norm * previous_norm
-    valid = product > _MIN_DISTANCE
+    valid = product > min_distance
 
     if not bool(valid.any()):
         return temperatures, skew_gauge
 
-    safe_product = product.clamp(min=_MIN_DISTANCE)
+    safe_product = product.clamp(min=min_distance)
     sin_beta = (
         current_impulse[:, 0] * previous_impulse[:, 0]
         - current_impulse[:, 1] * previous_impulse[:, 1]
@@ -76,11 +91,11 @@ def _gem_update_temperatures(
         + current_impulse[:, 1] * previous_impulse[:, 1]
     ) / safe_product
 
-    rotation_mask = valid & (sin_beta > _ROTATION_SINE_THRESHOLD)
-    skew_gauge = torch.where(rotation_mask, skew_gauge + _ROTATION_SENSITIVITY, skew_gauge)
+    rotation_mask = valid & (sin_beta > rotation_sine_threshold)
+    skew_gauge = torch.where(rotation_mask, skew_gauge + rotation_sensitivity, skew_gauge)
 
-    oscillation_mask = valid & (cos_beta.abs() > _OSCILLATION_COSINE_THRESHOLD)
-    oscillation_scale = 1.0 + cos_beta * _OSCILLATION_SENSITIVITY
+    oscillation_mask = valid & (cos_beta.abs() > oscillation_cosine_threshold)
+    oscillation_scale = 1.0 + cos_beta * oscillation_sensitivity
     temperatures = torch.where(oscillation_mask, temperatures * oscillation_scale, temperatures)
     temperatures = temperatures * (1.0 - skew_gauge.abs())
     temperatures = torch.minimum(temperatures, torch.full_like(temperatures, initial_temperature))
@@ -287,7 +302,11 @@ def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
         group["lr"] = lr
 
 
-def _default_lr_decay_end_lr(start_lr: float, total_steps: int) -> float:
+def _default_lr_decay_end_lr(
+    start_lr: float,
+    total_steps: int,
+    end_lr_multiplier: float,
+) -> float:
     """Compute the LinLog-style default final learning rate.
 
     Parameters
@@ -296,13 +315,18 @@ def _default_lr_decay_end_lr(start_lr: float, total_steps: int) -> float:
         Initial learning rate.
     total_steps : int
         Planned optimization horizon.
+    end_lr_multiplier : float
+        Fraction of ``start_lr`` used by the linear fallback endpoint.
 
     Returns
     -------
     float
         Default final learning rate.
     """
-    return max(start_lr * 0.1, start_lr / math.sqrt(float(max(total_steps, 1))))
+    return max(
+        start_lr * end_lr_multiplier,
+        start_lr / math.sqrt(float(max(total_steps, 1))),
+    )
 
 
 def _state_device(problem: LayoutProblem, state: SolveState) -> torch.device:
@@ -352,8 +376,13 @@ class LinearCool(Op):
 
     name: ClassVar[str] = "linear_cool"
     category: ClassVar[OpCategory] = OpCategory.ANNEAL
-    reads: ClassVar[Tuple[str, ...]] = ("temperature", "step", "total_steps")
-    writes: ClassVar[Tuple[str, ...]] = ("temperature",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        "temperature",
+        "step",
+        "total_steps",
+        f"extras.{_LINEAR_COOL_INITIAL_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = ("temperature", f"extras.{_LINEAR_COOL_INITIAL_KEY}")
     requires: ClassVar[Tuple[str, ...]] = ("temperature",)
 
     def apply(
@@ -529,10 +558,13 @@ class AdaptiveCoolConfig:
         Multiplicative factor used when the force norm decreases materially.
     down_factor : float, default=0.9
         Multiplicative factor used when the force norm does not improve.
+    improvement_threshold : float, default=0.95
+        Force-norm ratio below which the up-factor is applied.
     """
 
     up_factor: float = 1.1
     down_factor: float = 0.9
+    improvement_threshold: float = 0.95
 
 
 @register_op
@@ -544,8 +576,16 @@ class AdaptiveCool(Op):
 
     name: ClassVar[str] = "adaptive_cool"
     category: ClassVar[OpCategory] = OpCategory.ANNEAL
-    reads: ClassVar[Tuple[str, ...]] = ("forces", "old_forces", "temperature")
-    writes: ClassVar[Tuple[str, ...]] = ("temperature",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        "forces",
+        "old_forces",
+        "temperature",
+        f"extras.{_ADAPTIVE_COOL_PREV_FORCE_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        "temperature",
+        f"extras.{_ADAPTIVE_COOL_PREV_FORCE_KEY}",
+    )
     requires: ClassVar[Tuple[str, ...]] = ("temperature",)
 
     def apply(
@@ -587,7 +627,9 @@ class AdaptiveCool(Op):
         if math.isfinite(float(previous_force_norm)):
             if current_force_norm >= float(previous_force_norm):
                 temperature = temperature * self.config.down_factor
-            elif current_force_norm <= 0.95 * float(previous_force_norm):
+            elif current_force_norm <= self.config.improvement_threshold * float(
+                previous_force_norm
+            ):
                 temperature = temperature * self.config.up_factor
 
         state.temperature = temperature
@@ -605,10 +647,25 @@ class PerNodeTemperatureConfig:
         Initial local temperature for newly initialized nodes.
     min_temp : float, default=0.005
         Lower bound applied after each update.
+    min_distance : float, default=1e-9
+        Safety floor applied to impulse-norm products.
+    rotation_sine_threshold : float, default=sin(pi/2 + pi/6)
+        Sine threshold that grows the skew gauge.
+    oscillation_cosine_threshold : float, default=cos(pi/4)
+        Cosine threshold that triggers oscillation cooling.
+    rotation_sensitivity : float, default=0.01
+        Increment added to the skew gauge after a rotation event.
+    oscillation_sensitivity : float, default=0.3
+        Multiplier applied to temperature after an oscillation event.
     """
 
     init_temp: float = 12.0
     min_temp: float = 0.005
+    min_distance: float = _MIN_DISTANCE
+    rotation_sine_threshold: float = _ROTATION_SINE_THRESHOLD
+    oscillation_cosine_threshold: float = _OSCILLATION_COSINE_THRESHOLD
+    rotation_sensitivity: float = _ROTATION_SENSITIVITY
+    oscillation_sensitivity: float = _OSCILLATION_SENSITIVITY
 
 
 @register_op
@@ -620,8 +677,19 @@ class PerNodeTemperature(Op):
 
     name: ClassVar[str] = "per_node_temperature"
     category: ClassVar[OpCategory] = OpCategory.ANNEAL
-    reads: ClassVar[Tuple[str, ...]] = ("forces", "old_forces")
-    writes: ClassVar[Tuple[str, ...]] = ()
+    reads: ClassVar[Tuple[str, ...]] = (
+        "forces",
+        "old_forces",
+        "pos",
+        "extras.local_temperatures",
+        f"extras.{_PER_NODE_SKEW_KEY}",
+        f"extras.{_PER_NODE_PREV_IMPULSE_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        "extras.local_temperatures",
+        f"extras.{_PER_NODE_SKEW_KEY}",
+        f"extras.{_PER_NODE_PREV_IMPULSE_KEY}",
+    )
     requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
@@ -705,6 +773,11 @@ class PerNodeTemperature(Op):
             previous_impulse=previous_impulse,
             skew_gauge=skew,
             initial_temperature=float(self.config.init_temp),
+            min_distance=float(self.config.min_distance),
+            rotation_sine_threshold=float(self.config.rotation_sine_threshold),
+            oscillation_cosine_threshold=float(self.config.oscillation_cosine_threshold),
+            rotation_sensitivity=float(self.config.rotation_sensitivity),
+            oscillation_sensitivity=float(self.config.oscillation_sensitivity),
         )
         updated = updated.clamp(min=float(self.config.min_temp))
 
@@ -762,7 +835,7 @@ class PhaseSchedule(Op):
     name: ClassVar[str] = "phase_schedule"
     category: ClassVar[OpCategory] = OpCategory.ANNEAL
     reads: ClassVar[Tuple[str, ...]] = ("step",)
-    writes: ClassVar[Tuple[str, ...]] = ("temperature",)
+    writes: ClassVar[Tuple[str, ...]] = ("temperature", f"extras.{_PHASE_STATE_KEY}")
     requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
@@ -799,6 +872,8 @@ class PhaseSchedule(Op):
         phase_start = cumulative
         for index, phase in enumerate(self.config.phases):
             next_cumulative = cumulative + max(int(phase.iterations), 0)
+            # Clamp negative iteration counts to zero so malformed phase specs
+            # still preserve the legacy "fall through to the last phase" behavior.
             if step_index < next_cumulative or index == len(self.config.phases) - 1:
                 phase_index = index
                 active_phase = phase
@@ -842,7 +917,7 @@ class SmoothStepsSchedule(Op):
     name: ClassVar[str] = "smooth_steps_schedule"
     category: ClassVar[OpCategory] = OpCategory.ANNEAL
     reads: ClassVar[Tuple[str, ...]] = ("step",)
-    writes: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ("extras.criterion_weights",)
     requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
@@ -883,13 +958,19 @@ class SmoothStepsSchedule(Op):
 
 @register_op
 class WeightAnnealing(Op):
-    """Refresh ``annealing.current_weights`` from the active schedule functions."""
+    """Refresh ``annealing.current_weights`` from the active schedule functions.
 
-    name = "weight_annealing"
-    category = OpCategory.ANNEAL
-    reads = ("annealing", "step", "total_steps")
-    writes = ()
-    requires = ("annealing",)
+    Notes
+    -----
+    The op accepts both ``annealing.schedule_fns`` and the older
+    ``annealing.weight_fns`` attribute for backward compatibility.
+    """
+
+    name: ClassVar[str] = "weight_annealing"
+    category: ClassVar[OpCategory] = OpCategory.ANNEAL
+    reads: ClassVar[Tuple[str, ...]] = ("annealing", "step", "total_steps")
+    writes: ClassVar[Tuple[str, ...]] = ("annealing",)
+    requires: ClassVar[Tuple[str, ...]] = ("annealing",)
 
     def apply(
         self,
@@ -938,11 +1019,14 @@ class LRDecayConfig:
         Initial learning rate. When ``None``, use the optimizer's first-seen LR.
     end_lr : float or None, default=None
         Final learning rate. When ``None``, use the LinLog reference rule.
+    end_lr_multiplier : float, default=0.1
+        Fraction of ``start_lr`` used by the default linear endpoint rule.
     """
 
     mode: str = "linear"
     start_lr: Optional[float] = None
     end_lr: Optional[float] = None
+    end_lr_multiplier: float = 0.1
 
 
 @register_op
@@ -954,8 +1038,18 @@ class LRDecay(Op):
 
     name: ClassVar[str] = "lr_decay"
     category: ClassVar[OpCategory] = OpCategory.ANNEAL
-    reads: ClassVar[Tuple[str, ...]] = ("step", "total_steps")
-    writes: ClassVar[Tuple[str, ...]] = ()
+    reads: ClassVar[Tuple[str, ...]] = (
+        "optimizer",
+        "step",
+        "total_steps",
+        f"extras.{_LR_DECAY_START_KEY}",
+        f"extras.{_LR_DECAY_END_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        "optimizer",
+        f"extras.{_LR_DECAY_START_KEY}",
+        f"extras.{_LR_DECAY_END_KEY}",
+    )
     requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
@@ -996,7 +1090,11 @@ class LRDecay(Op):
         end_lr = state.extras.get(_LR_DECAY_END_KEY)
         if not isinstance(end_lr, (float, int)):
             if self.config.end_lr is None:
-                end_lr = _default_lr_decay_end_lr(start_lr=start_lr, total_steps=state.total_steps)
+                end_lr = _default_lr_decay_end_lr(
+                    start_lr=start_lr,
+                    total_steps=state.total_steps,
+                    end_lr_multiplier=float(self.config.end_lr_multiplier),
+                )
             else:
                 end_lr = float(self.config.end_lr)
             state.extras[_LR_DECAY_END_KEY] = float(end_lr)
@@ -1044,7 +1142,7 @@ class EarlyExaggeration(Op):
     name: ClassVar[str] = "early_exaggeration"
     category: ClassVar[OpCategory] = OpCategory.ANNEAL
     reads: ClassVar[Tuple[str, ...]] = ("step",)
-    writes: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ("extras.exaggeration",)
     requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
@@ -1089,11 +1187,17 @@ class ReduceLROnPlateauConfig:
         Plateau patience passed to PyTorch's scheduler.
     min_lr : float, default=1e-5
         Lower LR floor passed to the scheduler.
+    step_interval : int, default=10
+        How often (in optimization steps) to feed the EMA loss to the scheduler.
+    ema_decay : float, default=0.5**(1/100)
+        Exponential moving-average decay used between scheduler steps.
     """
 
     factor: float = 0.9
     patience: int = 20000
     min_lr: float = 1.0e-5
+    step_interval: int = 10
+    ema_decay: float = _PLATEAU_EMA_DECAY
 
 
 @register_op
@@ -1105,8 +1209,20 @@ class ReduceLROnPlateau(Op):
 
     name: ClassVar[str] = "reduce_lr_on_plateau"
     category: ClassVar[OpCategory] = OpCategory.ANNEAL
-    reads: ClassVar[Tuple[str, ...]] = ("prev_loss", "step")
-    writes: ClassVar[Tuple[str, ...]] = ()
+    reads: ClassVar[Tuple[str, ...]] = (
+        "optimizer",
+        "prev_loss",
+        "step",
+        f"extras.{_PLATEAU_SCHEDULER_KEY}",
+        f"extras.{_PLATEAU_EMA_SUM_KEY}",
+        f"extras.{_PLATEAU_EMA_WEIGHT_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        "optimizer",
+        f"extras.{_PLATEAU_SCHEDULER_KEY}",
+        f"extras.{_PLATEAU_EMA_SUM_KEY}",
+        f"extras.{_PLATEAU_EMA_WEIGHT_KEY}",
+    )
     requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
@@ -1115,7 +1231,7 @@ class ReduceLROnPlateau(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Step a plateau scheduler every ten iterations using an EMA loss.
+        """Step a plateau scheduler at a fixed interval using an EMA loss.
 
         Parameters
         ----------
@@ -1150,12 +1266,14 @@ class ReduceLROnPlateau(Op):
 
         ema_weighted_sum = float(state.extras.get(_PLATEAU_EMA_SUM_KEY, 0.0))
         ema_total_weight = float(state.extras.get(_PLATEAU_EMA_WEIGHT_KEY, 0.0))
-        ema_weighted_sum = ema_weighted_sum * _PLATEAU_EMA_DECAY + loss_value
-        ema_total_weight = ema_total_weight * _PLATEAU_EMA_DECAY + 1.0
+        # Keep the scheduler input smooth so noisy single-step losses do not
+        # cause unnecessary LR drops.
+        ema_weighted_sum = ema_weighted_sum * self.config.ema_decay + loss_value
+        ema_total_weight = ema_total_weight * self.config.ema_decay + 1.0
         state.extras[_PLATEAU_EMA_SUM_KEY] = ema_weighted_sum
         state.extras[_PLATEAU_EMA_WEIGHT_KEY] = ema_total_weight
 
-        if state.step % 10 == 0 and ema_total_weight > 0.0:
+        if state.step % self.config.step_interval == 0 and ema_total_weight > 0.0:
             scheduler.step(ema_weighted_sum / ema_total_weight)
         return state
 
@@ -1168,9 +1286,15 @@ class IdealLengthDecayConfig:
     ----------
     decay_factor : float, default=0.75
         Multiplicative decay applied to ``extras["ideal_length"]``.
+    default_initial_length : float, default=1.0
+        Fallback ideal length used when no cached or measured value exists.
+    min_ideal_length : float, default=1e-6
+        Lower bound applied after each decay step.
     """
 
     decay_factor: float = 0.75
+    default_initial_length: float = 1.0
+    min_ideal_length: float = _DEFAULT_MIN_IDEAL_LENGTH
 
 
 @register_op
@@ -1182,8 +1306,8 @@ class IdealLengthDecay(Op):
 
     name: ClassVar[str] = "ideal_length_decay"
     category: ClassVar[OpCategory] = OpCategory.ANNEAL
-    reads: ClassVar[Tuple[str, ...]] = ()
-    writes: ClassVar[Tuple[str, ...]] = ()
+    reads: ClassVar[Tuple[str, ...]] = ("spring_lengths", "extras.ideal_length")
+    writes: ClassVar[Tuple[str, ...]] = ("extras.ideal_length",)
     requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
@@ -1215,9 +1339,9 @@ class IdealLengthDecay(Op):
             if state.spring_lengths is not None and state.spring_lengths.numel() > 0:
                 current = float(state.spring_lengths.to(dtype=torch.float32).mean().item())
             else:
-                current = 1.0
+                current = float(self.config.default_initial_length)
         state.extras["ideal_length"] = max(
             float(current) * self.config.decay_factor,
-            _DEFAULT_MIN_IDEAL_LENGTH,
+            float(self.config.min_ideal_length),
         )
         return state
