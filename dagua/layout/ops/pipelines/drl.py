@@ -13,6 +13,7 @@ from dagua.layout.ops.drl import (
     DrLOptions,
     DRLPhaseSolve,
     DRLPrepareState,
+    DRLPrepareStateConfig,
 )
 from dagua.layout.ops.graph_utils import layout_device
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
@@ -33,7 +34,7 @@ def build_drl_pipeline(options: DrLOptions = "default") -> Pipeline:
     """
     return Pipeline(
         [
-            DRLPrepareState(options=options),
+            DRLPrepareState(config=DRLPrepareStateConfig(options=options)),
             DRLInitializePositions(),
             DRLPhaseSolve(),
             DRLFinalizePositions(),

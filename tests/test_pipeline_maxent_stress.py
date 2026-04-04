@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from dagua.layout.classic.maxent_stress import layout_maxent_stress
+from dagua.layout.ops.maxent_stress import MaxentPrepareState
 from dagua.layout.ops.pipelines.maxent_stress import (
     build_maxent_stress_pipeline,
     layout_maxent_stress_pipeline,
@@ -164,6 +165,45 @@ def _run_pipeline_direct(
     final_state = pipeline.apply(problem, state, ctx)
     assert final_state.pos is not None
     return final_state.pos
+
+
+def test_maxent_prepare_state_majorization_uses_typed_distance_matrix() -> None:
+    """Majorization preprocessing should populate typed graph caches."""
+    problem = LayoutProblem(
+        edge_index=_path_edge_index(5),
+        num_nodes=5,
+        seed=42,
+    )
+
+    state = MaxentPrepareState(for_majorization=True).apply(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+    )
+
+    assert state.distance_matrix is not None
+    assert state.adjacency_weighted is not None
+    assert "maxent_graph_distances" not in state.extras
+    assert "maxent_adjacency" not in state.extras
+    assert "maxent_weight_matrix" in state.extras
+
+
+def test_maxent_prepare_state_gradient_uses_typed_adjacency() -> None:
+    """Gradient preprocessing should store adjacency on the typed field."""
+    problem = LayoutProblem(
+        edge_index=_path_edge_index(5),
+        num_nodes=5,
+        seed=42,
+    )
+
+    state = MaxentPrepareState(for_majorization=False).apply(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+    )
+
+    assert state.adjacency_weighted is not None
+    assert "maxent_adjacency" not in state.extras
 
 
 # ===================================================================
