@@ -2209,10 +2209,10 @@ class BarnesHutForce(Op):
 
         pos = _require_positions(state)
         forces = _require_forces(state)
-        if "quadtree" not in state.extras:
-            raise ValueError("BarnesHutForce requires state.extras['quadtree'].")
+        quadtree = state.quadtree
+        if quadtree is None:
+            raise ValueError("BarnesHutForce requires state.quadtree.")
 
-        quadtree = state.extras["quadtree"]
         if isinstance(quadtree, _SFDPQuadTreeNode):
             contribution = _sfdp_barnes_hut_force(
                 quadtree=quadtree,
@@ -2676,18 +2676,16 @@ class GEMNodeTick(Op):
                 torch.zeros((problem.num_nodes, 2), device=pos.device, dtype=pos.dtype),
             ),
         ).to(device=pos.device, dtype=pos.dtype)
-        local_temperatures = cast(
-            torch.Tensor,
-            state.extras.get(
-                "gem_local_temperatures",
-                torch.full(
-                    (problem.num_nodes,),
-                    _GEM_INITIAL_TEMPERATURE,
-                    device=pos.device,
-                    dtype=pos.dtype,
-                ),
-            ),
-        ).to(device=pos.device, dtype=pos.dtype)
+        local_temperatures = state.local_temperatures
+        if local_temperatures is None or local_temperatures.shape != (problem.num_nodes,):
+            local_temperatures = torch.full(
+                (problem.num_nodes,),
+                _GEM_INITIAL_TEMPERATURE,
+                device=pos.device,
+                dtype=pos.dtype,
+            )
+        else:
+            local_temperatures = local_temperatures.to(device=pos.device, dtype=pos.dtype)
         skew_gauge = cast(
             torch.Tensor,
             state.extras.get(
@@ -2720,7 +2718,7 @@ class GEMNodeTick(Op):
 
         state.pos = pos
         state.extras["gem_previous_impulses"] = previous_impulse
-        state.extras["gem_local_temperatures"] = local_temperatures
+        state.local_temperatures = local_temperatures
         state.extras["gem_skew_gauge"] = skew_gauge
         state.extras["gem_barycenter"] = barycenter
         state.extras["gem_global_temperature"] = global_temperature

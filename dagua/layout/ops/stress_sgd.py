@@ -32,7 +32,6 @@ _STRESS_SGD_CONNECTED_KEY = "stress_sgd_connected"
 _STRESS_SGD_DEVICE_KEY = "stress_sgd_device"
 _STRESS_SGD_EXACT_KEY = "stress_sgd_exact_mode"
 _STRESS_SGD_NUM_NODES_KEY = "stress_sgd_num_nodes"
-_STRESS_SGD_PIVOT_DIST_KEY = "stress_sgd_pivot_dist"
 _STRESS_SGD_RNG_KEY = "stress_sgd_rng"
 _STRESS_SGD_TRACE_KEY = "stress_sgd_traces"
 _STRESS_SGD_WEIGHTED_KEY = "stress_sgd_weighted"
@@ -704,7 +703,7 @@ class PrepareStressSGDTerms(Op):
             pivots=pivots,
             weighted=weighted,
         )
-        state.extras[_STRESS_SGD_PIVOT_DIST_KEY] = pivot_dist
+        state.distance_matrix = torch.from_numpy(pivot_dist)
         return state
 
 
@@ -878,7 +877,12 @@ class RunStressSGDApproximateSchedule(Op):
         num_nodes = state.extras[_STRESS_SGD_NUM_NODES_KEY]
         device = state.extras[_STRESS_SGD_DEVICE_KEY]
         rng = state.extras[_STRESS_SGD_RNG_KEY]
-        pivot_dist = state.extras[_STRESS_SGD_PIVOT_DIST_KEY]
+        pivot_distances = state.distance_matrix
+        if not isinstance(pivot_distances, torch.Tensor):
+            raise ValueError(
+                "RunStressSGDApproximateSchedule requires pivot distances in state.distance_matrix."
+            )
+        pivot_dist = pivot_distances.to(dtype=torch.float64, device="cpu").numpy()
         effective_sample_size = _resolve_sample_size(num_nodes, self.sample_size)
 
         positions = np.random.rand(num_nodes, 2)

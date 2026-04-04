@@ -21,9 +21,7 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 _SM_MIN_DISTANCE = 1.0e-9
 _SM_MIN_SPAN = 1.0e-6
 
-TARGET_DISTANCES_KEY = "sm_target_distances"
 WEIGHTS_KEY = "sm_weights"
-LAPLACIAN_PINV_KEY = "sm_laplacian_pinv"
 CURRENT_POSITIONS_KEY = "sm_current_positions"
 CURRENT_STRESS_KEY = "sm_current_stress"
 TRACES_KEY = "sm_traces"
@@ -87,9 +85,9 @@ class PrepareStressMajorizationState(Op):
         np.fill_diagonal(laplacian, weights.sum(axis=1))
         laplacian_pinv = np.linalg.pinv(laplacian)
 
-        state.extras[TARGET_DISTANCES_KEY] = target_distances
         state.extras[WEIGHTS_KEY] = weights
-        state.extras[LAPLACIAN_PINV_KEY] = laplacian_pinv
+        state.distance_matrix = torch.from_numpy(target_distances)
+        state.laplacian = laplacian_pinv
         return state
 
 
@@ -229,9 +227,12 @@ class InitializeStressMajorizationPositions(Op):
         """
         del ctx
 
-        target_distances = state.extras[TARGET_DISTANCES_KEY]
-        if not isinstance(target_distances, np.ndarray):
-            raise ValueError("sm_initialize_positions requires target distances in state.extras.")
+        if not isinstance(state.distance_matrix, torch.Tensor):
+            raise ValueError(
+                "sm_initialize_positions requires target distances in state.distance_matrix."
+            )
+
+        target_distances = state.distance_matrix.to(dtype=torch.float64, device="cpu").numpy()
 
         raw_positions = self._classical_mds_embedding(distances=target_distances)
         extent = self._layout_extent(
@@ -306,20 +307,27 @@ class SmacofStep(Op):
 
         current = state.extras[CURRENT_POSITIONS_KEY]
         current_stress = state.extras[CURRENT_STRESS_KEY]
-        target_distances = state.extras[TARGET_DISTANCES_KEY]
+        target_distances = state.distance_matrix
         weights = state.extras[WEIGHTS_KEY]
-        laplacian_pinv = state.extras[LAPLACIAN_PINV_KEY]
+        laplacian_pinv = state.laplacian
 
         if not isinstance(current, np.ndarray):
             raise ValueError("sm_smacof_step requires sm_current_positions as numpy array.")
         if not isinstance(current_stress, float):
             current_stress = float(current_stress)
-        if not isinstance(target_distances, np.ndarray):
-            raise ValueError("sm_smacof_step requires sm_target_distances in state.extras.")
+        if not isinstance(target_distances, torch.Tensor):
+            raise ValueError(
+                "sm_smacof_step requires sm_target_distances in state.distance_matrix."
+            )
         if not isinstance(weights, np.ndarray):
             raise ValueError("sm_smacof_step requires sm_weights in state.extras.")
-        if not isinstance(laplacian_pinv, np.ndarray):
-            raise ValueError("sm_smacof_step requires sm_laplacian_pinv in state.extras.")
+        target_distances_np = target_distances.to(dtype=torch.float64, device="cpu").numpy()
+        if isinstance(laplacian_pinv, torch.Tensor):
+            laplacian_pinv_np = laplacian_pinv.to(dtype=torch.float64, device="cpu").numpy()
+        elif isinstance(laplacian_pinv, np.ndarray):
+            laplacian_pinv_np = laplacian_pinv
+        else:
+            raise ValueError("sm_smacof_step requires sm_laplacian_pinv in state.laplacian.")
 
         current_distances = np.maximum(
             np.sqrt(
@@ -332,15 +340,15 @@ class SmacofStep(Op):
             _SM_MIN_DISTANCE,
         )
 
-        ratio = np.zeros_like(target_distances)
+        ratio = np.zeros_like(target_distances_np)
         active_mask = weights > 0.0
-        ratio[active_mask] = target_distances[active_mask] / current_distances[active_mask]
+        ratio[active_mask] = target_distances_np[active_mask] / current_distances[active_mask]
 
         b_matrix = -weights * ratio
         np.fill_diagonal(b_matrix, 0.0)
         np.fill_diagonal(b_matrix, -b_matrix.sum(axis=1))
 
-        candidate = laplacian_pinv @ (b_matrix @ current)
+        candidate = laplacian_pinv_np @ (b_matrix @ current)
         candidate = candidate - candidate.mean(axis=0, keepdims=True)
 
         candidate_distances = np.sqrt(
@@ -351,7 +359,7 @@ class SmacofStep(Op):
             )
         )
         candidate_stress = 0.5 * float(
-            np.sum(weights * (candidate_distances - target_distances) ** 2)
+            np.sum(weights * (candidate_distances - target_distances_np) ** 2)
         )
 
         if candidate_stress > current_stress + 1.0e-8:
@@ -366,7 +374,7 @@ class SmacofStep(Op):
                     )
                 )
                 blended_stress = 0.5 * float(
-                    np.sum(weights * (blended_distances - target_distances) ** 2)
+                    np.sum(weights * (blended_distances - target_distances_np) ** 2)
                 )
                 if blended_stress <= current_stress + 1.0e-8:
                     candidate = blended

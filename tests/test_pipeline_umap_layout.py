@@ -13,6 +13,7 @@ from dagua.layout.ops.pipelines.umap_layout import (
     layout_umap_layout_pipeline,
 )
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.umap import BuildUMAPAdjacency, ComputeAllPairsShortestPaths
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -169,6 +170,30 @@ def _run_pipeline_direct(
     final_state = pipeline.apply(problem, state, ctx)
     assert final_state.pos is not None
     return final_state.pos
+
+
+def test_umap_preprocessing_uses_typed_adjacency_and_distance_fields() -> None:
+    """UMAP preprocessing should keep graph caches on typed state fields."""
+    problem = LayoutProblem(
+        edge_index=_path_edge_index(4),
+        num_nodes=4,
+        seed=42,
+    )
+    state = SolveState()
+
+    state = BuildUMAPAdjacency().apply(problem, state, RuntimeContext())
+    assert state.adjacency_weighted is not None
+    assert "umap_adjacency" not in state.extras
+
+    state = ComputeAllPairsShortestPaths().apply(problem, state, RuntimeContext())
+    assert state.distance_matrix is not None
+    assert state.distance_matrix.tolist() == [
+        [0.0, 1.0, 2.0, 3.0],
+        [1.0, 0.0, 1.0, 2.0],
+        [2.0, 1.0, 0.0, 1.0],
+        [3.0, 2.0, 1.0, 0.0],
+    ]
+    assert "umap_distances" not in state.extras
 
 
 class TestUMAPPipelineFidelity:
