@@ -7,13 +7,27 @@ from dataclasses import dataclass
 from math import sqrt
 from typing import DefaultDict, Dict, List, Optional, Sequence
 
+import numpy as np
 import torch
 
 from dagua.layout.ops.base import Op
+from dagua.layout.ops.graph_utils import (
+    layout_device as _layout_device,
+)
+from dagua.layout.ops.graph_utils import (
+    layout_extent as _layout_extent,
+)
+from dagua.layout.ops.graph_utils import (
+    normalize_positions as _normalize_positions,
+)
+from dagua.layout.ops.graph_utils import (
+    rescale_layout as _rescale_layout,
+)
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _MIN_SPAN = 1.0e-6
+_OUTPUT_SCALE_FACTOR = 50.0
 
 
 def _require_positions(state: SolveState, op_name: str) -> torch.Tensor:
@@ -293,6 +307,158 @@ class ScalePositions(Op):
         return state
 
 
+@register_op
+class FRFinalizePositions(Op):
+    """Apply the FR-specific final centering, scaling, and float32 cast."""
+
+    name = "fr_finalize_positions"
+    category = OpCategory.POSTPROCESS
+    reads: tuple[str, ...] = ("pos",)
+    writes: tuple[str, ...] = ("pos",)
+    requires: tuple[str, ...] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compose registered postprocess ops to match legacy FR finalization.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable layout state containing ``state.pos``.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with centered, scaled, float32 positions.
+
+        Raises
+        ------
+        ValueError
+            If ``state.pos`` is missing.
+        """
+        _ = ctx
+        if state.pos is None:
+            raise ValueError("FRFinalizePositions requires state.pos to be set.")
+
+        state = CenterPositions().apply(problem=problem, state=state, ctx=ctx)
+        state = ScalePositions(
+            ScalePositionsConfig(
+                method="max_abs",
+                factor=(sqrt(float(max(problem.num_nodes, 1))) * _OUTPUT_SCALE_FACTOR),
+            ),
+        ).apply(problem=problem, state=state, ctx=ctx)
+        state.pos = state.pos.to(dtype=torch.float32)
+        return state
+
+
+@register_op
+class GraphOptFinalizePositions(Op):
+    """Cast GraphOpt positions to the classic output dtype and device."""
+
+    name: str = "graphopt_finalize_positions"
+    category: OpCategory = OpCategory.POSTPROCESS
+    reads: tuple[str, ...] = ("pos",)
+    writes: tuple[str, ...] = ("pos",)
+    requires: tuple[str, ...] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Cast final GraphOpt positions onto the resolved output device.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state containing final ``state.pos``.
+        ctx : RuntimeContext
+            Execution context.
+
+        Returns
+        -------
+        SolveState
+            State with ``state.pos`` as ``float32`` on the output device.
+
+        Raises
+        ------
+        ValueError
+            If ``state.pos`` is missing.
+        """
+        _ = ctx
+        if state.pos is None:
+            raise ValueError("GraphOptFinalizePositions requires state.pos to be set.")
+
+        output_device = _layout_device(edge_index=problem.edge_index, node_sizes=problem.node_sizes)
+        if state.pos.numel() == 0:
+            state.pos = torch.empty((0, 2), dtype=torch.float32, device=output_device)
+            return state
+
+        state.pos = state.pos.to(dtype=torch.float32, device=output_device)
+        return state
+
+
+@register_op
+class LinLogFinalizePositions(Op):
+    """Finalize coordinates exactly as classic ``layout_linlog``."""
+
+    name = "linlog_finalize_positions"
+    category = OpCategory.POSTPROCESS
+    reads: tuple[str, ...] = ("pos",)
+    writes: tuple[str, ...] = ("pos",)
+    requires: tuple[str, ...] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Normalize and cast final LinLog positions.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable layout state containing final coordinates.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with final coordinates on the output device.
+        """
+        del ctx
+        if state.pos is None:
+            raise ValueError("LinLogFinalizePositions requires state.pos to be set.")
+
+        output_device = _layout_device(edge_index=problem.edge_index, node_sizes=problem.node_sizes)
+        if problem.num_nodes == 0:
+            state.pos = torch.empty((0, 2), dtype=torch.float32, device=output_device)
+            return state
+        if problem.num_nodes == 1:
+            state.pos = torch.zeros((1, 2), dtype=torch.float32, device=output_device)
+            return state
+
+        extent = _layout_extent(num_nodes=problem.num_nodes, node_sizes=problem.node_sizes)
+        normalized = _normalize_positions(state.pos.detach(), extent=extent)
+        state.pos = normalized.to(dtype=torch.float32, device=output_device)
+        return state
+
+
 @dataclass(frozen=True)
 class NormalizePositionsConfig:
     """Configuration for :class:`NormalizePositions`.
@@ -375,6 +541,239 @@ class NormalizePositions(Op):
             return state
 
         state.pos = centered * (extent / span)
+        return state
+
+
+_KK_TRACE_KEY = "kk_traces"
+
+
+@register_op
+class KamadaKawaiFinalizePositions(Op):
+    """Scale final Kamada-Kawai coordinates and move traces to output device."""
+
+    name: str = "kamada_kawai_finalize_positions"
+    category: OpCategory = OpCategory.POSTPROCESS
+    reads: tuple[str, ...] = ("pos",)
+    writes: tuple[str, ...] = ("pos", "extras")
+    requires: tuple[str, ...] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Normalize solved Kamada-Kawai coordinates and output artifacts.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state containing solved coordinates.
+        ctx : RuntimeContext
+            Execution context.
+
+        Returns
+        -------
+        SolveState
+            State with float32 coordinates and traces on output device.
+
+        Raises
+        ------
+        ValueError
+            If ``state.pos`` is missing.
+        """
+        _ = ctx
+        if state.pos is None:
+            raise ValueError("KamadaKawaiFinalizePositions requires state.pos to be set.")
+
+        output_device = _layout_device(edge_index=problem.edge_index, node_sizes=problem.node_sizes)
+        traces = state.extras.get(_KK_TRACE_KEY, [])
+        state.extras[_KK_TRACE_KEY] = [trace.to(device=output_device) for trace in traces]
+
+        if state.pos.shape[0] <= 1 or state.pos.numel() == 0:
+            state.pos = state.pos.to(dtype=torch.float32, device=output_device)
+            return state
+
+        state.pos = _rescale_layout(state.pos).to(dtype=torch.float32, device=output_device)
+        return state
+
+
+def _rescale_spectral_layout(positions: np.ndarray, scale: float = 1.0) -> np.ndarray:
+    """Center and scale coordinates like ``networkx.rescale_layout``."""
+    positions = positions.copy()
+    positions -= positions.mean(axis=0)
+    limit = np.abs(positions).max()
+    if limit > 0:
+        positions *= scale / limit
+    return positions
+
+
+@register_op
+class SpectralFinalizePositions(Op):
+    """Apply spectral centering and scaling with stable output device placement."""
+
+    name = "spectral_finalize_positions"
+    category = OpCategory.POSTPROCESS
+    reads = ("pos",)
+    writes = ("pos",)
+    requires = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Rescale coordinates like :func:`layout_spectral`."""
+        _ = ctx
+        if state.pos is None:
+            raise ValueError("SpectralFinalizePositions requires state.pos to be set.")
+
+        output_device = _layout_device(edge_index=problem.edge_index, node_sizes=problem.node_sizes)
+        if problem.num_nodes == 0:
+            state.pos = torch.empty((0, 2), dtype=torch.float32, device=output_device)
+            return state
+        if problem.num_nodes == 1:
+            state.pos = torch.zeros((1, 2), dtype=torch.float32, device=output_device)
+            return state
+
+        positions = state.pos.detach().to(device="cpu", dtype=torch.float64).numpy()
+        state.pos = torch.from_numpy(_rescale_spectral_layout(positions=positions, scale=1.0)).to(
+            dtype=torch.float32,
+            device=output_device,
+        )
+        return state
+
+
+def _normalize_classical_positions(positions: torch.Tensor, extent: float) -> torch.Tensor:
+    """Apply classical-MDS span normalization with legacy fallbacks."""
+
+    if positions.shape[0] <= 1:
+        return torch.zeros_like(positions)
+
+    centered = positions - positions.mean(dim=0, keepdim=True)
+    span = float(centered.abs().max().item())
+    if span < _MIN_SPAN:
+        fallback = torch.zeros_like(centered)
+        fallback[:, 0] = torch.linspace(
+            -1.0,
+            1.0,
+            steps=centered.shape[0],
+            device=centered.device,
+            dtype=centered.dtype,
+        )
+        centered = fallback
+        span = float(centered.abs().max().item())
+
+    return centered * (extent / max(span, _MIN_SPAN))
+
+
+@register_op
+class ClassicalMDSFinalizePositions(Op):
+    """Apply legacy classical-MDS final normalization and casting."""
+
+    name: str = "classical_mds_finalize_positions"
+    category: OpCategory = OpCategory.POSTPROCESS
+    reads: tuple[str, ...] = ("pos",)
+    writes: tuple[str, ...] = ("pos",)
+    requires: tuple[str, ...] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Normalize final classical-MDS coordinates and resolve output device.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state containing raw embedding coordinates.
+        ctx : RuntimeContext
+            Execution context.
+
+        Returns
+        -------
+        SolveState
+            State with normalized ``float32`` coordinates.
+
+        Raises
+        ------
+        ValueError
+            If ``state.pos`` is missing.
+        """
+        _ = ctx
+        if state.pos is None:
+            raise ValueError("ClassicalMDSFinalizePositions requires state.pos to be set.")
+
+        output_device = _layout_device(edge_index=problem.edge_index, node_sizes=problem.node_sizes)
+        extent = _layout_extent(num_nodes=problem.num_nodes, node_sizes=problem.node_sizes)
+        normalized = _normalize_classical_positions(
+            positions=state.pos.to(device=output_device),
+            extent=extent,
+        )
+        state.pos = normalized.to(dtype=torch.float32, device=output_device)
+        return state
+
+
+@register_op
+class PivotMDSFinalizePositions(Op):
+    """Apply Pivot-MDS-specific final normalization and output casting."""
+
+    name = "pivot_mds_finalize_positions"
+    category = OpCategory.POSTPROCESS
+    reads = ("pos",)
+    writes = ("pos",)
+    requires = ()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Finalize Pivot-MDS output with deterministic extent normalization.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state containing raw Pivot-MDS coordinates.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with final ``pos`` on the resolved output device and ``float32``.
+
+        Notes
+        -----
+        ``PivotMDSInit`` intentionally returns ``None`` for ``state.pos`` when
+        ``num_nodes == 0``. This final op normalizes that edge case to the
+        expected empty ``[0, 2]`` tensor after selecting the output device.
+        """
+        _ = ctx
+        output_device = _layout_device(
+            edge_index=problem.edge_index,
+            node_sizes=problem.node_sizes,
+        )
+        if state.pos is None or state.pos.numel() == 0:
+            state.pos = torch.empty((0, 2), dtype=torch.float32, device=output_device)
+            return state
+
+        extent = _layout_extent(num_nodes=problem.num_nodes, node_sizes=problem.node_sizes)
+        normalized = _normalize_classical_positions(
+            positions=state.pos.to(device=output_device),
+            extent=extent,
+        )
+        state.pos = normalized.to(dtype=torch.float32, device=output_device)
         return state
 
 
@@ -624,6 +1023,11 @@ __all__ = [
     "CenterPositions",
     "DirectionTransform",
     "DirectionTransformConfig",
+    "FRFinalizePositions",
+    "GraphOptFinalizePositions",
+    "KamadaKawaiFinalizePositions",
+    "ClassicalMDSFinalizePositions",
+    "LinLogFinalizePositions",
     "NormalizePositions",
     "NormalizePositionsConfig",
     "ScalePositions",
