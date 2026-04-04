@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import random
 from collections import defaultdict
@@ -236,7 +237,21 @@ def _barycenter_ordered_groups(
 
 @register_op
 class ValidateGraphOptInputs(Op):
-    """Validate GraphOpt inputs before force-directed iterations."""
+    """Validate GraphOpt problem inputs before any state is initialized.
+
+    Reads
+    -----
+    No ``SolveState`` fields.
+
+    Writes
+    ------
+    Nothing. The op raises on invalid input instead of mutating state.
+
+    Use this when
+    -------------
+    You want GraphOpt-style pipelines to fail early on malformed edge tensors
+    or mismatched edge weights before allocating positions.
+    """
 
     name = "validate_graphopt_inputs"
     category = OpCategory.INIT
@@ -314,7 +329,21 @@ class ValidateFA2InputsConfig:
 
 @register_op
 class ValidateFA2Inputs(Op):
-    """Validate ForceAtlas2 inputs before pipeline execution."""
+    """Validate ForceAtlas2 problem inputs before preprocessing.
+
+    Reads
+    -----
+    No ``SolveState`` fields.
+
+    Writes
+    ------
+    Nothing. The op only raises on invalid public inputs.
+
+    Use this when
+    -------------
+    You want FA2 pipelines to fail before building cached undirected state or
+    allocating force buffers.
+    """
 
     name = "validate_fa2_inputs"
     category = OpCategory.INIT
@@ -399,13 +428,55 @@ class ValidateFA2Inputs(Op):
         return state
 
 
+@dataclass(frozen=True)
+class GraphOptInitializePositionsConfig:
+    """Configuration for :class:`GraphOptInitializePositions`.
+
+    Parameters
+    ----------
+    position_dim : int, default=2
+        Output dimensionality for the initialized position tensor.
+    """
+
+    position_dim: int = 2
+
+
 @register_op
 class GraphOptInitializePositions(Op):
-    """Initialize GraphOpt positions with the exact Python-random recipe."""
+    """Seed ``state.pos`` with GraphOpt's historical Python-random recipe.
+
+    Reads
+    -----
+    No ``SolveState`` fields. Uses ``problem.seed`` and ``problem.num_nodes``.
+
+    Writes
+    ------
+    ``state.pos`` as a float64 tensor on the resolved target device.
+
+    Use this when
+    -------------
+    You need GraphOpt-compatible random starts before running the classic
+    GraphOpt force updates.
+    """
 
     name = "graphopt_initialize_positions"
     category = OpCategory.INIT
     writes = ("pos",)
+
+    def __init__(self, config: Optional[GraphOptInitializePositionsConfig] = None) -> None:
+        """Store the GraphOpt initialization configuration.
+
+        Parameters
+        ----------
+        config : GraphOptInitializePositionsConfig, optional
+            GraphOpt position-initialization settings.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or GraphOptInitializePositionsConfig()
 
     def apply(
         self,
@@ -431,28 +502,73 @@ class GraphOptInitializePositions(Op):
         """
         if problem.num_nodes == 0:
             state.pos = torch.empty(
-                (0, 2),
+                (0, self.config.position_dim),
                 dtype=torch.float64,
                 device=_target_device(problem, ctx),
             )
             return state
 
         rng = random.Random(problem.seed)
-        positions = [[rng.random(), rng.random()] for _ in range(problem.num_nodes)]
+        positions = [
+            [rng.random() for _ in range(self.config.position_dim)]
+            for _ in range(problem.num_nodes)
+        ]
         state.pos = torch.tensor(
             positions, dtype=torch.float64, device=_target_device(problem, ctx)
         )
         return state
 
 
+@dataclass(frozen=True)
+class KamadaKawaiInitializePositionsConfig:
+    """Configuration for :class:`KamadaKawaiInitializePositions`.
+
+    Parameters
+    ----------
+    position_dim : int, default=2
+        Output dimensionality for the initialized position tensor.
+    """
+
+    position_dim: int = 2
+
+
 @register_op
 class KamadaKawaiInitializePositions(Op):
-    """Initialize Kamada-Kawai coordinates with either user input or circle layout."""
+    """Initialize KK positions from user input or a deterministic circle fallback.
+
+    Reads
+    -----
+    ``state.extras["kk_initial_pos"]`` when present.
+
+    Writes
+    ------
+    ``state.pos`` as a float64 tensor.
+
+    Use this when
+    -------------
+    You want Kamada-Kawai to start from caller-supplied positions when
+    available, otherwise from the classic circle layout.
+    """
 
     name = "kamada_kawai_initialize_positions"
     category = OpCategory.INIT
     reads = ("extras.kk_initial_pos",)
     writes = ("pos",)
+
+    def __init__(self, config: Optional[KamadaKawaiInitializePositionsConfig] = None) -> None:
+        """Store the Kamada-Kawai initialization configuration.
+
+        Parameters
+        ----------
+        config : KamadaKawaiInitializePositionsConfig, optional
+            Kamada-Kawai initialization settings.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or KamadaKawaiInitializePositionsConfig()
 
     def apply(
         self,
@@ -479,22 +595,25 @@ class KamadaKawaiInitializePositions(Op):
         del ctx
 
         if problem.num_nodes == 0:
-            state.pos = torch.empty((0, 2), dtype=torch.float64)
+            state.pos = torch.empty((0, self.config.position_dim), dtype=torch.float64)
             return state
         if problem.num_nodes == 1:
-            state.pos = torch.zeros((1, 2), dtype=torch.float64)
+            state.pos = torch.zeros((1, self.config.position_dim), dtype=torch.float64)
             return state
 
         initial_positions = state.extras.get("kk_initial_pos")
         if isinstance(initial_positions, torch.Tensor):
-            if initial_positions.shape != (problem.num_nodes, 2):
+            expected_shape = (problem.num_nodes, self.config.position_dim)
+            if initial_positions.shape != expected_shape:
                 raise ValueError(
                     "kk_initial_pos must have shape "
-                    f"({problem.num_nodes}, 2), got {tuple(initial_positions.shape)}"
+                    f"{expected_shape}, got {tuple(initial_positions.shape)}"
                 )
             state.pos = initial_positions.to(dtype=torch.float64)
             return state
 
+        # The fallback mirrors the classic circular seed so KK starts from a
+        # deterministic, non-degenerate configuration without needing input positions.
         theta = np.linspace(0, 1, num=problem.num_nodes + 1)[:-1] * (2.0 * np.pi)
         theta = theta.astype(np.float32)
         coordinates = np.column_stack((np.cos(theta), np.sin(theta))).astype(np.float64, copy=False)
@@ -503,13 +622,54 @@ class KamadaKawaiInitializePositions(Op):
         return state
 
 
+@dataclass(frozen=True)
+class FA2InitializePositionsConfig:
+    """Configuration for :class:`FA2InitializePositions`.
+
+    Parameters
+    ----------
+    position_dim : int, default=2
+        Output dimensionality for the initialized position tensor.
+    """
+
+    position_dim: int = 2
+
+
 @register_op
 class FA2InitializePositions(Op):
-    """Initialize ForceAtlas2 positions with Python's reference RNG."""
+    """Seed ``state.pos`` with the reference FA2 Python-random initializer.
+
+    Reads
+    -----
+    No ``SolveState`` fields. Uses ``problem.seed`` and ``problem.num_nodes``.
+
+    Writes
+    ------
+    ``state.pos`` as a float32 tensor on ``problem.edge_index.device``.
+
+    Use this when
+    -------------
+    You want FA2-compatible random starts before building FA2 force caches.
+    """
 
     name = "fa2_initialize_positions"
     category = OpCategory.INIT
     writes = ("pos",)
+
+    def __init__(self, config: Optional[FA2InitializePositionsConfig] = None) -> None:
+        """Store the FA2 initialization configuration.
+
+        Parameters
+        ----------
+        config : FA2InitializePositionsConfig, optional
+            ForceAtlas2 initialization settings.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or FA2InitializePositionsConfig()
 
     def apply(
         self,
@@ -537,14 +697,25 @@ class FA2InitializePositions(Op):
         _ = ctx
 
         if problem.num_nodes == 0:
-            state.pos = torch.zeros((0, 2), dtype=torch.float32, device=problem.edge_index.device)
+            state.pos = torch.zeros(
+                (0, self.config.position_dim),
+                dtype=torch.float32,
+                device=problem.edge_index.device,
+            )
             return state
         if problem.num_nodes == 1:
-            state.pos = torch.zeros((1, 2), dtype=torch.float32, device=problem.edge_index.device)
+            state.pos = torch.zeros(
+                (1, self.config.position_dim),
+                dtype=torch.float32,
+                device=problem.edge_index.device,
+            )
             return state
 
         rng = random.Random(problem.seed)
-        positions = [[rng.random(), rng.random()] for _ in range(problem.num_nodes)]
+        positions = [
+            [rng.random() for _ in range(self.config.position_dim)]
+            for _ in range(problem.num_nodes)
+        ]
         state.pos = torch.tensor(
             positions,
             dtype=torch.float32,
@@ -566,16 +737,34 @@ class RandomUniformInitConfig:
         Inclusive lower bound and exclusive upper bound for the sample range.
     rng_backend : str, default="torch"
         Random backend: ``"torch"``, ``"python"``, or ``"numpy"``.
+    position_dim : int, default=2
+        Output dimensionality for the initialized position tensor.
     """
 
     scale: str = "sqrt_n"
     range: Tuple[float, float] = (0.0, 1.0)
     rng_backend: str = "torch"
+    position_dim: int = 2
 
 
 @register_op
 class RandomUniformInit(Op):
-    """Initialize positions from a uniform distribution."""
+    """Initialize positions from a reproducible uniform distribution.
+
+    Reads
+    -----
+    No ``SolveState`` fields. Uses ``problem.seed`` and optional
+    ``ctx.generator`` for the torch backend.
+
+    Writes
+    ------
+    ``state.pos`` with the configured scale, range, and backend.
+
+    Use this when
+    -------------
+    You want a generic random initializer for pipelines that do not need a
+    layout-specific seed strategy.
+    """
 
     name = "random_uniform_init"
     category = OpCategory.INIT
@@ -624,13 +813,18 @@ class RandomUniformInit(Op):
             and self.config.scale == "none"
         ):
             state.pos = torch.empty(
-                (0, 2),
+                (0, self.config.position_dim),
                 dtype=torch.float64,
                 device=_target_device(problem, ctx),
             )
             return state
 
-        if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
+        if _maybe_set_empty_or_single_positions(
+            problem=problem,
+            state=state,
+            ctx=ctx,
+            dim=self.config.position_dim,
+        ):
             return state
 
         low, high = self.config.range
@@ -639,19 +833,21 @@ class RandomUniformInit(Op):
 
         if self.config.rng_backend == "torch":
             positions = torch.rand(
-                (problem.num_nodes, 2),
+                (problem.num_nodes, self.config.position_dim),
                 generator=_torch_generator(problem=problem, ctx=ctx),
                 dtype=torch.float32,
             )
         elif self.config.rng_backend == "python":
             rng = random.Random(problem.seed)
             positions = torch.tensor(
-                [rng.random() for _ in range(problem.num_nodes * 2)],
+                [rng.random() for _ in range(problem.num_nodes * self.config.position_dim)],
                 dtype=torch.float32,
-            ).reshape(problem.num_nodes, 2)
+            ).reshape(problem.num_nodes, self.config.position_dim)
         elif self.config.rng_backend == "numpy":
             positions = torch.from_numpy(
-                np.random.RandomState(problem.seed).rand(problem.num_nodes, 2)
+                np.random.RandomState(problem.seed).rand(
+                    problem.num_nodes, self.config.position_dim
+                )
             )
         else:
             raise ValueError(
@@ -676,16 +872,34 @@ class RandomNormalInitConfig:
         Mean of the Gaussian sample.
     scale : str, default="none"
         Additional output scaling rule.
+    position_dim : int, default=2
+        Output dimensionality for the initialized position tensor.
     """
 
     std: float = 1.0e-4
     mean: float = 0.0
     scale: str = "none"
+    position_dim: int = 2
 
 
 @register_op
 class RandomNormalInit(Op):
-    """Initialize positions from a normal distribution."""
+    """Initialize positions from a reproducible normal distribution.
+
+    Reads
+    -----
+    No ``SolveState`` fields. Uses ``problem.seed`` and optional
+    ``ctx.generator``.
+
+    Writes
+    ------
+    ``state.pos`` with Gaussian samples on the resolved target device.
+
+    Use this when
+    -------------
+    You want a small-noise initializer around the origin for optimization
+    pipelines that quickly impose their own structure.
+    """
 
     name = "random_normal_init"
     category = OpCategory.INIT
@@ -728,11 +942,16 @@ class RandomNormalInit(Op):
         SolveState
             State with initialized positions.
         """
-        if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
+        if _maybe_set_empty_or_single_positions(
+            problem=problem,
+            state=state,
+            ctx=ctx,
+            dim=self.config.position_dim,
+        ):
             return state
 
         positions = torch.randn(
-            (problem.num_nodes, 2),
+            (problem.num_nodes, self.config.position_dim),
             generator=_torch_generator(problem=problem, ctx=ctx),
             dtype=torch.float32,
         )
@@ -742,13 +961,56 @@ class RandomNormalInit(Op):
         return state
 
 
+@dataclass(frozen=True)
+class LinLogInitializePositionsConfig:
+    """Configuration for :class:`LinLogInitializePositions`.
+
+    Parameters
+    ----------
+    position_dim : int, default=2
+        Output dimensionality for the initialized position tensor.
+    """
+
+    position_dim: int = 2
+
+
 @register_op
 class LinLogInitializePositions(Op):
-    """Initialize positions exactly like classic LinLog."""
+    """Seed ``state.pos`` exactly like the classic LinLog initializer.
+
+    Reads
+    -----
+    No ``SolveState`` fields. Uses ``problem.seed`` and the layout device
+    derived from immutable problem inputs.
+
+    Writes
+    ------
+    ``state.pos`` as a float32 tensor with gradients enabled.
+
+    Use this when
+    -------------
+    You need parity with the historical LinLog random start before its energy
+    optimization begins.
+    """
 
     name = "linlog_initialize_positions"
     category = OpCategory.INIT
     writes = ("pos",)
+
+    def __init__(self, config: Optional[LinLogInitializePositionsConfig] = None) -> None:
+        """Store the LinLog initialization configuration.
+
+        Parameters
+        ----------
+        config : LinLogInitializePositionsConfig, optional
+            LinLog initialization settings.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or LinLogInitializePositionsConfig()
 
     def apply(
         self,
@@ -777,18 +1039,22 @@ class LinLogInitializePositions(Op):
             node_sizes=problem.node_sizes,
         )
         if problem.num_nodes == 0:
-            state.pos = torch.empty((0, 2), dtype=torch.float32, device=output_device)
+            state.pos = torch.empty(
+                (0, self.config.position_dim),
+                dtype=torch.float32,
+                device=output_device,
+            )
             return state
         if problem.num_nodes == 1:
             state.pos = torch.zeros(
-                (1, 2),
+                (1, self.config.position_dim),
                 dtype=torch.float32,
                 device=output_device,
             )
             return state
 
         positions = torch.randn(
-            (problem.num_nodes, 2),
+            (problem.num_nodes, self.config.position_dim),
             generator=torch.Generator(device="cpu").manual_seed(problem.seed),
             dtype=torch.float32,
             device=output_device,
@@ -805,14 +1071,31 @@ class CircularInitConfig:
     ----------
     scale : float, default=1.0
         Radius of the output circle.
+    position_dim : int, default=2
+        Output dimensionality for the initialized position tensor.
     """
 
     scale: float = 1.0
+    position_dim: int = 2
 
 
 @register_op
 class CircularInit(Op):
-    """Place nodes uniformly on a circle."""
+    """Place nodes uniformly on a circle in deterministic node order.
+
+    Reads
+    -----
+    No ``SolveState`` fields.
+
+    Writes
+    ------
+    ``state.pos`` with evenly spaced circle coordinates.
+
+    Use this when
+    -------------
+    You need a cheap deterministic seed that preserves node order and avoids
+    random variation between runs.
+    """
 
     name = "circular_init"
     category = OpCategory.INIT
@@ -855,13 +1138,22 @@ class CircularInit(Op):
         SolveState
             State with initialized positions.
         """
-        if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
+        if _maybe_set_empty_or_single_positions(
+            problem=problem,
+            state=state,
+            ctx=ctx,
+            dim=self.config.position_dim,
+        ):
             return state
 
         points = []
         for index in range(problem.num_nodes):
             theta = (2.0 * pi * float(index)) / float(problem.num_nodes)
-            points.append([self.config.scale * cos(theta), self.config.scale * sin(theta)])
+            point = [0.0] * self.config.position_dim
+            point[0] = self.config.scale * cos(theta)
+            if self.config.position_dim > 1:
+                point[1] = self.config.scale * sin(theta)
+            points.append(point)
         state.pos = torch.tensor(points, dtype=torch.float32, device=_target_device(problem, ctx))
         return state
 
@@ -881,7 +1173,22 @@ class XavierInitConfig:
 
 @register_op
 class XavierInit(Op):
-    """Initialize positions with Xavier-uniform sampling."""
+    """Initialize positions with Xavier-uniform sampling.
+
+    Reads
+    -----
+    No ``SolveState`` fields. Uses ``problem.seed`` to bracket the global CPU
+    RNG state around ``torch.nn.init.xavier_uniform_``.
+
+    Writes
+    ------
+    ``state.pos`` with Xavier-uniform samples on the resolved target device.
+
+    Use this when
+    -------------
+    You want a scale-aware random initializer that matches common neural
+    parameter initialization heuristics.
+    """
 
     name = "xavier_init"
     category = OpCategory.INIT
@@ -936,6 +1243,8 @@ class XavierInit(Op):
         try:
             torch.manual_seed(problem.seed)
             positions = torch.empty((problem.num_nodes, self.config.dim), dtype=torch.float32)
+            # The gain matches the historical implementation, which scales the
+            # Xavier envelope by graph size rather than leaving the default gain at 1.
             torch.nn.init.xavier_uniform_(positions, gain=sqrt(float(max(problem.num_nodes, 1))))
         finally:
             torch.random.set_rng_state(cpu_state)
@@ -957,16 +1266,33 @@ class DeterministicInitConfig:
         Horizontal spacing between consecutive nodes in a layer.
     rank_sep : float, default=50.0
         Vertical spacing between consecutive layers.
+    position_dim : int, default=2
+        Output dimensionality for the initialized position tensor.
     """
 
     method: str = "barycenter"
     node_sep: float = 25.0
     rank_sep: float = 50.0
+    position_dim: int = 2
 
 
 @register_op
 class DeterministicInit(Op):
-    """Initialize positions from layered order rather than randomness."""
+    """Initialize positions from layer order instead of randomness.
+
+    Reads
+    -----
+    ``state.layers``.
+
+    Writes
+    ------
+    ``state.pos`` with deterministic per-layer coordinates.
+
+    Use this when
+    -------------
+    You already have a DAG layering and want a stable, interpretable seed for
+    layered or Sugiyama-style downstream optimization.
+    """
 
     name = "deterministic_init"
     category = OpCategory.INIT
@@ -1017,7 +1343,12 @@ class DeterministicInit(Op):
             If layer assignments are required but missing, or if the method
             is unsupported.
         """
-        if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
+        if _maybe_set_empty_or_single_positions(
+            problem=problem,
+            state=state,
+            ctx=ctx,
+            dim=self.config.position_dim,
+        ):
             return state
         if state.layers is None:
             raise ValueError("deterministic_init requires state.layers to be set.")
@@ -1034,12 +1365,13 @@ class DeterministicInit(Op):
         else:
             raise ValueError(f"Unsupported DeterministicInit method: {self.config.method}")
 
-        positions = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+        positions = torch.zeros((problem.num_nodes, self.config.position_dim), dtype=torch.float32)
         for layer in sorted(groups):
             y_value = float(layer) * self.config.rank_sep
             for index, node in enumerate(groups[layer]):
                 positions[node, 0] = float(index) * self.config.node_sep
-                positions[node, 1] = y_value
+                if self.config.position_dim > 1:
+                    positions[node, 1] = y_value
 
         state.pos = positions.to(device=_target_device(problem, ctx))
         return state
@@ -1401,8 +1733,16 @@ def _resolve_layout_algorithm(algorithm: str) -> Callable[..., Any]:
     from dagua.layout import classic as classic_layouts
 
     function_name = f"layout_{algorithm}"
-    try:
+    if hasattr(classic_layouts, function_name):
         return getattr(classic_layouts, function_name)
+
+    try:
+        module = importlib.import_module(f"dagua.layout.classic.{algorithm}")
+    except ModuleNotFoundError as exc:
+        raise ValueError(f"Unsupported inner layout algorithm: {algorithm!r}.") from exc
+
+    try:
+        return getattr(module, function_name)
     except AttributeError as exc:
         raise ValueError(f"Unsupported inner layout algorithm: {algorithm!r}.") from exc
 
@@ -1501,12 +1841,25 @@ class SpectralInitConfig:
 
 @register_op
 class SpectralInit(Op):
-    """Initialize positions from the graph Laplacian eigenvectors.
+    """Initialize positions from graph Laplacian eigenvectors.
 
     Notes
     -----
     This op is deterministic for the dense path. The sparse ARPACK path has
     no explicit seed control because SciPy manages its internal initialization.
+
+    Reads
+    -----
+    No ``SolveState`` fields.
+
+    Writes
+    ------
+    ``state.laplacian`` and ``state.pos``.
+
+    Use this when
+    -------------
+    You want a structure-aware deterministic initializer that reflects coarse
+    graph connectivity before force-directed refinement.
     """
 
     name = "spectral_init"
@@ -1604,18 +1957,46 @@ class ClassicalMDSInitConfig:
     ----------
     unreachable_fill : str, default="max_plus_1"
         Fill strategy for unreachable graph distances.
+    position_dim : int, default=2
+        Output dimensionality for the recovered embedding.
     """
 
     unreachable_fill: str = "max_plus_1"
+    position_dim: int = 2
 
 
 @register_op
 class ClassicalMDSInit(Op):
-    """Initialize positions with classical multidimensional scaling."""
+    """Initialize positions from all-pairs graph distances via classical MDS.
+
+    Reads
+    -----
+    No pre-existing ``SolveState`` fields. The op builds its own adjacency and
+    distance caches.
+
+    Writes
+    ------
+    ``state.adjacency``, optional ``state.adjacency_weighted``,
+    adjacency metadata in ``state.extras``, ``state.distance_matrix``, and
+    ``state.pos``.
+
+    Use this when
+    -------------
+    You want a dense, globally informed initializer for small-to-medium graphs
+    where exact shortest paths are affordable.
+    """
 
     name = "classical_mds_init"
     category = OpCategory.INIT
-    writes = ("adjacency", "distance_matrix", "pos")
+    writes = (
+        "adjacency",
+        "adjacency_weighted",
+        "extras.adjacency_format",
+        "extras.adjacency_directed",
+        "extras.adjacency_weighted",
+        "distance_matrix",
+        "pos",
+    )
 
     def __init__(self, config: Optional[ClassicalMDSInitConfig] = None) -> None:
         """Store the classical-MDS configuration.
@@ -1669,7 +2050,7 @@ class ClassicalMDSInit(Op):
 
         distances = state.distance_matrix.detach().to(device="cpu", dtype=torch.float64).numpy()
         gram = _double_center_squared_distances(distances)
-        coordinates = _positive_eigh_coordinates(gram=gram, dim=2)
+        coordinates = _positive_eigh_coordinates(gram=gram, dim=self.config.position_dim)
         state.pos = torch.from_numpy(coordinates).to(
             dtype=torch.float32,
             device=_target_device(problem, ctx),
@@ -1685,18 +2066,47 @@ class PivotMDSInitConfig:
     ----------
     n_pivots : int, default=50
         Maximum number of pivots to select.
+    position_dim : int, default=2
+        Output dimensionality for the recovered embedding.
     """
 
     n_pivots: int = 50
+    position_dim: int = 2
 
 
 @register_op
 class PivotMDSInit(Op):
-    """Initialize positions with landmark shortest paths and SVD."""
+    """Initialize positions with landmark shortest paths and SVD.
+
+    Reads
+    -----
+    No pre-existing ``SolveState`` fields. The op builds adjacency and pivot
+    caches on demand.
+
+    Writes
+    ------
+    ``state.adjacency``, optional ``state.adjacency_weighted``, adjacency
+    metadata in ``state.extras``, ``state.pivot_indices``,
+    ``state.pivot_distances``, and ``state.pos``.
+
+    Use this when
+    -------------
+    You want a cheaper approximation than full classical MDS while still
+    preserving coarse graph-distance structure.
+    """
 
     name = "pivot_mds_init"
     category = OpCategory.INIT
-    writes = ("adjacency", "pivot_indices", "pivot_distances", "pos")
+    writes = (
+        "adjacency",
+        "adjacency_weighted",
+        "extras.adjacency_format",
+        "extras.adjacency_directed",
+        "extras.adjacency_weighted",
+        "pivot_indices",
+        "pivot_distances",
+        "pos",
+    )
 
     def __init__(self, config: Optional[PivotMDSInitConfig] = None) -> None:
         """Store the pivot-MDS configuration.
@@ -1758,7 +2168,7 @@ class PivotMDSInit(Op):
         if state.pivot_distances is None:
             raise RuntimeError("PivotDistanceQueries did not populate state.pivot_distances.")
 
-        state.pos = _pivot_mds_coordinates(state.pivot_distances, dim=2).to(
+        state.pos = _pivot_mds_coordinates(state.pivot_distances, dim=self.config.position_dim).to(
             device=_target_device(problem, ctx)
         )
         return state
@@ -1786,7 +2196,21 @@ class FromAlgorithmInitConfig:
 
 @register_op
 class FromAlgorithmInit(Op):
-    """Initialize positions by delegating to another layout algorithm."""
+    """Initialize positions by delegating to another classic layout algorithm.
+
+    Reads
+    -----
+    No ``SolveState`` fields.
+
+    Writes
+    ------
+    ``state.pos`` from the delegated layout result.
+
+    Use this when
+    -------------
+    You want to reuse an existing classic algorithm as an initializer inside a
+    composable op pipeline.
+    """
 
     name = "from_algorithm_init"
     category = OpCategory.INIT

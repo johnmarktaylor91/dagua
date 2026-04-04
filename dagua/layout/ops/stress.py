@@ -6,7 +6,7 @@ stress-majorization as composable, registered layout operations.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, Tuple
 
 import numpy as np
@@ -20,6 +20,36 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _SM_MIN_DISTANCE = 1.0e-9
 _SM_MIN_SPAN = 1.0e-6
+
+
+@dataclass(frozen=True)
+class InitializeStressMajorizationPositionsConfig:
+    """Configuration for :class:`InitializeStressMajorizationPositions`.
+
+    Parameters
+    ----------
+    jitter_scale : float, default=0.05
+        Standard deviation of the Gaussian jitter added to the MDS warm start.
+    """
+
+    jitter_scale: float = 0.05
+
+
+@dataclass(frozen=True)
+class SmacofStepConfig:
+    """Configuration for :class:`SmacofStep`.
+
+    Parameters
+    ----------
+    stress_tolerance : float, default=1e-8
+        Absolute stress-increase tolerance for accepting a candidate step.
+    max_halving_steps : int, default=8
+        Maximum bisection halving attempts when the candidate increases stress.
+    """
+
+    stress_tolerance: float = 1.0e-8
+    max_halving_steps: int = 8
+
 
 WEIGHTS_KEY = "sm_weights"
 CURRENT_POSITIONS_KEY = "sm_current_positions"
@@ -95,6 +125,10 @@ class PrepareStressMajorizationState(Op):
 @dataclass(frozen=True)
 class InitializeStressMajorizationPositions(Op):
     """Seed positions from classical MDS with deterministic jitter."""
+
+    config: InitializeStressMajorizationPositionsConfig = field(
+        default_factory=InitializeStressMajorizationPositionsConfig
+    )
 
     name: ClassVar[str] = "sm_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
@@ -246,7 +280,7 @@ class InitializeStressMajorizationPositions(Op):
         baseline = self._normalize_positions(raw_positions.to(device=device), extent=extent)
 
         rng = np.random.default_rng(problem.seed)
-        jitter = rng.normal(loc=0.0, scale=0.05, size=(problem.num_nodes, 2))
+        jitter = rng.normal(loc=0.0, scale=self.config.jitter_scale, size=(problem.num_nodes, 2))
         initialized = baseline.detach().cpu().numpy().astype(np.float64) + jitter
         initialized = initialized - initialized.mean(axis=0, keepdims=True)
 
@@ -269,6 +303,8 @@ class InitializeStressMajorizationPositions(Op):
 @dataclass(frozen=True)
 class SmacofStep(Op):
     """Apply one dense SMACOF majorization update."""
+
+    config: SmacofStepConfig = field(default_factory=SmacofStepConfig)
 
     name: ClassVar[str] = "sm_smacof_step"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
@@ -303,7 +339,7 @@ class SmacofStep(Op):
         SolveState
             State with updated positions and stress in ``state.extras``.
         """
-        del self, ctx
+        del ctx
 
         current = state.extras[CURRENT_POSITIONS_KEY]
         current_stress = state.extras[CURRENT_STRESS_KEY]
@@ -362,9 +398,11 @@ class SmacofStep(Op):
             np.sum(weights * (candidate_distances - target_distances_np) ** 2)
         )
 
-        if candidate_stress > current_stress + 1.0e-8:
+        tolerance = self.config.stress_tolerance
+        if candidate_stress > current_stress + tolerance:
+            # Bisection halving: blend candidate toward current until stress improves
             blended = candidate
-            for _ in range(8):
+            for _ in range(self.config.max_halving_steps):
                 blended = 0.5 * (blended + current)
                 blended_distances = np.sqrt(
                     np.sum(
@@ -376,7 +414,7 @@ class SmacofStep(Op):
                 blended_stress = 0.5 * float(
                     np.sum(weights * (blended_distances - target_distances_np) ** 2)
                 )
-                if blended_stress <= current_stress + 1.0e-8:
+                if blended_stress <= current_stress + tolerance:
                     candidate = blended
                     candidate_stress = blended_stress
                     break
