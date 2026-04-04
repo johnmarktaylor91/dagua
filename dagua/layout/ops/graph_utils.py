@@ -13,15 +13,21 @@ from typing import Optional
 import numpy as np
 import torch
 
-from dagua.layout.classic._graph_distances import (
+from dagua.layout._archive.classic._graph_distances import (
     all_pairs_shortest_paths as _shared_all_pairs_shortest_paths,
 )
-from dagua.layout.classic._graph_distances import (
+from dagua.layout._archive.classic._graph_distances import (
     bfs_distances,  # noqa: F401
     dijkstra_distances,  # noqa: F401
 )
-from dagua.layout.classic._graph_distances import (
+from dagua.layout._archive.classic._graph_distances import (
+    bfs_distances as _shared_bfs_distances,  # noqa: F401, F811
+)
+from dagua.layout._archive.classic._graph_distances import (
     build_undirected_adjacency as _shared_build_undirected_adjacency,
+)
+from dagua.layout._archive.classic._graph_distances import (
+    dijkstra_distances as _shared_dijkstra_distances,  # noqa: F401, F811
 )
 
 # ---------------------------------------------------------------------------

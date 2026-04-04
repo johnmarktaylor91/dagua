@@ -12,13 +12,13 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 
-from dagua.layout.classic import davidson_harel as _dh
-from dagua.layout.classic import linlog as _linlog
-from dagua.layout.classic import maxent_stress as _maxent
-from dagua.layout.classic import neulay as _neulay
-from dagua.layout.classic import sgd2_multi as _sgd2
-from dagua.layout.classic import tsnet as _tsnet
-from dagua.layout.classic import umap_layout as _umap
+from dagua.layout._archive.classic import davidson_harel as _dh
+from dagua.layout._archive.classic import linlog as _linlog
+from dagua.layout._archive.classic import maxent_stress as _maxent
+from dagua.layout._archive.classic import neulay as _neulay
+from dagua.layout._archive.classic import sgd2_multi as _sgd2
+from dagua.layout._archive.classic import tsnet as _tsnet
+from dagua.layout._archive.classic import umap_layout as _umap
 from dagua.layout.ops.base import LossOp, Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
