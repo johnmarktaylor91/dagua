@@ -12,7 +12,7 @@ from typing import ClassVar, List, Optional, Tuple
 
 import torch
 
-from dagua.layout.ops.base import Op
+from dagua.layout.ops.base import Op, Repeat
 from dagua.layout.ops.graph_utils import layout_device as _layout_device
 from dagua.layout.ops.graph_utils import layout_extent as _layout_extent
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -38,6 +38,9 @@ _MAPPING_KEY = "sfdp_mappings"
 _GENERATOR_KEY = "sfdp_generator"
 _BASE_GRAPH_KEY = "sfdp_base_graph"
 _IDEAL_LENGTH_KEY = "sfdp_ideal_length"
+_SFDP_CURRENT_STEP_KEY = "sfdp_current_step"
+_SFDP_PREVIOUS_FORCE_NORM_KEY = "sfdp_previous_force_norm"
+_SFDP_FORCE_NORM_KEY = "sfdp_force_norm"
 
 
 @dataclass
@@ -702,67 +705,76 @@ def _update_step(step: float, force_norm: float, previous_force_norm: float) -> 
     return step * 1.1
 
 
-def _spring_electrical_layout(
-    graph: GraphData,
-    positions: torch.Tensor,
-    ideal_length: float,
-    steps: int,
-    theta: float,
-    repulsive_exponent: float,
-    adaptive_cooling: bool,
-    step_init: float,
-) -> torch.Tensor:
-    """Run Hu's spring-electrical fixed-step refinement on one graph level.
+@register_op
+@dataclass(frozen=True)
+class SFDPSpringElectricalStep(Op):
+    """Apply one force-displacement iteration for SFDP.
 
     Parameters
     ----------
     graph : GraphData
-        Current graph level.
-    positions : torch.Tensor
-        Initial positions with shape ``[N, 2]``.
-    ideal_length : float
-        Ideal edge length ``K``.
-    steps : int
-        Maximum number of iterations.
-    theta : float
+        Graph whose adjacency and weights define spring interactions.
+    attractive_scale : float
+        Precomputed attractive force coefficient for this level.
+    repulsive_scale : float
+        Precomputed repulsive force coefficient for this level.
+    theta : float, default=0.6
         Barnes-Hut opening angle threshold.
-    repulsive_exponent : float
-        SFDP repulsion exponent ``p``.
-    adaptive_cooling : bool
-        Whether to adapt the step size from force progress.
-    step_init : float
-        Initial fixed movement length per iteration.
-
-    Returns
-    -------
-    torch.Tensor
-        Refined positions with shape ``[N, 2]``.
+    repulsive_exponent : float, default=-1.0
+        SFDP repulsion exponent.
     """
-    if positions.shape[0] <= 1 or steps == 0:
-        return positions
 
-    attractive_scale = (_FORCE_SCALING ** ((2.0 - repulsive_exponent) / 3.0)) / max(
-        ideal_length,
-        _MIN_SPAN,
-    )
-    repulsive_scale = max(ideal_length, _MIN_SPAN) ** (1.0 - repulsive_exponent)
-    current_step = step_init
-    previous_force_norm = float("inf")
+    graph: GraphData
+    attractive_scale: float
+    repulsive_scale: float
+    theta: float = _DEFAULT_THETA
+    repulsive_exponent: float = _DEFAULT_P
 
-    for _ in range(steps):
-        if current_step < _DEFAULT_TOLERANCE:
-            break
+    name: ClassVar[str] = "sfdp_spring_electrical_step"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compute one iteration and move nodes with the current step size.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable solve state containing the current positions and current step
+            metadata.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with updated ``pos`` and latest force norm in extras.
+        """
+        del ctx
+        if state.pos is None:
+            raise ValueError("SFDPSpringElectricalStep requires state.pos to be set.")
+
+        current_step = float(state.extras.get(_SFDP_CURRENT_STEP_KEY, _DEFAULT_STEP))
 
         attractive = _spring_forces(
-            graph=graph,
-            positions=positions,
-            attractive_scale=attractive_scale,
+            graph=self.graph,
+            positions=state.pos,
+            attractive_scale=self.attractive_scale,
         )
         repulsive = _repulsive_forces(
-            positions=positions,
-            repulsive_scale=repulsive_scale,
-            repulsive_exponent=repulsive_exponent,
-            theta=theta,
+            positions=state.pos,
+            repulsive_scale=self.repulsive_scale,
+            repulsive_exponent=self.repulsive_exponent,
+            theta=self.theta,
         )
         total_force = attractive + repulsive
         node_force_norm = torch.linalg.vector_norm(total_force, dim=1, keepdim=True)
@@ -771,19 +783,72 @@ def _spring_electrical_layout(
             total_force / node_force_norm.clamp_min(_EPSILON),
             torch.zeros_like(total_force),
         )
-        positions = positions + (current_step * direction)
-        positions = positions - positions.mean(dim=0, keepdim=True)
+        state.pos = state.pos + (current_step * direction)
+        state.pos = state.pos - state.pos.mean(dim=0, keepdim=True)
+        state.extras[_SFDP_FORCE_NORM_KEY] = float(torch.linalg.vector_norm(total_force).item())
+        return state
 
-        force_norm = float(torch.linalg.vector_norm(total_force).item())
-        if adaptive_cooling and previous_force_norm < float("inf"):
+
+@register_op
+@dataclass(frozen=True)
+class SFDPAdaptiveCool(Op):
+    """Apply the SFDP adaptive step-size update.
+
+    Parameters
+    ----------
+    adaptive_cooling : bool, default=True
+        Whether to apply graphviz-style step-size adaptation.
+    """
+
+    adaptive_cooling: bool = True
+
+    name: ClassVar[str] = "sfdp_adaptive_cool"
+    category: ClassVar[OpCategory] = OpCategory.ANNEAL
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Adapt movement size for the next iteration and handle convergence.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable solve state with force norms in ``extras``.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with updated step size metadata.
+        """
+        del problem
+        if not self.adaptive_cooling:
+            return state
+
+        force_norm = float(state.extras.get(_SFDP_FORCE_NORM_KEY, 0.0))
+        previous_force_norm = float(state.extras.get(_SFDP_PREVIOUS_FORCE_NORM_KEY, float("inf")))
+        current_step = float(state.extras.get(_SFDP_CURRENT_STEP_KEY, _DEFAULT_STEP))
+
+        if previous_force_norm < float("inf"):
             current_step = _update_step(
                 step=current_step,
                 force_norm=force_norm,
                 previous_force_norm=previous_force_norm,
             )
-        previous_force_norm = force_norm
 
-    return positions
+        state.extras[_SFDP_CURRENT_STEP_KEY] = current_step
+        state.extras[_SFDP_PREVIOUS_FORCE_NORM_KEY] = force_norm
+        if current_step < _DEFAULT_TOLERANCE:
+            state.converged = True
+        return state
 
 
 def _prolongate_positions(
@@ -971,7 +1036,7 @@ class InitSFDPCoarsestPositions(Op):
             State with ``pos`` set to coarsest-level random positions and
             ``extras['sfdp_ideal_length']`` computed.
         """
-        del problem, ctx
+        del ctx
         graphs: List[GraphData] = state.extras[_GRAPH_KEY]
         generator: torch.Generator = state.extras[_GENERATOR_KEY]
 
@@ -992,7 +1057,7 @@ class SFDPRefineCoarsestLevel(Op):
     name: ClassVar[str] = "sfdp_refine_coarsest"
     category: ClassVar[OpCategory] = OpCategory.FORCE
     reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
 
     steps: int = 500
     theta: float = _DEFAULT_THETA
@@ -1020,27 +1085,50 @@ class SFDPRefineCoarsestLevel(Op):
         SolveState
             State with refined ``pos`` at the coarsest level.
         """
-        del problem, ctx
         graphs: List[GraphData] = state.extras[_GRAPH_KEY]
         coarsest = graphs[-1]
 
-        state.pos = _spring_electrical_layout(
-            graph=coarsest,
-            positions=state.pos,
-            ideal_length=state.extras[_IDEAL_LENGTH_KEY],
-            steps=self.steps,
-            theta=self.theta,
-            repulsive_exponent=self.repulsive_exponent,
-            adaptive_cooling=True,
-            step_init=_DEFAULT_STEP,
+        if state.pos is None:
+            raise ValueError("SFDPRefineCoarsestLevel requires state.pos to be set.")
+        if self.steps == 0 or state.pos.shape[0] <= 1:
+            return state
+
+        ideal_length = float(state.extras[_IDEAL_LENGTH_KEY])
+        attractive_scale = (_FORCE_SCALING ** ((2.0 - self.repulsive_exponent) / 3.0)) / max(
+            ideal_length,
+            _MIN_SPAN,
         )
+        repulsive_scale = max(ideal_length, _MIN_SPAN) ** (1.0 - self.repulsive_exponent)
+        state.extras[_SFDP_CURRENT_STEP_KEY] = _DEFAULT_STEP
+        state.extras[_SFDP_PREVIOUS_FORCE_NORM_KEY] = float("inf")
+
+        state = Repeat(
+            n=self.steps,
+            ops=[
+                SFDPSpringElectricalStep(
+                    graph=coarsest,
+                    attractive_scale=attractive_scale,
+                    repulsive_scale=repulsive_scale,
+                    theta=self.theta,
+                    repulsive_exponent=self.repulsive_exponent,
+                ),
+                SFDPAdaptiveCool(),
+            ],
+        ).apply(problem, state, ctx)
+        state.converged = False
         return state
 
 
 @register_op
 @dataclass(frozen=True)
 class SFDPProlongateAndRefineLevels(Op):
-    """Prolongate from coarse to fine levels and refine after each step."""
+    """Prolongate from coarse to fine levels and refine after each step.
+
+    Notes
+    -----
+    The hierarchy traversal remains explicit because each level changes the graph,
+    fine-to-coarse mapping, and current target edge length before refinement.
+    """
 
     name: ClassVar[str] = "sfdp_prolongate_and_refine"
     category: ClassVar[OpCategory] = OpCategory.PROLONG
@@ -1073,7 +1161,6 @@ class SFDPProlongateAndRefineLevels(Op):
         SolveState
             State with ``pos`` at the finest (original) level.
         """
-        del problem, ctx
         graphs: List[GraphData] = state.extras[_GRAPH_KEY]
         mappings: list[torch.Tensor] = state.extras[_MAPPING_KEY]
         generator: torch.Generator = state.extras[_GENERATOR_KEY]
@@ -1090,16 +1177,32 @@ class SFDPProlongateAndRefineLevels(Op):
                 ideal_length=ideal_length,
                 generator=generator,
             )
-            positions = _spring_electrical_layout(
-                graph=fine_graph,
-                positions=positions,
-                ideal_length=ideal_length,
-                steps=self.steps,
-                theta=self.theta,
-                repulsive_exponent=self.repulsive_exponent,
-                adaptive_cooling=False,
-                step_init=_DEFAULT_STEP,
-            )
+            if positions.shape[0] > 1 and self.steps > 0:
+                state.pos = positions
+                state.extras[_SFDP_CURRENT_STEP_KEY] = _DEFAULT_STEP
+                state.extras[_SFDP_PREVIOUS_FORCE_NORM_KEY] = float("inf")
+                attractive_scale = (
+                    _FORCE_SCALING ** ((2.0 - self.repulsive_exponent) / 3.0)
+                ) / max(
+                    ideal_length,
+                    _MIN_SPAN,
+                )
+                repulsive_scale = max(ideal_length, _MIN_SPAN) ** (1.0 - self.repulsive_exponent)
+                state = Repeat(
+                    n=self.steps,
+                    ops=[
+                        SFDPSpringElectricalStep(
+                            graph=fine_graph,
+                            attractive_scale=attractive_scale,
+                            repulsive_scale=repulsive_scale,
+                            theta=self.theta,
+                            repulsive_exponent=self.repulsive_exponent,
+                        ),
+                        SFDPAdaptiveCool(adaptive_cooling=False),
+                    ],
+                ).apply(problem, state, ctx)
+                state.converged = False
+                positions = state.pos
 
         state.pos = positions
         state.extras[_IDEAL_LENGTH_KEY] = ideal_length
@@ -1166,6 +1269,8 @@ __all__ = [
     "BuildSFDPGraph",
     "BuildSFDPHierarchy",
     "InitSFDPCoarsestPositions",
+    "SFDPSpringElectricalStep",
+    "SFDPAdaptiveCool",
     "SFDPRefineCoarsestLevel",
     "SFDPProlongateAndRefineLevels",
     "SFDPFinalizePositions",

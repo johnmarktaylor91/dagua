@@ -142,6 +142,24 @@ class _VertexResolutionState:
 
 
 @dataclass
+class _SGD2MultiRunState:
+    """Mutable state carried across one decomposed (SGD)^2 optimization run."""
+
+    positions: torch.nn.Parameter
+    samplers: Dict[str, _CyclicSampler]
+    optimizer: torch.optim.Optimizer
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau
+    crossing_state: Optional[_CrossingLossState]
+    vertex_resolution_state: Optional[_VertexResolutionState]
+    ema_weighted_sum: float
+    ema_total_weight: float
+    step_index: int
+    latest_loss: Optional[torch.Tensor]
+    last_crossing_left: torch.Tensor
+    last_crossing_right: torch.Tensor
+
+
+@dataclass
 class _CrossingLossState:
     """Persistent neural detector state for the crossing criterion."""
 
@@ -1266,6 +1284,111 @@ def _crossings_loss(
     return crossing_state.position_loss(preds, torch.zeros_like(preds))
 
 
+def _crossings_position_loss(
+    pos: torch.Tensor,
+    left: torch.Tensor,
+    right: torch.Tensor,
+    crossing_state: _CrossingLossState,
+) -> torch.Tensor:
+    """Evaluate only the crossing position loss after detector warmup.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    left : torch.Tensor
+        Left edge batch with shape ``[2, B]``.
+    right : torch.Tensor
+        Right edge batch with shape ``[2, B]``.
+    crossing_state : _CrossingLossState
+        Persistent detector state for the crossing criterion.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar crossing position loss.
+    """
+    edge_pair_pos = _edge_pair_positions(pos=pos, left=left, right=right)
+    if edge_pair_pos.numel() == 0:
+        return pos.sum() * 0.0
+
+    crossing_state.detector.eval()
+    preds = crossing_state.detector(edge_pair_pos).view(-1)
+    return crossing_state.position_loss(preds, torch.zeros_like(preds))
+
+
+def _crossing_batch_for_step(
+    state: _PreparedState,
+    sampler: Optional[_CyclicSampler],
+    batch_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build an edge-pair batch for a single crossing step.
+
+    Parameters
+    ----------
+    state : _PreparedState
+        Precomputed graph state.
+    sampler : _CyclicSampler | None
+        Deterministic sampler for crossing pairs.
+    batch_size : int
+        Requested mini-batch size.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Left/right edge batches with shape ``[2, B]``.
+    """
+    if state.non_incident_edge_pairs is None:
+        return (
+            torch.empty((2, 0), dtype=torch.long, device=state.device),
+            torch.empty((2, 0), dtype=torch.long, device=state.device),
+        )
+    if sampler is not None:
+        sample_index = sampler.sample(batch_size)
+        pair_batch = state.non_incident_edge_pairs[:, sample_index]
+    else:
+        pair_batch = _sample_pairs(state.non_incident_edge_pairs, batch_size=batch_size)
+    return pair_batch[:2], pair_batch[2:]
+
+
+def _crossing_train_step(
+    pos: torch.Tensor,
+    left: torch.Tensor,
+    right: torch.Tensor,
+    crossing_state: _CrossingLossState,
+) -> None:
+    """Run one mini-step of the neural crossing-detector training loop.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    left : torch.Tensor
+        Left edge batch with shape ``[2, B]``.
+    right : torch.Tensor
+        Right edge batch with shape ``[2, B]``.
+    crossing_state : _CrossingLossState
+        Persistent detector state.
+    """
+    edge_pair_pos = _edge_pair_positions(pos=pos, left=left, right=right)
+    if edge_pair_pos.numel() == 0:
+        return
+
+    labels = _are_edge_pairs_crossed(edge_pair_pos.detach()).to(
+        device=pos.device,
+        dtype=pos.dtype,
+    )
+    crossing_state.detector.train()
+    for _ in range(_CROSSING_DETECTOR_TRAIN_STEPS):
+        preds = crossing_state.detector(edge_pair_pos.detach()).view(-1)
+        train_loss = crossing_state.train_loss(preds, labels)
+        crossing_state.optimizer.zero_grad(set_to_none=True)
+        train_loss.backward()
+        crossing_state.optimizer.step()
+
+    crossing_state.detector.eval()
+
+
 def _crossing_angle_loss(
     pos: torch.Tensor,
     left: torch.Tensor,
@@ -1551,6 +1674,221 @@ def _criterion_loss(
 
 
 @register_op
+class SGD2MultiCrossingDetectorStep(Op):
+    """Train one crossing-detector mini-step for the active crossing batch."""
+
+    name: ClassVar[str] = "sgd2_multi_crossing_detector_step"
+    category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def __init__(self, batch_size: int = 16) -> None:
+        """Store the crossing mini-batch size.
+
+        Parameters
+        ----------
+        batch_size : int
+            Mini-batch size used for crossing sampling.
+        """
+        self.batch_size = batch_size
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Train the detector and cache the sampled edge-pair batch.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused.
+
+        Returns
+        -------
+        SolveState
+            State with updated detector parameters and cached pair batch.
+        """
+        if state.converged:
+            return state
+
+        run_state = state.extras["sgd2_multi_run_state"]
+        if run_state.crossing_state is None:
+            return state
+
+        prepared = state.extras["sgd2_prepared"]
+        left, right = _crossing_batch_for_step(
+            state=prepared,
+            sampler=run_state.samplers.get("crossings"),
+            batch_size=self.batch_size,
+        )
+        run_state.last_crossing_left = left
+        run_state.last_crossing_right = right
+        if left.numel() == 0 or right.numel() == 0:
+            return state
+
+        _crossing_train_step(
+            pos=run_state.positions,
+            left=left,
+            right=right,
+            crossing_state=run_state.crossing_state,
+        )
+        return state
+
+
+@register_op
+class SGD2MultiOptStep(Op):
+    """Compute one Nesterov SGD step across all active criteria."""
+
+    name: ClassVar[str] = "sgd2_multi_opt_step"
+    category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def __init__(self, batch_size: int = 16, grad_clamp: float = 4.0) -> None:
+        """Store per-step optimization settings.
+
+        Parameters
+        ----------
+        batch_size : int
+            Mini-batch size.
+        grad_clamp : float
+            Symmetric gradient clip bound.
+        """
+        self.batch_size = batch_size
+        self.grad_clamp = grad_clamp
+        self._crossing_detector_step = SGD2MultiCrossingDetectorStep(batch_size=batch_size)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Run one full criterion-weighted Nesterov step.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused.
+
+        Returns
+        -------
+        SolveState
+            State with updated optimizer parameters and step cache.
+        """
+        if state.converged:
+            return state
+
+        run_state = state.extras["sgd2_multi_run_state"]
+        prepared = state.extras["sgd2_prepared"]
+        schedules = state.extras["sgd2_schedules"]
+        positions = run_state.positions
+
+        run_state.optimizer.zero_grad(set_to_none=True)
+        loss = positions.sum() * 0.0
+        step_index = run_state.step_index
+
+        for name, schedule in schedules.items():
+            weight = schedule(step_index)
+            if weight == 0.0:
+                continue
+            if name == "crossings":
+                # Crossing loss uses a separate step op so RNG order and
+                # cached batches stay synchronized with the reference loop.
+                self._crossing_detector_step.apply(problem, state, ctx)
+                if run_state.crossing_state is None:
+                    continue
+                loss = loss + weight * _crossings_position_loss(
+                    pos=positions,
+                    left=run_state.last_crossing_left,
+                    right=run_state.last_crossing_right,
+                    crossing_state=run_state.crossing_state,
+                )
+            else:
+                loss = loss + weight * _criterion_loss(
+                    name=name,
+                    pos=positions,
+                    state=prepared,
+                    batch_size=self.batch_size,
+                    sampler=run_state.samplers.get(name),
+                    vertex_resolution_state=run_state.vertex_resolution_state,
+                    crossing_state=run_state.crossing_state,
+                )
+
+        loss.backward()
+        if positions.grad is not None:
+            positions.grad.clamp_(-self.grad_clamp, self.grad_clamp)
+        run_state.optimizer.step()
+        run_state.latest_loss = loss.detach()
+        return state
+
+
+@register_op
+class SGD2MultiConvergenceCheck(Op):
+    """Update EMA stats, learning rate schedule, and stopping state."""
+
+    name: ClassVar[str] = "sgd2_multi_convergence_check"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def __init__(self) -> None:
+        """Create a convergence-check op."""
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Update EMA-smoothed loss, scheduler cadence, and convergence.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused.
+
+        Returns
+        -------
+        SolveState
+            State with updated loss history and potential early-stop flag.
+        """
+        del problem, ctx
+
+        if state.converged:
+            return state
+
+        run_state = state.extras["sgd2_multi_run_state"]
+        if run_state.latest_loss is None:
+            return state
+
+        _ema_decay = 0.5 ** (1.0 / 100.0)
+        loss_value = float(run_state.latest_loss.item())
+        run_state.ema_weighted_sum = run_state.ema_weighted_sum * _ema_decay + loss_value
+        run_state.ema_total_weight = run_state.ema_total_weight * _ema_decay + 1.0
+        if run_state.step_index % 10 == 0:
+            run_state.scheduler.step(run_state.ema_weighted_sum / run_state.ema_total_weight)
+        if float(run_state.optimizer.param_groups[0]["lr"]) <= 1.0e-5:
+            state.converged = True
+        run_state.step_index += 1
+        return state
+
+
+@register_op
 class _InitSGD2MultiState(Op):
     """Validate inputs, seed RNGs, and precompute graph structures.
 
@@ -1682,15 +2020,7 @@ class _InitSGD2MultiState(Op):
 
 @register_op
 class _RunSGD2MultiOptimization(Op):
-    """Execute the full (SGD)^2 Nesterov optimization loop.
-
-    This op encapsulates the entire training loop including cyclic
-    samplers, crossing detector training, EMA smoothing, and LR
-    scheduling.  The deeply intertwined RNG state (torch.manual_seed,
-    torch.randperm in cyclic samplers, torch.randint in mini-batch
-    sampling, torch.randn in position init) makes it impossible to
-    split the loop across separate ops without breaking bit-identity.
-    """
+    """Execute a decomposed (SGD)^2 Nesterov optimization loop."""
 
     name: ClassVar[str] = "sgd2_multi_run_optimization"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
@@ -1725,6 +2055,8 @@ class _RunSGD2MultiOptimization(Op):
         self.momentum = momentum
         self.grad_clamp = grad_clamp
         self.batch_size = batch_size
+        self._opt_step = SGD2MultiOptStep(batch_size=batch_size, grad_clamp=grad_clamp)
+        self._convergence_check = SGD2MultiConvergenceCheck()
 
     def apply(
         self,
@@ -1748,8 +2080,6 @@ class _RunSGD2MultiOptimization(Op):
         SolveState
             State with optimized positions in ``pos``.
         """
-        del ctx
-
         if state.converged:
             return state
 
@@ -1812,41 +2142,27 @@ class _RunSGD2MultiOptimization(Op):
             min_lr=1.0e-5,
         )
 
-        # EMA smoothing matching reference: half-life of 100 iterations
-        _ema_decay = 0.5 ** (1.0 / 100.0)
-        ema_weighted_sum = 0.0
-        ema_total_weight = 0.0
+        run_state = _SGD2MultiRunState(
+            positions=positions,
+            samplers=samplers,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            crossing_state=crossing_state,
+            vertex_resolution_state=vertex_resolution_state,
+            ema_weighted_sum=0.0,
+            ema_total_weight=0.0,
+            step_index=0,
+            latest_loss=None,
+            last_crossing_left=torch.empty((2, 0), dtype=torch.long, device=device),
+            last_crossing_right=torch.empty((2, 0), dtype=torch.long, device=device),
+        )
+        state.extras["sgd2_multi_run_state"] = run_state
 
-        for step_index in range(self.steps):
-            optimizer.zero_grad(set_to_none=True)
-            loss = positions.sum() * 0.0
-            for name, schedule in schedules.items():
-                weight = schedule(step_index)
-                if weight == 0.0:
-                    continue
-                loss = loss + weight * _criterion_loss(
-                    name=name,
-                    pos=positions,
-                    state=prepared,
-                    batch_size=self.batch_size,
-                    sampler=samplers.get(name),
-                    vertex_resolution_state=vertex_resolution_state,
-                    crossing_state=crossing_state,
-                )
-
-            loss.backward()
-            if positions.grad is not None:
-                positions.grad.clamp_(-self.grad_clamp, self.grad_clamp)
-            optimizer.step()
-
-            # EMA + scheduler step every 10 iterations (reference pattern)
-            loss_value = float(loss.detach().item())
-            ema_weighted_sum = ema_weighted_sum * _ema_decay + loss_value
-            ema_total_weight = ema_total_weight * _ema_decay + 1.0
-            if step_index % 10 == 0:
-                scheduler.step(ema_weighted_sum / ema_total_weight)
-            if float(optimizer.param_groups[0]["lr"]) <= 1.0e-5:
+        for _ in range(self.steps):
+            if state.converged:
                 break
+            self._opt_step.apply(problem, state, ctx)
+            self._convergence_check.apply(problem, state, ctx)
 
         state.pos = positions.detach().to(dtype=torch.float32)
         state.converged = True
@@ -1855,6 +2171,9 @@ class _RunSGD2MultiOptimization(Op):
 
 __all__ = [
     "_InitSGD2MultiState",
+    "SGD2MultiCrossingDetectorStep",
+    "SGD2MultiOptStep",
+    "SGD2MultiConvergenceCheck",
     "_RunSGD2MultiOptimization",
     "SmoothSteps",
 ]
