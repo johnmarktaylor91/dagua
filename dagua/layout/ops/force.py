@@ -19,27 +19,6 @@ from typing import Any, ClassVar, Optional, Tuple, cast
 import numpy as np
 import torch
 
-from dagua.layout._archive.classic.fa2 import (
-    _adjust_speed_and_apply_forces as _fa2_adjust_speed_and_apply_forces,
-)
-from dagua.layout._archive.classic.fa2 import (
-    _attraction_force as _fa2_attraction_force,
-)
-from dagua.layout._archive.classic.fa2 import (
-    _barnes_hut_force_for_node as _fa2_barnes_hut_force_for_node,
-)
-from dagua.layout._archive.classic.fa2 import (
-    _BarnesHutNode as _FA2BarnesHutNode,
-)
-from dagua.layout._archive.classic.fa2 import (
-    _compute_degree as _fa2_compute_degree,
-)
-from dagua.layout._archive.classic.fa2 import (
-    _gravity_force as _fa2_gravity_force,
-)
-from dagua.layout._archive.classic.fa2 import (
-    _unique_undirected_edges_with_weights as _fa2_unique_undirected_edges_with_weights,
-)
 from dagua.layout._archive.classic.gem import (
     _INITIAL_TEMPERATURE as _GEM_INITIAL_TEMPERATURE,
 )
@@ -77,6 +56,12 @@ _GRAPHOPT_MIN_DISTANCE = 1.0e-12
 _GRAPHOPT_MAX_REPULSION_DISTANCE = 500.0
 _LGL_MIN_DISTANCE = 1.0e-12
 _DENSITY_EPSILON_SCALE = 1.0
+
+_GRAPHOPT_PAIR_SOURCE_KEY = "graphopt_pair_source"
+_GRAPHOPT_PAIR_TARGET_KEY = "graphopt_pair_target"
+_GRAPHOPT_SPRING_EDGES_KEY = "graphopt_spring_edges"
+_GRAPHOPT_SPRING_WEIGHTS_KEY = "graphopt_spring_weights"
+_GRAPHOPT_MAX_REPULSION_DISTANCE_SQ_KEY = "graphopt_max_repulsion_distance_sq"
 
 
 def _require_positions(state: SolveState) -> torch.Tensor:
@@ -214,7 +199,23 @@ def _undirected_degree(
     torch.Tensor
         Degree tensor with shape ``[N]``.
     """
-    degree = _fa2_compute_degree(edge_index=edge_index, num_nodes=num_nodes)
+    degree = torch.zeros((num_nodes,), dtype=torch.float32, device=device)
+    if edge_index.numel() == 0:
+        return degree
+
+    source = edge_index[0].to(device=device, dtype=torch.long)
+    target = edge_index[1].to(device=device, dtype=torch.long)
+    non_self = source != target
+    if not bool(non_self.any().item()):
+        return degree
+
+    lower = torch.minimum(source[non_self], target[non_self])
+    upper = torch.maximum(source[non_self], target[non_self])
+    pairs = torch.stack([lower, upper], dim=1)
+    unique_pairs = torch.unique(pairs, dim=0)
+    ones = torch.ones(unique_pairs.shape[0], dtype=torch.float32, device=device)
+    degree.scatter_add_(0, unique_pairs[:, 0], ones)
+    degree.scatter_add_(0, unique_pairs[:, 1], ones)
     return degree.to(device=device, dtype=torch.float32)
 
 
@@ -335,49 +336,6 @@ def _pair_force_delta(pos: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     delta = pos.unsqueeze(1) - pos.unsqueeze(0)
     distance = torch.linalg.vector_norm(delta, dim=2)
     return delta, distance
-
-
-def _fa2_barnes_hut_force(
-    quadtree: _FA2BarnesHutNode,
-    pos: torch.Tensor,
-    mass: torch.Tensor,
-    theta: float,
-) -> torch.Tensor:
-    """Evaluate FA2 Barnes-Hut repulsion using a prebuilt quadtree.
-
-    Parameters
-    ----------
-    quadtree : _BarnesHutNode
-        Root Barnes-Hut region.
-    pos : torch.Tensor
-        Position tensor with shape ``[N, 2]``.
-    mass : torch.Tensor
-        Node mass tensor with shape ``[N]``.
-    theta : float
-        Barnes-Hut opening threshold.
-
-    Returns
-    -------
-    torch.Tensor
-        Force tensor with shape ``[N, 2]``.
-    """
-    pos_np = pos.detach().cpu().numpy()
-    mass_np = mass.detach().cpu().numpy()
-    force_np = np.zeros((pos.shape[0], 2), dtype=np.float64)
-
-    for node_index in range(pos.shape[0]):
-        fx, fy = _fa2_barnes_hut_force_for_node(
-            node=quadtree,
-            pos_np=pos_np,
-            mass_np=mass_np,
-            index=node_index,
-            scaling_ratio=1.0,
-            theta=theta,
-        )
-        force_np[node_index, 0] = fx
-        force_np[node_index, 1] = fy
-
-    return torch.from_numpy(force_np).to(device=pos.device, dtype=pos.dtype)
 
 
 def _sfdp_barnes_hut_force(
@@ -1025,6 +983,322 @@ class UniformSpringAttraction(Op):
         return state
 
 
+@dataclass(frozen=True)
+class GraphOptApplyConfig:
+    """Configuration for :class:`GraphOptApply`.
+
+    Parameters
+    ----------
+    node_mass : float
+        Shared mass used to convert force into displacement.
+    max_sa_movement : float
+        Maximum absolute displacement per axis per iteration.
+    """
+
+    node_mass: float = 30.0
+    max_sa_movement: float = 5.0
+
+
+@register_op
+@dataclass(frozen=True)
+class GraphOptApplyDisplacement(Op):
+    """Apply GraphOpt-style clamp-to-axis-step displacement."""
+
+    config: GraphOptApplyConfig = field(default_factory=GraphOptApplyConfig)
+
+    name: ClassVar[str] = "graphopt_apply_displacement"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "forces")
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "forces")
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Update positions with a clamped force/mass step.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution context.
+
+        Returns
+        -------
+        SolveState
+            State with updated positions.
+        """
+        del problem, ctx
+
+        if self.config.node_mass <= 0.0:
+            raise ValueError("GraphOptApplyDisplacement node_mass must be positive.")
+
+        positions = _require_positions(state)
+        forces = _require_forces(state)
+        movement = torch.clamp(
+            forces / float(self.config.node_mass),
+            min=-float(self.config.max_sa_movement),
+            max=float(self.config.max_sa_movement),
+        )
+        state.pos = positions + movement
+        return state
+
+
+@dataclass(frozen=True)
+class GraphOptPrepareStateConfig:
+    """Configuration for :class:`GraphOptPrepareState`.
+
+    Parameters
+    ----------
+    spring_max_distance : float, default=500.0
+        Maximum pairwise distance for GraphOpt coulomb repulsion.
+    """
+
+    spring_max_distance: float = 500.0
+
+
+@register_op
+@dataclass(frozen=True)
+class GraphOptPrepareState(Op):
+    """Prepare and cache GraphOpt-specific data in ``state.extras``.
+
+    Notes
+    -----
+    This op filters self-loops from the spring edge set (preserving duplicate
+    and reciprocal edges), stores edge-level spring weights, and precomputes the
+    all-pairs upper-triangle index pairs for repulsion.
+    """
+
+    config: GraphOptPrepareStateConfig = field(default_factory=GraphOptPrepareStateConfig)
+
+    name: ClassVar[str] = "graphopt_prepare_state"
+    category: ClassVar[OpCategory] = OpCategory.PREPROCESS
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Populate cached pair indices and spring metadata for one GraphOpt solve.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure (unused).
+
+        Returns
+        -------
+        SolveState
+            State with GraphOpt-specific tensors populated in ``extras``.
+        """
+        del ctx
+
+        if problem.edge_index.numel() == 0:
+            state.extras[_GRAPHOPT_SPRING_EDGES_KEY] = torch.empty((2, 0), dtype=torch.long)
+            state.extras[_GRAPHOPT_SPRING_WEIGHTS_KEY] = None
+        else:
+            edges = problem.edge_index.to(device="cpu", dtype=torch.long)
+            non_self = edges[0] != edges[1]
+            if not bool(non_self.any().item()):
+                state.extras[_GRAPHOPT_SPRING_EDGES_KEY] = torch.empty((2, 0), dtype=torch.long)
+                state.extras[_GRAPHOPT_SPRING_WEIGHTS_KEY] = None
+            else:
+                filtered_edges = edges[:, non_self].contiguous()
+                state.extras[_GRAPHOPT_SPRING_EDGES_KEY] = filtered_edges
+
+                if problem.edge_weights is not None:
+                    spring_weights = (
+                        problem.edge_weights.detach()
+                        .to(device="cpu", dtype=torch.float64)[non_self]
+                        .contiguous()
+                    )
+                    state.extras[_GRAPHOPT_SPRING_WEIGHTS_KEY] = spring_weights
+                else:
+                    state.extras[_GRAPHOPT_SPRING_WEIGHTS_KEY] = None
+
+        pair_source, pair_target = torch.triu_indices(
+            problem.num_nodes,
+            problem.num_nodes,
+            offset=1,
+        )
+        state.extras[_GRAPHOPT_PAIR_SOURCE_KEY] = pair_source
+        state.extras[_GRAPHOPT_PAIR_TARGET_KEY] = pair_target
+        max_distance_sq = float(self.config.spring_max_distance) * float(
+            self.config.spring_max_distance
+        )
+        state.extras[_GRAPHOPT_MAX_REPULSION_DISTANCE_SQ_KEY] = max_distance_sq
+        return state
+
+
+@dataclass(frozen=True)
+class GraphOptIterationConfig:
+    """Configuration for :class:`GraphOptIteration`.
+
+    Parameters
+    ----------
+    node_charge : float, default=0.001
+        Coulomb repulsion charge term.
+    node_mass : float, default=30.0
+        Shared mass in the explicit displacement step.
+    spring_length : float, default=0.0
+        Rest length used by explicit springs.
+    spring_constant : float, default=1.0
+        Spring constant used by explicit edge forces.
+    max_sa_movement : float, default=5.0
+        Absolute displacement clamp per axis.
+    """
+
+    node_charge: float = 0.001
+    node_mass: float = 30.0
+    spring_length: float = 0.0
+    spring_constant: float = 1.0
+    max_sa_movement: float = 5.0
+
+
+@register_op
+@dataclass(frozen=True)
+class GraphOptIteration(Op):
+    """Execute one exact GraphOpt force-and-move step.
+
+    Notes
+    -----
+    This op uses the state cached by :class:`GraphOptPrepareState` so repeated
+    iterations avoid rebuilding repulsion and spring indices each step.
+    """
+
+    config: GraphOptIterationConfig = field(default_factory=GraphOptIterationConfig)
+
+    name: ClassVar[str] = "graphopt_iteration"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "forces")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Update positions by one GraphOpt force application.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state with GraphOpt cache keys populated.
+        ctx : RuntimeContext
+            Execution context (unused).
+
+        Returns
+        -------
+        SolveState
+            State with updated positions and latest forces.
+        """
+        del problem, ctx
+
+        if state.pos is None:
+            raise ValueError("GraphOptIteration requires state.pos to be set.")
+
+        spring_edges = state.extras.get(_GRAPHOPT_SPRING_EDGES_KEY)
+        spring_weights = state.extras.get(_GRAPHOPT_SPRING_WEIGHTS_KEY)
+        if not isinstance(spring_edges, torch.Tensor):
+            raise ValueError(
+                "GraphOptIteration requires state.extras['graphopt_spring_edges'] to be set."
+            )
+
+        pair_source = state.extras.get(_GRAPHOPT_PAIR_SOURCE_KEY)
+        pair_target = state.extras.get(_GRAPHOPT_PAIR_TARGET_KEY)
+        if (
+            not isinstance(pair_source, torch.Tensor)
+            or not isinstance(pair_target, torch.Tensor)
+            or pair_source.shape != pair_target.shape
+        ):
+            raise ValueError(
+                "GraphOptIteration requires repulsion index buffers "
+                "state.extras['graphopt_pair_source/target'] to be set."
+            )
+        max_repulsion_distance_sq = state.extras.get(_GRAPHOPT_MAX_REPULSION_DISTANCE_SQ_KEY)
+        if not isinstance(max_repulsion_distance_sq, float):
+            max_repulsion_distance_sq = float(
+                _GRAPHOPT_MAX_REPULSION_DISTANCE * _GRAPHOPT_MAX_REPULSION_DISTANCE
+            )
+
+        positions = state.pos
+        forces = torch.zeros_like(positions)
+        num_nodes = int(positions.shape[0])
+
+        if self.config.node_charge != 0.0 and num_nodes > 1:
+            delta = positions[pair_source] - positions[pair_target]
+            distance_sq = delta.square().sum(dim=1)
+            mask = (distance_sq > _GRAPHOPT_MIN_DISTANCE) & (
+                distance_sq < torch.as_tensor(max_repulsion_distance_sq, device=distance_sq.device)
+            )
+            if bool(mask.any().item()):
+                pair_delta = delta[mask]
+                pair_distance_sq = distance_sq[mask]
+                pair_distance = torch.sqrt(pair_distance_sq)
+                direction = pair_delta / pair_distance.unsqueeze(1)
+                magnitude = (
+                    _GRAPHOPT_COULOMBS_CONSTANT
+                    * (float(self.config.node_charge) * float(self.config.node_charge))
+                    / pair_distance_sq
+                )
+                contribution = direction * magnitude.unsqueeze(1)
+                forces.index_add_(0, pair_source[mask], contribution)
+                forces.index_add_(0, pair_target[mask], -contribution)
+
+        if spring_edges.numel() > 0:
+            source = spring_edges[0]
+            target = spring_edges[1]
+            delta = positions[source] - positions[target]
+            distance = torch.linalg.vector_norm(delta, dim=1)
+            mask = distance > _GRAPHOPT_MIN_DISTANCE
+            if bool(mask.any().item()):
+                masked_distance = distance[mask]
+                direction = delta[mask] / masked_distance.unsqueeze(1)
+                stretch = (masked_distance - float(self.config.spring_length)).abs()
+                magnitude = 0.5 * float(self.config.spring_constant) * stretch
+                if spring_weights is not None:
+                    if not isinstance(spring_weights, torch.Tensor):
+                        raise ValueError(
+                            "GraphOptIteration expects state.extras['graphopt_spring_weights'] "
+                            "to be a torch.Tensor when present."
+                        )
+                    magnitude = magnitude * spring_weights[mask].to(dtype=magnitude.dtype)
+                source_sign = torch.where(
+                    masked_distance > float(self.config.spring_length),
+                    torch.full_like(masked_distance, -1.0),
+                    torch.full_like(masked_distance, 1.0),
+                )
+                contribution = direction * (magnitude * source_sign).unsqueeze(1)
+                forces.index_add_(0, source[mask], contribution)
+                forces.index_add_(0, target[mask], -contribution)
+
+        movement = torch.clamp(
+            forces / float(self.config.node_mass),
+            min=-float(self.config.max_sa_movement),
+            max=float(self.config.max_sa_movement),
+        )
+        state.forces = forces
+        state.pos = positions + movement
+        return state
+
+
 @register_op
 @dataclass(frozen=True)
 class DesiredLengthSpringAttraction(Op):
@@ -1112,6 +1386,359 @@ class DesiredLengthSpringAttraction(Op):
 
 
 @dataclass(frozen=True)
+class FA2ForceStepConfig:
+    """Configuration for ``FA2ForceStep``.
+
+    Parameters
+    ----------
+    gravity : float, default=1.0
+        Gravity coefficient.
+    scaling_ratio : float, default=2.0
+        Repulsion scaling coefficient.
+    linlog : bool, default=False
+        Whether to use logarithmic attraction.
+    strong_gravity : bool, default=False
+        Whether to use ForceAtlas2's strong-gravity mode.
+    outbound_attraction_distribution : bool, default=True
+        Whether to divide attraction by source-node mass.
+    dissuade_hubs : bool, default=False
+        Whether to divide attraction by source-node mass a second time.
+    edge_weight_influence : float, default=1.0
+        Exponent applied to edge weights before attraction.
+    barnes_hut : bool, default=False
+        Whether to approximate repulsion with Barnes-Hut.
+    barnes_hut_theta : float, default=1.2
+        Barnes-Hut opening threshold.
+    jitter_tolerance : float, default=1.0
+        Adaptive speed-controller jitter tolerance.
+    """
+
+    gravity: float = 1.0
+    scaling_ratio: float = 2.0
+    linlog: bool = False
+    strong_gravity: bool = False
+    outbound_attraction_distribution: bool = True
+    dissuade_hubs: bool = False
+    edge_weight_influence: float = 1.0
+    barnes_hut: bool = False
+    barnes_hut_theta: float = 1.2
+    jitter_tolerance: float = 1.0
+
+
+@register_op
+@dataclass(frozen=True)
+class FA2ForceStep(Op):
+    """Apply one full ForceAtlas2 iteration."""
+
+    config: FA2ForceStepConfig = field(default_factory=FA2ForceStepConfig)
+
+    name: ClassVar[str] = "fa2_force_step"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "old_forces", "degree", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "forces", "old_forces", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "old_forces")
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compute FA2 forces and apply the adaptive speed controller.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state with initialized FA2 caches.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this deterministic op.
+
+        Returns
+        -------
+        SolveState
+            State with updated positions, forces, and adaptive-speed caches.
+        """
+        del problem, ctx
+
+        pos = _require_positions(state)
+        if state.old_forces is None:
+            raise ValueError("FA2ForceStep requires state.old_forces.")
+        if "fa2_undirected_edges" not in state.extras:
+            raise ValueError("FA2ForceStep requires state.extras['fa2_undirected_edges'].")
+        if "fa2_mass" not in state.extras:
+            raise ValueError("FA2ForceStep requires state.extras['fa2_mass'].")
+        if "fa2_outbound_att_compensation" not in state.extras:
+            raise ValueError("FA2ForceStep requires state.extras['fa2_outbound_att_compensation'].")
+
+        undirected_edges = cast(
+            torch.Tensor,
+            state.extras["fa2_undirected_edges"],
+        ).to(device=pos.device, dtype=torch.long)
+        raw_weights = state.extras.get("fa2_undirected_weights")
+        undirected_weights = (
+            None
+            if raw_weights is None
+            else cast(torch.Tensor, raw_weights).to(device=pos.device, dtype=pos.dtype)
+        )
+        mass = cast(torch.Tensor, state.extras["fa2_mass"]).to(device=pos.device, dtype=pos.dtype)
+        outbound_att_compensation = float(state.extras["fa2_outbound_att_compensation"])
+        speed = float(state.extras.get("fa2_speed", 1.0))
+        speed_efficiency = float(state.extras.get("fa2_speed_efficiency", 1.0))
+        old_force = state.old_forces.to(device=pos.device, dtype=pos.dtype)
+
+        if pos.shape[0] == 0:
+            state.forces = torch.zeros_like(pos)
+            state.old_forces = state.forces.detach().clone()
+            return state
+
+        force = torch.zeros_like(pos)
+        if pos.shape[0] > 1:
+            if self.config.barnes_hut:
+                pos_np = pos.detach().cpu().numpy()
+                mass_np = mass.detach().cpu().numpy()
+                force_np = np.zeros((pos.shape[0], 2), dtype=np.float64)
+
+                @dataclass(slots=True)
+                class BarnesHutNode:
+                    """Internal FA2 Barnes-Hut cell used within one iteration."""
+
+                    mass_center_x: float
+                    mass_center_y: float
+                    mass_value: float
+                    size: float
+                    children: Optional[list["BarnesHutNode"]]
+                    indices: Optional[np.ndarray]
+
+                def build_tree(indices: np.ndarray) -> Optional[BarnesHutNode]:
+                    """Build one FA2 Barnes-Hut node for the given particle subset."""
+                    if indices.size == 0:
+                        return None
+                    if indices.size == 1:
+                        return BarnesHutNode(
+                            mass_center_x=0.0,
+                            mass_center_y=0.0,
+                            mass_value=0.0,
+                            size=0.0,
+                            children=None,
+                            indices=indices,
+                        )
+
+                    cell_mass = float(mass_np[indices].sum())
+                    if cell_mass > 0.0:
+                        center_x = float((pos_np[indices, 0] * mass_np[indices]).sum() / cell_mass)
+                        center_y = float((pos_np[indices, 1] * mass_np[indices]).sum() / cell_mass)
+                    else:
+                        center_x = float(pos_np[indices, 0].mean())
+                        center_y = float(pos_np[indices, 1].mean())
+
+                    x_coord = pos_np[indices, 0]
+                    y_coord = pos_np[indices, 1]
+                    distance = np.sqrt(((x_coord - center_x) ** 2) + ((y_coord - center_y) ** 2))
+                    size = float(2.0 * distance.max())
+                    quadrant_masks = (
+                        (x_coord < center_x) & (y_coord >= center_y),
+                        (x_coord < center_x) & (y_coord < center_y),
+                        (x_coord >= center_x) & (y_coord >= center_y),
+                        (x_coord >= center_x) & (y_coord < center_y),
+                    )
+
+                    children: list[BarnesHutNode] = []
+                    for mask in quadrant_masks:
+                        child_indices = indices[mask]
+                        if child_indices.size == 0:
+                            continue
+                        if child_indices.size < indices.size:
+                            child = build_tree(child_indices)
+                            if child is not None:
+                                children.append(child)
+                            continue
+                        for child_index in child_indices:
+                            children.append(
+                                BarnesHutNode(
+                                    mass_center_x=0.0,
+                                    mass_center_y=0.0,
+                                    mass_value=0.0,
+                                    size=0.0,
+                                    children=None,
+                                    indices=np.asarray([child_index], dtype=np.int64),
+                                )
+                            )
+
+                    return BarnesHutNode(
+                        mass_center_x=center_x,
+                        mass_center_y=center_y,
+                        mass_value=cell_mass,
+                        size=size,
+                        children=children,
+                        indices=None,
+                    )
+
+                def accumulate_from_leaf(node: BarnesHutNode, index: int) -> tuple[float, float]:
+                    """Compute the exact force from one FA2 Barnes-Hut leaf."""
+                    if node.indices is None:
+                        return 0.0, 0.0
+                    dx = pos_np[index, 0] - pos_np[node.indices, 0]
+                    dy = pos_np[index, 1] - pos_np[node.indices, 1]
+                    dist_sq = (dx * dx) + (dy * dy)
+                    valid = (node.indices != index) & (dist_sq > 0.0)
+                    if not np.any(valid):
+                        return 0.0, 0.0
+                    factor = (
+                        self.config.scaling_ratio
+                        * mass_np[index]
+                        * mass_np[node.indices[valid]]
+                        / dist_sq[valid]
+                    )
+                    return float(np.sum(factor * dx[valid])), float(np.sum(factor * dy[valid]))
+
+                root = build_tree(np.arange(pos.shape[0], dtype=np.int64))
+                if root is not None:
+                    for node_index in range(pos.shape[0]):
+                        pending = [root]
+                        fx = 0.0
+                        fy = 0.0
+                        while pending:
+                            node = pending.pop()
+                            if node.children is None:
+                                leaf_fx, leaf_fy = accumulate_from_leaf(node, node_index)
+                                fx += leaf_fx
+                                fy += leaf_fy
+                                continue
+
+                            dx = float(pos_np[node_index, 0] - node.mass_center_x)
+                            dy = float(pos_np[node_index, 1] - node.mass_center_y)
+                            dist_sq = (dx * dx) + (dy * dy)
+                            if dist_sq > 0.0 and (node.size * node.size / dist_sq) < (
+                                self.config.barnes_hut_theta * self.config.barnes_hut_theta
+                            ):
+                                dist = math.sqrt(dist_sq)
+                                if dist < 1.0e-12:
+                                    continue
+                                factor = (
+                                    self.config.scaling_ratio
+                                    * mass_np[node_index]
+                                    * node.mass_value
+                                    / dist_sq
+                                )
+                                fx += factor * dx
+                                fy += factor * dy
+                                continue
+
+                            pending.extend(reversed(node.children))
+                        force_np[node_index, 0] = fx
+                        force_np[node_index, 1] = fy
+                repulsion = torch.from_numpy(force_np).to(device=pos.device, dtype=pos.dtype)
+            else:
+                delta = pos.unsqueeze(1) - pos.unsqueeze(0)
+                distance = torch.cdist(pos, pos, p=2.0)
+                distance_sq = distance.square()
+                factor = torch.zeros_like(distance_sq)
+                valid = distance_sq > 0
+                mass_product = mass.unsqueeze(1) * mass.unsqueeze(0)
+                factor[valid] = self.config.scaling_ratio * mass_product[valid] / distance_sq[valid]
+                repulsion = (delta * factor.unsqueeze(2)).sum(dim=1)
+            force = force + repulsion
+
+        if self.config.strong_gravity:
+            gravity_factor = torch.zeros_like(mass)
+            valid = (pos[:, 0] != 0) & (pos[:, 1] != 0)
+            gravity_factor[valid] = self.config.scaling_ratio * mass[valid] * self.config.gravity
+            gravity = -pos * gravity_factor.unsqueeze(1)
+        else:
+            distance = torch.linalg.vector_norm(pos, dim=1)
+            gravity_factor = torch.zeros_like(distance)
+            valid = distance > 0
+            gravity_factor[valid] = mass[valid] * self.config.gravity / distance[valid]
+            gravity = -pos * gravity_factor.unsqueeze(1)
+        force = force + gravity
+
+        if undirected_edges.numel() > 0:
+            source = undirected_edges[0]
+            target = undirected_edges[1]
+            delta = pos.index_select(0, source) - pos.index_select(0, target)
+            if self.config.linlog:
+                distance = torch.linalg.vector_norm(delta, dim=1, keepdim=True).clamp(min=1e-6)
+                factor = (
+                    -float(outbound_att_compensation) * torch.log1p(distance) / distance
+                ).squeeze(1)
+            else:
+                factor = torch.full(
+                    (undirected_edges.shape[1],),
+                    fill_value=-float(outbound_att_compensation),
+                    dtype=pos.dtype,
+                    device=pos.device,
+                )
+
+            if self.config.outbound_attraction_distribution:
+                factor = factor / mass.index_select(0, source)
+            if self.config.dissuade_hubs:
+                factor = factor / mass.index_select(0, source)
+            if undirected_weights is not None:
+                transformed_weights = undirected_weights
+                if self.config.edge_weight_influence == 0.0:
+                    transformed_weights = torch.ones_like(transformed_weights)
+                elif self.config.edge_weight_influence != 1.0:
+                    transformed_weights = transformed_weights.pow(self.config.edge_weight_influence)
+                factor = factor * transformed_weights
+
+            attraction_force = torch.zeros_like(pos)
+            attraction = delta * factor.unsqueeze(1)
+            attraction_force.scatter_add_(
+                0,
+                source.unsqueeze(1).expand_as(attraction),
+                attraction,
+            )
+            attraction_force.scatter_add_(
+                0,
+                target.unsqueeze(1).expand_as(attraction),
+                -attraction,
+            )
+            force = force + attraction_force
+
+        swinging = mass * torch.linalg.vector_norm(old_force - force, dim=1)
+        effective_traction = 0.5 * mass * torch.linalg.vector_norm(old_force + force, dim=1)
+        total_swinging = float(swinging.sum().item())
+        total_effective_traction = float(effective_traction.sum().item())
+        estimated_optimal_jt = 0.05 * math.sqrt(float(pos.shape[0]))
+        min_jt = math.sqrt(estimated_optimal_jt)
+        max_jt = 10.0
+        jt = self.config.jitter_tolerance * max(
+            min_jt,
+            min(
+                max_jt,
+                estimated_optimal_jt
+                * total_effective_traction
+                / float(pos.shape[0] * pos.shape[0]),
+            ),
+        )
+        min_speed_efficiency = 0.05
+        if total_effective_traction > 0.0 and total_swinging / total_effective_traction > 2.0:
+            if speed_efficiency > min_speed_efficiency:
+                speed_efficiency *= 0.5
+            jt = max(jt, self.config.jitter_tolerance)
+        if total_swinging == 0.0:
+            target_speed = float("inf")
+        else:
+            target_speed = jt * speed_efficiency * total_effective_traction / total_swinging
+        if total_swinging > jt * total_effective_traction:
+            if speed_efficiency > min_speed_efficiency:
+                speed_efficiency *= 0.7
+        elif speed < 1000.0:
+            speed_efficiency *= 1.3
+        speed = speed + min(target_speed - speed, 0.5 * speed)
+        factor = speed / (1.0 + torch.sqrt(speed * swinging))
+
+        state.forces = force
+        state.pos = pos + (force * factor.unsqueeze(1))
+        state.old_forces = force.detach().clone()
+        state.extras["fa2_speed"] = speed
+        state.extras["fa2_speed_efficiency"] = speed_efficiency
+        return state
+
+
+@dataclass(frozen=True)
 class FA2DegreeCompensatedAttractionConfig:
     """Configuration for ``FA2DegreeCompensatedAttraction``.
 
@@ -1173,26 +1800,81 @@ class FA2DegreeCompensatedAttraction(Op):
         pos = _require_positions(state)
         forces = _require_forces(state)
         mass = _fa2_mass(problem=problem, state=state, device=pos.device).to(dtype=pos.dtype)
-        undirected_edges, undirected_weights = _fa2_unique_undirected_edges_with_weights(
-            edge_index=problem.edge_index,
-            edge_weights=problem.edge_weights,
+        raw_edges = state.extras.get("fa2_undirected_edges")
+        undirected_edges = (
+            cast(torch.Tensor, raw_edges).to(device=pos.device, dtype=torch.long)
+            if isinstance(raw_edges, torch.Tensor)
+            else None
         )
-        if undirected_weights is not None:
-            undirected_weights = undirected_weights.to(device=pos.device, dtype=pos.dtype)
+        raw_weights = state.extras.get("fa2_undirected_weights")
+        undirected_weights = (
+            cast(torch.Tensor, raw_weights).to(device=pos.device, dtype=pos.dtype)
+            if isinstance(raw_weights, torch.Tensor)
+            else None
+        )
+        if undirected_edges is None:
+            if problem.edge_index.numel() == 0:
+                undirected_edges = torch.empty((2, 0), dtype=torch.long, device=pos.device)
+            else:
+                source = problem.edge_index[0].to(device=pos.device, dtype=torch.long)
+                target = problem.edge_index[1].to(device=pos.device, dtype=torch.long)
+                non_self = source != target
+                if bool(non_self.any().item()):
+                    lower = torch.minimum(source[non_self], target[non_self])
+                    upper = torch.maximum(source[non_self], target[non_self])
+                    pairs = torch.stack([lower, upper], dim=1)
+                    unique_pairs, inverse = torch.unique(pairs, dim=0, return_inverse=True)
+                    undirected_edges = unique_pairs.transpose(0, 1).contiguous()
+                    if problem.edge_weights is not None:
+                        weights = problem.edge_weights[non_self].to(
+                            device=pos.device,
+                            dtype=pos.dtype,
+                        )
+                        undirected_weights = torch.zeros(
+                            unique_pairs.shape[0],
+                            dtype=pos.dtype,
+                            device=pos.device,
+                        )
+                        undirected_weights.scatter_add_(0, inverse, weights)
+                else:
+                    undirected_edges = torch.empty((2, 0), dtype=torch.long, device=pos.device)
         outbound_att_compensation = (
             float(mass.mean().item()) if self.config.outbound_compensation else 1.0
         )
-        contribution = _fa2_attraction_force(
-            pos=pos,
-            edge_index=undirected_edges.to(device=pos.device),
-            mass=mass,
-            outbound_att_compensation=outbound_att_compensation,
-            outbound_attraction_distribution=self.config.outbound_compensation,
-            linlog=self.config.linlog,
-            edge_weights=undirected_weights,
-            dissuade_hubs=self.config.dissuade_hubs,
-            edge_weight_influence=1.0,
-        )
+        contribution = torch.zeros_like(pos)
+        if undirected_edges.numel() > 0:
+            source = undirected_edges[0]
+            target = undirected_edges[1]
+            delta = pos.index_select(0, source) - pos.index_select(0, target)
+            if self.config.linlog:
+                distance = torch.linalg.vector_norm(delta, dim=1, keepdim=True).clamp(min=1.0e-6)
+                factor = (
+                    -float(outbound_att_compensation) * torch.log1p(distance) / distance
+                ).squeeze(1)
+            else:
+                factor = torch.full(
+                    (undirected_edges.shape[1],),
+                    fill_value=-float(outbound_att_compensation),
+                    dtype=pos.dtype,
+                    device=pos.device,
+                )
+            if self.config.outbound_compensation:
+                factor = factor / mass.index_select(0, source)
+            if self.config.dissuade_hubs:
+                factor = factor / mass.index_select(0, source)
+            if undirected_weights is not None:
+                factor = factor * undirected_weights
+            attraction = delta * factor.unsqueeze(1)
+            contribution.scatter_add_(
+                0,
+                source.unsqueeze(1).expand_as(attraction),
+                attraction,
+            )
+            contribution.scatter_add_(
+                0,
+                target.unsqueeze(1).expand_as(attraction),
+                -attraction,
+            )
         state.forces = forces + contribution
         return state
 
@@ -1253,13 +1935,17 @@ class GravityToOrigin(Op):
         pos = _require_positions(state)
         forces = _require_forces(state)
         mass = _fa2_mass(problem=problem, state=state, device=pos.device).to(dtype=pos.dtype)
-        contribution = _fa2_gravity_force(
-            pos=pos,
-            mass=mass,
-            gravity=self.config.strength,
-            strong_gravity=self.config.strong_mode,
-            scaling_ratio=1.0,
-        )
+        if self.config.strong_mode:
+            factor = torch.zeros_like(mass)
+            valid = (pos[:, 0] != 0) & (pos[:, 1] != 0)
+            factor[valid] = mass[valid] * float(self.config.strength)
+            contribution = -pos * factor.unsqueeze(1)
+        else:
+            distance = torch.linalg.vector_norm(pos, dim=1)
+            factor = torch.zeros_like(distance)
+            valid = distance > 0
+            factor[valid] = mass[valid] * float(self.config.strength) / distance[valid]
+            contribution = -pos * factor.unsqueeze(1)
         state.forces = forces + contribution
         return state
 
@@ -1385,20 +2071,67 @@ class BarnesHutForce(Op):
             raise ValueError("BarnesHutForce requires state.extras['quadtree'].")
 
         quadtree = state.extras["quadtree"]
-        if isinstance(quadtree, _FA2BarnesHutNode):
-            mass = _fa2_mass(problem=problem, state=state, device=pos.device).to(dtype=pos.dtype)
-            contribution = _fa2_barnes_hut_force(
-                quadtree=quadtree,
-                pos=pos,
-                mass=mass,
-                theta=self.config.theta,
-            )
-        elif isinstance(quadtree, _SFDPQuadTreeNode):
+        if isinstance(quadtree, _SFDPQuadTreeNode):
             contribution = _sfdp_barnes_hut_force(
                 quadtree=quadtree,
                 pos=pos,
                 theta=self.config.theta,
             )
+        elif all(
+            hasattr(quadtree, attr)
+            for attr in ("mass_center_x", "mass_center_y", "size", "children", "indices")
+        ) and (hasattr(quadtree, "mass") or hasattr(quadtree, "mass_value")):
+            mass = _fa2_mass(problem=problem, state=state, device=pos.device).to(dtype=pos.dtype)
+            pos_np = pos.detach().cpu().numpy()
+            mass_np = mass.detach().cpu().numpy()
+            force_np = np.zeros((pos.shape[0], 2), dtype=np.float64)
+
+            def accumulate_for_node(node: Any, index: int) -> tuple[float, float]:
+                """Recursively accumulate one FA2 Barnes-Hut force contribution."""
+                if node is None:
+                    return 0.0, 0.0
+
+                indices = getattr(node, "indices", None)
+                children = getattr(node, "children", None)
+                if children is None:
+                    if indices is None:
+                        return 0.0, 0.0
+                    dx = pos_np[index, 0] - pos_np[indices, 0]
+                    dy = pos_np[index, 1] - pos_np[indices, 1]
+                    dist_sq = (dx * dx) + (dy * dy)
+                    valid = (indices != index) & (dist_sq > 0.0)
+                    if not np.any(valid):
+                        return 0.0, 0.0
+                    factor = mass_np[index] * mass_np[indices[valid]] / dist_sq[valid]
+                    return float(np.sum(factor * dx[valid])), float(np.sum(factor * dy[valid]))
+
+                dx = float(pos_np[index, 0] - getattr(node, "mass_center_x"))
+                dy = float(pos_np[index, 1] - getattr(node, "mass_center_y"))
+                dist_sq = (dx * dx) + (dy * dy)
+                if dist_sq > 0.0 and (float(getattr(node, "size")) ** 2 / dist_sq) < (
+                    self.config.theta * self.config.theta
+                ):
+                    dist = math.sqrt(dist_sq)
+                    if dist < 1.0e-12:
+                        return 0.0, 0.0
+                    node_mass = float(getattr(node, "mass", getattr(node, "mass_value", 0.0)))
+                    factor = mass_np[index] * node_mass / dist_sq
+                    return factor * dx, factor * dy
+
+                fx = 0.0
+                fy = 0.0
+                for child in children:
+                    child_fx, child_fy = accumulate_for_node(child, index)
+                    fx += child_fx
+                    fy += child_fy
+                return fx, fy
+
+            for node_index in range(pos.shape[0]):
+                force_np[node_index, 0], force_np[node_index, 1] = accumulate_for_node(
+                    quadtree,
+                    node_index,
+                )
+            contribution = torch.from_numpy(force_np).to(device=pos.device, dtype=pos.dtype)
         else:
             raise ValueError("Unsupported quadtree type for BarnesHutForce.")
 
@@ -1705,18 +2438,50 @@ class AdaptiveSpeedApply(Op):
         mass = _fa2_mass(problem=problem, state=state, device=pos.device).to(dtype=pos.dtype)
         speed = float(state.extras.get("fa2_speed", 1.0))
         speed_efficiency = float(state.extras.get("fa2_speed_efficiency", 1.0))
-        updated_pos, new_speed, new_speed_efficiency = _fa2_adjust_speed_and_apply_forces(
-            pos=pos,
-            force=forces,
-            old_force=state.old_forces.to(device=pos.device, dtype=pos.dtype),
-            mass=mass,
-            speed=speed,
-            speed_efficiency=speed_efficiency,
-            jitter_tolerance=self.config.jitter_tolerance,
+        old_force = state.old_forces.to(device=pos.device, dtype=pos.dtype)
+
+        if pos.shape[0] == 0:
+            state.pos = pos
+            state.old_forces = forces.detach().clone()
+            return state
+
+        swinging = mass * torch.linalg.vector_norm(old_force - forces, dim=1)
+        effective_traction = 0.5 * mass * torch.linalg.vector_norm(old_force + forces, dim=1)
+        total_swinging = float(swinging.sum().item())
+        total_effective_traction = float(effective_traction.sum().item())
+        estimated_optimal_jt = 0.05 * math.sqrt(float(pos.shape[0]))
+        min_jt = math.sqrt(estimated_optimal_jt)
+        max_jt = 10.0
+        jt = self.config.jitter_tolerance * max(
+            min_jt,
+            min(
+                max_jt,
+                estimated_optimal_jt
+                * total_effective_traction
+                / float(pos.shape[0] * pos.shape[0]),
+            ),
         )
-        state.pos = updated_pos
-        state.extras["fa2_speed"] = new_speed
-        state.extras["fa2_speed_efficiency"] = new_speed_efficiency
+        min_speed_efficiency = 0.05
+        if total_effective_traction > 0.0 and total_swinging / total_effective_traction > 2.0:
+            if speed_efficiency > min_speed_efficiency:
+                speed_efficiency *= 0.5
+            jt = max(jt, self.config.jitter_tolerance)
+        if total_swinging == 0.0:
+            target_speed = float("inf")
+        else:
+            target_speed = jt * speed_efficiency * total_effective_traction / total_swinging
+        if total_swinging > jt * total_effective_traction:
+            if speed_efficiency > min_speed_efficiency:
+                speed_efficiency *= 0.7
+        elif speed < 1000.0:
+            speed_efficiency *= 1.3
+
+        speed = speed + min(target_speed - speed, 0.5 * speed)
+        factor = speed / (1.0 + torch.sqrt(speed * swinging))
+        state.pos = pos + (forces * factor.unsqueeze(1))
+        state.old_forces = forces.detach().clone()
+        state.extras["fa2_speed"] = speed
+        state.extras["fa2_speed_efficiency"] = speed_efficiency
         return state
 
 

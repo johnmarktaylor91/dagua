@@ -537,6 +537,159 @@ class OptimizerStep(Op):
 
 
 @dataclass(frozen=True)
+class LinLogCreateOptimizerConfig:
+    """Configuration for :class:`LinLogCreateOptimizer`.
+
+    Parameters
+    ----------
+    min_lr : float, default=0.05
+        Cap on the initial learning rate.
+    inverse_size_factor : float, default=0.8
+        Scale factor divided by ``num_nodes`` to seed the initial LR.
+    """
+
+    min_lr: float = 0.05
+    inverse_size_factor: float = 0.8
+
+
+@register_op
+class LinLogCreateOptimizer(Op):
+    """Create the classic LinLog Adam optimizer.
+
+    Notes
+    -----
+    The initial learning rate matches the archived ``layout_linlog``
+    implementation: ``min(0.05, 0.8 / num_nodes)`` with ``num_nodes >= 1``.
+    """
+
+    name = "linlog_create_optimizer"
+    category = OpCategory.OPTIMIZE
+    reads = ("pos",)
+    writes = ("optimizer",)
+    requires = ("pos",)
+
+    def __init__(self, config: Optional[LinLogCreateOptimizerConfig] = None) -> None:
+        """Store the LinLog optimizer configuration.
+
+        Parameters
+        ----------
+        config : LinLogCreateOptimizerConfig, optional
+            Initial-learning-rate configuration.
+
+        Returns
+        -------
+        None
+            The op stores its resolved configuration.
+        """
+        self.config = config or LinLogCreateOptimizerConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Create ``torch.optim.Adam`` with the classic LinLog default LR.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable problem inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with ``state.optimizer`` initialized.
+        """
+        del ctx
+        if state.pos is None:
+            raise ValueError("LinLogCreateOptimizer requires state.pos to be set.")
+        if self.config.min_lr <= 0.0:
+            raise ValueError("LinLogCreateOptimizer min_lr must be positive.")
+        if self.config.inverse_size_factor <= 0.0:
+            raise ValueError("LinLogCreateOptimizer inverse_size_factor must be positive.")
+
+        initial_lr = min(
+            float(self.config.min_lr),
+            float(self.config.inverse_size_factor) / float(max(problem.num_nodes, 1)),
+        )
+        state.optimizer = torch.optim.Adam([state.pos], lr=initial_lr)
+        return state
+
+
+@dataclass(frozen=True)
+class OptimizerZeroGradConfig:
+    """Configuration for :class:`OptimizerZeroGrad`.
+
+    Parameters
+    ----------
+    key : str, default="default"
+        Optimizer storage key. ``"default"`` targets ``state.optimizer``.
+    """
+
+    key: str = "default"
+
+
+@register_op
+class OptimizerZeroGrad(Op):
+    """Zero the active optimizer gradients in-place."""
+
+    name = "optimizer_zero_grad"
+    category = OpCategory.OPTIMIZE
+    reads = ("optimizer",)
+    writes = ()
+    requires = ("optimizer",)
+
+    def __init__(self, config: Optional[OptimizerZeroGradConfig] = None) -> None:
+        """Store key configuration for gradient reset.
+
+        Parameters
+        ----------
+        config : OptimizerZeroGradConfig, optional
+            Name of the optimizer bucket to reset.
+
+        Returns
+        -------
+        None
+            The op stores its resolved configuration.
+        """
+        self.config = config or OptimizerZeroGradConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Call ``zero_grad(set_to_none=True)`` for the target optimizer.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable graph metadata.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State after clearing optimizer gradients.
+        """
+        del problem, ctx
+        if not isinstance(self.config.key, str) or not self.config.key:
+            raise ValueError("OptimizerZeroGrad key must be a non-empty string.")
+        optimizer = _load_optimizer(state, self.config.key)
+        optimizer.zero_grad(set_to_none=True)
+        return state
+
+
+@dataclass(frozen=True)
 class ClipGradNormConfig:
     """Configuration for :class:`ClipGradNorm`.
 
@@ -697,9 +850,16 @@ class LBFGSStepConfig:
     maxiter : int or None, default=None
         Maximum SciPy L-BFGS-B iterations. ``None`` and ``0`` leave SciPy's
         default solve budget unchanged, matching the classic KK port.
+    trace_every : int, default=0
+        If greater than zero, record callback snapshots every
+        ``trace_every`` iterations.
+    trace_key : str, optional
+        Optional ``state.extras`` key to receive trace snapshots.
     """
 
     maxiter: Optional[int] = None
+    trace_every: int = 0
+    trace_key: Optional[str] = None
 
 
 @register_op
@@ -764,6 +924,8 @@ class LBFGSStep(Op):
             raise ValueError("LBFGSStep requires state.distance_matrix to be set.")
         if self.config.maxiter is not None and self.config.maxiter < 0:
             raise ValueError("LBFGSStep maxiter must be non-negative or None.")
+        if self.config.trace_every < 0:
+            raise ValueError("LBFGSStep trace_every must be non-negative.")
         if state.pos.numel() == 0:
             state.prev_loss = 0.0
             return state
@@ -781,6 +943,20 @@ class LBFGSStep(Op):
         distance_matrix = (
             state.distance_matrix.detach().to(device="cpu", dtype=torch.float64).numpy()
         )
+        iteration = 0
+        traces: list[torch.Tensor] = []
+
+        def _callback(pos_vec: np.ndarray) -> None:
+            nonlocal iteration
+
+            iteration += 1
+            if self.config.trace_every <= 0 or self.config.trace_key is None:
+                return
+            if iteration % self.config.trace_every == 0:
+                traces.append(
+                    torch.from_numpy(pos_vec.reshape((-1, dim)).copy()).to(dtype=torch.float32)
+                )
+
         inverse_distances = 1.0 / (
             distance_matrix
             + np.eye(distance_matrix.shape[0], dtype=np.float64) * kk_classic.DISTANCE_EPSILON
@@ -790,6 +966,7 @@ class LBFGSStep(Op):
             "method": "L-BFGS-B",
             "args": (np, inverse_distances, kk_classic.CENTERING_WEIGHT, dim),
             "jac": True,
+            "callback": _callback,
         }
         if self.config.maxiter not in {None, 0}:
             minimize_kwargs["options"] = {"maxiter": self.config.maxiter}
@@ -807,6 +984,8 @@ class LBFGSStep(Op):
             optimized = optimized.detach().clone().requires_grad_(True)
         state.pos = optimized
         state.prev_loss = float(result.fun)
+        if self.config.trace_key is not None:
+            state.extras[self.config.trace_key] = traces
         return state
 
 

@@ -217,6 +217,7 @@ def _register_all_ops() -> None:
         "converge",
         "coordinate",
         "distance",
+        "sgd2_multi",
         "embed",
         "force",
         "layering",

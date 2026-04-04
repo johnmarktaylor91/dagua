@@ -22,6 +22,8 @@ from dagua.layout.ops.distance import (
     PivotSelection,
     PivotSelectionConfig,
 )
+from dagua.layout.ops.graph_utils import layout_device as _layout_device
+from dagua.layout.ops.graph_utils import rescale_layout as _rescale_layout
 from dagua.layout.ops.preprocess import BuildAdjacency, BuildAdjacencyConfig
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -202,15 +204,18 @@ def _barycenter_ordered_groups(
     groups = _layer_groups(layers)
     parents = _parent_lists(edge_index=edge_index, num_nodes=num_nodes)
     current_order = {node: float(node) for node in range(num_nodes)}
+    if not groups:
+        return groups
 
+    first_layer = min(groups)
     for layer in sorted(groups):
         ordered_nodes = groups[layer]
-        if layer == min(groups):
+        if layer == first_layer:
             for index, node in enumerate(ordered_nodes):
                 current_order[node] = float(index)
             continue
 
-        enriched = []
+        enriched: List[Tuple[float, int, int]] = []
         for stable_index, node in enumerate(ordered_nodes):
             node_parents = parents.get(node, [])
             if node_parents:
@@ -219,7 +224,7 @@ def _barycenter_ordered_groups(
                 )
             else:
                 barycenter = current_order.get(node, float(stable_index))
-            enriched.append((barycenter, stable_index, node))
+            enriched.append((barycenter, stable_index, int(node)))
 
         enriched.sort()
         groups[layer] = [node for _, _, node in enriched]
@@ -227,6 +232,325 @@ def _barycenter_ordered_groups(
             current_order[node] = float(index)
 
     return groups
+
+
+@register_op
+class ValidateGraphOptInputs(Op):
+    """Validate GraphOpt inputs before force-directed iterations."""
+
+    name = "validate_graphopt_inputs"
+    category = OpCategory.INIT
+    writes = ()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Validate the public GraphOpt arguments.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable GraphOpt problem definition.
+        state : SolveState
+            Mutable solve state (unused).
+        ctx : RuntimeContext
+            Execution context (unused).
+
+        Returns
+        -------
+        SolveState
+            Unmodified state.
+
+        Raises
+        ------
+        ValueError
+            If any GraphOpt input is invalid.
+        """
+        _ = ctx
+
+        if problem.edge_index.ndim != 2 or problem.edge_index.shape[0] != 2:
+            raise ValueError("edge_index must have shape [2, E].")
+        if problem.edge_weights is not None:
+            if problem.edge_weights.ndim != 1:
+                raise ValueError("edge_weights must have shape [E].")
+            if problem.edge_weights.shape[0] != problem.edge_index.shape[1]:
+                raise ValueError(
+                    "edge_weights length "
+                    f"{problem.edge_weights.shape[0]} != edge count "
+                    f"{problem.edge_index.shape[1]}"
+                )
+
+        if problem.edge_index.numel() == 0:
+            return state
+
+        edge_index_cpu = problem.edge_index.to(device="cpu", dtype=torch.long)
+        min_index = int(edge_index_cpu.min().item())
+        max_index = int(edge_index_cpu.max().item())
+        if min_index < 0:
+            raise ValueError("edge_index cannot contain negative node indices.")
+        if max_index >= problem.num_nodes:
+            raise ValueError("edge_index contains node indices outside [0, num_nodes).")
+        return state
+
+
+@dataclass(frozen=True)
+class ValidateFA2InputsConfig:
+    """Configuration for :class:`ValidateFA2Inputs`.
+
+    Parameters
+    ----------
+    steps : int, default=100
+        Number of ForceAtlas2 iterations requested by the caller.
+    barnes_hut_theta : float, default=1.2
+        Barnes-Hut opening threshold. Must be positive.
+    """
+
+    steps: int = 100
+    barnes_hut_theta: float = 1.2
+
+
+@register_op
+class ValidateFA2Inputs(Op):
+    """Validate ForceAtlas2 inputs before pipeline execution."""
+
+    name = "validate_fa2_inputs"
+    category = OpCategory.INIT
+    writes = ()
+
+    def __init__(self, config: Optional[ValidateFA2InputsConfig] = None) -> None:
+        """Store the validation parameters.
+
+        Parameters
+        ----------
+        config : ValidateFA2InputsConfig, optional
+            FA2 validation settings.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or ValidateFA2InputsConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Validate public ForceAtlas2 arguments.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable ForceAtlas2 problem definition.
+        state : SolveState
+            Mutable solve state. Returned unchanged.
+        ctx : RuntimeContext
+            Execution context. Unused for deterministic validation.
+
+        Returns
+        -------
+        SolveState
+            Unmodified solve state.
+
+        Raises
+        ------
+        ValueError
+            If any ForceAtlas2 input is invalid.
+        """
+        del ctx
+
+        if problem.num_nodes < 0:
+            raise ValueError("num_nodes must be non-negative")
+        if self.config.steps < 0:
+            raise ValueError("steps must be non-negative")
+        if self.config.barnes_hut_theta <= 0.0:
+            raise ValueError("barnes_hut_theta must be positive")
+        if problem.edge_index.dim() != 2 or problem.edge_index.shape[0] != 2:
+            raise ValueError("edge_index must have shape [2, E]")
+        if problem.edge_index.dtype not in {
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+            torch.uint8,
+        }:
+            raise ValueError("edge_index must use an integer dtype")
+        if problem.edge_weights is not None:
+            if problem.edge_weights.dim() != 1:
+                raise ValueError("edge_weights must be a one-dimensional tensor")
+            if problem.edge_weights.shape[0] != problem.edge_index.shape[1]:
+                raise ValueError("edge_weights length must match edge_index column count")
+
+        if problem.edge_index.numel() == 0:
+            return state
+
+        edge_index_cpu = problem.edge_index.to(device="cpu", dtype=torch.long)
+        min_index = int(edge_index_cpu.min().item())
+        max_index = int(edge_index_cpu.max().item())
+        if min_index < 0:
+            raise ValueError("edge_index cannot contain negative node indices")
+        if max_index >= problem.num_nodes:
+            raise ValueError("edge_index contains node indices outside num_nodes")
+        return state
+
+
+@register_op
+class GraphOptInitializePositions(Op):
+    """Initialize GraphOpt positions with the exact Python-random recipe."""
+
+    name = "graphopt_initialize_positions"
+    category = OpCategory.INIT
+    writes = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize positions on ``[0, 1]^2`` with ``random.Random``.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable GraphOpt inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution context.
+
+        Returns
+        -------
+        SolveState
+            State with ``state.pos`` initialized.
+        """
+        if problem.num_nodes == 0:
+            state.pos = torch.empty(
+                (0, 2),
+                dtype=torch.float64,
+                device=_target_device(problem, ctx),
+            )
+            return state
+
+        rng = random.Random(problem.seed)
+        positions = [[rng.random(), rng.random()] for _ in range(problem.num_nodes)]
+        state.pos = torch.tensor(
+            positions, dtype=torch.float64, device=_target_device(problem, ctx)
+        )
+        return state
+
+
+@register_op
+class KamadaKawaiInitializePositions(Op):
+    """Initialize Kamada-Kawai coordinates with either user input or circle layout."""
+
+    name = "kamada_kawai_initialize_positions"
+    category = OpCategory.INIT
+    reads = ("extras.kk_initial_pos",)
+    writes = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Use provided positions when available or a deterministic circle fallback.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable Kamada-Kawai inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution context.
+
+        Returns
+        -------
+        SolveState
+            State with ``state.pos`` initialized.
+        """
+        del ctx
+
+        if problem.num_nodes == 0:
+            state.pos = torch.empty((0, 2), dtype=torch.float64)
+            return state
+        if problem.num_nodes == 1:
+            state.pos = torch.zeros((1, 2), dtype=torch.float64)
+            return state
+
+        initial_positions = state.extras.get("kk_initial_pos")
+        if isinstance(initial_positions, torch.Tensor):
+            if initial_positions.shape != (problem.num_nodes, 2):
+                raise ValueError(
+                    "kk_initial_pos must have shape "
+                    f"({problem.num_nodes}, 2), got {tuple(initial_positions.shape)}"
+                )
+            state.pos = initial_positions.to(dtype=torch.float64)
+            return state
+
+        theta = np.linspace(0, 1, num=problem.num_nodes + 1)[:-1] * (2.0 * np.pi)
+        theta = theta.astype(np.float32)
+        coordinates = np.column_stack((np.cos(theta), np.sin(theta))).astype(np.float64, copy=False)
+        coordinates = torch.from_numpy(coordinates)
+        state.pos = _rescale_layout(coordinates)
+        return state
+
+
+@register_op
+class FA2InitializePositions(Op):
+    """Initialize ForceAtlas2 positions with Python's reference RNG."""
+
+    name = "fa2_initialize_positions"
+    category = OpCategory.INIT
+    writes = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize ``state.pos`` on ``[0, 1]^2`` using ``random.Random``.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable FA2 inputs containing ``num_nodes`` and ``seed``.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused because FA2 follows the edge tensor
+            device exactly.
+
+        Returns
+        -------
+        SolveState
+            State with ``state.pos`` initialized as ``float32``.
+        """
+        _ = ctx
+
+        if problem.num_nodes == 0:
+            state.pos = torch.zeros((0, 2), dtype=torch.float32, device=problem.edge_index.device)
+            return state
+        if problem.num_nodes == 1:
+            state.pos = torch.zeros((1, 2), dtype=torch.float32, device=problem.edge_index.device)
+            return state
+
+        rng = random.Random(problem.seed)
+        positions = [[rng.random(), rng.random()] for _ in range(problem.num_nodes)]
+        state.pos = torch.tensor(
+            positions,
+            dtype=torch.float32,
+            device=problem.edge_index.device,
+        )
+        return state
 
 
 @dataclass(frozen=True)
@@ -294,6 +618,18 @@ class RandomUniformInit(Op):
         SolveState
             State with initialized positions.
         """
+        if (
+            problem.num_nodes == 0
+            and self.config.rng_backend == "numpy"
+            and self.config.scale == "none"
+        ):
+            state.pos = torch.empty(
+                (0, 2),
+                dtype=torch.float64,
+                device=_target_device(problem, ctx),
+            )
+            return state
+
         if _maybe_set_empty_or_single_positions(problem=problem, state=state, ctx=ctx):
             return state
 
@@ -403,6 +739,61 @@ class RandomNormalInit(Op):
         positions = positions * self.config.std + self.config.mean
         positions = positions * _scale_factor(num_nodes=problem.num_nodes, rule=self.config.scale)
         state.pos = positions.to(device=_target_device(problem, ctx))
+        return state
+
+
+@register_op
+class LinLogInitializePositions(Op):
+    """Initialize positions exactly like classic LinLog."""
+
+    name = "linlog_initialize_positions"
+    category = OpCategory.INIT
+    writes = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Seed ``state.pos`` with LinLog-compatible random values.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs containing ``num_nodes`` and ``seed``.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Runtime infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with ``state.pos`` populated as a float32 tensor.
+        """
+        output_device = _layout_device(
+            edge_index=problem.edge_index,
+            node_sizes=problem.node_sizes,
+        )
+        if problem.num_nodes == 0:
+            state.pos = torch.empty((0, 2), dtype=torch.float32, device=output_device)
+            return state
+        if problem.num_nodes == 1:
+            state.pos = torch.zeros(
+                (1, 2),
+                dtype=torch.float32,
+                device=output_device,
+            )
+            return state
+
+        positions = torch.randn(
+            (problem.num_nodes, 2),
+            generator=torch.Generator(device="cpu").manual_seed(problem.seed),
+            dtype=torch.float32,
+            device=output_device,
+        )
+        state.pos = positions.requires_grad_(True)
         return state
 
 
@@ -1466,8 +1857,10 @@ __all__ = [
     "ClassicalMDSInitConfig",
     "DeterministicInit",
     "DeterministicInitConfig",
+    "FA2InitializePositions",
     "FromAlgorithmInit",
     "FromAlgorithmInitConfig",
+    "LinLogInitializePositions",
     "PivotMDSInit",
     "PivotMDSInitConfig",
     "RandomNormalInit",
@@ -1476,6 +1869,8 @@ __all__ = [
     "RandomUniformInitConfig",
     "SpectralInit",
     "SpectralInitConfig",
+    "ValidateFA2Inputs",
+    "ValidateFA2InputsConfig",
     "XavierInit",
     "XavierInitConfig",
 ]
