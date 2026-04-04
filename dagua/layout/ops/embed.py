@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import log2
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -13,6 +13,7 @@ from scipy.sparse import linalg as sparse_linalg
 from torch import nn
 
 from dagua.layout.ops.base import Op
+from dagua.layout.ops.preprocess import _SYMMETRIC_FLAG_KEY
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
@@ -37,6 +38,8 @@ _MIN_SIGMA_SCALE = 1.0e-3
 _DEFAULT_CURVE_A = 1.93
 _DEFAULT_CURVE_B = 0.79
 _GCN_GAIN_FALLBACK_DIM = 2
+_CLASSICAL_MDS_MIN_SPAN = 1.0e-6
+_SPECTRAL_EIGENVALUE_TOLERANCE = 1.0e-9
 
 AdjacencyList = List[List[Union[int, Tuple[int, float]]]]
 CSRAdjacency = Dict[str, torch.Tensor]
@@ -262,6 +265,85 @@ def _restore_adjacency_type(
     if isinstance(original, np.ndarray):
         return matrix.toarray()
     raise TypeError(f"Unsupported adjacency type: {type(original)!r}.")
+
+
+def _pivot_mds_coordinates(distance_matrix: torch.Tensor) -> torch.Tensor:
+    """Recover a 2D pivot-MDS embedding from pivot distance rows.
+
+    Parameters
+    ----------
+    distance_matrix : torch.Tensor
+        Pivot-to-node distances with shape ``[P, N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Coordinates with shape ``[N, 2]``.
+    """
+    if distance_matrix.shape[0] == 0:
+        return torch.zeros((distance_matrix.shape[1], 2), dtype=torch.float32)
+
+    squared = distance_matrix.square()
+    row_means = squared.mean(dim=1, keepdim=True)
+    col_means = squared.mean(dim=0, keepdim=True)
+    grand_mean = squared.mean()
+    centered = -0.5 * (squared - row_means - col_means + grand_mean)
+
+    _, singular_values, vh = torch.linalg.svd(centered, full_matrices=False)
+    coord_dims = min(2, int(singular_values.shape[0]))
+    if coord_dims == 0:
+        return torch.zeros((distance_matrix.shape[1], 2), dtype=torch.float32)
+
+    scales = singular_values[:coord_dims].clamp_min(0.0)
+    coordinates = vh[:coord_dims].transpose(0, 1) * scales.unsqueeze(0)
+    if coord_dims == 1:
+        zeros = torch.zeros((coordinates.shape[0], 1), dtype=coordinates.dtype)
+        coordinates = torch.cat((coordinates, zeros), dim=1)
+    return coordinates.to(dtype=torch.float32)
+
+
+def _classical_mds_embedding(distances: torch.Tensor) -> torch.Tensor:
+    """Compute rank-2 classical MDS coordinates from a distance matrix.
+
+    Parameters
+    ----------
+    distances : torch.Tensor
+        Dense pairwise distances with shape ``[N, N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Raw coordinates with shape ``[N, 2]``.
+    """
+    num_nodes = int(distances.shape[0])
+    if num_nodes == 0:
+        return torch.zeros((0, 2), dtype=torch.float32, device=distances.device)
+    if num_nodes == 1:
+        return torch.zeros((1, 2), dtype=torch.float32, device=distances.device)
+
+    if distances.shape[1] != num_nodes:
+        raise ValueError("Classical-MDS embedding requires a square distance matrix.")
+
+    distances_np = distances.detach().to(dtype=torch.float64).numpy()
+    squared = distances_np * distances_np
+    centering = np.eye(num_nodes, dtype=np.float64) - (
+        np.ones((num_nodes, num_nodes), dtype=np.float64) / float(num_nodes)
+    )
+    gram = -0.5 * centering @ squared @ centering
+
+    eigenvalues, eigenvectors = np.linalg.eigh(gram)
+    sorted_indices = np.argsort(eigenvalues)[::-1]
+    positive_indices = [index for index in sorted_indices if eigenvalues[index] > 0.0][:2]
+
+    coordinates = np.zeros((num_nodes, 2), dtype=np.float64)
+    if positive_indices:
+        selected_values = np.clip(eigenvalues[positive_indices], a_min=0.0, a_max=None)
+        selected_vectors = eigenvectors[:, positive_indices]
+        coordinates[:, : len(positive_indices)] = selected_vectors * np.sqrt(selected_values)
+    else:
+        coordinates[:, 0] = np.linspace(-1.0, 1.0, num_nodes, dtype=np.float64)
+
+    return torch.from_numpy(coordinates).to(dtype=torch.float32, device=distances.device)
 
 
 def _payload_to_sparse_matrix(payload: Any) -> sparse.csr_matrix:
@@ -1019,6 +1101,140 @@ class BuildNormalizedAdjacency(Op):
         return state
 
 
+def _select_embedding_columns(
+    eigenvalues: np.ndarray,
+    eigenvectors: np.ndarray,
+    dim: int,
+) -> np.ndarray:
+    """Select the first non-trivial eigenvectors.
+
+    Parameters
+    ----------
+    eigenvalues : numpy.ndarray
+        Eigenvalues with shape ``[K]``.
+    eigenvectors : numpy.ndarray
+        Eigenvectors with shape ``[N, K]``.
+    dim : int
+        Requested output dimension.
+
+    Returns
+    -------
+    numpy.ndarray
+        Selected coordinates with shape ``[N, dim]``.
+    """
+    sorted_indices = np.argsort(np.real(eigenvalues))
+    nontrivial_indices = [
+        index
+        for index in sorted_indices
+        if abs(float(np.real(eigenvalues[index]))) > _SPECTRAL_EIGENVALUE_TOLERANCE
+    ][:dim]
+
+    num_nodes = eigenvectors.shape[0]
+    coordinates = np.zeros((num_nodes, dim), dtype=np.float64)
+    if nontrivial_indices:
+        coordinates[:, : len(nontrivial_indices)] = np.real(eigenvectors[:, nontrivial_indices])
+    elif num_nodes > 0:
+        coordinates[:, 0] = np.linspace(-1.0, 1.0, num_nodes, dtype=np.float64)
+    return coordinates
+
+
+def _dense_spectral_embedding(
+    laplacian: sparse.csr_matrix,
+    dim: int,
+    symmetric: bool,
+) -> np.ndarray:
+    """Compute dense spectral coordinates from a Laplacian matrix."""
+    dense_laplacian = laplacian.toarray()
+    if symmetric:
+        eigenvalues, eigenvectors = np.linalg.eigh(dense_laplacian)
+    else:
+        eigenvalues, eigenvectors = np.linalg.eig(dense_laplacian)
+    return _select_embedding_columns(eigenvalues=eigenvalues, eigenvectors=eigenvectors, dim=dim)
+
+
+def _sparse_spectral_embedding(
+    laplacian: sparse.csr_matrix,
+    dim: int,
+    symmetric: bool,
+) -> np.ndarray:
+    """Compute sparse spectral coordinates from a Laplacian matrix."""
+    num_nodes = laplacian.shape[0]
+    eigen_count = min(num_nodes - 1, max(dim + 4, dim + 1))
+    if eigen_count <= dim:
+        return _dense_spectral_embedding(laplacian=laplacian, dim=dim, symmetric=symmetric)
+
+    lanczos_vectors = max((2 * eigen_count) + 1, int(np.sqrt(num_nodes)))
+    if symmetric:
+        eigenvalues, eigenvectors = sparse_linalg.eigsh(
+            laplacian,
+            k=eigen_count,
+            which="SM",
+            ncv=min(max(lanczos_vectors, eigen_count + 2), num_nodes),
+        )
+    else:
+        eigenvalues, eigenvectors = sparse_linalg.eigs(
+            laplacian,
+            k=eigen_count,
+            which="SR",
+            ncv=min(max(lanczos_vectors, eigen_count + 2), num_nodes),
+        )
+    return _select_embedding_columns(eigenvalues=eigenvalues, eigenvectors=eigenvectors, dim=dim)
+
+
+@register_op
+class SpectralEmbed(Op):
+    """Compute raw spectral coordinates from a stored Laplacian."""
+
+    name = "spectral_embed"
+    category = OpCategory.EMBED
+    reads = ("laplacian", "extras")
+    writes = ("pos",)
+    requires = ("laplacian",)
+
+    def __init__(self, sparse_threshold: int) -> None:
+        """Store the dense-vs-sparse eigensolve threshold.
+
+        Parameters
+        ----------
+        sparse_threshold : int
+            Dense matrices smaller than this threshold use NumPy eigensolvers.
+        """
+        self.sparse_threshold = int(sparse_threshold)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Recover raw 2D spectral coordinates."""
+        _ = ctx
+        if state.pos is not None:
+            return state
+        if state.laplacian is None:
+            raise RuntimeError("SpectralEmbed requires state.laplacian to be set.")
+
+        is_symmetric = state.extras.get(_SYMMETRIC_FLAG_KEY)
+        if not isinstance(is_symmetric, bool):
+            raise RuntimeError("SpectralEmbed requires a cached symmetry flag.")
+
+        if problem.num_nodes < self.sparse_threshold:
+            coordinates = _dense_spectral_embedding(
+                laplacian=state.laplacian,
+                dim=2,
+                symmetric=is_symmetric,
+            )
+        else:
+            coordinates = _sparse_spectral_embedding(
+                laplacian=state.laplacian,
+                dim=2,
+                symmetric=is_symmetric,
+            )
+
+        state.pos = torch.from_numpy(coordinates)
+        return state
+
+
 @dataclass(frozen=True)
 class EigendecompositionConfig:
     """Configuration for :class:`Eigendecomposition`.
@@ -1164,6 +1380,47 @@ class SVD(Op):
             "s": singular_values,
             "vh": vh,
         }
+        return state
+
+
+@register_op
+class PivotMDSComputeCoordinates(Op):
+    """Compute raw Pivot-MDS coordinates from pivot-to-node distances."""
+
+    name = "pivot_mds_compute_coordinates"
+    category = OpCategory.EMBED
+    reads = ("pivot_distances",)
+    writes = ("pos",)
+    requires = ("pivot_distances",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compute coordinates from ``state.pivot_distances``.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused for this deterministic op.
+        state : SolveState
+            Mutable solve state containing ``pivot_distances``.
+        ctx : RuntimeContext
+            Execution context.
+
+        Returns
+        -------
+        SolveState
+            State with ``state.pos`` populated.
+        """
+        _ = problem
+        _ = ctx
+        if state.pivot_distances is None:
+            raise ValueError("PivotMDSComputeCoordinates requires state.pivot_distances to be set.")
+
+        state.pos = _pivot_mds_coordinates(state.pivot_distances)
         return state
 
 
@@ -1550,6 +1807,67 @@ class FuzzySimplicialSet(Op):
             sigmas=sigmas,
             rhos=rhos,
         )
+        return state
+
+
+@dataclass(frozen=True)
+class ClassicalMDSComputeEmbeddingConfig:
+    """Configuration for :class:`ClassicalMDSComputeEmbedding`.
+
+    Notes
+    -----
+    The classic-MDS embedding step is deterministic and currently accepts
+    no configurable behavior.
+    """
+
+
+@register_op
+@dataclass(frozen=True)
+class ClassicalMDSComputeEmbedding(Op):
+    """Compute raw rank-2 classical MDS coordinates from ``distance_matrix``."""
+
+    config: ClassicalMDSComputeEmbeddingConfig = field(
+        default_factory=ClassicalMDSComputeEmbeddingConfig
+    )
+
+    name: ClassVar[str] = "classical_mds_compute_embedding"
+    category: ClassVar[OpCategory] = OpCategory.EMBED
+    reads: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compute and store the raw coordinates for classical MDS.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state containing a dense distance matrix.
+        ctx : RuntimeContext
+            Execution context (unused).
+
+        Returns
+        -------
+        SolveState
+            State with ``state.pos`` populated.
+        """
+        del problem, ctx
+
+        if state.distance_matrix is None:
+            raise ValueError(
+                "ClassicalMDSComputeEmbedding requires state.distance_matrix to be set."
+            )
+
+        if state.distance_matrix.ndim != 2:
+            raise ValueError("ClassicalMDSComputeEmbedding requires a square distance matrix.")
+        state.pos = _classical_mds_embedding(state.distance_matrix)
         return state
 
 
