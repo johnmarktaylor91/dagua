@@ -73,7 +73,7 @@ class TsnetPrepareState(Op):
     name: ClassVar[str] = "tsnet_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
     reads: ClassVar[Tuple[str, ...]] = ()
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
 
     def apply(
         self,
@@ -88,7 +88,8 @@ class TsnetPrepareState(Op):
         problem : LayoutProblem
             Immutable layout inputs.
         state : SolveState
-            Mutable solve state receiving prepared ``extras`` values.
+            Mutable solve state receiving the dense distance matrix and
+            tsNET-specific optimization extras.
         ctx : RuntimeContext
             Execution context (unused).
 
@@ -109,12 +110,15 @@ class TsnetPrepareState(Op):
             problem.num_nodes,
             edge_weights=problem.edge_weights,
         )
-        distances = all_pairs_shortest_paths(adjacency, weighted=problem.edge_weights is not None)
+        state.distance_matrix = all_pairs_shortest_paths(
+            adjacency,
+            weighted=problem.edge_weights is not None,
+        )
 
         rows = []
-        num_nodes = int(distances.shape[0])
+        num_nodes = int(state.distance_matrix.shape[0])
         for node in range(num_nodes):
-            row = distances[node]
+            row = state.distance_matrix[node]
             if num_nodes <= 1:
                 rows.append(torch.zeros_like(row))
                 continue

@@ -29,8 +29,6 @@ _SPECTRAL_SPARSE_THRESHOLD = 512
 _GRADIENT_CLIP_VALUE = 4.0
 _NEGATIVE_SAMPLE_RATE = 5
 
-_ADJACENCY_KEY = "umap_adjacency"
-_DISTANCES_KEY = "umap_distances"
 _KNN_INDICES_KEY = "umap_knn_indices"
 _KNN_DISTANCES_KEY = "umap_knn_distances"
 _SIGMAS_KEY = "umap_sigmas"
@@ -56,12 +54,12 @@ def _build_undirected_adjacency(
     edge_index: torch.Tensor,
     num_nodes: int,
     edge_weights: Optional[torch.Tensor] = None,
-) -> Union[list[list[int]], list[list[tuple[int, float]]]]:
+) -> list[list[tuple[int, float]]]:
     """Build an undirected adjacency list from ``edge_index``."""
     if edge_weights is None:
         adjacency_sets: list[set[int]] = [set() for _ in range(num_nodes)]
         if edge_index.numel() == 0:
-            return [sorted(neighbors) for neighbors in adjacency_sets]
+            return [[] for _ in range(num_nodes)]
 
         edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
         for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
@@ -70,7 +68,7 @@ def _build_undirected_adjacency(
             adjacency_sets[source].add(target)
             adjacency_sets[target].add(source)
 
-        return [sorted(neighbors) for neighbors in adjacency_sets]
+        return [[(neighbor, 1.0) for neighbor in sorted(neighbors)] for neighbors in adjacency_sets]
 
     adjacency_maps: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
     if edge_index.numel() == 0:
@@ -652,7 +650,7 @@ class BuildUMAPAdjacency(Op):
 
     name: ClassVar[str] = "umap_build_adjacency"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("adjacency_weighted",)
 
     def apply(
         self,
@@ -660,15 +658,14 @@ class BuildUMAPAdjacency(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Build an undirected adjacency list and store it in ``extras``."""
+        """Build an undirected weighted adjacency list and store it on the state."""
         del ctx
 
-        adjacency = _build_undirected_adjacency(
+        state.adjacency_weighted = _build_undirected_adjacency(
             edge_index=problem.edge_index,
             num_nodes=problem.num_nodes,
             edge_weights=problem.edge_weights,
         )
-        state.extras[_ADJACENCY_KEY] = adjacency
         return state
 
 
@@ -678,8 +675,8 @@ class ComputeAllPairsShortestPaths(Op):
 
     name: ClassVar[str] = "umap_all_pairs_shortest_paths"
     category: ClassVar[OpCategory] = OpCategory.DISTANCE
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ("adjacency_weighted",)
+    writes: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
 
     def apply(
         self,
@@ -689,9 +686,10 @@ class ComputeAllPairsShortestPaths(Op):
     ) -> SolveState:
         """Compute and cache the dense shortest-path matrix."""
         del problem, ctx
-        adjacency = state.extras[_ADJACENCY_KEY]
-        distances = _all_pairs_shortest_paths(adjacency=adjacency)
-        state.extras[_DISTANCES_KEY] = distances
+        adjacency = state.adjacency_weighted
+        if adjacency is None:
+            raise ValueError("ComputeAllPairsShortestPaths requires state.adjacency_weighted.")
+        state.distance_matrix = _all_pairs_shortest_paths(adjacency=adjacency)
         return state
 
 
@@ -701,7 +699,7 @@ class ExtractKNN(Op):
 
     name: ClassVar[str] = "umap_extract_knn"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
 
     def apply(
@@ -712,7 +710,9 @@ class ExtractKNN(Op):
     ) -> SolveState:
         """Extract kNN indices and distances from cached graph distances."""
         del problem, ctx
-        distances = state.extras[_DISTANCES_KEY]
+        distances = state.distance_matrix
+        if distances is None:
+            raise ValueError("ExtractKNN requires state.distance_matrix.")
         n_neighbors = state.extras[_N_NEIGHBORS_KEY]
         knn_indices, knn_distances = _knn_from_distances(
             distances=distances,
