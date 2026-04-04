@@ -6,17 +6,12 @@ composable ``Op`` interface.
 
 from __future__ import annotations
 
+import heapq
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
-from dagua.layout._archive.classic.sugiyama import (
-    _expand_long_edges_with_dummy_nodes,
-    _longest_path_layering,
-    _promote_layer_assignments,
-    _resolve_node_sizes,
-)
 from dagua.layout.layers import build_layer_index
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -59,6 +54,301 @@ class ExpandedGraph:
     node_sizes: torch.Tensor
     edge_paths: list[list[int]]
     num_nodes: int
+
+
+@dataclass(frozen=True)
+class _ExpandedLayeredGraph:
+    """Expanded DAG after dummy-node insertion for long edges.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Expanded edge list with shape ``[2, E_expanded]``.
+    layers : list[list[int]]
+        Node ids grouped by layer.
+    node_sizes : torch.Tensor
+        Expanded node sizes with shape ``[N_expanded, 2]``.
+    edge_paths : list[list[int]]
+        Expanded node chains for each original edge.
+    num_nodes : int
+        Total expanded node count.
+    """
+
+    edge_index: torch.Tensor
+    layers: list[list[int]]
+    node_sizes: torch.Tensor
+    edge_paths: list[list[int]]
+    num_nodes: int
+
+
+def _resolve_node_sizes(node_sizes: torch.Tensor | None, num_nodes: int) -> torch.Tensor:
+    """Return CPU node sizes for layer expansion.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor | None
+        Optional input node sizes.
+    num_nodes : int
+        Number of original nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU float tensor with shape ``[N, 2]``.
+    """
+    if node_sizes is None:
+        return torch.zeros((num_nodes, 2), dtype=torch.float32)
+    return node_sizes.detach().to(device="cpu", dtype=torch.float32)
+
+
+def _build_neighbor_lists(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> tuple[list[list[int]], list[list[int]]]:
+    """Build parent and child adjacency lists from an edge index.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    tuple[list[list[int]], list[list[int]]]
+        ``(parents, children)`` adjacency lists.
+    """
+    parents: List[List[int]] = [[] for _ in range(num_nodes)]
+    children: List[List[int]] = [[] for _ in range(num_nodes)]
+    sources = edge_index[0].tolist()
+    targets = edge_index[1].tolist()
+    for source, target in zip(sources, targets):
+        children[source].append(target)
+        parents[target].append(source)
+    return parents, children
+
+
+def _longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """Assign each node to a layer via Kahn traversal.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Acyclic edge list of shape ``[2, E]`` on CPU.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Long tensor with shape ``[N]`` and layer indices.
+
+    Raises
+    ------
+    ValueError
+        If the graph remains cyclic after edge reversal.
+    """
+    children: List[List[int]] = [[] for _ in range(num_nodes)]
+    in_degree = [0] * num_nodes
+    src_nodes = edge_index[0].tolist()
+    dst_nodes = edge_index[1].tolist()
+
+    for source, target in zip(src_nodes, dst_nodes):
+        children[source].append(target)
+        in_degree[target] += 1
+
+    layers = [0] * num_nodes
+    ready = [node for node, degree in enumerate(in_degree) if degree == 0]
+    heapq.heapify(ready)
+
+    processed = 0
+    while ready:
+        node = heapq.heappop(ready)
+        processed += 1
+        next_layer = layers[node] + 1
+        for child in children[node]:
+            if next_layer > layers[child]:
+                layers[child] = next_layer
+            in_degree[child] -= 1
+            if in_degree[child] == 0:
+                heapq.heappush(ready, child)
+
+    if processed != num_nodes:
+        raise ValueError("graph must be acyclic after back-edge reversal")
+
+    return torch.tensor(layers, dtype=torch.long)
+
+
+def _group_nodes_by_layer(layer_assignments: torch.Tensor, num_nodes: int) -> list[list[int]]:
+    """Group nodes into ordered per-layer lists.
+
+    Parameters
+    ----------
+    layer_assignments : torch.Tensor
+        Layer indices for each node.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Node ids grouped by layer.
+    """
+    if num_nodes == 0:
+        return []
+
+    num_layers = int(layer_assignments.max().item()) + 1
+    layers: List[List[int]] = [[] for _ in range(num_layers)]
+    for node in range(num_nodes):
+        layer_index = int(layer_assignments[node].item())
+        layers[layer_index].append(node)
+    return layers
+
+
+def _promote_layer_assignments(
+    edge_index: torch.Tensor,
+    layer_assignments: torch.Tensor,
+    num_nodes: int,
+) -> torch.Tensor:
+    """Push nodes down where outgoing edges skip multiple layers.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Acyclic edge list with shape ``[2, E]`` on CPU.
+    layer_assignments : torch.Tensor
+        Initial layer assignments with shape ``[N]``.
+    num_nodes : int
+        Number of original nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Promoted layer assignments.
+    """
+    if num_nodes == 0 or edge_index.numel() == 0:
+        return layer_assignments
+
+    _, children = _build_neighbor_lists(edge_index=edge_index, num_nodes=num_nodes)
+    promoted_layers = layer_assignments.clone()
+
+    changed = True
+    while changed:
+        changed = False
+        node_order = sorted(
+            range(num_nodes),
+            key=lambda node: int(promoted_layers[node].item()),
+            reverse=True,
+        )
+        for node in node_order:
+            successor_layers = [int(promoted_layers[child].item()) for child in children[node]]
+            if not successor_layers:
+                continue
+
+            current_layer = int(promoted_layers[node].item())
+            min_successor_layer = min(successor_layers)
+            if min_successor_layer < current_layer + 2:
+                continue
+
+            candidate_layer = min_successor_layer - 1
+            if candidate_layer > current_layer:
+                promoted_layers[node] = candidate_layer
+                changed = True
+
+    return promoted_layers
+
+
+def _expand_long_edges_with_dummy_nodes(
+    edge_index: torch.Tensor,
+    layer_assignments: torch.Tensor,
+    node_sizes: torch.Tensor,
+    num_original_nodes: int,
+    edge_weights: torch.Tensor | None = None,
+) -> tuple[_ExpandedLayeredGraph, torch.Tensor | None]:
+    """Insert dummy nodes for edges spanning multiple layers.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Acyclic edge list with shape ``[2, E]`` on CPU.
+    layer_assignments : torch.Tensor
+        Original-node layer indices with shape ``[N]``.
+    node_sizes : torch.Tensor
+        Original node sizes with shape ``[N, 2]`` on CPU.
+    num_original_nodes : int
+        Number of real graph nodes before expansion.
+    edge_weights : torch.Tensor | None, default=None
+        Optional edge weights.
+
+    Returns
+    -------
+    tuple[_ExpandedLayeredGraph, torch.Tensor | None]
+        Expanded graph and expanded edge weights.
+    """
+    expanded_layers = _group_nodes_by_layer(
+        layer_assignments=layer_assignments,
+        num_nodes=num_original_nodes,
+    )
+    dummy_sizes: list[list[float]] = []
+    expanded_sources: list[int] = []
+    expanded_targets: list[int] = []
+    expanded_weight_values: list[float] = []
+    edge_paths: list[list[int]] = []
+    next_dummy_index = num_original_nodes
+
+    for edge_idx, (source, target) in enumerate(
+        zip(edge_index[0].tolist(), edge_index[1].tolist())
+    ):
+        source_layer = int(layer_assignments[source].item())
+        target_layer = int(layer_assignments[target].item())
+        path = [source]
+        previous = source
+        orig_weight = float(edge_weights[edge_idx].item()) if edge_weights is not None else 1.0
+
+        for layer_index in range(source_layer + 1, target_layer):
+            dummy_index = next_dummy_index
+            next_dummy_index += 1
+            expanded_layers[layer_index].append(dummy_index)
+            dummy_sizes.append([0.0, 0.0])
+            expanded_sources.append(previous)
+            expanded_targets.append(dummy_index)
+            expanded_weight_values.append(orig_weight)
+            path.append(dummy_index)
+            previous = dummy_index
+
+        expanded_sources.append(previous)
+        expanded_targets.append(target)
+        expanded_weight_values.append(orig_weight)
+        path.append(target)
+        edge_paths.append(path)
+
+    if dummy_sizes:
+        expanded_node_sizes = torch.cat(
+            [
+                node_sizes,
+                torch.tensor(dummy_sizes, dtype=torch.float32),
+            ],
+            dim=0,
+        )
+    else:
+        expanded_node_sizes = node_sizes.clone()
+
+    expanded_edge_index = torch.tensor(
+        [expanded_sources, expanded_targets],
+        dtype=torch.long,
+    )
+    expanded_edge_weights: torch.Tensor | None = None
+    if edge_weights is not None:
+        expanded_edge_weights = torch.tensor(expanded_weight_values, dtype=torch.float32)
+
+    return _ExpandedLayeredGraph(
+        edge_index=expanded_edge_index,
+        layers=expanded_layers,
+        node_sizes=expanded_node_sizes,
+        edge_paths=edge_paths,
+        num_nodes=next_dummy_index,
+    ), expanded_edge_weights
 
 
 def _validate_problem_edge_index(problem: LayoutProblem) -> torch.Tensor:

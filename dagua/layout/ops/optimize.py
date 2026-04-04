@@ -13,7 +13,6 @@ from typing import Any, Optional, Sequence, cast
 import numpy as np
 import torch
 
-from dagua.layout._archive.classic import kk as kk_classic
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -21,6 +20,68 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 _DEFAULT_TSNE_EARLY_STEPS = 250
 _OPTIMIZER_KEY_PREFIX = "optimizer_"
 _UMAP_DEFAULT_GAMMA = 1.0
+DISTANCE_EPSILON = 1.0e-3
+CENTERING_WEIGHT = 1.0e-3
+
+
+def _kamada_kawai_costfn(
+    pos_vec: np.ndarray,
+    np_module: Any,
+    invdist: np.ndarray,
+    meanweight: float,
+    dim: int,
+) -> tuple[float, np.ndarray]:
+    """Compute the exact NetworkX Kamada-Kawai objective and gradient.
+
+    Parameters
+    ----------
+    pos_vec : numpy.ndarray
+        Flattened position vector with shape ``[N * dim]``.
+    np_module : Any
+        NumPy module passed through to mirror the NetworkX helper signature.
+    invdist : numpy.ndarray
+        Inverse preferred-distance matrix with shape ``[N, N]``.
+    meanweight : float
+        Weight of the origin-centering penalty.
+    dim : int
+        Layout dimension.
+
+    Returns
+    -------
+    tuple[float, numpy.ndarray]
+        Objective value and flattened analytic gradient.
+    """
+    num_nodes = invdist.shape[0]
+    pos_arr = pos_vec.reshape((num_nodes, dim))
+
+    delta = pos_arr[:, np_module.newaxis, :] - pos_arr[np_module.newaxis, :, :]
+    node_separation = np_module.linalg.norm(delta, axis=-1)
+    direction = np_module.einsum(
+        "ijk,ij->ijk",
+        delta,
+        1.0 / (node_separation + np_module.eye(num_nodes) * DISTANCE_EPSILON),
+    )
+
+    offset = (node_separation * invdist) - 1.0
+    offset[np_module.diag_indices(num_nodes)] = 0.0
+
+    cost = 0.5 * float(np_module.sum(offset**2))
+    gradient = np_module.einsum(
+        "ij,ij,ijk->ik",
+        invdist,
+        offset,
+        direction,
+    ) - np_module.einsum(
+        "ij,ij,ijk->jk",
+        invdist,
+        offset,
+        direction,
+    )
+
+    sum_positions = np_module.sum(pos_arr, axis=0)
+    cost += 0.5 * meanweight * float(np_module.sum(sum_positions**2))
+    gradient += meanweight * sum_positions
+    return cost, gradient.ravel()
 
 
 def _optimizer_storage_key(key: str) -> str:
@@ -958,13 +1019,12 @@ class LBFGSStep(Op):
                 )
 
         inverse_distances = 1.0 / (
-            distance_matrix
-            + np.eye(distance_matrix.shape[0], dtype=np.float64) * kk_classic.DISTANCE_EPSILON
+            distance_matrix + np.eye(distance_matrix.shape[0], dtype=np.float64) * DISTANCE_EPSILON
         )
 
         minimize_kwargs: dict[str, Any] = {
             "method": "L-BFGS-B",
-            "args": (np, inverse_distances, kk_classic.CENTERING_WEIGHT, dim),
+            "args": (np, inverse_distances, CENTERING_WEIGHT, dim),
             "jac": True,
             "callback": _callback,
         }
@@ -972,7 +1032,7 @@ class LBFGSStep(Op):
             minimize_kwargs["options"] = {"maxiter": self.config.maxiter}
 
         result = sp.optimize.minimize(
-            kk_classic._kamada_kawai_costfn,
+            _kamada_kawai_costfn,
             initial_positions.ravel(),
             **minimize_kwargs,
         )
