@@ -1,6 +1,6 @@
 """Competitor adapters for dagua's classic algorithm reimplementations.
 
-These wrap the educational implementations in ``dagua/layout/classic/`` so
+These wrap the educational implementations in ``dagua/layout/ops/pipelines/`` so
 they can be benchmarked alongside the original reference implementations.
 """
 
@@ -150,112 +150,112 @@ def _warn_on_unrecognized_variant_params(
 
 _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_fr": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.fr",
+        import_path="dagua.layout.ops.pipelines.fr",
         function_name="layout_fr",
         default_params={"steps": 200},
     ),
     "classic_kk": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.kk",
+        import_path="dagua.layout.ops.pipelines.kk",
         function_name="layout_kk",
         default_params={"steps": 300},
     ),
     "classic_fa2": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.fa2",
+        import_path="dagua.layout.ops.pipelines.fa2",
         function_name="layout_fa2",
         default_params={"steps": 200, "barnes_hut": True, "barnes_hut_theta": 1.2},
     ),
     "classic_stress_sgd": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.stress_sgd",
+        import_path="dagua.layout.ops.pipelines.stress_sgd",
         function_name="layout_stress_sgd",
         default_params={"steps": 300},
     ),
     "classic_sugiyama": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.sugiyama",
+        import_path="dagua.layout.ops.pipelines.sugiyama",
         function_name="layout_sugiyama",
         default_params={},
     ),
     "classic_spectral": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.spectral",
+        import_path="dagua.layout.ops.pipelines.spectral",
         function_name="layout_spectral",
         default_params={},
     ),
     "classic_classical_mds": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.classical_mds",
+        import_path="dagua.layout.ops.pipelines.classical_mds",
         function_name="layout_classical_mds",
         default_params={},
     ),
     "classic_stress_maj": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.stress_majorization",
+        import_path="dagua.layout.ops.pipelines.stress_majorization",
         function_name="layout_stress_majorization",
         default_params={"iterations": 200},
     ),
     "classic_pivot_mds": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.pivot_mds",
+        import_path="dagua.layout.ops.pipelines.pivot_mds",
         function_name="layout_pivot_mds",
         default_params={"n_pivots": 50},
     ),
     "classic_rt": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.reingold_tilford",
+        import_path="dagua.layout.ops.pipelines.reingold_tilford",
         function_name="layout_reingold_tilford",
         default_params={},
     ),
     "classic_linlog": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.linlog",
+        import_path="dagua.layout.ops.pipelines.linlog",
         function_name="layout_linlog",
         default_params={"steps": 300},
     ),
     "classic_gem": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.gem",
+        import_path="dagua.layout.ops.pipelines.gem",
         function_name="layout_gem",
         default_params={"max_iters": 500},
     ),
     "classic_tsnet": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.tsnet",
+        import_path="dagua.layout.ops.pipelines.tsnet",
         function_name="layout_tsnet",
         default_params={"perplexity": 30, "steps": 500},
     ),
     "classic_maxent_stress": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.maxent_stress",
+        import_path="dagua.layout.ops.pipelines.maxent_stress",
         function_name="layout_maxent_stress",
         default_params={"steps": 200, "alpha": 1.0},
     ),
     "classic_davidson_harel": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.davidson_harel",
+        import_path="dagua.layout.ops.pipelines.davidson_harel",
         function_name="layout_davidson_harel",
         default_params={"rounds": 100},
     ),
     "classic_fmmm": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.fmmm",
+        import_path="dagua.layout.ops.pipelines.fmmm",
         function_name="layout_fmmm",
         default_params={"steps": 100},
     ),
     "classic_graphopt": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.graphopt",
+        import_path="dagua.layout.ops.pipelines.graphopt",
         function_name="layout_graphopt",
         default_params={},
     ),
     "classic_drl": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.drl",
+        import_path="dagua.layout.ops.pipelines.drl",
         function_name="layout_drl",
         default_params={},
     ),
     "classic_lgl": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.lgl",
+        import_path="dagua.layout.ops.pipelines.lgl",
         function_name="layout_lgl",
         default_params={},
     ),
     "classic_sfdp": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.sfdp",
+        import_path="dagua.layout.ops.pipelines.sfdp",
         function_name="layout_sfdp",
         default_params={},
     ),
     "classic_umap": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.umap_layout",
+        import_path="dagua.layout.ops.pipelines.umap_layout",
         function_name="layout_umap",
         default_params={},
     ),
     "classic_neulay": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.neulay",
+        import_path="dagua.layout.ops.pipelines.neulay",
         function_name="layout_neulay",
         default_params={
             "steps": 20_000,
@@ -266,7 +266,7 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
         },
     ),
     "classic_sgd2_multi": _ClassicLayoutSpec(
-        import_path="dagua.layout.classic.sgd2_multi",
+        import_path="dagua.layout.ops.pipelines.sgd2_multi",
         function_name="layout_sgd2_multi",
         default_params={"criteria": {"stress": 1.0, "ideal_edge_length": 1.0}, "lr": 0.01},
     ),
@@ -593,7 +593,7 @@ class ClassicFR(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.fr import layout_fr
+        from dagua.layout.ops.pipelines.fr import layout_fr_pipeline as layout_fr
 
         start = time.perf_counter()
         try:
@@ -648,7 +648,7 @@ class ClassicKK(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.kk import layout_kk
+        from dagua.layout.ops.pipelines.kk import layout_kk_pipeline as layout_kk
 
         start = time.perf_counter()
         try:
@@ -811,7 +811,7 @@ class ClassicFA2(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.fa2 import layout_fa2
+        from dagua.layout.ops.pipelines.fa2 import layout_fa2_pipeline as layout_fa2
 
         start = time.perf_counter()
         try:
@@ -866,7 +866,9 @@ class ClassicStressSGD(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.stress_sgd import layout_stress_sgd
+        from dagua.layout.ops.pipelines.stress_sgd import (
+            layout_stress_sgd_pipeline as layout_stress_sgd,
+        )
 
         start = time.perf_counter()
         try:
@@ -921,7 +923,7 @@ class ClassicSugiyama(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.sugiyama import layout_sugiyama
+        from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline as layout_sugiyama
 
         start = time.perf_counter()
         try:
@@ -975,7 +977,7 @@ class ClassicSpectral(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.spectral import layout_spectral
+        from dagua.layout.ops.pipelines.spectral import layout_spectral_pipeline as layout_spectral
 
         start = time.perf_counter()
         try:
@@ -1094,7 +1096,9 @@ class ClassicPivotMDS(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.pivot_mds import layout_pivot_mds
+        from dagua.layout.ops.pipelines.pivot_mds import (
+            layout_pivot_mds_pipeline as layout_pivot_mds,
+        )
 
         start = time.perf_counter()
         try:
@@ -1181,7 +1185,7 @@ class ClassicLinLog(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.linlog import layout_linlog
+        from dagua.layout.ops.pipelines.linlog import layout_linlog_pipeline as layout_linlog
 
         start = time.perf_counter()
         try:
@@ -1236,7 +1240,7 @@ class ClassicGEM(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.gem import layout_gem
+        from dagua.layout.ops.pipelines.gem import layout_gem_pipeline as layout_gem
 
         start = time.perf_counter()
         try:
@@ -1292,7 +1296,7 @@ class ClassicTsNET(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.tsnet import layout_tsnet
+        from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline as layout_tsnet
 
         start = time.perf_counter()
         try:
@@ -1348,7 +1352,9 @@ class ClassicMaxentStress(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.maxent_stress import layout_maxent_stress
+        from dagua.layout.ops.pipelines.maxent_stress import (
+            layout_maxent_stress_pipeline as layout_maxent_stress,
+        )
 
         start = time.perf_counter()
         try:
@@ -1404,7 +1410,9 @@ class ClassicDavidsonHarel(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.davidson_harel import layout_davidson_harel
+        from dagua.layout.ops.pipelines.davidson_harel import (
+            layout_davidson_harel_pipeline as layout_davidson_harel,
+        )
 
         start = time.perf_counter()
         try:
@@ -1459,7 +1467,7 @@ class ClassicFMMM(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.classic.fmmm import layout_fmmm
+        from dagua.layout.ops.pipelines.fmmm import layout_fmmm_pipeline as layout_fmmm
 
         start = time.perf_counter()
         try:
@@ -1549,7 +1557,7 @@ class ClassicGraphOpt(_ClassicBase):
         del timeout
         return _quick_classic(
             self.name,
-            "dagua.layout.classic.graphopt",
+            "dagua.layout.ops.pipelines.graphopt",
             "layout_graphopt",
             graph,
             self._layout_seed(seed),
@@ -1566,7 +1574,11 @@ class ClassicDRL(_ClassicBase):
     ) -> CompetitorResult:
         del timeout
         return _quick_classic(
-            self.name, "dagua.layout.classic.drl", "layout_drl", graph, self._layout_seed(seed)
+            self.name,
+            "dagua.layout.ops.pipelines.drl",
+            "layout_drl",
+            graph,
+            self._layout_seed(seed),
         )
 
 
@@ -1580,7 +1592,11 @@ class ClassicLGL(_ClassicBase):
     ) -> CompetitorResult:
         del timeout
         return _quick_classic(
-            self.name, "dagua.layout.classic.lgl", "layout_lgl", graph, self._layout_seed(seed)
+            self.name,
+            "dagua.layout.ops.pipelines.lgl",
+            "layout_lgl",
+            graph,
+            self._layout_seed(seed),
         )
 
 
@@ -1594,7 +1610,11 @@ class ClassicSFDP(_ClassicBase):
     ) -> CompetitorResult:
         del timeout
         return _quick_classic(
-            self.name, "dagua.layout.classic.sfdp", "layout_sfdp", graph, self._layout_seed(seed)
+            self.name,
+            "dagua.layout.ops.pipelines.sfdp",
+            "layout_sfdp",
+            graph,
+            self._layout_seed(seed),
         )
 
 
@@ -1610,7 +1630,7 @@ class ClassicUMAP(_ClassicBase):
         del timeout
         return _quick_classic(
             self.name,
-            "dagua.layout.classic.umap_layout",
+            "dagua.layout.ops.pipelines.umap_layout",
             "layout_umap",
             graph,
             self._layout_seed(seed),
@@ -1646,7 +1666,7 @@ class ClassicNeuLay(_ClassicBase):
         del timeout
         return _quick_classic(
             self.name,
-            "dagua.layout.classic.neulay",
+            "dagua.layout.ops.pipelines.neulay",
             "layout_neulay",
             graph,
             self._layout_seed(seed),
@@ -1686,7 +1706,7 @@ class ClassicSGD2Multi(_ClassicBase):
         del timeout
         return _quick_classic(
             self.name,
-            "dagua.layout.classic.sgd2_multi",
+            "dagua.layout.ops.pipelines.sgd2_multi",
             "layout_sgd2_multi",
             graph,
             self._layout_seed(seed),
