@@ -6,19 +6,308 @@ from typing import ClassVar, List, Optional, Tuple
 
 import torch
 
-from dagua.layout.classic.davidson_harel import (
-    _COOLING_FACTOR,
-    _MIN_DISTANCE,
-    _energy,
-    _initialize_positions,
-    _layout_device,
-    _layout_extent,
-    _unique_edges,
+from dagua.layout.ops.graph_utils import (
+    layout_device as _layout_device,
 )
-from dagua.layout.ops.base import Op, Pipeline, Repeat
-from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.taxonomy import OpCategory
+from dagua.layout.ops.graph_utils import (
+    layout_extent as _layout_extent,
+)
+
+# ---------------------------------------------------------------------------
+# Algorithm-specific constants and functions copied from
+# dagua/layout/classic/davidson_harel.py (bit-identical)
+# ---------------------------------------------------------------------------
+
+_MIN_DISTANCE = 1.0e-3
+_BORDER_WEIGHT = 0.1
+_EDGE_LENGTH_WEIGHT = 0.2
+_CROSSING_WEIGHT = 2.0
+_NODE_EDGE_WEIGHT = 0.5
+_COOLING_FACTOR = 0.75
+_COLLINEAR_EPSILON = 1.0e-10
+
+
+def _unique_edges(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> tuple[list[tuple[int, int]], torch.Tensor]:
+    """Convert an edge tensor into unique undirected edges and weights.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    tuple[list[tuple[int, int]], torch.Tensor]
+        Unique undirected edges and their aggregated weights with shape
+        ``[E_unique]``. Parallel or mirrored edges are summed so the collapsed
+        undirected energy term preserves total attraction strength.
+    """
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+
+    seen: dict[tuple[int, int], float] = {}
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    if edge_weights is None:
+        weights_cpu = torch.ones((edge_index.shape[1],), dtype=torch.float32)
+    else:
+        weights_cpu = edge_weights.detach().to(device="cpu", dtype=torch.float32)
+
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
+        if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
+            raise ValueError("edge_index contains a node index outside [0, num_nodes).")
+        if source == target:
+            continue
+        pair = (min(source, target), max(source, target))
+        seen[pair] = seen.get(pair, 0.0) + float(weights_cpu[edge_id].item())
+
+    ordered_edges = sorted(seen)
+    ordered_weights = torch.tensor(
+        [seen[edge] for edge in ordered_edges],
+        dtype=torch.float32,
+    )
+    return ordered_edges, ordered_weights
+
+
+def _initialize_positions(
+    num_nodes: int,
+    extent: float,
+    device: torch.device,
+    seed: int,
+) -> torch.Tensor:
+    """Create deterministic random coordinates inside the drawing box.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    extent : float
+        Half-width of the drawing box.
+    device : torch.device
+        Device for the result.
+    seed : int
+        Random seed.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial coordinates with shape ``[N, 2]``.
+    """
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    return ((torch.rand((num_nodes, 2), generator=generator) * 2.0) - 1.0).to(device) * extent
+
+
+def _orientation(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> float:
+    """Compute the signed triangle area used by segment intersection tests.
+
+    Parameters
+    ----------
+    a : torch.Tensor
+        First point with shape ``[2]``.
+    b : torch.Tensor
+        Second point with shape ``[2]``.
+    c : torch.Tensor
+        Third point with shape ``[2]``.
+
+    Returns
+    -------
+    float
+        Signed cross product value.
+    """
+    return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+
+
+def _segments_intersect(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, d: torch.Tensor) -> bool:
+    """Test whether two line segments intersect.
+
+    Parameters
+    ----------
+    a : torch.Tensor
+        First endpoint of the first segment.
+    b : torch.Tensor
+        Second endpoint of the first segment.
+    c : torch.Tensor
+        First endpoint of the second segment.
+    d : torch.Tensor
+        Second endpoint of the second segment.
+
+    Returns
+    -------
+    bool
+        ``True`` if the segments intersect.
+    """
+    o1 = _orientation(a, b, c)
+    o2 = _orientation(a, b, d)
+    o3 = _orientation(c, d, a)
+    o4 = _orientation(c, d, b)
+    return (abs(o1) < _COLLINEAR_EPSILON or abs(o2) < _COLLINEAR_EPSILON or o1 * o2 < 0.0) and (
+        abs(o3) < _COLLINEAR_EPSILON or abs(o4) < _COLLINEAR_EPSILON or o3 * o4 < 0.0
+    )
+
+
+def _point_segment_distance(
+    point: torch.Tensor, start: torch.Tensor, end: torch.Tensor
+) -> torch.Tensor:
+    """Compute the Euclidean distance from a point to a segment.
+
+    Parameters
+    ----------
+    point : torch.Tensor
+        Point with shape ``[2]``.
+    start : torch.Tensor
+        Segment start point.
+    end : torch.Tensor
+        Segment end point.
+
+    Returns
+    -------
+    torch.Tensor
+        Distance scalar.
+    """
+    segment = end - start
+    denom = segment.dot(segment).clamp(min=_MIN_DISTANCE)
+    projection = ((point - start).dot(segment) / denom).clamp(0.0, 1.0)
+    nearest = start + projection * segment
+    return torch.linalg.norm(point - nearest)
+
+
+def _scale_denominator(numerator_count: int) -> float:
+    """Return a non-zero normalization denominator for one energy term.
+
+    Parameters
+    ----------
+    numerator_count : int
+        Expected scale factor for the corresponding summed energy term.
+
+    Returns
+    -------
+    float
+        Positive normalization denominator.
+    """
+    return float(max(numerator_count, 1))
+
+
+def _energy(
+    positions: torch.Tensor,
+    edges: list[tuple[int, int]],
+    extent: float,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Evaluate the Davidson-Harel layout energy.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edges : list[tuple[int, int]]
+        Unique undirected edges.
+    extent : float
+        Half-width of the drawing box.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights aligned with ``edges`` and shape ``[E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar energy value.
+
+    Notes
+    -----
+    The paper defines the individual energy terms as sums. This implementation
+    keeps that formulation, then normalizes each term by its natural graph-size
+    scale so the fixed weights remain comparable across different graph sizes.
+    """
+    num_nodes = int(positions.shape[0])
+    distribution = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
+    if num_nodes > 1:
+        src, dst = torch.triu_indices(num_nodes, num_nodes, offset=1, device=positions.device)
+        squared_distances = (
+            (positions[src] - positions[dst]).square().sum(dim=1).clamp(min=_MIN_DISTANCE)
+        )
+        distribution = squared_distances.reciprocal().sum()
+
+    border_distances = torch.stack(
+        [
+            positions[:, 0] + extent,
+            extent - positions[:, 0],
+            positions[:, 1] + extent,
+            extent - positions[:, 1],
+        ],
+        dim=1,
+    ).clamp(min=_MIN_DISTANCE)
+    border = border_distances.reciprocal().square().sum()
+
+    edge_length = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
+    if edges:
+        edge_weight_tensor = (
+            torch.ones((len(edges),), dtype=positions.dtype, device=positions.device)
+            if edge_weights is None
+            else edge_weights.to(device=positions.device, dtype=positions.dtype)
+        )
+        edge_lengths = [
+            torch.linalg.norm(positions[source] - positions[target]).square()
+            * edge_weight_tensor[index]
+            for index, (source, target) in enumerate(edges)
+        ]
+        edge_length = torch.stack(edge_lengths).sum()
+
+    crossings = 0.0
+    for index, (a, b) in enumerate(edges):
+        for c, d in edges[index + 1 :]:
+            if len({a, b, c, d}) < 4:
+                continue
+            if _segments_intersect(positions[a], positions[b], positions[c], positions[d]):
+                crossings += 1.0
+    crossing_energy = torch.tensor(crossings, dtype=positions.dtype, device=positions.device)
+
+    node_edge = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
+    penalties: list[torch.Tensor] = []
+    for node in range(num_nodes):
+        for source, target in edges:
+            if node in (source, target):
+                continue
+            distance = _point_segment_distance(
+                positions[node], positions[source], positions[target]
+            )
+            penalties.append(distance.clamp(min=_MIN_DISTANCE).reciprocal().square())
+    if penalties:
+        node_edge = torch.stack(penalties).sum()
+
+    edge_count = len(edges)
+    distribution_scale = _scale_denominator(num_nodes * max(num_nodes - 1, 1) // 2)
+    border_scale = _scale_denominator(num_nodes)
+    edge_length_scale = _scale_denominator(edge_count)
+    crossing_scale = _scale_denominator(edge_count * edge_count)
+    node_edge_scale = _scale_denominator(num_nodes * edge_count)
+
+    return (
+        distribution / distribution_scale
+        + _BORDER_WEIGHT * (border / border_scale)
+        + _EDGE_LENGTH_WEIGHT * (edge_length / edge_length_scale)
+        + _CROSSING_WEIGHT * (crossing_energy / crossing_scale)
+        + _NODE_EDGE_WEIGHT * (node_edge / node_edge_scale)
+    )
+
+
+from dagua.layout.ops.base import Op, Pipeline, Repeat  # noqa: E402
+from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig  # noqa: E402
+from dagua.layout.ops.state import (  # noqa: E402
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
+from dagua.layout.ops.taxonomy import OpCategory  # noqa: E402
 
 
 class _InitializeDHPositions(Op):
