@@ -617,6 +617,11 @@ def _gem_apply_node_update(
     degree_weights: torch.Tensor,
     barycenter: torch.Tensor,
     global_temperature: float,
+    initial_temperature: float,
+    rotation_sine_threshold: float,
+    rotation_sensitivity: float,
+    oscillation_cosine_threshold: float,
+    oscillation_sensitivity: float,
 ) -> float:
     """Apply OGDF GEM's sequential node update rule.
 
@@ -640,6 +645,16 @@ def _gem_apply_node_update(
         Weighted barycenter sum with shape ``[2]``.
     global_temperature : float
         Current global GEM temperature.
+    initial_temperature : float
+        Maximum allowed local temperature.
+    rotation_sine_threshold : float
+        Sine threshold that grows the skew gauge.
+    rotation_sensitivity : float
+        Increment added to the skew gauge after a rotation event.
+    oscillation_cosine_threshold : float
+        Cosine threshold that triggers oscillation cooling.
+    oscillation_sensitivity : float
+        Multiplier applied to local temperature after an oscillation event.
 
     Returns
     -------
@@ -674,15 +689,15 @@ def _gem_apply_node_update(
         cos_beta = (move_x * old_x + move_y * old_y) / product
 
         skew_value = float(skew_gauge[node_index].item())
-        if sin_beta > _GEM_ROTATION_SINE_THRESHOLD:
-            skew_value += _GEM_ROTATION_SENSITIVITY
+        if sin_beta > rotation_sine_threshold:
+            skew_value += rotation_sensitivity
 
-        if abs(cos_beta) > _GEM_OSCILLATION_COSINE_THRESHOLD:
-            local_temperature *= 1.0 + (cos_beta * _GEM_OSCILLATION_SENSITIVITY)
+        if abs(cos_beta) > oscillation_cosine_threshold:
+            local_temperature *= 1.0 + (cos_beta * oscillation_sensitivity)
 
         local_temperature *= 1.0 - abs(skew_value)
-        if local_temperature >= _GEM_INITIAL_TEMPERATURE:
-            local_temperature = _GEM_INITIAL_TEMPERATURE
+        if local_temperature >= initial_temperature:
+            local_temperature = initial_temperature
 
         skew_gauge[node_index] = skew_value
         local_temperatures[node_index] = local_temperature
@@ -695,10 +710,17 @@ def _gem_apply_node_update(
 
 @register_op
 class ZeroForces(Op):
-    """Allocate or reset the force accumulation buffer."""
+    """Allocate or reset the force accumulation buffer.
+
+    Notes
+    -----
+    The op prefers ``state.pos`` when available so the force buffer stays on
+    the same device and uses the same dtype as the active position tensor.
+    """
 
     name: ClassVar[str] = "zero_forces"
     category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "forces")
     writes: ClassVar[Tuple[str, ...]] = ("forces",)
 
     def apply(
@@ -736,6 +758,7 @@ class ZeroForces(Op):
             state.forces.zero_()
             return state
 
+        # Fall back to a CPU float32 buffer when no position tensor exists yet.
         state.forces = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
         return state
 
@@ -810,9 +833,25 @@ class InverseDistanceRepulsion(Op):
         return state
 
 
+@dataclass(frozen=True)
+class FRCombinedForceConfig:
+    """Configuration for :class:`FRCombinedForce`.
+
+    Parameters
+    ----------
+    min_distance : float, default=0.01
+        Safety floor applied to pairwise distances before dividing by them.
+    """
+
+    min_distance: float = _FR_MIN_DISTANCE
+
+
 @register_op
+@dataclass(frozen=True)
 class FRCombinedForce(Op):
-    """Compute the exact dense FR force update in one einsum."""
+    """Compute the exact dense Fruchterman-Reingold force field in one pass."""
+
+    config: FRCombinedForceConfig = field(default_factory=FRCombinedForceConfig)
 
     name: ClassVar[str] = "fr_combined_force"
     category: ClassVar[OpCategory] = OpCategory.FORCE
@@ -861,7 +900,7 @@ class FRCombinedForce(Op):
         optimal_distance = _resolve_area_k(problem=problem, state=state)
         delta = pos[:, np.newaxis, :] - pos[np.newaxis, :, :]
         distance = torch.linalg.norm(delta, dim=-1)
-        distance = torch.clamp(distance, min=_FR_MIN_DISTANCE)
+        distance = torch.clamp(distance, min=float(self.config.min_distance))
         adjacency = adjacency.to(device=pos.device, dtype=pos.dtype)
         displacement = torch.einsum(
             "ijk,ij->ik",
@@ -1221,8 +1260,13 @@ class GraphOptPrepareState(Op):
 
     name: ClassVar[str] = "graphopt_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
-    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_GRAPHOPT_SPRING_EDGES_KEY}",
+        f"extras.{_GRAPHOPT_SPRING_WEIGHTS_KEY}",
+        f"extras.{_GRAPHOPT_PAIR_SOURCE_KEY}",
+        f"extras.{_GRAPHOPT_PAIR_TARGET_KEY}",
+        f"extras.{_GRAPHOPT_MAX_REPULSION_DISTANCE_SQ_KEY}",
+    )
 
     def apply(
         self,
@@ -1258,6 +1302,7 @@ class GraphOptPrepareState(Op):
                 state.extras[_GRAPHOPT_SPRING_EDGES_KEY] = torch.empty((2, 0), dtype=torch.long)
                 state.extras[_GRAPHOPT_SPRING_WEIGHTS_KEY] = None
             else:
+                # GraphOpt springs ignore self-loops but preserve duplicate and reciprocal edges.
                 filtered_edges = edges[:, non_self].contiguous()
                 state.extras[_GRAPHOPT_SPRING_EDGES_KEY] = filtered_edges
 
@@ -1325,7 +1370,14 @@ class GraphOptIteration(Op):
 
     name: ClassVar[str] = "graphopt_iteration"
     category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        f"extras.{_GRAPHOPT_SPRING_EDGES_KEY}",
+        f"extras.{_GRAPHOPT_SPRING_WEIGHTS_KEY}",
+        f"extras.{_GRAPHOPT_PAIR_SOURCE_KEY}",
+        f"extras.{_GRAPHOPT_PAIR_TARGET_KEY}",
+        f"extras.{_GRAPHOPT_MAX_REPULSION_DISTANCE_SQ_KEY}",
+    )
     writes: ClassVar[Tuple[str, ...]] = ("pos", "forces")
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
@@ -1385,6 +1437,8 @@ class GraphOptIteration(Op):
         num_nodes = int(positions.shape[0])
 
         if self.config.node_charge != 0.0 and num_nodes > 1:
+            # Reuse the cached upper-triangle index buffers so each iteration only
+            # evaluates the explicit force law, not the pair enumeration.
             delta = positions[pair_source] - positions[pair_target]
             distance_sq = delta.square().sum(dim=1)
             mask = (distance_sq > _GRAPHOPT_MIN_DISTANCE) & (
@@ -1441,10 +1495,36 @@ class GraphOptIteration(Op):
         return state
 
 
+@dataclass(frozen=True)
+class DesiredLengthSpringAttractionConfig:
+    """Configuration for :class:`DesiredLengthSpringAttraction`.
+
+    Parameters
+    ----------
+    node_min_length : float, default=1e-9
+        Safety floor for GEM-style per-node desired lengths.
+    edge_min_length : float, default=1e-12
+        Safety floor for per-edge desired lengths.
+    """
+
+    node_min_length: float = _GEM_MIN_DISTANCE
+    edge_min_length: float = _GRAPHOPT_MIN_DISTANCE
+
+
 @register_op
 @dataclass(frozen=True)
 class DesiredLengthSpringAttraction(Op):
-    """Accumulate spring attraction using lengths from ``state.spring_lengths``."""
+    """Accumulate spring attraction using lengths from ``state.spring_lengths``.
+
+    Notes
+    -----
+    A length vector with shape ``[N]`` follows GEM's per-node normalization.
+    A vector with shape ``[E]`` follows the direct per-edge desired-length law.
+    """
+
+    config: DesiredLengthSpringAttractionConfig = field(
+        default_factory=DesiredLengthSpringAttractionConfig
+    )
 
     name: ClassVar[str] = "desired_length_spring_attraction"
     category: ClassVar[OpCategory] = OpCategory.FORCE
@@ -1504,8 +1584,8 @@ class DesiredLengthSpringAttraction(Op):
             )
             source_weights = degree_weights[src].clamp(min=1.0)
             target_weights = degree_weights[dst].clamp(min=1.0)
-            source_desired = spring_lengths[src].clamp(min=_GEM_MIN_DISTANCE)
-            target_desired = spring_lengths[dst].clamp(min=_GEM_MIN_DISTANCE)
+            source_desired = spring_lengths[src].clamp(min=float(self.config.node_min_length))
+            target_desired = spring_lengths[dst].clamp(min=float(self.config.node_min_length))
             source_force = -delta * (distances / (source_desired * source_weights)).unsqueeze(1)
             target_force = delta * (distances / (target_desired * target_weights)).unsqueeze(1)
             source_force = source_force * edge_weights.unsqueeze(1)
@@ -1513,7 +1593,7 @@ class DesiredLengthSpringAttraction(Op):
             updated.index_add_(0, src, source_force)
             updated.index_add_(0, dst, target_force)
         elif spring_lengths.shape[0] == problem.edge_index.shape[1]:
-            desired = spring_lengths.clamp(min=_GRAPHOPT_MIN_DISTANCE)
+            desired = spring_lengths.clamp(min=float(self.config.edge_min_length))
             contribution = -delta * (distances / desired).unsqueeze(1) * edge_weights.unsqueeze(1)
             updated.index_add_(0, src, contribution)
             updated.index_add_(0, dst, -contribution)
@@ -1553,6 +1633,26 @@ class FA2ForceStepConfig:
         Barnes-Hut opening threshold.
     jitter_tolerance : float, default=1.0
         Adaptive speed-controller jitter tolerance.
+    max_jitter_tolerance : float, default=10.0
+        Upper bound on the jitter-tolerance estimate.
+    min_speed_efficiency : float, default=0.05
+        Floor for the adaptive speed-efficiency multiplier.
+    speed_slowdown : float, default=0.7
+        Multiplicative factor applied to speed-efficiency when oscillation detected.
+    speed_speedup : float, default=1.3
+        Multiplicative factor applied to speed-efficiency when stable.
+    speed_cap : float, default=1000.0
+        Global speed threshold above which speed-up is suppressed.
+    linlog_min_distance : float, default=1e-6
+        Safety floor for the linlog attraction normalization.
+    barnes_hut_min_distance : float, default=1e-12
+        Distance floor inside the Barnes-Hut branch.
+    estimated_jitter_scale : float, default=0.05
+        Scale used by the original FA2 jitter-tolerance heuristic.
+    swinging_over_traction_threshold : float, default=2.0
+        Threshold above which swinging is treated as dominant.
+    speed_update_fraction_cap : float, default=0.5
+        Maximum fractional speed increase applied in one iteration.
     """
 
     gravity: float = 1.0
@@ -1565,6 +1665,16 @@ class FA2ForceStepConfig:
     barnes_hut: bool = False
     barnes_hut_theta: float = 1.2
     jitter_tolerance: float = 1.0
+    max_jitter_tolerance: float = 10.0
+    min_speed_efficiency: float = 0.05
+    speed_slowdown: float = 0.7
+    speed_speedup: float = 1.3
+    speed_cap: float = 1000.0
+    linlog_min_distance: float = 1.0e-6
+    barnes_hut_min_distance: float = 1.0e-12
+    estimated_jitter_scale: float = 0.05
+    swinging_over_traction_threshold: float = 2.0
+    speed_update_fraction_cap: float = 0.5
 
 
 @register_op
@@ -1576,8 +1686,24 @@ class FA2ForceStep(Op):
 
     name: ClassVar[str] = "fa2_force_step"
     category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "old_forces", "degree", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos", "forces", "old_forces", "extras")
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "old_forces",
+        "degree",
+        "extras.fa2_undirected_edges",
+        "extras.fa2_undirected_weights",
+        "extras.fa2_mass",
+        "extras.fa2_outbound_att_compensation",
+        "extras.fa2_speed",
+        "extras.fa2_speed_efficiency",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "forces",
+        "old_forces",
+        "extras.fa2_speed",
+        "extras.fa2_speed_efficiency",
+    )
     requires: ClassVar[Tuple[str, ...]] = ("pos", "old_forces")
 
     def apply(
@@ -1756,7 +1882,7 @@ class FA2ForceStep(Op):
                                 self.config.barnes_hut_theta * self.config.barnes_hut_theta
                             ):
                                 dist = math.sqrt(dist_sq)
-                                if dist < 1.0e-12:
+                                if dist < self.config.barnes_hut_min_distance:
                                     continue
                                 factor = (
                                     self.config.scaling_ratio
@@ -1801,7 +1927,9 @@ class FA2ForceStep(Op):
             target = undirected_edges[1]
             delta = pos.index_select(0, source) - pos.index_select(0, target)
             if self.config.linlog:
-                distance = torch.linalg.vector_norm(delta, dim=1, keepdim=True).clamp(min=1e-6)
+                distance = torch.linalg.vector_norm(delta, dim=1, keepdim=True).clamp(
+                    min=float(self.config.linlog_min_distance)
+                )
                 factor = (
                     -float(outbound_att_compensation) * torch.log1p(distance) / distance
                 ).squeeze(1)
@@ -1843,9 +1971,9 @@ class FA2ForceStep(Op):
         effective_traction = 0.5 * mass * torch.linalg.vector_norm(old_force + force, dim=1)
         total_swinging = float(swinging.sum().item())
         total_effective_traction = float(effective_traction.sum().item())
-        estimated_optimal_jt = 0.05 * math.sqrt(float(pos.shape[0]))
+        estimated_optimal_jt = self.config.estimated_jitter_scale * math.sqrt(float(pos.shape[0]))
         min_jt = math.sqrt(estimated_optimal_jt)
-        max_jt = 10.0
+        max_jt = self.config.max_jitter_tolerance
         jt = self.config.jitter_tolerance * max(
             min_jt,
             min(
@@ -1855,8 +1983,13 @@ class FA2ForceStep(Op):
                 / float(pos.shape[0] * pos.shape[0]),
             ),
         )
-        min_speed_efficiency = 0.05
-        if total_effective_traction > 0.0 and total_swinging / total_effective_traction > 2.0:
+        min_speed_efficiency = self.config.min_speed_efficiency
+        # Halve speed-efficiency when swinging dominates traction
+        if (
+            total_effective_traction > 0.0
+            and total_swinging / total_effective_traction
+            > self.config.swinging_over_traction_threshold
+        ):
             if speed_efficiency > min_speed_efficiency:
                 speed_efficiency *= 0.5
             jt = max(jt, self.config.jitter_tolerance)
@@ -1864,12 +1997,17 @@ class FA2ForceStep(Op):
             target_speed = float("inf")
         else:
             target_speed = jt * speed_efficiency * total_effective_traction / total_swinging
+        # Slow down when oscillation exceeds jitter tolerance threshold
         if total_swinging > jt * total_effective_traction:
             if speed_efficiency > min_speed_efficiency:
-                speed_efficiency *= 0.7
-        elif speed < 1000.0:
-            speed_efficiency *= 1.3
-        speed = speed + min(target_speed - speed, 0.5 * speed)
+                speed_efficiency *= self.config.speed_slowdown
+        elif speed < self.config.speed_cap:
+            # Speed up when stable and below speed cap
+            speed_efficiency *= self.config.speed_speedup
+        speed = speed + min(
+            target_speed - speed,
+            self.config.speed_update_fraction_cap * speed,
+        )
         factor = speed / (1.0 + torch.sqrt(speed * swinging))
 
         state.forces = force
@@ -2211,7 +2349,9 @@ class BarnesHutForce(Op):
         forces = _require_forces(state)
         quadtree = state.quadtree
         if quadtree is None:
-            raise ValueError("BarnesHutForce requires state.quadtree.")
+            quadtree = state.extras.get("quadtree")
+        if quadtree is None:
+            raise ValueError("BarnesHutForce requires state.quadtree or extras['quadtree'].")
 
         if isinstance(quadtree, _SFDPQuadTreeNode):
             contribution = _sfdp_barnes_hut_force(
@@ -2254,7 +2394,7 @@ class BarnesHutForce(Op):
                     self.config.theta * self.config.theta
                 ):
                     dist = math.sqrt(dist_sq)
-                    if dist < 1.0e-12:
+                    if dist < 1.0e-12:  # numerical safety floor
                         return 0.0, 0.0
                     node_mass = float(getattr(node, "mass", getattr(node, "mass_value", 0.0)))
                     factor = mass_np[index] * node_mass / dist_sq
@@ -2477,15 +2617,45 @@ class CellGridForce(Op):
         return state
 
 
+@dataclass(frozen=True)
+class ApplyDisplacementConfig:
+    """Configuration for :class:`ApplyDisplacement`.
+
+    Parameters
+    ----------
+    min_force_norm : float, default=0.01
+        Safety floor applied before normalizing each node force vector.
+    """
+
+    min_force_norm: float = _FR_MIN_DISTANCE
+
+
 @register_op
 class ApplyDisplacement(Op):
     """Normalize the accumulated force and clamp motion by temperature."""
 
+    config: ApplyDisplacementConfig
+
     name: ClassVar[str] = "apply_displacement"
     category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("forces", "temperature")
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "forces", "temperature")
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos", "forces", "temperature")
+
+    def __init__(self, config: Optional[ApplyDisplacementConfig] = None) -> None:
+        """Store the frozen configuration for this op.
+
+        Parameters
+        ----------
+        config : ApplyDisplacementConfig, optional
+            Displacement configuration. When omitted, defaults are used.
+
+        Returns
+        -------
+        None
+            This constructor stores configuration only.
+        """
+        self.config = config or ApplyDisplacementConfig()
 
     def apply(
         self,
@@ -2516,7 +2686,10 @@ class ApplyDisplacement(Op):
         if state.temperature is None:
             raise ValueError("ApplyDisplacement requires state.temperature.")
 
-        length = torch.linalg.vector_norm(forces, dim=1).clamp(min=_FR_MIN_DISTANCE)
+        # Clamp the norm so isolated nodes do not generate NaNs during normalization.
+        length = torch.linalg.vector_norm(forces, dim=1).clamp(
+            min=float(self.config.min_force_norm)
+        )
         delta_pos = forces * (float(state.temperature) / length).unsqueeze(1)
         state.pos = pos + delta_pos
         return state
@@ -2530,9 +2703,33 @@ class AdaptiveSpeedApplyConfig:
     ----------
     jitter_tolerance : float, default=1.0
         ForceAtlas2 jitter-tolerance hyperparameter.
+    max_jitter_tolerance : float, default=10.0
+        Upper bound on the jitter-tolerance estimate.
+    min_speed_efficiency : float, default=0.05
+        Floor for the adaptive speed-efficiency multiplier.
+    speed_slowdown : float, default=0.7
+        Multiplicative factor applied to speed-efficiency when oscillation detected.
+    speed_speedup : float, default=1.3
+        Multiplicative factor applied to speed-efficiency when stable.
+    speed_cap : float, default=1000.0
+        Global speed threshold above which speed-up is suppressed.
+    estimated_jitter_scale : float, default=0.05
+        Scale used by the original FA2 jitter-tolerance heuristic.
+    swinging_over_traction_threshold : float, default=2.0
+        Threshold above which swinging is treated as dominant.
+    speed_update_fraction_cap : float, default=0.5
+        Maximum fractional speed increase applied in one iteration.
     """
 
     jitter_tolerance: float = 1.0
+    max_jitter_tolerance: float = 10.0
+    min_speed_efficiency: float = 0.05
+    speed_slowdown: float = 0.7
+    speed_speedup: float = 1.3
+    speed_cap: float = 1000.0
+    estimated_jitter_scale: float = 0.05
+    swinging_over_traction_threshold: float = 2.0
+    speed_update_fraction_cap: float = 0.5
 
 
 @register_op
@@ -2544,8 +2741,21 @@ class AdaptiveSpeedApply(Op):
 
     name: ClassVar[str] = "adaptive_speed_apply"
     category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("forces", "old_forces")
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "forces",
+        "old_forces",
+        "degree",
+        "extras.fa2_speed",
+        "extras.fa2_speed_efficiency",
+        "extras.fa2_mass",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "old_forces",
+        "extras.fa2_speed",
+        "extras.fa2_speed_efficiency",
+    )
     requires: ClassVar[Tuple[str, ...]] = ("pos", "forces", "old_forces")
 
     def apply(
@@ -2591,9 +2801,9 @@ class AdaptiveSpeedApply(Op):
         effective_traction = 0.5 * mass * torch.linalg.vector_norm(old_force + forces, dim=1)
         total_swinging = float(swinging.sum().item())
         total_effective_traction = float(effective_traction.sum().item())
-        estimated_optimal_jt = 0.05 * math.sqrt(float(pos.shape[0]))
+        estimated_optimal_jt = self.config.estimated_jitter_scale * math.sqrt(float(pos.shape[0]))
         min_jt = math.sqrt(estimated_optimal_jt)
-        max_jt = 10.0
+        max_jt = self.config.max_jitter_tolerance
         jt = self.config.jitter_tolerance * max(
             min_jt,
             min(
@@ -2603,8 +2813,13 @@ class AdaptiveSpeedApply(Op):
                 / float(pos.shape[0] * pos.shape[0]),
             ),
         )
-        min_speed_efficiency = 0.05
-        if total_effective_traction > 0.0 and total_swinging / total_effective_traction > 2.0:
+        min_speed_efficiency = self.config.min_speed_efficiency
+        # Halve speed-efficiency when swinging dominates traction
+        if (
+            total_effective_traction > 0.0
+            and total_swinging / total_effective_traction
+            > self.config.swinging_over_traction_threshold
+        ):
             if speed_efficiency > min_speed_efficiency:
                 speed_efficiency *= 0.5
             jt = max(jt, self.config.jitter_tolerance)
@@ -2612,13 +2827,18 @@ class AdaptiveSpeedApply(Op):
             target_speed = float("inf")
         else:
             target_speed = jt * speed_efficiency * total_effective_traction / total_swinging
+        # Slow down when oscillation exceeds jitter tolerance threshold
         if total_swinging > jt * total_effective_traction:
             if speed_efficiency > min_speed_efficiency:
-                speed_efficiency *= 0.7
-        elif speed < 1000.0:
-            speed_efficiency *= 1.3
+                speed_efficiency *= self.config.speed_slowdown
+        elif speed < self.config.speed_cap:
+            # Speed up when stable and below speed cap
+            speed_efficiency *= self.config.speed_speedup
 
-        speed = speed + min(target_speed - speed, 0.5 * speed)
+        speed = speed + min(
+            target_speed - speed,
+            self.config.speed_update_fraction_cap * speed,
+        )
         factor = speed / (1.0 + torch.sqrt(speed * swinging))
         state.pos = pos + (forces * factor.unsqueeze(1))
         state.old_forces = forces.detach().clone()
@@ -2627,14 +2847,68 @@ class AdaptiveSpeedApply(Op):
         return state
 
 
+@dataclass(frozen=True)
+class GEMNodeTickConfig:
+    """Configuration for :class:`GEMNodeTick`.
+
+    Parameters
+    ----------
+    initial_temperature : float, default=12.0
+        Maximum local temperature for newly initialized nodes.
+    rotation_sine_threshold : float, default=sin(pi/2 + pi/6)
+        Sine threshold that grows the skew gauge.
+    rotation_sensitivity : float, default=0.01
+        Increment added to the skew gauge after a rotation event.
+    oscillation_cosine_threshold : float, default=cos(pi/4)
+        Cosine threshold that triggers oscillation cooling.
+    oscillation_sensitivity : float, default=0.3
+        Multiplier applied to local temperature after an oscillation event.
+    """
+
+    initial_temperature: float = _GEM_INITIAL_TEMPERATURE
+    rotation_sine_threshold: float = _GEM_ROTATION_SINE_THRESHOLD
+    rotation_sensitivity: float = _GEM_ROTATION_SENSITIVITY
+    oscillation_cosine_threshold: float = _GEM_OSCILLATION_COSINE_THRESHOLD
+    oscillation_sensitivity: float = _GEM_OSCILLATION_SENSITIVITY
+
+
 @register_op
+@dataclass(frozen=True)
 class GEMNodeTick(Op):
-    """Apply one sequential GEM node update from the current force field."""
+    """Apply one sequential GEM node update from the current force field.
+
+    Notes
+    -----
+    This op mutates exactly one node per call, matching OGDF's sequential GEM
+    schedule rather than the batched variant used for large graphs.
+    """
+
+    config: GEMNodeTickConfig = field(default_factory=GEMNodeTickConfig)
 
     name: ClassVar[str] = "gem_node_tick"
     category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("forces", "pos")
-    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    reads: ClassVar[Tuple[str, ...]] = (
+        "forces",
+        "pos",
+        "local_temperatures",
+        "extras.gem_node_index",
+        "extras.gem_permutation",
+        "extras.gem_previous_impulses",
+        "extras.gem_skew_gauge",
+        "extras.gem_barycenter",
+        "extras.gem_global_temperature",
+        "extras.gem_degree_weights",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "local_temperatures",
+        "extras.gem_permutation",
+        "extras.gem_previous_impulses",
+        "extras.gem_skew_gauge",
+        "extras.gem_barycenter",
+        "extras.gem_global_temperature",
+        "extras.gem_last_node_index",
+    )
     requires: ClassVar[Tuple[str, ...]] = ("pos", "forces")
 
     def apply(
@@ -2680,7 +2954,7 @@ class GEMNodeTick(Op):
         if local_temperatures is None or local_temperatures.shape != (problem.num_nodes,):
             local_temperatures = torch.full(
                 (problem.num_nodes,),
-                _GEM_INITIAL_TEMPERATURE,
+                float(self.config.initial_temperature),
                 device=pos.device,
                 dtype=pos.dtype,
             )
@@ -2701,7 +2975,7 @@ class GEMNodeTick(Op):
             ),
         ).to(device=pos.device, dtype=pos.dtype)
         global_temperature = float(
-            state.extras.get("gem_global_temperature", _GEM_INITIAL_TEMPERATURE)
+            state.extras.get("gem_global_temperature", self.config.initial_temperature)
         )
 
         global_temperature = _gem_apply_node_update(
@@ -2714,6 +2988,11 @@ class GEMNodeTick(Op):
             degree_weights=degree_weights,
             barycenter=barycenter,
             global_temperature=global_temperature,
+            initial_temperature=float(self.config.initial_temperature),
+            rotation_sine_threshold=float(self.config.rotation_sine_threshold),
+            rotation_sensitivity=float(self.config.rotation_sensitivity),
+            oscillation_cosine_threshold=float(self.config.oscillation_cosine_threshold),
+            oscillation_sensitivity=float(self.config.oscillation_sensitivity),
         )
 
         state.pos = pos
@@ -2734,9 +3013,12 @@ class StressSGDPairUpdateConfig:
     ----------
     clamp_mu : float, default=1.0
         Upper bound for the pair step coefficient ``mu``.
+    weight_floor : float, default=1e-12
+        Safety floor applied when synthesizing a ``d^-2`` pair weight.
     """
 
     clamp_mu: float = 1.0
+    weight_floor: float = 1.0e-12
 
 
 @register_op
@@ -2748,7 +3030,14 @@ class StressSGDPairUpdate(Op):
 
     name: ClassVar[str] = "stress_sgd_pair_update"
     category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "distance_matrix")
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "distance_matrix",
+        "extras.stress_sgd_pair",
+        "extras.stress_sgd_eta",
+        "extras.stress_sgd_target_distance",
+        "extras.stress_sgd_weight",
+    )
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
@@ -2797,7 +3086,10 @@ class StressSGDPairUpdate(Op):
         if "stress_sgd_weight" in state.extras:
             weight = float(state.extras["stress_sgd_weight"])
         else:
-            weight = 1.0 / max(target_distance * target_distance, 1.0e-12)
+            weight = 1.0 / max(
+                target_distance * target_distance,
+                float(self.config.weight_floor),
+            )
 
         mu = min(eta * weight, self.config.clamp_mu)
         dx = float(pos[source_index, 0].item() - pos[target_index, 0].item())
@@ -2815,13 +3107,39 @@ class StressSGDPairUpdate(Op):
         return state
 
 
+@dataclass(frozen=True)
+class StressMajNodeSweepConfig:
+    """Configuration for :class:`StressMajNodeSweep`.
+
+    Parameters
+    ----------
+    min_target_distance : float, default=0.0
+        Distances at or below this threshold receive zero SMACOF weight.
+    """
+
+    min_target_distance: float = 0.0
+
+
 @register_op
+@dataclass(frozen=True)
 class StressMajNodeSweep(Op):
-    """Apply one dense SMACOF majorization sweep."""
+    """Apply one dense SMACOF majorization sweep.
+
+    Notes
+    -----
+    When a cached Laplacian pseudoinverse is present in ``state.extras``, this
+    op reuses it to avoid repeating the expensive dense pseudoinverse.
+    """
+
+    config: StressMajNodeSweepConfig = field(default_factory=StressMajNodeSweepConfig)
 
     name: ClassVar[str] = "stress_majorization_node_sweep"
     category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "distance_matrix")
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "distance_matrix",
+        "extras.stress_maj_laplacian_pinv",
+    )
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos", "distance_matrix")
 
@@ -2857,7 +3175,11 @@ class StressMajNodeSweep(Op):
             state.distance_matrix.detach().cpu().numpy().astype(np.float64, copy=True)
         )
         with np.errstate(divide="ignore"):
-            weights = np.where(target_distances > 0.0, 1.0 / np.square(target_distances), 0.0)
+            weights = np.where(
+                target_distances > float(self.config.min_target_distance),
+                1.0 / np.square(target_distances),
+                0.0,
+            )
         np.fill_diagonal(weights, 0.0)
 
         if "stress_maj_laplacian_pinv" in state.extras:

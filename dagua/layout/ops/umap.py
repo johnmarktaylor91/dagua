@@ -596,8 +596,23 @@ class StoreUMAPHyperparameters(Op):
         learning_rate: float = 1.0,
         negative_sample_rate: int = _NEGATIVE_SAMPLE_RATE,
         repulsion_strength: float = 1.0,
+        default_epochs_small: int = 500,
+        default_epochs_large: int = 200,
+        large_graph_threshold: int = 10_000,
     ) -> None:
-        """Store UMAP hyperparameters for the pipeline."""
+        """Store UMAP hyperparameters for the pipeline.
+
+        Parameters
+        ----------
+        default_epochs_small : int
+            Epoch count used when ``n_epochs`` is ``None`` and the graph is
+            at or below ``large_graph_threshold`` nodes.
+        default_epochs_large : int
+            Epoch count used when ``n_epochs`` is ``None`` and the graph
+            exceeds ``large_graph_threshold`` nodes.
+        large_graph_threshold : int
+            Node count dividing the small/large epoch heuristic.
+        """
         self._n_neighbors = n_neighbors
         self._min_dist = min_dist
         self._spread = spread
@@ -605,6 +620,9 @@ class StoreUMAPHyperparameters(Op):
         self._learning_rate = learning_rate
         self._negative_sample_rate = negative_sample_rate
         self._repulsion_strength = repulsion_strength
+        self._default_epochs_small = default_epochs_small
+        self._default_epochs_large = default_epochs_large
+        self._large_graph_threshold = large_graph_threshold
 
     def apply(
         self,
@@ -632,7 +650,11 @@ class StoreUMAPHyperparameters(Op):
 
         n_epochs = self._n_epochs
         if n_epochs is None:
-            n_epochs = 500 if problem.num_nodes <= 10_000 else 200
+            n_epochs = (
+                self._default_epochs_small
+                if problem.num_nodes <= self._large_graph_threshold
+                else self._default_epochs_large
+            )
 
         state.extras[_N_NEIGHBORS_KEY] = self._n_neighbors
         state.extras[_MIN_DIST_KEY] = self._min_dist
