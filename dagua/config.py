@@ -167,6 +167,10 @@ class LayoutConfig:
     w_edge_curvature_penalty: float = 0.5
     w_edge_cluster_crossing: float = 8.0  # penalize edges through foreign clusters
 
+    # Optional algorithm override for direct pipeline-based layouts.
+    # None routes to the native multilevel/direct engine.
+    algorithm: Optional[str] = None
+
 
 # Registry of all tunable parameters with metadata
 PARAM_REGISTRY: List[TunableParam] = [
