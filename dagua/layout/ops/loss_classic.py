@@ -108,6 +108,22 @@ class LinLogRepulsionLossConfig:
 
 
 @dataclass(frozen=True)
+class LinLogLossConfig:
+    """Configuration for :class:`LinLogLoss`.
+
+    Parameters
+    ----------
+    exponent_a : float, default=1.0
+        Attraction exponent ``a`` in ``|p_i - p_j|^a``.
+    exponent_r : float, default=0.0
+        Repulsion exponent ``r`` in ``-|p_i - p_j|^r``.
+    """
+
+    exponent_a: float = 1.0
+    exponent_r: float = 0.0
+
+
+@dataclass(frozen=True)
 class EntropyLossConfig:
     """Configuration for :class:`EntropyLoss`.
 
@@ -1171,6 +1187,65 @@ class LinLogRepulsionLoss(LossOp):
         if self.config.exponent_r == 0.0:
             return -torch.log(distances).sum()
         return -distances.pow(self.config.exponent_r).sum()
+
+
+@register_op
+class LinLogLoss(LossOp):
+    """Evaluate the full classic LinLog objective (attraction + repulsion)."""
+
+    name = "linlog_loss"
+    category = OpCategory.LOSS
+    reads = ("pos", "step")
+    requires = ("pos",)
+
+    def __init__(self, config: Optional[LinLogLossConfig] = None) -> None:
+        """Store full objective exponents for the LinLog criterion.
+
+        Parameters
+        ----------
+        config : LinLogLossConfig, optional
+            Attraction and repulsion exponents.
+
+        Returns
+        -------
+        None
+            The op stores only its resolved configuration.
+        """
+        self.config = config or LinLogLossConfig()
+
+    def evaluate(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> torch.Tensor:
+        """Evaluate the full objective via the archived helper.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout problem definition.
+        state : SolveState
+            Mutable state containing current positions.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        torch.Tensor
+            Scalar classic LinLog energy value.
+        """
+        del ctx
+        positions = _require_positions(state)
+        return _linlog._linlog_loss(
+            positions=positions,
+            edge_index=problem.edge_index,
+            seed=problem.seed,
+            step=state.step,
+            a=self.config.exponent_a,
+            r=self.config.exponent_r,
+            edge_weights=problem.edge_weights,
+        )
 
 
 @register_op

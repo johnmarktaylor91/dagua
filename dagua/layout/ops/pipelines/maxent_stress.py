@@ -2,1089 +2,33 @@
 
 from __future__ import annotations
 
-import math
-from typing import ClassVar, Optional, Tuple
+from typing import Optional
 
 import torch
 
-from dagua.layout.ops.graph_utils import (
-    _shared_all_pairs_shortest_paths,
-    _shared_build_undirected_adjacency,
+from dagua.layout.ops.base import Pipeline, Repeat
+from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig
+from dagua.layout.ops.graph_utils import layout_device
+from dagua.layout.ops.maxent_stress import (
+    MaxentFinalizePositions,
+    MaxentGradientStep,
+    MaxentInitializeOptimizer,
+    MaxentInitializePositions,
+    MaxentMajorizationStep,
+    MaxentPrepareState,
 )
-from dagua.layout.ops.graph_utils import (
-    _shared_bfs_distances as bfs_distances,
-)
-from dagua.layout.ops.graph_utils import (
-    _shared_dijkstra_distances as dijkstra_distances,
-)
-from dagua.layout.ops.graph_utils import (
-    layout_device as _layout_device,
-)
-from dagua.layout.ops.graph_utils import (
-    layout_extent as _layout_extent,
-)
-from dagua.layout.ops.graph_utils import (
-    normalize_positions as _normalize_positions,
-)
-from dagua.layout.ops.pipelines.pivot_mds import layout_pivot_mds_pipeline as _layout_pivot_mds
-
-# ---------------------------------------------------------------------------
-# Algorithm-specific constants and functions copied from
-# dagua/layout/classic/maxent_stress.py (bit-identical)
-# ---------------------------------------------------------------------------
-
-_MIN_DISTANCE = 1.0e-3
-_FULL_STRESS_LIMIT = 1_000
-_MAJORIZATION_NODE_LIMIT = 5_000
-_PIVOT_COUNT = 50
-_SAMPLED_REPULSION_NEIGHBORS = 96
-
-
-def _build_undirected_adjacency(
-    edge_index: torch.Tensor,
-    num_nodes: int,
-    edge_weights: Optional[torch.Tensor] = None,
-) -> list[list[tuple[int, float]]]:
-    """Build an undirected adjacency list from the edge tensor.
-
-    Parameters
-    ----------
-    edge_index : torch.Tensor
-        Edge list with shape ``[2, E]``.
-    num_nodes : int
-        Number of nodes.
-    edge_weights : torch.Tensor, optional
-        Optional per-edge weights with shape ``[E]``.
-
-    Returns
-    -------
-    list[list[tuple[int, float]]]
-        One neighbor list per node.
-    """
-    return _shared_build_undirected_adjacency(
-        edge_index=edge_index,
-        num_nodes=num_nodes,
-        edge_weights=edge_weights,
-    )
-
-
-def _connected_components(adjacency: list[list[tuple[int, float]]]) -> torch.Tensor:
-    """Label connected components in the undirected graph.
-
-    Parameters
-    ----------
-    adjacency : list[list[tuple[int, float]]]
-        Undirected adjacency list.
-
-    Returns
-    -------
-    torch.Tensor
-        Component labels with shape ``[N]``.
-    """
-    from collections import deque
-
-    num_nodes = len(adjacency)
-    component_ids = torch.full((num_nodes,), -1, dtype=torch.long)
-    component_index = 0
-
-    for start in range(num_nodes):
-        if int(component_ids[start].item()) >= 0:
-            continue
-
-        frontier: deque[int] = deque([start])
-        component_ids[start] = component_index
-        while frontier:
-            node = frontier.popleft()
-            for neighbor, _ in adjacency[node]:
-                if int(component_ids[neighbor].item()) >= 0:
-                    continue
-                component_ids[neighbor] = component_index
-                frontier.append(neighbor)
-
-        component_index += 1
-
-    return component_ids
-
-
-def _average_edge_cost(edge_weights: Optional[torch.Tensor]) -> float:
-    """Compute the average edge cost used for disconnected-pair fallbacks.
-
-    Parameters
-    ----------
-    edge_weights : torch.Tensor, optional
-        Optional per-edge weights with shape ``[E]``.
-
-    Returns
-    -------
-    float
-        Mean edge cost, or ``1.0`` for unweighted graphs.
-    """
-    if edge_weights is None or edge_weights.numel() == 0:
-        return 1.0
-    return float(edge_weights.detach().to(device="cpu", dtype=torch.float32).mean().item())
-
-
-def _single_source_distances(
-    adjacency: list[list[tuple[int, float]]],
-    source: int,
-    weighted: bool,
-    disconnected_distance: float,
-) -> torch.Tensor:
-    """Compute one source's graph distances with disconnected fallback values.
-
-    Parameters
-    ----------
-    adjacency : list[list[tuple[int, float]]]
-        Undirected adjacency list.
-    source : int
-        Shortest-path source node index.
-    weighted : bool
-        Whether to use Dijkstra instead of BFS.
-    disconnected_distance : float
-        Replacement distance for unreachable nodes.
-
-    Returns
-    -------
-    torch.Tensor
-        Float distances with shape ``[N]``.
-    """
-    import numpy as np
-
-    if weighted:
-        distances = dijkstra_distances(adjacency, source)
-        cleaned = np.where(np.isinf(distances), disconnected_distance, distances)
-    else:
-        distances = bfs_distances(adjacency, source).astype(np.float64)
-        cleaned = np.where(distances < 0, disconnected_distance, distances)
-    return torch.tensor(cleaned, dtype=torch.float32)
-
-
-def _cross_component_distance(num_nodes: int, average_edge_cost: float = 1.0) -> float:
-    """Compute OGDF's disconnected-pair fallback distance.
-
-    Parameters
-    ----------
-    num_nodes : int
-        Number of nodes in the graph.
-    average_edge_cost : float, default=1.0
-        Average edge cost used by the shortest-path objective.
-
-    Returns
-    -------
-    float
-        Replacement distance for unreachable node pairs.
-    """
-    return average_edge_cost * math.sqrt(float(max(num_nodes, 1)))
-
-
-def _all_pairs_shortest_paths(
-    adjacency: list[list[tuple[int, float]]],
-    weighted: bool,
-    average_edge_cost: float,
-) -> torch.Tensor:
-    """Compute the full shortest-path matrix for a small graph.
-
-    Parameters
-    ----------
-    adjacency : list[list[tuple[int, float]]]
-        Undirected adjacency list.
-    weighted : bool
-        Whether to use Dijkstra instead of BFS.
-    average_edge_cost : float
-        Average edge cost used for disconnected-pair fallback values.
-
-    Returns
-    -------
-    torch.Tensor
-        Float shortest-path matrix with shape ``[N, N]``.
-    """
-    import numpy as np
-
-    raw_distances = _shared_all_pairs_shortest_paths(adjacency, weighted=weighted)
-    if raw_distances.size == 0:
-        return torch.empty((0, 0), dtype=torch.float32)
-
-    disconnected_distance = _cross_component_distance(
-        len(adjacency),
-        average_edge_cost=average_edge_cost,
-    )
-    cleaned = raw_distances.astype(np.float64, copy=True)
-    if weighted:
-        cleaned[np.isinf(cleaned)] = disconnected_distance
-    else:
-        cleaned[cleaned < 0] = disconnected_distance
-    return torch.tensor(cleaned, dtype=torch.float32)
-
-
-def _full_stress_terms(
-    adjacency: list[list[tuple[int, float]]],
-    weighted: bool = False,
-    average_edge_cost: float = 1.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build exact stress pairs from the all-pairs shortest-path matrix.
-
-    Parameters
-    ----------
-    adjacency : list[list[tuple[int, float]]]
-        Undirected adjacency list.
-    weighted : bool
-        Whether to use Dijkstra instead of BFS.
-    average_edge_cost : float
-        Average edge cost used for disconnected-pair fallback values.
-
-    Returns
-    -------
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        Unique reachable node pairs and their graph distances.
-    """
-    distances = _all_pairs_shortest_paths(
-        adjacency,
-        weighted=weighted,
-        average_edge_cost=average_edge_cost,
-    )
-    if distances.numel() == 0:
-        empty = torch.empty((0,), dtype=torch.long)
-        return empty, empty, torch.empty((0,), dtype=torch.float32)
-
-    upper = torch.triu_indices(distances.shape[0], distances.shape[1], offset=1)
-    pair_distances = distances[upper[0], upper[1]]
-    return (
-        upper[0],
-        upper[1],
-        pair_distances.to(dtype=torch.float32),
-    )
-
-
-def _choose_pivots(
-    component_ids: torch.Tensor,
-    max_pivots: int,
-    seed: int,
-) -> torch.Tensor:
-    """Choose pivot nodes while covering every connected component.
-
-    Parameters
-    ----------
-    component_ids : torch.Tensor
-        Component labels with shape ``[N]``.
-    max_pivots : int
-        Maximum number of pivots to select.
-    seed : int
-        Random seed for the remaining pivot slots.
-
-    Returns
-    -------
-    torch.Tensor
-        Pivot indices with shape ``[P]``.
-    """
-    num_nodes = int(component_ids.shape[0])
-    if num_nodes == 0:
-        return torch.empty((0,), dtype=torch.long)
-    if num_nodes <= max_pivots:
-        return torch.arange(num_nodes, dtype=torch.long)
-
-    pivots: list[int] = []
-    seen_components: set[int] = set()
-    for node, component in enumerate(component_ids.tolist()):
-        if component in seen_components:
-            continue
-        pivots.append(node)
-        seen_components.add(component)
-        if len(pivots) == max_pivots:
-            return torch.tensor(pivots, dtype=torch.long)
-
-    remaining = max_pivots - len(pivots)
-    if remaining <= 0:
-        return torch.tensor(pivots, dtype=torch.long)
-
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed)
-    pivot_mask = torch.zeros(num_nodes, dtype=torch.bool)
-    pivot_mask[torch.tensor(pivots, dtype=torch.long)] = True
-    candidates = torch.arange(num_nodes, dtype=torch.long)[~pivot_mask]
-    permutation = torch.randperm(int(candidates.shape[0]), generator=generator)
-    extra = candidates[permutation[:remaining]]
-    return torch.cat([torch.tensor(pivots, dtype=torch.long), extra], dim=0)
-
-
-def _pivot_stress_terms(
-    adjacency: list[list[tuple[int, float]]],
-    seed: int,
-    weighted: bool = False,
-    average_edge_cost: float = 1.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build a KK-style pivot approximation for large-graph stress.
-
-    Parameters
-    ----------
-    adjacency : list[list[tuple[int, float]]]
-        Undirected adjacency list.
-    seed : int
-        Random seed for pivot selection.
-    weighted : bool
-        Whether to use Dijkstra instead of BFS.
-    average_edge_cost : float
-        Average edge cost used for disconnected-pair fallback values.
-
-    Returns
-    -------
-    tuple[torch.Tensor, torch.Tensor]
-        Pivot indices with shape ``[P]`` and node-to-pivot distances with shape
-        ``[N, P]``. Unreachable entries remain ``-1``.
-    """
-    component_ids = _connected_components(adjacency)
-    pivots = _choose_pivots(component_ids, min(_PIVOT_COUNT, len(adjacency)), seed)
-    if int(pivots.numel()) == 0:
-        return pivots, torch.empty((len(adjacency), 0), dtype=torch.float32)
-
-    disconnected_distance = _cross_component_distance(
-        len(adjacency),
-        average_edge_cost=average_edge_cost,
-    )
-    rows = [
-        _single_source_distances(
-            adjacency,
-            int(pivot.item()),
-            weighted=weighted,
-            disconnected_distance=disconnected_distance,
-        )
-        for pivot in pivots
-    ]
-    distances = torch.stack(rows, dim=0).transpose(0, 1).to(dtype=torch.float32)
-    return pivots, distances
-
-
-def _full_non_edge_pairs(
-    adjacency: list[list[tuple[int, float]]],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Enumerate all unique non-edge pairs for exact entropy repulsion.
-
-    Parameters
-    ----------
-    adjacency : list[list[tuple[int, float]]]
-        Undirected adjacency list.
-
-    Returns
-    -------
-    tuple[torch.Tensor, torch.Tensor]
-        Unique non-edge pairs ``(i, j)`` with ``i < j``.
-    """
-    num_nodes = len(adjacency)
-    if num_nodes <= 1:
-        empty = torch.empty((0,), dtype=torch.long)
-        return empty, empty
-
-    adjacency_mask = torch.zeros((num_nodes, num_nodes), dtype=torch.bool)
-    for source, neighbors in enumerate(adjacency):
-        if neighbors:
-            neighbor_indices = torch.tensor(
-                [neighbor for neighbor, _ in neighbors],
-                dtype=torch.long,
-            )
-            adjacency_mask[source, neighbor_indices] = True
-
-    upper = torch.triu_indices(num_nodes, num_nodes, offset=1)
-    mask = ~adjacency_mask[upper[0], upper[1]]
-    return upper[0][mask], upper[1][mask]
-
-
-def _sample_non_edges(
-    adjacency: list[list[tuple[int, float]]],
-    step: int,
-    seed: int,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Sample random non-edge pairs for entropy repulsion.
-
-    Parameters
-    ----------
-    adjacency : list[list[tuple[int, float]]]
-        Undirected adjacency list.
-    step : int
-        Optimization step.
-    seed : int
-        Base random seed.
-    device : torch.device
-        Device for the returned tensors.
-
-    Returns
-    -------
-    tuple[torch.Tensor, torch.Tensor, int]
-        Sampled source indices, sampled target indices, and the total number of
-        unique non-edge pairs in the graph.
-    """
-    num_nodes = len(adjacency)
-    total_pairs = num_nodes * (num_nodes - 1) // 2
-    edge_count = sum(len(neighbors) for neighbors in adjacency) // 2
-    total_non_edges = max(total_pairs - edge_count, 0)
-    if total_non_edges == 0:
-        empty = torch.empty((0,), dtype=torch.long, device=device)
-        return empty, empty, 0
-
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed + step + 1)
-    sample_size = min(
-        total_non_edges,
-        max(num_nodes, num_nodes * _SAMPLED_REPULSION_NEIGHBORS // 2),
-    )
-
-    adjacency_sets = [
-        {neighbor for neighbor, _ in neighbors} | {node} for node, neighbors in enumerate(adjacency)
-    ]
-    sources: list[int] = []
-    targets: list[int] = []
-    while len(sources) < sample_size:
-        remaining = sample_size - len(sources)
-        batch_size = max(remaining * 3, 16)
-        candidate_sources = torch.randint(
-            0,
-            num_nodes,
-            (batch_size,),
-            generator=generator,
-            dtype=torch.long,
-        ).tolist()
-        candidate_targets = torch.randint(
-            0,
-            num_nodes,
-            (batch_size,),
-            generator=generator,
-            dtype=torch.long,
-        ).tolist()
-        for source, target in zip(candidate_sources, candidate_targets):
-            if target not in adjacency_sets[source]:
-                sources.append(min(source, target))
-                targets.append(max(source, target))
-                if len(sources) >= sample_size:
-                    break
-
-    return (
-        torch.tensor(sources, dtype=torch.long, device=device),
-        torch.tensor(targets, dtype=torch.long, device=device),
-        total_non_edges,
-    )
-
-
-def _stress_term(
-    positions: torch.Tensor,
-    stress_src: torch.Tensor,
-    stress_dst: torch.Tensor,
-    stress_lengths: torch.Tensor,
-    pivot_indices: torch.Tensor,
-    pivot_distances: torch.Tensor,
-) -> torch.Tensor:
-    """Evaluate either exact or pivot-approximated stress.
-
-    Parameters
-    ----------
-    positions : torch.Tensor
-        Current coordinates with shape ``[N, 2]``.
-    stress_src : torch.Tensor
-        Exact stress-pair source indices.
-    stress_dst : torch.Tensor
-        Exact stress-pair target indices.
-    stress_lengths : torch.Tensor
-        Graph distances for exact stress pairs.
-    pivot_indices : torch.Tensor
-        Pivot node indices with shape ``[P]``.
-    pivot_distances : torch.Tensor
-        Node-to-pivot graph distances with shape ``[N, P]``.
-
-    Returns
-    -------
-    torch.Tensor
-        Scalar stress term.
-    """
-    if stress_src.numel() > 0:
-        src = stress_src.to(device=positions.device)
-        dst = stress_dst.to(device=positions.device)
-        targets = stress_lengths.to(device=positions.device)
-        distances = torch.linalg.norm(positions[src] - positions[dst], dim=1).clamp(
-            min=_MIN_DISTANCE
-        )
-        weights = targets.reciprocal().square()
-        return (weights * (distances - targets).square()).sum()
-
-    if pivot_indices.numel() == 0:
-        return torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
-
-    pivot_positions = positions[pivot_indices.to(device=positions.device)]
-    geometric = torch.cdist(positions, pivot_positions).clamp(min=_MIN_DISTANCE)
-    targets = pivot_distances.to(device=positions.device)
-    reachable = targets > 0
-    safe_targets = torch.where(reachable, targets, torch.ones_like(targets))
-    weights = torch.where(reachable, safe_targets.reciprocal().square(), torch.zeros_like(targets))
-    return (weights * (geometric - safe_targets).square()).sum()
-
-
-def _entropy_term(
-    positions: torch.Tensor,
-    non_edge_src: torch.Tensor,
-    non_edge_dst: torch.Tensor,
-    scale: float,
-) -> torch.Tensor:
-    """Evaluate the non-edge logarithmic entropy term.
-
-    Parameters
-    ----------
-    positions : torch.Tensor
-        Current coordinates with shape ``[N, 2]``.
-    non_edge_src : torch.Tensor
-        Non-edge source indices.
-    non_edge_dst : torch.Tensor
-        Non-edge target indices.
-    scale : float
-        Scaling factor for Monte Carlo estimates. Use ``1.0`` for exact sums.
-
-    Returns
-    -------
-    torch.Tensor
-        Scalar entropy term ``-sum(log ||p_i - p_j||)``.
-    """
-    if non_edge_src.numel() == 0:
-        return torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
-
-    nonedge_distances = torch.linalg.norm(
-        positions[non_edge_src] - positions[non_edge_dst],
-        dim=1,
-    ).clamp(min=_MIN_DISTANCE)
-    return -torch.log(nonedge_distances).sum() * scale
-
-
-def _majorization_iteration(
-    positions: torch.Tensor,
-    graph_distances: torch.Tensor,
-    weight_matrix: torch.Tensor,
-) -> None:
-    """Run one in-place Gauss-Seidel stress-majorization iteration.
-
-    Parameters
-    ----------
-    positions : torch.Tensor
-        Current coordinates with shape ``[N, 2]`` on CPU.
-    graph_distances : torch.Tensor
-        All-pairs graph distances with shape ``[N, N]``.
-    weight_matrix : torch.Tensor
-        Stress weights ``1 / d_ij^2`` with shape ``[N, N]``.
-
-    Returns
-    -------
-    None
-        The position tensor is updated in place.
-    """
-    num_nodes = int(positions.shape[0])
-    for node_index in range(num_nodes):
-        current_x = float(positions[node_index, 0].item())
-        current_y = float(positions[node_index, 1].item())
-        new_x = 0.0
-        new_y = 0.0
-        total_weight = 0.0
-
-        for other_index in range(num_nodes):
-            if node_index == other_index:
-                continue
-
-            weight = float(weight_matrix[node_index, other_index].item())
-            desired_distance = float(graph_distances[node_index, other_index].item())
-            other_x = float(positions[other_index, 0].item())
-            other_y = float(positions[other_index, 1].item())
-            delta_x = current_x - other_x
-            delta_y = current_y - other_y
-            euclidean_distance = math.hypot(delta_x, delta_y)
-
-            vote_x = other_x
-            vote_y = other_y
-            if euclidean_distance != 0.0:
-                vote_x += desired_distance * (current_x - vote_x) / euclidean_distance
-                vote_y += desired_distance * (current_y - vote_y) / euclidean_distance
-
-            new_x += weight * vote_x
-            new_y += weight * vote_y
-            total_weight += weight
-
-        if total_weight != 0.0:
-            positions[node_index, 0] = new_x / total_weight
-            positions[node_index, 1] = new_y / total_weight
-
-
-from dagua.layout.ops.base import Op, Pipeline, Repeat  # noqa: E402
-from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig  # noqa: E402
 from dagua.layout.ops.state import (  # noqa: E402
     ExecutionPlan,
     LayoutProblem,
     RuntimeContext,
     SolveState,
 )
-from dagua.layout.ops.taxonomy import OpCategory  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Shared init op -- PivotMDS initialization used by both branches
-# ---------------------------------------------------------------------------
-
-
-class _InitializeMaxentPositions(Op):
-    """Initialize positions from PivotMDS, exactly like the classic code."""
-
-    name: ClassVar[str] = "maxent_initialize_positions"
-    category: ClassVar[OpCategory] = OpCategory.INIT
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
-
-    def __init__(self, *, for_majorization: bool = False) -> None:
-        """Store the branch flag.
-
-        Parameters
-        ----------
-        for_majorization : bool, default=False
-            When ``True``, cast to float64 on CPU for the majorization
-            branch. When ``False``, keep float32 for the gradient branch.
-        """
-        self.for_majorization = for_majorization
-
-    def apply(
-        self,
-        problem: LayoutProblem,
-        state: SolveState,
-        ctx: RuntimeContext,
-    ) -> SolveState:
-        """Seed positions from PivotMDS exactly like classic maxent-stress.
-
-        Parameters
-        ----------
-        problem : LayoutProblem
-            Immutable layout inputs.
-        state : SolveState
-            Mutable solve state.
-        ctx : RuntimeContext
-            Execution infrastructure. Unused by this op.
-
-        Returns
-        -------
-        SolveState
-            State with ``pos`` populated from PivotMDS.
-        """
-        del ctx
-
-        positions = _layout_pivot_mds(
-            edge_index=problem.edge_index,
-            num_nodes=problem.num_nodes,
-            node_sizes=problem.node_sizes,
-            n_pivots=min(_PIVOT_COUNT, problem.num_nodes),
-            seed=problem.seed,
-            edge_weights=problem.edge_weights,
-        )
-
-        if self.for_majorization:
-            state.pos = positions.to(device="cpu", dtype=torch.float64)
-        else:
-            device = _layout_device(problem.edge_index, problem.node_sizes)
-            state.pos = positions.to(device=device, dtype=torch.float32)
-
-        return state
-
-
-# ---------------------------------------------------------------------------
-# Shared preprocess op -- build adjacency and distances
-# ---------------------------------------------------------------------------
-
-
-class _PrepareMaxentState(Op):
-    """Compute adjacency, distances, and stress terms for both branches."""
-
-    name: ClassVar[str] = "maxent_prepare_state"
-    category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
-
-    def __init__(self, *, for_majorization: bool = False, use_entropy: bool = False) -> None:
-        """Store branch configuration.
-
-        Parameters
-        ----------
-        for_majorization : bool, default=False
-            Prepare full distance matrix and weight matrix for majorization.
-        use_entropy : bool, default=False
-            Pre-enumerate non-edge pairs for the entropy term.
-        """
-        self.for_majorization = for_majorization
-        self.use_entropy = use_entropy
-
-    def apply(
-        self,
-        problem: LayoutProblem,
-        state: SolveState,
-        ctx: RuntimeContext,
-    ) -> SolveState:
-        """Build all precomputed data structures mirroring the classic code.
-
-        Parameters
-        ----------
-        problem : LayoutProblem
-            Immutable layout inputs.
-        state : SolveState
-            Mutable solve state receiving maxent extras.
-        ctx : RuntimeContext
-            Execution infrastructure. Unused by this op.
-
-        Returns
-        -------
-        SolveState
-            State with maxent-specific data in ``extras``.
-        """
-        del ctx
-
-        weighted = problem.edge_weights is not None
-        average_edge_cost = _average_edge_cost(problem.edge_weights)
-        adjacency = _build_undirected_adjacency(
-            problem.edge_index,
-            problem.num_nodes,
-            edge_weights=problem.edge_weights,
-        )
-
-        if self.for_majorization:
-            graph_distances = _all_pairs_shortest_paths(
-                adjacency,
-                weighted=weighted,
-                average_edge_cost=average_edge_cost,
-            ).to(dtype=torch.float64)
-            weight_matrix = torch.zeros_like(graph_distances)
-            off_diagonal_mask = ~torch.eye(problem.num_nodes, dtype=torch.bool)
-            weight_matrix[off_diagonal_mask] = (
-                graph_distances[off_diagonal_mask].reciprocal().square()
-            )
-            state.extras["maxent_graph_distances"] = graph_distances
-            state.extras["maxent_weight_matrix"] = weight_matrix
-        else:
-            # Gradient branch: full or pivot stress terms
-            if problem.num_nodes <= _FULL_STRESS_LIMIT:
-                stress_src, stress_dst, stress_lengths = _full_stress_terms(
-                    adjacency,
-                    weighted=weighted,
-                    average_edge_cost=average_edge_cost,
-                )
-                pivot_indices = torch.empty((0,), dtype=torch.long)
-                pivot_distances = torch.empty((problem.num_nodes, 0), dtype=torch.float32)
-                if self.use_entropy:
-                    full_ne_src, full_ne_dst = _full_non_edge_pairs(adjacency)
-                else:
-                    full_ne_src = torch.empty((0,), dtype=torch.long)
-                    full_ne_dst = torch.empty((0,), dtype=torch.long)
-            else:
-                stress_src = torch.empty((0,), dtype=torch.long)
-                stress_dst = torch.empty((0,), dtype=torch.long)
-                stress_lengths = torch.empty((0,), dtype=torch.float32)
-                pivot_indices, pivot_distances = _pivot_stress_terms(
-                    adjacency,
-                    problem.seed,
-                    weighted=weighted,
-                    average_edge_cost=average_edge_cost,
-                )
-                full_ne_src = torch.empty((0,), dtype=torch.long)
-                full_ne_dst = torch.empty((0,), dtype=torch.long)
-
-            state.extras["maxent_stress_src"] = stress_src
-            state.extras["maxent_stress_dst"] = stress_dst
-            state.extras["maxent_stress_lengths"] = stress_lengths
-            state.extras["maxent_pivot_indices"] = pivot_indices
-            state.extras["maxent_pivot_distances"] = pivot_distances
-            state.extras["maxent_full_ne_src"] = full_ne_src
-            state.extras["maxent_full_ne_dst"] = full_ne_dst
-            state.extras["maxent_adjacency"] = adjacency
-
-        return state
-
-
-# ---------------------------------------------------------------------------
-# Gradient branch ops
-# ---------------------------------------------------------------------------
-
-
-class _InitializeMaxentOptimizer(Op):
-    """Create the Adam optimizer with the classic learning rate schedule."""
-
-    name: ClassVar[str] = "maxent_initialize_optimizer"
-    category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
-    reads: ClassVar[Tuple[str, ...]] = ("pos",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
-    requires: ClassVar[Tuple[str, ...]] = ("pos",)
-
-    def apply(
-        self,
-        problem: LayoutProblem,
-        state: SolveState,
-        ctx: RuntimeContext,
-    ) -> SolveState:
-        """Enable gradients on positions and create the Adam optimizer.
-
-        Parameters
-        ----------
-        problem : LayoutProblem
-            Immutable layout inputs.
-        state : SolveState
-            Mutable solve state with ``pos`` already set.
-        ctx : RuntimeContext
-            Execution infrastructure. Unused by this op.
-
-        Returns
-        -------
-        SolveState
-            State with gradient-enabled positions and optimizer in extras.
-        """
-        del ctx
-
-        assert state.pos is not None
-        state.pos = state.pos.requires_grad_(True)
-        initial_lr = min(0.04, 0.8 / float(max(problem.num_nodes, 1)))
-        final_lr = max(
-            initial_lr * 0.1,
-            initial_lr / math.sqrt(float(max(state.total_steps, 1))),
-        )
-        state.optimizer = torch.optim.Adam([state.pos], lr=initial_lr)
-        state.extras["maxent_initial_lr"] = initial_lr
-        state.extras["maxent_final_lr"] = final_lr
-        return state
-
-
-class _MaxentGradientStep(Op):
-    """One Adam update step of the maxent-stress gradient objective."""
-
-    name: ClassVar[str] = "maxent_gradient_step"
-    category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
-    requires: ClassVar[Tuple[str, ...]] = ("pos",)
-
-    def __init__(self, *, alpha: float = 1.0, use_entropy: bool = False) -> None:
-        """Store loss parameters.
-
-        Parameters
-        ----------
-        alpha : float, default=1.0
-            Entropy repulsion weight.
-        use_entropy : bool, default=False
-            Whether to include the logarithmic entropy repulsion term.
-        """
-        self.alpha = alpha
-        self.use_entropy = use_entropy
-
-    def apply(
-        self,
-        problem: LayoutProblem,
-        state: SolveState,
-        ctx: RuntimeContext,
-    ) -> SolveState:
-        """Execute one optimizer step exactly like the classic gradient loop.
-
-        Parameters
-        ----------
-        problem : LayoutProblem
-            Immutable layout inputs.
-        state : SolveState
-            Mutable solve state.
-        ctx : RuntimeContext
-            Execution infrastructure. Unused by this op.
-
-        Returns
-        -------
-        SolveState
-            State after one gradient update.
-        """
-        del ctx
-
-        assert state.pos is not None
-        assert state.optimizer is not None
-
-        positions = state.pos
-        optimizer = state.optimizer
-        step = state.step
-
-        stress_src = state.extras["maxent_stress_src"]
-        stress_dst = state.extras["maxent_stress_dst"]
-        stress_lengths = state.extras["maxent_stress_lengths"]
-        pivot_indices = state.extras["maxent_pivot_indices"]
-        pivot_distances = state.extras["maxent_pivot_distances"]
-        adjacency = state.extras["maxent_adjacency"]
-
-        optimizer.zero_grad(set_to_none=True)
-
-        if problem.num_nodes <= _FULL_STRESS_LIMIT:
-            full_ne_src = state.extras["maxent_full_ne_src"]
-            full_ne_dst = state.extras["maxent_full_ne_dst"]
-
-            loss = _stress_term(
-                positions,
-                stress_src,
-                stress_dst,
-                stress_lengths,
-                pivot_indices,
-                pivot_distances,
-            )
-            if self.use_entropy:
-                loss = loss + self.alpha * _entropy_term(
-                    positions,
-                    full_ne_src.to(device=positions.device),
-                    full_ne_dst.to(device=positions.device),
-                    scale=1.0,
-                )
-        else:
-            loss = _stress_term(
-                positions,
-                stress_src,
-                stress_dst,
-                stress_lengths,
-                pivot_indices,
-                pivot_distances,
-            )
-            if self.use_entropy:
-                sampled_src, sampled_dst, total_non_edges = _sample_non_edges(
-                    adjacency,
-                    step,
-                    problem.seed,
-                    positions.device,
-                )
-                sample_count = max(int(sampled_src.numel()), 1)
-                loss = loss + self.alpha * _entropy_term(
-                    positions,
-                    sampled_src,
-                    sampled_dst,
-                    scale=(
-                        float(total_non_edges) / float(sample_count) if total_non_edges > 0 else 1.0
-                    ),
-                )
-
-        loss.backward()
-        optimizer.step()
-
-        # LR decay exactly like classic
-        initial_lr = state.extras["maxent_initial_lr"]
-        final_lr = state.extras["maxent_final_lr"]
-        fraction = float(step + 1) / float(max(state.total_steps, 1))
-        optimizer.param_groups[0]["lr"] = initial_lr + (final_lr - initial_lr) * fraction
-
-        return state
-
-
-# ---------------------------------------------------------------------------
-# Majorization branch ops
-# ---------------------------------------------------------------------------
-
-
-class _MajorizationStep(Op):
-    """One in-place Gauss-Seidel stress-majorization iteration."""
-
-    name: ClassVar[str] = "maxent_majorization_step"
-    category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
-    requires: ClassVar[Tuple[str, ...]] = ("pos",)
-
-    def apply(
-        self,
-        problem: LayoutProblem,
-        state: SolveState,
-        ctx: RuntimeContext,
-    ) -> SolveState:
-        """Run one majorization iteration on CPU float64 positions.
-
-        Parameters
-        ----------
-        problem : LayoutProblem
-            Immutable layout inputs.
-        state : SolveState
-            Mutable solve state.
-        ctx : RuntimeContext
-            Execution infrastructure. Unused by this op.
-
-        Returns
-        -------
-        SolveState
-            State after one majorization update.
-        """
-        del ctx
-
-        assert state.pos is not None
-
-        _majorization_iteration(
-            positions=state.pos,
-            graph_distances=state.extras["maxent_graph_distances"],
-            weight_matrix=state.extras["maxent_weight_matrix"],
-        )
-
-        return state
-
-
-# ---------------------------------------------------------------------------
-# Finalize ops
-# ---------------------------------------------------------------------------
-
-
-class _FinalizeMaxentPositions(Op):
-    """Apply classic maxent-stress final normalization and type cast."""
-
-    name: ClassVar[str] = "maxent_finalize_positions"
-    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("pos",)
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
-    requires: ClassVar[Tuple[str, ...]] = ("pos",)
-
-    def __init__(self, *, for_majorization: bool = False) -> None:
-        """Store the branch flag.
-
-        Parameters
-        ----------
-        for_majorization : bool, default=False
-            When ``True``, cast from float64 to float32 like the majorization
-            branch.
-        """
-        self.for_majorization = for_majorization
-
-    def apply(
-        self,
-        problem: LayoutProblem,
-        state: SolveState,
-        ctx: RuntimeContext,
-    ) -> SolveState:
-        """Normalize and cast positions to match classic output exactly.
-
-        Parameters
-        ----------
-        problem : LayoutProblem
-            Immutable layout inputs.
-        state : SolveState
-            Mutable solve state.
-        ctx : RuntimeContext
-            Execution infrastructure. Unused by this op.
-
-        Returns
-        -------
-        SolveState
-            State with final output positions.
-        """
-        del ctx
-
-        assert state.pos is not None
-
-        device = _layout_device(problem.edge_index, problem.node_sizes)
-        extent = _layout_extent(problem.num_nodes, problem.node_sizes)
-
-        if self.for_majorization:
-            state.pos = _normalize_positions(state.pos.to(dtype=torch.float32), extent).to(
-                dtype=torch.float32, device=device
-            )
-        else:
-            state.pos = _normalize_positions(state.pos.detach(), extent).to(
-                dtype=torch.float32, device=device
-            )
-
-        return state
-
-
-# ---------------------------------------------------------------------------
-# Pipeline builders
-# ---------------------------------------------------------------------------
+_MAJORIZATION_NODE_LIMIT = 5_000
 
 
 def build_maxent_stress_majorization_pipeline(steps: int = 200) -> Pipeline:
     """Build a pipeline for the majorization branch of maxent-stress.
-
-    This pipeline matches the classic ``_layout_stress_majorization`` path
-    bit-for-bit.
 
     Parameters
     ----------
@@ -1094,18 +38,18 @@ def build_maxent_stress_majorization_pipeline(steps: int = 200) -> Pipeline:
     Returns
     -------
     Pipeline
-        Composable pipeline that reproduces majorization-based stress layout.
+        Pipeline that reproduces the classical majorization branch.
     """
     return Pipeline(
         [
             FixedSteps(FixedStepsConfig(n=steps)),
-            _InitializeMaxentPositions(for_majorization=True),
-            _PrepareMaxentState(for_majorization=True),
+            MaxentInitializePositions(for_majorization=True),
+            MaxentPrepareState(for_majorization=True),
             Repeat(
                 n=steps,
-                ops=[_MajorizationStep()],
+                ops=[MaxentMajorizationStep()],
             ),
-            _FinalizeMaxentPositions(for_majorization=True),
+            MaxentFinalizePositions(for_majorization=True),
         ],
         name="maxent_stress_majorization_pipeline",
     )
@@ -1118,34 +62,31 @@ def build_maxent_stress_gradient_pipeline(
 ) -> Pipeline:
     """Build a pipeline for the gradient branch of maxent-stress.
 
-    This pipeline matches the classic ``_layout_maxent_stress_gradient``
-    path bit-for-bit.
-
     Parameters
     ----------
     steps : int, default=200
-        Number of Adam optimization steps.
+        Number of Adam updates.
     alpha : float, default=1.0
         Entropy repulsion weight.
     use_entropy : bool, default=False
-        Whether to include the logarithmic entropy repulsion term.
+        Whether to include entropy repulsion term.
 
     Returns
     -------
     Pipeline
-        Composable pipeline that reproduces gradient-based maxent-stress layout.
+        Pipeline that reproduces the classical gradient branch.
     """
     return Pipeline(
         [
             FixedSteps(FixedStepsConfig(n=steps)),
-            _InitializeMaxentPositions(for_majorization=False),
-            _PrepareMaxentState(for_majorization=False, use_entropy=use_entropy),
-            _InitializeMaxentOptimizer(),
+            MaxentInitializePositions(for_majorization=False),
+            MaxentPrepareState(for_majorization=False, use_entropy=use_entropy),
+            MaxentInitializeOptimizer(),
             Repeat(
                 n=steps,
-                ops=[_MaxentGradientStep(alpha=alpha, use_entropy=use_entropy)],
+                ops=[MaxentGradientStep(alpha=alpha, use_entropy=use_entropy)],
             ),
-            _FinalizeMaxentPositions(for_majorization=False),
+            MaxentFinalizePositions(for_majorization=False),
         ],
         name="maxent_stress_gradient_pipeline",
     )
@@ -1158,15 +99,7 @@ def build_maxent_stress_pipeline(
     use_majorization: bool = True,
     num_nodes: int = 0,
 ) -> Pipeline:
-    """Build the correct maxent-stress pipeline matching classic dispatch.
-
-    The classic ``layout_maxent_stress`` chooses majorization when all of:
-    - ``use_majorization`` is ``True``
-    - ``use_entropy`` is ``False``
-    - ``num_nodes <= 5000``
-    - ``steps == 200``
-
-    Otherwise it uses the gradient path.
+    """Build the classical maxent-stress dispatch pipeline.
 
     Parameters
     ----------
@@ -1175,16 +108,16 @@ def build_maxent_stress_pipeline(
     alpha : float, default=1.0
         Entropy repulsion weight.
     use_entropy : bool, default=False
-        Whether to include the entropy repulsion term.
+        Whether to include entropy repulsion term.
     use_majorization : bool, default=True
-        Whether to prefer majorization for eligible problems.
+        Whether to prefer majorization for eligible graphs.
     num_nodes : int, default=0
-        Node count, used to choose the dispatch branch.
+        Number of nodes used for branch dispatch.
 
     Returns
     -------
     Pipeline
-        The appropriate composable pipeline.
+        Majorization pipeline when eligible; otherwise gradient pipeline.
     """
     if (
         use_majorization
@@ -1211,16 +144,16 @@ def layout_maxent_stress_pipeline(
     use_majorization: bool = True,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the maxent-stress pipeline as a drop-in replacement for the classic.
+    """Run the maxent-stress pipeline as a drop-in replacement.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge list with shape ``[2, E]``.
+        Edge tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of nodes.
+        Number of graph nodes.
     node_sizes : torch.Tensor, optional
-        Optional node sizes.
+        Optional node-size tensor used to select output device.
     steps : int, default=200
         Number of optimization iterations.
     alpha : float, default=1.0
@@ -1228,23 +161,23 @@ def layout_maxent_stress_pipeline(
     seed : int, default=42
         Random seed.
     use_entropy : bool, default=False
-        Include the entropy repulsion term.
+        Whether to include entropy repulsion term.
     use_majorization : bool, default=True
-        Prefer majorization for eligible problems.
+        Prefer majorization for eligible graphs.
     edge_weights : torch.Tensor, optional
         Optional per-edge weights with shape ``[E]``.
 
     Returns
     -------
     torch.Tensor
-        Node positions with shape ``[N, 2]``.
+        Final node positions with shape ``[N, 2]``.
 
     Raises
     ------
     ValueError
-        If ``num_nodes``, ``steps``, ``alpha``, or ``edge_weights`` are invalid.
+        If inputs are invalid.
     RuntimeError
-        If the pipeline fails to produce final positions.
+        If pipeline execution does not produce final positions.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
@@ -1260,7 +193,7 @@ def layout_maxent_stress_pipeline(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
 
-    device = _layout_device(edge_index, node_sizes)
+    device = layout_device(edge_index=edge_index, node_sizes=node_sizes)
     if num_nodes == 0:
         return torch.empty((0, 2), dtype=torch.float32, device=device)
     if num_nodes == 1:
