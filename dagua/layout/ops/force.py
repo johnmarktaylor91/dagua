@@ -19,52 +19,54 @@ from typing import Any, ClassVar, Optional, Tuple, cast
 import numpy as np
 import torch
 
-from dagua.layout.classic.fa2 import (
+from dagua.layout._archive.classic.fa2 import (
     _adjust_speed_and_apply_forces as _fa2_adjust_speed_and_apply_forces,
 )
-from dagua.layout.classic.fa2 import (
+from dagua.layout._archive.classic.fa2 import (
     _attraction_force as _fa2_attraction_force,
 )
-from dagua.layout.classic.fa2 import (
+from dagua.layout._archive.classic.fa2 import (
     _barnes_hut_force_for_node as _fa2_barnes_hut_force_for_node,
 )
-from dagua.layout.classic.fa2 import (
+from dagua.layout._archive.classic.fa2 import (
     _BarnesHutNode as _FA2BarnesHutNode,
 )
-from dagua.layout.classic.fa2 import (
+from dagua.layout._archive.classic.fa2 import (
     _compute_degree as _fa2_compute_degree,
 )
-from dagua.layout.classic.fa2 import (
+from dagua.layout._archive.classic.fa2 import (
     _gravity_force as _fa2_gravity_force,
 )
-from dagua.layout.classic.fa2 import (
+from dagua.layout._archive.classic.fa2 import (
     _unique_undirected_edges_with_weights as _fa2_unique_undirected_edges_with_weights,
 )
-from dagua.layout.classic.gem import (
+from dagua.layout._archive.classic.gem import (
     _INITIAL_TEMPERATURE as _GEM_INITIAL_TEMPERATURE,
 )
-from dagua.layout.classic.gem import (
+from dagua.layout._archive.classic.gem import (
     _MIN_DISTANCE as _GEM_MIN_DISTANCE,
 )
-from dagua.layout.classic.gem import (
+from dagua.layout._archive.classic.gem import (
     _OSCILLATION_COSINE_THRESHOLD as _GEM_OSCILLATION_COSINE_THRESHOLD,
 )
-from dagua.layout.classic.gem import (
+from dagua.layout._archive.classic.gem import (
     _OSCILLATION_SENSITIVITY as _GEM_OSCILLATION_SENSITIVITY,
 )
-from dagua.layout.classic.gem import (
+from dagua.layout._archive.classic.gem import (
     _ROTATION_SENSITIVITY as _GEM_ROTATION_SENSITIVITY,
 )
-from dagua.layout.classic.gem import (
+from dagua.layout._archive.classic.gem import (
     _ROTATION_SINE_THRESHOLD as _GEM_ROTATION_SINE_THRESHOLD,
 )
-from dagua.layout.classic.sfdp import (
+from dagua.layout._archive.classic.sfdp import (
     _barnes_hut_force_for_index as _sfdp_barnes_hut_force_for_index,
 )
-from dagua.layout.classic.sfdp import (
+from dagua.layout._archive.classic.sfdp import (
     _QuadTreeNode as _SFDPQuadTreeNode,
 )
-from dagua.layout.classic.stress_majorization import _smacof_update as _stress_maj_smacof_update
+from dagua.layout._archive.classic.stress_majorization import (
+    _smacof_update as _stress_maj_smacof_update,
+)
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
