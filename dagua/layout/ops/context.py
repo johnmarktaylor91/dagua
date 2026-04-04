@@ -2,24 +2,131 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 import torch
 
-from dagua.layout._archive.classic.drl import _DensityGrid
-from dagua.layout._archive.classic.neulay import _kdtree_repulsion_pairs
-from dagua.layout.engine import (
+_MIN_DISTANCE = 1.0e-12
+_FINE_REPULSION_SCALE = 1.0e-4
+
+
+class _DensityGrid:
+    """Density proxy used by the DrL energy function."""
+
+    def __init__(self, grid_size: int, view_size: float, radius: int) -> None:
+        """Initialize the density grid and its tent kernel."""
+        self.grid_size = grid_size
+        self.view_size = view_size
+        self.radius = radius
+        self.cell_width = view_size / float(grid_size)
+        self.origin = -0.5 * view_size
+        self.density = torch.zeros((grid_size, grid_size), dtype=torch.float64)
+        self.node_cells: dict[int, tuple[int, int]] = {}
+        self.buckets: dict[tuple[int, int], set[int]] = {}
+
+        axis = torch.arange(-radius, radius + 1, dtype=torch.float64)
+        yy, xx = torch.meshgrid(axis, axis, indexing="ij")
+        distance = torch.sqrt(xx.square() + yy.square())
+        self.kernel = torch.clamp(1.0 - (distance / float(radius)), min=0.0)
+
+    def _cell_index(self, position: torch.Tensor) -> tuple[int, int]:
+        """Convert a coordinate to a clamped integer grid cell."""
+        x_value = float(position[0].item())
+        y_value = float(position[1].item())
+        cell_x = int(math.floor((x_value - self.origin) / self.cell_width))
+        cell_y = int(math.floor((y_value - self.origin) / self.cell_width))
+        return (
+            max(0, min(self.grid_size - 1, cell_x)),
+            max(0, min(self.grid_size - 1, cell_y)),
+        )
+
+    def _apply_kernel(self, cell_x: int, cell_y: int, sign: float) -> None:
+        """Add or subtract one tent kernel at the given cell location."""
+        x_start = max(0, cell_x - self.radius)
+        x_end = min(self.grid_size, cell_x + self.radius + 1)
+        y_start = max(0, cell_y - self.radius)
+        y_end = min(self.grid_size, cell_y + self.radius + 1)
+
+        kernel_x_start = x_start - (cell_x - self.radius)
+        kernel_x_end = kernel_x_start + (x_end - x_start)
+        kernel_y_start = y_start - (cell_y - self.radius)
+        kernel_y_end = kernel_y_start + (y_end - y_start)
+
+        self.density[y_start:y_end, x_start:x_end] += (
+            sign * self.kernel[kernel_y_start:kernel_y_end, kernel_x_start:kernel_x_end]
+        )
+
+    def add_node(self, node: int, position: torch.Tensor) -> None:
+        """Insert a node into the coarse grid and fine buckets."""
+        cell = self._cell_index(position)
+        self.node_cells[node] = cell
+        self._apply_kernel(cell[0], cell[1], sign=1.0)
+        self.buckets.setdefault(cell, set()).add(node)
+
+    def remove_node(self, node: int) -> None:
+        """Remove a node from the coarse grid and fine buckets."""
+        cell = self.node_cells.pop(node, None)
+        if cell is None:
+            return
+        self._apply_kernel(cell[0], cell[1], sign=-1.0)
+        bucket = self.buckets.get(cell)
+        if bucket is None:
+            return
+        bucket.discard(node)
+        if not bucket:
+            del self.buckets[cell]
+
+    def coarse_density(self, position: torch.Tensor) -> float:
+        """Return the coarse density penalty at one position."""
+        cell_x, cell_y = self._cell_index(position)
+        value = float(self.density[cell_y, cell_x].item())
+        return value * value
+
+    def fine_density(self, node: int, position: torch.Tensor, positions: torch.Tensor) -> float:
+        """Return the exact simmer-stage local repulsion penalty."""
+        cell_x, cell_y = self._cell_index(position)
+        density = 0.0
+        for offset_y in (-1, 0, 1):
+            for offset_x in (-1, 0, 1):
+                neighbor_cell = (cell_x + offset_x, cell_y + offset_y)
+                bucket = self.buckets.get(neighbor_cell)
+                if not bucket:
+                    continue
+                for other in bucket:
+                    if other == node:
+                        continue
+                    delta = position - positions[other]
+                    distance_sq = float(delta.dot(delta).item()) + _MIN_DISTANCE
+                    density += _FINE_REPULSION_SCALE / distance_sq
+        return density
+
+
+def _kdtree_repulsion_pairs(pos: torch.Tensor, query_radius: float) -> np.ndarray:
+    """Find nearby node pairs using SciPy's cKDTree."""
+    from scipy.spatial import cKDTree
+
+    if pos.shape[0] < 2:
+        return np.empty((0, 2), dtype=np.int64)
+    tree = cKDTree(pos.detach().cpu().numpy())
+    pairs = tree.query_pairs(query_radius, output_type="ndarray")
+    if pairs.size == 0:
+        return np.empty((0, 2), dtype=np.int64)
+    return pairs.astype(np.int64)
+
+
+from dagua.layout.engine import (  # noqa: E402
     SAMPLED_SAME_LAYER_K,
     EdgeBatchContext,
     SampledNodeContext,
     _sampled_node_context_sizes,
 )
-from dagua.layout.layers import LayerIndex, build_layer_index
-from dagua.layout.ops.base import Op
-from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.taxonomy import OpCategory, register_op
+from dagua.layout.layers import LayerIndex, build_layer_index  # noqa: E402
+from dagua.layout.ops.base import Op  # noqa: E402
+from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState  # noqa: E402
+from dagua.layout.ops.taxonomy import OpCategory, register_op  # noqa: E402
 
 _DENSITY_GRID_RADIUS = 10
 
