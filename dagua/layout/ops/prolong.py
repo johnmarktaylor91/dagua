@@ -9,15 +9,19 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 import torch
 
-from dagua.layout._archive.classic.fmmm import (
-    _TYPE_MOON,
-    _TYPE_PLANET,
-    _TYPE_SUN,
+_TYPE_SUN = 1
+_TYPE_PLANET = 2
+_TYPE_MOON = 4
+
+from dagua.layout.ops.base import Op  # noqa: E402
+from dagua.layout.ops.coarsen import SolarHierarchyStep  # noqa: E402
+from dagua.layout.ops.state import (  # noqa: E402
+    HierarchyLevel,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
 )
-from dagua.layout.ops.base import Op
-from dagua.layout.ops.coarsen import SolarHierarchyStep
-from dagua.layout.ops.state import HierarchyLevel, LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.taxonomy import OpCategory, register_op
+from dagua.layout.ops.taxonomy import OpCategory, register_op  # noqa: E402
 
 _SOLAR_STEPS_KEY = "solar_system_steps"
 _MIN_DISTANCE = 1.0e-3

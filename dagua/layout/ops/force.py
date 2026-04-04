@@ -19,33 +19,6 @@ from typing import Any, ClassVar, Optional, Tuple, cast
 import numpy as np
 import torch
 
-from dagua.layout._archive.classic.gem import (
-    _INITIAL_TEMPERATURE as _GEM_INITIAL_TEMPERATURE,
-)
-from dagua.layout._archive.classic.gem import (
-    _MIN_DISTANCE as _GEM_MIN_DISTANCE,
-)
-from dagua.layout._archive.classic.gem import (
-    _OSCILLATION_COSINE_THRESHOLD as _GEM_OSCILLATION_COSINE_THRESHOLD,
-)
-from dagua.layout._archive.classic.gem import (
-    _OSCILLATION_SENSITIVITY as _GEM_OSCILLATION_SENSITIVITY,
-)
-from dagua.layout._archive.classic.gem import (
-    _ROTATION_SENSITIVITY as _GEM_ROTATION_SENSITIVITY,
-)
-from dagua.layout._archive.classic.gem import (
-    _ROTATION_SINE_THRESHOLD as _GEM_ROTATION_SINE_THRESHOLD,
-)
-from dagua.layout._archive.classic.sfdp import (
-    _barnes_hut_force_for_index as _sfdp_barnes_hut_force_for_index,
-)
-from dagua.layout._archive.classic.sfdp import (
-    _QuadTreeNode as _SFDPQuadTreeNode,
-)
-from dagua.layout._archive.classic.stress_majorization import (
-    _smacof_update as _stress_maj_smacof_update,
-)
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -62,6 +35,173 @@ _GRAPHOPT_PAIR_TARGET_KEY = "graphopt_pair_target"
 _GRAPHOPT_SPRING_EDGES_KEY = "graphopt_spring_edges"
 _GRAPHOPT_SPRING_WEIGHTS_KEY = "graphopt_spring_weights"
 _GRAPHOPT_MAX_REPULSION_DISTANCE_SQ_KEY = "graphopt_max_repulsion_distance_sq"
+_GEM_INITIAL_TEMPERATURE = 12.0
+_GEM_MIN_DISTANCE = 1.0e-9
+_GEM_OSCILLATION_COSINE_THRESHOLD = math.cos(0.5 * (math.pi / 2.0))
+_GEM_OSCILLATION_SENSITIVITY = 0.3
+_GEM_ROTATION_SENSITIVITY = 0.01
+_GEM_ROTATION_SINE_THRESHOLD = math.sin((math.pi / 2.0) + (math.pi / 3.0 / 2.0))
+_EPSILON = 1.0e-9
+_MIN_DISTANCE = 1.0e-9
+
+
+@dataclass
+class _QuadTreeNode:
+    """Barnes-Hut quadtree node used for large-graph repulsion.
+
+    Parameters
+    ----------
+    center : torch.Tensor
+        Cell center with shape ``[2]``.
+    half_width : float
+        Half-width of the square cell.
+    indices : list[int]
+        Point indices stored under this node.
+    level : int
+        Depth within the quadtree.
+    mass : float, default=0.0
+        Aggregate number of points represented by the cell.
+    center_of_mass : torch.Tensor, optional
+        Mean position of points represented by the cell.
+    children : list[_QuadTreeNode], optional
+        Child quadrants. Empty means the node is a leaf.
+    """
+
+    center: torch.Tensor
+    half_width: float
+    indices: list[int]
+    level: int
+    mass: float = 0.0
+    center_of_mass: Optional[torch.Tensor] = None
+    children: list["_QuadTreeNode"] = field(default_factory=list)
+
+
+_SFDPQuadTreeNode = _QuadTreeNode
+
+
+def _barnes_hut_force_for_index(
+    node: _QuadTreeNode,
+    positions: torch.Tensor,
+    index: int,
+    theta: float,
+    repulsive_scale: float,
+    repulsive_exponent: float,
+) -> torch.Tensor:
+    """Evaluate the Barnes-Hut repulsive force on one node.
+
+    Parameters
+    ----------
+    node : _QuadTreeNode
+        Current quadtree node.
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    index : int
+        Query node index.
+    theta : float
+        Barnes-Hut opening angle threshold.
+    repulsive_scale : float
+        Global repulsion multiplier.
+    repulsive_exponent : float
+        SFDP repulsion exponent ``p``.
+
+    Returns
+    -------
+    torch.Tensor
+        Repulsive force vector with shape ``[2]``.
+    """
+    if node.mass <= 0.0 or node.center_of_mass is None:
+        return torch.zeros(2, dtype=torch.float32)
+
+    query = positions[index]
+    if len(node.indices) == 1 and node.indices[0] == index:
+        return torch.zeros(2, dtype=torch.float32)
+
+    if node.children:
+        delta = query - node.center_of_mass
+        distance = float(torch.linalg.vector_norm(delta).item())
+        width = node.half_width * 2.0
+        if index not in node.indices and distance > _EPSILON and (width / distance) < theta:
+            denominator = max(distance, _EPSILON) ** (2.0 - repulsive_exponent)
+            return repulsive_scale * node.mass * delta / denominator
+
+        force = torch.zeros(2, dtype=torch.float32)
+        for child in node.children:
+            force = force + _barnes_hut_force_for_index(
+                node=child,
+                positions=positions,
+                index=index,
+                theta=theta,
+                repulsive_scale=repulsive_scale,
+                repulsive_exponent=repulsive_exponent,
+            )
+        return force
+
+    if len(node.indices) == 0:
+        return torch.zeros(2, dtype=torch.float32)
+
+    leaf_indices = [point_index for point_index in node.indices if point_index != index]
+    if not leaf_indices:
+        return torch.zeros(2, dtype=torch.float32)
+
+    coords = positions[torch.tensor(leaf_indices, dtype=torch.long)]
+    delta = query.unsqueeze(0) - coords
+    distance = torch.linalg.vector_norm(delta, dim=1).clamp_min(_EPSILON)
+    denominator = distance.pow(2.0 - repulsive_exponent).unsqueeze(1)
+    return (repulsive_scale * delta / denominator).sum(dim=0)
+
+
+def _pairwise_distances(positions: np.ndarray) -> np.ndarray:
+    """Compute dense Euclidean distances between all node pairs.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Position array with shape ``[N, 2]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Pairwise Euclidean distances with shape ``[N, N]``.
+    """
+    deltas = positions[:, None, :] - positions[None, :, :]
+    return np.sqrt(np.sum(deltas * deltas, axis=2))
+
+
+def _smacof_update(
+    positions: np.ndarray,
+    target_distances: np.ndarray,
+    weights: np.ndarray,
+    laplacian_pinv: np.ndarray,
+) -> np.ndarray:
+    """Apply one SMACOF majorization step.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Current positions with shape ``[N, 2]``.
+    target_distances : numpy.ndarray
+        Desired graph distances with shape ``[N, N]``.
+    weights : numpy.ndarray
+        SMACOF weight matrix with shape ``[N, N]``.
+    laplacian_pinv : np.ndarray
+        Pseudoinverse of the weighted Laplacian with shape ``[N, N]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Updated centered positions with shape ``[N, 2]``.
+    """
+    current_distances = np.maximum(_pairwise_distances(positions), _MIN_DISTANCE)
+    ratio = np.zeros_like(target_distances)
+    active_mask = weights > 0.0
+    ratio[active_mask] = target_distances[active_mask] / current_distances[active_mask]
+
+    b_matrix = -weights * ratio
+    np.fill_diagonal(b_matrix, 0.0)
+    np.fill_diagonal(b_matrix, -b_matrix.sum(axis=1))
+
+    updated = laplacian_pinv @ (b_matrix @ positions)
+    return updated - updated.mean(axis=0, keepdims=True)
 
 
 def _require_positions(state: SolveState) -> torch.Tensor:
@@ -372,6 +512,10 @@ def _sfdp_barnes_hut_force(
         )
         force[node_index] = node_force.to(device=pos.device, dtype=pos.dtype)
     return force
+
+
+_sfdp_barnes_hut_force_for_index = _barnes_hut_force_for_index
+_stress_maj_smacof_update = _smacof_update
 
 
 def _density_grid_gradient(
