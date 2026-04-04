@@ -2,23 +2,147 @@
 
 from __future__ import annotations
 
+import random
 from typing import ClassVar, Optional, Tuple
 
 import torch
 
-from dagua.layout.classic.graphopt import (
-    _COULOMBS_CONSTANT,
-    _MAX_REPULSION_DISTANCE,
-    _MIN_DISTANCE,
-    _initialize_positions,
-    _layout_device,
-    _spring_edges,
-    _validate_inputs,
+from dagua.layout.ops.graph_utils import layout_device as _layout_device
+
+_COULOMBS_CONSTANT = 8_987_500_000.0
+_MIN_DISTANCE = 1.0e-12
+_MAX_REPULSION_DISTANCE = 500.0
+
+
+def _validate_inputs(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    niter: int,
+    node_mass: float,
+    max_sa_movement: float,
+    edge_weights: Optional[torch.Tensor],
+) -> None:
+    """Validate the public GraphOpt arguments.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    niter : int
+        Number of layout iterations.
+    node_mass : float
+        Shared node mass used to scale movement.
+    max_sa_movement : float
+        Maximum movement per axis per iteration.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
+
+    Returns
+    -------
+    None
+        Raises ``ValueError`` when an input is invalid.
+    """
+    if num_nodes < 0:
+        raise ValueError("num_nodes must be non-negative.")
+    if niter < 0:
+        raise ValueError("niter must be non-negative.")
+    if node_mass <= 0.0:
+        raise ValueError("node_mass must be positive.")
+    if max_sa_movement < 0.0:
+        raise ValueError("max_sa_movement must be non-negative.")
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+    if edge_weights is not None:
+        if edge_weights.ndim != 1:
+            raise ValueError("edge_weights must have shape [E].")
+        if edge_weights.shape[0] != edge_index.shape[1]:
+            raise ValueError(
+                f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
+            )
+
+    if edge_index.numel() == 0:
+        return
+
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    min_index = int(edge_index_cpu.min().item())
+    max_index = int(edge_index_cpu.max().item())
+    if min_index < 0:
+        raise ValueError("edge_index cannot contain negative node indices.")
+    if max_index >= num_nodes:
+        raise ValueError("edge_index contains node indices outside [0, num_nodes).")
+
+
+def _initialize_positions(num_nodes: int, seed: int) -> torch.Tensor:
+    """Create GraphOpt's random starting coordinates.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the graph.
+    seed : int
+        Random seed for the initial placement.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial positions with shape ``[N, 2]`` and dtype ``float64``.
+    """
+    rng = random.Random(seed)
+    data = [[rng.random(), rng.random()] for _ in range(num_nodes)]
+    return torch.tensor(data, dtype=torch.float64)
+
+
+def _spring_edges(
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Return the non-self-loop springs exactly as encoded in ``edge_index``.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, Optional[torch.Tensor]]
+        Spring edge tensor with shape ``[2, E_clean]`` and the matching
+        filtered edge weights when provided.
+
+    Notes
+    -----
+    igraph GraphOpt treats every edge occurrence as its own spring. Parallel
+    edges and reciprocal directed edges therefore contribute multiple spring
+    forces and must not be deduplicated here.
+    """
+    if edge_index.numel() == 0:
+        return torch.empty((2, 0), dtype=torch.long), None
+
+    edges = edge_index.to(device="cpu", dtype=torch.long)
+    non_self = edges[0] != edges[1]
+    if not bool(non_self.any().item()):
+        return torch.empty((2, 0), dtype=torch.long), None
+
+    filtered_edges = edges[:, non_self].contiguous()
+    filtered_weights = None
+    if edge_weights is not None:
+        filtered_weights = edge_weights.detach().to(device="cpu", dtype=torch.float64)[non_self]
+    return filtered_edges, filtered_weights.contiguous() if filtered_weights is not None else None
+
+
+from dagua.layout.ops.base import Op, Pipeline, Repeat  # noqa: E402
+from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig  # noqa: E402
+from dagua.layout.ops.state import (  # noqa: E402
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
 )
-from dagua.layout.ops.base import Op, Pipeline, Repeat
-from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.taxonomy import OpCategory
+from dagua.layout.ops.taxonomy import OpCategory  # noqa: E402
 
 _SPRING_EDGES_KEY = "graphopt_spring_edges"
 _SPRING_WEIGHTS_KEY = "graphopt_spring_weights"

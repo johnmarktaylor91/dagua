@@ -7,17 +7,311 @@ from typing import ClassVar, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from dagua.layout.classic.classical_mds import _shortest_path_distances
-from dagua.layout.classic.stress_majorization import (
-    _initial_positions,
-    _layout_device,
-    _smacof_update,
-    _stress_value,
+from dagua.layout.ops.graph_utils import (
+    layout_device as _layout_device,
 )
-from dagua.layout.ops.base import Op, Pipeline, Repeat
-from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.taxonomy import OpCategory
+from dagua.layout.ops.graph_utils import (
+    shortest_path_distances as _shortest_path_distances,
+)
+
+# ---------------------------------------------------------------------------
+# Algorithm-specific constants and functions copied from
+# dagua/layout/classic/stress_majorization.py (bit-identical)
+# ---------------------------------------------------------------------------
+
+_SM_MIN_DISTANCE = 1.0e-9
+_MIN_SPAN = 1.0e-6
+
+
+def _layout_classical_mds(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor] = None,
+    seed: int = 42,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Lay out a graph with classical multidimensional scaling.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]`` used only to pick a
+        stable drawing extent.
+    seed : int, default=42
+        Accepted for interface compatibility. Classical MDS is deterministic
+        once the graph distances are fixed.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]`` used when computing
+        shortest-path distances.
+
+    Returns
+    -------
+    torch.Tensor
+        Final position tensor with shape ``[N, 2]``.
+
+    Raises
+    ------
+    ValueError
+        If ``num_nodes`` is negative or ``edge_weights`` has the wrong shape.
+    """
+    del seed
+
+    if num_nodes < 0:
+        raise ValueError("num_nodes must be non-negative.")
+    if edge_weights is not None:
+        if edge_weights.ndim != 1:
+            raise ValueError("edge_weights must have shape [E].")
+        if edge_weights.shape[0] != edge_index.shape[1]:
+            raise ValueError(
+                f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
+            )
+
+    device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float32, device=device)
+
+    distances = _shortest_path_distances(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+    )
+    raw_positions = _classical_mds_embedding(distances)
+    extent = _layout_extent(num_nodes=num_nodes, node_sizes=node_sizes)
+    normalized = _normalize_positions(raw_positions.to(device=device), extent=extent)
+    return normalized.to(dtype=torch.float32, device=device)
+
+
+def _layout_extent(
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor] = None,
+) -> float:
+    """Estimate a stable output scale for the embedding.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Target half-width after normalization.
+    """
+    if node_sizes is None or node_sizes.numel() == 0:
+        return max(float(max(num_nodes, 1)) ** 0.5 * 5.0, 1.0)
+
+    max_size = float(node_sizes.to(dtype=torch.float32, device="cpu").max().item())
+    return max(max_size * max(float(max(num_nodes, 1)) ** 0.5, 1.0) * 2.0, 1.0)
+
+
+def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor:
+    """Center and scale coordinates into a stable bounding box.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    extent : float
+        Target half-width after normalization.
+
+    Returns
+    -------
+    torch.Tensor
+        Centered and scaled coordinates.
+    """
+    if positions.shape[0] <= 1:
+        return torch.zeros_like(positions)
+
+    centered = positions - positions.mean(dim=0, keepdim=True)
+    span = float(centered.abs().max().item())
+    if span < _MIN_SPAN:
+        centered = centered.clone()
+        centered[:, 0] = torch.linspace(
+            -1.0,
+            1.0,
+            steps=positions.shape[0],
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+        span = float(centered.abs().max().item())
+    return centered * (extent / max(span, _MIN_SPAN))
+
+
+def _classical_mds_embedding(distances: np.ndarray) -> torch.Tensor:
+    """Recover a rank-2 embedding from pairwise graph distances.
+
+    Parameters
+    ----------
+    distances : numpy.ndarray
+        Dense shortest-path distance matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Raw coordinates with shape ``[N, 2]`` on CPU.
+    """
+    num_nodes = int(distances.shape[0])
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float32)
+    if num_nodes == 1:
+        return torch.zeros((1, 2), dtype=torch.float32)
+
+    squared = distances * distances
+    centering = np.eye(num_nodes, dtype=np.float64) - (
+        np.ones((num_nodes, num_nodes), dtype=np.float64) / float(num_nodes)
+    )
+    gram = -0.5 * centering @ squared @ centering
+
+    eigenvalues, eigenvectors = np.linalg.eigh(gram)
+    sorted_indices = np.argsort(eigenvalues)[::-1]
+    positive_indices = [index for index in sorted_indices if eigenvalues[index] > 0.0][:2]
+
+    coordinates = np.zeros((num_nodes, 2), dtype=np.float64)
+    if positive_indices:
+        selected_values = np.clip(eigenvalues[positive_indices], a_min=0.0, a_max=None)
+        selected_vectors = eigenvectors[:, positive_indices]
+        coordinates[:, : len(positive_indices)] = selected_vectors * np.sqrt(selected_values)
+    else:
+        coordinates[:, 0] = np.linspace(-1.0, 1.0, num_nodes, dtype=np.float64)
+
+    return torch.from_numpy(coordinates).to(dtype=torch.float32)
+
+
+def _pairwise_distances(positions: np.ndarray) -> np.ndarray:
+    """Compute dense Euclidean distances between all node pairs.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Position array with shape ``[N, 2]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Pairwise Euclidean distances with shape ``[N, N]``.
+    """
+    deltas = positions[:, None, :] - positions[None, :, :]
+    return np.sqrt(np.sum(deltas * deltas, axis=2))
+
+
+def _stress_value(
+    positions: np.ndarray,
+    target_distances: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    """Compute the weighted stress objective for one embedding.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Position array with shape ``[N, 2]``.
+    target_distances : numpy.ndarray
+        Desired graph distances with shape ``[N, N]``.
+    weights : numpy.ndarray
+        SMACOF weight matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    float
+        Weighted stress value.
+    """
+    current_distances = _pairwise_distances(positions)
+    errors = current_distances - target_distances
+    return 0.5 * float(np.sum(weights * errors * errors))
+
+
+def _smacof_update(
+    positions: np.ndarray,
+    target_distances: np.ndarray,
+    weights: np.ndarray,
+    laplacian_pinv: np.ndarray,
+) -> np.ndarray:
+    """Apply one SMACOF majorization step.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Current positions with shape ``[N, 2]``.
+    target_distances : numpy.ndarray
+        Desired graph distances with shape ``[N, N]``.
+    weights : numpy.ndarray
+        SMACOF weight matrix with shape ``[N, N]``.
+    laplacian_pinv : numpy.ndarray
+        Pseudoinverse of the weighted Laplacian with shape ``[N, N]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Updated centered positions with shape ``[N, 2]``.
+    """
+    current_distances = np.maximum(_pairwise_distances(positions), _SM_MIN_DISTANCE)
+    ratio = np.zeros_like(target_distances)
+    active_mask = weights > 0.0
+    ratio[active_mask] = target_distances[active_mask] / current_distances[active_mask]
+
+    b_matrix = -weights * ratio
+    np.fill_diagonal(b_matrix, 0.0)
+    np.fill_diagonal(b_matrix, -b_matrix.sum(axis=1))
+
+    updated = laplacian_pinv @ (b_matrix @ positions)
+    return updated - updated.mean(axis=0, keepdims=True)
+
+
+def _initial_positions(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    seed: int,
+    edge_weights: Optional[torch.Tensor],
+) -> np.ndarray:
+    """Build a stable stochastic warm start for SMACOF.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]``.
+    seed : int
+        Random seed for the warm-start jitter.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Initial positions with shape ``[N, 2]``.
+    """
+    baseline = _layout_classical_mds(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        seed=42,
+        edge_weights=edge_weights,
+    )
+    rng = np.random.default_rng(seed)
+    jitter = rng.normal(loc=0.0, scale=0.05, size=(num_nodes, 2))
+    initialized = baseline.detach().cpu().numpy().astype(np.float64) + jitter
+    return initialized - initialized.mean(axis=0, keepdims=True)
+
+
+from dagua.layout.ops.base import Op, Pipeline, Repeat  # noqa: E402
+from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig  # noqa: E402
+from dagua.layout.ops.state import (  # noqa: E402
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
+from dagua.layout.ops.taxonomy import OpCategory  # noqa: E402
 
 _MIN_DISTANCE = 1.0e-9
 
