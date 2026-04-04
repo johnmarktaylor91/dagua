@@ -1,0 +1,547 @@
+"""Registered NeuLay ops for a composable two-phase layout pipeline."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import ClassVar, Optional, Tuple
+
+import numpy as np
+import scipy.sparse as sp
+import torch
+from scipy.spatial import cKDTree
+from torch import nn
+
+from dagua.layout.ops.base import Op
+from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.taxonomy import OpCategory, register_op
+
+_PATIENCE = 10
+_GCN_REL_TOL = 1.0e-4
+_LINEAR_REL_TOL = 1.0e-8
+_GNN_LR = 0.01
+_PAIR_QUERY_RADIUS_FACTOR = 4.0
+_PAIR_REFRESH_INTERVAL = 5
+
+
+@dataclass(frozen=True)
+class NeuLayPrepareStateConfig:
+    """Configuration for :class:`NeuLayPrepareState`.
+
+    Parameters
+    ----------
+    dim : int, default=2
+        Output dimensionality.
+    lr : float, default=0.01
+        Direct-phase optimizer learning rate.
+    radius : float, default=0.4
+        Gaussian repulsion radius.
+    magnitude : float | None, default=None
+        NeuLay repulsion magnitude. ``None`` triggers adaptive resolution.
+    use_gcn : bool, default=True
+        Whether to run the optional GCN pre-phase.
+    gcn_steps : int, default=2_000
+        Number of gradient steps in the GCN phase.
+    total_steps : int, default=20_000
+        Total optimization budget across both phases.
+    """
+
+    dim: int = 2
+    lr: float = 0.01
+    radius: float = 0.4
+    magnitude: Optional[float] = None
+    use_gcn: bool = True
+    gcn_steps: int = 2_000
+    total_steps: int = 20_000
+
+
+class _SparseGCN(nn.Module):
+    """Sparse GCN layer implementing ``A_norm @ (X @ W)``."""
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        adj_norm: torch.Tensor,
+        gain: float,
+    ) -> None:
+        super().__init__()
+        self.adj_norm = adj_norm
+        self.weight = nn.Parameter(
+            torch.empty(in_dim, out_dim, device=adj_norm.device, dtype=torch.float32)
+        )
+        nn.init.xavier_uniform_(self.weight, gain=gain)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply one sparse GCN message-passing step.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Node features with shape ``[N, in_dim]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Updated features with shape ``[N, out_dim]``.
+        """
+        support = torch.mm(x, self.weight)
+        return torch.sparse.mm(self.adj_norm, support)
+
+
+class _ResGCN(nn.Module):
+    """NeuLay-style residual two-layer sparse GCN model."""
+
+    _HIDDEN = 100
+    _GCN2_OUT = 3
+
+    def __init__(
+        self,
+        num_nodes: int,
+        dim: int,
+        device: torch.device,
+        edge_index: torch.Tensor,
+    ) -> None:
+        super().__init__()
+        gain = float(max(num_nodes, 1)) ** (1.0 / float(max(dim, 1)))
+        adj_norm = _build_normalized_adjacency(edge_index=edge_index, num_nodes=num_nodes).to(
+            device
+        )
+
+        self.weight1 = nn.Parameter(
+            torch.empty((num_nodes, self._HIDDEN), device=device, dtype=torch.float32)
+        )
+        nn.init.xavier_uniform_(self.weight1, gain=gain)
+
+        self.gcn1 = _SparseGCN(self._HIDDEN, self._HIDDEN, adj_norm, gain)
+        self.gcn2 = _SparseGCN(self._HIDDEN, self._GCN2_OUT, adj_norm, gain)
+
+        concat_dim = self._HIDDEN + self._HIDDEN + self._GCN2_OUT
+        self.weight2 = nn.Parameter(
+            torch.empty((concat_dim, dim), device=device, dtype=torch.float32)
+        )
+        nn.init.xavier_uniform_(self.weight2, gain=gain)
+
+    def forward(self) -> torch.Tensor:
+        """Generate coordinates from residual GCN features."""
+        h0 = self.weight1
+        h1 = torch.tanh(self.gcn1(h0))
+        h2 = self.gcn2(h1)
+        return torch.mm(torch.cat([h0, h1, h2], dim=1), self.weight2)
+
+
+def _build_normalized_adjacency(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """Build the NeuLay symmetric degree-normalized adjacency matrix."""
+    if edge_index.numel() == 0:
+        idx = torch.arange(num_nodes, dtype=torch.long)
+        return torch.sparse_coo_tensor(
+            torch.stack([idx, idx]),
+            torch.ones(num_nodes, dtype=torch.float32),
+            (num_nodes, num_nodes),
+        ).coalesce()
+
+    src = edge_index[0].cpu()
+    dst = edge_index[1].cpu()
+    pairs = np.stack(
+        [
+            np.concatenate([src.numpy(), dst.numpy()]),
+            np.concatenate([dst.numpy(), src.numpy()]),
+        ],
+        axis=0,
+    ).astype(np.int64)
+    values = np.ones(pairs.shape[1], dtype=np.float32)
+
+    adjacency = sp.coo_matrix((values, (pairs[0], pairs[1])), shape=(num_nodes, num_nodes))
+    adjacency = adjacency + sp.eye(num_nodes, dtype=np.float32, format="coo")
+    adjacency.sum_duplicates()
+    if adjacency.nnz > 0:
+        adjacency.data[:] = 1.0
+
+    degree = np.asarray(adjacency.sum(axis=0), dtype=np.float32).ravel()
+    inv_sqrt = np.zeros_like(degree)
+    mask = degree > 0
+    inv_sqrt[mask] = 1.0 / np.sqrt(degree[mask])
+    d_mat = sp.diags(inv_sqrt).tocsr()
+    normalized = d_mat.dot(adjacency.dot(d_mat)).tocoo()
+
+    indices = torch.from_numpy(np.vstack((normalized.row, normalized.col)).astype(np.int64))
+    values = torch.from_numpy(normalized.data.astype(np.float32))
+    return torch.sparse_coo_tensor(
+        indices,
+        values,
+        (num_nodes, num_nodes),
+        dtype=torch.float32,
+    ).coalesce()
+
+
+def _initial_positions(num_nodes: int, dim: int, device: torch.device) -> torch.Tensor:
+    """Create random Xavier-initialized start positions."""
+    gain = float(max(num_nodes, 1)) ** (1.0 / float(max(dim, 1)))
+    initial = torch.empty((num_nodes, dim), device=device, dtype=torch.float32)
+    nn.init.xavier_uniform_(initial, gain=gain)
+    return initial
+
+
+def _relative_window_difference(loss_window: list[float]) -> float:
+    """Compute relative range over a rolling loss window."""
+    max_loss = max(loss_window)
+    if max_loss <= 0.0:
+        return 0.0
+    return (max_loss - min(loss_window)) / max_loss
+
+
+def _query_pairs(pos: torch.Tensor, query_radius: float) -> np.ndarray:
+    """Return KD-tree pairs within ``query_radius``."""
+    if pos.shape[0] < 2:
+        return np.empty((0, 2), dtype=np.int64)
+    tree = cKDTree(pos.detach().cpu().numpy())
+    pairs = tree.query_pairs(query_radius, output_type="ndarray")
+    if pairs.size == 0:
+        return np.empty((0, 2), dtype=np.int64)
+    return pairs.astype(np.int64)
+
+
+def _kdtree_repulsion_loss(
+    pos: torch.Tensor, pairs: np.ndarray, radius: float, magnitude: float
+) -> torch.Tensor:
+    """Evaluate NeuLay Gaussian repulsion for cached KD-tree pairs."""
+    if pairs.shape[0] == 0 or magnitude == 0.0:
+        return pos.sum() * 0.0
+    idx = torch.from_numpy(pairs).to(device=pos.device)
+    sq_dist = ((pos[idx[:, 0]] - pos[idx[:, 1]]) ** 2).sum(dim=-1)
+    return magnitude * torch.exp(-sq_dist / (4.0 * radius * radius)).sum()
+
+
+@register_op
+class NeuLaySeedRNG(Op):
+    """Seed classic NeuLay RNG state (PyTorch and NumPy)."""
+
+    name: ClassVar[str] = "neulay_seed_rng"
+    category: ClassVar[OpCategory] = OpCategory.INIT
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Set global PRNG state for deterministic NeuLay trajectories."""
+        del ctx
+
+        torch.manual_seed(problem.seed)
+        np.random.seed(problem.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(problem.seed)
+        return state
+
+
+@register_op
+class NeuLayPrepareState(Op):
+    """Clean edge index and cache NeuLay hyper-parameters."""
+
+    name: ClassVar[str] = "neulay_prepare_state"
+    category: ClassVar[OpCategory] = OpCategory.PREPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def __init__(self, config: Optional[NeuLayPrepareStateConfig] = None) -> None:
+        self.config = config or NeuLayPrepareStateConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Resolve reusable NeuLay values into ``state.extras``."""
+        del ctx
+
+        if self.config.dim <= 0:
+            raise ValueError("NeuLay dim must be positive.")
+        if self.config.lr <= 0.0:
+            raise ValueError("NeuLay lr must be positive.")
+        if self.config.radius <= 0.0:
+            raise ValueError("NeuLay radius must be positive.")
+        if self.config.magnitude is not None and self.config.magnitude < 0.0:
+            raise ValueError("NeuLay magnitude must be non-negative.")
+        if self.config.gcn_steps < 0:
+            raise ValueError("NeuLay gcn_steps must be non-negative.")
+        if self.config.total_steps < 0:
+            raise ValueError("NeuLay total_steps must be non-negative.")
+
+        device = (
+            problem.edge_index.device
+            if problem.edge_index.numel() > 0
+            else problem.node_sizes.device
+            if problem.node_sizes is not None
+            else torch.device("cpu")
+        )
+        cleaned = problem.edge_index.to(device=device, dtype=torch.long)
+        if cleaned.numel() == 0:
+            cleaned = cleaned.reshape(2, 0)
+        else:
+            non_self = cleaned[0] != cleaned[1]
+            cleaned = cleaned[:, non_self].contiguous()
+
+        if self.config.magnitude is None:
+            magnitude = 100.0 * (problem.num_nodes ** (1.0 / 3.0)) * self.config.radius
+        else:
+            magnitude = float(self.config.magnitude)
+
+        linear_steps = (
+            max(self.config.total_steps - self.config.gcn_steps, 0)
+            if self.config.use_gcn
+            else self.config.total_steps
+        )
+
+        state.extras["neulay_cleaned_edge_index"] = cleaned
+        state.extras["neulay_device"] = device
+        state.extras["neulay_dim"] = self.config.dim
+        state.extras["neulay_lr"] = self.config.lr
+        state.extras["neulay_radius"] = self.config.radius
+        state.extras["neulay_magnitude"] = magnitude
+        state.extras["neulay_use_gcn"] = self.config.use_gcn
+        state.extras["neulay_gcn_steps"] = self.config.gcn_steps
+        state.extras["neulay_linear_steps"] = linear_steps
+        state.extras["neulay_query_radius"] = _PAIR_QUERY_RADIUS_FACTOR * self.config.radius
+        return state
+
+
+@register_op
+class NeuLayRunGCNPhase(Op):
+    """Run the optional NeuLay GCN pre-optimization phase."""
+
+    name: ClassVar[str] = "neulay_gcn_phase"
+    category: ClassVar[OpCategory] = OpCategory.INIT
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Run GCN training unless disabled by config and return coarse positions."""
+        del ctx
+
+        cleaned = state.extras["neulay_cleaned_edge_index"]
+        device = state.extras["neulay_device"]
+        dim = state.extras["neulay_dim"]
+        radius = state.extras["neulay_radius"]
+        magnitude = state.extras["neulay_magnitude"]
+        gcn_steps = state.extras["neulay_gcn_steps"]
+        use_gcn = state.extras["neulay_use_gcn"]
+        query_radius = state.extras["neulay_query_radius"]
+
+        if use_gcn and gcn_steps > 0:
+            model = _ResGCN(
+                num_nodes=problem.num_nodes,
+                dim=dim,
+                device=device,
+                edge_index=cleaned,
+            )
+            optimizer = torch.optim.RMSprop(model.parameters(), lr=_GNN_LR)
+            loss_window = [0.0] * _PATIENCE
+            pairs = np.empty((0, 2), dtype=np.int64)
+
+            for step in range(gcn_steps):
+                optimizer.zero_grad(set_to_none=True)
+                output = model()
+                if step % _PAIR_REFRESH_INTERVAL == 0:
+                    pairs = _query_pairs(output, query_radius)
+
+                if cleaned.numel() == 0:
+                    elastic = output.sum() * 0.0
+                else:
+                    src = cleaned[0]
+                    dst = cleaned[1]
+                    low = torch.minimum(src, dst)
+                    high = torch.maximum(src, dst)
+                    pairs_matrix = torch.stack([low, high], dim=0)
+                    unique_pairs = torch.unique(pairs_matrix, dim=1)
+                    diff = output[unique_pairs[0]] - output[unique_pairs[1]]
+                    elastic = diff.square().sum() * 0.5
+
+                repulsion = _kdtree_repulsion_loss(
+                    output,
+                    pairs=pairs,
+                    radius=radius,
+                    magnitude=magnitude,
+                )
+                loss = elastic + repulsion
+                loss.backward()
+                optimizer.step()
+                loss_window.append(float(loss.detach().item()))
+                loss_window.pop(0)
+                if _relative_window_difference(loss_window) < (
+                    _GCN_REL_TOL * math.sqrt(float(problem.num_nodes))
+                ):
+                    break
+
+            with torch.no_grad():
+                state.pos = model().detach()
+            return state
+
+        state.pos = _initial_positions(
+            num_nodes=problem.num_nodes,
+            dim=dim,
+            device=device,
+        )
+        return state
+
+
+@register_op
+class NeuLayPrepareDirectOptimizer(Op):
+    """Create RMSprop state for NeuLay's direct refinement phase."""
+
+    name: ClassVar[str] = "neulay_init_direct_optimizer"
+    category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "optimizer", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Clone initial coordinates and attach an RMSprop optimizer."""
+        del problem, ctx
+
+        if state.pos is None:
+            raise ValueError("NeuLayPrepareDirectOptimizer requires state.pos.")
+
+        lr = state.extras["neulay_lr"]
+        state.pos = nn.Parameter(state.pos.clone())
+        state.optimizer = torch.optim.RMSprop([state.pos], lr=lr)
+        state.extras["neulay_loss_window"] = [0.0] * _PATIENCE
+        state.extras["neulay_pairs"] = np.empty((0, 2), dtype=np.int64)
+        return state
+
+
+@register_op
+class NeuLayDirectStep(Op):
+    """Run one NeuLay direct refinement step."""
+
+    name: ClassVar[str] = "neulay_direct_step"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "optimizer", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compute NeuLay loss, backpropagate, and apply one RMSprop update."""
+        del problem, ctx
+
+        if state.pos is None:
+            raise ValueError("NeuLayDirectStep requires state.pos.")
+        if state.optimizer is None:
+            raise ValueError("NeuLayDirectStep requires state.optimizer.")
+
+        cleaned = state.extras["neulay_cleaned_edge_index"]
+        radius = state.extras["neulay_radius"]
+        magnitude = state.extras["neulay_magnitude"]
+        query_radius = state.extras["neulay_query_radius"]
+        loss_window = state.extras["neulay_loss_window"]
+        pairs = state.extras["neulay_pairs"]
+
+        state.optimizer.zero_grad(set_to_none=True)
+        if state.step % _PAIR_REFRESH_INTERVAL == 0:
+            pairs = _query_pairs(state.pos, query_radius)
+            state.extras["neulay_pairs"] = pairs
+
+        if cleaned.numel() == 0:
+            elastic = state.pos.sum() * 0.0
+        else:
+            src = cleaned[0]
+            dst = cleaned[1]
+            low = torch.minimum(src, dst)
+            high = torch.maximum(src, dst)
+            pairs_matrix = torch.stack([low, high], dim=0)
+            unique_pairs = torch.unique(pairs_matrix, dim=1)
+            diff = state.pos[unique_pairs[0]] - state.pos[unique_pairs[1]]
+            elastic = diff.square().sum() * 0.5
+
+        repulsion = _kdtree_repulsion_loss(
+            state.pos,
+            pairs=pairs,
+            radius=radius,
+            magnitude=magnitude,
+        )
+        loss = elastic + repulsion
+        loss.backward()
+        state.optimizer.step()
+
+        loss_window.append(float(loss.detach().item()))
+        loss_window.pop(0)
+        state.extras["neulay_loss_window"] = loss_window
+        return state
+
+
+@register_op
+class NeuLayDirectConvergenceCheck(Op):
+    """Check NeuLay convergence in direct refinement."""
+
+    name: ClassVar[str] = "neulay_direct_convergence"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Set ``state.converged`` when the sliding loss window stabilizes."""
+        del ctx
+        loss_window = state.extras["neulay_loss_window"]
+        threshold = _LINEAR_REL_TOL * math.sqrt(float(problem.num_nodes))
+        if _relative_window_difference(loss_window) < threshold:
+            state.converged = True
+        return state
+
+
+@register_op
+class NeuLayFinalizePositions(Op):
+    """Detach final coordinates for deterministic output."""
+
+    name: ClassVar[str] = "neulay_finalize_positions"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Detach the final positions from autograd and return them."""
+        del problem, ctx
+        if state.pos is None:
+            raise ValueError("NeuLayFinalizePositions requires state.pos.")
+        state.pos = state.pos.detach()
+        return state
+
+
+__all__ = [
+    "NeuLaySeedRNG",
+    "NeuLayPrepareState",
+    "NeuLayPrepareStateConfig",
+    "NeuLayRunGCNPhase",
+    "NeuLayPrepareDirectOptimizer",
+    "NeuLayDirectStep",
+    "NeuLayDirectConvergenceCheck",
+    "NeuLayFinalizePositions",
+]
