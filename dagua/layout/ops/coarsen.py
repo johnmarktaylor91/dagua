@@ -4,28 +4,386 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from typing import List, Optional, Sequence, Tuple
 
 import torch
 
-from dagua.layout._archive.classic.fmmm import (
-    _TYPE_MOON,
-    _TYPE_PLANET,
-    _TYPE_PLANET_WITH_MOONS,
-    _TYPE_SUN,
-    _build_weighted_adjacency,
-    _LevelGraph,
-    _RandomNodeSet,
-    _star_masses,
-    _unique_edges_with_lengths,
+_TYPE_SUN = 1
+_TYPE_PLANET = 2
+_TYPE_PLANET_WITH_MOONS = 3
+_TYPE_MOON = 4
+_MIN_COARSE_SIZE = 4
+_MIN_COARSEN_REDUCTION = 0.75
+
+
+@dataclass
+class _LevelGraph:
+    """One multilevel FM^3 graph with per-edge desired lengths.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Unique edges with shape ``[2, E]``.
+    edge_lengths : torch.Tensor
+        Desired edge lengths with shape ``[E]``.
+    num_nodes : int
+        Number of nodes in this level.
+    edge_weights : torch.Tensor, optional
+        Edge-weight tensor with shape ``[E]`` used by attraction force terms.
+    """
+
+    edge_index: torch.Tensor
+    edge_lengths: torch.Tensor
+    num_nodes: int
+    edge_weights: torch.Tensor = field(
+        default_factory=lambda: torch.empty((0,), dtype=torch.float32)
+    )
+
+
+@dataclass
+class _RandomNodeSet:
+    """Mutable node set mirroring OGDF's swap-delete random selection structure.
+
+    Parameters
+    ----------
+    nodes : list[int]
+        Permutation storage backing the active node set.
+    positions : list[int]
+        Position index lookup for each node.
+    last_selectable_index : int
+        Final index of the active swap-delete prefix.
+    star_masses : list[int]
+        Star mass used as sampling weights for selection.
+    """
+
+    nodes: list[int]
+    positions: list[int]
+    last_selectable_index: int
+    star_masses: list[int]
+
+    @classmethod
+    def from_star_masses(cls, star_masses: list[int]) -> "_RandomNodeSet":
+        """Create a selectable node set for the given star masses."""
+        num_nodes = len(star_masses)
+        return cls(
+            nodes=list(range(num_nodes)),
+            positions=list(range(num_nodes)),
+            last_selectable_index=num_nodes - 1,
+            star_masses=star_masses,
+        )
+
+    def empty(self) -> bool:
+        """Return whether no selectable nodes remain."""
+        return self.last_selectable_index < 0
+
+    def is_deleted(self, node: int) -> bool:
+        """Return whether a node has been removed from the selectable prefix."""
+        return self.positions[node] > self.last_selectable_index
+
+    def delete(self, node: int) -> None:
+        """Delete a node from the selectable prefix if it is still active."""
+        if self.is_deleted(node):
+            return
+        del_index = self.positions[node]
+        last_node = self.nodes[self.last_selectable_index]
+        self.nodes[self.last_selectable_index] = node
+        self.nodes[del_index] = last_node
+        self.positions[node] = self.last_selectable_index
+        self.positions[last_node] = del_index
+        self.last_selectable_index -= 1
+
+    def _get_random_node_common(self, rand_index: int, last_index: int) -> tuple[int, int]:
+        """Swap a sampled node with the current tail and remove it from a prefix."""
+        random_node = self.nodes[rand_index]
+        last_node = self.nodes[last_index]
+        self.nodes[last_index] = random_node
+        self.nodes[rand_index] = last_node
+        self.positions[random_node] = last_index
+        self.positions[last_node] = rand_index
+        return random_node, last_index - 1
+
+    def get_random_node_with_highest_star_mass(
+        self,
+        rng: random.Random,
+        random_tries: int,
+    ) -> int:
+        """Sample several distinct candidates and keep the one with highest star mass."""
+        if self.empty():
+            raise ValueError("cannot select from an empty node set")
+
+        best_index = -1
+        best_mass = 0
+        last_try_index = self.last_selectable_index
+        max_tries = min(random_tries, last_try_index + 1)
+        for trial_index in range(1, max_tries + 1):
+            sampled_index = rng.randint(0, last_try_index)
+            mass = self.star_masses[self.nodes[sampled_index]]
+            _, last_try_index = self._get_random_node_common(sampled_index, last_try_index)
+            if trial_index == 1 or mass > best_mass:
+                best_index = last_try_index + 1
+                best_mass = mass
+
+        if best_index < 0:
+            raise RuntimeError("failed to select a sun node")
+
+        selected_node, self.last_selectable_index = self._get_random_node_common(
+            best_index,
+            self.last_selectable_index,
+        )
+        return selected_node
+
+
+def _unique_edges_with_lengths(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Convert an edge tensor into unique undirected edges with lengths and weights."""
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+
+    if edge_weights is not None and edge_weights.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            f"edge_weights length {edge_weights.shape[0]} does not match "
+            f"edge count {edge_index.shape[1]}"
+        )
+
+    seen: dict[tuple[int, int], tuple[float, int, float]] = {}
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    weights_cpu = (
+        torch.ones((edge_index.shape[1],), dtype=torch.float32)
+        if edge_weights is None
+        else edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
+        if source < 0 or source >= num_nodes or target < 0 or target >= num_nodes:
+            raise ValueError("edge_index contains a node index outside [0, num_nodes).")
+        if source == target:
+            continue
+        pair = (min(source, target), max(source, target))
+        length_sum, count, weight_sum = seen.get(pair, (0.0, 0, 0.0))
+        seen[pair] = (
+            length_sum + 1.0,
+            count + 1,
+            weight_sum + float(weights_cpu[edge_id].item()),
+        )
+
+    if not seen:
+        return (
+            torch.empty((2, 0), dtype=torch.long),
+            torch.empty((0,), dtype=torch.float32),
+            torch.empty((0,), dtype=torch.float32),
+        )
+
+    ordered_pairs = sorted(seen)
+    lengths = [seen[pair][0] / seen[pair][1] for pair in ordered_pairs]
+    weights = [seen[pair][2] for pair in ordered_pairs]
+    return (
+        torch.tensor(ordered_pairs, dtype=torch.long).transpose(0, 1).contiguous(),
+        torch.tensor(lengths, dtype=torch.float32),
+        torch.tensor(weights, dtype=torch.float32),
+    )
+
+
+def _build_weighted_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> list[list[tuple[int, int]]]:
+    """Build an undirected adjacency list referencing edge indices."""
+    adjacency: list[list[tuple[int, int]]] = [[] for _ in range(num_nodes)]
+    if edge_index.numel() == 0:
+        return adjacency
+
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
+        adjacency[source].append((target, edge_id))
+        adjacency[target].append((source, edge_id))
+
+    for neighbors in adjacency:
+        neighbors.sort(key=lambda item: item[0])
+    return adjacency
+
+
+def _star_masses(
+    node_masses: torch.Tensor,
+    adjacency: list[list[tuple[int, int]]],
+) -> list[int]:
+    """Compute OGDF's star mass for each node."""
+    masses_cpu = node_masses.to(device="cpu", dtype=torch.long).tolist()
+    return [
+        masses_cpu[node] + sum(masses_cpu[neighbor] for neighbor, _ in neighbors)
+        for node, neighbors in enumerate(adjacency)
+    ]
+
+
+@dataclass
+class _GraphData:
+    """Undirected weighted graph representation for SFDP."""
+
+    num_nodes: int
+    edge_index: torch.Tensor
+    edge_weight: torch.Tensor
+    adjacency: list[list[tuple[int, float]]] = field(default_factory=list)
+
+
+def _build_graph(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> _GraphData:
+    """Build an undirected weighted graph from a directed edge list."""
+    adjacency: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
+    if edge_index.numel() > 0:
+        edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+        weights_cpu = (
+            torch.ones((edge_index.shape[1],), dtype=torch.float32)
+            if edge_weights is None
+            else edge_weights.detach().to(device="cpu", dtype=torch.float32)
+        )
+        for edge_id, (source, target) in enumerate(
+            zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+        ):
+            if source == target:
+                continue
+            lower = min(source, target)
+            upper = max(source, target)
+            adjacency[lower][upper] = adjacency[lower].get(upper, 0.0) + float(
+                weights_cpu[edge_id].item()
+            )
+
+    edge_pairs: list[tuple[int, int]] = []
+    edge_weight_values: list[float] = []
+    adjacency_lists: list[list[tuple[int, float]]] = [[] for _ in range(num_nodes)]
+    for source in range(num_nodes):
+        for target, weight in sorted(adjacency[source].items()):
+            edge_pairs.append((source, target))
+            edge_weight_values.append(weight)
+            adjacency_lists[source].append((target, weight))
+            adjacency_lists[target].append((source, weight))
+
+    if edge_pairs:
+        edge_index_cpu = torch.tensor(edge_pairs, dtype=torch.long).transpose(0, 1).contiguous()
+        edge_weight_cpu = torch.tensor(edge_weight_values, dtype=torch.float32)
+    else:
+        edge_index_cpu = torch.empty((2, 0), dtype=torch.long)
+        edge_weight_cpu = torch.empty((0,), dtype=torch.float32)
+    return _GraphData(
+        num_nodes=num_nodes,
+        edge_index=edge_index_cpu,
+        edge_weight=edge_weight_cpu,
+        adjacency=adjacency_lists,
+    )
+
+
+def _heavy_edge_matching(
+    graph: _GraphData,
+    generator: torch.Generator,
+) -> Optional[tuple[torch.Tensor, _GraphData]]:
+    """Coarsen one level with random-order heavy-edge matching."""
+    num_nodes = graph.num_nodes
+    if num_nodes < _MIN_COARSE_SIZE:
+        return None
+
+    order = torch.randperm(num_nodes, generator=generator).tolist()
+    matched = torch.zeros(num_nodes, dtype=torch.bool)
+    fine_to_coarse = torch.full((num_nodes,), -1, dtype=torch.long)
+    coarse_node = 0
+
+    for node in order:
+        if bool(matched[node].item()):
+            continue
+        matched[node] = True
+        partner = -1
+        partner_weight = -1.0
+        for neighbor, weight in graph.adjacency[node]:
+            if bool(matched[neighbor].item()):
+                continue
+            if weight > partner_weight:
+                partner = neighbor
+                partner_weight = weight
+
+        fine_to_coarse[node] = coarse_node
+        if partner >= 0:
+            matched[partner] = True
+            fine_to_coarse[partner] = coarse_node
+        coarse_node += 1
+
+    coarse_num_nodes = coarse_node
+    if coarse_num_nodes == num_nodes:
+        return None
+    if coarse_num_nodes < _MIN_COARSE_SIZE:
+        return None
+    if coarse_num_nodes > int(_MIN_COARSEN_REDUCTION * float(num_nodes)):
+        return None
+
+    coarse_graph = _build_graph_from_mapping(
+        graph=graph,
+        fine_to_coarse=fine_to_coarse,
+        coarse_num_nodes=coarse_num_nodes,
+    )
+    return fine_to_coarse, coarse_graph
+
+
+def _build_graph_from_mapping(
+    graph: _GraphData,
+    fine_to_coarse: torch.Tensor,
+    coarse_num_nodes: int,
+) -> _GraphData:
+    """Aggregate a coarse graph from a fine-to-coarse assignment."""
+    coarse_edges: dict[tuple[int, int], float] = {}
+    for edge_id in range(graph.edge_index.shape[1]):
+        source = int(graph.edge_index[0, edge_id].item())
+        target = int(graph.edge_index[1, edge_id].item())
+        coarse_source = int(fine_to_coarse[source].item())
+        coarse_target = int(fine_to_coarse[target].item())
+        if coarse_source == coarse_target:
+            continue
+        lower = min(coarse_source, coarse_target)
+        upper = max(coarse_source, coarse_target)
+        coarse_edges[(lower, upper)] = coarse_edges.get((lower, upper), 0.0) + float(
+            graph.edge_weight[edge_id].item()
+        )
+
+    if coarse_edges:
+        coarse_index = torch.tensor(list(coarse_edges.keys()), dtype=torch.long).transpose(0, 1)
+        coarse_weight = torch.tensor(list(coarse_edges.values()), dtype=torch.float32)
+    else:
+        coarse_index = torch.empty((2, 0), dtype=torch.long)
+        coarse_weight = torch.empty((0,), dtype=torch.float32)
+
+    adjacency_lists: list[list[tuple[int, float]]] = [[] for _ in range(coarse_num_nodes)]
+    for edge_id in range(coarse_index.shape[1]):
+        source = int(coarse_index[0, edge_id].item())
+        target = int(coarse_index[1, edge_id].item())
+        weight = float(coarse_weight[edge_id].item())
+        adjacency_lists[source].append((target, weight))
+        adjacency_lists[target].append((source, weight))
+
+    return _GraphData(
+        num_nodes=coarse_num_nodes,
+        edge_index=coarse_index.contiguous(),
+        edge_weight=coarse_weight,
+        adjacency=adjacency_lists,
+    )
+
+
+_build_sfdp_graph = _build_graph
+_sfdp_heavy_edge_matching = _heavy_edge_matching
+
+from dagua.layout.ops.base import Op  # noqa: E402
+from dagua.layout.ops.state import (  # noqa: E402
+    HierarchyLevel,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
 )
-from dagua.layout._archive.classic.sfdp import _build_graph as _build_sfdp_graph
-from dagua.layout._archive.classic.sfdp import _heavy_edge_matching as _sfdp_heavy_edge_matching
-from dagua.layout.ops.base import Op
-from dagua.layout.ops.state import HierarchyLevel, LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.taxonomy import OpCategory, register_op
+from dagua.layout.ops.taxonomy import OpCategory, register_op  # noqa: E402
 
 _multilevel = import_module("dagua.layout.multilevel")
 _SOLAR_STEPS_KEY = "solar_system_steps"

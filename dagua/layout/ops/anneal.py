@@ -8,7 +8,6 @@ from typing import Any, Callable, ClassVar, Dict, Mapping, Optional, Sequence, T
 
 import torch
 
-from dagua.layout._archive.classic.gem import _update_temperatures as _gem_update_temperatures
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import AnnealingSchedule, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -25,6 +24,67 @@ _PLATEAU_EMA_SUM_KEY = "reduce_lr_on_plateau_ema_weighted_sum"
 _PLATEAU_EMA_WEIGHT_KEY = "reduce_lr_on_plateau_ema_total_weight"
 _LR_DECAY_START_KEY = "lr_decay_start_lr"
 _LR_DECAY_END_KEY = "lr_decay_end_lr"
+_MIN_DISTANCE = 1.0e-9
+_ROTATION_SINE_THRESHOLD = math.sin((math.pi / 2.0) + (math.pi / 3.0 / 2.0))
+_OSCILLATION_COSINE_THRESHOLD = math.cos((math.pi / 2.0) / 2.0)
+_ROTATION_SENSITIVITY = 0.01
+_OSCILLATION_SENSITIVITY = 0.3
+
+
+def _gem_update_temperatures(
+    temperatures: torch.Tensor,
+    current_impulse: torch.Tensor,
+    previous_impulse: torch.Tensor,
+    skew_gauge: torch.Tensor,
+    initial_temperature: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Adjust per-node temperatures with OGDF's oscillation and skew rules.
+
+    Parameters
+    ----------
+    temperatures : torch.Tensor
+        Per-node temperature tensor with shape ``[N]``.
+    current_impulse : torch.Tensor
+        Current scaled node movements with shape ``[N, 2]``.
+    previous_impulse : torch.Tensor
+        Previous scaled node movements with shape ``[N, 2]``.
+    skew_gauge : torch.Tensor
+        Per-node rotation accumulator with shape ``[N]``.
+    initial_temperature : float
+        Maximum allowed per-node temperature.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Updated temperatures and skew-gauge values, both with shape ``[N]``.
+    """
+    current_norm = torch.linalg.norm(current_impulse, dim=1)
+    previous_norm = torch.linalg.norm(previous_impulse, dim=1)
+    product = current_norm * previous_norm
+    valid = product > _MIN_DISTANCE
+
+    if not bool(valid.any()):
+        return temperatures, skew_gauge
+
+    safe_product = product.clamp(min=_MIN_DISTANCE)
+    sin_beta = (
+        current_impulse[:, 0] * previous_impulse[:, 0]
+        - current_impulse[:, 1] * previous_impulse[:, 1]
+    ) / safe_product
+    cos_beta = (
+        current_impulse[:, 0] * previous_impulse[:, 0]
+        + current_impulse[:, 1] * previous_impulse[:, 1]
+    ) / safe_product
+
+    rotation_mask = valid & (sin_beta > _ROTATION_SINE_THRESHOLD)
+    skew_gauge = torch.where(rotation_mask, skew_gauge + _ROTATION_SENSITIVITY, skew_gauge)
+
+    oscillation_mask = valid & (cos_beta.abs() > _OSCILLATION_COSINE_THRESHOLD)
+    oscillation_scale = 1.0 + cos_beta * _OSCILLATION_SENSITIVITY
+    temperatures = torch.where(oscillation_mask, temperatures * oscillation_scale, temperatures)
+    temperatures = temperatures * (1.0 - skew_gauge.abs())
+    temperatures = torch.minimum(temperatures, torch.full_like(temperatures, initial_temperature))
+    return temperatures, skew_gauge
 
 
 def _require_temperature(state: SolveState, op_name: str) -> float:

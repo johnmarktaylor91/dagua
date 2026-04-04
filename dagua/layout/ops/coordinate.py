@@ -5,11 +5,10 @@ from __future__ import annotations
 import sys
 from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
-from dagua.layout._archive.classic.sugiyama import _brandes_koepf_x_positions, _resolve_node_sizes
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import (
     build_undirected_adjacency as _build_undirected_adjacency,
@@ -19,6 +18,618 @@ from dagua.layout.ops.graph_utils import (
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
+
+_NO_SHIFT = float("inf")
+
+
+def _resolve_node_sizes(node_sizes: Optional[torch.Tensor], num_nodes: int) -> torch.Tensor:
+    """Return CPU node sizes for coordinate spacing.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor | None
+        Optional input node sizes.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU float tensor with shape ``[N, 2]``.
+    """
+    if node_sizes is None:
+        return torch.zeros((num_nodes, 2), dtype=torch.float32)
+    return node_sizes.detach().to(device="cpu", dtype=torch.float32)
+
+
+def _brandes_koepf_x_positions(
+    layers: Sequence[Sequence[int]],
+    parents: Sequence[Sequence[int]],
+    children: Sequence[Sequence[int]],
+    node_sizes: torch.Tensor,
+    num_nodes: int,
+    num_original_nodes: int,
+    node_sep: float,
+) -> List[float]:
+    """Compute balanced horizontal coordinates with four BK passes.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered nodes per layer.
+    parents : sequence of sequence of int
+        Parent adjacency indexed by node id.
+    children : sequence of sequence of int
+        Child adjacency indexed by node id.
+    node_sizes : torch.Tensor
+        CPU node sizes ``[N, 2]``.
+    num_nodes : int
+        Number of nodes.
+    num_original_nodes : int
+        Count of non-dummy nodes.
+    node_sep : float
+        Horizontal gap between node bounding boxes.
+
+    Returns
+    -------
+    list of float
+        Final X coordinates for all expanded nodes.
+    """
+    if num_nodes == 0:
+        return []
+
+    dummy_mask = [node >= num_original_nodes for node in range(num_nodes)]
+    orientation_specs = (
+        ("ul", False, False),
+        ("ur", False, True),
+        ("dl", True, False),
+        ("dr", True, True),
+    )
+    x_by_alignment: Dict[str, List[float]] = {}
+    for alignment_name, reverse_layers, reverse_within in orientation_specs:
+        oriented_layers = _transform_layers(
+            layers=layers,
+            reverse_layers=reverse_layers,
+            reverse_within=reverse_within,
+        )
+        rank_of, pos_of = _layer_position_maps(layers=oriented_layers, num_nodes=num_nodes)
+        predecessor_source = children if reverse_layers else parents
+        predecessors = _ordered_transformed_neighbors(
+            neighbors_by_node=predecessor_source,
+            pos_of=pos_of,
+        )
+        conflicts = _find_type1_conflicts(
+            layers=oriented_layers,
+            predecessors=predecessors,
+            pos_of=pos_of,
+            dummy_mask=dummy_mask,
+        )
+        root, align = _vertical_alignment(
+            layers=oriented_layers,
+            predecessors=predecessors,
+            pos_of=pos_of,
+            conflicts=conflicts,
+            num_nodes=num_nodes,
+        )
+        compacted = _horizontal_compaction(
+            layers=oriented_layers,
+            root=root,
+            align=align,
+            rank_of=rank_of,
+            pos_of=pos_of,
+            node_sizes=node_sizes,
+            node_sep=node_sep,
+            num_nodes=num_nodes,
+        )
+        if reverse_within:
+            compacted = [-value for value in compacted]
+        x_by_alignment[alignment_name] = compacted
+
+    _align_compacted_coordinates(x_by_alignment=x_by_alignment)
+    balanced = _median_balanced_coordinates(x_by_alignment=x_by_alignment, num_nodes=num_nodes)
+    return _center_coordinates(values=balanced)
+
+
+def _transform_layers(
+    layers: Sequence[Sequence[int]],
+    reverse_layers: bool,
+    reverse_within: bool,
+) -> List[List[int]]:
+    """Return an orientation-specific view of the ordered layers.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Ordered nodes per layer in the original top-down orientation.
+    reverse_layers : bool
+        Whether to scan layers from bottom to top.
+    reverse_within : bool
+        Whether to mirror each layer left-to-right.
+
+    Returns
+    -------
+    list of list of int
+        Oriented layer ordering for one Brandes-Kopf pass.
+    """
+    oriented_layers = [list(layer) for layer in layers]
+    if reverse_layers:
+        oriented_layers = list(reversed(oriented_layers))
+    if reverse_within:
+        oriented_layers = [list(reversed(layer)) for layer in oriented_layers]
+    return oriented_layers
+
+
+def _layer_position_maps(
+    layers: Sequence[Sequence[int]],
+    num_nodes: int,
+) -> Tuple[List[int], List[int]]:
+    """Build rank and order maps for one oriented layering.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Oriented layers for one pass.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    tuple
+        ``(rank_of, pos_of)`` arrays indexed by node id.
+    """
+    rank_of = [-1] * num_nodes
+    pos_of = [-1] * num_nodes
+    for rank_index, layer_nodes in enumerate(layers):
+        for position, node in enumerate(layer_nodes):
+            rank_of[node] = rank_index
+            pos_of[node] = position
+    return rank_of, pos_of
+
+
+def _ordered_transformed_neighbors(
+    neighbors_by_node: Sequence[Sequence[int]],
+    pos_of: Sequence[int],
+) -> List[List[int]]:
+    """Sort neighbors by their position in the transformed layering.
+
+    Parameters
+    ----------
+    neighbors_by_node : sequence of sequence of int
+        Neighbor adjacency indexed by node id.
+    pos_of : sequence of int
+        Within-layer positions for the transformed layering.
+
+    Returns
+    -------
+    list of list of int
+        Neighbor ids sorted left-to-right in the transformed layering.
+    """
+    ordered_neighbors: List[List[int]] = []
+    for neighbors in neighbors_by_node:
+        ordered_neighbors.append(sorted(neighbors, key=lambda node: pos_of[node]))
+    return ordered_neighbors
+
+
+def _find_type1_conflicts(
+    layers: Sequence[Sequence[int]],
+    predecessors: Sequence[Sequence[int]],
+    pos_of: Sequence[int],
+    dummy_mask: Sequence[bool],
+) -> Set[Tuple[int, int]]:
+    """Mark Type 1 conflicts between inner and non-inner segments.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Oriented layers for one Brandes-Kopf pass.
+    predecessors : sequence of sequence of int
+        Oriented predecessor adjacency indexed by node id.
+    pos_of : sequence of int
+        Within-layer positions in the oriented layering.
+    dummy_mask : sequence of bool
+        Flags indicating which nodes are dummy vertices created for long
+        edges.
+
+    Returns
+    -------
+    set of tuple of int
+        Conflicting oriented edges as ``(predecessor, node)`` pairs.
+    """
+    conflicts: Set[Tuple[int, int]] = set()
+    for rank_index in range(1, len(layers)):
+        north_layer = layers[rank_index - 1]
+        south_layer = layers[rank_index]
+        if not south_layer:
+            continue
+
+        left_boundary = 0
+        scan_start = 0
+        last_index = len(south_layer) - 1
+        for south_index, node in enumerate(south_layer):
+            inner_predecessor = _inner_segment_predecessor(
+                node=node,
+                predecessors=predecessors,
+                dummy_mask=dummy_mask,
+            )
+            right_boundary = (
+                pos_of[inner_predecessor] if inner_predecessor is not None else len(north_layer)
+            )
+            if inner_predecessor is None and south_index != last_index:
+                continue
+
+            for scan_node in south_layer[scan_start : south_index + 1]:
+                for predecessor in predecessors[scan_node]:
+                    predecessor_position = pos_of[predecessor]
+                    is_inner_segment = dummy_mask[scan_node] and dummy_mask[predecessor]
+                    if not is_inner_segment and (
+                        predecessor_position < left_boundary
+                        or predecessor_position > right_boundary
+                    ):
+                        conflicts.add((predecessor, scan_node))
+
+            scan_start = south_index + 1
+            left_boundary = right_boundary
+    return conflicts
+
+
+def _inner_segment_predecessor(
+    node: int,
+    predecessors: Sequence[Sequence[int]],
+    dummy_mask: Sequence[bool],
+) -> Optional[int]:
+    """Return the predecessor of an inner segment dummy, if present.
+
+    Parameters
+    ----------
+    node : int
+        Candidate node on the lower layer of an oriented pass.
+    predecessors : sequence of sequence of int
+        Oriented predecessor adjacency indexed by node id.
+    dummy_mask : sequence of bool
+        Flags indicating dummy nodes.
+
+    Returns
+    -------
+    int | None
+        The predecessor node id when ``node`` participates in a dummy-to-dummy
+        inner segment; otherwise ``None``.
+    """
+    if not dummy_mask[node] or len(predecessors[node]) != 1:
+        return None
+    predecessor = predecessors[node][0]
+    if not dummy_mask[predecessor]:
+        return None
+    return predecessor
+
+
+def _vertical_alignment(
+    layers: Sequence[Sequence[int]],
+    predecessors: Sequence[Sequence[int]],
+    pos_of: Sequence[int],
+    conflicts: Set[Tuple[int, int]],
+    num_nodes: int,
+) -> Tuple[List[int], List[int]]:
+    """Construct aligned blocks for one Brandes-Kopf orientation.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Oriented layers for one pass.
+    predecessors : sequence of sequence of int
+        Oriented predecessor adjacency indexed by node id.
+    pos_of : sequence of int
+        Within-layer positions in the oriented layering.
+    conflicts : set of tuple of int
+        Type 1 conflicts as ``(predecessor, node)`` pairs.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    tuple
+        ``(root, align)`` arrays indexed by node id.
+    """
+    root = list(range(num_nodes))
+    align = list(range(num_nodes))
+
+    for rank_index in range(1, len(layers)):
+        previous_position = -1
+        for node in layers[rank_index]:
+            neighbor_nodes = predecessors[node]
+            if not neighbor_nodes:
+                continue
+
+            median_start = (len(neighbor_nodes) - 1) // 2
+            median_stop = len(neighbor_nodes) // 2
+            for neighbor_index in range(median_start, median_stop + 1):
+                predecessor = neighbor_nodes[neighbor_index]
+                if align[node] != node:
+                    break
+                if pos_of[predecessor] <= previous_position:
+                    continue
+                if (predecessor, node) in conflicts:
+                    continue
+
+                align[predecessor] = node
+                align[node] = root[node] = root[predecessor]
+                previous_position = pos_of[predecessor]
+    return root, align
+
+
+def _horizontal_compaction(
+    layers: Sequence[Sequence[int]],
+    root: Sequence[int],
+    align: Sequence[int],
+    rank_of: Sequence[int],
+    pos_of: Sequence[int],
+    node_sizes: torch.Tensor,
+    node_sep: float,
+    num_nodes: int,
+) -> List[float]:
+    """Compact one aligned orientation into concrete X positions.
+
+    Parameters
+    ----------
+    layers : sequence of sequence of int
+        Oriented layers for one pass.
+    root : sequence of int
+        Block-root array from vertical alignment.
+    align : sequence of int
+        Cyclic alignment array from vertical alignment.
+    rank_of : sequence of int
+        Layer indices in the oriented layering.
+    pos_of : sequence of int
+        Within-layer positions in the oriented layering.
+    node_sizes : torch.Tensor
+        CPU node sizes ``[N, 2]``.
+    node_sep : float
+        Horizontal gap between node bounding boxes.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    list of float
+        Compacted X coordinates for the oriented pass.
+    """
+    sink = list(range(num_nodes))
+    shift = [_NO_SHIFT] * num_nodes
+    x: List[Optional[float]] = [None] * num_nodes
+
+    for node in range(num_nodes):
+        if root[node] == node:
+            _place_compaction_block(
+                block_root=node,
+                layers=layers,
+                root=root,
+                align=align,
+                rank_of=rank_of,
+                pos_of=pos_of,
+                node_sizes=node_sizes,
+                node_sep=node_sep,
+                sink=sink,
+                shift=shift,
+                x=x,
+            )
+
+    compacted = [0.0] * num_nodes
+    for node in range(num_nodes):
+        block_root = root[node]
+        block_x = 0.0 if x[block_root] is None else x[block_root]
+        sink_shift = shift[sink[block_root]]
+        compacted[node] = block_x if sink_shift == _NO_SHIFT else block_x + sink_shift
+    return compacted
+
+
+def _place_compaction_block(
+    block_root: int,
+    layers: Sequence[Sequence[int]],
+    root: Sequence[int],
+    align: Sequence[int],
+    rank_of: Sequence[int],
+    pos_of: Sequence[int],
+    node_sizes: torch.Tensor,
+    node_sep: float,
+    sink: List[int],
+    shift: List[float],
+    x: List[Optional[float]],
+) -> None:
+    """Recursively place one aligned block during horizontal compaction.
+
+    Parameters
+    ----------
+    block_root : int
+        Root node of the block currently being placed.
+    layers : sequence of sequence of int
+        Oriented layers for the current pass.
+    root : sequence of int
+        Block-root array from vertical alignment.
+    align : sequence of int
+        Cyclic alignment array from vertical alignment.
+    rank_of : sequence of int
+        Layer indices in the oriented layering.
+    pos_of : sequence of int
+        Within-layer positions in the oriented layering.
+    node_sizes : torch.Tensor
+        CPU node sizes ``[N, 2]``.
+    node_sep : float
+        Horizontal gap between node bounding boxes.
+    sink : list of int
+        Sink representative for each block root.
+    shift : list of float
+        Deferred class shifts indexed by sink root.
+    x : list of float, optional
+        Root coordinates under construction.
+    """
+    if x[block_root] is not None:
+        return
+
+    x[block_root] = 0.0
+    current = block_root
+    while True:
+        layer_nodes = layers[rank_of[current]]
+        position = pos_of[current]
+        if position > 0:
+            left_neighbor = layer_nodes[position - 1]
+            left_root = root[left_neighbor]
+            _place_compaction_block(
+                block_root=left_root,
+                layers=layers,
+                root=root,
+                align=align,
+                rank_of=rank_of,
+                pos_of=pos_of,
+                node_sizes=node_sizes,
+                node_sep=node_sep,
+                sink=sink,
+                shift=shift,
+                x=x,
+            )
+            if sink[block_root] == block_root:
+                sink[block_root] = sink[left_root]
+
+            block_x = 0.0 if x[block_root] is None else x[block_root]
+            left_x = 0.0 if x[left_root] is None else x[left_root]
+            minimum_gap = _minimum_separation(
+                left_node=left_neighbor,
+                right_node=current,
+                node_sizes=node_sizes,
+                node_sep=node_sep,
+            )
+            if sink[block_root] != sink[left_root]:
+                shift[sink[left_root]] = min(
+                    shift[sink[left_root]],
+                    block_x - left_x - minimum_gap,
+                )
+            else:
+                x[block_root] = max(block_x, left_x + minimum_gap)
+
+        current = align[current]
+        if current == block_root:
+            break
+
+
+def _minimum_separation(
+    left_node: int,
+    right_node: int,
+    node_sizes: torch.Tensor,
+    node_sep: float,
+) -> float:
+    """Return the minimum center-to-center separation within one layer.
+
+    Parameters
+    ----------
+    left_node : int
+        Left node id in the current orientation.
+    right_node : int
+        Right node id in the current orientation.
+    node_sizes : torch.Tensor
+        CPU node sizes ``[N, 2]``.
+    node_sep : float
+        Horizontal gap between node bounding boxes.
+
+    Returns
+    -------
+    float
+        Required center-to-center distance between the node pair.
+    """
+    return (
+        float(node_sizes[left_node, 0].item()) + float(node_sizes[right_node, 0].item())
+    ) / 2.0 + node_sep
+
+
+def _align_compacted_coordinates(x_by_alignment: Dict[str, List[float]]) -> None:
+    """Shift the four compacted assignments into a common coordinate frame.
+
+    Parameters
+    ----------
+    x_by_alignment : dict
+        Mapping from alignment name (``ul``, ``ur``, ``dl``, ``dr``) to
+        compacted X coordinates.
+    """
+    if not x_by_alignment:
+        return
+
+    anchor_name = min(
+        x_by_alignment,
+        key=lambda name: _coordinate_span(values=x_by_alignment[name]),
+    )
+    anchor_values = x_by_alignment[anchor_name]
+    anchor_left = min(anchor_values)
+    anchor_right = max(anchor_values)
+
+    for alignment_name, values in x_by_alignment.items():
+        if alignment_name == anchor_name:
+            continue
+        if alignment_name.endswith("l"):
+            shift = anchor_left - min(values)
+        else:
+            shift = anchor_right - max(values)
+        for index in range(len(values)):
+            values[index] += shift
+
+
+def _coordinate_span(values: Sequence[float]) -> float:
+    """Return the span of a coordinate assignment.
+
+    Parameters
+    ----------
+    values : sequence of float
+        Coordinate values.
+
+    Returns
+    -------
+    float
+        ``max(values) - min(values)`` or zero for empty inputs.
+    """
+    if not values:
+        return 0.0
+    return max(values) - min(values)
+
+
+def _median_balanced_coordinates(
+    x_by_alignment: Dict[str, Sequence[float]],
+    num_nodes: int,
+) -> List[float]:
+    """Take the per-node median across the four compacted assignments.
+
+    Parameters
+    ----------
+    x_by_alignment : dict
+        Mapping from alignment name to compacted X coordinates.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    list of float
+        Median-balanced X coordinates.
+    """
+    balanced = [0.0] * num_nodes
+    for node in range(num_nodes):
+        samples = sorted(values[node] for values in x_by_alignment.values())
+        balanced[node] = (samples[1] + samples[2]) / 2.0
+    return balanced
+
+
+def _center_coordinates(values: Sequence[float]) -> List[float]:
+    """Translate coordinates so the overall span is centered at zero.
+
+    Parameters
+    ----------
+    values : sequence of float
+        Coordinate values.
+
+    Returns
+    -------
+    list of float
+        Centered coordinates.
+    """
+    if not values:
+        return []
+
+    midpoint = (min(values) + max(values)) / 2.0
+    return [value - midpoint for value in values]
 
 
 def _target_device(problem: LayoutProblem, state: SolveState) -> torch.device:
