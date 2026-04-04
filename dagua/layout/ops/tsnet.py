@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, Tuple
+from dataclasses import dataclass
+from typing import ClassVar, Optional, Tuple
 
 import torch
 
@@ -21,6 +22,53 @@ _MIN_DISTANCE = 1.0e-12
 _TSNET_EARLY_EXAGGERATION = 12.0
 _TSNET_EARLY_STEPS = 250
 _TSNET_MIN_GAIN = 0.01
+
+
+@dataclass(frozen=True)
+class TsnetPrepareStateConfig:
+    """Configuration for :class:`TsnetPrepareState`.
+
+    Parameters
+    ----------
+    default_perplexity : float, default=30.0
+        Perplexity used when ``state.extras["tsnet_perplexity"]`` is not set.
+    binary_search_tolerance : float, default=1e-5
+        Convergence tolerance for the binary search over beta.
+    binary_search_iterations : int, default=100
+        Maximum iterations for the per-row binary search.
+    lr_divisor : float, default=48.0
+        Divisor applied to ``num_nodes`` to compute the initial learning rate.
+    lr_floor : float, default=50.0
+        Minimum learning rate applied when ``num_nodes / lr_divisor`` is small.
+    """
+
+    default_perplexity: float = 30.0
+    binary_search_tolerance: float = 1.0e-5
+    binary_search_iterations: int = 100
+    lr_divisor: float = 48.0
+    lr_floor: float = 50.0
+
+
+@dataclass(frozen=True)
+class TsnetGradientStepConfig:
+    """Configuration for :class:`TsnetGradientStep`.
+
+    Parameters
+    ----------
+    early_momentum : float, default=0.5
+        Momentum used during the early exaggeration phase.
+    late_momentum : float, default=0.8
+        Momentum used after the early exaggeration phase.
+    gain_increase : float, default=0.2
+        Additive gain bump when the gradient sign flips.
+    gain_decrease : float, default=0.8
+        Multiplicative gain decay when the gradient sign is consistent.
+    """
+
+    early_momentum: float = 0.5
+    late_momentum: float = 0.8
+    gain_increase: float = 0.2
+    gain_decrease: float = 0.8
 
 
 @register_op
@@ -68,12 +116,23 @@ class TsnetInitializePositions(Op):
 
 @register_op
 class TsnetPrepareState(Op):
-    """Compute all-pairs distances and tsNET affinities plus optimization constants."""
+    """Compute all-pairs distances and tsNET affinities plus optimization constants.
+
+    Reads
+        (none -- uses problem topology)
+    Writes
+        distance_matrix, extras (tsNET probabilities, schedule constants)
+    """
+
+    config: TsnetPrepareStateConfig
 
     name: ClassVar[str] = "tsnet_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
     reads: ClassVar[Tuple[str, ...]] = ()
     writes: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
+
+    def __init__(self, config: Optional[TsnetPrepareStateConfig] = None) -> None:
+        self.config = config or TsnetPrepareStateConfig()
 
     def apply(
         self,
@@ -102,7 +161,7 @@ class TsnetPrepareState(Op):
 
         device = layout_device(problem.edge_index, problem.node_sizes)
         perplexity = min(
-            float(state.extras.get("tsnet_perplexity", 30.0)),
+            float(state.extras.get("tsnet_perplexity", self.config.default_perplexity)),
             float(max(problem.num_nodes - 1, 1)),
         )
         adjacency = build_undirected_adjacency(
@@ -133,7 +192,7 @@ class TsnetPrepareState(Op):
             target_entropy = torch.log(torch.tensor(perplexity, dtype=torch.float32))
 
             probabilities = torch.zeros_like(row)
-            for _ in range(100):
+            for _ in range(self.config.binary_search_iterations):
                 weights = torch.exp(-squared * beta) * mask.to(dtype=torch.float32)
                 weights_sum = weights.sum().clamp(min=_MIN_DISTANCE)
                 probabilities = weights / weights_sum
@@ -141,7 +200,7 @@ class TsnetPrepareState(Op):
                     probabilities[mask] * probabilities[mask].clamp(min=_MIN_DISTANCE).log()
                 ).sum()
                 error = entropy - target_entropy
-                if torch.abs(error) < 1.0e-5:
+                if torch.abs(error) < self.config.binary_search_tolerance:
                     break
                 if error > 0:
                     beta_min = beta
@@ -162,7 +221,10 @@ class TsnetPrepareState(Op):
         state.extras["tsnet_early_exaggeration"] = _TSNET_EARLY_EXAGGERATION
         state.extras["tsnet_early_exaggeration_steps"] = _TSNET_EARLY_STEPS
         state.extras["tsnet_min_gain"] = _TSNET_MIN_GAIN
-        early_lr = max(float(max(problem.num_nodes, 1)) / 48.0, 50.0)
+        early_lr = max(
+            float(max(problem.num_nodes, 1)) / self.config.lr_divisor,
+            self.config.lr_floor,
+        )
         state.extras["tsnet_early_learning_rate"] = early_lr
         state.extras["tsnet_late_learning_rate"] = early_lr
         return state
@@ -215,13 +277,24 @@ class TsnetInitializeOptimizer(Op):
 
 @register_op
 class TsnetGradientStep(Op):
-    """Compute one tsNET gradient step with gains and momentum."""
+    """Compute one tsNET gradient step with gains and momentum.
+
+    Reads
+        pos, extras (tsNET probabilities, optimizer buffers)
+    Writes
+        pos, extras (updated gains and momentum buffer)
+    """
+
+    config: TsnetGradientStepConfig
 
     name: ClassVar[str] = "tsnet_gradient_step"
     category: ClassVar[OpCategory] = OpCategory.FORCE
     reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
     writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def __init__(self, config: Optional[TsnetGradientStepConfig] = None) -> None:
+        self.config = config or TsnetGradientStepConfig()
 
     def apply(
         self,
@@ -286,14 +359,14 @@ class TsnetGradientStep(Op):
         loss.backward()
 
         grad = state.pos.grad.detach().clone()
-        momentum = 0.5 if step < early_steps else 0.8
+        momentum = self.config.early_momentum if step < early_steps else self.config.late_momentum
         learning_rate = early_lr if step < early_steps else late_lr
 
         with torch.no_grad():
             inc = (update * grad) < 0.0
             dec = ~inc
-            gains[inc] += 0.2
-            gains[dec] *= 0.8
+            gains[inc] += self.config.gain_increase
+            gains[dec] *= self.config.gain_decrease
             gains.clamp_(min=min_gain)
             grad = grad * gains
             update = momentum * update - learning_rate * grad

@@ -436,9 +436,15 @@ class StreamingCoarsenConfig:
     chunk_size : int, default=100_000_000
         Node or edge threshold above which the multilevel builder switches to
         the streaming coarsening path.
+    min_nodes : int, default=2000
+        Stop coarsening when the coarsest level has fewer than this many nodes.
+    max_levels : int, default=20
+        Maximum number of coarsening levels.
     """
 
     chunk_size: int = 100_000_000
+    min_nodes: int = 2000
+    max_levels: int = 20
 
 
 @dataclass(frozen=True)
@@ -1227,8 +1233,8 @@ class StreamingCoarsen(Op):
         state.hierarchy = _build_layered_hierarchy(
             problem=problem,
             state=state,
-            min_nodes=2000,
-            max_levels=20,
+            min_nodes=self.config.min_nodes,
+            max_levels=self.config.max_levels,
             streaming_threshold=self.config.chunk_size,
         )
         state.extras.pop(_SOLAR_STEPS_KEY, None)

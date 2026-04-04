@@ -1064,12 +1064,18 @@ class TSNEGainsMomentumStepConfig:
         Momentum used before the early-exaggeration phase ends.
     momentum_late : float, default=0.8
         Momentum used afterward.
+    gain_increase : float, default=0.2
+        Additive increase applied to per-parameter gains when the gradient flips sign.
+    gain_decrease : float, default=0.8
+        Multiplicative decay applied to per-parameter gains when the gradient sign is consistent.
     """
 
     lr_rule: str = "N/48"
     min_gain: float = 0.01
     momentum_early: float = 0.5
     momentum_late: float = 0.8
+    gain_increase: float = 0.2
+    gain_decrease: float = 0.8
 
 
 @register_op
@@ -1155,8 +1161,8 @@ class TSNEGainsMomentumStep(Op):
         with torch.no_grad():
             increasing = (update * grad) < 0.0
             decreasing = ~increasing
-            gains[increasing] += 0.2
-            gains[decreasing] *= 0.8
+            gains[increasing] += self.config.gain_increase
+            gains[decreasing] *= self.config.gain_decrease
             gains.clamp_(min=self.config.min_gain)
             grad = grad * gains
             update = momentum * update - learning_rate * grad

@@ -551,13 +551,24 @@ class DetectCyclesConfig:
 class DetectCycles(Op):
     """Detect cycle-forming edges and store the reversal mask.
 
-    Notes
+    Reads
     -----
-    This op is deterministic and uses no randomness.
+    ``state.extras["preprocess_edge_index"]`` when an earlier op already
+    rewrote the active edge view.
+
+    Writes
+    ------
+    ``state.back_edge_mask``.
+
+    Use this when
+    -------------
+    You need a reusable mask for acyclic rewrites, DAG-only layering, or graph
+    classification without mutating ``problem.edge_index``.
     """
 
     name = "detect_cycles"
     category = OpCategory.PREPROCESS
+    reads = ("extras.preprocess_edge_index",)
     writes = ("back_edge_mask",)
 
     def __init__(self, config: Optional[DetectCyclesConfig] = None) -> None:
@@ -603,6 +614,8 @@ class DetectCycles(Op):
             state.back_edge_mask = detect_back_edges(edge_index, problem.num_nodes)
             return state
         if self.config.method == "dfs_then_greedy":
+            # The robust helper preserves the DFS fast path but falls back to a
+            # greedy repair when the plain back-edge mask still leaves cycles.
             _, reversed_mask = make_acyclic_robust(edge_index, problem.num_nodes)
             state.back_edge_mask = reversed_mask.to(dtype=torch.bool)
             return state
@@ -613,18 +626,24 @@ class DetectCycles(Op):
 class MakeAcyclic(Op):
     """Materialize an acyclic edge view into ``state.extras``.
 
-    Notes
+    Reads
     -----
-    This op does not mutate ``problem.edge_index``. The rewritten edge tensor is
-    stored in ``state.extras["preprocess_edge_index"]`` so downstream ops can
-    opt into the acyclic view while preserving the original graph topology.
+    ``state.back_edge_mask`` when already computed.
+
+    Writes
+    ------
+    ``state.extras["preprocess_edge_index"]``.
+
+    Use this when
+    -------------
+    Downstream ops should consume a DAG view while the original
+    ``problem.edge_index`` remains unchanged for provenance or later reuse.
     """
 
     name = "make_acyclic"
     category = OpCategory.PREPROCESS
     reads = ("back_edge_mask",)
     writes = ("extras.preprocess_edge_index",)
-    requires = ("back_edge_mask",)
 
     def apply(
         self,
@@ -651,6 +670,8 @@ class MakeAcyclic(Op):
         _ = ctx
         back_edge_mask = state.back_edge_mask
         if back_edge_mask is None:
+            # Missing masks mean "no reversals requested", which keeps this op
+            # safe to run in conservative pipelines that skip cycle detection.
             back_edge_mask = torch.zeros(problem.edge_index.shape[1], dtype=torch.bool)
         state.extras[_ACYCLIC_EDGE_KEY] = make_acyclic(problem.edge_index, back_edge_mask)
         return state
@@ -672,7 +693,22 @@ class ClassifyGraphConfig:
 
 @register_op
 class ClassifyGraph(Op):
-    """Classify graph structure and write it onto ``problem.structure``."""
+    """Classify graph structure and write it onto ``problem.structure``.
+
+    Reads
+    -----
+    ``state.layers``, ``state.back_edge_mask``, and the active edge override in
+    ``state.extras["preprocess_edge_index"]`` when present.
+
+    Writes
+    ------
+    ``problem.structure``.
+
+    Use this when
+    -------------
+    Later pipeline stages need topology hints such as DAG-ness, layer width, or
+    component counts to choose specialized algorithms.
+    """
 
     name = "classify_graph"
     category = OpCategory.PREPROCESS
@@ -752,7 +788,22 @@ class BuildAdjacencyConfig:
 
 @register_op
 class BuildAdjacency(Op):
-    """Build a cached adjacency representation from the active edge tensor."""
+    """Build a cached adjacency representation from the active edge tensor.
+
+    Reads
+    -----
+    ``state.extras["preprocess_edge_index"]`` when present.
+
+    Writes
+    ------
+    ``state.adjacency``, optional ``state.adjacency_weighted``, and adjacency
+    metadata in ``state.extras``.
+
+    Use this when
+    -------------
+    Traversal, distance, or embedding ops need a shared adjacency cache in list,
+    dense, or CSR form.
+    """
 
     name = "build_adjacency"
     category = OpCategory.PREPROCESS
@@ -762,6 +813,7 @@ class BuildAdjacency(Op):
         "adjacency_weighted",
         "extras.adjacency_format",
         "extras.adjacency_directed",
+        "extras.adjacency_weighted",
     )
 
     def __init__(self, config: Optional[BuildAdjacencyConfig] = None) -> None:
@@ -823,6 +875,8 @@ class BuildAdjacency(Op):
         state.adjacency = None
         state.adjacency_weighted = None
         if self.config.weighted:
+            # Keep the weighted list cache even when the public adjacency output
+            # is dense or CSR so downstream distance ops can reuse exact weights.
             state.adjacency_weighted = adjacency_list
 
         if self.config.format == "list":
@@ -941,24 +995,60 @@ def _spectral_laplacian(
     raise ValueError("normalization must be one of 'symmetric', 'random_walk', or 'unnormalized'.")
 
 
+@dataclass(frozen=True)
+class SpectralPrepareStateConfig:
+    """Configuration for :class:`SpectralPrepareState`.
+
+    Parameters
+    ----------
+    position_dim : int, default=2
+        Output dimensionality for the placeholder position tensor used by
+        empty and single-node edge cases.
+    """
+
+    position_dim: int = 2
+
+
 @register_op
 class SpectralPrepareState(Op):
-    """Build the state required by spectral eigenpair ops."""
+    """Build the state required by spectral eigenpair ops.
+
+    Reads
+    -----
+    No ``SolveState`` fields.
+
+    Writes
+    ------
+    ``state.pos`` for trivial graphs, ``state.laplacian``, and
+    ``state.extras["spectral_is_symmetric"]``.
+
+    Use this when
+    -------------
+    You want spectral pipelines to separate Laplacian construction from the
+    later eigendecomposition step.
+    """
 
     name = "spectral_prepare_state"
     category = OpCategory.PREPROCESS
     reads = ()
-    writes = ("pos", "laplacian", "extras")
+    writes = ("pos", "laplacian", "extras.spectral_is_symmetric")
 
-    def __init__(self, normalization: str) -> None:
+    def __init__(
+        self,
+        normalization: str,
+        config: Optional[SpectralPrepareStateConfig] = None,
+    ) -> None:
         """Store the spectral normalization mode.
 
         Parameters
         ----------
         normalization : str
             One of ``"symmetric"``, ``"random_walk"``, or ``"unnormalized"``.
+        config : SpectralPrepareStateConfig, optional
+            Spectral preprocessing settings.
         """
         self.normalization = normalization
+        self.config = config or SpectralPrepareStateConfig()
 
     def apply(
         self,
@@ -984,10 +1074,10 @@ class SpectralPrepareState(Op):
         """
         _ = ctx
         if problem.num_nodes == 0:
-            state.pos = torch.empty((0, 2), dtype=torch.float32)
+            state.pos = torch.empty((0, self.config.position_dim), dtype=torch.float32)
             return state
         if problem.num_nodes == 1:
-            state.pos = torch.zeros((1, 2), dtype=torch.float32)
+            state.pos = torch.zeros((1, self.config.position_dim), dtype=torch.float32)
             return state
 
         adjacency = _build_spectral_adjacency(
@@ -1004,14 +1094,57 @@ class SpectralPrepareState(Op):
         return state
 
 
+@dataclass(frozen=True)
+class FRPrepareAdjacencyConfig:
+    """Configuration for :class:`FRPrepareAdjacency`.
+
+    Parameters
+    ----------
+    default_force_area : float, default=1.0
+        Default unit-square area used by FR force calculations when callers do
+        not supply an override later in the pipeline.
+    """
+
+    default_force_area: float = 1.0
+
+
 @register_op
 class FRPrepareAdjacency(Op):
-    """Build a dense FR adjacency matrix and default force metadata."""
+    """Build a dense FR adjacency matrix and default force metadata.
+
+    Reads
+    -----
+    No ``SolveState`` fields.
+
+    Writes
+    ------
+    ``state.dense_adjacency`` and ``state.force_area``.
+
+    Use this when
+    -------------
+    The Fruchterman-Reingold force op expects a dense adjacency matrix and a
+    resolved initial force area.
+    """
 
     name = "fr_prepare_adjacency"
     category = OpCategory.PREPROCESS
     reads: tuple[str, ...] = ()
     writes: tuple[str, ...] = ("dense_adjacency", "force_area")
+
+    def __init__(self, config: Optional[FRPrepareAdjacencyConfig] = None) -> None:
+        """Store the FR adjacency-preparation configuration.
+
+        Parameters
+        ----------
+        config : FRPrepareAdjacencyConfig, optional
+            FR preparation settings.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or FRPrepareAdjacencyConfig()
 
     def apply(
         self,
@@ -1044,7 +1177,7 @@ class FRPrepareAdjacency(Op):
                 num_nodes=problem.num_nodes,
                 edge_weights=problem.edge_weights,
             )
-        state.force_area = 1.0
+        state.force_area = self.config.default_force_area
         return state
 
 
@@ -1057,19 +1190,55 @@ class FA2PrepareStateConfig:
     outbound_attraction_distribution : bool, default=True
         Whether FA2 should divide attraction by the source-node mass and apply
         the matching mean-mass compensation.
+    mass_offset : float, default=1.0
+        Constant added to degree to produce FA2 mass.
+    force_dim : int, default=2
+        Dimensionality of the cached ``old_forces`` tensor.
+    initial_speed : float, default=1.0
+        Initial FA2 speed scalar.
+    initial_speed_efficiency : float, default=1.0
+        Initial FA2 speed-efficiency scalar.
     """
 
     outbound_attraction_distribution: bool = True
+    mass_offset: float = 1.0
+    force_dim: int = 2
+    initial_speed: float = 1.0
+    initial_speed_efficiency: float = 1.0
 
 
 @register_op
 class FA2PrepareState(Op):
-    """Build the cached undirected graph state required by FA2 iterations."""
+    """Build the cached undirected graph state required by FA2 iterations.
+
+    Reads
+    -----
+    No ``SolveState`` fields.
+
+    Writes
+    ------
+    ``state.degree``, ``state.old_forces``, and the FA2 cache entries in
+    ``state.extras``.
+
+    Use this when
+    -------------
+    ForceAtlas2 steps need undirected unique edges, node masses, and speed
+    control scalars prepared exactly once up front.
+    """
 
     name = "fa2_prepare_state"
     category = OpCategory.PREPROCESS
     reads = ()
-    writes = ("degree", "old_forces", "extras")
+    writes = (
+        "degree",
+        "old_forces",
+        "extras.fa2_undirected_edges",
+        "extras.fa2_undirected_weights",
+        "extras.fa2_mass",
+        "extras.fa2_outbound_att_compensation",
+        "extras.fa2_speed",
+        "extras.fa2_speed_efficiency",
+    )
 
     def __init__(self, config: Optional[FA2PrepareStateConfig] = None) -> None:
         """Store the FA2 preprocessing configuration.
@@ -1121,6 +1290,8 @@ class FA2PrepareState(Op):
             if bool(non_self.any().item()):
                 source = source[non_self]
                 target = target[non_self]
+                # FA2 works on unique undirected pairs here so degree, mass, and
+                # attraction compensation stay aligned with the later force step.
                 lower = torch.minimum(source, target)
                 upper = torch.maximum(source, target)
                 pairs = torch.stack([lower, upper], dim=1)
@@ -1146,23 +1317,41 @@ class FA2PrepareState(Op):
             degree.scatter_add_(0, undirected_edges[0], ones)
             degree.scatter_add_(0, undirected_edges[1], ones)
 
-        mass = degree + 1.0
+        mass = degree + self.config.mass_offset
         state.degree = degree
-        state.old_forces = torch.zeros((problem.num_nodes, 2), dtype=torch.float32, device=device)
+        state.old_forces = torch.zeros(
+            (problem.num_nodes, self.config.force_dim),
+            dtype=torch.float32,
+            device=device,
+        )
         state.extras["fa2_undirected_edges"] = undirected_edges
         state.extras["fa2_undirected_weights"] = undirected_weights
         state.extras["fa2_mass"] = mass
         state.extras["fa2_outbound_att_compensation"] = (
             float(mass.mean().item()) if self.config.outbound_attraction_distribution else 1.0
         )
-        state.extras["fa2_speed"] = 1.0
-        state.extras["fa2_speed_efficiency"] = 1.0
+        state.extras["fa2_speed"] = self.config.initial_speed
+        state.extras["fa2_speed_efficiency"] = self.config.initial_speed_efficiency
         return state
 
 
 @register_op
 class DetectComponents(Op):
-    """Detect weakly connected components from the active edge tensor."""
+    """Detect weakly connected components from the active edge tensor.
+
+    Reads
+    -----
+    ``state.extras["preprocess_edge_index"]`` when present.
+
+    Writes
+    ------
+    ``state.component_ids``.
+
+    Use this when
+    -------------
+    Later ops need stable weak-component labels for disconnected-graph logic or
+    batched processing.
+    """
 
     name = "detect_components"
     category = OpCategory.PREPROCESS
