@@ -151,112 +151,112 @@ def _warn_on_unrecognized_variant_params(
 _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_fr": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.fr",
-        function_name="layout_fr",
+        function_name="layout_fr_pipeline",
         default_params={"steps": 200},
     ),
     "classic_kk": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.kk",
-        function_name="layout_kk",
+        function_name="layout_kk_pipeline",
         default_params={"steps": 300},
     ),
     "classic_fa2": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.fa2",
-        function_name="layout_fa2",
+        function_name="layout_fa2_pipeline",
         default_params={"steps": 200, "barnes_hut": True, "barnes_hut_theta": 1.2},
     ),
     "classic_stress_sgd": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.stress_sgd",
-        function_name="layout_stress_sgd",
+        function_name="layout_stress_sgd_pipeline",
         default_params={"steps": 300},
     ),
     "classic_sugiyama": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.sugiyama",
-        function_name="layout_sugiyama",
+        function_name="layout_sugiyama_pipeline",
         default_params={},
     ),
     "classic_spectral": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.spectral",
-        function_name="layout_spectral",
+        function_name="layout_spectral_pipeline",
         default_params={},
     ),
     "classic_classical_mds": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.classical_mds",
-        function_name="layout_classical_mds",
+        function_name="layout_classical_mds_pipeline",
         default_params={},
     ),
     "classic_stress_maj": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.stress_majorization",
-        function_name="layout_stress_majorization",
+        function_name="layout_stress_majorization_pipeline",
         default_params={"iterations": 200},
     ),
     "classic_pivot_mds": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.pivot_mds",
-        function_name="layout_pivot_mds",
+        function_name="layout_pivot_mds_pipeline",
         default_params={"n_pivots": 50},
     ),
     "classic_rt": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.reingold_tilford",
-        function_name="layout_reingold_tilford",
+        function_name="layout_reingold_tilford_pipeline",
         default_params={},
     ),
     "classic_linlog": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.linlog",
-        function_name="layout_linlog",
+        function_name="layout_linlog_pipeline",
         default_params={"steps": 300},
     ),
     "classic_gem": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.gem",
-        function_name="layout_gem",
+        function_name="layout_gem_pipeline",
         default_params={"max_iters": 500},
     ),
     "classic_tsnet": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.tsnet",
-        function_name="layout_tsnet",
+        function_name="layout_tsnet_pipeline",
         default_params={"perplexity": 30, "steps": 500},
     ),
     "classic_maxent_stress": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.maxent_stress",
-        function_name="layout_maxent_stress",
+        function_name="layout_maxent_stress_pipeline",
         default_params={"steps": 200, "alpha": 1.0},
     ),
     "classic_davidson_harel": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.davidson_harel",
-        function_name="layout_davidson_harel",
+        function_name="layout_davidson_harel_pipeline",
         default_params={"rounds": 100},
     ),
     "classic_fmmm": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.fmmm",
-        function_name="layout_fmmm",
+        function_name="layout_fmmm_pipeline",
         default_params={"steps": 100},
     ),
     "classic_graphopt": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.graphopt",
-        function_name="layout_graphopt",
+        function_name="layout_graphopt_pipeline",
         default_params={},
     ),
     "classic_drl": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.drl",
-        function_name="layout_drl",
+        function_name="layout_drl_pipeline",
         default_params={},
     ),
     "classic_lgl": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.lgl",
-        function_name="layout_lgl",
+        function_name="layout_lgl_pipeline",
         default_params={},
     ),
     "classic_sfdp": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.sfdp",
-        function_name="layout_sfdp",
+        function_name="layout_sfdp_pipeline",
         default_params={},
     ),
     "classic_umap": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.umap_layout",
-        function_name="layout_umap",
+        function_name="layout_umap_layout_pipeline",
         default_params={},
     ),
     "classic_neulay": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.neulay",
-        function_name="layout_neulay",
+        function_name="layout_neulay_pipeline",
         default_params={
             "steps": 20_000,
             "gcn_steps": 2_000,
@@ -267,7 +267,7 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     ),
     "classic_sgd2_multi": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.sgd2_multi",
-        function_name="layout_sgd2_multi",
+        function_name="layout_sgd2_multi_pipeline",
         default_params={"criteria": {"stress": 1.0, "ideal_edge_length": 1.0}, "lr": 0.01},
     ),
 }
