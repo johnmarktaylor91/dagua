@@ -1483,6 +1483,16 @@ class _InitializeCoarsestLevel(Op):
     reads: ClassVar[Tuple[str, ...]] = ("extras",)
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
 
+    def __init__(self, min_coarsest_steps: int = 50) -> None:
+        """Store the minimum FR step count for the coarsest level.
+
+        Parameters
+        ----------
+        min_coarsest_steps : int
+            Floor for the number of FR iterations at the coarsest level.
+        """
+        self._min_coarsest_steps = min_coarsest_steps
+
     def apply(
         self,
         problem: LayoutProblem,
@@ -1516,7 +1526,7 @@ class _InitializeCoarsestLevel(Op):
             coarsest_level.edge_index,
             coarsest_nodes,
             node_sizes=None,
-            steps=max(50, steps),
+            steps=max(self._min_coarsest_steps, steps),
             seed=problem.seed,
             edge_weights=coarsest_level.edge_weights,
         )

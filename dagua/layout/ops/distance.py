@@ -253,12 +253,12 @@ def _to_torch(raw: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(raw.astype(np.float64, copy=False))
 
 
-def _fill_all_pairs_unreachable(raw: np.ndarray, mode: str) -> np.ndarray:
+def _fill_all_pairs_unreachable(raw: Union[np.ndarray, torch.Tensor], mode: str) -> np.ndarray:
     """Apply unreachable-pair filling to an all-pairs matrix.
 
     Parameters
     ----------
-    raw : numpy.ndarray
+    raw : numpy.ndarray | torch.Tensor
         All-pairs matrix from the reference helper.
     mode : str
         Fill strategy: ``"reference"`` or ``"max_plus_1"``.
@@ -273,16 +273,19 @@ def _fill_all_pairs_unreachable(raw: np.ndarray, mode: str) -> np.ndarray:
     ValueError
         If the fill mode is unknown.
     """
+    raw_array = raw.detach().to(device="cpu").numpy() if isinstance(raw, torch.Tensor) else raw
     if mode == "reference":
-        return raw
+        return np.array(raw_array, copy=True)
     if mode != "max_plus_1":
         raise ValueError(f"Unsupported unreachable_fill mode: {mode!r}.")
 
-    filled = raw.astype(np.float64, copy=True)
+    filled = raw_array.astype(np.float64, copy=True)
     if filled.size == 0:
         return filled
 
-    finite_mask = np.isfinite(raw) if np.issubdtype(raw.dtype, np.floating) else raw >= 0
+    finite_mask = (
+        np.isfinite(raw_array) if np.issubdtype(raw_array.dtype, np.floating) else raw_array >= 0
+    )
     max_distance = float(filled[finite_mask].max()) if bool(finite_mask.any()) else 0.0
     replacement = max_distance + 1.0 if filled.shape[0] > 1 else 0.0
     filled[~finite_mask] = replacement
@@ -388,7 +391,23 @@ class BFSDistancesConfig:
 
 @register_op
 class BFSDistances(Op):
-    """Compute unweighted graph distances via BFS."""
+    """Compute unweighted graph distances via repeated BFS traversals.
+
+    Reads
+    -----
+    ``state.adjacency`` and optional source overrides from
+    ``state.extras["distance_sources"]``.
+
+    Writes
+    ------
+    ``state.distance_matrix`` for all-pairs runs or
+    ``state.extras["distance_rows"]`` for selected sources.
+
+    Use this when
+    -------------
+    The graph is effectively unweighted and downstream ops need exact hop
+    counts rather than weighted path lengths.
+    """
 
     name = "bfs_distances"
     category = OpCategory.DISTANCE
@@ -442,6 +461,7 @@ class BFSDistances(Op):
         if rows:
             state.extras[_DISTANCE_ROWS_KEY] = rows
         else:
+            # Clear stale row caches when switching back to a full all-pairs run.
             state.extras.pop(_DISTANCE_ROWS_KEY, None)
         return state
 
@@ -461,7 +481,22 @@ class DijkstraDistancesConfig:
 
 @register_op
 class DijkstraDistances(Op):
-    """Compute weighted graph distances via Dijkstra."""
+    """Compute weighted graph distances via repeated Dijkstra traversals.
+
+    Reads
+    -----
+    ``state.adjacency`` and optional source overrides from
+    ``state.extras["distance_sources"]``.
+
+    Writes
+    ------
+    ``state.distance_matrix`` for all-pairs runs or
+    ``state.extras["distance_rows"]`` for selected sources.
+
+    Use this when
+    -------------
+    Edge costs matter and downstream ops need exact weighted shortest paths.
+    """
 
     name = "dijkstra_distances"
     category = OpCategory.DISTANCE
@@ -539,7 +574,22 @@ class AllPairsShortestPathsConfig:
 
 @register_op
 class AllPairsShortestPaths(Op):
-    """Compute all-pairs shortest-path distances."""
+    """Compute the full all-pairs shortest-path matrix.
+
+    Reads
+    -----
+    ``state.adjacency`` and weighted-adjacency metadata from
+    ``state.extras["adjacency_weighted"]``.
+
+    Writes
+    ------
+    ``state.distance_matrix``.
+
+    Use this when
+    -------------
+    Embedding or stress-style ops need one complete shortest-path matrix and
+    can afford the corresponding memory cost.
+    """
 
     name = "all_pairs_shortest_paths"
     category = OpCategory.DISTANCE
@@ -595,6 +645,8 @@ class AllPairsShortestPaths(Op):
         else:
             raise ValueError(f"Unsupported APSP method: {self.config.method!r}.")
 
+        # Delegate to the classic helper to preserve its BFS-vs-Dijkstra
+        # behavior exactly, then post-process only the unreachable fill policy.
         raw = _reference_all_pairs_shortest_paths(adjacency, weighted=weighted)
         filled = _fill_all_pairs_unreachable(raw, mode=self.config.unreachable_fill)
         state.distance_matrix = _to_torch(filled)
@@ -620,7 +672,21 @@ class KamadaKawaiAllPairsShortestPathsConfig:
 
 @register_op
 class KamadaKawaiAllPairsShortestPaths(Op):
-    """Compute directed shortest paths with KK-compatible unreachable fills."""
+    """Compute directed shortest paths with KK-compatible unreachable fills.
+
+    Reads
+    -----
+    No ``SolveState`` fields.
+
+    Writes
+    ------
+    ``state.distance_matrix``.
+
+    Use this when
+    -------------
+    Kamada-Kawai needs its historical directed APSP preprocessing, including a
+    large finite replacement for unreachable pairs.
+    """
 
     name = "kamada_kawai_all_pairs_shortest_paths"
     category = OpCategory.DISTANCE
@@ -703,7 +769,21 @@ class ClassicalMDSDistanceMatrixConfig:
 
 @register_op
 class ClassicalMDSDistanceMatrix(Op):
-    """Compute the exact graph distance matrix for classical MDS."""
+    """Compute the exact graph distance matrix for classical MDS.
+
+    Reads
+    -----
+    No ``SolveState`` fields.
+
+    Writes
+    ------
+    ``state.distance_matrix``.
+
+    Use this when
+    -------------
+    Classical MDS should consume the reference shortest-path matrix directly
+    from immutable problem inputs.
+    """
 
     name = "classical_mds_distance_matrix"
     category = OpCategory.DISTANCE
@@ -804,6 +884,20 @@ class PivotSelection(Op):
     ``torch.randint(0, num_nodes, (1,), generator=generator)``. The generator
     comes from ``ctx.generator`` when provided, otherwise a private CPU
     generator seeded from ``problem.seed`` is used.
+
+    Reads
+    -----
+    ``state.adjacency`` and weighted-adjacency metadata from
+    ``state.extras["adjacency_weighted"]``.
+
+    Writes
+    ------
+    ``state.pivot_indices``.
+
+    Use this when
+    -------------
+    Approximate distance or Pivot-MDS pipelines need a deterministic max-min
+    landmark set.
     """
 
     name = "pivot_selection"
@@ -871,6 +965,8 @@ class PivotSelection(Op):
 
         min_distances = _graph_distances_for_pivot(adjacency, first_pivot, weighted=weighted)
         while len(pivot_indices) < n_pivots:
+            # Already selected pivots are masked out so ties never reselect the
+            # same node when the graph has disconnected regions.
             candidate_scores = min_distances.masked_fill(selected, -1.0)
             next_pivot = int(torch.argmax(candidate_scores).item())
             if bool(selected[next_pivot].item()):
@@ -886,13 +982,28 @@ class PivotSelection(Op):
 
 @register_op
 class PivotDistanceQueries(Op):
-    """Run distance queries from the selected pivots."""
+    """Run distance queries from the selected pivots.
+
+    Reads
+    -----
+    ``state.pivot_indices``, ``state.adjacency``, and weighted-adjacency
+    metadata from ``state.extras["adjacency_weighted"]``.
+
+    Writes
+    ------
+    ``state.pivot_distances``.
+
+    Use this when
+    -------------
+    Pivot-based embeddings or losses need the exact distance row for each
+    previously selected landmark.
+    """
 
     name = "pivot_distance_queries"
     category = OpCategory.DISTANCE
     reads = ("pivot_indices", "adjacency", "extras.adjacency_weighted")
     writes = ("pivot_distances",)
-    requires = ("pivot_indices", "adjacency")
+    requires = ("adjacency",)
 
     def apply(
         self,
@@ -935,7 +1046,21 @@ class PivotDistanceQueries(Op):
 
 @register_op
 class ConnectivityCheck(Op):
-    """Check whether the current adjacency is connected."""
+    """Check whether the current adjacency is connected.
+
+    Reads
+    -----
+    ``state.adjacency``.
+
+    Writes
+    ------
+    ``state.extras["is_connected"]``.
+
+    Use this when
+    -------------
+    Later stages need a fast disconnected-graph guard without building full
+    component labels.
+    """
 
     name = "connectivity_check"
     category = OpCategory.DISTANCE

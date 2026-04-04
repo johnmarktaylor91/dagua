@@ -1842,8 +1842,26 @@ class SGD2MultiConvergenceCheck(Op):
     reads: ClassVar[Tuple[str, ...]] = ("extras",)
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
 
-    def __init__(self) -> None:
-        """Create a convergence-check op."""
+    def __init__(
+        self,
+        ema_half_life: float = 100.0,
+        scheduler_interval: int = 10,
+        lr_threshold: float = 1.0e-5,
+    ) -> None:
+        """Create a convergence-check op.
+
+        Parameters
+        ----------
+        ema_half_life : float
+            Half-life in steps for the exponential moving average of loss.
+        scheduler_interval : int
+            How often (in steps) to feed the EMA loss to the LR scheduler.
+        lr_threshold : float
+            Learning rate below which convergence is declared.
+        """
+        self._ema_half_life = ema_half_life
+        self._scheduler_interval = scheduler_interval
+        self._lr_threshold = lr_threshold
 
     def apply(
         self,
@@ -1876,13 +1894,13 @@ class SGD2MultiConvergenceCheck(Op):
         if run_state.latest_loss is None:
             return state
 
-        _ema_decay = 0.5 ** (1.0 / 100.0)
+        _ema_decay = 0.5 ** (1.0 / self._ema_half_life)
         loss_value = float(run_state.latest_loss.item())
         run_state.ema_weighted_sum = run_state.ema_weighted_sum * _ema_decay + loss_value
         run_state.ema_total_weight = run_state.ema_total_weight * _ema_decay + 1.0
-        if run_state.step_index % 10 == 0:
+        if run_state.step_index % self._scheduler_interval == 0:
             run_state.scheduler.step(run_state.ema_weighted_sum / run_state.ema_total_weight)
-        if float(run_state.optimizer.param_groups[0]["lr"]) <= 1.0e-5:
+        if float(run_state.optimizer.param_groups[0]["lr"]) <= self._lr_threshold:
             state.converged = True
         run_state.step_index += 1
         return state
@@ -2034,6 +2052,12 @@ class _RunSGD2MultiOptimization(Op):
         momentum: float = 0.7,
         grad_clamp: float = 4.0,
         batch_size: int = 16,
+        scheduler_factor: float = 0.9,
+        scheduler_patience: int = 20_000,
+        scheduler_min_lr: float = 1.0e-5,
+        ema_half_life: float = 100.0,
+        scheduler_interval: int = 10,
+        lr_threshold: float = 1.0e-5,
     ) -> None:
         """Store optimizer hyperparameters.
 
@@ -2049,14 +2073,33 @@ class _RunSGD2MultiOptimization(Op):
             Symmetric gradient clamp.
         batch_size : int
             Mini-batch size.
+        scheduler_factor : float
+            Multiplicative LR decay factor for ReduceLROnPlateau.
+        scheduler_patience : int
+            Plateau patience for the LR scheduler.
+        scheduler_min_lr : float
+            Lower LR floor for the scheduler.
+        ema_half_life : float
+            EMA half-life passed to the convergence check.
+        scheduler_interval : int
+            Scheduler step interval passed to the convergence check.
+        lr_threshold : float
+            LR convergence threshold passed to the convergence check.
         """
         self.steps = steps
         self.lr = lr
         self.momentum = momentum
         self.grad_clamp = grad_clamp
         self.batch_size = batch_size
+        self._scheduler_factor = scheduler_factor
+        self._scheduler_patience = scheduler_patience
+        self._scheduler_min_lr = scheduler_min_lr
         self._opt_step = SGD2MultiOptStep(batch_size=batch_size, grad_clamp=grad_clamp)
-        self._convergence_check = SGD2MultiConvergenceCheck()
+        self._convergence_check = SGD2MultiConvergenceCheck(
+            ema_half_life=ema_half_life,
+            scheduler_interval=scheduler_interval,
+            lr_threshold=lr_threshold,
+        )
 
     def apply(
         self,
@@ -2137,9 +2180,9 @@ class _RunSGD2MultiOptimization(Op):
         optimizer = torch.optim.SGD([positions], lr=self.lr, momentum=self.momentum, nesterov=True)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            factor=0.9,
-            patience=20000,
-            min_lr=1.0e-5,
+            factor=self._scheduler_factor,
+            patience=self._scheduler_patience,
+            min_lr=self._scheduler_min_lr,
         )
 
         run_state = _SGD2MultiRunState(

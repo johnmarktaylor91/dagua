@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
@@ -1185,14 +1185,21 @@ class ReingoldTilfordTreeConfig:
         minimum floor.
     component_gap : float | None, default=None
         Extra spacing between disconnected components.
+    default_component_gap_multiplier : float, default=2.0
+        Multiplier applied to the resolved sibling spacing when
+        ``component_gap`` is left unset.
     horizontal : bool, default=False
         Rotate the output so depth maps to x when ``True``.
+    recursion_limit_multiplier : int, default=2
+        Multiplier used when raising Python's recursion limit for large trees.
     """
 
     sibling_sep: Optional[float] = None
     layer_sep: Optional[float] = None
     component_gap: Optional[float] = None
+    default_component_gap_multiplier: float = 2.0
     horizontal: bool = False
+    recursion_limit_multiplier: int = 2
 
 
 @dataclass(frozen=True)
@@ -1223,22 +1230,25 @@ class BucheimWalkerTreeConfig:
         Vertical spacing between consecutive tree depths.
     component_gap : float, default=2.0
         Horizontal gap between disconnected tree components.
+    recursion_limit_multiplier : int, default=2
+        Multiplier used when raising Python's recursion limit for large trees.
     """
 
     sibling_sep: float = 1.0
     layer_sep: float = 1.5
     component_gap: float = 2.0
+    recursion_limit_multiplier: int = 2
 
 
 @register_op
 class BrandesKopf4Pass(Op):
     """Assign x coordinates via four-pass Brandes-Kopf compaction."""
 
-    name = "brandes_kopf_4pass"
-    category = OpCategory.COORDINATE
-    reads = ("layers", "ordering")
-    writes = ("pos",)
-    requires = ("layers", "ordering")
+    name: ClassVar[str] = "brandes_kopf_4pass"
+    category: ClassVar[OpCategory] = OpCategory.COORDINATE
+    reads: ClassVar[Tuple[str, ...]] = ("layers", "ordering")
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("layers", "ordering")
 
     def __init__(self, config: Optional[BrandesKopf4PassConfig] = None) -> None:
         """Store the coordinate-assignment configuration.
@@ -1287,6 +1297,8 @@ class BrandesKopf4Pass(Op):
 
         positions = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
         if problem.num_nodes > 0:
+            # The four orientation passes balance each other, so keep the
+            # Brandes-Kopf output in local CPU tensors until the final transfer.
             x_coordinates = _brandes_koepf_x_positions(
                 layers=ordered_layers,
                 parents=parents,
@@ -1307,9 +1319,11 @@ class BrandesKopf4Pass(Op):
 class BucheimWalkerTree(Op):
     """Lay out the graph as a tidy BFS forest using Buchheim's algorithm."""
 
-    name = "bucheim_walker_tree"
-    category = OpCategory.COORDINATE
-    writes = ("pos",)
+    name: ClassVar[str] = "bucheim_walker_tree"
+    category: ClassVar[OpCategory] = OpCategory.COORDINATE
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ()
 
     def __init__(self, config: Optional[BucheimWalkerTreeConfig] = None) -> None:
         """Store the tree-layout configuration.
@@ -1351,7 +1365,12 @@ class BucheimWalkerTree(Op):
             state.pos = torch.empty((0, 2), dtype=torch.float32, device=target_device)
             return state
 
-        sys.setrecursionlimit(max(sys.getrecursionlimit(), problem.num_nodes * 2))
+        sys.setrecursionlimit(
+            max(
+                sys.getrecursionlimit(),
+                problem.num_nodes * self.config.recursion_limit_multiplier,
+            )
+        )
         roots, children, depths = _bfs_forest(
             edge_index=edge_index_cpu,
             num_nodes=problem.num_nodes,
@@ -1374,6 +1393,8 @@ class BucheimWalkerTree(Op):
             positions[node_idx, 0] = float(preliminary_x[node_idx]) * self.config.sibling_sep
             positions[node_idx, 1] = float(depths[node_idx]) * self.config.layer_sep
 
+        # Re-center the whole forest so disconnected components remain balanced
+        # around the origin like the historical tree ops.
         positions -= positions.mean(dim=0, keepdim=True)
         state.pos = positions.to(device=target_device)
         return state
@@ -1383,9 +1404,11 @@ class BucheimWalkerTree(Op):
 class ReingoldTilfordTree(Op):
     """Assign Reingold-Tilford coordinates with optional size-aware spacing."""
 
-    name = "reingold_tilford_tree"
-    category = OpCategory.COORDINATE
-    writes = ("pos",)
+    name: ClassVar[str] = "reingold_tilford_tree"
+    category: ClassVar[OpCategory] = OpCategory.COORDINATE
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ()
 
     def __init__(self, config: Optional[ReingoldTilfordTreeConfig] = None) -> None:
         """Store the tree configuration.
@@ -1439,10 +1462,17 @@ class ReingoldTilfordTree(Op):
             else self.config.layer_sep
         )
         component_gap = (
-            sibling_sep * 2.0 if self.config.component_gap is None else self.config.component_gap
+            sibling_sep * self.config.default_component_gap_multiplier
+            if self.config.component_gap is None
+            else self.config.component_gap
         )
 
-        sys.setrecursionlimit(max(sys.getrecursionlimit(), problem.num_nodes * 2))
+        sys.setrecursionlimit(
+            max(
+                sys.getrecursionlimit(),
+                problem.num_nodes * self.config.recursion_limit_multiplier,
+            )
+        )
         roots, children, depths = _bfs_forest(
             edge_index=edge_index_cpu,
             num_nodes=problem.num_nodes,
@@ -1467,6 +1497,8 @@ class ReingoldTilfordTree(Op):
 
         positions -= positions.mean(dim=0, keepdim=True)
         if self.config.horizontal:
+            # Preserve the same coordinates but swap depth into x for
+            # left-to-right tree renderers.
             positions = positions[:, [1, 0]]
         state.pos = positions.to(device=output_device, dtype=torch.float32)
         return state
