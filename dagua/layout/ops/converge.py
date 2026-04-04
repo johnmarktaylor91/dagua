@@ -83,11 +83,11 @@ class FixedSteps(Op):
     This op does not use randomness.
     """
 
-    name = "FixedSteps"
-    category = OpCategory.CONVERGE
-    reads = ()
-    writes = ("total_steps",)
-    requires = ()
+    name: ClassVar[str] = "FixedSteps"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ("total_steps",)
+    requires: ClassVar[Tuple[str, ...]] = ()
 
     def __init__(self, config: Optional[FixedStepsConfig] = None) -> None:
         """Store the frozen configuration for this op.
@@ -158,11 +158,11 @@ class DisplacementThreshold(Op):
     baseline and cannot mark convergence.
     """
 
-    name = "DisplacementThreshold"
-    category = OpCategory.CONVERGE
-    reads = ("pos", "extras")
-    writes = ("converged", "extras")
-    requires = ("pos",)
+    name: ClassVar[str] = "DisplacementThreshold"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", f"extras.{_PREV_POS_KEY}")
+    writes: ClassVar[Tuple[str, ...]] = ("converged", f"extras.{_PREV_POS_KEY}")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def __init__(self, config: Optional[DisplacementThresholdConfig] = None) -> None:
         """Store the frozen configuration for this op.
@@ -214,6 +214,7 @@ class DisplacementThreshold(Op):
             tuple(previous.shape) == tuple(state.pos.shape)
         )
         if not previous_shape_matches:
+            # The first call only seeds the baseline for the next displacement check.
             return state
 
         displacement = (state.pos.detach() - previous.to(device=state.pos.device)).norm(dim=1)
@@ -230,9 +231,12 @@ class FRConvergenceCheckConfig:
     ----------
     threshold : float, default=1e-4
         Classic FR convergence threshold applied to ``||delta_pos||_F / N``.
+    min_force_norm : float, default=1e-2
+        Safety floor applied before normalizing node-force vectors.
     """
 
     threshold: float = 1.0e-4
+    min_force_norm: float = 1.0e-2
 
 
 @register_op
@@ -294,7 +298,9 @@ class FRConvergenceCheck(Op):
         if problem.num_nodes <= 0 or state.forces is None or state.temperature is None:
             return state
 
-        length = torch.linalg.vector_norm(state.forces, dim=1).clamp(min=1.0e-2)
+        length = torch.linalg.vector_norm(state.forces, dim=1).clamp(
+            min=float(self.config.min_force_norm)
+        )
         delta_pos = state.forces * (float(state.temperature) / length).unsqueeze(1)
         mean_displacement = float(torch.linalg.norm(delta_pos).item()) / float(problem.num_nodes)
         state.converged = state.converged or mean_displacement < self.config.threshold
@@ -323,11 +329,11 @@ class TemperatureThreshold(Op):
     This op does not use randomness.
     """
 
-    name = "TemperatureThreshold"
-    category = OpCategory.CONVERGE
-    reads = ("temperature",)
-    writes = ("converged",)
-    requires = ()
+    name: ClassVar[str] = "TemperatureThreshold"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = ("temperature",)
+    writes: ClassVar[Tuple[str, ...]] = ("converged",)
+    requires: ClassVar[Tuple[str, ...]] = ()
 
     def __init__(self, config: Optional[TemperatureThresholdConfig] = None) -> None:
         """Store the frozen configuration for this op.
@@ -402,11 +408,11 @@ class SlidingWindowRelative(Op):
     NeuLay criterion ``relative_range < tol * sqrt(N)``.
     """
 
-    name = "SlidingWindowRelative"
-    category = OpCategory.CONVERGE
-    reads = ("extras", "pos")
-    writes = ("converged",)
-    requires = ("extras",)
+    name: ClassVar[str] = "SlidingWindowRelative"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras.loss_window")
+    writes: ClassVar[Tuple[str, ...]] = ("converged",)
+    requires: ClassVar[Tuple[str, ...]] = ("extras.loss_window",)
 
     def __init__(self, config: Optional[SlidingWindowRelativeConfig] = None) -> None:
         """Store the frozen configuration for this op.
@@ -477,10 +483,13 @@ class StallCountConfig:
         Number of consecutive stalled iterations required for convergence.
     rel_threshold : float, default=1e-4
         Relative-improvement threshold below which a step counts as stalled.
+    denominator_floor : float, default=1e-12
+        Safety floor used when normalizing the relative-loss change.
     """
 
     limit: int = 5
     rel_threshold: float = 1.0e-4
+    denominator_floor: float = 1.0e-12
 
 
 @register_op
@@ -494,11 +503,19 @@ class StallCount(Op):
     used even though ``SolveState`` only carries one scalar loss slot.
     """
 
-    name = "StallCount"
-    category = OpCategory.CONVERGE
-    reads = ("prev_loss", "stall_count", "extras")
-    writes = ("stall_count", "converged", "extras")
-    requires = ("prev_loss",)
+    name: ClassVar[str] = "StallCount"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = (
+        "prev_loss",
+        "stall_count",
+        f"extras.{_STALL_LAST_LOSS_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        "stall_count",
+        "converged",
+        f"extras.{_STALL_LAST_LOSS_KEY}",
+    )
+    requires: ClassVar[Tuple[str, ...]] = ("prev_loss",)
 
     def __init__(self, config: Optional[StallCountConfig] = None) -> None:
         """Store the frozen configuration for this op.
@@ -550,7 +567,7 @@ class StallCount(Op):
         if previous_loss is None:
             return state
 
-        denominator = max(abs(float(previous_loss)), 1.0e-12)
+        denominator = max(abs(float(previous_loss)), float(self.config.denominator_floor))
         relative_change = abs(float(previous_loss) - current_loss) / denominator
         if relative_change <= self.config.rel_threshold:
             state.stall_count += 1
@@ -582,11 +599,11 @@ class LRThreshold(Op):
     This op does not use randomness.
     """
 
-    name = "LRThreshold"
-    category = OpCategory.CONVERGE
-    reads = ("optimizer",)
-    writes = ("converged",)
-    requires = ()
+    name: ClassVar[str] = "LRThreshold"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = ("optimizer",)
+    writes: ClassVar[Tuple[str, ...]] = ("converged",)
+    requires: ClassVar[Tuple[str, ...]] = ()
 
     def __init__(self, config: Optional[LRThresholdConfig] = None) -> None:
         """Store the frozen configuration for this op.

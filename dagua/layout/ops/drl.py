@@ -823,6 +823,28 @@ class DRLInitializePositions(Op):
         return state
 
 
+@dataclass(frozen=True)
+class DRLPhaseSolveConfig:
+    """Configuration for :class:`DRLPhaseSolve`.
+
+    Parameters
+    ----------
+    initial_min_edges : float, default=20.0
+        Starting minimum-edge threshold for candidate edge pruning.
+    cut_off_multiplier : float, default=4.0
+        Multiplier applied to ``cut_end`` to initialize ``cut_off_length``.
+    cut_rate_numerator : float, default=3.0
+        Numerator multiplied by ``cut_end`` in the cut-rate formula.
+    cut_rate_divisor : float, default=400.0
+        Divisor for computing the per-iteration cut-rate cooling.
+    """
+
+    initial_min_edges: float = 20.0
+    cut_off_multiplier: float = 4.0
+    cut_rate_numerator: float = 3.0
+    cut_rate_divisor: float = 400.0
+
+
 @register_op
 class DRLPhaseSolve(Op):
     """Run all DRL phases and all node-level energy updates.
@@ -841,6 +863,9 @@ class DRLPhaseSolve(Op):
     reads: ClassVar[tuple[str, ...]] = ("pos", "extras")
     writes: ClassVar[tuple[str, ...]] = ("pos",)
     requires: ClassVar[tuple[str, ...]] = ("pos",)
+
+    def __init__(self, config: Optional[DRLPhaseSolveConfig] = None) -> None:
+        self.config = config or DRLPhaseSolveConfig()
 
     def apply(
         self,
@@ -869,9 +894,13 @@ class DRLPhaseSolve(Op):
 
         rng = random.Random(problem.seed)
         cut_end = _CUT_BASE * (1.0 - params.edge_cut)
-        cut_off_length = 4.0 * cut_end
-        cut_rate = 0.0 if cut_end <= 0.0 else (3.0 * cut_end) / 400.0
-        min_edges = 20.0
+        cut_off_length = self.config.cut_off_multiplier * cut_end
+        cut_rate = (
+            0.0
+            if cut_end <= 0.0
+            else (self.config.cut_rate_numerator * cut_end) / self.config.cut_rate_divisor
+        )
+        min_edges = self.config.initial_min_edges
 
         phase_specs = [
             ("init", params.init),

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from math import sqrt
-from typing import DefaultDict, Dict, List, Optional, Sequence
+from typing import ClassVar, DefaultDict, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -27,7 +27,6 @@ from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _MIN_SPAN = 1.0e-6
-_OUTPUT_SCALE_FACTOR = 50.0
 
 
 def _require_positions(state: SolveState, op_name: str) -> torch.Tensor:
@@ -186,11 +185,11 @@ def _unique_children_in_order(children: Sequence[int]) -> List[int]:
 class CenterPositions(Op):
     """Translate positions so their centroid is at the origin."""
 
-    name = "center_positions"
-    category = OpCategory.POSTPROCESS
-    reads = ("pos",)
-    writes = ("pos",)
-    requires = ("pos",)
+    name: ClassVar[str] = "center_positions"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def apply(
         self,
@@ -242,11 +241,11 @@ class ScalePositionsConfig:
 class ScalePositions(Op):
     """Scale coordinates either by a fixed factor or to a target max extent."""
 
-    name = "scale_positions"
-    category = OpCategory.POSTPROCESS
-    reads = ("pos",)
-    writes = ("pos",)
-    requires = ("pos",)
+    name: ClassVar[str] = "scale_positions"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def __init__(self, config: Optional[ScalePositionsConfig] = None) -> None:
         """Store the scaling configuration.
@@ -307,15 +306,47 @@ class ScalePositions(Op):
         return state
 
 
+@dataclass(frozen=True)
+class FRFinalizePositionsConfig:
+    """Configuration for :class:`FRFinalizePositions`.
+
+    Parameters
+    ----------
+    scale_method : str, default="max_abs"
+        Scaling mode passed through to :class:`ScalePositions`.
+    output_scale_factor : float, default=50.0
+        Multiplier applied to ``sqrt(num_nodes)`` before the final max-abs
+        normalization step.
+    """
+
+    scale_method: str = "max_abs"
+    output_scale_factor: float = 50.0
+
+
 @register_op
 class FRFinalizePositions(Op):
     """Apply the FR-specific final centering, scaling, and float32 cast."""
 
-    name = "fr_finalize_positions"
-    category = OpCategory.POSTPROCESS
-    reads: tuple[str, ...] = ("pos",)
-    writes: tuple[str, ...] = ("pos",)
-    requires: tuple[str, ...] = ("pos",)
+    name: ClassVar[str] = "fr_finalize_positions"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def __init__(self, config: Optional[FRFinalizePositionsConfig] = None) -> None:
+        """Store the FR finalization configuration.
+
+        Parameters
+        ----------
+        config : FRFinalizePositionsConfig, optional
+            Final scaling configuration. Defaults to the legacy FR constants.
+
+        Returns
+        -------
+        None
+            The operation stores the resolved configuration.
+        """
+        self.config = config or FRFinalizePositionsConfig()
 
     def apply(
         self,
@@ -348,11 +379,13 @@ class FRFinalizePositions(Op):
         if state.pos is None:
             raise ValueError("FRFinalizePositions requires state.pos to be set.")
 
+        # Compose the shared postprocess ops so FR keeps the same ordering and
+        # numerics as the historical finalize path.
         state = CenterPositions().apply(problem=problem, state=state, ctx=ctx)
         state = ScalePositions(
             ScalePositionsConfig(
-                method="max_abs",
-                factor=(sqrt(float(max(problem.num_nodes, 1))) * _OUTPUT_SCALE_FACTOR),
+                method=self.config.scale_method,
+                factor=(sqrt(float(max(problem.num_nodes, 1))) * self.config.output_scale_factor),
             ),
         ).apply(problem=problem, state=state, ctx=ctx)
         state.pos = state.pos.to(dtype=torch.float32)
@@ -480,11 +513,11 @@ class NormalizePositionsConfig:
 class NormalizePositions(Op):
     """Center and scale positions into a stable extent."""
 
-    name = "normalize_positions"
-    category = OpCategory.POSTPROCESS
-    reads = ("pos",)
-    writes = ("pos",)
-    requires = ("pos",)
+    name: ClassVar[str] = "normalize_positions"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def __init__(self, config: Optional[NormalizePositionsConfig] = None) -> None:
         """Store the normalization configuration.
@@ -537,6 +570,8 @@ class NormalizePositions(Op):
         centered = _centered_positions(positions)
         span = _max_abs_coordinate(centered)
         if span < _MIN_SPAN:
+            # Degenerate layouts otherwise collapse to a single point. Spread
+            # them deterministically so downstream direction transforms stay stable.
             state.pos = _fallback_normalized_positions(positions=centered, extent=extent)
             return state
 
@@ -551,11 +586,11 @@ _KK_TRACE_KEY = "kk_traces"
 class KamadaKawaiFinalizePositions(Op):
     """Scale final Kamada-Kawai coordinates and move traces to output device."""
 
-    name: str = "kamada_kawai_finalize_positions"
-    category: OpCategory = OpCategory.POSTPROCESS
-    reads: tuple[str, ...] = ("pos",)
-    writes: tuple[str, ...] = ("pos", "extras")
-    requires: tuple[str, ...] = ("pos",)
+    name: ClassVar[str] = "kamada_kawai_finalize_positions"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos", f"extras.{_KK_TRACE_KEY}")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", f"extras.{_KK_TRACE_KEY}")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def apply(
         self,
@@ -614,11 +649,11 @@ def _rescale_spectral_layout(positions: np.ndarray, scale: float = 1.0) -> np.nd
 class SpectralFinalizePositions(Op):
     """Apply spectral centering and scaling with stable output device placement."""
 
-    name = "spectral_finalize_positions"
-    category = OpCategory.POSTPROCESS
-    reads = ("pos",)
-    writes = ("pos",)
-    requires = ("pos",)
+    name: ClassVar[str] = "spectral_finalize_positions"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def apply(
         self,
@@ -626,7 +661,27 @@ class SpectralFinalizePositions(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Rescale coordinates like :func:`layout_spectral`."""
+        """Rescale coordinates like :func:`layout_spectral`.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state containing spectral coordinates.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with centered, unit-extent ``float32`` coordinates.
+
+        Raises
+        ------
+        ValueError
+            If ``state.pos`` is missing.
+        """
         _ = ctx
         if state.pos is None:
             raise ValueError("SpectralFinalizePositions requires state.pos to be set.")
@@ -639,6 +694,8 @@ class SpectralFinalizePositions(Op):
             state.pos = torch.zeros((1, 2), dtype=torch.float32, device=output_device)
             return state
 
+        # Match NetworkX's CPU rescale implementation exactly before returning
+        # to the caller's preferred output device.
         positions = state.pos.detach().to(device="cpu", dtype=torch.float64).numpy()
         state.pos = torch.from_numpy(_rescale_spectral_layout(positions=positions, scale=1.0)).to(
             dtype=torch.float32,
@@ -725,11 +782,11 @@ class ClassicalMDSFinalizePositions(Op):
 class PivotMDSFinalizePositions(Op):
     """Apply Pivot-MDS-specific final normalization and output casting."""
 
-    name = "pivot_mds_finalize_positions"
-    category = OpCategory.POSTPROCESS
-    reads = ("pos",)
-    writes = ("pos",)
-    requires = ()
+    name: ClassVar[str] = "pivot_mds_finalize_positions"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
         self,
@@ -795,11 +852,11 @@ class DirectionTransformConfig:
 class DirectionTransform(Op):
     """Rotate or flip coordinates into the requested layout direction."""
 
-    name = "direction_transform"
-    category = OpCategory.POSTPROCESS
-    reads = ("pos",)
-    writes = ("pos",)
-    requires = ("pos",)
+    name: ClassVar[str] = "direction_transform"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def __init__(self, config: Optional[DirectionTransformConfig] = None) -> None:
         """Store the direction transform configuration.
@@ -869,11 +926,11 @@ class DirectionTransform(Op):
 class StripDummyNodes(Op):
     """Remove dummy-node coordinates introduced by layered expansions."""
 
-    name = "strip_dummy_nodes"
-    category = OpCategory.POSTPROCESS
-    reads = ("pos", "extras.expanded_graph")
-    writes = ("pos",)
-    requires = ("pos",)
+    name: ClassVar[str] = "strip_dummy_nodes"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras.expanded_graph")
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def apply(
         self,
@@ -902,6 +959,8 @@ class StripDummyNodes(Op):
         expanded_graph = state.extras.get("expanded_graph")
         if expanded_graph is not None:
             expanded_num_nodes = getattr(expanded_graph, "num_nodes", positions.shape[0])
+            # Guard against stale expansion metadata before slicing away the
+            # dummy-node tail.
             if expanded_num_nodes < problem.num_nodes:
                 raise ValueError(
                     "expanded_graph.num_nodes cannot be smaller than problem.num_nodes"
@@ -921,21 +980,25 @@ class SpreadFanoutChildrenConfig:
         Minimum unique out-neighbor count required to treat a node as a hub.
     widening : float, default=1.5
         Multiplier applied to the observed child spacing before re-spreading.
+    minimum_step : float, default=1.0
+        Minimum left-to-right spacing between adjacent children after
+        widening. This preserves the previous unit-spacing floor.
     """
 
     hub_threshold: int = 8
     widening: float = 1.5
+    minimum_step: float = 1.0
 
 
 @register_op
 class SpreadFanoutChildren(Op):
     """Redistribute high-fanout child groups around each hub's x-coordinate."""
 
-    name = "spread_fanout_children"
-    category = OpCategory.POSTPROCESS
-    reads = ("pos", "layers")
-    writes = ("pos",)
-    requires = ("pos", "layers")
+    name: ClassVar[str] = "spread_fanout_children"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "layers")
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "layers")
 
     def __init__(self, config: Optional[SpreadFanoutChildrenConfig] = None) -> None:
         """Store the hub spreading configuration.
@@ -1002,14 +1065,17 @@ class SpreadFanoutChildren(Op):
                 if len(layer_children) <= 1:
                     continue
 
+                # Preserve the original left-to-right order while expanding the
+                # band symmetrically around the hub center.
                 ordered_children = sorted(layer_children, key=lambda node: float(updated[node, 0]))
                 left = float(updated[ordered_children[0], 0].item())
                 right = float(updated[ordered_children[-1], 0].item())
-                current_span = max(right - left, float(len(ordered_children) - 1))
+                minimum_span = float(len(ordered_children) - 1) * self.config.minimum_step
+                current_span = max(right - left, minimum_span)
                 step = max(
                     (current_span / float(max(len(ordered_children) - 1, 1)))
                     * self.config.widening,
-                    1.0,
+                    self.config.minimum_step,
                 )
                 start = hub_x - (step * float(len(ordered_children) - 1) / 2.0)
                 for index, child in enumerate(ordered_children):
@@ -1024,6 +1090,7 @@ __all__ = [
     "DirectionTransform",
     "DirectionTransformConfig",
     "FRFinalizePositions",
+    "FRFinalizePositionsConfig",
     "GraphOptFinalizePositions",
     "KamadaKawaiFinalizePositions",
     "ClassicalMDSFinalizePositions",
