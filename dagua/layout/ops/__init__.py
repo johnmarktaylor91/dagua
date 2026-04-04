@@ -12,6 +12,11 @@ MultilevelVCycle) for building layout workflows.
 OpCategory enum and registry for operation discovery.
 """
 
+import importlib
+import logging
+from pathlib import Path
+from typing import Set
+
 from dagua.layout.ops.base import (
     Conditional,
     EarlyBreak,
@@ -98,6 +103,7 @@ from dagua.layout.ops.state import (
     TraceSink,
 )
 from dagua.layout.ops.taxonomy import (
+    OP_REGISTRY,
     OpCategory,
     get_op_class,
     list_categories,
@@ -213,32 +219,79 @@ __all__ = [
     "Timer",
     "VRAMGuard",
     "VRAMGuardConfig",
+    "OP_REGISTRY",
 ]
+
+_EXPECTED_OP_MODULES = (
+    "anneal",
+    "coarsen",
+    "context",
+    "converge",
+    "coordinate",
+    "distance",
+    "sgd2_multi",
+    "embed",
+    "force",
+    "layering",
+    "loss_engine",
+    "optimize",
+    "ordering",
+    "preprocess",
+    "project",
+)
+
+log = logging.getLogger(__name__)
 
 
 # Late imports: trigger @register_op in all category modules.
 # Placed after __all__ to avoid circular import issues.
 def _register_all_ops() -> None:
-    """Import every category module so their @register_op decorators fire."""
-    import importlib
+    """Import all operation modules to trigger ``@register_op`` decorators.
 
-    for mod_name in (
-        "anneal",
-        "coarsen",
-        "context",
-        "converge",
-        "coordinate",
-        "distance",
-        "sgd2_multi",
-        "embed",
-        "force",
-        "layering",
-        "loss_engine",
-        "optimize",
-        "ordering",
-        "preprocess",
-        "project",
-    ):
+    The list of expected modules is retained for validation to catch package
+    drift. If discovery and expectation diverge, a warning is emitted but import
+    continues from discovered modules.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+
+    expected_modules: Set[str] = set(_EXPECTED_OP_MODULES)
+    discovered_modules: Set[str] = set()
+    ops_dir = Path(__file__).resolve().parent
+    excluded_modules = {
+        "__init__",
+        "base",
+        "state",
+        "taxonomy",
+        "graph_utils",
+    }
+
+    for module_path in ops_dir.glob("*.py"):
+        stem = module_path.stem
+        if stem in excluded_modules or stem.startswith("_"):
+            continue
+        discovered_modules.add(stem)
+
+    if not discovered_modules:
+        log.warning("No op modules discovered in %s; falling back to expected list.", ops_dir)
+        discovered_modules = expected_modules
+
+    missing_modules = expected_modules.difference(discovered_modules)
+    extra_modules = discovered_modules.difference(expected_modules)
+    if missing_modules or extra_modules:
+        log.warning(
+            "Mismatch between expected and discovered op modules. Missing: %s. Extra: %s.",
+            sorted(missing_modules),
+            sorted(extra_modules),
+        )
+
+    for mod_name in sorted(discovered_modules):
         importlib.import_module(f"dagua.layout.ops.{mod_name}")
 
 
