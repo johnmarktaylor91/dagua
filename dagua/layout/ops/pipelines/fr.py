@@ -7,19 +7,80 @@ from typing import ClassVar, Optional, Tuple
 
 import torch
 
-from dagua.layout.classic.fr import (
-    OUTPUT_SCALE_FACTOR,
-    _adjacency_matrix,
-    _initialize_positions,
-    _layout_device,
-    _rescale_layout,
-)
 from dagua.layout.ops.anneal import InitTemperatureFromExtent, LinearCool
-from dagua.layout.ops.base import Op, Pipeline, Repeat
-from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig, FRConvergenceCheck
+from dagua.layout.ops.base import Op, Pipeline, Repeat  # noqa: E402
+from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig, FRConvergenceCheck  # noqa: E402
 from dagua.layout.ops.force import ApplyDisplacement, FRCombinedForce
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.taxonomy import OpCategory
+from dagua.layout.ops.graph_utils import (
+    initialize_numpy_positions as _initialize_positions,
+)
+from dagua.layout.ops.graph_utils import (
+    layout_device as _layout_device,
+)
+from dagua.layout.ops.graph_utils import (
+    rescale_layout as _rescale_layout,
+)
+from dagua.layout.ops.state import (  # noqa: E402
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
+from dagua.layout.ops.taxonomy import OpCategory  # noqa: E402
+
+_OUTPUT_SCALE_FACTOR = 50.0
+
+
+def _adjacency_matrix(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Build the directed dense adjacency matrix used by NetworkX FR.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Dense adjacency matrix with shape ``[N, N]`` and dtype ``float64``.
+
+    Raises
+    ------
+    ValueError
+        If ``edge_index`` has an invalid shape or contains out-of-range nodes.
+    """
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+
+    adjacency = torch.zeros((num_nodes, num_nodes), dtype=torch.float64)
+    if edge_index.numel() == 0:
+        return adjacency
+
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    sources = edge_index_cpu[0]
+    targets = edge_index_cpu[1]
+    if (
+        torch.any(sources < 0)
+        or torch.any(sources >= num_nodes)
+        or torch.any(targets < 0)
+        or torch.any(targets >= num_nodes)
+    ):
+        raise ValueError("edge_index contains a node index outside [0, num_nodes).")
+
+    if edge_weights is not None:
+        weights = edge_weights.detach().to(device="cpu", dtype=torch.float64)
+        adjacency[sources, targets] = weights
+    else:
+        adjacency[sources, targets] = 1.0
+    return adjacency
 
 
 class _InitializeFRPositions(Op):
@@ -151,7 +212,7 @@ class _FinalizeFRPositions(Op):
             return state
 
         scaled = _rescale_layout(state.pos, scale=1.0)
-        scaled = scaled * (sqrt(float(max(problem.num_nodes, 1))) * OUTPUT_SCALE_FACTOR)
+        scaled = scaled * (sqrt(float(max(problem.num_nodes, 1))) * _OUTPUT_SCALE_FACTOR)
         state.pos = scaled.to(dtype=torch.float32, device=output_device)
         return state
 

@@ -2,23 +2,236 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, List, Optional, Tuple, Union
+from typing import Any, ClassVar, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 
-from dagua.layout.classic._graph_distances import build_directed_adjacency
-from dagua.layout.classic.kk import (
-    _circular_layout,
-    _layout_device,
-    _rescale_layout,
-    _shortest_path_distance_matrix,
-    _solve_kamada_kawai,
+from dagua.layout.ops.graph_utils import (
+    bfs_distances,
+    build_directed_adjacency,
+    dijkstra_distances,
 )
-from dagua.layout.ops.base import Op, Pipeline
-from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.taxonomy import OpCategory
+from dagua.layout.ops.graph_utils import (
+    layout_device as _layout_device,
+)
+
+UNREACHABLE_DISTANCE = 1.0e6
+DISTANCE_EPSILON = 1.0e-3
+CENTERING_WEIGHT = 1.0e-3
+
+
+def _shortest_path_distance_matrix(
+    adjacency: list[list[tuple[int, float]]],
+    weighted: bool,
+) -> np.ndarray:
+    """Compute directed all-pairs shortest-path distances.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Directed adjacency list.
+    weighted : bool
+        Whether to compute weighted shortest paths with Dijkstra.
+
+    Returns
+    -------
+    numpy.ndarray
+        Distance matrix with shape ``[N, N]`` and ``1e6`` for unreachable pairs.
+    """
+    num_nodes = len(adjacency)
+    distances = np.full((num_nodes, num_nodes), UNREACHABLE_DISTANCE, dtype=np.float64)
+    for source in range(num_nodes):
+        if weighted:
+            source_distances = dijkstra_distances(adjacency, source)
+            source_distances[np.isinf(source_distances)] = UNREACHABLE_DISTANCE
+            distances[source] = source_distances
+            continue
+
+        source_distances = bfs_distances(adjacency, source).astype(np.float64)
+        source_distances[source_distances < 0] = UNREACHABLE_DISTANCE
+        distances[source] = source_distances
+    return distances
+
+
+def _rescale_layout(positions: np.ndarray, scale: float = 1.0) -> np.ndarray:
+    """Center and scale coordinates like ``networkx.rescale_layout``.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Position array with shape ``[N, 2]``.
+    scale : float, default=1.0
+        Target half-width after rescaling.
+
+    Returns
+    -------
+    numpy.ndarray
+        Rescaled coordinates.
+    """
+    positions = positions.copy()
+    positions -= positions.mean(axis=0)
+    limit = np.abs(positions).max()
+    if limit > 0:
+        positions *= scale / limit
+    return positions
+
+
+def _circular_layout(num_nodes: int) -> np.ndarray:
+    """Create the exact 2D circular initialization used by NetworkX.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    numpy.ndarray
+        Circular coordinates with shape ``[N, 2]``.
+    """
+    if num_nodes == 0:
+        return np.empty((0, 2), dtype=np.float64)
+    if num_nodes == 1:
+        return np.zeros((1, 2), dtype=np.float64)
+
+    theta = np.linspace(0, 1, num_nodes + 1)[:-1] * (2.0 * np.pi)
+    theta = theta.astype(np.float32)
+    positions = np.column_stack((np.cos(theta), np.sin(theta)))
+    return _rescale_layout(positions.astype(np.float64, copy=False), scale=1.0)
+
+
+def _kamada_kawai_costfn(
+    pos_vec: np.ndarray,
+    np_module: Any,
+    invdist: np.ndarray,
+    meanweight: float,
+    dim: int,
+) -> tuple[float, np.ndarray]:
+    """Compute the exact NetworkX Kamada-Kawai objective and gradient.
+
+    Parameters
+    ----------
+    pos_vec : numpy.ndarray
+        Flattened position vector with shape ``[N * dim]``.
+    np_module : Any
+        NumPy module passed through to mirror the NetworkX helper signature.
+    invdist : numpy.ndarray
+        Inverse preferred-distance matrix with shape ``[N, N]``.
+    meanweight : float
+        Weight of the origin-centering penalty.
+    dim : int
+        Layout dimension.
+
+    Returns
+    -------
+    tuple[float, numpy.ndarray]
+        Objective value and flattened analytic gradient.
+    """
+    num_nodes = invdist.shape[0]
+    pos_arr = pos_vec.reshape((num_nodes, dim))
+
+    delta = pos_arr[:, np_module.newaxis, :] - pos_arr[np_module.newaxis, :, :]
+    node_separation = np_module.linalg.norm(delta, axis=-1)
+    direction = np_module.einsum(
+        "ijk,ij->ijk",
+        delta,
+        1.0 / (node_separation + np_module.eye(num_nodes) * DISTANCE_EPSILON),
+    )
+
+    offset = (node_separation * invdist) - 1.0
+    offset[np_module.diag_indices(num_nodes)] = 0.0
+
+    cost = 0.5 * float(np_module.sum(offset**2))
+    gradient = np_module.einsum(
+        "ij,ij,ijk->ik",
+        invdist,
+        offset,
+        direction,
+    ) - np_module.einsum(
+        "ij,ij,ijk->jk",
+        invdist,
+        offset,
+        direction,
+    )
+
+    sum_positions = np_module.sum(pos_arr, axis=0)
+    cost += 0.5 * meanweight * float(np_module.sum(sum_positions**2))
+    gradient += meanweight * sum_positions
+    return cost, gradient.ravel()
+
+
+def _solve_kamada_kawai(
+    distance_matrix: np.ndarray,
+    initial_positions: np.ndarray,
+    steps: Optional[int],
+    trace_every: int,
+) -> tuple[np.ndarray, list[torch.Tensor]]:
+    """Run the exact SciPy L-BFGS-B solver used by NetworkX KK.
+
+    Parameters
+    ----------
+    distance_matrix : numpy.ndarray
+        Preferred graph distances with shape ``[N, N]``.
+    initial_positions : numpy.ndarray
+        Initial coordinates with shape ``[N, 2]``.
+    steps : int, optional
+        Maximum optimization iterations. ``None`` or ``0`` mirrors the
+        uncapped NetworkX behavior by leaving ``maxiter`` unset.
+    trace_every : int
+        Callback snapshot cadence.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, list[torch.Tensor]]
+        Final coordinates and optional trace snapshots.
+    """
+    try:
+        import scipy as sp
+    except ImportError as error:
+        raise ImportError("layout_kk requires scipy to match NetworkX exactly.") from error
+
+    inverse_distances = 1.0 / (
+        distance_matrix + np.eye(distance_matrix.shape[0], dtype=np.float64) * DISTANCE_EPSILON
+    )
+    traces: list[torch.Tensor] = []
+    iteration = 0
+
+    def _callback(pos_vec: np.ndarray) -> None:
+        """Collect optimizer traces without affecting the solve."""
+        nonlocal iteration
+
+        iteration += 1
+        if trace_every > 0 and iteration % trace_every == 0:
+            snapshot = pos_vec.reshape((-1, 2)).copy()
+            traces.append(torch.from_numpy(snapshot).to(dtype=torch.float32))
+
+    minimize_kwargs: dict[str, Any] = {
+        "method": "L-BFGS-B",
+        "args": (np, inverse_distances, CENTERING_WEIGHT, 2),
+        "jac": True,
+        "callback": _callback,
+    }
+    if steps not in {None, 0}:
+        minimize_kwargs["options"] = {"maxiter": steps}
+
+    optresult = sp.optimize.minimize(
+        _kamada_kawai_costfn,
+        initial_positions.ravel(),
+        **minimize_kwargs,
+    )
+    return optresult.x.reshape((-1, 2)), traces
+
+
+from dagua.layout.ops.base import Op, Pipeline  # noqa: E402
+from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig  # noqa: E402
+from dagua.layout.ops.state import (  # noqa: E402
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
+from dagua.layout.ops.taxonomy import OpCategory  # noqa: E402
 
 _INITIAL_POS_KEY = "kk_initial_pos"
 _DISTANCE_MATRIX_KEY = "kk_distance_matrix"

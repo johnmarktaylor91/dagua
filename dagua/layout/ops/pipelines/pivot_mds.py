@@ -4,19 +4,229 @@ from __future__ import annotations
 
 from typing import ClassVar, Optional, Tuple
 
+import numpy as np
 import torch
 
-from dagua.layout.classic.pivot_mds import (
-    _build_undirected_adjacency,
-    _layout_device,
-    _layout_extent,
-    _normalize_positions,
-    _pivot_mds_coordinates,
-    _select_pivots,
+from dagua.layout.ops.graph_utils import (
+    _shared_bfs_distances as bfs_distances,
 )
-from dagua.layout.ops.base import Op, Pipeline
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.taxonomy import OpCategory
+from dagua.layout.ops.graph_utils import (
+    _shared_dijkstra_distances as dijkstra_distances,
+)
+from dagua.layout.ops.graph_utils import (
+    layout_device as _layout_device,
+)
+from dagua.layout.ops.graph_utils import (
+    layout_extent as _layout_extent,
+)
+
+_MIN_SPAN = 1.0e-6
+
+
+def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor:
+    """Center and scale coordinates into a stable bounding box.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    extent : float
+        Target half-width.
+
+    Returns
+    -------
+    torch.Tensor
+        Normalized coordinates.
+    """
+    if positions.shape[0] <= 1:
+        return torch.zeros_like(positions)
+
+    centered = positions - positions.mean(dim=0, keepdim=True)
+    span = float(centered.abs().max().item())
+    if span < _MIN_SPAN:
+        centered = centered.clone()
+        centered[:, 0] = torch.linspace(
+            -1.0, 1.0, steps=positions.shape[0], device=positions.device
+        )
+        span = float(centered.abs().max().item())
+    return centered * (extent / max(span, _MIN_SPAN))
+
+
+def _build_undirected_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> list[list[tuple[int, float]]]:
+    """Build an undirected adjacency list.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    edge_weights : torch.Tensor, optional
+        Optional per-edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    list[list[tuple[int, float]]]
+        One neighbor list per node.
+    """
+    adjacency: list[dict[int, float]] = [{} for _ in range(num_nodes)]
+    if edge_index.numel() == 0:
+        return [[] for _ in range(num_nodes)]
+
+    ei_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    sources = ei_cpu[0].tolist()
+    targets = ei_cpu[1].tolist()
+
+    if edge_weights is not None:
+        weights = edge_weights.detach().cpu().float().tolist()
+    else:
+        weights = [1.0] * len(sources)
+
+    for src, tgt, weight in zip(sources, targets, weights):
+        if src == tgt:
+            continue
+        if tgt not in adjacency[src] or weight < adjacency[src][tgt]:
+            adjacency[src][tgt] = weight
+        if src not in adjacency[tgt] or weight < adjacency[tgt][src]:
+            adjacency[tgt][src] = weight
+
+    return [sorted(neighbors.items()) for neighbors in adjacency]
+
+
+def _graph_distances(
+    adjacency: list[list[tuple[int, float]]],
+    start: int,
+    weighted: bool,
+) -> torch.Tensor:
+    """Compute graph distances from one source.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list.
+    start : int
+        Source node index.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
+
+    Returns
+    -------
+    torch.Tensor
+        Float distances with unreachable nodes replaced by ``max_distance + 1``.
+    """
+    if weighted:
+        raw_distances = dijkstra_distances(adjacency, start)
+        finite_mask = np.isfinite(raw_distances)
+    else:
+        raw_distances = bfs_distances(adjacency, start).astype(np.float64)
+        finite_mask = raw_distances >= 0
+
+    max_distance = float(raw_distances[finite_mask].max()) if bool(finite_mask.any()) else 0.0
+    fill_value = max_distance + 1.0 if len(adjacency) > 1 else 0.0
+    cleaned = np.where(finite_mask, raw_distances, fill_value)
+    return torch.tensor(cleaned, dtype=torch.float32)
+
+
+def _select_pivots(
+    adjacency: list[list[tuple[int, float]]],
+    n_pivots: int,
+    seed: int,
+    weighted: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select pivots with a deterministic max-min heuristic.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list.
+    n_pivots : int
+        Number of pivots to choose.
+    seed : int
+        Random seed for the first pivot.
+    weighted : bool
+        Whether to use Dijkstra instead of BFS.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Pivot indices ``[P]`` and pivot-to-node distance matrix ``[P, N]``.
+    """
+    num_nodes = len(adjacency)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+
+    selected = torch.zeros(num_nodes, dtype=torch.bool)
+    pivot_indices: list[int] = []
+    pivot_distances: list[torch.Tensor] = []
+
+    first_pivot = int(torch.randint(0, num_nodes, (1,), generator=generator).item())
+    pivot_indices.append(first_pivot)
+    selected[first_pivot] = True
+
+    min_distances = _graph_distances(adjacency, first_pivot, weighted=weighted)
+    pivot_distances.append(min_distances)
+
+    while len(pivot_indices) < n_pivots:
+        candidate_scores = min_distances.masked_fill(selected, -1.0)
+        next_pivot = int(torch.argmax(candidate_scores).item())
+        if selected[next_pivot]:
+            break
+        selected[next_pivot] = True
+        pivot_indices.append(next_pivot)
+        distances = _graph_distances(adjacency, next_pivot, weighted=weighted)
+        pivot_distances.append(distances)
+        min_distances = torch.minimum(min_distances, distances)
+
+    return torch.tensor(pivot_indices, dtype=torch.long), torch.stack(pivot_distances, dim=0)
+
+
+def _pivot_mds_coordinates(distance_matrix: torch.Tensor) -> torch.Tensor:
+    """Recover a 2D embedding from pivot distances with SVD.
+
+    Parameters
+    ----------
+    distance_matrix : torch.Tensor
+        Pivot-to-node distance matrix with shape ``[P, N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Coordinate matrix with shape ``[N, 2]``.
+    """
+    squared = distance_matrix.square()
+    row_means = squared.mean(dim=1, keepdim=True)
+    col_means = squared.mean(dim=0, keepdim=True)
+    grand_mean = squared.mean()
+    centered = -0.5 * (squared - row_means - col_means + grand_mean)
+
+    _, singular_values, vh = torch.linalg.svd(centered, full_matrices=False)
+    coord_dims = min(2, int(singular_values.shape[0]))
+    if coord_dims == 0:
+        return torch.zeros((distance_matrix.shape[1], 2), dtype=torch.float32)
+
+    # Brandes-Pich 2007: for rectangular PxN pivot distance matrix C,
+    # SVD gives C = U*S*V^T and coordinates are X = V[:,:k] * S[:k].
+    # NOT sqrt(S) -- that's only for classical MDS on square NxN matrices.
+    scales = singular_values[:coord_dims].clamp_min(0.0)
+    coords = vh[:coord_dims].transpose(0, 1) * scales.unsqueeze(0)
+    if coord_dims == 1:
+        zeros = torch.zeros((coords.shape[0], 1), dtype=coords.dtype)
+        coords = torch.cat((coords, zeros), dim=1)
+    return coords.to(dtype=torch.float32)
+
+
+from dagua.layout.ops.base import Op, Pipeline  # noqa: E402
+from dagua.layout.ops.state import (  # noqa: E402
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
+from dagua.layout.ops.taxonomy import OpCategory  # noqa: E402
 
 
 class _PreparePivotMDSState(Op):
