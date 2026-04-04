@@ -8,8 +8,8 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from dagua.layout.classic.reingold_tilford import _assign_preliminary_x, _bfs_forest
-from dagua.layout.classic.sugiyama import _brandes_koepf_x_positions, _resolve_node_sizes
+from dagua.layout._archive.classic.reingold_tilford import _assign_preliminary_x, _bfs_forest
+from dagua.layout._archive.classic.sugiyama import _brandes_koepf_x_positions, _resolve_node_sizes
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op

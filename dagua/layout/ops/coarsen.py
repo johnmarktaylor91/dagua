@@ -10,7 +10,7 @@ from typing import List, Optional, Sequence, Tuple
 
 import torch
 
-from dagua.layout.classic.fmmm import (
+from dagua.layout._archive.classic.fmmm import (
     _TYPE_MOON,
     _TYPE_PLANET,
     _TYPE_PLANET_WITH_MOONS,
@@ -21,8 +21,8 @@ from dagua.layout.classic.fmmm import (
     _star_masses,
     _unique_edges_with_lengths,
 )
-from dagua.layout.classic.sfdp import _build_graph as _build_sfdp_graph
-from dagua.layout.classic.sfdp import _heavy_edge_matching as _sfdp_heavy_edge_matching
+from dagua.layout._archive.classic.sfdp import _build_graph as _build_sfdp_graph
+from dagua.layout._archive.classic.sfdp import _heavy_edge_matching as _sfdp_heavy_edge_matching
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import HierarchyLevel, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
