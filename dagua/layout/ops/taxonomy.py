@@ -117,6 +117,7 @@ class OpCategory(Enum):
 # ---------------------------------------------------------------------------
 
 _OP_REGISTRY: Dict[str, Type["Op"]] = {}
+OP_REGISTRY: Dict[str, Type["Op"]] = _OP_REGISTRY
 
 
 def register_op(cls: Type["Op"]) -> Type["Op"]:
