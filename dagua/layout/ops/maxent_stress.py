@@ -115,7 +115,7 @@ class MaxentPrepareState(Op):
     name: ClassVar[str] = "maxent_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
     reads: ClassVar[Tuple[str, ...]] = ()
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("distance_matrix", "adjacency_weighted", "extras")
     requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
@@ -138,7 +138,8 @@ class MaxentPrepareState(Op):
         Returns
         -------
         SolveState
-            State with maxent-specific entries in ``state.extras``.
+            State with typed adjacency and, for majorization, typed graph
+            distances plus maxent-specific extras.
         """
         del ctx
 
@@ -155,6 +156,8 @@ class MaxentPrepareState(Op):
             num_nodes=problem.num_nodes,
             edge_weights=problem.edge_weights,
         )
+
+        state.adjacency_weighted = adjacency
 
         if self.for_majorization:
             raw_distances = _shared_all_pairs_shortest_paths(
@@ -181,7 +184,7 @@ class MaxentPrepareState(Op):
             )
             if graph_distances.numel() > 0:
                 weight_matrix[off_diagonal] = graph_distances[off_diagonal].reciprocal().square()
-            state.extras["maxent_graph_distances"] = graph_distances
+            state.distance_matrix = graph_distances
             state.extras["maxent_weight_matrix"] = weight_matrix
             return state
 
@@ -324,7 +327,6 @@ class MaxentPrepareState(Op):
         state.extras["maxent_pivot_distances"] = pivot_distances
         state.extras["maxent_full_ne_src"] = full_ne_src
         state.extras["maxent_full_ne_dst"] = full_ne_dst
-        state.extras["maxent_adjacency"] = adjacency
         return state
 
 
@@ -385,7 +387,7 @@ class MaxentGradientStep(Op):
     use_entropy: bool = False
     name: ClassVar[str] = "maxent_gradient_step"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "adjacency_weighted", "extras")
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
@@ -425,7 +427,9 @@ class MaxentGradientStep(Op):
         stress_lengths = state.extras["maxent_stress_lengths"]
         pivot_indices = state.extras["maxent_pivot_indices"]
         pivot_distances = state.extras["maxent_pivot_distances"]
-        adjacency = state.extras["maxent_adjacency"]
+        adjacency = state.adjacency_weighted
+        if adjacency is None:
+            raise ValueError("MaxentGradientStep requires state.adjacency_weighted to be set.")
 
         optimizer.zero_grad(set_to_none=True)
         if int(problem.num_nodes) <= _FULL_STRESS_LIMIT:
@@ -556,7 +560,7 @@ class MaxentMajorizationStep(Op):
 
     name: ClassVar[str] = "maxent_majorization_step"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "distance_matrix", "extras")
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
@@ -586,7 +590,9 @@ class MaxentMajorizationStep(Op):
 
         assert state.pos is not None
         positions = state.pos
-        graph_distances = state.extras["maxent_graph_distances"]
+        graph_distances = state.distance_matrix
+        if graph_distances is None:
+            raise ValueError("MaxentMajorizationStep requires state.distance_matrix.")
         weight_matrix = state.extras["maxent_weight_matrix"]
 
         num_nodes = int(positions.shape[0])

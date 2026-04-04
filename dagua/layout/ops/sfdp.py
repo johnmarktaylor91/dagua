@@ -37,7 +37,6 @@ _GRAPH_KEY = "sfdp_graphs"
 _MAPPING_KEY = "sfdp_mappings"
 _GENERATOR_KEY = "sfdp_generator"
 _BASE_GRAPH_KEY = "sfdp_base_graph"
-_IDEAL_LENGTH_KEY = "sfdp_ideal_length"
 _SFDP_CURRENT_STEP_KEY = "sfdp_current_step"
 _SFDP_PREVIOUS_FORCE_NORM_KEY = "sfdp_previous_force_norm"
 _SFDP_FORCE_NORM_KEY = "sfdp_force_norm"
@@ -1034,7 +1033,7 @@ class InitSFDPCoarsestPositions(Op):
         -------
         SolveState
             State with ``pos`` set to coarsest-level random positions and
-            ``extras['sfdp_ideal_length']`` computed.
+            ``state.ideal_length`` computed.
         """
         del ctx
         graphs: List[GraphData] = state.extras[_GRAPH_KEY]
@@ -1045,7 +1044,7 @@ class InitSFDPCoarsestPositions(Op):
         ideal_length = _average_edge_length(graph=coarsest, positions=positions)
 
         state.pos = positions
-        state.extras[_IDEAL_LENGTH_KEY] = ideal_length
+        state.ideal_length = float(ideal_length)
         return state
 
 
@@ -1093,7 +1092,9 @@ class SFDPRefineCoarsestLevel(Op):
         if self.steps == 0 or state.pos.shape[0] <= 1:
             return state
 
-        ideal_length = float(state.extras[_IDEAL_LENGTH_KEY])
+        if state.ideal_length is None:
+            raise ValueError("SFDPRefineCoarsestLevel requires state.ideal_length.")
+        ideal_length = float(state.ideal_length)
         attractive_scale = (_FORCE_SCALING ** ((2.0 - self.repulsive_exponent) / 3.0)) / max(
             ideal_length,
             _MIN_SPAN,
@@ -1164,7 +1165,9 @@ class SFDPProlongateAndRefineLevels(Op):
         graphs: List[GraphData] = state.extras[_GRAPH_KEY]
         mappings: list[torch.Tensor] = state.extras[_MAPPING_KEY]
         generator: torch.Generator = state.extras[_GENERATOR_KEY]
-        ideal_length: float = state.extras[_IDEAL_LENGTH_KEY]
+        if state.ideal_length is None:
+            raise ValueError("SFDPProlongateAndRefineLevels requires state.ideal_length.")
+        ideal_length: float = float(state.ideal_length)
 
         positions = state.pos
         for level_index in range(len(mappings) - 1, -1, -1):
@@ -1205,7 +1208,7 @@ class SFDPProlongateAndRefineLevels(Op):
                 positions = state.pos
 
         state.pos = positions
-        state.extras[_IDEAL_LENGTH_KEY] = ideal_length
+        state.ideal_length = ideal_length
         return state
 
 

@@ -1077,11 +1077,9 @@ class FMMMForceStep(Op):
         if state.pos is None:
             raise ValueError("FMMMForceStep requires state.pos to be set.")
 
-        temperature = state.extras.get(self.temperature_key)
-        if temperature is None:
-            raise ValueError(
-                f"FMMMForceStep requires state.extras['{self.temperature_key}'] to exist."
-            )
+        if state.ideal_length is None:
+            raise ValueError("FMMMForceStep requires state.ideal_length to exist.")
+        temperature = float(state.ideal_length)
 
         positions = state.pos
         repulsive = (
@@ -1134,14 +1132,11 @@ class FMMMCoolStep(Op):
         """Decay FM^3 temperature using the configured exponential factor."""
         del problem, ctx
 
-        temperature = state.extras.get(self.temperature_key)
-        if temperature is None:
-            raise ValueError(
-                f"FMMMCoolStep requires state.extras['{self.temperature_key}'] to exist."
-            )
+        if state.ideal_length is None:
+            raise ValueError("FMMMCoolStep requires state.ideal_length to exist.")
 
-        state.extras[self.temperature_key] = max(
-            float(temperature) * self.cooling_factor,
+        state.ideal_length = max(
+            float(state.ideal_length) * self.cooling_factor,
             self.minimum_temperature,
         )
         return state
@@ -1194,9 +1189,9 @@ class FMMMRefineLevel(Op):
         if self.steps <= 0:
             return state
 
-        previous_temperature = state.extras.get(self.temperature_key)
+        previous_ideal_length = state.ideal_length
         ideal_length = _fr_ideal_length(self.area, int(state.pos.shape[0]))
-        state.extras[self.temperature_key] = ideal_length
+        state.ideal_length = ideal_length
         try:
             force_step = FMMMForceStep(
                 edge_index=self.edge_index,
@@ -1217,10 +1212,7 @@ class FMMMRefineLevel(Op):
                 state = cool_step.apply(problem, state, ctx)
             return state
         finally:
-            if previous_temperature is None:
-                state.extras.pop(self.temperature_key, None)
-            else:
-                state.extras[self.temperature_key] = previous_temperature
+            state.ideal_length = previous_ideal_length
 
 
 def _create_random_position(
@@ -1409,7 +1401,21 @@ def _prolong_positions(
     return fine_positions
 
 
+@dataclass(frozen=True)
+class _InitializeFMMMStateConfig:
+    """Configuration for :class:`_InitializeFMMMState`.
+
+    Parameters
+    ----------
+    steps : int, default=100
+        Total refinement budget across hierarchy levels.
+    """
+
+    steps: int = 100
+
+
 @register_op
+@dataclass(frozen=True)
 class _InitializeFMMMState(Op):
     """Build the FM^3 multilevel hierarchy and store it in extras.
 
@@ -1420,23 +1426,7 @@ class _InitializeFMMMState(Op):
     name: ClassVar[str] = "fmmm_initialize_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
-
-    _steps: int
-
-    def __init__(self, steps: int = 100) -> None:
-        """Store the total refinement budget.
-
-        Parameters
-        ----------
-        steps : int, default=100
-            Total refinement budget across hierarchy levels.
-
-        Returns
-        -------
-        None
-            Configuration stored for use by ``apply()``.
-        """
-        self._steps = steps
+    config: _InitializeFMMMStateConfig = field(default_factory=_InitializeFMMMStateConfig)
 
     def apply(
         self,
@@ -1475,8 +1465,8 @@ class _InitializeFMMMState(Op):
         state.extras["fmmm_hierarchy_steps"] = hierarchy_steps
         state.extras["fmmm_extent"] = extent
         state.extras["fmmm_refinement_area"] = refinement_area
-        state.extras["fmmm_level_budget"] = max(10, self._steps // max(len(levels), 1))
-        state.extras["fmmm_steps"] = self._steps
+        state.extras["fmmm_level_budget"] = max(10, self.config.steps // max(len(levels), 1))
+        state.extras["fmmm_steps"] = self.config.steps
         return state
 
 

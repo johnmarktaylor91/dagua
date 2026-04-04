@@ -262,6 +262,13 @@ class SolveState:
         Dense adjacency matrix with shape ``[N, N]``.
     distance_matrix : torch.Tensor | None
         All-pairs shortest paths with shape ``[N, N]``.
+    ideal_length : float | None
+        Shared ideal spring/rest length target for SFDP, FMMM, and similar
+        force-directed ops.
+    local_temperatures : torch.Tensor | None
+        Per-node temperatures used by GEM and other adaptive methods.
+    quadtree : Any | None
+        Barnes-Hut quadtree object reused by FA2 and SFDP.
     pivot_indices : torch.Tensor | None
         Pivot node IDs with shape ``[P]``.
     pivot_distances : torch.Tensor | None
@@ -336,6 +343,9 @@ class SolveState:
     adjacency_weighted: Optional[List[List[Tuple[int, float]]]] = None
     dense_adjacency: Optional[torch.Tensor] = None
     distance_matrix: Optional[torch.Tensor] = None
+    ideal_length: Optional[float] = None
+    local_temperatures: Optional[torch.Tensor] = None
+    quadtree: Optional[Any] = None
     pivot_indices: Optional[torch.Tensor] = None
     pivot_distances: Optional[torch.Tensor] = None
     component_ids: Optional[torch.Tensor] = None
