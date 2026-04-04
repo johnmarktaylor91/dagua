@@ -11,7 +11,7 @@ from typing import Optional
 
 import torch
 
-from dagua.layout.classic.sugiyama import (
+from dagua.layout._archive.classic.sugiyama import (
     _expand_long_edges_with_dummy_nodes,
     _longest_path_layering,
     _promote_layer_assignments,
