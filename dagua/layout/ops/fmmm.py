@@ -33,6 +33,7 @@ _MAX_TREE_DEPTH = 10
 _COOLING_FACTOR = 0.99
 _SOLAR_RANDOM_TRIES = 20
 _WAGGLE_FACTOR = 0.05
+_FMMM_TEMPERATURE_KEY = "fmmm_temperature"
 _TYPE_SUN = 1
 _TYPE_PLANET = 2
 _TYPE_PLANET_WITH_MOONS = 3
@@ -1030,6 +1031,198 @@ def _refine_level_with_edge_lengths(
     return refined
 
 
+@register_op
+@dataclass(frozen=True)
+class FMMMForceStep(Op):
+    """Compute one spring-force update for a single FM^3 refinement step."""
+
+    name: ClassVar[str] = "fmmm_force_step"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    edge_index: torch.Tensor
+    theta: float = 1.0
+    ideal_length: float = 1.0
+    edge_lengths: Optional[torch.Tensor] = None
+    edge_weights: Optional[torch.Tensor] = None
+    use_exact: bool = True
+    temperature_key: str = _FMMM_TEMPERATURE_KEY
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Apply one iteration of FM^3 spring forces.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable solve state with current positions and running temperature.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with updated positions after one force step.
+        """
+        del problem, ctx
+
+        if state.pos is None:
+            raise ValueError("FMMMForceStep requires state.pos to be set.")
+
+        temperature = state.extras.get(self.temperature_key)
+        if temperature is None:
+            raise ValueError(
+                f"FMMMForceStep requires state.extras['{self.temperature_key}'] to exist."
+            )
+
+        positions = state.pos
+        repulsive = (
+            _exact_repulsion(positions)
+            if self.use_exact
+            else _barnes_hut_repulsion(positions, self.theta, self.ideal_length)
+        )
+        if self.edge_lengths is None:
+            attractive = _attractive_force(
+                positions,
+                self.edge_index,
+                self.ideal_length,
+                edge_weights=self.edge_weights,
+            )
+        else:
+            attractive = _attractive_force_with_lengths(
+                positions,
+                self.edge_index,
+                self.edge_lengths,
+                edge_weights=self.edge_weights,
+            )
+
+        displacement = repulsive + attractive
+        norm = torch.linalg.norm(displacement, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
+        limited_step = torch.minimum(norm, torch.full_like(norm, float(temperature)))
+        state.pos = positions + (displacement / norm) * limited_step
+        return state
+
+
+@register_op
+@dataclass(frozen=True)
+class FMMMCoolStep(Op):
+    """Apply one temperature-decay step for FM^3."""
+
+    name: ClassVar[str] = "fmmm_cool_step"
+    category: ClassVar[OpCategory] = OpCategory.ANNEAL
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    cooling_factor: float = _COOLING_FACTOR
+    minimum_temperature: float = _MIN_DISTANCE
+    temperature_key: str = _FMMM_TEMPERATURE_KEY
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Decay FM^3 temperature using the configured exponential factor."""
+        del problem, ctx
+
+        temperature = state.extras.get(self.temperature_key)
+        if temperature is None:
+            raise ValueError(
+                f"FMMMCoolStep requires state.extras['{self.temperature_key}'] to exist."
+            )
+
+        state.extras[self.temperature_key] = max(
+            float(temperature) * self.cooling_factor,
+            self.minimum_temperature,
+        )
+        return state
+
+
+@register_op
+@dataclass(frozen=True)
+class FMMMRefineLevel(Op):
+    """Run a fixed number of spring iterations for one refinement level."""
+
+    name: ClassVar[str] = "fmmm_refine_level"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    edge_index: torch.Tensor
+    steps: int
+    theta: float
+    area: float
+    edge_lengths: Optional[torch.Tensor] = None
+    edge_weights: Optional[torch.Tensor] = None
+    cooling_factor: float = _COOLING_FACTOR
+    temperature_key: str = _FMMM_TEMPERATURE_KEY
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Execute ``steps`` force iterations with per-step cooling.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable solve state with starting positions.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            Refined positions for this level.
+        """
+        if state.pos is None:
+            raise ValueError("FMMMRefineLevel requires state.pos to be set.")
+        if self.steps <= 0:
+            return state
+
+        previous_temperature = state.extras.get(self.temperature_key)
+        ideal_length = _fr_ideal_length(self.area, int(state.pos.shape[0]))
+        state.extras[self.temperature_key] = ideal_length
+        try:
+            force_step = FMMMForceStep(
+                edge_index=self.edge_index,
+                theta=self.theta,
+                ideal_length=ideal_length,
+                edge_lengths=self.edge_lengths,
+                edge_weights=self.edge_weights,
+                use_exact=int(state.pos.shape[0]) <= 500,
+                temperature_key=self.temperature_key,
+            )
+            cool_step = FMMMCoolStep(
+                cooling_factor=self.cooling_factor,
+                minimum_temperature=_MIN_DISTANCE,
+                temperature_key=self.temperature_key,
+            )
+            for _ in range(self.steps):
+                state = force_step.apply(problem, state, ctx)
+                state = cool_step.apply(problem, state, ctx)
+            return state
+        finally:
+            if previous_temperature is None:
+                state.extras.pop(self.temperature_key, None)
+            else:
+                state.extras[self.temperature_key] = previous_temperature
+
+
 def _create_random_position(
     center: torch.Tensor,
     radius: float,
@@ -1378,8 +1571,6 @@ class _RefineCoarsestLevel(Op):
         SolveState
             State with refined coarsest-level positions.
         """
-        del ctx
-
         hierarchy_steps = state.extras["fmmm_hierarchy_steps"]
         if not hierarchy_steps:
             return state
@@ -1389,25 +1580,34 @@ class _RefineCoarsestLevel(Op):
         level_budget = state.extras["fmmm_level_budget"]
         refinement_area = state.extras["fmmm_refinement_area"]
 
-        state.pos = _refine_level_with_edge_lengths(
-            state.pos,
-            coarsest_level.edge_index,
-            coarsest_level.edge_lengths,
-            level_budget,
+        state = FMMMRefineLevel(
+            edge_index=coarsest_level.edge_index,
+            steps=level_budget,
             theta=1.0,
             area=refinement_area,
+            edge_lengths=coarsest_level.edge_lengths,
             edge_weights=coarsest_level.edge_weights,
+        ).apply(
+            problem,
+            state,
+            ctx,
         )
         return state
 
 
 @register_op
-class _UncoarsenLoop(Op):
+class FMMMUncoarsenLoop(Op):
     """Prolong and refine through the hierarchy from coarse to fine.
 
     Iterates from the coarsest prolongation step back to the finest level,
     prolonging positions using OGDF-style lambda interpolation and then
     refining each level with Barnes-Hut forces.
+
+    Notes
+    -----
+    This loop remains a single op so that each prolongation step can refresh
+    the current level metadata before a full refinement run, matching the
+    original SFDP-style level-control flow.
     """
 
     name: ClassVar[str] = "fmmm_uncoarsen_loop"
@@ -1438,8 +1638,6 @@ class _UncoarsenLoop(Op):
         SolveState
             State with fine-level positions after uncoarsening.
         """
-        del ctx
-
         hierarchy_steps = state.extras["fmmm_hierarchy_steps"]
         if not hierarchy_steps:
             return state
@@ -1452,18 +1650,22 @@ class _UncoarsenLoop(Op):
         positions = state.pos
         for level in range(len(hierarchy_steps) - 1, -1, -1):
             fine_positions = _prolong_positions(positions, hierarchy_steps[level], rng)
-            positions = _refine_level_with_edge_lengths(
-                fine_positions,
-                levels[level].edge_index,
-                levels[level].edge_lengths,
-                level_budget,
+            state.pos = fine_positions
+            state = FMMMRefineLevel(
+                edge_index=levels[level].edge_index,
+                steps=level_budget,
                 theta=1.0,
                 area=refinement_area,
+                edge_lengths=levels[level].edge_lengths,
                 edge_weights=levels[level].edge_weights,
-            )
+            ).apply(problem, state, ctx)
+            positions = state.pos
 
         state.pos = positions
         return state
+
+
+_UncoarsenLoop = FMMMUncoarsenLoop
 
 
 @register_op
@@ -1503,8 +1705,6 @@ class _SingleLevelFallback(Op):
         SolveState
             State with refined positions.
         """
-        del ctx
-
         hierarchy_steps = state.extras["fmmm_hierarchy_steps"]
         if hierarchy_steps:
             return state
@@ -1513,13 +1713,16 @@ class _SingleLevelFallback(Op):
         level_budget = state.extras["fmmm_level_budget"]
         refinement_area = state.extras["fmmm_refinement_area"]
 
-        state.pos = _refine_level(
-            state.pos,
-            levels[0].edge_index,
-            level_budget,
+        state = FMMMRefineLevel(
+            edge_index=levels[0].edge_index,
+            steps=level_budget,
             theta=1.0,
             area=refinement_area,
             edge_weights=levels[0].edge_weights,
+        ).apply(
+            problem,
+            state,
+            ctx,
         )
         return state
 

@@ -27,6 +27,13 @@ from dagua.layout.ops.edge_route import (
     BezierControlPointOptConfig,
     ReconstructEdgeRoutes,
 )
+from dagua.layout.ops.gem import (
+    GEMApplyDisplacement,
+    GEMComputeImpulse,
+    GEMConvergenceCheck,
+    GEMSequentialStep,
+    GEMUpdateTemperatures,
+)
 from dagua.layout.ops.init import (
     CircularInit,
     CircularInitConfig,
@@ -163,6 +170,11 @@ __all__ = [
     "EarlyBreak",
     "LossGroup",
     "MultilevelVCycle",
+    "GEMApplyDisplacement",
+    "GEMConvergenceCheck",
+    "GEMComputeImpulse",
+    "GEMSequentialStep",
+    "GEMUpdateTemperatures",
     # Taxonomy
     "OpCategory",
     "register_op",
