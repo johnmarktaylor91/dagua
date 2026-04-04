@@ -880,6 +880,14 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
     if config is None:
         config = LayoutConfig()
 
+    if config.algorithm is not None:
+        from dagua.layout.ops.pipelines import get_pipeline_function
+
+        pipeline_fn = get_pipeline_function(config.algorithm)
+        edge_index = graph.edge_index
+        num_nodes = graph.num_nodes
+        return pipeline_fn(edge_index=edge_index, num_nodes=num_nodes)
+
     # Ensure node sizes are computed
     graph.compute_node_sizes()
 
