@@ -11,7 +11,7 @@ from typing import ClassVar, Tuple
 
 import torch
 
-from dagua.layout.ops.base import Op
+from dagua.layout.ops.base import Op, Repeat
 from dagua.layout.ops.graph_utils import (
     build_undirected_adjacency,
     layout_device,
@@ -38,6 +38,180 @@ _OSCILLATION_SENSITIVITY = 0.3
 _ATTRACTION_FORMULA = 1
 _ROTATION_SINE_THRESHOLD = math.sin((math.pi / 2.0) + (_ROTATION_ANGLE / 2.0))
 _OSCILLATION_COSINE_THRESHOLD = math.cos(_OSCILLATION_ANGLE / 2.0)
+
+_GEM_BATCHED_CACHE_READY_KEY = "gem_batched_cache_ready"
+_GEM_BATCHED_DEGREE_WEIGHTS_KEY = "gem_batched_degree_weights"
+_GEM_BATCHED_DESIRED_LENGTHS_KEY = "gem_batched_desired_lengths"
+_GEM_BATCHED_TEMPERATURES_KEY = "gem_batched_temperatures"
+_GEM_BATCHED_PREVIOUS_IMPULSE_KEY = "gem_batched_previous_impulse"
+_GEM_BATCHED_SKEW_GAUGE_KEY = "gem_batched_skew_gauge"
+_GEM_BATCHED_SAMPLED_DISTANCE_KEY = "gem_batched_sampled_ideal_distance"
+_GEM_BATCHED_EDGE_SRC_KEY = "gem_batched_edge_src"
+_GEM_BATCHED_EDGE_DST_KEY = "gem_batched_edge_dst"
+_GEM_BATCHED_EDGE_WEIGHTS_KEY = "gem_batched_edge_weights"
+_GEM_BATCHED_IMPULSE_KEY = "gem_batched_impulse"
+_GEM_BATCHED_MOVEMENT_KEY = "gem_batched_movement"
+_GEM_BATCHED_EARLY_STOP_KEY = "gem_batched_early_stop"
+_GEM_BATCHED_STEP_INDEX_KEY = "gem_batched_step_index"
+
+
+def _compute_degree_weights(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Compute OGDF-style degree weights for GEM.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge list with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+    device : torch.device
+        Device for the returned tensor.
+    dtype : torch.dtype, default ``torch.float32``
+        Degree weight dtype.
+
+    Returns
+    -------
+    torch.Tensor
+        Degree-derived weights with shape ``[N]``.
+    """
+    degree_weights = torch.zeros((num_nodes,), dtype=dtype, device=device)
+    if edge_index.numel() > 0:
+        src = edge_index[0].to(device=device, dtype=torch.long)
+        dst = edge_index[1].to(device=device, dtype=torch.long)
+        ones = torch.ones_like(src, dtype=dtype)
+        degree_weights.index_add_(0, src, ones)
+        degree_weights.index_add_(0, dst, ones)
+    return degree_weights / 2.5 + 1.0
+
+
+def _compute_node_desired_lengths(
+    problem: LayoutProblem,
+    num_nodes: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Recover per-node target diagonal lengths from node-size annotations.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Layout inputs that may include node-size metadata.
+    num_nodes : int
+        Number of nodes.
+    device : torch.device
+        Device for the returned tensor.
+    dtype : torch.dtype, default ``torch.float32``
+        Desired-length dtype.
+
+    Returns
+    -------
+    torch.Tensor
+        Per-node desired lengths with shape ``[N]``.
+    """
+    node_sizes_cpu = (
+        torch.zeros((num_nodes,), dtype=torch.float32, device="cpu")
+        if problem.node_sizes is None or problem.node_sizes.numel() == 0
+        else problem.node_sizes.to(dtype=torch.float32, device="cpu")
+    )
+    if (
+        node_sizes_cpu.ndim == 2
+        and node_sizes_cpu.shape[0] == num_nodes
+        and node_sizes_cpu.shape[1] >= 2
+    ):
+        node_widths = node_sizes_cpu[:, 0]
+        node_heights = node_sizes_cpu[:, 1]
+        node_desired_lengths = torch.sqrt(node_widths.square() + node_heights.square())
+    elif node_sizes_cpu.ndim == 1 and node_sizes_cpu.shape[0] == num_nodes:
+        node_desired_lengths = torch.sqrt(2.0 * node_sizes_cpu.square())
+    else:
+        node_desired_lengths = torch.zeros((num_nodes,), dtype=dtype, device="cpu")
+    node_desired_lengths = node_desired_lengths.to(device=device, dtype=dtype) + _DESIRED_LENGTH
+    return node_desired_lengths
+
+
+def _initialize_batched_gem_cache(
+    problem: LayoutProblem,
+    state: SolveState,
+) -> None:
+    """Create reusable batched GEM buffers in ``state.extras``.
+
+    The decomposed batched solver mutates these buffers every step, so this
+    setup step must run once before the per-iteration ``Repeat`` loop.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable problem inputs.
+    state : SolveState
+        Mutable solve state.
+
+    Returns
+    -------
+    None
+        The buffers are stored on ``state.extras``.
+    """
+    if state.pos is None:
+        raise ValueError("GEM batched cache initialization requires state.pos to be set.")
+    if _GEM_BATCHED_CACHE_READY_KEY in state.extras:
+        return
+
+    positions = state.pos
+    device = positions.device
+    num_nodes = problem.num_nodes
+
+    degree_weights = _compute_degree_weights(
+        edge_index=problem.edge_index,
+        num_nodes=num_nodes,
+        device=device,
+        dtype=torch.float32,
+    )
+    node_desired_lengths = _compute_node_desired_lengths(
+        problem=problem,
+        num_nodes=num_nodes,
+        device=device,
+        dtype=torch.float32,
+    )
+    temperatures = torch.full(
+        (num_nodes,),
+        fill_value=_INITIAL_TEMPERATURE,
+        dtype=torch.float32,
+        device=device,
+    )
+    previous_impulse = torch.zeros_like(positions)
+    skew_gauge = torch.zeros((num_nodes,), dtype=torch.float32, device=device)
+
+    extent = float(state.extras["gem_extent"])
+    sampled_ideal_distance = max(
+        extent / max(float(max(num_nodes, 1)) ** 0.5, 1.0),
+        _MIN_DISTANCE,
+    )
+
+    edge_src = torch.empty((0,), dtype=torch.long, device=device)
+    edge_dst = torch.empty((0,), dtype=torch.long, device=device)
+    edge_weights: torch.Tensor | None = None
+    if problem.edge_index.numel() > 0:
+        edge_src = problem.edge_index[0].to(device=device, dtype=torch.long)
+        edge_dst = problem.edge_index[1].to(device=device, dtype=torch.long)
+    if problem.edge_weights is not None:
+        edge_weights = problem.edge_weights.to(device=device, dtype=torch.float32)
+
+    state.extras[_GEM_BATCHED_DEGREE_WEIGHTS_KEY] = degree_weights
+    state.extras[_GEM_BATCHED_DESIRED_LENGTHS_KEY] = node_desired_lengths
+    state.extras[_GEM_BATCHED_TEMPERATURES_KEY] = temperatures
+    state.extras[_GEM_BATCHED_PREVIOUS_IMPULSE_KEY] = previous_impulse
+    state.extras[_GEM_BATCHED_SKEW_GAUGE_KEY] = skew_gauge
+    state.extras[_GEM_BATCHED_SAMPLED_DISTANCE_KEY] = sampled_ideal_distance
+    state.extras[_GEM_BATCHED_EDGE_SRC_KEY] = edge_src
+    state.extras[_GEM_BATCHED_EDGE_DST_KEY] = edge_dst
+    state.extras[_GEM_BATCHED_EDGE_WEIGHTS_KEY] = edge_weights
+    state.extras[_GEM_BATCHED_STEP_INDEX_KEY] = 0
+    state.extras[_GEM_BATCHED_EARLY_STOP_KEY] = False
+    state.extras[_GEM_BATCHED_CACHE_READY_KEY] = True
 
 
 @register_op
@@ -138,14 +312,24 @@ class GEMPrepareState(Op):
         state.extras["gem_capped_iters"] = capped_iters
         state.extras["gem_device"] = layout_device(problem.edge_index, problem.node_sizes)
         state.extras["gem_is_sequential"] = problem.num_nodes <= _SEQUENTIAL_NODE_LIMIT
+
+        if not state.extras["gem_is_sequential"]:
+            _initialize_batched_gem_cache(problem, state)
         return state
 
 
 @register_op
-class GEMSequentialSolve(Op):
-    """Run the OGDF-like sequential Gauss-Seidel GEM loop on CPU."""
+class GEMSequentialStep(Op):
+    """Run one exact sequential Gauss-Seidel GEM sweep.
 
-    name: ClassVar[str] = "gem_sequential_solve"
+    Notes
+    -----
+    This is intentionally **not** split into per-iteration sub-ops because the
+    next node update depends on immediately-updated positions and an in-loop
+    weighted barycenter update.
+    """
+
+    name: ClassVar[str] = "gem_sequential_step"
     category: ClassVar[OpCategory] = OpCategory.FORCE
     reads: ClassVar[Tuple[str, ...]] = (
         "pos",
@@ -185,33 +369,18 @@ class GEMSequentialSolve(Op):
 
         positions = state.pos.to(dtype=torch.float64, device="cpu")
 
-        degree_weights = torch.zeros((num_nodes,), dtype=torch.float32, device="cpu")
-        if problem.edge_index.numel() > 0:
-            src = problem.edge_index[0].to(device="cpu", dtype=torch.long)
-            dst = problem.edge_index[1].to(device="cpu", dtype=torch.long)
-            ones = torch.ones_like(src, dtype=torch.float32)
-            degree_weights.index_add_(0, src, ones)
-            degree_weights.index_add_(0, dst, ones)
-        degree_weights = degree_weights / 2.5 + 1.0
-
-        node_sizes_cpu = (
-            torch.zeros((num_nodes,), dtype=torch.float32)
-            if problem.node_sizes is None or problem.node_sizes.numel() == 0
-            else problem.node_sizes.to(dtype=torch.float32, device="cpu")
+        degree_weights = _compute_degree_weights(
+            edge_index=problem.edge_index,
+            num_nodes=num_nodes,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
         )
-        if (
-            node_sizes_cpu.ndim == 2
-            and node_sizes_cpu.shape[0] == num_nodes
-            and node_sizes_cpu.shape[1] >= 2
-        ):
-            node_widths = node_sizes_cpu[:, 0]
-            node_heights = node_sizes_cpu[:, 1]
-            node_desired_lengths = torch.sqrt(node_widths.square() + node_heights.square())
-        elif node_sizes_cpu.ndim == 1 and node_sizes_cpu.shape[0] == num_nodes:
-            node_desired_lengths = torch.sqrt(2.0 * node_sizes_cpu.square())
-        else:
-            node_desired_lengths = torch.zeros((num_nodes,), dtype=torch.float32)
-        node_desired_lengths = node_desired_lengths.to(dtype=torch.float64) + _DESIRED_LENGTH
+        node_desired_lengths = _compute_node_desired_lengths(
+            problem=problem,
+            num_nodes=num_nodes,
+            device=torch.device("cpu"),
+            dtype=torch.float64,
+        )
 
         adjacency = build_undirected_adjacency(
             problem.edge_index,
@@ -331,11 +500,10 @@ class GEMSequentialSolve(Op):
         return state
 
 
-@register_op
-class GEMBatchedSolve(Op):
-    """Run the vectorized batched GEM solver for larger graphs."""
+class GEMSequentialSolve(GEMSequentialStep):
+    """Backward-compatible wrapper for the sequential GEM monolithic step."""
 
-    name: ClassVar[str] = "gem_batched_solve"
+    name: ClassVar[str] = "gem_sequential_solve"
     category: ClassVar[OpCategory] = OpCategory.FORCE
     reads: ClassVar[Tuple[str, ...]] = (
         "pos",
@@ -349,7 +517,294 @@ class GEMBatchedSolve(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Run the exact batched GEM fallback used when ``N > 5000``.
+        """Run the exact sequential path while preserving legacy op naming.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Runtime context.
+
+        Returns
+        -------
+        SolveState
+            Updated state containing the sequential solution.
+        """
+        return super().apply(problem, state, ctx)
+
+
+@register_op
+class GEMComputeImpulse(Op):
+    """Compute one batched GEM impulse vector before temperature adaptation."""
+
+    name: ClassVar[str] = "gem_compute_impulse"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compute batched repulsion + attraction + gravity for one iteration.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state holding cached batched buffers.
+        ctx : RuntimeContext
+            Runtime context (unused).
+
+        Returns
+        -------
+        SolveState
+            State with ``state.extras["gem_batched_impulse"]`` populated.
+        """
+        del ctx
+
+        if state.pos is None or state.converged:
+            return state
+        if not state.extras.get(_GEM_BATCHED_CACHE_READY_KEY, False):
+            _initialize_batched_gem_cache(problem, state)
+
+        if state.extras.get(_GEM_BATCHED_EARLY_STOP_KEY, False):
+            state.extras[_GEM_BATCHED_IMPULSE_KEY] = torch.zeros_like(state.pos)
+            return state
+
+        positions = state.pos
+        num_nodes = problem.num_nodes
+        degree_weights = state.extras[_GEM_BATCHED_DEGREE_WEIGHTS_KEY]
+        node_desired_lengths = state.extras[_GEM_BATCHED_DESIRED_LENGTHS_KEY]
+
+        if num_nodes > _FULL_REPULSION_LIMIT:
+            sample_size = min(num_nodes, _SAMPLED_REPULSION_NEIGHBORS)
+            step_index = int(state.extras.get(_GEM_BATCHED_STEP_INDEX_KEY, 0))
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(problem.seed + step_index + 1)
+            sampled = torch.randint(
+                0,
+                num_nodes,
+                (num_nodes, sample_size),
+                generator=generator,
+                dtype=torch.long,
+            ).to(positions.device)
+            neighbors = positions[sampled]
+            delta = positions.unsqueeze(1) - neighbors
+            distances = torch.linalg.norm(delta, dim=2).clamp(min=_MIN_DISTANCE)
+            ideal_distance = state.extras[_GEM_BATCHED_SAMPLED_DISTANCE_KEY]
+            force = (ideal_distance * ideal_distance) / distances
+            repulsive = (delta / distances.unsqueeze(2) * force.unsqueeze(2)).sum(dim=1)
+            state.extras[_GEM_BATCHED_STEP_INDEX_KEY] = step_index + 1
+        else:
+            delta = positions.unsqueeze(1) - positions.unsqueeze(0)
+            distance_square = delta.square().sum(dim=2)
+            mask = distance_square > _MIN_DISTANCE
+            safe_distance_square = torch.where(
+                mask,
+                distance_square,
+                torch.ones_like(distance_square),
+            )
+            desired_square = node_desired_lengths.square().unsqueeze(1).unsqueeze(2)
+            repulsive = delta * desired_square / safe_distance_square.unsqueeze(2)
+            repulsive = (repulsive * mask.unsqueeze(2)).sum(dim=1)
+
+        edge_src = state.extras[_GEM_BATCHED_EDGE_SRC_KEY]
+        if edge_src.numel() == 0:
+            attractive = torch.zeros_like(positions)
+        else:
+            attractive = torch.zeros_like(positions)
+            edge_dst = state.extras[_GEM_BATCHED_EDGE_DST_KEY]
+            edge_weights = state.extras.get(_GEM_BATCHED_EDGE_WEIGHTS_KEY)
+            source_force = torch.zeros_like(positions)
+            source_delta = positions[edge_src] - positions[edge_dst]
+            source_distance = torch.linalg.norm(source_delta, dim=1)
+            source_weights = degree_weights[edge_src].clamp(min=1.0)
+            target_weights = degree_weights[edge_dst].clamp(min=1.0)
+            source_desired = node_desired_lengths[edge_src].clamp(min=_MIN_DISTANCE)
+            target_desired = node_desired_lengths[edge_dst].clamp(min=_MIN_DISTANCE)
+
+            source_force = -source_delta * (
+                source_distance / (source_desired * source_weights)
+            ).unsqueeze(1)
+            target_force = source_delta * (
+                source_distance / (target_desired * target_weights)
+            ).unsqueeze(1)
+
+            if edge_weights is not None:
+                weighted = edge_weights.unsqueeze(1)
+                source_force = source_force * weighted
+                target_force = target_force * weighted
+
+            attractive.index_add_(0, edge_src, source_force)
+            attractive.index_add_(0, edge_dst, target_force)
+
+        barycenter = (positions * degree_weights.unsqueeze(1)).sum(dim=0)
+        gravity = (barycenter / max(num_nodes, 1) - positions) * _GRAVITATIONAL_CONSTANT
+
+        impulse = repulsive + attractive + gravity
+        state.extras[_GEM_BATCHED_IMPULSE_KEY] = impulse
+        return state
+
+
+@register_op
+class GEMUpdateTemperatures(Op):
+    """Update batched per-node temperatures and compute the movement vector."""
+
+    name: ClassVar[str] = "gem_update_temperatures"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compute scaled movement and adapt per-node temperatures."""
+        del problem, ctx
+
+        if state.converged:
+            return state
+
+        impulse = state.extras[_GEM_BATCHED_IMPULSE_KEY]
+        temperatures = state.extras[_GEM_BATCHED_TEMPERATURES_KEY]
+        previous_impulse = state.extras[_GEM_BATCHED_PREVIOUS_IMPULSE_KEY]
+        skew_gauge = state.extras[_GEM_BATCHED_SKEW_GAUGE_KEY]
+
+        norm = torch.linalg.norm(impulse, dim=1, keepdim=True)
+        safe_norm = norm.clamp(min=_MIN_DISTANCE)
+        movement = torch.where(
+            norm > 0,
+            impulse * (temperatures.unsqueeze(1) / safe_norm),
+            torch.zeros_like(impulse),
+        )
+
+        current_norm = torch.linalg.norm(movement, dim=1)
+        previous_norm = torch.linalg.norm(previous_impulse, dim=1)
+        product = current_norm * previous_norm
+        valid = product > _MIN_DISTANCE
+        if bool(valid.any()):
+            safe_product = product.clamp(min=_MIN_DISTANCE)
+            sin_beta = (
+                movement[:, 0] * previous_impulse[:, 0] - movement[:, 1] * previous_impulse[:, 1]
+            ) / safe_product
+            cos_beta = (
+                movement[:, 0] * previous_impulse[:, 0] + movement[:, 1] * previous_impulse[:, 1]
+            ) / safe_product
+
+            rotation_mask = valid & (sin_beta > _ROTATION_SINE_THRESHOLD)
+            skew_gauge = torch.where(
+                rotation_mask,
+                skew_gauge + _ROTATION_SENSITIVITY,
+                skew_gauge,
+            )
+            oscillation_mask = valid & (cos_beta.abs() > _OSCILLATION_COSINE_THRESHOLD)
+            oscillation_scale = 1.0 + cos_beta * _OSCILLATION_SENSITIVITY
+            temperatures = torch.where(
+                oscillation_mask,
+                temperatures * oscillation_scale,
+                temperatures,
+            )
+            temperatures = temperatures * (1.0 - skew_gauge.abs())
+            temperatures = torch.minimum(
+                temperatures,
+                torch.full_like(temperatures, _INITIAL_TEMPERATURE),
+            )
+
+        if float(temperatures.mean().item()) < _MINIMAL_TEMPERATURE:
+            state.extras[_GEM_BATCHED_EARLY_STOP_KEY] = True
+
+        state.extras[_GEM_BATCHED_TEMPERATURES_KEY] = temperatures
+        state.extras[_GEM_BATCHED_SKEW_GAUGE_KEY] = skew_gauge
+        state.extras[_GEM_BATCHED_MOVEMENT_KEY] = movement
+        state.extras[_GEM_BATCHED_PREVIOUS_IMPULSE_KEY] = movement
+        return state
+
+
+@register_op
+class GEMApplyDisplacement(Op):
+    """Apply one batched movement field to positions."""
+
+    name: ClassVar[str] = "gem_apply_displacement"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Move nodes by the buffered batched movement vector."""
+        del problem, ctx
+
+        if state.pos is None:
+            return state
+
+        movement = state.extras.get(_GEM_BATCHED_MOVEMENT_KEY)
+        if movement is None:
+            return state
+
+        state.pos = state.pos + movement
+        state.extras[_GEM_BATCHED_PREVIOUS_IMPULSE_KEY] = movement
+        return state
+
+
+@register_op
+class GEMConvergenceCheck(Op):
+    """Optional batched convergence marker based on mean temperature."""
+
+    name: ClassVar[str] = "gem_convergence_check"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("converged",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Raise ``state.converged`` when batched temperatures fall below threshold."""
+        del problem, ctx
+
+        if state.converged:
+            return state
+
+        temperatures = state.extras.get(_GEM_BATCHED_TEMPERATURES_KEY)
+        if temperatures is not None:
+            state.converged = bool(float(temperatures.mean().item()) < _MINIMAL_TEMPERATURE)
+        return state
+
+
+@register_op
+class GEMBatchedSolve(Op):
+    """Run the vectorized batched GEM solver for larger graphs."""
+
+    name: ClassVar[str] = "gem_batched_solve"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "extras",
+    )
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Run the batched GEM fallback used when ``N > 5000``.
 
         Parameters
         ----------
@@ -365,164 +820,27 @@ class GEMBatchedSolve(Op):
         SolveState
             Updated state with batched GEM positions.
         """
-        del ctx
-
         if state.converged or state.extras.get("gem_is_sequential", True):
             return state
 
-        num_nodes = problem.num_nodes
-        extent = float(state.extras["gem_extent"])
         capped_iters = int(state.extras.get("gem_capped_iters", 0))
-        positions = state.pos
+        if capped_iters <= 0:
+            return state
 
-        degree_weights = torch.zeros((num_nodes,), dtype=torch.float32, device=positions.device)
-        if problem.edge_index.numel() > 0:
-            src = problem.edge_index[0].to(device=positions.device, dtype=torch.long)
-            dst = problem.edge_index[1].to(device=positions.device, dtype=torch.long)
-            ones = torch.ones_like(src, dtype=torch.float32)
-            degree_weights.index_add_(0, src, ones)
-            degree_weights.index_add_(0, dst, ones)
-        degree_weights = degree_weights / 2.5 + 1.0
+        _initialize_batched_gem_cache(problem, state)
+        state.extras[_GEM_BATCHED_EARLY_STOP_KEY] = False
+        state.extras[_GEM_BATCHED_STEP_INDEX_KEY] = 0
 
-        node_sizes = (
-            torch.zeros((num_nodes,), dtype=torch.float32, device=positions.device)
-            if problem.node_sizes is None or problem.node_sizes.numel() == 0
-            else problem.node_sizes.to(dtype=torch.float32, device=positions.device)
-        )
-        if node_sizes.ndim == 2 and node_sizes.shape[0] == num_nodes and node_sizes.shape[1] >= 2:
-            node_desired_lengths = torch.sqrt(node_sizes[:, 0].square() + node_sizes[:, 1].square())
-        elif node_sizes.ndim == 1 and node_sizes.shape[0] == num_nodes:
-            node_desired_lengths = torch.sqrt(2.0 * node_sizes.square())
-        else:
-            node_desired_lengths = torch.zeros(
-                (num_nodes,), dtype=torch.float32, device=positions.device
-            )
-        node_desired_lengths = node_desired_lengths + _DESIRED_LENGTH
-
-        temperatures = torch.full(
-            (num_nodes,),
-            fill_value=_INITIAL_TEMPERATURE,
-            dtype=torch.float32,
-            device=positions.device,
-        )
-        previous_impulse = torch.zeros_like(positions)
-        skew_gauge = torch.zeros((num_nodes,), dtype=torch.float32, device=positions.device)
-        sampled_ideal_distance = max(
-            extent / max(float(max(num_nodes, 1)) ** 0.5, 1.0),
-            _MIN_DISTANCE,
-        )
-
-        edges = problem.edge_index
-        if edges.numel() == 0:
-            edges = torch.empty((2, 0), dtype=torch.long, device=positions.device)
-
-        for step in range(capped_iters):
-            if float(temperatures.mean().item()) < _MINIMAL_TEMPERATURE:
-                break
-
-            if num_nodes > _FULL_REPULSION_LIMIT:
-                sample_size = min(num_nodes, _SAMPLED_REPULSION_NEIGHBORS)
-                generator = torch.Generator(device="cpu")
-                generator.manual_seed(problem.seed + step + 1)
-                sampled = torch.randint(
-                    0,
-                    num_nodes,
-                    (num_nodes, sample_size),
-                    generator=generator,
-                    dtype=torch.long,
-                ).to(positions.device)
-                neighbors = positions[sampled]
-                delta = positions.unsqueeze(1) - neighbors
-                distances = torch.linalg.norm(delta, dim=2).clamp(min=_MIN_DISTANCE)
-                force = (sampled_ideal_distance * sampled_ideal_distance) / distances
-                repulsive = (delta / distances.unsqueeze(2) * force.unsqueeze(2)).sum(dim=1)
-            else:
-                delta = positions.unsqueeze(1) - positions.unsqueeze(0)
-                distance_square = delta.square().sum(dim=2)
-                mask = distance_square > _MIN_DISTANCE
-                safe_distance_square = torch.where(
-                    mask, distance_square, torch.ones_like(distance_square)
-                )
-                desired_square = node_desired_lengths.square().unsqueeze(1).unsqueeze(2)
-                repulsive = delta * desired_square / safe_distance_square.unsqueeze(2)
-                repulsive = (repulsive * mask.unsqueeze(2)).sum(dim=1)
-
-            if edges.numel() == 0:
-                attractive = torch.zeros_like(positions)
-            else:
-                attractive = torch.zeros_like(positions)
-                src = edges[0].to(device=positions.device, dtype=torch.long)
-                dst = edges[1].to(device=positions.device, dtype=torch.long)
-                delta = positions[src] - positions[dst]
-                distances = torch.linalg.norm(delta, dim=1)
-                source_weights = degree_weights[src].clamp(min=1.0)
-                target_weights = degree_weights[dst].clamp(min=1.0)
-                source_desired = node_desired_lengths[src].clamp(min=_MIN_DISTANCE)
-                target_desired = node_desired_lengths[dst].clamp(min=_MIN_DISTANCE)
-
-                source_force = -delta * (distances / (source_desired * source_weights)).unsqueeze(1)
-                target_force = delta * (distances / (target_desired * target_weights)).unsqueeze(1)
-                if problem.edge_weights is not None:
-                    edge_weight_tensor = problem.edge_weights.to(
-                        device=positions.device,
-                        dtype=positions.dtype,
-                    ).unsqueeze(1)
-                    source_force = source_force * edge_weight_tensor
-                    target_force = target_force * edge_weight_tensor
-
-                attractive.index_add_(0, src, source_force)
-                attractive.index_add_(0, dst, target_force)
-
-            barycenter = (positions * degree_weights.unsqueeze(1)).sum(dim=0, keepdim=True)
-            barycenter = barycenter / max(num_nodes, 1)
-            gravity = (barycenter - positions) * _GRAVITATIONAL_CONSTANT
-
-            impulse = repulsive + attractive + gravity
-            norm = torch.linalg.norm(impulse, dim=1, keepdim=True)
-            safe_norm = norm.clamp(min=_MIN_DISTANCE)
-            movement = torch.where(
-                norm > 0,
-                impulse * (temperatures.unsqueeze(1) / safe_norm),
-                torch.zeros_like(impulse),
-            )
-
-            current_norm = torch.linalg.norm(movement, dim=1)
-            previous_norm = torch.linalg.norm(previous_impulse, dim=1)
-            product = current_norm * previous_norm
-            valid = product > _MIN_DISTANCE
-            if bool(valid.any()):
-                safe_product = product.clamp(min=_MIN_DISTANCE)
-                sin_beta = (
-                    movement[:, 0] * previous_impulse[:, 0]
-                    - movement[:, 1] * previous_impulse[:, 1]
-                ) / safe_product
-                cos_beta = (
-                    movement[:, 0] * previous_impulse[:, 0]
-                    + movement[:, 1] * previous_impulse[:, 1]
-                ) / safe_product
-                rotation_mask = valid & (sin_beta > _ROTATION_SINE_THRESHOLD)
-                skew_gauge = torch.where(
-                    rotation_mask,
-                    skew_gauge + _ROTATION_SENSITIVITY,
-                    skew_gauge,
-                )
-                oscillation_mask = valid & (cos_beta.abs() > _OSCILLATION_COSINE_THRESHOLD)
-                oscillation_scale = 1.0 + cos_beta * _OSCILLATION_SENSITIVITY
-                temperatures = torch.where(
-                    oscillation_mask,
-                    temperatures * oscillation_scale,
-                    temperatures,
-                )
-                temperatures = temperatures * (1.0 - skew_gauge.abs())
-                temperatures = torch.minimum(
-                    temperatures,
-                    torch.full_like(temperatures, _INITIAL_TEMPERATURE),
-                )
-
-            positions = positions + movement
-            previous_impulse = movement
-
-        state.pos = positions
+        saved_step = state.step
+        state = Repeat(
+            n=capped_iters,
+            ops=[
+                GEMComputeImpulse(),
+                GEMUpdateTemperatures(),
+                GEMApplyDisplacement(),
+            ],
+        ).apply(problem, state, ctx)
+        state.step = saved_step
         return state
 
 
