@@ -256,6 +256,10 @@ class SolveState:
         Multilevel coarsening hierarchy from finest to coarsest.
     adjacency : list[list[int]] | None
         Cached undirected adjacency list for graph traversals.
+    adjacency_weighted : list[list[tuple[int, float]]] | None
+        Cached weighted adjacency list.
+    dense_adjacency : torch.Tensor | None
+        Dense adjacency matrix with shape ``[N, N]``.
     distance_matrix : torch.Tensor | None
         All-pairs shortest paths with shape ``[N, N]``.
     pivot_indices : torch.Tensor | None
@@ -329,6 +333,8 @@ class SolveState:
     back_edge_mask: Optional[torch.Tensor] = None
     hierarchy: Optional[List[HierarchyLevel]] = None
     adjacency: Optional[List[List[int]]] = None
+    adjacency_weighted: Optional[List[List[Tuple[int, float]]]] = None
+    dense_adjacency: Optional[torch.Tensor] = None
     distance_matrix: Optional[torch.Tensor] = None
     pivot_indices: Optional[torch.Tensor] = None
     pivot_distances: Optional[torch.Tensor] = None
@@ -355,6 +361,7 @@ class SolveState:
 
     # -- Temperature (global cooling for FR, SFDP, GEM, DH, DRL, FMMM) --
     temperature: Optional[float] = None
+    force_area: Optional[float] = None
 
     # -- Ordering (within-layer node ordering for Sugiyama, init, etc.) --
     ordering: Optional[torch.Tensor] = None

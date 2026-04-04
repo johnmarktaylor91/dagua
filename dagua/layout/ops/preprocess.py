@@ -757,7 +757,12 @@ class BuildAdjacency(Op):
     name = "build_adjacency"
     category = OpCategory.PREPROCESS
     reads = ("extras.preprocess_edge_index",)
-    writes = ("adjacency", "extras.adjacency_format", "extras.adjacency_directed")
+    writes = (
+        "adjacency",
+        "adjacency_weighted",
+        "extras.adjacency_format",
+        "extras.adjacency_directed",
+    )
 
     def __init__(self, config: Optional[BuildAdjacencyConfig] = None) -> None:
         """Initialize the adjacency builder.
@@ -789,7 +794,8 @@ class BuildAdjacency(Op):
         Returns
         -------
         SolveState
-            State with ``adjacency`` populated.
+            State with ``adjacency`` (and ``adjacency_weighted`` for weighted
+            builds) populated.
 
         Raises
         ------
@@ -813,6 +819,11 @@ class BuildAdjacency(Op):
             dedup=self.config.dedup,
             keep_multiplicity=self.config.keep_multiplicity or self.config.dedup == "keep_all",
         )
+
+        state.adjacency = None
+        state.adjacency_weighted = None
+        if self.config.weighted:
+            state.adjacency_weighted = adjacency_list
 
         if self.config.format == "list":
             state.adjacency = adjacency_list
@@ -1000,7 +1011,7 @@ class FRPrepareAdjacency(Op):
     name = "fr_prepare_adjacency"
     category = OpCategory.PREPROCESS
     reads: tuple[str, ...] = ()
-    writes: tuple[str, ...] = ("extras",)
+    writes: tuple[str, ...] = ("dense_adjacency", "force_area")
 
     def apply(
         self,
@@ -1008,7 +1019,7 @@ class FRPrepareAdjacency(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Set ``state.extras`` entries required by FR force ops.
+        """Set FR state fields required for force-directed updates.
 
         Parameters
         ----------
@@ -1022,18 +1033,18 @@ class FRPrepareAdjacency(Op):
         Returns
         -------
         SolveState
-            State with ``fr_adjacency`` and ``force_area`` populated.
+            State with ``dense_adjacency`` and ``force_area`` populated.
         """
         _ = ctx
         if problem.num_nodes == 0:
-            state.extras["fr_adjacency"] = torch.zeros((0, 0), dtype=torch.float64)
+            state.dense_adjacency = torch.zeros((0, 0), dtype=torch.float64)
         else:
-            state.extras["fr_adjacency"] = _build_fr_adjacency_matrix(
+            state.dense_adjacency = _build_fr_adjacency_matrix(
                 edge_index=problem.edge_index,
                 num_nodes=problem.num_nodes,
                 edge_weights=problem.edge_weights,
             )
-        state.extras["force_area"] = 1.0
+        state.force_area = 1.0
         return state
 
 

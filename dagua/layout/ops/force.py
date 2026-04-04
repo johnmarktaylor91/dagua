@@ -268,11 +268,11 @@ def _resolve_force_area(problem: LayoutProblem, state: SolveState) -> float:
     Notes
     -----
     The classic FR implementation in this repository uses a unit square.
-    Callers can override that by placing ``force_area`` in ``state.extras``.
+    Callers can override that by setting ``state.force_area``.
     """
-    area = state.extras.get("force_area", 1.0)
+    area = 1.0 if state.force_area is None else state.force_area
     if not isinstance(area, (int, float)):
-        raise ValueError("state.extras['force_area'] must be a real number.")
+        raise ValueError("state.force_area must be a real number.")
     return max(float(area), 1.0e-12)
 
 
@@ -748,8 +748,7 @@ class InverseDistanceRepulsionConfig:
     ----------
     k_formula : str, default="area"
         Spacing rule. ``"area"`` uses the FR constant ``sqrt(area / N)`` with
-        a unit-square default area and an optional ``state.extras['force_area']``
-        override.
+        a unit-square default area and an optional ``state.force_area`` override.
     """
 
     k_formula: str = "area"
@@ -817,9 +816,9 @@ class FRCombinedForce(Op):
 
     name: ClassVar[str] = "fr_combined_force"
     category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras.fr_adjacency")
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "dense_adjacency")
     writes: ClassVar[Tuple[str, ...]] = ("forces",)
-    requires: ClassVar[Tuple[str, ...]] = ("pos", "extras.fr_adjacency")
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "dense_adjacency")
 
     def apply(
         self,
@@ -846,18 +845,17 @@ class FRCombinedForce(Op):
         Raises
         ------
         ValueError
-            If ``state.extras['fr_adjacency']`` is missing or malformed.
+            If ``state.dense_adjacency`` is missing or malformed.
         """
         del ctx
 
         pos = _require_positions(state)
-        adjacency = state.extras.get("fr_adjacency")
+        adjacency = state.dense_adjacency
         if not isinstance(adjacency, torch.Tensor):
-            raise ValueError("FRCombinedForce requires state.extras['fr_adjacency'].")
+            raise ValueError("FRCombinedForce requires state.dense_adjacency.")
         if tuple(adjacency.shape) != (problem.num_nodes, problem.num_nodes):
             raise ValueError(
-                "state.extras['fr_adjacency'] must have shape "
-                f"({problem.num_nodes}, {problem.num_nodes})."
+                f"state.dense_adjacency must have shape ({problem.num_nodes}, {problem.num_nodes})."
             )
 
         optimal_distance = _resolve_area_k(problem=problem, state=state)
