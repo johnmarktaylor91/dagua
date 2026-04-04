@@ -881,12 +881,28 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
         config = LayoutConfig()
 
     if config.algorithm is not None:
+        import inspect
+
         from dagua.layout.ops.pipelines import get_pipeline_function
 
         pipeline_fn = get_pipeline_function(config.algorithm)
-        edge_index = graph.edge_index
-        num_nodes = graph.num_nodes
-        return pipeline_fn(edge_index=edge_index, num_nodes=num_nodes)
+        graph.compute_node_sizes()
+        kwargs: dict = {
+            "edge_index": graph.edge_index,
+            "num_nodes": graph.num_nodes,
+            "node_sizes": graph.node_sizes,
+            "seed": config.seed,
+        }
+        if graph.edge_weights is not None:
+            kwargs["edge_weights"] = graph.edge_weights
+        # Forward steps if the pipeline accepts it
+        sig = inspect.signature(pipeline_fn)
+        if "steps" in sig.parameters:
+            kwargs["steps"] = config.steps
+        # Filter to only params the function accepts
+        accepted = set(sig.parameters.keys())
+        kwargs = {k: v for k, v in kwargs.items() if k in accepted}
+        return pipeline_fn(**kwargs)
 
     # Ensure node sizes are computed
     graph.compute_node_sizes()
