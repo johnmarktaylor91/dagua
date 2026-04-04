@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, Mapping, Optional, Protocol, Tuple, Union, cast
 
 import torch
@@ -51,6 +51,19 @@ class OptionObject(Protocol):
 
 
 DrLOptions = Union[str, Mapping[str, object], OptionObject]
+
+
+@dataclass(frozen=True)
+class DRLPrepareStateConfig:
+    """Configuration for :class:`DRLPrepareState`.
+
+    Parameters
+    ----------
+    options : str or Mapping[str, object] or OptionObject, default="default"
+        Preset name or override provider.
+    """
+
+    options: DrLOptions = "default"
 
 
 @dataclass(frozen=True)
@@ -759,24 +772,14 @@ class DRLPhaseStep:
 
 
 @register_op
+@dataclass(frozen=True)
 class DRLPrepareState(Op):
     """Prepare DRL runtime options and precomputed adjacency."""
 
     name: ClassVar[str] = "drl_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
     writes: ClassVar[tuple[str, ...]] = ("extras",)
-
-    _options: DrLOptions
-
-    def __init__(self, options: DrLOptions = "default") -> None:
-        """Store the DRL option source for later resolution.
-
-        Parameters
-        ----------
-        options : str or Mapping[str, object] or OptionObject, default="default"
-            Preset name or override provider.
-        """
-        self._options = options
+    config: DRLPrepareStateConfig = field(default_factory=DRLPrepareStateConfig)
 
     def apply(
         self,
@@ -787,7 +790,7 @@ class DRLPrepareState(Op):
         """Resolve options and build DRL adjacency in ``state.extras``."""
         del ctx
 
-        params = _resolve_drl_parameters(options=self._options)
+        params = _resolve_drl_parameters(options=self.config.options)
         adjacency = _build_undirected_adjacency(
             edge_index=problem.edge_index,
             num_nodes=problem.num_nodes,

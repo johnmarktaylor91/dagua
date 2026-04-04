@@ -388,7 +388,23 @@ class GEMSequentialStep(Op):
             edge_weights=problem.edge_weights,
         )
 
-        local_temperatures = torch.full((num_nodes,), _INITIAL_TEMPERATURE, dtype=torch.float64)
+        local_temperatures = state.local_temperatures
+        if local_temperatures is None:
+            local_temperatures = torch.full(
+                (num_nodes,),
+                _INITIAL_TEMPERATURE,
+                dtype=torch.float64,
+                device="cpu",
+            )
+        else:
+            local_temperatures = local_temperatures.to(dtype=torch.float64, device="cpu")
+            if int(local_temperatures.numel()) != num_nodes:
+                local_temperatures = torch.full(
+                    (num_nodes,),
+                    _INITIAL_TEMPERATURE,
+                    dtype=torch.float64,
+                    device="cpu",
+                )
         previous_impulse = torch.zeros((num_nodes, 2), dtype=torch.float64)
         skew_gauge = torch.zeros((num_nodes,), dtype=torch.float64)
         barycenter = (positions * degree_weights.unsqueeze(1)).sum(dim=0)
@@ -497,6 +513,7 @@ class GEMSequentialStep(Op):
             rounds_remaining -= 1
 
         state.pos = positions.to(dtype=torch.float32)
+        state.local_temperatures = local_temperatures
         return state
 
 

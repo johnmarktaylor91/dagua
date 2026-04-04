@@ -11,6 +11,7 @@ from dagua.layout.ops.fmmm import (
     _FinalizeFMMMPositions,
     _InitializeCoarsestLevel,
     _InitializeFMMMState,
+    _InitializeFMMMStateConfig,
     _RefineCoarsestLevel,
     _SingleLevelFallback,
     _UncoarsenLoop,
@@ -42,7 +43,7 @@ def build_fmmm_pipeline(steps: int = 100) -> Pipeline:
     if steps < 0:
         raise ValueError("steps must be non-negative.")
 
-    initialize_state = _InitializeFMMMState(steps=steps)
+    initialize_state = _InitializeFMMMState(config=_InitializeFMMMStateConfig(steps=steps))
     initialize_coarsest = _InitializeCoarsestLevel()
     refine_coarsest = _RefineCoarsestLevel()
     uncoarsen_loop = _UncoarsenLoop()
