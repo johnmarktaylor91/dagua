@@ -8,15 +8,15 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 
-from dagua.layout._archive.classic._graph_distances import (
+from dagua.layout.ops.base import Op
+from dagua.layout.ops.graph_utils import (
     all_pairs_shortest_paths as _reference_all_pairs_shortest_paths,
 )
-from dagua.layout._archive.classic._graph_distances import bfs_distances as _reference_bfs_distances
-from dagua.layout._archive.classic._graph_distances import (
+from dagua.layout.ops.graph_utils import bfs_distances as _reference_bfs_distances
+from dagua.layout.ops.graph_utils import (
     dijkstra_distances as _reference_dijkstra_distances,
 )
-from dagua.layout._archive.classic._graph_distances import is_connected as _reference_is_connected
-from dagua.layout.ops.base import Op
+from dagua.layout.ops.graph_utils import is_connected as _reference_is_connected
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
