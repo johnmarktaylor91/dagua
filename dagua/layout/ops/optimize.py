@@ -13,7 +13,7 @@ from typing import Any, Optional, Sequence, cast
 import numpy as np
 import torch
 
-from dagua.layout.classic import kk as kk_classic
+from dagua.layout._archive.classic import kk as kk_classic
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op

@@ -8,8 +8,8 @@ from typing import Optional
 import numpy as np
 import torch
 
-from dagua.layout.classic.drl import _DensityGrid
-from dagua.layout.classic.neulay import _kdtree_repulsion_pairs
+from dagua.layout._archive.classic.drl import _DensityGrid
+from dagua.layout._archive.classic.neulay import _kdtree_repulsion_pairs
 from dagua.layout.engine import (
     SAMPLED_SAME_LAYER_K,
     EdgeBatchContext,

@@ -8,7 +8,7 @@ from typing import Any, Callable, ClassVar, Dict, Mapping, Optional, Sequence, T
 
 import torch
 
-from dagua.layout.classic.gem import _update_temperatures as _gem_update_temperatures
+from dagua.layout._archive.classic.gem import _update_temperatures as _gem_update_temperatures
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import AnnealingSchedule, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
