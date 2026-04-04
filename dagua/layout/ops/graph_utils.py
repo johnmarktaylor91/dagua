@@ -8,27 +8,125 @@ are bit-for-bit identical to their sources.
 
 from __future__ import annotations
 
+import heapq
+from collections import deque
 from typing import Optional
 
 import numpy as np
 import torch
 
-from dagua.layout._archive.classic._graph_distances import (
-    all_pairs_shortest_paths as _shared_all_pairs_shortest_paths,
-)
-from dagua.layout._archive.classic._graph_distances import (
-    bfs_distances,  # noqa: F401
-    dijkstra_distances,  # noqa: F401
-)
-from dagua.layout._archive.classic._graph_distances import (
-    bfs_distances as _shared_bfs_distances,  # noqa: F401, F811
-)
-from dagua.layout._archive.classic._graph_distances import (
-    build_undirected_adjacency as _shared_build_undirected_adjacency,
-)
-from dagua.layout._archive.classic._graph_distances import (
-    dijkstra_distances as _shared_dijkstra_distances,  # noqa: F401, F811
-)
+# ---------------------------------------------------------------------------
+# Graph distance primitives (formerly in _graph_distances.py)
+# ---------------------------------------------------------------------------
+
+UNREACHABLE: int = -1
+UNREACHABLE_FLOAT: float = 1e6
+
+
+def _build_min_weight_undirected_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> list[list[tuple[int, float]]]:
+    """Build undirected adjacency list keeping minimum weight on duplicates."""
+    adjacency: list[dict[int, float]] = [{} for _ in range(num_nodes)]
+    if edge_index.numel() == 0:
+        return [[] for _ in range(num_nodes)]
+    ei_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    sources = ei_cpu[0].tolist()
+    targets = ei_cpu[1].tolist()
+    if edge_weights is not None:
+        weights = edge_weights.detach().cpu().float().tolist()
+    else:
+        weights = [1.0] * len(sources)
+    for src, tgt, weight in zip(sources, targets, weights):
+        if src == tgt:
+            continue
+        if tgt not in adjacency[src] or weight < adjacency[src][tgt]:
+            adjacency[src][tgt] = weight
+        if src not in adjacency[tgt] or weight < adjacency[tgt][src]:
+            adjacency[tgt][src] = weight
+    return [sorted(neighbors.items()) for neighbors in adjacency]
+
+
+def bfs_distances(
+    adjacency: list[list[tuple[int, float]]],
+    source: int,
+) -> np.ndarray:
+    """Compute unweighted shortest-path distances from one source via BFS.
+
+    Returns np.int32 array with -1 for unreachable nodes.
+    """
+    num_nodes = len(adjacency)
+    distances = np.full(num_nodes, UNREACHABLE, dtype=np.int32)
+    distances[source] = 0
+    frontier: deque[int] = deque([source])
+    while frontier:
+        node = frontier.popleft()
+        next_dist = int(distances[node]) + 1
+        for neighbor, _ in adjacency[node]:
+            if int(distances[neighbor]) != UNREACHABLE:
+                continue
+            distances[neighbor] = next_dist
+            frontier.append(neighbor)
+    return distances
+
+
+def dijkstra_distances(
+    adjacency: list[list[tuple[int, float]]],
+    source: int,
+) -> np.ndarray:
+    """Compute weighted shortest-path distances from one source via Dijkstra.
+
+    Returns np.float64 array with inf for unreachable nodes.
+    """
+    num_nodes = len(adjacency)
+    distances = np.full(num_nodes, np.inf, dtype=np.float64)
+    distances[source] = 0.0
+    visited = np.zeros(num_nodes, dtype=np.bool_)
+    heap: list[tuple[float, int]] = [(0.0, source)]
+    while heap:
+        dist, node = heapq.heappop(heap)
+        if visited[node]:
+            continue
+        visited[node] = True
+        for neighbor, weight in adjacency[node]:
+            new_dist = dist + weight
+            if new_dist < distances[neighbor]:
+                distances[neighbor] = new_dist
+                heapq.heappush(heap, (new_dist, neighbor))
+    return distances
+
+
+def _apsp(
+    adjacency: list[list[tuple[int, float]]],
+    weighted: bool = False,
+) -> np.ndarray:
+    """All-pairs shortest paths. Returns np.ndarray [N,N]."""
+    num_nodes = len(adjacency)
+    if weighted:
+        distances = np.full((num_nodes, num_nodes), np.inf, dtype=np.float64)
+        for source in range(num_nodes):
+            distances[source] = dijkstra_distances(adjacency, source)
+    else:
+        distances = np.full((num_nodes, num_nodes), UNREACHABLE, dtype=np.int32)
+        for source in range(num_nodes):
+            distances[source] = bfs_distances(adjacency, source)
+    return distances
+
+
+def is_connected(adjacency: list[list[tuple[int, float]]]) -> bool:
+    """Check whether the undirected graph is connected."""
+    if len(adjacency) <= 1:
+        return True
+    return bool(np.all(bfs_distances(adjacency, 0) >= 0))
+
+
+# Aliases for backward compatibility with code that uses _shared_* names
+_shared_bfs_distances = bfs_distances
+_shared_dijkstra_distances = dijkstra_distances
+_shared_all_pairs_shortest_paths = _apsp
+_shared_build_undirected_adjacency = _build_min_weight_undirected_adjacency
 
 # ---------------------------------------------------------------------------
 # 1. layout_device  (source: fr.py::_layout_device)
