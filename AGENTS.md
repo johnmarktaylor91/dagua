@@ -43,12 +43,14 @@ During development iteration, ONLY run Tier 1 (targeted tests for the modules
 you changed). Run Tier 2 ONCE as the final check before reporting done. Do NOT
 run the full suite on every iteration — it takes 5+ minutes and wastes time.
 Match test files to changed modules:
-- Changed `engine.py` → run `tests/test_layout/`
-- Changed `constraints.py` → run `tests/test_layout/test_constraints.py`
-- Changed `multilevel.py` → run `tests/test_layout/`
-- Changed `graph.py` → run `tests/test_graph.py`
-- Changed `utils.py` → run `tests/test_smoke.py tests/test_layout/`
-- Changed `config.py` → run `tests/test_layout/test_engine.py`
+- Changed `engine.py` -> run `tests/test_layout/`
+- Changed `constraints.py` -> run `tests/test_layout/test_constraints.py`
+- Changed `multilevel.py` -> run `tests/test_layout/`
+- Changed `graph.py` -> run `tests/test_graph.py`
+- Changed `utils.py` -> run `tests/test_smoke.py tests/test_layout/`
+- Changed `config.py` -> run `tests/test_layout/test_engine.py`
+- Changed `layout/ops/<name>.py` -> run `tests/test_ops_<name>.py`
+- Changed `layout/ops/pipelines/<name>.py` -> run `tests/test_pipeline_<name>.py`
 
 ## Code Quality Standards (mandatory for ALL tasks)
 
@@ -134,7 +136,7 @@ dagua/
 ├── reference_glossary.py # glossary builder
 ├── showcase_gallery.py  # gallery builder
 ├── layout/              # [see dagua/layout/AGENTS.md]
-│   ├── engine.py        # optimization loop — wires flex/pin/align constraints
+│   ├── engine.py        # optimization loop + algorithm dispatch to ops pipelines
 │   ├── constraints.py   # DAG, Repel, Attract, Overlap, Cluster, Pin, Align, FlexSpacing
 │   ├── projection.py    # hard overlap + hard pin projection
 │   ├── schedule.py      # annealing schedules for constraint weights
@@ -142,7 +144,44 @@ dagua/
 │   ├── layers.py        # layer assignment algorithms
 │   ├── multilevel.py    # multilevel/coarsening layout
 │   ├── cycle.py         # cycle detection and handling
-│   └── edge_optimization.py # edge-aware position refinement
+│   ├── edge_optimization.py # edge-aware position refinement
+│   ├── ops/             # 268 registered composable layout primitives
+│   │   ├── __init__.py  # op registry, @register_op, get_pipeline_function
+│   │   ├── base.py      # Op protocol, registration machinery
+│   │   ├── state.py     # SolveState (9 typed fields for cross-algo composability)
+│   │   ├── graph_utils.py # BFS, Dijkstra, APSP, adjacency builders (self-contained)
+│   │   ├── force.py     # 22 ops: repulsion, attraction, displacement, cooling
+│   │   ├── stress.py    # stress majorization ops
+│   │   ├── embed.py     # 14 ops: spectral, MDS, pivot MDS embedding
+│   │   ├── init.py      # 15 ops: position initialization strategies
+│   │   ├── anneal.py    # 12 ops: temperature/weight annealing schedules
+│   │   ├── loss_engine.py  # 16 ops: engine-level loss computation
+│   │   ├── loss_classic.py # 14 ops: classical loss functions
+│   │   ├── optimize.py  # optimizer creation/stepping
+│   │   ├── converge.py  # convergence detection
+│   │   ├── postprocess.py  # 13 ops: post-layout refinement
+│   │   ├── preprocess.py   # graph preprocessing
+│   │   ├── coarsen.py   # multilevel coarsening ops
+│   │   ├── prolong.py   # multilevel prolongation ops
+│   │   ├── project.py   # constraint projection ops
+│   │   ├── coordinate.py   # coordinate transforms
+│   │   ├── context.py   # context managers for ops
+│   │   ├── utility.py   # shared op utilities
+│   │   ├── taxonomy.py  # op categorization metadata
+│   │   ├── [algo].py    # per-algorithm ops (drl, fmmm, gem, lgl, neulay, ...)
+│   │   └── pipelines/   # 23 algorithm pipelines (pure op composition)
+│   │       ├── __init__.py      # PIPELINE_REGISTRY, get_pipeline_function()
+│   │       ├── fr.py            # Fruchterman-Reingold
+│   │       ├── kk.py            # Kamada-Kawai
+│   │       ├── fa2.py           # ForceAtlas2
+│   │       ├── stress_sgd.py    # Stress via SGD
+│   │       ├── sfdp.py          # Scalable Force-Directed
+│   │       ├── umap_layout.py   # UMAP layout
+│   │       ├── tsnet.py         # t-SNE network embedding
+│   │       ├── sugiyama.py      # Sugiyama hierarchical
+│   │       ├── spectral.py      # Spectral layout
+│   │       └── ... (14 more)    # classical_mds, drl, gem, graphopt, etc.
+│   └── _archive/        # frozen monolithic reimplementations (reference only)
 ├── render/              # [see dagua/render/AGENTS.md]
 │   ├── mpl.py           # matplotlib: PatchCollection, LineCollection, batched
 │   ├── svg.py           # direct SVG string output (zero deps)
