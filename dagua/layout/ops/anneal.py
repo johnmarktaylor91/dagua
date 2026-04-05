@@ -1007,6 +1007,156 @@ class WeightAnnealing(Op):
 
 
 @dataclass(frozen=True)
+class InitAnnealingScheduleConfig:
+    """Configuration for :class:`InitAnnealingSchedule`.
+
+    Parameters
+    ----------
+    w_dag : float, default=10.0
+        Base DAG ordering loss weight.
+    w_attract : float, default=2.0
+        Base edge-attraction loss weight.
+    w_repel : float, default=0.1
+        Base repulsion loss weight.
+    w_overlap : float, default=5.0
+        Base overlap-avoidance loss weight.
+    w_cluster : float, default=1.0
+        Base cluster-compactness loss weight.
+    w_cluster_contain : float, default=2.0
+        Base cluster-containment loss weight.
+    w_crossing : float, default=1.8
+        Base edge-crossing loss weight.
+    w_straightness : float, default=2.2
+        Base edge-straightness loss weight.
+    w_length_variance : float, default=0.7
+        Base edge-length variance loss weight.
+    w_spacing : float, default=0.3
+        Base same-layer spacing-consistency loss weight.
+    w_fanout : float, default=0.3
+        Base fanout-distribution loss weight.
+    w_back_edge : float, default=0.3
+        Base back-edge compactness loss weight.
+    crossing_ramp_fraction : float, default=0.3
+        Fraction of the solve horizon used to ramp crossing penalties.
+    crossing_alpha_start : float, default=3.0
+        Initial crossing-loss sharpness retained for state bookkeeping.
+    crossing_alpha_end : float, default=10.0
+        Final crossing-loss sharpness retained for state bookkeeping.
+    """
+
+    w_dag: float = 10.0
+    w_attract: float = 2.0
+    w_repel: float = 0.1
+    w_overlap: float = 5.0
+    w_cluster: float = 1.0
+    w_cluster_contain: float = 2.0
+    w_crossing: float = 1.8
+    w_straightness: float = 2.2
+    w_length_variance: float = 0.7
+    w_spacing: float = 0.3
+    w_fanout: float = 0.3
+    w_back_edge: float = 0.3
+    crossing_ramp_fraction: float = 0.3
+    crossing_alpha_start: float = 3.0
+    crossing_alpha_end: float = 10.0
+
+
+@register_op
+@dataclass(frozen=True)
+class InitAnnealingSchedule(Op):
+    """Seed the native engine's per-loss annealing schedule.
+
+    Notes
+    -----
+    This op mirrors the monolithic native engine's weight map, including the
+    late crossing-weight ramp and the monotone boosts for repulsion, overlap,
+    and straightness. Crossing alpha is stored on ``state.annealing`` for
+    parity with the native bookkeeping even though the current loss op reads a
+    fixed alpha from its own config.
+    """
+
+    config: InitAnnealingScheduleConfig = field(default_factory=InitAnnealingScheduleConfig)
+
+    name: ClassVar[str] = "init_annealing_schedule"
+    category: ClassVar[OpCategory] = OpCategory.ANNEAL
+    reads: ClassVar[Tuple[str, ...]] = ("total_steps", "step")
+    writes: ClassVar[Tuple[str, ...]] = ("annealing",)
+    requires: ClassVar[Tuple[str, ...]] = ()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Initialize native-engine annealing functions on the solve state.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable solve state carrying ``total_steps`` and ``step``.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with a populated ``annealing`` schedule and initial weights.
+        """
+        del problem, ctx
+
+        def _progress(step: int, total_steps: int) -> float:
+            """Return the native engine's normalized step fraction."""
+            return float(step) / float(max(total_steps - 1, 1))
+
+        def _crossing_progress(step: int, total_steps: int) -> float:
+            """Return the crossing-specific warm-up fraction."""
+            progress = _progress(step=step, total_steps=total_steps)
+            return min(progress / max(self.config.crossing_ramp_fraction, 1.0e-8), 1.0)
+
+        schedule = AnnealingSchedule(
+            weight_fns={
+                "w_dag": lambda step, total_steps: self.config.w_dag
+                * (1.0 - 0.5 * _progress(step, total_steps)),
+                "w_attract": lambda step, total_steps: self.config.w_attract,
+                "w_repel": lambda step, total_steps: self.config.w_repel
+                * (1.0 + 2.0 * _progress(step, total_steps)),
+                "w_overlap": lambda step, total_steps: self.config.w_overlap
+                * (1.0 + _progress(step, total_steps)),
+                "w_cluster": lambda step, total_steps: self.config.w_cluster,
+                "w_cluster_sep": lambda step, total_steps: self.config.w_cluster * 0.5,
+                "w_cluster_contain": lambda step, total_steps: self.config.w_cluster_contain,
+                "w_crossing": lambda step, total_steps: self.config.w_crossing
+                * _crossing_progress(step, total_steps),
+                "w_straightness": lambda step, total_steps: self.config.w_straightness
+                * (1.0 + 0.5 * _progress(step, total_steps)),
+                "w_length_variance": lambda step, total_steps: self.config.w_length_variance,
+                "w_spacing": lambda step, total_steps: self.config.w_spacing,
+                "w_fanout": lambda step, total_steps: self.config.w_fanout,
+                "w_back_edge": lambda step, total_steps: self.config.w_back_edge,
+                "w_pin": lambda step, total_steps: 1.0,
+                "w_align_flex": lambda step, total_steps: 1.0,
+                "w_flex_spacing": lambda step, total_steps: 1.0,
+            },
+            crossing_alpha=self.config.crossing_alpha_start,
+        )
+        schedule.current_weights = {
+            key: float(weight_fn(state.step, state.total_steps))
+            for key, weight_fn in schedule.weight_fns.items()
+        }
+        crossing_fraction = _crossing_progress(state.step, state.total_steps)
+        schedule.crossing_alpha = (
+            self.config.crossing_alpha_start
+            + (self.config.crossing_alpha_end - self.config.crossing_alpha_start)
+            * crossing_fraction
+        )
+        state.annealing = schedule
+        return state
+
+
+@dataclass(frozen=True)
 class LRDecayConfig:
     """Configuration for :class:`LRDecay`.
 
