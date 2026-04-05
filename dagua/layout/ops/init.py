@@ -6,15 +6,17 @@ import importlib
 import inspect
 import random
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import cos, pi, sin, sqrt
-from typing import Any, Callable, DefaultDict, Dict, List, Optional, Tuple
+from typing import Any, Callable, ClassVar, DefaultDict, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 from scipy import sparse
 from scipy.sparse import linalg as sparse_linalg
 
+from dagua.layout.init_placement import init_positions
+from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.distance import (
     AllPairsShortestPaths,
@@ -28,6 +30,7 @@ from dagua.layout.ops.graph_utils import rescale_layout as _rescale_layout
 from dagua.layout.ops.preprocess import BuildAdjacency, BuildAdjacencyConfig
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
+from dagua.utils import longest_path_layering
 
 _SPECTRAL_EIGEN_TOLERANCE = 1.0e-9
 
@@ -2274,6 +2277,149 @@ class FromAlgorithmInit(Op):
         return state
 
 
+@dataclass(frozen=True)
+class NativeEngineInitConfig:
+    """Configuration for :class:`NativeEngineInit`.
+
+    Parameters
+    ----------
+    node_sep : float, default=25.0
+        Horizontal separation target passed to ``init_positions()``.
+    rank_sep : float, default=50.0
+        Vertical separation target passed to ``init_positions()``.
+    device : str or None, default=None
+        Explicit device for initialized positions and layer metadata. When
+        ``None``, derive the device from the runtime context.
+    verbose : bool, default=False
+        Forward verbose layering/projection messages to the native init path.
+    layer_assignments : torch.Tensor or None, default=None
+        Optional precomputed layer IDs with shape ``[N]``.
+    prebuilt_layer_index : LayerIndex or None, default=None
+        Optional precomputed layer index to reuse directly.
+    """
+
+    node_sep: float = 25.0
+    rank_sep: float = 50.0
+    device: Optional[str] = None
+    verbose: bool = False
+    layer_assignments: Optional[torch.Tensor] = None
+    prebuilt_layer_index: Optional[LayerIndex] = None
+
+
+@register_op
+@dataclass(frozen=True)
+class NativeEngineInit(Op):
+    """Initialize the native engine positions and layered metadata.
+
+    Notes
+    -----
+    This op mirrors the monolithic native engine's initialization phase:
+    it seeds ``state.pos`` with ``init_positions()`` when a warm start is not
+    already present, then prepares ``state.layers`` and ``state.layer_index``
+    for the layer-aware losses and projections used later in the pipeline.
+    """
+
+    config: NativeEngineInitConfig = field(default_factory=NativeEngineInitConfig)
+
+    name: ClassVar[str] = "native_engine_init"
+    category: ClassVar[OpCategory] = OpCategory.INIT
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "layers", "layer_index")
+    requires: ClassVar[Tuple[str, ...]] = ()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Populate native-engine initialization outputs on the solve state.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state that may already carry warm-start positions.
+        ctx : RuntimeContext
+            Execution infrastructure that may request a target device.
+
+        Returns
+        -------
+        SolveState
+            State with ``pos``, ``layers``, and ``layer_index`` populated.
+
+        Raises
+        ------
+        ValueError
+            If ``problem.node_sizes`` is missing.
+        """
+        target_device = torch.device(self.config.device or _target_device(problem, ctx))
+        if problem.node_sizes is None:
+            raise ValueError("NativeEngineInit requires problem.node_sizes to be set.")
+
+        node_sizes = problem.node_sizes.to(device=target_device, dtype=torch.float32)
+        if state.pos is None:
+            state.pos = init_positions(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+                node_sizes=node_sizes,
+                node_sep=self.config.node_sep,
+                rank_sep=self.config.rank_sep,
+                device=str(target_device),
+                verbose=self.config.verbose,
+            )
+        else:
+            state.pos = state.pos.to(device=target_device, dtype=torch.float32)
+
+        if self.config.prebuilt_layer_index is not None:
+            prebuilt = self.config.prebuilt_layer_index
+            state.layer_index = (
+                prebuilt
+                if prebuilt.node_to_layer.device == target_device
+                else build_layer_index(
+                    prebuilt.node_to_layer,
+                    device=str(target_device),
+                    verbose=self.config.verbose,
+                )
+            )
+            state.layers = state.layer_index.node_to_layer
+            return state
+
+        if self.config.layer_assignments is not None:
+            layers = self.config.layer_assignments.to(device=target_device, dtype=torch.long)
+            state.layers = layers
+            state.layer_index = build_layer_index(
+                layers,
+                device=str(target_device),
+                verbose=self.config.verbose,
+            )
+            return state
+
+        if problem.edge_index.numel() == 0:
+            state.layers = None
+            state.layer_index = None
+            return state
+
+        layering_device = "cuda" if torch.cuda.is_available() else "cpu"
+        layers = longest_path_layering(
+            problem.edge_index,
+            problem.num_nodes,
+            device=layering_device,
+            verbose=self.config.verbose,
+        )
+        if not isinstance(layers, torch.Tensor):
+            layers = torch.tensor(layers, dtype=torch.long)
+        layers = layers.to(device=target_device, dtype=torch.long)
+        state.layers = layers
+        state.layer_index = build_layer_index(
+            layers,
+            device=str(target_device),
+            verbose=self.config.verbose,
+        )
+        return state
+
+
 __all__ = [
     "CircularInit",
     "CircularInitConfig",
@@ -2285,6 +2431,8 @@ __all__ = [
     "FromAlgorithmInit",
     "FromAlgorithmInitConfig",
     "LinLogInitializePositions",
+    "NativeEngineInit",
+    "NativeEngineInitConfig",
     "PivotMDSInit",
     "PivotMDSInitConfig",
     "RandomNormalInit",

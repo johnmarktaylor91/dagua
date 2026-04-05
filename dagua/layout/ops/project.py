@@ -245,6 +245,104 @@ class OverlapProjection(Op):
         return state
 
 
+@dataclass(frozen=True)
+class PeriodicOverlapProjectionConfig:
+    """Configuration for :class:`PeriodicOverlapProjection`.
+
+    Parameters
+    ----------
+    interval : int, default=5
+        Run the overlap projector every ``interval`` optimization steps.
+    padding : float, default=2.0
+        Extra spacing enforced between node bounding boxes.
+    iterations : int or None, default=None
+        Projection iterations per trigger. When ``None``, derive the native
+        engine's scale-aware default from ``problem.num_nodes``.
+    run_on_last_step : bool, default=True
+        Whether to force one projection on the final optimization step even
+        when it does not align with ``interval``.
+    """
+
+    interval: int = 5
+    padding: float = 2.0
+    iterations: Optional[int] = None
+    run_on_last_step: bool = True
+
+
+@register_op
+@dataclass(frozen=True)
+class PeriodicOverlapProjection(Op):
+    """Run overlap projection periodically during native optimization."""
+
+    config: PeriodicOverlapProjectionConfig = field(default_factory=PeriodicOverlapProjectionConfig)
+
+    name: ClassVar[str] = "periodic_overlap_projection"
+    category: ClassVar[OpCategory] = OpCategory.PROJECT
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "step", "total_steps", "layer_index")
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Project overlaps on the configured cadence.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state carrying positions and the current step.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with positions projected when the cadence fires.
+        """
+        del ctx
+
+        positions = _require_positions(state=state, op_name=self.name)
+        if problem.node_sizes is None or problem.node_sizes.numel() == 0:
+            return state
+        if self.config.interval <= 0:
+            raise ValueError("PeriodicOverlapProjection interval must be positive.")
+        if state.step <= 0:
+            return state
+
+        is_interval_step = state.step % self.config.interval == 0
+        is_last_step = state.step >= max(state.total_steps - 1, 0)
+        if not is_interval_step and not (self.config.run_on_last_step and is_last_step):
+            return state
+
+        if self.config.iterations is None:
+            if problem.num_nodes <= 500_000:
+                iterations = 5
+            elif problem.num_nodes <= 5_000_000:
+                iterations = 3
+            else:
+                iterations = 2
+        else:
+            iterations = self.config.iterations
+        if iterations <= 0:
+            return state
+
+        node_sizes = problem.node_sizes.to(device=positions.device, dtype=positions.dtype)
+        project_overlaps(
+            pos=positions,
+            node_sizes=node_sizes,
+            padding=self.config.padding,
+            iterations=iterations,
+            layer_index=state.layer_index,
+        )
+        state.pos = positions
+        return state
+
+
 @register_op
 class HardPinProjection(Op):
     """Project hard-pinned node coordinates onto their target axes."""
