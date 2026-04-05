@@ -29,7 +29,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Literal, Optional, Union, cast
+from typing import Any, Callable, List, Literal, Optional, Union, cast
 
 import torch
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
@@ -867,15 +867,23 @@ def _override_for_tree(config: LayoutConfig) -> LayoutConfig:
     return tree_config
 
 
-def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Tensor:
+def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None) -> torch.Tensor:
     """Compute layout positions for all nodes.
 
-    Args:
-        graph: DaguaGraph instance
-        config: LayoutConfig (uses defaults if None)
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object exposing the Dagua layout interface, including
+        topology tensors, node-size preparation, and layout-cache helpers.
+    config : LayoutConfig, optional
+        Layout configuration. Uses ``LayoutConfig()`` when omitted.
+    trace : Any, optional
+        Optional tracing sink forwarded through the legacy engine path.
 
-    Returns:
-        [N, 2] tensor of (x, y) positions
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]``.
     """
     if config is None:
         config = LayoutConfig()
@@ -887,7 +895,7 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
 
         pipeline_fn = get_pipeline_function(config.algorithm)
         graph.compute_node_sizes()
-        kwargs: dict = {
+        kwargs: dict[str, object] = {
             "edge_index": graph.edge_index,
             "num_nodes": graph.num_nodes,
             "node_sizes": graph.node_sizes,
@@ -895,6 +903,7 @@ def layout(graph, config: Optional[LayoutConfig] = None, trace=None) -> torch.Te
         }
         if graph.edge_weights is not None:
             kwargs["edge_weights"] = graph.edge_weights
+        kwargs.update(config.algorithm_params)
         # Forward steps if the pipeline accepts it
         sig = inspect.signature(pipeline_fn)
         if "steps" in sig.parameters:
