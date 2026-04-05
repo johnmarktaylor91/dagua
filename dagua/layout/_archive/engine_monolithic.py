@@ -1405,23 +1405,6 @@ def _layout_inner(
     torch.Tensor
         Detached position tensor shaped ``[N, 2]``.
     """
-    if config.use_pipeline:
-        return _layout_inner_pipeline(
-            edge_index=edge_index,
-            num_nodes=num_nodes,
-            node_sizes=node_sizes,
-            config=config,
-            device=device,
-            optimizer_type=optimizer_type,
-            init_pos=init_pos,
-            clusters=clusters,
-            cluster_parents=cluster_parents,
-            layer_assignments=layer_assignments,
-            graph_structure=graph_structure,
-            prebuilt_layer_index=prebuilt_layer_index,
-            skip_classification=skip_classification,
-        )
-
     import time as _time
 
     n = num_nodes
@@ -2720,78 +2703,6 @@ def _layout_inner(
         executor.shutdown(wait=False)
 
     return pos.detach()
-
-
-def _layout_inner_pipeline(
-    edge_index: torch.Tensor,
-    num_nodes: int,
-    node_sizes: torch.Tensor,
-    config: LayoutConfig,
-    device: str = "cpu",
-    optimizer_type: OptimizerType = "adam",
-    init_pos: Optional[torch.Tensor] = None,
-    clusters: Optional[dict] = None,
-    cluster_parents: Optional[dict] = None,
-    layer_assignments: Optional[torch.Tensor] = None,
-    *,
-    graph_structure: Optional[GraphStructure] = None,
-    prebuilt_layer_index: Optional[LayerIndex] = None,
-    skip_classification: bool = False,
-) -> torch.Tensor:
-    """Delegate native direct-layout execution through the composable pipeline.
-
-    Parameters
-    ----------
-    edge_index : torch.Tensor
-        Edge tensor shaped ``[2, E]``.
-    num_nodes : int
-        Number of graph nodes.
-    node_sizes : torch.Tensor
-        Node size tensor shaped ``[N, 2]`` or broadcastable from ``[N]`` /
-        ``[N, 1]``.
-    config : LayoutConfig
-        Layout configuration for the current solve.
-    device : str, default="cpu"
-        Target device for optimization.
-    optimizer_type : {"adam", "sgd_nesterov", "sgd"}, default="adam"
-        Optimizer tier requested by the caller.
-    init_pos : torch.Tensor, optional
-        Warm-start positions shaped ``[N, 2]``.
-    clusters : dict, optional
-        Cluster membership data for cluster losses.
-    cluster_parents : dict, optional
-        Parent-cluster mapping used by containment/separation losses.
-    layer_assignments : torch.Tensor, optional
-        Raw layer assignments shaped ``[N]``.
-    graph_structure : GraphStructure, optional
-        Pre-classified structure metadata for the current graph.
-    prebuilt_layer_index : LayerIndex, optional
-        Pre-computed layer index for the current graph.
-    skip_classification : bool, default=False
-        When ``True``, skip graph-family classification before pipeline setup.
-
-    Returns
-    -------
-    torch.Tensor
-        Detached position tensor shaped ``[N, 2]``.
-    """
-    from dagua.layout.ops.pipelines.dagua_native import layout_dagua_native_pipeline
-
-    return layout_dagua_native_pipeline(
-        edge_index=edge_index,
-        num_nodes=num_nodes,
-        node_sizes=node_sizes,
-        config=config,
-        device=device,
-        optimizer_type=optimizer_type,
-        init_pos=init_pos,
-        clusters=clusters,
-        cluster_parents=cluster_parents,
-        layer_assignments=layer_assignments,
-        prebuilt_layer_index=prebuilt_layer_index,
-        graph_structure=graph_structure,
-        skip_classification=skip_classification,
-    )
 
 
 def _resolve_memory_strategy(
