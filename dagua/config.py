@@ -169,6 +169,7 @@ class LayoutConfig:
 
     # Optional algorithm override for direct pipeline-based layouts.
     # None routes to the native multilevel/direct engine.
+    use_pipeline: bool = False
     algorithm: Optional[str] = None
     algorithm_params: dict[str, Any] = field(default_factory=dict)
 

@@ -19,6 +19,10 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "layout_davidson_harel_pipeline",
     ),
     "drl": ("dagua.layout.ops.pipelines.drl", "layout_drl_pipeline"),
+    "dagua_native": (
+        "dagua.layout.ops.pipelines.dagua_native",
+        "layout_dagua_native_pipeline",
+    ),
     "fa2": ("dagua.layout.ops.pipelines.fa2", "layout_fa2_pipeline"),
     "fmmm": ("dagua.layout.ops.pipelines.fmmm", "layout_fmmm_pipeline"),
     "fr": ("dagua.layout.ops.pipelines.fr", "layout_fr_pipeline"),
