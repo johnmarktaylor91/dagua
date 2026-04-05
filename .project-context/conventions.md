@@ -75,11 +75,26 @@ from dagua.styles import NodeStyle
 
 ## Layout Engine Conventions
 
-- Layout modules (`dagua/layout/`) are **pure torch** — no imports from dagua core.
+- Layout modules (`dagua/layout/`) are **pure torch** -- no imports from dagua core.
 - Constraints are callables: `(pos: Tensor, graph_data: dict) -> Tensor` (scalar loss).
-- Position tensors are always N×2 (x, y). Edge index is always 2×E.
+- Position tensors are always Nx2 (x, y). Edge index is always 2xE.
 - Bottom-up default direction (matches DNN forward pass).
 - Deterministic by default: `seed=42`, `seed=None` to opt out.
+
+## Composable Ops Conventions
+
+- **Registration**: all ops use `@register_op` decorator from `dagua.layout.ops.base`
+- **State**: ops share data via `SolveState` (9 typed fields). Algorithm-specific state
+  goes in `extras` dict with `"algo_field"` key convention (e.g., `"tsne_gains"`)
+- **Configs**: every tunable parameter is a frozen `@dataclass` -- no loose kwargs
+- **RNG fidelity**: ops match the RNG backend of their original algorithm source
+  (torch.Generator, numpy.random, or Python random.Random). Do NOT unify to torch.
+- **Pipelines**: pure composition of registered ops -- no inline functions, no archive imports
+- **Pipeline naming**: `PIPELINE_REGISTRY` in `ops/pipelines/__init__.py` maps algorithm
+  names to `(module, function)` tuples
+- **Testing**: ops have unit tests (`test_ops_<name>.py`), pipelines have fidelity tests
+  (`test_pipeline_<name>.py`) validating bit-identical output against archive reimplementations
+- **graph_utils.py**: self-contained graph utilities. No torch imports from outside ops/.
 
 ## Style System Conventions
 

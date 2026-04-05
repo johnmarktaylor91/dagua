@@ -65,3 +65,42 @@ Context: Border dashes visually merged on tight curves.
 Decision: Scale dash on-lengths with curvature while keeping gap lengths constant, with a minimum scale floor of 0.4.
 Rationale: Constant gaps preserve visual density, while shorter on-segments prevent neighboring dashes from merging on high-curvature sections. The 0.4 floor avoids over-shortening into visual noise.
 Alternatives considered: Scaling both dashes and gaps (density drift), fixed dash pattern everywhere (merging on tight curves), unconstrained scaling (dashes disappear on extreme curvature).
+
+## Composable Ops Wave 1 Decisions (2026-04-02)
+
+1. **RNG backend per algorithm**: Ops match the RNG backend of their classic/ source
+   (torch.Generator, numpy.random, Python random.Random). NOT unified to torch only.
+   Why: Classic algos use 5+ different RNG families. Fidelity requires matching each.
+
+2. **Force pipeline pattern**: ZeroForces -> [accumulators] -> ApplyDisplacement.
+   GEMNodeTick is the exception (sequential single-node Gauss-Seidel).
+   Why: Force-directed algos accumulate forces then apply; GEM processes one node at a time.
+
+3. **loss.py split into two files**: loss_engine.py (16 ops) + loss_classic.py (12 ops).
+   Why: Too large for one Codex agent; no shared helpers needed between the two.
+
+4. **Execution strategies NOT ops**: Tiled GPU, subset GPU, hybrid CPU/GPU stay in engine.py.
+   Why: These are engine infrastructure, not algorithm logic. Ops must be callable FROM them.
+
+5. **Multiple optimizers via keyed storage**: CreateOptimizer(key="detector") stores in
+   extras["optimizer_detector"]. Default key uses state.optimizer.
+   Why: SGD2 needs pos optimizer + crossing detector optimizer simultaneously.
+
+6. **Algorithm-specific state in extras dict**: "algo_field" convention (e.g. "tsne_gains").
+   reads/writes metadata is advisory only for extras keys.
+   Why: Adding 50+ typed fields to SolveState would be worse than the escape hatch.
+
+## Composable Ops Completion (2026-04-04)
+
+7. **All 23 algorithms decomposed into ops pipelines**: Wave 2 (all algorithms) and Wave 3
+   (migration + fidelity validation) completed. 268 ops, 34 modules, 23 pipelines. All
+   pipeline fidelity tests green (bit-identical to archive reimplementations).
+
+8. **algorithm_params in LayoutConfig**: `LayoutConfig(algorithm="fr", algorithm_params={"cooling": 0.95})`
+   passes kwargs through to the pipeline function's frozen config dataclass. Validated
+   via integration tests. Keeps LayoutConfig stable while pipelines grow independently.
+   Why: Adding per-algorithm fields to LayoutConfig would explode its surface area.
+
+9. **Archive as reference, not compatibility layer**: `_archive/classic/` is reference-only.
+   No backward-compat symlinks or re-exports. Tests import from pipelines, not archive.
+   Why: Clean break. Maintaining compatibility would constrain ops evolution.

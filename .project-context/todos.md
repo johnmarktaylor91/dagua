@@ -36,7 +36,6 @@
 
 ### Architecture
 - [ ] [HIGH] Original algorithm backend: `dagua.layout(g, algorithm="fr", backend="original")` -- user-facing transparency, runs literal originals via competitor adapters
-- [ ] [HIGH] Composable ops migration: decompose classic/ into dagua/layout/ops/. Monoliths become dagua/layout/_reference/ as frozen test oracles. Bitwise-identical seed-matched validation.
 - [ ] [HIGH] Pixel-unit overrides: "2pt" syntax for fixed-size elements
 - [ ] [HIGH] Expose text rendering in style fields: text_background, text_underline, text_strikethrough, label_outline
 
@@ -95,6 +94,8 @@
 - [ ] Fix fanout_distribution_loss hub count mismatch at 200M+ scale
 
 ## Completed (This Sprint)
+- [x] Composable ops migration: 268 ops across 34 modules, 23 algorithm pipelines, all via pure op composition. Monoliths archived at _archive/classic/ as frozen test oracles. Bitwise-identical seed-matched fidelity validation (2,532 tests, 371 pipeline fidelity).
+- [x] algorithm_params in LayoutConfig: `LayoutConfig(algorithm="fr", algorithm_params={"cooling": 0.95})`
 - [x] Full variant benchmark: 104 variants x 91 graphs x 30 seeds (432K evals)
 - [x] Benchmark pitstop: skip-after-3 errors, graph-size timeout, rolling submission, SIGINT handler, watchdog executor
 - [x] 4 new competitors: cytoscape fcose, gephi yifanhu, FR->KK chain, KK->FR chain

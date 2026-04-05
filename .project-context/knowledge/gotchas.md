@@ -17,6 +17,13 @@
 - [LAYOUT] LR/RL direction: node_sizes not swapped before layout computation.
 - [LAYOUT] Back-edge routing creates wide arcs that can overlap with other nodes.
 - [LAYOUT] Multilevel/coarsening path is the most fragile layout code. Recent hardening with checkpoint validation, but needs smoke test coverage for each failure mode fixed.
+
+- [OPS] RNG backend varies per algorithm (torch, numpy, Python random). Changing backend breaks fidelity tests. Check archive source before choosing.
+- [OPS] SolveState extras dict is the escape hatch. Keys use "algo_field" convention (e.g., "tsne_gains"). No validation -- read/write metadata is advisory only.
+- [OPS] Pipeline fidelity tests compare against archive reimplementations with matching seeds. If an op changes behavior, the corresponding test_pipeline_*.py will fail.
+- [OPS] graph_utils.py is self-contained. Do NOT add dagua imports or use torch ops that have graph.py equivalents.
+- [OPS] 12 classic test modules have collection errors (stale imports from archived code). These are test_classic_*.py files -- they import from the old classic/ location. Not blocking but should be fixed.
+
 - [RENDER] Multi-line node labels: secondary line font scaling is hardcoded (0.8x).
 - [RENDER] Edge arrowheads: mutation_scale=1 makes heads very small at some zoom levels.
 - [RENDER] Font sizing: use data coordinates directly (font_size_data = font_size_points). The old height-based heuristic (_node_relative_font_size_data) caused overflow/shrink/wrap bugs. compute_node_size already returns the correct font in layout units = data units.
