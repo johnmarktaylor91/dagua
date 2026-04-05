@@ -1,4 +1,4 @@
-"""Kamada-Kawai expressed as a composable ops pipeline."""
+"""Kamada-Kawai spring-embedding layout pipeline."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def build_kk_pipeline(
     steps: Optional[int] = None,
     trace_every: int = 0,
 ) -> Pipeline:
-    """Build a KK pipeline that is bit-identical to classic ``layout_kk``.
+    """Build a Kamada-Kawai spring-embedding pipeline.
 
     Parameters
     ----------
@@ -33,12 +33,15 @@ def build_kk_pipeline(
         Maximum L-BFGS-B iterations. ``None`` or ``0`` leaves ``maxiter``
         unset to match classic KK.
     trace_every : int, default=0
-        Callback snapshot cadence.
+        Snapshot cadence for optimizer traces.
 
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic KK exactly.
+        Pipeline implementing the classical Kamada-Kawai algorithm. The
+        pipeline produces final node coordinates by computing all-pairs
+        shortest paths, initializing positions, minimizing the spring-energy
+        objective with L-BFGS, and finalizing the layout.
 
     Raises
     ------
@@ -78,16 +81,17 @@ def layout_kk_pipeline(
     pos: Optional[torch.Tensor] = None,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-    """Run the KK pipeline as a drop-in replacement for classic ``layout_kk``.
+    """Run the Kamada-Kawai pipeline as a drop-in replacement.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Unused, accepted for interface compatibility.
+        Optional node-size tensor with shape ``[N, 2]``. Unused and accepted
+        for interface compatibility.
     steps : int, optional
         Maximum L-BFGS-B iterations. ``None`` or ``0`` leaves ``maxiter``
         unset to match classic KK.
@@ -108,7 +112,8 @@ def layout_kk_pipeline(
     Returns
     -------
     torch.Tensor or tuple[torch.Tensor, list[torch.Tensor]]
-        Final positions with shape ``[N, 2]``.
+        Final positions with shape ``[N, 2]``. When ``trace_every > 0``,
+        periodic optimizer snapshots are returned alongside the final layout.
 
     Raises
     ------

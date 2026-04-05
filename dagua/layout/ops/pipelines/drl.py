@@ -1,4 +1,4 @@
-"""Distributed Recursive Layout (DrL) expressed as a composable ops pipeline."""
+"""Distributed Recursive Layout (DrL) pipeline."""
 
 from __future__ import annotations
 
@@ -20,17 +20,20 @@ from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext,
 
 
 def build_drl_pipeline(options: DrLOptions = "default") -> Pipeline:
-    """Build a DRL pipeline that matches ``layout_drl`` output.
+    """Build a Distributed Recursive Layout pipeline.
 
     Parameters
     ----------
     options : str or Mapping[str, object] or OptionObject, default="default"
-        DrL preset name or per-phase override container.
+        DrL preset name or per-phase override container controlling the coarse,
+        liquid, expansion, and final smoothing phases.
 
     Returns
     -------
     Pipeline
-        Composable pipeline of registered DRL operations.
+        Pipeline implementing the DrL algorithm. The pipeline produces final
+        node coordinates by preparing phase parameters, initializing positions,
+        running the staged recursive DrL solve, and finalizing the layout.
     """
     return Pipeline(
         [
@@ -51,16 +54,17 @@ def layout_drl_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     options: DrLOptions = "default",
 ) -> torch.Tensor:
-    """Run the registered DRL pipeline as a drop-in replacement.
+    """Run the Distributed Recursive Layout pipeline.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge list with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Total number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Unused compatibility placeholder.
+        Optional node-size tensor with shape ``[N, 2]``. Unused compatibility
+        placeholder.
     seed : int, default=42
         Random seed for initial layout and random perturbations.
     edge_weights : torch.Tensor, optional
@@ -72,6 +76,13 @@ def layout_drl_pipeline(
     -------
     torch.Tensor
         Final layout positions with shape ``[N, 2]`` and dtype ``float32``.
+
+    Raises
+    ------
+    ValueError
+        If ``num_nodes``, ``edge_index``, or ``edge_weights`` are invalid.
+    RuntimeError
+        If the pipeline does not populate final positions.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")

@@ -1,4 +1,4 @@
-"""Classical MDS expressed as a composable ops pipeline."""
+"""Classical multidimensional scaling layout pipeline."""
 
 from __future__ import annotations
 
@@ -19,12 +19,15 @@ from dagua.layout.ops.state import (
 
 
 def build_classical_mds_pipeline() -> Pipeline:
-    """Build a classical MDS pipeline that matches ``layout_classical_mds``.
+    """Build a classical multidimensional scaling pipeline.
 
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic classical MDS exactly.
+        Pipeline implementing classical MDS. The pipeline produces final node
+        coordinates by computing the all-pairs graph distance matrix, solving
+        the double-centered eigendecomposition, and finalizing the embedding
+        into a 2D layout.
     """
     return Pipeline(
         [
@@ -43,16 +46,17 @@ def layout_classical_mds_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the classical MDS pipeline as a drop-in replacement.
+    """Run the classical multidimensional scaling pipeline.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor used only to pick a stable output extent.
+        Optional node-size tensor with shape ``[N, 2]`` used only to pick a
+        stable output extent.
     seed : int, default=42
         Accepted for interface compatibility. Classical MDS is deterministic
         once graph distances are fixed.
@@ -62,8 +66,7 @@ def layout_classical_mds_pipeline(
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_classical_mds``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------

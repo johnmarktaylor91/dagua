@@ -7,8 +7,8 @@ composable ``Op`` interface.
 from __future__ import annotations
 
 import heapq
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import ClassVar, List, Optional, Tuple
 
 import torch
 
@@ -29,6 +29,22 @@ class BuildLayerIndexConfig:
     """
 
     enable_cuda_sort: bool = True
+
+
+@dataclass(frozen=True)
+class InsertDummyNodesConfig:
+    """Configuration for :class:`InsertDummyNodes`.
+
+    Parameters
+    ----------
+    dummy_width : float, default=0.0
+        Width assigned to inserted dummy nodes.
+    dummy_height : float, default=0.0
+        Height assigned to inserted dummy nodes.
+    """
+
+    dummy_width: float = 0.0
+    dummy_height: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -264,6 +280,7 @@ def _expand_long_edges_with_dummy_nodes(
     layer_assignments: torch.Tensor,
     node_sizes: torch.Tensor,
     num_original_nodes: int,
+    dummy_size: tuple[float, float],
     edge_weights: torch.Tensor | None = None,
 ) -> tuple[_ExpandedLayeredGraph, torch.Tensor | None]:
     """Insert dummy nodes for edges spanning multiple layers.
@@ -278,6 +295,8 @@ def _expand_long_edges_with_dummy_nodes(
         Original node sizes with shape ``[N, 2]`` on CPU.
     num_original_nodes : int
         Number of real graph nodes before expansion.
+    dummy_size : tuple[float, float]
+        Size assigned to inserted dummy nodes.
     edge_weights : torch.Tensor | None, default=None
         Optional edge weights.
 
@@ -310,7 +329,7 @@ def _expand_long_edges_with_dummy_nodes(
             dummy_index = next_dummy_index
             next_dummy_index += 1
             expanded_layers[layer_index].append(dummy_index)
-            dummy_sizes.append([0.0, 0.0])
+            dummy_sizes.append([dummy_size[0], dummy_size[1]])
             expanded_sources.append(previous)
             expanded_targets.append(dummy_index)
             expanded_weight_values.append(orig_weight)
@@ -472,9 +491,9 @@ def _edge_weights_cpu(problem: LayoutProblem) -> Optional[torch.Tensor]:
 class LongestPathLayering(Op):
     """Assign layers by longest-path depth in an acyclic graph."""
 
-    name = "longest_path_layering"
-    category = OpCategory.LAYERING
-    writes = ("layers",)
+    name: ClassVar[str] = "longest_path_layering"
+    category: ClassVar[OpCategory] = OpCategory.LAYERING
+    writes: ClassVar[Tuple[str, ...]] = ("layers",)
 
     def apply(
         self,
@@ -511,11 +530,11 @@ class LongestPathLayering(Op):
 class LayerPromotion(Op):
     """Push nodes to the deepest legal layer after longest-path assignment."""
 
-    name = "layer_promotion"
-    category = OpCategory.LAYERING
-    reads = ("layers",)
-    writes = ("layers",)
-    requires = ("layers",)
+    name: ClassVar[str] = "layer_promotion"
+    category: ClassVar[OpCategory] = OpCategory.LAYERING
+    reads: ClassVar[Tuple[str, ...]] = ("layers",)
+    writes: ClassVar[Tuple[str, ...]] = ("layers",)
+    requires: ClassVar[Tuple[str, ...]] = ("layers",)
 
     def apply(
         self,
@@ -557,11 +576,11 @@ class LayerPromotion(Op):
 class BuildLayerIndex(Op):
     """Build a reusable per-layer index for layer-aware losses and projections."""
 
-    name = "build_layer_index"
-    category = OpCategory.LAYERING
-    reads = ("layers",)
-    writes = ("layer_index",)
-    requires = ("layers",)
+    name: ClassVar[str] = "build_layer_index"
+    category: ClassVar[OpCategory] = OpCategory.LAYERING
+    reads: ClassVar[Tuple[str, ...]] = ("layers",)
+    writes: ClassVar[Tuple[str, ...]] = ("layer_index",)
+    requires: ClassVar[Tuple[str, ...]] = ("layers",)
 
     def __init__(self, config: Optional[BuildLayerIndexConfig] = None) -> None:
         """Initialize the op with an optional config.
@@ -609,14 +628,17 @@ class BuildLayerIndex(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class InsertDummyNodes(Op):
     """Expand long edges through dummy-node chains for layered routing."""
 
-    name = "insert_dummy_nodes"
-    category = OpCategory.LAYERING
-    reads = ("layers",)
-    writes = ("extras.expanded_graph",)
-    requires = ("layers",)
+    config: InsertDummyNodesConfig = field(default_factory=InsertDummyNodesConfig)
+
+    name: ClassVar[str] = "insert_dummy_nodes"
+    category: ClassVar[OpCategory] = OpCategory.LAYERING
+    reads: ClassVar[Tuple[str, ...]] = ("layers",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras.expanded_graph",)
+    requires: ClassVar[Tuple[str, ...]] = ("layers",)
 
     def apply(
         self,
@@ -650,8 +672,11 @@ class InsertDummyNodes(Op):
             layer_assignments=layers_cpu,
             node_sizes=node_sizes,
             num_original_nodes=problem.num_nodes,
+            dummy_size=(self.config.dummy_width, self.config.dummy_height),
             edge_weights=_edge_weights_cpu(problem),
         )
+        # Preserve the original edge order via edge_paths so coordinate and
+        # routing ops can collapse the expanded graph back to per-edge routes.
         state.extras["expanded_graph"] = ExpandedGraph(
             edge_index=expanded_graph.edge_index,
             layers=expanded_graph.layers,

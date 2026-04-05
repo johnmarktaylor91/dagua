@@ -18,12 +18,96 @@ from dagua.layout.ops.graph_utils import layout_device
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
-_GRID_SIZE = 1000
-_VIEW_SIZE = 4000.0
-_GRID_RADIUS = 10
-_MIN_DISTANCE = 1.0e-12
-_FINE_REPULSION_SCALE = 1.0e-4
-_CUT_BASE = 40_000.0
+
+@dataclass(frozen=True)
+class DRLDensityGridConfig:
+    """Configuration for DrL's coarse density proxy.
+
+    Parameters
+    ----------
+    grid_size : int, default=1000
+        Number of cells per axis in the coarse density grid.
+    view_size : float, default=4000.0
+        Side length of the square density view.
+    radius : int, default=10
+        Tent-kernel radius measured in grid cells.
+    """
+
+    grid_size: int = 1000
+    view_size: float = 4000.0
+    radius: int = 10
+
+
+@dataclass(frozen=True)
+class DRLEnergyConfig:
+    """Configuration for DrL node-energy evaluation.
+
+    Parameters
+    ----------
+    min_distance : float, default=1e-12
+        Small additive guard used by fine-density repulsion.
+    fine_repulsion_scale : float, default=1e-4
+        Scale factor for exact local repulsion during the simmer phase.
+    attraction_factor_scale : float, default=0.02
+        Multiplier applied after raising the attraction coefficient to the
+        classic fourth power.
+    jump_temperature_scale : float, default=0.01
+        Fraction of the current temperature used for random candidate jumps.
+    """
+
+    min_distance: float = 1.0e-12
+    fine_repulsion_scale: float = 1.0e-4
+    attraction_factor_scale: float = 0.02
+    jump_temperature_scale: float = 0.01
+
+
+@dataclass(frozen=True)
+class DRLPhaseDynamicsConfig:
+    """Configuration for intra-phase DrL schedule updates.
+
+    Parameters
+    ----------
+    expansion_attraction_floor : float, default=1.0
+        Minimum attraction allowed during the expansion phase.
+    expansion_attraction_delta : float, default=0.05
+        Per-iteration attraction decrement during expansion.
+    expansion_min_edges_floor : float, default=12.0
+        Lower bound for the expansion-phase edge-cut threshold.
+    expansion_min_edges_delta : float, default=0.05
+        Per-iteration decrement for the expansion edge-cut threshold.
+    expansion_damping_floor : float, default=0.1
+        Lower bound for the expansion damping multiplier.
+    expansion_damping_delta : float, default=0.005
+        Per-iteration decrement for the expansion damping multiplier.
+    cooldown_temperature_floor : float, default=50.0
+        Minimum cooldown temperature.
+    cooldown_temperature_delta : float, default=10.0
+        Per-iteration temperature decrement during cooldown.
+    cooldown_cut_rate_multiplier : float, default=2.0
+        Extra multiplier applied to cut-rate cooling during cooldown.
+    cooldown_min_edges_floor : float, default=1.0
+        Lower bound for the cooldown edge-cut threshold.
+    cooldown_min_edges_delta : float, default=0.2
+        Per-iteration decrement for the cooldown edge-cut threshold.
+    simmer_temperature_floor : float, default=50.0
+        Minimum simmer temperature.
+    simmer_temperature_delta : float, default=2.0
+        Per-iteration temperature decrement during simmer.
+    """
+
+    expansion_attraction_floor: float = 1.0
+    expansion_attraction_delta: float = 0.05
+    expansion_min_edges_floor: float = 12.0
+    expansion_min_edges_delta: float = 0.05
+    expansion_damping_floor: float = 0.1
+    expansion_damping_delta: float = 0.005
+    cooldown_temperature_floor: float = 50.0
+    cooldown_temperature_delta: float = 10.0
+    cooldown_cut_rate_multiplier: float = 2.0
+    cooldown_min_edges_floor: float = 1.0
+    cooldown_min_edges_delta: float = 0.2
+    simmer_temperature_floor: float = 50.0
+    simmer_temperature_delta: float = 2.0
 
 
 class OptionObject(Protocol):
@@ -326,20 +410,27 @@ def _initialize_positions(num_nodes: int, seed: int) -> torch.Tensor:
 class _DensityGrid:
     """Density proxy used by DrL's coarse/fine repulsion term."""
 
-    def __init__(self, grid_size: int, view_size: float, radius: int) -> None:
-        self.grid_size = grid_size
-        self.view_size = view_size
-        self.radius = radius
-        self.cell_width = view_size / float(grid_size)
-        self.origin = -0.5 * view_size
-        self.density = torch.zeros((grid_size, grid_size), dtype=torch.float64)
+    def __init__(self, config: DRLDensityGridConfig) -> None:
+        """Initialize the coarse density grid.
+
+        Parameters
+        ----------
+        config : DRLDensityGridConfig
+            Grid resolution, view size, and kernel radius.
+        """
+        self.grid_size = config.grid_size
+        self.view_size = config.view_size
+        self.radius = config.radius
+        self.cell_width = config.view_size / float(config.grid_size)
+        self.origin = -0.5 * config.view_size
+        self.density = torch.zeros((config.grid_size, config.grid_size), dtype=torch.float64)
         self.node_cells: dict[int, tuple[int, int]] = {}
         self.buckets: dict[tuple[int, int], set[int]] = {}
 
-        axis = torch.arange(-radius, radius + 1, dtype=torch.float64)
+        axis = torch.arange(-config.radius, config.radius + 1, dtype=torch.float64)
         yy, xx = torch.meshgrid(axis, axis, indexing="ij")
         distance = torch.sqrt(xx.square() + yy.square())
-        self.kernel = torch.clamp(1.0 - (distance / float(radius)), min=0.0)
+        self.kernel = torch.clamp(1.0 - (distance / float(config.radius)), min=0.0)
 
     def _cell_index(self, position: torch.Tensor) -> tuple[int, int]:
         """Convert a point to a clamped cell index.
@@ -415,8 +506,31 @@ class _DensityGrid:
         value = float(self.density[cell_y, cell_x].item())
         return value * value
 
-    def fine_density(self, node: int, position: torch.Tensor, positions: torch.Tensor) -> float:
-        """Return exact local repulsion for simmer stage."""
+    def fine_density(
+        self,
+        node: int,
+        position: torch.Tensor,
+        positions: torch.Tensor,
+        config: DRLEnergyConfig,
+    ) -> float:
+        """Return the exact local repulsion term for the simmer stage.
+
+        Parameters
+        ----------
+        node : int
+            Query node index.
+        position : torch.Tensor
+            Candidate coordinate with shape ``[2]``.
+        positions : torch.Tensor
+            Shared position tensor with shape ``[N, 2]``.
+        config : DRLEnergyConfig
+            Energy constants controlling repulsion scaling.
+
+        Returns
+        -------
+        float
+            Local fine-density penalty for the candidate coordinate.
+        """
         cell_x, cell_y = self._cell_index(position)
         density = 0.0
         for offset_y in (-1, 0, 1):
@@ -429,8 +543,8 @@ class _DensityGrid:
                     if other == node:
                         continue
                     delta = position - positions[other]
-                    distance_sq = float(delta.dot(delta).item()) + _MIN_DISTANCE
-                    density += _FINE_REPULSION_SCALE / distance_sq
+                    distance_sq = float(delta.dot(delta).item()) + config.min_distance
+                    density += config.fine_repulsion_scale / distance_sq
         return density
 
 
@@ -452,10 +566,38 @@ def _compute_energy(
     phase_name: str,
     density_grid: _DensityGrid,
     fine_density: bool,
+    config: DRLEnergyConfig,
 ) -> float:
-    """Evaluate one-node objective for a DRL candidate coordinate."""
+    """Evaluate one-node DrL energy for a candidate coordinate.
+
+    Parameters
+    ----------
+    node : int
+        Node index under evaluation.
+    candidate : torch.Tensor
+        Candidate coordinate with shape ``[2]``.
+    positions : torch.Tensor
+        Shared position tensor with shape ``[N, 2]``.
+    adjacency : list[dict[int, float]]
+        Weighted undirected adjacency used for attraction terms.
+    attraction : float
+        Current phase attraction coefficient.
+    phase_name : str
+        Active phase name controlling the distance exponent.
+    density_grid : _DensityGrid
+        Shared density proxy for repulsion.
+    fine_density : bool
+        Whether to use exact local density instead of the coarse grid.
+    config : DRLEnergyConfig
+        Energy constants controlling repulsion and jump scaling.
+
+    Returns
+    -------
+    float
+        Scalar energy for the candidate coordinate.
+    """
     energy = 0.0
-    attraction_factor = float(attraction**4) * 0.02
+    attraction_factor = float(attraction**4) * config.attraction_factor_scale
     power = _stage_power(phase_name=phase_name)
 
     for neighbor, weight in adjacency[node].items():
@@ -466,7 +608,12 @@ def _compute_energy(
         energy += weight * attraction_factor * (distance_sq**power)
 
     if fine_density:
-        energy += density_grid.fine_density(node=node, position=candidate, positions=positions)
+        energy += density_grid.fine_density(
+            node=node,
+            position=candidate,
+            positions=positions,
+            config=config,
+        )
     else:
         energy += density_grid.coarse_density(position=candidate)
     return energy
@@ -533,8 +680,14 @@ class DRLNodeUpdate:
 
     _phase_name: str
     _fine_density: bool
+    _energy_config: DRLEnergyConfig
 
-    def __init__(self, phase_name: str, fine_density: bool) -> None:
+    def __init__(
+        self,
+        phase_name: str,
+        fine_density: bool,
+        energy_config: DRLEnergyConfig,
+    ) -> None:
         """Store per-node phase context for repeated updates.
 
         Parameters
@@ -543,9 +696,12 @@ class DRLNodeUpdate:
             Active phase label.
         fine_density : bool
             ``True`` when the phase uses fine-grained density.
+        energy_config : DRLEnergyConfig
+            Constants used in energy evaluation and random jump sizing.
         """
         self._phase_name = phase_name
         self._fine_density = fine_density
+        self._energy_config = energy_config
 
     def apply(
         self,
@@ -604,6 +760,7 @@ class DRLNodeUpdate:
             phase_name=self._phase_name,
             density_grid=density_grid,
             fine_density=self._fine_density,
+            config=self._energy_config,
         )
 
         centroid = _weighted_centroid(
@@ -622,7 +779,9 @@ class DRLNodeUpdate:
                 cut_off_length=cut_off_length,
             )
 
-        jump_length = 0.01 * temperature
+        # DrL tests two candidates per node: the damped analytic point and a
+        # small random perturbation scaled by the current phase temperature.
+        jump_length = self._energy_config.jump_temperature_scale * temperature
         random_offset = torch.tensor(
             [
                 rng.uniform(-0.5, 0.5) * jump_length,
@@ -641,6 +800,7 @@ class DRLNodeUpdate:
             phase_name=self._phase_name,
             density_grid=density_grid,
             fine_density=self._fine_density,
+            config=self._energy_config,
         )
         perturbed_energy = _compute_energy(
             node=node,
@@ -651,6 +811,7 @@ class DRLNodeUpdate:
             phase_name=self._phase_name,
             density_grid=density_grid,
             fine_density=self._fine_density,
+            config=self._energy_config,
         )
 
         if analytic_energy < current_energy:
@@ -675,8 +836,16 @@ class DRLPhaseStep:
 
     _phase_name: str
     _phase: _PhaseParameters
+    _energy_config: DRLEnergyConfig
+    _phase_dynamics_config: DRLPhaseDynamicsConfig
 
-    def __init__(self, phase_name: str, phase: _PhaseParameters) -> None:
+    def __init__(
+        self,
+        phase_name: str,
+        phase: _PhaseParameters,
+        energy_config: DRLEnergyConfig,
+        phase_dynamics_config: DRLPhaseDynamicsConfig,
+    ) -> None:
         """Store phase label and baseline parameters.
 
         Parameters
@@ -685,9 +854,15 @@ class DRLPhaseStep:
             Active phase label.
         phase : _PhaseParameters
             Baseline phase parameters.
+        energy_config : DRLEnergyConfig
+            Energy-function constants used by node updates.
+        phase_dynamics_config : DRLPhaseDynamicsConfig
+            Per-phase decrement floors and step sizes.
         """
         self._phase_name = phase_name
         self._phase = phase
+        self._energy_config = energy_config
+        self._phase_dynamics_config = phase_dynamics_config
 
     def apply(
         self,
@@ -729,29 +904,58 @@ class DRLPhaseStep:
         attraction = float(self._phase.attraction)
         damping_mult = float(self._phase.damping_mult)
         fine_density = self._phase_name == "simmer"
-        node_update = DRLNodeUpdate(phase_name=self._phase_name, fine_density=fine_density)
+        node_update = DRLNodeUpdate(
+            phase_name=self._phase_name,
+            fine_density=fine_density,
+            energy_config=self._energy_config,
+        )
         num_nodes = len(positions)
 
         temperature = float(self._phase.temperature)
         for _ in range(self._phase.iterations):
             if self._phase_name == "expansion":
-                if attraction > 1.0:
-                    attraction = max(1.0, attraction - 0.05)
-                if min_edges > 12.0:
-                    min_edges = max(12.0, min_edges - 0.05)
+                if attraction > self._phase_dynamics_config.expansion_attraction_floor:
+                    attraction = max(
+                        self._phase_dynamics_config.expansion_attraction_floor,
+                        attraction - self._phase_dynamics_config.expansion_attraction_delta,
+                    )
+                if min_edges > self._phase_dynamics_config.expansion_min_edges_floor:
+                    min_edges = max(
+                        self._phase_dynamics_config.expansion_min_edges_floor,
+                        min_edges - self._phase_dynamics_config.expansion_min_edges_delta,
+                    )
                 if cut_end > 0.0:
                     cut_off_length = max(cut_end, cut_off_length - cut_rate)
-                if damping_mult > 0.1:
-                    damping_mult = max(0.1, damping_mult - 0.005)
+                if damping_mult > self._phase_dynamics_config.expansion_damping_floor:
+                    damping_mult = max(
+                        self._phase_dynamics_config.expansion_damping_floor,
+                        damping_mult - self._phase_dynamics_config.expansion_damping_delta,
+                    )
             elif self._phase_name == "cooldown":
-                if temperature > 50.0:
-                    temperature = max(50.0, temperature - 10.0)
+                if temperature > self._phase_dynamics_config.cooldown_temperature_floor:
+                    temperature = max(
+                        self._phase_dynamics_config.cooldown_temperature_floor,
+                        temperature - self._phase_dynamics_config.cooldown_temperature_delta,
+                    )
                 if cut_end > 0.0:
-                    cut_off_length = max(cut_end, cut_off_length - (2.0 * cut_rate))
-                if min_edges > 1.0:
-                    min_edges = max(1.0, min_edges - 0.2)
-            elif self._phase_name == "simmer" and temperature > 50.0:
-                temperature = max(50.0, temperature - 2.0)
+                    cut_off_length = max(
+                        cut_end,
+                        cut_off_length
+                        - (self._phase_dynamics_config.cooldown_cut_rate_multiplier * cut_rate),
+                    )
+                if min_edges > self._phase_dynamics_config.cooldown_min_edges_floor:
+                    min_edges = max(
+                        self._phase_dynamics_config.cooldown_min_edges_floor,
+                        min_edges - self._phase_dynamics_config.cooldown_min_edges_delta,
+                    )
+            elif (
+                self._phase_name == "simmer"
+                and temperature > self._phase_dynamics_config.simmer_temperature_floor
+            ):
+                temperature = max(
+                    self._phase_dynamics_config.simmer_temperature_floor,
+                    temperature - self._phase_dynamics_config.simmer_temperature_delta,
+                )
 
             for node in range(num_nodes):
                 node_update.apply(
@@ -774,11 +978,18 @@ class DRLPhaseStep:
 @register_op
 @dataclass(frozen=True)
 class DRLPrepareState(Op):
-    """Prepare DRL runtime options and precomputed adjacency."""
+    """Resolve DRL parameters and build the mutable adjacency state.
+
+    The resulting extras entries are shared across all later DrL phases, so the
+    adjacency remains mutable and can reflect the exact edge-cut behavior of the
+    classic implementation.
+    """
 
     name: ClassVar[str] = "drl_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
+    reads: ClassVar[tuple[str, ...]] = ()
     writes: ClassVar[tuple[str, ...]] = ("extras",)
+    requires: ClassVar[tuple[str, ...]] = ()
     config: DRLPrepareStateConfig = field(default_factory=DRLPrepareStateConfig)
 
     def apply(
@@ -787,7 +998,22 @@ class DRLPrepareState(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Resolve options and build DRL adjacency in ``state.extras``."""
+        """Resolve options and build DRL adjacency in ``state.extras``.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable graph layout inputs.
+        state : SolveState
+            Mutable solve state receiving DRL extras.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with resolved DRL parameters and undirected adjacency.
+        """
         del ctx
 
         params = _resolve_drl_parameters(options=self.config.options)
@@ -803,12 +1029,15 @@ class DRLPrepareState(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class DRLInitializePositions(Op):
-    """Initialize positions exactly as in classic DrL."""
+    """Seed the deterministic random starting layout used by classic DrL."""
 
     name: ClassVar[str] = "drl_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
+    reads: ClassVar[tuple[str, ...]] = ()
     writes: ClassVar[tuple[str, ...]] = ("pos",)
+    requires: ClassVar[tuple[str, ...]] = ()
 
     def apply(
         self,
@@ -816,7 +1045,22 @@ class DRLInitializePositions(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Seed deterministic RNG-based starting coordinates."""
+        """Seed deterministic RNG-based starting coordinates.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs containing the seed and node count.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with initial ``float64`` DrL coordinates.
+        """
         del ctx
 
         state.pos = _initialize_positions(num_nodes=problem.num_nodes, seed=problem.seed)
@@ -837,15 +1081,28 @@ class DRLPhaseSolveConfig:
         Numerator multiplied by ``cut_end`` in the cut-rate formula.
     cut_rate_divisor : float, default=400.0
         Divisor for computing the per-iteration cut-rate cooling.
+    cut_base : float, default=40000.0
+        Base value multiplied by ``1 - edge_cut`` to derive ``cut_end``.
+    density_grid : DRLDensityGridConfig, optional
+        Density-grid resolution and view parameters.
+    energy : DRLEnergyConfig, optional
+        Energy-function constants used during node updates.
+    phase_dynamics : DRLPhaseDynamicsConfig, optional
+        Per-phase decrement floors and step sizes.
     """
 
     initial_min_edges: float = 20.0
     cut_off_multiplier: float = 4.0
     cut_rate_numerator: float = 3.0
     cut_rate_divisor: float = 400.0
+    cut_base: float = 40_000.0
+    density_grid: DRLDensityGridConfig = field(default_factory=DRLDensityGridConfig)
+    energy: DRLEnergyConfig = field(default_factory=DRLEnergyConfig)
+    phase_dynamics: DRLPhaseDynamicsConfig = field(default_factory=DRLPhaseDynamicsConfig)
 
 
 @register_op
+@dataclass(frozen=True)
 class DRLPhaseSolve(Op):
     """Run all DRL phases and all node-level energy updates.
 
@@ -861,11 +1118,9 @@ class DRLPhaseSolve(Op):
     name: ClassVar[str] = "drl_phase_solve"
     category: ClassVar[OpCategory] = OpCategory.FORCE
     reads: ClassVar[tuple[str, ...]] = ("pos", "extras")
-    writes: ClassVar[tuple[str, ...]] = ("pos",)
-    requires: ClassVar[tuple[str, ...]] = ("pos",)
-
-    def __init__(self, config: Optional[DRLPhaseSolveConfig] = None) -> None:
-        self.config = config or DRLPhaseSolveConfig()
+    writes: ClassVar[tuple[str, ...]] = ("pos", "extras")
+    requires: ClassVar[tuple[str, ...]] = ("pos", "extras")
+    config: DRLPhaseSolveConfig = field(default_factory=DRLPhaseSolveConfig)
 
     def apply(
         self,
@@ -873,7 +1128,22 @@ class DRLPhaseSolve(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Execute the full six-phase sequential DRL update loop."""
+        """Execute the full six-phase sequential DRL update loop.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable graph inputs including node count and seed.
+        state : SolveState
+            Mutable solve state containing initialized positions and DRL extras.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with final DrL positions after all sequential phases.
+        """
         del ctx
 
         if state.pos is None:
@@ -884,16 +1154,12 @@ class DRLPhaseSolve(Op):
         num_nodes = problem.num_nodes
         positions = state.pos
 
-        density_grid = _DensityGrid(
-            grid_size=_GRID_SIZE,
-            view_size=_VIEW_SIZE,
-            radius=_GRID_RADIUS,
-        )
+        density_grid = _DensityGrid(config=self.config.density_grid)
         for node in range(num_nodes):
             density_grid.add_node(node=node, position=positions[node])
 
         rng = random.Random(problem.seed)
-        cut_end = _CUT_BASE * (1.0 - params.edge_cut)
+        cut_end = self.config.cut_base * (1.0 - params.edge_cut)
         cut_off_length = self.config.cut_off_multiplier * cut_end
         cut_rate = (
             0.0
@@ -912,7 +1178,14 @@ class DRLPhaseSolve(Op):
         ]
 
         for phase_name, phase in phase_specs:
-            phase_step = DRLPhaseStep(phase_name=phase_name, phase=phase)
+            # Each phase mutates the shared adjacency and density state in place,
+            # which is why the full phase loop remains inside one op.
+            phase_step = DRLPhaseStep(
+                phase_name=phase_name,
+                phase=phase,
+                energy_config=self.config.energy,
+                phase_dynamics_config=self.config.phase_dynamics,
+            )
             _, min_edges, cut_off_length = phase_step.apply(
                 positions=positions,
                 adjacency=adjacency,
@@ -929,8 +1202,9 @@ class DRLPhaseSolve(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class DRLFinalizePositions(Op):
-    """Cast to float32 and move to the requested output device."""
+    """Cast final DrL coordinates to the classic output dtype and device."""
 
     name: ClassVar[str] = "drl_finalize_positions"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
@@ -944,7 +1218,22 @@ class DRLFinalizePositions(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Match classic DrL output dtype and device."""
+        """Match classic DrL output dtype and device.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs used to resolve the output device.
+        state : SolveState
+            Mutable solve state containing the final DrL coordinates.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with final ``float32`` coordinates on the target device.
+        """
         del ctx
 
         if state.pos is None:

@@ -40,10 +40,39 @@ _PIVOT_COUNT: int = 50
 _SAMPLED_REPULSION_NEIGHBORS: int = 96
 
 
+@dataclass(frozen=True)
+class MaxentInitializePositionsConfig:
+    """Configuration for :class:`MaxentInitializePositions`.
+
+    Parameters
+    ----------
+    pivot_count : int, default=50
+        Maximum number of pivots used by the PivotMDS warm start.
+    """
+
+    pivot_count: int = _PIVOT_COUNT
+
+
+@dataclass(frozen=True)
+class MaxentPrepareStateConfig:
+    """Configuration for :class:`MaxentPrepareState`.
+
+    Parameters
+    ----------
+    full_stress_limit : int, default=1000
+        Node cutoff below which the gradient branch materializes full stress pairs.
+    pivot_count : int, default=50
+        Maximum number of pivots retained for large-graph approximations.
+    """
+
+    full_stress_limit: int = _FULL_STRESS_LIMIT
+    pivot_count: int = _PIVOT_COUNT
+
+
 @register_op
 @dataclass(frozen=True)
 class MaxentInitializePositions(Op):
-    """Initialize positions via PivotMDS.
+    """Initialize maxent-stress positions with the classic PivotMDS warm start.
 
     Parameters
     ----------
@@ -52,8 +81,10 @@ class MaxentInitializePositions(Op):
     """
 
     for_majorization: bool = False
+    config: MaxentInitializePositionsConfig = field(default_factory=MaxentInitializePositionsConfig)
     name: ClassVar[str] = "maxent_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
+    reads: ClassVar[Tuple[str, ...]] = ()
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ()
 
@@ -85,7 +116,7 @@ class MaxentInitializePositions(Op):
             edge_index=problem.edge_index,
             num_nodes=problem.num_nodes,
             node_sizes=problem.node_sizes,
-            n_pivots=min(_PIVOT_COUNT, problem.num_nodes),
+            n_pivots=min(self.config.pivot_count, problem.num_nodes),
             seed=problem.seed,
             edge_weights=problem.edge_weights,
         )
@@ -100,7 +131,7 @@ class MaxentInitializePositions(Op):
 @register_op
 @dataclass(frozen=True)
 class MaxentPrepareState(Op):
-    """Precompute graph-derived terms for either majorization or gradient mode.
+    """Precompute graph-derived terms for either maxent-stress execution branch.
 
     Parameters
     ----------
@@ -112,6 +143,7 @@ class MaxentPrepareState(Op):
 
     for_majorization: bool = False
     use_entropy: bool = False
+    config: MaxentPrepareStateConfig = field(default_factory=MaxentPrepareStateConfig)
     name: ClassVar[str] = "maxent_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
     reads: ClassVar[Tuple[str, ...]] = ()
@@ -167,6 +199,8 @@ class MaxentPrepareState(Op):
             if raw_distances.size == 0:
                 graph_distances = torch.empty((0, 0), dtype=torch.float32)
             else:
+                # Disconnected entries are replaced with the same heuristic scale
+                # used by the classic implementation so every pair remains finite.
                 disconnected_distance = average_edge_cost * math.sqrt(
                     float(max(problem.num_nodes, 1))
                 )
@@ -188,7 +222,7 @@ class MaxentPrepareState(Op):
             state.extras["maxent_weight_matrix"] = weight_matrix
             return state
 
-        if problem.num_nodes <= _FULL_STRESS_LIMIT:
+        if problem.num_nodes <= self.config.full_stress_limit:
             raw_distances = _shared_all_pairs_shortest_paths(adjacency, weighted=weighted)
             if raw_distances.size == 0:
                 stress_src = torch.empty((0,), dtype=torch.long)
@@ -257,7 +291,7 @@ class MaxentPrepareState(Op):
                             frontier.append(neighbor)
                     component_index += 1
 
-                max_pivots = min(_PIVOT_COUNT, problem.num_nodes)
+                max_pivots = min(self.config.pivot_count, problem.num_nodes)
                 if problem.num_nodes <= max_pivots:
                     pivots = torch.arange(problem.num_nodes, dtype=torch.long)
                 else:
@@ -296,6 +330,8 @@ class MaxentPrepareState(Op):
                     pivot_indices = pivots
                     pivot_distances = torch.empty((problem.num_nodes, 0), dtype=torch.float32)
                 else:
+                    # Seed pivots with one node per connected component before
+                    # random fill so every component receives at least one anchor.
                     disconnected_distance = average_edge_cost * math.sqrt(
                         float(max(problem.num_nodes, 1))
                     )
@@ -359,23 +395,32 @@ class MaxentGradientStepConfig:
         Floor for the random-pair batch size in the gradient term.
     batch_multiplier : int, default=3
         Multiplier applied to remaining-pair count when sizing batches.
+    min_distance : float, default=1e-3
+        Clamp floor applied to Euclidean distances inside the loss.
+    full_stress_limit : int, default=1000
+        Node cutoff below which the gradient branch uses all-pairs stress terms.
+    sampled_repulsion_neighbors : int, default=96
+        Approximate non-edge sample budget multiplier for entropy mode.
     """
 
     min_batch_size: int = 16
     batch_multiplier: int = 3
+    min_distance: float = _MIN_DISTANCE
+    full_stress_limit: int = _FULL_STRESS_LIMIT
+    sampled_repulsion_neighbors: int = _SAMPLED_REPULSION_NEIGHBORS
 
 
 @register_op
 @dataclass(frozen=True)
 class MaxentInitializeOptimizer(Op):
-    """Create the Adam optimizer for the gradient branch."""
+    """Create the Adam optimizer used by the gradient branch."""
 
     config: MaxentInitializeOptimizerConfig = field(default_factory=MaxentInitializeOptimizerConfig)
 
     name: ClassVar[str] = "maxent_initialize_optimizer"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
     reads: ClassVar[Tuple[str, ...]] = ("pos",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras", "optimizer")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras", "optimizer")
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def apply(
@@ -403,6 +448,8 @@ class MaxentInitializeOptimizer(Op):
         del ctx
 
         assert state.pos is not None
+        # ``requires_grad_(True)`` mutates the shared tensor in place so later
+        # ops can keep using ``state.pos`` directly.
         state.pos = state.pos.requires_grad_(True)
         initial_lr = min(
             self.config.lr_cap,
@@ -428,9 +475,9 @@ class MaxentGradientStep(Op):
     config: MaxentGradientStepConfig = field(default_factory=MaxentGradientStepConfig)
     name: ClassVar[str] = "maxent_gradient_step"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "adjacency_weighted", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
-    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "optimizer", "adjacency_weighted", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "optimizer")
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "optimizer", "adjacency_weighted", "extras")
 
     def apply(
         self,
@@ -473,7 +520,7 @@ class MaxentGradientStep(Op):
             raise ValueError("MaxentGradientStep requires state.adjacency_weighted to be set.")
 
         optimizer.zero_grad(set_to_none=True)
-        if int(problem.num_nodes) <= _FULL_STRESS_LIMIT:
+        if int(problem.num_nodes) <= self.config.full_stress_limit:
             full_ne_src = state.extras["maxent_full_ne_src"]
             full_ne_dst = state.extras["maxent_full_ne_dst"]
             if int(stress_src.numel()) > 0:
@@ -481,7 +528,7 @@ class MaxentGradientStep(Op):
                 dst = stress_dst.to(device=positions.device)
                 targets = stress_lengths.to(device=positions.device)
                 distances = torch.linalg.norm(positions[src] - positions[dst], dim=1).clamp(
-                    min=_MIN_DISTANCE
+                    min=self.config.min_distance
                 )
                 weights = targets.reciprocal().square()
                 loss = (weights * (distances - targets).square()).sum()
@@ -496,7 +543,7 @@ class MaxentGradientStep(Op):
                         positions[full_ne_src.to(device=positions.device)]
                         - positions[full_ne_dst.to(device=positions.device)],
                         dim=1,
-                    ).clamp(min=_MIN_DISTANCE)
+                    ).clamp(min=self.config.min_distance)
                     entropy = -torch.log(non_edge_distances).sum()
                 loss = loss + self.alpha * entropy
         else:
@@ -505,13 +552,15 @@ class MaxentGradientStep(Op):
                 dst = stress_dst.to(device=positions.device)
                 targets = stress_lengths.to(device=positions.device)
                 distances = torch.linalg.norm(positions[src] - positions[dst], dim=1).clamp(
-                    min=_MIN_DISTANCE
+                    min=self.config.min_distance
                 )
                 weights = targets.reciprocal().square()
                 loss = (weights * (distances - targets).square()).sum()
             elif int(pivot_indices.numel()) > 0:
                 pivot_positions = positions[pivot_indices.to(device=positions.device)]
-                geometric = torch.cdist(positions, pivot_positions).clamp(min=_MIN_DISTANCE)
+                geometric = torch.cdist(positions, pivot_positions).clamp(
+                    min=self.config.min_distance
+                )
                 targets = pivot_distances.to(device=positions.device)
                 reachable = targets > 0
                 safe_targets = torch.where(reachable, targets, torch.ones_like(targets))
@@ -543,7 +592,10 @@ class MaxentGradientStep(Op):
                     generator.manual_seed(problem.seed + step + 1)
                     sample_size = min(
                         total_non_edges,
-                        max(num_nodes, num_nodes * _SAMPLED_REPULSION_NEIGHBORS // 2),
+                        max(
+                            num_nodes,
+                            num_nodes * self.config.sampled_repulsion_neighbors // 2,
+                        ),
                     )
                     while total_non_edges_sample < sample_size:
                         remaining = sample_size - total_non_edges_sample
@@ -566,6 +618,8 @@ class MaxentGradientStep(Op):
                         ).tolist()
                         for source, target in zip(candidate_sources, candidate_targets):
                             if target not in adjacency_sets[source]:
+                                # Oversampling candidate pairs is cheaper than
+                                # enumerating all non-edges on large graphs.
                                 sources.append(min(source, target))
                                 targets.append(max(source, target))
                                 total_non_edges_sample += 1
@@ -580,7 +634,7 @@ class MaxentGradientStep(Op):
                         non_edge_distances = torch.linalg.norm(
                             positions[sampled_src] - positions[sampled_dst],
                             dim=1,
-                        ).clamp(min=_MIN_DISTANCE)
+                        ).clamp(min=self.config.min_distance)
                         entropy = -torch.log(non_edge_distances).sum() * (
                             float(total_non_edges) / float(max(int(sampled_src.numel()), 1))
                         )
@@ -591,6 +645,8 @@ class MaxentGradientStep(Op):
 
         initial_lr = state.extras["maxent_initial_lr"]
         final_lr = state.extras["maxent_final_lr"]
+        # The classic branch linearly anneals Adam's LR from the initialized
+        # value toward the computed floor over the requested step budget.
         fraction = float(step + 1) / float(max(state.total_steps, 1))
         optimizer.param_groups[0]["lr"] = initial_lr + (final_lr - initial_lr) * fraction
         return state
@@ -599,13 +655,13 @@ class MaxentGradientStep(Op):
 @register_op
 @dataclass(frozen=True)
 class MaxentMajorizationStep(Op):
-    """Run one Gauss-Seidel majorization update for all nodes."""
+    """Run one dense Gauss-Seidel majorization sweep over all nodes."""
 
     name: ClassVar[str] = "maxent_majorization_step"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
     reads: ClassVar[Tuple[str, ...]] = ("pos", "distance_matrix", "extras")
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
-    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "distance_matrix", "extras")
 
     def apply(
         self,
@@ -657,6 +713,8 @@ class MaxentMajorizationStep(Op):
                 delta_y = current_y - other_y
                 euclidean_distance = math.hypot(delta_x, delta_y)
 
+                # Each neighbor contributes a weighted vote along the ray from
+                # its current position toward the target graph distance.
                 vote_x = other_x
                 vote_y = other_y
                 if euclidean_distance != 0.0:
@@ -676,7 +734,7 @@ class MaxentMajorizationStep(Op):
 @register_op
 @dataclass(frozen=True)
 class MaxentFinalizePositions(Op):
-    """Normalize and place final positions on the output device."""
+    """Normalize final coordinates and cast them onto the output device."""
 
     for_majorization: bool = False
     name: ClassVar[str] = "maxent_finalize_positions"
