@@ -1,4 +1,4 @@
-"""Fruchterman-Reingold expressed as a composable ops pipeline."""
+"""Fruchterman-Reingold force-directed layout pipeline."""
 
 from __future__ import annotations
 
@@ -22,18 +22,22 @@ from dagua.layout.ops.state import (  # noqa: E402
 
 
 def build_fr_pipeline(steps: int = 50) -> Pipeline:
-    """Build an FR pipeline that is bit-identical to classic ``layout_fr``.
+    """Build a Fruchterman-Reingold force-directed layout pipeline.
 
     Parameters
     ----------
     steps : int, default=50
-        Maximum number of FR iterations.
+        Maximum number of cooling iterations to run.
 
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic ``layout_fr`` initialization, dense force
-        update, cooling schedule, convergence rule, and final post-processing.
+        Pipeline implementing the classical Fruchterman-Reingold algorithm.
+        The pipeline produces final node coordinates by sampling unit-square
+        initial positions, building adjacency data, setting an initial
+        temperature from the current extent, iterating attraction and
+        repulsion force updates with displacement and linear cooling, then
+        finalizing the coordinates.
 
     Raises
     ------
@@ -77,28 +81,28 @@ def layout_fr_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the FR pipeline as a drop-in replacement for classic ``layout_fr``.
+    """Run the Fruchterman-Reingold pipeline as a drop-in replacement.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor used only to resolve output device.
+        Optional node-size tensor with shape ``[N, 2]`` used only to resolve
+        the output device.
     steps : int, default=50
-        Maximum number of FR iterations.
+        Maximum number of cooling iterations to run.
     seed : int, default=42
-        Random seed for the NumPy unit-square initialization.
+        Random seed for the NumPy-backed unit-square initialization.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_fr``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------

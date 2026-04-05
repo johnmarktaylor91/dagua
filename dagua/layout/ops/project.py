@@ -249,11 +249,11 @@ class OverlapProjection(Op):
 class HardPinProjection(Op):
     """Project hard-pinned node coordinates onto their target axes."""
 
-    name = "hard_pin_projection"
-    category = OpCategory.PROJECT
-    reads = ("pos",)
-    writes = ("pos",)
-    requires = ("pos",)
+    name: ClassVar[str] = "hard_pin_projection"
+    category: ClassVar[OpCategory] = OpCategory.PROJECT
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def apply(
         self,
@@ -553,6 +553,8 @@ class MonotoneSafeguard(Op):
         accepted_value = reference_value
         blended = positions
         for _ in range(self.config.max_bisections):
+            # Bisect toward the last accepted state rather than line-searching
+            # from scratch so the safeguard stays deterministic and cheap.
             blended = 0.5 * (blended + accepted)
             blended_value = _resolve_monotone_objective_value(
                 objective=objective,

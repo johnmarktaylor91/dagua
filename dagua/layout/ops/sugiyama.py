@@ -22,6 +22,21 @@ from dagua.layout.ops.state import (  # noqa: E402
 from dagua.layout.ops.taxonomy import OpCategory, register_op  # noqa: E402
 
 _NO_SHIFT = float("inf")
+_SUGIYAMA_RESOLVED_SIZES_KEY = "sugiyama_resolved_sizes"
+_SUGIYAMA_ACYCLIC_EDGES_KEY = "sugiyama_acyclic_edges"
+_SUGIYAMA_REVERSED_MASK_KEY = "sugiyama_reversed_mask"
+_SUGIYAMA_LAYER_ASSIGNMENTS_KEY = "sugiyama_layer_assignments"
+_SUGIYAMA_EXPANDED_GRAPH_KEY = "sugiyama_expanded_graph"
+_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY = "sugiyama_expanded_edge_weights"
+_SUGIYAMA_PARENTS_KEY = "sugiyama_parents"
+_SUGIYAMA_CHILDREN_KEY = "sugiyama_children"
+_SUGIYAMA_PARENT_WEIGHTS_KEY = "sugiyama_parent_weights"
+_SUGIYAMA_CHILD_WEIGHTS_KEY = "sugiyama_child_weights"
+_SUGIYAMA_ORDERED_LAYERS_KEY = "sugiyama_ordered_layers"
+_SUGIYAMA_TRACES_KEY = "sugiyama_traces"
+_SUGIYAMA_EXPANDED_POSITIONS_KEY = "sugiyama_expanded_positions"
+_SUGIYAMA_RANK_SEP_KEY = "sugiyama_rank_sep"
+_SUGIYAMA_NODE_SEP_KEY = "sugiyama_node_sep"
 
 
 @dataclass(frozen=True)
@@ -33,6 +48,41 @@ class _ExpandedLayeredGraph:
     node_sizes: torch.Tensor
     edge_paths: list[list[int]]
     num_nodes: int
+
+
+@dataclass(frozen=True)
+class _BarycenterOrderingConfig:
+    """Configuration for :class:`_BarycenterOrdering`.
+
+    Parameters
+    ----------
+    barycenter_passes : int, default=24
+        Number of down/up sweeps used for crossing minimization.
+    seed : int, default=42
+        Retained for API compatibility with the classic entry point.
+    trace_every : int, default=0
+        Snapshot cadence in passes. Zero disables tracing.
+    """
+
+    barycenter_passes: int = 24
+    seed: int = 42
+    trace_every: int = 0
+
+
+@dataclass(frozen=True)
+class _StoreSpacingParamsConfig:
+    """Configuration for :class:`_StoreSpacingParams`.
+
+    Parameters
+    ----------
+    rank_sep : float, default=1.0
+        Vertical spacing between layers.
+    node_sep : float, default=1.0
+        Horizontal spacing between nodes within a layer.
+    """
+
+    rank_sep: float = 1.0
+    node_sep: float = 1.0
 
 
 def _validate_layout_inputs(
@@ -1267,7 +1317,9 @@ class _ValidateInputs(Op):
 
     name: ClassVar[str] = "sugiyama_validate_inputs"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ()
     writes: ClassVar[Tuple[str, ...]] = ()
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1313,7 +1365,9 @@ class _ResolveNodeSizes(Op):
 
     name: ClassVar[str] = "sugiyama_resolve_node_sizes"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_SUGIYAMA_RESOLVED_SIZES_KEY}",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1335,7 +1389,7 @@ class _ResolveNodeSizes(Op):
         Returns
         -------
         SolveState
-            State with ``extras["sugiyama_resolved_sizes"]`` populated.
+            State with resolved node sizes cached in ``state.extras``.
         """
         del ctx
 
@@ -1343,7 +1397,7 @@ class _ResolveNodeSizes(Op):
             node_sizes=problem.node_sizes,
             num_nodes=problem.num_nodes,
         )
-        state.extras["sugiyama_resolved_sizes"] = resolved
+        state.extras[_SUGIYAMA_RESOLVED_SIZES_KEY] = resolved
         return state
 
 
@@ -1354,7 +1408,11 @@ class _PrepareAcyclicEdges(Op):
     name: ClassVar[str] = "sugiyama_prepare_acyclic_edges"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
     reads: ClassVar[Tuple[str, ...]] = ()
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",
+        f"extras.{_SUGIYAMA_REVERSED_MASK_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1384,8 +1442,8 @@ class _PrepareAcyclicEdges(Op):
             edge_index=problem.edge_index,
             num_nodes=problem.num_nodes,
         )
-        state.extras["sugiyama_acyclic_edges"] = acyclic_edges
-        state.extras["sugiyama_reversed_mask"] = reversed_mask
+        state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY] = acyclic_edges
+        state.extras[_SUGIYAMA_REVERSED_MASK_KEY] = reversed_mask
         return state
 
 
@@ -1395,8 +1453,10 @@ class _AssignLayers(Op):
 
     name: ClassVar[str] = "sugiyama_assign_layers"
     category: ClassVar[OpCategory] = OpCategory.LAYERING
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = (f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",)
+    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_SUGIYAMA_LAYER_ASSIGNMENTS_KEY}",)
+    requires: ClassVar[Tuple[str, ...]] = (f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1422,7 +1482,7 @@ class _AssignLayers(Op):
         """
         del ctx
 
-        acyclic_edges = state.extras["sugiyama_acyclic_edges"]
+        acyclic_edges = state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY]
         layer_assignments = _longest_path_layering(
             edge_index=acyclic_edges,
             num_nodes=problem.num_nodes,
@@ -1432,7 +1492,7 @@ class _AssignLayers(Op):
             layer_assignments=layer_assignments,
             num_nodes=problem.num_nodes,
         )
-        state.extras["sugiyama_layer_assignments"] = layer_assignments
+        state.extras[_SUGIYAMA_LAYER_ASSIGNMENTS_KEY] = layer_assignments
         return state
 
 
@@ -1442,8 +1502,21 @@ class _ExpandDummyNodes(Op):
 
     name: ClassVar[str] = "sugiyama_expand_dummy_nodes"
     category: ClassVar[OpCategory] = OpCategory.LAYERING
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",
+        f"extras.{_SUGIYAMA_LAYER_ASSIGNMENTS_KEY}",
+        f"extras.{_SUGIYAMA_RESOLVED_SIZES_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",
+        f"extras.{_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY}",
+    )
+    requires: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",
+        f"extras.{_SUGIYAMA_LAYER_ASSIGNMENTS_KEY}",
+        f"extras.{_SUGIYAMA_RESOLVED_SIZES_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1470,14 +1543,14 @@ class _ExpandDummyNodes(Op):
         del ctx
 
         expanded_graph, expanded_edge_weights = _expand_long_edges_with_dummy_nodes(
-            edge_index=state.extras["sugiyama_acyclic_edges"],
-            layer_assignments=state.extras["sugiyama_layer_assignments"],
-            node_sizes=state.extras["sugiyama_resolved_sizes"],
+            edge_index=state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY],
+            layer_assignments=state.extras[_SUGIYAMA_LAYER_ASSIGNMENTS_KEY],
+            node_sizes=state.extras[_SUGIYAMA_RESOLVED_SIZES_KEY],
             num_original_nodes=problem.num_nodes,
             edge_weights=problem.edge_weights,
         )
-        state.extras["sugiyama_expanded_graph"] = expanded_graph
-        state.extras["sugiyama_expanded_edge_weights"] = expanded_edge_weights
+        state.extras[_SUGIYAMA_EXPANDED_GRAPH_KEY] = expanded_graph
+        state.extras[_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY] = expanded_edge_weights
         return state
 
 
@@ -1487,8 +1560,18 @@ class _BuildNeighborStructures(Op):
 
     name: ClassVar[str] = "sugiyama_build_neighbor_structures"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",
+        f"extras.{_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_PARENTS_KEY}",
+        f"extras.{_SUGIYAMA_CHILDREN_KEY}",
+        f"extras.{_SUGIYAMA_PARENT_WEIGHTS_KEY}",
+        f"extras.{_SUGIYAMA_CHILD_WEIGHTS_KEY}",
+    )
+    requires: ClassVar[Tuple[str, ...]] = (f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1514,7 +1597,7 @@ class _BuildNeighborStructures(Op):
         """
         del ctx
 
-        expanded_graph = state.extras["sugiyama_expanded_graph"]
+        expanded_graph = state.extras[_SUGIYAMA_EXPANDED_GRAPH_KEY]
         parents, children = _build_neighbor_lists(
             edge_index=expanded_graph.edge_index,
             num_nodes=expanded_graph.num_nodes,
@@ -1522,12 +1605,12 @@ class _BuildNeighborStructures(Op):
         parent_weights, child_weights = _build_neighbor_weight_maps(
             edge_index=expanded_graph.edge_index,
             num_nodes=expanded_graph.num_nodes,
-            edge_weights=state.extras["sugiyama_expanded_edge_weights"],
+            edge_weights=state.extras[_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY],
         )
-        state.extras["sugiyama_parents"] = parents
-        state.extras["sugiyama_children"] = children
-        state.extras["sugiyama_parent_weights"] = parent_weights
-        state.extras["sugiyama_child_weights"] = child_weights
+        state.extras[_SUGIYAMA_PARENTS_KEY] = parents
+        state.extras[_SUGIYAMA_CHILDREN_KEY] = children
+        state.extras[_SUGIYAMA_PARENT_WEIGHTS_KEY] = parent_weights
+        state.extras[_SUGIYAMA_CHILD_WEIGHTS_KEY] = child_weights
         return state
 
 
@@ -1535,16 +1618,39 @@ class _BuildNeighborStructures(Op):
 class _BarycenterOrdering(Op):
     """Minimize edge crossings via repeated barycenter sweeps."""
 
+    config: _BarycenterOrderingConfig
+
     name: ClassVar[str] = "sugiyama_barycenter_ordering"
     category: ClassVar[OpCategory] = OpCategory.ORDERING
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",
+        f"extras.{_SUGIYAMA_PARENTS_KEY}",
+        f"extras.{_SUGIYAMA_CHILDREN_KEY}",
+        f"extras.{_SUGIYAMA_PARENT_WEIGHTS_KEY}",
+        f"extras.{_SUGIYAMA_CHILD_WEIGHTS_KEY}",
+        f"extras.{_SUGIYAMA_RANK_SEP_KEY}",
+        f"extras.{_SUGIYAMA_NODE_SEP_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_ORDERED_LAYERS_KEY}",
+        f"extras.{_SUGIYAMA_TRACES_KEY}",
+    )
+    requires: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",
+        f"extras.{_SUGIYAMA_PARENTS_KEY}",
+        f"extras.{_SUGIYAMA_CHILDREN_KEY}",
+        f"extras.{_SUGIYAMA_PARENT_WEIGHTS_KEY}",
+        f"extras.{_SUGIYAMA_CHILD_WEIGHTS_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(
         self,
         barycenter_passes: int = 24,
         seed: int = 42,
         trace_every: int = 0,
+        *,
+        config: Optional[_BarycenterOrderingConfig] = None,
     ) -> None:
         """Store barycenter sweep parameters.
 
@@ -1556,15 +1662,20 @@ class _BarycenterOrdering(Op):
             Retained for API compatibility.
         trace_every : int, default=0
             Snapshot cadence in passes. Zero disables tracing.
+        config : _BarycenterOrderingConfig | None, optional
+            Optional configuration. When provided, it takes precedence over
+            the scalar arguments.
 
         Returns
         -------
         None
             This constructor stores configuration only.
         """
-        self.barycenter_passes = barycenter_passes
-        self.seed = seed
-        self.trace_every = trace_every
+        self.config = config or _BarycenterOrderingConfig(
+            barycenter_passes=barycenter_passes,
+            seed=seed,
+            trace_every=trace_every,
+        )
 
     def apply(
         self,
@@ -1590,32 +1701,32 @@ class _BarycenterOrdering(Op):
         """
         del ctx
 
-        expanded_graph = state.extras["sugiyama_expanded_graph"]
+        expanded_graph = state.extras[_SUGIYAMA_EXPANDED_GRAPH_KEY]
         output_device = problem.edge_index.device
         if problem.node_sizes is not None:
             output_device = problem.node_sizes.device
 
-        rank_sep = state.extras.get("sugiyama_rank_sep", 1.0)
-        node_sep = state.extras.get("sugiyama_node_sep", 1.0)
+        rank_sep = state.extras.get(_SUGIYAMA_RANK_SEP_KEY, 1.0)
+        node_sep = state.extras.get(_SUGIYAMA_NODE_SEP_KEY, 1.0)
 
         ordered_layers, traces = _barycenter_ordering(
             layers=expanded_graph.layers,
-            parents=state.extras["sugiyama_parents"],
-            children=state.extras["sugiyama_children"],
-            parent_weights=state.extras["sugiyama_parent_weights"],
-            child_weights=state.extras["sugiyama_child_weights"],
+            parents=state.extras[_SUGIYAMA_PARENTS_KEY],
+            children=state.extras[_SUGIYAMA_CHILDREN_KEY],
+            parent_weights=state.extras[_SUGIYAMA_PARENT_WEIGHTS_KEY],
+            child_weights=state.extras[_SUGIYAMA_CHILD_WEIGHTS_KEY],
             num_nodes=expanded_graph.num_nodes,
             num_original_nodes=problem.num_nodes,
-            num_passes=self.barycenter_passes,
-            seed=self.seed,
+            num_passes=self.config.barycenter_passes,
+            seed=self.config.seed,
             node_sizes=expanded_graph.node_sizes,
             rank_sep=rank_sep,
             node_sep=node_sep,
-            trace_every=self.trace_every,
+            trace_every=self.config.trace_every,
             output_device=output_device,
         )
-        state.extras["sugiyama_ordered_layers"] = ordered_layers
-        state.extras["sugiyama_traces"] = traces
+        state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY] = ordered_layers
+        state.extras[_SUGIYAMA_TRACES_KEY] = traces
         return state
 
 
@@ -1625,8 +1736,20 @@ class _CoordinateAssignment(Op):
 
     name: ClassVar[str] = "sugiyama_coordinate_assignment"
     category: ClassVar[OpCategory] = OpCategory.COORDINATE
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",
+        f"extras.{_SUGIYAMA_ORDERED_LAYERS_KEY}",
+        f"extras.{_SUGIYAMA_PARENTS_KEY}",
+        f"extras.{_SUGIYAMA_CHILDREN_KEY}",
+        f"extras.{_SUGIYAMA_RANK_SEP_KEY}",
+        f"extras.{_SUGIYAMA_NODE_SEP_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = ("pos", f"extras.{_SUGIYAMA_EXPANDED_POSITIONS_KEY}")
+    requires: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",
+        f"extras.{_SUGIYAMA_ORDERED_LAYERS_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1652,18 +1775,18 @@ class _CoordinateAssignment(Op):
         """
         del ctx
 
-        expanded_graph = state.extras["sugiyama_expanded_graph"]
+        expanded_graph = state.extras[_SUGIYAMA_EXPANDED_GRAPH_KEY]
         output_device = problem.edge_index.device
         if problem.node_sizes is not None:
             output_device = problem.node_sizes.device
 
-        rank_sep = state.extras.get("sugiyama_rank_sep", 1.0)
-        node_sep = state.extras.get("sugiyama_node_sep", 1.0)
+        rank_sep = state.extras.get(_SUGIYAMA_RANK_SEP_KEY, 1.0)
+        node_sep = state.extras.get(_SUGIYAMA_NODE_SEP_KEY, 1.0)
 
         expanded_positions = _coordinate_assignment(
-            layers=state.extras["sugiyama_ordered_layers"],
-            parents=state.extras["sugiyama_parents"],
-            children=state.extras["sugiyama_children"],
+            layers=state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY],
+            parents=state.extras[_SUGIYAMA_PARENTS_KEY],
+            children=state.extras[_SUGIYAMA_CHILDREN_KEY],
             node_sizes=expanded_graph.node_sizes,
             num_nodes=expanded_graph.num_nodes,
             num_original_nodes=problem.num_nodes,
@@ -1671,7 +1794,9 @@ class _CoordinateAssignment(Op):
             node_sep=node_sep,
             output_device=output_device,
         )
-        state.extras["sugiyama_expanded_positions"] = expanded_positions
+        # Keep the expanded coordinates for downstream edge routing before
+        # slicing back to the original node set.
+        state.extras[_SUGIYAMA_EXPANDED_POSITIONS_KEY] = expanded_positions
         state.pos = expanded_positions[: problem.num_nodes]
         return state
 
@@ -1681,9 +1806,19 @@ class _BuildEdgeRoutes(Op):
     """Convert dummy-node chains into routed edge polylines."""
 
     name: ClassVar[str] = "sugiyama_build_edge_routes"
-    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    category: ClassVar[OpCategory] = OpCategory.EDGE_ROUTE
+    reads: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",
+        f"extras.{_SUGIYAMA_EXPANDED_POSITIONS_KEY}",
+        f"extras.{_SUGIYAMA_REVERSED_MASK_KEY}",
+    )
     writes: ClassVar[Tuple[str, ...]] = ("edge_routes",)
+    requires: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_EXPANDED_GRAPH_KEY}",
+        f"extras.{_SUGIYAMA_EXPANDED_POSITIONS_KEY}",
+        f"extras.{_SUGIYAMA_REVERSED_MASK_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1709,15 +1844,15 @@ class _BuildEdgeRoutes(Op):
         """
         del ctx
 
-        expanded_graph = state.extras["sugiyama_expanded_graph"]
+        expanded_graph = state.extras[_SUGIYAMA_EXPANDED_GRAPH_KEY]
         output_device = problem.edge_index.device
         if problem.node_sizes is not None:
             output_device = problem.node_sizes.device
 
         state.edge_routes = _build_edge_routes(
-            positions=state.extras["sugiyama_expanded_positions"],
+            positions=state.extras[_SUGIYAMA_EXPANDED_POSITIONS_KEY],
             edge_paths=expanded_graph.edge_paths,
-            reversed_edge_mask=state.extras["sugiyama_reversed_mask"],
+            reversed_edge_mask=state.extras[_SUGIYAMA_REVERSED_MASK_KEY],
             output_device=output_device,
         )
         return state
@@ -1727,11 +1862,24 @@ class _BuildEdgeRoutes(Op):
 class _StoreSpacingParams(Op):
     """Store rank_sep and node_sep in extras for downstream ops."""
 
+    config: _StoreSpacingParamsConfig
+
     name: ClassVar[str] = "sugiyama_store_spacing"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_RANK_SEP_KEY}",
+        f"extras.{_SUGIYAMA_NODE_SEP_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
-    def __init__(self, rank_sep: float = 1.0, node_sep: float = 1.0) -> None:
+    def __init__(
+        self,
+        rank_sep: float = 1.0,
+        node_sep: float = 1.0,
+        *,
+        config: Optional[_StoreSpacingParamsConfig] = None,
+    ) -> None:
         """Store spacing parameters.
 
         Parameters
@@ -1740,14 +1888,16 @@ class _StoreSpacingParams(Op):
             Vertical spacing between layers.
         node_sep : float, default=1.0
             Horizontal spacing between nodes within a layer.
+        config : _StoreSpacingParamsConfig | None, optional
+            Optional configuration. When provided, it takes precedence over
+            the scalar arguments.
 
         Returns
         -------
         None
             This constructor stores configuration only.
         """
-        self.rank_sep = rank_sep
-        self.node_sep = node_sep
+        self.config = config or _StoreSpacingParamsConfig(rank_sep=rank_sep, node_sep=node_sep)
 
     def apply(
         self,
@@ -1773,6 +1923,6 @@ class _StoreSpacingParams(Op):
         """
         del problem, ctx
 
-        state.extras["sugiyama_rank_sep"] = self.rank_sep
-        state.extras["sugiyama_node_sep"] = self.node_sep
+        state.extras[_SUGIYAMA_RANK_SEP_KEY] = self.config.rank_sep
+        state.extras[_SUGIYAMA_NODE_SEP_KEY] = self.config.node_sep
         return state

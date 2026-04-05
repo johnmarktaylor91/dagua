@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional, Tuple
 
 import numpy as np
 import torch
@@ -184,10 +184,13 @@ class BuildDensityGridConfig:
         Number of cells along each grid axis.
     view_size : float, default=4000
         Width of the square view window tracked by the density grid.
+    kernel_radius : int, default=10
+        Tent-kernel radius used by the DrL density proxy.
     """
 
     grid_size: int = 1000
     view_size: float = 4000.0
+    kernel_radius: int = 10
 
 
 @dataclass(frozen=True)
@@ -643,12 +646,12 @@ def _build_quadtree_node(
 class BuildEdgeBatchCtx(Op):
     """Precompute edge deltas for the current edge batch."""
 
-    name = "build_edge_batch_ctx"
-    category = OpCategory.CONTEXT
-    reads = ("pos",)
-    writes = ("edge_batch_context",)
-    requires = ("pos",)
-    access_pattern = "edge"
+    name: ClassVar[str] = "build_edge_batch_ctx"
+    category: ClassVar[OpCategory] = OpCategory.CONTEXT
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("edge_batch_context",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "edge"
 
     def __init__(self, config: Optional[BuildEdgeBatchCtxConfig] = None) -> None:
         """Initialize the op with an optional config.
@@ -725,12 +728,12 @@ class BuildEdgeBatchCtx(Op):
 class RefreshSampledNodeCtx(Op):
     """Refresh the shared sampled-node context on a fixed cadence."""
 
-    name = "refresh_sampled_node_ctx"
-    category = OpCategory.CONTEXT
-    reads = ("layer_index", "layers", "pos", "step")
-    writes = ("sampled_node_context",)
-    requires = ("step",)
-    access_pattern = "sampled"
+    name: ClassVar[str] = "refresh_sampled_node_ctx"
+    category: ClassVar[OpCategory] = OpCategory.CONTEXT
+    reads: ClassVar[Tuple[str, ...]] = ("layer_index", "layers", "pos", "step")
+    writes: ClassVar[Tuple[str, ...]] = ("sampled_node_context",)
+    requires: ClassVar[Tuple[str, ...]] = ("step",)
+    access_pattern: ClassVar[str] = "sampled"
 
     def __init__(self, config: Optional[RefreshSampledNodeCtxConfig] = None) -> None:
         """Initialize the op with an optional config.
@@ -788,6 +791,8 @@ class RefreshSampledNodeCtx(Op):
             layer_index=layer_index,
             device=sampled_device,
             n_active=n_active,
+            # Reuse the engine's layered sampling layout so same-layer and
+            # adjacent-layer draws stay distribution-compatible with native losses.
             generator=_cpu_generator(problem, state, ctx),
         )
         return state
@@ -797,12 +802,12 @@ class RefreshSampledNodeCtx(Op):
 class BuildQuadTree(Op):
     """Build a Barnes-Hut quadtree over the current positions."""
 
-    name = "build_quad_tree"
-    category = OpCategory.CONTEXT
-    reads = ("pos", "degree")
-    writes = ("extras.quadtree",)
-    requires = ("pos",)
-    access_pattern = "global"
+    name: ClassVar[str] = "build_quad_tree"
+    category: ClassVar[OpCategory] = OpCategory.CONTEXT
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "degree")
+    writes: ClassVar[Tuple[str, ...]] = ("extras.quadtree",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[BuildQuadTreeConfig] = None) -> None:
         """Initialize the op with an optional config.
@@ -863,12 +868,12 @@ class BuildQuadTree(Op):
 class BuildDensityGrid(Op):
     """Build the DrL-style density grid over the current positions."""
 
-    name = "build_density_grid"
-    category = OpCategory.CONTEXT
-    reads = ("pos",)
-    writes = ("extras.density_grid",)
-    requires = ("pos",)
-    access_pattern = "global"
+    name: ClassVar[str] = "build_density_grid"
+    category: ClassVar[OpCategory] = OpCategory.CONTEXT
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras.density_grid",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[BuildDensityGridConfig] = None) -> None:
         """Initialize the op with an optional config.
@@ -883,6 +888,8 @@ class BuildDensityGrid(Op):
             raise ValueError("grid_size must be positive")
         if self.config.view_size <= 0.0:
             raise ValueError("view_size must be positive")
+        if self.config.kernel_radius <= 0:
+            raise ValueError("kernel_radius must be positive")
 
     def apply(
         self,
@@ -912,8 +919,10 @@ class BuildDensityGrid(Op):
         density_grid = _DensityGrid(
             grid_size=self.config.grid_size,
             view_size=float(self.config.view_size),
-            radius=_DENSITY_GRID_RADIUS,
+            radius=self.config.kernel_radius,
         )
+        # Mirror the reference implementation by inserting nodes one by one so
+        # the bucket cache stays consistent with the coarse-density tensor.
         for node in range(pos.shape[0]):
             density_grid.add_node(node=node, position=pos[node])
         state.extras["density_grid"] = density_grid
@@ -924,12 +933,12 @@ class BuildDensityGrid(Op):
 class RefreshKDTreePairs(Op):
     """Refresh cached local repulsion pairs using SciPy's ``cKDTree``."""
 
-    name = "refresh_kdtree_pairs"
-    category = OpCategory.CONTEXT
-    reads = ("pos", "step")
-    writes = ("extras.kdtree_pairs",)
-    requires = ("pos",)
-    access_pattern = "sampled"
+    name: ClassVar[str] = "refresh_kdtree_pairs"
+    category: ClassVar[OpCategory] = OpCategory.CONTEXT
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "step")
+    writes: ClassVar[Tuple[str, ...]] = ("extras.kdtree_pairs",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "sampled"
 
     def __init__(self, config: Optional[RefreshKDTreePairsConfig] = None) -> None:
         """Initialize the op with an optional config.

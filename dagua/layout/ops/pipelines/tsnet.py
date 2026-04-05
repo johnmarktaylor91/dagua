@@ -1,4 +1,4 @@
-"""tsNET expressed as a composable ops pipeline."""
+"""tsNET layout pipeline."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from dagua.layout.ops.tsnet import (  # noqa: E402
 
 
 def build_tsnet_pipeline(steps: int = 1000) -> Pipeline:
-    """Build a tsNET pipeline that is bit-identical to classic ``layout_tsnet``.
+    """Build a tsNET layout pipeline.
 
     Parameters
     ----------
@@ -35,8 +35,10 @@ def build_tsnet_pipeline(steps: int = 1000) -> Pipeline:
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic tsNET's initialization, affinity
-        computation, gains-plus-momentum optimization, and postprocessing.
+        Pipeline implementing the tsNET algorithm. The pipeline produces final
+        node coordinates by initializing positions, preparing t-SNE-style
+        affinities, creating the optimizer state, applying repeated
+        gains-and-momentum gradient steps, and finalizing the embedding.
 
     Raises
     ------
@@ -73,16 +75,17 @@ def layout_tsnet_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the tsNET pipeline as a drop-in replacement for classic ``layout_tsnet``.
+    """Run the tsNET pipeline as a drop-in replacement.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor used for final scaling.
+        Optional node-size tensor with shape ``[N, 2]`` used for final
+        scaling.
     perplexity : float, default=30
         Target t-SNE perplexity. Currently only the default value of 30
         preserves bit-identity with classic; non-default values require
@@ -97,8 +100,7 @@ def layout_tsnet_pipeline(
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_tsnet``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------

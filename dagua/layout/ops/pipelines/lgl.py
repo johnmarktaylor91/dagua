@@ -1,4 +1,4 @@
-"""Large Graph Layout (LGL) expressed as a composable ops pipeline."""
+"""Large Graph Layout (LGL) pipeline."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def build_lgl_pipeline(
     cellsize: Optional[float] = None,
     root: Optional[int] = None,
 ) -> Pipeline:
-    """Build an LGL pipeline that is bit-identical to ``layout_lgl``.
+    """Build a Large Graph Layout pipeline.
 
     Parameters
     ----------
@@ -54,8 +54,10 @@ def build_lgl_pipeline(
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic LGL's BFS shell growth and post
-        processing.
+        Pipeline implementing the LGL algorithm. The pipeline produces final
+        node coordinates by preparing shell-growth state, initializing shell
+        placements from a root breadth-first traversal, refining each BFS
+        layer with sparse repulsion, and finalizing the result.
 
     Raises
     ------
@@ -102,16 +104,17 @@ def layout_lgl_pipeline(
     root: Optional[int] = None,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the LGL pipeline as a drop-in replacement for classic ``layout_lgl``.
+    """Run the Large Graph Layout pipeline as a drop-in replacement.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor used only to resolve output device.
+        Optional node-size tensor with shape ``[N, 2]`` used only to resolve
+        the output device.
     seed : int, default=42
         Random seed controlling root selection and shell placement.
     maxiter : int, default=150
@@ -134,8 +137,7 @@ def layout_lgl_pipeline(
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_lgl``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------

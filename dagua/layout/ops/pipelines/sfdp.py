@@ -1,4 +1,4 @@
-"""SFDP (Scalable Force-Directed Placement) expressed as a composable ops pipeline."""
+"""SFDP multilevel force-directed layout pipeline."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def build_sfdp_pipeline(
     theta: float = _DEFAULT_THETA,
     repulsive_exponent: float = _DEFAULT_P,
 ) -> Pipeline:
-    """Build an SFDP pipeline that is bit-identical to classic ``layout_sfdp``.
+    """Build an SFDP multilevel force-directed pipeline.
 
     Parameters
     ----------
@@ -48,8 +48,11 @@ def build_sfdp_pipeline(
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic SFDP's multilevel coarsening,
-        spring-electrical refinement, prolongation, and normalization.
+        Pipeline implementing the classical SFDP algorithm. The pipeline
+        produces final node coordinates by building the multilevel graph,
+        initializing the coarsest level, refining with spring-electrical
+        updates, prolongating through finer levels, and normalizing the final
+        positions.
 
     Raises
     ------
@@ -90,16 +93,17 @@ def layout_sfdp_pipeline(
     repulsive_exponent: float = _DEFAULT_P,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the SFDP pipeline as a drop-in replacement for classic ``layout_sfdp``.
+    """Run the SFDP pipeline as a drop-in replacement.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor used only for output scaling.
+        Optional node-size tensor with shape ``[N, 2]`` used only for output
+        scaling.
     steps : int, default=500
         Maximum number of spring-electrical iterations per level.
     seed : int, default=123
@@ -115,8 +119,7 @@ def layout_sfdp_pipeline(
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_sfdp``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------

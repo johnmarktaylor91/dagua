@@ -1,4 +1,4 @@
-"""Sugiyama layered graph drawing expressed as a composable ops pipeline."""
+"""Sugiyama layered graph-drawing pipeline."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def build_sugiyama_pipeline(
     trace_every: int = 0,
     return_edge_routes: bool = False,
 ) -> Pipeline:
-    """Build a Sugiyama pipeline that reproduces ``layout_sugiyama``.
+    """Build a Sugiyama layered graph-drawing pipeline.
 
     Parameters
     ----------
@@ -50,7 +50,11 @@ def build_sugiyama_pipeline(
     Returns
     -------
     Pipeline
-        Pipeline equivalent to classic ``layout_sugiyama``.
+        Pipeline implementing the Sugiyama framework. The pipeline produces
+        final layered coordinates by validating inputs, storing spacing
+        parameters, resolving node sizes, making the graph acyclic, assigning
+        layers, expanding dummy nodes, running barycenter ordering sweeps,
+        assigning coordinates, and optionally reconstructing edge routes.
     """
     ops: list[Op] = [
         _ValidateInputs(),
@@ -89,14 +93,14 @@ def layout_sugiyama_pipeline(
     Tuple[torch.Tensor, List[torch.Tensor]],
     Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]],
 ]:
-    """Run the Sugiyama pipeline as a drop-in replacement for ``layout_sugiyama``.
+    """Run the Sugiyama layered graph-drawing pipeline.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor, shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
         Optional node-size tensor with shape ``[N, 2]``.
     rank_sep : float
@@ -119,7 +123,9 @@ def layout_sugiyama_pipeline(
     Returns
     -------
     torch.Tensor or tuple
-        Final positions and optional traces/routes.
+        Final positions with shape ``[N, 2]`` and optional ordering traces or
+        routed edge polylines depending on ``trace_every`` and
+        ``return_edge_routes``.
 
     Raises
     ------

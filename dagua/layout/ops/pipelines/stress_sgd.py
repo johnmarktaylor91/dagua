@@ -1,4 +1,4 @@
-"""Stress-SGD expressed as a composable ops pipeline."""
+"""Stress-SGD layout pipeline."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def build_stress_sgd_pipeline(
     sample_size: Union[int, str] = "auto",
     trace_every: int = 0,
 ) -> Pipeline:
-    """Build the stress-SGD pipeline from composable registered ops.
+    """Build a Stress-SGD layout pipeline.
 
     Parameters
     ----------
@@ -50,7 +50,10 @@ def build_stress_sgd_pipeline(
     Returns
     -------
     Pipeline
-        A fully composed stress-SGD pipeline.
+        Pipeline implementing the Stress-SGD algorithm. The pipeline produces
+        final node coordinates by building weighted adjacency, initializing the
+        SGD state, preparing exact or approximate stress terms, and running the
+        corresponding annealed optimization schedule with optional traces.
     """
     if steps < 0:
         raise ValueError("steps must be non-negative.")
@@ -93,16 +96,16 @@ def layout_stress_sgd_pipeline(
     max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, "tuple[torch.Tensor, list[torch.Tensor]]"]:
-    """Run a pipeline-composed Stress-SGD layout.
+    """Run the Stress-SGD pipeline.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor | None
-        Optional node sizes.
+        Optional node-size tensor with shape ``[N, 2]``.
     steps : int
         Number of optimization epochs.
     seed : int
@@ -116,12 +119,20 @@ def layout_stress_sgd_pipeline(
     max_exact_nodes : int
         Exact-path cutoff.
     edge_weights : torch.Tensor | None
-        Optional edge weights.
+        Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
     torch.Tensor or tuple[torch.Tensor, list[torch.Tensor]]
-        Layout coordinates and optional trace snapshots.
+        Final coordinates with shape ``[N, 2]``. When ``trace_every > 0``,
+        periodic trace snapshots are returned alongside the final layout.
+
+    Raises
+    ------
+    ValueError
+        If the public Stress-SGD inputs are invalid.
+    RuntimeError
+        If the pipeline does not populate final positions.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative")

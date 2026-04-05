@@ -1,4 +1,4 @@
-"""Stress majorization (SMACOF) expressed as a composable ops pipeline."""
+"""Stress majorization (SMACOF) layout pipeline."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def build_stress_majorization_pipeline(
     iterations: int = 200,
     trace_every: int = 0,
 ) -> Pipeline:
-    """Build a stress majorization pipeline matching the classic implementation.
+    """Build a stress-majorization (SMACOF) pipeline.
 
     Parameters
     ----------
@@ -42,7 +42,10 @@ def build_stress_majorization_pipeline(
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic stress majorization exactly.
+        Pipeline implementing the classical SMACOF algorithm. The pipeline
+        produces final node coordinates by preparing stress weights,
+        initializing positions, applying repeated majorization updates,
+        collecting optional traces, and finalizing the layout.
 
     Raises
     ------
@@ -81,14 +84,14 @@ def layout_stress_majorization_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     trace_every: int = 0,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
-    """Run the stress majorization pipeline as a drop-in classic replacement.
+    """Run the stress-majorization pipeline as a drop-in replacement.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
         Optional node-size tensor with shape ``[N, 2]``.
     iterations : int, default=200
@@ -104,7 +107,7 @@ def layout_stress_majorization_pipeline(
     -------
     torch.Tensor or tuple[torch.Tensor, list[torch.Tensor]]
         Final position tensor with shape ``[N, 2]``. When ``trace_every > 0``,
-        also returns periodic snapshots.
+        periodic snapshots are returned alongside the final layout.
 
     Raises
     ------

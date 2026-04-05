@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import ClassVar, List, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -352,11 +352,11 @@ class DirectMapping(Op):
     ``torch.randn([N_fine, 2])`` sample when ``jitter_scale`` is non-zero.
     """
 
-    name = "direct_mapping"
-    category = OpCategory.PROLONG
-    reads = ("hierarchy", "pos")
-    writes = ("pos",)
-    requires = ("hierarchy", "pos")
+    name: ClassVar[str] = "direct_mapping"
+    category: ClassVar[OpCategory] = OpCategory.PROLONG
+    reads: ClassVar[Tuple[str, ...]] = ("hierarchy", "pos")
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("hierarchy", "pos")
 
     def __init__(self, config: Optional[DirectMappingConfig] = None) -> None:
         """Store the direct-mapping configuration.
@@ -425,11 +425,11 @@ class LambdaInterpolation(Op):
     ``random()`` calls in fine-node order.
     """
 
-    name = "lambda_interpolation"
-    category = OpCategory.PROLONG
-    reads = ("hierarchy", "pos")
-    writes = ("pos",)
-    requires = ("hierarchy", "pos")
+    name: ClassVar[str] = "lambda_interpolation"
+    category: ClassVar[OpCategory] = OpCategory.PROLONG
+    reads: ClassVar[Tuple[str, ...]] = ("hierarchy", "pos")
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("hierarchy", "pos")
 
     def __init__(self, config: Optional[LambdaInterpolationConfig] = None) -> None:
         """Store the lambda-interpolation configuration.
@@ -489,6 +489,7 @@ class LambdaInterpolation(Op):
                 continue
             fine_positions[node] = coarse_pos[int(step.mapping[node].item())]
 
+        # Planets and moons depend only on already-placed sun coordinates.
         for node, node_type in enumerate(step.node_types):
             if node_type not in (_TYPE_PLANET, _TYPE_MOON):
                 continue
@@ -568,11 +569,11 @@ class LambdaInterpolation(Op):
 class NeighborSmoothing(Op):
     """Blend each node toward the mean position of its neighbors."""
 
-    name = "neighbor_smoothing"
-    category = OpCategory.PROLONG
-    reads = ("pos", "adjacency")
-    writes = ("pos",)
-    requires = ("pos", "adjacency")
+    name: ClassVar[str] = "neighbor_smoothing"
+    category: ClassVar[OpCategory] = OpCategory.PROLONG
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "adjacency")
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "adjacency")
 
     def __init__(self, config: Optional[NeighborSmoothingConfig] = None) -> None:
         """Store the neighbor-smoothing configuration.
