@@ -1558,7 +1558,7 @@ class ClassicGraphOpt(_ClassicBase):
         return _quick_classic(
             self.name,
             "dagua.layout.ops.pipelines.graphopt",
-            "layout_graphopt",
+            "layout_graphopt_pipeline",
             graph,
             self._layout_seed(seed),
         )
@@ -1576,7 +1576,7 @@ class ClassicDRL(_ClassicBase):
         return _quick_classic(
             self.name,
             "dagua.layout.ops.pipelines.drl",
-            "layout_drl",
+            "layout_drl_pipeline",
             graph,
             self._layout_seed(seed),
         )
@@ -1594,7 +1594,7 @@ class ClassicLGL(_ClassicBase):
         return _quick_classic(
             self.name,
             "dagua.layout.ops.pipelines.lgl",
-            "layout_lgl",
+            "layout_lgl_pipeline",
             graph,
             self._layout_seed(seed),
         )
@@ -1612,7 +1612,7 @@ class ClassicSFDP(_ClassicBase):
         return _quick_classic(
             self.name,
             "dagua.layout.ops.pipelines.sfdp",
-            "layout_sfdp",
+            "layout_sfdp_pipeline",
             graph,
             self._layout_seed(seed),
         )
@@ -1631,7 +1631,7 @@ class ClassicUMAP(_ClassicBase):
         return _quick_classic(
             self.name,
             "dagua.layout.ops.pipelines.umap_layout",
-            "layout_umap",
+            "layout_umap_layout_pipeline",
             graph,
             self._layout_seed(seed),
         )
@@ -1667,7 +1667,7 @@ class ClassicNeuLay(_ClassicBase):
         return _quick_classic(
             self.name,
             "dagua.layout.ops.pipelines.neulay",
-            "layout_neulay",
+            "layout_neulay_pipeline",
             graph,
             self._layout_seed(seed),
             steps=20_000,
@@ -1707,7 +1707,7 @@ class ClassicSGD2Multi(_ClassicBase):
         return _quick_classic(
             self.name,
             "dagua.layout.ops.pipelines.sgd2_multi",
-            "layout_sgd2_multi",
+            "layout_sgd2_multi_pipeline",
             graph,
             self._layout_seed(seed),
             criteria={"stress": 1.0, "ideal_edge_length": 1.0},
