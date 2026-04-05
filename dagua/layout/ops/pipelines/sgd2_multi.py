@@ -1,4 +1,4 @@
-"""(SGD)^2 multicriteria layout expressed as a composable ops pipeline."""
+"""(SGD)^2 multicriteria layout pipeline."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def build_sgd2_multi_pipeline(
     grad_clamp: float = 4.0,
     batch_size: int = 16,
 ) -> Pipeline:
-    """Build an (SGD)^2 multicriteria pipeline.
+    """Build an ``(SGD)^2`` multicriteria layout pipeline.
 
     Parameters
     ----------
@@ -46,7 +46,10 @@ def build_sgd2_multi_pipeline(
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic (SGD)^2 behavior.
+        Pipeline implementing the multicriteria ``(SGD)^2`` algorithm. The
+        pipeline produces final node coordinates by initializing the optimizer
+        state, scheduling criterion weights, and running stochastic
+        multi-objective optimization until the configured budget is exhausted.
 
     Raises
     ------
@@ -93,16 +96,17 @@ def layout_sgd2_multi_pipeline(
     batch_size: int = 16,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the (SGD)^2 multicriteria pipeline as a drop-in replacement.
+    """Run the ``(SGD)^2`` multicriteria pipeline.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor | None, default=None
-        Unused placeholder kept for interface compatibility.
+        Optional node-size tensor with shape ``[N, 2]``. Unused placeholder
+        kept for interface compatibility.
     seed : int, default=42
         Random seed.
     steps : int, default=10000

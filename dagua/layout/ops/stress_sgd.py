@@ -9,6 +9,7 @@ building blocks.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any, ClassVar, Optional, Tuple, Union
 
 import numpy as np
@@ -35,6 +36,85 @@ _STRESS_SGD_NUM_NODES_KEY = "stress_sgd_num_nodes"
 _STRESS_SGD_RNG_KEY = "stress_sgd_rng"
 _STRESS_SGD_TRACE_KEY = "stress_sgd_traces"
 _STRESS_SGD_WEIGHTED_KEY = "stress_sgd_weighted"
+
+
+@dataclass(frozen=True)
+class InitializeStressSGDStateConfig:
+    """Configuration for :class:`InitializeStressSGDState`.
+
+    Parameters
+    ----------
+    trace_every : int, default=0
+        Trace interval passed through from the public adapter.
+    disconnected_fallback_scale : float, default=10.0
+        Coordinate scale used by the disconnected-graph fallback layout.
+    """
+
+    trace_every: int = 0
+    disconnected_fallback_scale: float = _DISCONNECTED_FALLBACK_SCALE
+
+
+@dataclass(frozen=True)
+class PrepareStressSGDTermsConfig:
+    """Configuration for :class:`PrepareStressSGDTerms`.
+
+    Parameters
+    ----------
+    max_exact_nodes : int, default=10000
+        Maximum node count for materializing all-pairs exact terms.
+    max_pivots : int, default=200
+        Upper bound on the approximate-mode pivot count.
+    """
+
+    max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES
+    max_pivots: int = _MAX_PIVOTS
+
+
+@dataclass(frozen=True)
+class RunStressSGDExactScheduleConfig:
+    """Configuration for :class:`RunStressSGDExactSchedule`.
+
+    Parameters
+    ----------
+    steps : int, default=30
+        Number of SGD epochs.
+    eps : float, default=0.01
+        Final schedule shrinkage factor.
+    trace_every : int, default=0
+        Snapshot interval, zero disables traces.
+    """
+
+    steps: int = 30
+    eps: float = _DEFAULT_EPS
+    trace_every: int = 0
+
+
+@dataclass(frozen=True)
+class RunStressSGDApproximateScheduleConfig:
+    """Configuration for :class:`RunStressSGDApproximateSchedule`.
+
+    Parameters
+    ----------
+    steps : int, default=30
+        Number of optimization epochs.
+    eps : float, default=0.01
+        Final schedule shrinkage factor.
+    sample_size : int | str, default="auto"
+        Pivot sampler budget (``"auto"`` or explicit positive integer).
+    trace_every : int, default=0
+        Snapshot interval, zero disables traces.
+    auto_full_epoch_threshold : int, default=1000
+        Node threshold below which ``sample_size="auto"`` expands to a full epoch.
+    auto_sample_threshold : int, default=1000
+        Fixed sampling budget used by ``sample_size="auto"`` on larger graphs.
+    """
+
+    steps: int = 30
+    eps: float = _DEFAULT_EPS
+    sample_size: Union[int, str] = "auto"
+    trace_every: int = 0
+    auto_full_epoch_threshold: int = _AUTO_FULL_EPOCH_THRESHOLD
+    auto_sample_threshold: int = _AUTO_SAMPLE_THRESHOLD
 
 
 def _bfs_graph_distances(
@@ -233,7 +313,12 @@ def _schedule_from_weights(
     )
 
 
-def _resolve_sample_size(num_nodes: int, sample_size: Union[int, str]) -> int:
+def _resolve_sample_size(
+    num_nodes: int,
+    sample_size: Union[int, str],
+    auto_full_epoch_threshold: int,
+    auto_sample_threshold: int,
+) -> int:
     """Resolve the large-graph sample budget.
 
     Parameters
@@ -242,6 +327,10 @@ def _resolve_sample_size(num_nodes: int, sample_size: Union[int, str]) -> int:
         Number of nodes.
     sample_size : int | str
         ``"auto"`` or a positive sample count.
+    auto_full_epoch_threshold : int
+        Node threshold below which ``"auto"`` expands to a full epoch.
+    auto_sample_threshold : int
+        Fixed sampling budget used by ``"auto"`` on larger graphs.
 
     Returns
     -------
@@ -256,9 +345,9 @@ def _resolve_sample_size(num_nodes: int, sample_size: Union[int, str]) -> int:
     if isinstance(sample_size, str):
         if sample_size != "auto":
             raise ValueError("sample_size must be a positive integer or 'auto'.")
-        if num_nodes <= _AUTO_FULL_EPOCH_THRESHOLD:
+        if num_nodes <= auto_full_epoch_threshold:
             return num_nodes
-        return _AUTO_SAMPLE_THRESHOLD
+        return auto_sample_threshold
 
     if sample_size <= 0:
         raise ValueError("sample_size must be positive.")
@@ -510,6 +599,7 @@ def _disconnected_fallback_layout(
     num_nodes: int,
     seed: int,
     device: torch.device,
+    scale: float,
 ) -> torch.Tensor:
     """Return deterministic disconnected fallback coordinates.
 
@@ -521,6 +611,8 @@ def _disconnected_fallback_layout(
         Seed for ``torch.Generator``.
     device : torch.device
         Output device.
+    scale : float
+        Coordinate scale factor applied to the fallback Gaussian samples.
 
     Returns
     -------
@@ -529,35 +621,33 @@ def _disconnected_fallback_layout(
     """
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
-    positions = (
-        torch.randn((num_nodes, 2), generator=generator, dtype=torch.float32)
-        * _DISCONNECTED_FALLBACK_SCALE
-    )
+    positions = torch.randn((num_nodes, 2), generator=generator, dtype=torch.float32) * scale
     return positions.to(device=device)
 
 
 @register_op
 class InitializeStressSGDState(Op):
-    """Prepare Stress-SGD state and deterministic RNG setup.
+    """Prepare graph-wide Stress-SGD state and disconnected fallback handling.
 
     This op resolves graph connectivity and connected-component fallback behavior,
-    then captures all problem flags needed by the schedule builders.
+    then captures the exact flags and RNG state needed by the schedule builders.
     """
 
     name: ClassVar[str] = "stress_sgd_initialize_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ()
-    writes: ClassVar[Tuple[str, ...]] = ("extras", "pos")
+    reads: ClassVar[Tuple[str, ...]] = ("adjacency",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras", "pos", "converged")
+    requires: ClassVar[Tuple[str, ...]] = ("adjacency",)
 
     def __init__(self, trace_every: int = 0) -> None:
-        """Create an initializer with trace cadence metadata.
+        """Create an initializer with classic fallback and trace settings.
 
         Parameters
         ----------
         trace_every : int
             Trace interval passed through from the public adapter.
         """
-        self.trace_every = trace_every
+        self.config = InitializeStressSGDStateConfig(trace_every=trace_every)
 
     def apply(
         self,
@@ -597,7 +687,7 @@ class InitializeStressSGDState(Op):
             state.pos = torch.zeros((num_nodes, 2), dtype=torch.float32, device=device)
             state.extras[_STRESS_SGD_CONNECTED_KEY] = True
             state.converged = True
-            if self.trace_every > 0:
+            if self.config.trace_every > 0:
                 state.extras[_STRESS_SGD_TRACE_KEY] = []
             return state
 
@@ -610,15 +700,19 @@ class InitializeStressSGDState(Op):
                 num_nodes=num_nodes,
                 seed=problem.seed,
                 device=device,
+                scale=self.config.disconnected_fallback_scale,
             )
             state.pos = fallback_position
             state.converged = True
-            if self.trace_every > 0:
+            if self.config.trace_every > 0:
                 state.extras[_STRESS_SGD_TRACE_KEY] = [fallback_position.clone()]
             else:
                 state.extras.pop(_STRESS_SGD_TRACE_KEY, None)
             return state
 
+        # The classic implementation seeds the module-level NumPy RNG and then
+        # threads ``np.random`` through later schedule ops. Preserve that exact
+        # state model for bit-for-bit parity.
         np.random.seed(problem.seed)
         state.extras[_STRESS_SGD_RNG_KEY] = np.random
         state.extras.pop(_STRESS_SGD_CONNECTED_KEY, None)
@@ -627,13 +721,13 @@ class InitializeStressSGDState(Op):
 
 @register_op
 class PrepareStressSGDTerms(Op):
-    """Prepare exact or approximate pair data for the Stress-SGD kernels."""
+    """Prepare exact pair tensors or pivot approximations for Stress-SGD."""
 
     name: ClassVar[str] = "stress_sgd_prepare_terms"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
     reads: ClassVar[Tuple[str, ...]] = ("adjacency", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
-    requires: ClassVar[Tuple[str, ...]] = ("adjacency",)
+    writes: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("adjacency", "extras")
 
     def __init__(self, max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES) -> None:
         """Create a configured term builder.
@@ -643,7 +737,7 @@ class PrepareStressSGDTerms(Op):
         max_exact_nodes : int
             Maximum number of nodes for full all-pairs tensor construction.
         """
-        self.max_exact_nodes = max_exact_nodes
+        self.config = PrepareStressSGDTermsConfig(max_exact_nodes=max_exact_nodes)
 
     def apply(
         self,
@@ -680,7 +774,7 @@ class PrepareStressSGDTerms(Op):
         weighted = bool(state.extras.get(_STRESS_SGD_WEIGHTED_KEY, False))
         rng = state.extras.get(_STRESS_SGD_RNG_KEY)
 
-        if num_nodes <= self.max_exact_nodes:
+        if num_nodes <= self.config.max_exact_nodes:
             state.extras[_STRESS_SGD_EXACT_KEY] = True
             sources, targets, distances, weights = _build_exact_terms(
                 adjacency=adjacency,
@@ -695,7 +789,7 @@ class PrepareStressSGDTerms(Op):
         state.extras[_STRESS_SGD_EXACT_KEY] = False
         pivots = _choose_pivots(
             num_nodes=num_nodes,
-            max_pivots=min(num_nodes, _MAX_PIVOTS),
+            max_pivots=min(num_nodes, self.config.max_pivots),
             rng=rng,
         )
         pivot_dist = _compute_pivot_distances(
@@ -703,18 +797,20 @@ class PrepareStressSGDTerms(Op):
             pivots=pivots,
             weighted=weighted,
         )
+        # Large graphs keep only pivot distances to avoid the quadratic memory
+        # blow-up of explicit all-pairs terms.
         state.distance_matrix = torch.from_numpy(pivot_dist)
         return state
 
 
 @register_op
 class RunStressSGDExactSchedule(Op):
-    """Run the full exact upper-triangle Stress-SGD schedule."""
+    """Run the exact upper-triangle Stress-SGD schedule to completion."""
 
     name: ClassVar[str] = "stress_sgd_run_exact_schedule"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
     reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras", "converged")
     requires: ClassVar[Tuple[str, ...]] = ("extras",)
 
     def __init__(self, steps: int = 30, eps: float = _DEFAULT_EPS, trace_every: int = 0) -> None:
@@ -729,9 +825,11 @@ class RunStressSGDExactSchedule(Op):
         trace_every : int
             Optional trace interval, zero disables snapshots.
         """
-        self.steps = steps
-        self.eps = eps
-        self.trace_every = trace_every
+        self.config = RunStressSGDExactScheduleConfig(
+            steps=steps,
+            eps=eps,
+            trace_every=trace_every,
+        )
 
     def apply(
         self,
@@ -773,21 +871,26 @@ class RunStressSGDExactSchedule(Op):
         targets = state.extras["stress_sgd_targets"]
         distances = state.extras["stress_sgd_distances"]
         weights = state.extras["stress_sgd_weights"]
+        config = self.config
 
+        # Positions are initialized from the shared module-level NumPy RNG to
+        # match the classic routine's exact random draw order.
         positions = np.random.rand(num_nodes, 2)
         traces: list[torch.Tensor] = []
         schedule = _schedule_from_weights(
-            steps=self.steps,
+            steps=config.steps,
             w_min=float(weights.min()),
             w_max=float(weights.max()),
-            eps=self.eps,
+            eps=config.eps,
         )
         order = np.arange(sources.shape[0], dtype=np.int64)
 
-        if self.trace_every > 0 and self.steps == 0:
+        if config.trace_every > 0 and config.steps == 0:
             _trace_snapshot(traces, positions, device)
 
         for step_index, eta in enumerate(schedule):
+            # The classic implementation reshuffles pair order every epoch so
+            # sequential updates do not bias toward a fixed traversal.
             rng.shuffle(order)
             for term_index in order:
                 source_index = int(sources[term_index])
@@ -801,7 +904,7 @@ class RunStressSGDExactSchedule(Op):
                     eta=float(eta),
                 )
 
-            if self.trace_every > 0 and (step_index + 1) % self.trace_every == 0:
+            if config.trace_every > 0 and (step_index + 1) % config.trace_every == 0:
                 _trace_snapshot(traces, positions, device)
 
         state.pos = torch.from_numpy(positions.astype(np.float32, copy=False)).to(device=device)
@@ -816,9 +919,9 @@ class RunStressSGDApproximateSchedule(Op):
 
     name: ClassVar[str] = "stress_sgd_run_approximate_schedule"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
-    requires: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras", "converged")
+    requires: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
 
     def __init__(
         self,
@@ -840,10 +943,12 @@ class RunStressSGDApproximateSchedule(Op):
         trace_every : int
             Snapshot interval, zero disables traces.
         """
-        self.steps = steps
-        self.eps = eps
-        self.sample_size = sample_size
-        self.trace_every = trace_every
+        self.config = RunStressSGDApproximateScheduleConfig(
+            steps=steps,
+            eps=eps,
+            sample_size=sample_size,
+            trace_every=trace_every,
+        )
 
     def apply(
         self,
@@ -878,18 +983,24 @@ class RunStressSGDApproximateSchedule(Op):
         device = state.extras[_STRESS_SGD_DEVICE_KEY]
         rng = state.extras[_STRESS_SGD_RNG_KEY]
         pivot_distances = state.distance_matrix
+        config = self.config
         if not isinstance(pivot_distances, torch.Tensor):
             raise ValueError(
                 "RunStressSGDApproximateSchedule requires pivot distances in state.distance_matrix."
             )
         pivot_dist = pivot_distances.to(dtype=torch.float64, device="cpu").numpy()
-        effective_sample_size = _resolve_sample_size(num_nodes, self.sample_size)
+        effective_sample_size = _resolve_sample_size(
+            num_nodes,
+            config.sample_size,
+            auto_full_epoch_threshold=config.auto_full_epoch_threshold,
+            auto_sample_threshold=config.auto_sample_threshold,
+        )
 
         positions = np.random.rand(num_nodes, 2)
         traces: list[torch.Tensor] = []
         d_min, d_max = _schedule_bounds(pivot_dist)
         use_full_epoch = (
-            effective_sample_size >= num_nodes and num_nodes <= _AUTO_FULL_EPOCH_THRESHOLD
+            effective_sample_size >= num_nodes and num_nodes <= config.auto_full_epoch_threshold
         )
 
         full_sources: Optional[np.ndarray] = None
@@ -899,15 +1010,17 @@ class RunStressSGDApproximateSchedule(Op):
             full_sources, full_targets = np.triu_indices(num_nodes, k=1)
             full_order = np.arange(full_sources.shape[0], dtype=np.int64)
 
-        if self.trace_every > 0 and self.steps == 0:
+        if config.trace_every > 0 and config.steps == 0:
             _trace_snapshot(traces, positions, device)
 
-        for step_index in range(self.steps):
-            eta = _learning_rate(step_index, self.steps, d_min, d_max, eps=self.eps)
+        for step_index in range(config.steps):
+            eta = _learning_rate(step_index, config.steps, d_min, d_max, eps=config.eps)
             if use_full_epoch:
                 assert full_sources is not None
                 assert full_targets is not None
                 assert full_order is not None
+                # Small "approximate" problems still expand to the full pair set
+                # when ``sample_size="auto"`` so the classic branch is preserved.
                 rng.shuffle(full_order)
                 for pair_index in full_order:
                     source_index = int(full_sources[pair_index])
@@ -947,7 +1060,7 @@ class RunStressSGDApproximateSchedule(Op):
                         eta=eta,
                     )
 
-            if self.trace_every > 0 and (step_index + 1) % self.trace_every == 0:
+            if config.trace_every > 0 and (step_index + 1) % config.trace_every == 0:
                 _trace_snapshot(traces, positions, device)
 
         state.pos = torch.from_numpy(positions.astype(np.float32, copy=False)).to(device=device)

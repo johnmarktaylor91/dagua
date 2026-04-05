@@ -1,4 +1,4 @@
-"""GEM (Graph Embedder) expressed as a composable ops pipeline."""
+"""GEM graph-embedder layout pipeline."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from dagua.layout.ops.state import (  # noqa: E402
 
 
 def build_gem_pipeline(max_iters: int = 500) -> Pipeline:
-    """Build a GEM pipeline that is bit-identical to classic ``layout_gem``.
+    """Build a GEM graph-embedder pipeline.
 
     Parameters
     ----------
@@ -34,8 +34,10 @@ def build_gem_pipeline(max_iters: int = 500) -> Pipeline:
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic GEM's initialization, sequential/batched
-        solve, and postprocessing.
+        Pipeline implementing the GEM algorithm. The pipeline produces final
+        node coordinates by initializing node positions, preparing local state,
+        performing the classic sequential and batched update phases, and
+        finalizing the coordinates.
 
     Raises
     ------
@@ -66,16 +68,17 @@ def layout_gem_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the GEM pipeline as a drop-in replacement for classic ``layout_gem``.
+    """Run the GEM pipeline as a drop-in replacement.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor used only to resolve the output device.
+        Optional node-size tensor with shape ``[N, 2]`` used only to resolve
+        the output device.
     max_iters : int, default=500
         Maximum number of OGDF node updates.
     seed : int, default=42
@@ -86,8 +89,7 @@ def layout_gem_pipeline(
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_gem``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------

@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, Optional, Tuple, Union
 
 import torch
 
@@ -223,10 +223,10 @@ class Checkpoint(Op):
 
     config: CheckpointConfig = CheckpointConfig()
 
-    name = "checkpoint"
-    category = OpCategory.UTILITY
-    reads = ("*",)
-    writes = ("extras.checkpoint_path",)
+    name: ClassVar[str] = "checkpoint"
+    category: ClassVar[OpCategory] = OpCategory.UTILITY
+    reads: ClassVar[Tuple[str, ...]] = ("*",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras.checkpoint_path",)
 
     def apply(
         self,
@@ -262,10 +262,10 @@ class Checkpoint(Op):
 class DiskOffload(Op):
     """Offload resident hierarchy tensors to disk and free host memory."""
 
-    name = "disk_offload"
-    category = OpCategory.UTILITY
-    reads = ("hierarchy",)
-    writes = ("hierarchy", "extras.offload_dir")
+    name: ClassVar[str] = "disk_offload"
+    category: ClassVar[OpCategory] = OpCategory.UTILITY
+    reads: ClassVar[Tuple[str, ...]] = ("hierarchy",)
+    writes: ClassVar[Tuple[str, ...]] = ("hierarchy", "extras.offload_dir")
 
     def apply(
         self,
@@ -301,6 +301,8 @@ class DiskOffload(Op):
                 continue
             path = offload_dir / f"level_{level_index:02d}.pt"
             _atomic_torch_save(path, payload)
+            # Clear only tensors we just serialized so non-tensor bookkeeping
+            # remains resident on the hierarchy objects.
             for field_name in payload:
                 setattr(level, field_name, None)
             level.offload_path = path
@@ -315,10 +317,10 @@ class DiskOffload(Op):
 class DiskReload(Op):
     """Reload offloaded hierarchy tensors back into memory."""
 
-    name = "disk_reload"
-    category = OpCategory.UTILITY
-    reads = ("hierarchy",)
-    writes = ("hierarchy",)
+    name: ClassVar[str] = "disk_reload"
+    category: ClassVar[OpCategory] = OpCategory.UTILITY
+    reads: ClassVar[Tuple[str, ...]] = ("hierarchy",)
+    writes: ClassVar[Tuple[str, ...]] = ("hierarchy",)
 
     def apply(
         self,
@@ -360,10 +362,10 @@ class DiskReload(Op):
 class GarbageCollect(Op):
     """Run Python, CUDA, and libc memory cleanup hooks."""
 
-    name = "garbage_collect"
-    category = OpCategory.UTILITY
-    reads = ()
-    writes = ("extras.gc_stats",)
+    name: ClassVar[str] = "garbage_collect"
+    category: ClassVar[OpCategory] = OpCategory.UTILITY
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ("extras.gc_stats",)
 
     def apply(
         self,
@@ -418,10 +420,10 @@ class VRAMGuard(Op):
 
     config: VRAMGuardConfig = VRAMGuardConfig()
 
-    name = "vram_guard"
-    category = OpCategory.UTILITY
-    reads = ()
-    writes = ("extras.vram_guard",)
+    name: ClassVar[str] = "vram_guard"
+    category: ClassVar[OpCategory] = OpCategory.UTILITY
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ("extras.vram_guard",)
 
     def apply(
         self,
@@ -466,6 +468,8 @@ class VRAMGuard(Op):
             free_bytes, total_bytes = torch.cuda.mem_get_info()
             used_bytes = int(total_bytes - free_bytes)
         except RuntimeError:
+            # Older drivers occasionally fail `mem_get_info`; reserved/allocated
+            # memory is the closest stable fallback for a guardrail check.
             total_bytes = int(
                 torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
             )
@@ -510,10 +514,10 @@ class ProgressReport(Op):
 
     config: ProgressReportConfig = ProgressReportConfig()
 
-    name = "progress_report"
-    category = OpCategory.UTILITY
-    reads = ("step", "total_steps", "prev_loss", "converged")
-    writes = ()
+    name: ClassVar[str] = "progress_report"
+    category: ClassVar[OpCategory] = OpCategory.UTILITY
+    reads: ClassVar[Tuple[str, ...]] = ("step", "total_steps", "prev_loss", "converged")
+    writes: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
         self,
@@ -576,10 +580,10 @@ class ProgressReport(Op):
 class Timer(Op):
     """Measure and log the execution time of an optional wrapped operation."""
 
-    name = "timer"
-    category = OpCategory.UTILITY
-    reads = ()
-    writes = ("extras.op_timings", "extras.last_timing_seconds")
+    name: ClassVar[str] = "timer"
+    category: ClassVar[OpCategory] = OpCategory.UTILITY
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ("extras.op_timings", "extras.last_timing_seconds")
 
     def __init__(self, op: Optional[Op] = None, label: Optional[str] = None) -> None:
         """Store the wrapped op and optional timing label.

@@ -1,4 +1,4 @@
-"""ForceAtlas2 expressed as a composable ops pipeline."""
+"""ForceAtlas2 force-directed layout pipeline."""
 
 from __future__ import annotations
 
@@ -59,18 +59,22 @@ class FA2Config:
 
 
 def build_fa2_pipeline(config: Optional[FA2Config] = None) -> Pipeline:
-    """Build an FA2 pipeline that is bit-identical to classic ``layout_fa2``.
+    """Build a ForceAtlas2 pipeline.
 
     Parameters
     ----------
     config : FA2Config, optional
-        FA2 configuration. Uses defaults when not provided.
+        ForceAtlas2 hyperparameters controlling iteration count, gravity,
+        attraction and repulsion variants, and Barnes-Hut acceleration. Uses
+        defaults when not provided.
 
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic FA2's initialization, preprocessing,
-        force computation, and adaptive speed control.
+        Pipeline implementing the classical ForceAtlas2 algorithm. The
+        pipeline produces final node coordinates by validating inputs,
+        initializing positions, preparing graph-dependent state, and applying
+        repeated FA2 force steps with adaptive speed control.
 
     Raises
     ------
@@ -137,26 +141,27 @@ def layout_fa2_pipeline(
     barnes_hut: bool = False,
     barnes_hut_theta: float = 1.2,
 ) -> torch.Tensor:
-    """Run the FA2 pipeline as a drop-in replacement for classic ``layout_fa2``.
+    """Run the ForceAtlas2 pipeline as a drop-in replacement.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor. Unused, kept for API compatibility.
+        Optional node-size tensor with shape ``[N, 2]``. Unused and retained
+        for API compatibility.
     steps : int, default=100
-        Number of FA2 iterations.
+        Number of ForceAtlas2 iterations.
     seed : int, default=42
         Random seed for the Python-random initialization.
     gravity : float, default=1.0
-        Gravity coefficient.
+        Gravity coefficient applied each iteration.
     scaling_ratio : float, default=2.0
         Repulsion scaling coefficient.
     linlog : bool, default=False
-        Whether to use log-attraction.
+        Whether to use the LinLog attraction variant.
     strong_gravity : bool, default=False
         Whether to use strong-gravity mode.
     outbound_attraction_distribution : bool, default=True
@@ -166,17 +171,16 @@ def layout_fa2_pipeline(
     dissuade_hubs : bool, default=False
         Whether to further penalize hub attraction.
     edge_weight_influence : float, default=1.0
-        Exponent applied to edge weights.
+        Exponent applied to edge weights during attraction.
     barnes_hut : bool, default=False
         Whether to use Barnes-Hut approximation for repulsion.
     barnes_hut_theta : float, default=1.2
-        Acceptance threshold for Barnes-Hut.
+        Acceptance threshold for Barnes-Hut aggregation.
 
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_fa2``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------

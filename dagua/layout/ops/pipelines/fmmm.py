@@ -1,4 +1,4 @@
-"""FM^3 multilevel force-directed layout expressed as a composable ops pipeline."""
+"""FM^3 multilevel force-directed layout pipeline."""
 
 from __future__ import annotations
 
@@ -21,19 +21,21 @@ from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext,
 
 
 def build_fmmm_pipeline(steps: int = 100) -> Pipeline:
-    """Build an FM^3 pipeline that is bit-identical to classic ``layout_fmmm``.
+    """Build an FM^3 multilevel force-directed pipeline.
 
     Parameters
     ----------
     steps : int, default=100
-        Total refinement budget across hierarchy levels.
+        Total refinement budget distributed across hierarchy levels.
 
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic FM^3's hierarchy construction,
-        coarse FR initialization, per-level refinement, prolongation,
-        and final normalization.
+        Pipeline implementing the FM^3 algorithm. The pipeline produces final
+        node coordinates by constructing a multilevel hierarchy, initializing
+        the coarsest graph, refining that level, uncoarsening with per-level
+        refinement, falling back to a single-level solve when needed, and
+        normalizing the result.
 
     Raises
     ------
@@ -71,28 +73,29 @@ def layout_fmmm_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the FM^3 pipeline as a drop-in replacement for classic ``layout_fmmm``.
+    """Run the FM^3 pipeline as a drop-in replacement.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor used for extent calculation and output device.
+        Optional node-size tensor with shape ``[N, 2]`` used for extent
+        calculation and output-device selection.
     steps : int, default=100
-        Total refinement budget across hierarchy levels.
+        Total refinement budget distributed across hierarchy levels.
     seed : int, default=42
-        Random seed for coarsening, FR initialization, and prolongation jitter.
+        Random seed for coarsening, coarse initialization, and prolongation
+        jitter.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
 
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_fmmm``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------

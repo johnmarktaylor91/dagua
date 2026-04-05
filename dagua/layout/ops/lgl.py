@@ -21,7 +21,7 @@ from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _LGL_MIN_DISTANCE = 1.0e-12
-_LGL_CONVERGENCE_EPSILON = 1.0e-5
+_LGL_BUCKET_NEIGHBORHOOD = (-1, 0, 1)
 
 
 @dataclass(frozen=True)
@@ -53,6 +53,20 @@ class LGLPrepareStateConfig:
     repulserad: Optional[float] = None
     cellsize: Optional[float] = None
     root: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class LGLLayeredRefinementConfig:
+    """Configuration for :class:`LGLLayeredRefinement`.
+
+    Parameters
+    ----------
+    convergence_epsilon : float, default=1e-5
+        Early-stop threshold for the maximum node movement inside one shell's
+        local refinement loop.
+    """
+
+    convergence_epsilon: float = 1.0e-5
 
 
 @register_op
@@ -203,8 +217,11 @@ class LGLInitializePositions(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class LGLLayeredRefinement(Op):
     """Run BFS shell growth and local FR-style relaxation on each layer."""
+
+    config: LGLLayeredRefinementConfig = field(default_factory=LGLLayeredRefinementConfig)
 
     name: ClassVar[str] = "lgl_shell_growth_solve"
     category: ClassVar[OpCategory] = OpCategory.FORCE
@@ -325,6 +342,8 @@ class LGLLayeredRefinement(Op):
             layer_child_index = 0
 
             for parent in current_layer:
+                # Respect the BFS tree here so each shell inherits a stable
+                # radial anchor before the FR refinement redistributes it.
                 children = [node for node in next_layer if parents[node] == parent]
                 if not children:
                     continue
@@ -425,8 +444,8 @@ class LGLLayeredRefinement(Op):
                 sorted_cells = sorted(buckets)
                 for cell in sorted_cells:
                     nodes_here = buckets[cell]
-                    for offset_y in (-1, 0, 1):
-                        for offset_x in (-1, 0, 1):
+                    for offset_y in _LGL_BUCKET_NEIGHBORHOOD:
+                        for offset_x in _LGL_BUCKET_NEIGHBORHOOD:
                             neighbor_cell = (cell[0] + offset_x, cell[1] + offset_y)
                             if neighbor_cell not in buckets or neighbor_cell < cell:
                                 continue
@@ -479,7 +498,7 @@ class LGLLayeredRefinement(Op):
                         abs(float(movement[1].item())),
                     )
 
-                if maxchange < _LGL_CONVERGENCE_EPSILON:
+                if maxchange < self.config.convergence_epsilon:
                     break
 
         state.pos = positions
@@ -522,5 +541,6 @@ __all__ = [
     "LGLPrepareStateConfig",
     "LGLInitializePositions",
     "LGLLayeredRefinement",
+    "LGLLayeredRefinementConfig",
     "LGLFinalizePositions",
 ]

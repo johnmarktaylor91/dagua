@@ -1,4 +1,4 @@
-"""Reingold-Tilford expressed as a composable registered-ops pipeline."""
+"""Reingold-Tilford tidy-tree layout pipeline."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from dagua.layout.ops.state import (  # noqa: E402
 
 
 def build_reingold_tilford_pipeline(horizontal: bool = False) -> Pipeline:
-    """Build a pipeline that matches ``layout_reingold_tilford``.
+    """Build a Reingold-Tilford tidy-tree pipeline.
 
     Parameters
     ----------
@@ -27,7 +27,10 @@ def build_reingold_tilford_pipeline(horizontal: bool = False) -> Pipeline:
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic Reingold-Tilford coordinates.
+        Pipeline implementing the Reingold-Tilford tree-drawing algorithm.
+        The pipeline produces final node coordinates by computing the tidy-tree
+        contour placement and optionally rotating the result for horizontal
+        depth.
     """
     return Pipeline(
         [ReingoldTilfordTree(ReingoldTilfordTreeConfig(horizontal=horizontal))],
@@ -43,14 +46,14 @@ def layout_reingold_tilford_pipeline(
     horizontal: bool = False,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the Reingold-Tilford pipeline as a drop-in replacement.
+    """Run the Reingold-Tilford tidy-tree pipeline.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
         Optional node-size tensor with shape ``[N, 2]``.
     seed : int, default=42
@@ -63,7 +66,14 @@ def layout_reingold_tilford_pipeline(
     Returns
     -------
     torch.Tensor
-        Final layout coordinates.
+        Final layout coordinates with shape ``[N, 2]``.
+
+    Raises
+    ------
+    ValueError
+        If ``num_nodes`` or ``edge_weights`` are invalid.
+    RuntimeError
+        If the pipeline does not populate final positions.
     """
     _ = seed
 

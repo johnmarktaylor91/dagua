@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import ClassVar, List, Optional, Tuple
 
 import torch
 
@@ -17,7 +18,6 @@ _BORDER_WEIGHT = 0.1
 _EDGE_LENGTH_WEIGHT = 0.2
 _CROSSING_WEIGHT = 2.0
 _NODE_EDGE_WEIGHT = 0.5
-_COOLING_FACTOR = 0.75
 _COLLINEAR_EPSILON = 1.0e-10
 
 _DH_EDGES_KEY = "dh_edges"
@@ -193,13 +193,56 @@ def _energy(
     )
 
 
+@dataclass(frozen=True)
+class PrepareDHStateConfig:
+    """Configuration for :class:`PrepareDHState`.
+
+    Parameters
+    ----------
+    initial_temperature_scale : float, default=0.1
+        Fraction of the starting energy used as the initial annealing
+        temperature before the minimum-distance floor is applied.
+    """
+
+    initial_temperature_scale: float = 0.1
+
+
+@dataclass(frozen=True)
+class DHAnnealingRoundConfig:
+    """Configuration for :class:`DHAnnealingRound`.
+
+    Parameters
+    ----------
+    move_scale_fraction : float, default=0.25
+        Fraction of the layout extent used for the maximum proposal radius at
+        the starting temperature.
+    """
+
+    move_scale_fraction: float = 0.25
+
+
+@dataclass(frozen=True)
+class DHCoolConfig:
+    """Configuration for :class:`DHCool`.
+
+    Parameters
+    ----------
+    cooling_factor : float, default=0.75
+        Geometric decay factor applied to ``state.temperature`` after each
+        annealing round.
+    """
+
+    cooling_factor: float = 0.75
+
+
 @register_op
+@dataclass(frozen=True)
 class InitializeDHPositions(Op):
     """Initialize random coordinates and cached layout extent metadata."""
 
-    name = "dh_initialize_positions"
-    category = OpCategory.INIT
-    writes = ("pos",)
+    name: ClassVar[str] = "dh_initialize_positions"
+    category: ClassVar[OpCategory] = OpCategory.INIT
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def apply(
         self,
@@ -218,13 +261,16 @@ class InitializeDHPositions(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class PrepareDHState(Op):
-    """Build cached, undirected edge state and starting energy."""
+    """Build cached, undirected edge state and the initial annealing energy."""
 
-    name = "dh_prepare_state"
-    category = OpCategory.PREPROCESS
-    reads = ("pos",)
-    writes = ("extras",)
+    config: PrepareDHStateConfig = field(default_factory=PrepareDHStateConfig)
+
+    name: ClassVar[str] = "dh_prepare_state"
+    category: ClassVar[OpCategory] = OpCategory.PREPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
 
     def apply(
         self,
@@ -256,7 +302,10 @@ class PrepareDHState(Op):
             )
         state.extras[_DH_CURRENT_ENERGY_KEY] = current_energy
 
-        initial_temperature = max(0.1 * float(current_energy.item()), _MIN_DISTANCE)
+        initial_temperature = max(
+            self.config.initial_temperature_scale * float(current_energy.item()),
+            _MIN_DISTANCE,
+        )
         state.extras[_DH_INITIAL_TEMPERATURE_KEY] = initial_temperature
         state.temperature = initial_temperature
 
@@ -268,14 +317,17 @@ class PrepareDHState(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class DHAnnealingRound(Op):
     """Apply one Davidson-Harel annealing round."""
 
-    name = "dh_annealing_round"
-    category = OpCategory.FORCE
-    reads = ("pos", "extras")
-    writes = ("pos", "extras")
-    requires = ("pos",)
+    config: DHAnnealingRoundConfig = field(default_factory=DHAnnealingRoundConfig)
+
+    name: ClassVar[str] = "dh_annealing_round"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def apply(
         self,
@@ -302,7 +354,11 @@ class DHAnnealingRound(Op):
 
         for _ in range(moves_per_round):
             node = int(torch.randint(0, problem.num_nodes, (1,), generator=generator).item())
-            move_scale = 0.25 * extent * (temperature / max(initial_temperature, _MIN_DISTANCE))
+            move_scale = (
+                self.config.move_scale_fraction
+                * extent
+                * (temperature / max(initial_temperature, _MIN_DISTANCE))
+            )
             delta = ((torch.rand((2,), generator=generator) * 2.0) - 1.0).to(device) * move_scale
             candidate = positions.clone()
             candidate[node] = (candidate[node] + delta).clamp(min=-extent, max=extent)
@@ -317,6 +373,8 @@ class DHAnnealingRound(Op):
                 current_energy = candidate_energy
                 continue
 
+            # Match simulated annealing semantics: uphill moves remain possible
+            # while the temperature is positive, but become exponentially rarer.
             acceptance = torch.exp(-delta_energy / max(temperature, _MIN_DISTANCE)).clamp(max=1.0)
             threshold = float(torch.rand((1,), generator=generator).item())
             if threshold < float(acceptance.item()):
@@ -329,13 +387,16 @@ class DHAnnealingRound(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class DHCool(Op):
     """Exponential schedule used by Davidson-Harel."""
 
-    name = "dh_cool"
-    category = OpCategory.ANNEAL
-    reads = ()
-    writes = ()
+    config: DHCoolConfig = field(default_factory=DHCoolConfig)
+
+    name: ClassVar[str] = "dh_cool"
+    category: ClassVar[OpCategory] = OpCategory.ANNEAL
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
         self,
@@ -346,19 +407,20 @@ class DHCool(Op):
         """Apply geometric annealing to ``state.temperature``."""
         del problem, ctx
         assert state.temperature is not None
-        state.temperature = state.temperature * _COOLING_FACTOR
+        state.temperature = state.temperature * self.config.cooling_factor
         return state
 
 
 @register_op
+@dataclass(frozen=True)
 class FinalizeDHPositions(Op):
     """Center and scale final DH coordinates to deterministic extent."""
 
-    name = "dh_finalize_positions"
-    category = OpCategory.POSTPROCESS
-    reads = ("pos",)
-    writes = ("pos",)
-    requires = ("pos",)
+    name: ClassVar[str] = "dh_finalize_positions"
+    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def apply(
         self,
@@ -375,6 +437,8 @@ class FinalizeDHPositions(Op):
         device = state.extras[_DH_DEVICE_KEY]
         extent: float = state.extras[_DH_EXTENT_KEY]
 
+        # Normalize around the centroid first so the final scale is independent
+        # of where the last accepted annealing move left the cloud.
         centered = state.pos - state.pos.mean(dim=0, keepdim=True)
         span = centered.abs().max().clamp(min=1.0)
         state.pos = (centered * (extent / span)).to(dtype=torch.float32, device=device)

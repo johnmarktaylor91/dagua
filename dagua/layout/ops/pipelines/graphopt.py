@@ -1,4 +1,4 @@
-"""GraphOpt expressed as a composable ops pipeline."""
+"""GraphOpt force-directed layout pipeline."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def build_graphopt_pipeline(
     spring_constant: float = 1.0,
     max_sa_movement: float = 5.0,
 ) -> Pipeline:
-    """Build a GraphOpt pipeline that is bit-identical to ``layout_graphopt``.
+    """Build a GraphOpt force-directed layout pipeline.
 
     Parameters
     ----------
@@ -52,7 +52,10 @@ def build_graphopt_pipeline(
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic GraphOpt exactly.
+        Pipeline implementing the GraphOpt algorithm. The pipeline produces
+        final node coordinates by validating inputs, initializing positions,
+        preparing force state, clearing force accumulators, applying repeated
+        spring-and-repulsion iterations, and finalizing the layout.
 
     Raises
     ------
@@ -108,16 +111,17 @@ def layout_graphopt_pipeline(
     max_sa_movement: float = 5.0,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the GraphOpt pipeline as a drop-in replacement for classic GraphOpt.
+    """Run the GraphOpt force-directed layout pipeline.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor used only to resolve output device.
+        Optional node-size tensor with shape ``[N, 2]`` used only to resolve
+        the output device.
     seed : int, default=42
         Random seed for ``random.Random`` initialization.
     niter : int, default=500
@@ -138,8 +142,7 @@ def layout_graphopt_pipeline(
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_graphopt``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------
