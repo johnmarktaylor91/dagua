@@ -16,8 +16,13 @@ Key entry points:
 
 ## How to Read This Codebase
 - Start with `dagua/__init__.py` for the public API surface, then `dagua/graph.py` for DaguaGraph
-- Complexity lives in `dagua/layout/engine.py` (optimization loop), `dagua/layout/constraints.py` (loss functions), and `dagua/eval/` (benchmark/comparison system)
-- Stable: graph data model, styles, config, render backends. In-flux: eval system, edge optimization, multilevel layout
+- Layout algorithms live in `dagua/layout/ops/` (268 registered ops) composed into pipelines
+  in `dagua/layout/ops/pipelines/` (23 algorithms). The engine in `dagua/layout/engine.py`
+  dispatches to these pipelines via `LayoutConfig(algorithm="fr")`.
+- Complexity lives in `dagua/layout/engine.py` (optimization loop + pipeline dispatch),
+  `dagua/layout/ops/` (composable primitives), and `dagua/eval/` (benchmark/comparison system)
+- Stable: graph data model, styles, config, render backends, composable ops, algorithm pipelines
+- In-flux: eval system, edge optimization, default algorithm tuning
 
 ## Design Principles
 
@@ -28,6 +33,8 @@ Key entry points:
 5. **Domain knowledge enters as loss terms**, not algorithmic modifications
 6. **GPU acceleration is automatic** — same code on CPU or CUDA via `device=`
 7. **Steal Graphviz's aesthetic wisdom** (spacings, weight ratios) but not its architecture
+8. **Layout algorithms are composable op pipelines** -- 268 registered primitives, 23 algorithms
+   built purely by composing them. Monolithic reimplementations archived at `dagua/layout/_archive/`.
 
 ## Key API Surface
 
@@ -49,6 +56,11 @@ g.align(["a", "b", "c"], axis="x")
 config = dagua.LayoutConfig(flex=dagua.LayoutFlex(
     node_sep=dagua.Flex.firm(40),
 ))
+
+# Tier 1.5: Algorithm selection
+config = dagua.LayoutConfig(algorithm="fr")  # Fruchterman-Reingold
+config = dagua.LayoutConfig(algorithm="kk", algorithm_params={"spring_k": 1.5})
+# 24 algorithms: fr, kk, fa2, stress_sgd, sfdp, umap, tsnet, sugiyama, spectral, ...
 
 # Tier 2: Full control
 pos = dagua.layout(g, config)
@@ -88,8 +100,9 @@ Generated docs (rebuild when their sources change):
 
 ## Benchmark Iteration
 
-- **Data integrity:** `results.json` and `positions.h5` MUST stay in sync.
+- **Data integrity:** `results.json` and `positions/` (per-run .pt files) MUST stay in sync.
   `fidelity_analysis.py` aborts if >10 engines have results but missing positions.
+  Some scripts also support consolidated `positions.h5` (HDF5) format.
   - Validate: `python scripts/validate_benchmark_integrity.py`
   - Purge variants: `python scripts/safe_purge_variants.py <engines> --confirm`
     (purges BOTH stores atomically -- never purge one manually)
