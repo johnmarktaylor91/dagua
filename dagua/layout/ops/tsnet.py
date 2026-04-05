@@ -18,10 +18,29 @@ from dagua.layout.ops.graph_utils import (
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
-_MIN_DISTANCE = 1.0e-12
-_TSNET_EARLY_EXAGGERATION = 12.0
-_TSNET_EARLY_STEPS = 250
-_TSNET_MIN_GAIN = 0.01
+_TSNET_PERPLEXITY_KEY = "tsnet_perplexity"
+_TSNET_PROBABILITIES_KEY = "tsnet_probabilities"
+_TSNET_EARLY_EXAGGERATION_KEY = "tsnet_early_exaggeration"
+_TSNET_EARLY_STEPS_KEY = "tsnet_early_exaggeration_steps"
+_TSNET_MIN_GAIN_KEY = "tsnet_min_gain"
+_TSNET_MIN_DISTANCE_KEY = "tsnet_min_distance"
+_TSNET_EARLY_LR_KEY = "tsnet_early_learning_rate"
+_TSNET_LATE_LR_KEY = "tsnet_late_learning_rate"
+_TSNET_UPDATE_KEY = "tsnet_update"
+_TSNET_GAINS_KEY = "tsnet_gains"
+
+
+@dataclass(frozen=True)
+class TsnetInitializePositionsConfig:
+    """Configuration for :class:`TsnetInitializePositions`.
+
+    Parameters
+    ----------
+    noise_scale : float, default=1e-4
+        Standard deviation of the Gaussian initialization noise.
+    """
+
+    noise_scale: float = 1.0e-4
 
 
 @dataclass(frozen=True)
@@ -40,6 +59,14 @@ class TsnetPrepareStateConfig:
         Divisor applied to ``num_nodes`` to compute the initial learning rate.
     lr_floor : float, default=50.0
         Minimum learning rate applied when ``num_nodes / lr_divisor`` is small.
+    early_exaggeration : float, default=12.0
+        Multiplicative weight applied to ``P`` during the early tsNET phase.
+    early_exaggeration_steps : int, default=250
+        Number of early-exaggeration updates.
+    min_gain : float, default=0.01
+        Lower bound for per-parameter adaptive gains.
+    min_distance : float, default=1e-12
+        Numerical floor used when normalizing and taking logarithms.
     """
 
     default_perplexity: float = 30.0
@@ -47,6 +74,10 @@ class TsnetPrepareStateConfig:
     binary_search_iterations: int = 100
     lr_divisor: float = 48.0
     lr_floor: float = 50.0
+    early_exaggeration: float = 12.0
+    early_exaggeration_steps: int = 250
+    min_gain: float = 0.01
+    min_distance: float = 1.0e-12
 
 
 @dataclass(frozen=True)
@@ -73,11 +104,24 @@ class TsnetGradientStepConfig:
 
 @register_op
 class TsnetInitializePositions(Op):
-    """Initialize tsNET positions with small Gaussian noise."""
+    """Initialize tsNET coordinates from deterministic Gaussian noise."""
+
+    config: TsnetInitializePositionsConfig
 
     name: ClassVar[str] = "tsnet_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, config: Optional[TsnetInitializePositionsConfig] = None) -> None:
+        """Store initialization parameters.
+
+        Parameters
+        ----------
+        config : TsnetInitializePositionsConfig | None, optional
+            Optional initialization configuration.
+        """
+        self.config = config or TsnetInitializePositionsConfig()
 
     def apply(
         self,
@@ -106,7 +150,10 @@ class TsnetInitializePositions(Op):
         generator = torch.Generator(device="cpu")
         generator.manual_seed(problem.seed)
         state.pos = (
-            (torch.randn(problem.num_nodes, 2, generator=generator, dtype=torch.float32) * 1e-4)
+            (
+                torch.randn(problem.num_nodes, 2, generator=generator, dtype=torch.float32)
+                * self.config.noise_scale
+            )
             .to(device=device)
             .clone()
             .requires_grad_(True)
@@ -116,22 +163,34 @@ class TsnetInitializePositions(Op):
 
 @register_op
 class TsnetPrepareState(Op):
-    """Compute all-pairs distances and tsNET affinities plus optimization constants.
-
-    Reads
-        (none -- uses problem topology)
-    Writes
-        distance_matrix, extras (tsNET probabilities, schedule constants)
-    """
+    """Build tsNET distances, affinities, and optimizer constants."""
 
     config: TsnetPrepareStateConfig
 
     name: ClassVar[str] = "tsnet_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ()
-    writes: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
+    reads: ClassVar[Tuple[str, ...]] = (f"extras.{_TSNET_PERPLEXITY_KEY}",)
+    writes: ClassVar[Tuple[str, ...]] = (
+        "distance_matrix",
+        f"extras.{_TSNET_PERPLEXITY_KEY}",
+        f"extras.{_TSNET_PROBABILITIES_KEY}",
+        f"extras.{_TSNET_EARLY_EXAGGERATION_KEY}",
+        f"extras.{_TSNET_EARLY_STEPS_KEY}",
+        f"extras.{_TSNET_MIN_GAIN_KEY}",
+        f"extras.{_TSNET_MIN_DISTANCE_KEY}",
+        f"extras.{_TSNET_EARLY_LR_KEY}",
+        f"extras.{_TSNET_LATE_LR_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[TsnetPrepareStateConfig] = None) -> None:
+        """Store deterministic affinity-preparation parameters.
+
+        Parameters
+        ----------
+        config : TsnetPrepareStateConfig | None, optional
+            Optional preparation configuration.
+        """
         self.config = config or TsnetPrepareStateConfig()
 
     def apply(
@@ -161,7 +220,7 @@ class TsnetPrepareState(Op):
 
         device = layout_device(problem.edge_index, problem.node_sizes)
         perplexity = min(
-            float(state.extras.get("tsnet_perplexity", self.config.default_perplexity)),
+            float(state.extras.get(_TSNET_PERPLEXITY_KEY, self.config.default_perplexity)),
             float(max(problem.num_nodes - 1, 1)),
         )
         adjacency = build_undirected_adjacency(
@@ -193,11 +252,14 @@ class TsnetPrepareState(Op):
 
             probabilities = torch.zeros_like(row)
             for _ in range(self.config.binary_search_iterations):
+                # The classic implementation zeros the self-edge before
+                # normalization so perplexity only reflects true neighbors.
                 weights = torch.exp(-squared * beta) * mask.to(dtype=torch.float32)
-                weights_sum = weights.sum().clamp(min=_MIN_DISTANCE)
+                weights_sum = weights.sum().clamp(min=self.config.min_distance)
                 probabilities = weights / weights_sum
                 entropy = -(
-                    probabilities[mask] * probabilities[mask].clamp(min=_MIN_DISTANCE).log()
+                    probabilities[mask]
+                    * probabilities[mask].clamp(min=self.config.min_distance).log()
                 ).sum()
                 error = entropy - target_entropy
                 if torch.abs(error) < self.config.binary_search_tolerance:
@@ -214,19 +276,20 @@ class TsnetPrepareState(Op):
 
         conditional = torch.stack(rows, dim=0) if rows else torch.empty((0, 0), device=device)
         symmetrized = (conditional + conditional.transpose(0, 1)) / (2.0 * max(num_nodes, 1))
-        probabilities = symmetrized.clamp(min=_MIN_DISTANCE).to(device=device)
+        probabilities = symmetrized.clamp(min=self.config.min_distance).to(device=device)
 
-        state.extras["tsnet_perplexity"] = perplexity
-        state.extras["tsnet_probabilities"] = probabilities
-        state.extras["tsnet_early_exaggeration"] = _TSNET_EARLY_EXAGGERATION
-        state.extras["tsnet_early_exaggeration_steps"] = _TSNET_EARLY_STEPS
-        state.extras["tsnet_min_gain"] = _TSNET_MIN_GAIN
+        state.extras[_TSNET_PERPLEXITY_KEY] = perplexity
+        state.extras[_TSNET_PROBABILITIES_KEY] = probabilities
+        state.extras[_TSNET_EARLY_EXAGGERATION_KEY] = self.config.early_exaggeration
+        state.extras[_TSNET_EARLY_STEPS_KEY] = self.config.early_exaggeration_steps
+        state.extras[_TSNET_MIN_GAIN_KEY] = self.config.min_gain
+        state.extras[_TSNET_MIN_DISTANCE_KEY] = self.config.min_distance
         early_lr = max(
             float(max(problem.num_nodes, 1)) / self.config.lr_divisor,
             self.config.lr_floor,
         )
-        state.extras["tsnet_early_learning_rate"] = early_lr
-        state.extras["tsnet_late_learning_rate"] = early_lr
+        state.extras[_TSNET_EARLY_LR_KEY] = early_lr
+        state.extras[_TSNET_LATE_LR_KEY] = early_lr
         return state
 
 
@@ -235,10 +298,14 @@ class TsnetInitializeOptimizer(Op):
     """Initialize tsNET optimizer buffers."""
 
     name: ClassVar[str] = "tsnet_initialize_optimizer"
-    category: ClassVar[OpCategory] = OpCategory.INIT
+    category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
     reads: ClassVar[Tuple[str, ...]] = ("pos",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_TSNET_UPDATE_KEY}",
+        f"extras.{_TSNET_GAINS_KEY}",
+    )
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -270,30 +337,52 @@ class TsnetInitializeOptimizer(Op):
         del problem, ctx
         if state.pos is None:
             raise ValueError("TsnetInitializeOptimizer requires state.pos to be set.")
-        state.extras["tsnet_update"] = torch.zeros_like(state.pos)
-        state.extras["tsnet_gains"] = torch.ones_like(state.pos)
+        state.extras[_TSNET_UPDATE_KEY] = torch.zeros_like(state.pos)
+        state.extras[_TSNET_GAINS_KEY] = torch.ones_like(state.pos)
         return state
 
 
 @register_op
 class TsnetGradientStep(Op):
-    """Compute one tsNET gradient step with gains and momentum.
-
-    Reads
-        pos, extras (tsNET probabilities, optimizer buffers)
-    Writes
-        pos, extras (updated gains and momentum buffer)
-    """
+    """Apply one classic tsNET momentum-and-gains optimization update."""
 
     config: TsnetGradientStepConfig
 
     name: ClassVar[str] = "tsnet_gradient_step"
-    category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
-    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        f"extras.{_TSNET_PROBABILITIES_KEY}",
+        f"extras.{_TSNET_EARLY_EXAGGERATION_KEY}",
+        f"extras.{_TSNET_EARLY_STEPS_KEY}",
+        f"extras.{_TSNET_MIN_GAIN_KEY}",
+        f"extras.{_TSNET_MIN_DISTANCE_KEY}",
+        f"extras.{_TSNET_EARLY_LR_KEY}",
+        f"extras.{_TSNET_LATE_LR_KEY}",
+        f"extras.{_TSNET_UPDATE_KEY}",
+        f"extras.{_TSNET_GAINS_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        f"extras.{_TSNET_UPDATE_KEY}",
+        f"extras.{_TSNET_GAINS_KEY}",
+    )
+    requires: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        f"extras.{_TSNET_PROBABILITIES_KEY}",
+        f"extras.{_TSNET_UPDATE_KEY}",
+        f"extras.{_TSNET_GAINS_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[TsnetGradientStepConfig] = None) -> None:
+        """Store gain-and-momentum hyperparameters.
+
+        Parameters
+        ----------
+        config : TsnetGradientStepConfig | None, optional
+            Optional gradient-step configuration.
+        """
         self.config = config or TsnetGradientStepConfig()
 
     def apply(
@@ -327,14 +416,15 @@ class TsnetGradientStep(Op):
         if state.pos is None:
             raise ValueError("TsnetGradientStep requires state.pos to be set.")
 
-        probabilities = state.extras["tsnet_probabilities"]
-        early_exag = state.extras["tsnet_early_exaggeration"]
-        early_steps = state.extras["tsnet_early_exaggeration_steps"]
-        min_gain = state.extras["tsnet_min_gain"]
-        early_lr = state.extras["tsnet_early_learning_rate"]
-        late_lr = state.extras["tsnet_late_learning_rate"]
-        update = state.extras["tsnet_update"]
-        gains = state.extras["tsnet_gains"]
+        probabilities = state.extras[_TSNET_PROBABILITIES_KEY]
+        early_exag = state.extras[_TSNET_EARLY_EXAGGERATION_KEY]
+        early_steps = state.extras[_TSNET_EARLY_STEPS_KEY]
+        min_gain = state.extras[_TSNET_MIN_GAIN_KEY]
+        min_distance = state.extras[_TSNET_MIN_DISTANCE_KEY]
+        early_lr = state.extras[_TSNET_EARLY_LR_KEY]
+        late_lr = state.extras[_TSNET_LATE_LR_KEY]
+        update = state.extras[_TSNET_UPDATE_KEY]
+        gains = state.extras[_TSNET_GAINS_KEY]
 
         step = state.step
         exaggeration = early_exag if step < early_steps else 1.0
@@ -342,18 +432,20 @@ class TsnetGradientStep(Op):
         delta = state.pos.unsqueeze(1) - state.pos.unsqueeze(0)
         squared_distances = delta.square().sum(dim=2)
         numerators = (1.0 + squared_distances).reciprocal()
+        # Self-similarities stay zero so the Student-t normalization matches
+        # classic t-SNE and only covers off-diagonal mass.
         diagonal_mask = ~torch.eye(
             state.pos.shape[0],
             dtype=torch.bool,
             device=state.pos.device,
         )
         numerators = numerators * diagonal_mask.to(dtype=numerators.dtype)
-        q = numerators / numerators.sum().clamp(min=_MIN_DISTANCE)
+        q = numerators / numerators.sum().clamp(min=min_distance)
         loss = (
             effective_probabilities
             * (
-                effective_probabilities.clamp(min=_MIN_DISTANCE).log()
-                - q.clamp(min=_MIN_DISTANCE).log()
+                effective_probabilities.clamp(min=min_distance).log()
+                - q.clamp(min=min_distance).log()
             )
         ).sum()
         loss.backward()
@@ -363,6 +455,8 @@ class TsnetGradientStep(Op):
         learning_rate = early_lr if step < early_steps else late_lr
 
         with torch.no_grad():
+            # Adaptive gains increase only where the update and current
+            # gradient disagree, matching the classic tsNET optimizer state.
             inc = (update * grad) < 0.0
             dec = ~inc
             gains[inc] += self.config.gain_increase
@@ -373,8 +467,8 @@ class TsnetGradientStep(Op):
             state.pos.add_(update)
             state.pos.grad.zero_()
 
-        state.extras["tsnet_update"] = update
-        state.extras["tsnet_gains"] = gains
+        state.extras[_TSNET_UPDATE_KEY] = update
+        state.extras[_TSNET_GAINS_KEY] = gains
         return state
 
 
@@ -387,6 +481,7 @@ class TsnetFinalizePositions(Op):
     reads: ClassVar[Tuple[str, ...]] = ("pos",)
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -429,9 +524,12 @@ class TsnetFinalizePositions(Op):
 
 
 __all__ = [
+    "TsnetInitializePositionsConfig",
     "TsnetInitializePositions",
+    "TsnetPrepareStateConfig",
     "TsnetPrepareState",
     "TsnetInitializeOptimizer",
+    "TsnetGradientStepConfig",
     "TsnetGradientStep",
     "TsnetFinalizePositions",
 ]

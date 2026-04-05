@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import ClassVar, List, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -246,11 +246,11 @@ class BezierControlPointOpt(Op):
 
     config: BezierControlPointOptConfig = BezierControlPointOptConfig()
 
-    name = "bezier_control_point_opt"
-    category = OpCategory.EDGE_ROUTE
-    reads = ("pos", "edge_routes")
-    writes = ("edge_routes",)
-    requires = ("pos", "edge_routes")
+    name: ClassVar[str] = "bezier_control_point_opt"
+    category: ClassVar[OpCategory] = OpCategory.EDGE_ROUTE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "edge_routes")
+    writes: ClassVar[Tuple[str, ...]] = ("edge_routes",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "edge_routes")
 
     def apply(
         self,
@@ -310,11 +310,11 @@ class BezierControlPointOpt(Op):
 class ReconstructEdgeRoutes(Op):
     """Rebuild per-edge polyline routes from Sugiyama dummy-node chains."""
 
-    name = "reconstruct_edge_routes"
-    category = OpCategory.EDGE_ROUTE
-    reads = ("pos", "back_edge_mask", "extras.expanded_graph")
-    writes = ("edge_routes",)
-    requires = ("pos",)
+    name: ClassVar[str] = "reconstruct_edge_routes"
+    category: ClassVar[OpCategory] = OpCategory.EDGE_ROUTE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "back_edge_mask", "extras.expanded_graph")
+    writes: ClassVar[Tuple[str, ...]] = ("edge_routes",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
     def apply(
         self,
@@ -364,6 +364,8 @@ class ReconstructEdgeRoutes(Op):
         state.edge_routes = _reconstruct_routes(
             positions=positions,
             edge_paths=expanded_graph.edge_paths,
+            # Cycle breaking reverses some edges transiently; flip those routes
+            # back so downstream renderers see the original edge direction.
             reversed_edge_mask=state.back_edge_mask,
         )
         return state

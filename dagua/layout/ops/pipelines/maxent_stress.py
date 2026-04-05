@@ -1,4 +1,4 @@
-"""MaxEnt-Stress expressed as a composable ops pipeline."""
+"""MaxEnt-Stress layout pipeline."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ _MAJORIZATION_NODE_LIMIT = 5_000
 
 
 def build_maxent_stress_majorization_pipeline(steps: int = 200) -> Pipeline:
-    """Build a pipeline for the majorization branch of maxent-stress.
+    """Build the maxent-stress majorization pipeline.
 
     Parameters
     ----------
@@ -38,7 +38,10 @@ def build_maxent_stress_majorization_pipeline(steps: int = 200) -> Pipeline:
     Returns
     -------
     Pipeline
-        Pipeline that reproduces the classical majorization branch.
+        Pipeline implementing the classical maxent-stress majorization branch.
+        The pipeline produces final node coordinates by initializing positions,
+        preparing stress state, applying repeated majorization updates, and
+        finalizing the layout.
     """
     return Pipeline(
         [
@@ -60,21 +63,24 @@ def build_maxent_stress_gradient_pipeline(
     alpha: float = 1.0,
     use_entropy: bool = False,
 ) -> Pipeline:
-    """Build a pipeline for the gradient branch of maxent-stress.
+    """Build the maxent-stress gradient pipeline.
 
     Parameters
     ----------
     steps : int, default=200
         Number of Adam updates.
     alpha : float, default=1.0
-        Entropy repulsion weight.
+        Entropy repulsion weight used by the gradient objective.
     use_entropy : bool, default=False
         Whether to include entropy repulsion term.
 
     Returns
     -------
     Pipeline
-        Pipeline that reproduces the classical gradient branch.
+        Pipeline implementing the gradient-based maxent-stress variant. The
+        pipeline produces final node coordinates by initializing positions,
+        preparing the gradient objective, creating the optimizer, applying
+        repeated gradient steps, and finalizing the layout.
     """
     return Pipeline(
         [
@@ -106,7 +112,7 @@ def build_maxent_stress_pipeline(
     steps : int, default=200
         Number of optimization iterations.
     alpha : float, default=1.0
-        Entropy repulsion weight.
+        Entropy repulsion weight for the gradient branch.
     use_entropy : bool, default=False
         Whether to include entropy repulsion term.
     use_majorization : bool, default=True
@@ -117,7 +123,10 @@ def build_maxent_stress_pipeline(
     Returns
     -------
     Pipeline
-        Majorization pipeline when eligible; otherwise gradient pipeline.
+        Pipeline implementing maxent-stress with classical branch selection.
+        The pipeline produces final node coordinates by choosing the
+        majorization branch for small default-parameter problems and otherwise
+        dispatching to the gradient branch.
     """
     if (
         use_majorization
@@ -149,17 +158,18 @@ def layout_maxent_stress_pipeline(
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor used to select output device.
+        Optional node-size tensor with shape ``[N, 2]`` used to select the
+        output device.
     steps : int, default=200
         Number of optimization iterations.
     alpha : float, default=1.0
         Entropy repulsion weight.
     seed : int, default=42
-        Random seed.
+        Random seed used by the chosen branch.
     use_entropy : bool, default=False
         Whether to include entropy repulsion term.
     use_majorization : bool, default=True

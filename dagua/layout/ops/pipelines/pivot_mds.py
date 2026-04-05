@@ -1,4 +1,4 @@
-"""Pivot-MDS expressed as a composable ops pipeline."""
+"""Pivot-MDS layout pipeline."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def build_pivot_mds_pipeline(
     n_pivots: int = 50,
     weighted: bool = False,
 ) -> Pipeline:
-    """Build a Pivot-MDS pipeline that matches classic ``layout_pivot_mds``.
+    """Build a Pivot-MDS pipeline.
 
     Parameters
     ----------
@@ -35,7 +35,10 @@ def build_pivot_mds_pipeline(
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic Pivot-MDS exactly.
+        Pipeline implementing the Pivot-MDS algorithm. The pipeline produces
+        final node coordinates by building adjacency, selecting pivots,
+        computing pivot-to-node distances, solving the low-rank MDS embedding,
+        and finalizing the layout.
 
     Raises
     ------
@@ -76,11 +79,12 @@ def layout_pivot_mds_pipeline(
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor used to scale the final drawing extent.
+        Optional node-size tensor with shape ``[N, 2]`` used to scale the
+        final drawing extent.
     n_pivots : int, default=50
         Maximum number of pivots to select.
     seed : int, default=42
@@ -91,8 +95,7 @@ def layout_pivot_mds_pipeline(
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_pivot_mds``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------
