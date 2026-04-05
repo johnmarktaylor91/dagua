@@ -31,9 +31,11 @@ expressed as differentiable loss terms. Hard pins (weight=inf) enforced via proj
 
 ### `dagua/layout/` — Layout Engine (Heart of Dagua)
 Differentiable graph layout via PyTorch optimization. **Headless**: operates on tensors,
-not Graph objects. See `dagua/layout/CLAUDE.md` for module-level detail.
+not Graph objects. See `dagua/layout/AGENTS.md` for module-level detail.
 
-- `engine.py` — Optimization loop. Wires constraints, runs Adam, optional projection.
+**Core engine modules:**
+- `engine.py` — Optimization loop + algorithm dispatch. When `LayoutConfig.algorithm` is set,
+  dispatches to the corresponding ops pipeline; otherwise runs the native multilevel/direct engine.
 - `constraints.py` — Composable loss callables: DAG, Repel, Attract, Overlap, Cluster, Pin, Align, FlexSpacing, Crossing.
 - `projection.py` — Hard overlap + hard pin projection (projected gradient descent).
 - `schedule.py` — Annealing schedules for constraint weights over optimization steps.
@@ -42,6 +44,30 @@ not Graph objects. See `dagua/layout/CLAUDE.md` for module-level detail.
 - `multilevel.py` — Multilevel/coarsening layout for large graphs.
 - `cycle.py` — Cycle detection and temporary edge reversal for DAG constraints.
 - `edge_optimization.py` — Post-layout edge-aware position refinement.
+
+**Composable ops system (`dagua/layout/ops/`):**
+268 registered primitives across 34 modules. Each op is a pure function decorated with
+`@register_op`. Ops share state via `SolveState` (9 typed fields: pos, edge_index, N, E,
+adj, graph_data, rng, extras, optimizer).
+
+- `base.py` — Op protocol, `@register_op` decorator, op registry
+- `state.py` — `SolveState` dataclass for cross-op data flow
+- `graph_utils.py` — Self-contained graph utilities (BFS, Dijkstra, APSP, adjacency builders)
+- `force.py` (22 ops), `embed.py` (14), `init.py` (15), `anneal.py` (12), etc.
+- Per-algorithm op files: `drl.py`, `fmmm.py`, `gem.py`, `lgl.py`, `neulay.py`, etc.
+
+**Algorithm pipelines (`dagua/layout/ops/pipelines/`):**
+23 algorithms built purely by composing registered ops — no inline functions, no archive
+imports. `PIPELINE_REGISTRY` maps algorithm names to pipeline functions. Each pipeline
+accepts a `SolveState` and returns final positions.
+
+Available algorithms: fr, kk, fa2, stress_sgd, stress_majorization, sfdp, umap, tsnet,
+sugiyama, spectral, classical_mds, pivot_mds, drl, gem, graphopt, lgl, linlog, fmmm,
+davidson_harel, maxent_stress, neulay, sgd2_multi, reingold_tilford.
+
+**Archive (`dagua/layout/_archive/`):**
+Frozen monolithic reimplementations of all 23 algorithms. Reference-only -- used as
+test oracles for pipeline fidelity validation. Not imported by production code.
 
 ### `dagua/render/` — Output Backends
 Three independent renderers, no shared state. See `dagua/render/CLAUDE.md`.
@@ -129,36 +155,49 @@ Key types flowing between modules:
 
 ```
 elements.py, styles.py, flex.py, config.py, defaults.py  (leaf modules, no dagua imports)
-    ↓
+    |
 utils.py  (imports elements for text measurement)
-    ↓
+    |
 graph.py  (imports styles, elements, utils, config, flex, defaults)
-    ↓
-layout/  (imports NOTHING from dagua — headless, tensor-only)
-    ↓
+    |
+layout/engine.py  (imports constraints, projection, schedule -- nothing else from dagua)
+    |   dispatches to:
+    |
+layout/ops/  (268 ops -- imports NOTHING from dagua; pure torch + stdlib)
+    |   composed into:
+layout/ops/pipelines/  (23 algorithms -- imports only from ops/)
+    |
+layout/_archive/  (frozen monoliths -- reference only, not imported by production)
+    |
 routing.py  (post-layout, imports elements for edge types)
-    ↓
+    |
 edges.py  (imports routing, elements)
-    ↓
-render/  (imports elements, styles for type info — never imports graph)
-    ↓
+    |
+render/  (imports elements, styles for type info -- never imports graph)
+    |
 io.py  (imports graph, elements, styles for serialization)
-    ↓
+    |
 __init__.py  (re-exports everything)
-    ↓
+    |
 cli.py  (imports from __init__, eval/)
 ```
 
 `eval/` is a parallel tree: imports from dagua public API + competitors. Never imported
-by core dagua modules.
+by core dagua modules. `layout/ops/` is similarly isolated -- pure torch, no dagua imports.
 
 ## Known Complexity
 
-- **`dagua/layout/engine.py`** — The optimization loop wires many concerns: constraints,
-  projection, annealing, flex, pin/align, multilevel. Most layout bugs originate here.
+- **`dagua/layout/engine.py`** -- The optimization loop wires many concerns: constraints,
+  projection, annealing, flex, pin/align, multilevel. Also handles algorithm dispatch to
+  ops pipelines. Most layout bugs originate here.
 
-- **`dagua/layout/constraints.py`** — Crossing loss is O(E²). Interval amortization needed
+- **`dagua/layout/constraints.py`** -- Crossing loss is O(E^2). Interval amortization needed
   for large graphs. Adding new constraints requires understanding the graph_data dict protocol.
+
+- **`dagua/layout/ops/`** -- 268 ops across 34 modules. Each op is independently testable
+  but correctness depends on precise composition order in pipelines. RNG backends vary
+  per algorithm (torch, numpy, Python random) for fidelity with original implementations.
+  SolveState extras dict is the escape hatch for algorithm-specific state.
 
 - **`dagua/graph.py`** — Large file (~800+ lines). Style cascade resolution, the draw()
   pipeline, and tensor extraction logic all live here. Refactoring into smaller pieces
