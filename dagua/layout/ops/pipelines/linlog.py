@@ -1,4 +1,4 @@
-"""LinLog expressed as a composable ops pipeline."""
+"""LinLog energy-model layout pipeline."""
 
 from __future__ import annotations
 
@@ -30,21 +30,25 @@ def build_linlog_pipeline(
     a: float = 1.0,
     r: float = 0.0,
 ) -> Pipeline:
-    """Build a LinLog pipeline that matches classic ``layout_linlog``.
+    """Build a LinLog energy-model pipeline.
 
     Parameters
     ----------
     steps : int, default=300
         Number of Adam updates.
     a : float, default=1.0
-        Attraction exponent.
+        Attraction exponent in the LinLog objective.
     r : float, default=0.0
-        Repulsion exponent.
+        Repulsion exponent in the LinLog objective.
 
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic ``layout_linlog``.
+        Pipeline implementing the LinLog algorithm. The pipeline produces
+        final node coordinates by initializing positions, creating an Adam
+        optimizer, iteratively evaluating the LinLog loss with the requested
+        exponents, stepping the optimizer with learning-rate decay, and
+        finalizing the layout.
 
     Raises
     ------
@@ -107,11 +111,12 @@ def layout_linlog_pipeline(
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor used only to scale the final layout.
+        Optional node-size tensor with shape ``[N, 2]`` used only to scale the
+        final layout.
     steps : int, default=300
         Number of Adam updates.
     seed : int, default=42
@@ -126,8 +131,7 @@ def layout_linlog_pipeline(
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_linlog``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------

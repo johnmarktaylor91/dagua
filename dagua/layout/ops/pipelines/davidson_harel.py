@@ -1,4 +1,4 @@
-"""Davidson-Harel simulated annealing expressed as a composable ops pipeline."""
+"""Davidson-Harel simulated-annealing layout pipeline."""
 
 from __future__ import annotations
 
@@ -24,7 +24,26 @@ from dagua.layout.ops.state import (  # noqa: E402
 
 
 def build_davidson_harel_pipeline(rounds: int = 100) -> Pipeline:
-    """Build a Davidson-Harel pipeline that reproduces the classic implementation."""
+    """Build a Davidson-Harel simulated-annealing pipeline.
+
+    Parameters
+    ----------
+    rounds : int, default=100
+        Number of annealing rounds to execute.
+
+    Returns
+    -------
+    Pipeline
+        Pipeline implementing the Davidson-Harel algorithm. The pipeline
+        produces final node coordinates by initializing positions, preparing
+        annealing state, proposing and accepting moves across repeated rounds,
+        cooling the temperature, and finalizing the layout.
+
+    Raises
+    ------
+    ValueError
+        If ``rounds`` is negative.
+    """
     if rounds < 0:
         raise ValueError("rounds must be non-negative.")
 
@@ -54,16 +73,17 @@ def layout_davidson_harel_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the Davidson-Harel pipeline as a drop-in classic replacement.
+    """Run the Davidson-Harel pipeline as a drop-in replacement.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Node-size tensor used only for output device/extent selection.
+        Optional node-size tensor with shape ``[N, 2]`` used only for output
+        device and extent selection.
     rounds : int, default=100
         Number of annealing rounds.
     seed : int, default=42
@@ -74,7 +94,14 @@ def layout_davidson_harel_pipeline(
     Returns
     -------
     torch.Tensor
-        Position tensor with shape ``[N, 2]``.
+        Final position tensor with shape ``[N, 2]``.
+
+    Raises
+    ------
+    ValueError
+        If ``num_nodes``, ``rounds``, or ``edge_weights`` are invalid.
+    RuntimeError
+        If the pipeline does not populate final positions.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")

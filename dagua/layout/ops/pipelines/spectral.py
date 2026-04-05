@@ -1,4 +1,4 @@
-"""Spectral layout expressed as a composable ops pipeline."""
+"""Spectral graph layout pipeline."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def build_spectral_pipeline(
     normalization: str = "symmetric",
     sparse_threshold: int = SPARSE_EIGEN_THRESHOLD,
 ) -> Pipeline:
-    """Build a spectral pipeline that matches ``layout_spectral``.
+    """Build a spectral graph layout pipeline.
 
     Parameters
     ----------
@@ -36,7 +36,10 @@ def build_spectral_pipeline(
     Returns
     -------
     Pipeline
-        Pipeline that reproduces ``layout_spectral`` exactly.
+        Pipeline implementing the spectral-layout algorithm. The pipeline
+        produces final node coordinates by preparing the requested graph
+        Laplacian, solving the leading non-trivial eigenvectors with dense or
+        sparse eigendecomposition, and finalizing the embedding.
 
     Raises
     ------
@@ -64,16 +67,17 @@ def layout_spectral_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     normalization: str = "symmetric",
 ) -> torch.Tensor:
-    """Run the spectral pipeline as a drop-in replacement.
+    """Run the spectral graph layout pipeline.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Unused, accepted for interface compatibility.
+        Optional node-size tensor with shape ``[N, 2]``. Unused and accepted
+        for interface compatibility.
     seed : int, default=42
         Accepted for interface compatibility. Spectral layout is deterministic
         once the graph is fixed.
@@ -85,8 +89,7 @@ def layout_spectral_pipeline(
     Returns
     -------
     torch.Tensor
-        Final position tensor with the same dtype, device, and values as
-        classic ``layout_spectral``.
+        Final position tensor with shape ``[N, 2]``.
 
     Raises
     ------

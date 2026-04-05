@@ -12,7 +12,7 @@ import math
 from collections import deque
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -1452,6 +1452,7 @@ _sgd2 = SimpleNamespace(
     _edge_pair_positions=_sgd2_edge_pair_positions,
     _are_edge_pairs_crossed=_sgd2_are_edge_pairs_crossed,
     _criterion_loss=_sgd2_criterion_loss,
+    torch=torch,
 )
 
 
@@ -2250,11 +2251,13 @@ def _crossings_loss_with_override_steps(
 class ExactPairStressLoss(LossOp):
     """Exact graph-stress loss over all finite node pairs."""
 
-    name = "exact_pair_stress_loss"
-    category = OpCategory.LOSS
-    reads = ("pos", "distance_matrix")
-    requires = ("pos",)
-    weight_key = "stress"
+    name: ClassVar[str] = "exact_pair_stress_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "distance_matrix")
+    writes: ClassVar[Tuple[str, ...]] = ()
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
+    weight_key: ClassVar[str] = "stress"
 
     def __init__(self, config: Optional[ExactPairStressLossConfig] = None) -> None:
         """Store the exact-stress configuration.
@@ -2307,11 +2310,13 @@ class ExactPairStressLoss(LossOp):
 class PivotApproxStressLoss(LossOp):
     """Pivot-approximated maxent-stress objective."""
 
-    name = "pivot_approx_stress_loss"
-    category = OpCategory.LOSS
-    reads = ("pos", "pivot_indices", "pivot_distances")
-    requires = ("pos", "pivot_distances")
-    weight_key = "stress"
+    name: ClassVar[str] = "pivot_approx_stress_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "pivot_indices", "pivot_distances")
+    writes: ClassVar[Tuple[str, ...]] = ()
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "pivot_distances")
+    access_pattern: ClassVar[str] = "global"
+    weight_key: ClassVar[str] = "stress"
 
     def evaluate(
         self,
@@ -2361,11 +2366,13 @@ class PivotApproxStressLoss(LossOp):
 class KLDivergenceLoss(LossOp):
     """Exact t-SNE KL divergence with early exaggeration."""
 
-    name = "kl_divergence_loss"
-    category = OpCategory.LOSS
-    reads = ("pos", "affinity_matrix", "distance_matrix")
-    requires = ("pos",)
-    weight_key = "kl"
+    name: ClassVar[str] = "kl_divergence_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "affinity_matrix", "distance_matrix")
+    writes: ClassVar[Tuple[str, ...]] = ()
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
+    weight_key: ClassVar[str] = "kl"
 
     def __init__(self, config: Optional[KLDivergenceLossConfig] = None) -> None:
         """Store the t-SNE KL configuration.
@@ -2420,12 +2427,18 @@ class KLDivergenceLoss(LossOp):
 class UMAPCrossEntropyLoss(LossOp):
     """UMAP cross-entropy loss with negative sampling."""
 
-    name = "umap_cross_entropy_loss"
-    category = OpCategory.LOSS
-    reads = ("pos", "extras.umap_head", "extras.umap_tail", "extras.umap_weight")
-    requires = ("pos",)
-    weight_key = "umap_ce"
-    access_pattern = "sampled"
+    name: ClassVar[str] = "umap_cross_entropy_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "extras.umap_head",
+        "extras.umap_tail",
+        "extras.umap_weight",
+    )
+    writes: ClassVar[Tuple[str, ...]] = ()
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    weight_key: ClassVar[str] = "umap_ce"
+    access_pattern: ClassVar[str] = "sampled"
 
     def __init__(self, config: Optional[UMAPCrossEntropyLossConfig] = None) -> None:
         """Store the UMAP loss configuration.
@@ -2482,6 +2495,8 @@ class UMAPCrossEntropyLoss(LossOp):
         if self.config.neg_rate <= 0 or self.config.repulsion_strength == 0.0:
             return positive_loss
 
+        # Draw negatives from the full node set, matching UMAP's reference
+        # objective where repulsion is estimated by uniform negative sampling.
         negatives = torch.randint(
             0,
             problem.num_nodes,
@@ -2504,11 +2519,13 @@ class UMAPCrossEntropyLoss(LossOp):
 class LinLogAttractionLoss(LossOp):
     """LinLog edge-attraction term from the classic objective."""
 
-    name = "linlog_attraction_loss"
-    category = OpCategory.LOSS
-    reads = ("pos",)
-    requires = ("pos",)
-    weight_key = "linlog_attract"
+    name: ClassVar[str] = "linlog_attraction_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ()
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "edge"
+    weight_key: ClassVar[str] = "linlog_attract"
 
     def __init__(self, config: Optional[LinLogAttractionLossConfig] = None) -> None:
         """Store the LinLog attraction configuration.
@@ -2564,11 +2581,13 @@ class LinLogAttractionLoss(LossOp):
 class LinLogRepulsionLoss(LossOp):
     """LinLog all-pairs repulsion term from the classic objective."""
 
-    name = "linlog_repulsion_loss"
-    category = OpCategory.LOSS
-    reads = ("pos",)
-    requires = ("pos",)
-    weight_key = "linlog_repel"
+    name: ClassVar[str] = "linlog_repulsion_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ()
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
+    weight_key: ClassVar[str] = "linlog_repel"
 
     def __init__(self, config: Optional[LinLogRepulsionLossConfig] = None) -> None:
         """Store the LinLog repulsion configuration.
@@ -2625,10 +2644,12 @@ class LinLogRepulsionLoss(LossOp):
 class LinLogLoss(LossOp):
     """Evaluate the full classic LinLog objective (attraction + repulsion)."""
 
-    name = "linlog_loss"
-    category = OpCategory.LOSS
-    reads = ("pos", "step")
-    requires = ("pos",)
+    name: ClassVar[str] = "linlog_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "step")
+    writes: ClassVar[Tuple[str, ...]] = ()
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[LinLogLossConfig] = None) -> None:
         """Store full objective exponents for the LinLog criterion.
@@ -2684,11 +2705,17 @@ class LinLogLoss(LossOp):
 class EntropyLoss(LossOp):
     """Maxent-stress non-edge entropy regularizer."""
 
-    name = "entropy_loss"
-    category = OpCategory.LOSS
-    reads = ("pos", "extras.maxent_non_edge_src", "extras.maxent_non_edge_dst")
-    requires = ("pos",)
-    weight_key = "entropy"
+    name: ClassVar[str] = "entropy_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "extras.maxent_non_edge_src",
+        "extras.maxent_non_edge_dst",
+    )
+    writes: ClassVar[Tuple[str, ...]] = ()
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "sampled"
+    weight_key: ClassVar[str] = "entropy"
 
     def __init__(self, config: Optional[EntropyLossConfig] = None) -> None:
         """Store the entropy-loss configuration.
@@ -2737,11 +2764,13 @@ class EntropyLoss(LossOp):
 class DavidsonHarelEnergyLoss(LossOp):
     """Five-term Davidson-Harel simulated-annealing energy."""
 
-    name = "davidson_harel_energy_loss"
-    category = OpCategory.LOSS
-    reads = ("pos",)
-    requires = ("pos",)
-    weight_key = "davidson_harel"
+    name: ClassVar[str] = "davidson_harel_energy_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ()
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
+    weight_key: ClassVar[str] = "davidson_harel"
 
     def __init__(self, config: Optional[DavidsonHarelEnergyLossConfig] = None) -> None:
         """Store the Davidson-Harel energy weights.
@@ -2884,11 +2913,13 @@ class DavidsonHarelEnergyLoss(LossOp):
 class ElasticLoss(LossOp):
     """NeuLay elastic edge-attraction loss."""
 
-    name = "elastic_loss"
-    category = OpCategory.LOSS
-    reads = ("pos",)
-    requires = ("pos",)
-    weight_key = "elastic"
+    name: ClassVar[str] = "elastic_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ()
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "edge"
+    weight_key: ClassVar[str] = "elastic"
 
     def evaluate(
         self,
@@ -2922,13 +2953,13 @@ class ElasticLoss(LossOp):
 class KDTreeRepulsionLoss(LossOp):
     """NeuLay Gaussian repulsion over cached KD-tree pairs."""
 
-    name = "kdtree_repulsion_loss"
-    category = OpCategory.LOSS
-    reads = ("pos", "extras.neulay_kdtree_pairs")
-    writes = ("extras.neulay_kdtree_pairs",)
-    requires = ("pos",)
-    weight_key = "kdtree_repel"
-    access_pattern = "sampled"
+    name: ClassVar[str] = "kdtree_repulsion_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras.neulay_kdtree_pairs")
+    writes: ClassVar[Tuple[str, ...]] = ("extras.neulay_kdtree_pairs",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    weight_key: ClassVar[str] = "kdtree_repel"
+    access_pattern: ClassVar[str] = "sampled"
 
     def __init__(self, config: Optional[KDTreeRepulsionLossConfig] = None) -> None:
         """Store the KD-tree repulsion configuration.
@@ -2987,13 +3018,13 @@ class KDTreeRepulsionLoss(LossOp):
 class SGD2CriterionLoss(LossOp):
     """One sampled criterion from the classic (SGD)^2 optimizer."""
 
-    name = "sgd2_criterion_loss"
-    category = OpCategory.LOSS
-    reads = ("pos", "extras.sgd2_prepared_state", "extras.sgd2_samplers")
-    writes = ("extras.sgd2_prepared_state", "extras.sgd2_samplers")
-    requires = ("pos",)
-    weight_key = "sgd2_criterion"
-    access_pattern = "sampled"
+    name: ClassVar[str] = "sgd2_criterion_loss"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras.sgd2_prepared_state", "extras.sgd2_samplers")
+    writes: ClassVar[Tuple[str, ...]] = ("extras.sgd2_prepared_state", "extras.sgd2_samplers")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    weight_key: ClassVar[str] = "sgd2_criterion"
+    access_pattern: ClassVar[str] = "sampled"
 
     def __init__(self, config: Optional[SGD2CriterionLossConfig] = None) -> None:
         """Store the SGD2 criterion configuration.
@@ -3055,6 +3086,8 @@ class SGD2CriterionLoss(LossOp):
                 inner_steps=_sgd2._CROSSING_DETECTOR_TRAIN_STEPS,
                 detector_lr=_sgd2._CROSSING_DETECTOR_LR,
             )
+        # The prepared-state cache keeps expensive graph preprocessing stable
+        # while the active criterion swaps between different sampled batches.
         return _sgd2._criterion_loss(
             name=self.config.criterion,
             pos=pos,
@@ -3070,12 +3103,16 @@ class SGD2CriterionLoss(LossOp):
 class SGD2CrossingDetectorStep(Op):
     """Train the SGD2 crossing detector and backpropagate crossing loss."""
 
-    name = "sgd2_crossing_detector_step"
-    category = OpCategory.LOSS
-    reads = ("pos", "extras.sgd2_prepared_state", "extras.sgd2_samplers")
-    writes = ("prev_loss", "extras.sgd2_crossing_state", "extras.sgd2_prepared_state")
-    requires = ("pos",)
-    access_pattern = "sampled"
+    name: ClassVar[str] = "sgd2_crossing_detector_step"
+    category: ClassVar[OpCategory] = OpCategory.LOSS
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras.sgd2_prepared_state", "extras.sgd2_samplers")
+    writes: ClassVar[Tuple[str, ...]] = (
+        "prev_loss",
+        "extras.sgd2_crossing_state",
+        "extras.sgd2_prepared_state",
+    )
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "sampled"
 
     def __init__(self, config: Optional[SGD2CrossingDetectorStepConfig] = None) -> None:
         """Store the crossing-detector configuration.
@@ -3162,10 +3199,13 @@ class SGD2CrossingDetectorStep(Op):
 class CyclicSampler(Op):
     """Create or refresh an SGD2 cyclic sampler in ``state.extras``."""
 
-    name = "cyclic_sampler"
-    category = OpCategory.UTILITY
-    reads = ("extras.sgd2_active_criterion", "extras.sgd2_prepared_state")
-    writes = ("extras.sgd2_samplers",)
+    name: ClassVar[str] = "cyclic_sampler"
+    category: ClassVar[OpCategory] = OpCategory.UTILITY
+    reads: ClassVar[Tuple[str, ...]] = (
+        "extras.sgd2_active_criterion",
+        "extras.sgd2_prepared_state",
+    )
+    writes: ClassVar[Tuple[str, ...]] = ("extras.sgd2_samplers",)
 
     def __init__(self, config: Optional[CyclicSamplerConfig] = None) -> None:
         """Store the sampler configuration.

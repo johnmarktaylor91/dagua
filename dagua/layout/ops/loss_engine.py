@@ -97,6 +97,7 @@ def _zero_scalar(pos: torch.Tensor) -> torch.Tensor:
 
 def _exact_repulsion_loss(
     pos: torch.Tensor,
+    distance_epsilon: float,
     node_sizes: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute the exact all-pairs repulsion term from ``constraints.py``.
@@ -105,6 +106,8 @@ def _exact_repulsion_loss(
     ----------
     pos : torch.Tensor
         Node positions with shape ``[N, 2]``.
+    distance_epsilon : float
+        Positive additive floor applied to squared distances.
     node_sizes : torch.Tensor | None, default=None
         Optional node sizes with shape ``[N, 2]`` for size-aware scaling.
 
@@ -118,7 +121,7 @@ def _exact_repulsion_loss(
         return _zero_scalar(pos)
 
     diff = pos.unsqueeze(0) - pos.unsqueeze(1)
-    dist_sq = diff.square().sum(dim=2) + 1e-4
+    dist_sq = diff.square().sum(dim=2) + distance_epsilon
     mask = ~torch.eye(num_nodes, dtype=torch.bool, device=pos.device)
 
     if node_sizes is not None:
@@ -206,12 +209,29 @@ class EdgeLengthVarianceLossConfig:
 
 @dataclass(frozen=True)
 class RepulsionLossConfig:
-    """Configuration for :class:`RepulsionLoss`."""
+    """Configuration for :class:`RepulsionLoss`.
+
+    Parameters
+    ----------
+    threshold : int, default=2000
+        Reserved threshold for switching away from the exact all-pairs path.
+        The current op keeps the exact path regardless of this value.
+    sample_k : int, default=128
+        Reserved sample count for future sampled repulsion paths.
+    rvs_threshold : int, default=5000
+        Reserved threshold for future random-vantage-set repulsion paths.
+    rvs_nn_k : int, default=20
+        Reserved neighbor count for future random-vantage-set paths.
+    distance_epsilon : float, default=1e-4
+        Positive additive floor applied to squared pairwise distances in the
+        current exact path.
+    """
 
     threshold: int = 2000
     sample_k: int = 128
     rvs_threshold: int = 5000
     rvs_nn_k: int = 20
+    distance_epsilon: float = 1.0e-4
 
 
 @dataclass(frozen=True)
@@ -510,7 +530,11 @@ class RepulsionLoss(LossOp):
         node_sizes = problem.node_sizes
         # TODO(jtaylor): Add the scatter/RVS/sampled strategies from constraints.py
         # behind this op once the simple exact path is covered by tests.
-        return _exact_repulsion_loss(pos, node_sizes=node_sizes)
+        return _exact_repulsion_loss(
+            pos,
+            distance_epsilon=self.config.distance_epsilon,
+            node_sizes=node_sizes,
+        )
 
 
 @register_op
