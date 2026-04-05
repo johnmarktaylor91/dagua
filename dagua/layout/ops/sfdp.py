@@ -18,20 +18,96 @@ from dagua.layout.ops.graph_utils import layout_extent as _layout_extent
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
-_EPSILON = 1.0e-9
-_MIN_SPAN = 1.0e-6
-_FORCE_SCALING = 0.2
-_DEFAULT_P = -1.0
-_DEFAULT_THETA = 0.6
-_DEFAULT_TOLERANCE = 1.0e-3
-_DEFAULT_STEP = 0.1
-_MAX_QUADTREE_DEPTH = 10
-_MIN_COARSE_SIZE = 4
-_MIN_COARSEN_REDUCTION = 0.75
-_BARNES_HUT_THRESHOLD = 10_000
-_PROLONGATION_NOISE_SCALE = 1.0e-3
-_PROLONGATION_SMOOTHING = 0.5
-_REFINEMENT_K_DECAY = 0.75
+
+@dataclass(frozen=True)
+class SFDPAlgorithmConfig:
+    """Shared SFDP numerical constants.
+
+    Parameters
+    ----------
+    epsilon : float, default=1e-9
+        Lower bound used in norm and distance denominators.
+    min_span : float, default=1e-6
+        Minimum coordinate span used during normalization and scaling.
+    force_scaling : float, default=0.2
+        Graphviz-style ``C`` scaling term used in force coefficients.
+    default_theta : float, default=0.6
+        Default Barnes-Hut opening angle.
+    default_repulsive_exponent : float, default=-1.0
+        Default SFDP repulsive exponent ``p``.
+    default_step : float, default=0.1
+        Initial displacement step per iteration.
+    fallback_edge_length : float, default=1.0
+        Edge-length fallback for edgeless coarse graphs.
+    max_quadtree_depth : int, default=10
+        Maximum Barnes-Hut tree depth.
+    barnes_hut_threshold : int, default=10000
+        Node-count cutoff for switching from exact to approximate repulsion.
+    prolongation_noise_scale : float, default=1e-3
+        Small jitter scale used to split fine nodes that share a coarse parent.
+    prolongation_smoothing : float, default=0.5
+        Blend factor between inherited and neighbor-smoothed prolongation.
+    refinement_k_decay : float, default=0.75
+        Per-level decay applied to the ideal edge length during refinement.
+    """
+
+    epsilon: float = 1.0e-9
+    min_span: float = 1.0e-6
+    force_scaling: float = 0.2
+    default_theta: float = 0.6
+    default_repulsive_exponent: float = -1.0
+    default_step: float = 0.1
+    fallback_edge_length: float = 1.0
+    max_quadtree_depth: int = 10
+    barnes_hut_threshold: int = 10_000
+    prolongation_noise_scale: float = 1.0e-3
+    prolongation_smoothing: float = 0.5
+    refinement_k_decay: float = 0.75
+
+
+@dataclass(frozen=True)
+class SFDPHierarchyConfig:
+    """Configuration for heavy-edge matching hierarchy construction.
+
+    Parameters
+    ----------
+    min_coarse_size : int, default=4
+        Smallest coarse graph that is still worth solving.
+    min_coarsen_reduction : float, default=0.75
+        Maximum retained node ratio for accepting a coarsening step.
+    """
+
+    min_coarse_size: int = 4
+    min_coarsen_reduction: float = 0.75
+
+
+@dataclass(frozen=True)
+class SFDPAdaptiveCoolConfig:
+    """Configuration for :class:`SFDPAdaptiveCool`.
+
+    Parameters
+    ----------
+    adaptive_cooling : bool, default=True
+        Whether to apply Graphviz-style step adaptation.
+    tolerance : float, default=1e-3
+        Convergence threshold on the adaptive step size.
+    shrink_factor : float, default=0.9
+        Multiplicative shrink when force norm worsens.
+    plateau_ratio : float, default=0.95
+        Ratio above which the step is held constant.
+    growth_factor : float, default=1.1
+        Multiplicative growth when the force norm improves sufficiently.
+    """
+
+    adaptive_cooling: bool = True
+    tolerance: float = 1.0e-3
+    shrink_factor: float = 0.90
+    plateau_ratio: float = 0.95
+    growth_factor: float = 1.1
+
+
+_SFDP_ALGORITHM_CONFIG = SFDPAlgorithmConfig()
+_SFDP_HIERARCHY_CONFIG = SFDPHierarchyConfig()
 
 _GRAPH_KEY = "sfdp_graphs"
 _MAPPING_KEY = "sfdp_mappings"
@@ -115,7 +191,7 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
 
     centered = positions - positions.mean(dim=0, keepdim=True)
     span = float(centered.abs().max().item())
-    if span < _MIN_SPAN:
+    if span < _SFDP_ALGORITHM_CONFIG.min_span:
         centered = centered.clone()
         centered[:, 0] = torch.linspace(
             -1.0,
@@ -124,7 +200,7 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
             device=positions.device,
         )
         span = float(centered.abs().max().item())
-    return centered * (extent / max(span, _MIN_SPAN))
+    return centered * (extent / max(span, _SFDP_ALGORITHM_CONFIG.min_span))
 
 
 def _build_graph(
@@ -253,6 +329,7 @@ def _build_graph_from_mapping(
 def _heavy_edge_matching(
     graph: GraphData,
     generator: torch.Generator,
+    config: SFDPHierarchyConfig = _SFDP_HIERARCHY_CONFIG,
 ) -> Optional[tuple[torch.Tensor, GraphData]]:
     """Coarsen one level with random-order heavy-edge matching.
 
@@ -262,6 +339,8 @@ def _heavy_edge_matching(
         Fine-level graph.
     generator : torch.Generator
         Deterministic CPU random generator.
+    config : SFDPHierarchyConfig, default=SFDPHierarchyConfig()
+        Acceptance thresholds for each coarsening step.
 
     Returns
     -------
@@ -270,7 +349,7 @@ def _heavy_edge_matching(
         otherwise ``None``.
     """
     num_nodes = graph.num_nodes
-    if num_nodes < _MIN_COARSE_SIZE:
+    if num_nodes < config.min_coarse_size:
         return None
 
     order = torch.randperm(num_nodes, generator=generator).tolist()
@@ -300,9 +379,9 @@ def _heavy_edge_matching(
     coarse_num_nodes = coarse_node
     if coarse_num_nodes == graph.num_nodes:
         return None
-    if coarse_num_nodes < _MIN_COARSE_SIZE:
+    if coarse_num_nodes < config.min_coarse_size:
         return None
-    if coarse_num_nodes > int(_MIN_COARSEN_REDUCTION * float(graph.num_nodes)):
+    if coarse_num_nodes > int(config.min_coarsen_reduction * float(graph.num_nodes)):
         return None
 
     coarse_graph = _build_graph_from_mapping(
@@ -349,12 +428,12 @@ def _average_edge_length(graph: GraphData, positions: torch.Tensor) -> float:
         Average Euclidean edge length, or ``1.0`` when the graph is edgeless.
     """
     if graph.edge_index.numel() == 0:
-        return 1.0
+        return _SFDP_ALGORITHM_CONFIG.fallback_edge_length
 
     delta = positions[graph.edge_index[0]] - positions[graph.edge_index[1]]
     lengths = torch.linalg.vector_norm(delta, dim=1)
     mean_length = float(lengths.mean().item())
-    return max(mean_length, _MIN_SPAN)
+    return max(mean_length, _SFDP_ALGORITHM_CONFIG.min_span)
 
 
 def _spring_forces(
@@ -417,7 +496,7 @@ def _exact_repulsive_forces(
         return torch.zeros_like(positions)
 
     delta = positions[:, None, :] - positions[None, :, :]
-    distance_sq = torch.sum(delta * delta, dim=-1).clamp_min(_EPSILON)
+    distance_sq = torch.sum(delta * delta, dim=-1).clamp_min(_SFDP_ALGORITHM_CONFIG.epsilon)
     distance = torch.sqrt(distance_sq)
     diagonal = torch.eye(positions.shape[0], dtype=torch.bool)
     distance = distance.masked_fill(diagonal, float("inf"))
@@ -447,7 +526,10 @@ def _build_quadtree(positions: torch.Tensor) -> Optional[QuadTreeNode]:
     minimum = torch.amin(positions, dim=0)
     maximum = torch.amax(positions, dim=0)
     span = float(torch.max(maximum - minimum).item())
-    half_width = max(span * 0.5 + _MIN_SPAN, _MIN_SPAN)
+    half_width = max(
+        span * 0.5 + _SFDP_ALGORITHM_CONFIG.min_span,
+        _SFDP_ALGORITHM_CONFIG.min_span,
+    )
     center = (minimum + maximum) * 0.5
     indices = list(range(num_nodes))
     return _build_quadtree_node(
@@ -497,7 +579,7 @@ def _build_quadtree_node(
     node.mass = float(len(indices))
     node.center_of_mass = coords.mean(dim=0)
 
-    if len(indices) <= 1 or level >= _MAX_QUADTREE_DEPTH:
+    if len(indices) <= 1 or level >= _SFDP_ALGORITHM_CONFIG.max_quadtree_depth:
         return node
 
     child_half_width = half_width * 0.5
@@ -571,8 +653,14 @@ def _barnes_hut_force_for_index(
         delta = query - node.center_of_mass
         distance = float(torch.linalg.vector_norm(delta).item())
         width = node.half_width * 2.0
-        if index not in node.indices and distance > _EPSILON and (width / distance) < theta:
-            denominator = max(distance, _EPSILON) ** (2.0 - repulsive_exponent)
+        if (
+            index not in node.indices
+            and distance > _SFDP_ALGORITHM_CONFIG.epsilon
+            and (width / distance) < theta
+        ):
+            denominator = max(distance, _SFDP_ALGORITHM_CONFIG.epsilon) ** (
+                2.0 - repulsive_exponent
+            )
             return repulsive_scale * node.mass * delta / denominator
 
         force = torch.zeros(2, dtype=torch.float32)
@@ -596,7 +684,7 @@ def _barnes_hut_force_for_index(
 
     coords = positions[torch.tensor(leaf_indices, dtype=torch.long)]
     delta = query.unsqueeze(0) - coords
-    distance = torch.linalg.vector_norm(delta, dim=1).clamp_min(_EPSILON)
+    distance = torch.linalg.vector_norm(delta, dim=1).clamp_min(_SFDP_ALGORITHM_CONFIG.epsilon)
     denominator = distance.pow(2.0 - repulsive_exponent).unsqueeze(1)
     return (repulsive_scale * delta / denominator).sum(dim=0)
 
@@ -666,7 +754,7 @@ def _repulsive_forces(
     torch.Tensor
         Repulsive force tensor with shape ``[N, 2]``.
     """
-    if positions.shape[0] < _BARNES_HUT_THRESHOLD:
+    if positions.shape[0] < _SFDP_ALGORITHM_CONFIG.barnes_hut_threshold:
         return _exact_repulsive_forces(
             positions=positions,
             repulsive_scale=repulsive_scale,
@@ -680,7 +768,12 @@ def _repulsive_forces(
     )
 
 
-def _update_step(step: float, force_norm: float, previous_force_norm: float) -> float:
+def _update_step(
+    step: float,
+    force_norm: float,
+    previous_force_norm: float,
+    config: SFDPAdaptiveCoolConfig,
+) -> float:
     """Apply the Graphviz-style adaptive cooling rule.
 
     Parameters
@@ -691,6 +784,8 @@ def _update_step(step: float, force_norm: float, previous_force_norm: float) -> 
         Current total force norm.
     previous_force_norm : float
         Previous iteration total force norm.
+    config : SFDPAdaptiveCoolConfig
+        Adaptive cooling policy.
 
     Returns
     -------
@@ -698,16 +793,16 @@ def _update_step(step: float, force_norm: float, previous_force_norm: float) -> 
         Updated step size.
     """
     if force_norm >= previous_force_norm:
-        return step * 0.90
-    if force_norm > 0.95 * previous_force_norm:
+        return step * config.shrink_factor
+    if force_norm > config.plateau_ratio * previous_force_norm:
         return step
-    return step * 1.1
+    return step * config.growth_factor
 
 
 @register_op
 @dataclass(frozen=True)
 class SFDPSpringElectricalStep(Op):
-    """Apply one force-displacement iteration for SFDP.
+    """Apply one spring-electrical displacement step on the current level.
 
     Parameters
     ----------
@@ -721,13 +816,16 @@ class SFDPSpringElectricalStep(Op):
         Barnes-Hut opening angle threshold.
     repulsive_exponent : float, default=-1.0
         SFDP repulsion exponent.
+    config : SFDPAlgorithmConfig, optional
+        Shared numerical constants for step-size and distance guards.
     """
 
     graph: GraphData
     attractive_scale: float
     repulsive_scale: float
-    theta: float = _DEFAULT_THETA
-    repulsive_exponent: float = _DEFAULT_P
+    theta: float = _SFDP_ALGORITHM_CONFIG.default_theta
+    repulsive_exponent: float = _SFDP_ALGORITHM_CONFIG.default_repulsive_exponent
+    config: SFDPAlgorithmConfig = field(default_factory=SFDPAlgorithmConfig)
 
     name: ClassVar[str] = "sfdp_spring_electrical_step"
     category: ClassVar[OpCategory] = OpCategory.FORCE
@@ -762,7 +860,7 @@ class SFDPSpringElectricalStep(Op):
         if state.pos is None:
             raise ValueError("SFDPSpringElectricalStep requires state.pos to be set.")
 
-        current_step = float(state.extras.get(_SFDP_CURRENT_STEP_KEY, _DEFAULT_STEP))
+        current_step = float(state.extras.get(_SFDP_CURRENT_STEP_KEY, self.config.default_step))
 
         attractive = _spring_forces(
             graph=self.graph,
@@ -778,10 +876,12 @@ class SFDPSpringElectricalStep(Op):
         total_force = attractive + repulsive
         node_force_norm = torch.linalg.vector_norm(total_force, dim=1, keepdim=True)
         direction = torch.where(
-            node_force_norm > _EPSILON,
-            total_force / node_force_norm.clamp_min(_EPSILON),
+            node_force_norm > self.config.epsilon,
+            total_force / node_force_norm.clamp_min(self.config.epsilon),
             torch.zeros_like(total_force),
         )
+        # Re-center after each step to preserve the translation-invariant classic
+        # SFDP trajectory and keep the quadtree focused on relative structure.
         state.pos = state.pos + (current_step * direction)
         state.pos = state.pos - state.pos.mean(dim=0, keepdim=True)
         state.extras[_SFDP_FORCE_NORM_KEY] = float(torch.linalg.vector_norm(total_force).item())
@@ -791,20 +891,21 @@ class SFDPSpringElectricalStep(Op):
 @register_op
 @dataclass(frozen=True)
 class SFDPAdaptiveCool(Op):
-    """Apply the SFDP adaptive step-size update.
+    """Apply Graphviz-style adaptive cooling for the SFDP step size.
 
     Parameters
     ----------
-    adaptive_cooling : bool, default=True
-        Whether to apply graphviz-style step-size adaptation.
+    config : SFDPAdaptiveCoolConfig, optional
+        Cooling enable flag and update coefficients.
     """
 
-    adaptive_cooling: bool = True
+    config: SFDPAdaptiveCoolConfig = field(default_factory=SFDPAdaptiveCoolConfig)
 
     name: ClassVar[str] = "sfdp_adaptive_cool"
     category: ClassVar[OpCategory] = OpCategory.ANNEAL
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ("extras", "converged")
+    writes: ClassVar[Tuple[str, ...]] = ("extras", "converged")
+    requires: ClassVar[Tuple[str, ...]] = ("extras",)
 
     def apply(
         self,
@@ -829,23 +930,26 @@ class SFDPAdaptiveCool(Op):
             State with updated step size metadata.
         """
         del problem
-        if not self.adaptive_cooling:
+        if not self.config.adaptive_cooling:
             return state
 
         force_norm = float(state.extras.get(_SFDP_FORCE_NORM_KEY, 0.0))
         previous_force_norm = float(state.extras.get(_SFDP_PREVIOUS_FORCE_NORM_KEY, float("inf")))
-        current_step = float(state.extras.get(_SFDP_CURRENT_STEP_KEY, _DEFAULT_STEP))
+        current_step = float(
+            state.extras.get(_SFDP_CURRENT_STEP_KEY, _SFDP_ALGORITHM_CONFIG.default_step)
+        )
 
         if previous_force_norm < float("inf"):
             current_step = _update_step(
                 step=current_step,
                 force_norm=force_norm,
                 previous_force_norm=previous_force_norm,
+                config=self.config,
             )
 
         state.extras[_SFDP_CURRENT_STEP_KEY] = current_step
         state.extras[_SFDP_PREVIOUS_FORCE_NORM_KEY] = force_norm
-        if current_step < _DEFAULT_TOLERANCE:
+        if current_step < self.config.tolerance:
             state.converged = True
         return state
 
@@ -888,15 +992,17 @@ def _prolongate_positions(
             continue
         neighbor_indices = torch.tensor([neighbor for neighbor, _ in neighbors], dtype=torch.long)
         neighbor_mean = positions[neighbor_indices].mean(dim=0)
-        smoothed[node] = (_PROLONGATION_SMOOTHING * positions[node]) + (
-            (1.0 - _PROLONGATION_SMOOTHING) * neighbor_mean
+        # Coarse coordinates provide the anchor; neighbor smoothing just breaks
+        # ties among siblings before fine-level relaxation starts.
+        smoothed[node] = (_SFDP_ALGORITHM_CONFIG.prolongation_smoothing * positions[node]) + (
+            (1.0 - _SFDP_ALGORITHM_CONFIG.prolongation_smoothing) * neighbor_mean
         )
 
     groups: dict[int, List[int]] = {}
     for fine_index, coarse_index in enumerate(fine_to_coarse.tolist()):
         groups.setdefault(coarse_index, []).append(fine_index)
 
-    noise_scale = ideal_length * _PROLONGATION_NOISE_SCALE
+    noise_scale = ideal_length * _SFDP_ALGORITHM_CONFIG.prolongation_noise_scale
     for group in groups.values():
         for fine_index in group[1:]:
             noise = (torch.rand((2,), generator=generator, dtype=torch.float32) - 0.5) * noise_scale
@@ -908,11 +1014,13 @@ def _prolongate_positions(
 @register_op
 @dataclass(frozen=True)
 class BuildSFDPGraph(Op):
-    """Build the undirected weighted graph representation for SFDP."""
+    """Build the weighted undirected graph representation consumed by SFDP."""
 
     name: ClassVar[str] = "sfdp_build_graph"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ()
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
         self,
@@ -948,12 +1056,15 @@ class BuildSFDPGraph(Op):
 @register_op
 @dataclass(frozen=True)
 class BuildSFDPHierarchy(Op):
-    """Build the multilevel SFDP hierarchy via heavy-edge matching."""
+    """Build the SFDP heavy-edge matching hierarchy from finest to coarsest."""
+
+    config: SFDPHierarchyConfig = field(default_factory=SFDPHierarchyConfig)
 
     name: ClassVar[str] = "sfdp_coarsen_hierarchy"
     category: ClassVar[OpCategory] = OpCategory.COARSEN
     reads: ClassVar[Tuple[str, ...]] = ("extras",)
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    requires: ClassVar[Tuple[str, ...]] = (f"extras.{_BASE_GRAPH_KEY}",)
 
     def apply(
         self,
@@ -988,7 +1099,11 @@ class BuildSFDPHierarchy(Op):
         current_graph = base_graph
 
         while True:
-            coarsened = _heavy_edge_matching(graph=current_graph, generator=generator)
+            coarsened = _heavy_edge_matching(
+                graph=current_graph,
+                generator=generator,
+                config=self.config,
+            )
             if coarsened is None:
                 break
             fine_to_coarse, coarse_graph = coarsened
@@ -1005,12 +1120,16 @@ class BuildSFDPHierarchy(Op):
 @register_op
 @dataclass(frozen=True)
 class InitSFDPCoarsestPositions(Op):
-    """Initialize random positions at the coarsest SFDP level."""
+    """Initialize the coarsest SFDP level and its initial ideal edge length."""
 
     name: ClassVar[str] = "sfdp_init_coarsest"
     category: ClassVar[OpCategory] = OpCategory.INIT
     reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "ideal_length")
+    requires: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_GRAPH_KEY}",
+        f"extras.{_GENERATOR_KEY}",
+    )
 
     def apply(
         self,
@@ -1051,16 +1170,17 @@ class InitSFDPCoarsestPositions(Op):
 @register_op
 @dataclass(frozen=True)
 class SFDPRefineCoarsestLevel(Op):
-    """Run spring-electrical layout on the coarsest level with adaptive cooling."""
+    """Refine the coarsest graph level with adaptive spring-electrical steps."""
 
     name: ClassVar[str] = "sfdp_refine_coarsest"
     category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "ideal_length", "extras", "converged")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras", "converged")
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "ideal_length", f"extras.{_GRAPH_KEY}")
 
     steps: int = 500
-    theta: float = _DEFAULT_THETA
-    repulsive_exponent: float = _DEFAULT_P
+    theta: float = _SFDP_ALGORITHM_CONFIG.default_theta
+    repulsive_exponent: float = _SFDP_ALGORITHM_CONFIG.default_repulsive_exponent
 
     def apply(
         self,
@@ -1095,12 +1215,16 @@ class SFDPRefineCoarsestLevel(Op):
         if state.ideal_length is None:
             raise ValueError("SFDPRefineCoarsestLevel requires state.ideal_length.")
         ideal_length = float(state.ideal_length)
-        attractive_scale = (_FORCE_SCALING ** ((2.0 - self.repulsive_exponent) / 3.0)) / max(
+        attractive_scale = (
+            _SFDP_ALGORITHM_CONFIG.force_scaling ** ((2.0 - self.repulsive_exponent) / 3.0)
+        ) / max(
             ideal_length,
-            _MIN_SPAN,
+            _SFDP_ALGORITHM_CONFIG.min_span,
         )
-        repulsive_scale = max(ideal_length, _MIN_SPAN) ** (1.0 - self.repulsive_exponent)
-        state.extras[_SFDP_CURRENT_STEP_KEY] = _DEFAULT_STEP
+        repulsive_scale = max(ideal_length, _SFDP_ALGORITHM_CONFIG.min_span) ** (
+            1.0 - self.repulsive_exponent
+        )
+        state.extras[_SFDP_CURRENT_STEP_KEY] = _SFDP_ALGORITHM_CONFIG.default_step
         state.extras[_SFDP_PREVIOUS_FORCE_NORM_KEY] = float("inf")
 
         state = Repeat(
@@ -1133,12 +1257,19 @@ class SFDPProlongateAndRefineLevels(Op):
 
     name: ClassVar[str] = "sfdp_prolongate_and_refine"
     category: ClassVar[OpCategory] = OpCategory.PROLONG
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "ideal_length", "extras", "converged")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "ideal_length", "extras", "converged")
+    requires: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "ideal_length",
+        f"extras.{_GRAPH_KEY}",
+        f"extras.{_MAPPING_KEY}",
+        f"extras.{_GENERATOR_KEY}",
+    )
 
     steps: int = 500
-    theta: float = _DEFAULT_THETA
-    repulsive_exponent: float = _DEFAULT_P
+    theta: float = _SFDP_ALGORITHM_CONFIG.default_theta
+    repulsive_exponent: float = _SFDP_ALGORITHM_CONFIG.default_repulsive_exponent
 
     def apply(
         self,
@@ -1171,7 +1302,10 @@ class SFDPProlongateAndRefineLevels(Op):
 
         positions = state.pos
         for level_index in range(len(mappings) - 1, -1, -1):
-            ideal_length = max(ideal_length * _REFINEMENT_K_DECAY, _MIN_SPAN)
+            ideal_length = max(
+                ideal_length * _SFDP_ALGORITHM_CONFIG.refinement_k_decay,
+                _SFDP_ALGORITHM_CONFIG.min_span,
+            )
             fine_graph = graphs[level_index]
             positions = _prolongate_positions(
                 graph=fine_graph,
@@ -1182,15 +1316,19 @@ class SFDPProlongateAndRefineLevels(Op):
             )
             if positions.shape[0] > 1 and self.steps > 0:
                 state.pos = positions
-                state.extras[_SFDP_CURRENT_STEP_KEY] = _DEFAULT_STEP
+                state.extras[_SFDP_CURRENT_STEP_KEY] = _SFDP_ALGORITHM_CONFIG.default_step
                 state.extras[_SFDP_PREVIOUS_FORCE_NORM_KEY] = float("inf")
+                # Each finer level recomputes force coefficients from the updated
+                # ideal length so refinement stays faithful to classic SFDP.
                 attractive_scale = (
-                    _FORCE_SCALING ** ((2.0 - self.repulsive_exponent) / 3.0)
+                    _SFDP_ALGORITHM_CONFIG.force_scaling ** ((2.0 - self.repulsive_exponent) / 3.0)
                 ) / max(
                     ideal_length,
-                    _MIN_SPAN,
+                    _SFDP_ALGORITHM_CONFIG.min_span,
                 )
-                repulsive_scale = max(ideal_length, _MIN_SPAN) ** (1.0 - self.repulsive_exponent)
+                repulsive_scale = max(ideal_length, _SFDP_ALGORITHM_CONFIG.min_span) ** (
+                    1.0 - self.repulsive_exponent
+                )
                 state = Repeat(
                     n=self.steps,
                     ops=[
@@ -1201,7 +1339,7 @@ class SFDPProlongateAndRefineLevels(Op):
                             theta=self.theta,
                             repulsive_exponent=self.repulsive_exponent,
                         ),
-                        SFDPAdaptiveCool(adaptive_cooling=False),
+                        SFDPAdaptiveCool(config=SFDPAdaptiveCoolConfig(adaptive_cooling=False)),
                     ],
                 ).apply(problem, state, ctx)
                 state.converged = False

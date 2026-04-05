@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -474,6 +474,7 @@ def _sort_layer_by_scores(
 def _deterministic_fiedler_vector(
     edge_index: torch.Tensor,
     num_nodes: int,
+    max_iterations: int,
 ) -> Optional[torch.Tensor]:
     """Compute a deterministic Fiedler vector using ``torch.lobpcg``.
 
@@ -483,6 +484,8 @@ def _deterministic_fiedler_vector(
         CPU edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
+    max_iterations : int
+        Maximum ``torch.lobpcg`` iteration count.
 
     Returns
     -------
@@ -525,7 +528,7 @@ def _deterministic_fiedler_vector(
             k=2,
             X=initial_guess,
             largest=False,
-            niter=32,
+            niter=max_iterations,
         )
     except Exception:
         return None
@@ -577,15 +580,28 @@ class TransposeHeuristicConfig:
     passes: int = 8
 
 
+@dataclass(frozen=True)
+class SpectralOrderConfig:
+    """Configuration for :class:`SpectralOrder`.
+
+    Parameters
+    ----------
+    max_iterations : int, default=32
+        Maximum ``torch.lobpcg`` iterations used for the Fiedler-vector solve.
+    """
+
+    max_iterations: int = 32
+
+
 @register_op
 class BarycenterSweep(Op):
     """Order each layer by repeated weighted barycenter sweeps."""
 
-    name = "barycenter_sweep"
-    category = OpCategory.ORDERING
-    reads = ("layers", "adjacency")
-    writes = ("ordering",)
-    requires = ("layers", "adjacency")
+    name: ClassVar[str] = "barycenter_sweep"
+    category: ClassVar[OpCategory] = OpCategory.ORDERING
+    reads: ClassVar[Tuple[str, ...]] = ("layers", "adjacency")
+    writes: ClassVar[Tuple[str, ...]] = ("ordering",)
+    requires: ClassVar[Tuple[str, ...]] = ("layers", "adjacency")
 
     def __init__(self, config: Optional[BarycenterSweepConfig] = None) -> None:
         """Store the sweep configuration.
@@ -671,11 +687,11 @@ class BarycenterSweep(Op):
 class MedianSweep(Op):
     """Order each layer by repeated median-of-neighbors sweeps."""
 
-    name = "median_sweep"
-    category = OpCategory.ORDERING
-    reads = ("layers", "adjacency")
-    writes = ("ordering",)
-    requires = ("layers", "adjacency")
+    name: ClassVar[str] = "median_sweep"
+    category: ClassVar[OpCategory] = OpCategory.ORDERING
+    reads: ClassVar[Tuple[str, ...]] = ("layers", "adjacency")
+    writes: ClassVar[Tuple[str, ...]] = ("ordering",)
+    requires: ClassVar[Tuple[str, ...]] = ("layers", "adjacency")
 
     def __init__(self, config: Optional[MedianSweepConfig] = None) -> None:
         """Store the sweep configuration.
@@ -750,11 +766,11 @@ class MedianSweep(Op):
 class TransposeHeuristic(Op):
     """Swap adjacent same-layer nodes when the swap reduces local crossings."""
 
-    name = "transpose_heuristic"
-    category = OpCategory.ORDERING
-    reads = ("layers", "ordering")
-    writes = ("ordering",)
-    requires = ("layers", "ordering")
+    name: ClassVar[str] = "transpose_heuristic"
+    category: ClassVar[OpCategory] = OpCategory.ORDERING
+    reads: ClassVar[Tuple[str, ...]] = ("layers", "ordering")
+    writes: ClassVar[Tuple[str, ...]] = ("ordering",)
+    requires: ClassVar[Tuple[str, ...]] = ("layers", "ordering")
 
     def __init__(self, config: Optional[TransposeHeuristicConfig] = None) -> None:
         """Store the transpose configuration.
@@ -822,14 +838,17 @@ class TransposeHeuristic(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class SpectralOrder(Op):
     """Order each layer by the global Fiedler vector of the graph Laplacian."""
 
-    name = "spectral_order"
-    category = OpCategory.ORDERING
-    reads = ("layers",)
-    writes = ("ordering",)
-    requires = ("layers",)
+    config: SpectralOrderConfig = field(default_factory=SpectralOrderConfig)
+
+    name: ClassVar[str] = "spectral_order"
+    category: ClassVar[OpCategory] = OpCategory.ORDERING
+    reads: ClassVar[Tuple[str, ...]] = ("layers",)
+    writes: ClassVar[Tuple[str, ...]] = ("ordering",)
+    requires: ClassVar[Tuple[str, ...]] = ("layers",)
 
     def apply(
         self,
@@ -861,10 +880,13 @@ class SpectralOrder(Op):
         fiedler = _deterministic_fiedler_vector(
             edge_index=edge_index_cpu,
             num_nodes=problem.num_nodes,
+            max_iterations=self.config.max_iterations,
         )
 
         if fiedler is not None:
             for layer_nodes in ordered_layers:
+                # Break ties with the pre-existing layer order so the spectral
+                # solve stays deterministic even when coordinates are repeated.
                 stable_positions = {node: index for index, node in enumerate(layer_nodes)}
                 layer_nodes.sort(
                     key=lambda node: (

@@ -30,9 +30,27 @@ class InitializeStressMajorizationPositionsConfig:
     ----------
     jitter_scale : float, default=0.05
         Standard deviation of the Gaussian jitter added to the MDS warm start.
+    base_extent_scale : float, default=5.0
+        Base extent multiplier used when no node sizes are available.
+    size_extent_multiplier : float, default=2.0
+        Extra padding factor applied when node sizes define the layout scale.
+    min_extent : float, default=1.0
+        Minimum half-width used for degenerate or tiny layouts.
+    fallback_line_start : float, default=-1.0
+        Start of the deterministic line fallback when MDS has no positive modes.
+    fallback_line_stop : float, default=1.0
+        End of the deterministic line fallback when MDS has no positive modes.
+    min_span : float, default=1e-6
+        Minimum span accepted before the normalized embedding is re-expanded.
     """
 
     jitter_scale: float = 0.05
+    base_extent_scale: float = 5.0
+    size_extent_multiplier: float = 2.0
+    min_extent: float = 1.0
+    fallback_line_start: float = -1.0
+    fallback_line_stop: float = 1.0
+    min_span: float = 1.0e-6
 
 
 @dataclass(frozen=True)
@@ -45,10 +63,13 @@ class SmacofStepConfig:
         Absolute stress-increase tolerance for accepting a candidate step.
     max_halving_steps : int, default=8
         Maximum bisection halving attempts when the candidate increases stress.
+    min_distance : float, default=1e-9
+        Minimum Euclidean distance used to avoid division by zero in ``B(X)``.
     """
 
     stress_tolerance: float = 1.0e-8
     max_halving_steps: int = 8
+    min_distance: float = 1.0e-9
 
 
 WEIGHTS_KEY = "sm_weights"
@@ -61,17 +82,18 @@ TRACE_EVERY_KEY = "sm_trace_every"
 @register_op
 @dataclass(frozen=True)
 class PrepareStressMajorizationState(Op):
-    """Prepare distance-derived SMACOF state.
+    """Prepare the dense state required by the SMACOF update.
 
     This op computes all-pairs shortest-path distances, the inverse
     stress weights, and the pseudoinverse of the weighted graph
-    Laplacian.
+    Laplacian. The resulting tensors exactly match the classic dense
+    stress-majorization implementation.
     """
 
     name: ClassVar[str] = "sm_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
     reads: ClassVar[Tuple[str, ...]] = ()
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("distance_matrix", "laplacian", "extras")
     requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
@@ -104,6 +126,8 @@ class PrepareStressMajorizationState(Op):
             edge_weights=problem.edge_weights,
         )
         with np.errstate(divide="ignore"):
+            # Classical stress majorization uses inverse-squared target distances
+            # and explicitly zeroes the diagonal so self-pairs stay inactive.
             weights = np.where(
                 target_distances > 0.0,
                 1.0 / np.square(target_distances),
@@ -124,7 +148,12 @@ class PrepareStressMajorizationState(Op):
 @register_op
 @dataclass(frozen=True)
 class InitializeStressMajorizationPositions(Op):
-    """Seed positions from classical MDS with deterministic jitter."""
+    """Build the classical-MDS warm start used by the SMACOF pipeline.
+
+    The op reproduces the classic initialization recipe: recover a rank-2
+    embedding from graph distances, normalize it into a stable extent, then add
+    seeded Gaussian jitter so disconnected symmetries break deterministically.
+    """
 
     config: InitializeStressMajorizationPositionsConfig = field(
         default_factory=InitializeStressMajorizationPositionsConfig
@@ -132,9 +161,9 @@ class InitializeStressMajorizationPositions(Op):
 
     name: ClassVar[str] = "sm_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
-    requires: ClassVar[Tuple[str, ...]] = ("extras",)
+    requires: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
 
     def _layout_extent(
         self,
@@ -156,10 +185,18 @@ class InitializeStressMajorizationPositions(Op):
             Half-width scale factor.
         """
         if node_sizes is None or node_sizes.numel() == 0:
-            return max(float(max(num_nodes, 1)) ** 0.5 * 5.0, 1.0)
+            return max(
+                float(max(num_nodes, 1)) ** 0.5 * self.config.base_extent_scale,
+                self.config.min_extent,
+            )
 
         max_size = float(node_sizes.to(dtype=torch.float32, device="cpu").max().item())
-        return max(max_size * max(float(max(num_nodes, 1)) ** 0.5, 1.0) * 2.0, 1.0)
+        return max(
+            max_size
+            * max(float(max(num_nodes, 1)) ** 0.5, self.config.min_extent)
+            * self.config.size_extent_multiplier,
+            self.config.min_extent,
+        )
 
     def _classical_mds_embedding(self, distances: np.ndarray) -> torch.Tensor:
         """Recover a rank-2 embedding from pairwise distances.
@@ -184,6 +221,8 @@ class InitializeStressMajorizationPositions(Op):
         centering = np.eye(num_nodes, dtype=np.float64) - (
             np.ones((num_nodes, num_nodes), dtype=np.float64) / float(num_nodes)
         )
+        # Double-centering converts squared distances into the Gram matrix used
+        # by classical MDS.
         gram = -0.5 * centering @ squared @ centering
 
         eigenvalues, eigenvectors = np.linalg.eigh(gram)
@@ -200,12 +239,18 @@ class InitializeStressMajorizationPositions(Op):
             selected_vectors = eigenvectors[:, positive_indices]
             coordinates[:, : len(positive_indices)] = selected_vectors * np.sqrt(selected_values)
         else:
-            coordinates[:, 0] = np.linspace(-1.0, 1.0, num_nodes, dtype=np.float64)
+            # Degenerate spectra fall back to a deterministic line so the later
+            # jitter still has a stable scaffold to perturb.
+            coordinates[:, 0] = np.linspace(
+                self.config.fallback_line_start,
+                self.config.fallback_line_stop,
+                num_nodes,
+                dtype=np.float64,
+            )
 
         return torch.from_numpy(coordinates).to(dtype=torch.float32)
 
-    @staticmethod
-    def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor:
+    def _normalize_positions(self, positions: torch.Tensor, extent: float) -> torch.Tensor:
         """Center and scale coordinates into a stable drawing box.
 
         Parameters
@@ -225,17 +270,17 @@ class InitializeStressMajorizationPositions(Op):
 
         centered = positions - positions.mean(dim=0, keepdim=True)
         span = float(centered.abs().max().item())
-        if span < _SM_MIN_SPAN:
+        if span < self.config.min_span:
             centered = centered.clone()
             centered[:, 0] = torch.linspace(
-                -1.0,
-                1.0,
+                self.config.fallback_line_start,
+                self.config.fallback_line_stop,
                 steps=positions.shape[0],
                 device=positions.device,
                 dtype=positions.dtype,
             )
             span = float(centered.abs().max().item())
-        return centered * (extent / max(span, _SM_MIN_SPAN))
+        return centered * (extent / max(span, self.config.min_span))
 
     def apply(
         self,
@@ -284,6 +329,8 @@ class InitializeStressMajorizationPositions(Op):
         initialized = baseline.detach().cpu().numpy().astype(np.float64) + jitter
         initialized = initialized - initialized.mean(axis=0, keepdims=True)
 
+        # Keep the initial stress cached in extras so each SMACOF step can apply
+        # the classical monotonicity safeguard without recomputing prior state.
         deltas = initialized[:, None, :] - initialized[None, :, :]
         current_distances = np.sqrt(np.sum(deltas * deltas, axis=2))
 
@@ -302,15 +349,15 @@ class InitializeStressMajorizationPositions(Op):
 @register_op
 @dataclass(frozen=True)
 class SmacofStep(Op):
-    """Apply one dense SMACOF majorization update."""
+    """Apply one dense SMACOF update with the classic monotonicity safeguard."""
 
     config: SmacofStepConfig = field(default_factory=SmacofStepConfig)
 
     name: ClassVar[str] = "sm_smacof_step"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ("distance_matrix", "laplacian", "extras")
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
-    requires: ClassVar[Tuple[str, ...]] = ("extras",)
+    requires: ClassVar[Tuple[str, ...]] = ("distance_matrix", "laplacian", "extras")
 
     def apply(
         self,
@@ -373,13 +420,15 @@ class SmacofStep(Op):
                     axis=2,
                 )
             ),
-            _SM_MIN_DISTANCE,
+            self.config.min_distance,
         )
 
         ratio = np.zeros_like(target_distances_np)
         active_mask = weights > 0.0
         ratio[active_mask] = target_distances_np[active_mask] / current_distances[active_mask]
 
+        # ``B(X)`` reweights the Laplacian by the ratio between graph-space and
+        # Euclidean distances at the current iterate.
         b_matrix = -weights * ratio
         np.fill_diagonal(b_matrix, 0.0)
         np.fill_diagonal(b_matrix, -b_matrix.sum(axis=1))
@@ -430,11 +479,11 @@ class SmacofStep(Op):
 @register_op
 @dataclass(frozen=True)
 class CollectStressMajorizationTrace(Op):
-    """Collect periodic position snapshots from SMACOF iterations."""
+    """Collect periodic snapshots from the SMACOF iteration state."""
 
     name: ClassVar[str] = "sm_collect_trace"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ("extras", "step", "total_steps")
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
     requires: ClassVar[Tuple[str, ...]] = ("extras",)
 
@@ -475,6 +524,8 @@ class CollectStressMajorizationTrace(Op):
                 edge_index=problem.edge_index,
                 node_sizes=problem.node_sizes,
             )
+            # Trace snapshots are materialized on the output device so the
+            # public adapter can return them directly without extra copies.
             traces.append(torch.from_numpy(current).to(dtype=torch.float32, device=device))
 
         return state
@@ -483,7 +534,7 @@ class CollectStressMajorizationTrace(Op):
 @register_op
 @dataclass(frozen=True)
 class FinalizeStressMajorizationPositions(Op):
-    """Materialize final SMACOF coordinates in the solve state."""
+    """Materialize final SMACOF coordinates and close out optional tracing."""
 
     name: ClassVar[str] = "sm_finalize_positions"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
@@ -529,6 +580,8 @@ class FinalizeStressMajorizationPositions(Op):
         trace_every = state.extras.get(TRACE_EVERY_KEY, 0)
         if trace_every > 0:
             traces = state.extras.get(TRACES_KEY, [])
+            # Ensure the returned trace always includes the final accepted state,
+            # even when the cadence does not land on the last iteration.
             if not traces or not torch.allclose(traces[-1], final_positions):
                 traces.append(final_positions.clone())
             state.extras[TRACES_KEY] = traces

@@ -40,6 +40,13 @@ _DEFAULT_CURVE_B = 0.79
 _GCN_GAIN_FALLBACK_DIM = 2
 _CLASSICAL_MDS_MIN_SPAN = 1.0e-6
 _SPECTRAL_EIGENVALUE_TOLERANCE = 1.0e-9
+_EMBEDDING_OUTPUT_DIM = 2
+_SPECTRAL_EXTRA_EIGENPAIRS = 4
+_SPECTRAL_LANCZOS_MULTIPLIER = 2
+_SPECTRAL_LANCZOS_PADDING = 2
+_GCN_REQUIRED_HIDDEN_LAYER_COUNT = 2
+_TSNE_JOINT_PROBABILITY_DIVISOR = 2.0
+_CURVE_FIT_INITIAL_GUESS = (_DEFAULT_CURVE_A, _DEFAULT_CURVE_B)
 
 AdjacencyList = List[List[Union[int, Tuple[int, float]]]]
 CSRAdjacency = Dict[str, torch.Tensor]
@@ -882,13 +889,14 @@ def _normalized_adjacency_to_sparse_torch(payload: Any) -> torch.Tensor:
 
 @register_op
 class SymmetrizeAdjacency(Op):
-    """Replace ``state.adjacency`` with ``A + A^T``."""
+    """Mirror the active adjacency so downstream embedding ops see an undirected graph."""
 
     name: ClassVar[str] = "symmetrize_adjacency"
     category: ClassVar[OpCategory] = OpCategory.EMBED
     reads: ClassVar[Tuple[str, ...]] = ("adjacency",)
     writes: ClassVar[Tuple[str, ...]] = ("adjacency",)
     requires: ClassVar[Tuple[str, ...]] = ("adjacency",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -918,6 +926,8 @@ class SymmetrizeAdjacency(Op):
             raise ValueError("SymmetrizeAdjacency requires state.adjacency to be set.")
         matrix = _adjacency_to_sparse_matrix(state.adjacency)
         symmetrized = (matrix + matrix.transpose()).tocsr()
+        # Restore the caller's original container type so later ops can keep
+        # using the same adjacency representation they started with.
         state.adjacency = _restore_adjacency_type(symmetrized, state.adjacency)
         return state
 
@@ -938,13 +948,14 @@ class BuildLaplacianConfig:
 
 @register_op
 class BuildLaplacian(Op):
-    """Build a graph Laplacian from the current adjacency payload."""
+    """Build the configured Laplacian variant and cache it for embedding ops."""
 
     name: ClassVar[str] = "build_laplacian"
     category: ClassVar[OpCategory] = OpCategory.EMBED
     reads: ClassVar[Tuple[str, ...]] = ("adjacency",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras.laplacian",)
+    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_LAPLACIAN_KEY}",)
     requires: ClassVar[Tuple[str, ...]] = ("adjacency",)
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[BuildLaplacianConfig] = None) -> None:
         """Store the Laplacian builder configuration.
@@ -992,6 +1003,8 @@ class BuildLaplacian(Op):
         elif self.config.normalization == "symmetric":
             inv_sqrt = np.zeros_like(degrees)
             nonzero_mask = degrees > 0.0
+            # Leave isolated nodes at zero so the normalized Laplacian stays
+            # finite without inventing degree mass.
             inv_sqrt[nonzero_mask] = 1.0 / np.sqrt(degrees[nonzero_mask])
             normalized = sparse.diags(inv_sqrt, offsets=0, format="csr")
             identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
@@ -999,6 +1012,8 @@ class BuildLaplacian(Op):
         elif self.config.normalization == "random_walk":
             inv_degree = np.zeros_like(degrees)
             nonzero_mask = degrees > 0.0
+            # Random-walk normalization uses the same isolated-node convention
+            # as the symmetric branch to preserve the legacy sparse output.
             inv_degree[nonzero_mask] = 1.0 / degrees[nonzero_mask]
             normalized = sparse.diags(inv_degree, offsets=0, format="csr")
             identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
@@ -1027,13 +1042,14 @@ class BuildNormalizedAdjacencyConfig:
 
 @register_op
 class BuildNormalizedAdjacency(Op):
-    """Build NeuLay's symmetric degree-normalized adjacency."""
+    """Build NeuLay's symmetric degree-normalized adjacency with optional self-loops."""
 
     name: ClassVar[str] = "build_normalized_adjacency"
     category: ClassVar[OpCategory] = OpCategory.EMBED
     reads: ClassVar[Tuple[str, ...]] = ("adjacency",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras.normalized_adjacency",)
+    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_NORMALIZED_ADJACENCY_KEY}",)
     requires: ClassVar[Tuple[str, ...]] = ("adjacency",)
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[BuildNormalizedAdjacencyConfig] = None) -> None:
         """Store the normalized-adjacency configuration.
@@ -1085,6 +1101,8 @@ class BuildNormalizedAdjacency(Op):
             )
         adjacency.sum_duplicates()
         if adjacency.nnz > 0:
+            # Adding the identity can introduce duplicate diagonal entries.
+            # Collapse them back to binary connectivity before normalization.
             adjacency.data[:] = 1.0
 
         degrees = np.asarray(adjacency.sum(axis=1)).reshape(-1).astype(np.float64, copy=False)
@@ -1161,37 +1179,41 @@ def _sparse_spectral_embedding(
 ) -> np.ndarray:
     """Compute sparse spectral coordinates from a Laplacian matrix."""
     num_nodes = laplacian.shape[0]
-    eigen_count = min(num_nodes - 1, max(dim + 4, dim + 1))
+    eigen_count = min(num_nodes - 1, max(dim + _SPECTRAL_EXTRA_EIGENPAIRS, dim + 1))
     if eigen_count <= dim:
         return _dense_spectral_embedding(laplacian=laplacian, dim=dim, symmetric=symmetric)
 
-    lanczos_vectors = max((2 * eigen_count) + 1, int(np.sqrt(num_nodes)))
+    lanczos_vectors = max(
+        (_SPECTRAL_LANCZOS_MULTIPLIER * eigen_count) + 1,
+        int(np.sqrt(num_nodes)),
+    )
     if symmetric:
         eigenvalues, eigenvectors = sparse_linalg.eigsh(
             laplacian,
             k=eigen_count,
             which="SM",
-            ncv=min(max(lanczos_vectors, eigen_count + 2), num_nodes),
+            ncv=min(max(lanczos_vectors, eigen_count + _SPECTRAL_LANCZOS_PADDING), num_nodes),
         )
     else:
         eigenvalues, eigenvectors = sparse_linalg.eigs(
             laplacian,
             k=eigen_count,
             which="SR",
-            ncv=min(max(lanczos_vectors, eigen_count + 2), num_nodes),
+            ncv=min(max(lanczos_vectors, eigen_count + _SPECTRAL_LANCZOS_PADDING), num_nodes),
         )
     return _select_embedding_columns(eigenvalues=eigenvalues, eigenvectors=eigenvectors, dim=dim)
 
 
 @register_op
 class SpectralEmbed(Op):
-    """Compute raw spectral coordinates from a stored Laplacian."""
+    """Compute 2D spectral coordinates from the cached Laplacian when no positions exist."""
 
     name: ClassVar[str] = "spectral_embed"
     category: ClassVar[OpCategory] = OpCategory.EMBED
     reads: ClassVar[Tuple[str, ...]] = ("pos", "laplacian", f"extras.{_SYMMETRIC_FLAG_KEY}")
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("laplacian", f"extras.{_SYMMETRIC_FLAG_KEY}")
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, sparse_threshold: int) -> None:
         """Store the dense-vs-sparse eigensolve threshold.
@@ -1245,13 +1267,13 @@ class SpectralEmbed(Op):
         if problem.num_nodes < self.sparse_threshold:
             coordinates = _dense_spectral_embedding(
                 laplacian=state.laplacian,
-                dim=2,
+                dim=_EMBEDDING_OUTPUT_DIM,
                 symmetric=is_symmetric,
             )
         else:
             coordinates = _sparse_spectral_embedding(
                 laplacian=state.laplacian,
-                dim=2,
+                dim=_EMBEDDING_OUTPUT_DIM,
                 symmetric=is_symmetric,
             )
 
@@ -1281,9 +1303,10 @@ class Eigendecomposition(Op):
 
     name: ClassVar[str] = "eigendecomposition"
     category: ClassVar[OpCategory] = OpCategory.EMBED
-    reads: ClassVar[Tuple[str, ...]] = ("extras.laplacian",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras.eigenpairs",)
-    requires: ClassVar[Tuple[str, ...]] = ("extras.laplacian",)
+    reads: ClassVar[Tuple[str, ...]] = (f"extras.{_LAPLACIAN_KEY}",)
+    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_EIGENPAIRS_KEY}",)
+    requires: ClassVar[Tuple[str, ...]] = (f"extras.{_LAPLACIAN_KEY}",)
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[EigendecompositionConfig] = None) -> None:
         """Store the eigendecomposition configuration.
@@ -1338,6 +1361,8 @@ class Eigendecomposition(Op):
             symmetric = _is_symmetric(laplacian)
             use_dense = num_nodes < self.config.sparse_threshold or k >= num_nodes
             if use_dense:
+                # Small problems and full-rank requests are cheaper and more
+                # stable through dense LAPACK routines.
                 dense = laplacian.toarray()
                 if symmetric:
                     raw_values, raw_vectors = np.linalg.eigh(dense)
@@ -1364,13 +1389,14 @@ class Eigendecomposition(Op):
 
 @register_op
 class SVD(Op):
-    """Compute the singular value decomposition of ``state.pivot_distances``."""
+    """Compute and cache the compact SVD of the pivot-distance matrix."""
 
     name: ClassVar[str] = "svd"
     category: ClassVar[OpCategory] = OpCategory.EMBED
     reads: ClassVar[Tuple[str, ...]] = ("pivot_distances",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras.svd_result",)
+    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_SVD_RESULT_KEY}",)
     requires: ClassVar[Tuple[str, ...]] = ("pivot_distances",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1409,13 +1435,14 @@ class SVD(Op):
 
 @register_op
 class PivotMDSComputeCoordinates(Op):
-    """Compute raw Pivot-MDS coordinates from pivot-to-node distances."""
+    """Recover 2D Pivot-MDS coordinates from the stored pivot-distance rows."""
 
     name: ClassVar[str] = "pivot_mds_compute_coordinates"
     category: ClassVar[OpCategory] = OpCategory.EMBED
     reads: ClassVar[Tuple[str, ...]] = ("pivot_distances",)
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pivot_distances",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1450,13 +1477,14 @@ class PivotMDSComputeCoordinates(Op):
 
 @register_op
 class Pseudoinverse(Op):
-    """Compute the dense pseudoinverse of the stored Laplacian."""
+    """Compute the dense Moore-Penrose pseudoinverse of the cached Laplacian."""
 
     name: ClassVar[str] = "pseudoinverse"
     category: ClassVar[OpCategory] = OpCategory.EMBED
-    reads: ClassVar[Tuple[str, ...]] = ("extras.laplacian",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras.laplacian_pinv",)
-    requires: ClassVar[Tuple[str, ...]] = ("extras.laplacian",)
+    reads: ClassVar[Tuple[str, ...]] = (f"extras.{_LAPLACIAN_KEY}",)
+    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_LAPLACIAN_PINV_KEY}",)
+    requires: ClassVar[Tuple[str, ...]] = (f"extras.{_LAPLACIAN_KEY}",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1508,7 +1536,7 @@ class GCNForwardConfig:
 
 @register_op
 class GCNForward(Op):
-    """Run one forward pass of the cached NeuLay-style residual GCN.
+    """Run one forward pass of the cached NeuLay-style residual GCN model.
 
     Notes
     -----
@@ -1530,6 +1558,7 @@ class GCNForward(Op):
         f"extras.{_GCN_ADJACENCY_REF_KEY}",
     )
     requires: ClassVar[Tuple[str, ...]] = (f"extras.{_NORMALIZED_ADJACENCY_KEY}",)
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[GCNForwardConfig] = None) -> None:
         """Store the GCN forward configuration.
@@ -1563,7 +1592,7 @@ class GCNForward(Op):
         SolveState
             State with ``pos`` and the cached model populated.
         """
-        if len(self.config.hidden_sizes) != 2:
+        if len(self.config.hidden_sizes) != _GCN_REQUIRED_HIDDEN_LAYER_COUNT:
             raise ValueError("hidden_sizes must contain exactly two layer widths.")
         if self.config.output_dim <= 0:
             raise ValueError("output_dim must be positive.")
@@ -1626,13 +1655,14 @@ class PerplexityMatchConfig:
 
 @register_op
 class PerplexityMatch(Op):
-    """Match Gaussian precisions to a target t-SNE perplexity."""
+    """Convert pairwise distances into symmetric t-SNE joint probabilities."""
 
     name: ClassVar[str] = "perplexity_match"
     category: ClassVar[OpCategory] = OpCategory.EMBED
     reads: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras.probabilities",)
+    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_PROBABILITIES_KEY}",)
     requires: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[PerplexityMatchConfig] = None) -> None:
         """Store the perplexity-matching configuration.
@@ -1688,8 +1718,10 @@ class PerplexityMatch(Op):
             for node in range(distance_matrix.shape[0])
         ]
         conditional = torch.stack(rows, dim=0) if rows else torch.empty((0, 0), dtype=torch.float32)
+        # Mirror the conditional rows into the joint distribution that t-SNE
+        # consumes, keeping the legacy normalization factor intact.
         probabilities = (conditional + conditional.transpose(0, 1)) / (
-            2.0 * max(distance_matrix.shape[0], 1)
+            _TSNE_JOINT_PROBABILITY_DIVISOR * max(distance_matrix.shape[0], 1)
         )
         state.extras[_PROBABILITIES_KEY] = probabilities.clamp(min=_EPSILON)
         return state
@@ -1716,17 +1748,18 @@ class SmoothKNNBandwidthConfig:
 
 @register_op
 class SmoothKNNBandwidth(Op):
-    """Compute UMAP smooth-kNN bandwidths from the distance matrix."""
+    """Compute UMAP smooth-kNN local bandwidths from the dense distance matrix."""
 
     name: ClassVar[str] = "smooth_knn_bandwidth"
     category: ClassVar[OpCategory] = OpCategory.EMBED
     reads: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
     writes: ClassVar[Tuple[str, ...]] = (
-        "extras.sigmas",
-        "extras.rhos",
+        f"extras.{_SIGMAS_KEY}",
+        f"extras.{_RHOS_KEY}",
         f"extras.{_UMAP_N_NEIGHBORS_KEY}",
     )
     requires: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[SmoothKNNBandwidthConfig] = None) -> None:
         """Store the smooth-kNN bandwidth configuration.
@@ -1771,6 +1804,8 @@ class SmoothKNNBandwidth(Op):
         if self.config.max_iter <= 0:
             raise ValueError("max_iter must be positive.")
 
+        # Reuse the exact neighbor extraction that the fuzzy-graph builder will
+        # later consume so the cached bandwidths stay aligned with it.
         _, knn_distances = _knn_from_distances(
             state.distance_matrix,
             n_neighbors=self.config.n_neighbors,
@@ -1803,18 +1838,23 @@ class FuzzySimplicialSetConfig:
 
 @register_op
 class FuzzySimplicialSet(Op):
-    """Build the symmetric fuzzy simplicial graph used by UMAP."""
+    """Build and cache UMAP's symmetric fuzzy simplicial graph edge list."""
 
     name: ClassVar[str] = "fuzzy_simplicial_set"
     category: ClassVar[OpCategory] = OpCategory.EMBED
     reads: ClassVar[Tuple[str, ...]] = (
         "distance_matrix",
-        "extras.sigmas",
-        "extras.rhos",
+        f"extras.{_SIGMAS_KEY}",
+        f"extras.{_RHOS_KEY}",
         f"extras.{_UMAP_N_NEIGHBORS_KEY}",
     )
-    writes: ClassVar[Tuple[str, ...]] = ("extras.fuzzy_graph",)
-    requires: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras.sigmas", "extras.rhos")
+    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_FUZZY_GRAPH_KEY}",)
+    requires: ClassVar[Tuple[str, ...]] = (
+        "distance_matrix",
+        f"extras.{_SIGMAS_KEY}",
+        f"extras.{_RHOS_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(
         self,
@@ -1903,7 +1943,7 @@ class ClassicalMDSComputeEmbeddingConfig:
 @register_op
 @dataclass(frozen=True)
 class ClassicalMDSComputeEmbedding(Op):
-    """Compute raw rank-2 classical MDS coordinates from ``distance_matrix``."""
+    """Compute raw 2D classical-MDS coordinates from ``distance_matrix``."""
 
     config: ClassicalMDSComputeEmbeddingConfig = field(
         default_factory=ClassicalMDSComputeEmbeddingConfig
@@ -1914,6 +1954,7 @@ class ClassicalMDSComputeEmbedding(Op):
     reads: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -1977,13 +2018,14 @@ class CurveFitABConfig:
 
 @register_op
 class CurveFit_ab(Op):
-    """Fit UMAP's scalar attraction-curve parameters ``a`` and ``b``."""
+    """Fit UMAP's scalar attraction-curve parameters ``a`` and ``b`` with fallback defaults."""
 
     name: ClassVar[str] = "curve_fit_ab"
     category: ClassVar[OpCategory] = OpCategory.EMBED
     reads: ClassVar[Tuple[str, ...]] = ()
-    writes: ClassVar[Tuple[str, ...]] = ("extras.umap_a", "extras.umap_b")
+    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_UMAP_A_KEY}", f"extras.{_UMAP_B_KEY}")
     requires: ClassVar[Tuple[str, ...]] = ()
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[CurveFitABConfig] = None) -> None:
         """Store the UMAP curve-fit configuration.
@@ -2034,6 +2076,8 @@ class CurveFit_ab(Op):
             self.config.sample_multiple * self.config.spread,
             self.config.sample_count,
         )
+        # Fit against the same piecewise target curve UMAP uses: a flat
+        # attraction zone inside ``min_dist`` followed by exponential decay.
         yv = np.where(
             xv < self.config.min_dist,
             1.0,
@@ -2044,7 +2088,7 @@ class CurveFit_ab(Op):
                 _curve_function,
                 xv,
                 yv,
-                p0=(_DEFAULT_CURVE_A, _DEFAULT_CURVE_B),
+                p0=_CURVE_FIT_INITIAL_GUESS,
                 maxfev=self.config.maxfev,
             )
             umap_a = float(params[0])

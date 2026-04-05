@@ -7,6 +7,7 @@ composable, registered building block surface for pipeline definitions.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass, field
 from typing import ClassVar, Tuple
 
 import torch
@@ -21,23 +22,102 @@ from dagua.layout.ops.graph_utils import (
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
-_MIN_DISTANCE = 1.0e-9
-_SEQUENTIAL_NODE_LIMIT = 5_000
-_FULL_REPULSION_LIMIT = 2_000
-_SAMPLED_REPULSION_NEIGHBORS = 96
-_NUMBER_OF_ROUNDS = 30_000
-_MINIMAL_TEMPERATURE = 0.005
-_INITIAL_TEMPERATURE = 12.0
-_GRAVITATIONAL_CONSTANT = 1.0 / 16.0
-_DESIRED_LENGTH = 20.0
-_MAXIMAL_DISTURBANCE = 0.0
-_ROTATION_ANGLE = math.pi / 3.0
-_OSCILLATION_ANGLE = math.pi / 2.0
-_ROTATION_SENSITIVITY = 0.01
-_OSCILLATION_SENSITIVITY = 0.3
-_ATTRACTION_FORMULA = 1
-_ROTATION_SINE_THRESHOLD = math.sin((math.pi / 2.0) + (_ROTATION_ANGLE / 2.0))
-_OSCILLATION_COSINE_THRESHOLD = math.cos(_OSCILLATION_ANGLE / 2.0)
+
+@dataclass(frozen=True)
+class GEMPhysicsConfig:
+    """Numerical constants shared across GEM solve phases.
+
+    Parameters
+    ----------
+    min_distance : float, default=1e-9
+        Lower bound used to avoid zero-distance divisions.
+    degree_divisor : float, default=2.5
+        OGDF degree-weight divisor applied before the unit offset.
+    degree_offset : float, default=1.0
+        Additive offset applied after degree scaling.
+    base_desired_length : float, default=20.0
+        Constant edge-length bias added after node-size-derived diagonals.
+    initial_temperature : float, default=12.0
+        Starting local temperature per node.
+    minimal_temperature : float, default=0.005
+        Early-stop threshold used by both solver variants.
+    gravitational_constant : float, default=1/16
+        Pull strength toward the weighted barycenter.
+    maximal_disturbance : float, default=0.0
+        Legacy disturbance amplitude. Non-zero values remain unsupported.
+    attraction_formula : int, default=1
+        OGDF attraction formula selector.
+    rotation_sensitivity : float, default=0.01
+        Increment applied when repeated motion indicates rotation.
+    oscillation_sensitivity : float, default=0.3
+        Temperature scaling applied when motion oscillates.
+    rotation_sine_threshold : float, default=sin(pi/2 + pi/6)
+        Rotation detector threshold from classic GEM.
+    oscillation_cosine_threshold : float, default=cos(pi/4)
+        Oscillation detector threshold from classic GEM.
+    """
+
+    min_distance: float = 1.0e-9
+    degree_divisor: float = 2.5
+    degree_offset: float = 1.0
+    base_desired_length: float = 20.0
+    initial_temperature: float = 12.0
+    minimal_temperature: float = 0.005
+    gravitational_constant: float = 1.0 / 16.0
+    maximal_disturbance: float = 0.0
+    attraction_formula: int = 1
+    rotation_sensitivity: float = 0.01
+    oscillation_sensitivity: float = 0.3
+    rotation_sine_threshold: float = math.sin((math.pi / 2.0) + (math.pi / 6.0))
+    oscillation_cosine_threshold: float = math.cos(math.pi / 4.0)
+
+
+@dataclass(frozen=True)
+class GEMPrepareStateConfig:
+    """Configuration for :class:`GEMPrepareState`.
+
+    Parameters
+    ----------
+    sequential_node_limit : int, default=5000
+        Graph-size cutoff for the exact sequential branch.
+    max_rounds : int, default=30000
+        OGDF-compatible cap on node updates, regardless of requested steps.
+    """
+
+    sequential_node_limit: int = 5_000
+    max_rounds: int = 30_000
+
+
+@dataclass(frozen=True)
+class GEMBatchedConfig:
+    """Configuration for GEM's vectorized large-graph fallback.
+
+    Parameters
+    ----------
+    full_repulsion_limit : int, default=2000
+        Largest graph size that still uses exact all-pairs repulsion.
+    sampled_repulsion_neighbors : int, default=96
+        Neighbor sample count for approximate repulsion above the exact limit.
+    """
+
+    full_repulsion_limit: int = 2_000
+    sampled_repulsion_neighbors: int = 96
+
+
+@dataclass(frozen=True)
+class GEMFinalizeConfig:
+    """Configuration for :class:`GEMFinalizePositions`.
+
+    Parameters
+    ----------
+    default_extent : float, default=1.0
+        Fallback normalization extent when preprocessing metadata is absent.
+    """
+
+    default_extent: float = 1.0
+
+
+_GEM_PHYSICS_CONFIG = GEMPhysicsConfig()
 
 _GEM_BATCHED_CACHE_READY_KEY = "gem_batched_cache_ready"
 _GEM_BATCHED_DEGREE_WEIGHTS_KEY = "gem_batched_degree_weights"
@@ -60,6 +140,7 @@ def _compute_degree_weights(
     num_nodes: int,
     device: torch.device,
     dtype: torch.dtype = torch.float32,
+    config: GEMPhysicsConfig = _GEM_PHYSICS_CONFIG,
 ) -> torch.Tensor:
     """Compute OGDF-style degree weights for GEM.
 
@@ -73,6 +154,8 @@ def _compute_degree_weights(
         Device for the returned tensor.
     dtype : torch.dtype, default ``torch.float32``
         Degree weight dtype.
+    config : GEMPhysicsConfig, default=GEMPhysicsConfig()
+        GEM constants controlling degree scaling.
 
     Returns
     -------
@@ -86,7 +169,7 @@ def _compute_degree_weights(
         ones = torch.ones_like(src, dtype=dtype)
         degree_weights.index_add_(0, src, ones)
         degree_weights.index_add_(0, dst, ones)
-    return degree_weights / 2.5 + 1.0
+    return degree_weights / config.degree_divisor + config.degree_offset
 
 
 def _compute_node_desired_lengths(
@@ -94,6 +177,7 @@ def _compute_node_desired_lengths(
     num_nodes: int,
     device: torch.device,
     dtype: torch.dtype = torch.float32,
+    config: GEMPhysicsConfig = _GEM_PHYSICS_CONFIG,
 ) -> torch.Tensor:
     """Recover per-node target diagonal lengths from node-size annotations.
 
@@ -107,6 +191,8 @@ def _compute_node_desired_lengths(
         Device for the returned tensor.
     dtype : torch.dtype, default ``torch.float32``
         Desired-length dtype.
+    config : GEMPhysicsConfig, default=GEMPhysicsConfig()
+        GEM constants controlling desired-length bias.
 
     Returns
     -------
@@ -130,13 +216,16 @@ def _compute_node_desired_lengths(
         node_desired_lengths = torch.sqrt(2.0 * node_sizes_cpu.square())
     else:
         node_desired_lengths = torch.zeros((num_nodes,), dtype=dtype, device="cpu")
-    node_desired_lengths = node_desired_lengths.to(device=device, dtype=dtype) + _DESIRED_LENGTH
+    node_desired_lengths = (
+        node_desired_lengths.to(device=device, dtype=dtype) + config.base_desired_length
+    )
     return node_desired_lengths
 
 
 def _initialize_batched_gem_cache(
     problem: LayoutProblem,
     state: SolveState,
+    physics_config: GEMPhysicsConfig = _GEM_PHYSICS_CONFIG,
 ) -> None:
     """Create reusable batched GEM buffers in ``state.extras``.
 
@@ -149,6 +238,8 @@ def _initialize_batched_gem_cache(
         Immutable problem inputs.
     state : SolveState
         Mutable solve state.
+    physics_config : GEMPhysicsConfig, default=GEMPhysicsConfig()
+        GEM constants reused by the batched solver.
 
     Returns
     -------
@@ -169,16 +260,18 @@ def _initialize_batched_gem_cache(
         num_nodes=num_nodes,
         device=device,
         dtype=torch.float32,
+        config=physics_config,
     )
     node_desired_lengths = _compute_node_desired_lengths(
         problem=problem,
         num_nodes=num_nodes,
         device=device,
         dtype=torch.float32,
+        config=physics_config,
     )
     temperatures = torch.full(
         (num_nodes,),
-        fill_value=_INITIAL_TEMPERATURE,
+        fill_value=physics_config.initial_temperature,
         dtype=torch.float32,
         device=device,
     )
@@ -188,7 +281,7 @@ def _initialize_batched_gem_cache(
     extent = float(state.extras["gem_extent"])
     sampled_ideal_distance = max(
         extent / max(float(max(num_nodes, 1)) ** 0.5, 1.0),
-        _MIN_DISTANCE,
+        physics_config.min_distance,
     )
 
     edge_src = torch.empty((0,), dtype=torch.long, device=device)
@@ -215,12 +308,20 @@ def _initialize_batched_gem_cache(
 
 
 @register_op
+@dataclass(frozen=True)
 class InitializeGEMPositions(Op):
-    """Initialize positions for GEM with the classic random generator seed."""
+    """Seed the initial GEM coordinates exactly like classic GEM.
+
+    The op preserves the original empty-graph and singleton shortcuts before
+    falling back to the deterministic CPU Gaussian initializer used by OGDF's
+    GEM implementation.
+    """
 
     name: ClassVar[str] = "gem_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
+    reads: ClassVar[Tuple[str, ...]] = ()
     writes: ClassVar[Tuple[str, ...]] = ("pos", "converged")
+    requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
         self,
@@ -272,12 +373,22 @@ class InitializeGEMPositions(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class GEMPrepareState(Op):
-    """Prepare cached metadata consumed by GEM sequential and batched branches."""
+    """Prepare branch-selection and normalization metadata for GEM.
+
+    This op records the classic GEM extent, iteration cap, output device, and
+    whether the solve should take the exact sequential path or the batched
+    fallback used for larger graphs.
+    """
+
+    config: GEMPrepareStateConfig = field(default_factory=GEMPrepareStateConfig)
 
     name: ClassVar[str] = "gem_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ("converged", "total_steps")
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    requires: ClassVar[Tuple[str, ...]] = ()
 
     def apply(
         self,
@@ -307,11 +418,11 @@ class GEMPrepareState(Op):
             return state
 
         extent = layout_extent(problem.num_nodes, problem.node_sizes)
-        capped_iters = min(int(state.total_steps), _NUMBER_OF_ROUNDS)
+        capped_iters = min(int(state.total_steps), self.config.max_rounds)
         state.extras["gem_extent"] = extent
         state.extras["gem_capped_iters"] = capped_iters
         state.extras["gem_device"] = layout_device(problem.edge_index, problem.node_sizes)
-        state.extras["gem_is_sequential"] = problem.num_nodes <= _SEQUENTIAL_NODE_LIMIT
+        state.extras["gem_is_sequential"] = problem.num_nodes <= self.config.sequential_node_limit
 
         if not state.extras["gem_is_sequential"]:
             _initialize_batched_gem_cache(problem, state)
@@ -319,6 +430,7 @@ class GEMPrepareState(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class GEMSequentialStep(Op):
     """Run one exact sequential Gauss-Seidel GEM sweep.
 
@@ -329,13 +441,18 @@ class GEMSequentialStep(Op):
     weighted barycenter update.
     """
 
+    config: GEMPhysicsConfig = field(default_factory=GEMPhysicsConfig)
+
     name: ClassVar[str] = "gem_sequential_step"
     category: ClassVar[OpCategory] = OpCategory.FORCE
     reads: ClassVar[Tuple[str, ...]] = (
         "pos",
+        "local_temperatures",
         "extras",
+        "converged",
     )
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "local_temperatures")
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "extras")
 
     def apply(
         self,
@@ -374,12 +491,14 @@ class GEMSequentialStep(Op):
             num_nodes=num_nodes,
             device=torch.device("cpu"),
             dtype=torch.float32,
+            config=self.config,
         )
         node_desired_lengths = _compute_node_desired_lengths(
             problem=problem,
             num_nodes=num_nodes,
             device=torch.device("cpu"),
             dtype=torch.float64,
+            config=self.config,
         )
 
         adjacency = build_undirected_adjacency(
@@ -392,7 +511,7 @@ class GEMSequentialStep(Op):
         if local_temperatures is None:
             local_temperatures = torch.full(
                 (num_nodes,),
-                _INITIAL_TEMPERATURE,
+                self.config.initial_temperature,
                 dtype=torch.float64,
                 device="cpu",
             )
@@ -401,24 +520,26 @@ class GEMSequentialStep(Op):
             if int(local_temperatures.numel()) != num_nodes:
                 local_temperatures = torch.full(
                     (num_nodes,),
-                    _INITIAL_TEMPERATURE,
+                    self.config.initial_temperature,
                     dtype=torch.float64,
                     device="cpu",
                 )
         previous_impulse = torch.zeros((num_nodes, 2), dtype=torch.float64)
         skew_gauge = torch.zeros((num_nodes,), dtype=torch.float64)
         barycenter = (positions * degree_weights.unsqueeze(1)).sum(dim=0)
-        global_temperature = _INITIAL_TEMPERATURE
+        global_temperature = self.config.initial_temperature
         generator = torch.Generator(device="cpu")
         generator.manual_seed(problem.seed)
         permutation: list[int] = []
 
-        if not (_MAXIMAL_DISTURBANCE == 0.0):
+        if self.config.maximal_disturbance != 0.0:
             raise NotImplementedError("Non-zero GEM disturbance is intentionally unsupported.")
 
         rounds_remaining = capped_iters
-        while global_temperature > _MINIMAL_TEMPERATURE and rounds_remaining > 0:
+        while global_temperature > self.config.minimal_temperature and rounds_remaining > 0:
             if not permutation:
+                # GEM consumes one deterministic random permutation at a time and
+                # keeps reusing the same mutable position tensor within the round.
                 permutation = torch.randperm(num_nodes, generator=generator).tolist()
             node_index = int(permutation.pop())
 
@@ -429,10 +550,10 @@ class GEMSequentialStep(Op):
 
             impulse_x = (
                 float(barycenter[0].item()) / max(num_nodes, 1) - x_coord
-            ) * _GRAVITATIONAL_CONSTANT
+            ) * self.config.gravitational_constant
             impulse_y = (
                 float(barycenter[1].item()) / max(num_nodes, 1) - y_coord
-            ) * _GRAVITATIONAL_CONSTANT
+            ) * self.config.gravitational_constant
 
             for other_index in range(num_nodes):
                 if other_index == node_index:
@@ -450,7 +571,7 @@ class GEMSequentialStep(Op):
                 delta_x = x_coord - float(positions[neighbor_index, 0].item())
                 delta_y = y_coord - float(positions[neighbor_index, 1].item())
                 distance = math.hypot(delta_x, delta_y)
-                if _ATTRACTION_FORMULA == 1:
+                if self.config.attraction_formula == 1:
                     if distance > 0.0:
                         impulse_x -= (
                             edge_weight * delta_x * distance / (desired_length * node_weight)
@@ -493,15 +614,17 @@ class GEMSequentialStep(Op):
                     cos_beta = (move_x * old_x + move_y * old_y) / product
 
                     skew_value = float(skew_gauge[node_index].item())
-                    if sin_beta > _ROTATION_SINE_THRESHOLD:
-                        skew_value += _ROTATION_SENSITIVITY
+                    if sin_beta > self.config.rotation_sine_threshold:
+                        skew_value += self.config.rotation_sensitivity
 
-                    if abs(cos_beta) > _OSCILLATION_COSINE_THRESHOLD:
-                        local_temperature *= 1.0 + (cos_beta * _OSCILLATION_SENSITIVITY)
+                    if abs(cos_beta) > self.config.oscillation_cosine_threshold:
+                        local_temperature *= 1.0 + (cos_beta * self.config.oscillation_sensitivity)
 
+                    # The skew gauge damps nodes that keep turning sharply so the
+                    # exact sequential path cools in the same order as classic GEM.
                     local_temperature *= 1.0 - abs(skew_value)
-                    if local_temperature >= _INITIAL_TEMPERATURE:
-                        local_temperature = _INITIAL_TEMPERATURE
+                    if local_temperature >= self.config.initial_temperature:
+                        local_temperature = self.config.initial_temperature
 
                     skew_gauge[node_index] = skew_value
                     local_temperatures[node_index] = local_temperature
@@ -554,13 +677,23 @@ class GEMSequentialSolve(GEMSequentialStep):
 
 
 @register_op
+@dataclass(frozen=True)
 class GEMComputeImpulse(Op):
-    """Compute one batched GEM impulse vector before temperature adaptation."""
+    """Assemble one batched GEM impulse field.
+
+    The op mirrors the sequential solver's gravity, repulsion, and attraction
+    terms, but evaluates them in vectorized form so larger graphs can use the
+    approximate batched fallback.
+    """
+
+    physics_config: GEMPhysicsConfig = field(default_factory=GEMPhysicsConfig)
+    batched_config: GEMBatchedConfig = field(default_factory=GEMBatchedConfig)
 
     name: ClassVar[str] = "gem_compute_impulse"
     category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras", "converged")
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "extras")
 
     def apply(
         self,
@@ -589,7 +722,11 @@ class GEMComputeImpulse(Op):
         if state.pos is None or state.converged:
             return state
         if not state.extras.get(_GEM_BATCHED_CACHE_READY_KEY, False):
-            _initialize_batched_gem_cache(problem, state)
+            _initialize_batched_gem_cache(
+                problem,
+                state,
+                physics_config=self.physics_config,
+            )
 
         if state.extras.get(_GEM_BATCHED_EARLY_STOP_KEY, False):
             state.extras[_GEM_BATCHED_IMPULSE_KEY] = torch.zeros_like(state.pos)
@@ -600,8 +737,8 @@ class GEMComputeImpulse(Op):
         degree_weights = state.extras[_GEM_BATCHED_DEGREE_WEIGHTS_KEY]
         node_desired_lengths = state.extras[_GEM_BATCHED_DESIRED_LENGTHS_KEY]
 
-        if num_nodes > _FULL_REPULSION_LIMIT:
-            sample_size = min(num_nodes, _SAMPLED_REPULSION_NEIGHBORS)
+        if num_nodes > self.batched_config.full_repulsion_limit:
+            sample_size = min(num_nodes, self.batched_config.sampled_repulsion_neighbors)
             step_index = int(state.extras.get(_GEM_BATCHED_STEP_INDEX_KEY, 0))
             generator = torch.Generator(device="cpu")
             generator.manual_seed(problem.seed + step_index + 1)
@@ -614,7 +751,9 @@ class GEMComputeImpulse(Op):
             ).to(positions.device)
             neighbors = positions[sampled]
             delta = positions.unsqueeze(1) - neighbors
-            distances = torch.linalg.norm(delta, dim=2).clamp(min=_MIN_DISTANCE)
+            # Sampled repulsion intentionally follows the existing seeded draw
+            # schedule so the batched fallback remains reproducible.
+            distances = torch.linalg.norm(delta, dim=2).clamp(min=self.physics_config.min_distance)
             ideal_distance = state.extras[_GEM_BATCHED_SAMPLED_DISTANCE_KEY]
             force = (ideal_distance * ideal_distance) / distances
             repulsive = (delta / distances.unsqueeze(2) * force.unsqueeze(2)).sum(dim=1)
@@ -622,7 +761,7 @@ class GEMComputeImpulse(Op):
         else:
             delta = positions.unsqueeze(1) - positions.unsqueeze(0)
             distance_square = delta.square().sum(dim=2)
-            mask = distance_square > _MIN_DISTANCE
+            mask = distance_square > self.physics_config.min_distance
             safe_distance_square = torch.where(
                 mask,
                 distance_square,
@@ -644,8 +783,12 @@ class GEMComputeImpulse(Op):
             source_distance = torch.linalg.norm(source_delta, dim=1)
             source_weights = degree_weights[edge_src].clamp(min=1.0)
             target_weights = degree_weights[edge_dst].clamp(min=1.0)
-            source_desired = node_desired_lengths[edge_src].clamp(min=_MIN_DISTANCE)
-            target_desired = node_desired_lengths[edge_dst].clamp(min=_MIN_DISTANCE)
+            source_desired = node_desired_lengths[edge_src].clamp(
+                min=self.physics_config.min_distance
+            )
+            target_desired = node_desired_lengths[edge_dst].clamp(
+                min=self.physics_config.min_distance
+            )
 
             source_force = -source_delta * (
                 source_distance / (source_desired * source_weights)
@@ -663,7 +806,9 @@ class GEMComputeImpulse(Op):
             attractive.index_add_(0, edge_dst, target_force)
 
         barycenter = (positions * degree_weights.unsqueeze(1)).sum(dim=0)
-        gravity = (barycenter / max(num_nodes, 1) - positions) * _GRAVITATIONAL_CONSTANT
+        gravity = (
+            barycenter / max(num_nodes, 1) - positions
+        ) * self.physics_config.gravitational_constant
 
         impulse = repulsive + attractive + gravity
         state.extras[_GEM_BATCHED_IMPULSE_KEY] = impulse
@@ -671,13 +816,22 @@ class GEMComputeImpulse(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class GEMUpdateTemperatures(Op):
-    """Update batched per-node temperatures and compute the movement vector."""
+    """Adapt batched node temperatures and derive a movement field.
+
+    The temperature update intentionally mirrors the sequential path's rotation
+    and oscillation heuristics so the large-graph fallback cools with the same
+    qualitative behavior.
+    """
+
+    config: GEMPhysicsConfig = field(default_factory=GEMPhysicsConfig)
 
     name: ClassVar[str] = "gem_update_temperatures"
     category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ("extras", "converged")
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    requires: ClassVar[Tuple[str, ...]] = ("extras",)
 
     def apply(
         self,
@@ -685,7 +839,22 @@ class GEMUpdateTemperatures(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Compute scaled movement and adapt per-node temperatures."""
+        """Compute scaled movement and adapt per-node temperatures.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable solve state containing cached GEM batched buffers.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with updated temperatures and buffered node movement.
+        """
         del problem, ctx
 
         if state.converged:
@@ -697,7 +866,7 @@ class GEMUpdateTemperatures(Op):
         skew_gauge = state.extras[_GEM_BATCHED_SKEW_GAUGE_KEY]
 
         norm = torch.linalg.norm(impulse, dim=1, keepdim=True)
-        safe_norm = norm.clamp(min=_MIN_DISTANCE)
+        safe_norm = norm.clamp(min=self.config.min_distance)
         movement = torch.where(
             norm > 0,
             impulse * (temperatures.unsqueeze(1) / safe_norm),
@@ -707,9 +876,9 @@ class GEMUpdateTemperatures(Op):
         current_norm = torch.linalg.norm(movement, dim=1)
         previous_norm = torch.linalg.norm(previous_impulse, dim=1)
         product = current_norm * previous_norm
-        valid = product > _MIN_DISTANCE
+        valid = product > self.config.min_distance
         if bool(valid.any()):
-            safe_product = product.clamp(min=_MIN_DISTANCE)
+            safe_product = product.clamp(min=self.config.min_distance)
             sin_beta = (
                 movement[:, 0] * previous_impulse[:, 0] - movement[:, 1] * previous_impulse[:, 1]
             ) / safe_product
@@ -717,14 +886,14 @@ class GEMUpdateTemperatures(Op):
                 movement[:, 0] * previous_impulse[:, 0] + movement[:, 1] * previous_impulse[:, 1]
             ) / safe_product
 
-            rotation_mask = valid & (sin_beta > _ROTATION_SINE_THRESHOLD)
+            rotation_mask = valid & (sin_beta > self.config.rotation_sine_threshold)
             skew_gauge = torch.where(
                 rotation_mask,
-                skew_gauge + _ROTATION_SENSITIVITY,
+                skew_gauge + self.config.rotation_sensitivity,
                 skew_gauge,
             )
-            oscillation_mask = valid & (cos_beta.abs() > _OSCILLATION_COSINE_THRESHOLD)
-            oscillation_scale = 1.0 + cos_beta * _OSCILLATION_SENSITIVITY
+            oscillation_mask = valid & (cos_beta.abs() > self.config.oscillation_cosine_threshold)
+            oscillation_scale = 1.0 + cos_beta * self.config.oscillation_sensitivity
             temperatures = torch.where(
                 oscillation_mask,
                 temperatures * oscillation_scale,
@@ -733,10 +902,10 @@ class GEMUpdateTemperatures(Op):
             temperatures = temperatures * (1.0 - skew_gauge.abs())
             temperatures = torch.minimum(
                 temperatures,
-                torch.full_like(temperatures, _INITIAL_TEMPERATURE),
+                torch.full_like(temperatures, self.config.initial_temperature),
             )
 
-        if float(temperatures.mean().item()) < _MINIMAL_TEMPERATURE:
+        if float(temperatures.mean().item()) < self.config.minimal_temperature:
             state.extras[_GEM_BATCHED_EARLY_STOP_KEY] = True
 
         state.extras[_GEM_BATCHED_TEMPERATURES_KEY] = temperatures
@@ -747,13 +916,15 @@ class GEMUpdateTemperatures(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class GEMApplyDisplacement(Op):
-    """Apply one batched movement field to positions."""
+    """Apply the buffered batched GEM movement field to positions."""
 
     name: ClassVar[str] = "gem_apply_displacement"
     category: ClassVar[OpCategory] = OpCategory.FORCE
     reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "extras")
 
     def apply(
         self,
@@ -761,7 +932,22 @@ class GEMApplyDisplacement(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Move nodes by the buffered batched movement vector."""
+        """Move nodes by the buffered batched movement vector.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable solve state containing buffered GEM movement.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with positions displaced by the current batched update.
+        """
         del problem, ctx
 
         if state.pos is None:
@@ -777,13 +963,17 @@ class GEMApplyDisplacement(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class GEMConvergenceCheck(Op):
     """Optional batched convergence marker based on mean temperature."""
 
+    config: GEMPhysicsConfig = field(default_factory=GEMPhysicsConfig)
+
     name: ClassVar[str] = "gem_convergence_check"
     category: ClassVar[OpCategory] = OpCategory.CONVERGE
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ("extras", "converged")
     writes: ClassVar[Tuple[str, ...]] = ("converged",)
+    requires: ClassVar[Tuple[str, ...]] = ("extras",)
 
     def apply(
         self,
@@ -791,7 +981,22 @@ class GEMConvergenceCheck(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Raise ``state.converged`` when batched temperatures fall below threshold."""
+        """Raise ``state.converged`` when batched temperatures fall below threshold.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable solve state containing cached temperatures.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with an updated ``converged`` flag.
+        """
         del problem, ctx
 
         if state.converged:
@@ -799,21 +1004,30 @@ class GEMConvergenceCheck(Op):
 
         temperatures = state.extras.get(_GEM_BATCHED_TEMPERATURES_KEY)
         if temperatures is not None:
-            state.converged = bool(float(temperatures.mean().item()) < _MINIMAL_TEMPERATURE)
+            state.converged = bool(
+                float(temperatures.mean().item()) < self.config.minimal_temperature
+            )
         return state
 
 
 @register_op
+@dataclass(frozen=True)
 class GEMBatchedSolve(Op):
-    """Run the vectorized batched GEM solver for larger graphs."""
+    """Run the vectorized GEM fallback for graphs above the sequential cutoff."""
+
+    physics_config: GEMPhysicsConfig = field(default_factory=GEMPhysicsConfig)
+    batched_config: GEMBatchedConfig = field(default_factory=GEMBatchedConfig)
 
     name: ClassVar[str] = "gem_batched_solve"
     category: ClassVar[OpCategory] = OpCategory.FORCE
     reads: ClassVar[Tuple[str, ...]] = (
         "pos",
         "extras",
+        "converged",
+        "step",
     )
     writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "extras")
 
     def apply(
         self,
@@ -844,7 +1058,11 @@ class GEMBatchedSolve(Op):
         if capped_iters <= 0:
             return state
 
-        _initialize_batched_gem_cache(problem, state)
+        _initialize_batched_gem_cache(
+            problem,
+            state,
+            physics_config=self.physics_config,
+        )
         state.extras[_GEM_BATCHED_EARLY_STOP_KEY] = False
         state.extras[_GEM_BATCHED_STEP_INDEX_KEY] = 0
 
@@ -852,8 +1070,11 @@ class GEMBatchedSolve(Op):
         state = Repeat(
             n=capped_iters,
             ops=[
-                GEMComputeImpulse(),
-                GEMUpdateTemperatures(),
+                GEMComputeImpulse(
+                    physics_config=self.physics_config,
+                    batched_config=self.batched_config,
+                ),
+                GEMUpdateTemperatures(config=self.physics_config),
                 GEMApplyDisplacement(),
             ],
         ).apply(problem, state, ctx)
@@ -862,12 +1083,15 @@ class GEMBatchedSolve(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class GEMFinalizePositions(Op):
-    """Normalize and cast GEM results to the final output device."""
+    """Normalize GEM coordinates and move them to the resolved output device."""
+
+    config: GEMFinalizeConfig = field(default_factory=GEMFinalizeConfig)
 
     name: ClassVar[str] = "gem_finalize_positions"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras", "converged")
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
@@ -910,6 +1134,6 @@ class GEMFinalizePositions(Op):
         if not isinstance(device, torch.device):
             device = layout_device(torch.empty((2, 0), dtype=torch.long), None)
 
-        extent = float(state.extras.get("gem_extent", 1.0))
+        extent = float(state.extras.get("gem_extent", self.config.default_extent))
         state.pos = normalize_positions(state.pos, extent).to(dtype=torch.float32, device=device)
         return state

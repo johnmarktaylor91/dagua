@@ -20,6 +20,11 @@ from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _NO_SHIFT = float("inf")
+_POSITION_OUTPUT_DIM = 2
+_NODE_SIZE_SPACING_MULTIPLIER = 1.5
+_WALKER_ROOT_NUMBER = 1
+_WALKER_BASE_DISTANCE = 1.0
+_COMPONENT_PADDING = 1.0
 
 
 def _resolve_node_sizes(node_sizes: Optional[torch.Tensor], num_nodes: int) -> torch.Tensor:
@@ -38,7 +43,7 @@ def _resolve_node_sizes(node_sizes: Optional[torch.Tensor], num_nodes: int) -> t
         CPU float tensor with shape ``[N, 2]``.
     """
     if node_sizes is None:
-        return torch.zeros((num_nodes, 2), dtype=torch.float32)
+        return torch.zeros((num_nodes, _POSITION_OUTPUT_DIM), dtype=torch.float32)
     return node_sizes.detach().to(device="cpu", dtype=torch.float32)
 
 
@@ -834,7 +839,7 @@ def _node_spacing(
     if node_sizes is None or node_sizes.numel() == 0:
         return default
     max_size = float(node_sizes.to(dtype=torch.float32, device="cpu")[:, axis].max().item())
-    return max(max_size * 1.5, default)
+    return max(max_size * _NODE_SIZE_SPACING_MULTIPLIER, default)
 
 
 def _root_candidates(edge_index: torch.Tensor, num_nodes: int) -> list[int]:
@@ -1155,10 +1160,10 @@ def _assign_preliminary_x(
         root_idx=root_idx,
         children=children,
         depth=depths[root_idx],
-        number=1,
+        number=_WALKER_ROOT_NUMBER,
         subtree_nodes=subtree_nodes,
     )
-    _first_walk(root, distance=1.0)
+    _first_walk(root, distance=_WALKER_BASE_DISTANCE)
 
     coordinates: dict[int, float] = {}
     min_x, max_x = _second_walk(root, modifier=0.0, coordinates=coordinates)
@@ -1166,7 +1171,7 @@ def _assign_preliminary_x(
     for node_idx in subtree_nodes:
         preliminary_x[node_idx] = coordinates[node_idx] + normalization_shift
 
-    return component_offset + (max_x - min_x) + 1.0 + component_gap
+    return component_offset + (max_x - min_x) + _COMPONENT_PADDING + component_gap
 
 
 @dataclass(frozen=True)
@@ -1242,13 +1247,14 @@ class BucheimWalkerTreeConfig:
 
 @register_op
 class BrandesKopf4Pass(Op):
-    """Assign x coordinates via four-pass Brandes-Kopf compaction."""
+    """Assign layered coordinates via four-pass Brandes-Kopf horizontal compaction."""
 
     name: ClassVar[str] = "brandes_kopf_4pass"
     category: ClassVar[OpCategory] = OpCategory.COORDINATE
     reads: ClassVar[Tuple[str, ...]] = ("layers", "ordering")
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("layers", "ordering")
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[BrandesKopf4PassConfig] = None) -> None:
         """Store the coordinate-assignment configuration.
@@ -1295,7 +1301,7 @@ class BrandesKopf4Pass(Op):
         )
         node_sizes_cpu = _resolve_node_sizes(problem.node_sizes, problem.num_nodes)
 
-        positions = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+        positions = torch.zeros((problem.num_nodes, _POSITION_OUTPUT_DIM), dtype=torch.float32)
         if problem.num_nodes > 0:
             # The four orientation passes balance each other, so keep the
             # Brandes-Kopf output in local CPU tensors until the final transfer.
@@ -1309,6 +1315,8 @@ class BrandesKopf4Pass(Op):
                 node_sep=self.config.node_sep,
             )
             positions[:, 0] = torch.tensor(x_coordinates, dtype=torch.float32)
+            # Layer indices already encode vertical rank, so only the configured
+            # separation factor is needed here.
             positions[:, 1] = layers_cpu.to(dtype=torch.float32) * self.config.rank_sep
 
         state.pos = positions.to(device=_target_device(problem, state))
@@ -1317,13 +1325,14 @@ class BrandesKopf4Pass(Op):
 
 @register_op
 class BucheimWalkerTree(Op):
-    """Lay out the graph as a tidy BFS forest using Buchheim's algorithm."""
+    """Lay out the graph as a tidy BFS forest using Buchheim's linear-time algorithm."""
 
     name: ClassVar[str] = "bucheim_walker_tree"
     category: ClassVar[OpCategory] = OpCategory.COORDINATE
     reads: ClassVar[Tuple[str, ...]] = ()
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ()
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[BucheimWalkerTreeConfig] = None) -> None:
         """Store the tree-layout configuration.
@@ -1362,9 +1371,13 @@ class BucheimWalkerTree(Op):
         edge_index_cpu = _validate_edge_index(problem.edge_index, problem.num_nodes)
         target_device = _target_device(problem, state)
         if problem.num_nodes == 0:
-            state.pos = torch.empty((0, 2), dtype=torch.float32, device=target_device)
+            state.pos = torch.empty(
+                (0, _POSITION_OUTPUT_DIM), dtype=torch.float32, device=target_device
+            )
             return state
 
+        # Walker-style tree layout still uses recursion internally, so raise
+        # the limit defensively for large forests before descending.
         sys.setrecursionlimit(
             max(
                 sys.getrecursionlimit(),
@@ -1388,7 +1401,7 @@ class BucheimWalkerTree(Op):
                 component_gap=self.config.component_gap,
             )
 
-        positions = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+        positions = torch.zeros((problem.num_nodes, _POSITION_OUTPUT_DIM), dtype=torch.float32)
         for node_idx in range(problem.num_nodes):
             positions[node_idx, 0] = float(preliminary_x[node_idx]) * self.config.sibling_sep
             positions[node_idx, 1] = float(depths[node_idx]) * self.config.layer_sep
@@ -1402,13 +1415,14 @@ class BucheimWalkerTree(Op):
 
 @register_op
 class ReingoldTilfordTree(Op):
-    """Assign Reingold-Tilford coordinates with optional size-aware spacing."""
+    """Assign Reingold-Tilford tree coordinates with optional size-aware spacing."""
 
     name: ClassVar[str] = "reingold_tilford_tree"
     category: ClassVar[OpCategory] = OpCategory.COORDINATE
     reads: ClassVar[Tuple[str, ...]] = ()
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ()
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[ReingoldTilfordTreeConfig] = None) -> None:
         """Store the tree configuration.
@@ -1448,9 +1462,13 @@ class ReingoldTilfordTree(Op):
         edge_index_cpu = _validate_edge_index(problem.edge_index, problem.num_nodes)
 
         if problem.num_nodes == 0:
-            state.pos = torch.empty((0, 2), dtype=torch.float32, device=output_device)
+            state.pos = torch.empty(
+                (0, _POSITION_OUTPUT_DIM), dtype=torch.float32, device=output_device
+            )
             return state
 
+        # When explicit spacing is absent, derive it from node extents so
+        # larger labels reserve proportionally more room between subtrees.
         sibling_sep = (
             _node_spacing(problem.node_sizes, axis=0, default=1.0)
             if self.config.sibling_sep is None
@@ -1490,7 +1508,7 @@ class ReingoldTilfordTree(Op):
                 component_gap=component_gap,
             )
 
-        positions = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+        positions = torch.zeros((problem.num_nodes, _POSITION_OUTPUT_DIM), dtype=torch.float32)
         for node_idx in range(problem.num_nodes):
             positions[node_idx, 0] = float(preliminary_x[node_idx]) * sibling_sep
             positions[node_idx, 1] = float(depths[node_idx]) * layer_sep

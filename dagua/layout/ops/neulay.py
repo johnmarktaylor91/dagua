@@ -16,12 +16,18 @@ from dagua.layout.ops.base import Op
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
-_PATIENCE = 10
-_GCN_REL_TOL = 1.0e-4
-_LINEAR_REL_TOL = 1.0e-8
-_GNN_LR = 0.01
-_PAIR_QUERY_RADIUS_FACTOR = 4.0
-_PAIR_REFRESH_INTERVAL = 5
+_NEULAY_CLEANED_EDGE_INDEX_KEY = "neulay_cleaned_edge_index"
+_NEULAY_DEVICE_KEY = "neulay_device"
+_NEULAY_DIM_KEY = "neulay_dim"
+_NEULAY_LR_KEY = "neulay_lr"
+_NEULAY_RADIUS_KEY = "neulay_radius"
+_NEULAY_MAGNITUDE_KEY = "neulay_magnitude"
+_NEULAY_USE_GCN_KEY = "neulay_use_gcn"
+_NEULAY_GCN_STEPS_KEY = "neulay_gcn_steps"
+_NEULAY_LINEAR_STEPS_KEY = "neulay_linear_steps"
+_NEULAY_QUERY_RADIUS_KEY = "neulay_query_radius"
+_NEULAY_LOSS_WINDOW_KEY = "neulay_loss_window"
+_NEULAY_PAIRS_KEY = "neulay_pairs"
 
 
 @dataclass(frozen=True)
@@ -44,6 +50,10 @@ class NeuLayPrepareStateConfig:
         Number of gradient steps in the GCN phase.
     total_steps : int, default=20_000
         Total optimization budget across both phases.
+    magnitude_scale_base : float, default=100.0
+        Base coefficient for the adaptive repulsion magnitude heuristic.
+    query_radius_factor : float, default=4.0
+        Multiplier that expands the KD-tree query radius beyond ``radius``.
     """
 
     dim: int = 2
@@ -53,6 +63,69 @@ class NeuLayPrepareStateConfig:
     use_gcn: bool = True
     gcn_steps: int = 2_000
     total_steps: int = 20_000
+    magnitude_scale_base: float = 100.0
+    query_radius_factor: float = 4.0
+
+
+@dataclass(frozen=True)
+class NeuLayRunGCNPhaseConfig:
+    """Configuration for :class:`NeuLayRunGCNPhase`.
+
+    Parameters
+    ----------
+    patience : int, default=10
+        Rolling loss-window length used for the GCN early-stop heuristic.
+    relative_tolerance : float, default=1e-4
+        Relative loss-window threshold, scaled by ``sqrt(num_nodes)``.
+    optimizer_lr : float, default=0.01
+        RMSprop learning rate for the GCN phase.
+    pair_refresh_interval : int, default=5
+        Steps between KD-tree neighborhood refreshes.
+    """
+
+    patience: int = 10
+    relative_tolerance: float = 1.0e-4
+    optimizer_lr: float = 0.01
+    pair_refresh_interval: int = 5
+
+
+@dataclass(frozen=True)
+class NeuLayPrepareDirectOptimizerConfig:
+    """Configuration for :class:`NeuLayPrepareDirectOptimizer`.
+
+    Parameters
+    ----------
+    patience : int, default=10
+        Rolling loss-window length used by the direct-phase convergence check.
+    """
+
+    patience: int = 10
+
+
+@dataclass(frozen=True)
+class NeuLayDirectStepConfig:
+    """Configuration for :class:`NeuLayDirectStep`.
+
+    Parameters
+    ----------
+    pair_refresh_interval : int, default=5
+        Steps between KD-tree neighborhood refreshes.
+    """
+
+    pair_refresh_interval: int = 5
+
+
+@dataclass(frozen=True)
+class NeuLayDirectConvergenceCheckConfig:
+    """Configuration for :class:`NeuLayDirectConvergenceCheck`.
+
+    Parameters
+    ----------
+    relative_tolerance : float, default=1e-8
+        Relative loss-window threshold, scaled by ``sqrt(num_nodes)``.
+    """
+
+    relative_tolerance: float = 1.0e-8
 
 
 class _SparseGCN(nn.Module):
@@ -220,6 +293,7 @@ class NeuLaySeedRNG(Op):
     category: ClassVar[OpCategory] = OpCategory.INIT
     reads: ClassVar[Tuple[str, ...]] = ()
     writes: ClassVar[Tuple[str, ...]] = ()
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -241,12 +315,33 @@ class NeuLaySeedRNG(Op):
 class NeuLayPrepareState(Op):
     """Clean edge index and cache NeuLay hyper-parameters."""
 
+    config: NeuLayPrepareStateConfig
+
     name: ClassVar[str] = "neulay_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
     reads: ClassVar[Tuple[str, ...]] = ()
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_NEULAY_CLEANED_EDGE_INDEX_KEY}",
+        f"extras.{_NEULAY_DEVICE_KEY}",
+        f"extras.{_NEULAY_DIM_KEY}",
+        f"extras.{_NEULAY_LR_KEY}",
+        f"extras.{_NEULAY_RADIUS_KEY}",
+        f"extras.{_NEULAY_MAGNITUDE_KEY}",
+        f"extras.{_NEULAY_USE_GCN_KEY}",
+        f"extras.{_NEULAY_GCN_STEPS_KEY}",
+        f"extras.{_NEULAY_LINEAR_STEPS_KEY}",
+        f"extras.{_NEULAY_QUERY_RADIUS_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(self, config: Optional[NeuLayPrepareStateConfig] = None) -> None:
+        """Store reusable NeuLay configuration.
+
+        Parameters
+        ----------
+        config : NeuLayPrepareStateConfig | None, optional
+            Optional preparation configuration.
+        """
         self.config = config or NeuLayPrepareStateConfig()
 
     def apply(
@@ -286,7 +381,11 @@ class NeuLayPrepareState(Op):
             cleaned = cleaned[:, non_self].contiguous()
 
         if self.config.magnitude is None:
-            magnitude = 100.0 * (problem.num_nodes ** (1.0 / 3.0)) * self.config.radius
+            magnitude = (
+                self.config.magnitude_scale_base
+                * (problem.num_nodes ** (1.0 / 3.0))
+                * self.config.radius
+            )
         else:
             magnitude = float(self.config.magnitude)
 
@@ -296,16 +395,18 @@ class NeuLayPrepareState(Op):
             else self.config.total_steps
         )
 
-        state.extras["neulay_cleaned_edge_index"] = cleaned
-        state.extras["neulay_device"] = device
-        state.extras["neulay_dim"] = self.config.dim
-        state.extras["neulay_lr"] = self.config.lr
-        state.extras["neulay_radius"] = self.config.radius
-        state.extras["neulay_magnitude"] = magnitude
-        state.extras["neulay_use_gcn"] = self.config.use_gcn
-        state.extras["neulay_gcn_steps"] = self.config.gcn_steps
-        state.extras["neulay_linear_steps"] = linear_steps
-        state.extras["neulay_query_radius"] = _PAIR_QUERY_RADIUS_FACTOR * self.config.radius
+        state.extras[_NEULAY_CLEANED_EDGE_INDEX_KEY] = cleaned
+        state.extras[_NEULAY_DEVICE_KEY] = device
+        state.extras[_NEULAY_DIM_KEY] = self.config.dim
+        state.extras[_NEULAY_LR_KEY] = self.config.lr
+        state.extras[_NEULAY_RADIUS_KEY] = self.config.radius
+        state.extras[_NEULAY_MAGNITUDE_KEY] = magnitude
+        state.extras[_NEULAY_USE_GCN_KEY] = self.config.use_gcn
+        state.extras[_NEULAY_GCN_STEPS_KEY] = self.config.gcn_steps
+        state.extras[_NEULAY_LINEAR_STEPS_KEY] = linear_steps
+        state.extras[_NEULAY_QUERY_RADIUS_KEY] = (
+            self.config.query_radius_factor * self.config.radius
+        )
         return state
 
 
@@ -313,10 +414,37 @@ class NeuLayPrepareState(Op):
 class NeuLayRunGCNPhase(Op):
     """Run the optional NeuLay GCN pre-optimization phase."""
 
+    config: NeuLayRunGCNPhaseConfig
+
     name: ClassVar[str] = "neulay_gcn_phase"
     category: ClassVar[OpCategory] = OpCategory.INIT
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_NEULAY_CLEANED_EDGE_INDEX_KEY}",
+        f"extras.{_NEULAY_DEVICE_KEY}",
+        f"extras.{_NEULAY_DIM_KEY}",
+        f"extras.{_NEULAY_RADIUS_KEY}",
+        f"extras.{_NEULAY_MAGNITUDE_KEY}",
+        f"extras.{_NEULAY_GCN_STEPS_KEY}",
+        f"extras.{_NEULAY_USE_GCN_KEY}",
+        f"extras.{_NEULAY_QUERY_RADIUS_KEY}",
+    )
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_NEULAY_CLEANED_EDGE_INDEX_KEY}",
+        f"extras.{_NEULAY_DEVICE_KEY}",
+        f"extras.{_NEULAY_DIM_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, config: Optional[NeuLayRunGCNPhaseConfig] = None) -> None:
+        """Store GCN-phase optimization controls.
+
+        Parameters
+        ----------
+        config : NeuLayRunGCNPhaseConfig | None, optional
+            Optional GCN-phase configuration.
+        """
+        self.config = config or NeuLayRunGCNPhaseConfig()
 
     def apply(
         self,
@@ -327,14 +455,14 @@ class NeuLayRunGCNPhase(Op):
         """Run GCN training unless disabled by config and return coarse positions."""
         del ctx
 
-        cleaned = state.extras["neulay_cleaned_edge_index"]
-        device = state.extras["neulay_device"]
-        dim = state.extras["neulay_dim"]
-        radius = state.extras["neulay_radius"]
-        magnitude = state.extras["neulay_magnitude"]
-        gcn_steps = state.extras["neulay_gcn_steps"]
-        use_gcn = state.extras["neulay_use_gcn"]
-        query_radius = state.extras["neulay_query_radius"]
+        cleaned = state.extras[_NEULAY_CLEANED_EDGE_INDEX_KEY]
+        device = state.extras[_NEULAY_DEVICE_KEY]
+        dim = state.extras[_NEULAY_DIM_KEY]
+        radius = state.extras[_NEULAY_RADIUS_KEY]
+        magnitude = state.extras[_NEULAY_MAGNITUDE_KEY]
+        gcn_steps = state.extras[_NEULAY_GCN_STEPS_KEY]
+        use_gcn = state.extras[_NEULAY_USE_GCN_KEY]
+        query_radius = state.extras[_NEULAY_QUERY_RADIUS_KEY]
 
         if use_gcn and gcn_steps > 0:
             model = _ResGCN(
@@ -343,14 +471,14 @@ class NeuLayRunGCNPhase(Op):
                 device=device,
                 edge_index=cleaned,
             )
-            optimizer = torch.optim.RMSprop(model.parameters(), lr=_GNN_LR)
-            loss_window = [0.0] * _PATIENCE
+            optimizer = torch.optim.RMSprop(model.parameters(), lr=self.config.optimizer_lr)
+            loss_window = [0.0] * self.config.patience
             pairs = np.empty((0, 2), dtype=np.int64)
 
             for step in range(gcn_steps):
                 optimizer.zero_grad(set_to_none=True)
                 output = model()
-                if step % _PAIR_REFRESH_INTERVAL == 0:
+                if step % self.config.pair_refresh_interval == 0:
                     pairs = _query_pairs(output, query_radius)
 
                 if cleaned.numel() == 0:
@@ -361,6 +489,8 @@ class NeuLayRunGCNPhase(Op):
                     low = torch.minimum(src, dst)
                     high = torch.maximum(src, dst)
                     pairs_matrix = torch.stack([low, high], dim=0)
+                    # NeuLay treats edges as undirected in the elastic term,
+                    # so parallel opposite directions must collapse here.
                     unique_pairs = torch.unique(pairs_matrix, dim=1)
                     diff = output[unique_pairs[0]] - output[unique_pairs[1]]
                     elastic = diff.square().sum() * 0.5
@@ -377,7 +507,7 @@ class NeuLayRunGCNPhase(Op):
                 loss_window.append(float(loss.detach().item()))
                 loss_window.pop(0)
                 if _relative_window_difference(loss_window) < (
-                    _GCN_REL_TOL * math.sqrt(float(problem.num_nodes))
+                    self.config.relative_tolerance * math.sqrt(float(problem.num_nodes))
                 ):
                     break
 
@@ -397,11 +527,29 @@ class NeuLayRunGCNPhase(Op):
 class NeuLayPrepareDirectOptimizer(Op):
     """Create RMSprop state for NeuLay's direct refinement phase."""
 
+    config: NeuLayPrepareDirectOptimizerConfig
+
     name: ClassVar[str] = "neulay_init_direct_optimizer"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos", "optimizer", "extras")
+    reads: ClassVar[Tuple[str, ...]] = ("pos", f"extras.{_NEULAY_LR_KEY}")
+    writes: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "optimizer",
+        f"extras.{_NEULAY_LOSS_WINDOW_KEY}",
+        f"extras.{_NEULAY_PAIRS_KEY}",
+    )
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, config: Optional[NeuLayPrepareDirectOptimizerConfig] = None) -> None:
+        """Store direct-phase optimizer initialization settings.
+
+        Parameters
+        ----------
+        config : NeuLayPrepareDirectOptimizerConfig | None, optional
+            Optional direct-optimizer configuration.
+        """
+        self.config = config or NeuLayPrepareDirectOptimizerConfig()
 
     def apply(
         self,
@@ -415,11 +563,11 @@ class NeuLayPrepareDirectOptimizer(Op):
         if state.pos is None:
             raise ValueError("NeuLayPrepareDirectOptimizer requires state.pos.")
 
-        lr = state.extras["neulay_lr"]
+        lr = state.extras[_NEULAY_LR_KEY]
         state.pos = nn.Parameter(state.pos.clone())
         state.optimizer = torch.optim.RMSprop([state.pos], lr=lr)
-        state.extras["neulay_loss_window"] = [0.0] * _PATIENCE
-        state.extras["neulay_pairs"] = np.empty((0, 2), dtype=np.int64)
+        state.extras[_NEULAY_LOSS_WINDOW_KEY] = [0.0] * self.config.patience
+        state.extras[_NEULAY_PAIRS_KEY] = np.empty((0, 2), dtype=np.int64)
         return state
 
 
@@ -427,11 +575,37 @@ class NeuLayPrepareDirectOptimizer(Op):
 class NeuLayDirectStep(Op):
     """Run one NeuLay direct refinement step."""
 
+    config: NeuLayDirectStepConfig
+
     name: ClassVar[str] = "neulay_direct_step"
-    category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "optimizer", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "optimizer",
+        f"extras.{_NEULAY_CLEANED_EDGE_INDEX_KEY}",
+        f"extras.{_NEULAY_RADIUS_KEY}",
+        f"extras.{_NEULAY_MAGNITUDE_KEY}",
+        f"extras.{_NEULAY_QUERY_RADIUS_KEY}",
+        f"extras.{_NEULAY_LOSS_WINDOW_KEY}",
+        f"extras.{_NEULAY_PAIRS_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        f"extras.{_NEULAY_LOSS_WINDOW_KEY}",
+        f"extras.{_NEULAY_PAIRS_KEY}",
+    )
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, config: Optional[NeuLayDirectStepConfig] = None) -> None:
+        """Store direct-phase step controls.
+
+        Parameters
+        ----------
+        config : NeuLayDirectStepConfig | None, optional
+            Optional direct-step configuration.
+        """
+        self.config = config or NeuLayDirectStepConfig()
 
     def apply(
         self,
@@ -447,17 +621,17 @@ class NeuLayDirectStep(Op):
         if state.optimizer is None:
             raise ValueError("NeuLayDirectStep requires state.optimizer.")
 
-        cleaned = state.extras["neulay_cleaned_edge_index"]
-        radius = state.extras["neulay_radius"]
-        magnitude = state.extras["neulay_magnitude"]
-        query_radius = state.extras["neulay_query_radius"]
-        loss_window = state.extras["neulay_loss_window"]
-        pairs = state.extras["neulay_pairs"]
+        cleaned = state.extras[_NEULAY_CLEANED_EDGE_INDEX_KEY]
+        radius = state.extras[_NEULAY_RADIUS_KEY]
+        magnitude = state.extras[_NEULAY_MAGNITUDE_KEY]
+        query_radius = state.extras[_NEULAY_QUERY_RADIUS_KEY]
+        loss_window = state.extras[_NEULAY_LOSS_WINDOW_KEY]
+        pairs = state.extras[_NEULAY_PAIRS_KEY]
 
         state.optimizer.zero_grad(set_to_none=True)
-        if state.step % _PAIR_REFRESH_INTERVAL == 0:
+        if state.step % self.config.pair_refresh_interval == 0:
             pairs = _query_pairs(state.pos, query_radius)
-            state.extras["neulay_pairs"] = pairs
+            state.extras[_NEULAY_PAIRS_KEY] = pairs
 
         if cleaned.numel() == 0:
             elastic = state.pos.sum() * 0.0
@@ -467,6 +641,8 @@ class NeuLayDirectStep(Op):
             low = torch.minimum(src, dst)
             high = torch.maximum(src, dst)
             pairs_matrix = torch.stack([low, high], dim=0)
+            # The direct phase uses the same undirected elastic energy as the
+            # GCN warm start, so mirror edges collapse to one spring.
             unique_pairs = torch.unique(pairs_matrix, dim=1)
             diff = state.pos[unique_pairs[0]] - state.pos[unique_pairs[1]]
             elastic = diff.square().sum() * 0.5
@@ -483,7 +659,7 @@ class NeuLayDirectStep(Op):
 
         loss_window.append(float(loss.detach().item()))
         loss_window.pop(0)
-        state.extras["neulay_loss_window"] = loss_window
+        state.extras[_NEULAY_LOSS_WINDOW_KEY] = loss_window
         return state
 
 
@@ -491,10 +667,27 @@ class NeuLayDirectStep(Op):
 class NeuLayDirectConvergenceCheck(Op):
     """Check NeuLay convergence in direct refinement."""
 
+    config: NeuLayDirectConvergenceCheckConfig
+
     name: ClassVar[str] = "neulay_direct_convergence"
     category: ClassVar[OpCategory] = OpCategory.CONVERGE
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = (f"extras.{_NEULAY_LOSS_WINDOW_KEY}",)
     writes: ClassVar[Tuple[str, ...]] = ()
+    requires: ClassVar[Tuple[str, ...]] = (f"extras.{_NEULAY_LOSS_WINDOW_KEY}",)
+    access_pattern: ClassVar[str] = "global"
+
+    def __init__(
+        self,
+        config: Optional[NeuLayDirectConvergenceCheckConfig] = None,
+    ) -> None:
+        """Store direct-phase convergence settings.
+
+        Parameters
+        ----------
+        config : NeuLayDirectConvergenceCheckConfig | None, optional
+            Optional convergence configuration.
+        """
+        self.config = config or NeuLayDirectConvergenceCheckConfig()
 
     def apply(
         self,
@@ -504,8 +697,8 @@ class NeuLayDirectConvergenceCheck(Op):
     ) -> SolveState:
         """Set ``state.converged`` when the sliding loss window stabilizes."""
         del ctx
-        loss_window = state.extras["neulay_loss_window"]
-        threshold = _LINEAR_REL_TOL * math.sqrt(float(problem.num_nodes))
+        loss_window = state.extras[_NEULAY_LOSS_WINDOW_KEY]
+        threshold = self.config.relative_tolerance * math.sqrt(float(problem.num_nodes))
         if _relative_window_difference(loss_window) < threshold:
             state.converged = True
         return state
@@ -520,6 +713,7 @@ class NeuLayFinalizePositions(Op):
     reads: ClassVar[Tuple[str, ...]] = ("pos",)
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -539,9 +733,13 @@ __all__ = [
     "NeuLaySeedRNG",
     "NeuLayPrepareState",
     "NeuLayPrepareStateConfig",
+    "NeuLayRunGCNPhaseConfig",
     "NeuLayRunGCNPhase",
+    "NeuLayPrepareDirectOptimizerConfig",
     "NeuLayPrepareDirectOptimizer",
+    "NeuLayDirectStepConfig",
     "NeuLayDirectStep",
+    "NeuLayDirectConvergenceCheckConfig",
     "NeuLayDirectConvergenceCheck",
     "NeuLayFinalizePositions",
 ]

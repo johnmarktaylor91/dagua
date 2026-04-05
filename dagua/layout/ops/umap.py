@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import heapq
 from collections import deque
+from dataclasses import dataclass
 from math import log2
 from typing import ClassVar, Optional, Tuple, Union, cast
 
@@ -48,6 +49,59 @@ _NEGATIVE_SAMPLE_RATE_KEY = "umap_negative_sample_rate"
 _GAMMA_KEY = "umap_gamma"
 _MIN_DIST_KEY = "umap_min_dist"
 _SPREAD_KEY = "umap_spread"
+
+
+@dataclass(frozen=True)
+class ValidateUMAPInputsConfig:
+    """Configuration for :class:`ValidateUMAPInputs`.
+
+    Parameters
+    ----------
+    n_neighbors : int, default=15
+        Expected neighborhood size for downstream UMAP preprocessing.
+    """
+
+    n_neighbors: int = 15
+
+
+@dataclass(frozen=True)
+class StoreUMAPHyperparametersConfig:
+    """Configuration for :class:`StoreUMAPHyperparameters`.
+
+    Parameters
+    ----------
+    n_neighbors : int, default=15
+        Number of nearest neighbors in the fuzzy simplicial graph.
+    min_dist : float, default=0.1
+        Target minimum low-dimensional distance.
+    spread : float, default=1.0
+        Effective radius of the embedding curve.
+    n_epochs : int | None, default=None
+        Optimization epoch count. ``None`` enables the small/large heuristic.
+    learning_rate : float, default=1.0
+        Initial SGD step size.
+    negative_sample_rate : int, default=5
+        Number of negative samples per positive edge update.
+    repulsion_strength : float, default=1.0
+        Gamma multiplier for negative samples.
+    default_epochs_small : int, default=500
+        Heuristic epoch count for graphs up to ``large_graph_threshold``.
+    default_epochs_large : int, default=200
+        Heuristic epoch count for graphs above ``large_graph_threshold``.
+    large_graph_threshold : int, default=10_000
+        Node-count boundary for the epoch heuristic.
+    """
+
+    n_neighbors: int = 15
+    min_dist: float = 0.1
+    spread: float = 1.0
+    n_epochs: Optional[int] = None
+    learning_rate: float = 1.0
+    negative_sample_rate: int = 5
+    repulsion_strength: float = 1.0
+    default_epochs_small: int = 500
+    default_epochs_large: int = 200
+    large_graph_threshold: int = 10_000
 
 
 def _build_undirected_adjacency(
@@ -528,15 +582,33 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
 
 @register_op
 class ValidateUMAPInputs(Op):
-    """Validate layout inputs before UMAP preprocessing."""
+    """Validate the graph inputs required by the graph-UMAP pipeline."""
+
+    config: ValidateUMAPInputsConfig
 
     name: ClassVar[str] = "validate_umap_inputs"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ()
     writes: ClassVar[Tuple[str, ...]] = ()
+    access_pattern: ClassVar[str] = "global"
 
-    def __init__(self, n_neighbors: int = 15) -> None:
-        """Store validated parameter requirements for later checks."""
-        self._n_neighbors = n_neighbors
+    def __init__(
+        self,
+        n_neighbors: int = 15,
+        *,
+        config: Optional[ValidateUMAPInputsConfig] = None,
+    ) -> None:
+        """Store graph-validation requirements.
+
+        Parameters
+        ----------
+        n_neighbors : int, default=15
+            Expected neighborhood size for downstream UMAP preprocessing.
+        config : ValidateUMAPInputsConfig | None, optional
+            Optional validation configuration. When provided, it takes
+            precedence over ``n_neighbors``.
+        """
+        self.config = config or ValidateUMAPInputsConfig(n_neighbors=n_neighbors)
 
     def apply(
         self,
@@ -549,7 +621,7 @@ class ValidateUMAPInputs(Op):
 
         if problem.num_nodes < 0:
             raise ValueError("num_nodes must be non-negative.")
-        if self._n_neighbors <= 0:
+        if self.config.n_neighbors <= 0:
             raise ValueError("n_neighbors must be positive.")
         if problem.edge_index.ndim != 2 or problem.edge_index.shape[0] != 2:
             raise ValueError("edge_index must have shape [2, E].")
@@ -581,11 +653,22 @@ class ValidateUMAPInputs(Op):
 
 @register_op
 class StoreUMAPHyperparameters(Op):
-    """Store UMAP hyperparameters into the state extras."""
+    """Persist validated UMAP hyperparameters into ``state.extras``."""
+
+    config: StoreUMAPHyperparametersConfig
 
     name: ClassVar[str] = "umap_store_hyperparameters"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_N_NEIGHBORS_KEY}",
+        f"extras.{_MIN_DIST_KEY}",
+        f"extras.{_SPREAD_KEY}",
+        f"extras.{_N_EPOCHS_KEY}",
+        f"extras.{_LEARNING_RATE_KEY}",
+        f"extras.{_NEGATIVE_SAMPLE_RATE_KEY}",
+        f"extras.{_GAMMA_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def __init__(
         self,
@@ -599,30 +682,49 @@ class StoreUMAPHyperparameters(Op):
         default_epochs_small: int = 500,
         default_epochs_large: int = 200,
         large_graph_threshold: int = 10_000,
+        *,
+        config: Optional[StoreUMAPHyperparametersConfig] = None,
     ) -> None:
-        """Store UMAP hyperparameters for the pipeline.
+        """Store pipeline hyperparameters.
 
         Parameters
         ----------
-        default_epochs_small : int
-            Epoch count used when ``n_epochs`` is ``None`` and the graph is
-            at or below ``large_graph_threshold`` nodes.
-        default_epochs_large : int
-            Epoch count used when ``n_epochs`` is ``None`` and the graph
-            exceeds ``large_graph_threshold`` nodes.
-        large_graph_threshold : int
-            Node count dividing the small/large epoch heuristic.
+        n_neighbors : int, default=15
+            Number of nearest neighbors in the fuzzy simplicial graph.
+        min_dist : float, default=0.1
+            Target minimum low-dimensional distance.
+        spread : float, default=1.0
+            Effective radius of the embedding curve.
+        n_epochs : int | None, optional
+            Optimization epoch count. ``None`` enables the small/large heuristic.
+        learning_rate : float, default=1.0
+            Initial SGD step size.
+        negative_sample_rate : int, default=5
+            Number of negative samples per positive edge update.
+        repulsion_strength : float, default=1.0
+            Gamma multiplier for negative samples.
+        default_epochs_small : int, default=500
+            Heuristic epoch count for smaller graphs.
+        default_epochs_large : int, default=200
+            Heuristic epoch count for larger graphs.
+        large_graph_threshold : int, default=10_000
+            Node-count boundary for the epoch heuristic.
+        config : StoreUMAPHyperparametersConfig | None, optional
+            Optional hyperparameter configuration. When provided, it takes
+            precedence over the scalar arguments.
         """
-        self._n_neighbors = n_neighbors
-        self._min_dist = min_dist
-        self._spread = spread
-        self._n_epochs = n_epochs
-        self._learning_rate = learning_rate
-        self._negative_sample_rate = negative_sample_rate
-        self._repulsion_strength = repulsion_strength
-        self._default_epochs_small = default_epochs_small
-        self._default_epochs_large = default_epochs_large
-        self._large_graph_threshold = large_graph_threshold
+        self.config = config or StoreUMAPHyperparametersConfig(
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            spread=spread,
+            n_epochs=n_epochs,
+            learning_rate=learning_rate,
+            negative_sample_rate=negative_sample_rate,
+            repulsion_strength=repulsion_strength,
+            default_epochs_small=default_epochs_small,
+            default_epochs_large=default_epochs_large,
+            large_graph_threshold=large_graph_threshold,
+        )
 
     def apply(
         self,
@@ -633,36 +735,36 @@ class StoreUMAPHyperparameters(Op):
         """Write all validated hyperparameters into solve-state extras."""
         del ctx
 
-        if self._n_neighbors <= 0:
+        if self.config.n_neighbors <= 0:
             raise ValueError("n_neighbors must be positive.")
-        if self._min_dist < 0.0:
+        if self.config.min_dist < 0.0:
             raise ValueError("min_dist must be non-negative.")
-        if self._spread <= 0.0:
+        if self.config.spread <= 0.0:
             raise ValueError("spread must be positive.")
-        if self._learning_rate <= 0.0:
+        if self.config.learning_rate <= 0.0:
             raise ValueError("learning_rate must be positive.")
-        if self._negative_sample_rate < 0:
+        if self.config.negative_sample_rate < 0:
             raise ValueError("negative_sample_rate must be non-negative.")
-        if self._repulsion_strength < 0.0:
+        if self.config.repulsion_strength < 0.0:
             raise ValueError("repulsion_strength must be non-negative.")
-        if self._n_epochs is not None and self._n_epochs < 0:
+        if self.config.n_epochs is not None and self.config.n_epochs < 0:
             raise ValueError("n_epochs must be non-negative.")
 
-        n_epochs = self._n_epochs
+        n_epochs = self.config.n_epochs
         if n_epochs is None:
             n_epochs = (
-                self._default_epochs_small
-                if problem.num_nodes <= self._large_graph_threshold
-                else self._default_epochs_large
+                self.config.default_epochs_small
+                if problem.num_nodes <= self.config.large_graph_threshold
+                else self.config.default_epochs_large
             )
 
-        state.extras[_N_NEIGHBORS_KEY] = self._n_neighbors
-        state.extras[_MIN_DIST_KEY] = self._min_dist
-        state.extras[_SPREAD_KEY] = self._spread
+        state.extras[_N_NEIGHBORS_KEY] = self.config.n_neighbors
+        state.extras[_MIN_DIST_KEY] = self.config.min_dist
+        state.extras[_SPREAD_KEY] = self.config.spread
         state.extras[_N_EPOCHS_KEY] = n_epochs
-        state.extras[_LEARNING_RATE_KEY] = self._learning_rate
-        state.extras[_NEGATIVE_SAMPLE_RATE_KEY] = self._negative_sample_rate
-        state.extras[_GAMMA_KEY] = self._repulsion_strength
+        state.extras[_LEARNING_RATE_KEY] = self.config.learning_rate
+        state.extras[_NEGATIVE_SAMPLE_RATE_KEY] = self.config.negative_sample_rate
+        state.extras[_GAMMA_KEY] = self.config.repulsion_strength
         return state
 
 
@@ -672,7 +774,9 @@ class BuildUMAPAdjacency(Op):
 
     name: ClassVar[str] = "umap_build_adjacency"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ()
     writes: ClassVar[Tuple[str, ...]] = ("adjacency_weighted",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -699,6 +803,8 @@ class ComputeAllPairsShortestPaths(Op):
     category: ClassVar[OpCategory] = OpCategory.DISTANCE
     reads: ClassVar[Tuple[str, ...]] = ("adjacency_weighted",)
     writes: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
+    requires: ClassVar[Tuple[str, ...]] = ("adjacency_weighted",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -721,8 +827,13 @@ class ExtractKNN(Op):
 
     name: ClassVar[str] = "umap_extract_knn"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = ("distance_matrix", f"extras.{_N_NEIGHBORS_KEY}")
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_KNN_INDICES_KEY}",
+        f"extras.{_KNN_DISTANCES_KEY}",
+    )
+    requires: ClassVar[Tuple[str, ...]] = ("distance_matrix", f"extras.{_N_NEIGHBORS_KEY}")
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -751,8 +862,19 @@ class SmoothKNNDistances(Op):
 
     name: ClassVar[str] = "umap_smooth_knn_dist"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_KNN_DISTANCES_KEY}",
+        f"extras.{_N_NEIGHBORS_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SIGMAS_KEY}",
+        f"extras.{_RHOS_KEY}",
+    )
+    requires: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_KNN_DISTANCES_KEY}",
+        f"extras.{_N_NEIGHBORS_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -779,8 +901,24 @@ class BuildFuzzySimplicialSet(Op):
 
     name: ClassVar[str] = "umap_build_fuzzy_set"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_KNN_INDICES_KEY}",
+        f"extras.{_KNN_DISTANCES_KEY}",
+        f"extras.{_SIGMAS_KEY}",
+        f"extras.{_RHOS_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_FUZZY_HEAD_KEY}",
+        f"extras.{_FUZZY_TAIL_KEY}",
+        f"extras.{_FUZZY_WEIGHT_KEY}",
+    )
+    requires: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_KNN_INDICES_KEY}",
+        f"extras.{_KNN_DISTANCES_KEY}",
+        f"extras.{_SIGMAS_KEY}",
+        f"extras.{_RHOS_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -809,6 +947,8 @@ class BuildFuzzySimplicialSet(Op):
             )
             scaled_weight = weight.clone()
             for index in range(weight.shape[0]):
+                # Preserve the classic behavior where explicit graph weights
+                # rescale the fuzzy-set membership after symmetrization.
                 pair = (
                     min(int(head[index].item()), int(tail[index].item())),
                     max(int(head[index].item()), int(tail[index].item())),
@@ -828,8 +968,18 @@ class SpectralInitialization(Op):
 
     name: ClassVar[str] = "umap_spectral_init"
     category: ClassVar[OpCategory] = OpCategory.INIT
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_FUZZY_HEAD_KEY}",
+        f"extras.{_FUZZY_TAIL_KEY}",
+        f"extras.{_FUZZY_WEIGHT_KEY}",
+    )
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_FUZZY_HEAD_KEY}",
+        f"extras.{_FUZZY_TAIL_KEY}",
+        f"extras.{_FUZZY_WEIGHT_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -858,8 +1008,19 @@ class FitCurveParameters(Op):
 
     name: ClassVar[str] = "umap_fit_curve"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_MIN_DIST_KEY}",
+        f"extras.{_SPREAD_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_CURVE_A_KEY}",
+        f"extras.{_CURVE_B_KEY}",
+    )
+    requires: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_MIN_DIST_KEY}",
+        f"extras.{_SPREAD_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -883,8 +1044,24 @@ class SelectPositiveEdges(Op):
 
     name: ClassVar[str] = "umap_select_positive_edges"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("extras",)
-    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_FUZZY_HEAD_KEY}",
+        f"extras.{_FUZZY_TAIL_KEY}",
+        f"extras.{_FUZZY_WEIGHT_KEY}",
+        f"extras.{_N_EPOCHS_KEY}",
+    )
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_POSITIVE_HEAD_KEY}",
+        f"extras.{_POSITIVE_TAIL_KEY}",
+        f"extras.{_EPOCHS_PER_SAMPLE_KEY}",
+    )
+    requires: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_FUZZY_HEAD_KEY}",
+        f"extras.{_FUZZY_TAIL_KEY}",
+        f"extras.{_FUZZY_WEIGHT_KEY}",
+        f"extras.{_N_EPOCHS_KEY}",
+    )
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -916,9 +1093,21 @@ class OptimizeUMAPEmbedding(Op):
 
     name: ClassVar[str] = "umap_optimize_embedding"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        f"extras.{_POSITIVE_HEAD_KEY}",
+        f"extras.{_POSITIVE_TAIL_KEY}",
+        f"extras.{_EPOCHS_PER_SAMPLE_KEY}",
+        f"extras.{_N_EPOCHS_KEY}",
+        f"extras.{_LEARNING_RATE_KEY}",
+        f"extras.{_NEGATIVE_SAMPLE_RATE_KEY}",
+        f"extras.{_GAMMA_KEY}",
+        f"extras.{_CURVE_A_KEY}",
+        f"extras.{_CURVE_B_KEY}",
+    )
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -956,6 +1145,7 @@ class FinalizeUMAPPositions(Op):
     reads: ClassVar[Tuple[str, ...]] = ("pos",)
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
+    access_pattern: ClassVar[str] = "global"
 
     def apply(
         self,
@@ -975,7 +1165,9 @@ class FinalizeUMAPPositions(Op):
 
 
 __all__ = [
+    "ValidateUMAPInputsConfig",
     "ValidateUMAPInputs",
+    "StoreUMAPHyperparametersConfig",
     "StoreUMAPHyperparameters",
     "BuildUMAPAdjacency",
     "ComputeAllPairsShortestPaths",

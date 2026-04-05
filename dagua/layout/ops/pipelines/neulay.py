@@ -1,4 +1,4 @@
-"""NeuLay two-phase graph layout expressed as a composable ops pipeline."""
+"""NeuLay two-phase graph layout pipeline."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def build_neulay_pipeline(
     radius: float = 0.4,
     magnitude: float | None = None,
 ) -> Pipeline:
-    """Build a NeuLay pipeline that is bit-identical to classic ``layout_neulay``.
+    """Build a NeuLay two-phase graph layout pipeline.
 
     Parameters
     ----------
@@ -50,8 +50,11 @@ def build_neulay_pipeline(
     Returns
     -------
     Pipeline
-        Pipeline that reproduces classic NeuLay's GCN phase, direct
-        RMSprop refinement, KD-tree repulsion, and convergence check.
+        Pipeline implementing the NeuLay algorithm. The pipeline produces
+        final node coordinates by seeding the RNG, preparing the GCN and
+        direct-optimization state, optionally running the GCN phase, refining
+        positions with RMSprop and KD-tree repulsion, checking convergence, and
+        finalizing the embedding.
     """
     if steps < 0:
         raise ValueError("steps must be non-negative.")
@@ -104,14 +107,14 @@ def layout_neulay_pipeline(
     magnitude: float | None = None,
     edge_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Run the NeuLay pipeline as a drop-in replacement for classic ``layout_neulay``.
+    """Run the NeuLay two-phase graph layout pipeline.
 
     Parameters
     ----------
     edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+        Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
-        Number of graph nodes.
+        Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor | None, default=None
         Optional node-size tensor used to resolve output device.
     seed : int, default=42

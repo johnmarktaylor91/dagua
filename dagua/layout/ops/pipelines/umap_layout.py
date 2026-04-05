@@ -1,4 +1,4 @@
-"""UMAP graph layout expressed as a composable ops pipeline."""
+"""UMAP graph layout pipeline."""
 
 from __future__ import annotations
 
@@ -38,7 +38,35 @@ def build_umap_layout_pipeline(
     negative_sample_rate: int = 5,
     repulsion_strength: float = 1.0,
 ) -> Pipeline:
-    """Build a UMAP pipeline that is bit-identical to ``layout_umap``."""
+    """Build a UMAP graph layout pipeline.
+
+    Parameters
+    ----------
+    n_neighbors : int, default=15
+        Size of the local neighborhood used to build the fuzzy simplicial set.
+    min_dist : float, default=0.1
+        Minimum distance target used by the low-dimensional attraction curve.
+    spread : float, default=1.0
+        Effective scale of the low-dimensional embedding.
+    n_epochs : int, optional
+        Number of optimization epochs. ``None`` lets the algorithm pick the
+        classical default from graph size.
+    learning_rate : float, default=1.0
+        Learning rate used by the embedding optimizer.
+    negative_sample_rate : int, default=5
+        Number of negative samples drawn per positive edge update.
+    repulsion_strength : float, default=1.0
+        Weight applied to sampled repulsive updates.
+
+    Returns
+    -------
+    Pipeline
+        Pipeline implementing the UMAP layout algorithm. The pipeline produces
+        final node coordinates by validating hyperparameters, building graph
+        distances and k-nearest neighbors, constructing the fuzzy simplicial
+        set, computing spectral initialization, fitting the attraction curve,
+        optimizing the embedding, and finalizing positions.
+    """
     return Pipeline(
         [
             ValidateUMAPInputs(n_neighbors=n_neighbors),
@@ -80,7 +108,46 @@ def layout_umap_layout_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run the UMAP pipeline as a drop-in replacement for classic ``layout_umap``."""
+    """Run the UMAP graph layout pipeline.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes ``N`` in the graph.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]``. Accepted for API
+        compatibility and forwarded through the layout problem.
+    n_neighbors : int, default=15
+        Size of the local neighborhood used to build the fuzzy simplicial set.
+    min_dist : float, default=0.1
+        Minimum low-dimensional separation encouraged between nearby points.
+    spread : float, default=1.0
+        Effective global scale of the embedding.
+    n_epochs : int, optional
+        Number of optimization epochs. ``None`` uses the algorithm default.
+    learning_rate : float, default=1.0
+        Learning rate used by embedding optimization.
+    negative_sample_rate : int, default=5
+        Number of negative samples drawn per positive edge update.
+    repulsion_strength : float, default=1.0
+        Weight applied to negative-sample repulsion updates.
+    seed : int, default=42
+        Random seed for spectral initialization and embedding optimization.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Final position tensor with shape ``[N, 2]``.
+
+    Raises
+    ------
+    RuntimeError
+        If the pipeline does not populate final positions.
+    """
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,
