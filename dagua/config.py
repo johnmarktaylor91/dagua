@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
 if TYPE_CHECKING:
     from dagua.flex import LayoutFlex
@@ -170,6 +170,7 @@ class LayoutConfig:
     # Optional algorithm override for direct pipeline-based layouts.
     # None routes to the native multilevel/direct engine.
     algorithm: Optional[str] = None
+    algorithm_params: dict[str, Any] = field(default_factory=dict)
 
 
 # Registry of all tunable parameters with metadata
