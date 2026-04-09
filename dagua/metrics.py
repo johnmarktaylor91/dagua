@@ -338,11 +338,34 @@ def depth_position_correlation(pos: torch.Tensor, topo_depth: torch.Tensor) -> D
     return {"depth_spearman_rho": float(rho), "depth_spearman_pval": float(pval)}
 
 
-def count_overlaps_detailed(pos: torch.Tensor, node_sizes: torch.Tensor) -> Dict[str, int]:
+def count_overlaps_detailed(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    *,
+    seed: Optional[int] = None,
+) -> Dict[str, int]:
     """Count overlapping node bounding box pairs using spatial hashing.
 
-    Complexity: O(N) expected with proper cell sizing.
-    Target: 0 (any nonzero = projection bug).
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node size tensor with shape ``[N, 2]`` containing width and height.
+    seed : Optional[int], optional
+        Seed for the capped per-cell subsampling path. ``None`` preserves the
+        existing stochastic behavior by using the global RNG state.
+
+    Returns
+    -------
+    Dict[str, int]
+        Overlap statistics containing ``overlap_count``.
+
+    Notes
+    -----
+    Complexity is ``O(N)`` expected with proper cell sizing. The stochastic
+    path only applies on large graphs when a crowded hash cell is capped to
+    avoid quadratic work.
     """
     n = pos.shape[0]
     if n <= 1:
@@ -386,6 +409,7 @@ def count_overlaps_detailed(pos: torch.Tensor, node_sizes: torch.Tensor) -> Dict
 
     overlap_count = 0
     n_cells = multi_starts.shape[0]
+    gen = None if seed is None else torch.Generator(device="cpu").manual_seed(int(seed))
 
     # Vectorized check per cell, capped at 200 nodes per cell
     for i in range(min(int(n_cells), 100000)):
@@ -394,7 +418,7 @@ def count_overlaps_detailed(pos: torch.Tensor, node_sizes: torch.Tensor) -> Dict
         cell_nodes = sorted_idx[s:e]
         m = cell_nodes.shape[0]
         if m > 200:
-            cell_nodes = cell_nodes[torch.randperm(m)[:200]]
+            cell_nodes = cell_nodes[torch.randperm(m, generator=gen)[:200]]
             m = 200
 
         p = pos[cell_nodes]
@@ -561,11 +585,34 @@ def sampled_stress(
 
 
 def sampled_crossing_rate(
-    pos: torch.Tensor, edge_index: torch.Tensor, n_samples: int = 1_000_000
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    n_samples: int = 1_000_000,
+    *,
+    seed: Optional[int] = None,
 ) -> Dict[str, float]:
-    """Estimated crossing rate via random edge-pair sampling.
+    """Estimate crossing rate via random edge-pair sampling.
 
-    Complexity: O(n_samples).
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    n_samples : int, optional
+        Maximum number of edge pairs to sample.
+    seed : Optional[int], optional
+        Seed for edge-pair sampling. ``None`` preserves the existing stochastic
+        behavior by using the global RNG state.
+
+    Returns
+    -------
+    Dict[str, float]
+        Estimated crossing statistics for the sampled edge pairs.
+
+    Notes
+    -----
+    Complexity is ``O(n_samples)``.
     """
     if edge_index.numel() == 0 or edge_index.shape[1] < 2:
         return {
@@ -578,9 +625,10 @@ def sampled_crossing_rate(
     E = edge_index.shape[1]
     src, tgt = edge_index[0], edge_index[1]
     actual_samples = min(n_samples, E * (E - 1) // 2)
+    gen = None if seed is None else torch.Generator(device="cpu").manual_seed(int(seed))
 
-    idx1 = torch.randint(0, E, (actual_samples,))
-    idx2 = torch.randint(0, E, (actual_samples,))
+    idx1 = torch.randint(0, E, (actual_samples,), generator=gen)
+    idx2 = torch.randint(0, E, (actual_samples,), generator=gen)
 
     # Exclude pairs sharing a node
     e1s, e1t = src[idx1], tgt[idx1]
@@ -1170,19 +1218,35 @@ def quick(
     node_sizes: Optional[torch.Tensor] = None,
     direction: str = "TB",
     back_edge_mask: Optional[torch.Tensor] = None,
+    *,
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Tier-1 metrics only.  O(N + E), runs in seconds at any scale.
+    """Compute the Tier-1 metric bundle.
 
-    Args:
-        pos: [N, 2] positions.
-        edge_index: [2, E] edge tensor.
-        topo_depth: [N] int tensor/list of topological depths (computed if None).
-        node_sizes: [N, 2] for overlap counting (skipped if None).
-        direction: layout direction for DAG consistency.
-        back_edge_mask: [E] bool mask of back edges (excluded from dag_consistency).
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    topo_depth : Any, optional
+        Topological depth metadata. When ``None``, it is derived from the
+        graph if edges are present.
+    node_sizes : Optional[torch.Tensor], optional
+        Node size tensor with shape ``[N, 2]`` used for overlap counting.
+    direction : str, optional
+        Layout direction for DAG consistency and straightness metrics.
+    back_edge_mask : Optional[torch.Tensor], optional
+        Boolean mask with shape ``[E]`` identifying back edges that should be
+        excluded from DAG consistency.
+    seed : Optional[int], optional
+        Seed forwarded to stochastic Tier-1 metrics. ``None`` preserves the
+        existing stochastic behavior.
 
-    Returns:
-        Flat dict of metric name -> value.
+    Returns
+    -------
+    Dict[str, Any]
+        Flat metric dictionary for the quick metric surface.
     """
     t0 = _time.perf_counter()
     pos = _ensure_cpu(pos)
@@ -1219,7 +1283,7 @@ def quick(
     # Overlap count
     if node_sizes is not None:
         ns = _ensure_cpu(node_sizes)
-        result.update(count_overlaps_detailed(pos, ns))
+        result.update(count_overlaps_detailed(pos, ns, seed=seed))
 
     # Aspect ratio
     ns_arg = _ensure_cpu(node_sizes) if node_sizes is not None else None
@@ -1551,8 +1615,29 @@ def graphviz_delta(dagua_metrics: Dict, graphviz_metrics: Dict) -> Dict[str, flo
 # Legacy function-name aliases (old API returned scalars)
 
 
-def count_crossings(pos: torch.Tensor, edge_index: torch.Tensor) -> int:
-    """Legacy: count edge crossings.  Exact for E<=500, sampled for larger."""
+def count_crossings(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    *,
+    seed: Optional[int] = None,
+) -> int:
+    """Count edge crossings exactly on small graphs and by sampling on large ones.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    seed : Optional[int], optional
+        Seed forwarded to the sampled large-graph path. ``None`` preserves the
+        existing stochastic behavior.
+
+    Returns
+    -------
+    int
+        Exact crossing count when ``E <= 500`` and sampled estimate otherwise.
+    """
     pos = _ensure_cpu(pos)
     ei = _ensure_cpu(edge_index)
     if ei.numel() == 0 or ei.shape[1] < 2:
@@ -1571,7 +1656,7 @@ def count_crossings(pos: torch.Tensor, edge_index: torch.Tensor) -> int:
                     crossings += 1
         return crossings
     else:
-        result = sampled_crossing_rate(pos, ei, n_samples=125000)
+        result = sampled_crossing_rate(pos, ei, n_samples=125000, seed=seed)
         return int(result["crossing_estimated_total"])
 
 
