@@ -1,1016 +1,427 @@
 #!/usr/bin/env python3
-"""Generate the LaTeX fidelity report from precomputed CSV outputs."""
+"""Generate a short markdown fidelity report from the analysis CSVs.
+
+Reads the four CSVs written by ``scripts/fidelity_analysis.py`` and emits
+a markdown summary at ``<output_dir>/report.md``. Large detail tables are
+kept in the sidecar CSVs; the markdown inlines only family-level
+summaries and a failures section.
+
+Usage
+-----
+python scripts/generate_fidelity_report.py \
+    --input eval_output/fidelity_report/data \
+    --output eval_output/fidelity_report/report.md
+"""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
-import shutil
-import subprocess
-from collections import defaultdict
+import sys
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Any
 
-README_HASH_PREFIX = "Results SHA-256:"
 QUALITY_METRICS: tuple[str, ...] = (
     "aspect_ratio",
     "dag_consistency",
     "edge_length_cv",
-)
-TOST_MARGIN_LABELS: tuple[str, ...] = ("0_5x", "1x", "1_5x", "2x")
-REQUIRED_LATEX_PACKAGES: tuple[str, ...] = (
-    "booktabs.sty",
-    "geometry.sty",
-    "hyperref.sty",
-    "graphicx.sty",
-    "amsmath.sty",
-    "siunitx.sty",
-    "longtable.sty",
-    "fancyhdr.sty",
+    "edge_straightness_mean_deg",
+    "depth_spearman_rho",
+    "overlap_count",
+    "sampled_stress",
+    "crossing_rate",
 )
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments.
+    """Parse CLI arguments for markdown report generation.
 
     Returns
     -------
     argparse.Namespace
-        Parsed command-line options.
+        Parsed command-line arguments.
     """
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Generate markdown fidelity report.")
     parser.add_argument(
-        "--data",
+        "--input",
         type=Path,
         default=Path("eval_output/fidelity_report/data"),
-        help="Directory containing the fidelity CSV outputs",
+        help="Directory containing fidelity CSV outputs.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("eval_output/fidelity_report"),
-        help="Destination directory for report.tex and report.pdf",
+        default=Path("eval_output/fidelity_report/report.md"),
+        help="Markdown report destination.",
     )
     return parser.parse_args()
 
 
-def read_csv_rows(path: Path) -> list[dict[str, str]]:
-    """Read a CSV file into memory.
+def load_csv(path: Path) -> list[dict[str, Any]]:
+    """Load a CSV into memory.
 
     Parameters
     ----------
     path : Path
-        CSV file path.
+        CSV file to load.
 
     Returns
     -------
-    list[dict[str, str]]
-        CSV rows as dictionaries.
+    list[dict[str, Any]]
+        Parsed CSV rows. Returns an empty list when the file is absent.
     """
-    with path.open("r", encoding="utf-8", newline="") as handle:
+    if not path.exists():
+        return []
+    with open(path, encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
 
 
-def latex_escape(value: object) -> str:
-    """Escape a value for LaTeX text contexts.
+def fmt_num(value: Any, precision: int = 3) -> str:
+    """Format a numeric value for markdown output.
 
     Parameters
     ----------
-    value : object
-        Raw value to render.
+    value : Any
+        Raw value to format.
+    precision : int, default=3
+        Number of digits after the decimal point.
 
     Returns
     -------
     str
-        Escaped LaTeX-safe string.
-    """
-    text = str(value)
-    replacements = {
-        "\\": r"\textbackslash{}",
-        "&": r"\&",
-        "%": r"\%",
-        "$": r"\$",
-        "#": r"\#",
-        "_": r"\_",
-        "{": r"\{",
-        "}": r"\}",
-        "~": r"\textasciitilde{}",
-        "^": r"\textasciicircum{}",
-    }
-    for source, target in replacements.items():
-        text = text.replace(source, target)
-    return text
-
-
-def parse_float(value: object) -> float:
-    """Parse a float-like value, returning ``nan`` on failure.
-
-    Parameters
-    ----------
-    value : object
-        Raw cell value.
-
-    Returns
-    -------
-    float
-        Parsed float or ``nan``.
+        Formatted number or ``"-"`` when the value is missing or non-finite.
     """
     try:
-        parsed = float(str(value))
+        parsed = float(value)
     except (TypeError, ValueError):
-        return math.nan
-    return parsed
+        return "-"
+    if math.isnan(parsed) or math.isinf(parsed):
+        return "-"
+    return f"{parsed:.{precision}f}"
 
 
-def parse_bool(value: object) -> bool:
-    """Parse a loose boolean string.
-
-    Parameters
-    ----------
-    value : object
-        Raw cell value.
-
-    Returns
-    -------
-    bool
-        Parsed truth value.
-    """
-    return str(value).strip().lower() in {"1", "true", "yes"}
-
-
-def format_float(value: float, digits: int = 3) -> str:
-    """Format a numeric value for LaTeX tables.
+def column_pass_rate(rows: list[dict[str, Any]], column_name: str) -> float:
+    """Compute the fraction of rows whose numeric column value is below 0.05.
 
     Parameters
     ----------
-    value : float
-        Numeric value.
-    digits : int, default=3
-        Digits after the decimal point.
-
-    Returns
-    -------
-    str
-        Formatted number or ``N/A``.
-    """
-    if not math.isfinite(value):
-        return "N/A"
-    return f"{value:.{digits}f}"
-
-
-def read_readme_metadata(path: Path) -> tuple[str, str]:
-    """Extract the benchmark hash and power statement from the README.
-
-    Parameters
-    ----------
-    path : Path
-        README path.
-
-    Returns
-    -------
-    tuple[str, str]
-        Results hash and power-effect summary.
-    """
-    if not path.exists():
-        return "N/A", "N/A"
-    results_hash = "N/A"
-    power_effect = "N/A"
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith(README_HASH_PREFIX):
-            parts = line.split("`")
-            if len(parts) >= 2:
-                results_hash = parts[1]
-        if "minimum detectable effect" in line and "`" in line:
-            parts = line.split("`")
-            if len(parts) >= 2:
-                power_effect = parts[1]
-    return results_hash, power_effect
-
-
-def rows_by_family(rows: Iterable[Mapping[str, str]]) -> dict[str, list[Mapping[str, str]]]:
-    """Group rows by algorithm family.
-
-    Parameters
-    ----------
-    rows : Iterable[Mapping[str, str]]
-        Input rows.
-
-    Returns
-    -------
-    dict[str, list[Mapping[str, str]]]
-        Grouped rows.
-    """
-    grouped: dict[str, list[Mapping[str, str]]] = defaultdict(list)
-    for row in rows:
-        grouped[str(row["algorithm_family"])].append(row)
-    return grouped
-
-
-def mean(values: Iterable[float]) -> float:
-    """Return the arithmetic mean, or ``nan`` for empty input.
-
-    Parameters
-    ----------
-    values : Iterable[float]
-        Numeric values.
+    rows : list[dict[str, Any]]
+        Input rows to inspect.
+    column_name : str
+        Column whose values are interpreted as p-values.
 
     Returns
     -------
     float
-        Arithmetic mean or ``nan``.
+        Fraction of finite values below 0.05, or ``nan`` when no finite
+        values are present.
     """
-    finite = [value for value in values if math.isfinite(value)]
-    if not finite:
-        return math.nan
-    return sum(finite) / len(finite)
-
-
-def std(values: Iterable[float]) -> float:
-    """Return the sample standard deviation, or ``0`` for short input.
-
-    Parameters
-    ----------
-    values : Iterable[float]
-        Numeric values.
-
-    Returns
-    -------
-    float
-        Sample standard deviation or ``0``.
-    """
-    finite = [value for value in values if math.isfinite(value)]
-    if len(finite) < 2:
-        return 0.0
-    sample_mean = sum(finite) / len(finite)
-    variance = sum((value - sample_mean) ** 2 for value in finite) / (len(finite) - 1)
-    return math.sqrt(max(variance, 0.0))
-
-
-def family_metric_summary(
-    rows: list[Mapping[str, str]], metric_name: str
-) -> tuple[float, float, float, float, float]:
-    """Aggregate one metric across per-graph rows for a family.
-
-    Parameters
-    ----------
-    rows : list[Mapping[str, str]]
-        Per-graph rows for one family.
-    metric_name : str
-        Metric identifier.
-
-    Returns
-    -------
-    tuple[float, float, float, float, float]
-        Original mean/std, reimplementation mean/std, and mean Cohen's d.
-    """
-    orig_means = [parse_float(row[f"{metric_name}_orig_mean"]) for row in rows]
-    reimpl_means = [parse_float(row[f"{metric_name}_reimpl_mean"]) for row in rows]
-    effect_sizes = [parse_float(row[f"{metric_name}_cohens_d"]) for row in rows]
-    return (
-        mean(orig_means),
-        std(orig_means),
-        mean(reimpl_means),
-        std(reimpl_means),
-        mean(effect_sizes),
-    )
-
-
-def family_tost_pass_rate(rows: list[Mapping[str, str]], label: str) -> float:
-    """Compute the fraction of rows whose BH-adjusted TOST passes at one margin.
-
-    Parameters
-    ----------
-    rows : list[Mapping[str, str]]
-        Per-graph rows for one family.
-    label : str
-        Margin label such as ``1x``.
-
-    Returns
-    -------
-    float
-        Pass rate in ``[0, 1]``.
-    """
-    eligible = [row for row in rows if str(row.get("verdict", "")) != "insufficient_data"]
-    if not eligible:
-        return math.nan
     passes = 0
-    for row in eligible:
-        if all(
-            parse_float(row[f"{metric_name}_tost_pvalue_{label}_bh"]) < 0.05
-            for metric_name in QUALITY_METRICS
-        ):
+    eligible = 0
+    for row in rows:
+        try:
+            value = float(row.get(column_name, ""))
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(value):
+            continue
+        eligible += 1
+        if value < 0.05:
             passes += 1
-    return passes / len(eligible)
+    if eligible == 0:
+        return math.nan
+    return passes / eligible
 
 
-def executive_summary_table(summary_rows: Sequence[Mapping[str, str]]) -> str:
-    """Render the executive summary verdict table.
+def build_executive_summary_table(algorithm_summary: list[dict[str, Any]]) -> str:
+    """Build the family-level executive summary markdown table.
 
     Parameters
     ----------
-    summary_rows : Sequence[Mapping[str, str]]
-        Algorithm-summary rows.
+    algorithm_summary : list[dict[str, Any]]
+        Rows from ``algorithm_summary.csv``.
 
     Returns
     -------
     str
-        LaTeX table.
+        Markdown table or a placeholder when no rows are present.
     """
-    body = []
-    for row in sorted(summary_rows, key=lambda item: str(item["algorithm_family"])):
-        body.append(
-            " & ".join(
+    if not algorithm_summary:
+        return "_(no algorithm summaries)_"
+    headers = [
+        "Family",
+        "Verdict",
+        "Stochastic",
+        "N OK",
+        "N Strong",
+        "N Weak",
+        "N Partial",
+        "N Divergent",
+        "Median Procrustes RMSD",
+    ]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in sorted(algorithm_summary, key=lambda item: str(item.get("algorithm_family", ""))):
+        lines.append(
+            "| "
+            + " | ".join(
                 [
-                    latex_escape(row["algorithm_family"]),
-                    latex_escape(row["verdict"]),
-                    latex_escape(row["num_graphs_paired_ok"]),
-                    format_float(parse_float(row["procrustes_rmsd_mean"])),
-                    format_float(parse_float(row["mean_runtime_ratio"])),
-                    format_float(parse_float(row["tost_pass_rate_at_1x"]), digits=2),
-                    latex_escape(row["anomaly_count"]),
+                    str(row.get("algorithm_family", "-")),
+                    str(row.get("family_verdict", row.get("verdict", "-"))),
+                    str(row.get("is_stochastic", "-")),
+                    str(row.get("num_graphs_paired_ok", "-")),
+                    str(row.get("num_strong_equivalent", "-")),
+                    str(row.get("num_weak_equivalent", "-")),
+                    str(row.get("num_partial_match", "-")),
+                    str(row.get("num_divergent", "-")),
+                    fmt_num(row.get("procrustes_rmsd_median")),
                 ]
             )
-            + r" \\"
+            + " |"
         )
-    return "\n".join(
-        [
-            r"\begin{table}[htbp]",
-            r"\centering",
-            r"\small",
-            r"\begin{tabular}{llllrrr}",
-            r"\toprule",
-            (
-                r"Family & Verdict & Paired groups & RMSD mean & Runtime ratio "
-                r"& TOST 1.0x & Anomalies \\"
-            ),
-            r"\midrule",
-            *body,
-            r"\bottomrule",
-            r"\end{tabular}",
-            r"\end{table}",
-        ]
-    )
-
-
-def methodology_section(
-    per_graph_rows: Sequence[Mapping[str, str]],
-    results_hash: str,
-    power_effect: str,
-) -> str:
-    """Render the methodology section.
-
-    Parameters
-    ----------
-    per_graph_rows : Sequence[Mapping[str, str]]
-        Per-graph detail rows.
-    results_hash : str
-        Benchmark results hash.
-    power_effect : str
-        Power-analysis summary.
-
-    Returns
-    -------
-    str
-        Methodology section body.
-    """
-    total_rows = len(per_graph_rows)
-    paired_rows = sum(str(row.get("verdict", "")) != "insufficient_data" for row in per_graph_rows)
-    distinct_graphs = len({str(row["graph_name"]) for row in per_graph_rows})
-    return "\n".join(
-        [
-            r"\section{Methodology}",
-            (
-                "Benchmark data were loaded from the fidelity CSV extracts "
-                rf"derived from `{latex_escape(results_hash)}`."
-            ),
-            (
-                f"The analysis covers {paired_rows} analyzable variant/graph "
-                f"groups across {distinct_graphs} distinct graphs "
-                f"({total_rows} total rows including insufficient-data cases)."
-            ),
-            r"",
-            r"\subsection{Data collection}",
-            (
-                r"Layouts were sourced from the full variant benchmark "
-                r"corpus, with one valid \texttt{[N,2]} tensor required "
-                r"per retained run."
-            ),
-            (
-                r"NaN, Inf, malformed tensors, and layouts with fewer than "
-                r"three nodes were rejected before metrics or geometry "
-                r"were computed."
-            ),
-            r"",
-            r"\subsection{Geometric comparison}",
-            (
-                r"Procrustes alignment was implemented with centering plus "
-                r"optimal proper rotation only: scale was reported "
-                r"separately rather than normalized away, and reflected "
-                r"alignments were detected but never accepted as the "
-                r"match score."
-            ),
-            (
-                r"Graphs with fewer than five nodes were excluded from "
-                r"Procrustes reporting because the resulting displacement "
-                r"summaries are not stable enough to interpret "
-                r"comparatively."
-            ),
-            r"",
-            r"\subsection{Quality metrics}",
-            (
-                r"The report tracks five quick metrics from "
-                r"\texttt{dagua.metrics.quick}: edge-length coefficient "
-                r"of variation, mean edge length, DAG consistency, "
-                r"overlap count, and aspect ratio."
-            ),
-            r"",
-            r"\subsection{Statistical tests}",
-            r"TOST equivalence testing is the primary evidence standard for stochastic algorithms.",
-            (
-                r"Two-sample Kolmogorov--Smirnov and Mann--Whitney U tests "
-                r"are secondary difference-detection checks only; they are "
-                r"not interpreted as evidence of equivalence when "
-                r"non-significant."
-            ),
-            (
-                r"Benjamini--Hochberg false-discovery-rate control at "
-                r"$q=0.05$ was applied separately to each test family "
-                r"across all graph-level metric tests."
-            ),
-            r"",
-            r"\subsection{Equivalence margins}",
-            (
-                r"TOST margins were reported at $0.5\times$, $1.0\times$, "
-                r"$1.5\times$, and $2.0\times$ the within-original "
-                r"standard deviation, subject to per-metric floors to "
-                r"handle zero-variance cases."
-            ),
-            r"",
-            r"\subsection{Power analysis}",
-            (
-                r"With $n=10$ seeds per side, the Mann--Whitney test "
-                r"reaches roughly 80\% power at "
-                rf"`{latex_escape(power_effect)}` under a Gaussian "
-                r"location-shift simulation."
-            ),
-            r"",
-            r"\subsection{Limitations}",
-            (
-                r"Graphs in the benchmark collection are not statistically "
-                r"independent, so family-level verdicts should be read as "
-                r"reproducibility evidence across a curated workload "
-                r"rather than as a sample from a broader population."
-            ),
-            (
-                r"Likewise, a large KS p-value does not imply equivalence; "
-                r"only the TOST analyses are used as primary equivalence "
-                r"evidence."
-            ),
-        ]
-    )
-
-
-def family_results_section(
-    summary_rows: Sequence[Mapping[str, str]],
-    per_graph_rows: Sequence[Mapping[str, str]],
-) -> str:
-    """Render algorithm-by-algorithm results.
-
-    Strong/identical families get a single compact summary table.
-    Non-strong families get detailed per-family subsections with metric
-    tables and anomaly lists.
-
-    Parameters
-    ----------
-    summary_rows : Sequence[Mapping[str, str]]
-        Algorithm-summary rows.
-    per_graph_rows : Sequence[Mapping[str, str]]
-        Per-graph detail rows.
-
-    Returns
-    -------
-    str
-        Results section body.
-    """
-    grouped = rows_by_family(per_graph_rows)
-    strong_families = [
-        r for r in summary_rows if str(r["verdict"]) in ("strong_equivalent", "identical")
-    ]
-    non_strong = [
-        r for r in summary_rows if str(r["verdict"]) not in ("strong_equivalent", "identical")
-    ]
-    sections: list[str] = [r"\section{Algorithm-by-algorithm results}"]
-
-    # Compact table for strong/identical families
-    if strong_families:
-        sections.extend(
-            [
-                r"\subsection{Strong/identical families}",
-                (
-                    f"The following {len(strong_families)} families are "
-                    r"\textbf{strong\_equivalent} or \textbf{identical} and "
-                    "require no further discussion. Full per-graph data is in "
-                    r"\texttt{per\_graph\_detail.csv}."
-                ),
-                "",
-                r"\begin{longtable}{lrrrrr}",
-                r"\toprule",
-                r"Family & Paired & RMSD & Scale & Runtime Ratio & TOST @1x \\",
-                r"\midrule",
-                r"\endfirsthead",
-                r"\toprule",
-                r"Family & Paired & RMSD & Scale & Runtime Ratio & TOST @1x \\",
-                r"\midrule",
-                r"\endhead",
-            ]
-        )
-        for row in sorted(strong_families, key=lambda r: str(r["algorithm_family"])):
-            sections.append(
-                " & ".join(
-                    [
-                        latex_escape(row["algorithm_family"]),
-                        str(row["num_graphs_paired_ok"]),
-                        format_float(parse_float(row["procrustes_rmsd_mean"])),
-                        format_float(parse_float(row["scale_ratio_mean"])),
-                        format_float(parse_float(row["mean_runtime_ratio"])),
-                        format_float(parse_float(row.get("tost_pass_rate_at_1x", "nan")), digits=2),
-                    ]
-                )
-                + r" \\"
-            )
-        sections.extend([r"\bottomrule", r"\end{longtable}", ""])
-
-    # Detailed subsections only for non-strong families
-    if non_strong:
-        sections.append(rf"\subsection{{Non-strong families ({len(non_strong)})}}")
-    for summary_row in sorted(non_strong, key=lambda item: str(item["algorithm_family"])):
-        family_name = str(summary_row["algorithm_family"])
-        family_rows = grouped.get(family_name, [])
-        sections.extend(
-            [
-                rf"\subsubsection{{{latex_escape(family_name)}}}",
-                rf"Verdict: \textbf{{{latex_escape(summary_row['verdict'])}}}. ",
-                (
-                    "This family contributes "
-                    f"{latex_escape(summary_row['num_graphs_paired_ok'])} "
-                    "analyzable variant/graph groups."
-                ),
-                "",
-                r"\begin{table}[htbp]",
-                r"\centering",
-                r"\small",
-                r"\begin{tabular}{lrrr}",
-                r"\toprule",
-                r"Metric & Original & Reimplementation & Cohen's d \\",
-                r"\midrule",
-            ]
-        )
-        for metric_name in QUALITY_METRICS:
-            orig_mean, orig_std, reimpl_mean, reimpl_std, effect_size = family_metric_summary(
-                family_rows, metric_name
-            )
-            sections.append(
-                " & ".join(
-                    [
-                        latex_escape(metric_name),
-                        f"{format_float(orig_mean)} $\\pm$ {format_float(orig_std)}",
-                        f"{format_float(reimpl_mean)} $\\pm$ {format_float(reimpl_std)}",
-                        format_float(effect_size),
-                    ]
-                )
-                + r" \\"
-            )
-        sections.extend(
-            [
-                r"\bottomrule",
-                r"\end{tabular}",
-                r"\end{table}",
-                "",
-                r"\begin{table}[htbp]",
-                r"\centering",
-                r"\small",
-                r"\begin{tabular}{lrrrr}",
-                r"\toprule",
-                r"Margin & 0.5x & 1.0x & 1.5x & 2.0x \\",
-                r"\midrule",
-                "Pass rate & "
-                + " & ".join(
-                    format_float(family_tost_pass_rate(family_rows, label), digits=2)
-                    for label in TOST_MARGIN_LABELS
-                )
-                + r" \\",
-                r"\bottomrule",
-                r"\end{tabular}",
-                r"\end{table}",
-                "",
-                (
-                    "Mean runtime ratio (reimplementation/original): "
-                    f"{format_float(parse_float(summary_row['mean_runtime_ratio']))}."
-                ),
-            ]
-        )
-        anomalies = [row for row in family_rows if str(row.get("anomaly_reason", "")).strip()]
-        if anomalies:
-            sections.append(r"\paragraph{Anomalous graphs.}")
-            sections.append(
-                ", ".join(
-                    latex_escape(
-                        f"{row['variant_id']}:{row['graph_name']} ({row['anomaly_reason']})"
-                    )
-                    for row in anomalies[:12]
-                )
-                + "."
-            )
-        else:
-            sections.append(r"\paragraph{Anomalous graphs.} None.")
-    return "\n".join(sections)
-
-
-def cross_algorithm_section(
-    summary_rows: Sequence[Mapping[str, str]],
-    per_graph_rows: Sequence[Mapping[str, str]],
-) -> str:
-    """Render the cross-algorithm summary and category breakdown.
-
-    Parameters
-    ----------
-    summary_rows : Sequence[Mapping[str, str]]
-        Algorithm-summary rows.
-    per_graph_rows : Sequence[Mapping[str, str]]
-        Per-graph detail rows.
-
-    Returns
-    -------
-    str
-        Cross-algorithm section body.
-    """
-    category_counts: dict[tuple[str, str], int] = defaultdict(int)
-    for row in per_graph_rows:
-        for category in ("density_bucket", "size_bucket", "structure_bucket"):
-            category_counts[(category, str(row[category]))] += 1
-    lines = [
-        r"\section{Cross-algorithm summary}",
-        executive_summary_table(summary_rows),
-        "",
-        r"\begin{table}[htbp]",
-        r"\centering",
-        r"\small",
-        r"\begin{tabular}{lll}",
-        r"\toprule",
-        r"Category axis & Bucket & Rows \\",
-        r"\midrule",
-    ]
-    for (category, bucket), count in sorted(category_counts.items()):
-        lines.append(
-            " & ".join([latex_escape(category), latex_escape(bucket), latex_escape(count)]) + r" \\"
-        )
-    lines.extend(
-        [
-            r"\bottomrule",
-            r"\end{tabular}",
-            r"\end{table}",
-        ]
-    )
     return "\n".join(lines)
 
 
-def anomaly_section(per_graph_rows: Sequence[Mapping[str, str]]) -> str:
-    """Render the anomaly deep-dive section when needed.
+def build_failures_section(
+    per_graph_detail: list[dict[str, Any]],
+    per_seed_detail: list[dict[str, Any]],
+    pairwise_similarity: list[dict[str, Any]],
+) -> str:
+    """Build a markdown section for divergent and partial-match variants.
 
     Parameters
     ----------
-    per_graph_rows : Sequence[Mapping[str, str]]
-        Per-graph rows.
+    per_graph_detail : list[dict[str, Any]]
+        Rows from ``per_graph_detail.csv``.
+    per_seed_detail : list[dict[str, Any]]
+        Rows from ``per_seed_detail.csv``.
+    pairwise_similarity : list[dict[str, Any]]
+        Rows from ``pairwise_similarity.csv``.
 
     Returns
     -------
     str
-        LaTeX section, or an empty string when there are no anomalies.
+        Markdown section summarizing the most important failures.
     """
-    anomalies = [row for row in per_graph_rows if str(row.get("anomaly_reason", "")).strip()]
-    if not anomalies:
-        return ""
-    # Count anomalies by reason type
-    reason_counts: dict[str, int] = defaultdict(int)
-    for row in anomalies:
-        for reason in str(row["anomaly_reason"]).split("; "):
-            reason = reason.strip()
-            if reason:
-                reason_counts[reason] += 1
+    failing = [
+        row
+        for row in per_graph_detail
+        if str(row.get("verdict", "")).lower() in {"divergent", "partial_match"}
+    ]
+    if not failing:
+        return "No variants were flagged as divergent or partial_match.\n"
+
     lines = [
-        r"\section{Anomaly deep dive}",
-        f"Total anomalous per-graph rows: {len(anomalies)}.",
-        r"The full anomaly listing is in \texttt{per\_graph\_detail.csv}.",
+        f"## Failure breakdown ({len(failing)} variants)",
         "",
-        r"\begin{table}[htbp]",
-        r"\centering",
-        r"\begin{tabular}{lr}",
-        r"\toprule",
-        r"Anomaly Type & Count \\",
-        r"\midrule",
+        (
+            f"Context: {len(per_seed_detail)} per-seed rows and "
+            f"{len(pairwise_similarity)} pairwise rows are available for forensic follow-up."
+        ),
+        "",
+        "| Variant | Graph | Verdict | Total Rejected | Top rejection reason |",
+        "| --- | --- | --- | --- | --- |",
     ]
-    for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
-        lines.append(f"{latex_escape(reason)} & {count}" + r" \\")
-    lines.extend(
-        [
-            r"\bottomrule",
-            r"\end{tabular}",
-            r"\end{table}",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def failure_patterns_section(per_graph_rows: Sequence[Mapping[str, str]]) -> str:
-    """Summarize which algorithms fail on which graph structures and why.
-
-    Groups anomalies by (algorithm_family, anomaly_reason) to surface
-    systematic patterns rather than listing individual failures.
-
-    Parameters
-    ----------
-    per_graph_rows : Sequence[Mapping[str, str]]
-        Per-graph detail rows.
-
-    Returns
-    -------
-    str
-        LaTeX section summarizing failure patterns.
-    """
-    anomalies = [row for row in per_graph_rows if str(row.get("anomaly_reason", "")).strip()]
-    if not anomalies:
-        return ""
-
-    # Group by (family, reason) and collect affected graphs
-    from collections import defaultdict
-
-    patterns: dict[tuple[str, str], list[str]] = defaultdict(list)
-    for row in anomalies:
-        family = str(row.get("algorithm_family", "unknown"))
-        reason = str(row.get("anomaly_reason", "unknown"))
-        graph = str(row.get("graph_name", ""))
-        patterns[(family, reason)].append(graph)
-
-    # Sort by count descending
-    sorted_patterns = sorted(patterns.items(), key=lambda x: -len(x[1]))
-
-    lines = [
-        r"\section{Failure patterns}",
-        r"This section aggregates anomalies into systematic patterns,",
-        r"identifying which algorithms fail on which graph structures and why.",
-        r"",
-        r"\begin{longtable}{p{0.14\textwidth}p{0.30\textwidth}r p{0.40\textwidth}}",
-        r"\toprule",
-        r"Algorithm & Failure reason & Count & Affected graphs \\",
-        r"\midrule",
-        r"\endfirsthead",
-        r"\toprule",
-        r"Algorithm & Failure reason & Count & Affected graphs \\",
-        r"\midrule",
-        r"\endhead",
-    ]
-    for (family, reason), graphs in sorted_patterns:
-        # Truncate long graph lists
-        if len(graphs) > 5:
-            graph_str = ", ".join(graphs[:5]) + f", ... ({len(graphs)} total)"
+    for row in failing[:50]:
+        breakdown_json = row.get("rejection_breakdown_json", "{}")
+        try:
+            breakdown = json.loads(breakdown_json)
+        except (TypeError, ValueError):
+            breakdown = {}
+        if breakdown:
+            top_reason_name, top_reason_count = max(
+                breakdown.items(),
+                key=lambda item: item[1],
+            )
+            top_reason = f"{top_reason_name}={top_reason_count}"
         else:
-            graph_str = ", ".join(graphs)
+            top_reason = "-"
         lines.append(
-            " & ".join(
+            "| "
+            + " | ".join(
                 [
-                    latex_escape(family),
-                    latex_escape(reason),
-                    str(len(graphs)),
-                    latex_escape(graph_str),
+                    str(row.get("variant_id", row.get("variant", "-"))),
+                    str(row.get("graph_name", "-")),
+                    str(row.get("verdict", "-")),
+                    str(row.get("total_rejected", "-")),
+                    top_reason,
                 ]
             )
-            + r" \\"
+            + " |"
         )
-    lines.extend([r"\bottomrule", r"\end{longtable}"])
-
-    # Add narrative summary of known structural causes
-    lines.extend(
-        [
-            r"",
-            r"\subsection*{Known structural causes}",
-            r"\begin{itemize}",
-            r"\item \textbf{Disconnected graphs:} Algorithms requiring finite "
-            r"pairwise distances (UMAP, stress-based methods) fail on graphs "
-            r"with disconnected components. This is expected behavior, not a "
-            r"reimplementation bug.",
-            r"\item \textbf{Scale-free hubs:} Force-directed algorithms may "
-            r"timeout or diverge on Barab\'asi--Albert graphs with extreme hub "
-            r"degree, producing different local minima across seeds.",
-            r"\item \textbf{Dense graphs:} Algorithms with $O(E^2)$ crossing "
-            r"detection (e.g., Davidson--Harel) timeout on graphs with high "
-            r"edge density.",
-            r"\item \textbf{Mirror layouts:} Some stochastic algorithms may "
-            r"produce reflected layouts across seeds. This is geometrically "
-            r"valid but flagged for transparency.",
-            r"\end{itemize}",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def appendix_section(per_graph_rows: Sequence[Mapping[str, str]]) -> str:
-    """Render the appendix with data reference and non-strong per-graph detail.
-
-    Only includes rows for non-strong families to keep the PDF compact.
-    Full data is in the companion CSVs.
-
-    Parameters
-    ----------
-    per_graph_rows : Sequence[Mapping[str, str]]
-        Per-graph detail rows.
-
-    Returns
-    -------
-    str
-        Appendix section body.
-    """
-    non_strong_verdicts = {"divergent", "partial_match", "weak_equivalent", "insufficient_data"}
-    non_strong_rows = [
-        row for row in per_graph_rows if str(row.get("verdict", "")) in non_strong_verdicts
-    ]
-    lines = [
-        r"\appendix",
-        r"\section{Data reference}",
-        r"The full per-graph and per-seed results are in the companion CSV files:",
-        r"\begin{itemize}",
-        r"\item \texttt{algorithm\_summary.csv} -- family-level verdicts and statistics",
-        r"\item \texttt{per\_graph\_detail.csv} -- per variant/graph "
-        r"Procrustes, TOST, and verdicts",
-        r"\item \texttt{per\_seed\_detail.csv} -- per-seed quality metrics and positions",
-        r"\item \texttt{pairwise\_similarity.csv} -- pairwise Procrustes comparisons",
-        r"\end{itemize}",
-    ]
-    if non_strong_rows:
+    if len(failing) > 50:
         lines.extend(
             [
                 "",
-                r"\section{Non-strong per-graph detail}",
-                (f"The following {len(non_strong_rows)} rows have non-strong verdicts."),
-                "",
-                r"\begin{longtable}{p{0.14\textwidth}p{0.16\textwidth}p{0.16\textwidth}rrrp{0.14\textwidth}}",
-                r"\toprule",
-                r"Family & Variant & Graph & Seeds & RMSD & Scale & Verdict \\",
-                r"\midrule",
-                r"\endfirsthead",
-                r"\toprule",
-                r"Family & Variant & Graph & Seeds & RMSD & Scale & Verdict \\",
-                r"\midrule",
-                r"\endhead",
+                f"_({len(failing) - 50} more rows in per_graph_detail.csv)_",
             ]
         )
-        for row in sorted(
-            non_strong_rows,
-            key=lambda item: (
-                str(item["algorithm_family"]),
-                str(item["variant_id"]),
-                str(item["graph_name"]),
-            ),
-        ):
-            seeds_label = f"{row['num_orig_seeds']}/{row['num_reimpl_seeds']}"
-            lines.append(
-                " & ".join(
-                    [
-                        latex_escape(row["algorithm_family"]),
-                        latex_escape(row["variant_id"]),
-                        latex_escape(row["graph_name"]),
-                        latex_escape(seeds_label),
-                        format_float(parse_float(row["procrustes_rmsd_mean"])),
-                        format_float(parse_float(row["scale_ratio_mean"])),
-                        latex_escape(row["verdict"]),
-                    ]
-                )
-                + r" \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     return "\n".join(lines)
 
 
-def build_report_tex(data_dir: Path, output_dir: Path) -> Path:
-    """Build the LaTeX source file for the fidelity report.
+def build_procrustes_summary(per_graph_detail: list[dict[str, Any]]) -> str:
+    """Summarize Procrustes equivalence columns across all variants.
+
+    Parameters
+    ----------
+    per_graph_detail : list[dict[str, Any]]
+        Rows from ``per_graph_detail.csv``.
+
+    Returns
+    -------
+    str
+        Markdown section summarizing TOST pass rates and RMSD sidecar columns.
+    """
+    if not per_graph_detail:
+        return "_(no per-graph data)_"
+
+    total = len(per_graph_detail)
+    tost_1x = column_pass_rate(per_graph_detail, "procrustes_tost_pvalue_1x_bh")
+    tost_2x = column_pass_rate(per_graph_detail, "procrustes_tost_pvalue_2x_bh")
+    lines = [
+        "## Procrustes equivalence (TOST)",
+        "",
+        f"- 1x margin pass rate: {fmt_num(tost_1x, 4)} ({total} variants)",
+        f"- 2x margin pass rate: {fmt_num(tost_2x, 4)}",
+        (
+            "- Sidecar columns include `within_orig_rmsd_mean`, `reimpl_rmsd_mean`, "
+            "`between_rmsd_mean`, `procrustes_tost_pvalue_1x_bh`, and "
+            "`procrustes_tost_pvalue_2x_bh`."
+        ),
+        "",
+        "See `per_graph_detail.csv` for per-variant Procrustes and TOST outputs.",
+    ]
+    return "\n".join(lines)
+
+
+def build_metric_surface_section() -> str:
+    """Describe the quality-metric and Welch-test surface tracked in the CSVs.
+
+    Returns
+    -------
+    str
+        Markdown section describing metric columns and test families.
+    """
+    metrics_label = ", ".join(QUALITY_METRICS)
+    return "\n".join(
+        [
+            "## Metric surface",
+            "",
+            f"- Quality metrics surfaced in the CSVs: {metrics_label}.",
+            (
+                "- Per-metric statistical columns include `*_tost_pvalue_{margin}_bh`, "
+                "`*_mannwhitney_pvalue_bh`, `*_ks_pvalue_bh`, and "
+                "`*_welch_pvalue_bh`."
+            ),
+            (
+                "- The markdown keeps these as sidecar evidence instead of inlining a large "
+                "table for every metric-family combination."
+            ),
+        ]
+    )
+
+
+def build_markdown_report(data_dir: Path, output_path: Path) -> str:
+    """Assemble the complete markdown report.
 
     Parameters
     ----------
     data_dir : Path
-        Directory containing the CSV outputs.
-    output_dir : Path
-        Directory to write ``report.tex`` into.
+        Directory containing the analysis CSV artifacts.
+    output_path : Path
+        Destination markdown file path.
 
     Returns
     -------
-    Path
-        Path to the written LaTeX source file.
+    str
+        Complete markdown report.
     """
-    summary_rows = read_csv_rows(data_dir / "algorithm_summary.csv")
-    per_graph_rows = read_csv_rows(data_dir / "per_graph_detail.csv")
-    results_hash, power_effect = read_readme_metadata(data_dir / "README.md")
+    algorithm_summary = load_csv(data_dir / "algorithm_summary.csv")
+    per_graph_detail = load_csv(data_dir / "per_graph_detail.csv")
+    per_seed_detail = load_csv(data_dir / "per_seed_detail.csv")
+    pairwise_similarity = load_csv(data_dir / "pairwise_similarity.csv")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    tex_path = output_dir / "report.tex"
-    executive_table = executive_summary_table(summary_rows)
-    anomaly_deep_dive = anomaly_section(per_graph_rows)
-    tex_source = "\n".join(
-        [
-            r"\documentclass[11pt]{article}",
-            r"\usepackage[margin=1in]{geometry}",
-            r"\usepackage{booktabs}",
-            r"\usepackage{hyperref}",
-            r"\usepackage{graphicx}",
-            r"\usepackage{amsmath}",
-            r"\usepackage{siunitx}",
-            r"\usepackage{longtable}",
-            r"\usepackage{fancyhdr}",
-            r"\pagestyle{fancy}",
-            r"\fancyhf{}",
-            r"\fancyhead[L]{Dagua Fidelity Report}",
-            r"\fancyhead[R]{\thepage}",
-            r"\begin{document}",
-            r"\begin{titlepage}",
-            r"\centering",
-            r"{\LARGE Dagua Algorithm Reimplementation Fidelity Report\par}",
-            r"\vspace{1cm}",
-            rf"{{\large Benchmark hash: \texttt{{{latex_escape(results_hash)}}}\par}}",
-            r"\vfill",
-            r"{\large Generated from structured fidelity-analysis exports\par}",
-            r"\end{titlepage}",
-            r"\section{Executive summary}",
-            executive_table,
-            (
-                r"The dominant pattern in the benchmark corpus is high "
-                r"geometric and metric agreement between the "
-                r"reimplementations and their reference algorithms, with "
-                r"remaining discrepancies concentrated in flagged anomaly "
-                r"cases."
-            ),
-            methodology_section(per_graph_rows, results_hash, power_effect),
-            family_results_section(summary_rows, per_graph_rows),
-            cross_algorithm_section(summary_rows, per_graph_rows),
-            anomaly_deep_dive,
-            failure_patterns_section(per_graph_rows),
-            appendix_section(per_graph_rows),
-            r"\end{document}",
-        ]
-    )
-    tex_path.write_text(tex_source + "\n", encoding="utf-8")
-    return tex_path
+    lines = [
+        "# Dagua Fidelity Analysis Report",
+        "",
+        "Short markdown summary. Detail tables live in the sidecar CSVs.",
+        "",
+        f"Report target: `{output_path}`",
+        "",
+        "## Executive Summary",
+        "",
+        build_executive_summary_table(algorithm_summary),
+        "",
+        build_procrustes_summary(per_graph_detail),
+        "",
+        build_metric_surface_section(),
+        "",
+        build_failures_section(per_graph_detail, per_seed_detail, pairwise_similarity),
+        "",
+        "## Methodology",
+        "",
+        (
+            "- **Procrustes alignment**: per-seed-pair SVD-based alignment accepts the "
+            "better of reflected and non-reflected fits."
+        ),
+        (
+            "- **Within-vs-between test**: the within-distribution is computed from "
+            "within-original seed pairs only, not pooled with reimplementation seeds."
+        ),
+        (
+            "- **Equivalence tests**: TOST at factors 0.5x, 1.0x, 1.5x, and 2.0x of "
+            "std(within-original) for Procrustes distances, plus per-metric TOST."
+        ),
+        (
+            "- **Difference tests**: KS, Mann-Whitney U, Welch t-test per metric, plus "
+            "one-sided and two-sided Mann-Whitney U on Procrustes distributions."
+        ),
+        "- **BH correction**: applied per test bucket across all variants before verdict routing.",
+        f"- **Quality metrics**: {', '.join(QUALITY_METRICS)}.",
+        (
+            "- **Seed counts**: deterministic originals may contribute a single seed; "
+            "stochastic verdict routing uses the asymmetric seed-handling implemented "
+            "in the analysis pipeline."
+        ),
+        "",
+        "## Artifacts",
+        "",
+        f"- `{data_dir / 'algorithm_summary.csv'}` -- family-level verdicts",
+        (
+            f"- `{data_dir / 'per_graph_detail.csv'}` -- per-variant Procrustes, "
+            "TOST, MWU, KS, and Welch p-values"
+        ),
+        f"- `{data_dir / 'per_seed_detail.csv'}` -- per-seed layout samples",
+        f"- `{data_dir / 'pairwise_similarity.csv'}` -- pairwise Procrustes RMSDs",
+        (
+            f"- `{data_dir / 'validate_sync_telemetry.json'}` -- sync mismatch telemetry "
+            "when HDF5 coverage lags results.json"
+        ),
+        "",
+    ]
+    return "\n".join(lines)
 
 
-def compile_report(output_dir: Path) -> bool:
-    """Compile ``report.tex`` with ``pdflatex`` when available.
-
-    Parameters
-    ----------
-    output_dir : Path
-        Report output directory.
+def main() -> int:
+    """Run the markdown report generator CLI.
 
     Returns
     -------
-    bool
-        ``True`` when compilation ran, otherwise ``False``.
+    int
+        Process exit code.
     """
-    if shutil.which("pdflatex") is None:
-        return False
-    if shutil.which("kpsewhich") is not None:
-        for package_name in REQUIRED_LATEX_PACKAGES:
-            package_lookup = subprocess.run(
-                ["kpsewhich", package_name],
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-            if package_lookup.returncode != 0 or not package_lookup.stdout.strip():
-                return False
-    for _ in range(2):
-        try:
-            subprocess.run(
-                ["pdflatex", "-interaction=nonstopmode", "report.tex"],
-                cwd=output_dir,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-        except subprocess.CalledProcessError:
-            return False
-    return True
-
-
-def main() -> None:
-    """Parse arguments, write LaTeX, and compile the report when possible."""
     args = parse_args()
-    tex_path = build_report_tex(args.data, args.output)
-    compiled = compile_report(args.output)
-    if compiled:
-        print(args.output / "report.pdf")
-    else:
-        print(f"PDF compilation unavailable. LaTeX source at {tex_path}")
+    markdown = build_markdown_report(args.input, args.output)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.output, "w", encoding="utf-8") as handle:
+        handle.write(markdown)
+    print(f"Wrote {args.output} ({len(markdown)} bytes)", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
