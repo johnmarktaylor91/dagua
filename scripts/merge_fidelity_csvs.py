@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -141,10 +143,19 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    # Copy README if partial has one
+    # Preserve the merged README when present so incremental merges do not
+    # clobber provenance already recorded in the full output directory.
+    merged_readme = args.output / "README.md"
     partial_readme = args.partial / "README.md"
-    if partial_readme.exists():
-        (args.output / "README.md").write_text(partial_readme.read_text())
+    if merged_readme.exists() and partial_readme.exists():
+        existing = merged_readme.read_text(encoding="utf-8")
+        note = (
+            "\n\n## Merge note\n\n"
+            f"Merged in records from {args.partial} on {datetime.now().isoformat()}\n"
+        )
+        merged_readme.write_text(existing + note, encoding="utf-8")
+    elif partial_readme.exists() and not merged_readme.exists():
+        shutil.copy2(partial_readme, merged_readme)
 
     print("Merge complete", file=sys.stderr)
 
