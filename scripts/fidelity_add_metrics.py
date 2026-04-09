@@ -2,8 +2,8 @@
 """Add quality metrics to existing fidelity analysis CSVs.
 
 Second-pass script: reads per_seed_detail.csv, loads positions from HDF5,
-computes metrics.quick() on each layout, and merges metric columns into
-both per_seed_detail.csv and per_graph_detail.csv.
+computes quick and sampled quality metrics on each layout, and merges metric
+columns into both per_seed_detail.csv and per_graph_detail.csv.
 
 Does NOT recompute Procrustes -- only adds quality metrics.
 
@@ -31,22 +31,31 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
+from fidelity_analysis import (  # noqa: E402
+    ALL_QUALITY_METRICS,
+    FIDELITY_CROSSING_N_SAMPLES,
+    FIDELITY_STRESS_N_SOURCES,
+    FIDELITY_STRESS_N_TARGETS,
+    QUALITY_METRICS,
+    SAMPLED_QUALITY_METRICS,
+)
+
+from dagua.eval.pipeline_io import stable_seed  # noqa: E402
 from dagua.eval.variants import get_variant, original_variant_name  # noqa: E402
-from dagua.metrics import quick  # noqa: E402
-
-QUALITY_METRICS = [
-    "aspect_ratio",
-    "dag_consistency",
-    "edge_length_cv",
-]
+from dagua.metrics import quick, sampled_crossing_rate, sampled_stress  # noqa: E402
 
 
 def _compute_metrics_for_row(
     result_key: str,
     positions_np: np.ndarray,
     graph_name: str,
-    graphs_dir: Path,
+    variant_id: str,
+    side: str,
+    seed_value: str,
 ) -> dict[str, float]:
     """Compute quality metrics for one layout.
 
@@ -58,8 +67,12 @@ def _compute_metrics_for_row(
         Position array [N, 2].
     graph_name : str
         Graph name for looking up edge_index and node_sizes.
-    graphs_dir : Path
-        Not used directly -- graph data loaded from registry.
+    variant_id : str
+        Fidelity variant identifier.
+    side : str
+        Layout side, either ``"orig"`` or ``"reimpl"``.
+    seed_value : str
+        Seed text from the per-seed CSV row.
 
     Returns
     -------
@@ -78,30 +91,51 @@ def _compute_metrics_for_row(
 
         tg = graph_cache.get(graph_name)
         if tg is None:
-            return {m: math.nan for m in QUALITY_METRICS}
+            return {m: math.nan for m in ALL_QUALITY_METRICS}
 
         pos = torch.from_numpy(positions_np).to(dtype=torch.float32)
         graph = tg.graph
         graph.compute_node_sizes()
-
-        raw_metrics = quick(pos, graph.edge_index, node_sizes=graph.node_sizes)
-        return {m: float(raw_metrics.get(m, math.nan)) for m in QUALITY_METRICS}
+        layout_seed = stable_seed(graph_name, variant_id, side, seed_value or "0")
+        raw_metrics = quick(pos, graph.edge_index, node_sizes=graph.node_sizes, seed=layout_seed)
+        metrics = {m: float(raw_metrics.get(m, math.nan)) for m in QUALITY_METRICS}
+        stress_result = sampled_stress(
+            pos,
+            graph.edge_index,
+            num_nodes=int(graph.node_sizes.shape[0]),
+            n_sources=FIDELITY_STRESS_N_SOURCES,
+            n_targets=FIDELITY_STRESS_N_TARGETS,
+        )
+        crossing_result = sampled_crossing_rate(
+            pos,
+            graph.edge_index,
+            n_samples=FIDELITY_CROSSING_N_SAMPLES,
+            seed=layout_seed,
+        )
+        for metric_name in SAMPLED_QUALITY_METRICS:
+            if metric_name in stress_result:
+                metrics[metric_name] = float(stress_result[metric_name])
+            elif metric_name in crossing_result:
+                metrics[metric_name] = float(crossing_result[metric_name])
+            else:
+                metrics[metric_name] = math.nan
+        return metrics
     except Exception:
-        return {m: math.nan for m in QUALITY_METRICS}
+        return {m: math.nan for m in ALL_QUALITY_METRICS}
 
 
 def _worker_batch(
-    batch: list[tuple[str, str, str]],
+    batch: list[tuple[str, str, str, str, str, str]],
     h5_path: str,
 ) -> list[tuple[str, dict[str, float]]]:
-    """Process a batch of (result_key, graph_name, row_id) in one worker.
+    """Process a batch of per-seed metric requests in one worker.
 
     Opens its own HDF5 handle to avoid cross-process sharing.
 
     Parameters
     ----------
-    batch : list[tuple[str, str, str]]
-        List of (result_key, graph_name, row_index_str) tuples.
+    batch : list[tuple[str, str, str, str, str, str]]
+        List of ``(result_key, graph_name, variant_id, side, seed_text, row_index_str)`` tuples.
     h5_path : str
         Path to positions.h5.
 
@@ -112,12 +146,19 @@ def _worker_batch(
     """
     results = []
     with h5py.File(h5_path, "r") as h5:
-        for result_key, graph_name, row_idx in batch:
+        for result_key, graph_name, variant_id, side, seed_text, row_idx in batch:
             if result_key not in h5:
-                results.append((row_idx, {m: math.nan for m in QUALITY_METRICS}))
+                results.append((row_idx, {m: math.nan for m in ALL_QUALITY_METRICS}))
                 continue
             positions_np = h5[result_key][:]
-            metrics = _compute_metrics_for_row(result_key, positions_np, graph_name, Path("."))
+            metrics = _compute_metrics_for_row(
+                result_key,
+                positions_np,
+                graph_name,
+                variant_id,
+                side,
+                seed_text,
+            )
             results.append((row_idx, metrics))
     return results
 
@@ -212,11 +253,20 @@ def main() -> None:
 
     # Build work items: (result_key, graph_name, row_index)
     # Reconstruct result_key from the CSV columns
-    work_items: list[tuple[str, str, str]] = []
+    work_items: list[tuple[str, str, str, str, str, str]] = []
     for idx, row in enumerate(seed_rows):
         graph = row.get("graph_name", "")
         result_key = reconstruct_result_key(row)
-        work_items.append((result_key, graph, str(idx)))
+        work_items.append(
+            (
+                result_key,
+                graph,
+                row.get("variant_id", ""),
+                row.get("side", ""),
+                row.get("seed", ""),
+                str(idx),
+            )
+        )
 
     # Process in parallel batches
     batches = [
@@ -255,13 +305,13 @@ def main() -> None:
     )
 
     # Merge metrics into seed rows
-    for metric_name in QUALITY_METRICS:
+    for metric_name in ALL_QUALITY_METRICS:
         if metric_name not in fieldnames:
             fieldnames.append(metric_name)
 
     for idx, row in enumerate(seed_rows):
         metrics = metrics_by_idx.get(str(idx), {})
-        for metric_name in QUALITY_METRICS:
+        for metric_name in ALL_QUALITY_METRICS:
             row[metric_name] = metrics.get(metric_name, "")
 
     # Write updated per_seed_detail.csv
@@ -288,7 +338,7 @@ def main() -> None:
         grouped[key].append(metrics)
 
     # Add metric columns to graph_rows
-    for metric_name in QUALITY_METRICS:
+    for metric_name in ALL_QUALITY_METRICS:
         for suffix in ["_orig_mean", "_orig_std", "_reimpl_mean", "_reimpl_std", "_cohens_d"]:
             col = metric_name + suffix
             if col not in graph_fieldnames:
@@ -300,7 +350,7 @@ def main() -> None:
         orig_metrics = grouped.get((vid, gname, "orig"), [])
         reimpl_metrics = grouped.get((vid, gname, "reimpl"), [])
 
-        for metric_name in QUALITY_METRICS:
+        for metric_name in ALL_QUALITY_METRICS:
             orig_vals = [
                 m.get(metric_name, math.nan)
                 for m in orig_metrics
