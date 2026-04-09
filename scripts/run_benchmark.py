@@ -446,6 +446,17 @@ def parse_args() -> argparse.Namespace:
         help="Per-layout timeout in seconds",
     )
     parser.add_argument(
+        "--watchdog-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Seconds to wait for any worker future before assuming a worker has "
+            "died (C-level crash). Defaults to WATCHDOG_TIMEOUT=300.0. Set this "
+            "higher (e.g. 7200) for repair runs on large stochastic work groups "
+            "that legitimately take > 300s to return all seeds."
+        ),
+    )
+    parser.add_argument(
         "--seeds",
         type=int,
         default=DEFAULT_SEED_COUNT,
@@ -494,6 +505,16 @@ def parse_args() -> argparse.Namespace:
         "--variants",
         action="store_true",
         help="Expand classic and original engines into parameterized variant competitors",
+    )
+    parser.add_argument(
+        "--additive-variants",
+        action="store_true",
+        help=(
+            "Only meaningful with --variants. When set, variant expansion is "
+            "ADDITIVE: base engines are kept in addition to their variant "
+            "expansions. Without this flag, --variants is substitutive (default "
+            "behavior)."
+        ),
     )
     return parser.parse_args()
 
@@ -694,13 +715,17 @@ def select_graphs(graph_filter: Optional[str], max_nodes: int) -> list[Any]:
     return [by_name[name] for name in requested_names]
 
 
-def _expand_engine_name_for_variants(engine_name: str) -> list[str]:
-    """Expand one engine selection into variant competitor names.
+def _expand_engine_name_for_variants(engine_name: str, *, additive: bool = False) -> list[str]:
+    """Expand one engine selection into benchmark engine names.
 
     Parameters
     ----------
     engine_name : str
         Base competitor name or already-expanded variant name.
+    additive : bool, default=False
+        When ``True``, keep the base engine name and append its variant
+        expansions. When ``False``, engines with variants are replaced by their
+        expanded variant names.
 
     Returns
     -------
@@ -714,7 +739,8 @@ def _expand_engine_name_for_variants(engine_name: str) -> list[str]:
 
     reimpl_variants = variants_for_base_engine(engine_name)
     if reimpl_variants:
-        return [variant.variant_id for variant in reimpl_variants]
+        expansions = [variant.variant_id for variant in reimpl_variants]
+        return [engine_name, *expansions] if additive else expansions
 
     original_names = [
         original_name
@@ -723,7 +749,7 @@ def _expand_engine_name_for_variants(engine_name: str) -> list[str]:
         if variant.original_engine == engine_name and original_name is not None
     ]
     if original_names:
-        return original_names
+        return [engine_name, *original_names] if additive else original_names
     return [engine_name]
 
 
@@ -795,7 +821,9 @@ def _build_engine_instance(
     return competitor_by_name[engine_name]
 
 
-def select_engines(engine_filter: str, include_variants: bool) -> list[Any]:
+def select_engines(
+    engine_filter: str, include_variants: bool, additive_variants: bool = False
+) -> list[Any]:
     """Select competitor adapters based on the CLI filter.
 
     Parameters
@@ -805,6 +833,9 @@ def select_engines(engine_filter: str, include_variants: bool) -> list[Any]:
     include_variants : bool
         Whether classic and original engines should expand into synthetic
         variant competitors.
+    additive_variants : bool, default=False
+        Whether base engine names should be retained alongside their variant
+        expansions when ``include_variants`` is enabled.
 
     Returns
     -------
@@ -861,7 +892,9 @@ def select_engines(engine_filter: str, include_variants: bool) -> list[Any]:
             [
                 expanded_name
                 for selected_name in selected_names
-                for expanded_name in _expand_engine_name_for_variants(selected_name)
+                for expanded_name in _expand_engine_name_for_variants(
+                    selected_name, additive=additive_variants
+                )
             ]
         )
         return [
@@ -1988,6 +2021,9 @@ def main() -> int:
     args = parse_args()
     validate_args(args)
     args.resolved_workers = resolve_worker_count(args.workers)
+    watchdog_timeout = (
+        args.watchdog_timeout if args.watchdog_timeout is not None else WATCHDOG_TIMEOUT
+    )
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     if hasattr(sys.stderr, "reconfigure"):
@@ -2000,7 +2036,11 @@ def main() -> int:
     manifest_path = output_dir / "manifest.json"
 
     try:
-        selected_engines = select_engines(args.engines, include_variants=bool(args.variants))
+        selected_engines = select_engines(
+            args.engines,
+            include_variants=bool(args.variants),
+            additive_variants=bool(args.additive_variants),
+        )
         selected_graphs = select_graphs(args.graphs, args.max_nodes)
     except ValueError as exc:
         print(f"[benchmark] ERROR: {exc}")
@@ -2036,6 +2076,13 @@ def main() -> int:
     work_items: list[WorkItem] = []
     immediate_records: list[BenchmarkRecord] = []
 
+    # Cache per-competitor availability. ``competitor.available()`` may spawn
+    # a subprocess (cytoscape probes node, gephi probes javac, etc.), so we
+    # must NOT call it inside the 105*269*60 = ~1.7M inner loop below.
+    availability_cache: dict[str, bool] = {
+        competitor.name: competitor.available() for competitor in selected_engines
+    }
+
     for test_graph in selected_graphs:
         summary = graph_summaries[test_graph.name]
         for competitor in selected_engines:
@@ -2055,7 +2102,7 @@ def main() -> int:
                     graph_completion_counts[summary.name] += 1
                     continue
 
-                if not competitor.available():
+                if not availability_cache.get(competitor.name, False):
                     record = _record_with_pairings(
                         graph_name=summary.name,
                         engine_name=competitor.name,
@@ -2295,7 +2342,7 @@ def main() -> int:
                     # the stuck futures as errors and rebuild the executor.
                     got_result = False
                     try:
-                        for fut in as_completed(inflight, timeout=WATCHDOG_TIMEOUT):
+                        for fut in as_completed(inflight, timeout=watchdog_timeout):
                             _collect_future(fut, inflight.pop(fut))
                             _fill_inflight()
                             got_result = True
@@ -2308,7 +2355,7 @@ def main() -> int:
                         # Watchdog fired -- worker pool is stuck.
                         print(
                             f"[benchmark] WATCHDOG: no future completed in "
-                            f"{WATCHDOG_TIMEOUT:.0f}s, recycling executor "
+                            f"{watchdog_timeout:.0f}s, recycling executor "
                             f"({len(inflight)} stuck futures)"
                         )
                         save_results(results_path, results)
@@ -2362,7 +2409,7 @@ def main() -> int:
                     while inflight and not _shutdown_requested:
                         got_result = False
                         try:
-                            for fut in as_completed(inflight, timeout=WATCHDOG_TIMEOUT):
+                            for fut in as_completed(inflight, timeout=watchdog_timeout):
                                 _collect_future(fut, inflight.pop(fut))
                                 _fill_inflight()
                                 got_result = True
@@ -2373,7 +2420,8 @@ def main() -> int:
                             pass
                         if not got_result and not _shutdown_requested:
                             print(
-                                f"[benchmark] WATCHDOG: recycling executor "
+                                f"[benchmark] WATCHDOG: no future completed in "
+                                f"{watchdog_timeout:.0f}s, recycling executor "
                                 f"({len(inflight)} stuck futures)"
                             )
                             save_results(results_path, results)
