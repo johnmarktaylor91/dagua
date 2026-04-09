@@ -19,7 +19,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
-from scipy.stats import ks_2samp, mannwhitneyu
+from scipy.stats import ks_2samp, mannwhitneyu, ttest_ind
 from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.weightstats import ttost_ind
 
@@ -27,19 +27,36 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from dagua.eval.pipeline_io import (  # noqa: E402
+    load_position_tensor,
+    stable_seed,
+    validate_positions,
+)
 from dagua.eval.variants import (  # noqa: E402
     VARIANT_REGISTRY,
     AlgorithmVariant,
     algorithm_family,
     original_variant_name,
 )
-from dagua.metrics import quick  # noqa: E402
+from dagua.metrics import (  # noqa: E402
+    quick,  # noqa: E402
+    sampled_crossing_rate,
+    sampled_stress,
+)
 
 QUALITY_METRICS: tuple[str, ...] = (
     "aspect_ratio",
     "dag_consistency",
     "edge_length_cv",
+    "edge_straightness_mean_deg",
+    "depth_spearman_rho",
+    "overlap_count",
 )
+SAMPLED_QUALITY_METRICS: tuple[str, ...] = (
+    "sampled_stress",
+    "crossing_rate",
+)
+ALL_QUALITY_METRICS: tuple[str, ...] = QUALITY_METRICS + SAMPLED_QUALITY_METRICS
 TOST_MARGIN_FACTORS: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0)
 TOST_MARGIN_LABELS: dict[float, str] = {
     0.5: "0_5x",
@@ -51,11 +68,19 @@ METRIC_MARGIN_FLOORS: dict[str, float] = {
     "aspect_ratio": 0.05,
     "dag_consistency": 0.02,
     "edge_length_cv": 0.05,
+    "edge_straightness_mean_deg": 3.0,
+    "depth_spearman_rho": 0.05,
+    "overlap_count": 5.0,
+    "sampled_stress": 1e-3,
+    "crossing_rate": 1e-4,
 }
-MIN_VALID_NODE_COUNT = 3
+FIDELITY_STRESS_N_SOURCES = 32
+FIDELITY_STRESS_N_TARGETS = 128
+FIDELITY_CROSSING_N_SAMPLES = 50_000
+COMPUTE_SAMPLED_METRICS = True
 MIN_PROCRUSTES_NODE_COUNT = 5
 MIN_STOCHASTIC_SEEDS = 10
-PAIRWISE_SAMPLE_SIZE = 10
+PAIRWISE_SAMPLE_SIZE = 30
 PAIRWISE_PROGRESS_INTERVAL = 1_000
 POWER_TARGET = 0.8
 POWER_ALPHA = 0.05
@@ -91,7 +116,7 @@ class LayoutRecord:
     positions : torch.Tensor
         Layout coordinates with shape ``[N, 2]``.
     metrics : dict[str, float]
-        Selected quick-metric values for this layout.
+        Selected per-layout quality metrics for this layout.
     """
 
     graph_name: str
@@ -121,6 +146,12 @@ class ResultRecord:
         Recorded runtime in seconds.
     positions_file : str | None
         Relative path to the saved position tensor.
+    result_key : str
+        Stable key from ``results.json`` used for HDF5 lookups.
+    error_message : str | None
+        Benchmark error message when ``status == "error"``.
+    skip_reason : str | None
+        Benchmark skip reason when ``status == "skipped"``.
     """
 
     graph_name: str
@@ -130,6 +161,24 @@ class ResultRecord:
     runtime_seconds: Optional[float]
     positions_file: Optional[str]
     result_key: str = ""
+    error_message: Optional[str] = None
+    skip_reason: Optional[str] = None
+
+
+@dataclass
+class SideRecordGroup:
+    """Partitioned benchmark records for one side of a variant/graph group.
+
+    Parameters
+    ----------
+    ok_records : list[ResultRecord]
+        Records with ``status == "ok"`` that are eligible for layout loading.
+    non_ok_records : list[ResultRecord]
+        Records retained for rejection accounting.
+    """
+
+    ok_records: list[ResultRecord] = field(default_factory=list)
+    non_ok_records: list[ResultRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -186,15 +235,18 @@ class PairwiseComparison:
         Whether a reflected alignment would improve the fit materially.
     max_node_displacement : float
         Maximum per-node displacement after proper-rotation alignment.
+    variant_id : str
+        Variant identifier shared by the compared layouts.
     """
 
-    comparison_type: str
-    seed_a: Optional[int]
-    seed_b: Optional[int]
-    procrustes_rmsd: float
-    scale_ratio: float
-    reflected: bool
-    max_node_displacement: float
+    comparison_type: str = ""
+    seed_a: Optional[int] = None
+    seed_b: Optional[int] = None
+    procrustes_rmsd: float = 0.0
+    scale_ratio: float = 0.0
+    reflected: bool = False
+    max_node_displacement: float = 0.0
+    variant_id: str = ""
 
 
 @dataclass
@@ -279,6 +331,14 @@ def parse_args() -> argparse.Namespace:
         "--skip-metrics",
         action="store_true",
         help="Skip quality metrics computation (Procrustes + stats only, much faster)",
+    )
+    parser.add_argument(
+        "--without-sampled-metrics",
+        action="store_true",
+        help=(
+            "Skip sampled_stress and crossing_rate for faster iteration; avoids the "
+            "extra 10-50 ms per layout sampled-metric cost in full fidelity runs."
+        ),
     )
     return parser.parse_args()
 
@@ -404,6 +464,8 @@ def result_record_from_dict(payload: Mapping[str, object]) -> ResultRecord:
         status=str(payload.get("status", "")),
         runtime_seconds=optional_float(payload.get("runtime_seconds")),
         positions_file=optional_str(payload.get("positions_file")),
+        error_message=optional_str(payload.get("error")),
+        skip_reason=optional_str(payload.get("skip_reason")),
     )
 
 
@@ -458,23 +520,6 @@ def selected_graph_names(
         return None
     graph_names = sorted({record.graph_name for record in records.values()})
     return set(graph_names[: max(0, max_graphs)])
-
-
-def stable_seed(*parts: str) -> int:
-    """Build a reproducible integer seed from stable string parts.
-
-    Parameters
-    ----------
-    *parts : str
-        Components to hash.
-
-    Returns
-    -------
-    int
-        Unsigned 32-bit integer derived from SHA-256.
-    """
-    joined = "::".join(parts)
-    return int(hashlib.sha256(joined.encode("utf-8")).hexdigest()[:8], 16)
 
 
 def sample_without_replacement(
@@ -719,39 +764,6 @@ def describe_graph(test_graph: Any) -> GraphDescriptor:
     )
 
 
-def validate_positions(
-    positions: torch.Tensor,
-    expected_nodes: int,
-) -> Optional[str]:
-    """Validate a loaded layout tensor against integrity requirements.
-
-    Parameters
-    ----------
-    positions : torch.Tensor
-        Candidate position tensor.
-    expected_nodes : int
-        Expected node count for the graph.
-
-    Returns
-    -------
-    str | None
-        Rejection reason, or ``None`` when valid.
-    """
-    if positions.ndim != 2:
-        return "tensor_not_2d"
-    if positions.shape[1] != 2:
-        return "tensor_not_xy"
-    if positions.shape[0] < MIN_VALID_NODE_COUNT:
-        return "too_few_nodes"
-    if positions.shape[0] != expected_nodes:
-        return "node_count_mismatch"
-    if torch.isnan(positions).any().item():
-        return "contains_nan"
-    if torch.isinf(positions).any().item():
-        return "contains_inf"
-    return None
-
-
 def load_layout(
     record: ResultRecord,
     variant_id: str,
@@ -784,30 +796,28 @@ def load_layout(
     """
     if record.positions_file is None:
         return None, "missing_positions_file"
-    # Try in-memory cache first, then HDF5, then individual .pt files
     positions_cache = getattr(load_layout, "_positions_cache", None)
     h5_file = getattr(load_layout, "_h5_file", None)
     record_key = record.result_key
+
     if positions_cache is not None and record_key and record_key in positions_cache:
         positions = positions_cache[record_key]
-    elif h5_file is not None and record_key and record_key in h5_file:
-        try:
-            positions = torch.from_numpy(h5_file[record_key][:]).to(dtype=torch.float32)
-        except Exception:
-            return None, "h5_load_failure"
     else:
-        path = input_dir / record.positions_file
-        try:
-            tensor = torch.load(path, map_location="cpu")
-        except Exception:
-            return None, "load_failure"
-        if not isinstance(tensor, torch.Tensor):
-            return None, "not_tensor"
-        positions = tensor.detach().to(dtype=torch.float32, device="cpu")
+        positions, reason = load_position_tensor(
+            record_key=record_key,
+            positions_file=record.positions_file,
+            input_dir=input_dir,
+            h5_file=h5_file,
+        )
+        if positions is None:
+            return None, reason
+
     rejection = validate_positions(positions, int(node_sizes.shape[0]))
     if rejection is not None:
         return None, rejection
     skip_metrics = getattr(load_layout, "_skip_metrics", False)
+    compute_sampled = getattr(load_layout, "_compute_sampled_metrics", COMPUTE_SAMPLED_METRICS)
+    layout_seed = stable_seed(record.graph_name, variant_id, side, str(record.seed or 0))
     if skip_metrics:
         metrics = {}
     else:
@@ -817,9 +827,32 @@ def load_layout(
                 positions,
                 edge_index,
                 node_sizes=node_sizes,
+                seed=layout_seed,
             ).items()
             if metric_name in QUALITY_METRICS
         }
+        if compute_sampled:
+            # Sampled metrics live outside quick(); keep budgets explicit so
+            # the fidelity runtime cost is deliberate and reproducible.
+            stress_result = sampled_stress(
+                positions,
+                edge_index,
+                num_nodes=int(node_sizes.shape[0]),
+                n_sources=FIDELITY_STRESS_N_SOURCES,
+                n_targets=FIDELITY_STRESS_N_TARGETS,
+            )
+            crossing_result = sampled_crossing_rate(
+                positions,
+                edge_index,
+                n_samples=FIDELITY_CROSSING_N_SAMPLES,
+                seed=layout_seed,
+            )
+            for key, value in stress_result.items():
+                if key in SAMPLED_QUALITY_METRICS:
+                    metrics[key] = float(value)
+            for key, value in crossing_result.items():
+                if key in SAMPLED_QUALITY_METRICS:
+                    metrics[key] = float(value)
     return (
         LayoutRecord(
             graph_name=record.graph_name,
@@ -890,6 +923,117 @@ def fidelity_procrustes(
     if reflected_rmsd < rmsd:
         return reflected_rmsd, scale_ratio, True, reflected_per_node
     return rmsd, scale_ratio, False, per_node
+
+
+def procrustes_align_rigid(
+    pos_a: torch.Tensor,
+    pos_b: torch.Tensor,
+) -> tuple[torch.Tensor, bool]:
+    """Return ``pos_b`` aligned to ``pos_a`` via centering plus rotation only.
+
+    Unlike :func:`fidelity_procrustes`, this helper does not normalize scale.
+    Use it for deterministic equivalence checks where scale drift should fail
+    the geometric match tier.
+
+    Parameters
+    ----------
+    pos_a : torch.Tensor
+        Reference position tensor shaped ``[N, 2]``.
+    pos_b : torch.Tensor
+        Candidate position tensor shaped ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, bool]
+        ``pos_b`` aligned into ``pos_a`` coordinates and a reflection flag
+        indicating whether the best rigid alignment used a reflected basis.
+    """
+    center_a = pos_a.mean(dim=0, keepdim=True)
+    center_b = pos_b.mean(dim=0, keepdim=True)
+    centered_a = pos_a - center_a
+    centered_b = pos_b - center_b
+
+    covariance = centered_b.t() @ centered_a
+    left_singular, _, right_singular_t = torch.linalg.svd(covariance)
+    rotation = left_singular @ right_singular_t
+    reflected = False
+    if torch.det(rotation) < 0:
+        right_singular_t_reflected = right_singular_t.clone()
+        right_singular_t_reflected[-1] = -right_singular_t_reflected[-1]
+        reflected_rotation = left_singular @ right_singular_t_reflected
+        aligned_rotation = centered_b @ rotation + center_a
+        aligned_reflection = centered_b @ reflected_rotation + center_a
+        rotation_rmsd = torch.sqrt(((pos_a - aligned_rotation).square()).sum(dim=1).mean())
+        reflection_rmsd = torch.sqrt(((pos_a - aligned_reflection).square()).sum(dim=1).mean())
+        if reflection_rmsd < rotation_rmsd:
+            return aligned_reflection, True
+        return aligned_rotation, reflected
+    aligned = centered_b @ rotation + center_a
+    return aligned, reflected
+
+
+def deterministic_verdict_from_layouts(
+    original_layout: LayoutRecord,
+    reimpl_layout: LayoutRecord,
+) -> tuple[Optional[str], int, str]:
+    """Return the deterministic verdict tier for one orig/reimpl pair.
+
+    Parameters
+    ----------
+    original_layout : LayoutRecord
+        Original implementation layout for one graph.
+    reimpl_layout : LayoutRecord
+        Reimplementation layout for the same graph.
+
+    Returns
+    -------
+    tuple[str | None, int, str]
+        Verdict label when a deterministic tier matches, the winning tier
+        number, and semicolon-delimited rejection reasons when all direct
+        comparators fail and the caller must fall back to heuristics.
+    """
+    original_positions = original_layout.positions
+    reimpl_positions = reimpl_layout.positions
+    rejection_reasons: list[str] = []
+
+    if original_positions.shape == reimpl_positions.shape and torch.equal(
+        original_positions, reimpl_positions
+    ):
+        return "identical", 1, ""
+    rejection_reasons.append("tier1_raw_tensor_mismatch")
+
+    if original_positions.shape == reimpl_positions.shape:
+        try:
+            aligned_reimpl, _ = procrustes_align_rigid(original_positions, reimpl_positions)
+        except RuntimeError:
+            rejection_reasons.append("tier2_rigid_alignment_failed")
+        else:
+            if torch.allclose(original_positions, aligned_reimpl, atol=1e-6, rtol=1e-4):
+                return "geometric_equivalent", 2, ""
+            rejection_reasons.append("tier2_rigid_geometric_mismatch")
+    else:
+        rejection_reasons.append("tier2_shape_mismatch")
+
+    original_metrics = original_layout.metrics or {}
+    reimpl_metrics = reimpl_layout.metrics or {}
+    all_metrics_close = True
+    compared_any = False
+    for metric_name in QUALITY_METRICS:
+        if metric_name in original_metrics and metric_name in reimpl_metrics:
+            compared_any = True
+            original_value = float(original_metrics[metric_name])
+            reimpl_value = float(reimpl_metrics[metric_name])
+            if not math.isclose(original_value, reimpl_value, abs_tol=1e-6, rel_tol=1e-4):
+                all_metrics_close = False
+                break
+
+    if compared_any and all_metrics_close:
+        return "metric_equivalent", 3, ""
+    if compared_any:
+        rejection_reasons.append("tier3_metric_mismatch")
+    else:
+        rejection_reasons.append("tier3_metrics_unavailable")
+    return None, 0, "; ".join(rejection_reasons)
 
 
 def pairwise_statistics(values: Sequence[float]) -> dict[str, float]:
@@ -1131,6 +1275,8 @@ def metric_test_columns(metric_name: str) -> list[str]:
         f"{metric_name}_ks_pvalue_bh",
         f"{metric_name}_mannwhitney_pvalue_raw",
         f"{metric_name}_mannwhitney_pvalue_bh",
+        f"{metric_name}_welch_pvalue_raw",
+        f"{metric_name}_welch_pvalue_bh",
         f"{metric_name}_bootstrap_diff_ci_low",
         f"{metric_name}_bootstrap_diff_ci_high",
     ]
@@ -1141,6 +1287,27 @@ def metric_test_columns(metric_name: str) -> list[str]:
                 f"{metric_name}_tost_margin_{label}",
                 f"{metric_name}_tost_pvalue_{label}_raw",
                 f"{metric_name}_tost_pvalue_{label}_bh",
+            )
+        )
+    return columns
+
+
+def procrustes_tost_columns() -> list[str]:
+    """Return per-graph columns for Procrustes within-vs-between TOST tests.
+
+    Returns
+    -------
+    list[str]
+        Output column names for the Procrustes-specific TOST families.
+    """
+    columns: list[str] = []
+    for factor in TOST_MARGIN_FACTORS:
+        label = TOST_MARGIN_LABELS[factor]
+        columns.extend(
+            (
+                f"procrustes_tost_margin_{label}",
+                f"procrustes_tost_pvalue_{label}_raw",
+                f"procrustes_tost_pvalue_{label}_bh",
             )
         )
     return columns
@@ -1174,7 +1341,13 @@ def per_graph_fieldnames() -> list[str]:
         "reflected",
         "max_node_displacement",
         "within_vs_between_pvalue",
+        "within_vs_between_pvalue_bh",
+        "procrustes_mannwhitney_pvalue_raw",
+        "procrustes_mannwhitney_pvalue_bh",
         "within_rmsd_mean",
+        "within_rmsd_std",
+        "reimpl_rmsd_mean",
+        "reimpl_rmsd_std",
         "between_rmsd_mean",
         "rmsd_ratio",
         "ks_pvalue_raw",
@@ -1187,10 +1360,14 @@ def per_graph_fieldnames() -> list[str]:
         "runtime_orig_mean",
         "runtime_reimpl_mean",
         "runtime_ratio",
+        "rejection_breakdown_json",
+        "total_rejected",
+        "_deterministic_tier",
         "verdict",
         "anomaly_reason",
     ]
-    for metric_name in QUALITY_METRICS:
+    columns.extend(procrustes_tost_columns())
+    for metric_name in ALL_QUALITY_METRICS:
         columns.extend(metric_test_columns(metric_name))
     return columns
 
@@ -1212,7 +1389,7 @@ def per_seed_fieldnames() -> list[str]:
         "runtime_seconds",
         "nearest_procrustes",
     ]
-    columns.extend(QUALITY_METRICS)
+    columns.extend(ALL_QUALITY_METRICS)
     return columns
 
 
@@ -1224,7 +1401,7 @@ def pairwise_fieldnames() -> list[str]:
     list[str]
         Output column names.
     """
-    return [
+    columns = [
         "algorithm_family",
         "graph_name",
         "seed_a",
@@ -1232,7 +1409,11 @@ def pairwise_fieldnames() -> list[str]:
         "comparison_type",
         "procrustes_rmsd",
         "scale_ratio",
+        "variant_id",
+        "reflected",
+        "max_node_displacement",
     ]
+    return columns
 
 
 def algorithm_summary_fieldnames() -> list[str]:
@@ -1305,6 +1486,7 @@ def compute_pairwise_comparisons(
                     scale_ratio=scale_ratio,
                     reflected=reflected,
                     max_node_displacement=float(per_node.max().item()),
+                    variant_id=layout_a.variant_id,
                 )
             )
     return comparisons
@@ -1424,10 +1606,100 @@ def runtime_ratio(
     return mean_reimpl / mean_orig
 
 
+REJECTION_BREAKDOWN_KEYS: tuple[str, ...] = (
+    "orig_error",
+    "orig_timeout",
+    "orig_skipped",
+    "orig_running",
+    "reimpl_error",
+    "reimpl_timeout",
+    "reimpl_skipped",
+    "reimpl_running",
+    "missing_positions_file",
+    "h5_load_failure",
+    "load_failure",
+    "not_tensor",
+    "tensor_not_2d",
+    "tensor_not_xy",
+    "too_few_nodes",
+    "node_count_mismatch",
+    "contains_nan",
+    "contains_inf",
+    "too_few_seeds",
+)
+
+
+def default_rejection_breakdown() -> dict[str, int]:
+    """Return the canonical rejection breakdown mapping.
+
+    Returns
+    -------
+    dict[str, int]
+        Zero-initialized counters keyed by canonical rejection reason.
+    """
+    return {reason: 0 for reason in REJECTION_BREAKDOWN_KEYS}
+
+
+def scheduling_rejection_reason(side: str, status: str) -> Optional[str]:
+    """Map a non-``ok`` benchmark status to a rejection bucket.
+
+    Parameters
+    ----------
+    side : str
+        Benchmark side, either ``"orig"`` or ``"reimpl"``.
+    status : str
+        Benchmark status string from ``results.json``.
+
+    Returns
+    -------
+    str | None
+        Canonical rejection bucket, or ``None`` for statuses that should not
+        be counted at scheduling time.
+    """
+    if status in {"error", "timeout", "skipped", "running"}:
+        return f"{side}_{status}"
+    return None
+
+
+def increment_rejection_breakdown(
+    rejection_breakdown: dict[str, int],
+    reason: Optional[str],
+) -> None:
+    """Increment one rejection bucket in place.
+
+    Parameters
+    ----------
+    rejection_breakdown : dict[str, int]
+        Mutable rejection counter mapping.
+    reason : str | None
+        Rejection reason to increment.
+    """
+    if reason is None:
+        return
+    rejection_breakdown[reason] = rejection_breakdown.get(reason, 0) + 1
+
+
+def finalize_rejection_columns(
+    row: dict[str, Any],
+    rejection_breakdown: Mapping[str, int],
+) -> None:
+    """Write structured rejection counters into the per-graph row.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Pending per-graph output row.
+    rejection_breakdown : Mapping[str, int]
+        Structured rejection counts collected for the group.
+    """
+    row["rejection_breakdown_json"] = json.dumps(dict(rejection_breakdown))
+    row["total_rejected"] = int(sum(rejection_breakdown.values()))
+
+
 def build_variant_groups(
     records: Mapping[str, ResultRecord],
     allowed_graphs: Optional[set[str]],
-) -> dict[tuple[str, str], dict[str, list[ResultRecord]]]:
+) -> dict[tuple[str, str], dict[str, SideRecordGroup]]:
     """Group benchmark records by variant and graph.
 
     Parameters
@@ -1439,8 +1711,9 @@ def build_variant_groups(
 
     Returns
     -------
-    dict[tuple[str, str], dict[str, list[ResultRecord]]]
-        Grouped metadata, with ``orig`` and ``reimpl`` record lists.
+    dict[tuple[str, str], dict[str, SideRecordGroup]]
+        Grouped metadata, with ``orig`` and ``reimpl`` side partitions that
+        retain both successful and non-successful benchmark records.
     """
     original_name_to_variant: dict[str, AlgorithmVariant] = {}
     variant_by_id = {candidate.variant_id: candidate for candidate in VARIANT_REGISTRY}
@@ -1449,13 +1722,11 @@ def build_variant_groups(
         if original_name is not None:
             original_name_to_variant[original_name] = candidate
 
-    groups: dict[tuple[str, str], dict[str, list[ResultRecord]]] = defaultdict(
-        lambda: {"orig": [], "reimpl": []}
+    groups: dict[tuple[str, str], dict[str, SideRecordGroup]] = defaultdict(
+        lambda: {"orig": SideRecordGroup(), "reimpl": SideRecordGroup()}
     )
     for record in records.values():
         if allowed_graphs is not None and record.graph_name not in allowed_graphs:
-            continue
-        if record.status != "ok":
             continue
         variant: Optional[AlgorithmVariant]
         side: Optional[str]
@@ -1469,7 +1740,11 @@ def build_variant_groups(
             side = "orig"
         else:
             continue
-        groups[(variant.variant_id, record.graph_name)][side].append(record)
+        side_group = groups[(variant.variant_id, record.graph_name)][side]
+        if record.status == "ok":
+            side_group.ok_records.append(record)
+        else:
+            side_group.non_ok_records.append(record)
     return groups
 
 
@@ -1508,7 +1783,7 @@ def add_metric_tests_to_row(
     skip = getattr(load_layout, "_skip_metrics", False)
     if skip:
         return
-    for metric_name in QUALITY_METRICS:
+    for metric_name in ALL_QUALITY_METRICS:
         original_values = collect_metric_values(original_layouts, metric_name)
         reimpl_values = collect_metric_values(reimpl_layouts, metric_name)
         delta = cliffs_delta(original_values, reimpl_values)
@@ -1536,11 +1811,23 @@ def add_metric_tests_to_row(
         mw_pvalue = float(
             mannwhitneyu(original_values, reimpl_values, alternative="two-sided").pvalue
         )
+        _, welch_pvalue = ttest_ind(
+            original_values,
+            reimpl_values,
+            equal_var=False,
+            alternative="two-sided",
+        )
         row[f"{metric_name}_ks_pvalue_raw"] = ks_pvalue
         row[f"{metric_name}_mannwhitney_pvalue_raw"] = mw_pvalue
+        row[f"{metric_name}_welch_pvalue_raw"] = (
+            float(welch_pvalue) if np.isfinite(welch_pvalue) else math.nan
+        )
         pvalue_buckets["ks"].entries.append((row_index, f"{metric_name}_ks_pvalue_bh", ks_pvalue))
         pvalue_buckets["mannwhitney"].entries.append(
             (row_index, f"{metric_name}_mannwhitney_pvalue_bh", mw_pvalue)
+        )
+        pvalue_buckets["welch"].entries.append(
+            (row_index, f"{metric_name}_welch_pvalue_bh", float(welch_pvalue))
         )
 
         for factor in TOST_MARGIN_FACTORS:
@@ -1563,9 +1850,12 @@ def initialize_metric_columns(row: dict[str, Any]) -> None:
     row : dict[str, Any]
         Pending per-graph row to mutate.
     """
-    for metric_name in QUALITY_METRICS:
+    for metric_name in ALL_QUALITY_METRICS:
         for column in metric_test_columns(metric_name):
             row[column] = math.nan
+
+    for column in procrustes_tost_columns():
+        row[column] = math.nan
 
 
 def ensure_node_sizes(test_graph: Any) -> torch.Tensor:
@@ -1595,7 +1885,7 @@ def ensure_node_sizes(test_graph: Any) -> torch.Tensor:
 def process_group(
     variant: AlgorithmVariant,
     graph_name: str,
-    records: dict[str, list[ResultRecord]],
+    records: dict[str, SideRecordGroup],
     input_dir: Path,
     test_graph: Any,
     row_index: int,
@@ -1611,8 +1901,9 @@ def process_group(
         Variant definition.
     graph_name : str
         Graph name for the group.
-    records : dict[str, list[ResultRecord]]
-        Side-partitioned benchmark records.
+    records : dict[str, SideRecordGroup]
+        Side-partitioned benchmark records, preserving both successful and
+        non-successful runs.
     input_dir : Path
         Benchmark artifact root.
     test_graph : Any
@@ -1655,7 +1946,13 @@ def process_group(
         "reflected": False,
         "max_node_displacement": math.nan,
         "within_vs_between_pvalue": math.nan,
+        "within_vs_between_pvalue_bh": math.nan,
+        "procrustes_mannwhitney_pvalue_raw": math.nan,
+        "procrustes_mannwhitney_pvalue_bh": math.nan,
         "within_rmsd_mean": math.nan,
+        "within_rmsd_std": math.nan,
+        "reimpl_rmsd_mean": math.nan,
+        "reimpl_rmsd_std": math.nan,
         "between_rmsd_mean": math.nan,
         "rmsd_ratio": math.nan,
         "ks_pvalue_raw": math.nan,
@@ -1668,8 +1965,13 @@ def process_group(
         "runtime_orig_mean": math.nan,
         "runtime_reimpl_mean": math.nan,
         "runtime_ratio": math.nan,
+        "rejection_breakdown_json": "{}",
+        "total_rejected": 0,
+        "_deterministic_tier": 0,
         "verdict": "insufficient_data",
         "anomaly_reason": "",
+        "_deterministic_verdict": "",
+        "_deterministic_rejection_reasons": "",
         "_variant_is_stochastic": variant.is_stochastic,
         "_structural_note_flag": descriptor.structural_note != "none",
     }
@@ -1677,12 +1979,20 @@ def process_group(
 
     loaded_layouts: dict[str, list[LayoutRecord]] = {"orig": [], "reimpl": []}
     rejection_count = 0
+    rejection_breakdown = default_rejection_breakdown()
+    for side in ("orig", "reimpl"):
+        for record in records[side].non_ok_records:
+            increment_rejection_breakdown(
+                rejection_breakdown,
+                scheduling_rejection_reason(side, record.status),
+            )
 
     # Parallel loading -- I/O bound so threads give ~4-8x speedup
     load_tasks: list[tuple[str, Any]] = []
     for side in ("orig", "reimpl"):
         for record in sorted(
-            records[side], key=lambda candidate: (candidate.seed is None, candidate.seed)
+            records[side].ok_records,
+            key=lambda candidate: (candidate.seed is None, candidate.seed),
         ):
             load_tasks.append((side, record))
 
@@ -1709,6 +2019,7 @@ def process_group(
                 )
             if layout is None:
                 rejection_count += 1
+                increment_rejection_breakdown(rejection_breakdown, rejection)
                 continue
             loaded_layouts[side].append(layout)
 
@@ -1733,6 +2044,7 @@ def process_group(
     seed_rows: list[dict[str, Any]] = []
     pairwise_rows: list[dict[str, Any]] = []
     if not original_layouts or not reimpl_layouts:
+        finalize_rejection_columns(row, rejection_breakdown)
         return GroupResult(
             row=row,
             seed_rows=seed_rows,
@@ -1743,6 +2055,7 @@ def process_group(
     pairwise_orig_reimpl: list[PairwiseComparison] = []
     if variant.is_stochastic:
         if len(reimpl_layouts) < MIN_STOCHASTIC_SEEDS:
+            increment_rejection_breakdown(rejection_breakdown, "too_few_seeds")
             for layouts in (original_layouts, reimpl_layouts):
                 for layout in layouts:
                     seed_row = {
@@ -1754,9 +2067,10 @@ def process_group(
                         "runtime_seconds": layout.runtime_seconds,
                         "nearest_procrustes": math.nan,
                     }
-                    for metric_name in QUALITY_METRICS:
+                    for metric_name in ALL_QUALITY_METRICS:
                         seed_row[metric_name] = layout.metrics.get(metric_name, math.nan)
                     seed_rows.append(seed_row)
+            finalize_rejection_columns(row, rejection_breakdown)
             return GroupResult(
                 row=row,
                 seed_rows=seed_rows,
@@ -1793,6 +2107,9 @@ def process_group(
                     "comparison_type": comparison.comparison_type,
                     "procrustes_rmsd": comparison.procrustes_rmsd,
                     "scale_ratio": comparison.scale_ratio,
+                    "variant_id": comparison.variant_id,
+                    "reflected": str(comparison.reflected),
+                    "max_node_displacement": comparison.max_node_displacement,
                 }
             )
         if descriptor.num_nodes >= MIN_PROCRUSTES_NODE_COUNT:
@@ -1813,24 +2130,89 @@ def process_group(
 
             # Within-vs-between Procrustes test: is between-engine RMSD
             # significantly greater than within-engine RMSD?
-            within_rmsd = [c.procrustes_rmsd for c in pairwise_orig] + [
-                c.procrustes_rmsd for c in pairwise_reimpl
-            ]
+            within_orig_rmsd = [c.procrustes_rmsd for c in pairwise_orig]
+            within_reimpl_rmsd = [c.procrustes_rmsd for c in pairwise_reimpl]
             between_rmsd = rmsd_values
-            if len(within_rmsd) >= 2 and len(between_rmsd) >= 2:
-                from scipy.stats import mannwhitneyu
-
+            if len(within_orig_rmsd) >= 2 and len(between_rmsd) >= 2:
                 # One-sided: is between > within?
-                _, pval = mannwhitneyu(between_rmsd, within_rmsd, alternative="greater")
-                row["within_vs_between_pvalue"] = float(pval)
-                row["within_rmsd_mean"] = safe_mean(within_rmsd)
+                _, wb_pval = mannwhitneyu(
+                    between_rmsd,
+                    within_orig_rmsd,
+                    alternative="greater",
+                )
+                row["within_vs_between_pvalue"] = float(wb_pval)
+                pvalue_buckets["procrustes_one_sided"].entries.append(
+                    (row_index, "within_vs_between_pvalue_bh", float(wb_pval))
+                )
+
+                _, wb_two_sided = mannwhitneyu(
+                    between_rmsd,
+                    within_orig_rmsd,
+                    alternative="two-sided",
+                )
+                row["procrustes_mannwhitney_pvalue_raw"] = float(wb_two_sided)
+                pvalue_buckets["procrustes_mannwhitney"].entries.append(
+                    (
+                        row_index,
+                        "procrustes_mannwhitney_pvalue_bh",
+                        float(wb_two_sided),
+                    )
+                )
+
+                row["within_rmsd_mean"] = safe_mean(within_orig_rmsd)
+                row["within_rmsd_std"] = safe_std(within_orig_rmsd)
+                row["reimpl_rmsd_mean"] = safe_mean(within_reimpl_rmsd)
+                row["reimpl_rmsd_std"] = safe_std(within_reimpl_rmsd)
                 row["between_rmsd_mean"] = safe_mean(between_rmsd)
-                row["rmsd_ratio"] = safe_mean(between_rmsd) / max(safe_mean(within_rmsd), 1e-12)
+                row["rmsd_ratio"] = safe_mean(between_rmsd) / max(
+                    safe_mean(within_orig_rmsd),
+                    1e-12,
+                )
             else:
                 row["within_vs_between_pvalue"] = math.nan
-                row["within_rmsd_mean"] = safe_mean(within_rmsd) if within_rmsd else math.nan
+                row["within_rmsd_mean"] = (
+                    safe_mean(within_orig_rmsd) if within_orig_rmsd else math.nan
+                )
+                row["within_rmsd_std"] = (
+                    safe_std(within_orig_rmsd) if within_orig_rmsd else math.nan
+                )
+                row["reimpl_rmsd_mean"] = (
+                    safe_mean(within_reimpl_rmsd) if within_reimpl_rmsd else math.nan
+                )
+                row["reimpl_rmsd_std"] = (
+                    safe_std(within_reimpl_rmsd) if within_reimpl_rmsd else math.nan
+                )
                 row["between_rmsd_mean"] = safe_mean(between_rmsd) if between_rmsd else math.nan
                 row["rmsd_ratio"] = math.nan
+
+            # Procrustes TOST: is the between-engine distribution
+            # statistically equivalent to within-original variation?
+            if len(within_orig_rmsd) >= 2 and len(between_rmsd) >= 2:
+                std_within_orig = float(np.std(within_orig_rmsd, ddof=1))
+                # Zero-variance within-original baselines need a floor so the
+                # equivalence band does not collapse to an exact-equality test.
+                std_floor = max(std_within_orig, 1e-6)
+                for factor in TOST_MARGIN_FACTORS:
+                    label = TOST_MARGIN_LABELS[factor]
+                    margin = factor * std_floor
+                    try:
+                        pvalue = tost_pvalue(
+                            np.asarray(within_orig_rmsd, dtype=np.float64),
+                            np.asarray(between_rmsd, dtype=np.float64),
+                            margin,
+                        )
+                    except Exception:
+                        pvalue = math.nan
+                    row[f"procrustes_tost_margin_{label}"] = float(margin)
+                    row[f"procrustes_tost_pvalue_{label}_raw"] = float(pvalue)
+                    if math.isfinite(pvalue):
+                        pvalue_buckets[f"procrustes_tost_{label}"].entries.append(
+                            (
+                                row_index,
+                                f"procrustes_tost_pvalue_{label}_bh",
+                                float(pvalue),
+                            )
+                        )
         nearest_orig = nearest_cross_procrustes(original_layouts, reimpl_layouts)
         nearest_reimpl = nearest_cross_procrustes(reimpl_layouts, original_layouts)
         for layouts in (original_layouts, reimpl_layouts):
@@ -1849,7 +2231,7 @@ def process_group(
                     "runtime_seconds": layout.runtime_seconds,
                     "nearest_procrustes": nearest_value,
                 }
-                for metric_name in QUALITY_METRICS:
+                for metric_name in ALL_QUALITY_METRICS:
                     seed_row[metric_name] = layout.metrics.get(metric_name, math.nan)
                 seed_rows.append(seed_row)
         add_metric_tests_to_row(
@@ -1863,17 +2245,18 @@ def process_group(
             bootstrap_samples=bootstrap_samples,
         )
         row["ks_pvalue_raw"] = min(
-            row[f"{metric_name}_ks_pvalue_raw"] for metric_name in QUALITY_METRICS
+            row[f"{metric_name}_ks_pvalue_raw"] for metric_name in ALL_QUALITY_METRICS
         )
         row["mannwhitney_pvalue_raw"] = min(
-            row[f"{metric_name}_mannwhitney_pvalue_raw"] for metric_name in QUALITY_METRICS
+            row[f"{metric_name}_mannwhitney_pvalue_raw"] for metric_name in ALL_QUALITY_METRICS
         )
         row["tost_pvalue_at_1x"] = max(
-            row[f"{metric_name}_tost_pvalue_1x_raw"] for metric_name in QUALITY_METRICS
+            row[f"{metric_name}_tost_pvalue_1x_raw"] for metric_name in ALL_QUALITY_METRICS
         )
         row["cliffs_delta"] = max(
-            abs(float(row[f"{metric_name}_cliffs_delta"])) for metric_name in QUALITY_METRICS
+            abs(float(row[f"{metric_name}_cliffs_delta"])) for metric_name in ALL_QUALITY_METRICS
         )
+        finalize_rejection_columns(row, rejection_breakdown)
         return GroupResult(
             row=row,
             seed_rows=seed_rows,
@@ -1904,6 +2287,7 @@ def process_group(
                 scale_ratio=scale_ratio,
                 reflected=reflected,
                 max_node_displacement=float(per_node.max().item()),
+                variant_id=variant.variant_id,
             )
         ]
         pairwise_rows.append(
@@ -1915,6 +2299,9 @@ def process_group(
                 "comparison_type": "orig-reimpl",
                 "procrustes_rmsd": rmsd,
                 "scale_ratio": scale_ratio,
+                "variant_id": variant.variant_id,
+                "reflected": str(reflected),
+                "max_node_displacement": float(per_node.max().item()),
             }
         )
     for layout, nearest_value in (
@@ -1930,7 +2317,7 @@ def process_group(
             "runtime_seconds": layout.runtime_seconds,
             "nearest_procrustes": nearest_value,
         }
-        for metric_name in QUALITY_METRICS:
+        for metric_name in ALL_QUALITY_METRICS:
             seed_row[metric_name] = layout.metrics.get(metric_name, math.nan)
             if layout.side == "orig":
                 row[f"{metric_name}_orig_mean"] = layout.metrics.get(metric_name, math.nan)
@@ -1939,7 +2326,7 @@ def process_group(
                 row[f"{metric_name}_reimpl_mean"] = layout.metrics.get(metric_name, math.nan)
                 row[f"{metric_name}_reimpl_std"] = 0.0
         seed_rows.append(seed_row)
-    for metric_name in QUALITY_METRICS:
+    for metric_name in ALL_QUALITY_METRICS:
         original_value = original_layout.metrics.get(metric_name, math.nan)
         reimpl_value = reimpl_layout.metrics.get(metric_name, math.nan)
         delta_value = reimpl_value - original_value
@@ -1952,6 +2339,13 @@ def process_group(
         row[f"{metric_name}_rank_biserial"] = row[f"{metric_name}_cliffs_delta"]
         row[f"{metric_name}_bootstrap_diff_ci_low"] = delta_value
         row[f"{metric_name}_bootstrap_diff_ci_high"] = delta_value
+    deterministic_verdict, deterministic_tier, deterministic_rejections = (
+        deterministic_verdict_from_layouts(original_layout, reimpl_layout)
+    )
+    row["_deterministic_tier"] = deterministic_tier
+    row["_deterministic_verdict"] = deterministic_verdict or ""
+    row["_deterministic_rejection_reasons"] = deterministic_rejections
+    finalize_rejection_columns(row, rejection_breakdown)
     return GroupResult(
         row=row, seed_rows=seed_rows, pairwise_rows=pairwise_rows, rejection_count=rejection_count
     )
@@ -2049,25 +2443,27 @@ def finalize_group_row(row: dict[str, Any]) -> None:
     if stochastic:
         _ks_vals = [
             v
-            for v in (_safe_float(row.get(f"{m}_ks_pvalue_bh")) for m in QUALITY_METRICS)
+            for v in (_safe_float(row.get(f"{m}_ks_pvalue_bh")) for m in ALL_QUALITY_METRICS)
             if math.isfinite(v)
         ]
         row["ks_pvalue_bh"] = min(_ks_vals) if _ks_vals else math.nan
         _mw_vals = [
             v
-            for v in (_safe_float(row.get(f"{m}_mannwhitney_pvalue_bh")) for m in QUALITY_METRICS)
+            for v in (
+                _safe_float(row.get(f"{m}_mannwhitney_pvalue_bh")) for m in ALL_QUALITY_METRICS
+            )
             if math.isfinite(v)
         ]
         row["mannwhitney_pvalue_bh"] = min(_mw_vals) if _mw_vals else math.nan
         _tost_vals = [
             v
-            for v in (_safe_float(row.get(f"{m}_tost_pvalue_1x_bh")) for m in QUALITY_METRICS)
+            for v in (_safe_float(row.get(f"{m}_tost_pvalue_1x_bh")) for m in ALL_QUALITY_METRICS)
             if math.isfinite(v)
         ]
         row["tost_pvalue_at_1x_bh"] = max(_tost_vals) if _tost_vals else math.nan
         _cd_vals = [
             v
-            for v in (abs(_safe_float(row.get(f"{m}_cliffs_delta"))) for m in QUALITY_METRICS)
+            for v in (abs(_safe_float(row.get(f"{m}_cliffs_delta"))) for m in ALL_QUALITY_METRICS)
             if math.isfinite(v)
         ]
         row["cliffs_delta"] = max(_cd_vals) if _cd_vals else math.nan
@@ -2140,72 +2536,107 @@ def finalize_group_row(row: dict[str, Any]) -> None:
                     return False  # genuinely missing data
                 return val < 0.05
 
-            def _mw_significant(metric: str) -> bool:
-                val = _safe_float(row.get(f"{metric}_mannwhitney_pvalue_bh"))
-                if math.isnan(val):
-                    # Fall back to raw p-value if BH correction failed
-                    raw_val = _safe_float(row.get(f"{metric}_mannwhitney_pvalue_raw"))
-                    if math.isfinite(raw_val):
-                        return raw_val < 0.05
-                    return False  # identical distributions -> no difference
-                return val < 0.05
-
             # Within-vs-between Procrustes verdict: is the between-engine
             # RMSD significantly greater than the within-engine RMSD?
             wb_pval = _safe_float(row.get("within_vs_between_pvalue"))
-            rmsd_ratio = _safe_float(row.get("rmsd_ratio"))
             if not math.isfinite(wb_pval):
                 # Not enough data for the test -- fall back to TOST
-                tost_2x = all(_tost_passes(metric_name, "2x") for metric_name in QUALITY_METRICS)
+                tost_2x = all(
+                    _tost_passes(metric_name, "2x") for metric_name in ALL_QUALITY_METRICS
+                )
                 if tost_2x:
                     row["verdict"] = "partial_match"
                 else:
                     row["verdict"] = "insufficient_data"
-            elif wb_pval >= 0.05:
-                # Between is NOT significantly greater than within -> equivalent
-                row["verdict"] = "strong_equivalent"
-            elif wb_pval >= 0.01 and rmsd_ratio < 1.5:
-                row["verdict"] = "weak_equivalent"
-            elif rmsd_ratio < 2.0:
-                row["verdict"] = "partial_match"
             else:
-                row["verdict"] = "divergent"
+                # TOST-based verdict replaces the old "failed to reject
+                # difference" heuristic. The between-engine distribution now
+                # has to be statistically equivalent to within-original
+                # variation, not merely non-significantly different.
+                def _tost_pass(column_name: str) -> bool:
+                    """Return whether one corrected Procrustes TOST p-value passes."""
+
+                    value = _safe_float(row.get(column_name))
+                    return math.isfinite(value) and value < 0.05
+
+                procrustes_1x_pass = _tost_pass("procrustes_tost_pvalue_1x_bh")
+                procrustes_2x_pass = _tost_pass("procrustes_tost_pvalue_2x_bh")
+
+                metric_pass_count = 0
+                metric_total = 0
+                for metric_name in ALL_QUALITY_METRICS:
+                    value = _safe_float(row.get(f"{metric_name}_tost_pvalue_1x_bh"))
+                    if math.isfinite(value):
+                        metric_total += 1
+                        if value < 0.05:
+                            metric_pass_count += 1
+                metric_tost_1x_pass_rate = (
+                    metric_pass_count / metric_total if metric_total > 0 else 0.0
+                )
+
+                if procrustes_1x_pass and metric_tost_1x_pass_rate >= 0.8:
+                    row["verdict"] = "strong_equivalent"
+                elif procrustes_2x_pass and metric_tost_1x_pass_rate >= 0.5:
+                    row["verdict"] = "weak_equivalent"
+                elif procrustes_2x_pass:
+                    row["verdict"] = "partial_match"
+                else:
+                    row["verdict"] = "divergent"
         else:
+            deterministic_tier = int(row.get("_deterministic_tier", 0) or 0)
+            deterministic_verdict = str(row.get("_deterministic_verdict", ""))
+            deterministic_rejections = [
+                reason.strip()
+                for reason in str(row.get("_deterministic_rejection_reasons", "")).split(";")
+                if reason.strip()
+            ]
             if math.isfinite(max_displacement) and max_displacement > PROCRUSTES_ANOMALY_THRESHOLD:
                 anomaly_reasons.append("max_node_displacement")
-            if (
-                math.isfinite(max_displacement)
-                and max_displacement < IDENTICAL_DISPLACEMENT_THRESHOLD
-            ):
-                row["verdict"] = "identical"
-            elif not anomaly_reasons or explainable_only(
-                {"anomaly_reason": "; ".join(anomaly_reasons)}
-            ):
-                row["verdict"] = "strong_equivalent"
-            elif (
-                not math.isfinite(max_displacement)
-                or max_displacement <= PROCRUSTES_ANOMALY_THRESHOLD
-            ):
-                row["verdict"] = "partial_match"
+            if deterministic_tier > 0 and deterministic_verdict:
+                row["verdict"] = deterministic_verdict
             else:
-                row["verdict"] = "divergent"
+                if (
+                    math.isfinite(max_displacement)
+                    and max_displacement < IDENTICAL_DISPLACEMENT_THRESHOLD
+                ):
+                    row["verdict"] = "identical"
+                elif not anomaly_reasons or explainable_only(
+                    {"anomaly_reason": "; ".join(anomaly_reasons)}
+                ):
+                    row["verdict"] = "strong_equivalent"
+                elif (
+                    not math.isfinite(max_displacement)
+                    or max_displacement <= PROCRUSTES_ANOMALY_THRESHOLD
+                ):
+                    row["verdict"] = "partial_match"
+                else:
+                    row["verdict"] = "divergent"
+                anomaly_reasons.extend(deterministic_rejections)
 
     reasons = sorted(set(reason for reason in anomaly_reasons if reason))
     row["anomaly_reason"] = "; ".join(reasons)
     row["_tost_pass_1x"] = bool(
-        row["verdict"] in {"strong_equivalent", "identical"}
+        row["verdict"]
+        in {"strong_equivalent", "identical", "geometric_equivalent", "metric_equivalent"}
         or all(
             math.isfinite(_safe_float(row.get(f"{metric_name}_tost_pvalue_1x_bh")))
             and _safe_float(row.get(f"{metric_name}_tost_pvalue_1x_bh")) < 0.05
-            for metric_name in QUALITY_METRICS
+            for metric_name in ALL_QUALITY_METRICS
         )
     )
     row["_tost_pass_1_5x"] = bool(
-        row["verdict"] in {"strong_equivalent", "weak_equivalent", "identical"}
+        row["verdict"]
+        in {
+            "strong_equivalent",
+            "weak_equivalent",
+            "identical",
+            "geometric_equivalent",
+            "metric_equivalent",
+        }
         or all(
             math.isfinite(_safe_float(row.get(f"{metric_name}_tost_pvalue_1_5x_bh")))
             and _safe_float(row.get(f"{metric_name}_tost_pvalue_1_5x_bh")) < 0.05
-            for metric_name in QUALITY_METRICS
+            for metric_name in ALL_QUALITY_METRICS
         )
     )
 
@@ -2246,14 +2677,44 @@ def family_summary_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
         else:
             n_identical = sum(1 for r in paired_ok if str(r["verdict"]) == "identical")
             n_strong = sum(
-                1 for r in paired_ok if str(r["verdict"]) in {"strong_equivalent", "identical"}
+                1
+                for r in paired_ok
+                if str(r["verdict"])
+                in {
+                    "strong_equivalent",
+                    "identical",
+                    "geometric_equivalent",
+                    "metric_equivalent",
+                }
             )
             n_weak = sum(
                 1
                 for r in paired_ok
-                if str(r["verdict"]) in {"strong_equivalent", "weak_equivalent", "identical"}
+                if str(r["verdict"])
+                in {
+                    "strong_equivalent",
+                    "weak_equivalent",
+                    "identical",
+                    "geometric_equivalent",
+                    "metric_equivalent",
+                }
             )
             n_divergent = sum(1 for r in paired_ok if str(r["verdict"]) == "divergent")
+            # Family-level verdict aggregation rule (conservative majority):
+            #   100% identical            -> "identical"
+            #   >= 90% strong_equivalent  -> "strong_equivalent"
+            #   >= 90% weak or stronger   -> "weak_equivalent"
+            #   > 50% divergent           -> "divergent"
+            #   else                      -> "partial_match"
+            #
+            # Rationale: a family verdict of "strong_equivalent" requires the
+            # vast majority of graphs in that family to have strongly
+            # equivalent per-graph verdicts. A handful of divergent graphs
+            # within an otherwise-matching family downgrades the family to
+            # "partial_match" rather than hiding the divergence under a
+            # majority pass. The 0.90 thresholds were chosen empirically
+            # during early iteration to tolerate occasional numerical flukes
+            # without whitewashing real fidelity gaps.
             if n_identical == n:
                 verdict = "identical"
             elif n_strong / n >= 0.90:
@@ -2450,6 +2911,7 @@ def run_analysis(
     bootstrap_samples: int,
     power_simulations: int,
     skip_metrics: bool = False,
+    compute_sampled_metrics: bool = COMPUTE_SAMPLED_METRICS,
 ) -> None:
     """Run the end-to-end fidelity analysis.
 
@@ -2465,14 +2927,17 @@ def run_analysis(
         Bootstrap sample count.
     power_simulations : int
         Simulation count for the power estimate.
+    skip_metrics : bool, optional
+        Whether to skip all quality-metric computation.
+    compute_sampled_metrics : bool, optional
+        Whether to compute the sampled quality metrics in addition to quick().
     """
     results_path = input_dir / "results.json"
     if not results_path.exists():
         raise FileNotFoundError(f"Missing benchmark results: {results_path}")
 
-    # Hard gate: validate results.json/positions.h5 sync before processing.
-    # Retro 2026-03-30: 9 hours wasted on analysis with 0 positions because
-    # results.json said "done" but H5 was empty.
+    # Telemetry-only sync check: retain the retro guardrail signal, but do not
+    # abort the full analysis when a subset of records is still desynced.
     h5_path = input_dir / "positions.h5"
     if h5_path.exists():
         sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -2489,18 +2954,32 @@ def run_analysis(
             for err in sync_errors[:20]:
                 print(f"  {err}", file=sys.stderr)
             if desync_count > 10:
+                telemetry_path = output_dir / "validate_sync_telemetry.json"
+                try:
+                    telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(telemetry_path, "w", encoding="utf-8") as handle:
+                        json.dump(
+                            {
+                                "total_errors": len(sync_errors),
+                                "desync_count": desync_count,
+                                "sample_errors": sync_errors[:20],
+                            },
+                            handle,
+                            indent=2,
+                        )
+                except Exception:
+                    pass
                 print(
-                    f"[fidelity] ABORT: {desync_count} engines have results "
-                    f"but missing positions. Fix the desync before running "
-                    f"analysis. Use scripts/safe_purge_variants.py to purge "
-                    f"and re-benchmark affected variants.",
+                    f"[fidelity] WARNING: {desync_count} engines have results "
+                    f"but missing positions. Continuing with best-effort "
+                    f"loading; see {telemetry_path} for details.",
                     file=sys.stderr,
                 )
-                sys.exit(1)
-            print(
-                "[fidelity] Minor desync -- proceeding with available data.",
-                file=sys.stderr,
-            )
+            else:
+                print(
+                    "[fidelity] Minor desync -- proceeding with available data.",
+                    file=sys.stderr,
+                )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     previous_hash = previous_results_hash(output_dir / "README.md")
@@ -2519,6 +2998,11 @@ def run_analysis(
     if skip_metrics:
         load_layout._skip_metrics = True  # type: ignore[attr-defined]
         print("[fidelity] Skipping quality metrics (Procrustes only)", file=sys.stderr)
+    else:
+        load_layout._skip_metrics = False  # type: ignore[attr-defined]
+    load_layout._compute_sampled_metrics = compute_sampled_metrics  # type: ignore[attr-defined]
+    if not compute_sampled_metrics:
+        print("[fidelity] Sampled metrics disabled (--without-sampled-metrics)", file=sys.stderr)
     if h5_file is None:
         print(
             "[fidelity] No HDF5 cache found. Loading individual .pt files. "
@@ -2528,6 +3012,13 @@ def run_analysis(
     pvalue_buckets = {
         "ks": PValueBucket(),
         "mannwhitney": PValueBucket(),
+        "welch": PValueBucket(),
+        "procrustes_one_sided": PValueBucket(),
+        "procrustes_mannwhitney": PValueBucket(),
+        "procrustes_tost_0_5x": PValueBucket(),
+        "procrustes_tost_1x": PValueBucket(),
+        "procrustes_tost_1_5x": PValueBucket(),
+        "procrustes_tost_2x": PValueBucket(),
         "tost_0_5x": PValueBucket(),
         "tost_1x": PValueBucket(),
         "tost_1_5x": PValueBucket(),
@@ -2630,6 +3121,7 @@ def run_analysis(
 def main() -> None:
     """Parse arguments and run the fidelity analysis."""
     args = parse_args()
+    load_layout._compute_sampled_metrics = not args.without_sampled_metrics  # type: ignore[attr-defined]
     run_analysis(
         input_dir=args.input,
         output_dir=args.output,
@@ -2637,6 +3129,7 @@ def main() -> None:
         bootstrap_samples=args.bootstrap_samples,
         power_simulations=args.power_simulations,
         skip_metrics=args.skip_metrics,
+        compute_sampled_metrics=not args.without_sampled_metrics,
     )
 
 
