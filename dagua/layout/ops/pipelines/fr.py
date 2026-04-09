@@ -7,7 +7,7 @@ from typing import Optional
 import torch
 
 from dagua.layout.ops.anneal import InitTemperatureFromExtent, LinearCool
-from dagua.layout.ops.base import Pipeline, Repeat  # noqa: E402
+from dagua.layout.ops.base import Conditional, Pipeline, Repeat  # noqa: E402
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig, FRConvergenceCheck  # noqa: E402
 from dagua.layout.ops.force import ApplyDisplacement, FRCombinedForce
 from dagua.layout.ops.init import RandomUniformInit, RandomUniformInitConfig
@@ -50,10 +50,13 @@ def build_fr_pipeline(steps: int = 50) -> Pipeline:
     return Pipeline(
         [
             FixedSteps(FixedStepsConfig(n=steps)),
-            RandomUniformInit(
-                RandomUniformInitConfig(
-                    scale="none",
-                    rng_backend="numpy",
+            Conditional(
+                predicate=lambda problem, state, ctx: state.pos is None,
+                op=RandomUniformInit(
+                    RandomUniformInitConfig(
+                        scale="none",
+                        rng_backend="numpy",
+                    ),
                 ),
             ),
             FRPrepareAdjacency(),
@@ -80,6 +83,7 @@ def layout_fr_pipeline(
     steps: int = 50,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
+    pos: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Run the Fruchterman-Reingold pipeline as a drop-in replacement.
 
@@ -98,6 +102,10 @@ def layout_fr_pipeline(
         Random seed for the NumPy-backed unit-square initialization.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
+    pos : torch.Tensor, optional
+        Initial positions with shape ``[N, 2]``. When provided, the pipeline
+        starts from these coordinates instead of sampling a random
+        initialization.
 
     Returns
     -------
@@ -107,7 +115,7 @@ def layout_fr_pipeline(
     Raises
     ------
     ValueError
-        If ``num_nodes``, ``steps``, or ``edge_weights`` are invalid.
+        If ``num_nodes``, ``steps``, ``edge_weights``, or ``pos`` are invalid.
     RuntimeError
         If the pipeline fails to populate final positions.
     """
@@ -122,6 +130,8 @@ def layout_fr_pipeline(
             raise ValueError(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
+    if pos is not None and pos.shape != (num_nodes, 2):
+        raise ValueError(f"pos must have shape ({num_nodes}, 2), got {tuple(pos.shape)}")
 
     problem = LayoutProblem(
         edge_index=edge_index,
@@ -131,6 +141,8 @@ def layout_fr_pipeline(
         seed=seed,
     )
     state = SolveState()
+    if pos is not None:
+        state.pos = pos.detach().clone().to(dtype=torch.float64)
     output_device = (
         edge_index.device
         if edge_index.numel() > 0
@@ -138,6 +150,8 @@ def layout_fr_pipeline(
         if node_sizes is not None
         else torch.device("cpu")
     )
+    if pos is not None and steps == 0:
+        return state.pos.to(device=output_device, dtype=torch.float32)
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
     final_state = build_fr_pipeline(steps=steps).apply(problem, state, ctx)
     if final_state.pos is None:

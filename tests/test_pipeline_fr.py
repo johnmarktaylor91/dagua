@@ -205,3 +205,44 @@ class TestFRPipelineFidelity:
         pipeline = _run_pipeline_direct(edge_index=edge_index, num_nodes=5, steps=50, seed=7)
 
         _assert_exact_match(classic, pipeline)
+
+    def test_layout_fr_pipeline_accepts_warm_start_positions(self) -> None:
+        """Warm-start positions should be accepted, preserved for zero steps, and validated."""
+        edge_index = torch.tensor(
+            [[0, 1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 0]],
+            dtype=torch.long,
+        )
+        pos = torch.tensor(
+            [
+                [1.0, 2.0],
+                [3.0, 4.0],
+                [5.0, 6.0],
+                [7.0, 8.0],
+                [9.0, 10.0],
+                [11.0, 12.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        cold_start = layout_fr_pipeline(edge_index=edge_index, num_nodes=6, steps=20, seed=42)
+        warm_start = layout_fr_pipeline(
+            edge_index=edge_index,
+            num_nodes=6,
+            steps=20,
+            seed=42,
+            pos=pos,
+        )
+        zero_step = layout_fr_pipeline(
+            edge_index=edge_index,
+            num_nodes=6,
+            steps=0,
+            seed=42,
+            pos=pos,
+        )
+
+        assert cold_start.shape == (6, 2)
+        assert warm_start.shape == (6, 2)
+        assert torch.allclose(zero_step.float(), pos.float(), atol=1e-5)
+
+        with pytest.raises(ValueError, match=r"pos must have shape"):
+            layout_fr_pipeline(edge_index=edge_index, num_nodes=6, steps=20, pos=torch.zeros(5, 2))
