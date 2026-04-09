@@ -285,7 +285,9 @@ class SGD2MultiRef(CompetitorBase):
             G_nx.add_nodes_from(range(n))
             for i in range(ei.shape[1]):
                 s, t = int(ei[0, i]), int(ei[1, i])
-                if s < t:
+                # networkx.Graph is undirected and dedups (s, t) / (t, s)
+                # automatically; we only need to skip self-loops.
+                if s != t:
                     G_nx.add_edge(s, t)
 
             # Run GD2 with stress criterion
@@ -326,6 +328,27 @@ class SGD2MultiRef(CompetitorBase):
             optimize_kwargs.setdefault("grad_clamp", 5.0)
 
             gd2 = GD2(G_nx)
+            # Strip crossings criteria when there are no non-incident edge
+            # pairs to sample. Upstream GD2 builds a DataLoader over this list
+            # for crossing-based criteria, and PyTorch rejects num_samples=0.
+            if not gd2.non_incident_edge_pairs:
+                crossings_keys = {"crossings", "crossing_angle_maximization"}
+                criteria_weights = {
+                    key: value
+                    for key, value in optimize_kwargs["criteria_weights"].items()
+                    if key not in crossings_keys
+                }
+                sample_sizes = {
+                    key: value
+                    for key, value in optimize_kwargs["sample_sizes"].items()
+                    if key not in crossings_keys
+                }
+                if not criteria_weights:
+                    # Fall back to stress-only so the wrapper still returns a layout.
+                    criteria_weights = {"stress": 1.0}
+                    sample_sizes = {"stress": 128}
+                optimize_kwargs["criteria_weights"] = criteria_weights
+                optimize_kwargs["sample_sizes"] = sample_sizes
             with _compat_reduce_lr_on_plateau(), _compat_criteria_patches():
                 gd2.optimize(**optimize_kwargs)
             if torch.isnan(gd2.pos).any():

@@ -565,6 +565,7 @@ class ChainCompetitor(CompetitorBase):
 class ClassicFR(_ClassicBase):
     """Competitor wrapper for the classic Fruchterman-Reingold reimplementation."""
 
+    variant_param_names = frozenset({"steps", "pos"})
     name = "classic_fr"
     max_nodes = 50_000
 
@@ -620,6 +621,7 @@ class ClassicFR(_ClassicBase):
 class ClassicKK(_ClassicBase):
     """Competitor wrapper for the classic Kamada-Kawai reimplementation."""
 
+    variant_param_names = frozenset({"steps", "pos"})
     name = "classic_kk"
     max_nodes = 5_000
 

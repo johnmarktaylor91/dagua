@@ -147,6 +147,10 @@ class TSNEGraph(CompetitorBase):
                 tsne_kwargs.update(dict(variant_params))
                 perplexity = float(tsne_kwargs.get("perplexity", 30.0))
                 tsne_kwargs["perplexity"] = min(perplexity, float(num_nodes - 1))
+            # sklearn 1.5+ requires max_iter >= 250; older benchmark variants
+            # configured max_iter=200 which the current sklearn rejects.
+            if "max_iter" in tsne_kwargs:
+                tsne_kwargs["max_iter"] = max(int(tsne_kwargs["max_iter"]), 250)
             tsne = TSNE(**tsne_kwargs)
             coordinates = tsne.fit_transform(distances)
             pos = torch.tensor(coordinates, dtype=torch.float32)
