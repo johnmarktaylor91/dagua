@@ -24,7 +24,7 @@ import numpy as np
 # Import shared logic from fidelity_analysis
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fidelity_analysis import (  # noqa: E402
-    QUALITY_METRICS,
+    ALL_QUALITY_METRICS,
     TOST_MARGIN_FACTORS,
     TOST_MARGIN_LABELS,
     VARIANT_REGISTRY,
@@ -39,11 +39,12 @@ from fidelity_analysis import (  # noqa: E402
     margin_for_metric,
     per_graph_fieldnames,
     rank_biserial_from_delta,
-    stable_seed,
     tost_pvalue,
     write_csv,
 )
-from scipy.stats import ks_2samp, mannwhitneyu  # noqa: E402
+from scipy.stats import ks_2samp, mannwhitneyu, ttest_ind  # noqa: E402
+
+from dagua.eval.pipeline_io import stable_seed  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,6 +105,7 @@ def main() -> None:
     pvalue_buckets: dict[str, PValueBucket] = {
         "ks": PValueBucket(),
         "mannwhitney": PValueBucket(),
+        "welch": PValueBucket(),
         "tost_0_5x": PValueBucket(),
         "tost_1x": PValueBucket(),
         "tost_1_5x": PValueBucket(),
@@ -133,7 +135,7 @@ def main() -> None:
             continue
 
         has_metrics = False
-        for metric_name in QUALITY_METRICS:
+        for metric_name in ALL_QUALITY_METRICS:
             orig_values = collect_metric_array(orig_seeds, metric_name)
             reimpl_values = collect_metric_array(reimpl_seeds, metric_name)
 
@@ -162,11 +164,23 @@ def main() -> None:
             mw_pvalue = float(
                 mannwhitneyu(orig_values, reimpl_values, alternative="two-sided").pvalue
             )
+            _, welch_pvalue = ttest_ind(
+                orig_values,
+                reimpl_values,
+                equal_var=False,
+                alternative="two-sided",
+            )
             row[f"{metric_name}_ks_pvalue_raw"] = ks_pvalue
             row[f"{metric_name}_mannwhitney_pvalue_raw"] = mw_pvalue
+            row[f"{metric_name}_welch_pvalue_raw"] = (
+                float(welch_pvalue) if np.isfinite(welch_pvalue) else math.nan
+            )
             pvalue_buckets["ks"].entries.append((row_idx, f"{metric_name}_ks_pvalue_bh", ks_pvalue))
             pvalue_buckets["mannwhitney"].entries.append(
                 (row_idx, f"{metric_name}_mannwhitney_pvalue_bh", mw_pvalue)
+            )
+            pvalue_buckets["welch"].entries.append(
+                (row_idx, f"{metric_name}_welch_pvalue_bh", float(welch_pvalue))
             )
 
             for factor in TOST_MARGIN_FACTORS:

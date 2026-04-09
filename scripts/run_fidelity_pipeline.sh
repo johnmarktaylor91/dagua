@@ -1,22 +1,21 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== Phase 1: Statistical Analysis ==="
+INPUT_DIR="${1:-eval_output/variant_bench_full}"
+OUTPUT_DIR="${2:-eval_output/fidelity_report}"
+
+# Phase 1: run analysis
 python scripts/fidelity_analysis.py \
-    --input eval_output/variant_bench_full \
-    --output eval_output/fidelity_report/data
+    --input "$INPUT_DIR" \
+    --output "$OUTPUT_DIR/data"
 
-echo "=== Phase 2: Generate Report ==="
+# Phase 2: validate output
+python scripts/validate_fidelity_output.py \
+    --data "$OUTPUT_DIR/data"
+
+# Phase 3: generate markdown report
 python scripts/generate_fidelity_report.py \
-    --data eval_output/fidelity_report/data \
-    --output eval_output/fidelity_report
+    --input "$OUTPUT_DIR/data" \
+    --output "$OUTPUT_DIR/report.md"
 
-echo "=== Phase 3: Compile PDF ==="
-if command -v pdflatex &> /dev/null; then
-    cd eval_output/fidelity_report
-    pdflatex -interaction=nonstopmode report.tex
-    pdflatex -interaction=nonstopmode report.tex
-    echo "=== Done: eval_output/fidelity_report/report.pdf ==="
-else
-    echo "=== Done: LaTeX at eval_output/fidelity_report/report.tex ==="
-fi
+echo "Fidelity pipeline complete. Report: $OUTPUT_DIR/report.md"
