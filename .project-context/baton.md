@@ -1,110 +1,189 @@
-NEW SESSION: Read this file first. Then read CLAUDE.md, AGENTS.md,
-and .project-context/knowledge/. The knowledge files contain durable
-project understanding. This baton file contains live session state.
-After reading everything, your first action should be: dispatch 10
-audit agents (5 Claude + 5 Codex) for the definitive fidelity run
-as described in the "Immediate Next Steps" section below.
+# Baton -- Fidelity + Quality/Runtime Pipelines COMPLETE
 
-## Goal
+Date: 2026-04-09
+Branch: feat/bench-and-aesthetics
+Status: Implementation complete. Awaiting benchmark completion for final runs.
 
-Launch the DEFINITIVE fidelity benchmark run: 60 seeds, 600s timeout,
-all 97 algorithm families, completely from scratch. This replaces all
-previous 30-seed runs. The run will take ~1 week. While it runs, we
-work on other things.
+---
 
-## Completed This Session
+## Summary
 
-- Fixed ALL identified code differences across 4 reimplementation files:
-  - neulay.py: 5 fixes (cKDTree repulsion, spring dedup, lr, step budget, numpy seed, manual GCN)
-  - sgd2_multi.py: 8 fixes (centering, CrossingDetector, BFS neighborhood, angular res, vertex res, aspect ratio, scheduler offset, cyclic sampling)
-  - fa2.py: 2 fixes (LinLog double-division, outboundAttCompensation)
-  - tsnet.py: already matched, no changes needed
-- Fixed analysis methodology:
-  - Within-vs-between Procrustes (Mann-Whitney one-sided) as primary verdict signal
-  - Scale-invariant metrics only (removed edge_length_mean, overlap_count)
-  - Proportion-based family aggregation (90% threshold, not all-or-nothing)
-  - Mirror-aware Procrustes, PValueBucket.add fix
-- 30-seed results: 57 strong, 6 weak, 34 partial, 0 divergent
-- All code verified by 8 independent audit agents + adversarial Codex critic + independent Codex reviewer
-- Committed as 3af2d2e on feat/bench-and-aesthetics
-- Previous results archived to eval_output/archives/*_20260331_132440*
+Both analysis pipelines (fidelity + new quality/runtime) are built, tested,
+and smoke-verified on the in-progress benchmark data. All 11 implementation
+tasks dispatched in 4 waves landed successfully. 91/91 new tests pass.
 
-## In Progress
+## What shipped
 
-Nothing currently running. The definitive run needs to be set up and launched.
+### New files
+- `dagua/eval/pipeline_io.py` -- shared loader + seeded metric helpers +
+  `stable_seed` + `validate_positions` + `aspect_ratio_deviation`
+- `scripts/quality_runtime_analysis.py` -- the new QR pipeline (1,812 lines)
+- `scripts/generate_quality_runtime_report.py` -- markdown report renderer
+- `scripts/run_quality_runtime_pipeline.sh` -- QR shell driver
+- `tests/test_pipeline_io.py` (29 tests)
+- `tests/test_metric_seeding.py` (12 tests)
+- `tests/test_fidelity_procrustes.py` (3 tests -- known-good / known-bad /
+  pooled-within regression)
+- `tests/test_fidelity_rejection_reasons.py` (3 tests)
+- `tests/test_fidelity_pairwise_columns.py` (1 test)
+- `tests/test_fidelity_metric_expansion.py` (4 tests)
+- `tests/test_fidelity_deterministic.py` (4 tests)
+- `tests/test_fidelity_report_markdown.py` (7 tests)
+- `tests/test_quality_runtime_analysis.py` (18 tests)
+- `tests/test_quality_runtime_report.py` (10 tests)
 
-## Immediate Next Steps
+### Modified files
+- `dagua/metrics.py` -- seeded `count_overlaps_detailed`,
+  `sampled_crossing_rate`, `count_crossings`, `quick`
+- `scripts/fidelity_analysis.py` -- A1-A5 atomic procrustes fix, B1 Welch,
+  B2 metric expansion, B2b sampled metrics, C1 three-tier deterministic
+  comparator, D1 seed cap, D2 pairwise CSV columns, E1 rejection
+  preservation, G1 docstring, Cleanup1 validate_sync telemetry
+- `scripts/fidelity_recompute_verdicts.py` -- mirrored Welch + expanded
+  metrics
+- `scripts/fidelity_add_metrics.py` -- canonical metric tuples + seeded
+  sampled metrics
+- `scripts/generate_fidelity_report.py` -- full rewrite to markdown (dropped
+  LaTeX)
+- `scripts/run_fidelity_pipeline.sh` -- dropped pdflatex, wired validator
+- `scripts/merge_fidelity_csvs.py` -- README preservation
 
-The user's explicit 7-step plan for the definitive run:
+## Critical bug fixes landed
 
-1. **Dispatch 10 agents (5 Claude + 5 Codex)** for final line-by-line sweep of
-   ALL 97 families. Also audit the full pipeline for easy iteration (targeted
-   reruns, adding seeds, etc.). Ensure analysis computes BOTH within-vs-between
-   Procrustes AND TOST -- everything we could want.
+1. **Pooled within-RMSD (CF1)**: `within_rmsd` was pooling orig + reimpl
+   pairwise distances, contaminating the baseline. A1 fixed it to
+   within-original only with diagnostic reimpl column.
+2. **LaTeX report (CF2)**: full rewrite to markdown. `pdflatex` dropped from
+   shell driver.
+3. **Python hash() instability**: FIX-S uses the existing SHA-256 based
+   `stable_seed()` for cross-process reproducibility. Verified with a
+   cross-process test in `test_metric_seeding.py`.
+4. **QR-IO rejection reason mismatch**: canonical enum now uses the EXACT
+   strings from the existing fidelity loader (missing_positions_file,
+   h5_load_failure, load_failure, not_tensor, tensor_not_2d, tensor_not_xy,
+   too_few_nodes, node_count_mismatch, contains_nan, contains_inf).
+5. **validate_sync hard gate**: Cleanup1 downgraded the sys.exit(1) at
+   line 2479-2499 to telemetry + warning. Verified on real benchmark data
+   (267 desyncs detected, pipeline continued).
+6. **Deterministic comparator**: three-tier comparator with raw equality
+   (Tier 1), rigid alignment (Tier 2 -- new `procrustes_align_rigid`),
+   metric near-equality (Tier 3). No over-engineered node ordering.
+7. **Coverage denominator**: QR uses `graphs_scheduled / graphs_covered`
+   derived from all-status records_df (not just ok rows), accounting for
+   variant filtering caps (max_nodes).
+8. **Graph-relative ranking**: rank is primary; rel_best is secondary with
+   clamp at 10.0 + floor at 1e-3 + typical_scale normalization.
+9. **Pareto ideal corner**: (1.0, 0.0) -- x = runtime_rel_fastest (min 1.0),
+   y = rel_best (min 0.0).
 
-2. **Write combined plan** from all 10 agents' findings. Iterate with adversarial
-   Codex until zero objections.
+## Dispatch summary (4 waves, ~55 minutes total Codex time)
 
-3. **Dispatch Codex workers** to implement all remaining fixes.
+| Wave | Task | Duration | Tests |
+|---|---|---|---|
+| 0a | QR-IO (pipeline_io + fidelity refactor) | 7m 22s | 26 |
+| 0b | FID-D + FID-G | 4m 25s + manual | 1 |
+| 1 | FID-S (metric seeding) | 7m 46s | 12 |
+| 1 | FID-A (procrustes atomic A1-A5) | 7m 40s | 3 |
+| 1 | FID-E (rejection reasons) | 5m 3s | 3 |
+| 2 | FID-B (Welch + metric expansion) | 9m 18s | 4 |
+| 2 | QR-CORE (quality/runtime analysis) | 16m 49s | 18 |
+| 3 | FID-C (deterministic comparator) | 7m 7s | 4 |
+| 3 | QR-REPORT (markdown renderer) | 5m 54s | 10 |
+| 3 | FID-CLEANUP (validate_sync + markdown) | 6m 27s | 7 |
+| **Total new tests** | | | **91** |
 
-4. **Launch definitive benchmark**: 60 seeds, 600s timeout, fresh from scratch,
-   maximum parallelism. Keep "skip after 3 consecutive timeouts" behavior.
-   Save previous results safely (already done -- archived).
+## Benchmark status
 
-5. **Report format**: per-algorithm breakdown showing % of graphs passing at each
-   threshold. Clear failure point identification. Adversarial Codex critiques
-   report format for rigor/clarity/readability, iterate until satisfied.
+- Progress: 989,125 / 1,267,245 = 78.1% (as of 2026-04-09 17:06)
+- Process: PID 2698780 (rescue wrapper 1799105), RSS 3.6GB, state Sl
+- Error counts: 1,444 timeouts + 99 disconnected + 90 acyclic + 12 connected
+  (all legitimate)
+- Rate: ~55-60 records/min (heavier stochastic zone)
+- ETA: ~2 more days to reach 100%
 
-6. **Documentation**: careful notes for the ~week-long run so nothing gets lost.
+## Next steps (when benchmark finishes)
 
-7. **Lessons learned**: apply everything from this iteration process.
+1. **Consolidate positions.h5** (one-time ~3 hours for ~900k files):
+   ```bash
+   python scripts/consolidate_positions_hdf5.py \
+       --input eval_output/variant_bench_full \
+       --output eval_output/variant_bench_full/positions.h5
+   ```
+   This refreshes the stale HDF5 store so analysis loads are 75x faster.
 
-## Context the New Instance Needs
+2. **Run fidelity pipeline**:
+   ```bash
+   ./scripts/run_fidelity_pipeline.sh
+   ```
+   Output: `eval_output/fidelity_report/data/*.csv` + `report.md`.
 
-- Read memory files: feedback_iteration_lessons.md, feedback_fidelity_verdicts.md,
-  project_definitive_run.md -- these contain critical lessons from this session
-- The H5 file at eval_output/variant_bench_full/positions.h5 is rebuilt and clean
-  (370K keys, perfect sync with results.json). But for the definitive run we start
-  fresh.
-- The report script (generate_fidelity_report.py) needs updating -- it still
-  expects edge_length_mean and overlap_count columns that were removed. The Codex
-  worker in step 3 should fix this.
-- Reference engines are NOT auto-included by --variants flag on run_benchmark.py.
-  Must be run explicitly or recovered from .pt files.
-- The safe_purge_variants.py script uses exact engine_name matching for results.json
-  but the H5 keys contain engine names as substrings -- be careful with substring
-  matching (it deleted reference positions in this session).
-- consolidate_positions_hdf5.py opens H5 with mode "w" (destructive replace).
-  Always write to temp file and rename atomically.
+3. **Run QR pipeline**:
+   ```bash
+   ./scripts/run_quality_runtime_pipeline.sh
+   ```
+   Output: `eval_output/quality_runtime_report/*.csv` + `report.md` +
+   per-family Pareto PNGs.
 
-## Promises to User
+## Known limitations (documented, not bugs)
 
-- Definitive run with 60 seeds, 600s timeout, all engines, from scratch
-- 10-agent audit before launching
-- Adversarial critique of both the plan and the final report format
-- Careful documentation so the ~week-long run doesn't get lost
-- Apply all lessons from this iteration process
+- `graph_rel_best` clamps at 10.0 for pathological near-zero cases. Rank is
+  the primary ordering; clamp is a safety floor.
+- Insight thresholds (15%/30%/1.25x/2.0x) are policy constants. The report
+  prints per-family p25/p50/p75 of each metric alongside so the user can
+  eyeball calibration.
+- Cache key hashes the whole `dagua/metrics.py` file content. Changes in
+  modules metrics.py imports from won't invalidate the cache; use
+  `--cache-invalidate` as the safety net.
+- QR first-run time on full benchmark: 1-3 hours with 8 workers + cache.
+  Second run: minutes.
 
-## Git State
+## Files NOT deleted (deferred)
 
-- Branch: feat/bench-and-aesthetics
-- Uncommitted: temporary scripts (scripts/_final_run.py, _final_run_v2.py,
-  _overnight.py, _purge_h5.py, _rebuild_h5.py) -- these are one-off helpers,
-  not needed going forward
-- Latest commit: 3af2d2e feat(fidelity): match all reimplementations to references + fix analysis methodology
-- Previous commit: ae2365d feat(fidelity): complete fidelity hardening sprint
+- `scripts/compare_classic.py` -- still referenced by `_final_run.py` and
+  `_overnight.py`.
+- `scripts/compare_reimpl_vs_original.py` -- same.
 
-## Running Processes
+## Plan docs
 
-None.
+- `.project-context/plans/fidelity_and_quality_pipeline_plan.md` (v4)
+- `.project-context/plans/fidelity_quality_codex_review.md` (round 1)
+- `.project-context/plans/fidelity_quality_claude_review.md` (round 1)
+- `.project-context/plans/fidelity_quality_round2_codex.md`
+- `.project-context/plans/fidelity_quality_round2_claude.md`
+- `.project-context/plans/fidelity_quality_round3_codex.md`
+- `.project-context/plans/fidelity_quality_round3_claude.md`
 
-## START HERE
+## Specs for each Codex task
 
-Dispatch 10 audit agents (5 Claude + 5 Codex) covering all 97 algorithm
-families and the full pipeline. Split by algorithm group:
-- Agents 1-2: FA2 variants (11 families)
-- Agents 3-4: SGD2 + stress_sgd variants (12 families)
-- Agents 5-6: NeuLay + t-SNE + UMAP variants (16 families)
-- Agents 7-8: FR + KK + spectral + MDS + other classics (30+ families)
-- Agents 9-10: Pipeline infrastructure + report format audit
-Each agent reads both dagua code AND reference code line by line.
+Saved at `/tmp/dagua_specs/`:
+- `wave0a_qr_io.md`
+- `wave0b_fid_d.md`
+- `wave0b_fid_g.md` (executed manually via Edit tool, not dispatched)
+- `wave1_fid_s.md`
+- `wave1_fid_a.md`
+- `wave1_fid_e.md`
+- `wave2_fid_b.md`
+- `wave2_qr_core.md`
+- `wave3_fid_c.md`
+- `wave3_fid_cleanup.md`
+- `wave3_qr_report.md`
+
+## Smoke test results
+
+Both pipelines were smoke-tested against the in-progress
+`eval_output/variant_bench_full/` (at 78.1% completion):
+
+- **Fidelity**: wrote `validate_sync_telemetry.json` listing 267 desyncs
+  (because positions.h5 is 9 days stale); continued instead of aborting
+  (Cleanup1 working).
+- **QR**: wrote `validate_sync_telemetry.json` + 129 metric cache entries
+  within 90 seconds on 2 workers. Multiprocessing + cache working.
+
+## Autonomous execution notes
+
+- Dispatched all 11 tasks via the codex-companion broker autonomously.
+- No critical blocking issues surfaced during the implementation.
+- Pre-existing unrelated issues NOT addressed (out of scope):
+  - `tests/test_classic_drl.py` fails to import `layout_drl` (archived
+    classic code).
+  - `scripts/purge_fixable_errors.py:219` has an E501 lint violation.
