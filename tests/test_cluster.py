@@ -118,6 +118,57 @@ class TestHierarchyAPI:
         assert g.cluster_parents.get("left") == "root"
         assert g.cluster_parents.get("right") == "root"
 
+    def test_torchlens_cluster_parent_inference(self):
+        """_build_torchlens_clusters should infer parents from dot-separated names."""
+        from dagua.graph import _build_torchlens_clusters
+
+        g = DaguaGraph()
+        for i in range(6):
+            g.add_node(i)
+
+        # Simulate what _build_torchlens_clusters produces before the fix:
+        # flat clusters with dot-separated names but no parent relationships.
+        g.clusters["1"] = [0, 1, 2]
+        g.clusters["1.conv1"] = [0]
+        g.clusters["1.bn1"] = [1]
+        g.clusters["2"] = [3, 4, 5]
+        g.clusters["2.conv1"] = [3]
+
+        # Manually invoke the parent-inference portion by calling the function
+        # with empty entries (membership already built above).
+        class FakeLog:
+            pass
+
+        _build_torchlens_clusters(g, [], FakeLog())
+
+        assert g.cluster_parents.get("1.conv1") == "1"
+        assert g.cluster_parents.get("1.bn1") == "1"
+        assert g.cluster_parents.get("2.conv1") == "2"
+        # Root clusters have no parent
+        assert g.cluster_parents.get("1") is None
+        assert g.cluster_parents.get("2") is None
+
+    def test_torchlens_deep_nesting_parent_inference(self):
+        """Deep dot-separated names should link to immediate parent only."""
+        from dagua.graph import _build_torchlens_clusters
+
+        g = DaguaGraph()
+        for i in range(3):
+            g.add_node(i)
+
+        g.clusters["encoder"] = [0, 1, 2]
+        g.clusters["encoder.layer"] = [0, 1]
+        g.clusters["encoder.layer.attn"] = [0]
+
+        class FakeLog:
+            pass
+
+        _build_torchlens_clusters(g, [], FakeLog())
+
+        assert g.cluster_parents.get("encoder.layer") == "encoder"
+        assert g.cluster_parents.get("encoder.layer.attn") == "encoder.layer"
+        assert g.cluster_parents.get("encoder") is None
+
     def test_cycle_detection(self):
         """Chain a -> b, then adding 'a' with parent='b' creates a cycle."""
         g = DaguaGraph()
