@@ -1853,6 +1853,15 @@ def _build_torchlens_clusters(g: DaguaGraph, entries, model_log) -> None:
                 if node_idx not in g.clusters[cluster_name]:
                     g.clusters[cluster_name].append(node_idx)
 
+    # Infer cluster_parents from dot-separated module addresses.
+    # E.g. "1.conv1" -> parent "1", "encoder.layer.0.attn" -> parent "encoder.layer.0".
+    # Only set parent if the parent cluster actually exists in g.clusters.
+    for cluster_name in list(g.clusters):
+        if "." in cluster_name:
+            parent_name = cluster_name.rsplit(".", 1)[0]
+            if parent_name in g.clusters and cluster_name not in g.cluster_parents:
+                g.cluster_parents[cluster_name] = parent_name
+
     # Add cluster labels from module metadata
     if hasattr(model_log, "modules"):
         try:
