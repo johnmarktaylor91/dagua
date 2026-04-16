@@ -68,7 +68,7 @@ def _compat_reduce_lr_on_plateau() -> Any:
 def _compat_criteria_patches() -> Any:
     """Patch upstream GD2 criteria functions for modern NetworkX and PyTorch.
 
-    Fixes two classes of bugs in the reference ``criteria.py``:
+    Fixes three classes of bugs in the reference ``criteria.py``:
 
     1. ``ideal_edge_length`` calls ``random.sample(G.edges, sampleSize)`` but
        modern NetworkX returns an EdgeView which ``random.sample`` rejects
@@ -78,11 +78,17 @@ def _compat_criteria_patches() -> Any:
        tensors.  This breaks when TorchLens decorates torch functions (the
        wrapped ``__len__`` path rejects 0-d tensors).  Fixed by using
        ``torch.stack`` / ``.item()`` instead.
+    3. ``aspect_ratio`` indexes ``singular_values[1]`` unconditionally, which
+       crashes when the SVD sample has fewer than 2 points.  Upstream GD2's
+       DataLoader leaves a trailing size-1 batch whenever
+       ``num_nodes % batch_size == 1`` (e.g. 257 nodes / batch 128 -> [128,
+       128, 1]); SVD of a 1x2 matrix returns only 1 singular value.  Fixed by
+       short-circuiting to zero loss when the sample has fewer than 2 points.
 
     Yields
     ------
     Any
-        Context manager that patches and restores both criteria functions.
+        Context manager that patches and restores the criteria functions.
     """
     import importlib
     import random as _random
@@ -96,6 +102,7 @@ def _compat_criteria_patches() -> Any:
     criteria = importlib.import_module("criteria")
     _orig_ideal_edge_length = criteria.ideal_edge_length
     _orig_stress = criteria.stress
+    _orig_aspect_ratio = criteria.aspect_ratio
 
     # -- patched ideal_edge_length -----------------------------------------
 
@@ -178,13 +185,53 @@ def _compat_criteria_patches() -> Any:
             return res.sum()
         return res.mean()
 
+    # -- patched aspect_ratio -----------------------------------------------
+
+    def _patched_aspect_ratio(
+        pos: Any,
+        target: Any = (1, 1),
+        sampleSize: Any = None,
+        sample: Any = None,
+    ) -> Any:
+        """aspect_ratio with guard against degenerate (<2-point) SVD samples."""
+        import torch as _torch
+        from torch import nn as _nn
+
+        target = list(target)
+        if target[0] < target[1]:
+            target = target[::-1]
+
+        if sample is not None:
+            sample = pos[sample, :]
+        elif sampleSize is None or sampleSize == "full":
+            sample = pos
+        else:
+            n = pos.shape[0]
+            i = _np.random.choice(n, min(n, sampleSize), replace=False)
+            sample = pos[i, :]
+
+        # SVD of an Nx2 matrix returns min(N, 2) singular values. When the
+        # DataLoader produces a trailing size-1 batch the upstream code crashes
+        # on ``singular_values[1]``; skip the term in that case.
+        if sample.shape[0] < 2:
+            return _torch.zeros((), dtype=pos.dtype, device=pos.device)
+
+        bce = _nn.BCELoss(reduction="sum")
+        singular_values = _torch.svd(sample - sample.mean(dim=0)).S
+        return bce(
+            singular_values[1] / singular_values[0],
+            _torch.tensor(target[1] / target[0]),
+        )
+
     criteria.ideal_edge_length = _patched_ideal_edge_length
     criteria.stress = _patched_stress
+    criteria.aspect_ratio = _patched_aspect_ratio
     try:
         yield
     finally:
         criteria.ideal_edge_length = _orig_ideal_edge_length
         criteria.stress = _orig_stress
+        criteria.aspect_ratio = _orig_aspect_ratio
 
 
 @register
@@ -364,11 +411,14 @@ class SGD2MultiRef(CompetitorBase):
             return CompetitorResult(name=self.name, pos=positions, runtime_seconds=elapsed)
         except Exception as exc:
             elapsed = time.perf_counter() - start
+            # MemoryError and some C-level exceptions have empty str(); fall back
+            # to the exception class name so the benchmark doesn't lose the signal.
+            message = str(exc) or type(exc).__name__
             return CompetitorResult(
                 name=self.name,
                 pos=None,
                 runtime_seconds=elapsed,
-                error=str(exc),
+                error=message,
             )
 
     def available(self) -> bool:
