@@ -297,10 +297,8 @@ class OGDFSugiyama(_OGDFBase):
     max_nodes = 20_000
 
 
-@register
-class OGDFLinLog(_OGDFBase):
-    """Competitor adapter for the requested OGDF LinLog layout."""
-
-    name = "ogdf_linlog"
-    algorithm = "linlog"
-    max_nodes = 20_000
+# OGDFLinLog removed: OGDF has no LinLog implementation. The class was a
+# placeholder that threw "unsupported algorithm: linlog" on every call,
+# producing 105 deterministic errors per benchmark with zero information value.
+# Dagua's own LinLog pipeline (dagua/layout/ops/pipelines/linlog.py) remains
+# available via the native engine.

@@ -480,7 +480,6 @@ def test_default_competitor_order_covers_expected_and_available_competitors():
         "ogdf_stress",
         "ogdf_sugiyama",
         "ogdf_davidson_harel",
-        "ogdf_linlog",
         "ogdf_pivot_mds",
         "classic_fr",
         "classic_kk",

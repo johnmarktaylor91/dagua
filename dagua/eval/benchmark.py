@@ -93,7 +93,6 @@ DEFAULT_COMPETITOR_ORDER = [
     "ogdf_stress",
     "ogdf_sugiyama",
     "ogdf_davidson_harel",
-    "ogdf_linlog",
     "ogdf_pivot_mds",
     # Dagua classic reimplementations
     "classic_fr",
