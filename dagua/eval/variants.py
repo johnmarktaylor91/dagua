@@ -1857,7 +1857,6 @@ _BASE_ENGINE_STOCHASTICITY: dict[str, bool] = {
     "ogdf_fmmm": False,
     "ogdf_stress": False,
     "ogdf_pivot_mds": False,
-    "ogdf_linlog": False,
     "fa2_ref": True,
     "sgd2": True,
     "tsne_graph": True,
