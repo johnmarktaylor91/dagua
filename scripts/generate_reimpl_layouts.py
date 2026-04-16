@@ -149,13 +149,13 @@ _register(
     max_nodes=500,
 )
 
-# LinLog (community-revealing)
+# LinLog (community-revealing). OGDF has no LinLog implementation, so this
+# reimpl has no fidelity counterpart -- leave original_competitor empty.
 _register(
     "classic_linlog",
     "dagua.layout.classic.linlog",
     "layout_linlog",
     stochastic=True,
-    original_competitor="ogdf_linlog",
     max_nodes=50_000,
 )
 

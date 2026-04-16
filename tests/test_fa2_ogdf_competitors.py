@@ -18,7 +18,6 @@ from dagua.eval.competitors.ogdf_competitor import (
     OGDFFMMM,
     OGDFDavidsonHarel,
     OGDFGem,
-    OGDFLinLog,
     OGDFPivotMDS,
     OGDFStress,
     OGDFSugiyama,
@@ -63,7 +62,6 @@ def test_fa2_and_ogdf_competitors_registered() -> None:
         "ogdf_gem",
         "ogdf_fmmm",
         "ogdf_stress",
-        "ogdf_linlog",
         "ogdf_pivot_mds",
         "ogdf_sugiyama",
         "ogdf_davidson_harel",
@@ -233,25 +231,6 @@ def test_ogdf_stress_layout() -> None:
     assert result.pos is not None
     assert result.pos.shape == (6, 2)
     assert result.error is None
-
-
-@pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
-def test_ogdf_linlog_layout() -> None:
-    """The LinLog adapter should either return positions or a clear error.
-
-    Returns
-    -------
-    None
-        This test asserts on the returned position tensor or unsupported error.
-    """
-    graph = _make_small_graph()
-    result = OGDFLinLog().layout(graph, timeout=30.0)
-    if result.pos is not None:
-        assert result.pos.shape == (6, 2)
-        assert result.error is None
-    else:
-        assert result.error is not None
-        assert "unsupported algorithm: linlog" in result.error
 
 
 @pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")
