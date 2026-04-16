@@ -41,6 +41,7 @@ def test_compat_criteria_patch_handles_empty_sample(
     criteria_module = types.ModuleType("criteria")
     criteria_module.ideal_edge_length = lambda *args, **kwargs: None
     criteria_module.stress = lambda *args, **kwargs: None
+    criteria_module.aspect_ratio = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "criteria", criteria_module)
 
     with _compat_criteria_patches():
@@ -54,11 +55,92 @@ def test_compat_criteria_patch_handles_empty_sample(
     assert loss.item() == 0.0
 
 
+def test_aspect_ratio_patch_handles_size_one_sample(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """aspect_ratio on a 1-point sample should return zero, not crash on SVD.
+
+    Upstream GD2 produces a size-1 trailing batch whenever
+    ``num_nodes % batch_size == 1`` (e.g. 257 % 128 == 1). SVD of a 1x2
+    matrix returns only 1 singular value, so the original
+    ``singular_values[1] / singular_values[0]`` raises IndexError.
+    """
+    criteria_module = types.ModuleType("criteria")
+    criteria_module.ideal_edge_length = lambda *args, **kwargs: None
+    criteria_module.stress = lambda *args, **kwargs: None
+    criteria_module.aspect_ratio = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "criteria", criteria_module)
+
+    with _compat_criteria_patches():
+        pos = torch.randn(10, 2)
+        # Pass a size-1 sample by index -- this is what DataLoader emits
+        # for the trailing batch on a graph where len % batch_size == 1.
+        loss = criteria_module.aspect_ratio(pos, sample=torch.tensor([3]))
+
+    assert isinstance(loss, torch.Tensor)
+    assert loss.shape == torch.Size([])
+    assert loss.item() == 0.0
+
+
+def test_aspect_ratio_patch_matches_original_for_normal_sample(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """aspect_ratio patch should behave normally when the sample has >= 2 points."""
+    criteria_module = types.ModuleType("criteria")
+    criteria_module.ideal_edge_length = lambda *args, **kwargs: None
+    criteria_module.stress = lambda *args, **kwargs: None
+    criteria_module.aspect_ratio = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "criteria", criteria_module)
+
+    with _compat_criteria_patches():
+        torch.manual_seed(0)
+        pos = torch.randn(16, 2)
+        loss = criteria_module.aspect_ratio(pos, sample=torch.arange(8))
+
+    assert isinstance(loss, torch.Tensor)
+    assert loss.shape == torch.Size([])
+    assert loss.item() > 0.0
+
+
+def test_sgd2_multi_memory_error_reports_class_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MemoryError has empty str(); adapter must fall back to the class name."""
+    criteria_module = types.ModuleType("criteria")
+    criteria_module.ideal_edge_length = lambda *args, **kwargs: None
+    criteria_module.stress = lambda *args, **kwargs: None
+    criteria_module.aspect_ratio = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "criteria", criteria_module)
+
+    class FakeGD2:
+        """GD2 stub that raises bare MemoryError during optimize."""
+
+        def __init__(self, graph: nx.Graph) -> None:
+            del graph
+            self.non_incident_edge_pairs = [(0, 1, 1, 2)]
+            self.pos = torch.zeros((3, 2), dtype=torch.float32)
+
+        def optimize(self, **kwargs: object) -> None:
+            """Simulate the rlimit-triggered allocation failure."""
+            del kwargs
+            raise MemoryError()
+
+    gd2_module = types.ModuleType("gd2")
+    gd2_module.GD2 = FakeGD2
+    monkeypatch.setitem(sys.modules, "gd2", gd2_module)
+
+    result = SGD2MultiRef().layout(_make_small_graph(), seed=7)
+
+    assert result.pos is None
+    assert result.error == "MemoryError"
+
+
 def test_sgd2_multi_reports_nan_divergence(monkeypatch: pytest.MonkeyPatch) -> None:
     """NaN positions from the upstream optimizer should become a clean error."""
     criteria_module = types.ModuleType("criteria")
     criteria_module.ideal_edge_length = lambda *args, **kwargs: None
     criteria_module.stress = lambda *args, **kwargs: None
+    criteria_module.aspect_ratio = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "criteria", criteria_module)
 
     observed: dict[str, object] = {}
@@ -91,6 +173,7 @@ def test_sgd2_multi_forwards_variant_grad_clamp(monkeypatch: pytest.MonkeyPatch)
     criteria_module = types.ModuleType("criteria")
     criteria_module.ideal_edge_length = lambda *args, **kwargs: None
     criteria_module.stress = lambda *args, **kwargs: None
+    criteria_module.aspect_ratio = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "criteria", criteria_module)
 
     observed: dict[str, object] = {}
