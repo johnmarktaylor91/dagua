@@ -1,14 +1,27 @@
-"""Core optimization loop — the heart of dagua.
+"""Core optimization loop -- the dispatch + legacy engine body.
 
-Takes a DaguaGraph and LayoutConfig, returns [N, 2] position tensor.
-Headless: operates on tensors extracted from the graph.
+Sprint 0 status (2026-04-22):
+- Top-level `layout()` is the active dispatcher.
+  * `algorithm=None` -> "dagua_native" ops pipeline (the new default).
+  * `algorithm="_legacy"` -> the legacy `_layout_inner` body in this file
+    (opt-in, unadvertised; preserved until Sprint 1 ports the memory
+    features it owns into ops).
+  * `algorithm=<other>` -> existing pipeline dispatch.
+- Animation (trace argument) keeps the legacy path until op-level snapshot
+  hooks land.
+- The `_layout_inner` body and its helpers below are SCHEDULED FOR ARCHIVE
+  to `dagua/layout/_archive/legacy_engine/` once Sprint 1 demonstrates
+  memory parity and re-implements per-loss backward, gradient checkpointing,
+  and hybrid device support as registered ops. Per 09 Q1 (user resolution:
+  archive). Do NOT add new features to `_layout_inner`; new optimization
+  work goes into ops + resolve.
 
-Scaling strategy (tiered):
+Scaling strategy of the LEGACY body (tiered):
 - Tier 0 (N < 500): exact O(N^2) repulsion, full overlap check
 - Tier 1 (500-20K): scatter sampling repulsion, layer-local overlap
 - Tier 2 (N > 20K by default): multilevel coarsening V-cycle
 
-Memory optimization (composable, auto-enabled for large graphs):
+Memory optimization in the LEGACY body (composable, auto-enabled for large graphs):
 - Per-loss backward: backward each loss term separately (3-4x memory reduction)
 - Gradient checkpointing: recompute forward during backward (2x memory, 30% more compute)
 - Hybrid device: CPU for heavy losses, GPU for edge losses (enables GPU at 10M+ nodes)
