@@ -38,7 +38,11 @@ def score(g, pos):
 
 def run_one(name, factory, algorithm):
     g = factory()
-    cfg = LayoutConfig(seed=42, steps=60, algorithm=algorithm)
+    # Opt INTO V-cycle for the ops_native run by setting multilevel_threshold
+    # below the graph size. Sprint 2 raised the default to 1M to safely
+    # disable the V-cycle while quality work is in flight; this script
+    # explicitly exercises it so the head-to-head is reproducible.
+    cfg = LayoutConfig(seed=42, steps=60, algorithm=algorithm, multilevel_threshold=5000)
     t = time.perf_counter()
     try:
         pos = engine_layout(g, cfg)

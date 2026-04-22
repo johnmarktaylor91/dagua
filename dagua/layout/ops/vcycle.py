@@ -79,13 +79,18 @@ def _default_per_level_steps(
 
     Coarsest level gets ``coarse_steps``. Each finer level gets linearly
     fewer steps, bottoming out at ``finest_steps`` at the finest level.
+
+    Sprint 2 bug-fix (2026-04-22): clamp level_index to [0, num_levels-1].
+    Caller used to pass level_index=-1 for the finest pass, which produced
+    NEGATIVE step counts -> Repeat ran ZERO iterations -> finest level
+    was never refined (the V-cycle's primary quality regression).
     """
     if num_levels <= 1:
-        return finest_steps
-    # level_index=num_levels-1 -> coarsest; 0 -> finest-level hierarchy[0]
-    # Linear interpolate: coarse at last, finest*1.5 at 0.
+        return max(finest_steps, 1)
+    level_index = max(0, min(level_index, num_levels - 1))
     frac = level_index / max(num_levels - 1, 1)
-    return int(finest_steps + (coarse_steps - finest_steps) * frac)
+    steps = int(finest_steps + (coarse_steps - finest_steps) * frac)
+    return max(steps, 1)
 
 
 @dataclass(frozen=True)
@@ -222,6 +227,17 @@ class VCycleRefine(Op):
                 fine_problem = problem  # finest == user's graph
             else:
                 fine_problem = _level_problem(problem, hierarchy[level_idx - 1])
+
+            # Sprint 2 bug-fix: reset per-level solve bookkeeping so each
+            # level behaves like an independent solve. Carrying step,
+            # total_steps, stall_count, and loss history across levels
+            # caused premature StallCount break + stale anneal weights.
+            state.step = 0
+            state.total_steps = 0
+            state.stall_count = 0
+            state.converged = False
+            state.prev_loss = None
+            state.extras.pop("stall_last_loss", None)
 
             # Refine at this level.
             level_steps = _default_per_level_steps(
