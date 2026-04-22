@@ -1,0 +1,168 @@
+{
+  "results": [
+    {
+      "graph": "chain_10000",
+      "algorithm": "ops_native",
+      "n": 10000,
+      "score": 99.95037404587492,
+      "runtime_s": 30.49962307419628,
+      "profile": "profile_large",
+      "error": null
+    },
+    {
+      "graph": "chain_10000",
+      "algorithm": "_legacy",
+      "n": 10000,
+      "score": 99.98948407010175,
+      "runtime_s": 20.471284022089094,
+      "profile": "profile_large",
+      "error": null
+    },
+    {
+      "graph": "chain_25000",
+      "algorithm": "ops_native",
+      "n": 25000,
+      "score": 21.295372415055667,
+      "runtime_s": 112.08896301221102,
+      "profile": "profile_large",
+      "error": null
+    },
+    {
+      "graph": "chain_25000",
+      "algorithm": "_legacy",
+      "n": 25000,
+      "score": 99.99431467695103,
+      "runtime_s": 63.76537513593212,
+      "profile": "profile_large",
+      "error": null
+    },
+    {
+      "graph": "random_dag_10000",
+      "algorithm": "ops_native",
+      "n": 10000,
+      "score": 49.757707046096556,
+      "runtime_s": 23.054915092885494,
+      "profile": "profile_large",
+      "error": null
+    },
+    {
+      "graph": "random_dag_10000",
+      "algorithm": "_legacy",
+      "n": 10000,
+      "score": 49.75771499213752,
+      "runtime_s": 16.009095767047256,
+      "profile": "profile_large",
+      "error": null
+    },
+    {
+      "graph": "random_dag_25000",
+      "algorithm": "ops_native",
+      "n": 25000,
+      "score": 20.034263652247375,
+      "runtime_s": 95.70721048302948,
+      "profile": "profile_large",
+      "error": null
+    },
+    {
+      "graph": "random_dag_25000",
+      "algorithm": "_legacy",
+      "n": 25000,
+      "score": 49.76230466216458,
+      "runtime_s": 42.287474147975445,
+      "profile": "profile_large",
+      "error": null
+    },
+    {
+      "graph": "tree_10000",
+      "algorithm": "ops_native",
+      "n": 10000,
+      "score": 68.03079547043225,
+      "runtime_s": 15.492127522826195,
+      "profile": "profile_large",
+      "error": null
+    },
+    {
+      "graph": "tree_10000",
+      "algorithm": "_legacy",
+      "n": 10000,
+      "score": 68.65149783177155,
+      "runtime_s": 15.18826302094385,
+      "profile": "profile_large",
+      "error": null
+    },
+    {
+      "graph": "tree_25000",
+      "algorithm": "ops_native",
+      "n": 25000,
+      "score": null,
+      "runtime_s": 43.38438636204228,
+      "error": "ValueError: overlap_projection requires state.pos to be set."
+    },
+    {
+      "graph": "tree_25000",
+      "algorithm": "_legacy",
+      "n": 25000,
+      "score": 55.72147356911848,
+      "runtime_s": 43.023800626862794,
+      "profile": "profile_large",
+      "error": null
+    }
+  ],
+  "pairs": [
+    {
+      "graph": "chain_10000",
+      "n": 10000,
+      "ops_score": 99.95037404587492,
+      "legacy_score": 99.98948407010175,
+      "score_delta": -0.03911002422682941,
+      "ops_runtime_s": 30.49962307419628,
+      "legacy_runtime_s": 20.471284022089094,
+      "runtime_ratio_ops_over_legacy": 1.4898734755126413
+    },
+    {
+      "graph": "chain_25000",
+      "n": 25000,
+      "ops_score": 21.295372415055667,
+      "legacy_score": 99.99431467695103,
+      "score_delta": -78.69894226189537,
+      "ops_runtime_s": 112.08896301221102,
+      "legacy_runtime_s": 63.76537513593212,
+      "runtime_ratio_ops_over_legacy": 1.7578342913103684
+    },
+    {
+      "graph": "random_dag_10000",
+      "n": 10000,
+      "ops_score": 49.757707046096556,
+      "legacy_score": 49.75771499213752,
+      "score_delta": -7.946040966544388e-06,
+      "ops_runtime_s": 23.054915092885494,
+      "legacy_runtime_s": 16.009095767047256,
+      "runtime_ratio_ops_over_legacy": 1.4401135097424544
+    },
+    {
+      "graph": "random_dag_25000",
+      "n": 25000,
+      "ops_score": 20.034263652247375,
+      "legacy_score": 49.76230466216458,
+      "score_delta": -29.728041009917206,
+      "ops_runtime_s": 95.70721048302948,
+      "legacy_runtime_s": 42.287474147975445,
+      "runtime_ratio_ops_over_legacy": 2.263252001009182
+    },
+    {
+      "graph": "tree_10000",
+      "n": 10000,
+      "ops_score": 68.03079547043225,
+      "legacy_score": 68.65149783177155,
+      "score_delta": -0.6207023613392977,
+      "ops_runtime_s": 15.492127522826195,
+      "legacy_runtime_s": 15.18826302094385,
+      "runtime_ratio_ops_over_legacy": 1.0200065340890747
+    },
+    {
+      "graph": "tree_25000",
+      "ops_error": "ValueError: overlap_projection requires state.pos to be set.",
+      "legacy_error": null
+    }
+  ]
+}

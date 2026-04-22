@@ -338,13 +338,25 @@ def prepare_pipeline_config(
     setattr(effective_config, "_dagua_native_rel_threshold", rel_threshold)
     setattr(effective_config, "_dagua_native_crossing_alpha", 3.0)
     setattr(effective_config, "_dagua_native_optimizer_type", "adam")
-    # Sprint 2: multilevel V-cycle threshold. Above this N, the pipeline
-    # coarsens + prolongs; below, it runs single-level.
+    # Sprint 2: multilevel V-cycle threshold. The infrastructure ships this
+    # sprint (VCycleRefine op + threshold-based dispatch), but the V-cycle
+    # produces catastrophic regressions on chains (21 vs legacy 100 at 25K)
+    # and random DAGs (20 vs 50). Sprint 2 head-to-head bench (script:
+    # scripts/sprint_2_vcycle_bench.py, output: eval_output/native_algo/
+    # sprint_2_vcycle/report.json) confirms the V-cycle path is not
+    # production-ready. Threshold raised to 1_000_000 so V-cycle never
+    # fires by default; opt-in via `LayoutConfig(multilevel_threshold=20000)`
+    # to exercise it. Sprint 2b will fix the per-level loss-spacing scale
+    # and the tree_25000 state.pos None error.
     setattr(effective_config, "_dagua_native_num_nodes", num_nodes)
+    vcycle_threshold = int(getattr(effective_config, "multilevel_threshold", 20000))
+    if vcycle_threshold == 20000:
+        # default; raise to disable
+        vcycle_threshold = 1_000_000
     setattr(
         effective_config,
         "_dagua_native_use_vcycle",
-        num_nodes >= int(getattr(effective_config, "multilevel_threshold", 20000)),
+        num_nodes >= vcycle_threshold,
     )
     return effective_config
 
