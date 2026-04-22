@@ -1,0 +1,277 @@
+{
+  "sprint_tag": "holdout_v1",
+  "salt_digest_prefix": "b0b82cb2",
+  "entries": [
+    {
+      "index": 0,
+      "family": "directed_dag_small",
+      "target_n": 80,
+      "actual_n": 80,
+      "actual_e": 160,
+      "topology_sha256": "496eef9ea4992ef477cf58104ab629c455d1af9053ebceb8ccdd328a7767a9cf",
+      "seed": 2962129552
+    },
+    {
+      "index": 1,
+      "family": "directed_dag_small",
+      "target_n": 150,
+      "actual_n": 150,
+      "actual_e": 300,
+      "topology_sha256": "ef3f13ab729381d85fb33b0690a11ea65b655c7f9bef8cfaeaf2c0bf97d6545c",
+      "seed": 2772099046
+    },
+    {
+      "index": 2,
+      "family": "directed_dag_medium",
+      "target_n": 400,
+      "actual_n": 400,
+      "actual_e": 1000,
+      "topology_sha256": "bf008ad886eac7224145c667e680e6778ad9d47b8a433534353a11cf6a28541f",
+      "seed": 2261621844
+    },
+    {
+      "index": 3,
+      "family": "directed_dag_medium",
+      "target_n": 900,
+      "actual_n": 900,
+      "actual_e": 2250,
+      "topology_sha256": "7b1b0c9734a7d95954f0c06192e8957f21d25b658ce14035058b7caa50b8fa1b",
+      "seed": 219801060
+    },
+    {
+      "index": 4,
+      "family": "chain_deep",
+      "target_n": 120,
+      "actual_n": 120,
+      "actual_e": 119,
+      "topology_sha256": "ba0745a3669559aa65d02b5bd095b1177253f508358acf91fce8d33a1140d8b8",
+      "seed": 1495450625
+    },
+    {
+      "index": 5,
+      "family": "chain_deep",
+      "target_n": 600,
+      "actual_n": 600,
+      "actual_e": 599,
+      "topology_sha256": "6ad46375a99589840ee2994e6b7cd7423d91564a1ffe680e9c6396f581a983c2",
+      "seed": 1322813442
+    },
+    {
+      "index": 6,
+      "family": "tree_branching_3",
+      "target_n": 100,
+      "actual_n": 100,
+      "actual_e": 99,
+      "topology_sha256": "06b7fe63446b2b806da03678fc81ea1b34b13fc078a204e50fe1650c24d93aca",
+      "seed": 1783384653
+    },
+    {
+      "index": 7,
+      "family": "tree_branching_3",
+      "target_n": 400,
+      "actual_n": 400,
+      "actual_e": 399,
+      "topology_sha256": "c74026759b24fcc6e88f7154a46ece15a0c6b201c20c84ede56cf89d8d9a6ca7",
+      "seed": 2355631200
+    },
+    {
+      "index": 8,
+      "family": "tree_branching_4",
+      "target_n": 150,
+      "actual_n": 150,
+      "actual_e": 149,
+      "topology_sha256": "348147e300cc75a7d286669dbce0ec91263bfe96b59e774d715fffcf27a7a1b6",
+      "seed": 3697581034
+    },
+    {
+      "index": 9,
+      "family": "tree_branching_4",
+      "target_n": 800,
+      "actual_n": 800,
+      "actual_e": 799,
+      "topology_sha256": "d32ca9fbb6da3db74acffeeb41aa3e8d56c976401e8be7443bdf3e694f96c660",
+      "seed": 3752413639
+    },
+    {
+      "index": 10,
+      "family": "wide_parallel",
+      "target_n": 120,
+      "actual_n": 120,
+      "actual_e": 225,
+      "topology_sha256": "0c756f6ef6b2b3d490ae3471721b351c3b15e65491cc0d6b01e2b90a45fecd7f",
+      "seed": 1611421399
+    },
+    {
+      "index": 11,
+      "family": "wide_parallel",
+      "target_n": 500,
+      "actual_n": 500,
+      "actual_e": 911,
+      "topology_sha256": "060ec03c02e8d8ec933e0e0e15860de6d84ace0eb4be14fa5ce8e23de29aac8c",
+      "seed": 3328054320
+    },
+    {
+      "index": 12,
+      "family": "diamond",
+      "target_n": 60,
+      "actual_n": 60,
+      "actual_e": 88,
+      "topology_sha256": "a004976e38bebb5780ede4c866ac5a26e10a2d66d514f24ce839b3f9497076fa",
+      "seed": 3458068576
+    },
+    {
+      "index": 13,
+      "family": "diamond",
+      "target_n": 200,
+      "actual_n": 200,
+      "actual_e": 298,
+      "topology_sha256": "f4d338b98fe29b066e9082db7559b45be74c4c14a76009cd1dc7e3c80c29bdcc",
+      "seed": 2823710332
+    },
+    {
+      "index": 14,
+      "family": "sparse_layered",
+      "target_n": 300,
+      "actual_n": 300,
+      "actual_e": 825,
+      "topology_sha256": "3c36dce5f6360ce2267f5c77a73c05ea0c16d05091895fbb6fc5b281ca146879",
+      "seed": 3972028545
+    },
+    {
+      "index": 15,
+      "family": "sparse_layered",
+      "target_n": 1200,
+      "actual_n": 1200,
+      "actual_e": 3505,
+      "topology_sha256": "22e0a20e928a1f600063b65b01dff9c56d624c464fbc9aa54a271b1ceadf4d49",
+      "seed": 4247252123
+    },
+    {
+      "index": 16,
+      "family": "powerlaw_dag",
+      "target_n": 400,
+      "actual_n": 400,
+      "actual_e": 797,
+      "topology_sha256": "516ec16734b3c1b46497267d8746636d349ef95d9fcb0c7f772b8ce34ad7f1d8",
+      "seed": 3701570073
+    },
+    {
+      "index": 17,
+      "family": "erdos_renyi_sparse",
+      "target_n": 200,
+      "actual_n": 200,
+      "actual_e": 396,
+      "topology_sha256": "93b784e50cee4fcd54a5469d6da1371dea3b4173fe99c1df3e5e1dd6165f31d3",
+      "seed": 1047324529
+    },
+    {
+      "index": 18,
+      "family": "random_geometric",
+      "target_n": 300,
+      "actual_n": 300,
+      "actual_e": 2803,
+      "topology_sha256": "f9ecd7151ba609c0af70983bc1516a45515ac82864d12b46484f6af86b5352b7",
+      "seed": 3123769877
+    },
+    {
+      "index": 19,
+      "family": "small_world",
+      "target_n": 250,
+      "actual_n": 250,
+      "actual_e": 500,
+      "topology_sha256": "ee98a80c2c99b4f6697c46499613223af2e87a8ba70309d7b19e7d8a98c618af",
+      "seed": 2607820405
+    },
+    {
+      "index": 20,
+      "family": "small_world",
+      "target_n": 900,
+      "actual_n": 900,
+      "actual_e": 1800,
+      "topology_sha256": "8a4dbc959ac0577c4a65e0fa98938bc262b74cf2b0fed6d9b59e8099bfcc2533",
+      "seed": 286436750
+    },
+    {
+      "index": 21,
+      "family": "grid_square",
+      "target_n": 100,
+      "actual_n": 100,
+      "actual_e": 180,
+      "topology_sha256": "e153a3c52d2418ee114bd582dc99d3bd70cc37d492b4116566fff53a93d05a20",
+      "seed": 1254783901
+    },
+    {
+      "index": 22,
+      "family": "grid_square",
+      "target_n": 400,
+      "actual_n": 400,
+      "actual_e": 760,
+      "topology_sha256": "e25edc07cc8927d6ccaddb6e1ca5f4fad0cd6682e03695fbb14c864dbbc28be7",
+      "seed": 604216163
+    },
+    {
+      "index": 23,
+      "family": "bipartite",
+      "target_n": 200,
+      "actual_n": 200,
+      "actual_e": 1056,
+      "topology_sha256": "2d740af57580ef865cdf987c0e46d44149b6569a8a536ed537a102429a3ac5a4",
+      "seed": 574024582
+    },
+    {
+      "index": 24,
+      "family": "hub_spoke",
+      "target_n": 120,
+      "actual_n": 68,
+      "actual_e": 131,
+      "topology_sha256": "694d6aa25ed687f07917b312bed343e7073eea8711e474466e69a0f0c859f4e9",
+      "seed": 3076512445
+    },
+    {
+      "index": 25,
+      "family": "complete_bipartite",
+      "target_n": 80,
+      "actual_n": 46,
+      "actual_e": 520,
+      "topology_sha256": "e68aa4d29f741f87a43387e617b8af3496ec4ae3c7b510a1a127de1d9eef663b",
+      "seed": 2491103272
+    },
+    {
+      "index": 26,
+      "family": "directed_dag_medium",
+      "target_n": 1500,
+      "actual_n": 1500,
+      "actual_e": 3750,
+      "topology_sha256": "dc86f2dd5e5ff45376acd62fb3ae8187e83b5f854faadc594bc88c819466ca3a",
+      "seed": 136681944
+    },
+    {
+      "index": 27,
+      "family": "chain_deep",
+      "target_n": 1800,
+      "actual_n": 1800,
+      "actual_e": 1799,
+      "topology_sha256": "8a9912aa49f7b39ff1a46feb801f3c1ba50267e3e29a2acf4387ea45bef37475",
+      "seed": 1875824568
+    },
+    {
+      "index": 28,
+      "family": "tree_branching_3",
+      "target_n": 1800,
+      "actual_n": 1800,
+      "actual_e": 1799,
+      "topology_sha256": "1710ecc15f9cf58b6d35e535660c686fab8de7700d2f8a269bb8b2151b66f6be",
+      "seed": 1212843704
+    },
+    {
+      "index": 29,
+      "family": "sparse_layered",
+      "target_n": 600,
+      "actual_n": 600,
+      "actual_e": 1684,
+      "topology_sha256": "77fd40b07461c3087fc57e3dc8275742d446f1b1dd3efeabba15b63fba0501a6",
+      "seed": 3125376356
+    }
+  ],
+  "entry_count": 30
+}
