@@ -1206,6 +1206,81 @@ def composite(metrics: Dict[str, float]) -> float:
     return score
 
 
+# Quick-mode fields (available from `quick()`). Used by composite_large to
+# avoid silent defaults for fields that only exist in full().
+_QUICK_AVAILABLE_FIELDS = frozenset(
+    {
+        "dag_consistency",
+        "edge_length_cv",
+        "depth_spearman_rho",
+        "overlap_count",
+        "edge_straightness_mean_deg",
+    }
+)
+
+# Fields that composite() expects but quick() does not provide. Required for
+# composite_small (the full profile). Missing any of these at N<=2000 is a bug.
+_FULL_ONLY_FIELDS = frozenset(
+    {
+        "crossing_rate",
+        "angular_res_mean_deg",
+    }
+)
+
+
+def composite_large(metrics: Dict[str, float]) -> float:
+    """Composite score for graphs where only ``quick()`` metrics are available.
+
+    At N>2000 the benchmark switches to ``quick()``, which does not compute
+    crossing_rate, angular_res_mean_deg, cluster_mean_sep_ratio, or
+    edge_node_crossing_rate. ``composite()`` would silently default those
+    fields and produce a score that is NOT comparable to small-graph scores.
+
+    ``composite_large`` uses ONLY quick-available fields and renormalizes to
+    0-100. It IS the correct score to use for N>2000 iteration/held-out
+    comparisons. It is NOT comparable to ``composite()`` scores computed on
+    full metrics at smaller N; see the "profile split" protocol in
+    ``.project-context/plans/native_placement_algo/04_evaluation_rubric.md``.
+
+    Weights (sum = 100):
+    - DAG consistency: 30
+    - Edge length uniformity (1 - CV): 25
+    - Depth correlation: 20
+    - No overlaps (binary): 15
+    - Edge straightness: 10
+    """
+    missing = [f for f in _QUICK_AVAILABLE_FIELDS if f not in metrics]
+    if missing:
+        raise ValueError(
+            f"composite_large: missing required quick-mode fields: {missing}. "
+            f"Did you call quick() before scoring? If the graph is empty or "
+            f"trivial, the caller must still populate the expected fields."
+        )
+
+    score = 0.0
+    score += 30 * metrics["dag_consistency"]
+    score += 25 * max(0.0, 1.0 - metrics["edge_length_cv"])
+    score += 20 * max(0.0, metrics["depth_spearman_rho"])
+    score += 15 * (1.0 if metrics["overlap_count"] == 0 else 0.0)
+    score += 10 * max(0.0, 1.0 - metrics["edge_straightness_mean_deg"] / 45.0)
+    return score
+
+
+def composite_strict(metrics: Dict[str, float]) -> float:
+    """Strict variant of ``composite()`` that refuses silent defaults.
+
+    Raises ValueError if any required full-profile field is absent.
+    Use at N<=2000 where ``full()`` has run; use ``composite_large`` at N>2000.
+    """
+    missing = [f for f in _FULL_ONLY_FIELDS | _QUICK_AVAILABLE_FIELDS if f not in metrics]
+    if missing:
+        raise ValueError(
+            f"composite_strict: missing required full-profile fields: {missing}. "
+            f"At N>2000 use composite_large() instead."
+        )
+    return composite(metrics)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
