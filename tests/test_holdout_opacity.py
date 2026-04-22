@@ -43,7 +43,7 @@ def test_holdout_manifest_has_hashes_not_edges():
     for key in forbidden_keys:
         assert key not in text, (
             f"Held-out MANIFEST.json must not embed raw edge data "
-            f"(found key '{key}'). Use topology_sha256_16 only."
+            f"(found key '{key}'). Use topology_sha256_10 only."
         )
 
 
@@ -54,8 +54,8 @@ def test_holdout_regeneration_is_deterministic():
 
     _, m1 = make_holdout_suite()
     _, m2 = make_holdout_suite()
-    hashes1 = [e["topology_sha256_16"] for e in m1.entries]
-    hashes2 = [e["topology_sha256_16"] for e in m2.entries]
+    hashes1 = [e["topology_sha256_10"] for e in m1.entries]
+    hashes2 = [e["topology_sha256_10"] for e in m2.entries]
     assert hashes1 == hashes2, "Held-out suite not deterministic; salt read is broken"
 
 
@@ -66,8 +66,8 @@ def test_holdout_rolling_never_collides():
 
     _, mh = make_holdout_suite()
     _, mr = make_rolling_suite(sprint_tag="sprint_smoke_test")
-    holdout_hashes = {e["topology_sha256_16"] for e in mh.entries}
-    rolling_hashes = {e["topology_sha256_16"] for e in mr.entries}
+    holdout_hashes = {e["topology_sha256_10"] for e in mh.entries}
+    rolling_hashes = {e["topology_sha256_10"] for e in mr.entries}
     # No rolling hash should collide with held-out. (Not impossible by
     # chance for small graphs, but extremely unlikely with sha256 prefixes.)
     collisions = holdout_hashes & rolling_hashes
