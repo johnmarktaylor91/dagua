@@ -70,9 +70,21 @@ Sprint 1 can credibly measure improvement.
     held-out; records version/hash per competitor.
   * `scripts/pick_weak_graphs.py` reads metrics, returns 5 weakest vs best
     competitor.
-  * Sprint 0 baseline RE-RUN under new opacity + competitor matrix; this
-    becomes the calibration point for the Pareto ladder.
-- Budget: 1.5-2 clock days.
+  * Sprint 0 baseline RE-RUN under new opacity (DAGUA-ONLY on 30 graphs,
+    committed at eval_output/native_algo/holdout_v1/metrics.json).
+  * **Pareto ladder calibration DEFERRED to Sprint 1 exit.** Calibration
+    requires a full 16-way competitor head-to-head on the held-out suite
+    (2-4h background run via scripts/refresh_competitors.sh --rerun). That
+    run was NOT executed at Sprint 0.5 exit per 2026-04-22 round-1 exit
+    review findings; the Dagua-only baseline is sufficient to pick weak
+    graphs (scripts/pick_weak_graphs.py) and drive Sprint 1 iteration, but
+    the per-sprint Pareto gate numbers in 10_iteration_loop.md (20% at
+    Sprint 1 -> 90% at Sprint 9) cannot be calibrated against absolute
+    competitor shares until the head-to-head lands. Sprint 1 entry
+    requires that run to complete before the Sprint 1 exit Pareto gate is
+    evaluated.
+- Budget: 1.5-2 clock days (competitor head-to-head run excluded;
+  scheduled as pre-Sprint-1 background task).
 - Extractions: none (infrastructure/parity sprint, exempt).
 - Non-regression: existing tests still pass; competitor cache invalidated
   cleanly without losing prior data (rename/keep-old).
