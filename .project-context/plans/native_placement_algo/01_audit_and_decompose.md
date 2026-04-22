@@ -35,8 +35,12 @@ At the end of Sprint 0:
    `build_dagua_pipeline` was called.
 2. `grep -r "from dagua.layout.engine import" dagua/layout/ops/pipelines/dagua_native.py`
    returns empty.
-3. `scripts/iterate_native.sh chain_100` completes in <=8 seconds and
-   prints a scalar quality score and an image path.
+3. `scripts/iterate_native.sh chain_100 40 --no-image` completes in <=8s
+   and prints a scalar quality score (image path NOT required for the
+   score-only iteration). Default `scripts/iterate_native.sh chain_100`
+   (with rendering) completes in ~10-12s on the dev machine -- slower
+   because matplotlib startup adds 3-5s. Both paths print an image path;
+   the image is rendered only on the default (image-on) path.
 4. `eval_output/native_algo/baseline_sprint_0/metrics.json` exists with metric
    values for the iteration suite (seed=42) at the Sprint-0 commit SHA.
    NOTE: held-out baseline comes in Sprint 0.5, not here.

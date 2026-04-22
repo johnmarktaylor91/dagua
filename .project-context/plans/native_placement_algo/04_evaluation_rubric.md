@@ -23,9 +23,14 @@ score += 10 * (1 if overlap_count == 0 else 0)            # hard no-overlap (bin
 score += 10 * max(0, 1 - edge_straightness_mean_deg/45)   # edges near vertical
 score += 10 * max(0, 1 - crossing_rate * 10)              # crossing density
 score +=  5 * min(1, angular_res_mean_deg / 40)           # angular resolution
-score +=  5 * (min(1, cluster_mean_sep_ratio/5) if clusters else 0.5)
-score +=  3 * max(0, 1 - edge_node_crossing_rate * 5)     # optional
-score +=  2 * label_overlap_contribution                  # optional, if computed
+score +=  5 * (min(1, cluster_mean_sep_ratio/5) if "cluster_mean_sep_ratio" in metrics else 0.5)
+# Optional fields (only added if present in metrics dict):
+if "edge_node_crossing_rate" in metrics:
+    score +=  3 * max(0, 1 - edge_node_crossing_rate * 5)
+if "label_overlaps" in metrics or "label_node_overlaps" in metrics:
+    total_label_overlaps = label_overlaps + label_node_overlaps
+    lo_score = 1.0 if total_label_overlaps == 0 else max(0, 1 - total_label_overlaps * 0.1)
+    score +=  2 * lo_score
 # Max theoretical: 105. Practical cap: ~100 depending on graph features.
 ```
 
