@@ -7,55 +7,55 @@
     {
       "n": 1000,
       "algorithm": null,
-      "peak_rss_mb": 1217.3984375,
-      "baseline_rss_mb": 528.0234375,
-      "delta_mb": 689.375,
-      "runtime_s": 4.333684771321714,
+      "peak_rss_mb": 1224.921875,
+      "baseline_rss_mb": 529.80078125,
+      "delta_mb": 695.12109375,
+      "runtime_s": 4.548989747650921,
       "error": null,
       "tag": "ops_pipeline"
     },
     {
       "n": 1000,
       "algorithm": "_legacy",
-      "peak_rss_mb": 1076.51953125,
-      "baseline_rss_mb": 529.49609375,
-      "delta_mb": 547.0234375,
-      "runtime_s": 3.2156273731961846,
+      "peak_rss_mb": 1087.77734375,
+      "baseline_rss_mb": 529.4140625,
+      "delta_mb": 558.36328125,
+      "runtime_s": 3.252752101048827,
       "error": null,
       "tag": "legacy"
     },
     {
       "n": 10000,
       "algorithm": null,
-      "peak_rss_mb": 8141.60546875,
-      "baseline_rss_mb": 530.80078125,
-      "delta_mb": 7610.8046875,
-      "runtime_s": 144.11298638302833,
+      "peak_rss_mb": 1224.4921875,
+      "baseline_rss_mb": 532.5703125,
+      "delta_mb": 691.921875,
+      "runtime_s": 26.858764125034213,
       "error": null,
       "tag": "ops_pipeline"
     },
     {
       "n": 10000,
       "algorithm": "_legacy",
-      "peak_rss_mb": 1001.73046875,
-      "baseline_rss_mb": 530.81640625,
-      "delta_mb": 470.9140625,
-      "runtime_s": 22.183125786017627,
+      "peak_rss_mb": 1000.9296875,
+      "baseline_rss_mb": 532.125,
+      "delta_mb": 468.8046875,
+      "runtime_s": 20.949694232083857,
       "error": null,
       "tag": "legacy"
     }
   ],
   "summary": {
     "1000": {
-      "ops_rss_mb": 1217.3984375,
-      "legacy_rss_mb": 1076.51953125,
-      "ops_over_legacy": 1.130865165155358,
+      "ops_rss_mb": 1224.921875,
+      "legacy_rss_mb": 1087.77734375,
+      "ops_over_legacy": 1.1260777603412924,
       "gap_exceeds_20pct": false
     },
     "10000": {
-      "ops_rss_mb": 8141.60546875,
-      "legacy_rss_mb": 1001.73046875,
-      "ops_over_legacy": 8.127541013012639,
+      "ops_rss_mb": 1224.4921875,
+      "legacy_rss_mb": 1000.9296875,
+      "ops_over_legacy": 1.2233548497880877,
       "gap_exceeds_20pct": true
     }
   },
