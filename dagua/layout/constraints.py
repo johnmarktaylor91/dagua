@@ -1130,24 +1130,212 @@ def _resolve_cluster_members(members, device):
     return None
 
 
+class _ClusterCache:
+    """Per-pipeline-call cache of vectorized cluster index tensors.
+
+    All cluster losses (compactness, separation, containment) iterate over the
+    SAME cluster dict every step. Building flat (cluster_id, node_idx) tensors
+    and sibling/containment pair tensors ONCE here turns each step from O(C +
+    P) Python work into a handful of scatter ops. node_sizes is constant across
+    steps so per-cluster max sizes are precomputed under no_grad.
+    """
+
+    __slots__ = (
+        "device",
+        "num_clusters",
+        "cluster_idx_flat",
+        "node_idx_flat",
+        "membership_count",
+        "compactness_active_mask",
+        "compactness_active_count",
+        "sibling_left",
+        "sibling_right",
+        "size_max_per_cluster",
+        "containment_child_idx",
+        "containment_parent_idx",
+        "containment_count",
+    )
+
+    def __init__(
+        self,
+        clusters: dict,
+        cluster_parents: Optional[Dict[str, Optional[str]]],
+        node_sizes: Optional[torch.Tensor],
+        device: torch.device,
+    ) -> None:
+        self.device = device
+
+        names: List[str] = []
+        flat_cluster_ids: List[int] = []
+        flat_node_idx: List[int] = []
+        membership_count_py: List[int] = []
+        for name, members in clusters.items():
+            idx = _resolve_cluster_members(members, device)
+            if idx is None:
+                continue
+            cid = len(names)
+            names.append(name)
+            n_members = int(idx.shape[0])
+            membership_count_py.append(n_members)
+            flat_cluster_ids.extend([cid] * n_members)
+            flat_node_idx.extend(idx.tolist())
+
+        self.num_clusters = len(names)
+        if self.num_clusters == 0:
+            self.cluster_idx_flat = torch.empty(0, dtype=torch.long, device=device)
+            self.node_idx_flat = torch.empty(0, dtype=torch.long, device=device)
+            self.membership_count = torch.empty(0, dtype=torch.float32, device=device)
+            self.compactness_active_mask = torch.empty(0, dtype=torch.bool, device=device)
+            self.compactness_active_count = 0
+            self.sibling_left = torch.empty(0, dtype=torch.long, device=device)
+            self.sibling_right = torch.empty(0, dtype=torch.long, device=device)
+            self.size_max_per_cluster = torch.empty((0, 2), dtype=torch.float32, device=device)
+            self.containment_child_idx = torch.empty(0, dtype=torch.long, device=device)
+            self.containment_parent_idx = torch.empty(0, dtype=torch.long, device=device)
+            self.containment_count = 0
+            return
+
+        self.cluster_idx_flat = torch.tensor(flat_cluster_ids, dtype=torch.long, device=device)
+        self.node_idx_flat = torch.tensor(flat_node_idx, dtype=torch.long, device=device)
+        membership_count = torch.tensor(membership_count_py, dtype=torch.float32, device=device)
+        self.membership_count = membership_count
+        active = membership_count > 1
+        self.compactness_active_mask = active
+        self.compactness_active_count = int(active.sum().item())
+
+        # Sibling pairs: same parent (or both root-level when parents provided),
+        # or all-pairs when no hierarchy. Sample if many clusters and no
+        # hierarchy is given (matches legacy behaviour).
+        sibling_pairs: List[Tuple[int, int]] = []
+        if cluster_parents:
+            parents_per_cluster = [cluster_parents.get(n) for n in names]
+            for i in range(self.num_clusters):
+                for j in range(i + 1, self.num_clusters):
+                    if parents_per_cluster[i] == parents_per_cluster[j]:
+                        sibling_pairs.append((i, j))
+        elif self.num_clusters > 50:
+            max_sample = int(min(50, self.num_clusters * (self.num_clusters - 1) // 2))
+            sampled: set[tuple[int, int]] = set()
+            attempts = 0
+            while len(sampled) < max_sample and attempts < max_sample * 10:
+                i = random.randint(0, self.num_clusters - 1)
+                j = random.randint(0, self.num_clusters - 1)
+                if i != j:
+                    sampled.add((min(i, j), max(i, j)))
+                attempts += 1
+            sibling_pairs = list(sampled)
+        else:
+            sibling_pairs = [
+                (i, j) for i in range(self.num_clusters) for j in range(i + 1, self.num_clusters)
+            ]
+
+        if sibling_pairs:
+            pair_tensor = torch.tensor(sibling_pairs, dtype=torch.long, device=device)
+            self.sibling_left = pair_tensor[:, 0].contiguous()
+            self.sibling_right = pair_tensor[:, 1].contiguous()
+        else:
+            self.sibling_left = torch.empty(0, dtype=torch.long, device=device)
+            self.sibling_right = torch.empty(0, dtype=torch.long, device=device)
+
+        # Per-cluster max node size (constant across steps -- no autograd needed).
+        if node_sizes is not None:
+            with torch.no_grad():
+                node_sizes_d = node_sizes.to(device=device, dtype=torch.float32)
+                size_per_row = node_sizes_d[self.node_idx_flat]
+                size_max = torch.full(
+                    (self.num_clusters, 2), float("-inf"), device=device, dtype=torch.float32
+                )
+                size_max.scatter_reduce_(
+                    0,
+                    self.cluster_idx_flat.unsqueeze(1).expand_as(size_per_row),
+                    size_per_row,
+                    reduce="amax",
+                    include_self=True,
+                )
+                # Singletons should still get a real size (scatter_reduce hit them once).
+                self.size_max_per_cluster = size_max
+        else:
+            self.size_max_per_cluster = torch.zeros(
+                (self.num_clusters, 2), dtype=torch.float32, device=device
+            )
+
+        # Containment pairs: (child_id, parent_id) for every parent-having
+        # cluster present in clusters AND parents.
+        if cluster_parents:
+            name_to_id = {n: i for i, n in enumerate(names)}
+            child_ids: List[int] = []
+            parent_ids: List[int] = []
+            for child_name, parent_name in cluster_parents.items():
+                if parent_name is None:
+                    continue
+                if child_name not in name_to_id or parent_name not in name_to_id:
+                    continue
+                child_ids.append(name_to_id[child_name])
+                parent_ids.append(name_to_id[parent_name])
+            if child_ids:
+                self.containment_child_idx = torch.tensor(
+                    child_ids, dtype=torch.long, device=device
+                )
+                self.containment_parent_idx = torch.tensor(
+                    parent_ids, dtype=torch.long, device=device
+                )
+            else:
+                self.containment_child_idx = torch.empty(0, dtype=torch.long, device=device)
+                self.containment_parent_idx = torch.empty(0, dtype=torch.long, device=device)
+            self.containment_count = len(child_ids)
+        else:
+            self.containment_child_idx = torch.empty(0, dtype=torch.long, device=device)
+            self.containment_parent_idx = torch.empty(0, dtype=torch.long, device=device)
+            self.containment_count = 0
+
+
+def _bbox_min_max_per_cluster(
+    pos: torch.Tensor,
+    cache: _ClusterCache,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return (bbox_min, bbox_max) tensors of shape [C, 2] via scatter_reduce.
+
+    Gradients flow through scatter_reduce(amin/amax) at the argmin/argmax
+    elements only -- same gradient semantics as ``pos[idx].min(dim=0).values``
+    used by the legacy loops, so behaviour is preserved.
+    """
+    pos_per_row = pos[cache.node_idx_flat]  # [R, 2]
+    cluster_idx_2d = cache.cluster_idx_flat.unsqueeze(1).expand_as(pos_per_row)
+    bbox_min = torch.full((cache.num_clusters, 2), float("inf"), device=pos.device, dtype=pos.dtype)
+    bbox_min.scatter_reduce_(0, cluster_idx_2d, pos_per_row, reduce="amin", include_self=True)
+    bbox_max = torch.full(
+        (cache.num_clusters, 2), float("-inf"), device=pos.device, dtype=pos.dtype
+    )
+    bbox_max.scatter_reduce_(0, cluster_idx_2d, pos_per_row, reduce="amax", include_self=True)
+    return bbox_min, bbox_max
+
+
 def cluster_compactness_loss(
     pos: torch.Tensor,
     clusters: dict,
     device: torch.device,
+    cache: Optional[_ClusterCache] = None,
 ) -> torch.Tensor:
-    """Nodes in same cluster attract their cluster centroid."""
-    total = torch.tensor(0.0, device=device)
-    count = 0
-    for name, members in clusters.items():
-        idx = _resolve_cluster_members(members, device)
-        if idx is not None and idx.shape[0] > 1:
-            centroid = pos[idx].mean(dim=0, keepdim=True)
-            total = total + ((pos[idx] - centroid) ** 2).sum(dim=1).mean()
-            count += 1
-
-    if count == 0:
+    """Nodes in same cluster attract their cluster centroid (vectorized)."""
+    if cache is None:
+        cache = _ClusterCache(clusters, None, None, device)
+    if cache.compactness_active_count == 0:
         return torch.tensor(0.0, device=device)
-    return total / count
+
+    pos_per_row = pos[cache.node_idx_flat]  # [R, 2]
+    cluster_idx_2d = cache.cluster_idx_flat.unsqueeze(1).expand_as(pos_per_row)
+    centroid_sum = torch.zeros((cache.num_clusters, 2), device=pos.device, dtype=pos.dtype)
+    centroid_sum.scatter_add_(0, cluster_idx_2d, pos_per_row)
+    centroid = centroid_sum / cache.membership_count.unsqueeze(1).to(pos.dtype)
+
+    centroid_per_row = centroid[cache.cluster_idx_flat]  # [R, 2]
+    sq_dist = ((pos_per_row - centroid_per_row) ** 2).sum(dim=1)  # [R]
+    sq_sum = torch.zeros(cache.num_clusters, device=pos.device, dtype=pos.dtype)
+    sq_sum.scatter_add_(0, cache.cluster_idx_flat, sq_dist)
+    per_cluster_mean = sq_sum / cache.membership_count.to(pos.dtype)
+
+    active = cache.compactness_active_mask
+    return per_cluster_mean[active].sum() / float(cache.compactness_active_count)
 
 
 def cluster_separation_loss(
@@ -1157,78 +1345,33 @@ def cluster_separation_loss(
     padding: float = 10.0,
     device: Optional[torch.device] = None,
     cluster_parents: Optional[Dict[str, Optional[str]]] = None,
+    cache: Optional[_ClusterCache] = None,
 ) -> torch.Tensor:
-    """Sibling cluster bounding boxes repel.
+    """Sibling cluster bounding boxes repel (vectorized).
 
     When cluster_parents is provided, only repels clusters at the same
     hierarchy level (same parent or both root-level). Parent vs child
-    should NOT repel — containment loss handles that.
+    should NOT repel -- containment loss handles that.
     """
     if device is None:
         device = pos.device
-
-    cluster_list = []
-    for name, members in clusters.items():
-        idx = _resolve_cluster_members(members, device)
-        if idx is not None and idx.shape[0] > 0:
-            parent = cluster_parents.get(name) if cluster_parents else None
-            cluster_list.append((name, idx, parent))
-
-    if len(cluster_list) < 2:
+    if cache is None:
+        cache = _ClusterCache(clusters, cluster_parents, node_sizes, device)
+    if cache.num_clusters < 2 or cache.sibling_left.numel() == 0:
         return torch.tensor(0.0, device=device)
 
-    # Build sibling pairs: only repel clusters with the same parent
-    num_clusters = len(cluster_list)
-    if cluster_parents:
-        all_pairs = []
-        for i in range(num_clusters):
-            for j in range(i + 1, num_clusters):
-                if cluster_list[i][2] == cluster_list[j][2]:  # same parent (or both None)
-                    all_pairs.append((i, j))
-    elif num_clusters > 50:
-        max_sample = int(min(50, num_clusters * (num_clusters - 1) // 2))
-        sampled: set[tuple[int, int]] = set()
-        attempts = 0
-        while len(sampled) < max_sample and attempts < max_sample * 10:
-            i = random.randint(0, num_clusters - 1)
-            j = random.randint(0, num_clusters - 1)
-            if i != j:
-                sampled.add((min(i, j), max(i, j)))
-            attempts += 1
-        all_pairs = list(sampled)
-    else:
-        all_pairs = [(i, j) for i in range(num_clusters) for j in range(i + 1, num_clusters)]
+    bbox_min, bbox_max = _bbox_min_max_per_cluster(pos, cache)
+    half_size = cache.size_max_per_cluster.to(pos.dtype) / 2 + padding
+    bbox_min = bbox_min - half_size
+    bbox_max = bbox_max + half_size
 
-    if not all_pairs:
-        return torch.tensor(0.0, device=device)
-
-    total = torch.tensor(0.0, device=device)
-    for i, j in all_pairs:
-        idx_i = cluster_list[i][1]
-        idx_j = cluster_list[j][1]
-
-        bbox_i_min = (
-            pos[idx_i].min(dim=0).values - node_sizes[idx_i].max(dim=0).values / 2 - padding
-        )
-        bbox_i_max = (
-            pos[idx_i].max(dim=0).values + node_sizes[idx_i].max(dim=0).values / 2 + padding
-        )
-        bbox_j_min = (
-            pos[idx_j].min(dim=0).values - node_sizes[idx_j].max(dim=0).values / 2 - padding
-        )
-        bbox_j_max = (
-            pos[idx_j].max(dim=0).values + node_sizes[idx_j].max(dim=0).values / 2 + padding
-        )
-
-        overlap_x = F.relu(
-            torch.min(bbox_i_max[0], bbox_j_max[0]) - torch.max(bbox_i_min[0], bbox_j_min[0])
-        )
-        overlap_y = F.relu(
-            torch.min(bbox_i_max[1], bbox_j_max[1]) - torch.max(bbox_i_min[1], bbox_j_min[1])
-        )
-        total = total + overlap_x * overlap_y
-
-    return total
+    left = cache.sibling_left
+    right = cache.sibling_right
+    overlap = F.relu(
+        torch.minimum(bbox_max[left], bbox_max[right])
+        - torch.maximum(bbox_min[left], bbox_min[right])
+    )  # [P, 2]
+    return (overlap[:, 0] * overlap[:, 1]).sum()
 
 
 def cluster_containment_loss(
@@ -1238,58 +1381,35 @@ def cluster_containment_loss(
     cluster_parents: Dict[str, Optional[str]],
     padding: float = 18.0,
     device: Optional[torch.device] = None,
+    cache: Optional[_ClusterCache] = None,
 ) -> torch.Tensor:
-    """Child cluster bboxes must stay inside parent cluster bboxes.
+    """Child cluster bboxes must stay inside parent cluster bboxes (vectorized).
 
     For each (child, parent) pair in cluster_parents:
     - Compute child bbox from its leaf members
-    - Compute parent bbox from its leaf members
-    - Penalize child bbox edges extending outside parent bbox:
-      ReLU(parent_min - child_min)² + ReLU(child_max - parent_max)² per axis
+    - Compute parent bbox from its leaf members (with padding)
+    - Penalize child bbox edges extending outside parent bbox.
     """
     if device is None:
         device = pos.device
-
-    total = torch.tensor(0.0, device=device)
-    count = 0
-
-    for child_name, parent_name in cluster_parents.items():
-        if parent_name is None:
-            continue
-        if child_name not in clusters or parent_name not in clusters:
-            continue
-
-        child_idx = _resolve_cluster_members(clusters[child_name], device)
-        parent_idx = _resolve_cluster_members(clusters[parent_name], device)
-        if child_idx is None or parent_idx is None:
-            continue
-
-        # Child bbox
-        child_min = pos[child_idx].min(dim=0).values - node_sizes[child_idx].max(dim=0).values / 2
-        child_max = pos[child_idx].max(dim=0).values + node_sizes[child_idx].max(dim=0).values / 2
-
-        # Parent bbox (with padding — parent should be larger)
-        parent_min = (
-            pos[parent_idx].min(dim=0).values
-            - node_sizes[parent_idx].max(dim=0).values / 2
-            - padding
-        )
-        parent_max = (
-            pos[parent_idx].max(dim=0).values
-            + node_sizes[parent_idx].max(dim=0).values / 2
-            + padding
-        )
-
-        # Penalize child extending outside parent
-        violation = (
-            F.relu(parent_min - child_min) ** 2 + F.relu(child_max - parent_max) ** 2
-        ).sum()
-        total = total + violation
-        count += 1
-
-    if count == 0:
+    if cache is None:
+        cache = _ClusterCache(clusters, cluster_parents, node_sizes, device)
+    if cache.containment_count == 0:
         return torch.tensor(0.0, device=device)
-    return total / count
+
+    bbox_min, bbox_max = _bbox_min_max_per_cluster(pos, cache)
+    half_size = cache.size_max_per_cluster.to(pos.dtype) / 2
+
+    child = cache.containment_child_idx
+    parent = cache.containment_parent_idx
+
+    child_min = bbox_min[child] - half_size[child]
+    child_max = bbox_max[child] + half_size[child]
+    parent_min = bbox_min[parent] - half_size[parent] - padding
+    parent_max = bbox_max[parent] + half_size[parent] + padding
+
+    violation = F.relu(parent_min - child_min) ** 2 + F.relu(child_max - parent_max) ** 2
+    return violation.sum() / float(cache.containment_count)
 
 
 # ─── Spacing consistency ──────────────────────────────────────────────────────
