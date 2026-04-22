@@ -255,6 +255,7 @@ _EXPECTED_OP_MODULES = (
     "tsnet",
     "umap",
     "utility",
+    "vcycle",
 )
 
 log = logging.getLogger(__name__)

@@ -20,6 +20,7 @@ from dagua.layout.ops.anneal import (
     WeightAnnealing,
 )
 from dagua.layout.ops.base import EarlyBreak, LossGroup, Pipeline, Repeat
+from dagua.layout.ops.coarsen import HeavyEdgeMatching
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig, StallCount, StallCountConfig
 from dagua.layout.ops.init import (
     NativeEngineInit,
@@ -46,6 +47,7 @@ from dagua.layout.ops.state import (
     RuntimeContext,
     SolveState,
 )
+from dagua.layout.ops.vcycle import VCycleRefine, VCycleRefineConfig
 from dagua.layout.resolve import (
     build_flex_constraints,
     build_loss_ops,
@@ -124,6 +126,104 @@ def build_gradient_core(
     )
 
 
+def _build_refine_pipeline_factory(
+    losses: list,
+    overlap_interval: int,
+    stall_limit: int,
+    rel_threshold: float,
+    resolved_node_sep: float,
+    resolved_rank_sep: float,
+    resolved_device: str,
+    resolved_verbose: bool,
+    weight_config: InitAnnealingScheduleConfig,
+    optimizer_type: str,
+    lr: float,
+):
+    """Return a factory that builds a refine pipeline with a given step count.
+
+    The V-cycle calls this per level to get a Pipeline sized to that level's
+    budget. Each invocation re-runs NativeEngineInit (which recomputes
+    layer_index + layers for the current level's edge_index while
+    preserving state.pos if already set, so prolonged positions survive)
+    + anneal + optimizer creation + gradient_core.
+    """
+
+    def _factory(steps: int) -> Pipeline:
+        return Pipeline(
+            [
+                # Recompute layers/layer_index for the current level's
+                # edge_index. NativeEngineInit preserves state.pos if set
+                # (so prolonged coarse positions pass through untouched).
+                NativeEngineInit(
+                    NativeEngineInitConfig(
+                        node_sep=resolved_node_sep,
+                        rank_sep=resolved_rank_sep,
+                        device=resolved_device,
+                        verbose=resolved_verbose,
+                    ),
+                ),
+                InitAnnealingSchedule(weight_config),
+                CreateOptimizer(
+                    CreateOptimizerConfig(
+                        optimizer_type=optimizer_type,
+                        lr=lr,
+                        target="pos",
+                        key="default",
+                    ),
+                ),
+                build_gradient_core(
+                    losses=losses,
+                    steps=steps,
+                    overlap_interval=overlap_interval,
+                    stall_limit=stall_limit,
+                    rel_threshold=rel_threshold,
+                ),
+            ],
+            name=f"vcycle_refine_level_{steps}",
+        )
+
+    return _factory
+
+
+def _build_coarse_init_pipeline_factory(
+    resolved_node_sep: float,
+    resolved_rank_sep: float,
+    resolved_device: str,
+    resolved_verbose: bool,
+    optimizer_type: str,
+    lr: float,
+    weight_config: InitAnnealingScheduleConfig,
+):
+    """Return a factory that builds the coarse-level init pipeline for a level."""
+
+    def _factory(level_problem: LayoutProblem) -> Pipeline:
+        del level_problem  # problem is passed at apply-time; no per-level config yet
+        return Pipeline(
+            [
+                NativeEngineInit(
+                    NativeEngineInitConfig(
+                        node_sep=resolved_node_sep,
+                        rank_sep=resolved_rank_sep,
+                        device=resolved_device,
+                        verbose=resolved_verbose,
+                    ),
+                ),
+                InitAnnealingSchedule(weight_config),
+                CreateOptimizer(
+                    CreateOptimizerConfig(
+                        optimizer_type=optimizer_type,
+                        lr=lr,
+                        target="pos",
+                        key="default",
+                    ),
+                ),
+            ],
+            name="vcycle_coarse_init",
+        )
+
+    return _factory
+
+
 def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
     """Build the composable native-engine pipeline from a resolved config.
 
@@ -158,6 +258,72 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
         node_sep=resolved_node_sep,
         rank_sep=resolved_rank_sep,
     )
+    weight_config = InitAnnealingScheduleConfig(
+        w_dag=config.w_dag,
+        w_attract=config.w_attract,
+        w_repel=config.w_repel,
+        w_overlap=config.w_overlap,
+        w_cluster=config.w_cluster,
+        w_cluster_contain=config.w_cluster_contain,
+        w_crossing=config.w_crossing,
+        w_straightness=config.w_straightness,
+        w_length_variance=config.w_length_variance,
+        w_spacing=config.w_spacing,
+        w_fanout=config.w_fanout,
+        w_back_edge=config.w_back_edge,
+    )
+
+    # Sprint 2: branch on N. V-cycle above threshold; flat below.
+    use_vcycle = bool(getattr(config, "_dagua_native_use_vcycle", False))
+    if use_vcycle:
+        refine_factory = _build_refine_pipeline_factory(
+            losses=losses,
+            overlap_interval=overlap_interval,
+            stall_limit=stall_limit,
+            rel_threshold=rel_threshold,
+            resolved_node_sep=resolved_node_sep,
+            resolved_rank_sep=resolved_rank_sep,
+            resolved_device=resolved_device,
+            resolved_verbose=resolved_verbose,
+            weight_config=weight_config,
+            optimizer_type=optimizer_type,
+            lr=config.lr,
+        )
+        coarse_init_factory = _build_coarse_init_pipeline_factory(
+            resolved_node_sep=resolved_node_sep,
+            resolved_rank_sep=resolved_rank_sep,
+            resolved_device=resolved_device,
+            resolved_verbose=resolved_verbose,
+            optimizer_type=optimizer_type,
+            lr=config.lr,
+            weight_config=weight_config,
+        )
+        return Pipeline(
+            [
+                FixedSteps(FixedStepsConfig(n=resolved_steps)),
+                # Sprint 2 V-cycle path: coarsen via HeavyEdgeMatching, then
+                # init on coarsest level and prolong+refine through hierarchy.
+                # Triggered when num_nodes >= config.multilevel_threshold.
+                HeavyEdgeMatching(),
+                VCycleRefine(
+                    coarse_init_pipeline=coarse_init_factory,
+                    refine_pipeline_factory=refine_factory,
+                    config=VCycleRefineConfig(
+                        coarse_steps=max(resolved_steps, 200),
+                        finest_steps=max(resolved_steps // 3, 40),
+                        jitter_scale=0.05,
+                        min_hierarchy_levels=1,
+                    ),
+                ),
+                OverlapProjection(
+                    OverlapProjectionConfig(
+                        padding=2.0,
+                        iterations=final_projection_iterations,
+                    ),
+                ),
+            ],
+            name="dagua_native_pipeline_vcycle",
+        )
 
     return Pipeline(
         [
@@ -185,22 +351,7 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
                     ),
                 ),
             ),
-            InitAnnealingSchedule(
-                InitAnnealingScheduleConfig(
-                    w_dag=config.w_dag,
-                    w_attract=config.w_attract,
-                    w_repel=config.w_repel,
-                    w_overlap=config.w_overlap,
-                    w_cluster=config.w_cluster,
-                    w_cluster_contain=config.w_cluster_contain,
-                    w_crossing=config.w_crossing,
-                    w_straightness=config.w_straightness,
-                    w_length_variance=config.w_length_variance,
-                    w_spacing=config.w_spacing,
-                    w_fanout=config.w_fanout,
-                    w_back_edge=config.w_back_edge,
-                ),
-            ),
+            InitAnnealingSchedule(weight_config),
             CreateOptimizer(
                 CreateOptimizerConfig(
                     optimizer_type=optimizer_type,
