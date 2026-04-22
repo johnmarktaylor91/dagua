@@ -1,0 +1,133 @@
+{
+  "matrix_version": "v1",
+  "records": [
+    {
+      "name": "graphviz_dot",
+      "adapter_module": "graphviz_competitor",
+      "present": true,
+      "binary_path": "/home/jtaylor/anaconda3/envs/py311/bin/dot",
+      "binary_sha256": "387836029491e0e662c85deb0a0b5b4e8fc95df6c05469d24087c72ba6a20ee7",
+      "version": "dot - graphviz version 8.0.3 (20230418.1244)"
+    },
+    {
+      "name": "graphviz_sfdp",
+      "adapter_module": "graphviz_competitor",
+      "present": true,
+      "binary_path": "/home/jtaylor/anaconda3/envs/py311/bin/sfdp",
+      "binary_sha256": "387836029491e0e662c85deb0a0b5b4e8fc95df6c05469d24087c72ba6a20ee7",
+      "version": "sfdp - graphviz version 8.0.3 (20230418.1244)"
+    },
+    {
+      "name": "graphviz_neato",
+      "adapter_module": "graphviz_competitor",
+      "present": true,
+      "binary_path": "/home/jtaylor/anaconda3/envs/py311/bin/neato",
+      "binary_sha256": "387836029491e0e662c85deb0a0b5b4e8fc95df6c05469d24087c72ba6a20ee7",
+      "version": "neato - graphviz version 8.0.3 (20230418.1244)"
+    },
+    {
+      "name": "graphviz_fdp",
+      "adapter_module": "graphviz_competitor",
+      "present": true,
+      "binary_path": "/home/jtaylor/anaconda3/envs/py311/bin/fdp",
+      "binary_sha256": "387836029491e0e662c85deb0a0b5b4e8fc95df6c05469d24087c72ba6a20ee7",
+      "version": "fdp - graphviz version 8.0.3 (20230418.1244)"
+    },
+    {
+      "name": "elk_layered",
+      "adapter_module": "elk_competitor",
+      "present": true,
+      "binary_path": "/usr/bin/java",
+      "binary_sha256": "034e35ef418b738c31ea4009714ea4f56a9805f630427634ec0736858c7baa17",
+      "version": "openjdk 11.0.27 2025-04-15"
+    },
+    {
+      "name": "dagre",
+      "adapter_module": "dagre_competitor",
+      "present": true,
+      "binary_path": "/home/jtaylor/.nvm/versions/node/v22.22.2/bin/node",
+      "binary_sha256": "81925c0995b5c1427b5d538e6a90ca2fdc4daffb786b09af749beaf7369d4e90",
+      "version": "v22.22.2"
+    },
+    {
+      "name": "igraph_sugiyama",
+      "adapter_module": "igraph_competitor",
+      "present": true,
+      "binary_path": null,
+      "binary_sha256": null,
+      "version": "1.0.0"
+    },
+    {
+      "name": "igraph_fr",
+      "adapter_module": "igraph_competitor",
+      "present": true,
+      "binary_path": null,
+      "binary_sha256": null,
+      "version": "1.0.0"
+    },
+    {
+      "name": "igraph_kamada_kawai",
+      "adapter_module": "igraph_competitor",
+      "present": true,
+      "binary_path": null,
+      "binary_sha256": null,
+      "version": "1.0.0"
+    },
+    {
+      "name": "nx_spring",
+      "adapter_module": "networkx_competitor",
+      "present": true,
+      "binary_path": null,
+      "binary_sha256": null,
+      "version": "3.6.1"
+    },
+    {
+      "name": "nx_kamada_kawai",
+      "adapter_module": "networkx_competitor",
+      "present": true,
+      "binary_path": null,
+      "binary_sha256": null,
+      "version": "3.6.1"
+    },
+    {
+      "name": "sgd2_multi_ref",
+      "adapter_module": "sgd2_multi_competitor",
+      "present": true,
+      "binary_path": null,
+      "binary_sha256": null,
+      "version": "in-tree-pipeline"
+    },
+    {
+      "name": "gephi_yifanhu",
+      "adapter_module": "gephi_competitor",
+      "present": true,
+      "binary_path": null,
+      "binary_sha256": null,
+      "version": "in-tree-adapter"
+    },
+    {
+      "name": "fa2_ref",
+      "adapter_module": "fa2_competitor",
+      "present": true,
+      "binary_path": null,
+      "binary_sha256": null,
+      "version": "in-tree-adapter"
+    },
+    {
+      "name": "ogdf_fmmm",
+      "adapter_module": "ogdf_competitor",
+      "present": true,
+      "binary_path": null,
+      "binary_sha256": null,
+      "version": "in-tree-adapter"
+    },
+    {
+      "name": "cytoscape_fcose",
+      "adapter_module": "cytoscape_fcose_competitor",
+      "present": true,
+      "binary_path": "/home/jtaylor/.nvm/versions/node/v22.22.2/bin/node",
+      "binary_sha256": "81925c0995b5c1427b5d538e6a90ca2fdc4daffb786b09af749beaf7369d4e90",
+      "version": "node-backed-adapter"
+    }
+  ]
+}

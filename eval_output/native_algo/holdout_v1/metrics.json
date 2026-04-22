@@ -1,0 +1,309 @@
+{
+  "mode": "holdout",
+  "sprint_tag": "holdout_v1",
+  "salt_digest_prefix": "b0b82cb2",
+  "entry_count": 30,
+  "mean_score": 62.429024160402925,
+  "results": [
+    {
+      "index": 0,
+      "family": "directed_dag_small",
+      "n": 80,
+      "score": 67.78699293180478,
+      "profile": "profile_small",
+      "runtime_s": 2.2755755027756095,
+      "error": null,
+      "topology_sha256_16": "496eef9ea4992ef4"
+    },
+    {
+      "index": 1,
+      "family": "directed_dag_small",
+      "n": 150,
+      "score": 62.782045333970714,
+      "profile": "profile_small",
+      "runtime_s": 0.13579277973622084,
+      "error": null,
+      "topology_sha256_16": "ef3f13ab729381d8"
+    },
+    {
+      "index": 2,
+      "family": "directed_dag_medium",
+      "n": 400,
+      "score": 55.80496844030341,
+      "profile": "profile_small",
+      "runtime_s": 12.306845454964787,
+      "error": null,
+      "topology_sha256_16": "bf008ad886eac722"
+    },
+    {
+      "index": 3,
+      "family": "directed_dag_medium",
+      "n": 900,
+      "score": 53.11344204718321,
+      "profile": "profile_small",
+      "runtime_s": 11.020696986000985,
+      "error": null,
+      "topology_sha256_16": "7b1b0c9734a7d959"
+    },
+    {
+      "index": 4,
+      "family": "chain_deep",
+      "n": 120,
+      "score": 97.49458530684933,
+      "profile": "profile_small",
+      "runtime_s": 0.13181813526898623,
+      "error": null,
+      "topology_sha256_16": "ba0745a3669559aa"
+    },
+    {
+      "index": 5,
+      "family": "chain_deep",
+      "n": 600,
+      "score": 97.48716992675327,
+      "profile": "profile_small",
+      "runtime_s": 1.3027752651832998,
+      "error": null,
+      "topology_sha256_16": "6ad46375a9958984"
+    },
+    {
+      "index": 6,
+      "family": "tree_branching_3",
+      "n": 100,
+      "score": 69.17648346572547,
+      "profile": "profile_small",
+      "runtime_s": 0.04686894500628114,
+      "error": null,
+      "topology_sha256_16": "06b7fe63446b2b80"
+    },
+    {
+      "index": 7,
+      "family": "tree_branching_3",
+      "n": 400,
+      "score": 63.83728938603692,
+      "profile": "profile_small",
+      "runtime_s": 0.049017931800335646,
+      "error": null,
+      "topology_sha256_16": "c74026759b24fcc6"
+    },
+    {
+      "index": 8,
+      "family": "tree_branching_4",
+      "n": 150,
+      "score": 64.64787805122015,
+      "profile": "profile_small",
+      "runtime_s": 0.03135229833424091,
+      "error": null,
+      "topology_sha256_16": "348147e300cc75a7"
+    },
+    {
+      "index": 9,
+      "family": "tree_branching_4",
+      "n": 800,
+      "score": 68.36359103588099,
+      "profile": "profile_small",
+      "runtime_s": 0.14387080306187272,
+      "error": null,
+      "topology_sha256_16": "d32ca9fbb6da3db7"
+    },
+    {
+      "index": 10,
+      "family": "wide_parallel",
+      "n": 120,
+      "score": 68.16044831898095,
+      "profile": "profile_small",
+      "runtime_s": 0.038021733053028584,
+      "error": null,
+      "topology_sha256_16": "0c756f6ef6b2b3d4"
+    },
+    {
+      "index": 11,
+      "family": "wide_parallel",
+      "n": 500,
+      "score": 61.236380953939246,
+      "profile": "profile_small",
+      "runtime_s": 4.95896496810019,
+      "error": null,
+      "topology_sha256_16": "060ec03c02e8d8ec"
+    },
+    {
+      "index": 12,
+      "family": "diamond",
+      "n": 60,
+      "score": 67.71308698615962,
+      "profile": "profile_small",
+      "runtime_s": 1.523257568012923,
+      "error": null,
+      "topology_sha256_16": "a004976e38bebb57"
+    },
+    {
+      "index": 13,
+      "family": "diamond",
+      "n": 200,
+      "score": 66.50779639319933,
+      "profile": "profile_small",
+      "runtime_s": 2.851168996654451,
+      "error": null,
+      "topology_sha256_16": "f4d338b98fe29b06"
+    },
+    {
+      "index": 14,
+      "family": "sparse_layered",
+      "n": 300,
+      "score": 64.0648120342221,
+      "profile": "profile_small",
+      "runtime_s": 3.12162635428831,
+      "error": null,
+      "topology_sha256_16": "3c36dce5f6360ce2"
+    },
+    {
+      "index": 15,
+      "family": "sparse_layered",
+      "n": 1200,
+      "score": 56.025491232717116,
+      "profile": "profile_small",
+      "runtime_s": 44.00481975823641,
+      "error": null,
+      "topology_sha256_16": "22e0a20e928a1f60"
+    },
+    {
+      "index": 16,
+      "family": "powerlaw_dag",
+      "n": 400,
+      "score": 53.964350255692864,
+      "profile": "profile_small",
+      "runtime_s": 6.554328893311322,
+      "error": null,
+      "topology_sha256_16": "516ec16734b3c1b4"
+    },
+    {
+      "index": 17,
+      "family": "erdos_renyi_sparse",
+      "n": 200,
+      "score": 48.904273112359874,
+      "profile": "profile_small",
+      "runtime_s": 4.610518244095147,
+      "error": null,
+      "topology_sha256_16": "93b784e50cee4fcd"
+    },
+    {
+      "index": 18,
+      "family": "random_geometric",
+      "n": 300,
+      "score": 50.23824702640097,
+      "profile": "profile_small",
+      "runtime_s": 3.150734710972756,
+      "error": null,
+      "topology_sha256_16": "f9ecd7151ba609c0"
+    },
+    {
+      "index": 19,
+      "family": "small_world",
+      "n": 250,
+      "score": 22.5,
+      "profile": "profile_small",
+      "runtime_s": 1.6404930711723864,
+      "error": null,
+      "topology_sha256_16": "ee98a80c2c99b4f6"
+    },
+    {
+      "index": 20,
+      "family": "small_world",
+      "n": 900,
+      "score": 22.5,
+      "profile": "profile_small",
+      "runtime_s": 8.571410656441003,
+      "error": null,
+      "topology_sha256_16": "8a4dbc959ac0577c"
+    },
+    {
+      "index": 21,
+      "family": "grid_square",
+      "n": 100,
+      "score": 89.49253615396701,
+      "profile": "profile_small",
+      "runtime_s": 0.13966498617082834,
+      "error": null,
+      "topology_sha256_16": "e153a3c52d2418ee"
+    },
+    {
+      "index": 22,
+      "family": "grid_square",
+      "n": 400,
+      "score": 67.08797814284095,
+      "profile": "profile_small",
+      "runtime_s": 6.691847593989223,
+      "error": null,
+      "topology_sha256_16": "e25edc07cc8927d6"
+    },
+    {
+      "index": 23,
+      "family": "bipartite",
+      "n": 200,
+      "score": 45.40865842199774,
+      "profile": "profile_small",
+      "runtime_s": 3.5250834580510855,
+      "error": null,
+      "topology_sha256_16": "2d740af57580ef86"
+    },
+    {
+      "index": 24,
+      "family": "hub_spoke",
+      "n": 68,
+      "score": 67.20543612610727,
+      "profile": "profile_small",
+      "runtime_s": 1.4149903235957026,
+      "error": null,
+      "topology_sha256_16": "694d6aa25ed687f0"
+    },
+    {
+      "index": 25,
+      "family": "complete_bipartite",
+      "n": 46,
+      "score": 56.43519422561644,
+      "profile": "profile_small",
+      "runtime_s": 0.6014073919504881,
+      "error": null,
+      "topology_sha256_16": "e68aa4d29f741f87"
+    },
+    {
+      "index": 26,
+      "family": "directed_dag_medium",
+      "n": 1500,
+      "score": 50.48683796901896,
+      "profile": "profile_small",
+      "runtime_s": 32.86337315989658,
+      "error": null,
+      "topology_sha256_16": "dc86f2dd5e5ff453"
+    },
+    {
+      "index": 27,
+      "family": "chain_deep",
+      "n": 1800,
+      "score": 97.49061896989588,
+      "profile": "profile_small",
+      "runtime_s": 6.911432876251638,
+      "error": null,
+      "topology_sha256_16": "8a9912aa49f7b39f"
+    },
+    {
+      "index": 28,
+      "family": "tree_branching_3",
+      "n": 1800,
+      "score": 62.21233535121648,
+      "profile": "profile_small",
+      "runtime_s": 0.3866053530946374,
+      "error": null,
+      "topology_sha256_16": "1710ecc15f9cf58b"
+    },
+    {
+      "index": 29,
+      "family": "sparse_layered",
+      "n": 600,
+      "score": 54.74179721202666,
+      "profile": "profile_small",
+      "runtime_s": 3.3629653896205127,
+      "error": null,
+      "topology_sha256_16": "77fd40b07461c308"
+    }
+  ]
+}
