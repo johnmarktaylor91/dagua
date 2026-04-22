@@ -1,6 +1,6 @@
 {
   "sprint_tag": "holdout_v1",
-  "salt_digest_prefix": "b0b82cb2",
+  "salt_digest_prefix": "79b4ed65",
   "entries": [
     {
       "index": 0,
@@ -8,8 +8,7 @@
       "target_n": 80,
       "actual_n": 80,
       "actual_e": 160,
-      "topology_sha256_10": "496eef9ea4",
-      "seed": 2962129552
+      "topology_sha256_10": "e6cb814287"
     },
     {
       "index": 1,
@@ -17,8 +16,7 @@
       "target_n": 150,
       "actual_n": 150,
       "actual_e": 300,
-      "topology_sha256_10": "ef3f13ab72",
-      "seed": 2772099046
+      "topology_sha256_10": "102226af77"
     },
     {
       "index": 2,
@@ -26,8 +24,7 @@
       "target_n": 400,
       "actual_n": 400,
       "actual_e": 1000,
-      "topology_sha256_10": "bf008ad886",
-      "seed": 2261621844
+      "topology_sha256_10": "ef7500f204"
     },
     {
       "index": 3,
@@ -35,8 +32,7 @@
       "target_n": 900,
       "actual_n": 900,
       "actual_e": 2250,
-      "topology_sha256_10": "7b1b0c9734",
-      "seed": 219801060
+      "topology_sha256_10": "50954e3915"
     },
     {
       "index": 4,
@@ -44,8 +40,7 @@
       "target_n": 120,
       "actual_n": 120,
       "actual_e": 119,
-      "topology_sha256_10": "ba0745a366",
-      "seed": 1495450625
+      "topology_sha256_10": "ba0745a366"
     },
     {
       "index": 5,
@@ -53,8 +48,7 @@
       "target_n": 600,
       "actual_n": 600,
       "actual_e": 599,
-      "topology_sha256_10": "6ad46375a9",
-      "seed": 1322813442
+      "topology_sha256_10": "6ad46375a9"
     },
     {
       "index": 6,
@@ -62,8 +56,7 @@
       "target_n": 100,
       "actual_n": 100,
       "actual_e": 99,
-      "topology_sha256_10": "06b7fe6344",
-      "seed": 1783384653
+      "topology_sha256_10": "06b7fe6344"
     },
     {
       "index": 7,
@@ -71,8 +64,7 @@
       "target_n": 400,
       "actual_n": 400,
       "actual_e": 399,
-      "topology_sha256_10": "c74026759b",
-      "seed": 2355631200
+      "topology_sha256_10": "c74026759b"
     },
     {
       "index": 8,
@@ -80,8 +72,7 @@
       "target_n": 150,
       "actual_n": 150,
       "actual_e": 149,
-      "topology_sha256_10": "348147e300",
-      "seed": 3697581034
+      "topology_sha256_10": "348147e300"
     },
     {
       "index": 9,
@@ -89,26 +80,23 @@
       "target_n": 800,
       "actual_n": 800,
       "actual_e": 799,
-      "topology_sha256_10": "d32ca9fbb6",
-      "seed": 3752413639
+      "topology_sha256_10": "d32ca9fbb6"
     },
     {
       "index": 10,
       "family": "wide_parallel",
       "target_n": 120,
       "actual_n": 120,
-      "actual_e": 225,
-      "topology_sha256_10": "0c756f6ef6",
-      "seed": 1611421399
+      "actual_e": 223,
+      "topology_sha256_10": "7eceb1e6a2"
     },
     {
       "index": 11,
       "family": "wide_parallel",
       "target_n": 500,
       "actual_n": 500,
-      "actual_e": 911,
-      "topology_sha256_10": "060ec03c02",
-      "seed": 3328054320
+      "actual_e": 914,
+      "topology_sha256_10": "08db891b3f"
     },
     {
       "index": 12,
@@ -116,8 +104,7 @@
       "target_n": 60,
       "actual_n": 60,
       "actual_e": 88,
-      "topology_sha256_10": "a004976e38",
-      "seed": 3458068576
+      "topology_sha256_10": "a004976e38"
     },
     {
       "index": 13,
@@ -125,26 +112,23 @@
       "target_n": 200,
       "actual_n": 200,
       "actual_e": 298,
-      "topology_sha256_10": "f4d338b98f",
-      "seed": 2823710332
+      "topology_sha256_10": "f4d338b98f"
     },
     {
       "index": 14,
       "family": "sparse_layered",
       "target_n": 300,
       "actual_n": 300,
-      "actual_e": 825,
-      "topology_sha256_10": "3c36dce5f6",
-      "seed": 3972028545
+      "actual_e": 827,
+      "topology_sha256_10": "677ec155d8"
     },
     {
       "index": 15,
       "family": "sparse_layered",
       "target_n": 1200,
       "actual_n": 1200,
-      "actual_e": 3505,
-      "topology_sha256_10": "22e0a20e92",
-      "seed": 4247252123
+      "actual_e": 3507,
+      "topology_sha256_10": "0c031758d8"
     },
     {
       "index": 16,
@@ -152,26 +136,23 @@
       "target_n": 400,
       "actual_n": 400,
       "actual_e": 797,
-      "topology_sha256_10": "516ec16734",
-      "seed": 3701570073
+      "topology_sha256_10": "1aa14e505b"
     },
     {
       "index": 17,
       "family": "erdos_renyi_sparse",
       "target_n": 200,
       "actual_n": 200,
-      "actual_e": 396,
-      "topology_sha256_10": "93b784e50c",
-      "seed": 1047324529
+      "actual_e": 408,
+      "topology_sha256_10": "1b6a8d405f"
     },
     {
       "index": 18,
       "family": "random_geometric",
       "target_n": 300,
       "actual_n": 300,
-      "actual_e": 2803,
-      "topology_sha256_10": "f9ecd7151b",
-      "seed": 3123769877
+      "actual_e": 2759,
+      "topology_sha256_10": "be51b9ee33"
     },
     {
       "index": 19,
@@ -179,8 +160,7 @@
       "target_n": 250,
       "actual_n": 250,
       "actual_e": 500,
-      "topology_sha256_10": "ee98a80c2c",
-      "seed": 2607820405
+      "topology_sha256_10": "ee98a80c2c"
     },
     {
       "index": 20,
@@ -188,8 +168,7 @@
       "target_n": 900,
       "actual_n": 900,
       "actual_e": 1800,
-      "topology_sha256_10": "8a4dbc959a",
-      "seed": 286436750
+      "topology_sha256_10": "8a4dbc959a"
     },
     {
       "index": 21,
@@ -197,8 +176,7 @@
       "target_n": 100,
       "actual_n": 100,
       "actual_e": 180,
-      "topology_sha256_10": "e153a3c52d",
-      "seed": 1254783901
+      "topology_sha256_10": "e153a3c52d"
     },
     {
       "index": 22,
@@ -206,8 +184,7 @@
       "target_n": 400,
       "actual_n": 400,
       "actual_e": 760,
-      "topology_sha256_10": "e25edc07cc",
-      "seed": 604216163
+      "topology_sha256_10": "e25edc07cc"
     },
     {
       "index": 23,
@@ -215,8 +192,7 @@
       "target_n": 200,
       "actual_n": 200,
       "actual_e": 1056,
-      "topology_sha256_10": "2d740af575",
-      "seed": 574024582
+      "topology_sha256_10": "92a697c43c"
     },
     {
       "index": 24,
@@ -224,8 +200,7 @@
       "target_n": 120,
       "actual_n": 68,
       "actual_e": 131,
-      "topology_sha256_10": "694d6aa25e",
-      "seed": 3076512445
+      "topology_sha256_10": "694d6aa25e"
     },
     {
       "index": 25,
@@ -233,8 +208,7 @@
       "target_n": 80,
       "actual_n": 46,
       "actual_e": 520,
-      "topology_sha256_10": "e68aa4d29f",
-      "seed": 2491103272
+      "topology_sha256_10": "e68aa4d29f"
     },
     {
       "index": 26,
@@ -242,8 +216,7 @@
       "target_n": 1500,
       "actual_n": 1500,
       "actual_e": 3750,
-      "topology_sha256_10": "dc86f2dd5e",
-      "seed": 136681944
+      "topology_sha256_10": "930710dac5"
     },
     {
       "index": 27,
@@ -251,8 +224,7 @@
       "target_n": 1800,
       "actual_n": 1800,
       "actual_e": 1799,
-      "topology_sha256_10": "8a9912aa49",
-      "seed": 1875824568
+      "topology_sha256_10": "8a9912aa49"
     },
     {
       "index": 28,
@@ -260,17 +232,15 @@
       "target_n": 1800,
       "actual_n": 1800,
       "actual_e": 1799,
-      "topology_sha256_10": "1710ecc15f",
-      "seed": 1212843704
+      "topology_sha256_10": "1710ecc15f"
     },
     {
       "index": 29,
       "family": "sparse_layered",
       "target_n": 600,
       "actual_n": 600,
-      "actual_e": 1684,
-      "topology_sha256_10": "77fd40b074",
-      "seed": 3125376356
+      "actual_e": 1690,
+      "topology_sha256_10": "386ee3d1a9"
     }
   ],
   "entry_count": 30
