@@ -21,7 +21,10 @@ from dagua.layout.ops.anneal import (
 )
 from dagua.layout.ops.base import EarlyBreak, LossGroup, Pipeline, Repeat
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig, StallCount, StallCountConfig
-from dagua.layout.ops.init import NativeEngineInit, NativeEngineInitConfig
+from dagua.layout.ops.init import (
+    NativeEngineInit,
+    NativeEngineInitConfig,
+)
 from dagua.layout.ops.optimize import (
     ClipGradNorm,
     ClipGradNormConfig,
@@ -89,6 +92,15 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
     return Pipeline(
         [
             FixedSteps(FixedStepsConfig(n=resolved_steps)),
+            # Sprint 1 attempted FamilyConditionalInit with spectral fallback
+            # for flat graphs; iteration on the held-out 30-graph suite showed
+            # widespread regressions (sparse_layered 64->30, grid_square 89->45,
+            # directed_dag_medium 50->29, bipartite 45->34) because the
+            # layer-ratio heuristic fires too aggressively. Spectral init
+            # works for large undirected graphs but not for the mixed DAG-ish
+            # suite we have. Reverted to plain NativeEngineInit; the
+            # FamilyConditionalInit op is registered but unused by default.
+            # Revisit in Sprint 1 follow-up with a stricter family predicate.
             NativeEngineInit(
                 NativeEngineInitConfig(
                     node_sep=resolved_node_sep,
