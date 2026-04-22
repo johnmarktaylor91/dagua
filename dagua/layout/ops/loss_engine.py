@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 
 from dagua.layout.constraints import (
+    _ClusterCache,
     alignment_loss,
     back_edge_compactness_loss,
     cluster_compactness_loss,
@@ -93,6 +94,41 @@ def _zero_scalar(pos: torch.Tensor) -> torch.Tensor:
         Scalar zero tensor.
     """
     return pos.sum() * 0.0
+
+
+def _get_cluster_cache(
+    problem: LayoutProblem,
+    state: SolveState,
+    device: torch.device,
+) -> _ClusterCache:
+    """Return a per-pipeline-call cluster cache, building it lazily.
+
+    Cluster losses iterate over the same cluster dict every step. The cache
+    flattens (cluster_id, node_idx) pairs and precomputes sibling/containment
+    pair tensors + per-cluster max sizes (since node_sizes are constant), so
+    each step is a few scatter ops instead of a Python loop.
+
+    The cache is invalidated when ``problem.clusters`` identity, cluster_parents
+    identity, or device changes -- safe across V-cycle level transitions which
+    set ``problem.clusters = None`` for coarse levels.
+    """
+    cached = state.extras.get("_cluster_cache")
+    key = (
+        id(problem.clusters),
+        id(problem.cluster_parents),
+        device,
+        id(problem.node_sizes),
+    )
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    cache = _ClusterCache(
+        problem.clusters or {},
+        problem.cluster_parents,
+        problem.node_sizes,
+        device,
+    )
+    state.extras["_cluster_cache"] = (key, cache)
+    return cache
 
 
 def _exact_repulsion_loss(
@@ -716,7 +752,8 @@ class ClusterCompactnessLoss(LossOp):
         pos = _require_pos(state)
         if not problem.clusters:
             return _zero_scalar(pos)
-        return cluster_compactness_loss(pos, problem.clusters, device=pos.device)
+        cache = _get_cluster_cache(problem, state, pos.device)
+        return cluster_compactness_loss(pos, problem.clusters, device=pos.device, cache=cache)
 
 
 @register_op
@@ -762,6 +799,7 @@ class ClusterSeparationLoss(LossOp):
         if not problem.clusters:
             return _zero_scalar(pos)
         node_sizes = _require_node_sizes(problem)
+        cache = _get_cluster_cache(problem, state, pos.device)
         return cluster_separation_loss(
             pos,
             node_sizes,
@@ -769,6 +807,7 @@ class ClusterSeparationLoss(LossOp):
             padding=self.config.padding,
             device=pos.device,
             cluster_parents=problem.cluster_parents,
+            cache=cache,
         )
 
 
@@ -815,6 +854,7 @@ class ClusterContainmentLoss(LossOp):
         if not problem.clusters or not problem.cluster_parents:
             return _zero_scalar(pos)
         node_sizes = _require_node_sizes(problem)
+        cache = _get_cluster_cache(problem, state, pos.device)
         return cluster_containment_loss(
             pos,
             node_sizes,
@@ -822,6 +862,7 @@ class ClusterContainmentLoss(LossOp):
             problem.cluster_parents,
             padding=self.config.padding,
             device=pos.device,
+            cache=cache,
         )
 
 
