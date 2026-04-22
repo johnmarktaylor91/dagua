@@ -132,7 +132,12 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
                 ops=[
                     WeightAnnealing(),
                     OptimizerZeroGrad(),
-                    LossGroup(losses=losses, backward_mode="combined"),
+                    # Sprint 1 memory port: per_loss backward frees each
+                    # loss term's autograd graph immediately, cutting peak
+                    # RSS 3-4x vs combined (Sprint 0 baseline: 8.13x legacy
+                    # at 10K nodes). Cost: recomputes shared tensors (e.g.,
+                    # pairwise distances) per loss term.
+                    LossGroup(losses=losses, backward_mode="per_loss"),
                     ClipGradNorm(ClipGradNormConfig(max_norm=100.0)),
                     OptimizerStep(),
                     HardPinProjection(),
