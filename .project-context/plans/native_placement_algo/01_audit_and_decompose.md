@@ -161,15 +161,26 @@ Sprint 0.5 (see 02_sprint_map.md). Sprint 0 retains iteration-suite
 baseline under the existing seed=42 convention; held-out baseline is
 regenerated and measured in Sprint 0.5.
 
-### Task 0.6 -- Baseline metrics (Sprint 0 partial, completed in 0.5)
+### Task 0.6 -- MVP-subset baseline metrics (Sprint 0 partial)
 
-In Sprint 0: run the default on every iteration-suite graph under the
-existing seed=42 convention at the Sprint-0 commit SHA. Save to
-`eval_output/native_algo/baseline_sprint_0/metrics.json`.
+SCOPE CLARIFIED per round-1 Sprint 0 adversarial review: the full 25-graph
+iteration suite (per 03_test_matrix.md) cannot run in Sprint 0 because
+`dagua/eval/graph_generator.py` (which produces most of the suite) is a
+Sprint 0.5 deliverable. Sprint 0 therefore commits a **7-graph MVP subset**
+baseline only:
+- chain_10 / chain_100 / chain_500 (linear-shallow, linear-deep)
+- random_dag_100 / random_dag_200 (random DAG)
+- diamond_40 / diamond_100 (diamond)
 
-In Sprint 0.5 (NOT here): re-run with held-out and rolling sets under the
-new opacity + 16-variant competitor matrix. That becomes the calibration
-baseline for the Pareto ladder.
+Under the existing seed=42 convention at the Sprint-0 commit SHA. Saved
+to `eval_output/native_algo/baseline_sprint_0/metrics.json` with a
+`mvp_suite_note` field stating the partial coverage. Sprint 0.5 rebuilds
+the baseline under the full 25-graph suite plus held-out and rolling sets
+under the new opacity + 16-variant competitor matrix; THAT becomes the
+calibration baseline for the Pareto ladder.
+
+This is an intentional scope split, not a shortfall. Sprint 1 entry does
+not require the full baseline.
 
 ### Task 0.7 -- DEFERRED to Sprint 0.5
 
