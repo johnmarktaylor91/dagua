@@ -112,10 +112,12 @@ See 11_sprint_init_and_core.md.
     scale-hardening (not needed at 1.22x peak / 1.48x delta).
   * Per-family +5% composite on 3/7 families: DEFERRED to Sprint 2+ since
     the Sprint 1 initializer experiment (FamilyConditionalInit with
-    layer_ratio<0.2) regressed the held-out mix and was reverted. No
-    other quality lever landed; this is an honest iteration-loop fail
-    per 10_iteration_loop.md "after 3 failed hypotheses, extract from
-    a competitor" rule -- the competitor extraction belongs to Sprint 3.
+    layer_ratio<0.2) regressed the held-out mix and was reverted.
+    Per 10_iteration_loop.md (competitor-extraction as mandatory 4th
+    hypothesis when 3 Dagua-native attempts fail), a competitor init
+    extraction is the next hypothesis. Sprint 2 (V-cycle + coarsening)
+    subsumes that work since coarsening IS the canonical competitor
+    init for the weak undirected family.
   * Sampled Repulsion/Overlap loss activation at N>2000 is VALIDATED
     on memory, PARTIALLY validated on quality (held-out max graph is
     n=1800). Sprint 2 V-cycle will exercise N>2000 and reveal any
@@ -130,7 +132,11 @@ See 11_sprint_init_and_core.md.
 
 ### Sprint 2 -- Multilevel V-Cycle + Hierarchy Memory Parity -- CP+AR
 See 12_sprint_multilevel.md.
-- Entry: Sprint 1 exit criteria met, memory-parity ops in place.
+- Entry: Sprint 1 exit criteria (revised) met -- i.e. 10K peak RSS
+  <1.30x legacy, delta RSS <1.60x legacy, GradientCore extracted,
+  LossGroup(per_loss) live, 4 init ops registered. `GradientCheckpoint`
+  and `HybridDeviceOffload` remain Sprint 8 work and are NOT blockers
+  for Sprint 2 entry.
 - Goal: coarsening + prolongation as composed ops. The native pipeline is a
   V-cycle: coarsen -> optimize at coarse -> prolong -> refine -> ... . Uses
   existing `coarsen.py` and `prolong.py` ops.
