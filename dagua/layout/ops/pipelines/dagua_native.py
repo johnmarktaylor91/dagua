@@ -54,6 +54,76 @@ from dagua.layout.resolve import (
 )
 
 
+def build_gradient_core(
+    losses: list,
+    steps: int,
+    overlap_interval: int,
+    stall_limit: int,
+    rel_threshold: float,
+) -> Pipeline:
+    """Build the inner differentiable optimizer as a named sub-pipeline.
+
+    Sprint 1 exit criterion: "the 'inner differentiable optimizer' is its
+    own named sub-pipeline (`GradientCore`), pluggable between initializers."
+    Packages the Repeat loop body + PeriodicOverlapProjection +
+    StallCount + EarlyBreak as a standalone Pipeline called "gradient_core"
+    that composes into the top-level pipeline, letting Sprint 2+ swap
+    initializers without touching the optimization loop.
+
+    Parameters
+    ----------
+    losses : list
+        Weighted loss operators to evaluate each step.
+    steps : int
+        Maximum optimization steps.
+    overlap_interval : int
+        Periodic overlap projection interval.
+    stall_limit : int
+        Consecutive-no-improve steps before early break.
+    rel_threshold : float
+        Relative-loss threshold for stall detection.
+
+    Returns
+    -------
+    Pipeline
+        Named ``gradient_core`` sub-pipeline.
+    """
+    return Pipeline(
+        [
+            Repeat(
+                n=steps,
+                ops=[
+                    WeightAnnealing(),
+                    OptimizerZeroGrad(),
+                    # Sprint 1 memory port: per_loss backward frees each
+                    # loss term's autograd graph immediately, cutting peak
+                    # RSS 3-4x vs combined.
+                    LossGroup(losses=losses, backward_mode="per_loss"),
+                    ClipGradNorm(ClipGradNormConfig(max_norm=100.0)),
+                    OptimizerStep(),
+                    HardPinProjection(),
+                    PeriodicOverlapProjection(
+                        PeriodicOverlapProjectionConfig(
+                            interval=overlap_interval,
+                            padding=2.0,
+                            iterations=None,
+                            run_on_last_step=True,
+                        ),
+                    ),
+                    StallCount(
+                        StallCountConfig(
+                            limit=stall_limit,
+                            rel_threshold=rel_threshold,
+                        ),
+                    ),
+                    EarlyBreak(lambda problem, state, ctx: state.converged),
+                ],
+            ),
+        ],
+        name="gradient_core",
+    )
+
+
 def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
     """Build the composable native-engine pipeline from a resolved config.
 
@@ -139,36 +209,14 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
                     key="default",
                 ),
             ),
-            Repeat(
-                n=resolved_steps,
-                ops=[
-                    WeightAnnealing(),
-                    OptimizerZeroGrad(),
-                    # Sprint 1 memory port: per_loss backward frees each
-                    # loss term's autograd graph immediately, cutting peak
-                    # RSS 3-4x vs combined (Sprint 0 baseline: 8.13x legacy
-                    # at 10K nodes). Cost: recomputes shared tensors (e.g.,
-                    # pairwise distances) per loss term.
-                    LossGroup(losses=losses, backward_mode="per_loss"),
-                    ClipGradNorm(ClipGradNormConfig(max_norm=100.0)),
-                    OptimizerStep(),
-                    HardPinProjection(),
-                    PeriodicOverlapProjection(
-                        PeriodicOverlapProjectionConfig(
-                            interval=overlap_interval,
-                            padding=2.0,
-                            iterations=None,
-                            run_on_last_step=True,
-                        ),
-                    ),
-                    StallCount(
-                        StallCountConfig(
-                            limit=stall_limit,
-                            rel_threshold=rel_threshold,
-                        ),
-                    ),
-                    EarlyBreak(lambda problem, state, ctx: state.converged),
-                ],
+            # Sprint 1: named gradient_core sub-pipeline extracted so
+            # Sprint 2+ can swap initializers without touching the loop.
+            build_gradient_core(
+                losses=losses,
+                steps=resolved_steps,
+                overlap_interval=overlap_interval,
+                stall_limit=stall_limit,
+                rel_threshold=rel_threshold,
             ),
             OverlapProjection(
                 OverlapProjectionConfig(
@@ -263,4 +311,4 @@ def layout_dagua_native_pipeline(
     return final_state.pos.detach()
 
 
-__all__ = ["build_dagua_pipeline", "layout_dagua_native_pipeline"]
+__all__ = ["build_dagua_pipeline", "build_gradient_core", "layout_dagua_native_pipeline"]
