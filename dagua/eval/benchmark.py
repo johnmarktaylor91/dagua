@@ -1720,7 +1720,7 @@ def _run_salt_derived_suite(args: argparse.Namespace) -> None:
                 "score": score,
                 "profile": profile,
                 "runtime_s": wall,
-                "topology_sha256": entry["topology_sha256"],
+                "topology_sha256_10": entry["topology_sha256_10"],
                 "error": error,
             }
         )
