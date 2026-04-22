@@ -906,7 +906,34 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
     # engine body (opt-in, unadvertised). Animation uses the legacy path
     # because layout-snapshot capture is not yet plumbed into ops pipelines
     # (Sprint 6+ will rebuild animation via op-level hooks).
-    remapped_from_default = config.algorithm is None and trace is None
+    #
+    # Sprint 0 fallback: relax_steps > 0 also stays on the legacy path because
+    # the relaxation pass (re-run with w_dag=0) is not yet a registered op.
+    # Sprint 1 will add a RelaxationStage op and drop this fallback.
+    trace_fallback = trace is not None and config.algorithm is None
+    relax_fallback = config.relax_steps > 0 and config.algorithm is None
+    if trace_fallback:
+        import warnings
+
+        warnings.warn(
+            "dagua.layout: trace-enabled runs still use the legacy engine "
+            "because op-level snapshot hooks land in Sprint 6+. Set "
+            'algorithm="_legacy" to silence this warning, or pass trace=None '
+            "to use the new default pipeline.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    if relax_fallback:
+        import warnings
+
+        warnings.warn(
+            "dagua.layout: relax_steps>0 still uses the legacy engine because "
+            'the RelaxationStage op lands in Sprint 1. Set algorithm="_legacy" '
+            "to silence, or set relax_steps=0 to use the new default.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    remapped_from_default = config.algorithm is None and trace is None and config.relax_steps <= 0
     if config.algorithm == "_legacy":
         config = copy.copy(config)
         config.algorithm = None

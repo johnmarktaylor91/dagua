@@ -1,11 +1,15 @@
 #!/bin/bash
 # MVP fast iteration harness for the native dagua pipeline.
 #
-# Sprint 0 Task 0.4: prints a scalar composite score + image path in <=8s.
-# Sprint 0.5 will replace with a full registry + rolling-set + competitor delta.
+# Sprint 0 Task 0.4: prints scalar composite score, runtime, AND image path
+# in <=8s (chain_100 baseline; larger graphs may exceed). Sprint 0.5 adds the
+# full registry, rolling subset, and competitor delta.
 #
 # Usage:
-#   scripts/iterate_native.sh [graph_id] [steps] [--image]
+#   scripts/iterate_native.sh [graph_id] [steps] [--no-image]
+#
+# Image emission is DEFAULT (per Sprint 0 exit criterion 3). Use --no-image
+# to skip rendering when only the score matters (faster iteration).
 #
 # Supported graph_id (MVP, chain-only):
 #   chain_<N>         e.g., chain_100, chain_500
@@ -27,20 +31,19 @@ mkdir -p "${OUTPUT_DIR}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 IMAGE_PATH="${OUTPUT_DIR}/iter_${TIMESTAMP}_${GRAPH}.png"
 
-EMIT_IMAGE=0
-if [ "${IMAGE_FLAG}" = "--image" ]; then
-    EMIT_IMAGE=1
+EMIT_IMAGE=1
+if [ "${IMAGE_FLAG}" = "--no-image" ]; then
+    EMIT_IMAGE=0
 fi
 
 python - "${GRAPH}" "${STEPS}" "${IMAGE_PATH}" "${EMIT_IMAGE}" <<'PY'
 import sys
 import time
 
-import torch
-
 from dagua.config import LayoutConfig
+from dagua.eval.graphs import make_chain, make_diamond, make_random_dag
 from dagua.layout.engine import layout as engine_layout
-from dagua.metrics import composite, quick
+from dagua.metrics import composite, composite_large, full, quick
 
 GRAPH = sys.argv[1]
 STEPS = int(sys.argv[2])
@@ -50,8 +53,6 @@ EMIT_IMAGE = bool(int(sys.argv[4]))
 
 def resolve_graph(spec: str):
     """MVP registry. Sprint 0.5 replaces with graph_generator.py."""
-    from dagua.eval.graphs import make_chain, make_diamond, make_random_dag
-
     if spec.startswith("chain_"):
         n = int(spec.split("_", 1)[1])
         return make_chain(n, seed=42).graph
@@ -70,20 +71,30 @@ def resolve_graph(spec: str):
 def main() -> None:
     g = resolve_graph(GRAPH)
     n = g.num_nodes
+    g.compute_node_sizes()
 
     t0 = time.perf_counter()
     pos = engine_layout(g, LayoutConfig(steps=STEPS, seed=42))
     wall = time.perf_counter() - t0
 
-    m = quick(pos, g.edge_index)
-    score = composite(m)
+    # Sprint 0 rule (Task 0.8): full() + composite() at N<=2000 (profile_small);
+    # quick() + composite_large() at N>2000 (profile_large). NEVER call
+    # composite() with quick-only metrics (silent-default blind spot).
+    if n <= 2000:
+        m = full(pos, g.edge_index, node_sizes=g.node_sizes)
+        score = composite(m)
+        profile = "profile_small"
+    else:
+        m = quick(pos, g.edge_index, node_sizes=g.node_sizes)
+        score = composite_large(m)
+        profile = "profile_large"
 
     overlap_count = m.get("overlap_count", 0)
     crossing_rate = m.get("crossing_rate", 0.0)
     dag_consistency = m.get("dag_consistency", 0.0)
     edge_length_cv = m.get("edge_length_cv", 0.0)
 
-    print(f"graph={GRAPH} n={n} steps={STEPS}")
+    print(f"graph={GRAPH} n={n} steps={STEPS} profile={profile}")
     print(f"score={score:.2f}")
     print(f"runtime_ms={wall * 1000:.1f}")
     print(
