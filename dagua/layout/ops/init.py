@@ -15,6 +15,7 @@ import torch
 from scipy import sparse
 from scipy.sparse import linalg as sparse_linalg
 
+from dagua.layout.graph_classify import GraphFamily, GraphStructure
 from dagua.layout.init_placement import init_positions
 from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.ops.base import Op
@@ -2420,6 +2421,109 @@ class NativeEngineInit(Op):
         return state
 
 
+@dataclass(frozen=True)
+class FamilyConditionalInitConfig:
+    """Configuration for :class:`FamilyConditionalInit`.
+
+    Sprint 1 (2026-04-22): dispatches between `NativeEngineInit` (topological +
+    barycenter) and `SpectralInit` based on graph structure. Layered, tree,
+    and grid families get the structured init; connectivity-dominant graphs
+    (low num_layers relative to N, or non-planar hint) get spectral.
+
+    Parameters
+    ----------
+    native_config : NativeEngineInitConfig
+        Config forwarded when the structured init wins.
+    spectral_config : SpectralInitConfig
+        Config forwarded when spectral wins.
+    structure : GraphStructure or None
+        Precomputed structure. When None, dispatches based on edge_index
+        shape via ``classify_graph`` inside ``apply``.
+    layer_ratio_threshold : float, default=0.2
+        num_layers / num_nodes threshold. BELOW = spectral; ABOVE = native.
+        Rationale: a "tall" DAG has many layers relative to nodes (chain =
+        1.0, tree = log_b(N)/N). Flat/cyclic graphs like small_world have
+        very few layers relative to nodes, so the spectral embedding
+        gives a better starting geometry than longest-path layering.
+    """
+
+    native_config: Optional[NativeEngineInitConfig] = None
+    spectral_config: Optional[SpectralInitConfig] = None
+    structure: Optional[GraphStructure] = None
+    layer_ratio_threshold: float = 0.2
+
+
+@register_op
+class FamilyConditionalInit(Op):
+    """Dispatch initializer based on detected graph family.
+
+    Sprint 1 weak-family fix (2026-04-22): the Sprint 0.5 held-out baseline
+    showed undirected-ish families (small_world, bipartite, erdos_renyi,
+    random_geometric) scoring 22-50 on composite while DAG families scored
+    65-97. Part of that gap is rubric-based (DAG-weighted composite), but
+    spectral init shifts undirected scores up because the initial geometry
+    reflects connectivity instead of a forced topological stack.
+    """
+
+    name = "family_conditional_init"
+    category = OpCategory.INIT
+    writes = ("pos", "layers", "layer_index")
+
+    def __init__(self, config: Optional[FamilyConditionalInitConfig] = None) -> None:
+        self.config = config or FamilyConditionalInitConfig()
+
+    def _use_spectral(self, problem: LayoutProblem) -> bool:
+        structure = self.config.structure
+        if structure is None:
+            from dagua.layout.graph_classify import classify_graph
+
+            structure = classify_graph(problem.edge_index, problem.num_nodes)
+        # Structured families (TREE, CHAIN, BIPARTITE_DAG, WIDE_LAYERED, GRID)
+        # always use native.
+        if structure.family != GraphFamily.GENERAL:
+            return False
+        # GENERAL: check layer ratio. Flat graphs -> spectral.
+        if problem.num_nodes == 0:
+            return False
+        layer_ratio = structure.num_layers / max(1, problem.num_nodes)
+        return layer_ratio < self.config.layer_ratio_threshold
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Dispatch to native or spectral init based on structure.
+
+        When spectral wins, we still layer the graph afterward so
+        downstream layer-aware losses have valid layer_index; layers are
+        derived from the spectral y-coordinate (quantile-bucketed into
+        sqrt(N) layers).
+        """
+        if self._use_spectral(problem):
+            spectral = SpectralInit(self.config.spectral_config)
+            state = spectral.apply(problem, state, ctx)
+            # Build fake layers from spectral y so layer-aware ops don't break.
+            if state.pos is not None and problem.num_nodes > 0:
+                y = state.pos[:, 1]
+                num_layers = max(1, int(problem.num_nodes**0.5))
+                if num_layers > 1:
+                    quantiles = torch.linspace(0, 1, num_layers + 1, device=y.device)
+                    thresholds = torch.quantile(y, quantiles[1:-1])
+                    layers = torch.bucketize(y, thresholds).to(dtype=torch.long)
+                else:
+                    layers = torch.zeros(problem.num_nodes, dtype=torch.long, device=y.device)
+                state.layers = layers
+                state.layer_index = build_layer_index(
+                    layers,
+                    device=str(y.device),
+                )
+            return state
+        native = NativeEngineInit(self.config.native_config or NativeEngineInitConfig())
+        return native.apply(problem, state, ctx)
+
+
 __all__ = [
     "CircularInit",
     "CircularInitConfig",
@@ -2428,6 +2532,8 @@ __all__ = [
     "DeterministicInit",
     "DeterministicInitConfig",
     "FA2InitializePositions",
+    "FamilyConditionalInit",
+    "FamilyConditionalInitConfig",
     "FromAlgorithmInit",
     "FromAlgorithmInitConfig",
     "LinLogInitializePositions",
