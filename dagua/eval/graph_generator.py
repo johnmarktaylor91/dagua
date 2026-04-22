@@ -216,12 +216,21 @@ def make_holdout_suite(
     salt_digest_prefix = hashlib.sha256(salt).hexdigest()[:8]
     manifest = SuiteManifest(sprint_tag=sprint_tag, salt_digest_prefix=salt_digest_prefix)
 
+    if not sprint_tag.startswith("holdout_"):
+        raise ValueError(
+            f"make_holdout_suite requires sprint_tag starting with 'holdout_' "
+            f"(got {sprint_tag!r}); reserved prefix enforces tag separation."
+        )
     graphs: List[TestGraph] = []
     for idx, (family, n) in enumerate(_HOLDOUT_V1_PLAN):
         builder = _FAMILY_SPECS[family]
         seed = _derive_seed(salt, sprint_tag, family, idx)
         tg = builder(n, seed)
         graphs.append(tg)
+        # CRITICAL (round-2 adversarial fix): do NOT include `seed` in the
+        # manifest. The seed is sufficient to regenerate the graph via
+        # `_FAMILY_SPECS[family](target_n, seed)`, defeating opacity. Only
+        # the topology hash is committed.
         manifest.entries.append(
             {
                 "index": idx,
@@ -230,7 +239,6 @@ def make_holdout_suite(
                 "actual_n": int(tg.graph.num_nodes),
                 "actual_e": int(tg.graph.edge_index.shape[1]),
                 "topology_sha256_10": _topology_hash(tg.graph),
-                "seed": seed,
             }
         )
 
@@ -268,6 +276,7 @@ def make_rolling_suite(
         seed = _derive_seed(salt, sprint_tag, family, idx)
         tg = builder(n, seed)
         graphs.append(tg)
+        # Same opacity rule as holdout: do NOT embed `seed` in manifest.
         manifest.entries.append(
             {
                 "index": idx,
@@ -276,7 +285,6 @@ def make_rolling_suite(
                 "actual_n": int(tg.graph.num_nodes),
                 "actual_e": int(tg.graph.edge_index.shape[1]),
                 "topology_sha256_10": _topology_hash(tg.graph),
-                "seed": seed,
             }
         )
 

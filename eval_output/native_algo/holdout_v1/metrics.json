@@ -1,49 +1,49 @@
 {
   "mode": "holdout",
   "sprint_tag": "holdout_v1",
-  "salt_digest_prefix": "b0b82cb2",
+  "salt_digest_prefix": "79b4ed65",
   "entry_count": 30,
-  "mean_score": 62.429024160402925,
+  "mean_score": 63.216471290202584,
   "results": [
     {
       "index": 0,
       "family": "directed_dag_small",
       "n": 80,
-      "score": 67.78699293180478,
+      "score": 69.23286860736259,
       "profile": "profile_small",
-      "runtime_s": 2.2755755027756095,
-      "error": null,
-      "topology_sha256_10": "496eef9ea4"
+      "runtime_s": 1.5320013430900872,
+      "topology_sha256_10": "e6cb814287",
+      "error": null
     },
     {
       "index": 1,
       "family": "directed_dag_small",
       "n": 150,
-      "score": 62.782045333970714,
+      "score": 67.42187270792962,
       "profile": "profile_small",
-      "runtime_s": 0.13579277973622084,
-      "error": null,
-      "topology_sha256_10": "ef3f13ab72"
+      "runtime_s": 0.0515313446521759,
+      "topology_sha256_10": "102226af77",
+      "error": null
     },
     {
       "index": 2,
       "family": "directed_dag_medium",
       "n": 400,
-      "score": 55.80496844030341,
+      "score": 62.47174570988352,
       "profile": "profile_small",
-      "runtime_s": 12.306845454964787,
-      "error": null,
-      "topology_sha256_10": "bf008ad886"
+      "runtime_s": 2.9654810591600835,
+      "topology_sha256_10": "ef7500f204",
+      "error": null
     },
     {
       "index": 3,
       "family": "directed_dag_medium",
       "n": 900,
-      "score": 53.11344204718321,
+      "score": 51.79270078671077,
       "profile": "profile_small",
-      "runtime_s": 11.020696986000985,
-      "error": null,
-      "topology_sha256_10": "7b1b0c9734"
+      "runtime_s": 8.949251185636967,
+      "topology_sha256_10": "50954e3915",
+      "error": null
     },
     {
       "index": 4,
@@ -51,9 +51,9 @@
       "n": 120,
       "score": 97.49458530684933,
       "profile": "profile_small",
-      "runtime_s": 0.13181813526898623,
-      "error": null,
-      "topology_sha256_10": "ba0745a366"
+      "runtime_s": 0.10608167666941881,
+      "topology_sha256_10": "ba0745a366",
+      "error": null
     },
     {
       "index": 5,
@@ -61,9 +61,9 @@
       "n": 600,
       "score": 97.48716992675327,
       "profile": "profile_small",
-      "runtime_s": 1.3027752651832998,
-      "error": null,
-      "topology_sha256_10": "6ad46375a9"
+      "runtime_s": 0.9769942979328334,
+      "topology_sha256_10": "6ad46375a9",
+      "error": null
     },
     {
       "index": 6,
@@ -71,9 +71,9 @@
       "n": 100,
       "score": 69.17648346572547,
       "profile": "profile_small",
-      "runtime_s": 0.04686894500628114,
-      "error": null,
-      "topology_sha256_10": "06b7fe6344"
+      "runtime_s": 0.031675755977630615,
+      "topology_sha256_10": "06b7fe6344",
+      "error": null
     },
     {
       "index": 7,
@@ -81,9 +81,9 @@
       "n": 400,
       "score": 63.83728938603692,
       "profile": "profile_small",
-      "runtime_s": 0.049017931800335646,
-      "error": null,
-      "topology_sha256_10": "c74026759b"
+      "runtime_s": 0.040424961131066084,
+      "topology_sha256_10": "c74026759b",
+      "error": null
     },
     {
       "index": 8,
@@ -91,9 +91,9 @@
       "n": 150,
       "score": 64.64787805122015,
       "profile": "profile_small",
-      "runtime_s": 0.03135229833424091,
-      "error": null,
-      "topology_sha256_10": "348147e300"
+      "runtime_s": 0.031957816798239946,
+      "topology_sha256_10": "348147e300",
+      "error": null
     },
     {
       "index": 9,
@@ -101,29 +101,29 @@
       "n": 800,
       "score": 68.36359103588099,
       "profile": "profile_small",
-      "runtime_s": 0.14387080306187272,
-      "error": null,
-      "topology_sha256_10": "d32ca9fbb6"
+      "runtime_s": 0.11601218394935131,
+      "topology_sha256_10": "d32ca9fbb6",
+      "error": null
     },
     {
       "index": 10,
       "family": "wide_parallel",
       "n": 120,
-      "score": 68.16044831898095,
+      "score": 67.38348573723434,
       "profile": "profile_small",
-      "runtime_s": 0.038021733053028584,
-      "error": null,
-      "topology_sha256_10": "0c756f6ef6"
+      "runtime_s": 0.03926304308697581,
+      "topology_sha256_10": "7eceb1e6a2",
+      "error": null
     },
     {
       "index": 11,
       "family": "wide_parallel",
       "n": 500,
-      "score": 61.236380953939246,
+      "score": 63.106077544262405,
       "profile": "profile_small",
-      "runtime_s": 4.95896496810019,
-      "error": null,
-      "topology_sha256_10": "060ec03c02"
+      "runtime_s": 2.4949414832517505,
+      "topology_sha256_10": "08db891b3f",
+      "error": null
     },
     {
       "index": 12,
@@ -131,9 +131,9 @@
       "n": 60,
       "score": 67.71308698615962,
       "profile": "profile_small",
-      "runtime_s": 1.523257568012923,
-      "error": null,
-      "topology_sha256_10": "a004976e38"
+      "runtime_s": 0.9220502120442688,
+      "topology_sha256_10": "a004976e38",
+      "error": null
     },
     {
       "index": 13,
@@ -141,59 +141,59 @@
       "n": 200,
       "score": 66.50779639319933,
       "profile": "profile_small",
-      "runtime_s": 2.851168996654451,
-      "error": null,
-      "topology_sha256_10": "f4d338b98f"
+      "runtime_s": 1.2206952068954706,
+      "topology_sha256_10": "f4d338b98f",
+      "error": null
     },
     {
       "index": 14,
       "family": "sparse_layered",
       "n": 300,
-      "score": 64.0648120342221,
+      "score": 64.88951724008706,
       "profile": "profile_small",
-      "runtime_s": 3.12162635428831,
-      "error": null,
-      "topology_sha256_10": "3c36dce5f6"
+      "runtime_s": 1.8618898666463792,
+      "topology_sha256_10": "677ec155d8",
+      "error": null
     },
     {
       "index": 15,
       "family": "sparse_layered",
       "n": 1200,
-      "score": 56.025491232717116,
+      "score": 56.16687818285763,
       "profile": "profile_small",
-      "runtime_s": 44.00481975823641,
-      "error": null,
-      "topology_sha256_10": "22e0a20e92"
+      "runtime_s": 14.659473021980375,
+      "topology_sha256_10": "0c031758d8",
+      "error": null
     },
     {
       "index": 16,
       "family": "powerlaw_dag",
       "n": 400,
-      "score": 53.964350255692864,
+      "score": 53.7597205573638,
       "profile": "profile_small",
-      "runtime_s": 6.554328893311322,
-      "error": null,
-      "topology_sha256_10": "516ec16734"
+      "runtime_s": 2.6892127292230725,
+      "topology_sha256_10": "1aa14e505b",
+      "error": null
     },
     {
       "index": 17,
       "family": "erdos_renyi_sparse",
       "n": 200,
-      "score": 48.904273112359874,
+      "score": 48.91401500171189,
       "profile": "profile_small",
-      "runtime_s": 4.610518244095147,
-      "error": null,
-      "topology_sha256_10": "93b784e50c"
+      "runtime_s": 1.3018901217728853,
+      "topology_sha256_10": "1b6a8d405f",
+      "error": null
     },
     {
       "index": 18,
       "family": "random_geometric",
       "n": 300,
-      "score": 50.23824702640097,
+      "score": 60.366514445776374,
       "profile": "profile_small",
-      "runtime_s": 3.150734710972756,
-      "error": null,
-      "topology_sha256_10": "f9ecd7151b"
+      "runtime_s": 2.5727324467152357,
+      "topology_sha256_10": "be51b9ee33",
+      "error": null
     },
     {
       "index": 19,
@@ -201,9 +201,9 @@
       "n": 250,
       "score": 22.5,
       "profile": "profile_small",
-      "runtime_s": 1.6404930711723864,
-      "error": null,
-      "topology_sha256_10": "ee98a80c2c"
+      "runtime_s": 1.527345061302185,
+      "topology_sha256_10": "ee98a80c2c",
+      "error": null
     },
     {
       "index": 20,
@@ -211,9 +211,9 @@
       "n": 900,
       "score": 22.5,
       "profile": "profile_small",
-      "runtime_s": 8.571410656441003,
-      "error": null,
-      "topology_sha256_10": "8a4dbc959a"
+      "runtime_s": 8.061082408763468,
+      "topology_sha256_10": "8a4dbc959a",
+      "error": null
     },
     {
       "index": 21,
@@ -221,9 +221,9 @@
       "n": 100,
       "score": 89.49253615396701,
       "profile": "profile_small",
-      "runtime_s": 0.13966498617082834,
-      "error": null,
-      "topology_sha256_10": "e153a3c52d"
+      "runtime_s": 0.05012281285598874,
+      "topology_sha256_10": "e153a3c52d",
+      "error": null
     },
     {
       "index": 22,
@@ -231,19 +231,19 @@
       "n": 400,
       "score": 67.08797814284095,
       "profile": "profile_small",
-      "runtime_s": 6.691847593989223,
-      "error": null,
-      "topology_sha256_10": "e25edc07cc"
+      "runtime_s": 2.073888448998332,
+      "topology_sha256_10": "e25edc07cc",
+      "error": null
     },
     {
       "index": 23,
       "family": "bipartite",
       "n": 200,
-      "score": 45.40865842199774,
+      "score": 45.1560883804014,
       "profile": "profile_small",
-      "runtime_s": 3.5250834580510855,
-      "error": null,
-      "topology_sha256_10": "2d740af575"
+      "runtime_s": 1.388725581113249,
+      "topology_sha256_10": "92a697c43c",
+      "error": null
     },
     {
       "index": 24,
@@ -251,9 +251,9 @@
       "n": 68,
       "score": 67.20543612610727,
       "profile": "profile_small",
-      "runtime_s": 1.4149903235957026,
-      "error": null,
-      "topology_sha256_10": "694d6aa25e"
+      "runtime_s": 0.9327910970896482,
+      "topology_sha256_10": "694d6aa25e",
+      "error": null
     },
     {
       "index": 25,
@@ -261,19 +261,19 @@
       "n": 46,
       "score": 56.43519422561644,
       "profile": "profile_small",
-      "runtime_s": 0.6014073919504881,
-      "error": null,
-      "topology_sha256_10": "e68aa4d29f"
+      "runtime_s": 0.8257168862037361,
+      "topology_sha256_10": "e68aa4d29f",
+      "error": null
     },
     {
       "index": 26,
       "family": "directed_dag_medium",
       "n": 1500,
-      "score": 50.48683796901896,
+      "score": 50.492685686871354,
       "profile": "profile_small",
-      "runtime_s": 32.86337315989658,
-      "error": null,
-      "topology_sha256_10": "dc86f2dd5e"
+      "runtime_s": 26.907418373040855,
+      "topology_sha256_10": "930710dac5",
+      "error": null
     },
     {
       "index": 27,
@@ -281,9 +281,9 @@
       "n": 1800,
       "score": 97.49061896989588,
       "profile": "profile_small",
-      "runtime_s": 6.911432876251638,
-      "error": null,
-      "topology_sha256_10": "8a9912aa49"
+      "runtime_s": 7.60545081878081,
+      "topology_sha256_10": "8a9912aa49",
+      "error": null
     },
     {
       "index": 28,
@@ -291,19 +291,19 @@
       "n": 1800,
       "score": 62.21233535121648,
       "profile": "profile_small",
-      "runtime_s": 0.3866053530946374,
-      "error": null,
-      "topology_sha256_10": "1710ecc15f"
+      "runtime_s": 0.5235568750649691,
+      "topology_sha256_10": "1710ecc15f",
+      "error": null
     },
     {
       "index": 29,
       "family": "sparse_layered",
       "n": 600,
-      "score": 54.74179721202666,
+      "score": 55.18798859615602,
       "profile": "profile_small",
-      "runtime_s": 3.3629653896205127,
-      "error": null,
-      "topology_sha256_10": "77fd40b074"
+      "runtime_s": 3.4155880962498486,
+      "topology_sha256_10": "386ee3d1a9",
+      "error": null
     }
   ]
 }

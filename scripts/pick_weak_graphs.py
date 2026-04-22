@@ -58,14 +58,47 @@ def _graph_spec(result: Dict[str, Any]) -> str:
 
 
 def pick_weak(metrics_path: Path, k: int = 5) -> List[Dict[str, Any]]:
+    """Pick k weakest graphs, normalizing by family to avoid rubric artifacts.
+
+    Raw composite is DAG-biased (dag_consistency weight 25, crossing weight
+    10, etc.), so undirected families like small_world floor below ~30 even
+    at perfect layout. Without normalization, `pick_weak` would always
+    return the same family's graphs (per the round-2 adversarial finding).
+
+    Strategy (revised): rank by `(score - family_max) / family_span` so a
+    graph is "weak" relative to what its family actually achieves in the
+    metrics file. Families with only one entry use raw score. Cross-family
+    spread (at-most-2-per-family) is still enforced.
+
+    Future (Sprint 1+): once head-to-head competitor metrics are available,
+    rank by Pareto dominance instead (dagua_score - best_competitor_score).
+    """
     payload = json.loads(metrics_path.read_text())
     results = payload.get("results", [])
     if not results:
         raise SystemExit(f"No 'results' in {metrics_path}")
 
-    # Rank by ascending composite score (lower = weaker).
     scored = [r for r in results if r.get("error") is None and r.get("score") is not None]
-    scored.sort(key=lambda r: r["score"])
+    if not scored:
+        raise SystemExit(f"No non-error results in {metrics_path}")
+
+    # Compute per-family max score for normalization.
+    by_family: Dict[str, List[float]] = defaultdict(list)
+    for r in scored:
+        by_family[_family_of(r)].append(r["score"])
+    family_max = {f: max(scores) for f, scores in by_family.items()}
+
+    def family_normalized(r: Dict[str, Any]) -> float:
+        """Return a rank key where lower = weaker within family.
+
+        raw_gap_to_family_max = family_max[f] - r['score']. Larger gap = weaker.
+        Negate so that sort ascending = weakest first.
+        """
+        fmax = family_max[_family_of(r)]
+        gap = fmax - r["score"]
+        return -gap  # ascending sort = most-negative (largest gap) first
+
+    scored.sort(key=family_normalized)
 
     # Spread: at most 2 per family.
     per_family: Dict[str, int] = defaultdict(int)
