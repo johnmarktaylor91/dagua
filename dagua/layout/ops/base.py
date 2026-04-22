@@ -684,8 +684,14 @@ class LossGroup(Op):
                 if w == 0.0:
                     continue
                 val = loss_op.evaluate(problem, state, ctx)
-                (w * val).backward()
-                total += w * val.item()
+                term = w * val
+                # Match legacy _backward_standard_loss_terms guard: skip
+                # constant terms (no grad_fn) so per_loss mode doesn't
+                # crash on degenerate loss ops (e.g. alignment with 1 node,
+                # crossing on graphs with 0 edges).
+                if term.requires_grad:
+                    term.backward()
+                total += term.item()
             state.prev_loss = total
         else:
             # Combined mode: sum then single backward.
