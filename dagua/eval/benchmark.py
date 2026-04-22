@@ -1648,6 +1648,104 @@ def _print_summary(payload: Dict[str, Any]) -> None:
     print()
 
 
+def _run_salt_derived_suite(args: argparse.Namespace) -> None:
+    """Sprint 0.5: run Dagua on a salt-derived suite (holdout or rolling).
+
+    Minimal implementation: loads the suite from ``graph_generator``, runs
+    ``engine.layout()`` (default pipeline) under seed=42, scores with
+    ``composite()`` (N<=2000) or ``composite_large()`` (N>2000), writes
+    per-graph metrics + manifest to
+    ``<output-dir>/native_algo/<sprint_tag>/metrics.json``.
+
+    This is NOT the full competitor head-to-head gate (Sprint 0.5 wires only
+    Dagua; competitor refresh is handled by scripts/refresh_competitors.sh).
+    """
+    import time
+    from pathlib import Path
+
+    from dagua.config import LayoutConfig
+    from dagua.eval.graph_generator import (
+        make_holdout_suite,
+        make_rolling_suite,
+    )
+    from dagua.layout.engine import layout as engine_layout
+    from dagua.metrics import composite, composite_large, full, quick
+
+    salt_path = Path(args.salt_path) if args.salt_path else None
+
+    if args.seed_strategy == "holdout":
+        sprint_tag = args.sprint_tag or "holdout_v1"
+        graphs, manifest = make_holdout_suite(sprint_tag=sprint_tag, salt_path=salt_path)
+    else:  # rolling
+        if not args.sprint_tag:
+            raise SystemExit("--seed-strategy=rolling requires --sprint-tag")
+        graphs, manifest = make_rolling_suite(sprint_tag=args.sprint_tag, salt_path=salt_path)
+
+    print(
+        f"Running Dagua on {len(graphs)} graphs "
+        f"(mode={args.seed_strategy}, tag={manifest.sprint_tag}) ..."
+    )
+
+    results: list = []
+    for idx, tg in enumerate(graphs):
+        g = tg.graph
+        n = g.num_nodes
+        g.compute_node_sizes()
+
+        t0 = time.perf_counter()
+        try:
+            pos = engine_layout(g, LayoutConfig(seed=42))
+            wall = time.perf_counter() - t0
+            if n <= 2000:
+                m = full(pos, g.edge_index, node_sizes=g.node_sizes)
+                score = composite(m)
+                profile = "profile_small"
+            else:
+                m = quick(pos, g.edge_index, node_sizes=g.node_sizes)
+                score = composite_large(m)
+                profile = "profile_large"
+            error = None
+        except Exception as e:
+            wall = time.perf_counter() - t0
+            score = float("nan")
+            profile = "error"
+            error = f"{type(e).__name__}: {e}"
+
+        entry = manifest.entries[idx]
+        results.append(
+            {
+                "index": idx,
+                "family": entry["family"],
+                "n": n,
+                "score": score,
+                "profile": profile,
+                "runtime_s": wall,
+                "topology_sha256": entry["topology_sha256"],
+                "error": error,
+            }
+        )
+        print(
+            f"  [{idx + 1:>2d}/{len(graphs)}] {entry['family']:<25} n={n:>5d} "
+            f"score={score:.2f} runtime={wall * 1000:.1f}ms ({profile})"
+        )
+
+    out_dir = Path(args.output_dir) / "native_algo" / manifest.sprint_tag
+    out_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "mode": args.seed_strategy,
+        "sprint_tag": manifest.sprint_tag,
+        "salt_digest_prefix": manifest.salt_digest_prefix,
+        "entry_count": len(results),
+        "mean_score": (
+            sum(r["score"] for r in results if r["error"] is None)
+            / max(1, sum(1 for r in results if r["error"] is None))
+        ),
+        "results": results,
+    }
+    (out_dir / "metrics.json").write_text(json.dumps(payload, indent=2))
+    print(f"\nwrote {out_dir / 'metrics.json'}")
+
+
 def main() -> None:
     """Run the benchmark CLI entry point."""
     parser = argparse.ArgumentParser(description="Run Dagua benchmark suites")
@@ -1683,7 +1781,33 @@ def main() -> None:
         action="store_true",
         help="Do not reuse cached competitor results from the latest run",
     )
+    # Sprint 0.5: salt-derived suite modes. fixed = legacy seed=42 standard/rare
+    # suites. holdout = salt-derived held-out graphs (opaque, never iterated
+    # against). rolling = per-sprint anti-overfit set (requires --sprint-tag).
+    parser.add_argument(
+        "--seed-strategy",
+        choices=["fixed", "rolling", "holdout"],
+        default="fixed",
+        help="Graph suite source: fixed = seed=42 standard/rare suites (default), "
+        "holdout = salt-derived opaque held-out set, "
+        "rolling = per-sprint anti-overfit set (requires --sprint-tag).",
+    )
+    parser.add_argument(
+        "--sprint-tag",
+        default=None,
+        help="Sprint tag for rolling mode, e.g. 'sprint_1_20260425'. Ignored for fixed/holdout.",
+    )
+    parser.add_argument(
+        "--salt-path",
+        default=None,
+        help="Override salt path for rolling/holdout modes. "
+        "Default: .project-context/private/holdout_salt (gitignored).",
+    )
     args = parser.parse_args()
+
+    if args.seed_strategy in ("rolling", "holdout"):
+        _run_salt_derived_suite(args)
+        return
 
     if args.merge_only:
         merge_latest_results(output_dir=args.output_dir)

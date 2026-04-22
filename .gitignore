@@ -107,3 +107,6 @@ aesthetic_review/
 # Claude Code: local settings are personal, commands + settings.json are shared
 .claude/settings.local.json
 .project-context/plans/native_placement_algo/reviews/
+
+# Sprint 0.5: secret salts for opaque held-out / rolling graph suites
+.project-context/private/
