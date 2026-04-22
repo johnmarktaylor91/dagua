@@ -338,6 +338,14 @@ def prepare_pipeline_config(
     setattr(effective_config, "_dagua_native_rel_threshold", rel_threshold)
     setattr(effective_config, "_dagua_native_crossing_alpha", 3.0)
     setattr(effective_config, "_dagua_native_optimizer_type", "adam")
+    # Sprint 2: multilevel V-cycle threshold. Above this N, the pipeline
+    # coarsens + prolongs; below, it runs single-level.
+    setattr(effective_config, "_dagua_native_num_nodes", num_nodes)
+    setattr(
+        effective_config,
+        "_dagua_native_use_vcycle",
+        num_nodes >= int(getattr(effective_config, "multilevel_threshold", 20000)),
+    )
     return effective_config
 
 
