@@ -888,6 +888,20 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
     if config is None:
         config = LayoutConfig()
 
+    # Sprint 0 Task 0.2: default flipped to dagua_native pipeline.
+    # algorithm=None -> "dagua_native"; algorithm="_legacy" -> pre-decomposition
+    # engine body (opt-in, unadvertised). Animation uses the legacy path
+    # because layout-snapshot capture is not yet plumbed into ops pipelines
+    # (Sprint 6+ will rebuild animation via op-level hooks).
+    remapped_from_default = config.algorithm is None and trace is None
+    if config.algorithm == "_legacy":
+        config = copy.copy(config)
+        config.algorithm = None
+        # Falls through to the legacy engine body below.
+    elif remapped_from_default:
+        config = copy.copy(config)
+        config.algorithm = "dagua_native"
+
     if config.algorithm is not None:
         import inspect
 
@@ -908,9 +922,35 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         sig = inspect.signature(pipeline_fn)
         if "steps" in sig.parameters:
             kwargs["steps"] = config.steps
-        # Filter to only params the function accepts
+
+        # For the flipped default (dagua_native), forward user-visible state
+        # the legacy body used to handle: clusters, flex, config passthrough,
+        # and wrap with cycle-prep + direction transform + cache.
+        if remapped_from_default:
+            if config.flex is not None:
+                config = _resolve_flex_ids(config, graph)
+            if config.flex is None and getattr(graph, "flex", None) is not None:
+                config = copy.copy(config)
+                config.flex = _resolve_graph_flex(graph.flex, graph._id_to_index)
+            kwargs["config"] = config
+            if hasattr(graph, "clusters") and graph.clusters:
+                kwargs["clusters"] = graph.clusters
+            if hasattr(graph, "cluster_parents") and graph.cluster_parents:
+                kwargs["cluster_parents"] = graph.cluster_parents
+
         accepted = set(sig.parameters.keys())
         kwargs = {k: v for k, v in kwargs.items() if k in accepted}
+
+        if remapped_from_default:
+            graph._prepare_for_layout()
+            try:
+                pos = pipeline_fn(**kwargs)
+                direction = config.direction if config else getattr(graph, "direction", "TB")
+                pos = _apply_direction(pos, direction)
+                graph.cache_layout(pos)
+                return pos
+            finally:
+                graph._restore_after_layout()
         return pipeline_fn(**kwargs)
 
     # Ensure node sizes are computed
