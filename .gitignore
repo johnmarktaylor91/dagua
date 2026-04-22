@@ -106,3 +106,4 @@ private-notes/tasks/
 
 # Claude Code: local settings are personal, commands + settings.json are shared
 .claude/settings.local.json
+private-notes/plans/native_placement_algo/reviews/
