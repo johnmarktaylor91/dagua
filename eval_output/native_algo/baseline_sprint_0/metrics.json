@@ -1,0 +1,103 @@
+{
+  "seed": 42,
+  "mvp_suite_note": "Sprint 0 uses MVP harness graphs only (chain_N, random_dag_N, diamond_N). Sprint 0.5 expands to the full 25-graph iteration suite + the opaque held-out set.",
+  "results": [
+    {
+      "name": "chain_10",
+      "n": 10,
+      "runtime_s": 1.8394122677855194,
+      "score": 97.49209117668215,
+      "profile": "profile_small",
+      "dag_consistency": 1.0,
+      "edge_length_cv": 0.0003954411658924073,
+      "depth_spearman_rho": 0.9999999999999999,
+      "overlap_count": 0,
+      "edge_straightness_mean_deg": 0.0,
+      "crossing_rate": 0.0
+    },
+    {
+      "name": "chain_100",
+      "n": 100,
+      "runtime_s": 0.16130144987255335,
+      "score": 97.49409563664813,
+      "profile": "profile_small",
+      "dag_consistency": 1.0,
+      "edge_length_cv": 0.0002952181675937027,
+      "depth_spearman_rho": 0.9999999999999999,
+      "overlap_count": 0,
+      "edge_straightness_mean_deg": 0.0,
+      "crossing_rate": 0.0
+    },
+    {
+      "name": "chain_500",
+      "n": 500,
+      "runtime_s": 1.8946470888331532,
+      "score": 97.48611214687116,
+      "profile": "profile_small",
+      "dag_consistency": 1.0,
+      "edge_length_cv": 0.0006943926564417779,
+      "depth_spearman_rho": 1.0,
+      "overlap_count": 0,
+      "edge_straightness_mean_deg": 0.0,
+      "crossing_rate": 0.0
+    },
+    {
+      "name": "random_dag_100",
+      "n": 100,
+      "runtime_s": 0.05155964894220233,
+      "score": 65.06280284859025,
+      "profile": "profile_small",
+      "dag_consistency": 1.0,
+      "edge_length_cv": 0.860505998134613,
+      "depth_spearman_rho": 0.9934420188735704,
+      "overlap_count": 0,
+      "edge_straightness_mean_deg": 41.75188446044922,
+      "crossing_rate": 0.03219517320394516
+    },
+    {
+      "name": "random_dag_200",
+      "n": 200,
+      "runtime_s": 0.07847821526229382,
+      "score": 64.87788960191317,
+      "profile": "profile_small",
+      "dag_consistency": 1.0,
+      "edge_length_cv": 0.7923833131790161,
+      "depth_spearman_rho": 0.9977445164340784,
+      "overlap_count": 0,
+      "edge_straightness_mean_deg": 50.463043212890625,
+      "crossing_rate": 0.03653758019208908
+    },
+    {
+      "name": "diamond_40",
+      "n": 40,
+      "runtime_s": 0.7936220248229802,
+      "score": 68.80432699204997,
+      "profile": "profile_small",
+      "dag_consistency": 1.0,
+      "edge_length_cv": 0.8864008188247681,
+      "depth_spearman_rho": 0.9354895579030218,
+      "overlap_count": 0,
+      "edge_straightness_mean_deg": 55.77141571044922,
+      "crossing_rate": 0.0
+    },
+    {
+      "name": "diamond_100",
+      "n": 100,
+      "runtime_s": 1.5648915879428387,
+      "score": 66.86958915904958,
+      "profile": "profile_small",
+      "dag_consistency": 1.0,
+      "edge_length_cv": 0.9818859100341797,
+      "depth_spearman_rho": 0.9354311856840754,
+      "overlap_count": 0,
+      "edge_straightness_mean_deg": 64.05885314941406,
+      "crossing_rate": 0.00024160425527952611
+    }
+  ],
+  "summary": {
+    "n_graphs": 7,
+    "mean_score_small": 79.72670108025777,
+    "mean_score_large": 0.0,
+    "mean_runtime_ms": 911.9874690659344
+  }
+}

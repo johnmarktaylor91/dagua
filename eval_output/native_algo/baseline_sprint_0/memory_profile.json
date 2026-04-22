@@ -1,0 +1,66 @@
+{
+  "sizes": [
+    1000,
+    10000
+  ],
+  "results": [
+    {
+      "n": 1000,
+      "algorithm": null,
+      "peak_rss_mb": 1217.3984375,
+      "baseline_rss_mb": 528.0234375,
+      "delta_mb": 689.375,
+      "runtime_s": 4.333684771321714,
+      "error": null,
+      "tag": "ops_pipeline"
+    },
+    {
+      "n": 1000,
+      "algorithm": "_legacy",
+      "peak_rss_mb": 1076.51953125,
+      "baseline_rss_mb": 529.49609375,
+      "delta_mb": 547.0234375,
+      "runtime_s": 3.2156273731961846,
+      "error": null,
+      "tag": "legacy"
+    },
+    {
+      "n": 10000,
+      "algorithm": null,
+      "peak_rss_mb": 8141.60546875,
+      "baseline_rss_mb": 530.80078125,
+      "delta_mb": 7610.8046875,
+      "runtime_s": 144.11298638302833,
+      "error": null,
+      "tag": "ops_pipeline"
+    },
+    {
+      "n": 10000,
+      "algorithm": "_legacy",
+      "peak_rss_mb": 1001.73046875,
+      "baseline_rss_mb": 530.81640625,
+      "delta_mb": 470.9140625,
+      "runtime_s": 22.183125786017627,
+      "error": null,
+      "tag": "legacy"
+    }
+  ],
+  "summary": {
+    "1000": {
+      "ops_rss_mb": 1217.3984375,
+      "legacy_rss_mb": 1076.51953125,
+      "ops_over_legacy": 1.130865165155358,
+      "gap_exceeds_20pct": false
+    },
+    "10000": {
+      "ops_rss_mb": 8141.60546875,
+      "legacy_rss_mb": 1001.73046875,
+      "ops_over_legacy": 8.127541013012639,
+      "gap_exceeds_20pct": true
+    }
+  },
+  "sprint_1_gate": {
+    "rule": "Sprint 1 must port memory features if any ratio > 1.20",
+    "triggered": true
+  }
+}
