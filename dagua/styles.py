@@ -354,6 +354,14 @@ class NodeStyle:
     # New fields (Part 3) — overflow policy
     overflow_policy: str = "shrink_text"  # "shrink_text", "expand_node", "overflow"
     min_font_size: float = 5.0  # Floor for shrink_text policy
+    # Sprint 7 LabelSizeFeedbackLoop: when shrink_text hits the
+    # min_font_size floor AND the label still wouldn't fit in the
+    # min_width/min_height bbox, fall back to expanding the node bbox so
+    # the rendered label doesn't clip. Defaults to True because silent
+    # clipping is strictly worse than a slightly-larger node; set to
+    # False to recover the pre-Sprint-7 "stay at min_width, let the
+    # label overflow" behaviour for explicit fixed-size layouts.
+    auto_expand_on_floor_overflow: bool = True
     label_format: str = "plain"  # plain, rich
     border_count: int = 1  # render-only: 1 = single border, 2 = double border
     border_position: str = "center"  # render-only: center, inside, outside
