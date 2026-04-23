@@ -133,6 +133,43 @@ def test_label_placement_reduces_overlap_vs_naive_midpoint():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "shape",
+    ["roundrect", "ellipse", "circle", "diamond", "hexagon", "octagon", "stadium"],
+)
+def test_long_label_does_not_clip_on_any_shape(shape):
+    """Sprint 7 r2: the feedback loop must protect against clipping for
+    EVERY node shape, not just curved ones. Different shapes reserve
+    interior for corners, angles, endcaps -- the feedback loop must
+    delegate to compute_node_size under expand_node policy so those
+    shape-specific losses are re-applied. Without this, diamond /
+    stadium / hexagon / etc. would still clip at the floor font."""
+    from dagua.styles import NodeStyle
+
+    g = DaguaGraph()
+    g.add_node(
+        0,
+        label="a very long node label that should not clip on any shape",
+        style=NodeStyle(shape=shape),
+    )
+    g.add_edge(0, 0)
+    g.compute_node_sizes()
+
+    label = g.node_labels[0]
+    effective_fs = g.node_font_sizes[0].item()
+    w_text, h_text = measure_text_fallback(label, effective_fs)
+    w_node = g.node_sizes[0, 0].item()
+    h_node = g.node_sizes[0, 1].item()
+    slack = 4.0
+    assert w_node + slack >= w_text, (
+        f"{shape} clips horizontally at efs={effective_fs}: text={w_text:.1f} node={w_node:.1f}"
+    )
+    assert h_node + slack >= h_text, (
+        f"{shape} clips vertically at efs={effective_fs}: text={h_text:.1f} node={h_node:.1f}"
+    )
+
+
+@pytest.mark.unit
 def test_held_out_suite_has_zero_label_clipping():
     """Aggregate: run the compute_node_sizes path on a variety of
     synthetic graphs with long labels and verify zero clipping across
