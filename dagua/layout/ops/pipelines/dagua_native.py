@@ -23,6 +23,11 @@ from dagua.layout.ops.barycenter import BarycenterReorder, BarycenterReorderConf
 from dagua.layout.ops.base import EarlyBreak, LossGroup, Pipeline, Repeat
 from dagua.layout.ops.coarsen import HeavyEdgeMatching
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig, StallCount, StallCountConfig
+from dagua.layout.ops.distance import (
+    PivotDistanceQueries,
+    PivotSelection,
+    PivotSelectionConfig,
+)
 from dagua.layout.ops.init import (
     NativeEngineInit,
     NativeEngineInitConfig,
@@ -36,6 +41,7 @@ from dagua.layout.ops.optimize import (
     OptimizerZeroGrad,
 )
 from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
+from dagua.layout.ops.preprocess import BuildAdjacency, BuildAdjacencyConfig
 from dagua.layout.ops.project import (
     HardPinProjection,
     OverlapProjection,
@@ -56,6 +62,24 @@ from dagua.layout.resolve import (
     normalize_node_sizes,
     prepare_pipeline_config,
 )
+
+
+def _stress_pivot_prep(config: LayoutConfig) -> list:
+    """Return pivot-prep ops for Sprint 15 stress loss when w_stress > 0.
+
+    Ops run once at pipeline entry (after NativeEngineInit, before the
+    optimizer loop) so every gradient step can read cached
+    state.pivot_indices + state.pivot_distances without rebuilding them.
+    """
+    if getattr(config, "w_stress", 0.0) <= 0.0:
+        return []
+    n_pivots = int(getattr(config, "w_stress_n_pivots", 50))
+    weighted = False  # pivot BFS uses unweighted graph-theoretic distance
+    return [
+        BuildAdjacency(BuildAdjacencyConfig(weighted=weighted)),
+        PivotSelection(PivotSelectionConfig(n_pivots=n_pivots)),
+        PivotDistanceQueries(),
+    ]
 
 
 def build_gradient_core(
@@ -273,6 +297,7 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
         w_spacing=config.w_spacing,
         w_fanout=config.w_fanout,
         w_back_edge=config.w_back_edge,
+        w_stress=getattr(config, "w_stress", 0.0),
     )
 
     # Sprint 2: branch on N. V-cycle above threshold; flat below.
@@ -353,6 +378,13 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
                     ),
                 ),
             ),
+            # Sprint 15: pivot-stress pre-prep. When w_stress > 0, build
+            # adjacency + select pivots + query BFS distances so the
+            # PivotApproxStressLoss (added to losses by
+            # build_loss_ops) has state.pivot_indices +
+            # state.pivot_distances populated. Happens once per layout
+            # call; the pivot cache is reused across every gradient step.
+            *_stress_pivot_prep(config),
             InitAnnealingSchedule(weight_config),
             CreateOptimizer(
                 CreateOptimizerConfig(
