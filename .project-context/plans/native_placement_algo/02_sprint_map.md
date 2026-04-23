@@ -346,6 +346,36 @@ See 18_sprint_scale.md.
 - Entry: Sprint 7 exit.
 - Goal: N=1M and 10M runs complete in bounded time under stated memory budget.
   Address the 1B coarsening offload path if user keeps it in-scope (09 Q7).
+- **Sprint 8 MVP (2026-04-23):** 1M target MET (445s <= 480s on RTX
+  2080 Ti). Two bug fixes unblocked V-cycle on CUDA (device migration
+  in ``_level_problem`` and ``_longest_path_layering_vectorized``),
+  and vectorizing ``HeavyEdgeMatching`` dropped it from 193s to 21s
+  on the 1M run. See commits ``8f254fc`` + ``6179fae``.
+  10M target NOT MET: hit CUDA OOM at 18.3min / 9.07GB VRAM inside
+  ``LossGroup.term.backward()`` (per_loss mode) on the RTX 2080 Ti
+  (11.5GB total). Went >= 1/3 of the 45-min budget before crashing,
+  so on a 24GB+ card the wall would likely be inside budget. The
+  reachable fix on current hardware is Sprint 8.5: chunked /
+  gradient-checkpointed backward for O(E) / O(sampled) losses at
+  very large N, and CPU-offload for the finest-level positions
+  during coarse passes. Tracked below.
+
+### Sprint 8.5 -- Scale-Ladder VRAM engineering (tracked)
+- Goal: close the 10M gap on consumer-tier GPUs.
+- Scope candidates (prioritize by profile data):
+  * Chunked per-loss backward: split the finest-level pos tensor into
+    K chunks along dim 0, backward on each, accumulate gradients.
+    Trades wall for peak VRAM. Primary target: RepulsionLoss and
+    CrossingLoss.
+  * Gradient checkpointing on the V-cycle refine pipeline (recompute
+    forward during backward).
+  * CPU offload for prolonged positions during coarse-level passes
+    so the fine-level pos tensor doesn't co-reside with coarse-level
+    optimizer states.
+  * Early adaptive-skip: if a loss's forward allocation alone exceeds
+    (free_vram - headroom), skip that loss at that level instead of
+    OOMing mid-backward.
+
 - Exit:
   * 1M nodes: <=8 minutes wall on GPU.
   * 10M nodes: <=45 minutes wall on GPU, peak RAM <=120 GB.
