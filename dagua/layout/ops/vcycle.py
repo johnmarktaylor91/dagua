@@ -87,13 +87,22 @@ def _propagate_flex_to_coarse(
     if flex.pin_indices is not None and flex.pin_indices.numel() > 0:
         fine_idx_cpu = flex.pin_indices.to(device=device, dtype=torch.long)
         coarse_ids = composed_mapping[fine_idx_cpu]  # [P]
-        seen: dict[int, int] = {}
-        keep_fine_positions: list[int] = []
+        # Dedup priority: a HARD pin on any axis outranks a soft pin on
+        # the same coarse node. Among equally-ranked pins (both hard or
+        # both soft), the lowest fine index wins -- stable w.r.t. the
+        # fine pin order. Without this rule a later soft pin that
+        # happens to precede a hard pin in the user's insertion order
+        # would silently down-rank the hard pin at the coarse level.
+        hard_mask_per_fine = None
+        if flex.hard_pin_mask is not None:
+            hard_mask_per_fine = flex.hard_pin_mask.any(dim=1).tolist()
+        best_per_coarse: dict[int, tuple[int, int]] = {}
         for p, c in enumerate(coarse_ids.tolist()):
-            if c in seen:
-                continue
-            seen[c] = p
-            keep_fine_positions.append(p)
+            rank = 1 if (hard_mask_per_fine is not None and hard_mask_per_fine[p]) else 0
+            prev = best_per_coarse.get(c)
+            if prev is None or rank > prev[0]:
+                best_per_coarse[c] = (rank, p)
+        keep_fine_positions = sorted(pos for _, pos in best_per_coarse.values())
         if keep_fine_positions:
             keep_tensor = torch.tensor(keep_fine_positions, dtype=torch.long, device=device)
             coarse_pin_indices = coarse_ids[keep_tensor]

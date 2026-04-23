@@ -1507,8 +1507,22 @@ def position_pin_loss(
         return torch.tensor(0.0, device=pos.device)
 
     pinned_pos = pos[pin_indices]  # [P, 2]
-    diff = (pinned_pos - pin_targets) ** 2  # [P, 2]
-    weighted = diff * pin_weights * pin_mask.float()  # [P, 2]
+    # Smooth-L1 (Huber) around the target instead of plain squared-L2:
+    # quadratic inside a unit half-beta, linear outside. This bounds the
+    # per-axis gradient magnitude to ``weight`` regardless of how far the
+    # node is from target, so a distant soft pin no longer blows past the
+    # engine's ClipGradNorm(max_norm=100) guard and gets shredded into a
+    # near-zero step. Legacy squared-L2 gave gradient = 2 * weight * |dist|,
+    # which at dist=500 & weight=50 is 50000 per axis -- two orders of
+    # magnitude above the clip ceiling, reducing the effective pull per
+    # step to ~1/500 of the intended strength.
+    delta = pinned_pos - pin_targets  # [P, 2]
+    beta = 1.0
+    abs_delta = delta.abs()
+    quad = 0.5 * delta.square() / beta
+    lin = abs_delta - 0.5 * beta
+    huber = torch.where(abs_delta < beta, quad, lin)  # [P, 2]
+    weighted = huber * pin_weights * pin_mask.float()  # [P, 2]
     return weighted.sum() / max(pin_mask.sum().item(), 1.0)
 
 
