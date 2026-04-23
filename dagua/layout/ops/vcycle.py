@@ -173,13 +173,31 @@ def _level_problem(
         from ``level``; direction / seed inherit from the finest problem.
         Clusters do NOT propagate to coarse levels in the Sprint 5 scope
         (cluster-centroid pinning is tracked separately).
+
+    Notes
+    -----
+    Sprint 8 fix: coarsen ops (HeavyEdgeMatching and its peers) build
+    ``level.edge_index`` / ``level.node_sizes`` on CPU regardless of the
+    top-level device. When the V-cycle fires (N >= multilevel_threshold,
+    typically 1M+) on a CUDA run, the coarse-level refine pipeline would
+    then try to index a CUDA ``state.pos`` by a CPU ``edge_index`` and
+    blow up in losses like ``dag_ordering_loss``. We move both tensors
+    onto the device of ``problem.edge_index`` (the finest level, already
+    migrated by the top-level engine) so all levels agree.
     """
     if level.edge_index is None or level.fine_to_coarse is None:
         raise ValueError("Hierarchy level is offloaded; reload before use.")
+    target_device = problem.edge_index.device
+    level_edge_index = level.edge_index
+    if level_edge_index.device != target_device:
+        level_edge_index = level_edge_index.to(device=target_device)
+    level_node_sizes = level.node_sizes
+    if level_node_sizes is not None and level_node_sizes.device != target_device:
+        level_node_sizes = level_node_sizes.to(device=target_device)
     return LayoutProblem(
-        edge_index=level.edge_index,
+        edge_index=level_edge_index,
         num_nodes=level.num_nodes,
-        node_sizes=level.node_sizes,
+        node_sizes=level_node_sizes,
         direction=problem.direction,
         clusters=None,
         cluster_parents=None,
