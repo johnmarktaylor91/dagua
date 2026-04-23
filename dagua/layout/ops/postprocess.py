@@ -579,6 +579,13 @@ class AspectRatioFit(Op):
         pos = state.pos
         if pos.shape[0] < 2:
             return state
+        # Skip cluster-aware graphs: clusters have natural aspect
+        # preferences (usually wider-than-square), and forcing to the
+        # default square target regressed clustered_shallow -6.6% in
+        # Sprint 13 r2 preflight. Cluster-centroid pinning + explicit
+        # cluster-aware rescale can be added later as Sprint 15.
+        if problem.clusters:
+            return state
 
         x_min = float(pos[:, 0].min().item())
         x_max = float(pos[:, 0].max().item())
