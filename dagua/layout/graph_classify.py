@@ -38,6 +38,7 @@ class GraphStructure:
     num_layers: int
     avg_layer_width: float
     is_planar_hint: bool
+    is_acyclic: bool = True
 
 
 def _compute_degree(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -246,6 +247,7 @@ def classify_graph(
             num_layers=num_layers,
             avg_layer_width=avg_layer_width,
             is_planar_hint=num_edges < 3 * num_nodes - 6,
+            is_acyclic=True,
         )
 
     degree = _compute_degree(edge_index, num_nodes)
@@ -295,4 +297,5 @@ def classify_graph(
         num_layers=num_layers,
         avg_layer_width=avg_layer_width,
         is_planar_hint=is_planar_hint,
+        is_acyclic=is_acyclic,
     )
