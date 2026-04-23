@@ -1027,33 +1027,34 @@ class DaguaGraph:
                     and label
                     and getattr(style, "auto_expand_on_floor_overflow", True)
                 ):
-                    from dagua.utils import (
-                        CURVED_NODE_SHAPES,
-                        CURVED_SHAPE_INSCRIBE_FACTOR,
-                        _measure_label_bounds,
-                    )
-
-                    text_w, text_h = _measure_label_bounds(
+                    # Sprint 7 r2: delegate the shape-aware expansion to
+                    # compute_node_size under overflow_policy="expand_node".
+                    # It already knows every shape's interior-loss rule
+                    # (diamond, stadium, hexagon, pentagon, octagon,
+                    # triangle, star, circle, ellipse, ...), so a second
+                    # call at the floor font size returns a bbox that
+                    # actually contains the text for ALL shapes -- not
+                    # just the curved ones.
+                    expand_w, expand_h, _ = compute_node_size(
                         label,
                         ff,
-                        efs,
-                        style.font_weight,
-                        style.font_style,
-                        style.text_wrap,
-                        style.text_max_width,
-                        style.text_transform,
-                        style.label_format,
-                        style.text_rotation,
+                        efs,  # measure at the FLOOR font size
+                        padding,
+                        shape=style.shape,
+                        font_weight=style.font_weight,
+                        font_style=style.font_style,
+                        text_wrap=style.text_wrap,
+                        text_max_width=style.text_max_width,
+                        text_transform=style.text_transform,
+                        overflow_policy="expand_node",
+                        min_font_size=style.min_font_size,
+                        label_format=style.label_format,
+                        text_rotation=style.text_rotation,
                     )
-                    required_w = text_w + padding[0] * 2
-                    required_h = text_h + padding[1] * 2
-                    if style.shape in CURVED_NODE_SHAPES:
-                        required_w *= CURVED_SHAPE_INSCRIBE_FACTOR
-                        required_h *= CURVED_SHAPE_INSCRIBE_FACTOR
-                    if required_w > w:
-                        w = required_w
-                    if required_h > h:
-                        h = required_h
+                    if expand_w > w:
+                        w = expand_w
+                    if expand_h > h:
+                        h = expand_h
             # Enforce aspect ratio: grow the smaller dimension to match.
             # aspect_ratio = width / height, so height = width / ratio.
             if style.aspect_ratio is not None and style.aspect_ratio > 0:
