@@ -19,6 +19,7 @@ from dagua.layout.ops.anneal import (
     InitAnnealingScheduleConfig,
     WeightAnnealing,
 )
+from dagua.layout.ops.barycenter import BarycenterReorder, BarycenterReorderConfig
 from dagua.layout.ops.base import EarlyBreak, LossGroup, Pipeline, Repeat
 from dagua.layout.ops.coarsen import HeavyEdgeMatching
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig, StallCount, StallCountConfig
@@ -34,6 +35,7 @@ from dagua.layout.ops.optimize import (
     OptimizerStep,
     OptimizerZeroGrad,
 )
+from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
 from dagua.layout.ops.project import (
     HardPinProjection,
     OverlapProjection,
@@ -369,12 +371,25 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
                 stall_limit=stall_limit,
                 rel_threshold=rel_threshold,
             ),
+            # Sprint 10: barycenter crossing-minimization polish.
+            # Runs after gradient_core / V-cycle so continuous layout
+            # sets y-coordinates + a first-pass x ordering, then this
+            # op reorders within-layer x-positions by barycenter of
+            # adjacent-layer neighbours. Preserves y (DAG direction)
+            # and overlap (permutes the same set of x's).
+            BarycenterReorder(BarycenterReorderConfig()),
             OverlapProjection(
                 OverlapProjectionConfig(
                     padding=2.0,
                     iterations=final_projection_iterations,
                 ),
             ),
+            # Sprint 13: rescale bbox to a sane aspect ratio. Dagua
+            # loses heavily on aspect_ratio_deviation because the
+            # gradient has no explicit AR term; layouts grow wherever
+            # repulsion pushes. This op is a uniform-per-axis rescale
+            # (preserves overlap-free property).
+            AspectRatioFit(AspectRatioFitConfig()),
         ],
         name="dagua_native_pipeline",
     )
@@ -456,6 +471,34 @@ def layout_dagua_native_pipeline(
             optimizer_type=optimizer_type,
         ),
     )
+    # Sprint 12: tree topology fast path. If the graph classifies as a
+    # rooted tree (|E| == N-1, 1 component, acyclic), skip the entire
+    # gradient pipeline and use the classical Reingold-Tilford layout.
+    # Trees are the single-most-winning competitor family (igraph_rt),
+    # and Dagua's general Sugiyama-over-gradient produces unnecessary
+    # crossings on them (205 crossings on binary_tree_127 where
+    # dot/elk/dagre produce 0). The exact R-T output has 0 crossings
+    # and optimal aesthetic by construction.
+    from dagua.layout.graph_classify import GraphFamily, classify_graph
+    from dagua.layout.ops.coordinate import (
+        ReingoldTilfordTree,
+        ReingoldTilfordTreeConfig,
+    )
+
+    structure = (
+        prepared_config.structure
+        if getattr(prepared_config, "structure", None) is not None
+        else classify_graph(prepared_edge_index, num_nodes)
+    )
+    if (
+        getattr(structure, "family", None) == GraphFamily.TREE
+        and getattr(config, "use_tree_fast_path", True)
+        and num_nodes > 0
+    ):
+        rt_state = ReingoldTilfordTree(ReingoldTilfordTreeConfig()).apply(problem, state, ctx)
+        if rt_state.pos is not None:
+            return rt_state.pos.detach()
+
     final_state = build_dagua_pipeline(prepared_config).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("dagua_native pipeline did not produce final positions.")

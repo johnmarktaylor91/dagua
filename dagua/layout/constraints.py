@@ -171,7 +171,21 @@ def edge_length_variance_loss(
     edge_index: torch.Tensor,
     edge_ctx: Optional[EdgeBatchLike] = None,
 ) -> torch.Tensor:
-    """Penalize variance of edge lengths.
+    """Penalize relative (scale-invariant) variation in edge lengths.
+
+    Sprint 11: the legacy formulation returned raw ``lengths.var()``,
+    whose magnitude scales with (mean_length)^2. On layouts with
+    typical edge lengths 50-200, the variance was in the thousands
+    and the config default weight 0.7 made this loss's gradient
+    either dominate or be swamped depending on graph scale -- and
+    Dagua wins 0/17 holdout graphs on ``edge_length_cv``.
+
+    New formulation: coefficient-of-variation squared =
+    ``var(lengths) / mean(lengths)^2``. Scale-invariant, bounded
+    roughly in [0, ~1], directly targets the metric we're evaluated on.
+    Combined with a proportionally-larger default weight (tuned in
+    :mod:`dagua.config`), this makes edge uniformity an active
+    constraint during gradient descent instead of background noise.
 
     Parameters
     ----------
@@ -185,7 +199,7 @@ def edge_length_variance_loss(
     Returns
     -------
     torch.Tensor
-        Scalar loss value.
+        Scalar loss value (approximately CV^2 of edge lengths).
     """
     if edge_ctx is not None:
         dist_sq = edge_ctx.dist_sq
@@ -201,7 +215,8 @@ def edge_length_variance_loss(
     lengths = dist_sq.add(1e-8).sqrt()
     if lengths.numel() <= 1:
         return torch.tensor(0.0, device=pos.device)
-    return lengths.var()
+    mean_len = lengths.mean().clamp(min=1e-6)
+    return lengths.var() / (mean_len * mean_len)
 
 
 # ─── Repulsion (fully vectorized — no per-layer Python loops) ────────────────
