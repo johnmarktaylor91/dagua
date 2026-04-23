@@ -33,9 +33,114 @@ from dagua.layout.ops.state import HierarchyLevel, LayoutProblem, RuntimeContext
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 
+def _compose_finest_to_coarse(
+    hierarchy: list, level_idx: int, device: torch.device
+) -> torch.Tensor:
+    """Return tensor mapping finest (original) node id -> coarse id at
+    ``hierarchy[level_idx]``.
+
+    ``hierarchy[0].fine_to_coarse`` maps the original problem's node ids to
+    level-0 coarse ids. Each subsequent level chains on top of the previous,
+    so the composed mapping is just nested indexing.
+    """
+    composed = hierarchy[0].fine_to_coarse.to(device=device, dtype=torch.long)
+    for k in range(1, level_idx + 1):
+        next_map = hierarchy[k].fine_to_coarse.to(device=device, dtype=torch.long)
+        composed = next_map[composed]
+    return composed
+
+
+def _propagate_flex_to_coarse(
+    flex,
+    composed_mapping: torch.Tensor,
+    num_coarse: int,
+):
+    """Propagate a finest-level ``FlexConstraints`` to a coarse level.
+
+    Pins: each finest pin is moved onto the coarse node that contains its
+    fine target. When multiple fine pins collapse into the same coarse
+    node, the first one (lowest fine index) wins. This preserves the
+    user-specified target on the coarse-level representative so coarse
+    refinement doesn't wander, and prolongation seeds the finer levels
+    with a position already close to the user's intent.
+
+    Align groups: fine member indices are mapped through the composed
+    coarsening. A group collapses if fewer than 2 distinct coarse members
+    remain (nothing to align). Group weight and axis are preserved.
+
+    Flex spacing (flex_node_sep / flex_node_sep_weight) propagates as-is
+    -- the target spacing is a user-facing constant that doesn't depend
+    on how many coarse representatives we ended up with.
+    """
+    if flex is None:
+        return None
+
+    # `FlexConstraints` is defined in state.py; import lazily to avoid cycles.
+    from dagua.layout.ops.state import FlexConstraints  # noqa: WPS433
+
+    device = composed_mapping.device
+    coarse_pin_indices = None
+    coarse_pin_targets = None
+    coarse_pin_weights = None
+    coarse_soft_mask = None
+    coarse_hard_mask = None
+    if flex.pin_indices is not None and flex.pin_indices.numel() > 0:
+        fine_idx_cpu = flex.pin_indices.to(device=device, dtype=torch.long)
+        coarse_ids = composed_mapping[fine_idx_cpu]  # [P]
+        seen: dict[int, int] = {}
+        keep_fine_positions: list[int] = []
+        for p, c in enumerate(coarse_ids.tolist()):
+            if c in seen:
+                continue
+            seen[c] = p
+            keep_fine_positions.append(p)
+        if keep_fine_positions:
+            keep_tensor = torch.tensor(keep_fine_positions, dtype=torch.long, device=device)
+            coarse_pin_indices = coarse_ids[keep_tensor]
+            coarse_pin_targets = flex.pin_targets.to(device=device)[keep_tensor]
+            coarse_pin_weights = flex.pin_weights.to(device=device)[keep_tensor]
+            if flex.soft_pin_mask is not None:
+                coarse_soft_mask = flex.soft_pin_mask.to(device=device)[keep_tensor]
+            if flex.hard_pin_mask is not None:
+                coarse_hard_mask = flex.hard_pin_mask.to(device=device)[keep_tensor]
+
+    coarse_align_groups = None
+    if flex.align_groups:
+        new_groups = []
+        for group in flex.align_groups:
+            indices, weight, axis = group[0], group[1], group[2]
+            fine_indices = indices.to(device=device, dtype=torch.long)
+            # Only keep fine indices inside the finest node-id range (the
+            # composed_mapping doesn't know about out-of-range ids).
+            valid = (fine_indices >= 0) & (fine_indices < composed_mapping.numel())
+            if not valid.any():
+                continue
+            coarse_ids = composed_mapping[fine_indices[valid]]
+            unique_coarse = torch.unique(coarse_ids)
+            if unique_coarse.numel() >= 2:
+                new_groups.append((unique_coarse, weight, axis))
+        if new_groups:
+            coarse_align_groups = new_groups
+
+    if coarse_pin_indices is None and coarse_align_groups is None and flex.flex_node_sep is None:
+        return None
+
+    return FlexConstraints(
+        pin_indices=coarse_pin_indices,
+        pin_targets=coarse_pin_targets,
+        pin_weights=coarse_pin_weights,
+        soft_pin_mask=coarse_soft_mask,
+        hard_pin_mask=coarse_hard_mask,
+        align_groups=coarse_align_groups,
+        flex_node_sep=flex.flex_node_sep,
+        flex_node_sep_weight=flex.flex_node_sep_weight,
+    )
+
+
 def _level_problem(
     problem: LayoutProblem,
     level: HierarchyLevel,
+    flex=None,
 ) -> LayoutProblem:
     """Build a per-level ``LayoutProblem`` view.
 
@@ -45,14 +150,20 @@ def _level_problem(
         Top-level immutable problem (the finest graph).
     level : HierarchyLevel
         Coarsened level to build a problem for.
+    flex : FlexConstraints | None, default=None
+        Propagated coarse flex (from ``_propagate_flex_to_coarse``). When
+        the level represents a coarsening of the FINEST problem and a
+        FlexConstraints view has been propagated, pass it here so coarse
+        refinement honours pins and alignment groups; otherwise ``None``
+        leaves the coarse level unconstrained.
 
     Returns
     -------
     LayoutProblem
         A new ``LayoutProblem`` whose ``edge_index`` and ``node_sizes`` come
-        from ``level``; direction / seed / flex inherit from the finest
-        problem. Clusters and flex do NOT propagate to coarse levels in the
-        MVP (Sprint 5 handles flex propagation).
+        from ``level``; direction / seed inherit from the finest problem.
+        Clusters do NOT propagate to coarse levels in the Sprint 5 scope
+        (cluster-centroid pinning is tracked separately).
     """
     if level.edge_index is None or level.fine_to_coarse is None:
         raise ValueError("Hierarchy level is offloaded; reload before use.")
@@ -63,7 +174,7 @@ def _level_problem(
         direction=problem.direction,
         clusters=None,
         cluster_parents=None,
-        flex=None,
+        flex=flex,
         edge_weights=None,
         seed=problem.seed,
     )
@@ -175,9 +286,22 @@ class VCycleRefine(Op):
                 "VCycleRefine requires coarse_init_pipeline and refine_pipeline_factory."
             )
 
+        # Precompute flex propagation per level BEFORE init so coarse
+        # refinement honours user pins and alignment groups (Sprint 5).
+        level_flex: list = [None] * len(hierarchy)
+        if problem.flex is not None:
+            # Anchor the composed mapping on the device the hierarchy uses.
+            ref_tensor = hierarchy[0].fine_to_coarse
+            fine_device = ref_tensor.device if ref_tensor is not None else torch.device("cpu")
+            for k in range(len(hierarchy)):
+                composed = _compose_finest_to_coarse(hierarchy, k, device=fine_device)
+                level_flex[k] = _propagate_flex_to_coarse(
+                    problem.flex, composed, hierarchy[k].num_nodes
+                )
+
         # 1. Init on coarsest level.
         coarsest_level = hierarchy[-1]
-        coarsest_problem = _level_problem(problem, coarsest_level)
+        coarsest_problem = _level_problem(problem, coarsest_level, flex=level_flex[-1])
         init_pipeline = self.coarse_init_pipeline(coarsest_problem)
         state.pos = None  # force coarse init (NativeEngineInit reseeds when pos is None)
         state = init_pipeline.apply(coarsest_problem, state, ctx)
@@ -226,7 +350,9 @@ class VCycleRefine(Op):
             if level_idx == 0:
                 fine_problem = problem  # finest == user's graph
             else:
-                fine_problem = _level_problem(problem, hierarchy[level_idx - 1])
+                fine_problem = _level_problem(
+                    problem, hierarchy[level_idx - 1], flex=level_flex[level_idx - 1]
+                )
 
             # Sprint 2 bug-fix: reset per-level solve bookkeeping so each
             # level behaves like an independent solve. Carrying step,
