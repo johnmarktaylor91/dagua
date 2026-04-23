@@ -1957,9 +1957,15 @@ def _longest_path_layering_vectorized(
 
     try:
         src, tgt = edge_index[0], edge_index[1]
-        if compute_device == "cuda":
-            src = src.to("cuda")
-            tgt = tgt.to("cuda")
+        # Sprint 8 fix: move src/tgt to whichever compute_device was
+        # picked, regardless of the caller-supplied edge_index device.
+        # Callers running through the V-cycle path now pass CUDA edge
+        # indices (so coarse-level losses can index CUDA pos), but this
+        # layering routine may still pick "cpu" compute_device when the
+        # VRAM budget doesn't fit.
+        if src.device.type != compute_device:
+            src = src.to(compute_device)
+            tgt = tgt.to(compute_device)
         chunked = N > _STREAMING_NODE_THRESHOLD
 
         # Use int32 for working arrays when chunked (saves 12 GB at 1B nodes).
