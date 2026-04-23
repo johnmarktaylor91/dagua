@@ -222,6 +222,7 @@ __all__ = [
 
 _EXPECTED_OP_MODULES = (
     "anneal",
+    "barycenter",
     "coarsen",
     "context",
     "converge",
