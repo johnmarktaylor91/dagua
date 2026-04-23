@@ -48,7 +48,11 @@ class LayoutConfig:
     w_dag: float = 10.0
     w_attract: float = 2.0
     w_attract_x_bias: float = 2.4
-    w_repel: float = 0.1
+    # Sprint 16: bumped 0.1 -> 0.2 after holdout sweep. +3.14 composite
+    # on bipartite, zero change on the other 20 families. Bipartite
+    # graphs need stronger repulsion to spread their two layers apart;
+    # other families have other constraints dominating already.
+    w_repel: float = 0.2
     w_overlap: float = 5.0
     w_cluster: float = 1.0
     w_cluster_contain: float = 2.0  # child clusters stay within parent bbox
@@ -61,6 +65,14 @@ class LayoutConfig:
     # gradient contribution comparable AND make edge uniformity a
     # stronger effective constraint (the metric we're being judged on).
     w_length_variance: float = 8.0
+    # Sprint 15: pivot-approximated graph-theoretic stress loss.
+    # Targets `sampled_stress` metric where Dagua wins 1.9% in the
+    # forward-memo benchmark. Default 0.0 = disabled (opt-in via
+    # LayoutConfig(w_stress=0.1) for graphs where node-distance
+    # fidelity matters). Non-zero triggers pivot adjacency + distance
+    # pre-computation at pipeline build time.
+    w_stress: float = 0.0
+    w_stress_n_pivots: int = 50
     w_spacing: float = 0.3  # penalize deviation from target node_sep within layers
     w_fanout: float = 0.3  # penalize uneven angular spread of high-degree node children
     w_back_edge: float = 0.3  # penalize wide back-edge arcs (horizontal distance)
