@@ -257,6 +257,76 @@ def test_pin_dedup_prefers_hard_over_soft():
 
 
 @pytest.mark.unit
+def test_vcycle_actually_passes_propagated_align_groups_to_coarse_refine():
+    """Sprint 5 r2: AlignmentLoss must run on coarse levels with propagated
+    align groups. Spy on AlignmentLoss.evaluate to confirm coarse-level
+    invocations have non-empty align_groups (mirrors the pin spy below)."""
+    from dagua.layout.ops.loss_engine import AlignmentLoss
+
+    seen_groups: list = []
+    seen_num_nodes: list[int] = []
+    orig_evaluate = AlignmentLoss.evaluate
+
+    def spy(self, problem, state, ctx):
+        if (
+            problem.flex is not None
+            and problem.flex.align_groups is not None
+            and len(problem.flex.align_groups) > 0
+        ):
+            seen_groups.append(len(problem.flex.align_groups))
+            seen_num_nodes.append(problem.num_nodes)
+        return orig_evaluate(self, problem, state, ctx)
+
+    AlignmentLoss.evaluate = spy
+    try:
+        g = make_chain(5000, seed=42).graph
+        g.compute_node_sizes()
+        g.align([0, 1000, 2000, 3000, 4000], axis="x", weight=10.0)
+        cfg = LayoutConfig(seed=42, steps=5, multilevel_threshold=1000)
+        cfg.flex = g.flex
+        engine_layout(g, cfg)
+    finally:
+        AlignmentLoss.evaluate = orig_evaluate
+
+    assert seen_groups, "AlignmentLoss never saw any propagated align groups"
+    coarse_calls = [n for n in seen_num_nodes if n < 5000]
+    assert coarse_calls, (
+        "AlignmentLoss only ran on the finest level; coarse levels are "
+        "still running without propagated align groups"
+    )
+
+
+@pytest.mark.unit
+def test_alignment_pulls_members_toward_group_axis_through_vcycle():
+    """End-to-end behavioural test: with propagated align groups + Huber-
+    safe scaling, aligned members should land closer in x than an
+    identical un-aligned run. Mirrors the soft-pin convergence test."""
+    target_ids = [0, 1000, 2000, 3000, 4000]
+
+    def _run(with_align: bool):
+        g = make_chain(3000, seed=42).graph
+        # Bound target_ids to the actual node range in this smaller graph.
+        bounded = [nid for nid in target_ids if nid < g.num_nodes]
+        g.compute_node_sizes()
+        if with_align:
+            g.align(bounded, axis="x", weight=200.0)
+            cfg = LayoutConfig(seed=42, steps=40, multilevel_threshold=1000)
+            cfg.flex = g.flex
+        else:
+            cfg = LayoutConfig(seed=42, steps=40, multilevel_threshold=1000)
+        pos = engine_layout(g, cfg)
+        xs = [pos[g._id_to_index[nid], 0].item() for nid in bounded]
+        return max(xs) - min(xs)
+
+    spread_aligned = _run(with_align=True)
+    spread_plain = _run(with_align=False)
+    assert spread_aligned < 0.7 * spread_plain, (
+        f"alignment did not measurably collapse x spread: "
+        f"aligned={spread_aligned:.1f}, plain={spread_plain:.1f}"
+    )
+
+
+@pytest.mark.unit
 def test_vcycle_actually_passes_propagated_flex_to_coarse_refine():
     """End-to-end: a pin on the finest graph must end up in the coarse-
     level problem.flex seen by refine ops. We patch PositionPinLoss'
