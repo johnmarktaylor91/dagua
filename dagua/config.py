@@ -167,12 +167,25 @@ class LayoutConfig:
     # user who wants the heuristic path shouldn't have to also remember
     # to pass edge_opt_steps=-1.
     edge_routing: str = "differentiable"
-    w_edge_crossing: float = 5.0
+    # Sprint 6 r2: re-tuned edge-CP loss weights. The Sprint 5 defaults
+    # (crossing=5, node_crossing=10, angular=2, curv_cons=1, curv_pen=0.5,
+    # cluster_cross=8) produced NEGATIVE edge-node-crossing drops on
+    # trees (-27.7% on tree_branching_4 n=800; -13.4% on branching_3).
+    # Per-loss ablation showed angular_res and curv_consistency each
+    # REGRESS crossings by ~6%, curv_penalty IMPROVES by ~52%, and
+    # edge_crossing+cluster_crossing are modestly positive. New defaults
+    # zero the saboteurs, strengthen curv_penalty, soften edge_crossing.
+    # Result on trees: +52% / +56% drop; dense DAGs neutral (no room to
+    # route around). Aggregate drop on the 39-graph held-out is dominated
+    # by dense graphs where edge-node crossings are inherent to the
+    # topology -- the 30% aggregate target is a Sprint 6.5 tuning
+    # bundle, not a default-weight fix.
+    w_edge_crossing: float = 0.5
     w_edge_node_crossing: float = 10.0
-    w_edge_angular_res: float = 2.0
-    w_edge_curvature_consistency: float = 1.0
-    w_edge_curvature_penalty: float = 0.5
-    w_edge_cluster_crossing: float = 8.0  # penalize edges through foreign clusters
+    w_edge_angular_res: float = 0.0
+    w_edge_curvature_consistency: float = 0.0
+    w_edge_curvature_penalty: float = 1.0
+    w_edge_cluster_crossing: float = 4.0  # penalize edges through foreign clusters
 
     # Optional algorithm override for direct pipeline-based layouts.
     # None routes to the native multilevel/direct engine.
