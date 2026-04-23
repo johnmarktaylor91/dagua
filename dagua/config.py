@@ -160,6 +160,13 @@ class LayoutConfig:
     # 0 = auto-scale based on edge count, -1 = skip (zero overhead)
     edge_opt_steps: int = 0
     edge_opt_lr: float = 0.1
+    # Sprint 6 user opt-out: "differentiable" runs optimize_edges (the
+    # default; unchanged from Sprint 5 behaviour), "heuristic" skips
+    # gradient refinement entirely and keeps the heuristic bezier curves
+    # produced by route_edges. Takes precedence over edge_opt_steps -- a
+    # user who wants the heuristic path shouldn't have to also remember
+    # to pass edge_opt_steps=-1.
+    edge_routing: str = "differentiable"
     w_edge_crossing: float = 5.0
     w_edge_node_crossing: float = 10.0
     w_edge_angular_res: float = 2.0
