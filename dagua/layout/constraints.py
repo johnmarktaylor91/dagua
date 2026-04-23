@@ -1289,24 +1289,90 @@ class _ClusterCache:
             self.containment_count = 0
 
 
+def _segment_arg_first_match(
+    values_per_row: torch.Tensor,
+    cluster_idx_flat: torch.Tensor,
+    num_clusters: int,
+    ref_per_row: torch.Tensor,
+) -> torch.Tensor:
+    """Return per-cluster row id of the FIRST row matching the cluster's reference.
+
+    Used as segment-argmin / segment-argmax with first-occurrence tie-break,
+    matching ``torch.min(dim=0).indices`` / ``torch.max(dim=0).indices``
+    semantics exactly. Caller must compute ``ref_per_row`` as the per-cluster
+    extremum (under no_grad).
+    """
+    R = values_per_row.shape[0]
+    if R == 0:
+        return torch.empty(num_clusters, dtype=torch.long, device=values_per_row.device)
+    match = values_per_row == ref_per_row
+    row_ids = torch.arange(R, device=values_per_row.device, dtype=torch.long)
+    sentinel = torch.full_like(row_ids, R)
+    candidate = torch.where(match, row_ids, sentinel)
+    first = torch.full((num_clusters,), R, dtype=torch.long, device=values_per_row.device)
+    first.scatter_reduce_(0, cluster_idx_flat, candidate, reduce="amin", include_self=True)
+    return first
+
+
 def _bbox_min_max_per_cluster(
     pos: torch.Tensor,
     cache: _ClusterCache,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Return (bbox_min, bbox_max) tensors of shape [C, 2] via scatter_reduce.
+    """Return (bbox_min, bbox_max) tensors of shape [C, 2].
 
-    Gradients flow through scatter_reduce(amin/amax) at the argmin/argmax
-    elements only -- same gradient semantics as ``pos[idx].min(dim=0).values``
-    used by the legacy loops, so behaviour is preserved.
+    Gradient routing matches the legacy ``pos[idx].min(dim=0).values`` /
+    ``.max(dim=0).values`` bit-for-bit, including the tie-breaking rule
+    (lowest row id wins). Implementation:
+
+    1. Compute per-cluster min/max VALUES under ``no_grad`` via
+       ``scatter_reduce(amin/amax)`` -- reference floats only, no autograd.
+    2. For each axis, find the first row in each cluster matching that
+       reference (segment-argmin / -argmax with first-occurrence tie-break).
+    3. Re-index the LIVE ``pos`` tensor at those rows. Backprop now flows
+       through indexed gather to exactly ONE argmin / argmax row per
+       cluster per axis -- identical to legacy ``min(dim=0)`` semantics
+       even when multiple cluster members tie at the boundary.
     """
     pos_per_row = pos[cache.node_idx_flat]  # [R, 2]
     cluster_idx_2d = cache.cluster_idx_flat.unsqueeze(1).expand_as(pos_per_row)
-    bbox_min = torch.full((cache.num_clusters, 2), float("inf"), device=pos.device, dtype=pos.dtype)
-    bbox_min.scatter_reduce_(0, cluster_idx_2d, pos_per_row, reduce="amin", include_self=True)
-    bbox_max = torch.full(
-        (cache.num_clusters, 2), float("-inf"), device=pos.device, dtype=pos.dtype
-    )
-    bbox_max.scatter_reduce_(0, cluster_idx_2d, pos_per_row, reduce="amax", include_self=True)
+
+    with torch.no_grad():
+        ref_min = torch.full(
+            (cache.num_clusters, 2), float("inf"), device=pos.device, dtype=pos.dtype
+        )
+        ref_min.scatter_reduce_(0, cluster_idx_2d, pos_per_row, reduce="amin", include_self=True)
+        ref_max = torch.full(
+            (cache.num_clusters, 2), float("-inf"), device=pos.device, dtype=pos.dtype
+        )
+        ref_max.scatter_reduce_(0, cluster_idx_2d, pos_per_row, reduce="amax", include_self=True)
+
+        argmin_x = _segment_arg_first_match(
+            pos_per_row[:, 0],
+            cache.cluster_idx_flat,
+            cache.num_clusters,
+            ref_min[cache.cluster_idx_flat, 0],
+        )
+        argmin_y = _segment_arg_first_match(
+            pos_per_row[:, 1],
+            cache.cluster_idx_flat,
+            cache.num_clusters,
+            ref_min[cache.cluster_idx_flat, 1],
+        )
+        argmax_x = _segment_arg_first_match(
+            pos_per_row[:, 0],
+            cache.cluster_idx_flat,
+            cache.num_clusters,
+            ref_max[cache.cluster_idx_flat, 0],
+        )
+        argmax_y = _segment_arg_first_match(
+            pos_per_row[:, 1],
+            cache.cluster_idx_flat,
+            cache.num_clusters,
+            ref_max[cache.cluster_idx_flat, 1],
+        )
+
+    bbox_min = torch.stack((pos_per_row[argmin_x, 0], pos_per_row[argmin_y, 1]), dim=1)
+    bbox_max = torch.stack((pos_per_row[argmax_x, 0], pos_per_row[argmax_y, 1]), dim=1)
     return bbox_min, bbox_max
 
 
