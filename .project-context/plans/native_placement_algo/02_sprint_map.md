@@ -254,17 +254,41 @@ See 15_sprint_pinning_flex.md.
   `_level_problem` drops cluster data on coarse levels -- that's
   the scope of 5.5).
 
-### Sprint 6.5 -- Edge-CP Routing, Dense-Graph Tuning (tracked)
-- Goal: close the edge-node crossings drop gap on dense families
-  (random_dag, sparse_layered, bipartite, complete_bipartite) where
-  Sprint 6 r2 is neutral because edges inherently must pass through
-  unrelated nodes in the heuristic layout -- CP refinement alone
-  can't find a routing solution that doesn't exist. Requires one of:
+### Sprint 6.5 -- Edge-CP Routing, Dense + Nested-Cluster Tuning (tracked)
+- Goal: close the edge-node crossings drop gap on TWO remaining
+  family groups:
+
+  * DENSE (random_dag, sparse_layered, bipartite): Sprint 6 r2 is
+    neutral because edges inherently must pass through unrelated
+    nodes in the heuristic layout -- CP refinement alone can't find
+    a routing solution that doesn't exist.
+  * NESTED CLUSTERS (nested_2lvl, nested_3lvl, nested_4lvl): Sprint 6
+    r2 REGRESSES these families (nested_2lvl heuristic=0, differentiable=33
+    creating crossings from nothing; nested_3lvl -78%, nested_4lvl -140%).
+    Root cause: the heuristic route_edges already produces near-optimal
+    paths inside nested clusters (short, straight, cluster-respecting),
+    and CP refinement pushes edges outward (responding to node-crossing
+    + curvature pressure) right through neighbouring cluster members.
+    No weight combination of the existing six losses fixes this:
+    cluster_crossing at 12 (Sprint 5 default=8) still produces the
+    regression because the loss penalizes edges crossing FOREIGN
+    clusters only, not edges breaking same-cluster locality.
+
+  Sprint 6.5 requires one of:
   a) topology-aware orthogonal routing (Graphviz-style visibility
-  graph polish), b) bundled confluence paths at endpoints (Pupyrev
-  2013), or c) layer-aware channel assignment (Sugiyama-style edge
-  routing). Driven by the held-out audit numbers from Sprint 6 r2;
-  no code change in Sprint 6.5 until we pick one of a/b/c.
+     graph polish) for dense graphs
+  b) cluster-locality loss (penalize cluster-member edges that leave
+     their cluster bbox mid-path) for nested graphs
+  c) adaptive step budget: skip CP refinement when the heuristic
+     edge-node crossing count is below a per-graph threshold
+     (trivial; closes the nested regression immediately)
+  d) bundled confluence paths at endpoints (Pupyrev 2013)
+  e) layer-aware channel assignment (Sugiyama-style edge routing)
+
+  Driven by the held-out audit numbers from Sprint 6 r2 (see
+  eval_output/native_algo/sprint_6_edge_routing/report.json). Start
+  with (c) because it's 10 lines of code and closes the worst-case
+  regression; then pick from (a)/(b)/(d)/(e) for the positive gains.
 
 ### Sprint 6 -- Differentiable Edge Routing -- CP+SS+AR
 See 16_sprint_edge_routing.md.

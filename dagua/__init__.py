@@ -143,11 +143,28 @@ def draw(
         getattr(config, "edge_routing", "differentiable") == "differentiable"
         and getattr(config, "edge_opt_steps", 0) >= 0
     ):
-        from dagua.layout.edge_optimization import optimize_edges
+        # Sprint 6 r3: adaptive skip when the heuristic already produces
+        # a near-optimal routing. The Sprint 6 audit revealed that nested
+        # cluster graphs (nested_2lvl/3lvl/4lvl) have zero or very few
+        # edge-node crossings under heuristic routing, and CP refinement
+        # CREATES new crossings there (nested_2lvl went 0 -> 33 under
+        # Sprint-5 defaults; the heuristic path already respects cluster
+        # locality which the six CP losses don't model). Skipping when
+        # heuristic crossings < adaptive_skip_threshold (default 5) closes
+        # that regression without touching graph families where
+        # differentiable mode meaningfully wins.
+        from dagua.metrics import edge_node_crossing_count
 
-        curves = optimize_edges(
-            curves, positions, graph.edge_index, graph.node_sizes, config, graph
-        )
+        heur_crossings = edge_node_crossing_count(
+            curves, positions, graph.node_sizes, graph.edge_index
+        )["edge_node_crossings"]
+        threshold = getattr(config, "edge_routing_auto_skip_threshold", 5)
+        if heur_crossings >= threshold:
+            from dagua.layout.edge_optimization import optimize_edges
+
+            curves = optimize_edges(
+                curves, positions, graph.edge_index, graph.node_sizes, config, graph
+            )
 
     label_positions = place_edge_labels(
         curves, positions, graph.node_sizes, graph.edge_labels, graph
