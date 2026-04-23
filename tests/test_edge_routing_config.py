@@ -64,7 +64,13 @@ def test_heuristic_mode_skips_optimize_edges():
 
 @pytest.mark.unit
 def test_differentiable_mode_calls_optimize_edges():
-    """``edge_routing='differentiable'`` (default) must call optimize_edges."""
+    """``edge_routing='differentiable'`` (default) must call optimize_edges
+    when the heuristic routing has non-trivial edge-node crossings.
+    The Sprint 6 r3 adaptive-skip guard short-circuits when heuristic
+    crossings are below ``edge_routing_auto_skip_threshold`` (protects
+    nested clusters). We force the refinement path by setting the
+    threshold to 0.
+    """
     from dagua.layout import edge_optimization as eo
 
     call_count = {"n": 0}
@@ -77,7 +83,11 @@ def test_differentiable_mode_calls_optimize_edges():
     eo.optimize_edges = spy
     try:
         g = _test_graph()
-        cfg = LayoutConfig(seed=42, edge_routing="differentiable")
+        cfg = LayoutConfig(
+            seed=42,
+            edge_routing="differentiable",
+            edge_routing_auto_skip_threshold=0,
+        )
         import dagua
 
         dagua.draw(g, cfg)
@@ -85,6 +95,46 @@ def test_differentiable_mode_calls_optimize_edges():
         eo.optimize_edges = orig
 
     assert call_count["n"] >= 1, "differentiable edge routing did not run"
+
+
+@pytest.mark.unit
+def test_auto_skip_threshold_bypasses_refinement_when_heuristic_clean():
+    """Sprint 6 r3: when heuristic routing produces fewer than
+    ``edge_routing_auto_skip_threshold`` edge-node crossings, the
+    differentiable path must skip gradient refinement. This protects
+    graph families (notably nested clusters) whose heuristic routing is
+    already near-optimal and where CP refinement WOULD create new
+    crossings.
+    """
+    from dagua.layout import edge_optimization as eo
+
+    call_count = {"n": 0}
+    orig = eo.optimize_edges
+
+    def spy(*args, **kwargs):
+        call_count["n"] += 1
+        return orig(*args, **kwargs)
+
+    eo.optimize_edges = spy
+    try:
+        # Two-node graph with one edge -- guaranteed zero crossings.
+        g = DaguaGraph()
+        g.add_node(0, label="0")
+        g.add_node(1, label="1")
+        g.add_edge(0, 1)
+        cfg = LayoutConfig(
+            seed=42, edge_routing="differentiable", edge_routing_auto_skip_threshold=5
+        )
+        import dagua
+
+        dagua.draw(g, cfg)
+    finally:
+        eo.optimize_edges = orig
+
+    assert call_count["n"] == 0, (
+        f"adaptive-skip did not trigger on a zero-crossing graph: "
+        f"optimize_edges called {call_count['n']} times"
+    )
 
 
 @pytest.mark.unit

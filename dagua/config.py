@@ -167,6 +167,15 @@ class LayoutConfig:
     # user who wants the heuristic path shouldn't have to also remember
     # to pass edge_opt_steps=-1.
     edge_routing: str = "differentiable"
+    # Sprint 6 r3: adaptive skip threshold. When edge_routing is
+    # "differentiable" but the heuristic routing already produces fewer
+    # than this many edge-node crossings, the gradient refinement is
+    # skipped entirely. Protects nested-cluster graphs whose heuristic
+    # routing is already near-optimal (CP refinement would create
+    # crossings; see audit at eval_output/native_algo/sprint_6_edge_routing/).
+    # Set to 0 to force refinement always, or a large number to force the
+    # heuristic path.
+    edge_routing_auto_skip_threshold: int = 5
     # Sprint 6 r2: re-tuned edge-CP loss weights. The Sprint 5 defaults
     # (crossing=5, node_crossing=10, angular=2, curv_cons=1, curv_pen=0.5,
     # cluster_cross=8) produced NEGATIVE edge-node-crossing drops on
