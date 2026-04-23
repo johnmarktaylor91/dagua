@@ -1012,6 +1012,48 @@ class DaguaGraph:
                     label_format=style.label_format,
                     text_rotation=style.text_rotation,
                 )
+                # Sprint 7 LabelSizeFeedbackLoop: if shrink_text hit the
+                # min_font_size floor AND the text STILL overflows the
+                # capped bbox (at the floor font size), fall back to
+                # expanding the bbox so the label doesn't clip.
+                # Preserves the user-visible min_width / min_height floor
+                # (w / h already honour it) and respects shape-specific
+                # inscribed-rectangle rules so ellipse/circle etc. keep
+                # enough padding around the text. Opt-out via
+                # style.auto_expand_on_floor_overflow=False for explicit
+                # fixed-size layouts that want the pre-Sprint-7 behaviour.
+                if (
+                    efs <= style.min_font_size + 1e-6
+                    and label
+                    and getattr(style, "auto_expand_on_floor_overflow", True)
+                ):
+                    from dagua.utils import (
+                        CURVED_NODE_SHAPES,
+                        CURVED_SHAPE_INSCRIBE_FACTOR,
+                        _measure_label_bounds,
+                    )
+
+                    text_w, text_h = _measure_label_bounds(
+                        label,
+                        ff,
+                        efs,
+                        style.font_weight,
+                        style.font_style,
+                        style.text_wrap,
+                        style.text_max_width,
+                        style.text_transform,
+                        style.label_format,
+                        style.text_rotation,
+                    )
+                    required_w = text_w + padding[0] * 2
+                    required_h = text_h + padding[1] * 2
+                    if style.shape in CURVED_NODE_SHAPES:
+                        required_w *= CURVED_SHAPE_INSCRIBE_FACTOR
+                        required_h *= CURVED_SHAPE_INSCRIBE_FACTOR
+                    if required_w > w:
+                        w = required_w
+                    if required_h > h:
+                        h = required_h
             # Enforce aspect ratio: grow the smaller dimension to match.
             # aspect_ratio = width / height, so height = width / ratio.
             if style.aspect_ratio is not None and style.aspect_ratio > 0:
