@@ -279,6 +279,7 @@ def prepare_pipeline_config(
     consumes.
     """
     effective_config = copy.copy(config)
+    structure: Optional[GraphStructure] = None
     if not skip_classification:
         structure = graph_structure
         if structure is None:
@@ -338,6 +339,13 @@ def prepare_pipeline_config(
     setattr(effective_config, "_dagua_native_rel_threshold", rel_threshold)
     setattr(effective_config, "_dagua_native_crossing_alpha", 3.0)
     setattr(effective_config, "_dagua_native_optimizer_type", "adam")
+    # Sprint 17: stash classified structure so downstream ops + loss-ops
+    # can gate behaviour on acyclicity / family without re-classifying.
+    # Used by:
+    # - build_loss_ops (skip DagOrderingLoss when graph is cyclic)
+    # - dagua_native_pipeline tree fast-path (already reads .structure)
+    setattr(effective_config, "structure", structure)
+    setattr(effective_config, "_dagua_native_structure", structure)
     # Sprint 2: multilevel V-cycle threshold. The infrastructure ships this
     # sprint (VCycleRefine op + threshold-based dispatch), but the V-cycle
     # produces catastrophic regressions on chains (21 vs legacy 100 at 25K)
@@ -368,7 +376,15 @@ def build_loss_ops(
 ) -> List[LossOp]:
     """Construct the active native-engine loss operators from a resolved config."""
     losses: List[LossOp] = []
-    if config.w_dag > 0.0:
+    # Sprint 17: skip DagOrderingLoss on cyclic graphs. The loss penalises
+    # every edge whose source-y >= target-y; on a cyclic graph (small_world,
+    # social-net), every back edge is a permanent violation and the term
+    # collapses the layout into a 1D stripe. Detect via stashed structure.
+    structure = getattr(config, "_dagua_native_structure", None) or getattr(
+        config, "structure", None
+    )
+    is_acyclic = bool(getattr(structure, "is_acyclic", True)) if structure is not None else True
+    if config.w_dag > 0.0 and is_acyclic:
         losses.append(DagOrderingLoss(DagOrderingLossConfig(rank_sep=rank_sep)))
     if config.w_attract > 0.0:
         losses.append(EdgeAttractionLoss(EdgeAttractionLossConfig(x_bias=config.w_attract_x_bias)))

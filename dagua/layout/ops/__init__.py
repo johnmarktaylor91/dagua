@@ -234,6 +234,7 @@ _EXPECTED_OP_MODULES = (
     "embed",
     "fmmm",
     "force",
+    "force_2d_init",
     "gem",
     "init",
     "layering",
