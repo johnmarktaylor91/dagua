@@ -1269,6 +1269,108 @@ def test_cluster_containment_loss_is_zero_without_hierarchy() -> None:
     assert loss.item() == pytest.approx(0.0, abs=1.0e-6)
 
 
+def test_cluster_separation_loss_grad_routes_to_one_row_per_cluster() -> None:
+    """With multiple cluster members tied at the bbox boundary, the gradient
+    must flow to exactly ONE row per cluster per axis -- matching the legacy
+    ``pos[idx].min(dim=0)`` first-occurrence semantics. Splitting gradient
+    across tied rows would make the cluster losses behave subtly differently
+    from the pre-vectorization implementation under highly symmetric inputs.
+    """
+
+    node_sizes = torch.full((12, 2), 4.0, dtype=torch.float32)
+    # Two clusters whose bboxes overlap (-> nonzero separation loss) AND
+    # whose min/max corners are duplicated within the cluster.
+    pos_tensor = torch.tensor(
+        [
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [10.0, 10.0],
+            [10.0, 10.0],
+            [5.0, 5.0],
+            [5.0, 5.0],
+            [5.0, 5.0],
+            [5.0, 5.0],
+            [15.0, 15.0],
+            [15.0, 15.0],
+            [10.0, 10.0],
+            [10.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    state = _make_state_from_pos(pos_tensor)
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=12,
+        node_sizes=node_sizes,
+        clusters={"a": [0, 1, 2, 3, 4, 5], "b": [6, 7, 8, 9, 10, 11]},
+        cluster_parents={"a": None, "b": None},
+    )
+    loss = ClusterSeparationLoss().evaluate(problem, state, RuntimeContext())
+    loss.backward()
+
+    # Tie semantics: lowest row id wins. Cluster A's max-x and max-y
+    # boundary is held by rows 2 and 3 (tied at [10, 10]); first-match
+    # rule should put gradient on row 2 only. Cluster B's min-x and
+    # min-y boundary is held by rows 6 and 7 (tied at [5, 5]); first
+    # match should put gradient on row 6 only.
+    grad_per_row = state.pos.grad.abs().sum(dim=1)
+    nonzero_rows = grad_per_row.nonzero().squeeze(-1).tolist()
+    assert nonzero_rows == [2, 6], f"expected gradient on rows [2, 6] only, got {nonzero_rows}"
+
+
+def test_cluster_loss_cache_is_reused_across_steps_and_invalidated_on_change() -> None:
+    """The per-pipeline-call cluster cache should be built ONCE per problem
+    and reused across many ``evaluate`` calls (the optimizer steps), and it
+    must be invalidated when the cluster dict identity changes (e.g. when
+    a new layout problem starts in the same SolveState container).
+    """
+    from dagua.layout.constraints import _ClusterCache
+
+    node_sizes = torch.full((4, 2), 2.0, dtype=torch.float32)
+    pos = torch.tensor(
+        [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], dtype=torch.float32
+    ).requires_grad_(True)
+
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=4,
+        node_sizes=node_sizes,
+        clusters={"a": [0, 1], "b": [2, 3]},
+        cluster_parents={"a": None, "b": None},
+    )
+    state = _make_state_from_pos(pos)
+    op = ClusterSeparationLoss()
+
+    op.evaluate(problem, state, RuntimeContext())
+    cached_first = state.extras.get("_cluster_cache")
+    assert cached_first is not None
+    assert isinstance(cached_first[1], _ClusterCache)
+
+    # Re-evaluate -- cache identity must NOT change between steps.
+    op.evaluate(problem, state, RuntimeContext())
+    cached_second = state.extras.get("_cluster_cache")
+    assert cached_second[1] is cached_first[1], (
+        "cluster cache rebuilt on every step -- the per-call cache is not being reused"
+    )
+
+    # Hand the same SolveState to a NEW problem (simulating a new layout()
+    # call that didn't reset extras). Cache MUST rebuild.
+    problem_b = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=4,
+        node_sizes=node_sizes,
+        clusters={"x": [0, 2], "y": [1, 3]},
+        cluster_parents={"x": None, "y": None},
+    )
+    op.evaluate(problem_b, state, RuntimeContext())
+    cached_after = state.extras.get("_cluster_cache")
+    assert cached_after[1] is not cached_first[1], (
+        "cluster cache survived a problem.clusters identity change -- stale cache risk"
+    )
+    assert cached_after[1].num_clusters == 2
+
+
 def test_spacing_consistency_loss_prefers_uniform_gaps() -> None:
     """Spacing consistency should be near zero for uniform same-layer gaps."""
 
