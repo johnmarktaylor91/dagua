@@ -195,6 +195,68 @@ def test_propagated_flex_is_none_when_no_constraints_survive():
 
 
 @pytest.mark.unit
+def test_soft_pin_converges_toward_target_through_vcycle():
+    """End-to-end behavioural test: with a strong-enough soft pin and the
+    Huber-based position_pin_loss (Sprint 5 r2) the pinned node must land
+    meaningfully closer to target than an otherwise identical unpinned
+    run. This is the Sprint 5 "soft flex weights propagate with
+    appropriate scale" criterion."""
+    target = (500.0, 500.0)
+    weight = 500.0
+
+    def _run(with_pin: bool):
+        g = make_chain(3000, seed=42).graph
+        g.compute_node_sizes()
+        if with_pin:
+            g.pin(0, x=target[0], y=target[1], weight=weight)
+            cfg = LayoutConfig(seed=42, steps=40, multilevel_threshold=1000)
+            cfg.flex = g.flex
+        else:
+            cfg = LayoutConfig(seed=42, steps=40, multilevel_threshold=1000)
+        pos = engine_layout(g, cfg)
+        return pos[g._id_to_index[0]].tolist()
+
+    pinned = _run(with_pin=True)
+    unpinned = _run(with_pin=False)
+    d_pin = ((pinned[0] - target[0]) ** 2 + (pinned[1] - target[1]) ** 2) ** 0.5
+    d_no = ((unpinned[0] - target[0]) ** 2 + (unpinned[1] - target[1]) ** 2) ** 0.5
+    # A 30% reduction in distance-to-target is a real signal that
+    # propagation + Huber scaling is doing the right thing -- not a
+    # tight convergence bound (the engine's ClipGradNorm still caps
+    # combined per-step motion so a few-dozen-step solve can't close
+    # a 700-unit gap fully).
+    assert d_pin < 0.7 * d_no, (
+        f"soft pin did not measurably move node toward target: "
+        f"pinned dist={d_pin:.1f}, unpinned dist={d_no:.1f}"
+    )
+
+
+@pytest.mark.unit
+def test_pin_dedup_prefers_hard_over_soft():
+    """Sprint 5 r2: when two fine pins collapse onto the same coarse node,
+    a HARD pin must outrank a soft pin regardless of their insertion order.
+    Pre-r2 the dedup was strictly 'first wins', so a later hard pin could
+    silently be replaced by an earlier soft one."""
+    level = _make_level(4, torch.tensor([0, 0, 1, 1], dtype=torch.long))
+    # Fine 0 is a SOFT pin, fine 1 is a HARD pin -- both collapse to coarse 0.
+    flex = FlexConstraints(
+        pin_indices=torch.tensor([0, 1], dtype=torch.long),
+        pin_targets=torch.tensor([[5.0, 5.0], [50.0, 50.0]], dtype=torch.float32),
+        pin_weights=torch.tensor([[1.0, 1.0], [float("inf"), float("inf")]], dtype=torch.float32),
+        soft_pin_mask=torch.tensor([[True, True], [False, False]], dtype=torch.bool),
+        hard_pin_mask=torch.tensor([[False, False], [True, True]], dtype=torch.bool),
+    )
+    composed = _compose_finest_to_coarse([level], 0, device=torch.device("cpu"))
+    coarse = _propagate_flex_to_coarse(flex, composed, level.num_nodes)
+
+    assert coarse.pin_indices.tolist() == [0]
+    # Hard pin (fine id 1, target 50,50) must win over the earlier soft pin.
+    assert coarse.pin_targets.tolist() == [[50.0, 50.0]]
+    assert coarse.hard_pin_mask.tolist() == [[True, True]]
+    assert coarse.soft_pin_mask.tolist() == [[False, False]]
+
+
+@pytest.mark.unit
 def test_vcycle_actually_passes_propagated_flex_to_coarse_refine():
     """End-to-end: a pin on the finest graph must end up in the coarse-
     level problem.flex seen by refine ops. We patch PositionPinLoss'

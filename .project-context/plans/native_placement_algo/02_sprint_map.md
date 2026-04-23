@@ -241,6 +241,18 @@ See 15_sprint_pinning_flex.md.
   `AlignGroupPropagate` (Graphviz rank=same), `PinSlackAnneal`
   (WebCola), verify `HardPinProjection` semantics match cola.js.
 - Non-regression: existing flex tests pass bit-for-bit where deterministic.
+- **Sprint 5 r2 descope (2026-04-23):** cluster-centroid pinning -- the
+  "cluster containing the pin is pinned at its center" clause -- is
+  EXPLICITLY deferred to a Sprint 5.5 follow-up. The current commit
+  ships `MultilevelPinPropagate` + `AlignGroupPropagate` through the
+  V-cycle with hard-pin-priority dedup, device-safe flex migration,
+  and a Huber-scaled soft pin loss (so soft pins no longer get
+  shredded by ClipGradNorm). The cluster-pin bullet requires a
+  separate op that injects a virtual pin at the cluster centroid
+  whenever ANY leaf in the cluster is user-pinned, which in turn
+  needs a cluster-to-coarse mapping during V-cycle (currently
+  `_level_problem` drops cluster data on coarse levels -- that's
+  the scope of 5.5).
 
 ### Sprint 6 -- Differentiable Edge Routing -- CP+SS+AR
 See 16_sprint_edge_routing.md.

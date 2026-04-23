@@ -116,7 +116,13 @@ class TestPositionPinLoss:
         assert loss.item() == 0.0
 
     def test_partial_pin(self):
-        """Pin only x axis, y should not contribute to loss."""
+        """Pin only x axis, y should not contribute to loss.
+
+        Sprint 5 r2: position_pin_loss uses smooth-L1 (Huber) with
+        beta=1.0, not plain squared-L2. For x deviation of 10 units
+        (far outside the unit quadratic region), the per-axis loss is
+        |dx| - 0.5 = 9.5, times weight=5 = 47.5. y is masked out.
+        """
         pos = torch.tensor([[10.0, 999.0]], requires_grad=True)
         pin_indices = torch.tensor([0])
         pin_targets = torch.tensor([[0.0, 0.0]])
@@ -124,8 +130,7 @@ class TestPositionPinLoss:
         pin_mask = torch.tensor([[True, False]])
 
         loss = position_pin_loss(pos, pin_indices, pin_targets, pin_weights, pin_mask)
-        # Should only penalize x deviation
-        expected = 5.0 * 100.0  # weight * (10-0)^2, divided by 1 masked element
+        expected = 5.0 * (10.0 - 0.5)  # weight * (|dx| - 0.5 * beta), beta=1
         assert loss.item() == pytest.approx(expected, rel=1e-4)
 
 
