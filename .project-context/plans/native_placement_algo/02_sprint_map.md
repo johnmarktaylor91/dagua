@@ -362,19 +362,33 @@ See 18_sprint_scale.md.
 
 ### Sprint 8.5 -- Scale-Ladder VRAM engineering (tracked)
 - Goal: close the 10M gap on consumer-tier GPUs.
-- Scope candidates (prioritize by profile data):
-  * Chunked per-loss backward: split the finest-level pos tensor into
-    K chunks along dim 0, backward on each, accumulate gradients.
-    Trades wall for peak VRAM. Primary target: RepulsionLoss and
-    CrossingLoss.
-  * Gradient checkpointing on the V-cycle refine pipeline (recompute
-    forward during backward).
-  * CPU offload for prolonged positions during coarse-level passes
-    so the fine-level pos tensor doesn't co-reside with coarse-level
-    optimizer states.
-  * Early adaptive-skip: if a loss's forward allocation alone exceeds
-    (free_vram - headroom), skip that loss at that level instead of
-    OOMing mid-backward.
+- **Sprint 8.5 r1 attempt (2026-04-23):** added chunked forward path
+  in RepulsionLoss + OverlapAvoidanceLoss with a 3 GB per-loss VRAM
+  budget (see ``_select_sampled_chunk`` in loss_engine.py). Per-loss
+  VRAM profile at 1M confirms overlap / repulsion peaks at
+  6.66 / 4.62 GB respectively under the un-chunked path, so at 10M
+  the forward intermediates alone would need ~66 / 46 GB.
+  1M CUDA wall unchanged (chunking no-ops since full intermediate
+  fits the budget). 10M retry STILL OOMs on RTX 2080 Ti at 10.46 GB
+  VRAM peak because the chunk-accumulating forward
+  (``total = total + chunk.sum()``) still holds every chunk's
+  activations alive until the outer ``term.backward()`` in
+  ``LossGroup``. Chunking forward without chunking backward is
+  insufficient.
+- **Sprint 8.5 r2 scope (unstarted)**: chunked-backward-per-chunk,
+  which requires coordinating the loss weight with an in-loss
+  autograd.grad call OR migrating LossGroup to a contract where
+  evaluate() may return a detached scalar and have already populated
+  pos.grad. Concretely:
+  * Option A: custom autograd.Function per sampled loss that
+    re-computes chunk activations in backward (torch.utils.checkpoint
+    style). Keeps LossGroup contract; adds recomputation cost.
+  * Option B: pass weight into evaluate(); loss calls backward()
+    per chunk; returns detached scalar; LossGroup term.requires_grad
+    check correctly skips the outer backward.
+  * Option C: CPU offload for prolonged finest-level pos during
+    coarse refine so the fine-level autograd graph + coarse
+    optimizer state don't co-reside on GPU.
 
 - Exit:
   * 1M nodes: <=8 minutes wall on GPU.

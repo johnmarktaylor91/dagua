@@ -80,6 +80,38 @@ def _require_node_sizes(problem: LayoutProblem) -> torch.Tensor:
     return problem.node_sizes
 
 
+_SAMPLED_LOSS_VRAM_BUDGET_BYTES = 3 * 1024 * 1024 * 1024  # 3 GB
+
+
+def _select_sampled_chunk(pos: torch.Tensor, k: int, fields: int = 2) -> Optional[int]:
+    """Pick a chunk size that keeps per-chunk intermediates below a VRAM budget.
+
+    Returns ``None`` when the pos tensor is on CPU (chunking is ineffective
+    there and just adds Python overhead) OR when the full N fits within
+    the budget (caller should use the non-chunked fast path).
+
+    ``fields`` is the number of dense [N, k] (or [N, k, 2]) intermediate
+    tensors the loss materializes BEFORE the backward pass. Repulsion
+    has 1 main tensor (diff [N,k,2] + dist_sq [N,k]) ~ 3 scalars per pair;
+    Overlap has 5 [N, k] tensors.
+
+    The budget is deliberately small (0.5 GB) relative to typical 8-11 GB
+    VRAM so per-loss forward + backward peaks stay well clear of the
+    OOM ceiling observed at 10M (per Sprint 8 audit).
+    """
+    num_nodes = int(pos.shape[0])
+    if pos.device.type != "cuda" or num_nodes == 0 or k <= 0:
+        return None
+    bytes_per_row = fields * k * pos.element_size()
+    if bytes_per_row == 0:
+        return None
+    full_bytes = num_nodes * bytes_per_row
+    if full_bytes <= _SAMPLED_LOSS_VRAM_BUDGET_BYTES:
+        return None
+    chunk = max(_SAMPLED_LOSS_VRAM_BUDGET_BYTES // bytes_per_row, 1024)
+    return int(min(chunk, num_nodes))
+
+
 def _zero_scalar(pos: torch.Tensor) -> torch.Tensor:
     """Return a differentiable zero scalar on the position device.
 
@@ -588,15 +620,39 @@ class RepulsionLoss(LossOp):
 
         # Sampled path for N > threshold: matches classic
         # `_repulsion_sampled` in constraints.py lines 269-278.
+        # Sprint 8.5: chunk over the N dim when the full [N, k, 2]
+        # intermediate would exceed the adaptive VRAM ceiling. This
+        # keeps forward-and-backward peak proportional to chunk_size,
+        # not N, so 10M-node graphs no longer OOM in
+        # LossGroup.term.backward on consumer GPUs. The mean over all
+        # [N*k] pairs factors correctly through the per-chunk sum
+        # accumulation because every pair is still sampled exactly
+        # once across the N iterations.
         k = min(self.config.sample_k, num_nodes - 1)
         eps = self.config.distance_epsilon
-        arange = torch.arange(num_nodes, device=pos.device)
-        raw_idx = torch.randint(0, num_nodes - 1, (num_nodes, k), device=pos.device)
-        self_idx = arange.unsqueeze(1).expand(-1, k)
-        idx = raw_idx + (raw_idx >= self_idx).long()
-        diff = pos.unsqueeze(1) - pos[idx]  # [N, k, 2]
-        dist_sq = (diff**2).sum(dim=2) + eps
-        return (1.0 / dist_sq).mean()
+        chunk_size = _select_sampled_chunk(pos, k)
+        if chunk_size is None or chunk_size >= num_nodes:
+            arange = torch.arange(num_nodes, device=pos.device)
+            raw_idx = torch.randint(0, num_nodes - 1, (num_nodes, k), device=pos.device)
+            self_idx = arange.unsqueeze(1).expand(-1, k)
+            idx = raw_idx + (raw_idx >= self_idx).long()
+            diff = pos.unsqueeze(1) - pos[idx]  # [N, k, 2]
+            dist_sq = (diff**2).sum(dim=2) + eps
+            return (1.0 / dist_sq).mean()
+        total = pos.sum() * 0.0  # keep dtype + device
+        total_count = 0
+        for start in range(0, num_nodes, chunk_size):
+            end = min(start + chunk_size, num_nodes)
+            b = end - start
+            row_range = torch.arange(start, end, device=pos.device)
+            raw_idx = torch.randint(0, num_nodes - 1, (b, k), device=pos.device)
+            self_idx = row_range.unsqueeze(1).expand(-1, k)
+            idx = raw_idx + (raw_idx >= self_idx).long()
+            diff = pos[start:end].unsqueeze(1) - pos[idx]
+            dist_sq = (diff**2).sum(dim=2) + eps
+            total = total + (1.0 / dist_sq).sum()
+            total_count += b * k
+        return total / float(total_count)
 
 
 @register_op
@@ -647,18 +703,42 @@ class OverlapAvoidanceLoss(LossOp):
 
         # Sprint 1 memory port: sampled O(N*k) overlap loss. Legacy path
         # scales to 10K+ by only checking each node against k random peers.
+        # Sprint 8.5: chunk over N when the [N, k] intermediate tensors
+        # (dx_abs, dy_abs, min_dx, min_dy, overlap) would collectively
+        # exceed the adaptive VRAM ceiling. Without this the finest
+        # level at N=10M pre-allocates ~5 * 10M * 128 * 4 = 25 GB of
+        # forward-graph memory before even the backward pass.
         padding = self.config.padding
         k = min(self.config.sample_k, num_nodes - 1)
-        arange = torch.arange(num_nodes, device=pos.device)
-        raw_idx = torch.randint(0, num_nodes - 1, (num_nodes, k), device=pos.device)
-        self_idx = arange.unsqueeze(1).expand(-1, k)
-        idx = raw_idx + (raw_idx >= self_idx).long()
-        dx_abs = torch.abs(pos[:, 0].unsqueeze(1) - pos[idx, 0])
-        dy_abs = torch.abs(pos[:, 1].unsqueeze(1) - pos[idx, 1])
-        min_dx = (node_sizes[:, 0].unsqueeze(1) + node_sizes[idx, 0]) / 2 + padding
-        min_dy = (node_sizes[:, 1].unsqueeze(1) + node_sizes[idx, 1]) / 2 + padding
-        overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)
-        return overlap.mean()
+        chunk_size = _select_sampled_chunk(pos, k, fields=5)
+        if chunk_size is None or chunk_size >= num_nodes:
+            arange = torch.arange(num_nodes, device=pos.device)
+            raw_idx = torch.randint(0, num_nodes - 1, (num_nodes, k), device=pos.device)
+            self_idx = arange.unsqueeze(1).expand(-1, k)
+            idx = raw_idx + (raw_idx >= self_idx).long()
+            dx_abs = torch.abs(pos[:, 0].unsqueeze(1) - pos[idx, 0])
+            dy_abs = torch.abs(pos[:, 1].unsqueeze(1) - pos[idx, 1])
+            min_dx = (node_sizes[:, 0].unsqueeze(1) + node_sizes[idx, 0]) / 2 + padding
+            min_dy = (node_sizes[:, 1].unsqueeze(1) + node_sizes[idx, 1]) / 2 + padding
+            overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)
+            return overlap.mean()
+        total = pos.sum() * 0.0
+        total_count = 0
+        for start in range(0, num_nodes, chunk_size):
+            end = min(start + chunk_size, num_nodes)
+            b = end - start
+            row_range = torch.arange(start, end, device=pos.device)
+            raw_idx = torch.randint(0, num_nodes - 1, (b, k), device=pos.device)
+            self_idx = row_range.unsqueeze(1).expand(-1, k)
+            idx = raw_idx + (raw_idx >= self_idx).long()
+            dx_abs = torch.abs(pos[start:end, 0].unsqueeze(1) - pos[idx, 0])
+            dy_abs = torch.abs(pos[start:end, 1].unsqueeze(1) - pos[idx, 1])
+            min_dx = (node_sizes[start:end, 0].unsqueeze(1) + node_sizes[idx, 0]) / 2 + padding
+            min_dy = (node_sizes[start:end, 1].unsqueeze(1) + node_sizes[idx, 1]) / 2 + padding
+            overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)
+            total = total + overlap.sum()
+            total_count += b * k
+        return total / float(total_count)
 
 
 @register_op
