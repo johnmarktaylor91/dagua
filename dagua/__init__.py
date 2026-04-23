@@ -136,7 +136,13 @@ def draw(
     graph.compute_node_sizes()
     curves = route_edges(positions, graph.edge_index, graph.node_sizes, effective_direction, graph)
 
-    if getattr(config, "edge_opt_steps", 0) >= 0:
+    # Sprint 6: edge_routing takes precedence over edge_opt_steps. Only
+    # the "differentiable" mode runs optimize_edges; "heuristic" keeps
+    # the bezier curves that route_edges produced (zero gradient work).
+    if (
+        getattr(config, "edge_routing", "differentiable") == "differentiable"
+        and getattr(config, "edge_opt_steps", 0) >= 0
+    ):
         from dagua.layout.edge_optimization import optimize_edges
 
         curves = optimize_edges(
