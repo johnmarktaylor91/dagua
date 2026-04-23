@@ -2350,6 +2350,12 @@ class PivotApproxStressLoss(LossOp):
         if state.pivot_distances is None:
             raise ValueError("PivotApproxStressLoss requires `state.pivot_distances`.")
         pivot_distances = state.pivot_distances.to(device=pos.device, dtype=pos.dtype)
+        # PivotDistanceQueries emits [P, N] (one row per pivot, one column
+        # per node). _maxent_stress_term broadcasts against
+        # torch.cdist(pos, pivot_pos) which returns [N, P]. Transpose so
+        # broadcast shapes agree.
+        if pivot_distances.dim() == 2 and pivot_distances.shape[0] == pivot_indices.shape[0]:
+            pivot_distances = pivot_distances.t().contiguous()
         empty_long = torch.empty((0,), dtype=torch.long, device=pos.device)
         empty_float = torch.empty((0,), dtype=pos.dtype, device=pos.device)
         return _maxent._stress_term(

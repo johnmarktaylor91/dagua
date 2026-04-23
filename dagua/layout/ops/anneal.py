@@ -1053,6 +1053,8 @@ class InitAnnealingScheduleConfig:
     w_crossing: float = 1.8
     w_straightness: float = 2.2
     w_length_variance: float = 8.0  # Sprint 11: bumped for CV^2 formulation
+    # Sprint 15: opt-in pivot-stress weight. Default 0.0 (disabled).
+    w_stress: float = 0.0
     w_spacing: float = 0.3
     w_fanout: float = 0.3
     w_back_edge: float = 0.3
@@ -1139,6 +1141,11 @@ class InitAnnealingSchedule(Op):
                 "w_pin": lambda step, total_steps: 1.0,
                 "w_align_flex": lambda step, total_steps: 1.0,
                 "w_flex_spacing": lambda step, total_steps: 1.0,
+                # Sprint 15: PivotApproxStressLoss weight_key is "stress".
+                # Honour the user's config.w_stress (default 0.0, i.e.
+                # disabled) so an opt-in w_stress=0.1 actually binds to
+                # the loss.
+                "stress": lambda step, total_steps: getattr(self.config, "w_stress", 0.0),
             },
             crossing_alpha=self.config.crossing_alpha_start,
         )
