@@ -28,6 +28,7 @@ from dagua.layout.ops.distance import (
     PivotSelection,
     PivotSelectionConfig,
 )
+from dagua.layout.ops.force_2d_init import Force2DInitIfFlat, Force2DInitIfFlatConfig
 from dagua.layout.ops.init import (
     NativeEngineInit,
     NativeEngineInitConfig,
@@ -378,6 +379,16 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
                     ),
                 ),
             ),
+            # Sprint 17: cyclic-graph 2D init fallback. NativeEngineInit
+            # uses longest-path layering, which collapses cyclic graphs
+            # (small_world, social-net) to a single layer (all y=0). The
+            # downstream gradient pipeline can't recover -- spring +
+            # repulsion losses operate on a 1D-collapsed initial state.
+            # Force2DInitIfFlat detects num_layers <= 1 and randomizes y
+            # to give the optimizer 2D space to work with from step 1.
+            # Acyclic graphs are unaffected (num_layers >= 2 is the
+            # common case).
+            Force2DInitIfFlat(Force2DInitIfFlatConfig()),
             # Sprint 15: pivot-stress pre-prep. When w_stress > 0, build
             # adjacency + select pivots + query BFS distances so the
             # PivotApproxStressLoss (added to losses by
