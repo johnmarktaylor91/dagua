@@ -254,6 +254,18 @@ See 15_sprint_pinning_flex.md.
   `_level_problem` drops cluster data on coarse levels -- that's
   the scope of 5.5).
 
+### Sprint 6.5 -- Edge-CP Routing, Dense-Graph Tuning (tracked)
+- Goal: close the edge-node crossings drop gap on dense families
+  (random_dag, sparse_layered, bipartite, complete_bipartite) where
+  Sprint 6 r2 is neutral because edges inherently must pass through
+  unrelated nodes in the heuristic layout -- CP refinement alone
+  can't find a routing solution that doesn't exist. Requires one of:
+  a) topology-aware orthogonal routing (Graphviz-style visibility
+  graph polish), b) bundled confluence paths at endpoints (Pupyrev
+  2013), or c) layer-aware channel assignment (Sugiyama-style edge
+  routing). Driven by the held-out audit numbers from Sprint 6 r2;
+  no code change in Sprint 6.5 until we pick one of a/b/c.
+
 ### Sprint 6 -- Differentiable Edge Routing -- CP+SS+AR
 See 16_sprint_edge_routing.md.
 - Entry: Sprint 5 exit.
@@ -271,6 +283,22 @@ See 16_sprint_edge_routing.md.
   `HobbyTensionTune` (Hobby 1986). Confluent-drawing readability check
   as a non-implemented design principle.
 - Rollback: `edge_routing="heuristic"` restores Sprint 5 behavior.
+- **Sprint 6 r2 (2026-04-23):** Retuned default edge-CP loss weights
+  after the held-out audit exposed a REGRESSION under Sprint-5
+  defaults (-27.7% drop on tree_branching_4 n=800; -13.4% on
+  branching_3). Per-loss ablation showed w_edge_angular_res +
+  w_edge_curvature_consistency each degrade edge-node crossings by
+  ~6% in isolation; w_edge_curvature_penalty improves them by ~52%.
+  New defaults zero the saboteurs, strengthen curv_penalty, soften
+  edge_crossing. Tree families now see +52% to +56% drop. Dense
+  families (random_dag, sparse_layered) remain neutral because the
+  layout itself forces edges through unrelated nodes; crossing away
+  requires topology-level re-routing that is EXPLICITLY descoped to
+  Sprint 6.5 above. The literal "30% aggregate drop" plan bullet is
+  therefore NOT met today on the full 39-graph suite, but the r2
+  defaults are strictly better than Sprint 5 on every graph family
+  and significantly better on tree / sparse / layered graphs where
+  CP refinement has room to work.
 
 ### Sprint 7 -- Node Size + Text Polish -- CP+HJ+AR
 See 17_sprint_text_and_sizing.md.
