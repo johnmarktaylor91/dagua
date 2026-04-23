@@ -422,6 +422,15 @@ def build_loss_ops(
         losses.append(AlignmentLoss())
     if config.flex is not None and config.flex.node_sep is not None:
         losses.append(FlexSpacingLoss())
+    # Sprint 15: pivot-approximated stress loss (opt-in via w_stress>0).
+    # Requires state.pivot_indices + state.pivot_distances pre-populated
+    # by the stress pre-prep ops (BuildAdjacency + PivotSelection +
+    # PivotDistanceQueries) which land in dagua_native_pipeline when
+    # config.w_stress > 0.
+    if getattr(config, "w_stress", 0.0) > 0.0:
+        from dagua.layout.ops.loss_classic import PivotApproxStressLoss
+
+        losses.append(PivotApproxStressLoss())
     return losses
 
 
