@@ -1052,7 +1052,7 @@ class InitAnnealingScheduleConfig:
     w_cluster_contain: float = 2.0
     w_crossing: float = 1.8
     w_straightness: float = 2.2
-    w_length_variance: float = 0.7
+    w_length_variance: float = 8.0  # Sprint 11: bumped for CV^2 formulation
     w_spacing: float = 0.3
     w_fanout: float = 0.3
     w_back_edge: float = 0.3
