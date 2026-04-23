@@ -1061,12 +1061,17 @@ class PositionPinLoss(LossOp):
             or flex.soft_pin_mask is None
         ):
             return _zero_scalar(pos)
+        # Propagated coarse flex may be on the hierarchy tensor's device,
+        # which can differ from the active pos device on mixed-device runs
+        # (CPU hierarchy + CUDA refinement). Move to pos.device before
+        # indexing pos.
+        device = pos.device
         return position_pin_loss(
             pos,
-            flex.pin_indices,
-            flex.pin_targets,
-            flex.pin_weights,
-            flex.soft_pin_mask,
+            flex.pin_indices.to(device=device, dtype=torch.long),
+            flex.pin_targets.to(device=device, dtype=pos.dtype),
+            flex.pin_weights.to(device=device, dtype=pos.dtype),
+            flex.soft_pin_mask.to(device=device),
         )
 
 
@@ -1113,7 +1118,14 @@ class AlignmentLoss(LossOp):
         flex = _flex(problem)
         if flex is None or not flex.align_groups:
             return _zero_scalar(pos)
-        return alignment_loss(pos, flex.align_groups)
+        # Propagated coarse align groups may live on a different device
+        # than the active pos (mixed-device runs); migrate index tensors
+        # before the loss indexes pos.
+        device = pos.device
+        migrated = [
+            (g[0].to(device=device, dtype=torch.long), g[1], g[2]) for g in flex.align_groups
+        ]
+        return alignment_loss(pos, migrated)
 
 
 @register_op
