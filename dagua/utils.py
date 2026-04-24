@@ -1469,6 +1469,9 @@ def _maybe_gpu_longest_path_layering(
         Layer assignments on CPU when GPU execution succeeds, otherwise
         ``None`` so callers can fall back to the CPU implementation.
     """
+    if not torch.cuda.is_available() or torch.cuda.device_count() <= 0:
+        return None
+
     fits, required_bytes, free_bytes = _gpu_longest_path_budget_status(edge_index, num_nodes)
 
     # The GPU layering path scans ALL edges per wave without CSR — O(waves × E).
