@@ -149,7 +149,7 @@ def resolve_topology_aware_aspect(
     if "lattice_like" in tags:
         return 0.05, 1.0
     if "planar_dag" in tags:
-        return 0.08, 1.0
+        return 0.45, 1.0
     if "wide_layered" in tags or structure.family == GraphFamily.BIPARTITE_DAG:
         return 0.85, 1.0
     if "dense_dag" in tags:
