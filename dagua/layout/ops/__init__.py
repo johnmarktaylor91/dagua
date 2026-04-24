@@ -228,6 +228,7 @@ _EXPECTED_OP_MODULES = (
     "context",
     "converge",
     "coordinate",
+    "crossing_swap",
     "davidson_harel",
     "distance",
     "drl",
