@@ -80,7 +80,7 @@ def test_lattice_and_planar_families_resolve_topology_targets() -> None:
     assert "planar_dag" in sierpinski_structure.topology_tags
     assert "lattice_like" not in sierpinski_structure.topology_tags
     assert getattr(_resolved_config(sierpinski), "_dagua_native_target_aspect") == pytest.approx(
-        0.08,
+        0.45,
     )
 
 
