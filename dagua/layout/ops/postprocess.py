@@ -517,11 +517,11 @@ class AspectRatioFitConfig:
     Parameters
     ----------
     target_aspect : float | None, default=None
-        Target width/height ratio. When None, a topology-aware default
-        is computed: sqrt(N) roughly, clamped to [0.6, 2.5]. Layouts
-        with aspect ratio farther than ``tolerance`` from the target
-        get the SHORTER axis scaled up so the new ratio matches the
-        target.
+        Target width/height ratio. When None, the op uses its pure fallback
+        target of ``0.25``; the native pipeline usually passes an explicit
+        topology-aware target resolved upstream. Layouts with aspect ratio
+        farther than ``tolerance`` from the target get the SHORTER axis scaled
+        up so the new ratio matches the target.
     tolerance : float, default=0.25
         Relative tolerance for "close enough" - only rescale if the
         ratio is outside ``[target * (1 - tolerance), target / (1 - tolerance)]``.
