@@ -1230,6 +1230,89 @@ def composite(metrics: Dict[str, float]) -> float:
     return score
 
 
+def composite_undirected(metrics: Dict[str, float]) -> float:
+    """Composite for undirected graphs: drops direction-sensitive metrics.
+
+    Dropped (50 pts total): dag_consistency (25), depth_spearman (15),
+    edge_straightness (10). Remaining 50 pts are rescaled to 100.
+
+    Retained metrics and rescaled weights (sum=100):
+      edge_length_cv:        20 -> 40
+      overlap_count:         10 -> 20
+      crossing_rate:         10 -> 20
+      angular_resolution:     5 -> 10
+      cluster_separation:     5 -> 10
+
+    Same rule per metric as `composite()` (lower-better terms inverted,
+    same clamping). See composite() for the per-metric formulas and clamp
+    ranges.
+
+    Parameters
+    ----------
+    metrics : Dict[str, float]
+        Metric name to scalar value mapping from ``full()`` or equivalent.
+
+    Returns
+    -------
+    float
+        Weighted undirected composite score where higher is better.
+    """
+    score = 0.0
+
+    # Edge length uniformity (40) - invert CV, cap at 1.0
+    score += 40 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
+
+    # No overlaps (20) - binary
+    score += 20 * (1.0 if metrics.get("overlap_count", 1) == 0 else 0.0)
+
+    # Crossing density (20) - lower is better
+    crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
+    score += 20 * crossing_score
+
+    # Angular resolution (10)
+    angle_score = min(1.0, metrics.get("angular_res_mean_deg", 20.0) / 40.0)
+    score += 10 * angle_score
+
+    # Cluster separation (10)
+    if "cluster_mean_sep_ratio" in metrics:
+        sep_score = min(1.0, metrics["cluster_mean_sep_ratio"] / 5.0)
+        score += 10 * sep_score
+    elif "cluster_sep" in metrics:
+        sep_score = min(1.0, metrics["cluster_sep"])
+        score += 10 * sep_score
+    else:
+        score += 10 * 0.5  # neutral if no clusters
+
+    return score
+
+
+def composite_auto(
+    metrics: Dict[str, float], is_semantically_directed: Optional[bool] = None
+) -> float:
+    """Pick composite or composite_undirected based on direction flag.
+
+    When ``is_semantically_directed`` is True (or None, conservative
+    default), returns ``composite(metrics)``. When False, returns
+    ``composite_undirected(metrics)``.
+
+    Parameters
+    ----------
+    metrics : Dict[str, float]
+        Metric name to scalar value mapping from ``full()`` or equivalent.
+    is_semantically_directed : Optional[bool], optional
+        Whether the graph has a meaningful direction. ``None`` is treated as
+        directed to preserve the existing conservative behavior.
+
+    Returns
+    -------
+    float
+        Directed or undirected composite score.
+    """
+    if is_semantically_directed is None or is_semantically_directed:
+        return composite(metrics)
+    return composite_undirected(metrics)
+
+
 # Quick-mode fields (available from `quick()`). Used by composite_large to
 # avoid silent defaults for fields that only exist in full().
 _QUICK_AVAILABLE_FIELDS = frozenset(
