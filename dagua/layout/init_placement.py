@@ -55,8 +55,46 @@ def init_positions(
     torch.Tensor
         Initial position tensor shaped ``[N, 2]``.
     """
-    # Step 1: Assign layers (y-coordinates) via longest-path
+    # Step 1: Assign layers (y-coordinates) via longest-path.
     layers = longest_path_layering(edge_index, num_nodes, device=device, verbose=verbose)
+
+    # Round 4 sprint 1: cycle reversal fallback. When the graph is cyclic
+    # (longest-path returns a single layer for >5 nodes), break cycles via
+    # feedback-arc-set removal and re-layer. Only adopted when the resulting
+    # acyclic layering produces a meaningful compression -- specifically at
+    # most one layer per two nodes on average. If cycle removal produces
+    # num_layers ~ num_nodes (one node per layer), the graph has no usable
+    # hierarchical structure (e.g. small-world, dense random); downstream
+    # Force2DInitIfFlat handles those via random 2D init instead.
+    #
+    # On graphs with genuine hierarchy plus a few back edges (e.g.
+    # center_port_backedge_hub, simple feedback nets), this closes the
+    # dag_consistency gap vs dagre/sugiyama.
+    if num_nodes > 5:
+        layer_seq = layers if isinstance(layers, list) else layers.tolist()
+        if len(set(layer_seq)) <= 1:
+            from dagua.layout.cycle import make_acyclic_robust
+
+            try:
+                acyclic_edges, _reversed_mask = make_acyclic_robust(edge_index, num_nodes)
+                if acyclic_edges.shape[1] > 0:
+                    relayered = longest_path_layering(
+                        acyclic_edges,
+                        num_nodes,
+                        device=device,
+                        verbose=verbose,
+                    )
+                    relayered_seq = relayered if isinstance(relayered, list) else relayered.tolist()
+                    n_relayered = len(set(relayered_seq))
+                    # Accept when layering is meaningful (compresses n nodes
+                    # into less than n/2 layers). Rejects degenerate
+                    # one-node-per-layer results on small-world topologies.
+                    if 1 < n_relayered <= max(2, num_nodes // 2):
+                        layers = relayered
+            except Exception:
+                # Cycle removal failed -- keep the original collapsed
+                # layering, downstream Force2DInitIfFlat will handle.
+                pass
 
     # Vectorized path is faster even at N=100 due to tensor ops vs Python loops
     if num_nodes > 100:
