@@ -56,7 +56,15 @@ class BarycenterReorderConfig:
         on specific graph families can be diagnosed against a skip run.
     """
 
-    iterations: int = 4
+    # Sprint 18k: bumped 4 -> 8 after re-sweep at the new
+    # (70, 240) spacing and AR target=0.25. Iteration sweep:
+    #   1: 76.642
+    #   2: 76.963
+    #   4: 77.043 (Sprint 10 default)
+    #   8: 77.064  <-- adopted (small gain, plateau begins)
+    #  16: 77.080 (further marginal gain)
+    #   0: 74.835 (no barycenter polish; significant regression)
+    iterations: int = 8
     min_layer_size: int = 2
     enabled: bool = True
 
