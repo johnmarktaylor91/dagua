@@ -126,6 +126,37 @@ def adaptive_spacing(
     return base_node_sep * scale, base_rank_sep * scale
 
 
+def resolve_topology_aware_aspect(
+    structure: Optional[GraphStructure],
+) -> tuple[float, float]:
+    """Return ``(target_aspect, rank_sep_multiplier)`` for one graph.
+
+    Parameters
+    ----------
+    structure : GraphStructure, optional
+        Topology metadata produced by :func:`dagua.layout.graph_classify.classify_graph`.
+
+    Returns
+    -------
+    tuple[float, float]
+        Target width/height ratio and a rank-separation multiplier for the
+        native pipeline.
+    """
+    if structure is None:
+        return 0.25, 1.0
+
+    tags = set(structure.topology_tags)
+    if "lattice_like" in tags:
+        return 0.05, 1.0
+    if "planar_dag" in tags:
+        return 0.08, 1.0
+    if "wide_layered" in tags or structure.family == GraphFamily.BIPARTITE_DAG:
+        return 0.85, 1.0
+    if "dense_dag" in tags:
+        return 0.05, 1.0
+    return 0.25, 1.0
+
+
 def final_projection_iterations(num_nodes: int) -> int:
     """Return the native engine's final overlap-projection iteration count."""
     if num_nodes <= 50:
@@ -316,11 +347,15 @@ def prepare_pipeline_config(
             base_node_sep=resolved_node_sep,
             base_rank_sep=resolved_rank_sep,
         )
+    target_aspect, rank_sep_multiplier = resolve_topology_aware_aspect(structure)
+    resolved_rank_sep *= rank_sep_multiplier
 
     stall_limit, rel_threshold = stall_config(num_nodes=num_nodes)
     setattr(effective_config, "_dagua_native_steps", resolved_steps)
     setattr(effective_config, "_dagua_native_node_sep", resolved_node_sep)
     setattr(effective_config, "_dagua_native_rank_sep", resolved_rank_sep)
+    setattr(effective_config, "_dagua_native_target_aspect", target_aspect)
+    setattr(effective_config, "_dagua_native_rank_sep_multiplier", rank_sep_multiplier)
     setattr(effective_config, "_dagua_native_device", device)
     setattr(effective_config, "_dagua_native_verbose", effective_config.verbose)
     setattr(effective_config, "_dagua_native_layer_assignments", layer_assignments)
