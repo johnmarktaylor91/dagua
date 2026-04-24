@@ -229,11 +229,13 @@ def test_dagua_native_dense_pair_50_improves_crossing_rate_and_composite() -> No
         seed=42,
         steps=80,
         use_native_median_transpose=False,
+        brandes_koepf_refine=False,
     )
     enabled_config = LayoutConfig(
         seed=42,
         steps=80,
         use_native_median_transpose=True,
+        brandes_koepf_refine=False,
     )
 
     baseline_pos = layout(graph, baseline_config)
@@ -252,11 +254,13 @@ def test_dagua_native_cyclic_graph_skips_median_transpose_and_preserves_composit
         seed=42,
         steps=40,
         use_native_median_transpose=False,
+        brandes_koepf_refine=False,
     )
     enabled_config = LayoutConfig(
         seed=42,
         steps=40,
         use_native_median_transpose=True,
+        brandes_koepf_refine=False,
     )
 
     baseline_pos = layout(graph, baseline_config)
