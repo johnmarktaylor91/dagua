@@ -50,6 +50,8 @@ class GraphStructure:
     num_layers_effective: int = 0
     cyclicity_ratio: float = 0.0
     has_dominant_component: bool = True
+    is_planar: Optional[bool] = None
+    planar_embedding: Any = None
 
 
 def _compute_degree(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -747,6 +749,9 @@ def classify_graph(
         is_planar_hint=is_planar_hint,
         is_directed_acyclic=is_directed_acyclic,
     )
+    is_planar, planar_embedding = _check_exact_planarity(
+        edge_index, num_nodes, is_planar_hint=is_planar_hint
+    )
     return GraphStructure(
         family=family,
         num_components=num_components,
@@ -764,4 +769,39 @@ def classify_graph(
         num_layers_effective=num_layers_effective,
         cyclicity_ratio=cyclicity_ratio,
         has_dominant_component=has_dominant_component,
+        is_planar=is_planar,
+        planar_embedding=planar_embedding,
     )
+
+
+def _check_exact_planarity(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    *,
+    is_planar_hint: bool,
+) -> tuple[Optional[bool], Any]:
+    """Run an exact planarity check via networkx for graphs that pass the hint.
+
+    Returns ``(is_planar, planar_embedding)``. For very large graphs the cheap
+    Euler-formula hint stands in for the exact check (None if the hint says
+    not planar; otherwise the hint value with no embedding).
+    """
+    if num_nodes <= 1 or edge_index.numel() == 0:
+        return True, None
+    if not is_planar_hint:
+        return False, None
+    if num_nodes > 1500:
+        return is_planar_hint, None
+    try:
+        import networkx as nx  # type: ignore
+    except Exception:
+        return is_planar_hint, None
+    g = nx.Graph()
+    g.add_nodes_from(range(num_nodes))
+    edges = edge_index.detach().cpu().t().tolist()
+    g.add_edges_from((int(u), int(v)) for u, v in edges if int(u) != int(v))
+    try:
+        is_planar, embedding = nx.check_planarity(g, counterexample=False)
+    except Exception:
+        return is_planar_hint, None
+    return bool(is_planar), embedding if is_planar else None
