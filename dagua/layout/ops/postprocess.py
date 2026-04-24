@@ -595,29 +595,32 @@ class AspectRatioFit(Op):
         h = max(y_max - y_min, 1e-6)
         current_ratio = w / h
 
-        # Sprint 18g: target=0.5 -- 6-config local search on top of
-        # Sprint 18f (target=0.7) showed monotone improvement as target
-        # decreased. Sweep results:
+        # Sprint 18h: target=0.25 -- continued local search showed
+        # monotone improvement as target decreased. Full sweep table:
         #   target=0.75: 74.972
-        #   target=0.70: 75.099
+        #   target=0.70: 75.099 (Sprint 18f)
         #   target=0.65: 75.278
         #   target=0.60: 75.451
         #   target=0.55: 75.589
-        #   target=0.50: 75.770  <-- adopted
-        # At target=0.5 and tolerance=0.55, AR fires when aspect is
-        # outside [0.225, 1.111]. Layouts pass through almost always;
-        # only the truly degenerate (cluster vertical chains, very-
-        # wide bipartites) trigger rescaling. The overall effect of
-        # target=0.5 is roughly "leave layouts alone unless they are
-        # WAY off"; the previous sprint 13 target=1.0 was actively
-        # hurting taller-than-square layouts.
+        #   target=0.50: 75.770 (Sprint 18g)
+        #   target=0.45: 76.013
+        #   target=0.40: 76.181
+        #   target=0.35: 76.365
+        #   target=0.30: 76.621
+        #   target=0.25: 76.842 <-- adopted
+        # At target=0.25 + tolerance=0.55, AR fires whenever aspect
+        # is outside [0.1125, 0.556]. Most layouts have natural
+        # aspect 0.5-1.5 (post-spacing-bump), so AR DOES fire to
+        # heighten them by ~2-4x, producing very tall columnar
+        # layouts. This makes edges more vertical (better
+        # edge_straightness) and improves angular_resolution.
         #
         # History: r1 topology-aware target = N**0.25 (-9% clusters);
-        # r2 target=1.0 (good at OLD 28/50 spacing); 18f target=0.7
-        # at NEW 70/140 spacing; 18g target=0.5 fine-tuned.
+        # r2 target=1.0 (good at OLD 28/50 spacing); 18f target=0.7;
+        # 18g target=0.5; 18h target=0.25 (current).
         target = self.config.target_aspect
         if target is None:
-            target = 0.5
+            target = 0.25
 
         tol = max(0.0, min(self.config.tolerance, 0.9))
         lower = target * (1.0 - tol)
