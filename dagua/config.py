@@ -70,6 +70,7 @@ class LayoutConfig:
     lr: float = 0.05
     device: str = "cpu"
     seed: Optional[int] = 42
+    multi_start_k: int = 1
 
     # Adaptive spacing: scale node_sep and rank_sep based on graph size
     adaptive_spacing: bool = True

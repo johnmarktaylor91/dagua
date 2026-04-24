@@ -1051,6 +1051,32 @@ def _tile_component_positions(
     return out
 
 
+def _score_native_result(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+) -> float:
+    """Return the composite metric score for one native layout candidate.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Graph connectivity with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Higher-is-better composite score for the candidate layout.
+    """
+    from dagua.metrics import composite, full
+
+    return float(composite(full(pos, edge_index, node_sizes=node_sizes)))
+
+
 def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
     """Build the composable native-engine pipeline from a resolved config.
 
@@ -1319,14 +1345,89 @@ def layout_dagua_native_pipeline(
 ) -> torch.Tensor:
     """Run the native-engine pipeline as a drop-in tensor layout entrypoint.
 
-    Thin adapter: resolves a config via :mod:`dagua.layout.resolve`,
-    constructs a ``LayoutProblem``/``SolveState``/``RuntimeContext``, then
-    invokes the pipeline built by :func:`build_dagua_pipeline`.
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    config : LayoutConfig, optional
+        User-facing layout configuration.
+    device : str, optional
+        Target execution device override.
+    optimizer_type : str, default="adam"
+        Optimizer implementation used by the native gradient core.
+    init_pos : torch.Tensor, optional
+        Optional initial positions with shape ``[N, 2]``.
+    clusters : dict[str, Any], optional
+        Cluster membership metadata.
+    cluster_parents : dict[str, str], optional
+        Parent mapping for nested clusters.
+    layer_assignments : torch.Tensor, optional
+        Optional layer assignments with shape ``[N]``.
+    prebuilt_layer_index : Any, optional
+        Pre-computed layer index for the current graph.
+    graph_structure : GraphStructure, optional
+        Pre-classified graph metadata.
+    skip_classification : bool, default=False
+        Whether to skip graph-family classification during config prep.
+    seed : int, optional
+        Seed override forwarded from the layout dispatcher.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Detached position tensor with shape ``[N, 2]``.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
 
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
+    multi_start_k = int(getattr(effective_config, "multi_start_k", 1))
+    if multi_start_k > 1:
+        seed_base = seed if seed is not None else effective_config.seed
+        if seed_base is None:
+            seed_base = 42
+        best_pos: Optional[torch.Tensor] = None
+        best_score = float("-inf")
+        for seed_offset in range(multi_start_k):
+            candidate_seed = int(seed_base) + seed_offset
+            candidate_config = copy.copy(effective_config)
+            candidate_config.seed = candidate_seed
+            candidate_config.multi_start_k = 1
+            candidate_pos = layout_dagua_native_pipeline(
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                node_sizes=node_sizes,
+                config=candidate_config,
+                device=device,
+                optimizer_type=optimizer_type,
+                init_pos=init_pos,
+                clusters=clusters,
+                cluster_parents=cluster_parents,
+                layer_assignments=layer_assignments,
+                prebuilt_layer_index=prebuilt_layer_index,
+                graph_structure=graph_structure,
+                skip_classification=skip_classification,
+                seed=candidate_seed,
+                edge_weights=edge_weights,
+            )
+            candidate_score = _score_native_result(
+                pos=candidate_pos,
+                edge_index=edge_index,
+                node_sizes=node_sizes,
+            )
+            if candidate_score > best_score:
+                best_score = candidate_score
+                best_pos = candidate_pos
+        if best_pos is None:
+            raise RuntimeError("dagua_native multi-start did not produce candidate positions.")
+        return best_pos
+
     requested_device = device or effective_config.device
     if requested_device == "cuda" and not torch.cuda.is_available():
         requested_device = "cpu"
