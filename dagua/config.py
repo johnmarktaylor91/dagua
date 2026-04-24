@@ -138,6 +138,10 @@ class LayoutConfig:
     use_native_median_transpose: bool = True
     native_median_passes: int = 4
     native_transpose_passes: int = 8
+    # Sprint 19g: x-only Brandes-Koepf compaction after native ordering.
+    # Conservative DAG gate keeps this out of cyclic, flat, tree, chain, and
+    # multi-component cases unless there is only one isolated tail node.
+    brandes_koepf_refine: bool = True
     # Sprint 19d: adapter-level disconnected-component decomposition for the
     # default dagua_native pipeline. Each weak component is solved
     # independently and tiled unless a conservative safety gate disables it.
