@@ -192,6 +192,38 @@ class OverlapProjectionConfig:
     iterations: int = 10
 
 
+def _visible_original_positions(
+    problem: LayoutProblem,
+    state: SolveState,
+    positions: torch.Tensor,
+) -> tuple[torch.Tensor, Optional[object]]:
+    """Return the original-node view for overlap projection.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable original graph inputs.
+    state : SolveState
+        Mutable solve state that may be dummy-expanded.
+    positions : torch.Tensor
+        Active positions with shape ``[N_active, 2]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, object | None]
+        Original-node position view and matching layer index.
+    """
+    expanded_graph = state.extras.get("expanded_graph")
+    if expanded_graph is None or int(getattr(expanded_graph, "num_nodes", -1)) != int(
+        positions.shape[0]
+    ):
+        return positions, state.layer_index
+    return positions[: problem.num_nodes], state.extras.get(
+        "original_layer_index",
+        state.layer_index,
+    )
+
+
 @register_op
 @dataclass(frozen=True)
 class OverlapProjection(Op):
@@ -233,13 +265,21 @@ class OverlapProjection(Op):
         if problem.node_sizes is None or problem.node_sizes.numel() == 0:
             return state
 
-        node_sizes = problem.node_sizes.to(device=positions.device, dtype=positions.dtype)
+        visible_positions, layer_index = _visible_original_positions(
+            problem=problem,
+            state=state,
+            positions=positions,
+        )
+        node_sizes = problem.node_sizes.to(
+            device=visible_positions.device,
+            dtype=visible_positions.dtype,
+        )
         project_overlaps(
-            pos=positions,
+            pos=visible_positions,
             node_sizes=node_sizes,
             padding=self.config.padding,
             iterations=self.config.iterations,
-            layer_index=state.layer_index,
+            layer_index=layer_index,
         )
         state.pos = positions
         return state
@@ -331,13 +371,21 @@ class PeriodicOverlapProjection(Op):
         if iterations <= 0:
             return state
 
-        node_sizes = problem.node_sizes.to(device=positions.device, dtype=positions.dtype)
+        visible_positions, layer_index = _visible_original_positions(
+            problem=problem,
+            state=state,
+            positions=positions,
+        )
+        node_sizes = problem.node_sizes.to(
+            device=visible_positions.device,
+            dtype=visible_positions.dtype,
+        )
         project_overlaps(
-            pos=positions,
+            pos=visible_positions,
             node_sizes=node_sizes,
             padding=self.config.padding,
             iterations=iterations,
-            layer_index=state.layer_index,
+            layer_index=layer_index,
         )
         state.pos = positions
         return state

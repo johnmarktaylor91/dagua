@@ -1094,8 +1094,15 @@ class StripDummyNodes(Op):
 
     name: ClassVar[str] = "strip_dummy_nodes"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("pos", f"extras.{_EXPANDED_GRAPH_KEY}")
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "layers",
+        "ordering",
+        f"extras.{_EXPANDED_GRAPH_KEY}",
+        "extras.original_layers",
+        "extras.original_layer_index",
+    )
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "layers", "layer_index", "ordering")
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
     access_pattern: ClassVar[str] = "global"
 
@@ -1134,6 +1141,15 @@ class StripDummyNodes(Op):
                 )
         visible_nodes = min(problem.num_nodes, positions.shape[0])
         state.pos = positions[:visible_nodes].clone()
+        original_layers = state.extras.get("original_layers")
+        original_layer_index = state.extras.get("original_layer_index")
+        if isinstance(original_layers, torch.Tensor):
+            state.layers = original_layers[:visible_nodes].clone()
+            state.layer_index = original_layer_index
+        elif state.layers is not None and state.layers.shape[0] != visible_nodes:
+            state.layers = state.layers[:visible_nodes].clone()
+        if state.ordering is not None and state.ordering.shape[0] != visible_nodes:
+            state.ordering = state.ordering[:visible_nodes].clone()
         return state
 
 

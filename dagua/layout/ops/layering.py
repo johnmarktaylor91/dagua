@@ -685,3 +685,141 @@ class InsertDummyNodes(Op):
             num_nodes=expanded_graph.num_nodes,
         )
         return state
+
+
+def _expanded_layers_to_tensor(
+    expanded_layers: list[list[int]],
+    num_nodes: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Convert expanded layer groups into a per-node tensor.
+
+    Parameters
+    ----------
+    expanded_layers : list[list[int]]
+        Node IDs grouped by layer for the expanded graph.
+    num_nodes : int
+        Number of expanded graph nodes.
+    device : torch.device
+        Target device for the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Layer assignments with shape ``[N_expanded]``.
+
+    Raises
+    ------
+    ValueError
+        If any expanded node is missing from the grouped layers.
+    """
+    layers = torch.full((num_nodes,), -1, dtype=torch.long)
+    for layer_index, nodes in enumerate(expanded_layers):
+        if nodes:
+            layers[torch.tensor(nodes, dtype=torch.long)] = layer_index
+    if bool((layers < 0).any().item()):
+        raise ValueError("expanded_graph.layers must cover every expanded node")
+    return layers.to(device=device)
+
+
+def _seed_expanded_positions(
+    pos: torch.Tensor,
+    edge_paths: list[list[int]],
+    expanded_num_nodes: int,
+) -> torch.Tensor:
+    """Interpolate dummy positions along each original edge path.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Original-node positions with shape ``[N_original, 2]``.
+    edge_paths : list[list[int]]
+        Expanded path for each original edge.
+    expanded_num_nodes : int
+        Total number of expanded graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Expanded positions with shape ``[N_expanded, 2]``.
+    """
+    expanded = torch.zeros((expanded_num_nodes, 2), dtype=pos.dtype, device=pos.device)
+    expanded[: pos.shape[0]] = pos
+    for path in edge_paths:
+        if len(path) <= 2:
+            continue
+        start = pos[path[0]]
+        end = pos[path[-1]]
+        denom = float(len(path) - 1)
+        for step, node in enumerate(path[1:-1], start=1):
+            alpha = float(step) / denom
+            expanded[node] = start + ((end - start) * alpha)
+    return expanded
+
+
+@register_op
+class ActivateExpandedGraphState(Op):
+    """Promote active positions and layers to a dummy-expanded graph."""
+
+    name: ClassVar[str] = "activate_expanded_graph_state"
+    category: ClassVar[OpCategory] = OpCategory.LAYERING
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "layers", "layer_index", "extras.expanded_graph")
+    writes: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "layers",
+        "layer_index",
+        "ordering",
+        "extras.original_layers",
+        "extras.original_layer_index",
+    )
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "extras.expanded_graph")
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Expand active solve tensors after dummy-node insertion.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable solve state with original-node positions and expansion
+            metadata in ``extras["expanded_graph"]``.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State whose ``pos``, ``layers``, and ``layer_index`` match the
+            expanded graph.
+        """
+        del problem, ctx
+        if state.pos is None:
+            raise ValueError("ActivateExpandedGraphState requires state.pos")
+        expanded_graph = state.extras.get("expanded_graph")
+        if expanded_graph is None:
+            return state
+
+        state.extras["original_layers"] = None if state.layers is None else state.layers.clone()
+        state.extras["original_layer_index"] = state.layer_index
+
+        expanded_pos = _seed_expanded_positions(
+            pos=state.pos.detach(),
+            edge_paths=expanded_graph.edge_paths,
+            expanded_num_nodes=int(expanded_graph.num_nodes),
+        )
+        expanded_layers = _expanded_layers_to_tensor(
+            expanded_layers=expanded_graph.layers,
+            num_nodes=int(expanded_graph.num_nodes),
+            device=state.pos.device,
+        )
+        state.pos = expanded_pos.requires_grad_(state.pos.requires_grad)
+        state.layers = expanded_layers
+        state.layer_index = build_layer_index(expanded_layers, device=str(state.pos.device))
+        state.ordering = None
+        return state
