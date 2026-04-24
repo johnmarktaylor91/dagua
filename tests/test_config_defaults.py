@@ -12,7 +12,7 @@ def test_layout_config_default_aesthetic_values() -> None:
     # still scales these down for n >= 1000.
     assert config.node_sep == 70.0
     assert config.rank_sep == 240.0
-    assert config.w_attract_x_bias == 2.4
+    assert config.w_attract_x_bias == 1.0
     assert config.w_crossing == 1.8
     assert config.w_straightness == 2.2
     # Sprint 11: CV^2 reformulation of edge length variance loss
