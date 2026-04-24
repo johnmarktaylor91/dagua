@@ -76,6 +76,12 @@ class LayoutConfig:
     # The layered path produces one-node-per-layer outputs on these graphs
     # which collapses crossings, dag_consistency, and edge_straightness.
     route_flat_to_stress: bool = True
+    # Sprint-20e: override native topology dispatch. Deprecated sprint-19
+    # booleans remain accepted as kill switches, but auto dispatch should be
+    # controlled through this single selector.
+    force_pipeline: Optional[
+        Literal["tree", "layered_dag", "force_directed", "hybrid", "legacy_monolith"]
+    ] = None
 
     # Adaptive spacing: scale node_sep and rank_sep based on graph size
     adaptive_spacing: bool = True
