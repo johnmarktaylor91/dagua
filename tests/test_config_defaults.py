@@ -11,7 +11,7 @@ def test_layout_config_default_aesthetic_values() -> None:
     # and lift edge_straightness via taller layouts. adaptive_spacing
     # still scales these down for n >= 1000.
     assert config.node_sep == 70.0
-    assert config.rank_sep == 200.0
+    assert config.rank_sep == 240.0
     assert config.w_attract_x_bias == 2.4
     assert config.w_crossing == 1.8
     assert config.w_straightness == 2.2
