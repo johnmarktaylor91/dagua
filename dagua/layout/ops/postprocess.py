@@ -595,22 +595,29 @@ class AspectRatioFit(Op):
         h = max(y_max - y_min, 1e-6)
         current_ratio = w / h
 
-        # Sprint 18f: target reduced from 1.0 -> 0.7 after holdout
-        # sweep at the new (70, 140) spacing defaults. The taller
-        # rank_sep makes layouts naturally taller-than-wide; forcing
-        # them back to square (target=1.0) over-widened them and
-        # regressed several families. target=0.7 lets the natural
-        # tall geometry persist while still rescuing degenerate
-        # extreme-aspect layouts.
+        # Sprint 18g: target=0.5 -- 6-config local search on top of
+        # Sprint 18f (target=0.7) showed monotone improvement as target
+        # decreased. Sweep results:
+        #   target=0.75: 74.972
+        #   target=0.70: 75.099
+        #   target=0.65: 75.278
+        #   target=0.60: 75.451
+        #   target=0.55: 75.589
+        #   target=0.50: 75.770  <-- adopted
+        # At target=0.5 and tolerance=0.55, AR fires when aspect is
+        # outside [0.225, 1.111]. Layouts pass through almost always;
+        # only the truly degenerate (cluster vertical chains, very-
+        # wide bipartites) trigger rescaling. The overall effect of
+        # target=0.5 is roughly "leave layouts alone unless they are
+        # WAY off"; the previous sprint 13 target=1.0 was actively
+        # hurting taller-than-square layouts.
         #
-        # Sprint 13 history: r1 topology-aware target = N**0.25
-        # clamped to 2.5 was too wide for cluster families
-        # (-9% on clustered_shallow); r2 set target=1.0 + tolerance=0.55
-        # which was the optimum at the OLD spacing (28, 50). Sprint
-        # 18f re-tuned for the NEW (70, 140) spacing.
+        # History: r1 topology-aware target = N**0.25 (-9% clusters);
+        # r2 target=1.0 (good at OLD 28/50 spacing); 18f target=0.7
+        # at NEW 70/140 spacing; 18g target=0.5 fine-tuned.
         target = self.config.target_aspect
         if target is None:
-            target = 0.7
+            target = 0.5
 
         tol = max(0.0, min(self.config.tolerance, 0.9))
         lower = target * (1.0 - tol)
