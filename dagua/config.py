@@ -37,17 +37,25 @@ class LayoutConfig:
     # taller layout makes multi-layer edges more vertical, lifting
     # edge_straightness + angular_resolution metrics.
     #
-    # Sprint 18e: refined to (70, 140) after 7-config local search
-    # around (60, 120). 70_140 won at suite mean 74.340 (vs 60_120
-    # at 74.222), +0.12 lift. Tied 2:1 ratio holds (best for vertical
-    # edge alignment); slightly larger absolute spacing helps edge
-    # straightness on dense families. Past 75 hurts cv. Past 160
-    # for rank_sep plateaus and hurts stress correlation.
+    # Sprint 18e: refined to (70, 140) after 7-config local search.
+    # Sprint 18i: re-swept after Sprint 18h adopted AR target=0.25.
+    # The aggressive vertical rescaling means larger rank_sep gets
+    # amplified through AR, so a higher rank_sep is now optimal:
+    #
+    #   70_140 (Sprint 18e): suite 76.842
+    #   60_140             : suite 76.871
+    #   70_160             : suite 76.933
+    #   80_160             : suite 76.911
+    #   70_200 (this)      : suite 77.005  <-- adopted
+    #
+    # Adopting (70, 200) gives a 2.86:1 rank/node ratio. Layouts
+    # produced are pre-AR aspect ~ 0.5; AR target=0.25 then doubles
+    # the height to land at the metric optimum.
     #
     # adaptive_spacing still scales these down for very large
     # graphs (n >= 1000), so >1M layouts stay compact.
     node_sep: float = 70.0
-    rank_sep: float = 140.0
+    rank_sep: float = 200.0
     direction: str = "TB"
 
     # Optimization (0 = auto-scale based on graph size)
