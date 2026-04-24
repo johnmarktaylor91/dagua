@@ -123,6 +123,212 @@ def _validate_edge_index(edge_index: torch.Tensor, num_nodes: int) -> torch.Tens
     return edge_index_cpu
 
 
+def _expanded_layers_to_tensor(layers: Any, num_nodes: int) -> torch.Tensor:
+    """Return per-node layer assignments from expanded-graph layer groups.
+
+    Parameters
+    ----------
+    layers : Any
+        Expanded layer data, either a tensor with shape ``[N]`` or a sequence
+        of per-layer node-id sequences.
+    num_nodes : int
+        Expected node count for the expanded graph.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU long tensor with shape ``[N]``.
+
+    Raises
+    ------
+    ValueError
+        If the expanded layer data cannot be interpreted safely.
+    """
+    if isinstance(layers, torch.Tensor):
+        return _validate_layers(layers, num_nodes)
+
+    layer_tensor = torch.full((num_nodes,), -1, dtype=torch.long)
+    try:
+        for layer_index, layer_nodes in enumerate(layers):
+            for node in layer_nodes:
+                node_index = int(node)
+                if not 0 <= node_index < num_nodes:
+                    raise ValueError("expanded_graph.layers references an invalid node")
+                layer_tensor[node_index] = int(layer_index)
+    except TypeError as exc:
+        raise ValueError("expanded_graph.layers must be a tensor or layer-node sequence") from exc
+
+    if num_nodes > 0 and int(layer_tensor.min().item()) < 0:
+        raise ValueError("expanded_graph.layers must assign every expanded node")
+    return layer_tensor
+
+
+def _solve_state_matches_node_count(state: SolveState, num_nodes: int) -> bool:
+    """Return whether the active solve state has tensors for ``num_nodes``.
+
+    Parameters
+    ----------
+    state : SolveState
+        Mutable solve state that may carry original-node or expanded-node
+        tensors.
+    num_nodes : int
+        Candidate active graph node count.
+
+    Returns
+    -------
+    bool
+        ``True`` when position or ordering tensors are already sized for the
+        candidate graph.
+    """
+    if state.pos is not None and state.pos.ndim >= 1 and int(state.pos.shape[0]) == num_nodes:
+        return True
+    return (
+        state.ordering is not None
+        and state.ordering.ndim == 1
+        and int(state.ordering.shape[0]) == num_nodes
+    )
+
+
+def _resolve_active_layered_graph(
+    problem: LayoutProblem,
+    state: SolveState,
+) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    """Return the layered graph that ordering ops should use.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable layout inputs for the original graph.
+    state : SolveState
+        Mutable solve state, optionally carrying ``extras["expanded_graph"]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, int]
+        ``(edge_index, layers, num_nodes)`` on CPU. The expanded graph is used
+        only when the active state tensors already match its node count.
+    """
+    expanded_graph = state.extras.get("expanded_graph")
+    if expanded_graph is not None:
+        expanded_edge_index = getattr(expanded_graph, "edge_index", None)
+        expanded_layers = getattr(expanded_graph, "layers", None)
+        expanded_num_nodes = getattr(expanded_graph, "num_nodes", None)
+        if (
+            isinstance(expanded_edge_index, torch.Tensor)
+            and expanded_layers is not None
+            and expanded_num_nodes is not None
+        ):
+            num_expanded = int(expanded_num_nodes)
+            if _solve_state_matches_node_count(state, num_expanded):
+                return (
+                    _validate_edge_index(expanded_edge_index, num_expanded),
+                    _expanded_layers_to_tensor(expanded_layers, num_expanded),
+                    num_expanded,
+                )
+
+    num_nodes = int(problem.num_nodes)
+    return (
+        _validate_edge_index(problem.edge_index, num_nodes),
+        _validate_layers(state.layers, num_nodes),
+        num_nodes,
+    )
+
+
+def _resolve_initial_ordering(
+    layers_cpu: torch.Tensor,
+    state: SolveState,
+    num_nodes: int,
+) -> Optional[torch.Tensor]:
+    """Use existing ordering when present, otherwise derive it from current x.
+
+    Parameters
+    ----------
+    layers_cpu : torch.Tensor
+        CPU layer assignment tensor with shape ``[N]``.
+    state : SolveState
+        Mutable solve state carrying optional ordering and positions.
+    num_nodes : int
+        Active graph node count.
+
+    Returns
+    -------
+    torch.Tensor | None
+        CPU long in-layer rank tensor with shape ``[N]`` when an ordering can
+        be resolved, otherwise ``None``.
+    """
+    if (
+        state.ordering is not None
+        and state.ordering.ndim == 1
+        and state.ordering.shape[0] == num_nodes
+    ):
+        return _validate_ordering(state.ordering, num_nodes)
+
+    if state.pos is None or state.pos.ndim != 2 or state.pos.shape[0] != num_nodes:
+        return None
+
+    pos_x = state.pos.detach().to(device="cpu")[:, 0]
+    ordered_layers = _initial_ordered_layers(layers_cpu)
+    for layer_nodes in ordered_layers:
+        layer_nodes.sort(key=lambda node_idx: (float(pos_x[node_idx].item()), node_idx))
+    return _ordering_from_layers(
+        ordered_layers=ordered_layers,
+        num_nodes=num_nodes,
+        device=torch.device("cpu"),
+    )
+
+
+def _apply_ordering_to_positions(
+    state: SolveState,
+    layers_cpu: torch.Tensor,
+    ordering_cpu: torch.Tensor,
+    num_nodes: int,
+) -> None:
+    """Project the resolved ordering back onto x coordinates.
+
+    Parameters
+    ----------
+    state : SolveState
+        Mutable solve state whose ``pos`` may be updated in place.
+    layers_cpu : torch.Tensor
+        CPU layer assignment tensor with shape ``[N]``.
+    ordering_cpu : torch.Tensor
+        CPU long ordering tensor with shape ``[N]``.
+    num_nodes : int
+        Active graph node count.
+
+    Returns
+    -------
+    None
+        ``state.pos`` is replaced when its node count matches ``num_nodes``.
+    """
+    if state.pos is None or state.pos.ndim != 2 or state.pos.shape[0] != num_nodes:
+        return
+
+    pos = state.pos
+    pos_new = pos.detach().clone()
+    ordered_layers = _initial_ordered_layers(layers_cpu)
+    if ordered_layers and all(len(layer_nodes) <= 1 for layer_nodes in ordered_layers):
+        # Longest-path DAGs such as dense_pair_50 can put every node in its
+        # own layer. There is no same-layer permutation to express, so collapse
+        # x to the median slot to remove arbitrary zig-zag crossings while
+        # preserving the solved y coordinates.
+        pos_new[:, 0] = torch.median(pos_new[:, 0])
+        state.pos = pos_new.detach().requires_grad_(pos.requires_grad)
+        return
+
+    for layer_nodes in ordered_layers:
+        if len(layer_nodes) < 2:
+            continue
+        members = torch.tensor(layer_nodes, dtype=torch.long, device=pos_new.device)
+        order_values = ordering_cpu[members.cpu()]
+        ordered_members_cpu = members.cpu()[torch.argsort(order_values, stable=True)]
+        ordered_members = ordered_members_cpu.to(device=pos_new.device)
+        sorted_x, _ = torch.sort(pos_new[members, 0])
+        pos_new[ordered_members, 0] = sorted_x
+
+    state.pos = pos_new.detach().requires_grad_(pos.requires_grad)
+
+
 def _adjacency_as_weighted_lists(adjacency: Any, num_nodes: int) -> List[List[Tuple[int, float]]]:
     """Normalize multiple adjacency formats into weighted Python lists.
 
@@ -689,9 +895,9 @@ class MedianSweep(Op):
 
     name: ClassVar[str] = "median_sweep"
     category: ClassVar[OpCategory] = OpCategory.ORDERING
-    reads: ClassVar[Tuple[str, ...]] = ("layers", "adjacency")
-    writes: ClassVar[Tuple[str, ...]] = ("ordering",)
-    requires: ClassVar[Tuple[str, ...]] = ("layers", "adjacency")
+    reads: ClassVar[Tuple[str, ...]] = ("layers", "ordering", "pos", "adjacency")
+    writes: ClassVar[Tuple[str, ...]] = ("ordering", "pos")
+    requires: ClassVar[Tuple[str, ...]] = ("layers",)
 
     def __init__(self, config: Optional[MedianSweepConfig] = None) -> None:
         """Store the sweep configuration.
@@ -727,14 +933,28 @@ class MedianSweep(Op):
         """
         del ctx
 
-        layers_cpu = _validate_layers(state.layers, problem.num_nodes)
-        weighted_adjacency = _adjacency_as_weighted_lists(state.adjacency, problem.num_nodes)
-        parents, children, _, _ = _layered_neighbors_from_adjacency(
-            adjacency=weighted_adjacency,
-            layers=layers_cpu,
-            use_weights=False,
+        edge_index_cpu, layers_cpu, num_nodes = _resolve_active_layered_graph(problem, state)
+        try:
+            weighted_adjacency = _adjacency_as_weighted_lists(state.adjacency, num_nodes)
+            parents, children, _, _ = _layered_neighbors_from_adjacency(
+                adjacency=weighted_adjacency,
+                layers=layers_cpu,
+                use_weights=False,
+            )
+        except ValueError:
+            # The native pipeline does not always build adjacency. Derive the
+            # directional layered neighborhoods from the active edge list.
+            parents, children = _layered_neighbors_from_edges(
+                edge_index=edge_index_cpu,
+                layers=layers_cpu,
+                num_nodes=num_nodes,
+            )
+        initial_ordering = _resolve_initial_ordering(
+            layers_cpu=layers_cpu,
+            state=state,
+            num_nodes=num_nodes,
         )
-        ordered_layers = _initial_ordered_layers(layers_cpu)
+        ordered_layers = _initial_ordered_layers(layers_cpu, ordering=initial_ordering)
 
         for _ in range(max(self.config.passes, 0)):
             order_map = _node_order_map(ordered_layers)
@@ -756,8 +976,14 @@ class MedianSweep(Op):
 
         state.ordering = _ordering_from_layers(
             ordered_layers=ordered_layers,
-            num_nodes=problem.num_nodes,
+            num_nodes=num_nodes,
             device=_target_device(problem, state),
+        )
+        _apply_ordering_to_positions(
+            state=state,
+            layers_cpu=layers_cpu,
+            ordering_cpu=state.ordering.detach().to(device="cpu", dtype=torch.long),
+            num_nodes=num_nodes,
         )
         return state
 
@@ -768,9 +994,9 @@ class TransposeHeuristic(Op):
 
     name: ClassVar[str] = "transpose_heuristic"
     category: ClassVar[OpCategory] = OpCategory.ORDERING
-    reads: ClassVar[Tuple[str, ...]] = ("layers", "ordering")
-    writes: ClassVar[Tuple[str, ...]] = ("ordering",)
-    requires: ClassVar[Tuple[str, ...]] = ("layers", "ordering")
+    reads: ClassVar[Tuple[str, ...]] = ("layers", "ordering", "pos")
+    writes: ClassVar[Tuple[str, ...]] = ("ordering", "pos")
+    requires: ClassVar[Tuple[str, ...]] = ("layers",)
 
     def __init__(self, config: Optional[TransposeHeuristicConfig] = None) -> None:
         """Store the transpose configuration.
@@ -807,13 +1033,22 @@ class TransposeHeuristic(Op):
         """
         del ctx
 
-        layers_cpu = _validate_layers(state.layers, problem.num_nodes)
-        ordering_cpu = _validate_ordering(state.ordering, problem.num_nodes)
-        edge_index_cpu = _validate_edge_index(problem.edge_index, problem.num_nodes)
+        edge_index_cpu, layers_cpu, num_nodes = _resolve_active_layered_graph(problem, state)
+        ordering_cpu = _resolve_initial_ordering(
+            layers_cpu=layers_cpu,
+            state=state,
+            num_nodes=num_nodes,
+        )
+        if ordering_cpu is None:
+            ordering_cpu = _ordering_from_layers(
+                ordered_layers=_initial_ordered_layers(layers_cpu),
+                num_nodes=num_nodes,
+                device=torch.device("cpu"),
+            )
         parents, children = _layered_neighbors_from_edges(
             edge_index=edge_index_cpu,
             layers=layers_cpu,
-            num_nodes=problem.num_nodes,
+            num_nodes=num_nodes,
         )
         ordered_layers = _initial_ordered_layers(layers=layers_cpu, ordering=ordering_cpu)
         layer_groups = {
@@ -831,8 +1066,14 @@ class TransposeHeuristic(Op):
         refined_layers = [layer_groups[layer_index] for layer_index in range(len(ordered_layers))]
         state.ordering = _ordering_from_layers(
             ordered_layers=refined_layers,
-            num_nodes=problem.num_nodes,
+            num_nodes=num_nodes,
             device=_target_device(problem, state),
+        )
+        _apply_ordering_to_positions(
+            state=state,
+            layers_cpu=layers_cpu,
+            ordering_cpu=state.ordering.detach().to(device="cpu", dtype=torch.long),
+            num_nodes=num_nodes,
         )
         return state
 

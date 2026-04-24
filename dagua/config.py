@@ -132,6 +132,12 @@ class LayoutConfig:
     # composite for trees. Opt in via LayoutConfig(use_tree_fast_path=True)
     # when edge crossings are the dominant concern vs edge uniformity.
     use_tree_fast_path: bool = False
+    # Sprint 19f: discrete native crossing reduction after barycenter polish.
+    # Median and transpose run only on acyclic graphs and can be disabled
+    # quickly if a narrow DAG family regresses.
+    use_native_median_transpose: bool = True
+    native_median_passes: int = 4
+    native_transpose_passes: int = 8
     # Sprint 19d: adapter-level disconnected-component decomposition for the
     # default dagua_native pipeline. Each weak component is solved
     # independently and tiled unless a conservative safety gate disables it.
