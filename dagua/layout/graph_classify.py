@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -44,6 +44,7 @@ class GraphStructure:
     edge_to_node_ratio: float = 0.0
     is_directed_acyclic: bool = True
     topology_tags: tuple[str, ...] = ()
+    is_semantically_directed: Optional[bool] = None
 
 
 def _compute_degree(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -322,6 +323,87 @@ def _analyze_layers(
     return num_layers, avg_layer_width, max_layer_width, layer_width_cv
 
 
+def _reciprocal_edge_ratio(edge_index: torch.Tensor) -> float:
+    """Return the fraction of directed edges with a reverse counterpart.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+
+    Returns
+    -------
+    float
+        Ratio in ``[0, 1]`` where ``1`` means every directed edge also appears
+        in the opposite direction.
+    """
+    if edge_index.numel() == 0:
+        return 0.0
+
+    cpu_edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    edge_pairs = list(zip(cpu_edges[0].tolist(), cpu_edges[1].tolist()))
+    pair_set = set(edge_pairs)
+    reciprocal_count = sum(1 for source, target in edge_pairs if (target, source) in pair_set)
+    return float(reciprocal_count) / float(len(edge_pairs))
+
+
+def _infer_semantically_directed(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    layer_assignments: Optional[torch.Tensor] = None,
+) -> bool:
+    """Infer whether graph edges carry semantic direction.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+    layer_assignments : torch.Tensor, optional
+        Optional layer assignment tensor shaped ``[N]``. When omitted, the
+        classifier computes longest-path layers for small graphs.
+
+    Returns
+    -------
+    bool
+        ``False`` for likely undirected-origin graphs that were mechanically
+        oriented into a DAG, otherwise ``True``.
+    """
+    if num_nodes <= 0 or edge_index.numel() == 0:
+        return True
+
+    if num_nodes > 10_000_000:
+        resolved_layers = (
+            _resolve_layer_assignments(edge_index, num_nodes, layer_assignments)
+            if layer_assignments is not None
+            else None
+        )
+        num_layers, _, _, _ = _analyze_layers(resolved_layers, num_nodes)
+        return not (num_layers > 0 and float(num_layers) / float(num_nodes) >= 0.4)
+
+    num_edges = edge_index.shape[1]
+    degree = _compute_degree(edge_index, num_nodes)
+    max_degree = int(degree.max().item()) if degree.numel() > 0 else 0
+    num_components = _count_components(edge_index, num_nodes)
+    is_acyclic = _is_undirected_acyclic(edge_index, num_nodes)
+    is_tree = num_components == 1 and is_acyclic and num_edges == num_nodes - 1
+    degree_one_count = int((degree == 1).sum().item()) if degree.numel() > 0 else 0
+    is_chain = is_tree and max_degree <= 2 and (num_nodes <= 2 or degree_one_count == 2)
+    if is_tree or is_chain:
+        return True
+
+    if _reciprocal_edge_ratio(edge_index) > 0.3:
+        return False
+
+    resolved_layers = _resolve_layer_assignments(edge_index, num_nodes, layer_assignments)
+    num_layers, _, _, _ = _analyze_layers(resolved_layers, num_nodes)
+    if num_layers > 0 and float(num_layers) / float(num_nodes) >= 0.4:
+        return False
+
+    return True
+
+
 def _derive_topology_tags(
     family: GraphFamily,
     num_nodes: int,
@@ -402,6 +484,7 @@ def classify_graph(
     edge_index: torch.Tensor,
     num_nodes: int,
     layer_assignments: Optional[torch.Tensor] = None,
+    graph: Optional[Any] = None,
 ) -> GraphStructure:
     """Classify graph structure in O(V+E).
 
@@ -414,6 +497,9 @@ def classify_graph(
     layer_assignments : torch.Tensor, optional
         Pre-computed layer assignments. When omitted, the classifier computes a
         longest-path layering to enable layered-graph heuristics.
+    graph : Any, optional
+        Optional graph object with ``is_semantically_directed`` set to override
+        heuristic inference.
 
     Returns
     -------
@@ -421,6 +507,9 @@ def classify_graph(
         Detected structure with metadata.
     """
     num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    explicit_direction = (
+        getattr(graph, "is_semantically_directed", None) if graph is not None else None
+    )
 
     # At very large scale, classification is always GENERAL — skip the
     # expensive degree computation (20GB+ allocation) and union-find.
@@ -435,6 +524,14 @@ def classify_graph(
             num_nodes,
         )
         edge_to_node_ratio = float(num_edges) / float(num_nodes) if num_nodes > 0 else 0.0
+        if explicit_direction is not None:
+            is_semantically_directed = bool(explicit_direction)
+        else:
+            is_semantically_directed = _infer_semantically_directed(
+                edge_index,
+                num_nodes,
+                resolved_layers,
+            )
         return GraphStructure(
             family=GraphFamily.GENERAL,
             num_components=1,
@@ -447,6 +544,7 @@ def classify_graph(
             layer_width_cv=layer_width_cv,
             edge_to_node_ratio=edge_to_node_ratio,
             is_directed_acyclic=True,
+            is_semantically_directed=is_semantically_directed,
         )
 
     degree = _compute_degree(edge_index, num_nodes)
@@ -505,6 +603,14 @@ def classify_graph(
         is_planar_hint=is_planar_hint,
         is_directed_acyclic=is_directed_acyclic,
     )
+    if explicit_direction is not None:
+        is_semantically_directed = bool(explicit_direction)
+    else:
+        is_semantically_directed = _infer_semantically_directed(
+            edge_index,
+            num_nodes,
+            resolved_layers,
+        )
 
     return GraphStructure(
         family=family,
@@ -519,4 +625,5 @@ def classify_graph(
         edge_to_node_ratio=edge_to_node_ratio,
         is_directed_acyclic=is_directed_acyclic,
         topology_tags=topology_tags,
+        is_semantically_directed=is_semantically_directed,
     )
