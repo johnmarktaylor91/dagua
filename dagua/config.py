@@ -142,6 +142,10 @@ class LayoutConfig:
     # Conservative DAG gate keeps this out of cyclic, flat, tree, chain, and
     # multi-component cases unless there is only one isolated tail node.
     brandes_koepf_refine: bool = True
+    # Sprint 19h: split long-span DAG edges into dummy-node chains inside
+    # dagua_native. This public kill switch lets benchmarks isolate routing
+    # regressions without reverting the whole feature.
+    insert_dummy_nodes: bool = True
     # Sprint 19d: adapter-level disconnected-component decomposition for the
     # default dagua_native pipeline. Each weak component is solved
     # independently and tiled unless a conservative safety gate disables it.

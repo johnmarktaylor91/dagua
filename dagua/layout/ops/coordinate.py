@@ -946,6 +946,44 @@ def _resolve_topology_structure(
     return classify_graph(edge_index=edge_index, num_nodes=num_nodes, layer_assignments=layers)
 
 
+def _active_coordinate_graph(
+    problem: LayoutProblem,
+    state: SolveState,
+) -> tuple[int, torch.Tensor, torch.Tensor]:
+    """Return the graph currently active for coordinate assignment.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable original graph inputs.
+    state : SolveState
+        Mutable solve state that may carry ``extras["expanded_graph"]``.
+
+    Returns
+    -------
+    tuple[int, torch.Tensor, torch.Tensor]
+        Active node count, edge tensor, and CPU node sizes. The expanded graph
+        is used only when active layer tensors already match its node count.
+    """
+    expanded_graph = state.extras.get("expanded_graph")
+    if (
+        expanded_graph is not None
+        and state.layers is not None
+        and int(getattr(expanded_graph, "num_nodes", -1)) == int(state.layers.shape[0])
+    ):
+        num_nodes = int(expanded_graph.num_nodes)
+        return (
+            num_nodes,
+            expanded_graph.edge_index,
+            _resolve_node_sizes(expanded_graph.node_sizes, num_nodes),
+        )
+    return (
+        problem.num_nodes,
+        problem.edge_index,
+        _resolve_node_sizes(problem.node_sizes, problem.num_nodes),
+    )
+
+
 def _should_apply_brandes_koepf_refine(
     structure: TopologyGraphStructure,
     edge_index: torch.Tensor,
@@ -1502,19 +1540,23 @@ class BrandesKoepfHorizontalRefine(Op):
         if state.pos is None:
             raise ValueError("state.pos must be populated before BK horizontal refine")
 
-        layers_cpu = _validate_layers(state.layers, problem.num_nodes)
-        edge_index_cpu = _validate_edge_index(problem.edge_index, problem.num_nodes)
+        active_num_nodes, active_edge_index, active_node_sizes = _active_coordinate_graph(
+            problem=problem,
+            state=state,
+        )
+        layers_cpu = _validate_layers(state.layers, active_num_nodes)
+        edge_index_cpu = _validate_edge_index(active_edge_index, active_num_nodes)
         structure = _resolve_topology_structure(
             structure=self.config.structure or problem.structure,
             edge_index=edge_index_cpu,
             layers=layers_cpu,
-            num_nodes=problem.num_nodes,
+            num_nodes=active_num_nodes,
         )
         if not _should_apply_brandes_koepf_refine(
             structure=structure,
             edge_index=edge_index_cpu,
             layers=layers_cpu,
-            num_nodes=problem.num_nodes,
+            num_nodes=active_num_nodes,
             min_layers=self.config.min_layers,
         ):
             return state
@@ -1524,15 +1566,14 @@ class BrandesKoepfHorizontalRefine(Op):
         parents, children = _layered_neighbors_from_edges(
             edge_index=edge_index_cpu,
             layers=layers_cpu,
-            num_nodes=problem.num_nodes,
+            num_nodes=active_num_nodes,
         )
-        node_sizes_cpu = _resolve_node_sizes(problem.node_sizes, problem.num_nodes)
         x_coordinates = _brandes_koepf_x_positions(
             layers=ordered_layers,
             parents=parents,
             children=children,
-            node_sizes=node_sizes_cpu,
-            num_nodes=problem.num_nodes,
+            node_sizes=active_node_sizes,
+            num_nodes=active_num_nodes,
             num_original_nodes=problem.num_nodes,
             node_sep=self.config.node_sep,
         )
@@ -1594,27 +1635,30 @@ class BrandesKopf4Pass(Op):
         """
         del ctx
 
-        layers_cpu = _validate_layers(state.layers, problem.num_nodes)
-        ordering_cpu = _validate_ordering(state.ordering, problem.num_nodes)
-        edge_index_cpu = _validate_edge_index(problem.edge_index, problem.num_nodes)
+        active_num_nodes, active_edge_index, active_node_sizes = _active_coordinate_graph(
+            problem=problem,
+            state=state,
+        )
+        layers_cpu = _validate_layers(state.layers, active_num_nodes)
+        ordering_cpu = _validate_ordering(state.ordering, active_num_nodes)
+        edge_index_cpu = _validate_edge_index(active_edge_index, active_num_nodes)
         ordered_layers = _ordered_layers_from_state(layers_cpu, ordering_cpu)
         parents, children = _layered_neighbors_from_edges(
             edge_index=edge_index_cpu,
             layers=layers_cpu,
-            num_nodes=problem.num_nodes,
+            num_nodes=active_num_nodes,
         )
-        node_sizes_cpu = _resolve_node_sizes(problem.node_sizes, problem.num_nodes)
 
-        positions = torch.zeros((problem.num_nodes, _POSITION_OUTPUT_DIM), dtype=torch.float32)
-        if problem.num_nodes > 0:
+        positions = torch.zeros((active_num_nodes, _POSITION_OUTPUT_DIM), dtype=torch.float32)
+        if active_num_nodes > 0:
             # The four orientation passes balance each other, so keep the
             # Brandes-Kopf output in local CPU tensors until the final transfer.
             x_coordinates = _brandes_koepf_x_positions(
                 layers=ordered_layers,
                 parents=parents,
                 children=children,
-                node_sizes=node_sizes_cpu,
-                num_nodes=problem.num_nodes,
+                node_sizes=active_node_sizes,
+                num_nodes=active_num_nodes,
                 num_original_nodes=problem.num_nodes,
                 node_sep=self.config.node_sep,
             )
