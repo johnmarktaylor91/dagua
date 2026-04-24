@@ -12,6 +12,7 @@ from dagua.layout.ops.layering import (
     InsertDummyNodes,
     LayerPromotion,
     LongestPathLayering,
+    _expand_long_edges_with_dummy_nodes,
 )
 from dagua.layout.ops.ordering import BarycenterSweep
 from dagua.layout.ops.postprocess import StripDummyNodes
@@ -161,6 +162,31 @@ def test_insert_dummy_nodes_expands_skip_edges_into_full_paths() -> None:
     assert expanded.num_nodes == 6
     assert expanded.edge_paths[0] == [0, 1]
     assert expanded.edge_paths[1] == [0, 4, 5, 3]
+
+
+def test_expand_long_edges_with_dummy_nodes_builds_expected_layer_chain() -> None:
+    """A three-rank skip edge should become a complete dummy chain."""
+    edge_index = torch.tensor([[0, 0], [1, 3]], dtype=torch.long)
+    layers = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+    node_sizes = torch.ones((4, 2), dtype=torch.float32)
+
+    expanded, expanded_weights = _expand_long_edges_with_dummy_nodes(
+        edge_index=edge_index,
+        layer_assignments=layers,
+        node_sizes=node_sizes,
+        num_original_nodes=4,
+        dummy_size=(0.0, 0.0),
+        edge_weights=None,
+    )
+
+    assert expanded_weights is None
+    assert expanded.num_nodes == 6
+    assert expanded.edge_paths == [[0, 1], [0, 4, 5, 3]]
+    assert expanded.layers == [[0], [1, 4], [2, 5], [3]]
+    assert torch.equal(
+        expanded.edge_index,
+        torch.tensor([[0, 0, 4, 5], [1, 4, 5, 3]], dtype=torch.long),
+    )
 
 
 def test_full_sugiyama_pipeline_produces_finite_original_node_positions() -> None:

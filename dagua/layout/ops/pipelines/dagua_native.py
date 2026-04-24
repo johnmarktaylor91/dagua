@@ -42,6 +42,7 @@ from dagua.layout.ops.init import (
     NativeEngineInit,
     NativeEngineInitConfig,
 )
+from dagua.layout.ops.layering import ActivateExpandedGraphState, InsertDummyNodes
 from dagua.layout.ops.optimize import (
     ClipGradNorm,
     ClipGradNormConfig,
@@ -56,7 +57,7 @@ from dagua.layout.ops.ordering import (
     TransposeHeuristic,
     TransposeHeuristicConfig,
 )
-from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
+from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig, StripDummyNodes
 from dagua.layout.ops.preprocess import BuildAdjacency, BuildAdjacencyConfig, DetectComponents
 from dagua.layout.ops.project import (
     HardPinProjection,
@@ -79,12 +80,113 @@ from dagua.layout.resolve import (
     normalize_node_sizes,
     prepare_pipeline_config,
 )
+from dagua.utils import longest_path_layering
 
 _COMPONENT_TILE_PAD_FACTOR = 2.0
 _COMPONENT_PACK_TARGET_ASPECT = 1.0
 _COMPONENT_PACK_AREA_WEIGHT = 0.05
 _COMPONENT_DOMINANCE_SKIP_FRACTION = 0.85
+# Tiny hand-authored DAGs rarely have enough long-edge mass for dummy nodes to
+# help, and one skip edge can dominate the post-strip geometry.
+_DUMMY_NODE_MIN_NODES = 20
 PackedComponent = tuple[torch.Tensor, torch.Tensor, float, float]
+
+
+def _resolve_native_layer_assignments(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    layer_assignments: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """Return CPU layer assignments for native dummy-node gating.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+    layer_assignments : torch.Tensor | None
+        Optional caller-provided layer assignments with shape ``[N]``.
+
+    Returns
+    -------
+    torch.Tensor | None
+        CPU long layer assignments when they can be resolved.
+    """
+    if layer_assignments is not None:
+        return layer_assignments.detach().to(device="cpu", dtype=torch.long)
+    if num_nodes == 0 or edge_index.numel() == 0:
+        return None
+    resolved = longest_path_layering(edge_index.detach().to(device="cpu"), num_nodes, device="cpu")
+    if isinstance(resolved, torch.Tensor):
+        return resolved.to(device="cpu", dtype=torch.long)
+    return torch.tensor(resolved, dtype=torch.long)
+
+
+def _has_long_layer_edges(
+    edge_index: torch.Tensor,
+    layer_assignments: Optional[torch.Tensor],
+) -> bool:
+    """Return whether any edge spans at least two layers.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity with shape ``[2, E]``.
+    layer_assignments : torch.Tensor | None
+        Layer assignments with shape ``[N]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one edge has target-source layer span ``>= 2``.
+    """
+    if layer_assignments is None or edge_index.numel() == 0:
+        return False
+    edges_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    spans = layer_assignments[edges_cpu[1]] - layer_assignments[edges_cpu[0]]
+    return bool((spans >= 2).any().item())
+
+
+def _should_use_native_dummy_nodes(
+    config: LayoutConfig,
+    structure: Optional[GraphStructure],
+    edge_index: torch.Tensor,
+    layer_assignments: Optional[torch.Tensor],
+) -> bool:
+    """Return whether native should expand long DAG edges with dummies.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Prepared layout configuration.
+    structure : GraphStructure | None
+        Classified topology for the current connected component.
+    edge_index : torch.Tensor
+        Graph connectivity with shape ``[2, E]``.
+    layer_assignments : torch.Tensor | None
+        Resolved layer assignments with shape ``[N]``.
+
+    Returns
+    -------
+    bool
+        ``True`` only for connected, non-flat DAGs with at least one long edge.
+    """
+    if not bool(getattr(config, "insert_dummy_nodes", True)):
+        return False
+    if structure is None:
+        return False
+    if not bool(getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))):
+        return False
+    if int(getattr(structure, "num_components", 1)) != 1:
+        return False
+    if int(getattr(structure, "num_layers", 0)) <= 1:
+        return False
+    if layer_assignments is None or int(layer_assignments.shape[0]) < _DUMMY_NODE_MIN_NODES:
+        return False
+    if "dense_dag" in getattr(structure, "topology_tags", ()):
+        return False
+    return _has_long_layer_edges(edge_index=edge_index, layer_assignments=layer_assignments)
 
 
 def _stress_pivot_prep(config: LayoutConfig) -> list:
@@ -324,6 +426,24 @@ def _prepare_native_config(
         skip_classification=skip_classification,
     )
     setattr(prepared_config, "_dagua_native_optimizer_type", optimizer_type)
+    structure = getattr(prepared_config, "_dagua_native_structure", None)
+    resolved_layers = _resolve_native_layer_assignments(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        layer_assignments=layer_assignments,
+    )
+    if resolved_layers is not None:
+        setattr(prepared_config, "_dagua_native_layer_assignments", resolved_layers)
+    setattr(
+        prepared_config,
+        "_dagua_native_use_dummy_nodes",
+        _should_use_native_dummy_nodes(
+            config=prepared_config,
+            structure=structure,
+            edge_index=edge_index,
+            layer_assignments=resolved_layers,
+        ),
+    )
     return prepared_config
 
 
@@ -381,7 +501,10 @@ def _run_native_problem(
     final_state = build_dagua_pipeline(config).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("dagua_native pipeline did not produce final positions.")
-    return final_state.pos.detach()
+    result = final_state.pos.detach()
+    if result.shape[0] > problem.num_nodes:
+        result = result[: problem.num_nodes]
+    return result
 
 
 def _has_pins(flex: Optional[FlexConstraints]) -> bool:
@@ -835,6 +958,7 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
     resolved_rank_sep = float(getattr(config, "_dagua_native_rank_sep", config.rank_sep))
     resolved_device = str(getattr(config, "_dagua_native_device", config.device))
     resolved_verbose = bool(getattr(config, "_dagua_native_verbose", config.verbose))
+    resolved_use_dummy_nodes = bool(getattr(config, "_dagua_native_use_dummy_nodes", False))
     overlap_interval = int(getattr(config, "_dagua_native_overlap_interval", 5))
     final_projection_iterations = int(
         getattr(config, "_dagua_native_final_projection_iterations", 10),
@@ -895,7 +1019,6 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
             )
         )
     )
-
     # Sprint 2: branch on N. V-cycle above threshold; flat below.
     use_vcycle = bool(getattr(config, "_dagua_native_use_vcycle", False))
     if use_vcycle:
@@ -984,6 +1107,14 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
             # Acyclic graphs are unaffected (num_layers >= 2 is the
             # common case).
             Force2DInitIfFlat(Force2DInitIfFlatConfig()),
+            *(
+                [
+                    InsertDummyNodes(),
+                    ActivateExpandedGraphState(),
+                ]
+                if resolved_use_dummy_nodes
+                else []
+            ),
             # Sprint 15: pivot-stress pre-prep. When w_stress > 0, build
             # adjacency + select pivots + query BFS distances so the
             # PivotApproxStressLoss (added to losses by
@@ -1022,6 +1153,7 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
                     iterations=final_projection_iterations,
                 ),
             ),
+            StripDummyNodes(),
             # Sprint 13: rescale bbox to a sane aspect ratio. Dagua
             # loses heavily on aspect_ratio_deviation because the
             # gradient has no explicit AR term; layouts grow wherever
