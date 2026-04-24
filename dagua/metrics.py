@@ -292,25 +292,29 @@ def dag_consistency(
         )
     else:
         src, tgt = forward_ei[0], forward_ei[1]
+        # Self-loops are trivially dag-consistent (no direction to violate).
+        # Ties (y_tgt == y_src) come from barycenter ordering and should not
+        # penalize -- only strictly reversed edges count as violations.
+        self_loops = src == tgt
         if direction == "TB":
             y_src, y_tgt = pos[src, 1], pos[tgt, 1]
-            correct = y_tgt > y_src
+            correct = (y_tgt >= y_src) | self_loops
             violation_mag = torch.clamp(y_src[~correct] - y_tgt[~correct], min=0)
         elif direction == "BT":
             y_src, y_tgt = pos[src, 1], pos[tgt, 1]
-            correct = y_tgt < y_src
+            correct = (y_tgt <= y_src) | self_loops
             violation_mag = torch.clamp(y_tgt[~correct] - y_src[~correct], min=0)
         elif direction == "LR":
             x_src, x_tgt = pos[src, 0], pos[tgt, 0]
-            correct = x_tgt > x_src
+            correct = (x_tgt >= x_src) | self_loops
             violation_mag = torch.clamp(x_src[~correct] - x_tgt[~correct], min=0)
         elif direction == "RL":
             x_src, x_tgt = pos[src, 0], pos[tgt, 0]
-            correct = x_tgt < x_src
+            correct = (x_tgt <= x_src) | self_loops
             violation_mag = torch.clamp(x_tgt[~correct] - x_src[~correct], min=0)
         else:
             y_src, y_tgt = pos[src, 1], pos[tgt, 1]
-            correct = y_tgt > y_src
+            correct = (y_tgt >= y_src) | self_loops
             violation_mag = torch.clamp(y_src[~correct] - y_tgt[~correct], min=0)
 
         n_violations = (~correct).sum().item()
@@ -484,12 +488,16 @@ def edge_direction_straightness(
 
     src, tgt = edge_index[0], edge_index[1]
     dx = (pos[tgt, 0] - pos[src, 0]).abs()
-    dy = (pos[tgt, 1] - pos[src, 1]).abs().clamp(min=1e-6)
+    dy = (pos[tgt, 1] - pos[src, 1]).abs()
 
+    # Clamp only the denominator for each layout direction so a zero-length
+    # edge deterministically reports 0 deg regardless of TB vs LR. Previously
+    # LR clamped both dx and dy, making coincident edges report 45 deg.
     if direction in ("LR", "RL"):
         dx = dx.clamp(min=1e-6)
         angles = torch.atan2(dy, dx) * 180 / torch.pi
     else:
+        dy = dy.clamp(min=1e-6)
         angles = torch.atan2(dx, dy) * 180 / torch.pi
 
     return {
@@ -722,12 +730,19 @@ def neighborhood_preservation(
 
 
 def angular_resolution(
-    pos: torch.Tensor, edge_index: torch.Tensor, n_samples: int = 10000
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    n_samples: int = 10000,
+    seed: int = 42,
 ) -> Dict[str, float]:
     """Minimum angle between incident edges at each node (sampled).
 
     Complexity: O(n_samples * avg_degree * log(avg_degree)).
     Target: mean > 20° decent, < 10% below 10°.
+
+    The ``seed`` parameter makes node sampling deterministic; previously the
+    global RNG was used, which injected run-to-run variance into benchmark
+    scores and masked small improvements from iteration to iteration.
     """
     if edge_index.numel() == 0:
         return {
@@ -760,7 +775,10 @@ def angular_resolution(
             "angular_res_below_10deg": 0.0,
         }
 
-    sample = candidates[torch.randperm(candidates.numel())[: min(n_samples, candidates.numel())]]
+    gen = torch.Generator(device="cpu").manual_seed(int(seed))
+    sample = candidates[
+        torch.randperm(candidates.numel(), generator=gen)[: min(n_samples, candidates.numel())]
+    ]
 
     min_angles = []
     for node in sample:
