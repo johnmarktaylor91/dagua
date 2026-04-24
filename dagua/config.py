@@ -46,16 +46,23 @@ class LayoutConfig:
     #   60_140             : suite 76.871
     #   70_160             : suite 76.933
     #   80_160             : suite 76.911
-    #   70_200 (this)      : suite 77.005  <-- adopted
+    #   70_200             : suite 77.005
+    #   70_240 (this)      : suite 77.043  <-- adopted
+    #   70_300             : suite 76.934 (plateau)
+    #   70_400             : suite 77.006 (plateau)
+    #   60_200             : suite 77.013
+    #   50_200             : suite 76.522
+    #   40_200             : suite 75.906
     #
-    # Adopting (70, 200) gives a 2.86:1 rank/node ratio. Layouts
-    # produced are pre-AR aspect ~ 0.5; AR target=0.25 then doubles
-    # the height to land at the metric optimum.
+    # Adopting (70, 240) gives a 3.43:1 rank/node ratio. Layouts
+    # produced are pre-AR aspect ~ 0.4; AR target=0.25 only mildly
+    # rescales (since natural aspect already < 1.0). Plateau past 240.
+    # Below node_sep=60 quickly degrades.
     #
     # adaptive_spacing still scales these down for very large
     # graphs (n >= 1000), so >1M layouts stay compact.
     node_sep: float = 70.0
-    rank_sep: float = 200.0
+    rank_sep: float = 240.0
     direction: str = "TB"
 
     # Optimization (0 = auto-scale based on graph size)
