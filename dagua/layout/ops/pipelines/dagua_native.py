@@ -77,7 +77,7 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
         ``"hybrid"``, or ``"legacy_monolith"``.
     """
     forced = _selected_force_pipeline(config)
-    if forced in {"tree", "layered_dag", "force_directed", "hybrid", "legacy_monolith"}:
+    if forced in {"tree", "layered_dag", "force_directed", "hybrid", "planar", "legacy_monolith"}:
         return forced
     if structure is None:
         return "layered_dag"
@@ -87,6 +87,10 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     small_tree_cutoff = int(getattr(config, "small_n_tree_cutoff", 64))
     if num_nodes <= small_tree_cutoff and family in {GraphFamily.TREE, GraphFamily.CHAIN}:
         return "tree"
+    # Sprint-20g: planar dispatch when the classifier confirms exact
+    # planarity (and the user has not opted out via try_planar_first=False).
+    if getattr(config, "try_planar_first", True) and bool(getattr(structure, "is_planar", False)):
+        return "planar"
     cyclicity_ratio = float(getattr(structure, "cyclicity_ratio", 0.0))
     if family == GraphFamily.FORCE_DIRECTED or cyclicity_ratio > 0.3:
         return "force_directed"
