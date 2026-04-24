@@ -89,6 +89,7 @@ _COMPONENT_DOMINANCE_SKIP_FRACTION = 0.85
 # Tiny hand-authored DAGs rarely have enough long-edge mass for dummy nodes to
 # help, and one skip edge can dominate the post-strip geometry.
 _DUMMY_NODE_MIN_NODES = 20
+_SMALL_DAG_MEDIAN_TRANSPOSE_MAX_NODES = 30
 PackedComponent = tuple[torch.Tensor, torch.Tensor, float, float]
 
 
@@ -148,6 +149,52 @@ def _has_long_layer_edges(
     return bool((spans >= 2).any().item())
 
 
+def _max_layer_width_from_layers(layer_assignments: Optional[torch.Tensor]) -> Optional[int]:
+    """Return the widest layer implied by layer assignments.
+
+    Parameters
+    ----------
+    layer_assignments : torch.Tensor | None
+        Layer assignments with shape ``[N]``.
+
+    Returns
+    -------
+    int | None
+        Maximum number of nodes in any layer, or ``None`` when no layer
+        assignment is available.
+    """
+    if layer_assignments is None or layer_assignments.numel() == 0:
+        return None
+    layers_cpu = layer_assignments.detach().to(device="cpu", dtype=torch.long)
+    normalized_layers = layers_cpu - int(layers_cpu.min().item())
+    return int(torch.bincount(normalized_layers).max().item())
+
+
+def _resolved_max_layer_width(
+    structure: Optional[GraphStructure],
+    layer_assignments: Optional[torch.Tensor],
+) -> Optional[int]:
+    """Return classified or computed max layer width for native gates.
+
+    Parameters
+    ----------
+    structure : GraphStructure | None
+        Optional graph classification metadata.
+    layer_assignments : torch.Tensor | None
+        Layer assignments with shape ``[N]``.
+
+    Returns
+    -------
+    int | None
+        Maximum layer width when it can be resolved.
+    """
+    if structure is not None:
+        classified_width = int(getattr(structure, "max_layer_width", 0))
+        if classified_width > 0:
+            return classified_width
+    return _max_layer_width_from_layers(layer_assignments)
+
+
 def _should_use_native_dummy_nodes(
     config: LayoutConfig,
     structure: Optional[GraphStructure],
@@ -184,9 +231,77 @@ def _should_use_native_dummy_nodes(
         return False
     if layer_assignments is None or int(layer_assignments.shape[0]) < _DUMMY_NODE_MIN_NODES:
         return False
+    max_layer_width = _resolved_max_layer_width(
+        structure=structure,
+        layer_assignments=layer_assignments,
+    )
+    if max_layer_width is not None and max_layer_width <= 1:
+        return False
     if "dense_dag" in getattr(structure, "topology_tags", ()):
         return False
     return _has_long_layer_edges(edge_index=edge_index, layer_assignments=layer_assignments)
+
+
+def _should_apply_brandes_koepf_refine(
+    config: LayoutConfig,
+    structure: Optional[GraphStructure],
+    layer_assignments: Optional[torch.Tensor],
+) -> bool:
+    """Return whether the native pipeline should enable BK refinement.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Prepared layout configuration.
+    structure : GraphStructure | None
+        Classified topology for the current problem.
+    layer_assignments : torch.Tensor | None
+        Layer assignments with shape ``[N]``.
+
+    Returns
+    -------
+    bool
+        ``True`` unless the user disabled BK or the graph has no real
+        horizontal spreading work to do.
+    """
+    if not bool(getattr(config, "brandes_koepf_refine", True)):
+        return False
+    max_layer_width = _resolved_max_layer_width(
+        structure=structure,
+        layer_assignments=layer_assignments,
+    )
+    if max_layer_width is not None and max_layer_width <= 1:
+        return False
+    return True
+
+
+def _should_use_native_median_transpose(
+    config: LayoutConfig,
+    is_acyclic: bool,
+) -> bool:
+    """Return whether native median/transpose crossing reduction should run.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Prepared layout configuration.
+    is_acyclic : bool
+        Whether the active graph is directed acyclic.
+
+    Returns
+    -------
+    bool
+        ``True`` for acyclic graphs larger than the tiny-DAG cutoff when the
+        user-facing feature flag is enabled.
+    """
+    if not bool(getattr(config, "use_native_median_transpose", True)):
+        return False
+    if not is_acyclic:
+        return False
+    num_nodes = getattr(config, "_dagua_native_num_nodes", None)
+    if num_nodes is not None and int(num_nodes) <= _SMALL_DAG_MEDIAN_TRANSPOSE_MAX_NODES:
+        return False
+    return True
 
 
 def _stress_pivot_prep(config: LayoutConfig) -> list:
@@ -996,14 +1111,22 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
         if structure is not None
         else True
     )
-    enable_native_median_transpose = bool(getattr(config, "use_native_median_transpose", True))
+    layer_assignments = getattr(config, "_dagua_native_layer_assignments", None)
+    enable_native_median_transpose = _should_use_native_median_transpose(
+        config=config,
+        is_acyclic=is_acyclic,
+    )
     native_median_passes = int(getattr(config, "native_median_passes", 4))
     native_transpose_passes = int(getattr(config, "native_transpose_passes", 8))
-    enable_brandes_koepf_refine = bool(getattr(config, "brandes_koepf_refine", True))
+    enable_brandes_koepf_refine = _should_apply_brandes_koepf_refine(
+        config=config,
+        structure=structure,
+        layer_assignments=layer_assignments,
+    )
     crossing_reduction_ops = [
         BarycenterReorder(BarycenterReorderConfig()),
     ]
-    if enable_native_median_transpose and is_acyclic:
+    if enable_native_median_transpose:
         crossing_reduction_ops.extend(
             [
                 MedianSweep(MedianSweepConfig(passes=native_median_passes)),
