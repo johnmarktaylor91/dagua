@@ -763,6 +763,7 @@ def test_gpu_layering_logs_cpu_fallback_on_low_vram(
 
     monkeypatch.setattr(utils_module, "VRAMBudget", _FakeBudget)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (1, 2))
     monkeypatch.setattr(
         utils_module,
@@ -808,6 +809,7 @@ def test_gpu_layering_logs_oom_cpu_fallback(
 
     monkeypatch.setattr(utils_module, "VRAMBudget", _FakeBudget)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (10_000_000_000, 20_000_000_000))
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(utils_module, "_gpu_longest_path_layering", _raise_oom)
@@ -858,6 +860,7 @@ def test_streaming_coarsen_end_to_end_matches_cpu_layout(
 
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (10_000_000_000, 20_000_000_000))
+        monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
         monkeypatch.setattr(
             layers_module,
             "_cuda_layer_argsort",
@@ -1021,6 +1024,7 @@ def test_memory_strategy_selects_plb_not_hybrid_at_50m(
     config = LayoutConfig(device="cuda")
 
     monkeypatch.setattr(engine_module, "VRAMBudget", _FakeBudget)
+    monkeypatch.setattr(engine_module, "_auto_sampled_node_cap", lambda verbose=False: 1_000_000)
 
     use_plb, use_checkpointing, use_hybrid = _resolve_memory_strategy(
         50_000_000,
@@ -1305,6 +1309,7 @@ def test_layout_inner_uses_cuda_layering_for_subset_gpu(
     """Subset-GPU mode should still request CUDA layering when available."""
     engine_module = importlib.import_module("dagua.layout.engine")
     requested_devices: list[str] = []
+    compute_device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def _record_layering(
         edge_index: torch.Tensor,
@@ -1330,7 +1335,7 @@ def test_layout_inner_uses_cuda_layering_for_subset_gpu(
             device="cuda",
             execution_mode="subset_gpu",
             w_dag=0.0,
-            w_attract=0.0,
+            w_attract=1.0,
             w_repel=0.0,
             w_overlap=0.0,
             w_cluster=0.0,
@@ -1342,12 +1347,12 @@ def test_layout_inner_uses_cuda_layering_for_subset_gpu(
             w_fanout=0.0,
             w_back_edge=0.0,
         ),
-        device="cuda",
+        device=compute_device,
         skip_classification=True,
     )
 
     assert pos.shape == (4, 2)
-    assert requested_devices == ["cuda" if torch.cuda.is_available() else "cpu"]
+    assert requested_devices == [compute_device]
 
 
 def test_classify_early_exit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1428,7 +1433,8 @@ def test_sampled_context_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert pos.shape == (n, 2)
     assert torch.isfinite(pos).all()
-    assert build_calls == 5
+    # Early stopping can finish before the final scheduled refresh at step 16.
+    assert 4 <= build_calls <= 5
 
 
 def test_edge_ctx_skipped_under_plb(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1629,7 +1635,7 @@ def test_multilevel_kicks_in_at_20k(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(multilevel_module, "multilevel_layout", _fake_multilevel_layout)
     monkeypatch.setattr(engine_module, "_layout_inner", _fake_layout_inner)
 
-    pos = layout(g, LayoutConfig(steps=50, verbose=False, seed=42))
+    pos = layout(g, LayoutConfig(algorithm="_legacy", steps=50, verbose=False, seed=42))
 
     assert pos.shape == (n, 2)
     assert called["multilevel"] is True
@@ -1704,7 +1710,7 @@ def test_direct_layout_below_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(multilevel_module, "multilevel_layout", _fake_multilevel_layout)
     monkeypatch.setattr(engine_module, "_layout_inner", _fake_layout_inner)
 
-    pos = layout(g, LayoutConfig(steps=20, verbose=False, seed=42))
+    pos = layout(g, LayoutConfig(algorithm="_legacy", steps=20, verbose=False, seed=42))
 
     assert pos.shape == (n, 2)
     assert called["direct"] is True
@@ -2289,6 +2295,7 @@ def test_layout_inner_logs_subset_gpu_execution_mode(
 ) -> None:
     """Verbose layout runs should report subset-GPU selection and the resulting strategy."""
     engine_module = importlib.import_module("dagua.layout.engine")
+    compute_device = "cuda" if torch.cuda.is_available() else "cpu"
 
     monkeypatch.setattr(
         engine_module,
@@ -2302,7 +2309,7 @@ def test_layout_inner_logs_subset_gpu_execution_mode(
         torch.full((3, 2), 20.0),
         LayoutConfig(
             steps=1,
-            device="cuda",
+            device=compute_device,
             verbose=True,
             subset_gpu_threshold=10_000,
             w_repel=0.0,
@@ -2311,7 +2318,7 @@ def test_layout_inner_logs_subset_gpu_execution_mode(
             w_spacing=0.0,
             w_fanout=0.0,
         ),
-        device="cuda",
+        device=compute_device,
         skip_classification=True,
     )
 
