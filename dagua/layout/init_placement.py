@@ -58,25 +58,34 @@ def init_positions(
     # Step 1: Assign layers (y-coordinates) via longest-path.
     layers = longest_path_layering(edge_index, num_nodes, device=device, verbose=verbose)
 
-    # Round 4 sprint 1: cycle reversal fallback. When the graph is cyclic
-    # (longest-path returns a single layer for >5 nodes), break cycles via
-    # feedback-arc-set removal and re-layer. Only adopted when the resulting
-    # acyclic layering produces a meaningful compression -- specifically at
-    # most one layer per two nodes on average. If cycle removal produces
-    # num_layers ~ num_nodes (one node per layer), the graph has no usable
-    # hierarchical structure (e.g. small-world, dense random); downstream
-    # Force2DInitIfFlat handles those via random 2D init instead.
+    # Round 4 sprint 19a/b: cycle reversal fallback. Kahn's algorithm lumps
+    # every cycle-trapped node into max_layer+1, so a cyclic graph often
+    # layers as a single blob (all-cycle case) or as a heavily skewed
+    # distribution (mostly-acyclic with a feedback hub). Both collapse to
+    # poor layouts: single layer triggers Force2DInitIfFlat, skewed
+    # distributions lose dag_consistency and edge_straightness.
     #
-    # On graphs with genuine hierarchy plus a few back edges (e.g.
-    # center_port_backedge_hub, simple feedback nets), this closes the
-    # dag_consistency gap vs dagre/sugiyama.
-    if num_nodes > 5:
+    # Trigger cycle-reversal relayering when the original layering is
+    # degenerate -- either a single layer, or >50% of nodes piled into one
+    # layer. Only adopt the re-layer when it compresses n nodes into less
+    # than n/2 layers; otherwise the graph has no real hierarchy (small-
+    # world, dense random) and downstream Force2DInitIfFlat handles it via
+    # 2D random init.
+    if num_nodes > 2:
         layer_seq = layers if isinstance(layers, list) else layers.tolist()
-        if len(set(layer_seq)) <= 1:
+        n_layers = len(set(layer_seq))
+        max_layer_count = max(layer_seq.count(v) for v in set(layer_seq))
+        heavy_skew = max_layer_count / float(num_nodes) > 0.5
+        if n_layers <= 1 or heavy_skew:
             from dagua.layout.cycle import make_acyclic_robust
 
             try:
-                acyclic_edges, _reversed_mask = make_acyclic_robust(edge_index, num_nodes)
+                # Self-loops participate in neither layering nor cycle
+                # reversal; filter them so FAS can terminate and Kahn can
+                # process the cycle-trapped nodes.
+                self_loop_mask = edge_index[0] != edge_index[1]
+                filtered_edges = edge_index[:, self_loop_mask]
+                acyclic_edges, _reversed_mask = make_acyclic_robust(filtered_edges, num_nodes)
                 if acyclic_edges.shape[1] > 0:
                     relayered = longest_path_layering(
                         acyclic_edges,
@@ -86,10 +95,16 @@ def init_positions(
                     )
                     relayered_seq = relayered if isinstance(relayered, list) else relayered.tolist()
                     n_relayered = len(set(relayered_seq))
-                    # Accept when layering is meaningful (compresses n nodes
-                    # into less than n/2 layers). Rejects degenerate
-                    # one-node-per-layer results on small-world topologies.
-                    if 1 < n_relayered <= max(2, num_nodes // 2):
+                    relayered_max = max(relayered_seq.count(v) for v in set(relayered_seq))
+                    # Accept when layering is meaningful: more layers than
+                    # before, <= n/2 layers (rejects one-node-per-layer on
+                    # small-world), and less pile-up than before.
+                    accept = (
+                        1 < n_relayered <= max(2, num_nodes // 2)
+                        and n_relayered >= n_layers
+                        and relayered_max <= max_layer_count
+                    )
+                    if accept:
                         layers = relayered
             except Exception:
                 # Cycle removal failed -- keep the original collapsed
