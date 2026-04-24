@@ -595,17 +595,22 @@ class AspectRatioFit(Op):
         h = max(y_max - y_min, 1e-6)
         current_ratio = w / h
 
-        # Target = 1.0 (square-ish) by default. Most well-laid-out
-        # graphs, including clustered/community/nested families, read
-        # best at roughly square aspect; going much wider than 2:1
-        # or narrower than 1:2 loses perceptual quality. The Sprint
-        # 13 r1 "topology-aware target = N**0.25" clamped to 2.5 was
-        # too wide for cluster families (natural ratio ~0.07) and
-        # caused a -9% regression on clustered_shallow (three graphs
-        # all rescaled from 225->7874 wide).
+        # Sprint 18f: target reduced from 1.0 -> 0.7 after holdout
+        # sweep at the new (70, 140) spacing defaults. The taller
+        # rank_sep makes layouts naturally taller-than-wide; forcing
+        # them back to square (target=1.0) over-widened them and
+        # regressed several families. target=0.7 lets the natural
+        # tall geometry persist while still rescuing degenerate
+        # extreme-aspect layouts.
+        #
+        # Sprint 13 history: r1 topology-aware target = N**0.25
+        # clamped to 2.5 was too wide for cluster families
+        # (-9% on clustered_shallow); r2 set target=1.0 + tolerance=0.55
+        # which was the optimum at the OLD spacing (28, 50). Sprint
+        # 18f re-tuned for the NEW (70, 140) spacing.
         target = self.config.target_aspect
         if target is None:
-            target = 1.0
+            target = 0.7
 
         tol = max(0.0, min(self.config.tolerance, 0.9))
         lower = target * (1.0 - tol)
