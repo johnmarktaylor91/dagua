@@ -1387,6 +1387,67 @@ def layout_dagua_native_pipeline(
         raise ValueError("num_nodes must be non-negative.")
 
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
+
+    # Sprint-20d: stress route for degenerate-layering cyclic graphs.
+    # Small-world / dense-cyclic graphs have no acyclic skeleton, so the
+    # layered pipeline collapses to one-per-layer and wrecks every metric
+    # that assumes a layer axis. Detect: original-graph has cycles +
+    # post-cycle-reversal layering is fully degenerate. Route to
+    # stress-majorization, then post-scale to real node-separation.
+    if (
+        getattr(effective_config, "route_flat_to_stress", True)
+        and getattr(effective_config, "algorithm", None) in (None, "dagua_native")
+        and num_nodes >= 20
+        and edge_index is not None
+        and edge_index.numel() > 0
+    ):
+        try:
+            from dagua.layout.cycle import detect_back_edges, make_acyclic_robust
+            from dagua.utils import longest_path_layering
+
+            if bool(detect_back_edges(edge_index, num_nodes).any().item()):
+                self_loop_mask = edge_index[0] != edge_index[1]
+                filtered = edge_index[:, self_loop_mask]
+                if filtered.shape[1] > 0:
+                    acyclic_edges, _ = make_acyclic_robust(filtered, num_nodes)
+                    layers = longest_path_layering(acyclic_edges, num_nodes)
+                    layer_seq = layers if isinstance(layers, list) else layers.tolist()
+                    unique = set(layer_seq)
+                    if len(unique) == num_nodes and max(layer_seq.count(v) for v in unique) == 1:
+                        from dagua.layout.ops.pipelines.stress_sgd import (
+                            layout_stress_sgd_pipeline,
+                        )
+
+                        stress_seed = seed if seed is not None else effective_config.seed
+                        if stress_seed is None:
+                            stress_seed = 42
+                        stress_pos = layout_stress_sgd_pipeline(
+                            edge_index=edge_index,
+                            num_nodes=num_nodes,
+                            node_sizes=node_sizes,
+                            seed=int(stress_seed),
+                        )
+                        if stress_pos.shape[0] > 1:
+                            mean_w = (
+                                float(node_sizes[:, 0].mean().item())
+                                if node_sizes is not None
+                                else 60.0
+                            )
+                            target = max(mean_w * 1.3, 1.0)
+                            centered = stress_pos - stress_pos.mean(dim=0, keepdim=True)
+                            diffs = centered.unsqueeze(0) - centered.unsqueeze(1)
+                            dists = diffs.pow(2).sum(-1).sqrt()
+                            n = centered.shape[0]
+                            mask = ~torch.eye(n, dtype=torch.bool, device=dists.device)
+                            if mask.any():
+                                current_min = float(dists[mask].min().item())
+                                if current_min > 1e-6:
+                                    stress_pos = centered * (target / current_min)
+                        return stress_pos
+        except Exception:
+            # Stress route is best-effort; fall through to the layered path.
+            pass
+
     multi_start_k = int(getattr(effective_config, "multi_start_k", 1))
     if multi_start_k > 1:
         seed_base = seed if seed is not None else effective_config.seed
