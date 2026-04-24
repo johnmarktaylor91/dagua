@@ -296,11 +296,13 @@ def _init_positions_vectorized(
     avg_w = node_w.mean()
     spacing = avg_w + node_sep
 
-    # For each layer, compute centered x positions based on order
-    # x = (order - layer_width/2) * spacing
+    # For each layer, compute centered x positions based on order.
+    # Ordinal positions 0..(w-1) center on (w-1)/2, not w/2 -- using
+    # w/2 biases every layer of size w left by half a slot and produces
+    # a non-zero centroid for any odd layer width.
     layer_widths = counts.float()  # [L]
     node_layer_width = layer_widths[layer_t]  # [N]
-    positions[:, 0] = (order - node_layer_width / 2) * spacing
+    positions[:, 0] = (order - (node_layer_width - 1.0) / 2.0) * spacing
 
     # Post-pass: spread children of high-degree (fan-out) hubs
     if edge_index.numel() > 0:
