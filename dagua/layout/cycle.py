@@ -199,6 +199,12 @@ def make_acyclic_robust(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Break cycles with a DFS pass and a greedy fallback for residual cycles.
 
+    Self-loops are irreducible cycles -- reversing ``(u, u)`` is a no-op --
+    so we split them off, run the normal DFS plus greedy FAS on the rest,
+    and reattach the self-loops flagged as ``reversed`` in the returned
+    mask. The caller can filter self-loops when building a layering graph
+    while still knowing which edges were "back" edges for styling.
+
     Parameters
     ----------
     edge_index : torch.Tensor
@@ -211,11 +217,31 @@ def make_acyclic_robust(
     tuple[torch.Tensor, torch.Tensor]
         ``(acyclic_edges, reversed_mask)`` aligned to the input edge order.
     """
+    num_edges = int(edge_index.shape[1])
     if edge_index.numel() == 0:
         return edge_index.clone(), torch.zeros((0,), dtype=torch.bool)
 
-    back_edge_mask = detect_back_edges(edge_index, num_nodes)
-    acyclic_edges = make_acyclic(edge_index, back_edge_mask)
-    if _is_acyclic(acyclic_edges, num_nodes):
-        return acyclic_edges, back_edge_mask.to(dtype=torch.bool)
-    return _greedy_fas(acyclic_edges, num_nodes)
+    self_loop_mask = edge_index[0] == edge_index[1]
+    has_self_loops = bool(self_loop_mask.any().item())
+
+    if not has_self_loops:
+        back_edge_mask = detect_back_edges(edge_index, num_nodes)
+        acyclic_edges = make_acyclic(edge_index, back_edge_mask)
+        if _is_acyclic(acyclic_edges, num_nodes):
+            return acyclic_edges, back_edge_mask.to(dtype=torch.bool)
+        return _greedy_fas(acyclic_edges, num_nodes)
+
+    # Process the non-self-loop subgraph, then stitch results back in
+    # original edge order so callers can line up the reversed_mask.
+    non_loop_idx = torch.nonzero(~self_loop_mask, as_tuple=False).squeeze(-1)
+    sub_edges = edge_index[:, non_loop_idx]
+    sub_acyclic, sub_mask = make_acyclic_robust(sub_edges, num_nodes)
+
+    acyclic_edges = edge_index.clone()
+    acyclic_edges[:, non_loop_idx] = sub_acyclic
+    reversed_mask = torch.zeros((num_edges,), dtype=torch.bool)
+    reversed_mask[non_loop_idx] = sub_mask.to(dtype=torch.bool)
+    # Self-loops can never be made acyclic by reversal, but layering code
+    # should treat them as back edges (and filter them).
+    reversed_mask[self_loop_mask] = True
+    return acyclic_edges, reversed_mask
