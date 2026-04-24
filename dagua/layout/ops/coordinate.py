@@ -9,6 +9,13 @@ from typing import ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
+from dagua.layout.graph_classify import (
+    GraphFamily,
+    classify_graph,
+)
+from dagua.layout.graph_classify import (
+    GraphStructure as TopologyGraphStructure,
+)
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import (
     build_undirected_adjacency as _build_undirected_adjacency,
@@ -25,6 +32,7 @@ _NODE_SIZE_SPACING_MULTIPLIER = 1.5
 _WALKER_ROOT_NUMBER = 1
 _WALKER_BASE_DISTANCE = 1.0
 _COMPONENT_PADDING = 1.0
+_BRANDES_KOEPF_APPLIED_KEY = "brandes_koepf_horizontal_refine_applied"
 
 
 def _resolve_node_sizes(node_sizes: Optional[torch.Tensor], num_nodes: int) -> torch.Tensor:
@@ -815,6 +823,180 @@ def _layered_neighbors_from_edges(
     return parents, children
 
 
+def _weak_component_sizes(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
+    """Return exact weak-component sizes for a directed graph.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes ``N``.
+
+    Returns
+    -------
+    list of int
+        Weak-component sizes sorted descending.
+    """
+    if num_nodes == 0:
+        return []
+
+    adjacency: List[List[int]] = [[] for _ in range(num_nodes)]
+    for source, target in edge_index.t().tolist():
+        adjacency[source].append(target)
+        adjacency[target].append(source)
+
+    seen = [False] * num_nodes
+    sizes: List[int] = []
+    for start in range(num_nodes):
+        if seen[start]:
+            continue
+        stack = [start]
+        seen[start] = True
+        component_size = 0
+        while stack:
+            node = stack.pop()
+            component_size += 1
+            for neighbor in adjacency[node]:
+                if seen[neighbor]:
+                    continue
+                seen[neighbor] = True
+                stack.append(neighbor)
+        sizes.append(component_size)
+    sizes.sort(reverse=True)
+    return sizes
+
+
+def _has_strict_forward_layering(edge_index: torch.Tensor, layers: torch.Tensor) -> bool:
+    """Return whether every edge advances in the current layer assignment.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    layers : torch.Tensor
+        CPU layer assignments with shape ``[N]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when every edge satisfies ``layers[src] < layers[dst]``.
+    """
+    if edge_index.numel() == 0:
+        return False
+    layer_deltas = layers[edge_index[1]] - layers[edge_index[0]]
+    return bool(torch.all(layer_deltas > 0).item())
+
+
+def _ordering_from_current_x(layers: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+    """Build in-layer ordering ranks from current x coordinates.
+
+    Parameters
+    ----------
+    layers : torch.Tensor
+        CPU layer assignments with shape ``[N]``.
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU ordering tensor with shape ``[N]``.
+    """
+    if layers.numel() == 0:
+        return torch.zeros((0,), dtype=torch.long)
+
+    pos_cpu = pos.detach().to(device="cpu", dtype=torch.float32)
+    max_layer = int(layers.max().item())
+    ordering = torch.zeros((layers.shape[0],), dtype=torch.long)
+    for layer_index in range(max_layer + 1):
+        layer_nodes = torch.where(layers == layer_index)[0].tolist()
+        layer_nodes.sort(key=lambda node_idx: (float(pos_cpu[node_idx, 0].item()), node_idx))
+        for position, node_idx in enumerate(layer_nodes):
+            ordering[node_idx] = position
+    return ordering
+
+
+def _resolve_topology_structure(
+    structure: Optional[TopologyGraphStructure],
+    edge_index: torch.Tensor,
+    layers: torch.Tensor,
+    num_nodes: int,
+) -> TopologyGraphStructure:
+    """Return the topology structure used by the BK gate.
+
+    Parameters
+    ----------
+    structure : TopologyGraphStructure | None
+        Optional pre-classified graph structure.
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    layers : torch.Tensor
+        CPU layer assignments with shape ``[N]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    TopologyGraphStructure
+        Structure used for family-based gating.
+    """
+    if structure is not None:
+        return structure
+    return classify_graph(edge_index=edge_index, num_nodes=num_nodes, layer_assignments=layers)
+
+
+def _should_apply_brandes_koepf_refine(
+    structure: TopologyGraphStructure,
+    edge_index: torch.Tensor,
+    layers: torch.Tensor,
+    num_nodes: int,
+    min_layers: int,
+) -> bool:
+    """Return whether native BK horizontal refinement should run.
+
+    Parameters
+    ----------
+    structure : TopologyGraphStructure
+        Classified graph structure. Only stable family metadata is trusted.
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    layers : torch.Tensor
+        CPU layer assignments with shape ``[N]``.
+    num_nodes : int
+        Number of graph nodes.
+    min_layers : int
+        Minimum layer count required for BK to be worthwhile.
+
+    Returns
+    -------
+    bool
+        ``True`` when the graph is a conservative BK candidate.
+
+    Notes
+    -----
+    ``classify_graph().is_acyclic`` and ``classify_graph().num_components``
+    are intentionally not used here because those fields are optimized for
+    tree/forest shortcut detection, not exact general-DAG gating.
+    """
+    if num_nodes == 0:
+        return False
+    if structure.family in {GraphFamily.TREE, GraphFamily.CHAIN}:
+        return False
+    if "lattice_like" in getattr(structure, "topology_tags", ()):
+        return False
+
+    num_layers = int(layers.max().item()) + 1 if layers.numel() > 0 else 0
+    if num_layers < min_layers:
+        return False
+
+    component_sizes = _weak_component_sizes(edge_index=edge_index, num_nodes=num_nodes)
+    if component_sizes not in ([num_nodes], [num_nodes - 1, 1]):
+        return False
+
+    return _has_strict_forward_layering(edge_index=edge_index, layers=layers)
+
+
 def _node_spacing(
     node_sizes: Optional[torch.Tensor],
     axis: int,
@@ -1224,6 +1406,28 @@ class BrandesKopf4PassConfig:
 
 
 @dataclass(frozen=True)
+class BrandesKoepfHorizontalRefineConfig:
+    """Configuration for :class:`BrandesKoepfHorizontalRefine`.
+
+    Parameters
+    ----------
+    node_sep : float, default=1.0
+        Horizontal separation used by the BK compaction pass.
+    min_layers : int, default=6
+        Minimum layer count before BK refinement is allowed.
+    enabled : bool, default=True
+        Master kill switch for rollback and A/B tests.
+    structure : TopologyGraphStructure | None, default=None
+        Optional pre-classified graph structure from native config resolution.
+    """
+
+    node_sep: float = 1.0
+    min_layers: int = 6
+    enabled: bool = True
+    structure: Optional[TopologyGraphStructure] = None
+
+
+@dataclass(frozen=True)
 class BucheimWalkerTreeConfig:
     """Configuration for :class:`BucheimWalkerTree`.
 
@@ -1243,6 +1447,106 @@ class BucheimWalkerTreeConfig:
     layer_sep: float = 1.5
     component_gap: float = 2.0
     recursion_limit_multiplier: int = 2
+
+
+@register_op
+class BrandesKoepfHorizontalRefine(Op):
+    """Reassign x coordinates with Brandes-Koepf while preserving y."""
+
+    name: ClassVar[str] = "brandes_koepf_horizontal_refine"
+    category: ClassVar[OpCategory] = OpCategory.COORDINATE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "layers")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "ordering", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "layers")
+    access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, config: Optional[BrandesKoepfHorizontalRefineConfig] = None) -> None:
+        """Store the horizontal-refinement configuration.
+
+        Parameters
+        ----------
+        config : BrandesKoepfHorizontalRefineConfig | None, optional
+            Optional op configuration.
+        """
+        self.config = config or BrandesKoepfHorizontalRefineConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Run x-only BK compaction when the native DAG gate allows it.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state with ``pos`` shaped ``[N, 2]`` and
+            ``layers`` shaped ``[N]``.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this deterministic op.
+
+        Returns
+        -------
+        SolveState
+            State with x coordinates refined when eligible. Y coordinates are
+            copied through exactly.
+        """
+        del ctx
+
+        state.extras[_BRANDES_KOEPF_APPLIED_KEY] = False
+        if not self.config.enabled:
+            return state
+        if state.pos is None:
+            raise ValueError("state.pos must be populated before BK horizontal refine")
+
+        layers_cpu = _validate_layers(state.layers, problem.num_nodes)
+        edge_index_cpu = _validate_edge_index(problem.edge_index, problem.num_nodes)
+        structure = _resolve_topology_structure(
+            structure=self.config.structure or problem.structure,
+            edge_index=edge_index_cpu,
+            layers=layers_cpu,
+            num_nodes=problem.num_nodes,
+        )
+        if not _should_apply_brandes_koepf_refine(
+            structure=structure,
+            edge_index=edge_index_cpu,
+            layers=layers_cpu,
+            num_nodes=problem.num_nodes,
+            min_layers=self.config.min_layers,
+        ):
+            return state
+
+        ordering_cpu = _ordering_from_current_x(layers=layers_cpu, pos=state.pos)
+        ordered_layers = _ordered_layers_from_state(layers_cpu, ordering_cpu)
+        parents, children = _layered_neighbors_from_edges(
+            edge_index=edge_index_cpu,
+            layers=layers_cpu,
+            num_nodes=problem.num_nodes,
+        )
+        node_sizes_cpu = _resolve_node_sizes(problem.node_sizes, problem.num_nodes)
+        x_coordinates = _brandes_koepf_x_positions(
+            layers=ordered_layers,
+            parents=parents,
+            children=children,
+            node_sizes=node_sizes_cpu,
+            num_nodes=problem.num_nodes,
+            num_original_nodes=problem.num_nodes,
+            node_sep=self.config.node_sep,
+        )
+
+        refined_pos = state.pos.detach().clone()
+        refined_pos[:, 0] = torch.tensor(
+            x_coordinates,
+            dtype=refined_pos.dtype,
+            device=refined_pos.device,
+        )
+        state.pos = refined_pos
+        state.ordering = ordering_cpu.to(device=refined_pos.device)
+        state.extras[_BRANDES_KOEPF_APPLIED_KEY] = True
+        return state
 
 
 @register_op
