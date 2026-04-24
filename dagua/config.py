@@ -80,7 +80,14 @@ class LayoutConfig:
     # Node placement loss weights
     w_dag: float = 10.0
     w_attract: float = 2.0
-    w_attract_x_bias: float = 2.4
+    # Sprint 18l: bumped 2.4 -> 1.0 after re-sweep at the new
+    # spacing/AR defaults. Sweep:
+    #   xb=0.5:  77.070
+    #   xb=1.0:  77.092  <-- adopted
+    #   xb=2.4:  77.064 (previous default)
+    #   xb=5.0:  77.074
+    #   xb=10.0: 76.634
+    w_attract_x_bias: float = 1.0
     # Sprint 16: bumped 0.1 -> 0.2 after holdout sweep. +3.14 composite
     # on bipartite, zero change on the other 20 families. Bipartite
     # graphs need stronger repulsion to spread their two layers apart;
