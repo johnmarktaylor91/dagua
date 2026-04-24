@@ -36,12 +36,61 @@ from dagua.layout.multilevel import (
     build_hierarchy,
     coarsen_once,
 )
+from dagua.layout.ops.pipelines.dagua_native import _prepare_native_config
 from dagua.layout.tiled_compute import (
     _compute_cross_edge_batch_size,
     _compute_edge_batch_size,
     _partition_edges_by_tile,
 )
-from dagua.metrics import compute_all_metrics
+from dagua.metrics import composite, compute_all_metrics, full
+
+
+def _named_eval_graph(name: str) -> DaguaGraph:
+    """Return a benchmark graph fixture by name.
+
+    Parameters
+    ----------
+    name : str
+        Graph name from ``dagua.eval.graphs.get_test_graphs()``.
+
+    Returns
+    -------
+    DaguaGraph
+        Graph with node sizes computed.
+    """
+    from dagua.eval.graphs import get_test_graphs
+
+    for test_graph in get_test_graphs():
+        if test_graph.name == name:
+            test_graph.graph.compute_node_sizes()
+            return test_graph.graph
+    raise AssertionError(f"missing graph fixture: {name}")
+
+
+def _layout_composite(graph: DaguaGraph, config: LayoutConfig) -> tuple[torch.Tensor, float, dict]:
+    """Lay out a graph and return positions, composite score, and metrics.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph to lay out.
+    config : LayoutConfig
+        Layout configuration.
+
+    Returns
+    -------
+    tuple[torch.Tensor, float, dict]
+        Positions, composite score, and full metrics.
+    """
+    pos = layout(graph, config)
+    metrics = full(
+        pos,
+        graph.edge_index,
+        node_sizes=graph.node_sizes,
+        crossing_samples=50_000,
+        neighborhood_samples=1000,
+    )
+    return pos, composite(metrics), metrics
 
 
 class TestLayoutBasic:
@@ -185,6 +234,49 @@ class TestLayoutReproducibility:
         config = LayoutConfig(steps=50, seed=None)
         pos = layout(g, config)
         assert pos.shape[0] == g.num_nodes
+
+
+def test_native_dummy_nodes_skip_cyclic_graph() -> None:
+    """Native dummy-node gating should stay off for cyclic inputs."""
+    graph = DaguaGraph.from_edge_list([("a", "b"), ("b", "c"), ("c", "a")])
+    graph.compute_node_sizes()
+
+    prepared = _prepare_native_config(
+        config=LayoutConfig(insert_dummy_nodes=True, seed=42, steps=10),
+        num_nodes=graph.num_nodes,
+        edge_index=graph.edge_index,
+        device="cpu",
+        optimizer_type="adam",
+    )
+
+    assert getattr(prepared, "_dagua_native_use_dummy_nodes", False) is False
+
+
+@pytest.mark.slow
+def test_native_dummy_nodes_improve_hexagonal_lattice_composite() -> None:
+    """Dummy-node splitting should improve planar DAG composite quality."""
+    graph = _named_eval_graph("hexagonal_lattice_42")
+    off_config = LayoutConfig(seed=42, steps=80, insert_dummy_nodes=False)
+    on_config = LayoutConfig(seed=42, steps=80, insert_dummy_nodes=True)
+
+    _, off_score, off_metrics = _layout_composite(graph, off_config)
+    _, on_score, on_metrics = _layout_composite(graph, on_config)
+
+    assert on_score > off_score
+    assert on_metrics["edge_straightness_mean_deg"] < off_metrics["edge_straightness_mean_deg"]
+
+
+@pytest.mark.slow
+def test_native_dummy_nodes_random_dag_200_composite_near_baseline() -> None:
+    """Dummy-node splitting should not materially regress random DAG quality."""
+    graph = _named_eval_graph("random_dag_200")
+    off_config = LayoutConfig(seed=42, steps=80, insert_dummy_nodes=False)
+    on_config = LayoutConfig(seed=42, steps=80, insert_dummy_nodes=True)
+
+    _, off_score, _ = _layout_composite(graph, off_config)
+    _, on_score, _ = _layout_composite(graph, on_config)
+
+    assert on_score >= off_score * 0.99
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

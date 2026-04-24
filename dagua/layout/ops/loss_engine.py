@@ -7,7 +7,7 @@ subclasses so they can participate in ``LossGroup`` execution.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import ClassVar, Optional, Tuple
+from typing import Any, ClassVar, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -78,6 +78,129 @@ def _require_node_sizes(problem: LayoutProblem) -> torch.Tensor:
     if problem.node_sizes is None:
         raise ValueError("Loss evaluation requires problem.node_sizes to be set.")
     return problem.node_sizes
+
+
+def _expanded_graph_for_state(state: SolveState, pos: torch.Tensor) -> Optional[Any]:
+    """Return the active expanded graph when positions match it.
+
+    Parameters
+    ----------
+    state : SolveState
+        Mutable solve state that may carry ``extras["expanded_graph"]``.
+    pos : torch.Tensor
+        Active positions with shape ``[N_active, 2]``.
+
+    Returns
+    -------
+    Any | None
+        Expanded graph metadata when ``pos`` is expanded, otherwise ``None``.
+    """
+    expanded_graph = state.extras.get("expanded_graph")
+    if expanded_graph is None:
+        return None
+    if int(getattr(expanded_graph, "num_nodes", -1)) != int(pos.shape[0]):
+        return None
+    return expanded_graph
+
+
+def _active_edge_index(
+    problem: LayoutProblem,
+    state: SolveState,
+    pos: torch.Tensor,
+) -> torch.Tensor:
+    """Return the edge tensor used by edge-centric losses.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable original graph inputs.
+    state : SolveState
+        Mutable solve state.
+    pos : torch.Tensor
+        Active positions with shape ``[N_active, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge tensor on ``pos.device``.
+    """
+    expanded_graph = _expanded_graph_for_state(state=state, pos=pos)
+    if expanded_graph is not None:
+        return expanded_graph.edge_index.to(device=pos.device, dtype=torch.long)
+    return problem.edge_index.to(device=pos.device, dtype=torch.long)
+
+
+def _active_node_sizes(
+    problem: LayoutProblem,
+    state: SolveState,
+    pos: torch.Tensor,
+) -> torch.Tensor:
+    """Return node sizes matching the active edge-loss graph.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable original graph inputs.
+    state : SolveState
+        Mutable solve state.
+    pos : torch.Tensor
+        Active positions with shape ``[N_active, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Node-size tensor with shape ``[N_active, 2]``.
+    """
+    expanded_graph = _expanded_graph_for_state(state=state, pos=pos)
+    if expanded_graph is not None:
+        return expanded_graph.node_sizes.to(device=pos.device, dtype=pos.dtype)
+    return _require_node_sizes(problem)
+
+
+def _visible_original_pos(
+    problem: LayoutProblem,
+    state: SolveState,
+    pos: torch.Tensor,
+) -> torch.Tensor:
+    """Return original-node positions for box-centric losses.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable original graph inputs.
+    state : SolveState
+        Mutable solve state.
+    pos : torch.Tensor
+        Active positions with shape ``[N_active, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Original node block with shape ``[N_original, 2]``.
+    """
+    if _expanded_graph_for_state(state=state, pos=pos) is None:
+        return pos
+    return pos[: problem.num_nodes]
+
+
+def _visible_original_layer_index(state: SolveState, pos: torch.Tensor) -> Optional[object]:
+    """Return original-node layer index when the active state is expanded.
+
+    Parameters
+    ----------
+    state : SolveState
+        Mutable solve state.
+    pos : torch.Tensor
+        Active positions with shape ``[N_active, 2]``.
+
+    Returns
+    -------
+    object | None
+        Layer index for original nodes when available.
+    """
+    if _expanded_graph_for_state(state=state, pos=pos) is None:
+        return state.layer_index
+    return state.extras.get("original_layer_index", state.layer_index)
 
 
 _SAMPLED_LOSS_VRAM_BUDGET_BYTES = 3 * 1024 * 1024 * 1024  # 3 GB
@@ -415,10 +538,10 @@ class DagOrderingLoss(LossOp):
         """
         del ctx
         pos = _require_pos(state)
-        node_sizes = _require_node_sizes(problem)
+        node_sizes = _active_node_sizes(problem=problem, state=state, pos=pos)
         return dag_ordering_loss(
             pos,
-            problem.edge_index,
+            _active_edge_index(problem=problem, state=state, pos=pos),
             node_sizes,
             rank_sep=self.config.rank_sep,
             edge_ctx=state.edge_batch_context,
@@ -467,7 +590,7 @@ class EdgeAttractionLoss(LossOp):
         pos = _require_pos(state)
         return edge_attraction_loss(
             pos,
-            problem.edge_index,
+            _active_edge_index(problem=problem, state=state, pos=pos),
             x_bias=self.config.x_bias,
             edge_ctx=state.edge_batch_context,
         )
@@ -513,7 +636,11 @@ class EdgeStraightnessLoss(LossOp):
         """
         del ctx
         pos = _require_pos(state)
-        return edge_straightness_loss(pos, problem.edge_index, edge_ctx=state.edge_batch_context)
+        return edge_straightness_loss(
+            pos,
+            _active_edge_index(problem=problem, state=state, pos=pos),
+            edge_ctx=state.edge_batch_context,
+        )
 
 
 @register_op
@@ -556,7 +683,11 @@ class EdgeLengthVarianceLoss(LossOp):
         """
         del ctx
         pos = _require_pos(state)
-        return edge_length_variance_loss(pos, problem.edge_index, edge_ctx=state.edge_batch_context)
+        return edge_length_variance_loss(
+            pos,
+            _active_edge_index(problem=problem, state=state, pos=pos),
+            edge_ctx=state.edge_batch_context,
+        )
 
 
 @register_op
@@ -607,7 +738,7 @@ class RepulsionLoss(LossOp):
             Scalar loss tensor.
         """
         del ctx
-        pos = _require_pos(state)
+        pos = _visible_original_pos(problem, state, _require_pos(state))
         node_sizes = problem.node_sizes
         num_nodes = pos.shape[0]
 
@@ -694,7 +825,7 @@ class OverlapAvoidanceLoss(LossOp):
             Scalar loss tensor.
         """
         del ctx
-        pos = _require_pos(state)
+        pos = _visible_original_pos(problem, state, _require_pos(state))
         node_sizes = _require_node_sizes(problem)
         num_nodes = pos.shape[0]
 
@@ -783,7 +914,7 @@ class CrossingLoss(LossOp):
         pos = _require_pos(state)
         return crossing_loss(
             pos,
-            problem.edge_index,
+            _active_edge_index(problem=problem, state=state, pos=pos),
             alpha=self.config.alpha,
             max_pairs=self.config.max_pairs,
             layer_assignments=state.layers,
@@ -985,12 +1116,13 @@ class SpacingConsistencyLoss(LossOp):
             Scalar loss tensor.
         """
         del ctx
-        pos = _require_pos(state)
+        full_pos = _require_pos(state)
+        pos = _visible_original_pos(problem, state, full_pos)
         node_sizes = _require_node_sizes(problem)
         return spacing_consistency_loss(
             pos,
             node_sizes,
-            state.layer_index,
+            _visible_original_layer_index(state, full_pos),
             target_gap=self.config.target_gap,
         )
 
@@ -1034,7 +1166,7 @@ class FanoutDistributionLoss(LossOp):
             Scalar loss tensor.
         """
         del ctx
-        pos = _require_pos(state)
+        pos = _visible_original_pos(problem, state, _require_pos(state))
         return fanout_distribution_loss(
             pos,
             problem.edge_index,
@@ -1084,7 +1216,7 @@ class BackEdgeCompactnessLoss(LossOp):
             Scalar loss tensor.
         """
         del ctx
-        pos = _require_pos(state)
+        pos = _visible_original_pos(problem, state, _require_pos(state))
         return back_edge_compactness_loss(
             pos,
             problem.edge_index,
@@ -1131,7 +1263,8 @@ class PositionPinLoss(LossOp):
             Scalar loss tensor.
         """
         del ctx
-        pos = _require_pos(state)
+        full_pos = _require_pos(state)
+        pos = _visible_original_pos(problem, state, full_pos)
         flex = _flex(problem)
         if (
             flex is None
@@ -1140,7 +1273,7 @@ class PositionPinLoss(LossOp):
             or flex.pin_weights is None
             or flex.soft_pin_mask is None
         ):
-            return _zero_scalar(pos)
+            return _zero_scalar(full_pos)
         # Propagated coarse flex may be on the hierarchy tensor's device,
         # which can differ from the active pos device on mixed-device runs
         # (CPU hierarchy + CUDA refinement). Move to pos.device before
@@ -1194,10 +1327,11 @@ class AlignmentLoss(LossOp):
             Scalar loss tensor.
         """
         del ctx
-        pos = _require_pos(state)
+        full_pos = _require_pos(state)
+        pos = _visible_original_pos(problem, state, full_pos)
         flex = _flex(problem)
         if flex is None or not flex.align_groups:
-            return _zero_scalar(pos)
+            return _zero_scalar(full_pos)
         # Propagated coarse align groups may live on a different device
         # than the active pos (mixed-device runs); migrate index tensors
         # before the loss indexes pos.
@@ -1247,15 +1381,16 @@ class FlexSpacingLoss(LossOp):
             Scalar loss tensor.
         """
         del ctx
-        pos = _require_pos(state)
+        full_pos = _require_pos(state)
+        pos = _visible_original_pos(problem, state, full_pos)
         node_sizes = _require_node_sizes(problem)
         flex = _flex(problem)
         if flex is None or flex.flex_node_sep is None or flex.flex_node_sep_weight is None:
-            return _zero_scalar(pos)
+            return _zero_scalar(full_pos)
         return flex_spacing_loss(
             pos,
             node_sizes,
-            state.layer_index,
+            _visible_original_layer_index(state, full_pos),
             flex.flex_node_sep,
             flex.flex_node_sep_weight,
         )
