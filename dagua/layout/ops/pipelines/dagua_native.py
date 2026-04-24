@@ -21,6 +21,10 @@ from dagua.layout.ops.anneal import (
 )
 from dagua.layout.ops.barycenter import BarycenterReorder, BarycenterReorderConfig
 from dagua.layout.ops.base import EarlyBreak, LossGroup, Pipeline, Repeat
+from dagua.layout.ops.cluster_arrange import (
+    ClusterGridArrange,
+    ClusterGridArrangeConfig,
+)
 from dagua.layout.ops.coarsen import HeavyEdgeMatching
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig, StallCount, StallCountConfig
 from dagua.layout.ops.distance import (
@@ -433,6 +437,14 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
             # repulsion pushes. This op is a uniform-per-axis rescale
             # (preserves overlap-free property).
             AspectRatioFit(AspectRatioFitConfig()),
+            # Sprint 18: cluster-centroid grid arrangement. Fires
+            # only when problem.clusters is populated AND the
+            # current aspect is degenerate (cluster columns stacked
+            # vertically). Re-positions cluster centroids on a
+            # roughly-square grid; intra-cluster geometry preserved.
+            # Addresses clustered_deep 77.50 ceiling where 6
+            # clusters of 16 nodes ended up at x=0.
+            ClusterGridArrange(ClusterGridArrangeConfig()),
         ],
         name="dagua_native_pipeline",
     )
