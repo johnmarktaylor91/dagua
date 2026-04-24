@@ -101,6 +101,9 @@ class DaguaGraph:
     # Layout direction
     direction: str = "TB"  # TB, BT, LR, RL
 
+    # Semantic direction hint for metric/classifier consumers.
+    is_semantically_directed: Optional[bool] = None
+
     # Graph-level style defaults (cascade level 4)
     default_node_style: Optional[NodeStyle] = None
     default_edge_style: Optional[EdgeStyle] = None
@@ -1633,14 +1636,31 @@ class DaguaGraph:
         return g
 
     @classmethod
-    def from_json(cls, data: Union[Dict, str, Any]) -> DaguaGraph:
-        """Create graph from JSON (dict, JSON string, or .json file path).
+    def from_json(
+        cls,
+        data: Union[Dict, str, Any],
+        is_semantically_directed: Optional[bool] = None,
+    ) -> DaguaGraph:
+        """Create graph from JSON data.
 
-        See ``dagua.io.graph_from_json`` for full documentation.
+        Parameters
+        ----------
+        data : dict | str | Any
+            Graph data as a dict, JSON string, or ``.json`` file path.
+        is_semantically_directed : bool, optional
+            Optional semantic direction hint to attach to the loaded graph.
+
+        Returns
+        -------
+        DaguaGraph
+            Graph populated from the JSON data.
         """
         from dagua.io import graph_from_json
 
-        return graph_from_json(data)
+        graph = graph_from_json(data)
+        if is_semantically_directed is not None:
+            graph.is_semantically_directed = is_semantically_directed
+        return graph
 
     def to_json(self) -> Dict[str, Any]:
         """Serialize this graph to a JSON-compatible dict.
@@ -1671,14 +1691,31 @@ class DaguaGraph:
         save(self, path, format=format)
 
     @classmethod
-    def from_yaml(cls, data) -> DaguaGraph:
-        """Create graph from YAML string or .yaml file path.
+    def from_yaml(
+        cls,
+        data: Any,
+        is_semantically_directed: Optional[bool] = None,
+    ) -> DaguaGraph:
+        """Create graph from YAML data.
 
-        See ``dagua.io.graph_from_yaml`` for full documentation.
+        Parameters
+        ----------
+        data : Any
+            YAML string or ``.yaml`` file path.
+        is_semantically_directed : bool, optional
+            Optional semantic direction hint to attach to the loaded graph.
+
+        Returns
+        -------
+        DaguaGraph
+            Graph populated from the YAML data.
         """
         from dagua.io import graph_from_yaml
 
-        return graph_from_yaml(data)
+        graph = graph_from_yaml(data)
+        if is_semantically_directed is not None:
+            graph.is_semantically_directed = is_semantically_directed
+        return graph
 
     def to_yaml(self, path=None) -> str:
         """Serialize to YAML string (or write to file if path given).
