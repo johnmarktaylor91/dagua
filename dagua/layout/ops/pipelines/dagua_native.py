@@ -984,7 +984,11 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
             # gradient has no explicit AR term; layouts grow wherever
             # repulsion pushes. This op is a uniform-per-axis rescale
             # (preserves overlap-free property).
-            AspectRatioFit(AspectRatioFitConfig()),
+            AspectRatioFit(
+                AspectRatioFitConfig(
+                    target_aspect=getattr(config, "_dagua_native_target_aspect", None),
+                ),
+            ),
             # Sprint 18: cluster-centroid grid arrangement. Fires
             # only when problem.clusters is populated AND the
             # current aspect is degenerate (cluster columns stacked
@@ -1078,7 +1082,7 @@ def layout_dagua_native_pipeline(
         direction=prepared_config.direction,
         clusters=clusters,
         cluster_parents=cluster_parents,
-        structure=getattr(prepared_config, "structure", None),
+        structure=getattr(prepared_config, "_dagua_native_structure", None),
         flex=flex_constraints,
         edge_weights=prepared_edge_weights,
         seed=int(resolved_seed if resolved_seed is not None else 42),
