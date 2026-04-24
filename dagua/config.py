@@ -80,8 +80,12 @@ class LayoutConfig:
     # booleans remain accepted as kill switches, but auto dispatch should be
     # controlled through this single selector.
     force_pipeline: Optional[
-        Literal["tree", "layered_dag", "force_directed", "hybrid", "legacy_monolith"]
+        Literal["tree", "layered_dag", "force_directed", "hybrid", "planar", "legacy_monolith"]
     ] = None
+    # Sprint-20g: try the native_planar sub-pipeline when classify_graph confirms
+    # exact planarity. Falls back to the standard topology dispatch on
+    # PlanarityFailure or when set to False.
+    try_planar_first: bool = True
 
     # Adaptive spacing: scale node_sep and rank_sep based on graph size
     adaptive_spacing: bool = True
