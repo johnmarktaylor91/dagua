@@ -1316,7 +1316,7 @@ def test_classify_tree() -> None:
 
 
 def test_classify_general() -> None:
-    """Dense cyclic graphs should remain on the general path."""
+    """Moderately cyclic directed graphs should classify as hybrid."""
     edges = torch.tensor(
         [[0, 0, 1, 1, 2, 2, 3], [1, 2, 2, 3, 3, 0, 0]],
         dtype=torch.long,
@@ -1324,7 +1324,8 @@ def test_classify_general() -> None:
 
     result = classify_graph(edges, 4)
 
-    assert result.family == GraphFamily.GENERAL
+    assert result.family == GraphFamily.HYBRID
+    assert result.cyclicity_ratio > 0.0
 
 
 def test_early_exit_forest() -> None:
