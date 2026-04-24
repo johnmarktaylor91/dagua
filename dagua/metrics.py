@@ -154,9 +154,15 @@ def segments_intersect(p1, p2, p3, p4):
 
     parallel = cross.abs() < 1e-10
 
+    # Sign-preserving division: clamp(min=1e-10) would flip the sign of
+    # negative-cross orientations, silently turning valid intersections
+    # into false negatives. Replace only the near-zero (parallel) cases
+    # with 1 to avoid div-by-zero.
+    safe_cross = torch.where(parallel, torch.ones_like(cross), cross)
+
     d3 = p3 - p1
-    t = (d3[:, 0] * d2[:, 1] - d3[:, 1] * d2[:, 0]) / cross.clamp(min=1e-10)
-    u = (d3[:, 0] * d1[:, 1] - d3[:, 1] * d1[:, 0]) / cross.clamp(min=1e-10)
+    t = (d3[:, 0] * d2[:, 1] - d3[:, 1] * d2[:, 0]) / safe_cross
+    u = (d3[:, 0] * d1[:, 1] - d3[:, 1] * d1[:, 0]) / safe_cross
 
     return (~parallel) & (t > 0) & (t < 1) & (u > 0) & (u < 1)
 
