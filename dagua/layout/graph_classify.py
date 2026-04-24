@@ -26,6 +26,8 @@ class GraphFamily(Enum):
     BIPARTITE_DAG = auto()
     WIDE_LAYERED = auto()
     GRID = auto()
+    FORCE_DIRECTED = auto()
+    HYBRID = auto()
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,9 @@ class GraphStructure:
     is_directed_acyclic: bool = True
     topology_tags: tuple[str, ...] = ()
     is_semantically_directed: Optional[bool] = None
+    num_layers_effective: int = 0
+    cyclicity_ratio: float = 0.0
+    has_dominant_component: bool = True
 
 
 def _compute_degree(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -145,6 +150,64 @@ def _count_components(edge_index: torch.Tensor, num_nodes: int) -> int:
 
     component_roots = {_find_root(parents, node) for node in range(num_nodes)}
     return len(component_roots)
+
+
+def _largest_component_fraction(edge_index: torch.Tensor, num_nodes: int) -> float:
+    """Return the largest weak-component fraction of all nodes.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    float
+        Fraction in ``[0, 1]`` covered by the largest weak component.
+    """
+    if num_nodes <= 0:
+        return 0.0
+
+    num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    if num_edges == 0:
+        return 1.0 / float(num_nodes)
+    if num_edges > num_nodes - 1:
+        # Dense benchmark/scale graphs are not component-pack candidates; avoid
+        # a second Python union-find pass on the classifier hot path.
+        return 1.0
+
+    parents = list(range(num_nodes))
+    ranks = [0] * num_nodes
+    sizes = [1] * num_nodes
+    cpu_edges = edge_index.detach().cpu()
+
+    for source, target in zip(cpu_edges[0].tolist(), cpu_edges[1].tolist()):
+        if source == target:
+            continue
+
+        source_root = _find_root(parents, source)
+        target_root = _find_root(parents, target)
+        if source_root == target_root:
+            continue
+
+        if ranks[source_root] < ranks[target_root]:
+            parents[source_root] = target_root
+            sizes[target_root] += sizes[source_root]
+        elif ranks[source_root] > ranks[target_root]:
+            parents[target_root] = source_root
+            sizes[source_root] += sizes[target_root]
+        else:
+            parents[target_root] = source_root
+            sizes[source_root] += sizes[target_root]
+            ranks[source_root] += 1
+
+    largest = 1
+    for node in range(num_nodes):
+        root = _find_root(parents, node)
+        largest = max(largest, sizes[root])
+    return float(largest) / float(num_nodes)
 
 
 def _is_undirected_acyclic(edge_index: torch.Tensor, num_nodes: int) -> bool:
@@ -321,6 +384,60 @@ def _analyze_layers(
     else:
         layer_width_cv = float(widths.std(unbiased=False).item()) / avg_layer_width
     return num_layers, avg_layer_width, max_layer_width, layer_width_cv
+
+
+def _effective_layer_count(layer_assignments: Optional[torch.Tensor]) -> int:
+    """Return the number of non-singleton layers in a layering.
+
+    Parameters
+    ----------
+    layer_assignments : torch.Tensor, optional
+        Layer assignments shaped ``[N]``.
+
+    Returns
+    -------
+    int
+        Count of layers with at least two nodes, or ``1`` for a non-empty
+        all-singleton layering. This keeps chain-like artifacts from looking
+        like meaningful layered DAGs to the native dispatcher.
+    """
+    if layer_assignments is None or layer_assignments.numel() == 0:
+        return 0
+
+    normalized = layer_assignments.detach().to(device="cpu", dtype=torch.long)
+    normalized = normalized - int(normalized.min().item())
+    counts = torch.bincount(normalized)
+    wide_layers = int((counts >= 2).sum().item())
+    if wide_layers > 0:
+        return wide_layers
+    return 1
+
+
+def _cyclicity_ratio(edge_index: torch.Tensor, num_nodes: int) -> float:
+    """Return the fraction of edges reversed by the feedback-arc heuristic.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor shaped ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    float
+        Ratio ``|back_edges| / |E|`` after greedy FAS cycle breaking.
+    """
+    num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+    if num_edges == 0:
+        return 0.0
+    if num_nodes > 50_000 or num_edges > 200_000:
+        return 0.0
+
+    from dagua.layout.cycle import make_acyclic_robust
+
+    _, reversed_mask = make_acyclic_robust(edge_index.detach().to(device="cpu"), num_nodes)
+    return float(reversed_mask.sum().item()) / float(num_edges)
 
 
 def _reciprocal_edge_ratio(edge_index: torch.Tensor) -> float:
@@ -523,6 +640,7 @@ def classify_graph(
             resolved_layers,
             num_nodes,
         )
+        num_layers_effective = _effective_layer_count(resolved_layers)
         edge_to_node_ratio = float(num_edges) / float(num_nodes) if num_nodes > 0 else 0.0
         if explicit_direction is not None:
             is_semantically_directed = bool(explicit_direction)
@@ -545,11 +663,16 @@ def classify_graph(
             edge_to_node_ratio=edge_to_node_ratio,
             is_directed_acyclic=True,
             is_semantically_directed=is_semantically_directed,
+            num_layers_effective=num_layers_effective,
+            cyclicity_ratio=0.0,
+            has_dominant_component=True,
         )
 
     degree = _compute_degree(edge_index, num_nodes)
     max_degree = int(degree.max().item()) if degree.numel() > 0 else 0
     num_components = _count_components(edge_index, num_nodes)
+    largest_component_fraction = _largest_component_fraction(edge_index, num_nodes)
+    has_dominant_component = largest_component_fraction >= 0.8
     is_acyclic = _is_undirected_acyclic(edge_index, num_nodes)
     is_directed_acyclic = _is_directed_acyclic(edge_index, num_nodes)
 
@@ -570,6 +693,7 @@ def classify_graph(
         resolved_layers,
         num_nodes,
     )
+    num_layers_effective = _effective_layer_count(resolved_layers)
     is_bipartite_dag = num_layers == 2
     is_wide_layered = (
         num_layers > 0
@@ -579,6 +703,19 @@ def classify_graph(
 
     is_planar_hint = (num_edges < 3 * num_nodes - 6) if num_nodes >= 3 else True
     edge_to_node_ratio = float(num_edges) / float(num_nodes) if num_nodes > 0 else 0.0
+    cyclicity_ratio = 0.0 if is_directed_acyclic else _cyclicity_ratio(edge_index, num_nodes)
+
+    large_dense_fast_path = num_nodes > 50_000 and num_edges > num_nodes - 1
+    if explicit_direction is not None:
+        is_semantically_directed = bool(explicit_direction)
+    elif large_dense_fast_path:
+        is_semantically_directed = True
+    else:
+        is_semantically_directed = _infer_semantically_directed(
+            edge_index,
+            num_nodes,
+            resolved_layers,
+        )
 
     if is_chain:
         family = GraphFamily.CHAIN
@@ -590,6 +727,13 @@ def classify_graph(
         family = GraphFamily.WIDE_LAYERED
     elif is_forest:
         family = GraphFamily.FOREST
+    elif large_dense_fast_path:
+        family = GraphFamily.GENERAL
+    elif not is_directed_acyclic:
+        if cyclicity_ratio > 0.3 or is_semantically_directed is False:
+            family = GraphFamily.FORCE_DIRECTED
+        else:
+            family = GraphFamily.HYBRID
     else:
         family = GraphFamily.GENERAL
     topology_tags = _derive_topology_tags(
@@ -603,15 +747,6 @@ def classify_graph(
         is_planar_hint=is_planar_hint,
         is_directed_acyclic=is_directed_acyclic,
     )
-    if explicit_direction is not None:
-        is_semantically_directed = bool(explicit_direction)
-    else:
-        is_semantically_directed = _infer_semantically_directed(
-            edge_index,
-            num_nodes,
-            resolved_layers,
-        )
-
     return GraphStructure(
         family=family,
         num_components=num_components,
@@ -626,4 +761,7 @@ def classify_graph(
         is_directed_acyclic=is_directed_acyclic,
         topology_tags=topology_tags,
         is_semantically_directed=is_semantically_directed,
+        num_layers_effective=num_layers_effective,
+        cyclicity_ratio=cyclicity_ratio,
+        has_dominant_component=has_dominant_component,
     )

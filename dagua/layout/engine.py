@@ -934,25 +934,13 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             stacklevel=2,
         )
     remapped_from_default = config.algorithm is None and trace is None and config.relax_steps <= 0
-    # Sprint-20d-3: direction-aware dispatch. When the user hasn't pinned an
-    # algorithm and route_flat_to_stress is on, route undirected-origin graphs
-    # to dagua_flat instead of the layered dagua_native path.
-    if remapped_from_default and getattr(config, "route_flat_to_stress", False):
-        is_dir = getattr(graph, "is_semantically_directed", None)
-        if is_dir is None:
-            try:
-                from dagua.layout.graph_classify import _infer_semantically_directed
-
-                is_dir = _infer_semantically_directed(
-                    graph.edge_index,
-                    graph.num_nodes,
-                )
-            except Exception:
-                is_dir = True
-        if is_dir is False:
-            config = copy.copy(config)
-            config.algorithm = "dagua_flat"
-            remapped_from_default = False
+    # Sprint-20e: algorithm=None now enters dagua_native, whose adapter
+    # dispatches to tree/layered-DAG/force-directed/hybrid sub-pipelines after
+    # classification. The Sprint-20d route_flat_to_stress flag remains as a
+    # compatibility shim: disabling it selects the preserved monolith.
+    if remapped_from_default and not getattr(config, "route_flat_to_stress", True):
+        config = copy.copy(config)
+        config.force_pipeline = "legacy_monolith"
     if config.algorithm == "_legacy":
         config = copy.copy(config)
         config.algorithm = None
