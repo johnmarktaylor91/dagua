@@ -8,12 +8,13 @@ is pure composed ops; no inline helpers, no imports from
 from __future__ import annotations
 
 import copy
+import math
 from typing import Any, Optional
 
 import torch
 
 from dagua.config import LayoutConfig
-from dagua.layout.graph_classify import GraphStructure
+from dagua.layout.graph_classify import GraphStructure, classify_graph
 from dagua.layout.ops.anneal import (
     InitAnnealingSchedule,
     InitAnnealingScheduleConfig,
@@ -46,7 +47,7 @@ from dagua.layout.ops.optimize import (
     OptimizerZeroGrad,
 )
 from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
-from dagua.layout.ops.preprocess import BuildAdjacency, BuildAdjacencyConfig
+from dagua.layout.ops.preprocess import BuildAdjacency, BuildAdjacencyConfig, DetectComponents
 from dagua.layout.ops.project import (
     HardPinProjection,
     OverlapProjection,
@@ -56,6 +57,7 @@ from dagua.layout.ops.project import (
 )
 from dagua.layout.ops.state import (
     ExecutionPlan,
+    FlexConstraints,
     LayoutProblem,
     RuntimeContext,
     SolveState,
@@ -67,6 +69,12 @@ from dagua.layout.resolve import (
     normalize_node_sizes,
     prepare_pipeline_config,
 )
+
+_COMPONENT_TILE_PAD_FACTOR = 2.0
+_COMPONENT_PACK_TARGET_ASPECT = 1.0
+_COMPONENT_PACK_AREA_WEIGHT = 0.05
+_COMPONENT_DOMINANCE_SKIP_FRACTION = 0.85
+PackedComponent = tuple[torch.Tensor, torch.Tensor, float, float]
 
 
 def _stress_pivot_prep(config: LayoutConfig) -> list:
@@ -253,6 +261,546 @@ def _build_coarse_init_pipeline_factory(
         )
 
     return _factory
+
+
+def _prepare_native_config(
+    config: LayoutConfig,
+    num_nodes: int,
+    edge_index: torch.Tensor,
+    device: str,
+    optimizer_type: str,
+    layer_assignments: Optional[torch.Tensor] = None,
+    prebuilt_layer_index: Optional[Any] = None,
+    graph_structure: Optional[GraphStructure] = None,
+    skip_classification: bool = False,
+) -> LayoutConfig:
+    """Resolve one native-pipeline config for a specific problem instance.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        User-facing base configuration.
+    num_nodes : int
+        Number of nodes in the current problem.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    device : str
+        Target execution device name.
+    optimizer_type : str
+        Optimizer name forwarded into private native config attrs.
+    layer_assignments : torch.Tensor, optional
+        Optional layer assignments with shape ``[N]`` for the current problem.
+    prebuilt_layer_index : Any, optional
+        Optional prebuilt layer index for the current problem.
+    graph_structure : GraphStructure, optional
+        Optional pre-classified structure for the current problem.
+    skip_classification : bool, default=False
+        Whether to skip graph classification during config preparation.
+
+    Returns
+    -------
+    LayoutConfig
+        Shallow config copy annotated with resolved private native-pipeline
+        metadata for this problem instance.
+    """
+    prepared_config = prepare_pipeline_config(
+        config=config,
+        num_nodes=num_nodes,
+        edge_index=edge_index,
+        device=device,
+        layer_assignments=layer_assignments,
+        prebuilt_layer_index=prebuilt_layer_index,
+        graph_structure=graph_structure,
+        skip_classification=skip_classification,
+    )
+    setattr(prepared_config, "_dagua_native_optimizer_type", optimizer_type)
+    return prepared_config
+
+
+def _run_native_problem(
+    problem: LayoutProblem,
+    state: SolveState,
+    ctx: RuntimeContext,
+    config: LayoutConfig,
+) -> torch.Tensor:
+    """Run the native pipeline for one already-prepared problem.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared layout problem for one connected component or the full graph.
+    state : SolveState
+        Mutable state for the solve.
+    ctx : RuntimeContext
+        Execution context shared across the solve.
+    config : LayoutConfig
+        Resolved native config for ``problem``.
+
+    Returns
+    -------
+    torch.Tensor
+        Final positions with shape ``[N, 2]``.
+
+    Raises
+    ------
+    RuntimeError
+        If the pipeline completes without producing positions.
+    """
+    from dagua.layout.graph_classify import GraphFamily
+    from dagua.layout.ops.coordinate import (
+        ReingoldTilfordTree,
+        ReingoldTilfordTreeConfig,
+    )
+
+    structure = problem.structure
+    if structure is None:
+        structure = getattr(config, "structure", None)
+    if structure is None:
+        structure = classify_graph(problem.edge_index, problem.num_nodes)
+        problem.structure = structure
+
+    if (
+        getattr(structure, "family", None) == GraphFamily.TREE
+        and getattr(config, "use_tree_fast_path", True)
+        and problem.num_nodes > 0
+    ):
+        rt_state = ReingoldTilfordTree(ReingoldTilfordTreeConfig()).apply(problem, state, ctx)
+        if rt_state.pos is not None:
+            return rt_state.pos.detach()
+
+    final_state = build_dagua_pipeline(config).apply(problem, state, ctx)
+    if final_state.pos is None:
+        raise RuntimeError("dagua_native pipeline did not produce final positions.")
+    return final_state.pos.detach()
+
+
+def _has_pins(flex: Optional[FlexConstraints]) -> bool:
+    """Return whether prepared flex constraints contain pinned nodes.
+
+    Parameters
+    ----------
+    flex : FlexConstraints, optional
+        Prepared flex constraints for the current problem.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one pin is present.
+    """
+    if flex is None or flex.pin_indices is None:
+        return False
+    return int(flex.pin_indices.numel()) > 0
+
+
+def _has_cross_component_flex(
+    flex: Optional[FlexConstraints],
+    component_ids: Optional[torch.Tensor],
+) -> bool:
+    """Return whether any alignment group spans multiple weak components.
+
+    Parameters
+    ----------
+    flex : FlexConstraints, optional
+        Prepared flex constraints for the parent problem.
+    component_ids : torch.Tensor, optional
+        Weak-component labels with shape ``[N]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when an alignment group references nodes from multiple
+        components. Global spacing flex is allowed because it is re-applied
+        inside each child solve and does not bind specific components
+        together.
+    """
+    if flex is None or component_ids is None or not flex.align_groups:
+        return False
+
+    labels = component_ids.to(dtype=torch.long)
+    for group_indices, _, _ in flex.align_groups:
+        members = group_indices.to(device=labels.device, dtype=torch.long)
+        if members.numel() < 2:
+            continue
+        if torch.unique(labels[members], sorted=False).numel() > 1:
+            return True
+    return False
+
+
+def _should_decompose_components(
+    problem: LayoutProblem,
+    config: LayoutConfig,
+    component_ids: Optional[torch.Tensor],
+) -> bool:
+    """Return whether adapter-level component decomposition should run.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Prepared parent problem.
+    config : LayoutConfig
+        Resolved native config for the parent problem.
+    component_ids : torch.Tensor, optional
+        Weak-component labels with shape ``[N]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the parent graph is safe and useful to split into
+        independent weak components.
+    """
+    if not getattr(config, "decompose_components", True):
+        return False
+    if problem.num_nodes < 2:
+        return False
+    if problem.clusters:
+        return False
+    if _has_pins(problem.flex):
+        return False
+
+    structure = problem.structure
+    if structure is not None and int(getattr(structure, "num_components", 1)) <= 1:
+        return False
+
+    if component_ids is None or component_ids.numel() == 0:
+        return False
+    if int(component_ids.max().item()) <= 0:
+        return False
+    component_sizes = torch.bincount(component_ids.to(dtype=torch.long))
+    if component_sizes.numel() > 0:
+        largest_component = int(component_sizes.max().item())
+        if largest_component / max(problem.num_nodes, 1) >= _COMPONENT_DOMINANCE_SKIP_FRACTION:
+            return False
+        sorted_sizes, _ = torch.sort(component_sizes, descending=True)
+        second_largest = int(sorted_sizes[1].item()) if sorted_sizes.numel() > 1 else 0
+        singleton_components = int((component_sizes == 1).sum().item())
+        if singleton_components >= 3 and largest_component >= (10 * max(second_largest, 1)):
+            return False
+    if _has_cross_component_flex(problem.flex, component_ids):
+        return False
+    return True
+
+
+def _subset_flex(
+    flex: Optional[FlexConstraints],
+    local_index: torch.Tensor,
+) -> Optional[FlexConstraints]:
+    """Project parent flex constraints into one component-local node space.
+
+    Parameters
+    ----------
+    flex : FlexConstraints, optional
+        Parent flex constraints.
+    local_index : torch.Tensor
+        Mapping from parent node id to child-local id with shape ``[N_parent]``.
+        Nodes outside the child component contain ``-1``.
+
+    Returns
+    -------
+    FlexConstraints | None
+        Child-local flex constraints. Alignment groups that shrink below two
+        in-component members are dropped.
+    """
+    if flex is None:
+        return None
+
+    device = local_index.device
+    pin_indices = None
+    pin_targets = None
+    pin_weights = None
+    soft_pin_mask = None
+    hard_pin_mask = None
+    if flex.pin_indices is not None and flex.pin_indices.numel() > 0:
+        parent_pins = flex.pin_indices.to(device=device, dtype=torch.long)
+        pin_mask = local_index[parent_pins] >= 0
+        if pin_mask.any():
+            pin_indices = local_index[parent_pins[pin_mask]]
+            if flex.pin_targets is not None:
+                pin_targets = flex.pin_targets.to(device=device, dtype=torch.float32)[pin_mask]
+            if flex.pin_weights is not None:
+                pin_weights = flex.pin_weights.to(device=device, dtype=torch.float32)[pin_mask]
+            if flex.soft_pin_mask is not None:
+                soft_pin_mask = flex.soft_pin_mask.to(device=device, dtype=torch.bool)[pin_mask]
+            if flex.hard_pin_mask is not None:
+                hard_pin_mask = flex.hard_pin_mask.to(device=device, dtype=torch.bool)[pin_mask]
+
+    align_groups = None
+    if flex.align_groups:
+        projected_groups: list[tuple[torch.Tensor, float, int]] = []
+        for indices, weight, axis in flex.align_groups:
+            members = indices.to(device=device, dtype=torch.long)
+            valid_members = local_index[members]
+            local_members = valid_members[valid_members >= 0]
+            unique_members = torch.unique(local_members, sorted=True)
+            if unique_members.numel() >= 2:
+                projected_groups.append((unique_members, float(weight), int(axis)))
+        if projected_groups:
+            align_groups = projected_groups
+
+    if pin_indices is None and align_groups is None and flex.flex_node_sep is None:
+        return None
+
+    return FlexConstraints(
+        pin_indices=pin_indices,
+        pin_targets=pin_targets,
+        pin_weights=pin_weights,
+        soft_pin_mask=soft_pin_mask,
+        hard_pin_mask=hard_pin_mask,
+        align_groups=align_groups,
+        flex_node_sep=flex.flex_node_sep,
+        flex_node_sep_weight=flex.flex_node_sep_weight,
+    )
+
+
+def _extract_component_problem(
+    parent_problem: LayoutProblem,
+    parent_state: SolveState,
+    component_nodes: torch.Tensor,
+    layer_assignments: Optional[torch.Tensor] = None,
+) -> tuple[LayoutProblem, SolveState, torch.Tensor, Optional[torch.Tensor]]:
+    """Build one relabeled child problem for a weak component.
+
+    Parameters
+    ----------
+    parent_problem : LayoutProblem
+        Prepared parent problem.
+    parent_state : SolveState
+        Parent solve state. Only ``pos`` is read for optional init seeding.
+    component_nodes : torch.Tensor
+        Parent node indices belonging to one weak component with shape ``[K]``.
+    layer_assignments : torch.Tensor, optional
+        Optional parent layer assignments with shape ``[N_parent]``.
+
+    Returns
+    -------
+    tuple[LayoutProblem, SolveState, torch.Tensor, torch.Tensor | None]
+        Child problem, child state, parent index map with shape ``[K]``, and
+        optional child layer assignments with shape ``[K]``.
+    """
+    device = parent_problem.edge_index.device
+    parent_indices = component_nodes.to(device=device, dtype=torch.long)
+    local_index = torch.full((parent_problem.num_nodes,), -1, dtype=torch.long, device=device)
+    local_index[parent_indices] = torch.arange(
+        parent_indices.numel(),
+        device=device,
+        dtype=torch.long,
+    )
+
+    membership = torch.zeros(parent_problem.num_nodes, dtype=torch.bool, device=device)
+    membership[parent_indices] = True
+    edge_index = parent_problem.edge_index
+    if edge_index.numel() == 0:
+        edge_mask = torch.zeros((0,), dtype=torch.bool, device=device)
+    else:
+        edge_mask = membership[edge_index[0]] & membership[edge_index[1]]
+
+    sub_edge_index = local_index[edge_index[:, edge_mask]]
+    sub_node_sizes = (
+        None if parent_problem.node_sizes is None else parent_problem.node_sizes[parent_indices]
+    )
+    sub_edge_weights = (
+        None if parent_problem.edge_weights is None else parent_problem.edge_weights[edge_mask]
+    )
+
+    sub_init_pos = None
+    if parent_state.pos is not None:
+        sub_init_pos = parent_state.pos[parent_indices].clone()
+        if sub_init_pos.numel() > 0:
+            sub_init_pos -= sub_init_pos.mean(dim=0, keepdim=True)
+
+    sub_layer_assignments = None
+    if layer_assignments is not None:
+        sub_layer_assignments = layer_assignments.to(device=device, dtype=torch.long)[
+            parent_indices
+        ].clone()
+
+    classified_structure = classify_graph(
+        sub_edge_index.detach().to(device="cpu", dtype=torch.long),
+        int(parent_indices.numel()),
+        layer_assignments=(
+            None
+            if sub_layer_assignments is None
+            else sub_layer_assignments.detach().to(device="cpu", dtype=torch.long)
+        ),
+    )
+    child_problem = LayoutProblem(
+        edge_index=sub_edge_index,
+        num_nodes=int(parent_indices.numel()),
+        node_sizes=sub_node_sizes,
+        direction=parent_problem.direction,
+        clusters=None,
+        cluster_parents=None,
+        structure=classified_structure,
+        flex=_subset_flex(parent_problem.flex, local_index),
+        edge_weights=sub_edge_weights,
+        seed=parent_problem.seed,
+    )
+    return child_problem, SolveState(pos=sub_init_pos), parent_indices, sub_layer_assignments
+
+
+def _grid_dimensions(
+    components: list[PackedComponent],
+    cols: int,
+    gap: float,
+) -> tuple[float, float]:
+    """Measure the outer bounding box for one row-major packing choice.
+
+    Parameters
+    ----------
+    components : list[PackedComponent]
+        Packed component descriptors ``(parent_indices, local_pos, width, height)``.
+    cols : int
+        Number of columns to place per row.
+    gap : float
+        Gap inserted between adjacent component boxes.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(bbox_width, bbox_height)`` for the candidate packing.
+    """
+    if not components:
+        return 0.0, 0.0
+
+    max_width = 0.0
+    total_height = 0.0
+    row_width = 0.0
+    row_height = 0.0
+    for index, (_, _, width, height) in enumerate(components):
+        if index > 0 and index % cols == 0:
+            max_width = max(max_width, max(row_width - gap, 0.0))
+            total_height += row_height + gap
+            row_width = 0.0
+            row_height = 0.0
+        row_width += width + gap
+        row_height = max(row_height, height)
+
+    max_width = max(max_width, max(row_width - gap, 0.0))
+    total_height += row_height
+    return max_width, total_height
+
+
+def _choose_component_grid(
+    components: list[PackedComponent],
+    gap: float,
+) -> int:
+    """Choose the row-major column count that best approximates square packing.
+
+    Parameters
+    ----------
+    components : list[PackedComponent]
+        Packed component descriptors ``(parent_indices, local_pos, width, height)``.
+    gap : float
+        Gap inserted between adjacent component boxes.
+
+    Returns
+    -------
+    int
+        Selected column count in ``[1, len(components)]``.
+    """
+    if not components:
+        return 1
+
+    base_area = sum(max(width, 1.0) * max(height, 1.0) for _, _, width, height in components)
+    best_cols = 1
+    best_score = float("inf")
+    for cols in range(1, len(components) + 1):
+        bbox_width, bbox_height = _grid_dimensions(components, cols=cols, gap=gap)
+        if bbox_width <= 0.0 or bbox_height <= 0.0:
+            return cols
+        aspect = bbox_width / max(bbox_height, 1.0e-6)
+        area_penalty = (bbox_width * bbox_height) / max(base_area, 1.0)
+        score = abs(math.log(aspect / _COMPONENT_PACK_TARGET_ASPECT)) + (
+            _COMPONENT_PACK_AREA_WEIGHT * area_penalty
+        )
+        if score < best_score or (math.isclose(score, best_score) and cols < best_cols):
+            best_score = score
+            best_cols = cols
+    return best_cols
+
+
+def _row_major_offsets(
+    components: list[PackedComponent],
+    cols: int,
+    gap: float,
+) -> list[tuple[float, float]]:
+    """Compute row-major tile offsets for the chosen packing grid.
+
+    Parameters
+    ----------
+    components : list[PackedComponent]
+        Packed component descriptors ``(parent_indices, local_pos, width, height)``.
+    cols : int
+        Number of columns to place per row.
+    gap : float
+        Gap inserted between adjacent component boxes.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Per-component ``(x_offset, y_offset)`` translations.
+    """
+    offsets: list[tuple[float, float]] = []
+    x_cursor = 0.0
+    y_cursor = 0.0
+    row_height = 0.0
+    for index, (_, _, width, height) in enumerate(components):
+        if index > 0 and index % cols == 0:
+            x_cursor = 0.0
+            y_cursor += row_height + gap
+            row_height = 0.0
+        offsets.append((x_cursor, y_cursor))
+        x_cursor += width + gap
+        row_height = max(row_height, height)
+    return offsets
+
+
+def _tile_component_positions(
+    component_results: list[tuple[torch.Tensor, torch.Tensor]],
+    node_sep: float,
+) -> torch.Tensor:
+    """Tile independently solved component layouts back into parent space.
+
+    Parameters
+    ----------
+    component_results : list[tuple[torch.Tensor, torch.Tensor]]
+        Parent node indices and local positions for each solved component.
+    node_sep : float
+        Resolved node separation used to size component padding.
+
+    Returns
+    -------
+    torch.Tensor
+        Tiled parent position tensor with shape ``[N, 2]``.
+    """
+    if not component_results:
+        return torch.zeros((0, 2), dtype=torch.float32)
+
+    gap = max(float(node_sep) * _COMPONENT_TILE_PAD_FACTOR, 1.0)
+    packed: list[PackedComponent] = []
+    for parent_indices, pos in component_results:
+        x_min = float(pos[:, 0].min().item())
+        x_max = float(pos[:, 0].max().item())
+        y_min = float(pos[:, 1].min().item())
+        y_max = float(pos[:, 1].max().item())
+        local = pos.clone()
+        local[:, 0] -= x_min
+        local[:, 1] -= y_min
+        width = max(x_max - x_min, float(node_sep))
+        height = max(y_max - y_min, float(node_sep))
+        packed.append((parent_indices, local, width, height))
+
+    packed.sort(key=lambda item: (-int(item[0].numel()), -(item[2] * item[3])))
+    cols = _choose_component_grid(packed, gap=gap)
+    offsets = _row_major_offsets(packed, cols=cols, gap=gap)
+
+    total_nodes = sum(int(parent_indices.numel()) for parent_indices, _ in component_results)
+    out = torch.zeros((total_nodes, 2), dtype=packed[0][1].dtype, device=packed[0][1].device)
+    for (parent_indices, local, _, _), (offset_x, offset_y) in zip(packed, offsets):
+        out[parent_indices, 0] = local[:, 0] + offset_x
+        out[parent_indices, 1] = local[:, 1] + offset_y
+
+    out -= out.mean(dim=0, keepdim=True)
+    return out
 
 
 def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
@@ -481,10 +1029,25 @@ def layout_dagua_native_pipeline(
     if requested_device == "cuda" and not torch.cuda.is_available():
         requested_device = "cpu"
     target_device = torch.device(requested_device)
+    if num_nodes == 0:
+        return torch.zeros((0, 2), dtype=torch.float32, device=target_device)
+    if num_nodes == 1:
+        return torch.zeros((1, 2), dtype=torch.float32, device=target_device)
+
     normalized_node_sizes = normalize_node_sizes(node_sizes=node_sizes, device=target_device)
     prepared_edge_index = edge_index.to(device=target_device, dtype=torch.long)
     prepared_init_pos = (
         init_pos.to(device=target_device, dtype=torch.float32) if init_pos is not None else None
+    )
+    prepared_edge_weights = (
+        edge_weights.to(device=target_device, dtype=torch.float32)
+        if edge_weights is not None
+        else None
+    )
+    prepared_layer_assignments = (
+        layer_assignments.to(device=target_device, dtype=torch.long)
+        if layer_assignments is not None
+        else None
     )
     resolved_seed = seed if seed is not None else effective_config.seed
     if resolved_seed is not None:
@@ -492,12 +1055,13 @@ def layout_dagua_native_pipeline(
         if target_device.type == "cuda":
             torch.cuda.manual_seed(int(resolved_seed))
 
-    prepared_config = prepare_pipeline_config(
+    prepared_config = _prepare_native_config(
         config=effective_config,
         num_nodes=num_nodes,
         edge_index=prepared_edge_index,
         device=str(target_device),
-        layer_assignments=layer_assignments,
+        optimizer_type=optimizer_type,
+        layer_assignments=prepared_layer_assignments,
         prebuilt_layer_index=prebuilt_layer_index,
         graph_structure=graph_structure,
         skip_classification=skip_classification,
@@ -507,7 +1071,6 @@ def layout_dagua_native_pipeline(
         num_nodes=num_nodes,
         device=target_device,
     )
-    setattr(prepared_config, "_dagua_native_optimizer_type", optimizer_type)
     problem = LayoutProblem(
         edge_index=prepared_edge_index,
         num_nodes=num_nodes,
@@ -515,8 +1078,9 @@ def layout_dagua_native_pipeline(
         direction=prepared_config.direction,
         clusters=clusters,
         cluster_parents=cluster_parents,
+        structure=getattr(prepared_config, "structure", None),
         flex=flex_constraints,
-        edge_weights=edge_weights,
+        edge_weights=prepared_edge_weights,
         seed=int(resolved_seed if resolved_seed is not None else 42),
     )
     state = SolveState(pos=prepared_init_pos)
@@ -526,38 +1090,68 @@ def layout_dagua_native_pipeline(
             optimizer_type=optimizer_type,
         ),
     )
-    # Sprint 12: tree topology fast path. If the graph classifies as a
-    # rooted tree (|E| == N-1, 1 component, acyclic), skip the entire
-    # gradient pipeline and use the classical Reingold-Tilford layout.
-    # Trees are the single-most-winning competitor family (igraph_rt),
-    # and Dagua's general Sugiyama-over-gradient produces unnecessary
-    # crossings on them (205 crossings on binary_tree_127 where
-    # dot/elk/dagre produce 0). The exact R-T output has 0 crossings
-    # and optimal aesthetic by construction.
-    from dagua.layout.graph_classify import GraphFamily, classify_graph
-    from dagua.layout.ops.coordinate import (
-        ReingoldTilfordTree,
-        ReingoldTilfordTreeConfig,
-    )
-
-    structure = (
-        prepared_config.structure
-        if getattr(prepared_config, "structure", None) is not None
-        else classify_graph(prepared_edge_index, num_nodes)
-    )
+    component_ids: Optional[torch.Tensor] = None
     if (
-        getattr(structure, "family", None) == GraphFamily.TREE
-        and getattr(config, "use_tree_fast_path", True)
-        and num_nodes > 0
+        getattr(prepared_config, "decompose_components", True)
+        and num_nodes >= 2
+        and not problem.clusters
+        and not _has_pins(problem.flex)
     ):
-        rt_state = ReingoldTilfordTree(ReingoldTilfordTreeConfig()).apply(problem, state, ctx)
-        if rt_state.pos is not None:
-            return rt_state.pos.detach()
+        component_state = DetectComponents().apply(problem, SolveState(), ctx)
+        component_ids = component_state.component_ids
 
-    final_state = build_dagua_pipeline(prepared_config).apply(problem, state, ctx)
-    if final_state.pos is None:
-        raise RuntimeError("dagua_native pipeline did not produce final positions.")
-    return final_state.pos.detach()
+    if _should_decompose_components(problem, prepared_config, component_ids):
+        component_results: list[tuple[torch.Tensor, torch.Tensor]] = []
+        parent_layers = getattr(prepared_config, "_dagua_native_layer_assignments", None)
+        assert component_ids is not None
+        for component_id in torch.unique(component_ids, sorted=True).tolist():
+            component_nodes = torch.nonzero(
+                component_ids == component_id,
+                as_tuple=False,
+            ).squeeze(1)
+            child_problem, child_state, parent_indices, child_layers = _extract_component_problem(
+                problem,
+                state,
+                component_nodes,
+                layer_assignments=parent_layers,
+            )
+            if child_problem.num_nodes <= 1:
+                child_pos = torch.zeros(
+                    (child_problem.num_nodes, 2),
+                    dtype=torch.float32,
+                    device=target_device,
+                )
+            else:
+                child_config = _prepare_native_config(
+                    config=effective_config,
+                    num_nodes=child_problem.num_nodes,
+                    edge_index=child_problem.edge_index,
+                    device=str(target_device),
+                    optimizer_type=optimizer_type,
+                    layer_assignments=child_layers,
+                    prebuilt_layer_index=None,
+                    graph_structure=child_problem.structure,
+                    skip_classification=False,
+                )
+                child_pos = _run_native_problem(child_problem, child_state, ctx, child_config)
+            component_results.append((parent_indices, child_pos))
+
+        tiled_positions = _tile_component_positions(
+            component_results,
+            node_sep=float(
+                getattr(prepared_config, "_dagua_native_node_sep", prepared_config.node_sep)
+            ),
+        )
+        outer_state = AspectRatioFit(AspectRatioFitConfig()).apply(
+            problem,
+            SolveState(pos=tiled_positions),
+            ctx,
+        )
+        if outer_state.pos is None:
+            raise RuntimeError("dagua_native component tiling did not produce positions.")
+        return outer_state.pos.detach()
+
+    return _run_native_problem(problem, state, ctx, prepared_config)
 
 
 __all__ = ["build_dagua_pipeline", "build_gradient_core", "layout_dagua_native_pipeline"]
