@@ -71,6 +71,11 @@ class LayoutConfig:
     device: str = "cpu"
     seed: Optional[int] = 42
     multi_start_k: int = 1
+    # Sprint-20d: route degenerate-layering cyclic graphs (e.g. small_world)
+    # to the stress-majorization pipeline instead of the layered native path.
+    # The layered path produces one-node-per-layer outputs on these graphs
+    # which collapses crossings, dag_consistency, and edge_straightness.
+    route_flat_to_stress: bool = True
 
     # Adaptive spacing: scale node_sep and rank_sep based on graph size
     adaptive_spacing: bool = True
