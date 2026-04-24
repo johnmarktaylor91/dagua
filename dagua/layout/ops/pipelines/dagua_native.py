@@ -46,6 +46,12 @@ from dagua.layout.ops.optimize import (
     OptimizerStep,
     OptimizerZeroGrad,
 )
+from dagua.layout.ops.ordering import (
+    MedianSweep,
+    MedianSweepConfig,
+    TransposeHeuristic,
+    TransposeHeuristicConfig,
+)
 from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
 from dagua.layout.ops.preprocess import BuildAdjacency, BuildAdjacencyConfig, DetectComponents
 from dagua.layout.ops.project import (
@@ -852,6 +858,29 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
         w_back_edge=config.w_back_edge,
         w_stress=getattr(config, "w_stress", 0.0),
     )
+    structure = getattr(config, "_dagua_native_structure", None) or getattr(
+        config,
+        "structure",
+        None,
+    )
+    is_acyclic = (
+        bool(getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True)))
+        if structure is not None
+        else True
+    )
+    enable_native_median_transpose = bool(getattr(config, "use_native_median_transpose", True))
+    native_median_passes = int(getattr(config, "native_median_passes", 4))
+    native_transpose_passes = int(getattr(config, "native_transpose_passes", 8))
+    crossing_reduction_ops = [
+        BarycenterReorder(BarycenterReorderConfig()),
+    ]
+    if enable_native_median_transpose and is_acyclic:
+        crossing_reduction_ops.extend(
+            [
+                MedianSweep(MedianSweepConfig(passes=native_median_passes)),
+                TransposeHeuristic(TransposeHeuristicConfig(passes=native_transpose_passes)),
+            ]
+        )
 
     # Sprint 2: branch on N. V-cycle above threshold; flat below.
     use_vcycle = bool(getattr(config, "_dagua_native_use_vcycle", False))
@@ -972,7 +1001,7 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
             # op reorders within-layer x-positions by barycenter of
             # adjacent-layer neighbours. Preserves y (DAG direction)
             # and overlap (permutes the same set of x's).
-            BarycenterReorder(BarycenterReorderConfig()),
+            *crossing_reduction_ops,
             OverlapProjection(
                 OverlapProjectionConfig(
                     padding=2.0,
