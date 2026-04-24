@@ -167,7 +167,10 @@ def _greedy_fas(edge_index: torch.Tensor, num_nodes: int) -> tuple[torch.Tensor,
                 continue
             in_degree = sum(1 for edge_idx in incoming_edges[node_idx] if active_edges[edge_idx])
             out_degree = sum(1 for edge_idx in outgoing_edges[node_idx] if active_edges[edge_idx])
-            score = (in_degree - out_degree, -node_idx)
+            # Eades-Lin-Smyth: pick source-like nodes (max out - in) first so
+            # the final order goes source -> sink. Reversed mask then flips
+            # only the edges that actually go against that order (the FAS).
+            score = (out_degree - in_degree, -node_idx)
             if best_score is None or score > best_score:
                 best_node = node_idx
                 best_score = score
