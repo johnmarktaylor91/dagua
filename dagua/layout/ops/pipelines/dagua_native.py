@@ -28,6 +28,10 @@ from dagua.layout.ops.cluster_arrange import (
 )
 from dagua.layout.ops.coarsen import HeavyEdgeMatching
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig, StallCount, StallCountConfig
+from dagua.layout.ops.coordinate import (
+    BrandesKoepfHorizontalRefine,
+    BrandesKoepfHorizontalRefineConfig,
+)
 from dagua.layout.ops.distance import (
     PivotDistanceQueries,
     PivotSelection,
@@ -871,6 +875,7 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
     enable_native_median_transpose = bool(getattr(config, "use_native_median_transpose", True))
     native_median_passes = int(getattr(config, "native_median_passes", 4))
     native_transpose_passes = int(getattr(config, "native_transpose_passes", 8))
+    enable_brandes_koepf_refine = bool(getattr(config, "brandes_koepf_refine", True))
     crossing_reduction_ops = [
         BarycenterReorder(BarycenterReorderConfig()),
     ]
@@ -881,6 +886,15 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
                 TransposeHeuristic(TransposeHeuristicConfig(passes=native_transpose_passes)),
             ]
         )
+    crossing_reduction_ops.append(
+        BrandesKoepfHorizontalRefine(
+            BrandesKoepfHorizontalRefineConfig(
+                node_sep=resolved_node_sep,
+                enabled=enable_brandes_koepf_refine,
+                structure=structure,
+            )
+        )
+    )
 
     # Sprint 2: branch on N. V-cycle above threshold; flat below.
     use_vcycle = bool(getattr(config, "_dagua_native_use_vcycle", False))
