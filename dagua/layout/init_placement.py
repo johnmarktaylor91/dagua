@@ -96,15 +96,15 @@ def init_positions(
                     relayered_seq = relayered if isinstance(relayered, list) else relayered.tolist()
                     n_relayered = len(set(relayered_seq))
                     relayered_max = max(relayered_seq.count(v) for v in set(relayered_seq))
-                    # Accept when layering is meaningful: more layers than
-                    # before, <= n/2 layers (rejects one-node-per-layer on
-                    # small-world), and less pile-up than before.
-                    accept = (
-                        1 < n_relayered <= max(2, num_nodes // 2)
-                        and n_relayered >= n_layers
-                        and relayered_max <= max_layer_count
-                    )
-                    if accept:
+                    # Accept when relayering reduces pile-up. Reject the
+                    # degenerate one-node-per-layer result for large graphs
+                    # (small-world / dense random where each node getting
+                    # its own layer is meaningless) but accept it on small
+                    # graphs where chain-like DAGs are legitimately linear.
+                    pile_reduced = relayered_max < max_layer_count
+                    not_degenerate = relayered_max >= 2 or num_nodes <= 10
+                    gained_layers = n_relayered > n_layers
+                    if pile_reduced and not_degenerate and gained_layers:
                         layers = relayered
             except Exception:
                 # Cycle removal failed -- keep the original collapsed

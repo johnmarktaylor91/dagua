@@ -125,6 +125,29 @@ class TestMakeAcyclic:
         assert reversed_mask.shape == (ei.shape[1],)
         assert _is_acyclic(acyclic, 4) is True
 
+    def test_make_acyclic_robust_preserves_linear_chain(self) -> None:
+        """Already-acyclic chain 0->1->2 must reverse zero edges.
+
+        Regression test for a sign-flip bug in ``_greedy_fas`` where the
+        node ordering inverted (sinks-first instead of sources-first), so
+        every forward edge was mis-flagged as a feedback arc and flipped.
+        """
+        ei = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+
+        acyclic, reversed_mask = make_acyclic_robust(ei, 3)
+
+        assert reversed_mask.sum().item() == 0
+        assert torch.equal(acyclic, ei)
+
+    def test_make_acyclic_robust_minimal_feedback_set_triangle(self) -> None:
+        """Triangle 0->1->2->0 needs exactly one edge reversed, not three."""
+        ei = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
+
+        acyclic, reversed_mask = make_acyclic_robust(ei, 3)
+
+        assert reversed_mask.sum().item() == 1
+        assert _is_acyclic(acyclic, 3) is True
+
 
 # ---------------------------------------------------------------------------
 # DaguaGraph cycle properties
