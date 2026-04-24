@@ -55,18 +55,30 @@ def test_auto_route_respects_is_semantically_directed_true() -> None:
 
 
 def test_auto_route_redirects_undirected_to_flat() -> None:
-    """Undirected ring routes to force-directed native under auto dispatch."""
+    """Undirected non-planar graph routes to dagua_flat when forced.
+
+    Sprint-20e refactored auto-dispatch: undirected graphs now flow
+    through native_force_directed inside dagua_native. dagua_flat remains
+    available as an explicit opt-in via algorithm="dagua_flat", which
+    this test exercises alongside the default (unforced) path.
+    """
+    edges: list[tuple[int, int]] = []
+    for i in range(4):
+        for j in range(4, 8):
+            edges.append((i, j))
     graph = DaguaGraph.from_edge_list(
-        [(i, (i + 1) % 12) for i in range(12)],
-        num_nodes=12,
+        edges,
+        num_nodes=8,
         is_semantically_directed=False,
     )
     graph.compute_node_sizes()
-    pos_routed = layout(graph, LayoutConfig(seed=42, route_flat_to_stress=True))
-    pos_bypass = layout(graph, LayoutConfig(seed=42, route_flat_to_stress=False))
-    # With routing on, the flat pipeline should produce a materially
-    # different layout than the native path on this undirected graph.
-    assert not torch.allclose(pos_routed, pos_bypass)
+    pos_flat = layout(graph, LayoutConfig(seed=42, algorithm="dagua_flat"))
+    pos_default = layout(graph, LayoutConfig(seed=42))
+    assert pos_flat.shape == pos_default.shape
+    assert torch.isfinite(pos_flat).all()
+    assert torch.isfinite(pos_default).all()
+    # The two pipelines should produce materially different layouts.
+    assert not torch.allclose(pos_flat, pos_default, atol=1e-3)
 
 
 def test_auto_route_off_preserves_default() -> None:

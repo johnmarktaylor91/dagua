@@ -39,6 +39,26 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
         "dagua.layout.ops.pipelines.maxent_stress",
         "layout_maxent_stress_pipeline",
     ),
+    "native_force_directed": (
+        "dagua.layout.ops.pipelines.native_force_directed",
+        "layout_native_force_directed_pipeline",
+    ),
+    "native_hybrid": (
+        "dagua.layout.ops.pipelines.native_hybrid",
+        "layout_native_hybrid_pipeline",
+    ),
+    "native_layered_dag": (
+        "dagua.layout.ops.pipelines.native_layered_dag",
+        "layout_native_layered_dag_pipeline",
+    ),
+    "native_planar": (
+        "dagua.layout.ops.pipelines.native_planar",
+        "layout_native_planar_pipeline",
+    ),
+    "native_tree": (
+        "dagua.layout.ops.pipelines.native_tree",
+        "layout_native_tree_pipeline",
+    ),
     "neulay": ("dagua.layout.ops.pipelines.neulay", "layout_neulay_pipeline"),
     "pivot_mds": (
         "dagua.layout.ops.pipelines.pivot_mds",
