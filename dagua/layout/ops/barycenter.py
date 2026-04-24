@@ -112,6 +112,35 @@ def _compute_barycenters_for_layer(
     return barycenter
 
 
+def _active_edge_index(
+    problem: LayoutProblem,
+    state: SolveState,
+    pos: torch.Tensor,
+) -> torch.Tensor:
+    """Return the edge tensor for the active barycenter graph.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable original graph inputs.
+    state : SolveState
+        Mutable solve state that may carry ``extras["expanded_graph"]``.
+    pos : torch.Tensor
+        Active position tensor with shape ``[N_active, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Edge tensor with shape ``[2, E_active]`` on ``pos.device``.
+    """
+    expanded_graph = state.extras.get("expanded_graph")
+    if expanded_graph is not None and int(getattr(expanded_graph, "num_nodes", -1)) == int(
+        pos.shape[0]
+    ):
+        return expanded_graph.edge_index.to(device=pos.device, dtype=torch.long)
+    return problem.edge_index.to(device=pos.device, dtype=torch.long)
+
+
 @register_op
 @dataclass
 class BarycenterReorder(Op):
@@ -128,7 +157,7 @@ class BarycenterReorder(Op):
 
     name: ClassVar[str] = "barycenter_reorder"
     category: ClassVar[OpCategory] = OpCategory.PROJECT
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "layers", "layer_index")
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "layers", "layer_index", "extras.expanded_graph")
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
 
@@ -152,7 +181,7 @@ class BarycenterReorder(Op):
         pos = state.pos
         layers = state.layers.to(device=pos.device, dtype=torch.long)
         layer_index = state.layer_index
-        edge_index = problem.edge_index.to(device=pos.device, dtype=torch.long)
+        edge_index = _active_edge_index(problem=problem, state=state, pos=pos)
         src_all = edge_index[0]
         tgt_all = edge_index[1]
         src_layer = layers[src_all]
