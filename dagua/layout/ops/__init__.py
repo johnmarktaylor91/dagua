@@ -253,6 +253,7 @@ _EXPECTED_OP_MODULES = (
     "prolong",
     "sfdp",
     "sgd2_multi",
+    "spatial_hash",
     "stress",
     "stress_sgd",
     "sugiyama",
