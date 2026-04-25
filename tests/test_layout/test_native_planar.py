@@ -166,16 +166,24 @@ def test_auto_dispatch_selects_planar_for_planar_targets_and_layered_for_random_
     hex_graph = _make_hexagonal_lattice_graph(rows=6, cols=7)
     sierpinski_graph = _make_sierpinski_graph(depth=3)
     random_graph = _random_dag(200, 300, seed=42)
-    config = LayoutConfig()
+    # Sprint-20g empirical tuning made try_planar_first an explicit opt-in
+    # because Schnyder+flat-stress lost composite vs layered_dag on every
+    # benchmark planar candidate. Default config still picks layered_dag.
+    default_config = LayoutConfig()
+    planar_config = LayoutConfig(try_planar_first=True)
 
     for graph in (hex_graph, sierpinski_graph, planar_graph):
         structure = classify_graph(graph.edge_index, graph.num_nodes)
         assert structure.is_planar
-        assert _choose_native_pipeline(structure, config) == "planar"
+        # Default: opt-out, so planar candidates take the layered path.
+        assert _choose_native_pipeline(structure, default_config) == "layered_dag"
+        # Explicit opt-in: planar selected.
+        assert _choose_native_pipeline(structure, planar_config) == "planar"
 
     random_structure = classify_graph(random_graph.edge_index, random_graph.num_nodes)
     assert not random_structure.is_planar
-    assert _choose_native_pipeline(random_structure, config) == "layered_dag"
+    assert _choose_native_pipeline(random_structure, default_config) == "layered_dag"
+    assert _choose_native_pipeline(random_structure, planar_config) == "layered_dag"
 
 
 def test_non_planar_graphs_fall_back_or_fail_only_when_forced() -> None:

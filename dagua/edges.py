@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import torch
 
@@ -33,6 +33,13 @@ class BezierCurve:
         Optional polyline vertices for routing modes such as ``"ortho"`` and
         ``"taxi"`` that need hard bends. When present, evaluation and tangents
         follow the waypoint polyline instead of the cubic control points.
+    routing : str, default="bezier"
+        Routing mode used to produce the curve.
+    direction : str, default="TB"
+        Layout direction used when constructing rectilinear routes.
+    step_fraction : float or torch.Tensor or None, default=None
+        Taxi-route step fraction. The optimizer may carry this as a tensor
+        before converting the final route back to floats for rendering.
     """
 
     p0: Tuple[float, float]
@@ -40,15 +47,29 @@ class BezierCurve:
     cp2: Tuple[float, float]
     p1: Tuple[float, float]
     waypoints: Optional[Tuple[Tuple[float, float], ...]] = None
+    routing: str = "bezier"
+    direction: str = "TB"
+    step_fraction: Optional[Union[float, torch.Tensor]] = None
 
 
-def _polyline_curve(points: Sequence[Tuple[float, float]]) -> BezierCurve:
+def _polyline_curve(
+    points: Sequence[Tuple[float, float]],
+    routing: str = "bezier",
+    direction: str = "TB",
+    step_fraction: Optional[Union[float, torch.Tensor]] = None,
+) -> BezierCurve:
     """Build a routed curve backed by explicit polyline waypoints.
 
     Parameters
     ----------
     points : sequence[tuple[float, float]]
         Polyline vertices in draw order.
+    routing : str, default="bezier"
+        Routing mode represented by the polyline.
+    direction : str, default="TB"
+        Layout direction used to construct the polyline.
+    step_fraction : float or torch.Tensor or None, default=None
+        Taxi step fraction associated with the polyline, if any.
 
     Returns
     -------
@@ -68,7 +89,16 @@ def _polyline_curve(points: Sequence[Tuple[float, float]]) -> BezierCurve:
         raise ValueError("Polyline routes require at least one point.")
     if len(deduped) == 1:
         point = deduped[0]
-        return BezierCurve(point, point, point, point, waypoints=(point,))
+        return BezierCurve(
+            point,
+            point,
+            point,
+            point,
+            waypoints=(point,),
+            routing=routing,
+            direction=direction,
+            step_fraction=step_fraction,
+        )
 
     first_bend = deduped[1] if len(deduped) > 2 else deduped[0]
     last_bend = deduped[-2] if len(deduped) > 2 else deduped[-1]
@@ -78,6 +108,9 @@ def _polyline_curve(points: Sequence[Tuple[float, float]]) -> BezierCurve:
         last_bend,
         deduped[-1],
         waypoints=tuple(deduped),
+        routing=routing,
+        direction=direction,
+        step_fraction=step_fraction,
     )
 
 
@@ -508,7 +541,7 @@ def route_edges(
 
     if graph is not None:
         node_shapes = [graph.get_style_for_node(i).shape for i in range(pos.shape[0])]
-        edge_styles = [graph.get_style_for_edge(i) for i in range(num_edges)]
+        edge_styles = [_get_route_edge_style(graph, i) for i in range(num_edges)]
 
     curves = []
     for e_idx in range(num_edges):
@@ -603,6 +636,31 @@ def route_edges(
         curves.append(curve)
 
     return curves
+
+
+def _get_route_edge_style(graph: Any, edge_index: int) -> Any:
+    """Return an edge style for routing, accepting dict overrides.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph object with ``edge_styles`` and ``get_style_for_edge``.
+    edge_index : int
+        Edge index to resolve.
+
+    Returns
+    -------
+    Any
+        EdgeStyle-like object with routing, curvature, and port fields.
+    """
+    raw_styles = getattr(graph, "edge_styles", [])
+    if edge_index < len(raw_styles) and isinstance(raw_styles[edge_index], dict):
+        from dagua.styles import EdgeStyle
+
+        style = EdgeStyle(**raw_styles[edge_index])
+        raw_styles[edge_index] = style
+        return style
+    return graph.get_style_for_edge(edge_index)
 
 
 def _adjust_port_for_shape(
@@ -787,7 +845,7 @@ def _compute_straight(
     ty: float,
 ) -> BezierCurve:
     """Straight line: control points = endpoints (degenerate bezier)."""
-    return BezierCurve((sx, sy), (sx, sy), (tx, ty), (tx, ty))
+    return BezierCurve((sx, sy), (sx, sy), (tx, ty), (tx, ty), routing="straight")
 
 
 def _compute_ortho(
@@ -800,10 +858,18 @@ def _compute_ortho(
     """Route an edge through one Manhattan elbow corridor."""
     if direction in ("TB", "BT"):
         mid_y = (sy + ty) / 2
-        return _polyline_curve([(sx, sy), (sx, mid_y), (tx, mid_y), (tx, ty)])
+        return _polyline_curve(
+            [(sx, sy), (sx, mid_y), (tx, mid_y), (tx, ty)],
+            routing="ortho",
+            direction=direction,
+        )
 
     mid_x = (sx + tx) / 2
-    return _polyline_curve([(sx, sy), (mid_x, sy), (mid_x, ty), (tx, ty)])
+    return _polyline_curve(
+        [(sx, sy), (mid_x, sy), (mid_x, ty), (tx, ty)],
+        routing="ortho",
+        direction=direction,
+    )
 
 
 def _compute_taxi(
@@ -837,7 +903,12 @@ def _compute_taxi(
         renderer interface.
     """
     if math.isclose(sx, tx, abs_tol=1e-9) and math.isclose(sy, ty, abs_tol=1e-9):
-        return _polyline_curve([(sx, sy)])
+        return _polyline_curve(
+            [(sx, sy)],
+            routing="taxi",
+            direction=direction,
+            step_fraction=0.35,
+        )
 
     step_fraction = 0.35
     if direction in ("TB", "BT"):
@@ -852,7 +923,10 @@ def _compute_taxi(
                 (mid_x, second_y),
                 (tx, second_y),
                 (tx, ty),
-            ]
+            ],
+            routing="taxi",
+            direction=direction,
+            step_fraction=step_fraction,
         )
 
     first_x = sx + (tx - sx) * step_fraction
@@ -866,7 +940,10 @@ def _compute_taxi(
             (second_x, mid_y),
             (second_x, ty),
             (tx, ty),
-        ]
+        ],
+        routing="taxi",
+        direction=direction,
+        step_fraction=step_fraction,
     )
 
 
@@ -887,7 +964,7 @@ def _compute_bezier(
     dist = (dx**2 + dy**2) ** 0.5
 
     if dist < 1e-6 or curvature < 1e-6:
-        return BezierCurve((sx, sy), (sx, sy), (tx, ty), (tx, ty))
+        return BezierCurve((sx, sy), (sx, sy), (tx, ty), (tx, ty), routing="bezier")
 
     abs_dx = abs(dx)
     abs_dy = abs(dy)
@@ -925,7 +1002,7 @@ def _compute_bezier(
             cp1 = (sx + offset_x, sy)
             cp2 = (tx - offset_x, ty)
 
-    return BezierCurve((sx, sy), cp1, cp2, (tx, ty))
+    return BezierCurve((sx, sy), cp1, cp2, (tx, ty), routing="bezier", direction=direction)
 
 
 def evaluate_bezier(curve: BezierCurve, t: float) -> Tuple[float, float]:
