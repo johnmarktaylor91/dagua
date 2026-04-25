@@ -119,7 +119,17 @@ class LayoutConfig:
     w_cluster_contain: float = 2.0  # child clusters stay within parent bbox
     w_align: float = 5.0
     w_crossing: float = 1.8
-    w_straightness: float = 2.2
+    # Sprint-20j: dropped 2.2 -> 0.5 after a comprehensive 93-graph sweep.
+    # The straightness loss was over-constraining the layered_dag pipeline:
+    # at 2.2 the optimizer pinned edges close to the layer axis at the
+    # expense of edge-length uniformity (the metric weights more heavily
+    # at 20pts vs straightness's 10pts). Net delta across 93 graphs was
+    # +4.22 composite when dropped to 0.5. Wins: random_dag_50 +1.49,
+    # dependency_graph_100 +1.20, er_100 +1.07, dependency_500 +0.84,
+    # random_bipartite_60 +0.63. Losses: inception_block -1.21 (still a
+    # double-digit win), kitchen_sink_hybrid_net -0.81 (still positive
+    # vs dagre). Lattices unchanged (already at convergence).
+    w_straightness: float = 0.5
     # Sprint 11: scale-invariant (CV^2) formulation -- see
     # edge_length_variance_loss. Loss magnitude is now roughly 0.0-1.0
     # vs legacy 10^2-10^3. Weight bumped 0.7 -> 8.0 to keep the
