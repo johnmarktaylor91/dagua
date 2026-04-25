@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -387,6 +387,23 @@ _POLISH_SETTINGS: tuple[tuple[int, float], ...] = (
     (50, 0.20),
 )
 
+_Y_LAYER_SNAP_EPS = 0.5
+_ORTHOGONAL_ALIGN_ITERS = 10
+_ORTHOGONAL_ALIGN_STEP = 0.1
+_OVERLAP_JITTER_MAX_NODES = 500
+_OVERLAP_JITTER_PADDING = 2.0
+_OVERLAP_JITTER_ITERS = 5
+_OVERLAP_JITTER_STEP = 0.5
+_ANTI_CROSSING_MAX_NODES = 200
+_ANTI_CROSSING_MAX_EDGES = 400
+_ANTI_CROSSING_MAX_SWAPS = 50
+_LAYER_X_KMEANS_MIN_NODES = 24
+_LAYER_X_KMEANS_MAX_NODES = 400
+_LAYER_X_KMEANS_MIN_EDGE_NODE_RATIO = 1.2
+_LAYER_X_KMEANS_MAX_EDGE_NODE_RATIO = 2.0
+_LAYER_X_KMEANS_MAX_LAYER_WIDTH_CV = 0.30
+_LAYER_X_KMEANS_ITERS = 8
+
 
 def _equalize_edges(
     pos: torch.Tensor,
@@ -433,20 +450,504 @@ def _equalize_edges(
     return pos
 
 
+def _y_layer_snap(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    layer_eps: float = _Y_LAYER_SNAP_EPS,
+) -> torch.Tensor:
+    """Snap near-horizontal y-bands to their median ordinate.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``. Present for the polish-candidate
+        call signature; y-band snapping only needs positions and node sizes.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    layer_eps : float, default=_Y_LAYER_SNAP_EPS
+        Mean-node-height multiplier used to bucket nearby y coordinates.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with layer-local y jitter removed.
+    """
+    del edge_index
+    cand = pos.detach().clone()
+    if cand.shape[0] < 2 or node_sizes.numel() == 0:
+        return cand
+    band = float(node_sizes[:, 1].mean().item()) * layer_eps
+    if band <= 1e-6:
+        return cand
+    buckets = torch.round(cand[:, 1] / band).to(dtype=torch.long)
+    for bucket in torch.unique(buckets, sorted=False):
+        idx = torch.nonzero(buckets == bucket, as_tuple=False).squeeze(1)
+        if idx.numel() > 1:
+            cand[idx, 1] = cand[idx, 1].median()
+    return cand
+
+
+def _orthogonal_align(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    iters: int = _ORTHOGONAL_ALIGN_ITERS,
+    step: float = _ORTHOGONAL_ALIGN_STEP,
+) -> torch.Tensor:
+    """Nudge each edge toward its dominant horizontal or vertical axis.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``. Present for the polish-candidate
+        call signature; orthogonal alignment only needs positions and edges.
+    iters : int, default=_ORTHOGONAL_ALIGN_ITERS
+        Number of nudge iterations.
+    step : float, default=_ORTHOGONAL_ALIGN_STEP
+        Per-iteration fraction of cross-axis displacement to remove.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with edge directions pulled toward cardinal axes.
+    """
+    del node_sizes
+    cand = pos.detach().clone()
+    if edge_index.numel() == 0:
+        return cand
+    src = edge_index[0]
+    tgt = edge_index[1]
+    mask = src != tgt
+    if not bool(mask.any().item()):
+        return cand
+    src = src[mask]
+    tgt = tgt[mask]
+    for _ in range(iters):
+        diffs = cand[tgt] - cand[src]
+        is_vertical = diffs[:, 1].abs() >= diffs[:, 0].abs()
+        delta = torch.zeros_like(diffs)
+        # Positive deltas move endpoints toward each other on the
+        # non-dominant axis; the sign in the research sketch was inverted.
+        delta[is_vertical, 0] = diffs[is_vertical, 0] * step
+        delta[~is_vertical, 1] = diffs[~is_vertical, 1] * step
+        cand.index_add_(0, src, delta * 0.5)
+        cand.index_add_(0, tgt, -delta * 0.5)
+    return cand
+
+
+def _overlap_jitter(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float = _OVERLAP_JITTER_PADDING,
+    iters: int = _OVERLAP_JITTER_ITERS,
+    step: float = _OVERLAP_JITTER_STEP,
+    max_nodes: int = _OVERLAP_JITTER_MAX_NODES,
+) -> torch.Tensor:
+    """Push overlapping node boxes apart with a bounded pairwise pass.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``. Present for the polish-candidate
+        call signature; overlap recovery only needs positions and node sizes.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    padding : float, default=_OVERLAP_JITTER_PADDING
+        Additional box separation target in layout units.
+    iters : int, default=_OVERLAP_JITTER_ITERS
+        Number of pairwise recovery passes.
+    step : float, default=_OVERLAP_JITTER_STEP
+        Fraction of the minimum separating displacement to apply per pass.
+    max_nodes : int, default=_OVERLAP_JITTER_MAX_NODES
+        Largest graph size allowed for the O(N^2) pairwise tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor after deterministic overlap recovery.
+    """
+    del edge_index
+    cand = pos.detach().clone()
+    num_nodes = cand.shape[0]
+    if num_nodes < 2 or num_nodes > max_nodes or node_sizes.numel() == 0:
+        return cand
+    eye = torch.eye(num_nodes, dtype=torch.bool, device=cand.device)
+    node_ids = torch.arange(num_nodes, device=cand.device)
+    fallback_sign = torch.where(
+        node_ids[:, None] >= node_ids[None, :],
+        torch.ones((num_nodes, num_nodes), dtype=cand.dtype, device=cand.device),
+        -torch.ones((num_nodes, num_nodes), dtype=cand.dtype, device=cand.device),
+    )
+    for _ in range(iters):
+        diffs = cand[:, None, :] - cand[None, :, :]
+        dx = diffs[..., 0].abs()
+        dy = diffs[..., 1].abs()
+        half_w = (node_sizes[:, 0:1] + node_sizes[:, 0:1].T) * 0.5 + padding
+        half_h = (node_sizes[:, 1:2] + node_sizes[:, 1:2].T) * 0.5 + padding
+        overlap_x = (half_w - dx).clamp(min=0.0)
+        overlap_y = (half_h - dy).clamp(min=0.0)
+        overlaps = (overlap_x > 0) & (overlap_y > 0) & ~eye
+        if not bool(overlaps.any().item()):
+            break
+        sign_x = torch.where(diffs[..., 0].abs() > 1e-6, torch.sign(diffs[..., 0]), fallback_sign)
+        sign_y = torch.where(diffs[..., 1].abs() > 1e-6, torch.sign(diffs[..., 1]), fallback_sign)
+        use_x = overlap_x <= overlap_y
+        push = torch.zeros_like(diffs)
+        push[..., 0] = torch.where(overlaps & use_x, sign_x * overlap_x, push[..., 0])
+        push[..., 1] = torch.where(overlaps & ~use_x, sign_y * overlap_y, push[..., 1])
+        cand = cand + push.sum(dim=1) * (step * 0.5)
+    return cand
+
+
+def _segments_cross_scalar(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+    d: tuple[float, float],
+) -> bool:
+    """Return whether two open line segments cross.
+
+    Parameters
+    ----------
+    a, b, c, d : tuple[float, float]
+        Segment endpoints in two-dimensional coordinates.
+
+    Returns
+    -------
+    bool
+        ``True`` when the two non-collinear open segments intersect.
+    """
+
+    def cross(
+        origin: tuple[float, float],
+        left: tuple[float, float],
+        right: tuple[float, float],
+    ) -> float:
+        """Return signed area for three scalar points.
+
+        Parameters
+        ----------
+        origin : tuple[float, float]
+            Origin point for the orientation test.
+        left : tuple[float, float]
+            First comparison point.
+        right : tuple[float, float]
+            Second comparison point.
+
+        Returns
+        -------
+        float
+            Signed twice-area of the triangle.
+        """
+        return (left[0] - origin[0]) * (right[1] - origin[1]) - (left[1] - origin[1]) * (
+            right[0] - origin[0]
+        )
+
+    d1 = cross(c, d, a)
+    d2 = cross(c, d, b)
+    d3 = cross(a, b, c)
+    d4 = cross(a, b, d)
+    return ((d1 > 0.0) != (d2 > 0.0)) and ((d3 > 0.0) != (d4 > 0.0))
+
+
+def _crossing_edge_pairs(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    max_pairs: int = 512,
+) -> list[tuple[int, int]]:
+    """Return exact non-incident crossing edge pairs for a small graph.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    max_pairs : int, default=512
+        Maximum number of crossing pairs to collect.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Crossing edge-index pairs.
+    """
+    if edge_index.numel() == 0 or edge_index.shape[1] < 2:
+        return []
+    cpu_pos = pos.detach().cpu().to(dtype=torch.float32)
+    cpu_edges = edge_index.detach().cpu().to(dtype=torch.long)
+    coords = [(float(x), float(y)) for x, y in cpu_pos.tolist()]
+    pairs: list[tuple[int, int]] = []
+    num_edges = int(cpu_edges.shape[1])
+    for left in range(num_edges):
+        u = int(cpu_edges[0, left].item())
+        v = int(cpu_edges[1, left].item())
+        if u == v:
+            continue
+        for right in range(left + 1, num_edges):
+            a = int(cpu_edges[0, right].item())
+            b = int(cpu_edges[1, right].item())
+            if a == b or len({u, v, a, b}) < 4:
+                continue
+            if _segments_cross_scalar(coords[u], coords[v], coords[a], coords[b]):
+                pairs.append((left, right))
+                if len(pairs) >= max_pairs:
+                    return pairs
+    return pairs
+
+
+def _y_layer_buckets(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    layer_eps: float = _Y_LAYER_SNAP_EPS,
+) -> torch.Tensor:
+    """Return y-band buckets inferred from positions and node heights.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    layer_eps : float, default=_Y_LAYER_SNAP_EPS
+        Mean-node-height multiplier used to bucket nearby y coordinates.
+
+    Returns
+    -------
+    torch.Tensor
+        Integer bucket id for each node with shape ``[N]``.
+    """
+    if node_sizes.numel() == 0:
+        return torch.arange(pos.shape[0], dtype=torch.long, device=pos.device)
+    band = float(node_sizes[:, 1].mean().item()) * layer_eps
+    if band <= 1e-6:
+        return torch.arange(pos.shape[0], dtype=torch.long, device=pos.device)
+    return torch.round(pos[:, 1] / band).to(dtype=torch.long)
+
+
+def _swap_2opt_anti_crossing(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    score_fn: Callable[[torch.Tensor], float],
+    max_swaps: int = _ANTI_CROSSING_MAX_SWAPS,
+) -> torch.Tensor:
+    """Try adjacent same-layer x swaps that improve composite score.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    score_fn : Callable[[torch.Tensor], float]
+        Composite scoring function used to accept or reject local swaps.
+    max_swaps : int, default=_ANTI_CROSSING_MAX_SWAPS
+        Maximum number of adjacent swap attempts.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor after accepted crossing-reduction swaps.
+    """
+    num_nodes = int(pos.shape[0])
+    num_edges = int(edge_index.shape[1]) if edge_index.numel() > 0 else 0
+    cand = pos.detach().clone()
+    if (
+        num_nodes > _ANTI_CROSSING_MAX_NODES
+        or num_edges > _ANTI_CROSSING_MAX_EDGES
+        or num_nodes < 4
+        or num_edges < 2
+    ):
+        return cand
+    crossing_pairs = _crossing_edge_pairs(cand, edge_index, max_pairs=512)
+    if not crossing_pairs:
+        return cand
+
+    layers = _y_layer_buckets(cand, node_sizes)
+    current_score = score_fn(cand)
+    attempts = 0
+    for _ in range(2):
+        crossing_pairs = _crossing_edge_pairs(cand, edge_index, max_pairs=512)
+        if not crossing_pairs:
+            break
+        crossing_edges = {edge_id for pair in crossing_pairs for edge_id in pair}
+        crossing_nodes = torch.zeros(num_nodes, dtype=torch.bool, device=cand.device)
+        for edge_id in crossing_edges:
+            crossing_nodes[edge_index[0, edge_id]] = True
+            crossing_nodes[edge_index[1, edge_id]] = True
+
+        accepted_this_pass = False
+        for layer in torch.unique(layers, sorted=True):
+            layer_nodes = torch.nonzero(layers == layer, as_tuple=False).squeeze(1)
+            if layer_nodes.numel() < 2:
+                continue
+            order = torch.argsort(cand[layer_nodes, 0], stable=True)
+            ordered_nodes = layer_nodes[order]
+            for left_idx in range(int(ordered_nodes.numel()) - 1):
+                if attempts >= max_swaps:
+                    return cand
+                left_node = ordered_nodes[left_idx]
+                right_node = ordered_nodes[left_idx + 1]
+                if not bool((crossing_nodes[left_node] & crossing_nodes[right_node]).item()):
+                    continue
+                trial = cand.clone()
+                left_x = trial[left_node, 0].clone()
+                trial[left_node, 0] = trial[right_node, 0]
+                trial[right_node, 0] = left_x
+                attempts += 1
+                if not bool(torch.isfinite(trial).all().item()):
+                    continue
+                try:
+                    trial_score = score_fn(trial)
+                except Exception:
+                    continue
+                if trial_score > current_score:
+                    cand = trial
+                    current_score = trial_score
+                    accepted_this_pass = True
+                    break
+            if accepted_this_pass:
+                break
+        if not accepted_this_pass:
+            break
+    return cand
+
+
+def _should_layer_x_kmeans(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Return whether a graph matches the lattice-like x-quantization gate.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    bool
+        ``True`` when the graph satisfies the conservative layer-width,
+        edge-density, and size gates from the sprint brief.
+    """
+    if (
+        num_nodes < _LAYER_X_KMEANS_MIN_NODES
+        or num_nodes > _LAYER_X_KMEANS_MAX_NODES
+        or edge_index.numel() == 0
+    ):
+        return False
+    num_edges = int(edge_index.shape[1])
+    edge_to_node = float(num_edges) / float(max(num_nodes, 1))
+    if not (
+        _LAYER_X_KMEANS_MIN_EDGE_NODE_RATIO <= edge_to_node <= _LAYER_X_KMEANS_MAX_EDGE_NODE_RATIO
+    ):
+        return False
+    try:
+        structure = classify_graph(edge_index.detach().cpu(), num_nodes)
+    except Exception:
+        return False
+    return (
+        bool(getattr(structure, "is_directed_acyclic", True))
+        and int(getattr(structure, "num_layers", 0)) >= 5
+        and float(getattr(structure, "layer_width_cv", 1.0)) <= _LAYER_X_KMEANS_MAX_LAYER_WIDTH_CV
+    )
+
+
+def _per_layer_x_kmeans(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    max_iters: int = _LAYER_X_KMEANS_ITERS,
+) -> torch.Tensor:
+    """Quantize x coordinates by running 1-D K-means inside each layer.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``. Present for the polish-candidate
+        call signature; layer x-quantization only needs positions and edges.
+    max_iters : int, default=_LAYER_X_KMEANS_ITERS
+        Maximum K-means iterations per layer.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with layer-local x coordinates snapped to centroids.
+    """
+    del node_sizes
+    cand = pos.detach().clone()
+    num_nodes = int(cand.shape[0])
+    if not _should_layer_x_kmeans(edge_index, num_nodes):
+        return cand
+    try:
+        from dagua.utils import longest_path_layering
+
+        raw_layers = longest_path_layering(edge_index.detach().cpu(), num_nodes)
+    except Exception:
+        return cand
+    layer_tensor = torch.as_tensor(raw_layers, dtype=torch.long, device=cand.device)
+    unique_layers, counts = torch.unique(layer_tensor, sorted=True, return_counts=True)
+    if unique_layers.numel() < 5:
+        return cand
+    median_width = int(torch.median(counts.to(dtype=torch.float32)).round().item())
+    if median_width < 2:
+        return cand
+
+    for layer in unique_layers:
+        idx = torch.nonzero(layer_tensor == layer, as_tuple=False).squeeze(1)
+        layer_count = int(idx.numel())
+        k = min(layer_count, median_width)
+        if layer_count <= 2 or k >= layer_count or k < 2:
+            continue
+        values = cand[idx, 0]
+        sorted_values = torch.sort(values).values
+        init_positions = torch.linspace(0, layer_count - 1, k, device=cand.device).round().long()
+        centers = sorted_values[init_positions].clone()
+        labels = torch.zeros(layer_count, dtype=torch.long, device=cand.device)
+        for _ in range(max_iters):
+            distances = (values[:, None] - centers[None, :]).abs()
+            labels = torch.argmin(distances, dim=1)
+            new_centers = centers.clone()
+            for center_idx in range(k):
+                members = values[labels == center_idx]
+                if members.numel() > 0:
+                    new_centers[center_idx] = members.mean()
+            if torch.allclose(new_centers, centers):
+                break
+            centers = new_centers
+        cand[idx, 0] = centers[labels]
+    return cand
+
+
 def _best_of_polish(
     base_pos: torch.Tensor,
     edge_index: torch.Tensor,
     node_sizes: torch.Tensor,
     margin: float = 0.5,
 ) -> torch.Tensor:
-    """Try several edge-equalize polish settings; return the best by composite.
+    """Try named polish candidates; return the best by composite.
 
     The gradient pipeline saturates on edge-length-variance for
     layered_dag and tree pipelines, so a direct constraint projection
-    can escape the local minimum. Each candidate is scored with the
-    same ``composite(full(...))`` metric the benchmark uses; the
-    un-polished baseline is preserved unless a candidate beats it by
-    at least ``margin`` composite points.
+    can escape the local minimum. Edge-equalize variants are tried first;
+    sprint-21a projection primitives are then scored as named candidates.
+    The un-polished baseline is preserved unless a candidate beats it by at
+    least ``margin`` composite points.
 
     Parameters
     ----------
@@ -470,17 +971,122 @@ def _best_of_polish(
         torch.manual_seed(0)
         return float(composite(full(pos, edge_index, node_sizes=node_sizes)))
 
+    def safe_score(pos: torch.Tensor) -> Optional[float]:
+        """Return a finite composite score or ``None`` for invalid candidates.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            Candidate position tensor with shape ``[N, 2]``.
+
+        Returns
+        -------
+        float | None
+            Composite score when scoring succeeds, otherwise ``None``.
+        """
+        if not bool(torch.isfinite(pos).all().item()):
+            return None
+        try:
+            return score(pos)
+        except Exception:
+            return None
+
     best_pos = base_pos
     best_score = score(base_pos)
-    for iters, step in _POLISH_SETTINGS:
-        cand = _equalize_edges(base_pos, edge_index, iters, step)
-        # Skip degenerate candidates; the projection can blow up on
-        # heavily-clustered or already-collapsed inputs.
-        if not bool(torch.isfinite(cand).all().item()):
+
+    edge_equalize_candidates: list[
+        tuple[str, Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]]
+    ] = [
+        (
+            f"edge_equalize_{iters}_{step:g}",
+            lambda pos, edges, sizes, iters=iters, step=step: _equalize_edges(
+                pos,
+                edges,
+                iters,
+                step,
+            ),
+        )
+        for iters, step in _POLISH_SETTINGS
+    ]
+
+    best_edge_pos = base_pos
+    best_edge_score = best_score
+    edge_seed_positions: list[tuple[str, torch.Tensor]] = []
+    for edge_name, make_candidate in edge_equalize_candidates:
+        cand = make_candidate(base_pos, edge_index, node_sizes)
+        cand_score = safe_score(cand)
+        if cand_score is None:
             continue
-        try:
-            cand_score = score(cand)
-        except Exception:
+        edge_seed_positions.append((edge_name, cand))
+        if cand_score > best_edge_score:
+            best_edge_score = cand_score
+            best_edge_pos = cand
+        if cand_score > best_score + margin:
+            best_score = cand_score
+            best_pos = cand
+
+    polish_candidates: list[
+        tuple[str, Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]]
+    ] = [
+        (
+            "y_layer_snap",
+            lambda pos, edges, sizes: _y_layer_snap(best_edge_pos, edges, sizes),
+        ),
+        (
+            "orthogonal_align",
+            lambda pos, edges, sizes: _orthogonal_align(best_edge_pos, edges, sizes),
+        ),
+        (
+            "overlap_jitter",
+            lambda pos, edges, sizes: _overlap_jitter(best_edge_pos, edges, sizes),
+        ),
+        (
+            "swap_2opt_anti_crossing",
+            lambda pos, edges, sizes: _swap_2opt_anti_crossing(
+                pos,
+                edges,
+                sizes,
+                score_fn=score,
+            ),
+        ),
+        (
+            "per_layer_x_kmeans",
+            lambda pos, edges, sizes: _per_layer_x_kmeans(pos, edges, sizes),
+        ),
+    ]
+    for edge_name, seed_pos in edge_seed_positions:
+        polish_candidates.extend(
+            [
+                (
+                    f"y_layer_snap_after_{edge_name}",
+                    lambda pos, edges, sizes, seed_pos=seed_pos: _y_layer_snap(
+                        seed_pos,
+                        edges,
+                        sizes,
+                    ),
+                ),
+                (
+                    f"orthogonal_align_after_{edge_name}",
+                    lambda pos, edges, sizes, seed_pos=seed_pos: _orthogonal_align(
+                        seed_pos,
+                        edges,
+                        sizes,
+                    ),
+                ),
+                (
+                    f"orthogonal_align_overlap_jitter_after_{edge_name}",
+                    lambda pos, edges, sizes, seed_pos=seed_pos: _overlap_jitter(
+                        _orthogonal_align(seed_pos, edges, sizes),
+                        edges,
+                        sizes,
+                    ),
+                ),
+            ]
+        )
+    for _, make_candidate in polish_candidates:
+        cand = make_candidate(best_pos, edge_index, node_sizes)
+        cand_score = safe_score(cand)
+        if cand_score is None:
             continue
         if cand_score > best_score + margin:
             best_score = cand_score
