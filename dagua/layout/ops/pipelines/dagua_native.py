@@ -354,7 +354,125 @@ def _run_native_problem(
     result = final_state.pos.detach()
     if result.shape[0] > problem.num_nodes:
         result = result[: problem.num_nodes]
+    # Sprint-20k: best-of-polish edge-equalize. The gradient pipeline
+    # converges to a local minimum where edge_length_variance_loss is
+    # saturated (confirmed empirically: w=0..200 produces identical
+    # output on the loss-bucket graphs). A direct constraint projection
+    # toward the mean edge length, scored against the un-polished
+    # baseline, escapes that minimum on most layered DAGs and lattices.
+    # Gated by force_pipeline=None and bool flag for opt-out.
+    if (
+        getattr(config, "edge_equalize_polish", True)
+        and _selected_force_pipeline(config) is None
+        and selected in {"layered_dag", "tree", "hybrid", "force_directed"}
+        and result.shape[0] >= 8
+        and problem.edge_index.numel() > 0
+        and problem.node_sizes is not None
+    ):
+        result = _best_of_polish(result, problem.edge_index, problem.node_sizes)
     return result
+
+
+_POLISH_SETTINGS: tuple[tuple[int, float], ...] = (
+    (5, 0.05),
+    (10, 0.05),
+    (20, 0.03),
+    (10, 0.10),
+    (30, 0.02),
+)
+
+
+def _equalize_edges(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    iters: int,
+    step: float,
+) -> torch.Tensor:
+    """Run direct constraint projection toward the mean edge length.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    iters : int
+        Number of projection iterations.
+    step : float
+        Per-iteration step size in [0, 1].
+
+    Returns
+    -------
+    torch.Tensor
+        Polished position tensor with shape ``[N, 2]``.
+    """
+    pos = pos.detach().clone()
+    if edge_index.numel() == 0:
+        return pos
+    src = edge_index[0]
+    tgt = edge_index[1]
+    mask = src != tgt
+    if not bool(mask.any().item()):
+        return pos
+    src = src[mask]
+    tgt = tgt[mask]
+    for _ in range(iters):
+        diffs = pos[tgt] - pos[src]
+        dists = diffs.pow(2).sum(-1).sqrt().clamp(min=1.0)
+        target = float(dists.mean().item())
+        unit = diffs / dists.unsqueeze(-1)
+        delta = (dists - target).unsqueeze(-1) * unit * step
+        pos.index_add_(0, src, delta * 0.5)
+        pos.index_add_(0, tgt, -delta * 0.5)
+    return pos
+
+
+def _best_of_polish(
+    base_pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    margin: float = 0.5,
+) -> torch.Tensor:
+    """Try several edge-equalize polish settings; return the best by composite.
+
+    The gradient pipeline saturates on edge-length-variance for
+    layered_dag and tree pipelines, so a direct constraint projection
+    can escape the local minimum. Each candidate is scored with the
+    same ``composite(full(...))`` metric the benchmark uses; the
+    un-polished baseline is preserved unless a candidate beats it by
+    at least ``margin`` composite points.
+
+    Parameters
+    ----------
+    base_pos : torch.Tensor
+        Un-polished pipeline output with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    margin : float, default=0.5
+        Minimum composite improvement to prefer a polished candidate.
+
+    Returns
+    -------
+    torch.Tensor
+        Best position tensor with shape ``[N, 2]``.
+    """
+    from dagua.metrics import composite, full
+
+    def score(pos: torch.Tensor) -> float:
+        torch.manual_seed(0)
+        return float(composite(full(pos, edge_index, node_sizes=node_sizes)))
+
+    best_pos = base_pos
+    best_score = score(base_pos)
+    for iters, step in _POLISH_SETTINGS:
+        cand = _equalize_edges(base_pos, edge_index, iters, step)
+        cand_score = score(cand)
+        if cand_score > best_score + margin:
+            best_score = cand_score
+            best_pos = cand
+    return best_pos
 
 
 def _score_native_result(
