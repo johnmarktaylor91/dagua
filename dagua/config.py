@@ -139,7 +139,11 @@ class LayoutConfig:
     w_back_edge: float = 0.3  # penalize wide back-edge arcs (horizontal distance)
 
     # Scale thresholds
-    exact_repulsion_threshold: int = 2000
+    # Sprint-20f: the default native loss path now switches from exact O(N^2)
+    # repulsion/overlap to a cell-list spatial hash at N >= 500. Set
+    # exact_repulsion=True to force the legacy exact pairwise losses.
+    exact_repulsion: bool = False
+    exact_repulsion_threshold: int = 500
     negative_sample_k: int = 128
 
     # Sprint 12: tree topology fast-path. Graphs that classify as
