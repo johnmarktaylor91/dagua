@@ -1,40 +1,100 @@
 {
   "mode": "autonomous",
-  "started": "2026-04-02T20:20:00-04:00",
-  "completed": "2026-04-02T20:55:00-04:00",
-  "user_directive": "autonomous all the way thru ima sleep",
+  "started": "2026-04-24T20:20:00-04:00",
+  "completed": "2026-04-24T22:20:00-04:00",
+  "user_directive": "Do it all. You have all night",
+  "sprint": "sprint-20-overnight-extension",
+  "scope": "Close remaining sprint-20 placement gaps without breaking sprint-19 winners",
   "exit_criteria": [
     {
-      "criterion": "FR pipeline fidelity tests pass with torch.equal()",
-      "target": "all parametrized cases green",
+      "criterion": "small_world_100 delta vs best competitor",
+      "target": "improve from -8.51 by at least +4.0 (i.e. delta >= -4.5)",
       "status": "pass",
-      "measured_value": "10 passed in 0.75s",
-      "measurement_source": "pytest tests/test_pipeline_fr.py -x -v"
+      "measured_value": "+0.10 (57.18 vs sugiyama 57.09); deterministic seed=0 scoring. Stochastic h2h shows it dropped OUT of top-10 losses entirely.",
+      "measurement_source": "/tmp/h2h_after_smallworld_full.log + /tmp/h2h_after_smallworld_fix.log; sprint-20i commit c906091"
     },
     {
-      "criterion": "Existing op tests unbroken",
-      "target": "0 failures in test_ops_*.py",
+      "criterion": "small_world_500 delta vs best competitor",
+      "target": "improve from -4.82 by at least +2.0",
       "status": "pass",
-      "measured_value": "105 passed in 0.67s",
-      "measurement_source": "pytest tests/test_ops_anneal.py tests/test_ops_force.py tests/test_ops_converge.py"
+      "measured_value": "52.19 vs elk 54.16, delta = -1.97 (improvement of +2.85 from baseline 49.34)",
+      "measurement_source": "deterministic seed=0 scoring at sprint-20i HEAD"
     },
     {
-      "criterion": "Full ops+layout suite green",
-      "target": "0 failures",
-      "status": "pass",
-      "measured_value": "750 passed in 128s",
-      "measurement_source": "pytest tests/test_ops_*.py tests/test_pipeline_fr.py tests/test_layout/ -x"
+      "criterion": "ragged_feature_pyramid delta vs best competitor",
+      "target": "improve from -3.74 by at least +1.5 (downgraded; CONTEXT.md -7.15 was already partially closed by sprint-20a-h)",
+      "status": "fail",
+      "measured_value": "-3.74 unchanged; this loss is on edge_length_cv (0.83 vs elk 0.72), not addressable by parameter tuning. Needs a polish op.",
+      "measurement_source": "/tmp/h2h_after_smallworld_full.log + /tmp/score_breakdown output"
     },
     {
-      "criterion": "No scope creep -- only specified files created/modified",
-      "target": "3 new files, 3 modified files",
+      "criterion": "disconnected_label_cycle_collage delta",
+      "target": "improve from -4.95 by at least +2.0",
+      "status": "fail",
+      "measured_value": "-4.95 unchanged. ALL pipelines (tree/layered/force/hybrid/planar/legacy) tie at 74.41, suggesting the gap is structural for tiny multi-component cyclic graphs. N=7, 3 components -- low-leverage to attack further.",
+      "measurement_source": "force_pipeline sweep at sprint-20i HEAD"
+    },
+    {
+      "criterion": "hexagonal_lattice_42 delta",
+      "target": "stay at delta = -3.77 (no regression)",
       "status": "pass",
-      "measured_value": "3 new (pipelines/__init__.py, pipelines/fr.py, test_pipeline_fr.py), 3 modified (anneal.py, force.py, converge.py)",
-      "measurement_source": "git diff --stat + git status"
+      "measured_value": "-3.77 unchanged. Lattice graphs lose primarily on edge_length_cv (0.57 vs dot 0.10) -- competitor delivers nearly-uniform edges, dagua's gradient pipeline doesn't.",
+      "measurement_source": "/tmp/h2h_after_smallworld_full.log"
+    },
+    {
+      "criterion": "Sprint-19 protected wins (composite delta > 0)",
+      "target": "kitchen_sink_hybrid_net, dense_pair_50, extreme_mixed_width_transformer stay positive",
+      "status": "pass",
+      "measured_value": "kitchen_sink +1.95, dense_pair_50 +4.91, transformer +1.16 (unchanged from baseline)",
+      "measurement_source": "/tmp/h2h_after_smallworld_fix.log"
+    },
+    {
+      "criterion": "Per-competitor head-to-head improvement",
+      "target": "Move at least one competitor from L>=2 to L<=2",
+      "status": "pass",
+      "measured_value": "igraph_sugiyama: 81W/9T/3L -> 81W/10T/2L (small_world_100 flipped from L to T). elk_layered: 74W/10T/9L -> 75W/9T/9L.",
+      "measurement_source": "/tmp/h2h_after_smallworld_full.log"
+    },
+    {
+      "criterion": "Full layout test suite",
+      "target": "tests/test_cycle.py + tests/test_layout/* all pass",
+      "status": "pass",
+      "measured_value": "225 passed, 7 skipped, 22 deselected (CUDA), 1 benign warning",
+      "measurement_source": "/tmp/claude-1001/.../bd2rvf97j.output (or b87593tdk.output)"
     }
   ],
-  "pre_existing_failures": [
-    "tests/test_animation.py::TestTourExport::test_tour_auto_scene_exports_mp4 (tifffile API change)",
-    "tests/test_bench_large.py::test_hierarchy_checkpoint_rejects_incomplete_manifest (assertion logic)"
+  "commits": [
+    "c906091 sprint-20i: restore stress route for ring-graph cyclic flat-layering bug"
+  ],
+  "non_regression": [
+    "Per-graph wins listed in CONTEXT.md must not regress > 0.5 each -- verified",
+    "Mean composite across 93 graphs must not decrease -- per-competitor avg_advantage all unchanged or improved",
+    "force_pipeline='legacy_monolith' must produce sprint-20d-3 output bit-for-bit -- regression test test_force_pipeline_legacy_monolith_matches_legacy_module passes"
+  ],
+  "remaining_open_targets": [
+    {
+      "graph": "transformer_layer",
+      "delta": "-4.00",
+      "diagnosis": "edge_length_cv 0.78 vs dot 0.73 (close); edge_straightness gap 0.84 vs 0.68 (already winning here); needs polish op",
+      "next_step": "design rectilinear-snap polish for layered DAGs"
+    },
+    {
+      "graph": "hexagonal_lattice_42 / sierpinski_42 / triangular_lattice_36",
+      "delta": "-2.4 to -3.8",
+      "diagnosis": "edge_length_cv -- competitor delivers near-uniform edges (0.10), dagua 0.42-0.57",
+      "next_step": "lattice-aware uniform-edge polish, or new metric weighting"
+    },
+    {
+      "graph": "dependency_500",
+      "delta": "-3.73",
+      "diagnosis": "large DAG, edge_length_cv 0.95 vs elk 0.79; w_length_variance has zero effect at any value, layered_dag pipeline ignores it",
+      "next_step": "audit why w_length_variance loss isn't engaged in layered_dag"
+    },
+    {
+      "graph": "disconnected_label_cycle_collage",
+      "delta": "-4.95",
+      "diagnosis": "all pipelines tie at 74.41; structural gap for N=7 / 3 disconnected components / cyclic",
+      "next_step": "low priority -- tiny graph, low total leverage on h2h"
+    }
   ]
 }
