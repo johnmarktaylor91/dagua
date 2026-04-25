@@ -934,6 +934,156 @@ def _per_layer_x_kmeans(
     return cand
 
 
+def _global_depth_align(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    component_gap_factor: float = 1.5,
+) -> torch.Tensor:
+    """Align disconnected components on shared global-depth y-rows.
+
+    The default per-component tile lays components row-major by node
+    count and area. depth_spearman_rho is computed at the node level
+    over ALL nodes globally, so components with overlapping local
+    depths but different y-bands break the correlation. Sprint-22
+    area C found that re-placing nodes on `y = global_depth * pitch`
+    (with components stacked horizontally instead of row-major) lifts
+    `disconnected_encoder_residual` from 74.01 to 86.19 (+12.17, flips
+    a -1.62 close-loss into a +0.56 win vs elk_layered). The metric
+    uses ``dagua.utils.longest_path_layering`` for depth, so this
+    function MUST use the same.
+
+    Cycle components (where all nodes share the same
+    longest-path-layering "max+1" cycle layer) keep their local y-shape
+    rescaled to 0.8 of the global pitch so the component still has
+    visible vertical structure but is anchored to a shared row.
+
+    Single-component graphs return ``pos`` unchanged.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``, typically the output of
+        ``_tile_component_positions``.
+    edge_index : torch.Tensor
+        Parent edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``. Unused by the algorithm
+        itself; kept for the polish-candidate signature.
+    component_gap_factor : float, default=1.5
+        Multiplier on the inferred row pitch used as the gap between
+        adjacent component columns.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    """
+    del node_sizes
+    cand = pos.detach().clone()
+    n = int(cand.shape[0])
+    if n < 4 or edge_index.numel() == 0:
+        return cand
+
+    # Undirected connected components.
+    src = edge_index[0]
+    tgt = edge_index[1]
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(int(edge_index.shape[1])):
+        a = find(int(src[i].item()))
+        b = find(int(tgt[i].item()))
+        if a != b:
+            parent[a] = b
+    comp_of: dict[int, list[int]] = {}
+    for i in range(n):
+        root = find(i)
+        comp_of.setdefault(root, []).append(i)
+    comps = list(comp_of.values())
+    if len(comps) < 2:
+        return cand
+
+    try:
+        from dagua.utils import longest_path_layering
+
+        global_depth = longest_path_layering(edge_index, n)
+    except Exception:
+        return cand
+    depth_t = torch.as_tensor(global_depth, dtype=torch.float32, device=cand.device)
+
+    # Inferred pitch: median per-component median y-step in the input.
+    per_comp_pitch: list[float] = []
+    for comp in comps:
+        comp_idx = torch.tensor(comp, dtype=torch.long, device=cand.device)
+        ys = torch.unique(cand[comp_idx, 1])
+        if ys.numel() >= 2:
+            sorted_ys = torch.sort(ys).values
+            steps = sorted_ys[1:] - sorted_ys[:-1]
+            steps = steps[steps > 1e-6]
+            if steps.numel() > 0:
+                per_comp_pitch.append(float(steps.median().item()))
+    if not per_comp_pitch:
+        return cand
+    pitch = float(torch.tensor(per_comp_pitch).median().item())
+    if pitch <= 1e-6:
+        return cand
+
+    # Vote on y-sign across components: deeper-node = larger y or smaller?
+    sign_votes = 0
+    for comp in comps:
+        comp_idx = torch.tensor(comp, dtype=torch.long, device=cand.device)
+        if comp_idx.numel() < 2:
+            continue
+        y_vals = cand[comp_idx, 1]
+        d_vals = depth_t[comp_idx]
+        if y_vals.std() <= 1e-6 or d_vals.std() <= 1e-6:
+            continue
+        cov = float(((y_vals - y_vals.mean()) * (d_vals - d_vals.mean())).mean().item())
+        sign_votes += -1 if cov < 0 else 1
+    y_sign = -1.0 if sign_votes < 0 else 1.0
+
+    new_pos = cand.clone()
+    cursor_x = 0.0
+    gap = component_gap_factor * pitch
+    for comp in comps:
+        comp_idx = torch.tensor(comp, dtype=torch.long, device=cand.device)
+        comp_depths = depth_t[comp_idx]
+        comp_local_y = cand[comp_idx, 1]
+        local_x = cand[comp_idx, 0]
+        local_x_min = float(local_x.min().item())
+        comp_width = float(local_x.max().item()) - local_x_min
+        unique_depths = torch.unique(comp_depths).numel()
+        if unique_depths <= 1:
+            base_y = float(comp_depths[0].item()) * pitch * y_sign
+            local_range = max(
+                float(comp_local_y.max().item() - comp_local_y.min().item()),
+                1e-6,
+            )
+            for k in range(comp_idx.numel()):
+                node = int(comp_idx[k].item())
+                norm_y = (
+                    float(cand[node, 1].item()) - float(comp_local_y.min().item())
+                ) / local_range
+                offset = (norm_y - 0.5) * pitch * 0.8 * y_sign
+                new_pos[node, 0] = cursor_x + (float(cand[node, 0].item()) - local_x_min)
+                new_pos[node, 1] = base_y + offset
+        else:
+            for k in range(comp_idx.numel()):
+                node = int(comp_idx[k].item())
+                new_pos[node, 0] = cursor_x + (float(cand[node, 0].item()) - local_x_min)
+                new_pos[node, 1] = float(depth_t[node].item()) * pitch * y_sign
+        cursor_x += max(comp_width, pitch) + gap
+
+    new_pos = new_pos - new_pos.mean(dim=0, keepdim=True)
+    return new_pos
+
+
 def _detect_back_edges_dfs(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
     """Return a boolean mask marking DFS back-edges + self-loops.
 
@@ -1187,6 +1337,14 @@ def _best_of_polish(
         (
             "per_layer_x_kmeans",
             lambda pos, edges, sizes: _per_layer_x_kmeans(pos, edges, sizes),
+        ),
+        (
+            "global_depth_align",
+            lambda pos, edges, sizes: _global_depth_align(
+                base_pos,
+                edges,
+                sizes,
+            ),
         ),
         (
             "back_edge_relayer_full",
