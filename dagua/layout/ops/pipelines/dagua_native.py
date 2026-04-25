@@ -1407,10 +1407,23 @@ def layout_dagua_native_pipeline(
                     graph_structure=child_problem.structure,
                     skip_classification=False,
                 )
-                # Sprint-19d component packing is a protected win; preserve
-                # the child-solve behavior inside the wrapper while the new
-                # flat/hybrid buckets are tuned independently.
-                if _selected_force_pipeline(child_config) is None:
+                # Sprint-19d component packing is a protected win for cyclic
+                # / general-family children. Sprint-21b: allow tree- and
+                # chain-shaped children to re-classify into the dedicated
+                # native_tree fast-path instead of forcing every child
+                # through legacy_monolith. The original blanket override
+                # cost +3.26 on disconnected_label_cycle_collage and small
+                # wins on org_chart_deep, random_dag_50, kitchen_sink_hybrid_net
+                # by preventing simple-component re-classification.
+                child_structure = (
+                    getattr(child_config, "_dagua_native_structure", None)
+                    or child_problem.structure
+                )
+                child_is_simple = child_structure is not None and child_structure.family in {
+                    GraphFamily.TREE,
+                    GraphFamily.CHAIN,
+                }
+                if _selected_force_pipeline(child_config) is None and not child_is_simple:
                     child_config.force_pipeline = "legacy_monolith"
                 child_pos = _run_native_problem(child_problem, child_state, ctx, child_config)
             component_results.append((parent_indices, child_pos))
