@@ -19,6 +19,10 @@ import torch
 
 from dagua.utils import VRAMBudget, longest_path_layering
 
+_CHAIN_LAYER_RATIO = 0.8
+_MIN_FLOW_PRESERVATION = 0.95
+_CHAIN_FLOW_ASPECT = 0.25
+
 
 def init_positions(
     edge_index: torch.Tensor,
@@ -57,6 +61,7 @@ def init_positions(
     """
     # Step 1: Assign layers (y-coordinates) via longest-path.
     layers = longest_path_layering(edge_index, num_nodes, device=device, verbose=verbose)
+    chain_flow_layers = False
 
     # Round 4 sprint 19a/b: cycle reversal fallback. Kahn's algorithm lumps
     # every cycle-trapped node into max_layer+1, so a cyclic graph often
@@ -96,16 +101,25 @@ def init_positions(
                     relayered_seq = relayered if isinstance(relayered, list) else relayered.tolist()
                     n_relayered = len(set(relayered_seq))
                     relayered_max = max(relayered_seq.count(v) for v in set(relayered_seq))
-                    # Accept when relayering reduces pile-up. Reject the
-                    # degenerate one-node-per-layer result for large graphs
-                    # (small-world / dense random where each node getting
-                    # its own layer is meaningless) but accept it on small
-                    # graphs where chain-like DAGs are legitimately linear.
+                    # Accept when relayering reduces pile-up. Near-chain
+                    # layerings are only useful when the FAS order still
+                    # preserves the graph's original directed flow; otherwise
+                    # they are dense/cyclic artifacts and the flat 2D fallback
+                    # is a better seed.
                     pile_reduced = relayered_max < max_layer_count
-                    not_degenerate = relayered_max >= 2 or num_nodes <= 10
+                    chain_like = n_relayered / float(num_nodes) > _CHAIN_LAYER_RATIO
+                    flow_preserved = (
+                        _layering_direction_consistency(
+                            filtered_edges,
+                            relayered_seq,
+                        )
+                        >= _MIN_FLOW_PRESERVATION
+                    )
+                    not_degenerate = num_nodes <= 10 or not chain_like or flow_preserved
                     gained_layers = n_relayered > n_layers
                     if pile_reduced and not_degenerate and gained_layers:
                         layers = relayered
+                        chain_flow_layers = chain_like and flow_preserved
             except Exception:
                 # Cycle removal failed -- keep the original collapsed
                 # layering, downstream Force2DInitIfFlat will handle.
@@ -121,6 +135,7 @@ def init_positions(
             node_sep,
             rank_sep,
             device,
+            chain_flow_layers,
         )
 
     # Step 2: Group nodes by layer
@@ -224,7 +239,84 @@ def init_positions(
     if edge_index.numel() > 0:
         _spread_fanout_children(positions, edge_index, node_sizes_cpu, node_sep)
 
+    if chain_flow_layers:
+        _apply_chain_flow_x(positions, layers, target_aspect=_CHAIN_FLOW_ASPECT)
+
     return positions
+
+
+def _layering_direction_consistency(
+    edge_index: torch.Tensor,
+    layers: List[int],
+) -> float:
+    """Return the share of edges that point forward in a candidate layering.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor shaped ``[2, E]``.
+    layers : List[int]
+        Candidate layer assignment with one integer layer per node.
+
+    Returns
+    -------
+    float
+        Fraction of non-self-loop edges whose target layer is greater than or
+        equal to the source layer. Ties are treated as forward, matching
+        ``dag_consistency``.
+    """
+    if edge_index.numel() == 0:
+        return 1.0
+
+    layer_t = torch.tensor(layers, dtype=torch.long, device=edge_index.device)
+    src = edge_index[0]
+    tgt = edge_index[1]
+    non_self = src != tgt
+    if not bool(non_self.any().item()):
+        return 1.0
+
+    forward = layer_t[tgt[non_self]] >= layer_t[src[non_self]]
+    return float(forward.float().mean().item())
+
+
+def _apply_chain_flow_x(
+    positions: torch.Tensor,
+    layers: Union[List[int], torch.Tensor],
+    *,
+    target_aspect: float,
+) -> None:
+    """Assign monotone x-coordinates for high-flow near-chain layerings.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Mutable position tensor shaped ``[N, 2]``.
+    layers : List[int] or torch.Tensor
+        Layer assignment used for y-coordinates.
+    target_aspect : float
+        Desired width/height ratio for the chain seed.
+
+    Returns
+    -------
+    None
+        The ``positions`` tensor is updated in place.
+    """
+    if positions.shape[0] <= 1:
+        return
+
+    layer_t = (
+        layers.to(dtype=positions.dtype, device=positions.device)
+        if isinstance(layers, torch.Tensor)
+        else torch.tensor(layers, dtype=positions.dtype, device=positions.device)
+    )
+    layer_span = float((layer_t.max() - layer_t.min()).item())
+    y_span = float((positions[:, 1].max() - positions[:, 1].min()).item())
+    if layer_span <= 0.0 or y_span <= 0.0:
+        return
+
+    desired_width = max(target_aspect, 0.0) * y_span
+    centered_layers = layer_t - layer_t.mean()
+    positions[:, 0] = centered_layers / layer_span * desired_width
 
 
 def _init_positions_vectorized(
@@ -235,6 +327,7 @@ def _init_positions_vectorized(
     node_sep: float,
     rank_sep: float,
     device: str,
+    chain_flow_layers: bool = False,
 ) -> torch.Tensor:
     """Fully vectorized initialization for large graphs.
 
@@ -307,6 +400,9 @@ def _init_positions_vectorized(
     # Post-pass: spread children of high-degree (fan-out) hubs
     if edge_index.numel() > 0:
         _spread_fanout_children(positions, edge_index, node_sizes, node_sep)
+
+    if chain_flow_layers:
+        _apply_chain_flow_x(positions, layer_t, target_aspect=_CHAIN_FLOW_ASPECT)
 
     return positions.to(device) if compute_device != device else positions
 
