@@ -6,6 +6,7 @@ subclasses so they can participate in ``LossGroup`` execution.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Optional, Tuple
 
@@ -30,8 +31,12 @@ from dagua.layout.constraints import (
     spacing_consistency_loss,
 )
 from dagua.layout.ops.base import LossOp
+from dagua.layout.ops.spatial_hash import cell_list_candidate_pairs
 from dagua.layout.ops.state import FlexConstraints, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
+
+_CELL_LIST_EXACT_THRESHOLD = 500
+_REPULSION_CUTOFF_DIAMETER_FACTOR = 5.0
 
 
 def _require_pos(state: SolveState) -> torch.Tensor:
@@ -203,38 +208,6 @@ def _visible_original_layer_index(state: SolveState, pos: torch.Tensor) -> Optio
     return state.extras.get("original_layer_index", state.layer_index)
 
 
-_SAMPLED_LOSS_VRAM_BUDGET_BYTES = 3 * 1024 * 1024 * 1024  # 3 GB
-
-
-def _select_sampled_chunk(pos: torch.Tensor, k: int, fields: int = 2) -> Optional[int]:
-    """Pick a chunk size that keeps per-chunk intermediates below a VRAM budget.
-
-    Returns ``None`` when the pos tensor is on CPU (chunking is ineffective
-    there and just adds Python overhead) OR when the full N fits within
-    the budget (caller should use the non-chunked fast path).
-
-    ``fields`` is the number of dense [N, k] (or [N, k, 2]) intermediate
-    tensors the loss materializes BEFORE the backward pass. Repulsion
-    has 1 main tensor (diff [N,k,2] + dist_sq [N,k]) ~ 3 scalars per pair;
-    Overlap has 5 [N, k] tensors.
-
-    The budget is deliberately small (0.5 GB) relative to typical 8-11 GB
-    VRAM so per-loss forward + backward peaks stay well clear of the
-    OOM ceiling observed at 10M (per Sprint 8 audit).
-    """
-    num_nodes = int(pos.shape[0])
-    if pos.device.type != "cuda" or num_nodes == 0 or k <= 0:
-        return None
-    bytes_per_row = fields * k * pos.element_size()
-    if bytes_per_row == 0:
-        return None
-    full_bytes = num_nodes * bytes_per_row
-    if full_bytes <= _SAMPLED_LOSS_VRAM_BUDGET_BYTES:
-        return None
-    chunk = max(_SAMPLED_LOSS_VRAM_BUDGET_BYTES // bytes_per_row, 1024)
-    return int(min(chunk, num_nodes))
-
-
 def _zero_scalar(pos: torch.Tensor) -> torch.Tensor:
     """Return a differentiable zero scalar on the position device.
 
@@ -358,6 +331,257 @@ def _exact_overlap_loss(
     return overlap[mask].mean()
 
 
+def _unique_pair_count(num_nodes: int) -> int:
+    """Return the number of unordered pairs in a node set.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    int
+        Count of unique unordered pairs.
+    """
+    return num_nodes * (num_nodes - 1) // 2
+
+
+def _size_factor_mean(node_sizes: torch.Tensor) -> torch.Tensor:
+    """Return the exact all-pairs mean for repulsion size normalization.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar mean of ``(w_i + w_j) * (h_i + h_j)`` over all ordered pairs.
+    """
+    widths = node_sizes[:, 0]
+    heights = node_sizes[:, 1]
+    return 2.0 * (widths * heights).mean() + 2.0 * widths.mean() * heights.mean()
+
+
+def _cell_list_repulsion_cutoff(
+    node_sizes: Optional[torch.Tensor],
+    cutoff_diameter_factor: float,
+) -> float:
+    """Return the radius used by cell-list repulsion.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor | None
+        Optional node sizes with shape ``[N, 2]``.
+    cutoff_diameter_factor : float
+        Multiplier applied to the maximum node diameter.
+
+    Returns
+    -------
+    float
+        Positive cutoff radius for candidate pair generation.
+    """
+    if node_sizes is None or int(node_sizes.numel()) == 0:
+        return max(float(cutoff_diameter_factor), 1.0)
+    max_diameter = float(node_sizes.detach().max().item())
+    return max(max_diameter * cutoff_diameter_factor, 1.0)
+
+
+def _cell_list_overlap_cutoff(node_sizes: torch.Tensor, padding: float) -> float:
+    """Return a radius guaranteed to include all overlapping boxes.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    padding : float
+        Extra separation margin applied around each node.
+
+    Returns
+    -------
+    float
+        Positive cutoff radius for candidate pair generation.
+    """
+    max_axis = float(node_sizes.detach().max().item()) + float(padding)
+    return max(math.sqrt(2.0) * max_axis, 1.0)
+
+
+def _cell_list_repulsion_loss(
+    pos: torch.Tensor,
+    distance_epsilon: float,
+    cutoff_radius: float,
+    node_sizes: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Compute cutoff repulsion over spatial-hash candidate pairs.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    distance_epsilon : float
+        Positive additive floor applied to squared distances.
+    cutoff_radius : float
+        Radius for retaining local repulsion pairs.
+    node_sizes : torch.Tensor | None, default=None
+        Optional node sizes with shape ``[N, 2]`` for size-aware scaling.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar repulsion loss normalized by all possible unordered pairs.
+    """
+    num_nodes = int(pos.shape[0])
+    if num_nodes <= 1:
+        return _zero_scalar(pos)
+    pairs = cell_list_candidate_pairs(pos, cutoff_radius=cutoff_radius)
+    if int(pairs.shape[1]) == 0:
+        return _zero_scalar(pos)
+
+    source = pairs[0]
+    target = pairs[1]
+    diff = pos[source] - pos[target]
+    raw_dist_sq = diff.square().sum(dim=1)
+    in_radius = raw_dist_sq <= cutoff_radius * cutoff_radius
+    if not bool(in_radius.any().item()):
+        return _zero_scalar(pos)
+
+    source = source[in_radius]
+    target = target[in_radius]
+    dist_sq = raw_dist_sq[in_radius] + distance_epsilon
+    if node_sizes is not None:
+        combined_w = node_sizes[source, 0] + node_sizes[target, 0]
+        combined_h = node_sizes[source, 1] + node_sizes[target, 1]
+        size_factor = (combined_w * combined_h) / _size_factor_mean(node_sizes)
+        pair_values = size_factor / dist_sq
+    else:
+        pair_values = 1.0 / dist_sq
+    return pair_values.sum() / float(_unique_pair_count(num_nodes))
+
+
+def _cell_list_overlap_loss(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float,
+    cutoff_radius: float,
+) -> torch.Tensor:
+    """Compute exact local overlap loss over spatial-hash candidate pairs.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    padding : float
+        Extra separation margin applied around each node.
+    cutoff_radius : float
+        Radius for candidate pair generation.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar overlap loss normalized by all possible unordered pairs.
+    """
+    num_nodes = int(pos.shape[0])
+    if num_nodes <= 1:
+        return _zero_scalar(pos)
+    pairs = cell_list_candidate_pairs(pos, cutoff_radius=cutoff_radius)
+    if int(pairs.shape[1]) == 0:
+        return _zero_scalar(pos)
+
+    source = pairs[0]
+    target = pairs[1]
+    dx_abs = torch.abs(pos[source, 0] - pos[target, 0])
+    dy_abs = torch.abs(pos[source, 1] - pos[target, 1])
+    min_dx = (node_sizes[source, 0] + node_sizes[target, 0]) / 2.0 + padding
+    min_dy = (node_sizes[source, 1] + node_sizes[target, 1]) / 2.0 + padding
+    overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)
+    return overlap.sum() / float(_unique_pair_count(num_nodes))
+
+
+def _repulsion_loss(
+    pos: torch.Tensor,
+    distance_epsilon: float,
+    node_sizes: Optional[torch.Tensor],
+    exact: bool,
+    exact_threshold: int,
+    cutoff_diameter_factor: float,
+) -> torch.Tensor:
+    """Compute repulsion with exact fallback or spatial-hash cutoff.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    distance_epsilon : float
+        Positive additive floor applied to squared distances.
+    node_sizes : torch.Tensor | None
+        Optional node sizes with shape ``[N, 2]`` for size-aware scaling.
+    exact : bool
+        Whether to force the legacy all-pairs path.
+    exact_threshold : int
+        Node-count threshold below which exact all-pairs is cheaper.
+    cutoff_diameter_factor : float
+        Radius multiplier applied to the maximum node diameter.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar repulsion loss.
+    """
+    if exact or int(pos.shape[0]) < exact_threshold:
+        return _exact_repulsion_loss(
+            pos,
+            distance_epsilon=distance_epsilon,
+            node_sizes=node_sizes,
+        )
+    return _cell_list_repulsion_loss(
+        pos,
+        distance_epsilon=distance_epsilon,
+        cutoff_radius=_cell_list_repulsion_cutoff(node_sizes, cutoff_diameter_factor),
+        node_sizes=node_sizes,
+    )
+
+
+def _overlap_loss(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    padding: float,
+    exact: bool,
+    exact_threshold: int,
+) -> torch.Tensor:
+    """Compute overlap loss with exact fallback or spatial-hash candidates.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    padding : float
+        Extra separation margin applied around each node.
+    exact : bool
+        Whether to force the legacy all-pairs path.
+    exact_threshold : int
+        Node-count threshold below which exact all-pairs is cheaper.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar overlap loss.
+    """
+    if exact or int(pos.shape[0]) < exact_threshold:
+        return _exact_overlap_loss(pos, node_sizes, padding=padding)
+    return _cell_list_overlap_loss(
+        pos,
+        node_sizes,
+        padding=padding,
+        cutoff_radius=_cell_list_overlap_cutoff(node_sizes, padding),
+    )
+
+
 def _flex(problem: LayoutProblem) -> Optional[FlexConstraints]:
     """Return prepared flex constraints when available.
 
@@ -404,25 +628,30 @@ class RepulsionLossConfig:
 
     Parameters
     ----------
-    threshold : int, default=2000
-        Reserved threshold for switching away from the exact all-pairs path.
-        The current op keeps the exact path regardless of this value.
+    threshold : int, default=500
+        Node-count threshold below which the exact all-pairs path is cheaper
+        than building the spatial hash.
     sample_k : int, default=128
-        Reserved sample count for future sampled repulsion paths.
+        Reserved sample count for compatibility with older sampled paths.
     rvs_threshold : int, default=5000
         Reserved threshold for future random-vantage-set repulsion paths.
     rvs_nn_k : int, default=20
         Reserved neighbor count for future random-vantage-set paths.
     distance_epsilon : float, default=1e-4
-        Positive additive floor applied to squared pairwise distances in the
-        current exact path.
+        Positive additive floor applied to squared pairwise distances.
+    exact : bool, default=False
+        Whether to force the legacy all-pairs loss path.
+    cutoff_diameter_factor : float, default=5.0
+        Spatial-hash repulsion radius as a multiple of maximum node diameter.
     """
 
-    threshold: int = 2000
+    threshold: int = _CELL_LIST_EXACT_THRESHOLD
     sample_k: int = 128
     rvs_threshold: int = 5000
     rvs_nn_k: int = 20
     distance_epsilon: float = 1.0e-4
+    exact: bool = False
+    cutoff_diameter_factor: float = _REPULSION_CUTOFF_DIAMETER_FACTOR
 
 
 @dataclass(frozen=True)
@@ -431,10 +660,11 @@ class OverlapAvoidanceLossConfig:
 
     padding: float = 2.0
     rvs_threshold: int = 100000
-    # Sprint 1 memory port: sampled fallback when N > exact_threshold.
-    # Exact path allocates 5 [N,N] f32 tensors (~400MB each at 10K nodes).
-    exact_threshold: int = 2000
+    # Cell-list path handles N >= exact_threshold exactly for overlap pairs
+    # without allocating the legacy [N, N] tensors.
+    exact_threshold: int = _CELL_LIST_EXACT_THRESHOLD
     sample_k: int = 128
+    exact: bool = False
 
 
 @dataclass(frozen=True)
@@ -714,14 +944,10 @@ class RepulsionLoss(LossOp):
     ) -> torch.Tensor:
         """Return the repulsion loss.
 
-        Tiered strategy (matches legacy ``repulsion_loss`` in
-        ``dagua.layout.constraints``):
-        - N <= self.config.threshold: exact O(N^2)
-        - N > threshold: global negative sampling with self-index exclusion,
-          O(N * sample_k). Cuts peak memory 10-100x at 10K+ nodes.
-
-        Sprint 1 memory port (2026-04-22): the exact path at N=10K consumes
-        ~6.5 GB RSS via autograd intermediates; sampled path drops to ~1 GB.
+        Tiered strategy:
+        - exact=True or N < self.config.threshold: legacy exact O(N^2)
+        - otherwise: uniform spatial hash with a radius cutoff, normalized as
+          omitted far pairs contributing zero to the all-pairs mean.
 
         Parameters
         ----------
@@ -740,50 +966,14 @@ class RepulsionLoss(LossOp):
         del ctx
         pos = _visible_original_pos(problem, state, _require_pos(state))
         node_sizes = problem.node_sizes
-        num_nodes = pos.shape[0]
-
-        if num_nodes <= self.config.threshold:
-            return _exact_repulsion_loss(
-                pos,
-                distance_epsilon=self.config.distance_epsilon,
-                node_sizes=node_sizes,
-            )
-
-        # Sampled path for N > threshold: matches classic
-        # `_repulsion_sampled` in constraints.py lines 269-278.
-        # Sprint 8.5: chunk over the N dim when the full [N, k, 2]
-        # intermediate would exceed the adaptive VRAM ceiling. This
-        # keeps forward-and-backward peak proportional to chunk_size,
-        # not N, so 10M-node graphs no longer OOM in
-        # LossGroup.term.backward on consumer GPUs. The mean over all
-        # [N*k] pairs factors correctly through the per-chunk sum
-        # accumulation because every pair is still sampled exactly
-        # once across the N iterations.
-        k = min(self.config.sample_k, num_nodes - 1)
-        eps = self.config.distance_epsilon
-        chunk_size = _select_sampled_chunk(pos, k)
-        if chunk_size is None or chunk_size >= num_nodes:
-            arange = torch.arange(num_nodes, device=pos.device)
-            raw_idx = torch.randint(0, num_nodes - 1, (num_nodes, k), device=pos.device)
-            self_idx = arange.unsqueeze(1).expand(-1, k)
-            idx = raw_idx + (raw_idx >= self_idx).long()
-            diff = pos.unsqueeze(1) - pos[idx]  # [N, k, 2]
-            dist_sq = (diff**2).sum(dim=2) + eps
-            return (1.0 / dist_sq).mean()
-        total = pos.sum() * 0.0  # keep dtype + device
-        total_count = 0
-        for start in range(0, num_nodes, chunk_size):
-            end = min(start + chunk_size, num_nodes)
-            b = end - start
-            row_range = torch.arange(start, end, device=pos.device)
-            raw_idx = torch.randint(0, num_nodes - 1, (b, k), device=pos.device)
-            self_idx = row_range.unsqueeze(1).expand(-1, k)
-            idx = raw_idx + (raw_idx >= self_idx).long()
-            diff = pos[start:end].unsqueeze(1) - pos[idx]
-            dist_sq = (diff**2).sum(dim=2) + eps
-            total = total + (1.0 / dist_sq).sum()
-            total_count += b * k
-        return total / float(total_count)
+        return _repulsion_loss(
+            pos,
+            distance_epsilon=self.config.distance_epsilon,
+            node_sizes=node_sizes,
+            exact=self.config.exact,
+            exact_threshold=self.config.threshold,
+            cutoff_diameter_factor=self.config.cutoff_diameter_factor,
+        )
 
 
 @register_op
@@ -808,7 +998,7 @@ class OverlapAvoidanceLoss(LossOp):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> torch.Tensor:
-        """Return the overlap-avoidance loss using the exact pairwise path.
+        """Return the overlap-avoidance loss.
 
         Parameters
         ----------
@@ -827,49 +1017,13 @@ class OverlapAvoidanceLoss(LossOp):
         del ctx
         pos = _visible_original_pos(problem, state, _require_pos(state))
         node_sizes = _require_node_sizes(problem)
-        num_nodes = pos.shape[0]
-
-        if num_nodes <= self.config.exact_threshold:
-            return _exact_overlap_loss(pos, node_sizes, padding=self.config.padding)
-
-        # Sprint 1 memory port: sampled O(N*k) overlap loss. Legacy path
-        # scales to 10K+ by only checking each node against k random peers.
-        # Sprint 8.5: chunk over N when the [N, k] intermediate tensors
-        # (dx_abs, dy_abs, min_dx, min_dy, overlap) would collectively
-        # exceed the adaptive VRAM ceiling. Without this the finest
-        # level at N=10M pre-allocates ~5 * 10M * 128 * 4 = 25 GB of
-        # forward-graph memory before even the backward pass.
-        padding = self.config.padding
-        k = min(self.config.sample_k, num_nodes - 1)
-        chunk_size = _select_sampled_chunk(pos, k, fields=5)
-        if chunk_size is None or chunk_size >= num_nodes:
-            arange = torch.arange(num_nodes, device=pos.device)
-            raw_idx = torch.randint(0, num_nodes - 1, (num_nodes, k), device=pos.device)
-            self_idx = arange.unsqueeze(1).expand(-1, k)
-            idx = raw_idx + (raw_idx >= self_idx).long()
-            dx_abs = torch.abs(pos[:, 0].unsqueeze(1) - pos[idx, 0])
-            dy_abs = torch.abs(pos[:, 1].unsqueeze(1) - pos[idx, 1])
-            min_dx = (node_sizes[:, 0].unsqueeze(1) + node_sizes[idx, 0]) / 2 + padding
-            min_dy = (node_sizes[:, 1].unsqueeze(1) + node_sizes[idx, 1]) / 2 + padding
-            overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)
-            return overlap.mean()
-        total = pos.sum() * 0.0
-        total_count = 0
-        for start in range(0, num_nodes, chunk_size):
-            end = min(start + chunk_size, num_nodes)
-            b = end - start
-            row_range = torch.arange(start, end, device=pos.device)
-            raw_idx = torch.randint(0, num_nodes - 1, (b, k), device=pos.device)
-            self_idx = row_range.unsqueeze(1).expand(-1, k)
-            idx = raw_idx + (raw_idx >= self_idx).long()
-            dx_abs = torch.abs(pos[start:end, 0].unsqueeze(1) - pos[idx, 0])
-            dy_abs = torch.abs(pos[start:end, 1].unsqueeze(1) - pos[idx, 1])
-            min_dx = (node_sizes[start:end, 0].unsqueeze(1) + node_sizes[idx, 0]) / 2 + padding
-            min_dy = (node_sizes[start:end, 1].unsqueeze(1) + node_sizes[idx, 1]) / 2 + padding
-            overlap = F.relu(min_dx - dx_abs) * F.relu(min_dy - dy_abs)
-            total = total + overlap.sum()
-            total_count += b * k
-        return total / float(total_count)
+        return _overlap_loss(
+            pos,
+            node_sizes,
+            padding=self.config.padding,
+            exact=self.config.exact,
+            exact_threshold=self.config.exact_threshold,
+        )
 
 
 @register_op
