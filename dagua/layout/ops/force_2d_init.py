@@ -99,6 +99,10 @@ class Force2DInitIfFlat(Op):
             return state
 
         pos = state.pos.detach()
+        y = pos[:, 1]
+        if int(torch.unique(y).numel()) >= self.config.min_layers:
+            return state
+
         x = pos[:, 0]
         x_extent = float((x.max() - x.min()).item())
         if x_extent <= 0.0:
