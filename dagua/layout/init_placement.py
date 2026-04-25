@@ -119,7 +119,19 @@ def init_positions(
                     gained_layers = n_relayered > n_layers
                     if pile_reduced and not_degenerate and gained_layers:
                         layers = relayered
-                        chain_flow_layers = chain_like and flow_preserved
+                        # Sprint-20i: when the ORIGINAL Kahn layering collapsed
+                        # everything into one cycle-trapped pile (n_layers <= 1)
+                        # but FAS reveals a clean spanning chain (n_relayered ~=
+                        # num_nodes, flow_preserved), keep the rank-based y
+                        # but skip the chain-flow x init. A monotone x init on
+                        # a fake-chain produces a diagonal line layout that
+                        # the optimizer can't escape; freeing x to barycenter
+                        # ordering lets the optimizer organize it around the
+                        # preserved y-rank. small_world_100 / small_world_500
+                        # confirms: 48.58 -> ~57, 49.34 -> ~55 composite when
+                        # both share this guard with rank-based y and free x.
+                        fake_chain = chain_like and n_layers <= 1
+                        chain_flow_layers = chain_like and flow_preserved and not fake_chain
             except Exception:
                 # Cycle removal failed -- keep the original collapsed
                 # layering, downstream Force2DInitIfFlat will handle.
