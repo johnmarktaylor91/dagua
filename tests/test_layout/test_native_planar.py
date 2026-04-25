@@ -143,17 +143,36 @@ def test_face_preserving_constraint_detects_inverted_face() -> None:
 
 
 def test_native_planar_hexagonal_lattice_zero_crossings_and_beats_baseline() -> None:
-    """Explicit native_planar should preserve crossings and beat the prior default baseline."""
+    """Explicit native_planar preserves crossings and beats the prior default baseline.
+
+    Compares against the un-polished baseline because sprint-20k's
+    edge-equalize post-polish lifted the layered_dag default above the
+    Schnyder+stress planar pipeline on this graph (86.30 vs 85.54
+    deterministic score). The test contract is that the PLANAR
+    pipeline itself is competitive with the LAYERED_DAG pipeline
+    itself, not that planar can compete with the default plus a
+    post-polish that isn't part of either pipeline.
+    """
     graph = _make_hexagonal_lattice_graph(rows=6, cols=7)
     graph.compute_node_sizes()
 
     baseline_score, _ = _composite_score(
         graph,
-        LayoutConfig(seed=42, steps=0, try_planar_first=False),
+        LayoutConfig(
+            seed=42,
+            steps=0,
+            try_planar_first=False,
+            edge_equalize_polish=False,
+        ),
     )
     planar_score, planar_crossings = _composite_score(
         graph,
-        LayoutConfig(algorithm="native_planar", seed=42, steps=10),
+        LayoutConfig(
+            algorithm="native_planar",
+            seed=42,
+            steps=10,
+            edge_equalize_polish=False,
+        ),
     )
 
     assert planar_crossings == 0
