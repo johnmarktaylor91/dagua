@@ -82,6 +82,15 @@ class LayoutConfig:
     force_pipeline: Optional[
         Literal["tree", "layered_dag", "force_directed", "hybrid", "planar", "legacy_monolith"]
     ] = None
+    # Sprint-20k: best-of-polish edge-equalize after the native pipeline
+    # converges. The gradient pipeline saturates on edge_length_variance
+    # for layered DAGs and lattices (confirmed empirically: w=0..200 same
+    # output). A direct constraint projection toward mean edge length,
+    # scored against the un-polished baseline, escapes the local minimum
+    # on ~9 of the 10 moderate-loss bucket graphs. Disable to skip the
+    # 5-candidate scoring pass (~10ms overhead at N=100).
+    edge_equalize_polish: bool = True
+
     # Sprint-20g: try the native_planar sub-pipeline when classify_graph confirms
     # exact planarity. Defaults to False because the current planar pipeline
     # (Schnyder init + flat stress refine) drops the depth_spearman /
