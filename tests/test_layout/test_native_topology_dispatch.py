@@ -13,6 +13,7 @@ from dagua.layout.ops.pipelines.dagua_native import (
 from dagua.layout.ops.pipelines.dagua_native_legacy import (
     layout_dagua_native_pipeline as layout_legacy_native_pipeline,
 )
+from dagua.metrics import composite, full
 
 
 def _ring_edges(num_nodes: int) -> torch.Tensor:
@@ -140,3 +141,18 @@ def test_force_pipeline_planar_runs_planar_pipeline_not_layered_fallback() -> No
     )
 
     assert not torch.equal(planar_pos, layered_pos)
+
+
+def test_native_default_hexagonal_lattice_polish_score_stays_high() -> None:
+    """Sprint-21a polish candidates should keep hex lattice above the close-loss band."""
+    from dagua.eval.graphs import get_test_graphs
+    from dagua.layout.engine import layout as engine_layout
+
+    graph = next(t.graph for t in get_test_graphs() if t.name == "hexagonal_lattice_42")
+    graph.compute_node_sizes()
+
+    pos = engine_layout(graph, LayoutConfig(seed=42))
+    torch.manual_seed(0)
+    score = float(composite(full(pos, graph.edge_index, node_sizes=graph.node_sizes)))
+
+    assert 88.0 < score < 100.0
