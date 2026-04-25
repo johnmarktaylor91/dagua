@@ -26,6 +26,10 @@ from dagua.layout.ops.pipelines.native_force_directed import (
 )
 from dagua.layout.ops.pipelines.native_hybrid import build_native_hybrid_pipeline
 from dagua.layout.ops.pipelines.native_layered_dag import build_native_layered_dag_pipeline
+from dagua.layout.ops.pipelines.native_planar import (
+    PlanarityFailure,
+    build_native_planar_pipeline,
+)
 from dagua.layout.ops.pipelines.native_tree import build_native_tree_pipeline
 from dagua.layout.ops.postprocess import AspectRatioFit, AspectRatioFitConfig
 from dagua.layout.ops.preprocess import DetectComponents
@@ -88,11 +92,19 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     if num_nodes <= small_tree_cutoff and family in {GraphFamily.TREE, GraphFamily.CHAIN}:
         return "tree"
     # Sprint-20g: planar dispatch when the classifier confirms exact
-    # planarity (and the user has not opted out via try_planar_first=False).
-    if getattr(config, "try_planar_first", True) and bool(getattr(structure, "is_planar", False)):
+    # planarity AND the user has explicitly opted in via try_planar_first.
+    # Default is False because the current Schnyder-init + flat-stress
+    # planar pipeline drops the dag_consistency / depth_spearman bonus
+    # that layered_dag earns on planar DAGs (loses 3-35 composite points
+    # vs layered_dag on every benchmark candidate).
+    if getattr(config, "try_planar_first", False) and bool(getattr(structure, "is_planar", False)):
         return "planar"
     cyclicity_ratio = float(getattr(structure, "cyclicity_ratio", 0.0))
-    if family == GraphFamily.FORCE_DIRECTED or cyclicity_ratio > 0.3:
+    # Sprint-20g: removed auto-route to force_directed. Empirically the
+    # PivotMDS+Stress force pipeline loses to layered_dag/hybrid on every
+    # cyclic benchmark candidate today (2026-04-24 measurement). Users can
+    # still opt in via force_pipeline="force_directed".
+    if family == GraphFamily.FORCE_DIRECTED and cyclicity_ratio > 0.5:
         return "force_directed"
     if family == GraphFamily.HYBRID or cyclicity_ratio > 0.05:
         return "hybrid"
@@ -122,6 +134,8 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
         return dagua_native_legacy.build_dagua_pipeline(config)
     if selected == "tree":
         return build_native_tree_pipeline(config)
+    if selected == "planar":
+        return build_native_planar_pipeline(config)
     if selected == "force_directed":
         return build_native_force_directed_pipeline(config)
     if selected == "hybrid":
@@ -323,7 +337,18 @@ def _run_native_problem(
             edge_weights=problem.edge_weights,
         )
 
-    final_state = build_dagua_pipeline(config).apply(problem, state, ctx)
+    try:
+        final_state = build_dagua_pipeline(config).apply(problem, state, ctx)
+    except PlanarityFailure:
+        if _selected_force_pipeline(config) == "planar":
+            raise
+        # Auto-routed to planar but validation failed at runtime (e.g.
+        # disconnected components). Fall back to the standard topology
+        # selection without trying planar again.
+        fallback_config = copy.copy(config)
+        fallback_config.try_planar_first = False
+        final_state = build_dagua_pipeline(fallback_config).apply(problem, state, ctx)
+        selected = _choose_native_pipeline(structure=structure, config=fallback_config)
     if final_state.pos is None:
         raise RuntimeError(f"native {selected} pipeline did not produce final positions.")
     result = final_state.pos.detach()

@@ -44,7 +44,16 @@ def test_classifier_exposes_dispatch_fields_for_cyclic_graph() -> None:
 
 
 def test_dispatch_routes_force_directed_family_to_force_pipeline() -> None:
-    """FORCE_DIRECTED classification should select the force sub-pipeline."""
+    """FORCE_DIRECTED + high cyclicity should select the force sub-pipeline.
+
+    Sprint-20g tightened the auto-route gate from ``cyclicity_ratio > 0.3``
+    to ``cyclicity_ratio > 0.5`` after benchmarking found force_directed
+    losing to layered_dag/hybrid on every cyclic candidate at the lower
+    threshold (recurrent_feedback_cell, kitchen_sink_*, parallel_cycles).
+    The strict gate keeps the force_directed branch reachable by its
+    intended target (densely-cyclic non-hierarchical graphs) while
+    excluding mostly-DAG graphs with sparse back-edges.
+    """
     structure = GraphStructure(
         family=GraphFamily.FORCE_DIRECTED,
         num_components=1,
@@ -53,7 +62,7 @@ def test_dispatch_routes_force_directed_family_to_force_pipeline() -> None:
         avg_layer_width=100.0,
         is_planar_hint=False,
         is_directed_acyclic=False,
-        cyclicity_ratio=0.4,
+        cyclicity_ratio=0.6,
     )
 
     selected = _choose_native_pipeline(structure, LayoutConfig())
@@ -99,3 +108,35 @@ def test_force_pipeline_legacy_monolith_matches_legacy_module() -> None:
     )
 
     assert torch.allclose(actual, expected)
+
+
+def test_force_pipeline_planar_runs_planar_pipeline_not_layered_fallback() -> None:
+    """force_pipeline='planar' must invoke the planar pipeline, not layered_dag.
+
+    Sprint-20g originally registered the planar branch in
+    ``_choose_native_pipeline`` but forgot to add the matching arm in
+    ``build_dagua_pipeline``, so every planar dispatch silently fell through
+    to ``build_native_layered_dag_pipeline``. This test pins the wiring to
+    catch a regression.
+    """
+    from dagua.eval.graphs import get_test_graphs
+
+    graph = next(t.graph for t in get_test_graphs() if t.name == "hexagonal_lattice_42")
+    graph.compute_node_sizes()
+
+    planar_pos = layout_dagua_native_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        config=LayoutConfig(seed=42, force_pipeline="planar"),
+        seed=42,
+    )
+    layered_pos = layout_dagua_native_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        config=LayoutConfig(seed=42, force_pipeline="layered_dag"),
+        seed=42,
+    )
+
+    assert not torch.equal(planar_pos, layered_pos)

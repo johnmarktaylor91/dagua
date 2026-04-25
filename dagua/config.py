@@ -83,9 +83,14 @@ class LayoutConfig:
         Literal["tree", "layered_dag", "force_directed", "hybrid", "planar", "legacy_monolith"]
     ] = None
     # Sprint-20g: try the native_planar sub-pipeline when classify_graph confirms
-    # exact planarity. Falls back to the standard topology dispatch on
-    # PlanarityFailure or when set to False.
-    try_planar_first: bool = True
+    # exact planarity. Defaults to False because the current planar pipeline
+    # (Schnyder init + flat stress refine) drops the depth_spearman /
+    # dag_consistency hierarchy bonus that layered_dag earns on planar DAGs,
+    # so it loses on every benchmark candidate today (-3 to -35 composite
+    # points vs layered_dag). Set True or use force_pipeline="planar" to
+    # exercise the wired pipeline; an open task is to layer-aware the planar
+    # init so it can beat layered_dag on at least cyclic-planar graphs.
+    try_planar_first: bool = False
 
     # Adaptive spacing: scale node_sep and rank_sep based on graph size
     adaptive_spacing: bool = True
