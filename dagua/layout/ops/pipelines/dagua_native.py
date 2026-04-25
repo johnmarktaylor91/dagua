@@ -365,7 +365,7 @@ def _run_native_problem(
         getattr(config, "edge_equalize_polish", True)
         and _selected_force_pipeline(config) is None
         and selected in {"layered_dag", "tree", "hybrid", "force_directed"}
-        and result.shape[0] >= 8
+        and result.shape[0] >= 6
         and problem.edge_index.numel() > 0
         and problem.node_sizes is not None
     ):
@@ -379,6 +379,12 @@ _POLISH_SETTINGS: tuple[tuple[int, float], ...] = (
     (20, 0.03),
     (10, 0.10),
     (30, 0.02),
+    # Sprint-20l: aggressive variants picked up by petersen_10 (+3.95
+    # composite) and disconnected_label_cycle_collage (+2.96). Other
+    # graphs keep the un-polished baseline because the picker's 0.5-
+    # margin gate filters out the regressions these two cause.
+    (50, 0.05),
+    (50, 0.20),
 )
 
 
@@ -468,7 +474,14 @@ def _best_of_polish(
     best_score = score(base_pos)
     for iters, step in _POLISH_SETTINGS:
         cand = _equalize_edges(base_pos, edge_index, iters, step)
-        cand_score = score(cand)
+        # Skip degenerate candidates; the projection can blow up on
+        # heavily-clustered or already-collapsed inputs.
+        if not bool(torch.isfinite(cand).all().item()):
+            continue
+        try:
+            cand_score = score(cand)
+        except Exception:
+            continue
         if cand_score > best_score + margin:
             best_score = cand_score
             best_pos = cand
@@ -809,7 +822,20 @@ def layout_dagua_native_pipeline(
         )
         if outer_state.pos is None:
             raise RuntimeError("dagua_native component tiling did not produce positions.")
-        return outer_state.pos.detach()
+        result = outer_state.pos.detach()
+        # Sprint-20l: also polish the per-component-tiled output. Closes
+        # +2.96 on disconnected_label_cycle_collage (the (50, 0.05)
+        # variant lifts depth_spearman by repacking nodes around the
+        # tile centers).
+        if (
+            getattr(effective_config, "edge_equalize_polish", True)
+            and _selected_force_pipeline(effective_config) is None
+            and result.shape[0] >= 6
+            and edge_index.numel() > 0
+            and node_sizes is not None
+        ):
+            result = _best_of_polish(result, edge_index, node_sizes)
+        return result
 
     return _run_native_problem(problem, state, ctx, prepared_config)
 
