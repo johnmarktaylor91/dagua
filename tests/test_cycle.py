@@ -5,7 +5,29 @@ import torch
 
 from dagua import DaguaGraph, LayoutConfig, draw
 from dagua.layout.cycle import _is_acyclic, detect_back_edges, make_acyclic, make_acyclic_robust
-from dagua.metrics import dag_consistency
+from dagua.layout.init_placement import init_positions
+from dagua.metrics import dag_consistency, full
+
+
+def _small_world_ring_chords(num_nodes: int) -> torch.Tensor:
+    """Build a directed ring plus short forward chords.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of ring nodes to create.
+
+    Returns
+    -------
+    torch.Tensor
+        Directed edge tensor shaped ``[2, E]``.
+    """
+    edges = []
+    for src in range(num_nodes):
+        edges.append((src, (src + 1) % num_nodes))
+        edges.append((src, (src + 2) % num_nodes))
+    return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
 
 # ---------------------------------------------------------------------------
 # detect_back_edges
@@ -264,6 +286,49 @@ class TestLayoutWithCycles:
 
         layout(g, LayoutConfig(steps=10, seed=42))
         assert g._original_edge_index is None
+
+    def test_init_positions_keeps_ring_like_cycle_order(self) -> None:
+        """Ring-plus-chord cycles should keep a high-flow FAS layering."""
+        num_nodes = 100
+        edge_index = _small_world_ring_chords(num_nodes)
+        node_sizes = torch.full((num_nodes, 2), 24.0)
+
+        pos = init_positions(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            node_sep=20.0,
+            rank_sep=40.0,
+        )
+
+        result = dag_consistency(pos, edge_index)
+        assert result["dag_consistency"] >= 0.95
+        assert int(torch.unique(pos[:, 1]).numel()) == num_nodes
+
+    @pytest.mark.parametrize(
+        ("graph_name", "minimum_dag_consistency"),
+        [
+            ("kitchen_sink_hybrid_net", 0.91),
+            ("recurrent_feedback_cell", 0.78),
+        ],
+    )
+    def test_cycle_layout_regressions_keep_dag_consistency(
+        self,
+        graph_name: str,
+        minimum_dag_consistency: float,
+    ) -> None:
+        """Sprint-19 cycle wins should stay within 0.05 dag-consistency."""
+        from dagua.eval.graphs import get_test_graphs
+        from dagua.layout.engine import layout as engine_layout
+
+        graphs = {test_graph.name: test_graph.graph for test_graph in get_test_graphs()}
+        graph = graphs[graph_name]
+        graph.compute_node_sizes()
+
+        pos = engine_layout(graph, LayoutConfig(seed=42))
+        metrics = full(pos, graph.edge_index, node_sizes=graph.node_sizes)
+
+        assert metrics["dag_consistency"] >= minimum_dag_consistency
 
 
 # ---------------------------------------------------------------------------
