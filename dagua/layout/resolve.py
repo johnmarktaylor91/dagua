@@ -431,6 +431,7 @@ def build_loss_ops(
                     sample_k=config.negative_sample_k,
                     rvs_threshold=config.rvs_threshold,
                     rvs_nn_k=config.rvs_nn_k,
+                    exact=config.exact_repulsion,
                 ),
             ),
         )
@@ -440,6 +441,7 @@ def build_loss_ops(
                 OverlapAvoidanceLossConfig(
                     padding=2.0,
                     rvs_threshold=config.rvs_threshold,
+                    exact=config.exact_repulsion,
                 ),
             ),
         )
