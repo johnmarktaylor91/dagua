@@ -159,7 +159,10 @@ def draw(
             curves, positions, graph.node_sizes, graph.edge_index
         )["edge_node_crossings"]
         threshold = getattr(config, "edge_routing_auto_skip_threshold", 5)
-        if heur_crossings >= threshold:
+        has_rectilinear_routes = any(
+            getattr(curve, "routing", "bezier") in ("ortho", "taxi") for curve in curves
+        )
+        if heur_crossings >= threshold or has_rectilinear_routes:
             from dagua.layout.edge_optimization import optimize_edges
 
             curves = optimize_edges(
