@@ -144,10 +144,22 @@ def _sampled_knn_preservation(pos_a: torch.Tensor, pos_b: torch.Tensor, k: int) 
 
 
 def segments_intersect(p1, p2, p3, p4):
-    """Vectorized segment intersection test.  All inputs [N, 2].
+    """Vectorized segment intersection test.  All inputs ``[N, 2]``.
 
-    Returns [N] bool tensor.  Complexity: O(N).
+    Returns an ``[N]`` bool tensor. Counts both standard transversal
+    crossings and *collinear-overlap* crossings (two parallel segments
+    on the same infinite line whose 1D projections overlap, e.g. two
+    vertical edges that share part of a column). The collinear case
+    matters because a layout that collapses every node to one column
+    produces edges that all live on the same vertical line; without
+    counting collinear overlap as crossing, every such pair scores
+    zero crossings and the composite metric awards a degenerate
+    layout free points.
+
+    Excludes endpoint-touch cases (segments that share only a vertex)
+    via a small ``EPS`` boundary on the parametric coordinates.
     """
+    EPS = 1e-6
     d1 = p2 - p1  # [N, 2]
     d2 = p4 - p3
     cross = d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]  # [N]
@@ -164,7 +176,29 @@ def segments_intersect(p1, p2, p3, p4):
     t = (d3[:, 0] * d2[:, 1] - d3[:, 1] * d2[:, 0]) / safe_cross
     u = (d3[:, 0] * d1[:, 1] - d3[:, 1] * d1[:, 0]) / safe_cross
 
-    return (~parallel) & (t > 0) & (t < 1) & (u > 0) & (u < 1)
+    # Standard transversal: strict-interior intersection on both segments.
+    proper = (~parallel) & (t > EPS) & (t < 1 - EPS) & (u > EPS) & (u < 1 - EPS)
+
+    # Collinear-overlap: parallel + p3 lies on the line through p1-p2 +
+    # the projections of (p3, p4) onto p1-p2's line direction overlap
+    # the open interval (EPS, 1 - EPS).
+    collinear = parallel & ((d1[:, 0] * d3[:, 1] - d1[:, 1] * d3[:, 0]).abs() < 1e-8)
+    collinear_overlap = torch.zeros_like(parallel)
+    if bool(collinear.any().item()):
+        d1_norm_sq = d1[:, 0].pow(2) + d1[:, 1].pow(2)
+        d1_norm_sq_safe = torch.where(
+            d1_norm_sq < 1e-10,
+            torch.ones_like(d1_norm_sq),
+            d1_norm_sq,
+        )
+        t3 = (d3[:, 0] * d1[:, 0] + d3[:, 1] * d1[:, 1]) / d1_norm_sq_safe
+        d4 = p4 - p1
+        t4 = (d4[:, 0] * d1[:, 0] + d4[:, 1] * d1[:, 1]) / d1_norm_sq_safe
+        a = torch.minimum(t3, t4)
+        b = torch.maximum(t3, t4)
+        collinear_overlap = collinear & (a < 1 - EPS) & (b > EPS)
+
+    return proper | collinear_overlap
 
 
 def _build_csr(edge_index: torch.Tensor, num_nodes: int):
@@ -638,11 +672,39 @@ def sampled_crossing_rate(
 
     E = edge_index.shape[1]
     src, tgt = edge_index[0], edge_index[1]
-    actual_samples = min(n_samples, E * (E - 1) // 2)
+    total_pairs = E * (E - 1) // 2
     gen = None if seed is None else torch.Generator(device="cpu").manual_seed(int(seed))
 
-    idx1 = torch.randint(0, E, (actual_samples,), generator=gen)
-    idx2 = torch.randint(0, E, (actual_samples,), generator=gen)
+    # When the request would exhaust the pair space, enumerate all pairs
+    # exactly. Otherwise sample without replacement so the same pair is
+    # never double-counted (under the prior implementation, sampling was
+    # with replacement, which biased the estimator on small graphs and
+    # gave the polish picker a noisy oracle).
+    if total_pairs <= n_samples:
+        # Enumerate (i, j) with i < j over edge ids.
+        ii, jj = torch.triu_indices(E, E, offset=1)
+        idx1 = ii
+        idx2 = jj
+    else:
+        # Without-replacement sample of unordered pairs (i, j), i < j.
+        # Encode pair as p = i * E + j; sample without replacement from the
+        # set of valid p values via randperm of total_pairs and decode.
+        # For very large E*(E-1)/2 the randperm allocation can be costly;
+        # fall back to random pair ids with deduplication.
+        if total_pairs <= 10_000_000:
+            perm = torch.randperm(total_pairs, generator=gen)[:n_samples]
+            # Decode triangular indices.
+            ii, jj = torch.triu_indices(E, E, offset=1)
+            idx1 = ii[perm]
+            idx2 = jj[perm]
+        else:
+            idx1 = torch.randint(0, E, (n_samples,), generator=gen)
+            idx2 = torch.randint(0, E, (n_samples,), generator=gen)
+            # Force i < j to canonicalize and let the same-edge filter drop
+            # equal pairs. With-replacement bias remains for huge E only.
+            lo = torch.minimum(idx1, idx2)
+            hi = torch.maximum(idx1, idx2)
+            idx1, idx2 = lo, hi
 
     # Exclude pairs sharing a node
     e1s, e1t = src[idx1], tgt[idx1]
