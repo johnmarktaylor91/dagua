@@ -934,6 +934,281 @@ def _per_layer_x_kmeans(
     return cand
 
 
+def _should_dot_lattice_lp(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> bool:
+    """Conservative gate for the dot-mimic LP polish candidate.
+
+    The LP candidate is expensive (~10-200 ms per graph). Sprint-22
+    area A measured large gains on layered DAGs with low hub-ratio and
+    short edge-spans (hex_lattice +9.28, grid_5x5 +16.56), but losses
+    on cyclic / hub graphs (parallel_cycles -9.92, hub_and_spoke
+    -15.28). Restrict firing to the structural class where the LP is
+    competitive.
+    """
+    if num_nodes < 12 or num_nodes > 2000 or edge_index.numel() == 0:
+        return False
+    src = edge_index[0]
+    tgt = edge_index[1]
+    non_self = src != tgt
+    src = src[non_self]
+    tgt = tgt[non_self]
+    e = int(src.numel())
+    if e == 0:
+        return False
+    indeg = torch.zeros(num_nodes, dtype=torch.long, device=edge_index.device)
+    out_adj: list[list[int]] = [[] for _ in range(num_nodes)]
+    for i in range(e):
+        u = int(src[i].item())
+        v = int(tgt[i].item())
+        indeg[v] += 1
+        out_adj[u].append(v)
+    queue = [int(v.item()) for v in torch.nonzero(indeg == 0, as_tuple=False).squeeze(-1)]
+    indeg_copy = indeg.clone()
+    visited = 0
+    while queue:
+        u = queue.pop(0)
+        visited += 1
+        for v in out_adj[u]:
+            indeg_copy[v] -= 1
+            if int(indeg_copy[v].item()) == 0:
+                queue.append(v)
+    if visited != num_nodes:
+        return False
+    parent = list(range(num_nodes))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(e):
+        a = find(int(src[i].item()))
+        b = find(int(tgt[i].item()))
+        if a != b:
+            parent[a] = b
+    if len({find(i) for i in range(num_nodes)}) > 1:
+        return False
+    deg = torch.zeros(num_nodes, dtype=torch.long, device=edge_index.device)
+    for i in range(e):
+        deg[int(src[i].item())] += 1
+        deg[int(tgt[i].item())] += 1
+    deg_sorted = torch.sort(deg).values.to(dtype=torch.float32)
+    median_deg = float(deg_sorted[num_nodes // 2].item())
+    max_deg = float(deg_sorted[-1].item())
+    if median_deg <= 0 or max_deg / median_deg > 4.0:
+        return False
+    return True
+
+
+def _dot_lattice_lp(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+) -> torch.Tensor:
+    """Replicate graphviz_dot's layered DAG layout via two LPs.
+
+    Implements the Gansner-Koutsofios-North-Vo 1993 pipeline:
+    rank-assignment LP -> virtual-node insertion -> median crossing
+    reduction -> x-coordinate LP. Sprint-22 area A measured this
+    candidate at +9.28 composite on hexagonal_lattice_42, +16.56 on
+    grid_5x5, +10.97 on dependency_graph_100, +3.21 on
+    complete_bipartite_8x12 over current dagua HEAD positions.
+
+    Inputs match the polish-candidate signature; the candidate ignores
+    ``pos`` and synthesizes coordinates from ``edge_index`` directly.
+    The picker's 0.5-margin gate handles regression risk.
+    """
+    n = int(pos.shape[0])
+    cand = pos.detach().clone()
+    if not _should_dot_lattice_lp(edge_index, n):
+        return cand
+    try:
+        import numpy as np
+        from scipy.optimize import linprog
+    except Exception:
+        return cand
+
+    src = edge_index[0]
+    tgt = edge_index[1]
+    non_self = src != tgt
+    src = src[non_self]
+    tgt = tgt[non_self]
+    e = int(src.numel())
+    if e == 0:
+        return cand
+
+    c_rank = np.zeros(n)
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    for i in range(e):
+        u = int(src[i].item())
+        v = int(tgt[i].item())
+        c_rank[v] += 1.0
+        c_rank[u] -= 1.0
+        row = np.zeros(n)
+        row[u] = 1.0
+        row[v] = -1.0
+        rows.append(row)
+        rhs.append(-1.0)
+    bounds_rank = [(0, None)] * n
+    try:
+        res = linprog(
+            c=c_rank,
+            A_ub=np.array(rows),
+            b_ub=np.array(rhs),
+            bounds=bounds_rank,
+            method="highs",
+        )
+    except Exception:
+        return cand
+    if not res.success:
+        return cand
+    rank_int = [int(round(r)) for r in res.x]
+    rmin = min(rank_int)
+    rank_int = [r - rmin for r in rank_int]
+
+    new_rank = list(rank_int)
+    new_edges: list[tuple[int, int, float]] = []
+    for i in range(e):
+        u = int(src[i].item())
+        v = int(tgt[i].item())
+        ru, rv = rank_int[u], rank_int[v]
+        if rv <= ru:
+            new_edges.append((u, v, 0.0))
+            continue
+        if rv == ru + 1:
+            new_edges.append((u, v, 1.0))
+            continue
+        prev = u
+        for kk in range(ru + 1, rv):
+            virt = len(new_rank)
+            new_rank.append(kk)
+            new_edges.append((prev, virt, 8.0))
+            prev = virt
+        new_edges.append((prev, v, 8.0))
+
+    n_total = len(new_rank)
+    layers: dict[int, list[int]] = {}
+    for i in range(n_total):
+        layers.setdefault(new_rank[i], []).append(i)
+    rmin_l = min(layers)
+    rmax_l = max(layers)
+    for r_l in layers:
+        layers[r_l] = sorted(layers[r_l])
+    in_e: list[list[int]] = [[] for _ in range(n_total)]
+    out_e: list[list[int]] = [[] for _ in range(n_total)]
+    for u, v, w in new_edges:
+        if w == 0.0:
+            continue
+        if new_rank[v] > new_rank[u]:
+            out_e[u].append(v)
+            in_e[v].append(u)
+
+    def _positions() -> dict[int, int]:
+        out: dict[int, int] = {}
+        for r_l in layers:
+            for j, vv in enumerate(layers[r_l]):
+                out[vv] = j
+        return out
+
+    for sweep in range(24):
+        if sweep % 2 == 0:
+            for r_l in range(rmin_l + 1, rmax_l + 1):
+                pos_idx = _positions()
+
+                def _key_down(v: int, r_l: int = r_l) -> float:
+                    nbr = sorted(pos_idx[u] for u in in_e[v] if new_rank[u] == r_l - 1)
+                    if not nbr:
+                        return float(pos_idx[v])
+                    m = len(nbr)
+                    return float(
+                        nbr[m // 2] if m % 2 == 1 else 0.5 * (nbr[m // 2 - 1] + nbr[m // 2])
+                    )
+
+                layers[r_l] = sorted(layers[r_l], key=_key_down)
+        else:
+            for r_l in range(rmax_l - 1, rmin_l - 1, -1):
+                pos_idx = _positions()
+
+                def _key_up(v: int, r_l: int = r_l) -> float:
+                    nbr = sorted(pos_idx[w_v] for w_v in out_e[v] if new_rank[w_v] == r_l + 1)
+                    if not nbr:
+                        return float(pos_idx[v])
+                    m = len(nbr)
+                    return float(
+                        nbr[m // 2] if m % 2 == 1 else 0.5 * (nbr[m // 2 - 1] + nbr[m // 2])
+                    )
+
+                layers[r_l] = sorted(layers[r_l], key=_key_up)
+
+    nodesep = float(node_sizes[:, 0].mean().item()) * 1.5 if node_sizes.numel() else 72.0
+    nodesep = max(nodesep, 1.0)
+    ranksep = float(node_sizes[:, 1].mean().item()) * 2.0 if node_sizes.numel() else 72.0
+    ranksep = max(ranksep, 1.0)
+
+    edges_pos_w = [(u, v, w) for (u, v, w) in new_edges if w > 0]
+    e_count = len(edges_pos_w)
+    if e_count == 0:
+        return cand
+    n_vars = n_total + e_count
+    cx = np.zeros(n_vars)
+    for k, (_, _, w) in enumerate(edges_pos_w):
+        cx[n_total + k] = w
+    A_ub: list[np.ndarray] = []
+    b_ub: list[float] = []
+    for k, (u, v, _) in enumerate(edges_pos_w):
+        r1 = np.zeros(n_vars)
+        r1[n_total + k] = -1.0
+        r1[v] = 1.0
+        r1[u] = -1.0
+        A_ub.append(r1)
+        b_ub.append(0.0)
+        r2 = np.zeros(n_vars)
+        r2[n_total + k] = -1.0
+        r2[v] = -1.0
+        r2[u] = 1.0
+        A_ub.append(r2)
+        b_ub.append(0.0)
+    for r_l, nodes_in_layer in layers.items():
+        for i in range(len(nodes_in_layer) - 1):
+            a = nodes_in_layer[i]
+            b = nodes_in_layer[i + 1]
+            row = np.zeros(n_vars)
+            row[a] = 1.0
+            row[b] = -1.0
+            A_ub.append(row)
+            b_ub.append(-nodesep)
+    A_eq = np.zeros((1, n_vars))
+    A_eq[0, 0] = 1.0
+    b_eq = np.array([0.0])
+    bounds_x = [(None, None)] * n_total + [(0, None)] * e_count
+    try:
+        res_x = linprog(
+            c=cx,
+            A_ub=np.array(A_ub),
+            b_ub=np.array(b_ub),
+            A_eq=A_eq,
+            b_eq=b_eq,
+            bounds=bounds_x,
+            method="highs",
+        )
+    except Exception:
+        return cand
+    if not res_x.success:
+        return cand
+    x_vals = res_x.x[:n_total]
+    x_vals = x_vals - x_vals.min()
+    out = torch.zeros((n, 2), dtype=cand.dtype, device=cand.device)
+    for v in range(n):
+        out[v, 0] = float(x_vals[v])
+        out[v, 1] = float(rank_int[v]) * ranksep
+    out = out - out.mean(dim=0, keepdim=True)
+    return out
+
+
 def _global_depth_align(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -1341,6 +1616,14 @@ def _best_of_polish(
         (
             "global_depth_align",
             lambda pos, edges, sizes: _global_depth_align(
+                base_pos,
+                edges,
+                sizes,
+            ),
+        ),
+        (
+            "dot_lattice_lp",
+            lambda pos, edges, sizes: _dot_lattice_lp(
                 base_pos,
                 edges,
                 sizes,
