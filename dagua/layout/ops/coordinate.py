@@ -10,12 +10,9 @@ from typing import ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 import torch
 
 from dagua.layout.graph_classify import (
-    GraphFamily,
-    classify_graph,
-)
-from dagua.layout.graph_classify import (
     GraphStructure as TopologyGraphStructure,
 )
+from dagua.layout.graph_classify import classify_graph
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import (
     build_undirected_adjacency as _build_undirected_adjacency,
@@ -1018,10 +1015,6 @@ def _should_apply_brandes_koepf_refine(
     tree/forest shortcut detection, not exact general-DAG gating.
     """
     if num_nodes == 0:
-        return False
-    if structure.family in {GraphFamily.TREE, GraphFamily.CHAIN}:
-        return False
-    if "lattice_like" in getattr(structure, "topology_tags", ()):
         return False
 
     num_layers = int(layers.max().item()) + 1 if layers.numel() > 0 else 0
