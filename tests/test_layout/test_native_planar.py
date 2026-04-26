@@ -161,6 +161,7 @@ def test_native_planar_hexagonal_lattice_zero_crossings_and_beats_baseline() -> 
         LayoutConfig(
             seed=42,
             steps=0,
+            brandes_koepf_refine=False,
             try_planar_first=False,
             edge_equalize_polish=False,
         ),
