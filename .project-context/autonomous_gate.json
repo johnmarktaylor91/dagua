@@ -215,6 +215,24 @@
       "Bet 3: hex-staggered LP variant or BK layer-center constraints. Targets hexagonal_lattice_42."
     ]
   },
+  "autonomous_mode_v2_victory_laps": {
+    "active": true,
+    "started": "2026-04-26T01:30:00-04:00",
+    "user_directive": "Do three more iterative autonomous sprints going through every tie and mild win and seeing if you can turn it into a major win. After this, inspect major wins and see if they can be turned into even bigger wins. So four sprints total. Then let's declare victory and call this a day for the algo :) Hop to it claude. Let's take some victory laps while we got the time and tokens. Goodnight",
+    "plan": [
+      "Sprint-26: identify all 11 ties and 41 modest wins. Find polish primitives that lift specific structural classes from tie/modest to strong (delta > +5). Target: +5-10 graphs upgraded.",
+      "Sprint-27: same as 26, focused on remaining ties + modest wins after sprint-26. Compounds.",
+      "Sprint-28: final pass on tie/modest. Cleanup.",
+      "Sprint-29: target strong wins (currently 41). Investigate if any can be pushed even higher (delta from +6 to +10, +10 to +20, etc.). Diminishing returns expected, but documented."
+    ],
+    "exit_criteria_v2": [
+      {"criterion": "best_or_tied_pct holds 100%", "target": "93/93 = 100%", "status": "untested"},
+      {"criterion": "strong_win_count increases", "target": ">= 41 + sprint lifts", "status": "untested"},
+      {"criterion": "tie_bucket_count decreases", "target": "< 11 (current)", "status": "untested"},
+      {"criterion": "test suite green", "target": "217/217 pass", "status": "untested"},
+      {"criterion": "no regressions on existing wins", "target": "every prior delta >= prior delta - 0.5", "status": "untested"}
+    ]
+  },
   "autonomous_mode": {
     "active": false,
     "started": "2026-04-26T00:25:00-04:00",
