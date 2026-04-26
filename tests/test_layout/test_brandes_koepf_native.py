@@ -142,6 +142,53 @@ def test_brandes_koepf_refinement_preserves_layer_y_assignments() -> None:
     assert result.extras["brandes_koepf_horizontal_refine_applied"] is True
 
 
+def test_brandes_koepf_refinement_admits_multi_component_forward_dag() -> None:
+    """BK refinement should run on disconnected DAGs with strict forward layers."""
+    component_layers = torch.arange(6, dtype=torch.long)
+    layers = torch.cat((component_layers, component_layers))
+    y_values = layers.to(dtype=torch.float32) * 11.0
+    x_values = torch.tensor(
+        [0.0, 0.2, -0.1, 0.1, -0.2, 0.0, 8.0, 8.2, 7.9, 8.1, 7.8, 8.0],
+        dtype=torch.float32,
+    )
+    original_pos = torch.stack((x_values, y_values), dim=1)
+    problem = LayoutProblem(
+        edge_index=_edge_index(
+            [
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 4),
+                (4, 5),
+                (6, 7),
+                (7, 8),
+                (8, 9),
+                (9, 10),
+                (10, 11),
+            ],
+        ),
+        num_nodes=12,
+        node_sizes=torch.full((12, 2), 1.0, dtype=torch.float32),
+        structure=GraphStructure(
+            family=GraphFamily.GENERAL,
+            num_components=2,
+            max_degree=2,
+            num_layers=6,
+            avg_layer_width=2.0,
+            is_planar_hint=True,
+            is_directed_acyclic=True,
+        ),
+    )
+    state = SolveState(pos=original_pos.clone(), layers=layers)
+
+    result = BrandesKoepfHorizontalRefine().apply(problem, state, RuntimeContext())
+
+    assert result.pos is not None
+    assert torch.equal(result.pos[:, 1], y_values)
+    assert not torch.allclose(result.pos[:, 0], x_values)
+    assert result.extras["brandes_koepf_horizontal_refine_applied"] is True
+
+
 def test_brandes_koepf_refinement_skips_cyclic_graph() -> None:
     """A back edge in the layer assignment should keep BK refinement off."""
     num_nodes = 6
