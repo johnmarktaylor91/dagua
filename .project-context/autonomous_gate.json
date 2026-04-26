@@ -185,5 +185,24 @@
       "Bet 2: cluster-bridge-aware Brandes-Koepf. Targets clustered_medium_5x20.",
       "Bet 3: hex-staggered LP variant or BK layer-center constraints. Targets hexagonal_lattice_42."
     ]
+  },
+  "autonomous_mode": {
+    "active": true,
+    "started": "2026-04-26T00:25:00-04:00",
+    "user_directive": "Going to bed. Keep cooking, I'd love to see 100% in the morning. If this sprint doesn't do it I authorize you to launch another one after this. Godspeed",
+    "exit_criteria": [
+      {"criterion": "petersen_10 delta", "target": ">= -0.5 (tied or strict win)", "status": "untested"},
+      {"criterion": "clustered_medium_5x20 delta", "target": ">= -0.5", "status": "untested"},
+      {"criterion": "hexagonal_lattice_42 delta", "target": ">= -0.5", "status": "untested"},
+      {"criterion": "best_or_tied_pct", "target": "100% (93/93)", "status": "currently 97% (90/93)"},
+      {"criterion": "test suite green", "target": "all pass", "status": "currently 217/217 with sprint-23 fix"},
+      {"criterion": "no regression on sprint-22/23 wins", "target": "every prior win delta >= prior delta - 0.5", "status": "untested"}
+    ],
+    "discipline": [
+      "MUST NOT declare done while any exit criterion shows fail/untested",
+      "After 3 stalled cycles on a single blocker, mark BLOCKED with diagnosis",
+      "Authorized to launch sprint-25/26/N as needed",
+      "All commits chain on feat/bench-and-aesthetics; no force-push, no main merge"
+    ]
   }
 }
