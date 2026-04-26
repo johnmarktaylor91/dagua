@@ -1120,20 +1120,25 @@ class InitAnnealingSchedule(Op):
 
         schedule = AnnealingSchedule(
             weight_fns={
-                "w_dag": lambda step, total_steps: self.config.w_dag
-                * (1.0 - 0.5 * _progress(step, total_steps)),
+                "w_dag": lambda step, total_steps: (
+                    self.config.w_dag * (1.0 - 0.5 * _progress(step, total_steps))
+                ),
                 "w_attract": lambda step, total_steps: self.config.w_attract,
-                "w_repel": lambda step, total_steps: self.config.w_repel
-                * (1.0 + 2.0 * _progress(step, total_steps)),
-                "w_overlap": lambda step, total_steps: self.config.w_overlap
-                * (1.0 + _progress(step, total_steps)),
+                "w_repel": lambda step, total_steps: (
+                    self.config.w_repel * (1.0 + 2.0 * _progress(step, total_steps))
+                ),
+                "w_overlap": lambda step, total_steps: (
+                    self.config.w_overlap * (1.0 + _progress(step, total_steps))
+                ),
                 "w_cluster": lambda step, total_steps: self.config.w_cluster,
                 "w_cluster_sep": lambda step, total_steps: self.config.w_cluster * 0.5,
                 "w_cluster_contain": lambda step, total_steps: self.config.w_cluster_contain,
-                "w_crossing": lambda step, total_steps: self.config.w_crossing
-                * _crossing_progress(step, total_steps),
-                "w_straightness": lambda step, total_steps: self.config.w_straightness
-                * (1.0 + 0.5 * _progress(step, total_steps)),
+                "w_crossing": lambda step, total_steps: (
+                    self.config.w_crossing * _crossing_progress(step, total_steps)
+                ),
+                "w_straightness": lambda step, total_steps: (
+                    self.config.w_straightness * (1.0 + 0.5 * _progress(step, total_steps))
+                ),
                 "w_length_variance": lambda step, total_steps: self.config.w_length_variance,
                 "w_spacing": lambda step, total_steps: self.config.w_spacing,
                 "w_fanout": lambda step, total_steps: self.config.w_fanout,

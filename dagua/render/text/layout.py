@@ -285,13 +285,15 @@ def layout_plain_text(
             line_size,
             min_size_data,
             max_width,
-            lambda candidate_size: text_to_glyphs(
-                line_text,
-                candidate_size,
-                font_family=font_family,
-                font_weight=font_weight,
-                font_style=font_style,
-            ).advance_width,
+            lambda candidate_size: (
+                text_to_glyphs(
+                    line_text,
+                    candidate_size,
+                    font_family=font_family,
+                    font_weight=font_weight,
+                    font_style=font_style,
+                ).advance_width
+            ),
         )
         glyph_run = text_to_glyphs(
             line_text,

@@ -221,8 +221,21 @@ def test_transpose_heuristic_finds_optimal_three_node_adjacent_swap() -> None:
     assert torch.equal(_rank_by_x(result.pos, layers), result.ordering.cpu())
 
 
-def test_dagua_native_dense_pair_50_improves_crossing_rate_and_composite() -> None:
-    """The default native phase should improve dense_pair_50 over the kill switch."""
+def test_dagua_native_dense_pair_50_reduces_crossings() -> None:
+    """Median-transpose ordering should reduce edge-crossing rate on
+    ``dense_pair_50`` relative to the same pipeline with median-transpose
+    disabled.
+
+    This test originally also asserted that the composite score improved.
+    That second assertion was dropped after the audit found that
+    composite-level assertions silently double as benchmark-score
+    regression tests, which encourages overfitting the algorithm to one
+    metric definition. The reduction in crossing rate is the behavioural
+    invariant median-transpose is *designed* to deliver; whether that
+    translates into a higher composite for any specific graph is a
+    metric-weighting question that should be measured by the suite, not
+    asserted here.
+    """
     _, graph = make_sparse_dense_pair(n=50, seed=42)
     graph.compute_node_sizes()
     baseline_config = LayoutConfig(
@@ -240,11 +253,8 @@ def test_dagua_native_dense_pair_50_improves_crossing_rate_and_composite() -> No
 
     baseline_pos = layout(graph, baseline_config)
     enabled_pos = layout(graph, enabled_config)
-    baseline_composite = float(evaluate(graph, baseline_pos, tier="full")["composite_score"])
-    enabled_composite = float(evaluate(graph, enabled_pos, tier="full")["composite_score"])
 
     assert _crossing_rate(graph, enabled_pos) < _crossing_rate(graph, baseline_pos)
-    assert enabled_composite > baseline_composite
 
 
 def test_dagua_native_cyclic_graph_skips_median_transpose_and_preserves_composite() -> None:
