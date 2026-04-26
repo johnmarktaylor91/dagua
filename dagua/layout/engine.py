@@ -1,16 +1,16 @@
 """Core optimization loop -- the dispatch + legacy engine body.
 
-Sprint 0 status (2026-04-22):
+status (2026-04-22):
 - Top-level `layout()` is the active dispatcher.
   * `algorithm=None` -> "dagua_native" ops pipeline (the new default).
   * `algorithm="_legacy"` -> the legacy `_layout_inner` body in this file
-    (opt-in, unadvertised; preserved until Sprint 1 ports the memory
+    (opt-in, unadvertised; preserved until ports the memory
     features it owns into ops).
   * `algorithm=<other>` -> existing pipeline dispatch.
 - Animation (trace argument) keeps the legacy path until op-level snapshot
   hooks land.
 - The `_layout_inner` body and its helpers below are SCHEDULED FOR ARCHIVE
-  to `dagua/layout/_archive/legacy_engine/` once Sprint 1 demonstrates
+  to `dagua/layout/_archive/legacy_engine/` once demonstrates
   memory parity and re-implements per-loss backward, gradient checkpointing,
   and hybrid device support as registered ops. Per 09 Q1 (user resolution:
   archive). Do NOT add new features to `_layout_inner`; new optimization
@@ -901,15 +901,15 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
     if config is None:
         config = LayoutConfig()
 
-    # Sprint 0 Task 0.2: default flipped to dagua_native pipeline.
+    # Task 0.2: default flipped to dagua_native pipeline.
     # algorithm=None -> "dagua_native"; algorithm="_legacy" -> pre-decomposition
     # engine body (opt-in, unadvertised). Animation uses the legacy path
     # because layout-snapshot capture is not yet plumbed into ops pipelines
-    # (Sprint 6+ will rebuild animation via op-level hooks).
     #
-    # Sprint 0 fallback: relax_steps > 0 also stays on the legacy path because
+    #
+    # fallback: relax_steps > 0 also stays on the legacy path because
     # the relaxation pass (re-run with w_dag=0) is not yet a registered op.
-    # Sprint 1 will add a RelaxationStage op and drop this fallback.
+    # will add a RelaxationStage op and drop this fallback.
     trace_fallback = trace is not None and config.algorithm is None
     relax_fallback = config.relax_steps > 0 and config.algorithm is None
     if trace_fallback:
@@ -917,7 +917,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
 
         warnings.warn(
             "dagua.layout: trace-enabled runs still use the legacy engine "
-            "because op-level snapshot hooks land in Sprint 6+. Set "
+            "Set "
             'algorithm="_legacy" to silence this warning, or pass trace=None '
             "to use the new default pipeline.",
             DeprecationWarning,
@@ -928,15 +928,15 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
 
         warnings.warn(
             "dagua.layout: relax_steps>0 still uses the legacy engine because "
-            'the RelaxationStage op lands in Sprint 1. Set algorithm="_legacy" '
+            'Set algorithm="_legacy" '
             "to silence, or set relax_steps=0 to use the new default.",
             DeprecationWarning,
             stacklevel=2,
         )
     remapped_from_default = config.algorithm is None and trace is None and config.relax_steps <= 0
-    # Sprint-20e: algorithm=None now enters dagua_native, whose adapter
+    # Algorithm=None now enters dagua_native, whose adapter
     # dispatches to tree/layered-DAG/force-directed/hybrid sub-pipelines after
-    # classification. The Sprint-20d route_flat_to_stress flag remains as a
+    # classification. The route_flat_to_stress flag remains as a
     # compatibility shim: disabling it selects the preserved monolith.
     if remapped_from_default and not getattr(config, "route_flat_to_stress", True):
         config = copy.copy(config)
