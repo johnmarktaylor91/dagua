@@ -91,7 +91,7 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     small_tree_cutoff = int(getattr(config, "small_n_tree_cutoff", 64))
     if num_nodes <= small_tree_cutoff and family in {GraphFamily.TREE, GraphFamily.CHAIN}:
         return "tree"
-    # Sprint-20g: planar dispatch when the classifier confirms exact
+    # Planar dispatch when the classifier confirms exact
     # planarity AND the user has explicitly opted in via try_planar_first.
     # Default is False because the current Schnyder-init + flat-stress
     # planar pipeline drops the dag_consistency / depth_spearman bonus
@@ -100,7 +100,7 @@ def _choose_native_pipeline(structure: Optional[GraphStructure], config: LayoutC
     if getattr(config, "try_planar_first", False) and bool(getattr(structure, "is_planar", False)):
         return "planar"
     cyclicity_ratio = float(getattr(structure, "cyclicity_ratio", 0.0))
-    # Sprint-20g: removed auto-route to force_directed. Empirically the
+    # Removed auto-route to force_directed. Empirically the
     # PivotMDS+Stress force pipeline loses to layered_dag/hybrid on every
     # cyclic benchmark candidate today (2026-04-24 measurement). Users can
     # still opt in via force_pipeline="force_directed".
@@ -354,7 +354,7 @@ def _run_native_problem(
     result = final_state.pos.detach()
     if result.shape[0] > problem.num_nodes:
         result = result[: problem.num_nodes]
-    # Sprint-20k: best-of-polish edge-equalize. The gradient pipeline
+    # Best-of-polish edge-equalize. The gradient pipeline
     # converges to a local minimum where edge_length_variance_loss is
     # saturated (confirmed empirically: w=0..200 produces identical
     # output on the loss-bucket graphs). A direct constraint projection
@@ -383,10 +383,8 @@ def _problem_cluster_ids(problem: LayoutProblem) -> Optional[torch.Tensor]:
     """Derive per-node cluster ids from ``problem.clusters``.
 
     Returns a ``[N]`` LongTensor with each node's deepest cluster index
-    (-1 = unassigned), mirroring ``DaguaGraph.cluster_ids``. Sprint-24
-    cluster-bridge polish needs this to detect the
-    ``clustered_medium_5x20`` topology. Returns ``None`` when no
-    clusters are present.
+    (-1 = unassigned), mirroring ``DaguaGraph.cluster_ids``. Returns
+    ``None`` when no clusters are present.
     """
     if not problem.clusters or problem.num_nodes == 0:
         return None
@@ -431,7 +429,7 @@ _POLISH_SETTINGS: tuple[tuple[int, float], ...] = (
     (20, 0.03),
     (10, 0.10),
     (30, 0.02),
-    # Sprint-20l: aggressive variants picked up by petersen_10 (+3.95
+    # Aggressive variants picked up by petersen_10 (+3.95
     # composite) and disconnected_label_cycle_collage (+2.96). Other
     # graphs keep the un-polished baseline because the picker's 0.5-
     # margin gate filters out the regressions these two cause.
@@ -992,12 +990,12 @@ def _should_dot_lattice_lp(
 ) -> bool:
     """Conservative gate for the dot-mimic LP polish candidate.
 
-    The LP candidate is expensive (~10-200 ms per graph). Sprint-22
-    area A measured large gains on layered DAGs with low hub-ratio and
-    short edge-spans (hex_lattice +9.28, grid_5x5 +16.56), but losses
-    on cyclic / hub graphs (parallel_cycles -9.92, hub_and_spoke
-    -15.28). Restrict firing to the structural class where the LP is
-    competitive.
+    The LP candidate is expensive (~10-200 ms per graph). It produces
+    large gains on layered DAGs with low hub-ratio and short edge
+    spans, but loses on cyclic / hub graphs and on tiny / huge graphs
+    where the LP solve is either uncompetitive or unaffordable. The
+    gate restricts firing to the structural class where the LP is
+    a net win.
     """
     if num_nodes < 12 or num_nodes > 2000 or edge_index.numel() == 0:
         return False
@@ -1064,7 +1062,7 @@ def _dot_lattice_lp(
 
     Implements the Gansner-Koutsofios-North-Vo 1993 pipeline:
     rank-assignment LP -> virtual-node insertion -> median crossing
-    reduction -> x-coordinate LP. Sprint-22 area A measured this
+    reduction -> x-coordinate LP. measured this
     candidate at +9.28 composite on hexagonal_lattice_42, +16.56 on
     grid_5x5, +10.97 on dependency_graph_100, +3.21 on
     complete_bipartite_8x12 over current dagua HEAD positions.
@@ -1268,32 +1266,32 @@ def _should_lattice_uniform_centered_slots(
 ) -> bool:
     """Gate the uniform-centered-slots polish for small/medium lattice DAGs.
 
-    Sprint-24 area C codex empirically found that replacing each layer's
-    LP x-positions with uniformly-spaced centered slots at 0.75 * pitch
-    closes hexagonal_lattice_42 (88.36 -> 89.11, +0.75 vs HEAD, +0.13 vs
-    graphviz_dot 88.99) and tightens triangular_lattice_36 (86.61 ->
-    87.06). Forced replacement would regress grid_5x5 (-1.08), so the
-    gate must reject grids and rely on the picker margin.
+    found that replacing each layer's
+       LP x-positions with uniformly-spaced centered slots at 0.75 * pitch
+       closes hexagonal_lattice_42 (88.36 -> 89.11, +0.75 vs HEAD, +0.13 vs
+       graphviz_dot 88.99) and tightens triangular_lattice_36 (86.61 ->
+       87.06). Forced replacement would regress grid_5x5 (-1.08), so the
+       gate must reject grids and rely on the picker margin.
 
-    Conservative gate: ``_should_dot_lattice_lp`` accepts (DAG, hub_ratio
-    <= 4, 12 <= N <= 200), >= 5 distinct y-layers, max layer width >= 4,
-    max degree <= 6, and not too many singleton layers (fractal
-    rejection). The picker margin (0.1) absorbs grid_5x5 regression.
+       Conservative gate: ``_should_dot_lattice_lp`` accepts (DAG, hub_ratio
+       <= 4, 12 <= N <= 200), >= 5 distinct y-layers, max layer width >= 4,
+       max degree <= 6, and not too many singleton layers (fractal
+       rejection). The picker margin (0.1) absorbs grid_5x5 regression.
 
-    Parameters
-    ----------
-    edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
-    num_nodes : int
-        Node count.
-    lp_pos : torch.Tensor
-        LP candidate positions with shape ``[N, 2]`` (the output of
-        ``_dot_lattice_lp``).
+       Parameters
+       ----------
+       edge_index : torch.Tensor
+           Edge tensor with shape ``[2, E]``.
+       num_nodes : int
+           Node count.
+       lp_pos : torch.Tensor
+           LP candidate positions with shape ``[N, 2]`` (the output of
+           ``_dot_lattice_lp``).
 
-    Returns
-    -------
-    bool
-        ``True`` when the lattice topology justifies the slot rewrite.
+       Returns
+       -------
+       bool
+           ``True`` when the lattice topology justifies the slot rewrite.
     """
     if num_nodes < 12 or num_nodes > 200:
         return False
@@ -1346,7 +1344,7 @@ def _lattice_uniform_centered_slots(
 ) -> torch.Tensor:
     """Replace LP per-layer x with uniformly-spaced centered slots.
 
-    Sprint-24 area C codex empirical finding: graphviz_dot's lattice
+    Graphviz_dot's lattice
     drawings beat dagua on edge_length_cv via uniformly-spaced layer
     slots, NOT via the alt-row stagger or median-center variants. This
     candidate reuses ``_dot_lattice_lp`` to get layered y, then rewrites
@@ -1364,7 +1362,7 @@ def _lattice_uniform_centered_slots(
         Node-size tensor with shape ``[N, 2]``.
     pitch_scale : float, default=0.75
         Multiplier on the median per-layer x-pitch to derive uniform
-        slot spacing. Sprint-24 area C codex found 0.75 optimal across
+        slot spacing. found 0.75 optimal across
         hex_42, tri_36, grid_5x5.
 
     Returns
@@ -1444,15 +1442,13 @@ def _global_depth_align(
     """Align disconnected components on shared global-depth y-rows.
 
     The default per-component tile lays components row-major by node
-    count and area. depth_spearman_rho is computed at the node level
-    over ALL nodes globally, so components with overlapping local
-    depths but different y-bands break the correlation. Sprint-22
-    area C found that re-placing nodes on `y = global_depth * pitch`
-    (with components stacked horizontally instead of row-major) lifts
-    `disconnected_encoder_residual` from 74.01 to 86.19 (+12.17, flips
-    a -1.62 close-loss into a +0.56 win vs elk_layered). The metric
-    uses ``dagua.utils.longest_path_layering`` for depth, so this
-    function MUST use the same.
+    count and area. ``depth_spearman_rho`` is computed at the node
+    level over ALL nodes globally, so components with overlapping
+    local depths but different y-bands break the correlation. Placing
+    nodes on ``y = global_depth * pitch`` -- with components stacked
+    horizontally instead of row-major -- restores the correlation. The
+    metric uses ``dagua.utils.longest_path_layering`` for depth, so
+    this function MUST use the same.
 
     Cycle components (where all nodes share the same
     longest-path-layering "max+1" cycle layer) keep their local y-shape
@@ -1640,13 +1636,13 @@ def _back_edge_relayer(
     """Re-layer cyclic graphs after removing detected back-edges.
 
     The gradient pipeline collapses cyclic graphs into compressed y bands
-    when its back-edge handling saturates. Sprint-22 area E discovered
+    when its back-edge handling saturates. area E discovered
     that re-running longest-path layering on the forward DAG (i.e. with
     DFS back-edges removed) and placing each forward layer at uniform y
     pitch lifts cyclic targets by 5-9 composite points:
 
       * recurrent_feedback_cell  +8.17 (66.73 -> 74.90, beats every comp)
-      * small_world_100          +8.65 (matches sprint-20i stress route)
+      * small_world_100          +8.65 (matches stress route)
       * small_world_500          +8.07 (1000x SNR confirmed)
       * braided_feedback_tails   +5.85
       * parallel_cycles_4x5      +5.03
@@ -1728,7 +1724,7 @@ def _should_tutte_cyclic_planar(edge_index: torch.Tensor, num_nodes: int) -> boo
     directed cycle (out-degree 1, in-degree 1, E_c == V_c). On lattice
     patches and 3-connected planar graphs the depth-warp tiebreak inflates
     edge_length_cv past the gradient baseline, so the gate has to be
-    strict. See sprint-22 area B for the full empirical envelope:
+    strict. See area B for the full empirical envelope:
     parallel_cycles_4x5 wins (+3.25), every other planar lattice loses.
 
     Parameters
@@ -1832,7 +1828,7 @@ def _tutte_cyclic_planar(
     except Exception:
         return cand
 
-    # Pitch inference: median y-step in the input. Sprint-22 area B used
+    # Pitch inference: median y-step in the input. area B used
     # equal x and y pitch (72 pt) and pitch ratio is the dominant
     # parameter -- aspect ratios far from 1:1 inflate edge_length_cv and
     # tank the win on parallel_cycles. Default to a single isotropic
@@ -2014,7 +2010,7 @@ def _should_gap_swap_large_dag(
     The search is only worth running when (a) the graph is large enough
     that the gradient pipeline saturates without exploring all x-orderings
     and (b) edge-length variance is high enough for permutations to find
-    real improvements. Sprint-22 area D measured the gain on
+    real improvements. measured the gain on
     ``dependency_500`` (N=500, baseline CV=0.91) at +0.98 composite; small
     graphs and low-CV graphs (random_dag_200, org_chart_deep,
     hub_fanout_label_skew) regress under forced equalization, so the gate
@@ -2060,36 +2056,36 @@ def _gap_validated_layer_swaps(
 ) -> torch.Tensor:
     """Bounded adjacent-x-swap search with composite validation.
 
-    Sprint-22 area D found that ``dependency_500`` saturates the gradient
-    pipeline with edge_length_cv as the dominant residual term (0.91 at
-    baseline, vs ELK 0.43). The fix is a small discrete permutation of
-    same-layer x order: take the longest 10% of edges, look at adjacent
-    same-layer node pairs that touch a long-edge endpoint, rank by cheap
-    edge-CV delta, then validate the top candidates with full composite.
+    found that ``dependency_500`` saturates the gradient
+       pipeline with edge_length_cv as the dominant residual term (0.91 at
+       baseline, vs ELK 0.43). The fix is a small discrete permutation of
+       same-layer x order: take the longest 10% of edges, look at adjacent
+       same-layer node pairs that touch a long-edge endpoint, rank by cheap
+       edge-CV delta, then validate the top candidates with full composite.
 
-    The search uses ``longest_path_layering`` for layers (matching the
-    metric's depth function) and only commits a swap when ``score_fn``
-    confirms the trial improves. Runs with ``_should_gap_swap_large_dag``
-    as the precondition; small graphs and low-CV graphs are skipped.
+       The search uses ``longest_path_layering`` for layers (matching the
+       metric's depth function) and only commits a swap when ``score_fn``
+       confirms the trial improves. Runs with ``_should_gap_swap_large_dag``
+       as the precondition; small graphs and low-CV graphs are skipped.
 
-    Parameters
-    ----------
-    pos : torch.Tensor
-        Position tensor with shape ``[N, 2]``.
-    edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
-    node_sizes : torch.Tensor
-        Node-size tensor with shape ``[N, 2]``. Unused but kept for the
-        polish-candidate signature.
-    score_fn : Callable[[torch.Tensor], float]
-        Composite scoring function for trial acceptance.
-    max_candidates : int, default=32
-        Maximum number of CV-prefiltered swaps to validate.
+       Parameters
+       ----------
+       pos : torch.Tensor
+           Position tensor with shape ``[N, 2]``.
+       edge_index : torch.Tensor
+           Edge tensor with shape ``[2, E]``.
+       node_sizes : torch.Tensor
+           Node-size tensor with shape ``[N, 2]``. Unused but kept for the
+           polish-candidate signature.
+       score_fn : Callable[[torch.Tensor], float]
+           Composite scoring function for trial acceptance.
+       max_candidates : int, default=32
+           Maximum number of CV-prefiltered swaps to validate.
 
-    Returns
-    -------
-    torch.Tensor
-        Position tensor after accepted swaps.
+       Returns
+       -------
+       torch.Tensor
+           Position tensor after accepted swaps.
     """
     del node_sizes
     cand = pos.detach().clone()
@@ -2184,30 +2180,30 @@ def _should_median_transpose_polish(
 ) -> bool:
     """Gate the median-transpose polish for large dense DAGs.
 
-    Sprint-23 area C dual-dispatch identified the dependency_500
-    close-loss as a within-layer x-order problem the gradient pipeline's
-    final 4-pass median sweep + 8-pass transpose doesn't resolve. A
-    deeper 24-sweep median-with-transpose run as a polish candidate
-    closes most of the remaining CV gap. The gate has to be strict
-    because random_dag_200 regresses -3.2 under the same algorithm
-    (different topology signature, sparse not dense).
+    identified the dependency_500
+       close-loss as a within-layer x-order problem the gradient pipeline's
+       final 4-pass median sweep + 8-pass transpose doesn't resolve. A
+       deeper 24-sweep median-with-transpose run as a polish candidate
+       closes most of the remaining CV gap. The gate has to be strict
+       because random_dag_200 regresses -3.2 under the same algorithm
+       (different topology signature, sparse not dense).
 
-    Conservative gate: N >= 200, E/N >= 2.0, edge_length_cv >= 0.5.
-    Single-component check intentionally omitted: dependency_500 has 2
-    components but is the primary target. Picker margin (0.1) absorbs
-    multi-component regression risk.
+       Conservative gate: N >= 200, E/N >= 2.0, edge_length_cv >= 0.5.
+       Single-component check intentionally omitted: dependency_500 has 2
+       components but is the primary target. Picker margin (0.1) absorbs
+       multi-component regression risk.
 
-    Parameters
-    ----------
-    pos : torch.Tensor
-        Position tensor with shape ``[N, 2]``.
-    edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
+       Parameters
+       ----------
+       pos : torch.Tensor
+           Position tensor with shape ``[N, 2]``.
+       edge_index : torch.Tensor
+           Edge tensor with shape ``[2, E]``.
 
-    Returns
-    -------
-    bool
-        ``True`` when the topology and CV justify the deeper sweep.
+       Returns
+       -------
+       bool
+           ``True`` when the topology and CV justify the deeper sweep.
     """
     n = int(pos.shape[0])
     if n < 200 or edge_index.numel() == 0:
@@ -2240,38 +2236,38 @@ def _median_transpose_polish(
 ) -> torch.Tensor:
     """Run 24-pass median ordering with transpose phase as polish.
 
-    Sprint-23 area C dual-dispatch found that the gradient pipeline's
-    final ordering pass (4 median sweeps + 8 transpose passes) is
-    insufficient on large dense DAGs like dependency_500. A deeper
-    median-with-transpose run as a post-pipeline polish candidate
-    improves edge_length_cv from 0.91 to 0.79 on dependency_500 and
-    lifts composite by +1.47..+1.81 (Claude vs codex measurements).
+    found that the gradient pipeline's
+       final ordering pass (4 median sweeps + 8 transpose passes) is
+       insufficient on large dense DAGs like dependency_500. A deeper
+       median-with-transpose run as a post-pipeline polish candidate
+       improves edge_length_cv from 0.91 to 0.79 on dependency_500 and
+       lifts composite by +1.47..+1.81 (Claude vs codex measurements).
 
-    The candidate preserves the per-layer x-slot multiset (it only
-    permutes node-to-slot assignment within each layer); y is
-    unchanged, so dag_consistency and depth_spearman are preserved by
-    construction. The picker margin gate (0.1 post sprint-23a) handles
-    regression risk.
+       The candidate preserves the per-layer x-slot multiset (it only
+       permutes node-to-slot assignment within each layer); y is
+       unchanged, so dag_consistency and depth_spearman are preserved by
+       construction. The picker margin gate (0.1 ) handles
+       regression risk.
 
-    Parameters
-    ----------
-    pos : torch.Tensor
-        Position tensor with shape ``[N, 2]``.
-    edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
-    node_sizes : torch.Tensor
-        Node-size tensor with shape ``[N, 2]``. Unused but kept for the
-        polish-candidate signature.
-    score_fn : Callable[[torch.Tensor], float]
-        Composite scoring function; the picker validates the candidate
-        through this callback after the function returns.
-    sweeps : int, default=24
-        Number of median-then-transpose sweeps.
+       Parameters
+       ----------
+       pos : torch.Tensor
+           Position tensor with shape ``[N, 2]``.
+       edge_index : torch.Tensor
+           Edge tensor with shape ``[2, E]``.
+       node_sizes : torch.Tensor
+           Node-size tensor with shape ``[N, 2]``. Unused but kept for the
+           polish-candidate signature.
+       score_fn : Callable[[torch.Tensor], float]
+           Composite scoring function; the picker validates the candidate
+           through this callback after the function returns.
+       sweeps : int, default=24
+           Number of median-then-transpose sweeps.
 
-    Returns
-    -------
-    torch.Tensor
-        Position tensor with shape ``[N, 2]``.
+       Returns
+       -------
+       torch.Tensor
+           Position tensor with shape ``[N, 2]``.
     """
     del node_sizes, score_fn
     cand = pos.detach().clone()
@@ -2403,15 +2399,15 @@ def _median_transpose_polish(
 def _is_source_fan_outerplanar(edge_index: torch.Tensor, num_nodes: int) -> bool:
     """Gate the source-fan outerplanar polish.
 
-    Triggers on the exact ``outerplanar_dag_20`` topology: one source node
-    with fan edges to nodes 2..n-1, plus a forward path 1->2->...->n-1.
-    Sprint-23 area E codex measured +0.66 lift on this graph (from 72.42
-    to 73.08, just shy of the igraph_sugiyama 73.16 target). The gate has
-    to be exact -- rotating the cached layout regressed by 16 points
-    because it broke DAG monotonicity, so this candidate constructs a
-    spine layout from scratch rather than perturbing positions.
+       Triggers on the exact ``outerplanar_dag_20`` topology: one source node
+       with fan edges to nodes 2..n-1, plus a forward path 1->2->...->n-1.
+    measured +0.66 lift on this graph (from 72.42
+       to 73.08, just shy of the igraph_sugiyama 73.16 target). The gate has
+       to be exact -- rotating the cached layout regressed by 16 points
+       because it broke DAG monotonicity, so this candidate constructs a
+       spine layout from scratch rather than perturbing positions.
 
-    Returns ``True`` when the topology matches.
+       Returns ``True`` when the topology matches.
     """
     if num_nodes < 6 or num_nodes > 40:
         return False
@@ -2475,29 +2471,29 @@ def _multi_component_row_major_repack(
 ) -> torch.Tensor:
     """Repack disconnected components row-major by size.
 
-    Sprint-23 area E codex measured +0.49 lift on
-    ``multi_component_80`` (from 74.49 to 74.98, recovering most of the
-    gap to graphviz_dot's 75.10). The win comes from reducing sampled
-    crossing rate via a different tile arrangement; CV and DAG terms are
-    already saturated.
+    measured +0.49 lift on
+       ``multi_component_80`` (from 74.49 to 74.98, recovering most of the
+       gap to graphviz_dot's 75.10). The win comes from reducing sampled
+       crossing rate via a different tile arrangement; CV and DAG terms are
+       already saturated.
 
-    Conservative gate: component_count >= 3, N <= 150, components
-    actually disconnected. Picker margin gate (0.1 post sprint-23a)
-    handles further regression risk.
+       Conservative gate: component_count >= 3, N <= 150, components
+       actually disconnected. Picker margin gate (0.1 )
+       handles further regression risk.
 
-    Parameters
-    ----------
-    pos : torch.Tensor
-        Position tensor with shape ``[N, 2]``.
-    edge_index : torch.Tensor
-        Edge tensor with shape ``[2, E]``.
-    node_sizes : torch.Tensor
-        Node-size tensor with shape ``[N, 2]``.
+       Parameters
+       ----------
+       pos : torch.Tensor
+           Position tensor with shape ``[N, 2]``.
+       edge_index : torch.Tensor
+           Edge tensor with shape ``[2, E]``.
+       node_sizes : torch.Tensor
+           Node-size tensor with shape ``[N, 2]``.
 
-    Returns
-    -------
-    torch.Tensor
-        Position tensor with shape ``[N, 2]``.
+       Returns
+       -------
+       torch.Tensor
+           Position tensor with shape ``[N, 2]``.
     """
     cand = pos.detach().clone()
     n = int(cand.shape[0])
@@ -2572,11 +2568,11 @@ def _best_of_polish(
     The gradient pipeline saturates on edge-length-variance for
     layered_dag and tree pipelines, so a direct constraint projection
     can escape the local minimum. Edge-equalize variants are tried first;
-    sprint-21a projection primitives are then scored as named candidates.
+    projection primitives are then scored as named candidates.
     The un-polished baseline is preserved unless a candidate beats it by at
     least ``margin`` composite points.
 
-    Sprint-23a: margin lowered from 0.5 to 0.1. Sprint-22b made
+    Margin lowered from 0.5 to 0.1. made
     composite() deterministic for fixed positions, so the larger gate
     that protected against sampling noise is no longer needed. Empirical
     sweep on the outcome-sensitive set (5 close-loss graphs +
@@ -2928,8 +2924,8 @@ def layout_dagua_native_pipeline(
             edge_weights=edge_weights,
         )
 
-    # Sprint-20i: stress route for degenerate-layering cyclic graphs. Ported
-    # from the legacy monolith (sprint-20d) which was lost in the s20e
+    # Stress route for degenerate-layering cyclic graphs. Ported
+    # from the legacy monolith (legacy monolith) which was lost during a
     # topology-dispatch refactor. Small-world / dense-cyclic graphs with a
     # ring or near-ring structure produce a fully degenerate post-FAS
     # layering (n_relayered == num_nodes, max layer count == 1) that the
@@ -2987,8 +2983,8 @@ def layout_dagua_native_pipeline(
                                 current_min = float(dists[mask].min().item())
                                 if current_min > 1e-6:
                                     stress_pos = centered * (target / current_min)
-                            # Sprint-22a: also polish the stress-route output.
-                            # Sprint-22 area E found the back-edge relayer
+                            # Also polish the stress-route output.
+                            # found the back-edge relayer
                             # adds +3.3 on small_world_500 ON TOP of the
                             # stress route's 52.19 baseline (final ~55-57).
                             # The picker margin gate handles regression risk.
@@ -3152,8 +3148,8 @@ def layout_dagua_native_pipeline(
                     graph_structure=child_problem.structure,
                     skip_classification=False,
                 )
-                # Sprint-19d component packing is a protected win for cyclic
-                # / general-family children. Sprint-21b: allow tree- and
+                # component packing is a protected win for cyclic
+                # / general-family children. Allow tree- and
                 # chain-shaped children to re-classify into the dedicated
                 # native_tree fast-path instead of forcing every child
                 # through legacy_monolith. The original blanket override
@@ -3187,7 +3183,7 @@ def layout_dagua_native_pipeline(
         if outer_state.pos is None:
             raise RuntimeError("dagua_native component tiling did not produce positions.")
         result = outer_state.pos.detach()
-        # Sprint-20l: also polish the per-component-tiled output. Closes
+        # Also polish the per-component-tiled output. Closes
         # +2.96 on disconnected_label_cycle_collage (the (50, 0.05)
         # variant lifts depth_spearman by repacking nodes around the
         # tile centers).

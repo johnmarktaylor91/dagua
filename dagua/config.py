@@ -28,26 +28,26 @@ class LayoutConfig:
     """All tunable parameters for the layout engine."""
 
     # Spacing
-    # Sprint 18a: bumped 28 -> 60, 50 -> 80 after holdout sweep
+    # Bumped 28 -> 60, 50 -> 80 after holdout sweep
     # discovered the prior defaults caused 6+ overlaps on dense
     # families (bipartite, erdos_renyi, powerlaw_dag), each costing
     # 10 composite points (overlap_count != 0 binary).
     #
-    # Sprint 18b: bumped rank_sep 80 -> 120 (ratio 1.5x -> 2x). The
+    # Bumped rank_sep 80 -> 120 (ratio 1.5x -> 2x). The
     # taller layout makes multi-layer edges more vertical, lifting
     # edge_straightness + angular_resolution metrics.
     #
-    # Sprint 18e: refined to (70, 140) after 7-config local search.
-    # Sprint 18i: re-swept after Sprint 18h adopted AR target=0.25.
+    # Refined to (70, 140) after 7-config local search.
+    # Re-swept after after a 7-config sweep AR target=0.25.
     # The aggressive vertical rescaling means larger rank_sep gets
     # amplified through AR, so a higher rank_sep is now optimal:
     #
-    #   70_140 (Sprint 18e): suite 76.842
+    #   70_140: suite 76.842
     #   60_140             : suite 76.871
     #   70_160             : suite 76.933
     #   80_160             : suite 76.911
     #   70_200             : suite 77.005
-    #   70_240 (this)      : suite 77.043  <-- adopted
+    #   70_240       : suite 77.043  <-- adopted
     #   70_300             : suite 76.934 (plateau)
     #   70_400             : suite 77.006 (plateau)
     #   60_200             : suite 77.013
@@ -71,18 +71,18 @@ class LayoutConfig:
     device: str = "cpu"
     seed: Optional[int] = 42
     multi_start_k: int = 1
-    # Sprint-20d: route degenerate-layering cyclic graphs (e.g. small_world)
+    # Route degenerate-layering cyclic graphs (e.g. small_world)
     # to the stress-majorization pipeline instead of the layered native path.
     # The layered path produces one-node-per-layer outputs on these graphs
     # which collapses crossings, dag_consistency, and edge_straightness.
     route_flat_to_stress: bool = True
-    # Sprint-20e: override native topology dispatch. Deprecated sprint-19
-    # booleans remain accepted as kill switches, but auto dispatch should be
-    # controlled through this single selector.
+    # Override native topology dispatch. Deprecated booleans remain
+    # accepted as kill switches, but auto dispatch should be controlled
+    # through this single selector.
     force_pipeline: Optional[
         Literal["tree", "layered_dag", "force_directed", "hybrid", "planar", "legacy_monolith"]
     ] = None
-    # Sprint-20k: best-of-polish edge-equalize after the native pipeline
+    # Best-of-polish edge-equalize after the native pipeline
     # converges. The gradient pipeline saturates on edge_length_variance
     # for layered DAGs and lattices (confirmed empirically: w=0..200 same
     # output). A direct constraint projection toward mean edge length,
@@ -91,7 +91,7 @@ class LayoutConfig:
     # 5-candidate scoring pass (~10ms overhead at N=100).
     edge_equalize_polish: bool = True
 
-    # Sprint-20g: try the native_planar sub-pipeline when classify_graph confirms
+    # Try the native_planar sub-pipeline when classify_graph confirms
     # exact planarity. Defaults to False because the current planar pipeline
     # (Schnyder init + flat stress refine) drops the depth_spearman /
     # dag_consistency hierarchy bonus that layered_dag earns on planar DAGs,
@@ -110,7 +110,7 @@ class LayoutConfig:
     # Node placement loss weights
     w_dag: float = 10.0
     w_attract: float = 2.0
-    # Sprint 18l: bumped 2.4 -> 1.0 after re-sweep at the new
+    # Bumped 2.4 -> 1.0 after re-sweep at the new
     # spacing/AR defaults. Sweep:
     #   xb=0.5:  77.070
     #   xb=1.0:  77.092  <-- adopted
@@ -118,7 +118,7 @@ class LayoutConfig:
     #   xb=5.0:  77.074
     #   xb=10.0: 76.634
     w_attract_x_bias: float = 1.0
-    # Sprint 16: bumped 0.1 -> 0.2 after holdout sweep. +3.14 composite
+    # Bumped 0.1 -> 0.2 after holdout sweep. +3.14 composite
     # on bipartite, zero change on the other 20 families. Bipartite
     # graphs need stronger repulsion to spread their two layers apart;
     # other families have other constraints dominating already.
@@ -128,7 +128,7 @@ class LayoutConfig:
     w_cluster_contain: float = 2.0  # child clusters stay within parent bbox
     w_align: float = 5.0
     w_crossing: float = 1.8
-    # Sprint-20j: dropped 2.2 -> 0.5 after a comprehensive 93-graph sweep.
+    # Dropped 2.2 -> 0.5 after a comprehensive 93-graph sweep.
     # The straightness loss was over-constraining the layered_dag pipeline:
     # at 2.2 the optimizer pinned edges close to the layer axis at the
     # expense of edge-length uniformity (the metric weights more heavily
@@ -139,13 +139,13 @@ class LayoutConfig:
     # double-digit win), kitchen_sink_hybrid_net -0.81 (still positive
     # vs dagre). Lattices unchanged (already at convergence).
     w_straightness: float = 0.5
-    # Sprint 11: scale-invariant (CV^2) formulation -- see
+    # Scale-invariant (CV^2) formulation -- see
     # edge_length_variance_loss. Loss magnitude is now roughly 0.0-1.0
     # vs legacy 10^2-10^3. Weight bumped 0.7 -> 8.0 to keep the
     # gradient contribution comparable AND make edge uniformity a
     # stronger effective constraint (the metric we're being judged on).
     w_length_variance: float = 8.0
-    # Sprint 15: pivot-approximated graph-theoretic stress loss.
+    # Pivot-approximated graph-theoretic stress loss.
     # Targets `sampled_stress` metric where Dagua wins 1.9% in the
     # forward-memo benchmark. Default 0.0 = disabled (opt-in via
     # LayoutConfig(w_stress=0.1) for graphs where node-distance
@@ -158,14 +158,14 @@ class LayoutConfig:
     w_back_edge: float = 0.3  # penalize wide back-edge arcs (horizontal distance)
 
     # Scale thresholds
-    # Sprint-20f: the default native loss path now switches from exact O(N^2)
+    # The default native loss path now switches from exact O(N^2)
     # repulsion/overlap to a cell-list spatial hash at N >= 500. Set
     # exact_repulsion=True to force the legacy exact pairwise losses.
     exact_repulsion: bool = False
     exact_repulsion_threshold: int = 500
     negative_sample_k: int = 128
 
-    # Sprint 12: tree topology fast-path. Graphs that classify as
+    # Tree topology fast-path. Graphs that classify as
     # rooted trees (|E| == N-1, 1 component, acyclic) skip the entire
     # gradient pipeline and use classical Reingold-Tilford layout --
     # 0 crossings by construction, matches igraph_rt / graphviz_dot.
@@ -176,21 +176,21 @@ class LayoutConfig:
     # composite for trees. Opt in via LayoutConfig(use_tree_fast_path=True)
     # when edge crossings are the dominant concern vs edge uniformity.
     use_tree_fast_path: bool = False
-    # Sprint 19f: discrete native crossing reduction after barycenter polish.
+    # Discrete native crossing reduction after barycenter polish.
     # Median and transpose run only on acyclic graphs and can be disabled
     # quickly if a narrow DAG family regresses.
     use_native_median_transpose: bool = True
     native_median_passes: int = 4
     native_transpose_passes: int = 8
-    # Sprint 19g: x-only Brandes-Koepf compaction after native ordering.
+    # X-only Brandes-Koepf compaction after native ordering.
     # Conservative DAG gate keeps this out of cyclic, flat, tree, chain, and
     # multi-component cases unless there is only one isolated tail node.
     brandes_koepf_refine: bool = True
-    # Sprint 19h: split long-span DAG edges into dummy-node chains inside
+    # Split long-span DAG edges into dummy-node chains inside
     # dagua_native. This public kill switch lets benchmarks isolate routing
     # regressions without reverting the whole feature.
     insert_dummy_nodes: bool = True
-    # Sprint 19d: adapter-level disconnected-component decomposition for the
+    # Adapter-level disconnected-component decomposition for the
     # default dagua_native pipeline. Each weak component is solved
     # independently and tiled unless a conservative safety gate disables it.
     decompose_components: bool = True
@@ -291,14 +291,14 @@ class LayoutConfig:
     # 0 = auto-scale based on edge count, -1 = skip (zero overhead)
     edge_opt_steps: int = 0
     edge_opt_lr: float = 0.1
-    # Sprint 6 user opt-out: "differentiable" runs optimize_edges (the
-    # default; unchanged from Sprint 5 behaviour), "heuristic" skips
+    # user opt-out: "differentiable" runs optimize_edges (the
+    # default; unchanged from behaviour), "heuristic" skips
     # gradient refinement entirely and keeps the heuristic bezier curves
     # produced by route_edges. Takes precedence over edge_opt_steps -- a
     # user who wants the heuristic path shouldn't have to also remember
     # to pass edge_opt_steps=-1.
     edge_routing: str = "differentiable"
-    # Sprint 6 r3: adaptive skip threshold. When edge_routing is
+    # r3: adaptive skip threshold. When edge_routing is
     # "differentiable" but the heuristic routing already produces fewer
     # than this many edge-node crossings, the gradient refinement is
     # skipped entirely. Protects nested-cluster graphs whose heuristic
@@ -307,7 +307,7 @@ class LayoutConfig:
     # Set to 0 to force refinement always, or a large number to force the
     # heuristic path.
     edge_routing_auto_skip_threshold: int = 5
-    # Sprint 6 r2: re-tuned edge-CP loss weights. The Sprint 5 defaults
+    # r2: re-tuned edge-CP loss weights. The defaults
     # (crossing=5, node_crossing=10, angular=2, curv_cons=1, curv_pen=0.5,
     # cluster_cross=8) produced NEGATIVE edge-node-crossing drops on
     # trees (-27.7% on tree_branching_4 n=800; -13.4% on branching_3).
@@ -318,7 +318,7 @@ class LayoutConfig:
     # Result on trees: +52% / +56% drop; dense DAGs neutral (no room to
     # route around). Aggregate drop on the 39-graph held-out is dominated
     # by dense graphs where edge-node crossings are inherent to the
-    # topology -- the 30% aggregate target is a Sprint 6.5 tuning
+    # topology -- the 30% aggregate target is a tuning
     # bundle, not a default-weight fix.
     w_edge_crossing: float = 0.5
     w_edge_node_crossing: float = 10.0
