@@ -1602,8 +1602,8 @@ def full(
 
     # Tier 2: Sampled metrics
     result.update(sampled_stress(pos, ei, N, n_sources=stress_sources, n_targets=stress_targets))
-    # Sprint-22: pass an explicit seed so composite scoring is deterministic
-    # for the same positions. Sprint-21 measurement found per-call composite
+    # Pass an explicit seed so composite scoring is deterministic
+    # for the same positions. measurement found per-call composite
     # spreads up to 6.9 (std 2.6) on small graphs because sampled_crossing_rate
     # was reading from the global torch RNG. Polish pickers had to torch.manual_seed
     # before each candidate; this makes the metric self-deterministic.
