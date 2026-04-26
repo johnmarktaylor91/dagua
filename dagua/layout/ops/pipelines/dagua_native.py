@@ -1779,6 +1779,179 @@ def _tutte_cyclic_planar(
     return out
 
 
+def _should_gap_swap_large_dag(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+) -> bool:
+    """Gate the gap-validated x-swap polish to large dependency-style DAGs.
+
+    The search is only worth running when (a) the graph is large enough
+    that the gradient pipeline saturates without exploring all x-orderings
+    and (b) edge-length variance is high enough for permutations to find
+    real improvements. Sprint-22 area D measured the gain on
+    ``dependency_500`` (N=500, baseline CV=0.91) at +0.98 composite; small
+    graphs and low-CV graphs (random_dag_200, org_chart_deep,
+    hub_fanout_label_skew) regress under forced equalization, so the gate
+    must reject them.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Current positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the topology and CV justify gap-search.
+    """
+    n = int(pos.shape[0])
+    e = int(edge_index.shape[1]) if edge_index.numel() > 0 else 0
+    if n < 200 or e < 2 * n:
+        return False
+    src = edge_index[0]
+    tgt = edge_index[1]
+    diffs = pos[tgt] - pos[src]
+    lengths = diffs.pow(2).sum(-1).sqrt()
+    finite = lengths[torch.isfinite(lengths)]
+    if finite.numel() == 0:
+        return False
+    mean = float(finite.mean().item())
+    if mean <= 1e-6:
+        return False
+    std = float(finite.std().item())
+    cv = std / mean
+    return cv >= 0.75
+
+
+def _gap_validated_layer_swaps(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    score_fn: Callable[[torch.Tensor], float],
+    max_candidates: int = 32,
+) -> torch.Tensor:
+    """Bounded adjacent-x-swap search with composite validation.
+
+    Sprint-22 area D found that ``dependency_500`` saturates the gradient
+    pipeline with edge_length_cv as the dominant residual term (0.91 at
+    baseline, vs ELK 0.43). The fix is a small discrete permutation of
+    same-layer x order: take the longest 10% of edges, look at adjacent
+    same-layer node pairs that touch a long-edge endpoint, rank by cheap
+    edge-CV delta, then validate the top candidates with full composite.
+
+    The search uses ``longest_path_layering`` for layers (matching the
+    metric's depth function) and only commits a swap when ``score_fn``
+    confirms the trial improves. Runs with ``_should_gap_swap_large_dag``
+    as the precondition; small graphs and low-CV graphs are skipped.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``. Unused but kept for the
+        polish-candidate signature.
+    score_fn : Callable[[torch.Tensor], float]
+        Composite scoring function for trial acceptance.
+    max_candidates : int, default=32
+        Maximum number of CV-prefiltered swaps to validate.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor after accepted swaps.
+    """
+    del node_sizes
+    cand = pos.detach().clone()
+    if not _should_gap_swap_large_dag(cand, edge_index):
+        return cand
+    n = int(cand.shape[0])
+    try:
+        from dagua.utils import longest_path_layering
+
+        raw_depth = longest_path_layering(edge_index, n)
+    except Exception:
+        return cand
+    layers = (
+        raw_depth.to(torch.long)
+        if isinstance(raw_depth, torch.Tensor)
+        else torch.as_tensor(raw_depth, dtype=torch.long)
+    )
+
+    src = edge_index[0]
+    tgt = edge_index[1]
+    diffs = cand[tgt] - cand[src]
+    lengths = diffs.pow(2).sum(-1).sqrt()
+    if lengths.numel() == 0:
+        return cand
+    threshold = float(torch.quantile(lengths, 0.90).item())
+    long_mask = lengths >= threshold
+    long_endpoints = torch.zeros(n, dtype=torch.bool, device=cand.device)
+    long_endpoints[src[long_mask]] = True
+    long_endpoints[tgt[long_mask]] = True
+
+    def edge_cv(p: torch.Tensor) -> float:
+        d = (p[tgt] - p[src]).pow(2).sum(-1).sqrt()
+        finite = d[torch.isfinite(d)]
+        if finite.numel() == 0:
+            return float("inf")
+        m = float(finite.mean().item())
+        if m <= 1e-6:
+            return float("inf")
+        return float(finite.std().item()) / m
+
+    base_cv = edge_cv(cand)
+
+    ranked: list[tuple[float, int, int]] = []
+    for layer_val in torch.unique(layers, sorted=True):
+        layer_nodes = torch.nonzero(layers == layer_val, as_tuple=False).squeeze(1)
+        if layer_nodes.numel() < 2:
+            continue
+        order = torch.argsort(cand[layer_nodes, 0], stable=True)
+        ordered = layer_nodes[order]
+        for k in range(int(ordered.numel()) - 1):
+            left = int(ordered[k].item())
+            right = int(ordered[k + 1].item())
+            if not (bool(long_endpoints[left].item()) or bool(long_endpoints[right].item())):
+                continue
+            trial = cand.clone()
+            tmp = float(trial[left, 0].item())
+            trial[left, 0] = trial[right, 0]
+            trial[right, 0] = tmp
+            cv_delta = edge_cv(trial) - base_cv
+            ranked.append((cv_delta, left, right))
+
+    if not ranked:
+        return cand
+    ranked.sort(key=lambda t: t[0])
+
+    best = cand
+    try:
+        best_score = score_fn(best)
+    except Exception:
+        return cand
+
+    for _, left, right in ranked[:max_candidates]:
+        trial = best.clone()
+        tmp = float(trial[left, 0].item())
+        trial[left, 0] = trial[right, 0]
+        trial[right, 0] = tmp
+        if not bool(torch.isfinite(trial).all().item()):
+            continue
+        try:
+            trial_score = score_fn(trial)
+        except Exception:
+            continue
+        if trial_score > best_score:
+            best = trial
+            best_score = trial_score
+    return best
+
+
 def _best_of_polish(
     base_pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -1947,6 +2120,16 @@ def _best_of_polish(
                 base_pos,
                 edges,
                 sizes,
+            ),
+        ),
+        (
+            "gap_validated_layer_swaps",
+            lambda pos, edges, sizes: _gap_validated_layer_swaps(
+                base_pos,
+                edges,
+                sizes,
+                score_fn=score,
+                max_candidates=32,
             ),
         ),
     ]
