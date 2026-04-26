@@ -600,26 +600,73 @@ def _transpose_heuristic(
     parents_of: Dict[int, List[int]],
     num_passes: int = 5,
 ) -> None:
-    """Swap adjacent nodes within layers if it reduces edge crossings."""
+    """Swap adjacent nodes within layers if it reduces edge crossings.
+
+    Parameters
+    ----------
+    layer_groups : Dict[int, List[int]]
+        Mapping from layer index to ordered node indices in that layer.
+    sorted_layers : List[int]
+        Layer indices in traversal order.
+    children_of : Dict[int, List[int]]
+        Mapping from source node index to outgoing neighbor indices.
+    parents_of : Dict[int, List[int]]
+        Mapping from target node index to incoming neighbor indices.
+    num_passes : int, default=5
+        Maximum number of transpose passes.
+
+    Returns
+    -------
+    None
+        ``layer_groups`` is updated in place.
+    """
     for _ in range(num_passes):
         improved = False
-        for layer_idx in sorted_layers:
+        for layer_idx_pos, layer_idx in enumerate(sorted_layers):
             nodes = layer_groups[layer_idx]
             if len(nodes) < 2:
                 continue
+
+            next_pos: Dict[int, int] = {}
+            if layer_idx_pos + 1 < len(sorted_layers):
+                next_layer = sorted_layers[layer_idx_pos + 1]
+                next_pos = {n: i for i, n in enumerate(layer_groups[next_layer])}
+
+            prev_pos: Dict[int, int] = {}
+            if layer_idx_pos > 0:
+                prev_layer = sorted_layers[layer_idx_pos - 1]
+                prev_pos = {n: i for i, n in enumerate(layer_groups[prev_layer])}
+
+            pos_in_layer: Dict[int, int] = {n: i for i, n in enumerate(nodes)}
 
             for i in range(len(nodes) - 1):
                 u, v = nodes[i], nodes[i + 1]
 
                 cross_before = _count_local_crossings(
-                    u, v, nodes, layer_groups, sorted_layers, children_of, parents_of, layer_idx
+                    u,
+                    v,
+                    pos_in_layer,
+                    next_pos,
+                    prev_pos,
+                    children_of,
+                    parents_of,
                 )
                 nodes[i], nodes[i + 1] = v, u
+                pos_in_layer[u] = i + 1
+                pos_in_layer[v] = i
                 cross_after = _count_local_crossings(
-                    v, u, nodes, layer_groups, sorted_layers, children_of, parents_of, layer_idx
+                    v,
+                    u,
+                    pos_in_layer,
+                    next_pos,
+                    prev_pos,
+                    children_of,
+                    parents_of,
                 )
                 if cross_after >= cross_before:
                     nodes[i], nodes[i + 1] = u, v
+                    pos_in_layer[u] = i
+                    pos_in_layer[v] = i + 1
                 else:
                     improved = True
 
@@ -630,24 +677,41 @@ def _transpose_heuristic(
 def _count_local_crossings(
     u: int,
     v: int,
-    nodes: List[int],
-    layer_groups: Dict[int, List[int]],
-    sorted_layers: List[int],
+    pos_in_layer: Dict[int, int],
+    next_pos: Dict[int, int],
+    prev_pos: Dict[int, int],
     children_of: Dict[int, List[int]],
     parents_of: Dict[int, List[int]],
-    current_layer: int,
 ) -> int:
-    """Count crossings between edges from u,v to adjacent layers."""
+    """Count crossings between edges from two nodes to adjacent layers.
+
+    Parameters
+    ----------
+    u : int
+        First node index in the current layer.
+    v : int
+        Second node index in the current layer.
+    pos_in_layer : Dict[int, int]
+        Position lookup for nodes in the current layer.
+    next_pos : Dict[int, int]
+        Position lookup for nodes in the next layer. Empty when no next layer
+        exists.
+    prev_pos : Dict[int, int]
+        Position lookup for nodes in the previous layer. Empty when no previous
+        layer exists.
+    children_of : Dict[int, List[int]]
+        Mapping from source node index to outgoing neighbor indices.
+    parents_of : Dict[int, List[int]]
+        Mapping from target node index to incoming neighbor indices.
+
+    Returns
+    -------
+    int
+        Number of local crossings involving edges incident to ``u`` and ``v``.
+    """
     crossings = 0
 
-    pos_in_layer = {n: i for i, n in enumerate(nodes)}
-
-    layer_idx_pos = sorted_layers.index(current_layer)
-    if layer_idx_pos + 1 < len(sorted_layers):
-        next_layer = sorted_layers[layer_idx_pos + 1]
-        next_nodes = layer_groups[next_layer]
-        next_pos = {n: i for i, n in enumerate(next_nodes)}
-
+    if next_pos:
         u_children = [c for c in children_of.get(u, []) if c in next_pos]
         v_children = [c for c in children_of.get(v, []) if c in next_pos]
 
@@ -659,11 +723,7 @@ def _count_local_crossings(
                 if (u_pos < v_pos) != (next_pos[uc] < next_pos[vc]):
                     crossings += 1
 
-    if layer_idx_pos > 0:
-        prev_layer = sorted_layers[layer_idx_pos - 1]
-        prev_nodes = layer_groups[prev_layer]
-        prev_pos = {n: i for i, n in enumerate(prev_nodes)}
-
+    if prev_pos:
         u_parents = [p for p in parents_of.get(u, []) if p in prev_pos]
         v_parents = [p for p in parents_of.get(v, []) if p in prev_pos]
 
