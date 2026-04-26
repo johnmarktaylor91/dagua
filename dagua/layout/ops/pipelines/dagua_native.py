@@ -1494,6 +1494,291 @@ def _back_edge_relayer(
     return (1.0 - blend) * cand + blend * relayered
 
 
+def _should_tutte_cyclic_planar(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Gate the Tutte polish to disconnected simple directed-cycle graphs.
+
+    The barycentric Tutte solve only beats the gradient pipeline on a very
+    narrow target: graphs whose every connected component is a simple
+    directed cycle (out-degree 1, in-degree 1, E_c == V_c). On lattice
+    patches and 3-connected planar graphs the depth-warp tiebreak inflates
+    edge_length_cv past the gradient baseline, so the gate has to be
+    strict. See sprint-22 area B for the full empirical envelope:
+    parallel_cycles_4x5 wins (+3.25), every other planar lattice loses.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Node count.
+
+    Returns
+    -------
+    bool
+        ``True`` when every component is a simple directed cycle.
+    """
+    if num_nodes < 6 or edge_index.numel() == 0:
+        return False
+    e_count = int(edge_index.shape[1])
+    if e_count != num_nodes:
+        return False  # disjoint cycles satisfy E == V exactly
+    src = edge_index[0]
+    tgt = edge_index[1]
+    if bool((src == tgt).any().item()):
+        return False
+    indeg = torch.zeros(num_nodes, dtype=torch.long)
+    outdeg = torch.zeros(num_nodes, dtype=torch.long)
+    indeg.index_add_(0, tgt, torch.ones_like(tgt))
+    outdeg.index_add_(0, src, torch.ones_like(src))
+    if not bool((indeg == 1).all().item()):
+        return False
+    if not bool((outdeg == 1).all().item()):
+        return False
+    # Connected components via union-find on undirected edges.
+    parent = list(range(num_nodes))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(e_count):
+        a = find(int(src[i].item()))
+        b = find(int(tgt[i].item()))
+        if a != b:
+            parent[a] = b
+    roots = {find(i) for i in range(num_nodes)}
+    if len(roots) < 2:
+        return False  # require multi-component (single cycle is trivial)
+    return True
+
+
+def _tutte_cyclic_planar(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+) -> torch.Tensor:
+    """Per-component classical Tutte + monotone y-warp polish.
+
+    Targets disconnected simple-directed-cycle graphs (parallel_cycles
+    family). Each component is embedded by classical Tutte 2D (outer face
+    on a regular polygon, interior solved via L_ii * pos = -L_ib *
+    boundary), then y is replaced by ``depth * pitch`` from
+    ``longest_path_layering`` to guarantee dag_consistency=1 and
+    depth_spearman=1. Within-layer x is tiebroken by Tutte-rotation-x
+    with a minimum gap of ``0.6 * x_pitch``. Components are packed
+    horizontally with gap ``2 * x_pitch``.
+
+    The pitch is inferred from the input ``pos`` so the polished output
+    keeps the same scale as the gradient baseline; falls back to
+    ``node_sizes`` mean when the input is degenerate.
+
+    Returns the input unchanged when the gate
+    (``_should_tutte_cyclic_planar``) rejects the topology, when scipy /
+    networkx are unavailable, or when any per-component solve fails.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    """
+    cand = pos.detach().clone()
+    n = int(cand.shape[0])
+    if not _should_tutte_cyclic_planar(edge_index, n):
+        return cand
+    try:
+        import networkx as nx
+        import numpy as np
+        import scipy.sparse as sp
+        import scipy.sparse.linalg as spla
+
+        from dagua.utils import longest_path_layering
+    except Exception:
+        return cand
+
+    # Pitch inference: median y-step in the input. Sprint-22 area B used
+    # equal x and y pitch (72 pt) and pitch ratio is the dominant
+    # parameter -- aspect ratios far from 1:1 inflate edge_length_cv and
+    # tank the win on parallel_cycles. Default to a single isotropic
+    # pitch derived from the input's natural y-step.
+    ys = torch.unique(cand[:, 1])
+    pitch = float(node_sizes[:, 1].mean().item()) * 2.0 if node_sizes.numel() else 1.0
+    if ys.numel() >= 2:
+        sorted_ys = torch.sort(ys).values
+        steps = sorted_ys[1:] - sorted_ys[:-1]
+        steps = steps[steps > 1e-6]
+        if steps.numel() > 0:
+            pitch = float(steps.median().item())
+    pitch = max(pitch, 1.0)
+    pitch_y = pitch
+    pitch_x = pitch
+
+    raw_depth = longest_path_layering(edge_index, n)
+    depth = (
+        raw_depth.cpu().numpy()
+        if isinstance(raw_depth, torch.Tensor)
+        else np.asarray(raw_depth, dtype=np.int64)
+    )
+
+    G = nx.Graph()
+    G.add_nodes_from(range(n))
+    for s, t in edge_index.t().tolist():
+        if int(s) != int(t):
+            G.add_edge(int(s), int(t))
+
+    def _outer_face(sub: nx.Graph) -> list[int]:
+        is_planar, embedding = nx.check_planarity(sub, counterexample=False)
+        if not is_planar:
+            cb = nx.cycle_basis(sub)
+            return cb[0] if cb else list(sub.nodes())[: max(3, len(sub.nodes()) // 4)]
+        seen: set[tuple[int, int]] = set()
+        faces: list[list[int]] = []
+        for v in embedding.nodes():
+            for w in embedding.neighbors_cw_order(v):
+                if (v, w) in seen:
+                    continue
+                face = embedding.traverse_face(v, w)
+                for i in range(len(face)):
+                    seen.add((face[i], face[(i + 1) % len(face)]))
+                faces.append(face)
+        if not faces:
+            return list(sub.nodes())[:3]
+        faces.sort(key=lambda f: -len(f))
+        return faces[0]
+
+    final = np.zeros((n, 2), dtype=np.float64)
+    x_offset = 0.0
+    for comp in nx.connected_components(G):
+        comp_nodes = sorted(comp)
+        n_sub = len(comp_nodes)
+        if n_sub == 0:
+            continue
+        if n_sub == 1:
+            v = comp_nodes[0]
+            final[v] = (x_offset, depth[v] * pitch_y)
+            x_offset += pitch_x * 2.0
+            continue
+        old_to_new = {v: i for i, v in enumerate(comp_nodes)}
+        new_to_old = {i: v for v, i in old_to_new.items()}
+        sub = nx.relabel_nodes(G.subgraph(comp_nodes).copy(), old_to_new)
+        sub_depth = depth[comp_nodes]
+
+        radius = max(1.0, float(np.sqrt(n_sub))) * pitch_x * 0.5
+        boundary = _outer_face(sub)
+        if not boundary or len(boundary) < 3:
+            boundary = list(range(min(3, n_sub)))
+        boundary_set = set(boundary)
+
+        pos2d = np.zeros((n_sub, 2), dtype=np.float64)
+        n_b = len(boundary)
+        for i, v in enumerate(boundary):
+            theta = 2 * np.pi * i / n_b
+            pos2d[v, 0] = radius * np.cos(theta)
+            pos2d[v, 1] = radius * np.sin(theta)
+        interior = [v for v in range(n_sub) if v not in boundary_set]
+        if interior:
+            int_idx = {v: i for i, v in enumerate(interior)}
+            n_int = len(interior)
+            edges_local = list(sub.edges())
+            rows_ii: list[int] = []
+            cols_ii: list[int] = []
+            vals_ii: list[float] = []
+            rows_ib: list[int] = []
+            cols_ib: list[int] = []
+            vals_ib: list[float] = []
+            deg = np.zeros(n_sub, dtype=np.float64)
+            for u, v in edges_local:
+                deg[u] += 1.0
+                deg[v] += 1.0
+                u_in = u in int_idx
+                v_in = v in int_idx
+                if u_in and v_in:
+                    iu, iv = int_idx[u], int_idx[v]
+                    rows_ii.extend([iu, iv])
+                    cols_ii.extend([iv, iu])
+                    vals_ii.extend([-1.0, -1.0])
+                elif u_in and not v_in:
+                    rows_ib.append(int_idx[u])
+                    cols_ib.append(v)
+                    vals_ib.append(-1.0)
+                elif v_in and not u_in:
+                    rows_ib.append(int_idx[v])
+                    cols_ib.append(u)
+                    vals_ib.append(-1.0)
+            diag_rows = list(range(n_int))
+            diag_cols = list(range(n_int))
+            diag_vals = [deg[v] for v in interior]
+            l_ii = sp.csr_matrix(
+                (vals_ii + diag_vals, (rows_ii + diag_rows, cols_ii + diag_cols)),
+                shape=(n_int, n_int),
+            )
+            l_ib = sp.csr_matrix(
+                (vals_ib, (rows_ib, cols_ib)),
+                shape=(n_int, n_sub),
+            )
+            rhs_x = -l_ib @ pos2d[:, 0]
+            rhs_y = -l_ib @ pos2d[:, 1]
+            try:
+                x_int = spla.spsolve(l_ii, rhs_x)
+                y_int = spla.spsolve(l_ii, rhs_y)
+            except Exception:
+                l_reg = l_ii + sp.eye(n_int) * 1e-6
+                try:
+                    x_int = spla.spsolve(l_reg, rhs_x)
+                    y_int = spla.spsolve(l_reg, rhs_y)
+                except Exception:
+                    return cand
+            for v_loc, xv, yv in zip(interior, x_int, y_int):
+                pos2d[v_loc, 0] = float(xv)
+                pos2d[v_loc, 1] = float(yv)
+
+        # Monotone y-warp + within-layer x-tiebreak.
+        new_x = pos2d[:, 0].copy()
+        layers: dict[int, list[int]] = {}
+        for i in range(n_sub):
+            layers.setdefault(int(sub_depth[i]), []).append(i)
+        new_y = np.array([sub_depth[i] * pitch_y for i in range(n_sub)], dtype=np.float64)
+
+        # Normalize new_x to span pitch_x * sqrt(n_sub) before tiebreak so
+        # the gap enforcement is meaningful at the right scale.
+        if new_x.max() - new_x.min() > 0:
+            target_span = pitch_x * float(np.sqrt(n_sub))
+            new_x = (new_x - new_x.min()) / (new_x.max() - new_x.min()) * target_span
+
+        min_gap = 0.6 * pitch_x
+        for d, members in layers.items():
+            members_sorted = sorted(members, key=lambda i: new_x[i])
+            n_layer = len(members_sorted)
+            if n_layer > 1:
+                xs = np.array([new_x[i] for i in members_sorted])
+                for k in range(1, n_layer):
+                    if xs[k] - xs[k - 1] < min_gap:
+                        xs[k] = xs[k - 1] + min_gap
+                for i, x_v in zip(members_sorted, xs):
+                    new_x[i] = x_v
+
+        for local_i in range(n_sub):
+            global_v = new_to_old[local_i]
+            final[global_v, 0] = x_offset + new_x[local_i]
+            final[global_v, 1] = new_y[local_i]
+        comp_width = float(new_x.max() - new_x.min()) if n_sub > 1 else 0.0
+        x_offset += comp_width + pitch_x * 2.0
+
+    out = torch.tensor(final, dtype=cand.dtype, device=cand.device)
+    out = out - out.mean(dim=0, keepdim=True)
+    return out
+
+
 def _best_of_polish(
     base_pos: torch.Tensor,
     edge_index: torch.Tensor,
@@ -1654,6 +1939,14 @@ def _best_of_polish(
                 edges,
                 sizes,
                 blend=0.5,
+            ),
+        ),
+        (
+            "tutte_cyclic_planar",
+            lambda pos, edges, sizes: _tutte_cyclic_planar(
+                base_pos,
+                edges,
+                sizes,
             ),
         ),
     ]
