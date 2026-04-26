@@ -1956,7 +1956,7 @@ def _best_of_polish(
     base_pos: torch.Tensor,
     edge_index: torch.Tensor,
     node_sizes: torch.Tensor,
-    margin: float = 0.5,
+    margin: float = 0.1,
 ) -> torch.Tensor:
     """Try named polish candidates; return the best by composite.
 
@@ -1967,6 +1967,15 @@ def _best_of_polish(
     The un-polished baseline is preserved unless a candidate beats it by at
     least ``margin`` composite points.
 
+    Sprint-23a: margin lowered from 0.5 to 0.1. Sprint-22b made
+    composite() deterministic for fixed positions, so the larger gate
+    that protected against sampling noise is no longer needed. Empirical
+    sweep on the outcome-sensitive set (5 close-loss graphs +
+    triangular_lattice_36 + petersen_10) found that margin=0.1 captures
+    `multi_component_80` close-loss to tie (-0.641 -> -0.419) and the
+    `hexagonal_lattice_42` improvement (-0.800 -> -0.632) without
+    accepting noise-level micro-moves below 0.1.
+
     Parameters
     ----------
     base_pos : torch.Tensor
@@ -1975,7 +1984,7 @@ def _best_of_polish(
         Edge tensor with shape ``[2, E]``.
     node_sizes : torch.Tensor
         Node-size tensor with shape ``[N, 2]``.
-    margin : float, default=0.5
+    margin : float, default=0.1
         Minimum composite improvement to prefer a polished candidate.
 
     Returns
