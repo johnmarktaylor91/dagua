@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import copy
 import math
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import torch
 
@@ -233,17 +233,24 @@ def _should_use_native_dummy_nodes(
         return False
     if int(getattr(structure, "num_layers", 0)) <= 1:
         return False
-    if layer_assignments is None or int(layer_assignments.shape[0]) < _DUMMY_NODE_MIN_NODES:
+    if layer_assignments is None:
         return False
+    num_nodes = int(layer_assignments.shape[0])
+    has_long_layer_edges = _has_long_layer_edges(
+        edge_index=edge_index,
+        layer_assignments=layer_assignments,
+    )
     max_layer_width = _resolved_max_layer_width(
         structure=structure,
         layer_assignments=layer_assignments,
     )
-    if max_layer_width is not None and max_layer_width <= 1:
+    if num_nodes < _DUMMY_NODE_MIN_NODES and not (
+        has_long_layer_edges and max_layer_width is not None and max_layer_width >= 1
+    ):
         return False
     if "dense_dag" in getattr(structure, "topology_tags", ()):
         return False
-    return _has_long_layer_edges(edge_index=edge_index, layer_assignments=layer_assignments)
+    return has_long_layer_edges
 
 
 def _should_apply_brandes_koepf_refine(
@@ -265,16 +272,9 @@ def _should_apply_brandes_koepf_refine(
     Returns
     -------
     bool
-        ``True`` unless the user disabled BK or the graph has no real
-        horizontal spreading work to do.
+        ``True`` unless the user disabled BK.
     """
     if not bool(getattr(config, "brandes_koepf_refine", True)):
-        return False
-    max_layer_width = _resolved_max_layer_width(
-        structure=structure,
-        layer_assignments=layer_assignments,
-    )
-    if max_layer_width is not None and max_layer_width <= 1:
         return False
     return True
 
@@ -601,12 +601,12 @@ def _run_native_problem(
         ReingoldTilfordTreeConfig,
     )
 
-    structure = problem.structure
+    structure: Any = problem.structure
     if structure is None:
         structure = getattr(config, "structure", None)
     if structure is None:
         structure = classify_graph(problem.edge_index, problem.num_nodes)
-        problem.structure = structure
+        problem.structure = cast(Any, structure)
 
     if (
         getattr(structure, "family", None) == GraphFamily.TREE
@@ -881,7 +881,7 @@ def _extract_component_problem(
         direction=parent_problem.direction,
         clusters=None,
         cluster_parents=None,
-        structure=classified_structure,
+        structure=cast(Any, classified_structure),
         flex=_subset_flex(parent_problem.flex, local_index),
         edge_weights=sub_edge_weights,
         seed=parent_problem.seed,
@@ -1163,7 +1163,7 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
         structure=structure,
         layer_assignments=layer_assignments,
     )
-    crossing_reduction_ops = [
+    crossing_reduction_ops: list[Any] = [
         BarycenterReorder(BarycenterReorderConfig()),
     ]
     if enable_native_median_transpose:
@@ -1435,11 +1435,14 @@ def layout_dagua_native_pipeline(
                         stress_seed = seed if seed is not None else effective_config.seed
                         if stress_seed is None:
                             stress_seed = 42
-                        stress_pos = layout_stress_sgd_pipeline(
-                            edge_index=edge_index,
-                            num_nodes=num_nodes,
-                            node_sizes=node_sizes,
-                            seed=int(stress_seed),
+                        stress_pos = cast(
+                            torch.Tensor,
+                            layout_stress_sgd_pipeline(
+                                edge_index=edge_index,
+                                num_nodes=num_nodes,
+                                node_sizes=node_sizes,
+                                seed=int(stress_seed),
+                            ),
                         )
                         if stress_pos.shape[0] > 1:
                             mean_w = (
@@ -1608,7 +1611,7 @@ def layout_dagua_native_pipeline(
                     optimizer_type=optimizer_type,
                     layer_assignments=child_layers,
                     prebuilt_layer_index=None,
-                    graph_structure=child_problem.structure,
+                    graph_structure=cast(Optional[GraphStructure], child_problem.structure),
                     skip_classification=False,
                 )
                 child_pos = _run_native_problem(child_problem, child_state, ctx, child_config)
