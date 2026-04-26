@@ -139,10 +139,10 @@ def _composite_score(graph: DaguaGraph) -> float:
     return float(evaluate(graph, pos, tier="full")["composite_score"])
 
 
-def test_single_width_chain_skips_dummy_nodes_and_bk_refine() -> None:
-    """Single-node layers should not trigger dummy expansion or BK spreading."""
+def test_single_width_chain_without_long_edges_skips_dummy_nodes() -> None:
+    """Single-node layers without skip edges should not trigger dummy expansion."""
     layers = torch.arange(20, dtype=torch.long)
-    edge_index = _edge_index([(0, 2)])
+    edge_index = _edge_index([(index, index + 1) for index in range(19)])
     structure = _general_dag_structure(num_layers=20, max_layer_width=1)
     config = LayoutConfig(insert_dummy_nodes=True, brandes_koepf_refine=True)
 
@@ -152,7 +152,27 @@ def test_single_width_chain_skips_dummy_nodes_and_bk_refine() -> None:
         edge_index=edge_index,
         layer_assignments=layers,
     )
-    assert not _should_apply_brandes_koepf_refine(
+    assert _should_apply_brandes_koepf_refine(
+        config=config,
+        structure=structure,
+        layer_assignments=layers,
+    )
+
+
+def test_single_width_chain_with_skip_edges_uses_dummy_nodes_and_bk_refine() -> None:
+    """Single-node layers with skip edges should admit dummy expansion and BK."""
+    layers = torch.arange(20, dtype=torch.long)
+    edge_index = _edge_index([(0, 2)])
+    structure = _general_dag_structure(num_layers=20, max_layer_width=1)
+    config = LayoutConfig(insert_dummy_nodes=True, brandes_koepf_refine=True)
+
+    assert _should_use_native_dummy_nodes(
+        config=config,
+        structure=structure,
+        edge_index=edge_index,
+        layer_assignments=layers,
+    )
+    assert _should_apply_brandes_koepf_refine(
         config=config,
         structure=structure,
         layer_assignments=layers,
