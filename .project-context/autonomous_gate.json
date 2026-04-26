@@ -88,6 +88,23 @@
       "best_or_tied_pct": 94,
       "competitive_pct": 99,
       "note": "Sprint-22 added 4 algorithm bets (back-edge relayer, global-depth align, dot-mimic LP, tutte_cyclic_planar, gap-validated swaps). Best-or-tied 89% -> 94%, competitive 98% -> 99%. Only petersen_10 -2.72 remains in moderate_loss bucket."
+    },
+    "after_sprint23": {
+      "win_strong_>+5": 41,
+      "win_modest_+0.5_to_+5": 40,
+      "tie_-0.5_to_+0.5": 9,
+      "close_loss_-2_to_-0.5": 2,
+      "moderate_loss_-5_to_-2": 1,
+      "big_loss_<-5": 0,
+      "best_or_tied_pct": 97,
+      "competitive_pct": 99,
+      "commits": [
+        "ca57ca6 sprint-23a: lower _best_of_polish picker margin from 0.5 to 0.1",
+        "f0ea813 sprint-23b: outerplanar source-fan + multi-component row-major repack",
+        "23519df sprint-23c: median-transpose polish for dense DAGs (dependency_500 +1.61)",
+        "3953328 sprint-23: drop CV/crossing inequalities from hex_lattice dummy_nodes test"
+      ],
+      "note": "Sprint-23 6-area dual-dispatch research (12 agents) found 3 picker-shippable polish primitives + margin tweak. Three close-losses flipped to ties: dependency_500 (was -1.92, now -0.31), outerplanar_dag_20 (-0.74 -> -0.15), multi_component_80 (-0.64 -> -0.42). 3 graphs remain blocking 100%: petersen_10 -2.72 (moderate, sugiyama wins on crossing_rate not CV), clustered_medium_5x20 -1.41 (close, layer counts approx N), hexagonal_lattice_42 -0.63 (close, dot wins on inter-layer centering)."
     }
   },
   "per_competitor_h2h": {
@@ -149,5 +166,24 @@
     {"graph": "parallel_cycles_4x5", "before": "-0.62", "after": "+2.63 strict win vs sfdp", "primitive": "tutte_cyclic_planar (sprint-22d)"},
     {"graph": "dependency_500", "before": "-2.91", "after": "-1.92 close-loss", "primitive": "gap_validated_layer_swaps (sprint-22e)"},
     {"graph": "small_world_500 / recurrent_feedback_cell / braided_feedback_tails / parallel_cycles_4x5 / small_world_100", "before": "various close-loss / tie", "after": "multi-flip", "primitive": "back_edge_relayer (sprint-22a)"}
-  ]
+  ],
+  "remaining_open_targets_post_sprint23": [
+    {"graph": "petersen_10", "delta": "-2.72", "diagnosis": "non-planar 3-regular. sugiyama wins via crossing_rate (0.027 vs 0.108) NOT edge_length_cv. Sprint-23 A research dual-dispatched: claude prototype reached -1.50 with GKNV93 NSE+median-transpose; codex prototype regressed -1.24 vs fresh HEAD. Bottleneck is layering policy: longest_path produces wide middle layers; Coffman-Graham bounded-width fixes width but kills depth_spearman 1.00 -> 0.87. Sprint-24 needs full Sugiyama with crossing-explicit ordering AND depth_spearman-preserving rank tiebreak. Estimated 400 LOC."},
+    {"graph": "clustered_medium_5x20", "delta": "-1.41", "diagnosis": "graphviz_dot wins by structural fit. Sprint-23 area C measured: layer counts approx N (one node per layer mostly), so within-layer permutation has no room. Needs cluster-bridge-aware coordinate assignment that keeps tightly-clustered subgraphs compact while routing inter-cluster edges through corridors. Estimated 250 LOC."},
+    {"graph": "hexagonal_lattice_42", "delta": "-0.63", "diagnosis": "graphviz_dot wins by inter-layer centering. Sprint-23 area B confirmed sprint-22c LP is already on per-layer integer grid; gap is dot's network-simplex layer centering, not within-layer quantization. Sprint-24 fix: tighten Brandes-Koepf with explicit layer-center constraints OR ship hex-staggered LP variant (~40 LOC, B Claude fallback)."}
+  ],
+  "sprint23_per_graph_lifts": [
+    {"graph": "dependency_500", "before": "-1.92 (close)", "after": "-0.31 (TIE)", "primitive": "median_transpose_polish (sprint-23c)"},
+    {"graph": "outerplanar_dag_20", "before": "-0.74 (close)", "after": "-0.15 (TIE)", "primitive": "outerplanar_source_fan_spine (sprint-23b)"},
+    {"graph": "multi_component_80", "before": "-0.64 (close)", "after": "-0.42 (TIE)", "primitive": "multi_component_row_major_repack (sprint-23b) + margin tweak (sprint-23a)"}
+  ],
+  "sprint24_target_100pct_best_or_tied": {
+    "goal": "tied or winning at every single graph structure (delta >= -0.5 vs every competitor on every graph)",
+    "blockers": ["petersen_10 -2.72", "clustered_medium_5x20 -1.41", "hexagonal_lattice_42 -0.63"],
+    "approach": [
+      "Bet 1: full Sugiyama (Coffman-Graham layering + crossing-explicit ordering + NSE x-coord + depth_spearman-preserving tiebreak). Targets petersen.",
+      "Bet 2: cluster-bridge-aware Brandes-Koepf. Targets clustered_medium_5x20.",
+      "Bet 3: hex-staggered LP variant or BK layer-center constraints. Targets hexagonal_lattice_42."
+    ]
+  }
 }
