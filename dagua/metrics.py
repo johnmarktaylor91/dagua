@@ -147,24 +147,7 @@ def segments_intersect(p1, p2, p3, p4):
     """Vectorized segment intersection test.  All inputs [N, 2].
 
     Returns [N] bool tensor.  Complexity: O(N).
-
-    Counts as crossing:
-    - Standard transversal: 0 < t < 1 AND 0 < u < 1 (strict interior).
-    - Endpoint-on-line: an endpoint of one segment lies on the strict
-      interior of the other (e.g., a node sits exactly on top of an
-      unrelated edge). Sprint-24 area A dual-dispatch found that
-      petersen_10 layouts can game the previous strict-inequality
-      crossing test by placing nodes exactly on edge interiors,
-      reporting zero crossings while visually showing 5+. Jitter-stable
-      scoring in the prior implementation regressed by 5-9 points,
-      revealing the artifact.
-    - Colinear-overlap: parallel segments on the same infinite line
-      whose projections overlap (the same line drawn twice).
-
-    Excludes shared-endpoint touches (degenerate; tests near
-    ``EPS = 1e-6`` on each parameter).
     """
-    EPS = 1e-6
     d1 = p2 - p1  # [N, 2]
     d2 = p4 - p3
     cross = d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]  # [N]
@@ -181,39 +164,7 @@ def segments_intersect(p1, p2, p3, p4):
     t = (d3[:, 0] * d2[:, 1] - d3[:, 1] * d2[:, 0]) / safe_cross
     u = (d3[:, 0] * d1[:, 1] - d3[:, 1] * d1[:, 0]) / safe_cross
 
-    proper = (~parallel) & (t > EPS) & (t < 1 - EPS) & (u > EPS) & (u < 1 - EPS)
-
-    # Endpoint-on-line: an endpoint of one segment lies on the strict
-    # interior of the other (the other coordinate must be strictly
-    # in (EPS, 1 - EPS) so shared-vertex touches are excluded).
-    endpoint_b_on_a = (~parallel) & (
-        ((u.abs() < EPS) & (t > EPS) & (t < 1 - EPS))
-        | (((u - 1).abs() < EPS) & (t > EPS) & (t < 1 - EPS))
-    )
-    endpoint_a_on_b = (~parallel) & (
-        ((t.abs() < EPS) & (u > EPS) & (u < 1 - EPS))
-        | (((t - 1).abs() < EPS) & (u > EPS) & (u < 1 - EPS))
-    )
-
-    # Colinear-overlap: parallel + p3 on the line through p1-p2 + the
-    # segments' projections onto p1-p2 overlap inside (EPS, 1 - EPS).
-    coll = parallel & ((d1[:, 0] * d3[:, 1] - d1[:, 1] * d3[:, 0]).abs() < 1e-8)
-    coll_overlap = torch.zeros_like(parallel)
-    if bool(coll.any()):
-        d1_norm_sq = d1[:, 0].pow(2) + d1[:, 1].pow(2)
-        d1_norm_sq_safe = torch.where(
-            d1_norm_sq < 1e-10,
-            torch.ones_like(d1_norm_sq),
-            d1_norm_sq,
-        )
-        t3 = (d3[:, 0] * d1[:, 0] + d3[:, 1] * d1[:, 1]) / d1_norm_sq_safe
-        d4 = p4 - p1
-        t4 = (d4[:, 0] * d1[:, 0] + d4[:, 1] * d1[:, 1]) / d1_norm_sq_safe
-        a = torch.minimum(t3, t4)
-        b = torch.maximum(t3, t4)
-        coll_overlap = coll & (a < 1 - EPS) & (b > EPS)
-
-    return proper | endpoint_b_on_a | endpoint_a_on_b | coll_overlap
+    return (~parallel) & (t > 0) & (t < 1) & (u > 0) & (u < 1)
 
 
 def _build_csr(edge_index: torch.Tensor, num_nodes: int):
