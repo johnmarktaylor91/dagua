@@ -13,7 +13,17 @@
     "b40261a sprint-20k: best-of-polish edge-equalize closes 6 of 10 moderate-loss bucket gaps",
     "8d92d8f sprint-20k: fix native_planar regression test for edge-equalize polish",
     "ab14c2d sprint-20k: gate file update with polish + per-competitor h2h evolution",
-    "ae2e545 sprint-20l: extend polish to component-tiled path + add aggressive variants"
+    "ae2e545 sprint-20l: extend polish to component-tiled path + add aggressive variants",
+    "97286e4 sprint-20l: gate file update -- 97% competitive, big_loss bucket empty",
+    "52517d7 sprint-21a: add 5 new polish primitives to _best_of_polish",
+    "c821eb6 sprint-21b: allow tree/chain children to re-classify in component dispatch",
+    "1ee12d7 sprint-22a: back-edge-aware relayer polish primitive (5-graph multi-flip)",
+    "da58b14 sprint-22b: make composite() metric deterministic without external seeding",
+    "83fdd51 sprint-22b: global-depth align polish for multi-component DAGs (+2.18 disc_enc_residual)",
+    "205ce1b sprint-22c: dot-mimic LP polish candidate for layered DAGs (+1.13 tri_lattice_36)",
+    "88c7343 sprint-22d: tutte_cyclic_planar polish for disjoint directed cycles (+3.25 parallel_cycles)",
+    "fd1f200 sprint-22e: gap-validated layer swaps for large dependency-style DAGs (+0.99 dep_500)",
+    "539ae15 sprint-22: relax hex_lattice dummy_nodes test to >= post-polish saturation"
   ],
   "h2h_distribution": {
     "baseline_sprint20h": {
@@ -56,6 +66,28 @@
       "best_or_tied_pct": 88,
       "competitive_pct": 97,
       "note": "Big_loss bucket emptied. Only 3 graphs in moderate_loss: dependency_500 -2.90, petersen_10 -2.72 (was -5.07!), hex_lattice -2.52."
+    },
+    "after_sprint21b": {
+      "win_strong_>+5": 40,
+      "win_modest_+0.5_to_+5": 36,
+      "tie_-0.5_to_+0.5": 7,
+      "close_loss_-2_to_-0.5": 8,
+      "moderate_loss_-5_to_-2": 2,
+      "big_loss_<-5": 0,
+      "best_or_tied_pct": 89,
+      "competitive_pct": 98,
+      "note": "Sprint-21a added 5 new polish primitives + sprint-21b fixed F-bug for tree/chain re-classification."
+    },
+    "after_sprint22": {
+      "win_strong_>+5": 40,
+      "win_modest_+0.5_to_+5": 41,
+      "tie_-0.5_to_+0.5": 6,
+      "close_loss_-2_to_-0.5": 5,
+      "moderate_loss_-5_to_-2": 1,
+      "big_loss_<-5": 0,
+      "best_or_tied_pct": 94,
+      "competitive_pct": 99,
+      "note": "Sprint-22 added 4 algorithm bets (back-edge relayer, global-depth align, dot-mimic LP, tutte_cyclic_planar, gap-validated swaps). Best-or-tied 89% -> 94%, competitive 98% -> 99%. Only petersen_10 -2.72 remains in moderate_loss bucket."
     }
   },
   "per_competitor_h2h": {
@@ -107,5 +139,15 @@
     {"graph": "dependency_500", "delta": "-2.90", "diagnosis": "edge_length_cv 0.95 vs elk 0.79; gradient saturated AND polish would regress (margin filter keeps baseline). Large DAG (N=500) -- needs grid-snap for layered y-rank."},
     {"graph": "petersen_10", "delta": "-2.72 (was -5.07!)", "diagnosis": "non-planar 3-regular; sugiyama wins on this class. Polish improved by +2.35 from sprint-20l aggressive variants -- escaped big_loss bucket but ceiling is the algorithm itself."},
     {"graph": "hexagonal_lattice_42", "delta": "-2.52 (was -3.77)", "diagnosis": "polish reduced gap by +1.25. Remaining gap is dot's deterministic grid placement vs dagua's gradient placement -- needs lattice-aware grid-snap."}
+  ],
+  "remaining_open_targets_post_sprint22": [
+    {"graph": "petersen_10", "delta": "-2.72", "diagnosis": "non-planar 3-regular Petersen graph; igraph_sugiyama wins by structural fit. dagua=74.64, sugiyama=77.36. Algorithm-ceiling -- would require a sugiyama-style integer-grid coordinate assignment to flip. Sprint-22 area F dual-dispatch confirmed no polish primitive escapes this gap. ONLY non-competitive graph remaining (1/93)."}
+  ],
+  "sprint22_per_graph_lifts": [
+    {"graph": "disconnected_encoder_residual", "before": "-1.62", "after": "+0.56 strict win", "primitive": "global_depth_align (sprint-22b)"},
+    {"graph": "triangular_lattice_36", "before": "-1.61", "after": "-0.48 close-loss", "primitive": "dot_lattice_lp (sprint-22c)"},
+    {"graph": "parallel_cycles_4x5", "before": "-0.62", "after": "+2.63 strict win vs sfdp", "primitive": "tutte_cyclic_planar (sprint-22d)"},
+    {"graph": "dependency_500", "before": "-2.91", "after": "-1.92 close-loss", "primitive": "gap_validated_layer_swaps (sprint-22e)"},
+    {"graph": "small_world_500 / recurrent_feedback_cell / braided_feedback_tails / parallel_cycles_4x5 / small_world_100", "before": "various close-loss / tie", "after": "multi-flip", "primitive": "back_edge_relayer (sprint-22a)"}
   ]
 }
