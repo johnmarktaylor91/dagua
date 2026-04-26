@@ -820,50 +820,6 @@ def _layered_neighbors_from_edges(
     return parents, children
 
 
-def _weak_component_sizes(edge_index: torch.Tensor, num_nodes: int) -> List[int]:
-    """Return exact weak-component sizes for a directed graph.
-
-    Parameters
-    ----------
-    edge_index : torch.Tensor
-        CPU edge tensor with shape ``[2, E]``.
-    num_nodes : int
-        Number of graph nodes ``N``.
-
-    Returns
-    -------
-    list of int
-        Weak-component sizes sorted descending.
-    """
-    if num_nodes == 0:
-        return []
-
-    adjacency: List[List[int]] = [[] for _ in range(num_nodes)]
-    for source, target in edge_index.t().tolist():
-        adjacency[source].append(target)
-        adjacency[target].append(source)
-
-    seen = [False] * num_nodes
-    sizes: List[int] = []
-    for start in range(num_nodes):
-        if seen[start]:
-            continue
-        stack = [start]
-        seen[start] = True
-        component_size = 0
-        while stack:
-            node = stack.pop()
-            component_size += 1
-            for neighbor in adjacency[node]:
-                if seen[neighbor]:
-                    continue
-                seen[neighbor] = True
-                stack.append(neighbor)
-        sizes.append(component_size)
-    sizes.sort(reverse=True)
-    return sizes
-
-
 def _has_strict_forward_layering(edge_index: torch.Tensor, layers: torch.Tensor) -> bool:
     """Return whether every edge advances in the current layer assignment.
 
@@ -1019,10 +975,6 @@ def _should_apply_brandes_koepf_refine(
 
     num_layers = int(layers.max().item()) + 1 if layers.numel() > 0 else 0
     if num_layers < min_layers:
-        return False
-
-    component_sizes = _weak_component_sizes(edge_index=edge_index, num_nodes=num_nodes)
-    if component_sizes not in ([num_nodes], [num_nodes - 1, 1]):
         return False
 
     return _has_strict_forward_layering(edge_index=edge_index, layers=layers)
