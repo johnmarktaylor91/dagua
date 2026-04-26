@@ -1952,6 +1952,228 @@ def _gap_validated_layer_swaps(
     return best
 
 
+def _should_median_transpose_polish(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+) -> bool:
+    """Gate the median-transpose polish for large dense DAGs.
+
+    Sprint-23 area C dual-dispatch identified the dependency_500
+    close-loss as a within-layer x-order problem the gradient pipeline's
+    final 4-pass median sweep + 8-pass transpose doesn't resolve. A
+    deeper 24-sweep median-with-transpose run as a polish candidate
+    closes most of the remaining CV gap. The gate has to be strict
+    because random_dag_200 regresses -3.2 under the same algorithm
+    (different topology signature, sparse not dense).
+
+    Conservative gate: N >= 200, E/N >= 2.0, edge_length_cv >= 0.5.
+    Single-component check intentionally omitted: dependency_500 has 2
+    components but is the primary target. Picker margin (0.1) absorbs
+    multi-component regression risk.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the topology and CV justify the deeper sweep.
+    """
+    n = int(pos.shape[0])
+    if n < 200 or edge_index.numel() == 0:
+        return False
+    e = int(edge_index.shape[1])
+    if e < 2 * n:
+        return False
+    src = edge_index[0]
+    tgt = edge_index[1]
+    diffs = pos[tgt] - pos[src]
+    lengths = diffs.pow(2).sum(-1).sqrt()
+    finite = lengths[torch.isfinite(lengths)]
+    if finite.numel() == 0:
+        return False
+    mean = float(finite.mean().item())
+    if mean <= 1e-6:
+        return False
+    cv = float(finite.std().item()) / mean
+    if cv < 0.5:
+        return False
+    return True
+
+
+def _median_transpose_polish(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    score_fn: Callable[[torch.Tensor], float],
+    sweeps: int = 24,
+) -> torch.Tensor:
+    """Run 24-pass median ordering with transpose phase as polish.
+
+    Sprint-23 area C dual-dispatch found that the gradient pipeline's
+    final ordering pass (4 median sweeps + 8 transpose passes) is
+    insufficient on large dense DAGs like dependency_500. A deeper
+    median-with-transpose run as a post-pipeline polish candidate
+    improves edge_length_cv from 0.91 to 0.79 on dependency_500 and
+    lifts composite by +1.47..+1.81 (Claude vs codex measurements).
+
+    The candidate preserves the per-layer x-slot multiset (it only
+    permutes node-to-slot assignment within each layer); y is
+    unchanged, so dag_consistency and depth_spearman are preserved by
+    construction. The picker margin gate (0.1 post sprint-23a) handles
+    regression risk.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``. Unused but kept for the
+        polish-candidate signature.
+    score_fn : Callable[[torch.Tensor], float]
+        Composite scoring function; the picker validates the candidate
+        through this callback after the function returns.
+    sweeps : int, default=24
+        Number of median-then-transpose sweeps.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    """
+    del node_sizes, score_fn
+    cand = pos.detach().clone()
+    if not _should_median_transpose_polish(cand, edge_index):
+        return cand
+    n = int(cand.shape[0])
+    try:
+        from dagua.utils import longest_path_layering
+
+        raw_depth = longest_path_layering(edge_index, n)
+    except Exception:
+        return cand
+    if isinstance(raw_depth, torch.Tensor):
+        depth = raw_depth.cpu().to(torch.long).tolist()
+    else:
+        depth = [int(d) for d in raw_depth]
+
+    src_list = edge_index[0].cpu().tolist()
+    tgt_list = edge_index[1].cpu().tolist()
+    parents: list[list[int]] = [[] for _ in range(n)]
+    children: list[list[int]] = [[] for _ in range(n)]
+    for s, t in zip(src_list, tgt_list):
+        if s == t:
+            continue
+        if depth[s] < depth[t]:
+            children[s].append(t)
+            parents[t].append(s)
+        elif depth[t] < depth[s]:
+            children[t].append(s)
+            parents[s].append(t)
+
+    layers_dict: dict[int, list[int]] = {}
+    for v in range(n):
+        layers_dict.setdefault(int(depth[v]), []).append(v)
+    sorted_keys = sorted(layers_dict.keys())
+    x_vals = cand[:, 0].cpu().tolist()
+    layered = [sorted(layers_dict[k], key=lambda v: x_vals[v]) for k in sorted_keys]
+    layer_count = len(layered)
+    if layer_count < 2:
+        return cand
+
+    def _order_map() -> dict[int, int]:
+        return {v: i for layer in layered for i, v in enumerate(layer)}
+
+    def _local_crossings(
+        layer_idx: int,
+        nodes_pair: list[int],
+    ) -> int:
+        # Count crossings between adjacent layers for the two nodes in
+        # nodes_pair only (cheap: bounded by their degrees).
+        order = _order_map()
+        a, b = nodes_pair[0], nodes_pair[1]
+        crossings = 0
+        # Above
+        if layer_idx > 0:
+            for u_a in parents[a]:
+                for u_b in parents[b]:
+                    if u_a == u_b:
+                        continue
+                    if (order.get(u_a, -1) > order.get(u_b, -1)) != (order[a] > order[b]):
+                        crossings += 1
+        # Below
+        if layer_idx < layer_count - 1:
+            for w_a in children[a]:
+                for w_b in children[b]:
+                    if w_a == w_b:
+                        continue
+                    if (order.get(w_a, -1) > order.get(w_b, -1)) != (order[a] > order[b]):
+                        crossings += 1
+        return crossings
+
+    for sweep in range(sweeps):
+        order = _order_map()
+        if sweep % 2 == 0:
+            layer_iter = range(1, layer_count)
+            reference = parents
+        else:
+            layer_iter = range(layer_count - 2, -1, -1)
+            reference = children
+        for layer_idx in layer_iter:
+            nodes = layered[layer_idx]
+            if len(nodes) < 2:
+                continue
+            stable = {v: i for i, v in enumerate(nodes)}
+            scores: dict[int, float] = {}
+            for v in nodes:
+                neighbor_ranks = sorted(order[u] for u in reference[v] if u in order)
+                if not neighbor_ranks:
+                    scores[v] = float(order[v])
+                elif len(neighbor_ranks) % 2 == 1:
+                    scores[v] = float(neighbor_ranks[len(neighbor_ranks) // 2])
+                else:
+                    mid = len(neighbor_ranks) // 2
+                    scores[v] = 0.5 * (neighbor_ranks[mid - 1] + neighbor_ranks[mid])
+            nodes.sort(key=lambda v: (scores[v], stable[v], v))
+
+        # Transpose phase: bounded local-crossing improvement only.
+        changed = True
+        passes = 0
+        while changed and passes < 4:
+            changed = False
+            passes += 1
+            for layer_idx in range(layer_count):
+                nodes = layered[layer_idx]
+                for i in range(len(nodes) - 1):
+                    u, v = nodes[i], nodes[i + 1]
+                    before = _local_crossings(layer_idx, [u, v])
+                    nodes[i], nodes[i + 1] = v, u
+                    after = _local_crossings(layer_idx, [v, u])
+                    if after < before:
+                        changed = True
+                    else:
+                        nodes[i], nodes[i + 1] = u, v
+
+    # Project new ordering onto existing per-layer x slots.
+    new_x = cand[:, 0].clone()
+    for layer_idx, nodes in enumerate(layered):
+        if len(nodes) < 2:
+            continue
+        idx = torch.tensor(nodes, dtype=torch.long, device=cand.device)
+        slot_xs = torch.sort(cand[idx, 0]).values
+        for rank, v in enumerate(nodes):
+            new_x[v] = slot_xs[rank]
+    out = cand.clone()
+    out[:, 0] = new_x
+    return out
+
+
 def _is_source_fan_outerplanar(edge_index: torch.Tensor, num_nodes: int) -> bool:
     """Gate the source-fan outerplanar polish.
 
@@ -2314,6 +2536,15 @@ def _best_of_polish(
                 base_pos,
                 edges,
                 sizes,
+            ),
+        ),
+        (
+            "median_transpose_polish",
+            lambda pos, edges, sizes: _median_transpose_polish(
+                base_pos,
+                edges,
+                sizes,
+                score_fn=score,
             ),
         ),
     ]
