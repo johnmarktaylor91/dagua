@@ -1370,7 +1370,7 @@ def _detect_back_edges_dfs(edge_index: torch.Tensor, num_nodes: int) -> torch.Te
     graph.
     """
     if edge_index.numel() == 0:
-        return torch.zeros(0, dtype=torch.bool)
+        return torch.zeros(0, dtype=torch.bool, device=edge_index.device)
     src = edge_index[0]
     tgt = edge_index[1]
     self_mask = src == tgt
@@ -1382,7 +1382,7 @@ def _detect_back_edges_dfs(edge_index: torch.Tensor, num_nodes: int) -> torch.Te
             continue
         adj[s_i].append((t_i, i))
     color = [0] * num_nodes
-    back = torch.zeros(edge_index.shape[1], dtype=torch.bool)
+    back = torch.zeros(edge_index.shape[1], dtype=torch.bool, device=edge_index.device)
     for start in range(num_nodes):
         if color[start] != 0:
             continue
@@ -1526,8 +1526,8 @@ def _should_tutte_cyclic_planar(edge_index: torch.Tensor, num_nodes: int) -> boo
     tgt = edge_index[1]
     if bool((src == tgt).any().item()):
         return False
-    indeg = torch.zeros(num_nodes, dtype=torch.long)
-    outdeg = torch.zeros(num_nodes, dtype=torch.long)
+    indeg = torch.zeros(num_nodes, dtype=torch.long, device=edge_index.device)
+    outdeg = torch.zeros(num_nodes, dtype=torch.long, device=edge_index.device)
     indeg.index_add_(0, tgt, torch.ones_like(tgt))
     outdeg.index_add_(0, src, torch.ones_like(src))
     if not bool((indeg == 1).all().item()):
@@ -1877,9 +1877,9 @@ def _gap_validated_layer_swaps(
     except Exception:
         return cand
     layers = (
-        raw_depth.to(torch.long)
+        raw_depth.to(torch.long).to(cand.device)
         if isinstance(raw_depth, torch.Tensor)
-        else torch.as_tensor(raw_depth, dtype=torch.long)
+        else torch.as_tensor(raw_depth, dtype=torch.long, device=cand.device)
     )
 
     src = edge_index[0]

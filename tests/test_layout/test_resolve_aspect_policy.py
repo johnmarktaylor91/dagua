@@ -106,15 +106,26 @@ def test_tree_family_keeps_tall_default_target() -> None:
 
 
 def test_hexagonal_lattice_layout_moves_to_lattice_aspect() -> None:
-    """The native pipeline should emit hexagonal lattice positions near the tag target."""
+    """The native pipeline should emit hexagonal lattice positions near the tag target.
+
+    Sprint-22c added a dot-mimic LP polish primitive whose chosen LP
+    coordinates can override the lattice-aspect snap when the LP solution
+    scores higher composite. To keep this test focused on the
+    aspect-snap mechanism (rather than the post-hoc polish picker) we
+    disable ``edge_equalize_polish`` and assert against the un-polished
+    gradient output. Using ``algorithm=None`` (the default routing path)
+    is required because ``algorithm="dagua_native"`` does not forward
+    the user-facing config to the pipeline, so the polish flag is not
+    honored on the explicit-algorithm path.
+    """
     graph = _make_hexagonal_lattice_graph(rows=6, cols=7)
     pos = layout(
         graph,
         LayoutConfig(
-            algorithm="dagua_native",
             steps=20,
             seed=42,
             device="cpu",
+            edge_equalize_polish=False,
         ),
     )
 
