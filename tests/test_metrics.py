@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 
+import dagua.metrics as metrics_module
 from dagua import layout
 from dagua.graph import DaguaGraph
 from dagua.metrics import (
+    _all_pairs_unweighted,
+    _bfs_distances,
+    _build_csr,
     compute_all_metrics,
     compute_dag_fraction,
     compute_edge_straightness,
@@ -15,7 +20,9 @@ from dagua.metrics import (
     count_crossings,
     count_overlaps,
     evaluate,
+    full,
     layout_similarity,
+    neighborhood_preservation,
     sampled_stress,
 )
 
@@ -225,3 +232,116 @@ class TestLayoutSimilarityAndEvaluate:
         stress_a = sampled_stress(pos, edge_index, 50)["sampled_stress"]
         stress_b = sampled_stress(pos * 100.0, edge_index, 50)["sampled_stress"]
         assert abs(stress_a - stress_b) < 0.01 * max(stress_a, stress_b, 1e-6)
+
+    def test_all_pairs_distances_match_truncated_bfs(self) -> None:
+        """Vectorized graph distances should match the legacy BFS contract.
+
+        Returns
+        -------
+        None
+            This test asserts all-pairs distances, disconnected pairs, and
+            truncation semantics.
+        """
+        edge_index = torch.tensor([[0, 1, 2, 4], [1, 2, 3, 5]], dtype=torch.long)
+        csr_offsets, csr_targets = _build_csr(edge_index, 7)
+        all_pairs = _all_pairs_unweighted(csr_offsets, csr_targets, 7, max_dist=2)
+
+        for source in range(7):
+            bfs_dist = _bfs_distances(csr_offsets, csr_targets, source, max_dist=2)
+            assert all_pairs[source].tolist() == bfs_dist.tolist()
+
+    def test_sampled_metrics_accept_precomputed_all_pairs(self) -> None:
+        """Affected sampled metrics should preserve values with cached distances.
+
+        Returns
+        -------
+        None
+            This test compares direct and precomputed-distance metric values.
+        """
+        torch.manual_seed(0)
+        pos = torch.randn(8, 2)
+        edge_index = torch.tensor(
+            [[0, 1, 2, 2, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7]],
+            dtype=torch.long,
+        )
+        csr_offsets, csr_targets = _build_csr(edge_index, 8)
+        all_pairs = _all_pairs_unweighted(csr_offsets, csr_targets, 8, max_dist=20)
+
+        stress_direct = sampled_stress(pos, edge_index, 8)
+        stress_cached = sampled_stress(pos, edge_index, 8, all_pairs_dist=all_pairs)
+        assert stress_cached == pytest.approx(stress_direct)
+
+        torch.manual_seed(123)
+        neighborhood_direct = neighborhood_preservation(pos, edge_index, 8, n_samples=8, k=3)
+        torch.manual_seed(123)
+        neighborhood_cached = neighborhood_preservation(
+            pos,
+            edge_index,
+            8,
+            n_samples=8,
+            k=3,
+            all_pairs_dist=all_pairs,
+        )
+        assert neighborhood_cached == pytest.approx(neighborhood_direct)
+
+    def test_full_reuses_one_all_pairs_distance_matrix(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``full`` should compute graph distances once for shared sampled metrics.
+
+        Parameters
+        ----------
+        monkeypatch : pytest.MonkeyPatch
+            Pytest monkeypatch fixture used to count helper calls.
+
+        Returns
+        -------
+        None
+            This test asserts that one all-pairs matrix is shared by stress and
+            neighborhood preservation.
+        """
+        calls = 0
+        original = metrics_module._all_pairs_unweighted
+
+        def counting_all_pairs(
+            csr_offsets: np.ndarray,
+            csr_targets: np.ndarray,
+            num_nodes: int,
+            max_dist: int = 20,
+        ) -> np.ndarray:
+            """Count all-pairs calls while delegating to the real helper.
+
+            Parameters
+            ----------
+            csr_offsets : numpy.ndarray
+                CSR row offsets.
+            csr_targets : numpy.ndarray
+                CSR target indices.
+            num_nodes : int
+                Number of graph nodes.
+            max_dist : int, optional
+                Maximum retained graph distance.
+
+            Returns
+            -------
+            numpy.ndarray
+                Delegated all-pairs distance matrix.
+            """
+            nonlocal calls
+            calls += 1
+            return original(csr_offsets, csr_targets, num_nodes, max_dist=max_dist)
+
+        monkeypatch.setattr(metrics_module, "_all_pairs_unweighted", counting_all_pairs)
+        pos = torch.randn(12, 2)
+        edge_index = torch.tensor([[0, 1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6]], dtype=torch.long)
+
+        full(
+            pos,
+            edge_index,
+            stress_sources=4,
+            stress_targets=4,
+            crossing_samples=10,
+            neighborhood_samples=4,
+        )
+
+        assert calls == 1

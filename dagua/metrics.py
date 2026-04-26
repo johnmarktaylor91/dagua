@@ -201,8 +201,22 @@ def segments_intersect(p1, p2, p3, p4):
     return proper | collinear_overlap
 
 
-def _build_csr(edge_index: torch.Tensor, num_nodes: int):
-    """Build CSR adjacency from edge_index.  Returns (offsets, targets) numpy arrays."""
+def _build_csr(edge_index: torch.Tensor, num_nodes: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Build an undirected CSR adjacency from an edge index.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    Tuple[numpy.ndarray, numpy.ndarray]
+        CSR row offsets with shape ``[N + 1]`` and target indices with shape
+        ``[2E]``.
+    """
     src, tgt = edge_index[0], edge_index[1]
     # Make undirected for BFS
     all_src = torch.cat([src, tgt])
@@ -218,8 +232,81 @@ def _build_csr(edge_index: torch.Tensor, num_nodes: int):
     return offsets.numpy(), csr_tgt
 
 
-def _bfs_distances(csr_offsets, csr_targets, source: int, max_dist: int = 20):
-    """BFS from source using CSR adjacency.  Returns numpy array of distances (-1 = unreached)."""
+def _all_pairs_unweighted(
+    csr_offsets: np.ndarray,
+    csr_targets: np.ndarray,
+    num_nodes: int,
+    max_dist: int = 20,
+) -> np.ndarray:
+    """Compute all-pairs unweighted shortest paths with scipy.
+
+    Parameters
+    ----------
+    csr_offsets : numpy.ndarray
+        CSR row offsets with shape ``[N + 1]``.
+    csr_targets : numpy.ndarray
+        CSR column indices with shape ``[2E]``.
+    num_nodes : int
+        Number of graph nodes.
+    max_dist : int, optional
+        Maximum distance to preserve. Larger distances are reported as
+        unreachable to match ``_bfs_distances`` truncation.
+
+    Returns
+    -------
+    numpy.ndarray
+        Integer distance matrix with shape ``[N, N]``. Unreachable pairs and
+        distances greater than ``max_dist`` are encoded as ``-1``.
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import shortest_path
+
+    adjacency = csr_matrix(
+        (
+            np.ones(csr_targets.shape[0], dtype=np.float32),
+            csr_targets,
+            csr_offsets,
+        ),
+        shape=(num_nodes, num_nodes),
+    )
+    distances = shortest_path(
+        adjacency,
+        method="D",
+        directed=False,
+        unweighted=True,
+    )
+    finite = np.isfinite(distances)
+    distance_int = np.full(distances.shape, -1, dtype=np.int64)
+    distance_int[finite] = distances[finite].astype(np.int64)
+    distance_int[distance_int > max_dist] = -1
+    return distance_int
+
+
+def _bfs_distances(
+    csr_offsets: np.ndarray,
+    csr_targets: np.ndarray,
+    source: int,
+    max_dist: int = 20,
+) -> np.ndarray:
+    """Compute truncated BFS distances from one source.
+
+    Parameters
+    ----------
+    csr_offsets : numpy.ndarray
+        CSR row offsets with shape ``[N + 1]``.
+    csr_targets : numpy.ndarray
+        CSR column indices with shape ``[2E]``.
+    source : int
+        Source node index.
+    max_dist : int, optional
+        Maximum distance to explore.
+
+    Returns
+    -------
+    numpy.ndarray
+        Distance vector with shape ``[N]``. Unreachable nodes and distances
+        greater than ``max_dist`` are encoded as ``-1``.
+    """
     N = len(csr_offsets) - 1
     dist = np.full(N, -1, dtype=np.int64)
     dist[source] = 0
@@ -552,6 +639,7 @@ def sampled_stress(
     n_sources: int = 200,
     n_targets: int = 1000,
     max_dist: int = 20,
+    all_pairs_dist: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """Estimate graph-theoretic stress from deterministic source samples.
 
@@ -569,6 +657,10 @@ def sampled_stress(
         Maximum number of reachable targets to evaluate per source.
     max_dist : int, optional
         Maximum graph distance to explore during BFS.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Precomputed unweighted shortest-path matrix with shape ``[N, N]``.
+        When provided, this avoids recomputing graph distances inside repeated
+        metric evaluations.
 
     Returns
     -------
@@ -599,14 +691,16 @@ def sampled_stress(
     pos_norm = (pos_cpu - mins) / span
     pos_np = pos_norm.numpy()
 
-    csr_off, csr_tgt = _build_csr(ei, N)
+    if all_pairs_dist is None:
+        csr_off, csr_tgt = _build_csr(ei, N)
+        all_pairs_dist = _all_pairs_unweighted(csr_off, csr_tgt, N, max_dist=max_dist)
     sources = _deterministic_sample_indices(N, min(n_sources, N))
 
     total_stress = 0.0
     count = 0
 
     for src_node in sources:
-        dist = _bfs_distances(csr_off, csr_tgt, int(src_node), max_dist=max_dist)
+        dist = all_pairs_dist[int(src_node)]
 
         reachable = np.where(dist > 0)[0]
         if len(reachable) == 0:
@@ -740,11 +834,40 @@ def sampled_crossing_rate(
 
 
 def neighborhood_preservation(
-    pos: torch.Tensor, edge_index: torch.Tensor, num_nodes: int, n_samples: int = 5000, k: int = 10
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    n_samples: int = 5000,
+    k: int = 10,
+    all_pairs_dist: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """Fraction of k-nearest graph neighbors that are also k-nearest Euclidean neighbors.
 
-    Complexity: O(n_samples * (BFS_cost + N)) — use spatial index for large N.
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the graph.
+    n_samples : int, optional
+        Maximum number of sampled source nodes.
+    k : int, optional
+        Number of nearest graph and Euclidean neighbors to compare.
+    all_pairs_dist : Optional[numpy.ndarray], optional
+        Precomputed unweighted shortest-path matrix with shape ``[N, N]``.
+        When provided, this avoids recomputing graph distances inside repeated
+        metric evaluations.
+
+    Returns
+    -------
+    Dict[str, float]
+        Mean, median, and standard deviation of sampled neighborhood
+        preservation scores.
+
+    Notes
+    -----
     Target: > 0.5 good, > 0.7 excellent.
     """
     pos_np = pos.cpu().numpy()
@@ -754,13 +877,15 @@ def neighborhood_preservation(
     if ei.numel() == 0 or N < k + 1:
         return {"neighborhood_mean": 0.0, "neighborhood_median": 0.0, "neighborhood_std": 0.0}
 
-    csr_off, csr_tgt = _build_csr(ei, N)
+    if all_pairs_dist is None:
+        csr_off, csr_tgt = _build_csr(ei, N)
+        all_pairs_dist = _all_pairs_unweighted(csr_off, csr_tgt, N, max_dist=k)
     samples = torch.randperm(N)[: min(n_samples, N)].numpy()
 
     scores = []
     for node in samples:
         # k nearest graph neighbors via BFS
-        dist = _bfs_distances(csr_off, csr_tgt, int(node), max_dist=k)
+        dist = all_pairs_dist[int(node)]
         reachable = np.where((dist > 0) & (dist <= k))[0]
         if len(reachable) < k:
             graph_neighbors = set(reachable.tolist())
@@ -1543,7 +1668,7 @@ def quick(
 def full(
     pos: torch.Tensor,
     edge_index: torch.Tensor,
-    topo_depth=None,
+    topo_depth: Optional[Any] = None,
     node_sizes: Optional[torch.Tensor] = None,
     cluster_ids: Optional[torch.Tensor] = None,
     direction: str = "TB",
@@ -1551,30 +1676,48 @@ def full(
     stress_targets: int = 1000,
     crossing_samples: int = 1_000_000,
     neighborhood_samples: int = 5000,
-    curves=None,
-    label_positions=None,
-    edge_labels=None,
+    curves: Optional[Any] = None,
+    label_positions: Optional[Any] = None,
+    edge_labels: Optional[Any] = None,
     back_edge_mask: Optional[torch.Tensor] = None,
 ) -> Dict[str, Any]:
     """All metrics including sampled Tier-2 and DAG-specific Tier-3.
 
-    Args:
-        pos: [N, 2] positions.
-        edge_index: [2, E] edge tensor.
-        topo_depth: [N] topological depths (computed if None).
-        node_sizes: [N, 2] for overlap/cluster metrics.
-        cluster_ids: [N] cluster assignments for cluster metrics.
-        direction: layout direction.
-        stress_sources: number of BFS sources for stress sampling.
-        stress_targets: number of targets per source.
-        crossing_samples: number of edge pairs to sample.
-        neighborhood_samples: number of nodes to sample.
-        curves: optional BezierCurve list for edge-aware metrics.
-        label_positions: optional pre-computed label positions.
-        edge_labels: optional edge label list for label overlap metrics.
-        back_edge_mask: [E] bool mask of back edges (excluded from dag_consistency).
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    topo_depth : Optional[Any], optional
+        Topological depths with shape ``[N]``. Computed when ``None``.
+    node_sizes : Optional[torch.Tensor], optional
+        Node sizes with shape ``[N, 2]`` for overlap and cluster metrics.
+    cluster_ids : Optional[torch.Tensor], optional
+        Cluster assignments with shape ``[N]``.
+    direction : str, optional
+        Layout direction.
+    stress_sources : int, optional
+        Number of sampled graph-distance sources for stress.
+    stress_targets : int, optional
+        Number of sampled reachable targets per stress source.
+    crossing_samples : int, optional
+        Number of edge pairs to sample for crossings.
+    neighborhood_samples : int, optional
+        Number of nodes to sample for neighborhood preservation.
+    curves : Optional[Any], optional
+        Optional BezierCurve list for edge-aware metrics.
+    label_positions : Optional[Any], optional
+        Optional precomputed label positions.
+    edge_labels : Optional[Any], optional
+        Optional edge label list for label-overlap metrics.
+    back_edge_mask : Optional[torch.Tensor], optional
+        Boolean mask with shape ``[E]`` for back edges excluded from
+        ``dag_consistency``.
 
-    Returns:
+    Returns
+    -------
+    Dict[str, Any]
         Flat dict of all metrics.
     """
     t0 = _time.perf_counter()
@@ -1600,15 +1743,38 @@ def full(
         back_edge_mask=back_edge_mask,
     )
 
-    # Tier 2: Sampled metrics
-    result.update(sampled_stress(pos, ei, N, n_sources=stress_sources, n_targets=stress_targets))
+    # Tier 2: Sampled metrics. Stress and neighborhood preservation both need
+    # graph distances, so full() computes them once per metric evaluation.
+    all_pairs_dist = None
+    if ei.numel() > 0 and N >= 2:
+        csr_off, csr_tgt = _build_csr(ei, N)
+        all_pairs_dist = _all_pairs_unweighted(csr_off, csr_tgt, N, max_dist=20)
+
+    result.update(
+        sampled_stress(
+            pos,
+            ei,
+            N,
+            n_sources=stress_sources,
+            n_targets=stress_targets,
+            all_pairs_dist=all_pairs_dist,
+        )
+    )
     # Pass an explicit seed so composite scoring is deterministic
     # for the same positions. measurement found per-call composite
     # spreads up to 6.9 (std 2.6) on small graphs because sampled_crossing_rate
     # was reading from the global torch RNG. Polish pickers had to torch.manual_seed
     # before each candidate; this makes the metric self-deterministic.
     result.update(sampled_crossing_rate(pos, ei, n_samples=crossing_samples, seed=0))
-    result.update(neighborhood_preservation(pos, ei, N, n_samples=neighborhood_samples))
+    result.update(
+        neighborhood_preservation(
+            pos,
+            ei,
+            N,
+            n_samples=neighborhood_samples,
+            all_pairs_dist=all_pairs_dist,
+        )
+    )
     result.update(angular_resolution(pos, ei))
 
     # Edge-aware metrics (when curves are provided)
