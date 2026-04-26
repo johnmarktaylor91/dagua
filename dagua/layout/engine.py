@@ -970,20 +970,24 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         if "steps" in sig.parameters:
             kwargs["steps"] = config.steps
 
-        # For the flipped default (dagua_native), forward user-visible state
-        # the legacy body used to handle: clusters, flex, config passthrough,
-        # and wrap with cycle-prep + direction transform + cache.
-        if remapped_from_default:
-            if config.flex is not None:
-                config = _resolve_flex_ids(config, graph)
-            if config.flex is None and getattr(graph, "flex", None) is not None:
-                config = copy.copy(config)
-                config.flex = _resolve_graph_flex(graph.flex, graph._id_to_index)
-            kwargs["config"] = config
-            if hasattr(graph, "clusters") and graph.clusters:
-                kwargs["clusters"] = graph.clusters
-            if hasattr(graph, "cluster_parents") and graph.cluster_parents:
-                kwargs["cluster_parents"] = graph.cluster_parents
+        # Forward user-facing state into the pipeline regardless of how the
+        # algorithm was selected. Previously this block was gated on
+        # ``remapped_from_default`` (i.e. ``algorithm=None``) which meant
+        # explicit ``algorithm="dagua_native"`` calls silently dropped the
+        # user's config (including booleans like ``edge_equalize_polish``,
+        # cluster metadata, and flex constraints). Forwarding always closes
+        # that gap; downstream pipelines whose signatures don't accept a
+        # particular kwarg are filtered by the ``accepted`` step below.
+        if config.flex is not None:
+            config = _resolve_flex_ids(config, graph)
+        if config.flex is None and getattr(graph, "flex", None) is not None:
+            config = copy.copy(config)
+            config.flex = _resolve_graph_flex(graph.flex, graph._id_to_index)
+        kwargs["config"] = config
+        if hasattr(graph, "clusters") and graph.clusters:
+            kwargs["clusters"] = graph.clusters
+        if hasattr(graph, "cluster_parents") and graph.cluster_parents:
+            kwargs["cluster_parents"] = graph.cluster_parents
 
         accepted = set(sig.parameters.keys())
         kwargs = {k: v for k, v in kwargs.items() if k in accepted}
