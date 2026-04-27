@@ -13,6 +13,7 @@ from dagua.metrics import (
     _all_pairs_unweighted,
     _bfs_distances,
     _build_csr,
+    composite,
     compute_all_metrics,
     compute_dag_fraction,
     compute_edge_straightness,
@@ -117,6 +118,42 @@ class TestComputeAllMetrics:
         q_good = compute_all_metrics(pos_good, ei, ns)["overall_quality"]
         q_bad = compute_all_metrics(pos_bad, ei, ns)["overall_quality"]
         assert q_good > q_bad
+
+
+def test_composite_includes_sampled_stress_weight() -> None:
+    """Directed composite should apply the 10-point sampled-stress term.
+
+    Returns
+    -------
+    None
+        This test asserts the weighted composite formula with non-trivial
+        normalized component values.
+    """
+    metric_values = {
+        "dag_consistency": 0.5,
+        "edge_length_cv": 0.25,
+        "depth_spearman_rho": 0.5,
+        "overlap_count": 0,
+        "edge_straightness_mean_deg": 15.0,
+        "crossing_rate": 0.05,
+        "sampled_stress": 0.2,
+        "angular_res_mean_deg": 20.0,
+        "cluster_mean_sep_ratio": 2.5,
+    }
+
+    expected = (
+        22 * 0.5
+        + 18 * 0.75
+        + 13 * 0.5
+        + 8
+        + 9 * (1.0 - 15.0 / 45.0)
+        + 9 * (1.0 - 0.05 * 10)
+        + 10 * (1.0 - 0.2)
+        + 5 * (20.0 / 40.0)
+        + 6 * (2.5 / 5.0)
+    )
+
+    assert composite(metric_values) == pytest.approx(expected)
 
 
 class TestDirectionAwareMetrics:
