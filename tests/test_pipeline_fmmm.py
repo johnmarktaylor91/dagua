@@ -9,7 +9,12 @@ import torch
 
 from dagua.layout.classic.fmmm import layout_fmmm
 from dagua.layout.ops.pipelines.fmmm import build_fmmm_pipeline, layout_fmmm_pipeline
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.state import (
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -255,6 +260,40 @@ class TestFMMMPipelineFidelity:
         pipeline = layout_fmmm_pipeline(edge_index=edge_index, num_nodes=15, steps=steps, seed=42)
 
         _assert_exact_match(classic, pipeline)
+
+    def test_layout_fmmm_pipeline_supports_fr_force_model_fallback(self) -> None:
+        """The pipeline should retain the prior FR spring model as a fallback."""
+        edge_index = _path_edge_index(12)
+
+        ogdf_new = layout_fmmm_pipeline(
+            edge_index=edge_index,
+            num_nodes=12,
+            steps=100,
+            seed=42,
+            force_model="ogdf_new",
+        )
+        fr = layout_fmmm_pipeline(
+            edge_index=edge_index,
+            num_nodes=12,
+            steps=100,
+            seed=42,
+            force_model="fr",
+        )
+
+        assert not torch.equal(ogdf_new, fr)
+
+    def test_layout_fmmm_pipeline_rejects_unknown_force_model(self) -> None:
+        """Unknown FM^3 force models should fail before running the pipeline."""
+        edge_index = _path_edge_index(4)
+
+        with pytest.raises(ValueError, match="force_model"):
+            layout_fmmm_pipeline(
+                edge_index=edge_index,
+                num_nodes=4,
+                steps=100,
+                seed=42,
+                force_model="unknown",
+            )
 
     def test_layout_fmmm_pipeline_matches_classic_large_graph_triggers_hierarchy(
         self,
