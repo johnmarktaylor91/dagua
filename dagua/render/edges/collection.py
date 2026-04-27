@@ -201,6 +201,12 @@ class DaguaEdge:
         Source node index when available.
     target_node : int | None, default=None
         Target node index when available.
+    disable_curve_length_clamp : bool, default=False
+        When ``True``, terminal arrowhead dimensions are not capped by the
+        SHORT_EDGE_HEAD_FRACTION clamp. graphviz_strict sets this so arrow
+        markers stay at a constant absolute size across panels (matching
+        dot's PostScript renderer, which never scales arrow markers with
+        edge length). Round 11 F3.
     """
 
     curve: CubicBezier
@@ -233,6 +239,7 @@ class DaguaEdge:
     group_key: Optional[Tuple[int, int]] = None
     source_node: Optional[int] = None
     target_node: Optional[int] = None
+    disable_curve_length_clamp: bool = False
 
     def resolved_arrow_length(self) -> float:
         """Return the effective arrowhead length.
@@ -603,6 +610,15 @@ def _terminal_dimensions(
         base_length = edge.resolved_tail_arrow_length()
         base_width = edge.resolved_tail_arrow_width()
     if curve_length <= FLOAT_EPSILON:
+        return base_length, base_width
+    if edge.disable_curve_length_clamp:
+        # graphviz_strict round 11 F3: dot draws arrowheads at a constant
+        # absolute size regardless of edge length. The default short-edge
+        # clamp made dagua's heads ~0.7x size on tiny_graph/single_edge while
+        # leaving them at full size on pipeline/colors_showcase, producing
+        # the panel-dependent variance the round-10 audit flagged. Returning
+        # the explicit base dimensions keeps every panel at the authored
+        # 12pt x 10pt dot-equivalent silhouette.
         return base_length, base_width
     max_fraction = (
         SHORT_EDGE_HEAD_FRACTION_BOTH_TERMINALS if has_both_terminals else SHORT_EDGE_HEAD_FRACTION
