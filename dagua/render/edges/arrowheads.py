@@ -501,7 +501,7 @@ def _dot(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _open(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build Graphviz's open arrowhead as a stroked V-shape.
+    """Build a legacy stroked V-shape arrowhead.
 
     Parameters
     ----------
@@ -519,9 +519,9 @@ def _open(length: float, width: float, body_width: float) -> ArrowheadResult:
 
     Notes
     -----
-    This stays outline-only on purpose. Graphviz renders ``open`` as a stroked
-    V rather than a filled wedge, so matching that silhouette avoids a heavier
-    terminal than users expect from DOT output.
+    This remains registered for compound compatibility, but Graphviz 8's
+    named ``open`` arrow is resolved as a filled polygon by
+    :func:`parse_arrowhead_spec`.
     """
     overlap = _join_overlap(length, body_width)
     join_x = max(length - overlap, length * 0.58)
@@ -604,7 +604,7 @@ def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build a crow-foot head with three filled tines fanning from the shaft.
+    """Build Graphviz's filled crow marker as one compact polygon.
 
     Parameters
     ----------
@@ -618,58 +618,33 @@ def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
     Returns
     -------
     ArrowheadResult
-        Filled tine geometry sized for ER-style cardinality markers.
+        Filled crow geometry sized for DOT-style arrowheads.
 
     Notes
     -----
-    The tines are deliberately wider than the legacy geometry, but they still
-    stay compact enough that the fork reads as a terminal marker instead of
-    dominating short edge segments.
-
-    Each tine is a narrow filled triangle radiating from the shaft neck
-    toward the tip, matching the ER-diagram "many" convention.
+    Graphviz 8 emits ``crow`` as a filled polygon, not the stroked ER
+    cardinality foot. The polygon keeps the notch silhouette while avoiding
+    the hollow-V appearance that appears after antialiasing at gallery scale.
     """
-    neck_half = max(body_width * 0.5, FLOAT_EPSILON)
-    tine_half = max(
-        _ornament_half_width(width * 1.4, body_width),
-        length * 0.8,
-    )
-    tine_thickness = max(body_width * 0.35, length * 0.10)
-    center_neck_half = max(neck_half + (tine_thickness * 0.35), body_width * 0.7)
-    merged_neck_half = max(center_neck_half - (tine_thickness * 0.25), neck_half * 0.95)
-    # Center tine
-    center = _local_path(
-        [
-            (length, center_neck_half),
-            (0.0, tine_thickness * 0.55),
-            (0.0, -tine_thickness * 0.55),
-            (length, -center_neck_half),
-        ],
-        closed=True,
-    )
-    # Upper tine
-    upper = _local_path(
-        [
-            (length, neck_half + tine_thickness * 0.85),
-            (0.0, tine_half + tine_thickness),
-            (0.0, tine_half - tine_thickness),
-            (length, merged_neck_half),
-        ],
-        closed=True,
-    )
-    # Lower tine
-    lower = _local_path(
-        [
-            (length, -neck_half - tine_thickness * 0.85),
-            (0.0, -tine_half - tine_thickness),
-            (0.0, -tine_half + tine_thickness),
-            (length, -merged_neck_half),
-        ],
-        closed=True,
-    )
+    half_width = max(width * 0.5, body_width * 1.2, FLOAT_EPSILON)
+    notch_half = max(body_width * 0.65, half_width * 0.28)
+    notch_x = length * 0.48
+    body_x = length
     overlap = _join_overlap(length, body_width)
     return ArrowheadResult(
-        filled_paths=[center, upper, lower],
+        filled_paths=[
+            _local_path(
+                [
+                    (0.0, 0.0),
+                    (body_x, half_width),
+                    (notch_x, notch_half),
+                    (body_x, 0.0),
+                    (notch_x, -notch_half),
+                    (body_x, -half_width),
+                ],
+                closed=True,
+            )
+        ],
         stroked_paths=[],
         trim_contour=_local_trim_contour(length - overlap, body_width),
     )
@@ -1064,7 +1039,7 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
 
 ARROWHEAD_ALIASES: Dict[str, str] = {
     "circle": "odot",
-    "open": "open",
+    "open": "normal",
     "odot": "odot",
     "obox": "obox",
     "odiamond": "odiamond",
@@ -1128,8 +1103,6 @@ def parse_arrowhead_spec(spec: str) -> List[ParsedPrimitive]:
         Parsed primitives from tip to body.
     """
     normalized = ARROWHEAD_ALIASES.get(spec, spec)
-    if normalized == "open":
-        return [ParsedPrimitive(shape="open", open_fill=False, side="both")]
     if normalized in {"odot", "obox", "odiamond"}:
         return [ParsedPrimitive(shape=normalized[1:], open_fill=True, side="both")]
     if normalized == "none":
@@ -1234,7 +1207,8 @@ def build_arrowhead(
     body_width : float | None, default=None
         Ribbon body width at the arrowhead junction in data units.
     fill_mode : str, default="filled"
-        Either ``"filled"`` or ``"hollow"``.
+        Either ``"filled"`` or ``"hollow"``. The named Graphviz 8 ``open``
+        arrow ignores this and remains filled.
 
     Returns
     -------
@@ -1244,6 +1218,8 @@ def build_arrowhead(
     tip_point = as_point(tip)
     body_direction = unit_vector(as_point(tangent))
     resolved_body_width = float(width if body_width is None else body_width)
+    if spec == "open":
+        fill_mode = "filled"
     parsed = parse_arrowhead_spec(spec)
     local_results: List[ArrowheadResult] = []
     offset = 0.0

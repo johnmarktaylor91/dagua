@@ -971,7 +971,7 @@ GRAPHVIZ_STRICT_THEME = Theme(
         ),
     },
     cluster_style=ClusterStyle(
-        fill="#F0F0F0",  # near-transparent gray, matching dot's subdued clusters
+        fill="#F2EFE9",  # faint warm tint matching dot's subdued clusters
         stroke="#CCCCCC",  # very light gray hairline like Graphviz cluster borders
         stroke_width=0.5,  # thin border matching Graphviz
         corner_radius=0.0,
@@ -982,7 +982,7 @@ GRAPHVIZ_STRICT_THEME = Theme(
         font_color="#000000",
         font_family="TeX Gyre Termes",
         opacity=0.15,
-        fill_opacity=0.08,
+        fill_opacity=0.10,
         border_opacity=1.0,
         depth_fill_step=0.0,
         depth_stroke_step=0.0,

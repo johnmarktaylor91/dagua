@@ -111,13 +111,14 @@ _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
 _SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION = 0.18
 _SELF_LOOP_ARROWHEAD_MAX_WIDTH_RATIO = 0.55
 _CLUSTER_LABEL_VERTICAL_GAP_POINTS = 2.0
-_GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE = float(np.sqrt(2.0))
-_GRAPHVIZ_STRICT_ELLIPSE_ASPECT_TRIGGER = 2.0
+_GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE = 1.18
+_GRAPHVIZ_STRICT_ELLIPSE_ASPECT_CAP = 3.0
 _GRAPHVIZ_STRICT_CLUSTER_HORIZONTAL_SEPARATION_POINTS = 18.0
-_GRAPHVIZ_STRICT_CLUSTER_LABEL_MASK_PADDING_POINTS = 3.0
+_GRAPHVIZ_STRICT_CLUSTER_LABEL_MASK_PADDING_POINTS = 4.0
 _GRAPHVIZ_STRICT_CLUSTER_EXTERNAL_NODE_GAP_POINTS = 36.0
-_GRAPHVIZ_STRICT_BACK_EDGE_OFFSET_FLOOR_POINTS = 36.0
+_GRAPHVIZ_STRICT_BACK_EDGE_OFFSET_FLOOR_POINTS = 60.0
 _GRAPHVIZ_STRICT_BACK_EDGE_OFFSET_FACTOR = 0.45
+_EDGE_LABEL_COLLISION_PADDING_POINTS = 2.0
 _DEFAULT_NODE_LABEL_FONT_POINTS = 8.5
 # Tuned down from ``8.0`` so external labels stay subordinate to node labels
 # and fit more consistently around dense gallery fixtures.
@@ -1296,6 +1297,7 @@ def render(
     if curves is None:
         curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
     curves = _graphviz_strict_back_edge_curves(ax, graph, curves)
+    curves = _graphviz_strict_reclip_edge_terminals(graph, curves, pos)
     edge_collection = _draw_edges(ax, graph, curves, positions=pos, svg_hover_map=svg_hover_map)
 
     # --- Layer 2: Nodes ---
@@ -2730,15 +2732,23 @@ def _graphviz_strict_ellipse_shape_spec(spec: ShapeSpec, style: NodeStyle) -> Sh
     Returns
     -------
     ShapeSpec
-        Ellipse spec with a Graphviz-style ``sqrt(2)`` circumscription
-        adjustment when the node is an ellipse or circle.
+        Ellipse spec with a uniform Graphviz-style circumscription multiplier
+        when the node is an ellipse or circle.
     """
     if str(style.shape) not in {"ellipse", "circle"}:
         return spec
-    adjusted_width = float(spec.width)
-    adjusted_height = float(spec.height)
-    if adjusted_width / max(adjusted_height, 1e-9) > _GRAPHVIZ_STRICT_ELLIPSE_ASPECT_TRIGGER:
-        adjusted_height *= _GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE
+    aspect = max(float(spec.width), float(spec.height)) / max(
+        min(float(spec.width), float(spec.height)),
+        1e-9,
+    )
+    aspect_blend = min(1.0, _GRAPHVIZ_STRICT_ELLIPSE_ASPECT_CAP / max(aspect, 1e-9))
+    scale = 1.0 + (_GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE - 1.0) * aspect_blend
+    adjusted_width = float(spec.width) * scale
+    base_height = float(spec.height)
+    if float(spec.width) > float(spec.height) and aspect > _GRAPHVIZ_STRICT_ELLIPSE_ASPECT_CAP:
+        min_height = float(style.min_height) if style.min_height is not None else 0.0
+        base_height = min(base_height, max(min_height, float(spec.height) / aspect))
+    adjusted_height = base_height * scale
     if str(style.shape) == "circle":
         adjusted_width = adjusted_height = max(adjusted_width, adjusted_height)
     return ShapeSpec(
@@ -2750,6 +2760,134 @@ def _graphviz_strict_ellipse_shape_spec(spec: ShapeSpec, style: NodeStyle) -> Sh
         corner_radius=spec.corner_radius,
         aspect_ratio=spec.aspect_ratio,
     )
+
+
+def _graphviz_strict_terminal_point(
+    curve: BezierCurve,
+    center: Tuple[float, float],
+    size: Tuple[float, float],
+    style: NodeStyle,
+    terminal: str,
+) -> Tuple[float, float]:
+    """Return a strict-theme edge terminal clipped to the rendered ellipse.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Routed edge curve whose endpoint should touch the visible node border.
+    center : tuple[float, float]
+        Node center in render/data coordinates.
+    size : tuple[float, float]
+        Layout node size before strict visual ellipse expansion.
+    style : NodeStyle
+        Effective node style for the terminal node.
+    terminal : str
+        Either ``"source"`` for ``curve.p0`` or ``"target"`` for ``curve.p1``.
+
+    Returns
+    -------
+    tuple[float, float]
+        Terminal point on the rendered strict ellipse boundary. Non-ellipse
+        nodes and degenerate rays return the original routed endpoint.
+    """
+    from dagua.render.edges.intersection import ray_ellipse_intersection
+
+    if str(style.shape) not in {"ellipse", "circle"}:
+        return curve.p0 if terminal == "source" else curve.p1
+
+    visual_spec = _graphviz_strict_ellipse_shape_spec(
+        ShapeSpec(
+            center_x=float(center[0]),
+            center_y=float(center[1]),
+            width=float(size[0]),
+            height=float(size[1]),
+            shape=str(style.shape),
+            corner_radius=0.0,
+            aspect_ratio=style.aspect_ratio,
+        ),
+        style,
+    )
+    original_terminal = curve.p0 if terminal == "source" else curve.p1
+    center_point = np.asarray(center, dtype=float)
+    ray_origin = center_point
+    direction = np.asarray(original_terminal, dtype=float) - center_point
+    if float(np.hypot(direction[0], direction[1])) <= 1e-9:
+        return curve.p0 if terminal == "source" else curve.p1
+
+    hit = ray_ellipse_intersection(
+        center=center_point,
+        half_size=(visual_spec.width / 2.0, visual_spec.height / 2.0),
+        ray_origin=ray_origin,
+        ray_direction=direction,
+    )
+    return float(hit[0]), float(hit[1])
+
+
+def _graphviz_strict_reclip_edge_terminals(
+    graph: Any,
+    curves: List[BezierCurve],
+    positions: Optional[np.ndarray],
+) -> List[BezierCurve]:
+    """Clip strict-theme ellipse edge endpoints to the rendered node outline.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing node styles, sizes, and edge indices.
+    curves : list[BezierCurve]
+        Routed edge curves.
+    positions : numpy.ndarray | None
+        Node centers with shape ``[N, 2]`` in render/data coordinates.
+
+    Returns
+    -------
+    list[BezierCurve]
+        Curves with source and target endpoints aligned to strict visual
+        ellipse boundaries.
+    """
+    if not _is_graphviz_strict_render(graph) or positions is None:
+        return curves
+    if not curves or not hasattr(graph, "edge_index") or not hasattr(graph, "node_sizes"):
+        return curves
+
+    if hasattr(graph.node_sizes, "detach"):
+        node_sizes = graph.node_sizes.detach().cpu().numpy()
+    else:
+        node_sizes = np.asarray(graph.node_sizes, dtype=float)
+    reclipped: List[BezierCurve] = []
+    for edge_idx, curve in enumerate(curves):
+        if edge_idx >= int(graph.edge_index.shape[1]) or curve.waypoints is not None:
+            reclipped.append(curve)
+            continue
+        src_idx = int(graph.edge_index[0, edge_idx])
+        tgt_idx = int(graph.edge_index[1, edge_idx])
+        source = _graphviz_strict_terminal_point(
+            curve,
+            center=(float(positions[src_idx, 0]), float(positions[src_idx, 1])),
+            size=(float(node_sizes[src_idx, 0]), float(node_sizes[src_idx, 1])),
+            style=_node_style_for_render(graph, src_idx),
+            terminal="source",
+        )
+        target = _graphviz_strict_terminal_point(
+            curve,
+            center=(float(positions[tgt_idx, 0]), float(positions[tgt_idx, 1])),
+            size=(float(node_sizes[tgt_idx, 0]), float(node_sizes[tgt_idx, 1])),
+            style=_node_style_for_render(graph, tgt_idx),
+            terminal="target",
+        )
+        reclipped.append(
+            BezierCurve(
+                p0=source,
+                cp1=curve.cp1,
+                cp2=curve.cp2,
+                p1=target,
+                waypoints=curve.waypoints,
+                routing=curve.routing,
+                direction=curve.direction,
+                step_fraction=curve.step_fraction,
+            )
+        )
+    return reclipped
 
 
 def _node_fill_path(
@@ -6480,7 +6618,7 @@ def _draw_edge_marker(
     # Graphviz-style calibration expects arrowheads to read slightly heavier
     # than the edge stroke, so keep marker fill/outline fully opaque.
     color = to_rgba(style.arrow_color or style.color, 1.0)
-    filled = style.arrow_fill == "filled" and marker not in {"open", "vee", "tee", "crow"}
+    filled = style.arrow_fill == "filled" and marker not in {"vee", "tee"}
     tip_x, tip_y = point
     outline_width = _edge_width_data_units(ax, float(style.width))
     emphasis_width = _edge_width_data_units(ax, max(float(style.width) * 1.8, 2.0))
@@ -6537,18 +6675,21 @@ def _draw_edge_marker(
     if marker == "open":
         base_x = tip_x - ux * manual_length
         base_y = tip_y - uy * manual_length
-        _draw_outline_segments(
-            ax=ax,
-            points=[
-                (tip_x, tip_y),
-                (base_x + px * manual_width * 0.6, base_y + py * manual_width * 0.6),
-                (base_x - px * manual_width * 0.6, base_y - py * manual_width * 0.6),
-            ],
-            stroke_width=outline_width,
-            color=color,
-            zorder=3,
+        vertices = [
+            (tip_x, tip_y),
+            (base_x + px * manual_width * 0.6, base_y + py * manual_width * 0.6),
+            (base_x - px * manual_width * 0.6, base_y - py * manual_width * 0.6),
+        ]
+        polygon = Polygon(
+            vertices,
             closed=True,
+            facecolor=color,
+            edgecolor="none",
+            linewidth=0.0,
+            joinstyle="round",
+            zorder=3,
         )
+        ax.add_patch(polygon)
         return
 
     if marker in {"dot", "circle"}:
@@ -6649,23 +6790,28 @@ def _draw_edge_marker(
     if marker == "crow":
         back_x = tip_x - ux * manual_length
         back_y = tip_y - uy * manual_length
-        crow_tine_width = _edge_width_data_units(ax, max(float(style.width) * 1.4, 2.0))
-        prong_spread = manual_width * 1.4
-        for end_x, end_y in (
+        notch_x = tip_x - ux * (manual_length * 0.48)
+        notch_y = tip_y - uy * (manual_length * 0.48)
+        notch_half = manual_width * 0.14
+        vertices = [
+            (tip_x, tip_y),
+            (back_x + px * manual_width * 0.5, back_y + py * manual_width * 0.5),
+            (notch_x + px * notch_half, notch_y + py * notch_half),
             (back_x, back_y),
-            (back_x + px * prong_spread, back_y + py * prong_spread),
-            (back_x - px * prong_spread, back_y - py * prong_spread),
-        ):
-            _add_filled_ribbon_patch(
-                ax=ax,
-                points=np.array([[tip_x, tip_y], [end_x, end_y]], dtype=float),
-                width=crow_tine_width,
-                color=color,
-                zorder=3,
-                cap_start="round",
-                cap_end="round",
-                join_style="bevel",
-            )
+            (notch_x - px * notch_half, notch_y - py * notch_half),
+            (back_x - px * manual_width * 0.5, back_y - py * manual_width * 0.5),
+        ]
+        polygon = Polygon(
+            vertices,
+            closed=True,
+            facecolor=color,
+            edgecolor="none",
+            linewidth=0.0,
+            joinstyle="round",
+            zorder=3,
+        )
+        ax.add_patch(polygon)
+        return
 
 
 def _draw_port_indicators(ax: Any, graph: Any, curves: List[BezierCurve]) -> None:
@@ -6903,6 +7049,106 @@ def _append_endpoint_edge_label_specs(
                 svg_hover_map[f"{gid}-background"] = hover_text
 
 
+def _edge_label_bbox(
+    spec: DaguaText,
+    display_scale: float,
+) -> Tuple[float, float, float, float]:
+    """Return an axis-aligned edge-label bbox in data coordinates.
+
+    Parameters
+    ----------
+    spec : DaguaText
+        Edge label render specification.
+    display_scale : float
+        Points-to-data conversion factor for the current axes.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Bounding box as ``(x_min, y_min, x_max, y_max)``.
+    """
+    width, height = measure_text_data(
+        spec.text,
+        size_data=max(float(spec.font_size) * display_scale, 1e-9),
+        font_family=str(spec.font_family or RESOLVED_FONT),
+        font_weight=str(spec.font_weight),
+        font_style=str(spec.font_style),
+    )
+    pad_x, pad_y = spec.background_padding if spec.background else (0.0, 0.0)
+    half_width = (width + 2.0 * float(pad_x) * display_scale) / 2.0
+    half_height = (height + 2.0 * float(pad_y) * display_scale) / 2.0
+    return (
+        float(spec.x - half_width),
+        float(spec.y - half_height),
+        float(spec.x + half_width),
+        float(spec.y + half_height),
+    )
+
+
+def _bboxes_overlap(
+    left: Tuple[float, float, float, float],
+    right: Tuple[float, float, float, float],
+) -> bool:
+    """Return whether two data-coordinate bboxes overlap.
+
+    Parameters
+    ----------
+    left : tuple[float, float, float, float]
+        First bbox as ``(x_min, y_min, x_max, y_max)``.
+    right : tuple[float, float, float, float]
+        Second bbox as ``(x_min, y_min, x_max, y_max)``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the boxes have positive overlap on both axes.
+    """
+    return min(left[2], right[2]) > max(left[0], right[0]) and min(left[3], right[3]) > max(
+        left[1], right[1]
+    )
+
+
+def _resolve_edge_label_collisions(
+    specs: List[DaguaText],
+    directions: List[Tuple[float, float]],
+    display_scale: float,
+) -> None:
+    """Nudge overlapping edge labels along their edge tangents.
+
+    Parameters
+    ----------
+    specs : list[DaguaText]
+        Mutable edge-label render specs to adjust in place.
+    directions : list[tuple[float, float]]
+        Edge tangent directions corresponding to ``specs``.
+    display_scale : float
+        Points-to-data conversion factor for the current axes.
+
+    Returns
+    -------
+    None
+        The input specs are modified in place.
+    """
+    placed: List[Tuple[float, float, float, float]] = []
+    padding = float(display_scale) * _EDGE_LABEL_COLLISION_PADDING_POINTS
+    for spec, direction in zip(specs, directions):
+        bbox = _edge_label_bbox(spec, display_scale)
+        dx, dy = direction
+        length = float(np.hypot(dx, dy))
+        if length <= 1e-9:
+            unit_x, unit_y = 0.0, 1.0
+        else:
+            unit_x, unit_y = dx / length, dy / length
+        step = max(bbox[3] - bbox[1], float(spec.font_size) * display_scale) + padding
+        for _ in range(8):
+            if not any(_bboxes_overlap(bbox, other) for other in placed):
+                break
+            spec.x += unit_x * step
+            spec.y += unit_y * step
+            bbox = _edge_label_bbox(spec, display_scale)
+        placed.append(bbox)
+
+
 def _draw_edge_labels(
     ax: Any,
     graph: Any,
@@ -6934,6 +7180,7 @@ def _draw_edge_labels(
     """
     display_scale = _compute_display_scale(ax)
     specs: List[DaguaText] = []
+    label_directions: List[Tuple[float, float]] = []
     if sizes is None:
         node_sizes = getattr(graph, "node_sizes", None)
         if node_sizes is None:
@@ -6977,6 +7224,13 @@ def _draw_edge_labels(
                     clip_on=False,
                     zorder=4.0,
                     gid=f"dagua-edge-label-{e_idx}",
+                )
+            )
+            reference_curve = prepared.body_curve or prepared.lane_curve
+            label_directions.append(
+                (
+                    float(reference_curve.p1[0] - reference_curve.p0[0]),
+                    float(reference_curve.p1[1] - reference_curve.p0[1]),
                 )
             )
             if svg_hover_map is not None:
@@ -7033,10 +7287,19 @@ def _draw_edge_labels(
                     gid=f"dagua-edge-label-{e_idx}",
                 )
             )
+            label_directions.append(
+                (
+                    float(curve.p1[0] - curve.p0[0]),
+                    float(curve.p1[1] - curve.p0[1]),
+                )
+            )
             if svg_hover_map is not None:
                 hover_text = _edge_hover_text(graph, e_idx)
                 svg_hover_map[f"dagua-edge-label-{e_idx}"] = hover_text
                 svg_hover_map[f"dagua-edge-label-{e_idx}-background"] = hover_text
+
+    if _is_graphviz_strict_render(graph) and len(specs) == len(label_directions):
+        _resolve_edge_label_collisions(specs, label_directions, display_scale)
 
     _append_endpoint_edge_label_specs(
         specs,
