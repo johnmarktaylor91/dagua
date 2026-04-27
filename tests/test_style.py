@@ -270,21 +270,25 @@ def test_graphviz_strict_theme_loads() -> None:
     assert node_style.fill == "#FFFFFF"
     assert node_style.stroke == "#000000"
     assert node_style.font_size == 16.0
-    assert node_style.stroke_width == 0.75
+    # Round 13 F6: stroke 0.75 -> 0.9 to match dot's heavier hairline weight.
+    assert node_style.stroke_width == 0.9
     assert node_style.font_family == "TeX Gyre Termes"
-    # Round 11 F1: padding/min sizes scaled ~12/16 to compensate for the
-    # round-9 16pt cap-height bump that widened auto-sized bounding boxes.
+    # Round 11 F1 / Round 13 F1: padding stays compact at (6,3) but min sizes
+    # are pulled back from round-11's 41/27 over-correction toward 50/33 so
+    # nodes track dot's silhouette without re-introducing puffiness.
     assert node_style.padding == (6.0, 3.0)
-    assert node_style.min_width == 41.0
-    assert node_style.min_height == 27.0
+    assert node_style.min_width == 50.0
+    assert node_style.min_height == 33.0
     assert node_style.overflow_policy == "expand_node"
 
     edge_style = theme.get_edge_style("default")
     assert edge_style.width == 1.0
     assert edge_style.opacity == 1.0
     assert edge_style.arrow_scale is None  # ignored; mpl uses unified point conversion
-    assert edge_style.arrow_length == 12.0
-    assert edge_style.arrow_width == 10.0
+    # Round 13 F5: arrow length/width bumped 12/10 -> 14/12 so the
+    # ribbon-aware sublinear scaling at width=1.0pt still renders stout heads.
+    assert edge_style.arrow_length == 14.0
+    assert edge_style.arrow_width == 12.0
     assert edge_style.arrow_node_fraction == pytest.approx(0.0)
     assert edge_style.arrow_width_ratio == pytest.approx(0.7)
     assert edge_style.label_font_size == pytest.approx(16.0)
@@ -292,8 +296,8 @@ def test_graphviz_strict_theme_loads() -> None:
     assert edge_style.curvature == pytest.approx(0.0)
     back_edge_style = theme.get_edge_style("back")
     assert back_edge_style.width == 1.0
-    assert back_edge_style.arrow_length == 12.0
-    assert back_edge_style.arrow_width == 10.0
+    assert back_edge_style.arrow_length == 14.0
+    assert back_edge_style.arrow_width == 12.0
     assert back_edge_style.label_font_size == pytest.approx(16.0)
     assert back_edge_style.curvature == pytest.approx(0.2)
 
