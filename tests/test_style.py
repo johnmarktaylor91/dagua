@@ -31,7 +31,7 @@ class TestNodeStyleNewFields:
 
     def test_defaults(self):
         s = NodeStyle()
-        assert s.padding == (14.0, 8.0)
+        assert s.padding == (11.0, 9.0)
         assert s.font_weight == "regular"
         assert s.font_style == "normal"
         assert s.shadow is False
@@ -71,8 +71,8 @@ class TestEdgeStyleNewFields:
     def test_defaults(self):
         s = EdgeStyle()
         assert s.arrow_scale is None
-        assert s.arrow_node_fraction == 0.0
-        assert s.arrow_width_ratio == 0.7
+        assert s.arrow_node_fraction == 0.35
+        assert s.arrow_width_ratio == 0.85
         assert s.routing == "bezier"
         assert s.label_font_size == 7.0
         assert s.label_font_color == NEAR_BLACK
@@ -270,27 +270,30 @@ def test_graphviz_strict_theme_loads() -> None:
     assert node_style.fill == "#FFFFFF"
     assert node_style.stroke == "#000000"
     assert node_style.font_size == 14.0
-    assert node_style.stroke_width == 1.4
+    assert node_style.stroke_width == 1.3
     assert node_style.font_family == "Times New Roman"
-    assert node_style.padding == (12.0, 5.0)
-    assert node_style.min_width == 48.0
+    assert node_style.padding == (8.0, 4.0)
+    assert node_style.min_width == 54.0
     assert node_style.overflow_policy == "expand_node"
 
     edge_style = theme.get_edge_style("default")
-    assert edge_style.width == 1.3
+    assert edge_style.width == 1.0
     assert edge_style.opacity == 1.0
     assert edge_style.arrow_scale is None  # ignored; mpl uses unified point conversion
-    assert edge_style.arrow_length == 22.0
-    assert edge_style.arrow_width == 15.0
-    assert edge_style.arrow_node_fraction == pytest.approx(0.26)
+    assert edge_style.arrow_length == 10.0
+    assert edge_style.arrow_width == 7.0
+    assert edge_style.arrow_node_fraction == pytest.approx(0.0)
     assert edge_style.arrow_width_ratio == pytest.approx(0.7)
     assert edge_style.label_font_family == "Times New Roman"
+    assert edge_style.curvature == pytest.approx(0.0)
 
-    assert theme.cluster_style.fill == "#F8F8F8"
-    assert theme.cluster_style.font_size == 12.0
+    assert theme.cluster_style.fill == "#F0F0F0"
+    assert theme.cluster_style.font_size == 10.0
     assert theme.cluster_style.font_weight == "regular"
     assert theme.cluster_style.font_family == "Times New Roman"
-    assert theme.cluster_style.opacity == 0.85
+    assert theme.cluster_style.opacity == pytest.approx(0.15)
+    assert theme.cluster_style.depth_fill_step == pytest.approx(0.0)
+    assert theme.cluster_style.depth_stroke_step == pytest.approx(0.0)
     assert theme.graph_style.edge_label_background_opacity == 1.0
 
 
@@ -326,7 +329,7 @@ def test_graphviz_improved_theme_loads() -> None:
     assert edge_style.arrow_scale is None  # ignored; mpl uses unified point conversion
     assert edge_style.arrow_length == 20.0
     assert edge_style.arrow_width == 14.0
-    assert edge_style.arrow_node_fraction == pytest.approx(0.24)
+    assert edge_style.arrow_node_fraction == pytest.approx(0.35)
     assert edge_style.arrow_width_ratio == pytest.approx(0.7)
     assert edge_style.arrow_color == "#333333"
     assert theme.get_edge_style("if").opacity == 0.92
