@@ -121,17 +121,46 @@ def test_roundrect_path_supports_per_corner_radii() -> None:
     np.testing.assert_allclose(path.vertices[13], np.array([-20.0, 8.0]))
 
 
-def test_star_inset_uses_uniform_centroid_scaling() -> None:
-    """Star inset should shrink every vertex radially toward the centroid."""
+def test_star_inset_uses_edge_perpendicular_offset() -> None:
+    """Star inset should keep uniform perpendicular ribbon width.
+
+    Round 15 F1: the prior centroid-radial inset collapsed the
+    perpendicular ribbon width at the acute outer points to a fraction
+    of ``border_width``, producing a sub-pixel-thin (gray) stroke at
+    star apexes. The fix offsets every edge inward by its own normal,
+    so each edge of the inset polygon sits exactly ``border_width``
+    perpendicular to the corresponding outer edge.
+    """
 
     vertices = star_vertices(0.0, 0.0, 100.0, 100.0)
-    inset_vertices = inset_star(vertices, 8.0)
+    border_width = 0.8
+    inset_vertices = inset_star(vertices, border_width)
+
     centroid = np.mean(vertices, axis=0)
     original_radii = np.linalg.norm(vertices - centroid, axis=1)
     inset_radii = np.linalg.norm(inset_vertices - centroid, axis=1)
-
     assert np.all(inset_radii < original_radii)
-    assert np.min(inset_radii / original_radii) > 0.1
+
+    n = vertices.shape[0]
+    for index in range(n):
+        next_index = (index + 1) % n
+        outer_a = vertices[index]
+        outer_b = vertices[next_index]
+        edge = outer_b - outer_a
+        edge_norm = float(np.linalg.norm(edge))
+        if edge_norm <= 0.0:
+            continue
+        edge_unit = edge / edge_norm
+        # Inward normal (CCW polygon): rotate edge 90 deg CCW.
+        normal = np.array([-edge_unit[1], edge_unit[0]])
+        inner_a = inset_vertices[index]
+        inner_b = inset_vertices[next_index]
+        # Each inset endpoint must sit border_width perpendicular to the
+        # outer edge along the inward normal.
+        offset_a = float(np.dot(inner_a - outer_a, normal))
+        offset_b = float(np.dot(inner_b - outer_a, normal))
+        assert offset_a == pytest.approx(border_width, abs=1e-6)
+        assert offset_b == pytest.approx(border_width, abs=1e-6)
 
 
 def test_border_width_clamps_to_forty_percent_fraction() -> None:
