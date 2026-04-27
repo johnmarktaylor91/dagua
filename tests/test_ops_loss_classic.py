@@ -604,6 +604,42 @@ def test_pivot_approx_stress_loss_is_positive_for_distorted_embedding() -> None:
     assert loss.item() > 0.0
 
 
+def test_pivot_approx_stress_loss_ignores_dummy_node_tail() -> None:
+    """Pivot stress should evaluate only original nodes when positions are expanded."""
+
+    problem = _path_graph_problem(4)
+    expanded_positions = torch.tensor(
+        [
+            [0.0, 0.0],
+            [1.3, 0.0],
+            [2.7, 0.0],
+            [4.2, 0.0],
+            [100.0, 100.0],
+        ],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    distance_matrix = _path_distance_matrix(4)
+    expanded_state = SolveState(
+        pos=expanded_positions,
+        pivot_indices=torch.arange(4, dtype=torch.long),
+        pivot_distances=distance_matrix,
+    )
+    original_state = SolveState(
+        pos=expanded_positions[:4],
+        pivot_indices=torch.arange(4, dtype=torch.long),
+        pivot_distances=distance_matrix,
+    )
+
+    expanded_loss = PivotApproxStressLoss().evaluate(problem, expanded_state, RuntimeContext())
+    original_loss = PivotApproxStressLoss().evaluate(problem, original_state, RuntimeContext())
+    expanded_loss.backward()
+
+    assert expanded_loss.item() == pytest.approx(original_loss.item(), rel=1.0e-6)
+    assert expanded_positions.grad is not None
+    assert expanded_positions.grad[4].abs().sum().item() == pytest.approx(0.0, abs=1.0e-8)
+
+
 def test_kl_divergence_loss_early_exaggeration_multiplier_changes_loss() -> None:
     """Early exaggeration should change the KL value before the configured step cutoff."""
 
