@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional, cast
 
 from dagua.eval.competitors.base import (
     CompetitorBase,
@@ -18,6 +18,8 @@ from dagua.eval.competitors.base import (
 )
 
 if TYPE_CHECKING:
+    import torch
+
     from dagua.graph import DaguaGraph
 
 
@@ -669,7 +671,11 @@ class ClassicKK(_ClassicBase):
                 orient_to_direction=True,
             )
             elapsed = time.perf_counter() - start
-            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+            return CompetitorResult(
+                name=self.name,
+                pos=cast("torch.Tensor", pos),
+                runtime_seconds=elapsed,
+            )
         except Exception as exc:
             elapsed = time.perf_counter() - start
             return CompetitorResult(
@@ -889,7 +895,11 @@ class ClassicStressSGD(_ClassicBase):
                 seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
-            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+            return CompetitorResult(
+                name=self.name,
+                pos=cast("torch.Tensor", pos),
+                runtime_seconds=elapsed,
+            )
         except Exception as exc:
             elapsed = time.perf_counter() - start
             return CompetitorResult(
@@ -945,7 +955,11 @@ class ClassicSugiyama(_ClassicBase):
                 seed=self._layout_seed(seed),
             )
             elapsed = time.perf_counter() - start
-            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+            return CompetitorResult(
+                name=self.name,
+                pos=cast("torch.Tensor", pos),
+                runtime_seconds=elapsed,
+            )
         except Exception as exc:
             elapsed = time.perf_counter() - start
             return CompetitorResult(
@@ -1549,8 +1563,9 @@ def _quick_classic(
     try:
         if graph.edge_weights is not None:
             extra_kwargs.setdefault("edge_weights", graph.edge_weights)
-        if fn_name == "layout_kk_pipeline":
+        if fn_name in {"layout_kk_pipeline", "layout_sfdp_pipeline"}:
             extra_kwargs.setdefault("direction", graph.direction)
+        if fn_name == "layout_kk_pipeline":
             extra_kwargs.setdefault("orient_to_direction", True)
         pos = fn(
             edge_index,
