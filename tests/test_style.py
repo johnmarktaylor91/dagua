@@ -270,7 +270,7 @@ def test_graphviz_strict_theme_loads() -> None:
     assert node_style.fill == "#FFFFFF"
     assert node_style.stroke == "#000000"
     assert node_style.font_size == 14.0
-    assert node_style.stroke_width == 1.3
+    assert node_style.stroke_width == 1.0
     assert node_style.font_family == "Times New Roman"
     assert node_style.padding == (8.0, 4.0)
     assert node_style.min_width == 54.0
@@ -286,12 +286,17 @@ def test_graphviz_strict_theme_loads() -> None:
     assert edge_style.arrow_width_ratio == pytest.approx(0.7)
     assert edge_style.label_font_family == "Times New Roman"
     assert edge_style.curvature == pytest.approx(0.0)
+    back_edge_style = theme.get_edge_style("back")
+    assert back_edge_style.curvature == pytest.approx(0.3)
 
     assert theme.cluster_style.fill == "#F0F0F0"
     assert theme.cluster_style.font_size == 10.0
     assert theme.cluster_style.font_weight == "regular"
     assert theme.cluster_style.font_family == "Times New Roman"
     assert theme.cluster_style.opacity == pytest.approx(0.15)
+    assert theme.cluster_style.fill_opacity == pytest.approx(0.15)
+    assert theme.cluster_style.border_opacity == pytest.approx(1.0)
+    assert theme.cluster_style.font_size_scaling == "fixed"
     assert theme.cluster_style.depth_fill_step == pytest.approx(0.0)
     assert theme.cluster_style.depth_stroke_step == pytest.approx(0.0)
     assert theme.graph_style.edge_label_background_opacity == 1.0

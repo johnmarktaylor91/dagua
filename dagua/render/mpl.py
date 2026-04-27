@@ -320,6 +320,8 @@ def _cluster_font_size_data(
     cluster_height: float,
     min_node_height: float,
     font_size_points: float,
+    font_size_scaling: str = "by_height",
+    display_scale: float = 1.0,
 ) -> float:
     """Compute a cluster-label size in data coordinates.
 
@@ -333,12 +335,21 @@ def _cluster_font_size_data(
         Minimum node height in the current render pass.
     font_size_points : float
         User-facing cluster font size in points.
+    font_size_scaling : str, default="by_height"
+        Cluster label scaling mode. ``"fixed"`` keeps the authored point size
+        authoritative; ``"by_height"`` preserves the legacy height-based
+        cluster-label scaling.
+    display_scale : float, default=1.0
+        Point-to-data conversion used when fixed point sizing is requested.
 
     Returns
     -------
     float
         Target cluster-label size in data units.
     """
+    if font_size_scaling == "fixed":
+        return max(float(font_size_points), 1e-9) * max(float(display_scale), 1e-9)
+
     base_size_data = max(
         max(float(cluster_height), 0.0) * _CLUSTER_LABEL_HEIGHT_FRACTION,
         max(float(min_node_height), 0.0) * _CLUSTER_LABEL_MIN_NODE_HEIGHT_FRACTION,
@@ -348,6 +359,51 @@ def _cluster_font_size_data(
         * _multiline_label_scale(text)
         * _font_size_user_scale(font_size_points, _DEFAULT_CLUSTER_LABEL_FONT_POINTS)
     )
+
+
+def _cluster_fill_alpha(style: ClusterStyle, depth: int) -> float:
+    """Return the effective fill alpha for one cluster.
+
+    Parameters
+    ----------
+    style : ClusterStyle
+        Cluster style after theme/style cascade resolution.
+    depth : int
+        Cluster nesting depth.
+
+    Returns
+    -------
+    float
+        Fill alpha clamped to Matplotlib's valid ``[0, 1]`` range.
+    """
+    depth_opacity_step = float(getattr(style, "depth_opacity_step", -0.05))
+    base_alpha = style.opacity if style.fill_opacity is None else style.fill_opacity
+    return min(max(float(base_alpha) + float(depth) * depth_opacity_step, 0.0), 1.0)
+
+
+def _cluster_border_alpha(style: ClusterStyle, depth: int) -> float:
+    """Return the effective border alpha for one cluster.
+
+    Parameters
+    ----------
+    style : ClusterStyle
+        Cluster style after theme/style cascade resolution.
+    depth : int
+        Cluster nesting depth.
+
+    Returns
+    -------
+    float
+        Stroke alpha clamped to Matplotlib's valid ``[0, 1]`` range.
+    """
+    depth_opacity_step = float(getattr(style, "depth_opacity_step", -0.05))
+    if style.border_opacity is not None:
+        return min(max(float(style.border_opacity) + float(depth) * depth_opacity_step, 0.0), 1.0)
+    legacy_alpha = min(
+        max(float(style.opacity) * 2.5, 0.6) + float(depth) * depth_opacity_step,
+        1.0,
+    )
+    return min(max(legacy_alpha, 0.0), 1.0)
 
 
 def _title_font_size_data(graph_height: float, font_size_points: float) -> float:
@@ -1109,6 +1165,7 @@ def render(
                     float(ch),
                     float(sizes[:, 1].min()) if sizes.size else 0.0,
                     float(cstyle.font_size),
+                    str(cstyle.font_size_scaling),
                 )
                 label_width, label_height = _measure_cluster_label_data(
                     graph.cluster_labels.get(cname, cname),
@@ -3183,6 +3240,8 @@ def _compute_cluster_y_maxes(
                 cluster_height,
                 min_node_height,
                 label_font_points,
+                str(style.font_size_scaling),
+                display_scale,
             ),
             font_family=str(style.font_family or RESOLVED_FONT),
             font_weight=str(style.font_weight),
@@ -3266,6 +3325,8 @@ def _compute_cluster_y_mins(
                 cluster_height,
                 min_node_height,
                 label_font_points,
+                str(style.font_size_scaling),
+                display_scale,
             ),
             font_family=str(style.font_family or RESOLVED_FONT),
             font_weight=str(style.font_weight),
@@ -3375,6 +3436,8 @@ def _expand_axes_for_clusters(
                 float(cluster_height),
                 min_node_height,
                 label_font_points,
+                str(style.font_size_scaling),
+                display_scale,
             )
             label_width, label_height = _measure_cluster_label_data(
                 label,
@@ -6845,6 +6908,8 @@ def _draw_clusters(
             float(cluster_height),
             min_node_height,
             float(label_font_points),
+            str(style.font_size_scaling),
+            display_scale,
         )
         label_width, label_height = _measure_cluster_label_data(
             label,
@@ -6875,9 +6940,8 @@ def _draw_clusters(
         fill_color = darken_hex(style.fill, depth * style.depth_fill_step)
         stroke_color = darken_hex(style.stroke, depth * style.depth_stroke_step)
 
-        depth_opacity_step = getattr(style, "depth_opacity_step", -0.05)
-        fill_alpha = max(style.opacity + depth * depth_opacity_step, 0.08)
-        border_alpha = min(max(style.opacity * 2.5, 0.6) + depth * depth_opacity_step, 1.0)
+        fill_alpha = _cluster_fill_alpha(style, depth)
+        border_alpha = _cluster_border_alpha(style, depth)
 
         depth_sw_step = getattr(style, "depth_stroke_width_step", 0.0)
         eff_stroke_width = max(float(style.stroke_width) + depth * depth_sw_step, 0.1)
