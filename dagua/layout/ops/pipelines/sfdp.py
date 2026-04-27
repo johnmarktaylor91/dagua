@@ -92,6 +92,7 @@ def layout_sfdp_pipeline(
     theta: float = _DEFAULT_THETA,
     repulsive_exponent: float = _DEFAULT_P,
     edge_weights: Optional[torch.Tensor] = None,
+    direction: str = "TB",
 ) -> torch.Tensor:
     """Run the SFDP pipeline as a drop-in replacement.
 
@@ -115,6 +116,8 @@ def layout_sfdp_pipeline(
         SFDP repulsion exponent ``p``.
     edge_weights : torch.Tensor, optional
         Optional edge weights with shape ``[E]``.
+    direction : str, default="TB"
+        Requested layout flow direction: ``TB``, ``BT``, ``LR``, or ``RL``.
 
     Returns
     -------
@@ -166,6 +169,7 @@ def layout_sfdp_pipeline(
         node_sizes=node_sizes,
         edge_weights=edge_weights,
         seed=seed,
+        direction=direction,
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
