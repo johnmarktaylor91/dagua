@@ -294,14 +294,14 @@ def test_graphviz_strict_theme_loads() -> None:
     assert back_edge_style.label_font_size == pytest.approx(12.0)
     assert back_edge_style.curvature == pytest.approx(0.2)
 
-    assert theme.cluster_style.fill == "#F0F0F0"
+    assert theme.cluster_style.fill == "#F2EFE9"
     assert theme.cluster_style.stroke == "#CCCCCC"
     assert theme.cluster_style.stroke_width == pytest.approx(0.5)
     assert theme.cluster_style.font_size == 10.0
     assert theme.cluster_style.font_weight == "regular"
     assert theme.cluster_style.font_family == "TeX Gyre Termes"
     assert theme.cluster_style.opacity == pytest.approx(0.15)
-    assert theme.cluster_style.fill_opacity == pytest.approx(0.08)
+    assert theme.cluster_style.fill_opacity == pytest.approx(0.10)
     assert theme.cluster_style.border_opacity == pytest.approx(1.0)
     assert theme.cluster_style.font_size_scaling == "fixed"
     assert theme.cluster_style.depth_fill_step == pytest.approx(0.0)
