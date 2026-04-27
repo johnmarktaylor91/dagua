@@ -49,7 +49,7 @@ import copy
 import dataclasses
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 # ─── Wong/Okabe-Ito Colorblind-Safe Palette ────────────────────────────────
 
@@ -492,6 +492,8 @@ class ClusterStyle:
     font_weight: str = "bold"
     font_color: str = DARK_GRAY
     opacity: float = 0.32
+    fill_opacity: Optional[float] = None
+    border_opacity: Optional[float] = None
     # New fields (Part 2)
     font_family: str = ""  # empty = use FONT_FAMILY default, render-only
     label_offset: Tuple[float, float] = (
@@ -507,6 +509,7 @@ class ClusterStyle:
     depth_font_size_step: float = -0.5  # additive font_size change per depth (points)
     depth_padding_step: float = -3.0  # additive padding change per depth (points)
     depth_corner_radius_step: float = 0.0  # additive corner_radius change per depth (points)
+    font_size_scaling: Literal["by_height", "fixed"] = "by_height"
     # Member style overrides — applied to all nodes/edges within this cluster
     member_node_style: Optional[NodeStyle] = None
     member_edge_style: Optional[EdgeStyle] = None
@@ -908,7 +911,7 @@ _GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
     shape="ellipse",
     fill="#FFFFFF",
     stroke="#000000",
-    stroke_width=1.3,  # slightly above 1.0 to compensate for AA thinning
+    stroke_width=1.0,
     font_family="Times New Roman",
     font_size=14.0,
     font_color="#000000",
@@ -948,6 +951,24 @@ GRAPHVIZ_STRICT_THEME = Theme(
             label_font_family="Times New Roman",
             curvature=0.0,
         ),
+        "back": EdgeStyle(
+            color="#000000",
+            width=1.0,
+            arrow="normal",
+            arrow_fill="filled",
+            arrow_length=10.0,
+            arrow_width=7.0,
+            arrow_scale=None,
+            arrow_node_fraction=0.0,
+            arrow_width_ratio=0.7,
+            style="solid",
+            opacity=1.0,
+            label_font_size=14.0,
+            label_font_color="#000000",
+            label_background="#FFFFFF",
+            label_font_family="Times New Roman",
+            curvature=0.3,
+        ),
     },
     cluster_style=ClusterStyle(
         fill="#F0F0F0",  # near-transparent gray, matching dot's subdued clusters
@@ -961,8 +982,11 @@ GRAPHVIZ_STRICT_THEME = Theme(
         font_color="#000000",
         font_family="Times New Roman",
         opacity=0.15,
+        fill_opacity=0.15,
+        border_opacity=1.0,
         depth_fill_step=0.0,
         depth_stroke_step=0.0,
+        font_size_scaling="fixed",
     ),
     graph_style=GraphStyle(
         background_color="#FFFFFF",
