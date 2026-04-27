@@ -17,16 +17,25 @@ from dagua.layout.ops.fmmm import (
     _UncoarsenLoop,
 )
 from dagua.layout.ops.graph_utils import layout_device as _layout_device
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.state import (
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
 
 
-def build_fmmm_pipeline(steps: int = 100) -> Pipeline:
+def build_fmmm_pipeline(steps: int = 200, force_model: str = "ogdf_new") -> Pipeline:
     """Build an FM^3 multilevel force-directed pipeline.
 
     Parameters
     ----------
-    steps : int, default=100
+    steps : int, default=200
         Total refinement budget distributed across hierarchy levels.
+    force_model : str, default="ogdf_new"
+        Spring-force model for edge attraction. ``"ogdf_new"`` matches
+        OGDF's default; ``"fr"`` preserves Dagua's earlier coefficient for
+        benchmark fallback selection.
 
     Returns
     -------
@@ -45,7 +54,9 @@ def build_fmmm_pipeline(steps: int = 100) -> Pipeline:
     if steps < 0:
         raise ValueError("steps must be non-negative.")
 
-    initialize_state = _InitializeFMMMState(config=_InitializeFMMMStateConfig(steps=steps))
+    initialize_state = _InitializeFMMMState(
+        config=_InitializeFMMMStateConfig(steps=steps, force_model=force_model)
+    )
     initialize_coarsest = _InitializeCoarsestLevel()
     refine_coarsest = _RefineCoarsestLevel()
     uncoarsen_loop = _UncoarsenLoop()
@@ -69,9 +80,10 @@ def layout_fmmm_pipeline(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
-    steps: int = 100,
+    steps: int = 200,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
+    force_model: str = "ogdf_new",
 ) -> torch.Tensor:
     """Run the FM^3 pipeline as a drop-in replacement.
 
@@ -84,13 +96,15 @@ def layout_fmmm_pipeline(
     node_sizes : torch.Tensor, optional
         Optional node-size tensor with shape ``[N, 2]`` used for extent
         calculation and output-device selection.
-    steps : int, default=100
+    steps : int, default=200
         Total refinement budget distributed across hierarchy levels.
     seed : int, default=42
         Random seed for coarsening, coarse initialization, and prolongation
         jitter.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
+    force_model : str, default="ogdf_new"
+        Spring-force model for edge attraction.
 
     Returns
     -------
@@ -100,7 +114,8 @@ def layout_fmmm_pipeline(
     Raises
     ------
     ValueError
-        If ``num_nodes``, ``steps``, or ``edge_weights`` are invalid.
+        If ``num_nodes``, ``steps``, ``edge_weights``, or ``force_model`` are
+        invalid.
     RuntimeError
         If the pipeline fails to populate final positions.
     """
@@ -108,6 +123,8 @@ def layout_fmmm_pipeline(
         raise ValueError("num_nodes must be non-negative.")
     if steps < 0:
         raise ValueError("steps must be non-negative.")
+    if force_model not in {"ogdf_new", "fr"}:
+        raise ValueError("force_model must be either 'ogdf_new' or 'fr'.")
     if edge_weights is not None:
         if edge_weights.ndim != 1:
             raise ValueError("edge_weights must have shape [E].")
@@ -131,7 +148,11 @@ def layout_fmmm_pipeline(
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_fmmm_pipeline(steps=steps).apply(problem, state, ctx)
+    final_state = build_fmmm_pipeline(steps=steps, force_model=force_model).apply(
+        problem,
+        state,
+        ctx,
+    )
     if final_state.pos is None:
         raise RuntimeError("FM^3 pipeline did not produce final positions.")
     return final_state.pos

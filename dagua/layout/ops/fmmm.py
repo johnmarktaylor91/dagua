@@ -34,10 +34,46 @@ _COOLING_FACTOR = 0.99
 _SOLAR_RANDOM_TRIES = 20
 _WAGGLE_FACTOR = 0.05
 _FMMM_TEMPERATURE_KEY = "fmmm_temperature"
+_FORCE_MODEL_OGDF_NEW = "ogdf_new"
+_FORCE_MODEL_FR = "fr"
 _TYPE_SUN = 1
 _TYPE_PLANET = 2
 _TYPE_PLANET_WITH_MOONS = 3
 _TYPE_MOON = 4
+
+
+def _attractive_force_scale(
+    distances: torch.Tensor,
+    desired_lengths: torch.Tensor,
+    force_model: str,
+) -> torch.Tensor:
+    """Compute the scalar spring-force term for FM^3 edge attraction.
+
+    Parameters
+    ----------
+    distances : torch.Tensor
+        Current edge lengths with shape ``[E]``.
+    desired_lengths : torch.Tensor
+        Ideal edge lengths with shape ``[E]``.
+    force_model : str
+        Either ``"ogdf_new"`` for OGDF's default logarithmic spring or
+        ``"fr"`` for the earlier Fruchterman-Reingold coefficient.
+
+    Returns
+    -------
+    torch.Tensor
+        Per-edge scale factors with shape ``[E]``.
+
+    Raises
+    ------
+    ValueError
+        If ``force_model`` is not recognized.
+    """
+    if force_model == _FORCE_MODEL_OGDF_NEW:
+        return torch.log2(distances / desired_lengths) * (distances / desired_lengths.pow(3))
+    if force_model == _FORCE_MODEL_FR:
+        return distances / desired_lengths.pow(3)
+    raise ValueError(f"unsupported FM^3 force_model: {force_model}")
 
 
 @dataclass
@@ -823,8 +859,9 @@ def _attractive_force(
     edge_index: torch.Tensor,
     ideal_length: float,
     edge_weights: Optional[torch.Tensor] = None,
+    force_model: str = _FORCE_MODEL_OGDF_NEW,
 ) -> torch.Tensor:
-    """Compute exact attractive forces along graph edges.
+    """Compute OGDF default attractive forces along graph edges.
 
     Parameters
     ----------
@@ -836,6 +873,9 @@ def _attractive_force(
         FR ideal edge length ``k`` for the current level.
     edge_weights : torch.Tensor, optional
         Optional per-edge attraction weights with shape ``[E]``.
+    force_model : str, default="ogdf_new"
+        Spring-force model. ``"ogdf_new"`` matches OGDF's default; ``"fr"``
+        preserves the earlier Dagua coefficient for fallback comparisons.
 
     Returns
     -------
@@ -850,8 +890,9 @@ def _attractive_force(
     dst = edge_index[1].to(device=positions.device, dtype=torch.long)
     delta = positions[dst] - positions[src]
     distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
-    denominator = max(ideal_length**3, _MIN_DISTANCE)
-    edge_force = delta * (distances / denominator).unsqueeze(1)
+    desired_length = torch.full_like(distances, max(ideal_length, _MIN_DISTANCE))
+    force_scale = _attractive_force_scale(distances, desired_length, force_model)
+    edge_force = delta * force_scale.unsqueeze(1)
     if edge_weights is not None:
         edge_force = edge_force * edge_weights.to(
             device=positions.device,
@@ -867,8 +908,9 @@ def _attractive_force_with_lengths(
     edge_index: torch.Tensor,
     edge_lengths: torch.Tensor,
     edge_weights: Optional[torch.Tensor] = None,
+    force_model: str = _FORCE_MODEL_OGDF_NEW,
 ) -> torch.Tensor:
-    """Compute OGDF-style attractive forces using per-edge desired lengths.
+    """Compute OGDF default attractive forces using per-edge desired lengths.
 
     Parameters
     ----------
@@ -880,6 +922,9 @@ def _attractive_force_with_lengths(
         Desired edge lengths with shape ``[E]``.
     edge_weights : torch.Tensor, optional
         Optional per-edge attraction weights with shape ``[E]``.
+    force_model : str, default="ogdf_new"
+        Spring-force model. ``"ogdf_new"`` matches OGDF's default; ``"fr"``
+        preserves the earlier Dagua coefficient for fallback comparisons.
 
     Returns
     -------
@@ -897,7 +942,8 @@ def _attractive_force_with_lengths(
     )
     delta = positions[dst] - positions[src]
     distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
-    edge_force = delta * (distances / desired_lengths.pow(3)).unsqueeze(1)
+    force_scale = _attractive_force_scale(distances, desired_lengths, force_model)
+    edge_force = delta * force_scale.unsqueeze(1)
     if edge_weights is not None:
         edge_force = edge_force * edge_weights.to(
             device=positions.device,
@@ -916,6 +962,7 @@ def _refine_level(
     area: float,
     edge_weights: Optional[torch.Tensor] = None,
     cooling_factor: float = _COOLING_FACTOR,
+    force_model: str = _FORCE_MODEL_OGDF_NEW,
 ) -> torch.Tensor:
     """Run Barnes-Hut force refinement on one hierarchy level.
 
@@ -935,6 +982,8 @@ def _refine_level(
         Optional per-edge attraction weights with shape ``[E]``.
     cooling_factor : float, default=0.99
         Multiplicative temperature decay applied after each refinement step.
+    force_model : str, default="ogdf_new"
+        Spring-force model used for edge attraction.
 
     Returns
     -------
@@ -959,6 +1008,7 @@ def _refine_level(
             edge_index,
             ideal_length,
             edge_weights=edge_weights,
+            force_model=force_model,
         )
         displacement = repulsive + attractive
         norm = torch.linalg.norm(displacement, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
@@ -977,6 +1027,7 @@ def _refine_level_with_edge_lengths(
     area: float,
     edge_weights: Optional[torch.Tensor] = None,
     cooling_factor: float = _COOLING_FACTOR,
+    force_model: str = _FORCE_MODEL_OGDF_NEW,
 ) -> torch.Tensor:
     """Run Barnes-Hut force refinement using individual desired edge lengths.
 
@@ -998,6 +1049,8 @@ def _refine_level_with_edge_lengths(
         Optional per-edge attraction weights with shape ``[E]``.
     cooling_factor : float, default=0.99
         Multiplicative temperature decay applied after each refinement step.
+    force_model : str, default="ogdf_new"
+        Spring-force model used for edge attraction.
 
     Returns
     -------
@@ -1022,6 +1075,7 @@ def _refine_level_with_edge_lengths(
             edge_index,
             edge_lengths,
             edge_weights=edge_weights,
+            force_model=force_model,
         )
         displacement = repulsive + attractive
         norm = torch.linalg.norm(displacement, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
@@ -1048,6 +1102,7 @@ class FMMMForceStep(Op):
     edge_lengths: Optional[torch.Tensor] = None
     edge_weights: Optional[torch.Tensor] = None
     use_exact: bool = True
+    force_model: str = _FORCE_MODEL_OGDF_NEW
     temperature_key: str = _FMMM_TEMPERATURE_KEY
 
     def apply(
@@ -1093,6 +1148,7 @@ class FMMMForceStep(Op):
                 self.edge_index,
                 self.ideal_length,
                 edge_weights=self.edge_weights,
+                force_model=self.force_model,
             )
         else:
             attractive = _attractive_force_with_lengths(
@@ -1100,6 +1156,7 @@ class FMMMForceStep(Op):
                 self.edge_index,
                 self.edge_lengths,
                 edge_weights=self.edge_weights,
+                force_model=self.force_model,
             )
 
         displacement = repulsive + attractive
@@ -1160,6 +1217,7 @@ class FMMMRefineLevel(Op):
     edge_lengths: Optional[torch.Tensor] = None
     edge_weights: Optional[torch.Tensor] = None
     cooling_factor: float = _COOLING_FACTOR
+    force_model: str = _FORCE_MODEL_OGDF_NEW
     temperature_key: str = _FMMM_TEMPERATURE_KEY
 
     def apply(
@@ -1200,6 +1258,7 @@ class FMMMRefineLevel(Op):
                 edge_lengths=self.edge_lengths,
                 edge_weights=self.edge_weights,
                 use_exact=int(state.pos.shape[0]) <= 500,
+                force_model=self.force_model,
                 temperature_key=self.temperature_key,
             )
             cool_step = FMMMCoolStep(
@@ -1407,11 +1466,14 @@ class _InitializeFMMMStateConfig:
 
     Parameters
     ----------
-    steps : int, default=100
+    steps : int, default=200
         Total refinement budget across hierarchy levels.
+    force_model : str, default="ogdf_new"
+        Spring-force model used for edge attraction.
     """
 
-    steps: int = 100
+    steps: int = 200
+    force_model: str = _FORCE_MODEL_OGDF_NEW
 
 
 @register_op
@@ -1467,6 +1529,7 @@ class _InitializeFMMMState(Op):
         state.extras["fmmm_refinement_area"] = refinement_area
         state.extras["fmmm_level_budget"] = max(10, self.config.steps // max(len(levels), 1))
         state.extras["fmmm_steps"] = self.config.steps
+        state.extras["fmmm_force_model"] = self.config.force_model
         return state
 
 
@@ -1579,6 +1642,7 @@ class _RefineCoarsestLevel(Op):
         coarsest_level = levels[-1]
         level_budget = state.extras["fmmm_level_budget"]
         refinement_area = state.extras["fmmm_refinement_area"]
+        force_model = state.extras["fmmm_force_model"]
 
         state = FMMMRefineLevel(
             edge_index=coarsest_level.edge_index,
@@ -1587,6 +1651,7 @@ class _RefineCoarsestLevel(Op):
             area=refinement_area,
             edge_lengths=coarsest_level.edge_lengths,
             edge_weights=coarsest_level.edge_weights,
+            force_model=force_model,
         ).apply(
             problem,
             state,
@@ -1645,6 +1710,7 @@ class FMMMUncoarsenLoop(Op):
         levels = state.extras["fmmm_levels"]
         level_budget = state.extras["fmmm_level_budget"]
         refinement_area = state.extras["fmmm_refinement_area"]
+        force_model = state.extras["fmmm_force_model"]
         rng = random.Random(problem.seed)
 
         positions = state.pos
@@ -1658,6 +1724,7 @@ class FMMMUncoarsenLoop(Op):
                 area=refinement_area,
                 edge_lengths=levels[level].edge_lengths,
                 edge_weights=levels[level].edge_weights,
+                force_model=force_model,
             ).apply(problem, state, ctx)
             positions = state.pos
 
@@ -1712,6 +1779,7 @@ class _SingleLevelFallback(Op):
         levels = state.extras["fmmm_levels"]
         level_budget = state.extras["fmmm_level_budget"]
         refinement_area = state.extras["fmmm_refinement_area"]
+        force_model = state.extras["fmmm_force_model"]
 
         state = FMMMRefineLevel(
             edge_index=levels[0].edge_index,
@@ -1719,6 +1787,7 @@ class _SingleLevelFallback(Op):
             theta=1.0,
             area=refinement_area,
             edge_weights=levels[0].edge_weights,
+            force_model=force_model,
         ).apply(
             problem,
             state,
