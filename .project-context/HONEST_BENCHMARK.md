@@ -390,18 +390,42 @@ which doesn't weight all metrics equally).
 (`PivotApproxStressLoss`) wired into `resolve.py`, gated on
 `w_stress > 0`. Default is `w_stress = 0.0` (off).
 
-**The stress loss is broken** for graphs with dummy-node insertion
+**The stress loss WAS broken** for graphs with dummy-node insertion
 (which is most non-trivial DAGs after sprint-31a/32). 12 of 15
 probed graphs threw `RuntimeError: tensor size mismatch` when
-enabled at `w_stress = 0.05`. The 3 that worked showed 0.00 metric
-delta because dagua's existing implicit stress (via edge-length
-variance) is already near-optimal on those graph classes.
+enabled at `w_stress = 0.05`. **Sprint-W-STRESS-FIX (commit b67a463)
+fixed the bug**: `PivotApproxStressLoss` now slices `pos[:N]` to
+ignore dummy-node tail before computing stress.
 
-So dagua's `sampled_stress` rank of 6.77 is what its implicit stress
-can produce; the explicit `PivotApproxStressLoss` would need shape-
-mismatch fixes + weight tuning + picker-bottleneck navigation before
-adding any value. ~2-3 day project; logged as
-Sprint-W-STRESS-FIX in future-stretch.
+After the fix, all 15 probed graphs run successfully at all w_stress
+values. **But enabling `w_stress > 0` does NOT lift sampled_stress.**
+
+Empirical data (post-fix probe, w_stress in {0.0, 0.05, 0.1, 0.2}):
+
+| metric at w_stress=0.05 | result |
+|---|---|
+| Graphs with stress improvement | 3 of 15 (target was 8) |
+| Mean sampled_stress delta | +0.0055 (worse) |
+| Mean composite delta | within +/-0.04 (tiny) |
+| 2 graphs got materially worse on stress | `real_lesmis_77` (+0.043), `dependency_graph_100` (+0.041) |
+
+**Why doesn't it work?** The picker bottleneck. With w_stress > 0,
+gradient produces a slightly-different base_pos. The polish picker
+re-scores 16 candidates by composite (which doesn't include stress).
+The new winning candidate at composite-optimum can have HIGHER stress
+than the original. So even when gradient improves stress, the picker's
+choice of polish can undo or reverse the improvement.
+
+**Strategic conclusion:** dagua's `sampled_stress` rank of 6.77 is
+**structural**, not a bug. It's the level dagua's architecture
+(gradient + picker, with stress NOT in composite) produces regardless
+of whether explicit stress loss is enabled. To meaningfully lift
+stress would require either (a) dropping the picker, or (b) adding
+stress to the composite metric, both of which are multi-week projects
+that change the scoring framework.
+
+Default left at `w_stress = 0.0`. Bug fix shipped. Honest answer
+captured.
 
 The strategic upshot: **dagua's implicit aesthetic terms already do
 most of the work the literature's named aesthetic losses do**. Adding
