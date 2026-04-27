@@ -1356,63 +1356,67 @@ def within_layer_compactness(pos: torch.Tensor, topo_depth) -> Dict[str, float]:
 
 
 def composite(metrics: Dict[str, float]) -> float:
-    """Weighted combination of normalized metrics.  Higher = better.  Range 0-100.
+    """Compute the directed 100-point composite quality score.
 
-    Weights:
-    - DAG consistency: 25
-    - Edge length uniformity (1 - CV): 20
-    - Depth correlation: 15
-    - No overlaps (binary): 10
-    - Edge straightness: 10
-    - Crossings (inverted): 10
+    Parameters
+    ----------
+    metrics : Dict[str, float]
+        Metric name to scalar value mapping from ``full()`` or equivalent.
+
+    Returns
+    -------
+    float
+        Weighted composite score where higher is better.
+
+    Notes
+    -----
+    Weights sum to 100:
+    - DAG consistency: 22
+    - Edge length uniformity (1 - CV): 18
+    - Depth correlation: 13
+    - No overlaps (binary): 8
+    - Edge straightness: 9
+    - Crossings (inverted): 9
+    - Stress (inverted sampled_stress): 10
     - Angular resolution: 5
-    - Cluster separation: 5
+    - Cluster separation: 6
     """
     score = 0.0
 
-    # DAG consistency (25) — most critical
-    score += 25 * metrics.get("dag_consistency", 0.0)
+    # DAG consistency (22) - most critical for directed graph readability.
+    score += 22 * metrics.get("dag_consistency", 0.0)
 
-    # Edge length uniformity (20) — invert CV, cap at 1.0
-    score += 20 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
+    # Edge length uniformity (18) - invert CV, cap at 1.0.
+    score += 18 * max(0.0, 1.0 - metrics.get("edge_length_cv", 1.0))
 
-    # Depth correlation (15)
-    score += 15 * max(0.0, metrics.get("depth_spearman_rho", 0.0))
+    # Depth correlation (13)
+    score += 13 * max(0.0, metrics.get("depth_spearman_rho", 0.0))
 
-    # No overlaps (10) — binary
-    score += 10 * (1.0 if metrics.get("overlap_count", 1) == 0 else 0.0)
+    # No overlaps (8) - binary.
+    score += 8 * (1.0 if metrics.get("overlap_count", 1) == 0 else 0.0)
 
-    # Edge straightness (10) — lower deviation = better
+    # Edge straightness (9) - lower deviation = better.
     straight_deg = metrics.get("edge_straightness_mean_deg", 45.0)
-    score += 10 * max(0.0, 1.0 - straight_deg / 45.0)
+    score += 9 * max(0.0, 1.0 - straight_deg / 45.0)
 
-    # Crossing density (10) — lower is better
+    # Crossing density (9) - lower is better.
     crossing_score = max(0.0, 1.0 - metrics.get("crossing_rate", 0.5) * 10)
-    score += 10 * crossing_score
+    score += 9 * crossing_score
+
+    # Sampled stress (10) - lower graph-theoretic stress is better.
+    stress_score = max(0.0, 1.0 - metrics.get("sampled_stress", 1.0))
+    score += 10 * stress_score
 
     # Angular resolution (5)
     angle_score = min(1.0, metrics.get("angular_res_mean_deg", 20.0) / 40.0)
     score += 5 * angle_score
 
-    # Cluster separation (5)
+    # Cluster separation (6)
     if "cluster_mean_sep_ratio" in metrics:
         sep_score = min(1.0, metrics["cluster_mean_sep_ratio"] / 5.0)
-        score += 5 * sep_score
+        score += 6 * sep_score
     else:
-        score += 5 * 0.5  # neutral if no clusters
-
-    # Edge-node crossings (3) — from existing margins, lower is better
-    if "edge_node_crossing_rate" in metrics:
-        enc_score = max(0.0, 1.0 - metrics["edge_node_crossing_rate"] * 5)
-        score += 3 * enc_score
-
-    # Label overlap (2) — fewer is better
-    if "label_overlaps" in metrics or "label_node_overlaps" in metrics:
-        total_label_overlaps = metrics.get("label_overlaps", 0) + metrics.get(
-            "label_node_overlaps", 0
-        )
-        lo_score = 1.0 if total_label_overlaps == 0 else max(0.0, 1.0 - total_label_overlaps * 0.1)
-        score += 2 * lo_score
+        score += 6 * 0.5  # neutral if no clusters
 
     return score
 
@@ -1517,6 +1521,7 @@ _QUICK_AVAILABLE_FIELDS = frozenset(
 _FULL_ONLY_FIELDS = frozenset(
     {
         "crossing_rate",
+        "sampled_stress",
         "angular_res_mean_deg",
     }
 )
