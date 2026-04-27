@@ -5748,6 +5748,19 @@ def _build_custom_edge_collection(
         if getattr(style, "taper", False):
             taper_width_start, taper_width_end = _resolved_taper_widths(ax, style)
         label = graph.edge_labels[e_idx] if e_idx < len(graph.edge_labels) else None
+        arrowhead = str(style.arrow)
+        tail_arrow = str(style.tail_arrow)
+        if (
+            str(getattr(graph, "direction", "")).upper() == "BT"
+            and arrowhead == "none"
+            and tail_arrow != "none"
+        ):
+            # Graphviz-positioned BT renders can express normal target heads
+            # as tail-only markers after coordinate conversion. The curve
+            # endpoint p1 still sits on the receiver boundary, so normalize
+            # those marker-only edges back to a head for rendering.
+            arrowhead = tail_arrow
+            tail_arrow = "none"
         edges.append(
             DaguaEdge(
                 curve=_curve_to_render_bezier(curve),
@@ -5758,8 +5771,8 @@ def _build_custom_edge_collection(
                 color=str(style.color or "#8C8C8C"),
                 alpha=float(style.opacity if style.opacity is not None else 0.7),
                 linestyle=style.style,
-                arrowhead=str(style.arrow),
-                tail_arrow=str(style.tail_arrow),
+                arrowhead=arrowhead,
+                tail_arrow=tail_arrow,
                 arrowhead_length=head_length,
                 arrowhead_width=head_width,
                 tail_arrow_length=tail_length,
