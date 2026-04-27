@@ -680,6 +680,79 @@ def _is_graphviz_strict_render(graph: Any) -> bool:
     return _render_theme_name(graph) == "graphviz_strict"
 
 
+def _strict_edge_label_font_size(graph: Any, fallback_points: float) -> float:
+    """Return the graphviz_strict edge label font size override.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing the active theme.
+    fallback_points : float
+        Per-edge ``label_font_size`` value to fall back to when the strict
+        theme is not active or the graph-level default is unset.
+
+    Returns
+    -------
+    float
+        Edge label font size in typographic points.
+
+    Notes
+    -----
+    Round 11 F2: gallery fixtures hardcode ``label_font_size=10`` on the
+    per-edge :class:`EdgeStyle` for arrow_types and edge_styles_showcase.
+    The 5-level cascade gives those overrides priority over the strict
+    theme's ``edge_label_font_size=16``, leaving standalone edge labels
+    visibly smaller than dot's labels at the same content. graphviz_strict
+    is a "match-dot exactly" theme; treating its graph-level edge-label
+    point size as authoritative closes the gap without disturbing other
+    themes' per-edge customization.
+    """
+    if not _is_graphviz_strict_render(graph):
+        return fallback_points
+    theme = getattr(graph, "_theme", None)
+    graph_style = getattr(theme, "graph_style", None) if theme is not None else None
+    override = getattr(graph_style, "edge_label_font_size", None)
+    if override is None:
+        return fallback_points
+    return float(override)
+
+
+def _strict_absolute_edge_label_font_data(
+    graph: Any,
+    font_size_points: float,
+    display_scale: float,
+) -> Optional[float]:
+    """Return an absolute-pt edge label size in data coordinates.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing the active theme.
+    font_size_points : float
+        Desired absolute font size in typographic points.
+    display_scale : float
+        Point-to-data conversion factor.
+
+    Returns
+    -------
+    float | None
+        Absolute label size in data units when graphviz_strict is active,
+        ``None`` otherwise so callers fall back to graph-relative sizing.
+
+    Notes
+    -----
+    Round 11 F2: dagua's general edge-label sizing is graph-relative
+    (``avg_node_height * 0.18 * font_pt/7``). On panels with small nodes
+    that produces sub-10pt labels even when the user asks for 16pt. dot
+    sizes labels in absolute points regardless of node geometry, so for
+    graphviz_strict bypass the graph-relative scaling and emit the
+    requested point size directly.
+    """
+    if not _is_graphviz_strict_render(graph):
+        return None
+    return max(float(font_size_points), 1e-9) * max(float(display_scale), 1e-9)
+
+
 def _theme_edge_type(graph: Any, edge_idx: int) -> str:
     """Resolve the built-in theme edge key for one edge.
 
@@ -6168,6 +6241,11 @@ def _build_custom_edge_collection(
     DaguaEdgeCollection
         Prepared custom edge collection.
     """
+    # Round 11 F3: graphviz_strict matches dot's invariant arrow size; suppress
+    # the SHORT_EDGE_HEAD_FRACTION clamp so panels with short edges (tiny_graph,
+    # single_edge) get the same arrowhead silhouette as panels with long edges
+    # (pipeline, colors_showcase).
+    disable_curve_length_clamp = _is_graphviz_strict_render(graph)
     edges: List[DaguaEdge] = []
     for e_idx, curve in enumerate(curves):
         style = _edge_style_for_render(graph, e_idx)
@@ -6244,6 +6322,7 @@ def _build_custom_edge_collection(
                 group_key=(src_idx, tgt_idx),
                 source_node=src_idx,
                 target_node=tgt_idx,
+                disable_curve_length_clamp=disable_curve_length_clamp,
             )
         )
     collection = DaguaEdgeCollection(edges)
@@ -7014,15 +7093,26 @@ def _append_endpoint_edge_label_specs(
                 ),
             ),
         )
+        endpoint_label_font_size_points = _strict_edge_label_font_size(
+            graph, float(style.label_font_size)
+        )
         for endpoint_name, label_text, label_offset in endpoint_specs:
             if not label_text:
                 continue
             x, y = edge_endpoint_label_position(curve, endpoint_name, label_offset=label_offset)
             gid = f"dagua-edge-{endpoint_name}-label-{e_idx}"
-            label_font_data = _edge_font_size_data(
-                label_text,
-                avg_node_height,
-                float(style.label_font_size) * 0.85,
+            scaled_endpoint_pts = endpoint_label_font_size_points * 0.85
+            absolute_font_data = _strict_absolute_edge_label_font_data(
+                graph, scaled_endpoint_pts, display_scale
+            )
+            label_font_data = (
+                absolute_font_data
+                if absolute_font_data is not None
+                else _edge_font_size_data(
+                    label_text,
+                    avg_node_height,
+                    scaled_endpoint_pts,
+                )
             )
             specs.append(
                 DaguaText(
@@ -7200,10 +7290,20 @@ def _draw_edge_labels(
                 continue
 
             style = _edge_style_for_render(graph, e_idx)
-            label_font_data = _edge_font_size_data(
-                label,
-                avg_node_height,
-                float(style.label_font_size),
+            label_font_size_points = _strict_edge_label_font_size(
+                graph, float(style.label_font_size)
+            )
+            absolute_font_data = _strict_absolute_edge_label_font_data(
+                graph, label_font_size_points, display_scale
+            )
+            label_font_data = (
+                absolute_font_data
+                if absolute_font_data is not None
+                else _edge_font_size_data(
+                    label,
+                    avg_node_height,
+                    label_font_size_points,
+                )
             )
             specs.append(
                 DaguaText(
@@ -7262,10 +7362,20 @@ def _draw_edge_labels(
                     label_side=style.label_side,
                 )
 
-            label_font_data = _edge_font_size_data(
-                label,
-                avg_node_height,
-                float(style.label_font_size),
+            label_font_size_points = _strict_edge_label_font_size(
+                graph, float(style.label_font_size)
+            )
+            absolute_font_data = _strict_absolute_edge_label_font_data(
+                graph, label_font_size_points, display_scale
+            )
+            label_font_data = (
+                absolute_font_data
+                if absolute_font_data is not None
+                else _edge_font_size_data(
+                    label,
+                    avg_node_height,
+                    label_font_size_points,
+                )
             )
             specs.append(
                 DaguaText(
