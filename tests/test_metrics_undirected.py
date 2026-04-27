@@ -22,6 +22,7 @@ def _sample_metrics() -> dict[str, float]:
         "overlap_count": 0,
         "edge_straightness_mean_deg": 10.0,
         "crossing_rate": 0.02,
+        "sampled_stress": 0.3,
         "angular_res_mean_deg": 30.0,
         "cluster_mean_sep_ratio": 3.0,
     }
