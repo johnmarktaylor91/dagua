@@ -911,7 +911,10 @@ _GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
     shape="ellipse",
     fill="#FFFFFF",
     stroke="#000000",
-    stroke_width=0.75,
+    # Round 13 F6: round-11 audited stroke read as ~1px while dot reads
+    # ~1.4px on outlines. Modest bump to 0.9pt closes the perceptual
+    # weight gap without re-introducing a heavy "sketched" appearance.
+    stroke_width=0.9,
     font_family="TeX Gyre Termes",
     # Round 9 F1: matplotlib's Termes glyph rasterization at the gallery's
     # 210 DPI render path produces a cap-height ~73% of dot's at the same
@@ -929,12 +932,17 @@ _GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
     # node_shapes_showcase.png where dagua's diamond was ~2.5x dot's area).
     # Scaling padding and the floor dimensions by ~12/16 = 0.75 keeps the
     # ellipse silhouette aligned with dot at the bumped font size.
+    # Round 13 F1: padding stays compact, but the round-11 41/27 floors
+    # over-corrected -- audit measured dagua nodes ~30% smaller than dot's
+    # across panels (tiny_graph "In" 125x70 vs dot 190x95). Pull back
+    # min_width/min_height to ~50/33 (audit recommendation) so the floor
+    # alone restores parity without re-inflating the auto-sized bbox.
     padding=(6.0, 3.0),  # Round 11 F1: was (8.0, 4.0) at 12pt baseline.
     corner_radius=0.0,
     opacity=1.0,
     base_color="#000000",
-    min_width=41.0,  # Round 11 F1: was 54.0 at 12pt baseline (54 * 0.75).
-    min_height=27.0,  # Round 11 F1: was 36.0 at 12pt baseline (36 * 0.75).
+    min_width=50.0,  # Round 13 F1: was 41.0; audit said pull back toward ~50.
+    min_height=33.0,  # Round 13 F1: was 27.0; audit said pull back toward ~33.
     overflow_policy="expand_node",
 )
 
@@ -958,15 +966,17 @@ GRAPHVIZ_STRICT_THEME = Theme(
             width=1.0,
             arrow="normal",
             arrow_fill="filled",
-            # Round 9 F4: dot's filled-triangle arrowhead measures 24px wide
-            # x 30px tall at 210 DPI on single_edge.png. With the round-7
-            # ribbon-aware sublinear sqrt(width / 1.2pt) scaling, arrow
-            # dimensions of (12.0, 10.0) at width=1.0pt produce roughly
-            # (10.96, 9.13)pt visible -> ~32x27px at 210 DPI, recovering the
-            # round-6 PASS-grade stout-triangle silhouette that round-7
-            # inadvertently slimmed down.
-            arrow_length=12.0,
-            arrow_width=10.0,
+            # Round 13 F5: round-11's `disable_curve_length_clamp` lifted the
+            # short-edge clamp but heads still rendered at sqrt(1.0/1.2) ~=
+            # 0.913 of authored after the ribbon-aware sublinear scaling.
+            # On short stubs (arrow_types) and tiny graphs, the resulting
+            # ~10.96pt heads read as undersized lozenges next to dot's
+            # generous fill. Bump the authored dimensions toward the
+            # 14pt x 12pt band so even the sublinear-scaled fallback path
+            # produces stout heads, and pair with the stroke 0.9pt bump
+            # (F6) so the body line carries dot's perceived weight.
+            arrow_length=14.0,
+            arrow_width=12.0,
             arrow_scale=None,
             arrow_node_fraction=0.0,  # fixed size, not node-relative
             arrow_width_ratio=0.7,
@@ -975,6 +985,10 @@ GRAPHVIZ_STRICT_THEME = Theme(
             # Round 9 F1: edge labels share the cap-height ratio gap with
             # node labels. 16pt matches the bumped node label so labels read
             # at parity with dot.
+            # Round 13 F4: the strict edge-label render path now scales this
+            # by 10/14 to match dot's smaller-than-node edge-label cap-height
+            # (~10pt vs ~14pt). The theme value stays at 16pt so the cascade
+            # behaves consistently with node-label sizing.
             label_font_size=16.0,
             label_font_color="#000000",
             label_background="#FFFFFF",
@@ -986,8 +1000,9 @@ GRAPHVIZ_STRICT_THEME = Theme(
             width=1.0,
             arrow="normal",
             arrow_fill="filled",
-            arrow_length=12.0,
-            arrow_width=10.0,
+            # Round 13 F5: see default edge style for the bump rationale.
+            arrow_length=14.0,
+            arrow_width=12.0,
             arrow_scale=None,
             arrow_node_fraction=0.0,
             arrow_width_ratio=0.7,
