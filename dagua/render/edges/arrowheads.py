@@ -1055,7 +1055,7 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
 }
 
 ARROWHEAD_ALIASES: Dict[str, str] = {
-    "circle": "odot",
+    "circle": "dot",
     "open": "open",
     "odot": "odot",
     "obox": "obox",
@@ -1237,6 +1237,8 @@ def build_arrowhead(
     body_direction = unit_vector(as_point(tangent))
     resolved_body_width = float(width if body_width is None else body_width)
     parsed = parse_arrowhead_spec(spec)
+    if spec == "circle":
+        fill_mode = "filled"
 
     local_results: List[ArrowheadResult] = []
     offset = 0.0

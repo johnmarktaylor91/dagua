@@ -935,8 +935,8 @@ GRAPHVIZ_STRICT_THEME = Theme(
             width=1.0,  # Graphviz default penwidth
             arrow="normal",
             arrow_fill="filled",
-            arrow_length=7.0,  # slim compact triangle
-            arrow_width=4.5,  # narrow, proportional to 1.0pt edge
+            arrow_length=10.0,  # Graphviz-like chunky filled triangle
+            arrow_width=7.0,
             arrow_scale=None,
             arrow_node_fraction=0.0,  # fixed size, not node-relative
             arrow_width_ratio=0.7,
@@ -946,20 +946,23 @@ GRAPHVIZ_STRICT_THEME = Theme(
             label_font_color="#000000",
             label_background="#FFFFFF",
             label_font_family="Times New Roman",
+            curvature=0.0,
         ),
     },
     cluster_style=ClusterStyle(
-        fill="#F0F0F0",  # very subtle gray (Graphviz defaults to no fill)
+        fill="#F0F0F0",  # near-transparent gray, matching dot's subdued clusters
         stroke="#666666",  # medium gray like Graphviz's light border
         stroke_width=0.8,  # thin border matching Graphviz
         corner_radius=0.0,
         padding=16.0,  # generous padding like Graphviz
         label_position="top-left",
-        font_size=12.0,
+        font_size=10.0,
         font_weight="regular",
         font_color="#000000",
         font_family="Times New Roman",
-        opacity=0.6,  # subtle fill, not heavy
+        opacity=0.15,
+        depth_fill_step=0.0,
+        depth_stroke_step=0.0,
     ),
     graph_style=GraphStyle(
         background_color="#FFFFFF",

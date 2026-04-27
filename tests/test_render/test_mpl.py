@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 from matplotlib.colors import to_rgba
-from matplotlib.patches import Circle, PathPatch, Polygon
+from matplotlib.patches import PathPatch, Polygon
 from matplotlib.path import Path as MplPath
 
 import dagua
@@ -565,20 +565,18 @@ def test_port_indicators_render_at_edge_endpoints() -> None:
     positions = torch.tensor([[-20.0, 0.0], [20.0, 0.0]], dtype=torch.float32)
 
     fig, ax = render(graph, positions=positions, show=False)
-    indicator_patches = [
-        patch
-        for patch in ax.patches
-        if isinstance(patch, Circle)
-        and isinstance(patch.get_gid(), str)
-        and patch.get_gid().startswith("dagua-port-indicator-")
+    indicator_lines = [
+        line
+        for line in ax.lines
+        if isinstance(line.get_gid(), str) and line.get_gid().startswith("dagua-port-indicator-")
     ]
     plt.close(fig)
 
-    assert len(indicator_patches) == 2
-    assert all(float(patch.get_zorder()) >= 4.0 for patch in indicator_patches)
-    assert all(float(patch.get_linewidth()) == pytest.approx(0.5) for patch in indicator_patches)
-    assert to_rgba(indicator_patches[0].get_edgecolor()) == pytest.approx(to_rgba("#ffffff"))
-    assert to_rgba(indicator_patches[0].get_facecolor()) == pytest.approx(to_rgba("#334455"))
+    assert len(indicator_lines) == 2
+    assert all(float(line.get_zorder()) >= 4.0 for line in indicator_lines)
+    assert all(float(line.get_markeredgewidth()) == pytest.approx(1.0) for line in indicator_lines)
+    assert to_rgba(indicator_lines[0].get_markeredgecolor()) == pytest.approx(to_rgba("#ffffff"))
+    assert to_rgba(indicator_lines[0].get_markerfacecolor()) == pytest.approx(to_rgba("#334455"))
 
 
 def test_bevel_nodes_render_overlay_patches() -> None:
@@ -613,9 +611,9 @@ def test_bevel_nodes_render_overlay_patches() -> None:
     assert highlight_patches
     assert shadow_patches
     assert max(float(patch.get_facecolor()[-1]) for patch in highlight_patches) == pytest.approx(
-        0.45
+        0.55
     )
-    assert max(float(patch.get_facecolor()[-1]) for patch in shadow_patches) == pytest.approx(0.28)
+    assert max(float(patch.get_facecolor()[-1]) for patch in shadow_patches) == pytest.approx(0.35)
     assert highlight_patches[0].get_path().vertices.shape[0] > 5
 
 
@@ -723,7 +721,7 @@ def test_bridge_crossing_adds_rounded_background_patch() -> None:
     plt.close(fig)
 
     assert len(bridge_patches) == 1
-    assert float(bridge_patches[0].get_linewidth()) == pytest.approx(1.0)
+    assert float(bridge_patches[0].get_linewidth()) == pytest.approx(1.5)
     assert float(bridge_patches[0].get_zorder()) > 1.7
     assert to_rgba(bridge_patches[0].get_facecolor()) == pytest.approx(to_rgba("#fafafa"))
     assert to_rgba(bridge_patches[0].get_edgecolor()) == pytest.approx(
@@ -881,7 +879,12 @@ def test_dot_arrow_marker_uses_larger_graphviz_like_radius() -> None:
     expected_scale = _compute_display_scale(ax)
     plt.close(fig)
 
-    assert ax.patches[0].radius == pytest.approx(0.55 * style.arrow_width * expected_scale)
+    _, scaled_width = mpl_renderer._scaled_arrowhead_dimensions(
+        style.arrow_length,
+        style.arrow_width,
+        style.width,
+    )
+    assert ax.patches[0].radius == pytest.approx(0.55 * scaled_width * expected_scale)
 
 
 def test_tee_arrow_marker_uses_visible_bar_offset_and_width() -> None:
@@ -1706,13 +1709,18 @@ def test_open_marker_uses_unified_display_scaled_dimensions() -> None:
     expected_scale = _compute_display_scale(ax)
     outline_width = _edge_width_data_units(ax, style.width)
     plt.close(fig)
+    scaled_length, scaled_width = mpl_renderer._scaled_arrowhead_dimensions(
+        style.arrow_length,
+        style.arrow_width,
+        style.width,
+    )
 
     assert float(vertices[:, 1].max()) == pytest.approx(
-        (style.arrow_length * expected_scale) + (outline_width / 2.0),
+        (scaled_length * expected_scale) + (outline_width / 2.0),
         rel=0.05,
     )
     assert float(vertices[:, 0].max() - vertices[:, 0].min()) == pytest.approx(
-        style.arrow_width * expected_scale * 1.2,
+        scaled_width * expected_scale * 1.2,
         rel=0.1,
     )
 
@@ -1816,11 +1824,11 @@ def test_custom_edge_collection_caps_self_loop_arrowheads() -> None:
 
     collection = _build_custom_edge_collection(ax, graph, [curve])
     edge = collection.edges[0]
-    max_length = float(min(graph.node_sizes[0, 0], graph.node_sizes[0, 1])) * 0.25
+    max_length = float(min(graph.node_sizes[0, 0], graph.node_sizes[0, 1])) * 0.18
     plt.close(fig)
 
     assert edge.arrowhead_length == pytest.approx(max_length)
-    assert edge.arrowhead_width == pytest.approx(max_length * 0.7)
+    assert edge.arrowhead_width == pytest.approx(max_length * 0.55)
 
 
 def test_normal_arrow_marker_uses_wider_graphviz_base() -> None:
@@ -1840,8 +1848,13 @@ def test_normal_arrow_marker_uses_wider_graphviz_base() -> None:
     assert len(ax.patches) == 1
     vertices = ax.patches[0].get_xy()
     expected_scale = _compute_display_scale(ax)
+    _, scaled_width = mpl_renderer._scaled_arrowhead_dimensions(
+        style.arrow_length,
+        style.arrow_width,
+        style.width,
+    )
     assert abs(float(vertices[1][0] - vertices[2][0])) == pytest.approx(
-        style.arrow_width * 1.2 * expected_scale
+        scaled_width * 1.2 * expected_scale
     )
     plt.close(fig)
 
@@ -2085,7 +2098,7 @@ def test_node_and_external_label_font_sizes_use_data_coordinate_scaling(
 
     # Node label font size uses layout-computed data coordinates directly.
     node_expected = 17.0  # font_size from node_font_sizes (data coords)
-    external_expected = max(20.0 * 0.35 * (12.0 / 8.0), 20.0 * 0.1)
+    external_expected = max(20.0 * 0.4 * (12.0 / 8.0), 20.0 * 0.1)
     external_expected = min(external_expected, 20.0 * 0.6)
 
     assert node_spec.font_size * node_display_scale == pytest.approx(node_expected)
@@ -2129,7 +2142,7 @@ def test_bold_node_and_external_labels_normalize_weight_and_gain_size_boost(
         spec for spec in external_specs if spec.gid == "dagua-node-external-label-0"
     )
 
-    baseline_external = max(20.0 * 0.35 * (10.0 / 8.0), 20.0 * 0.1)
+    baseline_external = max(20.0 * 0.4 * (10.0 / 8.0), 20.0 * 0.1)
     baseline_external = min(baseline_external, 20.0 * 0.6)
 
     assert node_spec.font_weight == "bold"
@@ -2218,13 +2231,13 @@ def test_edge_label_font_sizes_use_average_node_height(
     avg_node_height = float(sizes[:, 1].mean())
 
     assert main_spec.font_size * display_scale == pytest.approx(
-        avg_node_height * 0.25 * (14.0 / 7.0)
+        avg_node_height * 0.18 * (14.0 / 7.0)
     )
     assert head_spec.font_size * display_scale == pytest.approx(
-        avg_node_height * 0.25 * ((14.0 * 0.85) / 7.0)
+        avg_node_height * 0.18 * ((14.0 * 0.85) / 7.0)
     )
     assert tail_spec.font_size * display_scale == pytest.approx(
-        avg_node_height * 0.25 * ((14.0 * 0.85) / 7.0)
+        avg_node_height * 0.18 * ((14.0 * 0.85) / 7.0)
     )
     edge_style = mpl_renderer._edge_style_for_render(graph, 0)
     minimum_requested_offset = (12.0 + ((14.0 * 0.85) / 2.0)) * display_scale
