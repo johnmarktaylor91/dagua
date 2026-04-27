@@ -9,7 +9,12 @@ import torch
 
 from dagua.layout.classic.kk import layout_kk
 from dagua.layout.ops.pipelines.kk import build_kk_pipeline, layout_kk_pipeline
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.state import (
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -129,6 +134,29 @@ def _assert_trace_match(
         assert torch.equal(classic_trace, pipeline_trace)
 
 
+def _top_to_bottom_fraction(positions: torch.Tensor, edge_index: torch.Tensor) -> float:
+    """Return the share of edges whose target is below the source.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    float
+        Fraction of edges satisfying top-to-bottom direction.
+    """
+    if edge_index.numel() == 0:
+        return 1.0
+    source = edge_index[0]
+    target = edge_index[1]
+    aligned = positions[target, 1] >= positions[source, 1]
+    return float(aligned.to(dtype=torch.float32).mean().item())
+
+
 def _run_pipeline_direct(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -222,6 +250,25 @@ class TestKKPipelineFidelity:
         )
 
         _assert_exact_match(classic, pipeline)
+
+    def test_layout_kk_pipeline_can_orient_to_graph_direction(self) -> None:
+        """Direction orientation should fix KK's arbitrary vertical sign."""
+        pytest.importorskip("scipy")
+        edge_index = _path_edge_index(6)
+
+        raw = layout_kk_pipeline(edge_index=edge_index, num_nodes=6, steps=40)
+        oriented = layout_kk_pipeline(
+            edge_index=edge_index,
+            num_nodes=6,
+            steps=40,
+            direction="TB",
+            orient_to_direction=True,
+        )
+
+        assert _top_to_bottom_fraction(raw, edge_index) == 0.0
+        assert _top_to_bottom_fraction(oriented, edge_index) == 1.0
+        assert torch.equal(oriented[:, 0], raw[:, 0])
+        assert torch.equal(oriented[:, 1], -raw[:, 1])
 
     def test_layout_kk_pipeline_matches_classic_on_disconnected_graph(self) -> None:
         """Disconnected components and isolates should match exactly."""
