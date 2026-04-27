@@ -110,3 +110,6 @@ aesthetic_review/
 
 # Sprint 0.5: secret salts for opaque held-out / rolling graph suites
 .project-context/private/
+
+# Codex CLI tooling marker (empty file dropped by codex exec)
+.codex
