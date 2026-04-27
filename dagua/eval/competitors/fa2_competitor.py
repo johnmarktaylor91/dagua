@@ -194,6 +194,10 @@ class FA2Reference(CompetitorBase):
                 "gravity": 1.0,
                 "verbose": False,
             }
+            if seed is not None:
+                # Newer ``fa2`` releases initialize from random.Random(self.seed);
+                # global RNG seeding above only covers older reference packages.
+                engine_kwargs["seed"] = seed
             layout_kwargs: dict[str, Any] = {"pos": None, "iterations": 100}
             if variant_params is not None:
                 for key, value in dict(variant_params).items():
