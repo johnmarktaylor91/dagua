@@ -942,12 +942,18 @@ _GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
     # End) still measured 14-18% short of dot in height. Lift min_height
     # 33 -> 38 so single-line ellipses get adequate vertical room without
     # disturbing widths on multi-character labels.
+    # Round 17 F1: round-15's 33 -> 38 was a 15% lift but the round-16 audit
+    # measured ellipse heights at 1.05-1.20x dot's (i.e. 5-20% TOO TALL),
+    # with pipeline.png ellipses uniformly 18-20% over and tiny_graph 11%
+    # over. Pull min_height back to 35 (a +2 bump from round-13 instead of
+    # +5) so small/medium ellipses land inside the +/-5% target band rather
+    # than overshooting it.
     padding=(6.0, 3.0),  # Round 11 F1: was (8.0, 4.0) at 12pt baseline.
     corner_radius=0.0,
     opacity=1.0,
     base_color="#000000",
     min_width=50.0,  # Round 13 F1: was 41.0; audit said pull back toward ~50.
-    min_height=38.0,  # Round 15 F2: was 33.0; audit said small ellipses still ~14-18% short.
+    min_height=35.0,  # Round 17 F1: was 38.0; audit said ellipses now 5-20% too tall.
     overflow_policy="expand_node",
 )
 
@@ -986,8 +992,18 @@ GRAPHVIZ_STRICT_THEME = Theme(
             # base width, but keep arrow_length at 14 -- bumping length
             # (16) overshot height by 2x and produced heads taller than
             # dot's. (14, 14) hits dot's width without overshooting depth.
-            arrow_length=14.0,
-            arrow_width=14.0,
+            # Round 17 F3: round-15's (14, 14) inverted the aspect ratio.
+            # Audit measured dagua arrowhead h/w = 0.88 (wide-stubby) vs
+            # dot's 1.26 (narrow-tall) on tiny_graph. The width-only bump
+            # picked the wrong axis: dot's filled triangle is taller than
+            # wide, but dagua's became wider than tall. Swap: bump LENGTH
+            # 14 -> 18 to lift the head depth above its width, and pull
+            # WIDTH back to 12 so the base narrows toward dot's. Target
+            # h/w = 18/12 = 1.5 (vs dot's 1.26); slightly over to recover
+            # filled-area lost in round 15. If the audit measures back
+            # in the 1.10-1.30 band, we are home.
+            arrow_length=18.0,
+            arrow_width=12.0,
             arrow_scale=None,
             arrow_node_fraction=0.0,  # fixed size, not node-relative
             arrow_width_ratio=0.7,
@@ -1011,9 +1027,9 @@ GRAPHVIZ_STRICT_THEME = Theme(
             width=1.0,
             arrow="normal",
             arrow_fill="filled",
-            # Round 13 F5 / Round 15 F4: see default edge style for the bump rationale.
-            arrow_length=14.0,
-            arrow_width=14.0,
+            # Round 13 F5 / Round 15 F4 / Round 17 F3: see default edge style for rationale.
+            arrow_length=18.0,
+            arrow_width=12.0,
             arrow_scale=None,
             arrow_node_fraction=0.0,
             arrow_width_ratio=0.7,
