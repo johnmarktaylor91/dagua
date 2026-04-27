@@ -11,6 +11,13 @@ import torch
 
 RichMarkup = Dict[str, Any]
 RichSegment = Tuple[str, RichMarkup]
+_TEX_GYRE_TERMES_TYPE1_DIR = "/usr/share/texmf/fonts/type1/public/tex-gyre"
+_TEX_GYRE_TERMES_FACE_FILES = {
+    ("regular", "normal"): "qtmr.pfb",
+    ("bold", "normal"): "qtmb.pfb",
+    ("regular", "italic"): "qtmri.pfb",
+    ("bold", "italic"): "qtmbi.pfb",
+}
 
 
 class VRAMBudget:
@@ -439,6 +446,42 @@ def _normalize_font_style(font_style: str) -> Literal["normal", "italic", "obliq
     return "normal"
 
 
+def _tex_gyre_termes_font_path(
+    font_family: str,
+    font_weight: str,
+    font_style: str,
+) -> Optional[str]:
+    """Return the installed TeX Gyre Termes Type1 path for measurements.
+
+    Parameters
+    ----------
+    font_family : str
+        Requested font family.
+    font_weight : str
+        Requested weight token.
+    font_style : str
+        Requested style token.
+
+    Returns
+    -------
+    str | None
+        Absolute ``.pfb`` path for the matching face, or ``None`` when the
+        request is not for TeX Gyre Termes or the face is unavailable.
+    """
+    from pathlib import Path
+
+    normalized_family = str(font_family).strip().lower().replace(" ", "")
+    if normalized_family not in {"texgyretermes", "times-roman"}:
+        return None
+    normalized_weight = "bold" if str(font_weight).strip().lower() == "bold" else "regular"
+    normalized_style = "italic" if _normalize_font_style(font_style) == "italic" else "normal"
+    path = (
+        Path(_TEX_GYRE_TERMES_TYPE1_DIR)
+        / _TEX_GYRE_TERMES_FACE_FILES[(normalized_weight, normalized_style)]
+    )
+    return str(path) if path.exists() else None
+
+
 def measure_text_fallback(
     text: str,
     font_size: float = 8.5,
@@ -508,12 +551,16 @@ def _measure_text_exact_cached(
 
     line_spacing = 1.2
     text_to_path = TextToPath()
-    fp = FontProperties(
-        family=font_family,
-        size=font_size,
-        weight=font_weight,
-        style=_normalize_font_style(font_style),
-    )
+    font_path = _tex_gyre_termes_font_path(font_family, font_weight, font_style)
+    if font_path is None:
+        fp = FontProperties(
+            family=font_family,
+            size=font_size,
+            weight=font_weight,
+            style=_normalize_font_style(font_style),
+        )
+    else:
+        fp = FontProperties(fname=font_path, size=font_size)
     _, height_ref, _ = text_to_path.get_text_width_height_descent("Hg", fp, ismath=False)
     stable_line_height = max(float(height_ref), float(font_size))
     lines = text.split("\n")
