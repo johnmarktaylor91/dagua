@@ -379,7 +379,37 @@ current `dagua.metrics.full()`. Runtime values from
 `eval_output/{benchmark_full,variant_bench_full}/results.json` plus
 fresh measurements at `/tmp/runtime_fill.csv` and `/tmp/cuda_runtime.csv`.
 
-## 12. One-line summary for the morning
+## 12. Loss-weight tuning note (post-overnight finding)
+
+dagua's loss is a weighted sum exposed via `LayoutConfig`. Reweighting
+moves the gradient output along the Pareto frontier — but the picker
+neutralizes most movement (it re-picks polish candidates by composite,
+which doesn't weight all metrics equally).
+
+**Notable buried discovery:** dagua HAS a stress loss term
+(`PivotApproxStressLoss`) wired into `resolve.py`, gated on
+`w_stress > 0`. Default is `w_stress = 0.0` (off).
+
+**The stress loss is broken** for graphs with dummy-node insertion
+(which is most non-trivial DAGs after sprint-31a/32). 12 of 15
+probed graphs threw `RuntimeError: tensor size mismatch` when
+enabled at `w_stress = 0.05`. The 3 that worked showed 0.00 metric
+delta because dagua's existing implicit stress (via edge-length
+variance) is already near-optimal on those graph classes.
+
+So dagua's `sampled_stress` rank of 6.77 is what its implicit stress
+can produce; the explicit `PivotApproxStressLoss` would need shape-
+mismatch fixes + weight tuning + picker-bottleneck navigation before
+adding any value. ~2-3 day project; logged as
+Sprint-W-STRESS-FIX in future-stretch.
+
+The strategic upshot: **dagua's implicit aesthetic terms already do
+most of the work the literature's named aesthetic losses do**. Adding
+direct loss terms (angular, stress) to lift specific metrics either
+crashes (this case), produces no gradient (already optimal), or gets
+neutralized by the picker (sprint-37/37b).
+
+## 13. One-line summary for the morning
 
 **dagua is at architectural ceiling for the current pipeline shape:
 95.7% best-or-tied composite, tied with graphviz_dot for most-
