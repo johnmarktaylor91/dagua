@@ -1099,7 +1099,7 @@ def test_vee_arrow_marker_uses_wider_graphviz_spread() -> None:
 
 
 def test_crow_arrow_marker_uses_wider_graphviz_spread() -> None:
-    """Crow markers should widen their outer tines and use heavier strokes."""
+    """Crow markers should render as one filled Graphviz-style polygon."""
 
     fig, ax = plt.subplots()
     style = EdgeStyle(arrow="crow", width=1.1, arrow_width=10.0, arrow_length=14.0)
@@ -1114,18 +1114,16 @@ def test_crow_arrow_marker_uses_wider_graphviz_spread() -> None:
 
     assert len(ax.lines) == 0
     expected_scale = _compute_display_scale(ax)
-    endpoints = []
-    for patch in ax.patches:
-        vertices = patch.get_path().vertices
-        endpoint = vertices[np.argmax(np.linalg.norm(vertices, axis=1))]
-        endpoints.append(endpoint)
-    outer_x_offsets = sorted(abs(float(endpoint[0])) for endpoint in endpoints[1:])
-    expected_offset = (style.arrow_width * 1.4 * expected_scale) + (
-        _edge_width_data_units(ax, max(style.width * 1.4, 2.0)) / 2.0
+    assert len(ax.patches) == 1
+    vertices = ax.patches[0].get_path().vertices
+    expected_width = style.arrow_width * expected_scale
+    assert float(vertices[:, 0].max() - vertices[:, 0].min()) == pytest.approx(
+        expected_width,
+        rel=0.08,
     )
-    assert outer_x_offsets == pytest.approx(
-        [expected_offset, expected_offset],
-        rel=0.06,
+    assert float(vertices[:, 1].max()) == pytest.approx(
+        style.arrow_length * expected_scale,
+        rel=0.08,
     )
     assert all(patch.get_linewidth() == pytest.approx(0.0) for patch in ax.patches)
     plt.close(fig)
@@ -1704,10 +1702,9 @@ def test_open_marker_uses_unified_display_scaled_dimensions() -> None:
         style=style,
     )
 
-    assert len(ax.patches) == 3
+    assert len(ax.patches) == 1
     vertices = np.concatenate([patch.get_path().vertices for patch in ax.patches], axis=0)
     expected_scale = _compute_display_scale(ax)
-    outline_width = _edge_width_data_units(ax, style.width)
     plt.close(fig)
     scaled_length, scaled_width = mpl_renderer._scaled_arrowhead_dimensions(
         style.arrow_length,
@@ -1716,7 +1713,7 @@ def test_open_marker_uses_unified_display_scaled_dimensions() -> None:
     )
 
     assert float(vertices[:, 1].max()) == pytest.approx(
-        (scaled_length * expected_scale) + (outline_width / 2.0),
+        scaled_length * expected_scale,
         rel=0.05,
     )
     assert float(vertices[:, 0].max() - vertices[:, 0].min()) == pytest.approx(
