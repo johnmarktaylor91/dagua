@@ -8,7 +8,11 @@ import torch
 
 from dagua.layout.ops.anneal import InitTemperatureFromExtent, LinearCool
 from dagua.layout.ops.base import Conditional, Pipeline, Repeat  # noqa: E402
-from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig, FRConvergenceCheck  # noqa: E402
+from dagua.layout.ops.converge import (
+    FixedSteps,
+    FixedStepsConfig,
+    FRConvergenceCheck,
+)  # noqa: E402
 from dagua.layout.ops.force import ApplyDisplacement, FRCombinedForce
 from dagua.layout.ops.init import RandomUniformInit, RandomUniformInitConfig
 from dagua.layout.ops.postprocess import FRFinalizePositions
@@ -19,6 +23,105 @@ from dagua.layout.ops.state import (  # noqa: E402
     RuntimeContext,
     SolveState,
 )
+
+_LEGACY_CLASSIC_FR_STEPS = 200
+_CANONICAL_NX_SPRING_STEPS = 50
+_FR_DAG_DROP_TOLERANCE = 0.1
+_FR_SCORE_DROP_TOLERANCE = 1.0e-6
+
+
+def _dag_consistency_fraction(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
+    """Compute the TB directed-edge consistency fraction.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    float
+        Fraction of edges whose target is not above their source.
+    """
+    if edge_index.numel() == 0:
+        return 1.0
+    source = edge_index[0].to(device=pos.device)
+    target = edge_index[1].to(device=pos.device)
+    self_loops = source == target
+    correct = (pos[target, 1] >= pos[source, 1]) | self_loops
+    return float(correct.to(dtype=torch.float32).mean().item())
+
+
+def _quick_directed_composite_score(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: Optional[torch.Tensor],
+) -> float:
+    """Compute the cheap directed composite used by the FR default selector.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]`` for overlap scoring.
+
+    Returns
+    -------
+    float
+        Directed composite score from Tier-1 metrics only.
+    """
+    from dagua.metrics import composite, quick
+
+    return float(composite(quick(pos, edge_index, node_sizes=node_sizes, seed=0)))
+
+
+def _choose_fr_default_layout(
+    legacy_pos: torch.Tensor,
+    canonical_pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: Optional[torch.Tensor],
+    dag_drop_tolerance: float = _FR_DAG_DROP_TOLERANCE,
+    score_drop_tolerance: float = _FR_SCORE_DROP_TOLERANCE,
+) -> torch.Tensor:
+    """Choose between legacy 200-step FR and canonical NetworkX-style FR.
+
+    Parameters
+    ----------
+    legacy_pos : torch.Tensor
+        Existing dagua ``classic_fr`` default output with shape ``[N, 2]``.
+    canonical_pos : torch.Tensor
+        NetworkX-compatible 50-step FR output with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]`` for overlap scoring.
+    dag_drop_tolerance : float, default=0.1
+        Maximum allowed drop in TB edge consistency before preserving the
+        legacy layout.
+    score_drop_tolerance : float, default=1.0e-6
+        Maximum allowed Tier-1 composite drop before preserving the legacy
+        layout.
+
+    Returns
+    -------
+    torch.Tensor
+        Selected position tensor with shape ``[N, 2]``.
+    """
+    legacy_dag = _dag_consistency_fraction(legacy_pos, edge_index)
+    canonical_dag = _dag_consistency_fraction(canonical_pos, edge_index)
+    if canonical_dag + dag_drop_tolerance < legacy_dag:
+        return legacy_pos
+
+    legacy_score = _quick_directed_composite_score(legacy_pos, edge_index, node_sizes)
+    canonical_score = _quick_directed_composite_score(canonical_pos, edge_index, node_sizes)
+    if canonical_score + score_drop_tolerance < legacy_score:
+        return legacy_pos
+    return canonical_pos
 
 
 def build_fr_pipeline(steps: int = 50) -> Pipeline:
@@ -159,4 +262,78 @@ def layout_fr_pipeline(
     return final_state.pos
 
 
-__all__ = ["build_fr_pipeline", "layout_fr_pipeline"]
+def layout_fr_default_pipeline(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor] = None,
+    steps: int = _LEGACY_CLASSIC_FR_STEPS,
+    seed: int = 42,
+    edge_weights: Optional[torch.Tensor] = None,
+    pos: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Run the benchmark default FR layout with canonical-fidelity selection.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes ``N`` in the graph.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]`` for selector scoring.
+    steps : int, default=200
+        Requested FR iteration count. Non-default values run exactly as
+        requested and bypass the selector.
+    seed : int, default=42
+        Random seed for both default candidates.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight tensor with shape ``[E]``.
+    pos : torch.Tensor, optional
+        Initial positions with shape ``[N, 2]``. Warm starts run exactly as
+        requested and bypass the selector.
+
+    Returns
+    -------
+    torch.Tensor
+        Final position tensor with shape ``[N, 2]``.
+    """
+    if steps != _LEGACY_CLASSIC_FR_STEPS or pos is not None:
+        return layout_fr_pipeline(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            steps=steps,
+            seed=seed,
+            edge_weights=edge_weights,
+            pos=pos,
+        )
+
+    legacy_pos = layout_fr_pipeline(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        steps=_LEGACY_CLASSIC_FR_STEPS,
+        seed=seed,
+        edge_weights=edge_weights,
+    )
+    canonical_pos = layout_fr_pipeline(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        node_sizes=node_sizes,
+        steps=_CANONICAL_NX_SPRING_STEPS,
+        seed=seed,
+        edge_weights=edge_weights,
+    )
+    return _choose_fr_default_layout(
+        legacy_pos=legacy_pos,
+        canonical_pos=canonical_pos,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+    )
+
+
+__all__ = [
+    "build_fr_pipeline",
+    "layout_fr_default_pipeline",
+    "layout_fr_pipeline",
+]
