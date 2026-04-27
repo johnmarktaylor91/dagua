@@ -604,7 +604,7 @@ def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build Graphviz's filled crow marker as one compact polygon.
+    """Build Graphviz's filled crow marker as a compact two-wing dart.
 
     Parameters
     ----------
@@ -622,25 +622,32 @@ def _crow(length: float, width: float, body_width: float) -> ArrowheadResult:
 
     Notes
     -----
-    Graphviz 8 emits ``crow`` as a filled polygon, not the stroked ER
-    cardinality foot. The polygon keeps the notch silhouette while avoiding
-    the hollow-V appearance that appears after antialiasing at gallery scale.
+    Graphviz 8 emits ``crow`` as a filled polygon shaped like a notched
+    dart -- two wings sweeping back from the tip with a back-center spine
+    that makes the notch readable at typographic sizes.
+
+    Round-7 used a six-vertex three-prong polygon that drew correctly when
+    inspected in isolation but at gallery zoom (arrowhead extent ~24px) the
+    three thin prongs collapsed into an "M" silhouette indistinguishable
+    from the hollow ``vee`` chevron. Reverting to dot's actual geometry
+    (per the SVG vertices emitted by Graphviz 8.0.3) -- a tip on the body
+    axis, two wings at the back perimeter, and a back-center node forming
+    the spine -- produces a chunky filled dart that reads as crow at every
+    gallery scale.
     """
-    half_width = max(width * 0.5, body_width * 1.2, FLOAT_EPSILON)
-    notch_half = max(body_width * 0.65, half_width * 0.28)
-    notch_x = length * 0.48
-    body_x = length
+    half_width = max(width * 0.5, body_width * 1.5, FLOAT_EPSILON)
+    notch_x = length * 0.5
     overlap = _join_overlap(length, body_width)
     return ArrowheadResult(
         filled_paths=[
             _local_path(
                 [
-                    (0.0, 0.0),
-                    (body_x, half_width),
-                    (notch_x, notch_half),
-                    (body_x, 0.0),
-                    (notch_x, -notch_half),
-                    (body_x, -half_width),
+                    (length, 0.0),  # back-center spine
+                    (0.0, half_width),  # right wing tip (above body axis)
+                    (notch_x, 0.0),  # forward notch on axis
+                    (0.0, 0.0),  # tip
+                    (notch_x, 0.0),  # mirror notch (closes the upper half)
+                    (0.0, -half_width),  # left wing tip
                 ],
                 closed=True,
             )
