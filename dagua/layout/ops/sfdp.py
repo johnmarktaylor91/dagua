@@ -203,6 +203,151 @@ def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor
     return centered * (extent / max(span, _SFDP_ALGORITHM_CONFIG.min_span))
 
 
+def _principal_component_rotate(positions: torch.Tensor) -> torch.Tensor:
+    """Rotate coordinates onto Graphviz SFDP's principal-component frame.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Centered positions rotated so the major principal axis is horizontal.
+
+    Notes
+    -----
+    Graphviz calls ``pcp_rotate`` after multilevel refinement. SFDP's force
+    objective is rotation-invariant, so this late canonicalization materially
+    affects directed readability metrics even when relative geometry matches.
+    """
+    if positions.shape[0] <= 1:
+        return torch.zeros_like(positions)
+
+    centered = positions - positions.mean(dim=0, keepdim=True)
+    covariance = centered.transpose(0, 1) @ centered
+    cross = covariance[0, 1]
+
+    if abs(float(cross.item())) <= _SFDP_ALGORITHM_CONFIG.epsilon:
+        axis = torch.tensor([0.0, 1.0], dtype=positions.dtype, device=positions.device)
+    else:
+        xx = covariance[0, 0]
+        yy = covariance[1, 1]
+        discriminant = torch.sqrt((xx * xx) + (4.0 * cross * cross) - (2.0 * xx * yy) + (yy * yy))
+        axis_x = -(-xx + yy - discriminant) / (2.0 * cross)
+        axis = torch.stack([axis_x, torch.ones((), dtype=positions.dtype, device=positions.device)])
+        axis = axis / torch.linalg.vector_norm(axis).clamp_min(_SFDP_ALGORITHM_CONFIG.epsilon)
+
+    x_rotated = centered[:, 0] * axis[0] + centered[:, 1] * axis[1]
+    y_rotated = -centered[:, 0] * axis[1] + centered[:, 1] * axis[0]
+    return torch.stack([x_rotated, y_rotated], dim=1)
+
+
+def _reflect_flow_axis(positions: torch.Tensor, direction: str) -> torch.Tensor:
+    """Reflect positions along the axis used by the requested layout direction.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    direction : str
+        Layout direction: ``TB``, ``BT``, ``LR``, or ``RL``.
+
+    Returns
+    -------
+    torch.Tensor
+        Reflected position tensor with shape ``[N, 2]``.
+    """
+    reflected = positions.clone()
+    if direction in {"LR", "RL"}:
+        reflected[:, 0] = -reflected[:, 0]
+    else:
+        reflected[:, 1] = -reflected[:, 1]
+    return reflected
+
+
+def _edge_flow_score(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    direction: str,
+) -> float:
+    """Score how strongly edges advance in the requested flow direction.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    direction : str
+        Layout direction: ``TB``, ``BT``, ``LR``, or ``RL``.
+
+    Returns
+    -------
+    float
+        Mean normalized signed edge advance. Larger is better.
+    """
+    if edge_index.numel() == 0 or positions.shape[0] <= 1:
+        return 0.0
+
+    edges = edge_index.to(device=positions.device, dtype=torch.long)
+    source = edges[0]
+    target = edges[1]
+    delta = positions[target] - positions[source]
+    length = torch.linalg.vector_norm(delta, dim=1).clamp_min(_SFDP_ALGORITHM_CONFIG.epsilon)
+
+    if direction in {"LR", "RL"}:
+        advance = delta[:, 0]
+    else:
+        advance = delta[:, 1]
+    if direction in {"BT", "RL"}:
+        advance = -advance
+    return float((advance / length).mean().item())
+
+
+def _orient_positions_to_flow(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    direction: str,
+) -> torch.Tensor:
+    """Canonicalize SFDP's rotation-invariant output for directed graph flow.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    direction : str
+        Layout direction: ``TB``, ``BT``, ``LR``, or ``RL``.
+
+    Returns
+    -------
+    torch.Tensor
+        Oriented position tensor with shape ``[N, 2]``.
+    """
+    if positions.shape[0] <= 1 or edge_index.numel() == 0:
+        return positions
+
+    normalized_direction = direction if direction in {"TB", "BT", "LR", "RL"} else "TB"
+    rotated = _principal_component_rotate(positions)
+    candidates = [
+        positions,
+        _reflect_flow_axis(positions, normalized_direction),
+        rotated,
+        _reflect_flow_axis(rotated, normalized_direction),
+    ]
+    return max(
+        candidates,
+        key=lambda candidate: _edge_flow_score(
+            positions=candidate,
+            edge_index=edge_index,
+            direction=normalized_direction,
+        ),
+    )
+
+
 def _build_graph(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -1176,7 +1321,11 @@ class SFDPRefineCoarsestLevel(Op):
     category: ClassVar[OpCategory] = OpCategory.FORCE
     reads: ClassVar[Tuple[str, ...]] = ("pos", "ideal_length", "extras", "converged")
     writes: ClassVar[Tuple[str, ...]] = ("pos", "extras", "converged")
-    requires: ClassVar[Tuple[str, ...]] = ("pos", "ideal_length", f"extras.{_GRAPH_KEY}")
+    requires: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "ideal_length",
+        f"extras.{_GRAPH_KEY}",
+    )
 
     steps: int = 500
     theta: float = _SFDP_ALGORITHM_CONFIG.default_theta
@@ -1398,8 +1547,13 @@ class SFDPFinalizePositions(Op):
             node_sizes=problem.node_sizes,
         )
 
+        oriented = _orient_positions_to_flow(
+            positions=state.pos,
+            edge_index=problem.edge_index,
+            direction=problem.direction,
+        )
         extent = _layout_extent(num_nodes=problem.num_nodes, node_sizes=problem.node_sizes)
-        normalized = _normalize_positions(positions=state.pos, extent=extent)
+        normalized = _normalize_positions(positions=oriented, extent=extent)
         state.pos = normalized.to(dtype=torch.float32, device=device)
         return state
 

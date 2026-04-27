@@ -9,7 +9,12 @@ import torch
 
 from dagua.layout.classic.sfdp import layout_sfdp
 from dagua.layout.ops.pipelines.sfdp import build_sfdp_pipeline, layout_sfdp_pipeline
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.state import (
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -109,6 +114,7 @@ def _run_pipeline_direct(
     theta: float = 0.6,
     repulsive_exponent: float = -1.0,
     edge_weights: torch.Tensor | None = None,
+    direction: str = "TB",
 ) -> torch.Tensor:
     """Execute ``build_sfdp_pipeline`` directly on a fresh solve state.
 
@@ -128,6 +134,8 @@ def _run_pipeline_direct(
         SFDP repulsion exponent.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
+    direction : str, default="TB"
+        Requested layout flow direction.
 
     Returns
     -------
@@ -139,6 +147,7 @@ def _run_pipeline_direct(
         num_nodes=num_nodes,
         edge_weights=edge_weights,
         seed=seed,
+        direction=direction,
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
@@ -259,7 +268,9 @@ class TestSFDPPipelineFidelity:
 
         _assert_exact_match(classic, pipeline)
 
-    def test_layout_sfdp_pipeline_matches_classic_with_custom_repulsive_exponent(self) -> None:
+    def test_layout_sfdp_pipeline_matches_classic_with_custom_repulsive_exponent(
+        self,
+    ) -> None:
         """Custom repulsive exponent should propagate identically."""
         edge_index = _path_edge_index(10)
 
@@ -307,3 +318,29 @@ class TestSFDPPipelineFidelity:
         pipeline = layout_sfdp_pipeline(edge_index=edge_index, num_nodes=8, steps=500, seed=42)
 
         _assert_exact_match(classic, pipeline)
+
+    def test_layout_sfdp_pipeline_orients_directed_path_to_requested_direction(
+        self,
+    ) -> None:
+        """Final SFDP orientation should respect the requested directed flow."""
+        edge_index = _path_edge_index(14)
+
+        top_to_bottom = layout_sfdp_pipeline(
+            edge_index=edge_index,
+            num_nodes=14,
+            steps=500,
+            seed=42,
+            direction="TB",
+        )
+        bottom_to_top = layout_sfdp_pipeline(
+            edge_index=edge_index,
+            num_nodes=14,
+            steps=500,
+            seed=42,
+            direction="BT",
+        )
+
+        source = edge_index[0]
+        target = edge_index[1]
+        assert torch.all(top_to_bottom[target, 1] > top_to_bottom[source, 1])
+        assert torch.all(bottom_to_top[target, 1] < bottom_to_top[source, 1])
