@@ -2340,7 +2340,7 @@ class PivotApproxStressLoss(LossOp):
         torch.Tensor
             Scalar stress loss.
         """
-        del problem, ctx
+        del ctx
         pos = _require_positions(state)
         pivot_indices = (
             torch.empty((0,), dtype=torch.long, device=pos.device)
@@ -2356,6 +2356,11 @@ class PivotApproxStressLoss(LossOp):
         # broadcast shapes agree.
         if pivot_distances.dim() == 2 and pivot_distances.shape[0] == pivot_indices.shape[0]:
             pivot_distances = pivot_distances.t().contiguous()
+        if int(pos.shape[0]) > int(problem.num_nodes):
+            # Dummy nodes are layered-routing artifacts; pivot distances are
+            # computed on the original graph and only have semantic meaning
+            # for the leading original-node block.
+            pos = pos[: problem.num_nodes]
         empty_long = torch.empty((0,), dtype=torch.long, device=pos.device)
         empty_float = torch.empty((0,), dtype=pos.dtype, device=pos.device)
         return _maxent._stress_term(
