@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
 from dagua.layout.ops.base import Op, Pipeline
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.state import (
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
 from dagua.layout.ops.sugiyama import (
     _AssignLayers,
     _BarycenterOrdering,
@@ -20,6 +25,9 @@ from dagua.layout.ops.sugiyama import (
     _StoreSpacingParams,
     _ValidateInputs,
 )
+
+if TYPE_CHECKING:
+    from dagua.config import LayoutConfig
 
 
 def build_sugiyama_pipeline(
@@ -80,14 +88,15 @@ def layout_sugiyama_pipeline(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
-    rank_sep: float = 1.0,
-    node_sep: float = 1.0,
+    rank_sep: Optional[float] = None,
+    node_sep: Optional[float] = None,
     layer_sep: Optional[float] = None,
     seed: int = 42,
     barycenter_passes: int = 24,
     trace_every: int = 0,
     edge_weights: Optional[torch.Tensor] = None,
     return_edge_routes: bool = False,
+    config: Optional["LayoutConfig"] = None,
 ) -> Union[
     torch.Tensor,
     Tuple[torch.Tensor, List[torch.Tensor]],
@@ -103,10 +112,12 @@ def layout_sugiyama_pipeline(
         Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
         Optional node-size tensor with shape ``[N, 2]``.
-    rank_sep : float
-        Vertical spacing between layers.
-    node_sep : float
-        Horizontal spacing within layers.
+    rank_sep : float, optional
+        Vertical spacing between layers. Defaults to unit spacing for direct
+        calls, or ``config.rank_sep`` when invoked through ``LayoutConfig``.
+    node_sep : float, optional
+        Horizontal spacing within layers. Defaults to unit spacing for direct
+        calls, or ``config.node_sep`` when invoked through ``LayoutConfig``.
     layer_sep : float, optional
         Alias for ``rank_sep``. Overrides ``rank_sep`` when provided.
     seed : int
@@ -119,6 +130,9 @@ def layout_sugiyama_pipeline(
         Optional edge-weight vector with shape ``[E]``.
     return_edge_routes : bool, default=False
         If ``True``, include edge-route polylines in output.
+    config : LayoutConfig, optional
+        Full layout configuration supplied by the engine. Only spacing fields
+        are read by this classic pipeline.
 
     Returns
     -------
@@ -136,6 +150,15 @@ def layout_sugiyama_pipeline(
     """
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative.")
+    if config is not None:
+        if rank_sep is None:
+            rank_sep = config.rank_sep
+        if node_sep is None:
+            node_sep = config.node_sep
+    if rank_sep is None:
+        rank_sep = 1.0
+    if node_sep is None:
+        node_sep = 1.0
     if layer_sep is not None:
         rank_sep = layer_sep
 
