@@ -1326,7 +1326,7 @@ def _should_lattice_uniform_centered_slots(
     # Singleton layer fraction: reject fractals/nested rings.
     if sum(1 for w in widths if w <= 2) / len(widths) > 0.45:
         return False
-    deg = torch.zeros(num_nodes, dtype=torch.long)
+    deg = torch.zeros(num_nodes, dtype=torch.long, device=edge_index.device)
     src = edge_index[0]
     tgt = edge_index[1]
     deg.index_add_(0, src, torch.ones_like(src))
@@ -3191,10 +3191,10 @@ def layout_dagua_native_pipeline(
             getattr(effective_config, "edge_equalize_polish", True)
             and _selected_force_pipeline(effective_config) is None
             and result.shape[0] >= 4
-            and edge_index.numel() > 0
-            and node_sizes is not None
+            and prepared_edge_index.numel() > 0
+            and normalized_node_sizes is not None
         ):
-            result = _best_of_polish(result, edge_index, node_sizes)
+            result = _best_of_polish(result, prepared_edge_index, normalized_node_sizes)
         return result
 
     return _run_native_problem(problem, state, ctx, prepared_config)
