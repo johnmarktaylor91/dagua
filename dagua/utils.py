@@ -1033,6 +1033,7 @@ def compute_node_size(
     min_font_size: float = 5.0,
     label_format: str = "plain",
     text_rotation: float = 0.0,
+    compact_shape_factors: bool = False,
 ) -> Tuple[float, float, float]:
     """Compute a node bounding box from its label.
 
@@ -1067,6 +1068,13 @@ def compute_node_size(
     text_rotation : float, default=0.0
         Counter-clockwise label rotation in degrees. Sizing uses the rotated
         axis-aligned text bounds so rendered labels stay inside the node.
+    compact_shape_factors : bool, default=False
+        When ``True``, skip dagua's shape-specific expansion multipliers
+        (diamond ``* 2.0``, triangle interior factors, star ``* 2.2``,
+        ellipse ``* 1.15..1.35``). Use for graphviz_strict where dot's
+        layout sizes diamonds/circles/ellipses tightly to their text bbox
+        rather than enlarging for inscribed rectangle clearance.
+        Round 11 F1.
 
     Returns
     -------
@@ -1088,6 +1096,7 @@ def compute_node_size(
         min_font_size,
         label_format,
         text_rotation,
+        compact_shape_factors,
     )
 
 
@@ -1107,6 +1116,7 @@ def _compute_node_size_cached(
     min_font_size: float,
     label_format: str,
     text_rotation: float,
+    compact_shape_factors: bool = False,
 ) -> Tuple[float, float, float]:
     """Cached implementation of :func:`compute_node_size`.
 
@@ -1199,42 +1209,83 @@ def _compute_node_size_cached(
 
     if overflow_policy == "expand_node":
         if shape in CURVED_NODE_SHAPES:
-            # Curved outlines only guarantee the inscribed rectangle, so expand
-            # the axes until that inner rectangle can fully contain the padded text.
-            required_w = padded_text_w * CURVED_SHAPE_INSCRIBE_FACTOR
-            required_h = padded_text_h * CURVED_SHAPE_INSCRIBE_FACTOR
-            w = max(w, required_w)
-            h = max(h, required_h)
-            # Very long labels can turn ellipses into flat "pancakes". Preserve
-            # the text-containing width, but raise the height to keep a readable
-            # silhouette instead of silently changing the node shape.
-            if w / max(h, 1.0) > MAX_EXPANDED_ELLIPSE_ASPECT_RATIO:
-                h = w / MAX_EXPANDED_ELLIPSE_ASPECT_RATIO
+            if compact_shape_factors:
+                # Round 11 F1: dot does not pre-inflate ellipse/circle bbox by
+                # 1.5x to fit an inscribed text rectangle. The padded text box
+                # plus min_width/min_height floors are sufficient under the
+                # graphviz_strict regime.
+                pass
+            else:
+                # Curved outlines only guarantee the inscribed rectangle, so expand
+                # the axes until that inner rectangle can fully contain the padded
+                # text.
+                required_w = padded_text_w * CURVED_SHAPE_INSCRIBE_FACTOR
+                required_h = padded_text_h * CURVED_SHAPE_INSCRIBE_FACTOR
+                w = max(w, required_w)
+                h = max(h, required_h)
+                # Very long labels can turn ellipses into flat "pancakes".
+                # Preserve the text-containing width, but raise the height to
+                # keep a readable silhouette instead of silently changing the
+                # node shape.
+                if w / max(h, 1.0) > MAX_EXPANDED_ELLIPSE_ASPECT_RATIO:
+                    h = w / MAX_EXPANDED_ELLIPSE_ASPECT_RATIO
         elif shape == "stadium":
             # Stadium endcaps consume one full node height of horizontal interior.
             # Reserve that span in addition to the padded text box.
             w = max(w, padded_text_w + h)
 
     if shape == "diamond":
-        max_dim = max(w, h) * 2.0
-        # Diamonds lose usable interior width at the left/right corners, so
-        # keep a wider final floor than rectangular nodes.  The inscribed
-        # rectangle of a diamond is only half its bounding box in each axis.
-        w = max(max_dim * 1.3, MIN_NODE_WIDTH * 2.5)
-        h = max_dim
+        if compact_shape_factors:
+            # Round 11 F1: graphviz_strict matches dot's tighter diamond
+            # silhouette. Keep the diamond doubling (the inscribed rectangle
+            # really IS half the bbox in each axis) but drop the 1.3x extra
+            # widening and the MIN_NODE_WIDTH * 2.5 floor that dagua uses
+            # for general aesthetic generosity. dot's diamond on
+            # node_shapes_showcase is roughly 1.3-1.4x the text bbox; a
+            # straight 2.0 doubling overshoots, while padded-text-only
+            # under-shoots.
+            max_dim = max(w, h) * 1.4
+            w = max_dim
+            h = max_dim * 0.7
+        else:
+            max_dim = max(w, h) * 2.0
+            # Diamonds lose usable interior width at the left/right corners, so
+            # keep a wider final floor than rectangular nodes.  The inscribed
+            # rectangle of a diamond is only half its bounding box in each axis.
+            w = max(max_dim * 1.3, MIN_NODE_WIDTH * 2.5)
+            h = max_dim
     elif shape == "triangle":
-        # Graphviz triangles only have a usable label box in the lower body,
-        # so enlarge both axes before enforcing the characteristic silhouette.
-        w *= TRIANGLE_INTERIOR_WIDTH_FACTOR
-        h *= TRIANGLE_INTERIOR_HEIGHT_FACTOR
-        min_ratio = 3.2
-        if w < h * min_ratio:
-            w = h * min_ratio
+        if compact_shape_factors:
+            # Round 11 F1: scale dagua's interior factors down to ~half so
+            # dot's triangle silhouette is recovered without text overflow.
+            # The full 2.8x/2.4x multipliers were tuned for "comfortable
+            # interior" not "match graphviz".
+            w *= 1.5
+            h *= 1.4
+            min_ratio = 1.6
+            if w < h * min_ratio:
+                w = h * min_ratio
+        else:
+            # Graphviz triangles only have a usable label box in the lower body,
+            # so enlarge both axes before enforcing the characteristic silhouette.
+            w *= TRIANGLE_INTERIOR_WIDTH_FACTOR
+            h *= TRIANGLE_INTERIOR_HEIGHT_FACTOR
+            min_ratio = 3.2
+            if w < h * min_ratio:
+                w = h * min_ratio
     elif shape == "star":
-        # Star points consume much of the bounds, so enlarge the square body
-        # to keep the label readable in the center.
-        w = max(w, h) * 2.2
-        h = w
+        if compact_shape_factors:
+            # Round 11 F1: dot's stars sit at roughly 1.8x the padded text
+            # square rather than dagua's 2.2x. The 1.8 multiplier matches
+            # dot's visible star area on node_shapes_showcase while still
+            # leaving the label inside the inscribed pentagon.
+            w = max(w, h) * 1.8
+            h = w
+        else:
+            # Star points consume much of the bounds, so enlarge the square body
+            # to keep the label readable in the center.
+            w = max(w, h) * 2.2
+            h = w
     elif shape == "circle":
         r = max(w, h)
         w = h = r
@@ -1281,8 +1332,11 @@ def _compute_node_size_cached(
     if shape == "hexagon":
         w = max(w, padded_text_w / HEXAGON_INSCRIBE_WIDTH_FACTOR)
     elif shape == "star":
-        w = max(w, padded_text_w * STAR_INTERIOR_FACTOR)
-        h = max(h, padded_text_h * STAR_INTERIOR_FACTOR)
+        if not compact_shape_factors:
+            # Round 11 F1: under graphviz_strict, leave star at the padded
+            # text bbox so it matches dot's tighter star silhouette.
+            w = max(w, padded_text_w * STAR_INTERIOR_FACTOR)
+            h = max(h, padded_text_h * STAR_INTERIOR_FACTOR)
     elif shape == "tab":
         w = max(w, padded_text_w * TAB_INTERIOR_WIDTH_FACTOR)
     elif shape in ("pentagon", "octagon"):
