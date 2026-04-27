@@ -937,12 +937,17 @@ _GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
     # across panels (tiny_graph "In" 125x70 vs dot 190x95). Pull back
     # min_width/min_height to ~50/33 (audit recommendation) so the floor
     # alone restores parity without re-inflating the auto-sized bbox.
+    # Round 15 F2: round-13 closed widths to 0.95-1.13 but the terminal
+    # ellipses on small graphs (tiny_graph Out, single_edge Sink, diamond
+    # End) still measured 14-18% short of dot in height. Lift min_height
+    # 33 -> 38 so single-line ellipses get adequate vertical room without
+    # disturbing widths on multi-character labels.
     padding=(6.0, 3.0),  # Round 11 F1: was (8.0, 4.0) at 12pt baseline.
     corner_radius=0.0,
     opacity=1.0,
     base_color="#000000",
     min_width=50.0,  # Round 13 F1: was 41.0; audit said pull back toward ~50.
-    min_height=33.0,  # Round 13 F1: was 27.0; audit said pull back toward ~33.
+    min_height=38.0,  # Round 15 F2: was 33.0; audit said small ellipses still ~14-18% short.
     overflow_policy="expand_node",
 )
 
@@ -975,8 +980,14 @@ GRAPHVIZ_STRICT_THEME = Theme(
             # 14pt x 12pt band so even the sublinear-scaled fallback path
             # produces stout heads, and pair with the stroke 0.9pt bump
             # (F6) so the body line carries dot's perceived weight.
+            # Round 15 F4: tiny_graph audit measured dagua arrowheads at
+            # 91% width and 71% filled-area of dot at the round-13 (14, 12)
+            # band. Lift arrow_width 12 -> 14 so heads track dot's ~24px
+            # base width, but keep arrow_length at 14 -- bumping length
+            # (16) overshot height by 2x and produced heads taller than
+            # dot's. (14, 14) hits dot's width without overshooting depth.
             arrow_length=14.0,
-            arrow_width=12.0,
+            arrow_width=14.0,
             arrow_scale=None,
             arrow_node_fraction=0.0,  # fixed size, not node-relative
             arrow_width_ratio=0.7,
@@ -1000,9 +1011,9 @@ GRAPHVIZ_STRICT_THEME = Theme(
             width=1.0,
             arrow="normal",
             arrow_fill="filled",
-            # Round 13 F5: see default edge style for the bump rationale.
+            # Round 13 F5 / Round 15 F4: see default edge style for the bump rationale.
             arrow_length=14.0,
-            arrow_width=12.0,
+            arrow_width=14.0,
             arrow_scale=None,
             arrow_node_fraction=0.0,
             arrow_width_ratio=0.7,
