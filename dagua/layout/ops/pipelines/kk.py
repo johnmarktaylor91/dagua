@@ -20,6 +20,103 @@ from dagua.layout.ops.state import (
     SolveState,
 )
 
+_DIRECTIONAL_ORIENTATION_MIN_GAIN = 0.05
+_DIRECTION_TOP_TO_BOTTOM = "TB"
+_DIRECTION_BOTTOM_TO_TOP = "BT"
+_DIRECTION_LEFT_TO_RIGHT = "LR"
+_DIRECTION_RIGHT_TO_LEFT = "RL"
+
+
+def _directional_edge_fraction(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    direction: str,
+) -> float:
+    """Return the fraction of edges aligned with the requested direction.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    direction : str
+        Layout direction, one of ``"TB"``, ``"BT"``, ``"LR"``, or ``"RL"``.
+
+    Returns
+    -------
+    float
+        Fraction of edges whose target is not behind the source along the
+        requested layout axis. Self-loops count as aligned.
+    """
+    if edge_index.numel() == 0:
+        return 1.0
+
+    device_edge_index = edge_index.to(device=positions.device)
+    source = device_edge_index[0]
+    target = device_edge_index[1]
+    self_loops = source == target
+    if direction == _DIRECTION_LEFT_TO_RIGHT:
+        aligned = (positions[target, 0] >= positions[source, 0]) | self_loops
+    elif direction == _DIRECTION_RIGHT_TO_LEFT:
+        aligned = (positions[target, 0] <= positions[source, 0]) | self_loops
+    elif direction == _DIRECTION_BOTTOM_TO_TOP:
+        aligned = (positions[target, 1] <= positions[source, 1]) | self_loops
+    else:
+        aligned = (positions[target, 1] >= positions[source, 1]) | self_loops
+    return float(aligned.to(dtype=torch.float32).mean().item())
+
+
+def _orient_positions_to_direction(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    direction: str,
+) -> torch.Tensor:
+    """Flip a KK embedding when doing so materially improves edge direction.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Solved position tensor with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    direction : str
+        Layout direction, one of ``"TB"``, ``"BT"``, ``"LR"``, or ``"RL"``.
+
+    Returns
+    -------
+    torch.Tensor
+        Original or axis-flipped positions with shape ``[N, 2]``.
+    """
+    if positions.ndim != 2 or positions.shape[1] < 2 or edge_index.numel() == 0:
+        return positions
+    if direction not in {
+        _DIRECTION_TOP_TO_BOTTOM,
+        _DIRECTION_BOTTOM_TO_TOP,
+        _DIRECTION_LEFT_TO_RIGHT,
+        _DIRECTION_RIGHT_TO_LEFT,
+    }:
+        return positions
+
+    base_fraction = _directional_edge_fraction(
+        positions=positions,
+        edge_index=edge_index,
+        direction=direction,
+    )
+    flipped = positions.clone()
+    if direction in {_DIRECTION_LEFT_TO_RIGHT, _DIRECTION_RIGHT_TO_LEFT}:
+        flipped[:, 0] = -flipped[:, 0]
+    else:
+        flipped[:, 1] = -flipped[:, 1]
+    flipped_fraction = _directional_edge_fraction(
+        positions=flipped,
+        edge_index=edge_index,
+        direction=direction,
+    )
+    if flipped_fraction >= base_fraction + _DIRECTIONAL_ORIENTATION_MIN_GAIN:
+        return flipped
+    return positions
+
 
 def build_kk_pipeline(
     steps: Optional[int] = None,
@@ -80,6 +177,8 @@ def layout_kk_pipeline(
     solver: str = "auto",
     pos: Optional[torch.Tensor] = None,
     edge_weights: Optional[torch.Tensor] = None,
+    direction: str = "TB",
+    orient_to_direction: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
     """Run the Kamada-Kawai pipeline as a drop-in replacement.
 
@@ -108,6 +207,13 @@ def layout_kk_pipeline(
         default circular initialization.
     edge_weights : torch.Tensor, optional
         Optional edge weights with shape ``[E]``.
+    direction : {"TB", "BT", "LR", "RL"}, default="TB"
+        Requested graph reading direction used only when
+        ``orient_to_direction`` is enabled.
+    orient_to_direction : bool, default=False
+        Whether to choose the axis orientation that materially improves edge
+        direction consistency. The default is disabled so direct pipeline calls
+        remain bit-exact with the archived NetworkX-style KK port.
 
     Returns
     -------
@@ -156,6 +262,7 @@ def layout_kk_pipeline(
         num_nodes=num_nodes,
         node_sizes=node_sizes,
         edge_weights=edge_weights,
+        direction=direction,
     )
     state = SolveState()
     if pos is not None:
@@ -164,6 +271,12 @@ def layout_kk_pipeline(
     final_state = build_kk_pipeline(steps=steps, trace_every=trace_every).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("KK pipeline did not produce final positions.")
+    if orient_to_direction:
+        final_state.pos = _orient_positions_to_direction(
+            positions=final_state.pos,
+            edge_index=edge_index,
+            direction=direction,
+        )
 
     if trace_every > 0:
         traces = final_state.extras.get("kk_traces", [])
