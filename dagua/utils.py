@@ -1210,11 +1210,19 @@ def _compute_node_size_cached(
     if overflow_policy == "expand_node":
         if shape in CURVED_NODE_SHAPES:
             if compact_shape_factors:
-                # Round 11 F1: dot does not pre-inflate ellipse/circle bbox by
-                # 1.5x to fit an inscribed text rectangle. The padded text box
-                # plus min_width/min_height floors are sufficient under the
-                # graphviz_strict regime.
-                pass
+                # Round 13 F3: round-11 dropped the inscribe factor to 1.0
+                # (skip inflation entirely) which made ellipses slightly too
+                # tight per the round-12 audit. Restore a modest 1.15x
+                # multiplier -- enough headroom for the inscribed-rectangle
+                # rule on curved outlines without re-introducing dagua's
+                # standard 1.5x puff. dot's ellipses on node_shapes_showcase
+                # match this band.
+                required_w = padded_text_w * 1.15
+                required_h = padded_text_h * 1.15
+                w = max(w, required_w)
+                h = max(h, required_h)
+                if w / max(h, 1.0) > MAX_EXPANDED_ELLIPSE_ASPECT_RATIO:
+                    h = w / MAX_EXPANDED_ELLIPSE_ASPECT_RATIO
             else:
                 # Curved outlines only guarantee the inscribed rectangle, so expand
                 # the axes until that inner rectangle can fully contain the padded
@@ -1274,18 +1282,14 @@ def _compute_node_size_cached(
             if w < h * min_ratio:
                 w = h * min_ratio
     elif shape == "star":
-        if compact_shape_factors:
-            # Round 11 F1: dot's stars sit at roughly 1.8x the padded text
-            # square rather than dagua's 2.2x. The 1.8 multiplier matches
-            # dot's visible star area on node_shapes_showcase while still
-            # leaving the label inside the inscribed pentagon.
-            w = max(w, h) * 1.8
-            h = w
-        else:
-            # Star points consume much of the bounds, so enlarge the square body
-            # to keep the label readable in the center.
-            w = max(w, h) * 2.2
-            h = w
+        # Round 13 F2: round-11's compact star factor (1.8x + skipped second
+        # pass) collapsed dagua's star outline so the "star" label overflowed
+        # the points (audit: ~30-40px tall vs dot's ~110px). Star always uses
+        # the original 2.2x multiplier and STAR_INTERIOR_FACTOR second pass --
+        # dot's star points consume so much of the bounding box that any
+        # damping breaks label legibility.
+        w = max(w, h) * 2.2
+        h = w
     elif shape == "circle":
         r = max(w, h)
         w = h = r
@@ -1332,11 +1336,19 @@ def _compute_node_size_cached(
     if shape == "hexagon":
         w = max(w, padded_text_w / HEXAGON_INSCRIBE_WIDTH_FACTOR)
     elif shape == "star":
-        if not compact_shape_factors:
-            # Round 11 F1: under graphviz_strict, leave star at the padded
-            # text bbox so it matches dot's tighter star silhouette.
-            w = max(w, padded_text_w * STAR_INTERIOR_FACTOR)
-            h = max(h, padded_text_h * STAR_INTERIOR_FACTOR)
+        # Round 13 F2: star always honors STAR_INTERIOR_FACTOR (3.5x) so
+        # the inscribed pentagonal label region can hold the padded text.
+        # Round 11 gated this on `not compact_shape_factors` and produced a
+        # collapsed star where the label overflowed the points; reverted.
+        # Keep the star square so the silhouette matches dot's symmetric
+        # five-point outline -- without this final equalization the
+        # padded_text_w * 3.5 widens only the x-axis when the label is
+        # horizontally biased (e.g. "star" at 16pt yields padded_w ~35pt
+        # vs padded_h ~22pt).
+        w = max(w, padded_text_w * STAR_INTERIOR_FACTOR)
+        h = max(h, padded_text_h * STAR_INTERIOR_FACTOR)
+        side = max(w, h)
+        w = h = side
     elif shape == "tab":
         w = max(w, padded_text_w * TAB_INTERIOR_WIDTH_FACTOR)
     elif shape in ("pentagon", "octagon"):

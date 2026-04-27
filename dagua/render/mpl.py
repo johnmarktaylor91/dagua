@@ -680,6 +680,9 @@ def _is_graphviz_strict_render(graph: Any) -> bool:
     return _render_theme_name(graph) == "graphviz_strict"
 
 
+_STRICT_EDGE_LABEL_NODE_RATIO = 10.0 / 14.0
+
+
 def _strict_edge_label_font_size(graph: Any, fallback_points: float) -> float:
     """Return the graphviz_strict edge label font size override.
 
@@ -706,6 +709,15 @@ def _strict_edge_label_font_size(graph: Any, fallback_points: float) -> float:
     is a "match-dot exactly" theme; treating its graph-level edge-label
     point size as authoritative closes the gap without disturbing other
     themes' per-edge customization.
+
+    Round 13 F4: round-11 emitted the graph-level 16pt directly, which made
+    edge labels visibly LARGER than dot's (audit: ~14-15px cap-height vs
+    dot's ~9-10px on state_machine and arrow_types). dot renders edge
+    labels at ~10pt while node labels run ~14pt. dagua's strict node-label
+    point size is 16pt (round-9 cap-height compensation), so the matching
+    edge-label point size is 16 * 10/14 = ~11.43pt. Apply that ratio so
+    edge labels stay subordinate to node labels at the same FreeType
+    rendering compensation factor.
     """
     if not _is_graphviz_strict_render(graph):
         return fallback_points
@@ -714,7 +726,7 @@ def _strict_edge_label_font_size(graph: Any, fallback_points: float) -> float:
     override = getattr(graph_style, "edge_label_font_size", None)
     if override is None:
         return fallback_points
-    return float(override)
+    return float(override) * _STRICT_EDGE_LABEL_NODE_RATIO
 
 
 def _strict_absolute_edge_label_font_data(
