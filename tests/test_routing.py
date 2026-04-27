@@ -34,6 +34,18 @@ class TestRouteEdges:
         curves = route_edges(pos, ei, ns)
         assert len(curves) == 2
 
+    def test_parallel_back_edges_alternate_curvature_side(self) -> None:
+        """Duplicate edges should fan across both sides of their shared chord."""
+        pos = torch.tensor([[0.0, 100.0], [40.0, 0.0]])
+        ei = torch.tensor([[0, 0], [1, 1]])
+        ns = torch.tensor([[0.0, 0.0], [0.0, 0.0]])
+
+        curves = route_edges(pos, ei, ns, direction="TB")
+
+        assert len(curves) == 2
+        assert curves[0].cp1[0] > 0.0
+        assert curves[1].cp1[0] < 0.0
+
     def test_curve_endpoints(self) -> None:
         """Default TB routing should reverse ports for upward back-edges."""
         pos = torch.tensor([[0.0, 0.0], [0.0, 100.0]])

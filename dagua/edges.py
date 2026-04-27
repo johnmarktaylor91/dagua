@@ -480,6 +480,13 @@ def route_edges(
     num_edges = edge_index.shape[1]
     src_indices = edge_index[0].tolist()
     tgt_indices = edge_index[1].tolist()
+    pair_counts: Dict[Tuple[int, int], int] = {}
+    pair_ranks: Dict[int, int] = {}
+    for e_idx, (source, target) in enumerate(zip(src_indices, tgt_indices)):
+        pair_key = (int(source), int(target))
+        rank = pair_counts.get(pair_key, 0)
+        pair_ranks[e_idx] = rank
+        pair_counts[pair_key] = rank + 1
     x_coords = pos[:, 0].tolist()
     y_coords = pos[:, 1].tolist()
     widths = sizes[:, 0].tolist()
@@ -610,6 +617,11 @@ def route_edges(
         # Per-edge routing and curvature
         routing = edge_style.routing if edge_style is not None else "bezier"
         curvature = edge_style.curvature if edge_style is not None else 0.4
+        pair_key = (int(s), int(t))
+        if pair_counts.get(pair_key, 0) > 1 and pair_ranks.get(e_idx, 0) % 2 == 1:
+            # Parallel edges should fan across both sides of the chord, matching
+            # Graphviz's alternating spline lanes instead of stacking one-sided arcs.
+            curvature = -curvature
 
         curve = _compute_curve(
             src_port_x,
@@ -963,7 +975,10 @@ def _compute_bezier(
     dy = ty - sy
     dist = (dx**2 + dy**2) ** 0.5
 
-    if dist < 1e-6 or curvature < 1e-6:
+    curvature_sign = -1.0 if curvature < 0.0 else 1.0
+    curvature_magnitude = abs(float(curvature))
+
+    if dist < 1e-6 or curvature_magnitude < 1e-6:
         return BezierCurve((sx, sy), (sx, sy), (tx, ty), (tx, ty), routing="bezier")
 
     abs_dx = abs(dx)
@@ -973,12 +988,12 @@ def _compute_bezier(
     if direction in ("TB", "BT"):
         if abs_dx < abs_dy * 0.3:
             # Nearly vertical: gentle S-curve
-            offset = abs_dy * curvature * 0.75
+            offset = abs_dy * curvature_magnitude * 0.75
             cp1 = (sx, sy + offset)
             cp2 = (tx, ty - offset)
         elif dy > 0:
             # Normal downward edge: smooth bezier
-            offset_y = abs_dy * curvature
+            offset_y = abs_dy * curvature_magnitude
             cp1 = (sx, sy + offset_y)
             cp2 = (tx, ty - offset_y)
         else:
@@ -988,21 +1003,61 @@ def _compute_bezier(
             perp_y = dx / dist
             # Choose the side that arcs away from the main flow.
             side = 1.0 if perp_x >= 0 else -1.0
-            offset = dist * min(curvature, 2.0) * 0.45 + 30.0
+            offset = dist * min(curvature_magnitude, 2.0) * 0.45 + 30.0
             cp1 = (sx + side * perp_x * offset, sy + side * perp_y * offset)
             cp2 = (tx + side * perp_x * offset, ty + side * perp_y * offset)
     else:
         # Horizontal flow (LR/RL)
         if abs_dy < abs_dx * 0.3:
-            offset = abs_dx * curvature * 0.75
+            offset = abs_dx * curvature_magnitude * 0.75
             cp1 = (sx + offset, sy)
             cp2 = (tx - offset, ty)
         else:
-            offset_x = abs_dx * curvature
+            offset_x = abs_dx * curvature_magnitude
             cp1 = (sx + offset_x, sy)
             cp2 = (tx - offset_x, ty)
 
+    if curvature_sign < 0.0:
+        cp1 = _reflect_point_across_line(cp1, (sx, sy), (tx, ty))
+        cp2 = _reflect_point_across_line(cp2, (sx, sy), (tx, ty))
+
     return BezierCurve((sx, sy), cp1, cp2, (tx, ty), routing="bezier", direction=direction)
+
+
+def _reflect_point_across_line(
+    point: Tuple[float, float],
+    line_start: Tuple[float, float],
+    line_end: Tuple[float, float],
+) -> Tuple[float, float]:
+    """Reflect a point across a line segment's infinite supporting line.
+
+    Parameters
+    ----------
+    point : tuple[float, float]
+        Point to mirror.
+    line_start : tuple[float, float]
+        First point on the mirror line.
+    line_end : tuple[float, float]
+        Second point on the mirror line.
+
+    Returns
+    -------
+    tuple[float, float]
+        Reflected point. Degenerate mirror lines return ``point`` unchanged.
+    """
+    px, py = point
+    ax, ay = line_start
+    bx, by = line_end
+    dx = bx - ax
+    dy = by - ay
+    denom = dx * dx + dy * dy
+    if denom <= 1e-12:
+        return point
+
+    t = ((px - ax) * dx + (py - ay) * dy) / denom
+    proj_x = ax + t * dx
+    proj_y = ay + t * dy
+    return (2.0 * proj_x - px, 2.0 * proj_y - py)
 
 
 def evaluate_bezier(curve: BezierCurve, t: float) -> Tuple[float, float]:
