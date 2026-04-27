@@ -273,22 +273,27 @@ def test_graphviz_strict_theme_loads() -> None:
     # Round 13 F6: stroke 0.75 -> 0.9 to match dot's heavier hairline weight.
     assert node_style.stroke_width == 0.9
     assert node_style.font_family == "TeX Gyre Termes"
-    # Round 11 F1 / Round 13 F1: padding stays compact at (6,3) but min sizes
-    # are pulled back from round-11's 41/27 over-correction toward 50/33 so
-    # nodes track dot's silhouette without re-introducing puffiness.
+    # Round 11 F1 / Round 13 F1 / Round 15 F2: padding stays compact at (6,3)
+    # but min sizes are pulled back from round-11's 41/27 over-correction
+    # toward 50/38 so nodes track dot's silhouette without re-introducing
+    # puffiness. Round 15 lifted min_height 33 -> 38 to close the small
+    # ellipse height undershoot the round-14 audit measured (~14-18% short).
     assert node_style.padding == (6.0, 3.0)
     assert node_style.min_width == 50.0
-    assert node_style.min_height == 33.0
+    assert node_style.min_height == 38.0
     assert node_style.overflow_policy == "expand_node"
 
     edge_style = theme.get_edge_style("default")
     assert edge_style.width == 1.0
     assert edge_style.opacity == 1.0
     assert edge_style.arrow_scale is None  # ignored; mpl uses unified point conversion
-    # Round 13 F5: arrow length/width bumped 12/10 -> 14/12 so the
-    # ribbon-aware sublinear scaling at width=1.0pt still renders stout heads.
+    # Round 13 F5 / Round 15 F4: arrow length/width bumped 12/10 -> 14/12
+    # then arrow_width lifted to 14 (head 12 -> 14) so the base widens to
+    # match dot's ~24px chunk. arrow_length stays at 14 -- bumping length
+    # to 16 in the round-15 spike overshot dot's head depth (heads ended
+    # up 2x dot's height).
     assert edge_style.arrow_length == 14.0
-    assert edge_style.arrow_width == 12.0
+    assert edge_style.arrow_width == 14.0
     assert edge_style.arrow_node_fraction == pytest.approx(0.0)
     assert edge_style.arrow_width_ratio == pytest.approx(0.7)
     assert edge_style.label_font_size == pytest.approx(16.0)
@@ -297,7 +302,7 @@ def test_graphviz_strict_theme_loads() -> None:
     back_edge_style = theme.get_edge_style("back")
     assert back_edge_style.width == 1.0
     assert back_edge_style.arrow_length == 14.0
-    assert back_edge_style.arrow_width == 12.0
+    assert back_edge_style.arrow_width == 14.0
     assert back_edge_style.label_font_size == pytest.approx(16.0)
     assert back_edge_style.curvature == pytest.approx(0.2)
 
