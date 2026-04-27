@@ -17,6 +17,14 @@ FONT_SCALE = 100.0
 LINE_SPACING = 1.2
 _CACHE_PRECISION = 3
 _TEXT_TO_PATH = TextToPath()
+_TEX_GYRE_TERMES_FAMILY_ALIASES = {"tex gyre termes", "texgyretermes", "times-roman"}
+_TEX_GYRE_TERMES_TYPE1_DIR = "/usr/share/texmf/fonts/type1/public/tex-gyre"
+_TEX_GYRE_TERMES_FACE_FILES = {
+    ("regular", "normal"): "qtmr.pfb",
+    ("bold", "normal"): "qtmb.pfb",
+    ("regular", "italic"): "qtmri.pfb",
+    ("bold", "italic"): "qtmbi.pfb",
+}
 # A modest oblique shear that approximates italic posture without distorting
 # glyph proportions as aggressively as a steeper synthetic slant.
 _SYNTHETIC_ITALIC_SHEAR_DEGREES = 15.0
@@ -107,7 +115,36 @@ def _resolve_font_family(font_family: str) -> str:
     str
         Concrete family name.
     """
-    return font_family or RESOLVED_FONT
+    requested_family = font_family or RESOLVED_FONT
+    normalized_family = str(requested_family).strip().lower().replace(" ", "")
+    if normalized_family in {"texgyretermes", "times-roman"}:
+        return "TeXGyreTermes"
+    return requested_family
+
+
+def _tex_gyre_termes_font_path(font_weight: str, font_style: str) -> Optional[str]:
+    """Return the installed TeX Gyre Termes Type1 face path when available.
+
+    Parameters
+    ----------
+    font_weight : str
+        Requested weight token.
+    font_style : str
+        Requested style token.
+
+    Returns
+    -------
+    str | None
+        Absolute ``.pfb`` path for the matching face, or ``None`` when the file
+        is unavailable on the current system.
+    """
+    from pathlib import Path
+
+    normalized_weight = "bold" if _normalize_font_weight(font_weight) == "bold" else "regular"
+    normalized_style = "italic" if _normalize_font_style(font_style) == "italic" else "normal"
+    filename = _TEX_GYRE_TERMES_FACE_FILES[(normalized_weight, normalized_style)]
+    path = Path(_TEX_GYRE_TERMES_TYPE1_DIR) / filename
+    return str(path) if path.exists() else None
 
 
 def _build_font_properties(
@@ -248,6 +285,10 @@ def _find_font_path(
         Matched font file path, or ``None`` when matplotlib cannot resolve the
         request without falling back to a different default family.
     """
+    if str(font_family).strip().lower().replace(" ", "") in _TEX_GYRE_TERMES_FAMILY_ALIASES:
+        matched_path = _tex_gyre_termes_font_path(font_weight, font_style)
+        if matched_path is not None:
+            return matched_path
     try:
         return str(
             findfont(

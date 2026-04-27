@@ -111,6 +111,13 @@ _DIRECT_ARROW_TRIM_MAX_FRACTION = 0.4
 _SELF_LOOP_ARROWHEAD_MAX_NODE_FRACTION = 0.18
 _SELF_LOOP_ARROWHEAD_MAX_WIDTH_RATIO = 0.55
 _CLUSTER_LABEL_VERTICAL_GAP_POINTS = 2.0
+_GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE = float(np.sqrt(2.0))
+_GRAPHVIZ_STRICT_ELLIPSE_ASPECT_TRIGGER = 2.0
+_GRAPHVIZ_STRICT_CLUSTER_HORIZONTAL_SEPARATION_POINTS = 18.0
+_GRAPHVIZ_STRICT_CLUSTER_LABEL_MASK_PADDING_POINTS = 3.0
+_GRAPHVIZ_STRICT_CLUSTER_EXTERNAL_NODE_GAP_POINTS = 36.0
+_GRAPHVIZ_STRICT_BACK_EDGE_OFFSET_FLOOR_POINTS = 36.0
+_GRAPHVIZ_STRICT_BACK_EDGE_OFFSET_FACTOR = 0.45
 _DEFAULT_NODE_LABEL_FONT_POINTS = 8.5
 # Tuned down from ``8.0`` so external labels stay subordinate to node labels
 # and fit more consistently around dense gallery fixtures.
@@ -636,6 +643,40 @@ def _builtin_theme_for_render(graph: Any) -> Optional[Theme]:
     if not isinstance(theme_name, str):
         return None
     return THEME_REGISTRY.get(theme_name)
+
+
+def _render_theme_name(graph: Any) -> str:
+    """Return the active graph theme name for render-only compatibility gates.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing an optional ``_theme`` attribute.
+
+    Returns
+    -------
+    str
+        Theme name, or an empty string when it cannot be resolved.
+    """
+    theme = getattr(graph, "_theme", None)
+    theme_name = getattr(theme, "name", "")
+    return theme_name if isinstance(theme_name, str) else ""
+
+
+def _is_graphviz_strict_render(graph: Any) -> bool:
+    """Return whether Graphviz strict cosmetic compatibility should apply.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing an optional ``_theme`` attribute.
+
+    Returns
+    -------
+    bool
+        ``True`` only for the built-in ``graphviz_strict`` theme.
+    """
+    return _render_theme_name(graph) == "graphviz_strict"
 
 
 def _theme_edge_type(graph: Any, edge_idx: int) -> str:
@@ -1254,6 +1295,7 @@ def render(
     # --- Layer 1: Edges ---
     if curves is None:
         curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
+    curves = _graphviz_strict_back_edge_curves(ax, graph, curves)
     edge_collection = _draw_edges(ax, graph, curves, positions=pos, svg_hover_map=svg_hover_map)
 
     # --- Layer 2: Nodes ---
@@ -2675,6 +2717,41 @@ def _expanded_shape_spec(spec: ShapeSpec, delta: float) -> ShapeSpec:
     )
 
 
+def _graphviz_strict_ellipse_shape_spec(spec: ShapeSpec, style: NodeStyle) -> ShapeSpec:
+    """Return a Graphviz-style visual ellipse spec for strict rendering.
+
+    Parameters
+    ----------
+    spec : ShapeSpec
+        Node outline spec computed from the graph's node-size tensor.
+    style : NodeStyle
+        Effective node style for the same node.
+
+    Returns
+    -------
+    ShapeSpec
+        Ellipse spec with a Graphviz-style ``sqrt(2)`` circumscription
+        adjustment when the node is an ellipse or circle.
+    """
+    if str(style.shape) not in {"ellipse", "circle"}:
+        return spec
+    adjusted_width = float(spec.width)
+    adjusted_height = float(spec.height)
+    if adjusted_width / max(adjusted_height, 1e-9) > _GRAPHVIZ_STRICT_ELLIPSE_ASPECT_TRIGGER:
+        adjusted_height *= _GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE
+    if str(style.shape) == "circle":
+        adjusted_width = adjusted_height = max(adjusted_width, adjusted_height)
+    return ShapeSpec(
+        center_x=spec.center_x,
+        center_y=spec.center_y,
+        width=adjusted_width,
+        height=adjusted_height,
+        shape=spec.shape,
+        corner_radius=spec.corner_radius,
+        aspect_ratio=spec.aspect_ratio,
+    )
+
+
 def _node_fill_path(
     shape_spec: ShapeSpec,
     outer_path: Any,
@@ -3170,6 +3247,67 @@ class _ClusterLabelPlacement:
     parent_name: Optional[str]
 
 
+def _graphviz_strict_cluster_top_cap(
+    ax: Any,
+    graph: Any,
+    cluster_indices: Sequence[int],
+    pos: np.ndarray,
+    sizes: np.ndarray,
+) -> Optional[float]:
+    """Return a strict-theme top cap below external predecessor nodes.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes used for point-to-data conversion.
+    graph : Any
+        Graph exposing ``edge_index`` and theme metadata.
+    cluster_indices : sequence[int]
+        Leaf node indices contained by the cluster.
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]``.
+    sizes : numpy.ndarray
+        Node sizes with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float | None
+        Maximum allowed top ``y`` coordinate, or ``None`` when no external
+        incoming node needs a clearance cap.
+    """
+    if not _is_graphviz_strict_render(graph) or str(getattr(graph, "direction", "TB")) != "TB":
+        return None
+    cluster_set = set(int(index) for index in cluster_indices)
+    edge_index = getattr(graph, "edge_index", None)
+    if edge_index is None:
+        return None
+    if hasattr(edge_index, "detach"):
+        edges = edge_index.detach().cpu().numpy()
+    else:
+        edges = np.asarray(edge_index)
+    if edges.size == 0:
+        return None
+
+    external_sources: List[int] = []
+    for edge_offset in range(edges.shape[1]):
+        source = int(edges[0, edge_offset])
+        target = int(edges[1, edge_offset])
+        if target in cluster_set and source not in cluster_set:
+            external_sources.append(source)
+    if not external_sources:
+        return None
+
+    gap = _points_to_data_units(
+        ax,
+        _GRAPHVIZ_STRICT_CLUSTER_EXTERNAL_NODE_GAP_POINTS,
+        "y",
+    )
+    external_bottoms = [
+        float(pos[source, 1]) - float(sizes[source, 1]) / 2.0 for source in external_sources
+    ]
+    return min(external_bottoms) - gap
+
+
 def _compute_cluster_y_maxes(
     graph: Any,
     pos: np.ndarray,
@@ -3574,6 +3712,11 @@ def _resolve_cluster_label_collisions(
         sibling_groups[(placement.depth, placement.parent_name)].append(placement)
 
     vertical_gap = _points_to_data_units(ax, _CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y")
+    horizontal_gap = _points_to_data_units(
+        ax,
+        _GRAPHVIZ_STRICT_CLUSTER_HORIZONTAL_SEPARATION_POINTS,
+        "x",
+    )
     for group in sibling_groups.values():
         if len(group) < 2:
             continue
@@ -3597,8 +3740,8 @@ def _resolve_cluster_label_collisions(
                 overlapping_bounds = [
                     bounds
                     for bounds in placed_bounds
-                    if current_bounds[0] < bounds[2]
-                    and current_bounds[2] > bounds[0]
+                    if current_bounds[0] - horizontal_gap < bounds[2]
+                    and current_bounds[2] + horizontal_gap > bounds[0]
                     and current_bounds[1] < bounds[3]
                     and current_bounds[3] > bounds[1]
                 ]
@@ -3670,6 +3813,8 @@ def _draw_nodes(
             corner_radius=corner_radius,
             aspect_ratio=style.aspect_ratio,
         )
+        if _is_graphviz_strict_render(graph):
+            shape_spec = _graphviz_strict_ellipse_shape_spec(shape_spec, style)
         outer_path = build_shape_path(shape_spec)
         fill_path = _node_fill_path(shape_spec, outer_path, border_width, border_position)
 
@@ -5756,6 +5901,111 @@ def _draw_edges_direct(
     _draw_direct_edge_markers(ax, graph, curves, positions)
 
 
+def _graphviz_strict_back_edge_curve(
+    ax: Any,
+    graph: Any,
+    edge_idx: int,
+    curve: BezierCurve,
+    style: EdgeStyle,
+) -> BezierCurve:
+    """Return a visibly bowed strict-theme back-edge curve.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes used for point-to-data conversion.
+    graph : Any
+        Graph exposing direction and edge metadata.
+    edge_idx : int
+        Edge index in the graph.
+    curve : BezierCurve
+        Routed curve whose endpoints already sit on node boundaries.
+    style : EdgeStyle
+        Effective edge style for the edge.
+
+    Returns
+    -------
+    BezierCurve
+        Original curve unless it is a strict-theme long back edge, otherwise a
+        lateral cubic with a fixed point-floor offset.
+    """
+    if curve.waypoints is not None or not _is_graphviz_strict_render(graph):
+        return curve
+    if str(getattr(graph, "direction", "TB")).upper() not in {"TB", "BT"}:
+        return curve
+    back_edge_mask = getattr(graph, "_back_edge_mask", None)
+    is_back_edge = False
+    if back_edge_mask is not None and edge_idx < int(back_edge_mask.shape[0]):
+        is_back_edge = bool(back_edge_mask[edge_idx].item())
+    is_back_edge = is_back_edge or float(getattr(style, "curvature", 0.0)) > 0.0
+    if not is_back_edge:
+        return curve
+
+    sx, sy = curve.p0
+    tx, ty = curve.p1
+    dx = float(tx - sx)
+    dy = float(ty - sy)
+    dist = float(np.hypot(dx, dy))
+    if dist <= 1e-9:
+        return curve
+
+    floor_offset = _points_to_data_units(
+        ax,
+        _GRAPHVIZ_STRICT_BACK_EDGE_OFFSET_FLOOR_POINTS,
+        "x",
+    )
+    curvature = abs(float(getattr(style, "curvature", 0.0)))
+    fractional_offset = dist * min(curvature, 2.0) * _GRAPHVIZ_STRICT_BACK_EDGE_OFFSET_FACTOR
+    offset = max(fractional_offset, floor_offset)
+    perp_x = -dy / dist
+    perp_y = dx / dist
+    side = 1.0 if perp_x >= 0.0 else -1.0
+    if curve.cp1[0] < min(sx, tx) or curve.cp2[0] < min(sx, tx):
+        side = -1.0
+    return BezierCurve(
+        p0=curve.p0,
+        cp1=(sx + side * perp_x * offset, sy + side * perp_y * offset),
+        cp2=(tx + side * perp_x * offset, ty + side * perp_y * offset),
+        p1=curve.p1,
+        direction=curve.direction,
+    )
+
+
+def _graphviz_strict_back_edge_curves(
+    ax: Any,
+    graph: Any,
+    curves: List[BezierCurve],
+) -> List[BezierCurve]:
+    """Return curves with strict-theme back-edge curvature floors applied.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes used for point-to-data conversion.
+    graph : Any
+        Graph exposing edge styles.
+    curves : list[BezierCurve]
+        Routed curves in edge order.
+
+    Returns
+    -------
+    list[BezierCurve]
+        Original list for non-strict themes, otherwise a shallow adjusted copy.
+    """
+    if not _is_graphviz_strict_render(graph):
+        return curves
+    return [
+        _graphviz_strict_back_edge_curve(
+            ax,
+            graph,
+            edge_idx,
+            curve,
+            _edge_style_for_render(graph, edge_idx),
+        )
+        for edge_idx, curve in enumerate(curves)
+    ]
+
+
 def _build_custom_edge_collection(
     ax: Any,
     graph: Any,
@@ -6898,7 +7148,6 @@ def _draw_clusters(
             name,
             (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding,
         )
-
         # Enforce a modest minimum cluster width so tall vertical stacks do not
         # collapse into needle-thin boxes, while still allowing nested
         # clusters to stay closer to the matplotlib reference proportions.
@@ -6919,6 +7168,9 @@ def _draw_clusters(
             text_wrap=str(style.text_wrap),
             text_max_width=label_text_max_width,
         )
+        top_cap = _graphviz_strict_cluster_top_cap(ax, graph, indices, pos, sizes)
+        if top_cap is not None:
+            y_max = min(float(y_max), top_cap)
         cluster_width = x_max - x_min
         min_cluster_width = cluster_height * 0.65
         if cluster_width < min_cluster_width:
@@ -6992,6 +7244,21 @@ def _draw_clusters(
         )
 
         if label:
+            label_background = None
+            label_background_alpha = 0.0
+            label_background_padding = (0.0, 0.0)
+            if _is_graphviz_strict_render(graph):
+                label_background = str(_graph_style_for_render(graph).background_color)
+                label_background_alpha = 1.0
+                label_background_padding_data = _points_to_data_units(
+                    ax,
+                    _GRAPHVIZ_STRICT_CLUSTER_LABEL_MASK_PADDING_POINTS,
+                    "x",
+                )
+                label_background_padding = (
+                    label_background_padding_data,
+                    label_background_padding_data,
+                )
             label_spec = DaguaText(
                 x=lx,
                 y=ly,
@@ -7003,10 +7270,13 @@ def _draw_clusters(
                 alpha=1.0,
                 ha=ha,
                 va=va,
+                background=label_background,
+                background_alpha=label_background_alpha,
+                background_padding=label_background_padding,
                 clip_on=False,
                 text_wrap=style.text_wrap,
                 text_max_width=label_text_max_width,
-                zorder=0.1 + depth * 0.01,
+                zorder=0.12 + depth * 0.01,
                 gid=f"dagua-cluster-label-{name}",
             )
             cluster_label_specs.append(label_spec)
