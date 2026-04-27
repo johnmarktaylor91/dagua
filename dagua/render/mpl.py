@@ -680,7 +680,7 @@ def _is_graphviz_strict_render(graph: Any) -> bool:
     return _render_theme_name(graph) == "graphviz_strict"
 
 
-_STRICT_EDGE_LABEL_NODE_RATIO = 10.0 / 14.0
+_STRICT_EDGE_LABEL_NODE_RATIO = 9.3 / 14.0
 
 
 def _strict_edge_label_font_size(graph: Any, fallback_points: float) -> float:
@@ -718,6 +718,13 @@ def _strict_edge_label_font_size(graph: Any, fallback_points: float) -> float:
     edge-label point size is 16 * 10/14 = ~11.43pt. Apply that ratio so
     edge labels stay subordinate to node labels at the same FreeType
     rendering compensation factor.
+
+    Round 15 F5: round-13 (10/14) brought edge labels into subordination
+    but the audit measured them still 10-15% larger than dot's absolute
+    size on state_machine and arrow_types. Tightening the ratio to
+    9.3/14 (= ~0.664) yields 16 * 0.664 = ~10.6pt, dropping edge labels
+    fully below dot's measured cap height while keeping the
+    subordination contract.
     """
     if not _is_graphviz_strict_render(graph):
         return fallback_points
