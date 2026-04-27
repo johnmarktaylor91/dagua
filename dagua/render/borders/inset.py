@@ -181,7 +181,7 @@ def inset_convex_polygon(
 
 
 def inset_star(vertices: FloatArray, border_width: float) -> FloatArray:
-    """Inset the star shape by uniform centroid scaling.
+    """Inset the star shape by edge-perpendicular offset.
 
     Parameters
     ----------
@@ -193,15 +193,52 @@ def inset_star(vertices: FloatArray, border_width: float) -> FloatArray:
     Returns
     -------
     numpy.ndarray
-        Scaled star vertices with shape ``[10, 2]``.
+        Inset star vertices with shape ``[10, 2]``.
+
+    Notes
+    -----
+    Round 15 F1: the previous implementation insetting toward the centroid
+    placed every vertex's *radial* distance to the centroid at exactly
+    ``border_width``, but for an angular polygon the visible stroke width
+    is the *perpendicular* distance between an outer edge and the
+    corresponding inset edge. Centroid-radial inset collapses that
+    perpendicular ribbon width to a fraction of ``border_width`` near the
+    sharp outer star points (~22 deg apex), so the AA rasterizer averaged
+    the sub-pixel-thin ribbon into gray pixels (audit: mean RGB
+    ~156,156,156 vs dot's solid black at the same pen).
+
+    The fix mirrors :func:`inset_convex_polygon`: each edge is offset
+    inward by its own perpendicular normal at ``border_width``, and each
+    vertex moves to the miter intersection of its two adjacent inset
+    edges. Star geometry has only ten vertices and a regular shape, so
+    the miter length stays bounded (max ~5.5x at ~22 deg outer apices)
+    and intersecting infinite lines always meet -- no bevel fallback is
+    required, and the inset polygon never self-intersects within the
+    border_width regime allowed by ``clamp_border_width``.
     """
 
-    centroid = np.mean(vertices, axis=0)
-    directions = vertices - centroid
-    distances = np.linalg.norm(directions, axis=1, keepdims=True)
-    safe_distances = np.where(distances > FLOAT_EPSILON, distances, 1.0)
-    inner_distances = np.maximum(distances - border_width, distances * MIN_INNER_SCALE)
-    return centroid + directions * (inner_distances / safe_distances)
+    points = np.asarray(vertices, dtype=np.float64)
+    if polygon_signed_area(points) < 0.0:
+        points = points[::-1].copy()
+
+    edge_vectors = np.roll(points, -1, axis=0) - points
+    edge_directions = np.vstack([_unit(edge) for edge in edge_vectors])
+    inward_normals = np.column_stack([-edge_directions[:, 1], edge_directions[:, 0]])
+    inset_points: list[FloatArray] = []
+    n_vertices = points.shape[0]
+    for index in range(n_vertices):
+        point = points[index]
+        prev_index = (index - 1) % n_vertices
+        prev_direction = edge_directions[prev_index]
+        next_direction = edge_directions[index]
+        prev_offset = point + inward_normals[prev_index] * border_width
+        next_offset = point + inward_normals[index] * border_width
+        intersection = _line_intersection(prev_offset, prev_direction, next_offset, next_direction)
+        if intersection is None:
+            inset_points.append((prev_offset + next_offset) / 2.0)
+            continue
+        inset_points.append(intersection)
+    return np.vstack(inset_points)
 
 
 def inset_shape_path(spec: ShapeSpec, border_width: float) -> Path:
