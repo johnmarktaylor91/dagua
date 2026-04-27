@@ -922,12 +922,19 @@ _GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
     # accounted for. See REPORT_round_9.md for the measurement workflow.
     font_size=16.0,
     font_color="#000000",
-    padding=(8.0, 4.0),  # Graphviz margin: 0.11in x 0.055in = ~8pt x 4pt
+    # Round 11 F1: the round-9 16pt bump to match dot's cap-height widened
+    # the auto-sized text bounding box by ~33% relative to dot's 14pt @96dpi
+    # measurement. Padding/min sizes were tuned for the 12pt regime; carrying
+    # them forward at 16pt produced visibly puffy nodes (most dramatic on
+    # node_shapes_showcase.png where dagua's diamond was ~2.5x dot's area).
+    # Scaling padding and the floor dimensions by ~12/16 = 0.75 keeps the
+    # ellipse silhouette aligned with dot at the bumped font size.
+    padding=(6.0, 3.0),  # Round 11 F1: was (8.0, 4.0) at 12pt baseline.
     corner_radius=0.0,
     opacity=1.0,
     base_color="#000000",
-    min_width=54.0,  # Graphviz default: 0.75in = 54pt
-    min_height=36.0,  # Graphviz default: 0.5in = 36pt
+    min_width=41.0,  # Round 11 F1: was 54.0 at 12pt baseline (54 * 0.75).
+    min_height=27.0,  # Round 11 F1: was 36.0 at 12pt baseline (36 * 0.75).
     overflow_policy="expand_node",
 )
 

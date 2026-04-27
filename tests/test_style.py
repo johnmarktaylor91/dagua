@@ -272,8 +272,11 @@ def test_graphviz_strict_theme_loads() -> None:
     assert node_style.font_size == 16.0
     assert node_style.stroke_width == 0.75
     assert node_style.font_family == "TeX Gyre Termes"
-    assert node_style.padding == (8.0, 4.0)
-    assert node_style.min_width == 54.0
+    # Round 11 F1: padding/min sizes scaled ~12/16 to compensate for the
+    # round-9 16pt cap-height bump that widened auto-sized bounding boxes.
+    assert node_style.padding == (6.0, 3.0)
+    assert node_style.min_width == 41.0
+    assert node_style.min_height == 27.0
     assert node_style.overflow_policy == "expand_node"
 
     edge_style = theme.get_edge_style("default")

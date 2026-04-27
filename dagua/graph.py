@@ -959,6 +959,13 @@ class DaguaGraph:
         ):
             return
 
+        # Round 11 F1: graphviz_strict matches dot's compact node bbox where
+        # diamond/triangle/star/ellipse/circle do not get pre-inflated for
+        # inscribed-rectangle clearance. The flag suppresses dagua's standard
+        # shape-specific expansion factors so ellipse silhouettes track dot.
+        compact_shape_factors = (
+            getattr(getattr(self, "_theme", None), "name", "") == "graphviz_strict"
+        )
         sizes = []
         font_sizes = []
         for i in range(self.num_nodes):
@@ -982,6 +989,7 @@ class DaguaGraph:
                 min_font_size=style.min_font_size,
                 label_format=style.label_format,
                 text_rotation=style.text_rotation,
+                compact_shape_factors=compact_shape_factors,
             )
             # For shrink_text/overflow, min_width and min_height act as both
             # floor AND cap: the node stays at that size and text adapts
@@ -1053,6 +1061,7 @@ class DaguaGraph:
                         min_font_size=style.min_font_size,
                         label_format=style.label_format,
                         text_rotation=style.text_rotation,
+                        compact_shape_factors=compact_shape_factors,
                     )
                     if expand_w > w:
                         w = expand_w
