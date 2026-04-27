@@ -665,6 +665,8 @@ class ClassicKK(_ClassicBase):
                 node_sizes=graph.node_sizes,
                 steps=300,
                 seed=self._layout_seed(seed),
+                direction=graph.direction,
+                orient_to_direction=True,
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
@@ -1547,6 +1549,9 @@ def _quick_classic(
     try:
         if graph.edge_weights is not None:
             extra_kwargs.setdefault("edge_weights", graph.edge_weights)
+        if fn_name == "layout_kk_pipeline":
+            extra_kwargs.setdefault("direction", graph.direction)
+            extra_kwargs.setdefault("orient_to_direction", True)
         pos = fn(
             edge_index,
             graph.num_nodes,
