@@ -151,7 +151,7 @@ def _warn_on_unrecognized_variant_params(
 _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_fr": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.fr",
-        function_name="layout_fr_pipeline",
+        function_name="layout_fr_default_pipeline",
         default_params={"steps": 200},
     ),
     "classic_kk": _ClassicLayoutSpec(
@@ -268,7 +268,10 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_sgd2_multi": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.sgd2_multi",
         function_name="layout_sgd2_multi_pipeline",
-        default_params={"criteria": {"stress": 1.0, "ideal_edge_length": 1.0}, "lr": 0.01},
+        default_params={
+            "criteria": {"stress": 1.0, "ideal_edge_length": 1.0},
+            "lr": 0.01,
+        },
     ),
 }
 
@@ -594,7 +597,9 @@ class ClassicFR(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.ops.pipelines.fr import layout_fr_pipeline as layout_fr
+        from dagua.layout.ops.pipelines.fr import (
+            layout_fr_default_pipeline as layout_fr,
+        )
 
         start = time.perf_counter()
         try:
@@ -925,7 +930,9 @@ class ClassicSugiyama(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.ops.pipelines.sugiyama import layout_sugiyama_pipeline as layout_sugiyama
+        from dagua.layout.ops.pipelines.sugiyama import (
+            layout_sugiyama_pipeline as layout_sugiyama,
+        )
 
         start = time.perf_counter()
         try:
@@ -979,7 +986,9 @@ class ClassicSpectral(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.ops.pipelines.spectral import layout_spectral_pipeline as layout_spectral
+        from dagua.layout.ops.pipelines.spectral import (
+            layout_spectral_pipeline as layout_spectral,
+        )
 
         start = time.perf_counter()
         try:
@@ -1187,7 +1196,9 @@ class ClassicLinLog(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.ops.pipelines.linlog import layout_linlog_pipeline as layout_linlog
+        from dagua.layout.ops.pipelines.linlog import (
+            layout_linlog_pipeline as layout_linlog,
+        )
 
         start = time.perf_counter()
         try:
@@ -1298,7 +1309,9 @@ class ClassicTsNET(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline as layout_tsnet
+        from dagua.layout.ops.pipelines.tsnet import (
+            layout_tsnet_pipeline as layout_tsnet,
+        )
 
         start = time.perf_counter()
         try:
@@ -1544,7 +1557,10 @@ def _quick_classic(
         return CompetitorResult(name=name, pos=pos, runtime_seconds=time.perf_counter() - start)
     except Exception as exc:
         return CompetitorResult(
-            name=name, pos=None, runtime_seconds=time.perf_counter() - start, error=str(exc)
+            name=name,
+            pos=None,
+            runtime_seconds=time.perf_counter() - start,
+            error=str(exc),
         )
 
 
