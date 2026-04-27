@@ -7,12 +7,20 @@ from typing import Iterable
 import pytest
 import torch
 
+from dagua.config import LayoutConfig
+from dagua.graph import DaguaGraph
+from dagua.layout import layout as engine_layout
 from dagua.layout.classic.sugiyama import layout_sugiyama
 from dagua.layout.ops.pipelines.sugiyama import (
     build_sugiyama_pipeline,
     layout_sugiyama_pipeline,
 )
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.state import (
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -277,6 +285,37 @@ class TestSugiyamaPipelineFidelity:
         )
 
         _assert_exact_match(classic, pipeline)
+
+    def test_engine_config_spacing_is_forwarded(self) -> None:
+        """Explicit engine dispatch should honor LayoutConfig spacing fields."""
+        graph = DaguaGraph()
+        for node_id in ["root", "left", "right", "sink"]:
+            graph.add_node(node_id, label=node_id)
+        graph.add_edge("root", "left")
+        graph.add_edge("root", "right")
+        graph.add_edge("left", "sink")
+        graph.add_edge("right", "sink")
+
+        config = LayoutConfig(
+            algorithm="sugiyama",
+            rank_sep=11.0,
+            node_sep=7.0,
+        )
+
+        positions = engine_layout(graph, config)
+
+        assert graph.node_sizes is not None
+        torch.testing.assert_close(
+            positions[:, 1],
+            torch.tensor([0.0, 11.0, 11.0, 22.0]),
+        )
+        layer_nodes = sorted([1, 2], key=lambda node: positions[node, 0].item())
+        left_node, right_node = layer_nodes
+        center_gap = positions[right_node, 0].item() - positions[left_node, 0].item()
+        min_gap = (
+            graph.node_sizes[left_node, 0].item() + graph.node_sizes[right_node, 0].item()
+        ) / 2.0 + config.node_sep
+        assert center_gap >= min_gap
 
     def test_layer_sep_alias(self) -> None:
         """The layer_sep alias should override rank_sep identically."""
