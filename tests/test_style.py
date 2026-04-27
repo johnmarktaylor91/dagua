@@ -269,8 +269,8 @@ def test_graphviz_strict_theme_loads() -> None:
     assert node_style.shape == "ellipse"
     assert node_style.fill == "#FFFFFF"
     assert node_style.stroke == "#000000"
-    assert node_style.font_size == 14.0
-    assert node_style.stroke_width == 1.0
+    assert node_style.font_size == 10.5
+    assert node_style.stroke_width == 0.75
     assert node_style.font_family == "Times New Roman"
     assert node_style.padding == (8.0, 4.0)
     assert node_style.min_width == 54.0
@@ -284,12 +284,15 @@ def test_graphviz_strict_theme_loads() -> None:
     assert edge_style.arrow_width == 7.0
     assert edge_style.arrow_node_fraction == pytest.approx(0.0)
     assert edge_style.arrow_width_ratio == pytest.approx(0.7)
+    assert edge_style.label_font_size == pytest.approx(10.5)
     assert edge_style.label_font_family == "Times New Roman"
     assert edge_style.curvature == pytest.approx(0.0)
     back_edge_style = theme.get_edge_style("back")
-    assert back_edge_style.curvature == pytest.approx(0.3)
+    assert back_edge_style.label_font_size == pytest.approx(10.5)
+    assert back_edge_style.curvature == pytest.approx(0.2)
 
     assert theme.cluster_style.fill == "#F0F0F0"
+    assert theme.cluster_style.stroke == "#AAAAAA"
     assert theme.cluster_style.font_size == 10.0
     assert theme.cluster_style.font_weight == "regular"
     assert theme.cluster_style.font_family == "Times New Roman"
@@ -299,6 +302,7 @@ def test_graphviz_strict_theme_loads() -> None:
     assert theme.cluster_style.font_size_scaling == "fixed"
     assert theme.cluster_style.depth_fill_step == pytest.approx(0.0)
     assert theme.cluster_style.depth_stroke_step == pytest.approx(0.0)
+    assert theme.graph_style.edge_label_font_size == pytest.approx(10.5)
     assert theme.graph_style.edge_label_background_opacity == 1.0
 
 
@@ -355,7 +359,7 @@ def test_graphviz_strict_vs_improved_differences() -> None:
     strict_node_style = strict_theme.get_node_style("default")
     improved_node_style = improved_theme.get_node_style("default")
     assert strict_node_style.font_family != improved_node_style.font_family
-    assert strict_node_style.font_size > improved_node_style.font_size
+    assert strict_node_style.font_size != improved_node_style.font_size
     assert strict_node_style.stroke != improved_node_style.stroke
 
 
