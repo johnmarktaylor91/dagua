@@ -9,10 +9,16 @@ import torch
 
 from dagua.layout.classic.sgd2_multi import SmoothSteps, layout_sgd2_multi
 from dagua.layout.ops.pipelines.sgd2_multi import (
+    _choose_sgd2_default_layout,
     build_sgd2_multi_pipeline,
     layout_sgd2_multi_pipeline,
 )
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.state import (
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -109,6 +115,36 @@ def _assert_exact_match(classic: torch.Tensor, pipeline: torch.Tensor) -> None:
     )
 
 
+def test_default_selector_keeps_native_when_reference_drops_dag_consistency() -> None:
+    """The hybrid default should preserve native layouts with better edge direction."""
+    edge_index = _path_edge_index(3)
+    native = torch.tensor([[0.0, 0.0], [0.0, 1.0], [0.0, 2.0]])
+    reference = torch.tensor([[0.0, 2.0], [0.0, 1.0], [0.0, 0.0]])
+
+    selected = _choose_sgd2_default_layout(
+        native_pos=native,
+        reference_pos=reference,
+        edge_index=edge_index,
+    )
+
+    assert selected is native
+
+
+def test_default_selector_uses_reference_when_dag_consistency_is_preserved() -> None:
+    """The hybrid default should use canonical stress-SGD when direction is safe."""
+    edge_index = _path_edge_index(3)
+    native = torch.tensor([[0.0, 0.0], [0.0, 1.0], [0.0, 2.0]])
+    reference = torch.tensor([[2.0, 0.0], [1.0, 1.0], [0.0, 2.0]])
+
+    selected = _choose_sgd2_default_layout(
+        native_pos=native,
+        reference_pos=reference,
+        edge_index=edge_index,
+    )
+
+    assert selected is reference
+
+
 def _run_pipeline_direct(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -183,21 +219,30 @@ class TestSGD2MultiPipelineFidelity:
         ("num_nodes", "seed"),
         [(0, 42), (1, 42), (2, 42), (5, 42), (5, 99), (10, 42)],
     )
-    def test_pipeline_matches_classic_stress_default(
+    def test_pipeline_matches_classic_stress_criterion(
         self,
         num_nodes: int,
         seed: int,
     ) -> None:
-        """Default stress criterion should match classic exactly."""
+        """Explicit native stress criterion should match classic exactly."""
         edge_index = _path_edge_index(num_nodes)
         # Use fewer steps for test speed -- bit-identity holds at any step count
         steps = 50
+        criteria = {"stress": 1.0}
 
         classic = layout_sgd2_multi(
-            edge_index=edge_index, num_nodes=num_nodes, steps=steps, seed=seed
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            steps=steps,
+            seed=seed,
+            criteria=criteria,
         )
         pipeline = layout_sgd2_multi_pipeline(
-            edge_index=edge_index, num_nodes=num_nodes, steps=steps, seed=seed
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            steps=steps,
+            seed=seed,
+            criteria=criteria,
         )
 
         _assert_exact_match(classic, pipeline)
@@ -427,9 +472,22 @@ class TestSGD2MultiPipelineFidelity:
     def test_pipeline_matches_classic_on_disconnected_graph(self) -> None:
         """Disconnected graphs should match classic exactly."""
         edge_index = _disconnected_edge_index()
+        criteria = {"stress": 1.0}
 
-        classic = layout_sgd2_multi(edge_index=edge_index, num_nodes=7, steps=50, seed=99)
-        pipeline = layout_sgd2_multi_pipeline(edge_index=edge_index, num_nodes=7, steps=50, seed=99)
+        classic = layout_sgd2_multi(
+            edge_index=edge_index,
+            num_nodes=7,
+            steps=50,
+            seed=99,
+            criteria=criteria,
+        )
+        pipeline = layout_sgd2_multi_pipeline(
+            edge_index=edge_index,
+            num_nodes=7,
+            steps=50,
+            seed=99,
+            criteria=criteria,
+        )
 
         _assert_exact_match(classic, pipeline)
 
@@ -510,9 +568,22 @@ class TestSGD2MultiPipelineFidelity:
         n = 6
         edges = [(i, (i + 1) % n) for i in range(n)]
         edge_index = _edge_index_from_edges(edges)
+        criteria = {"stress": 1.0}
 
-        classic = layout_sgd2_multi(edge_index=edge_index, num_nodes=n, steps=50, seed=42)
-        pipeline = layout_sgd2_multi_pipeline(edge_index=edge_index, num_nodes=n, steps=50, seed=42)
+        classic = layout_sgd2_multi(
+            edge_index=edge_index,
+            num_nodes=n,
+            steps=50,
+            seed=42,
+            criteria=criteria,
+        )
+        pipeline = layout_sgd2_multi_pipeline(
+            edge_index=edge_index,
+            num_nodes=n,
+            steps=50,
+            seed=42,
+            criteria=criteria,
+        )
 
         _assert_exact_match(classic, pipeline)
 
