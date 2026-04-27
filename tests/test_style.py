@@ -280,20 +280,25 @@ def test_graphviz_strict_theme_loads() -> None:
     # ellipse height undershoot the round-14 audit measured (~14-18% short).
     assert node_style.padding == (6.0, 3.0)
     assert node_style.min_width == 50.0
-    assert node_style.min_height == 38.0
+    # Round 17 F1: was 38.0; audit measured ellipses 5-20% too tall after
+    # round-15's overshoot. Pull min_height back toward dot's silhouette.
+    assert node_style.min_height == 35.0
     assert node_style.overflow_policy == "expand_node"
 
     edge_style = theme.get_edge_style("default")
     assert edge_style.width == 1.0
     assert edge_style.opacity == 1.0
     assert edge_style.arrow_scale is None  # ignored; mpl uses unified point conversion
-    # Round 13 F5 / Round 15 F4: arrow length/width bumped 12/10 -> 14/12
-    # then arrow_width lifted to 14 (head 12 -> 14) so the base widens to
-    # match dot's ~24px chunk. arrow_length stays at 14 -- bumping length
-    # to 16 in the round-15 spike overshot dot's head depth (heads ended
-    # up 2x dot's height).
-    assert edge_style.arrow_length == 14.0
-    assert edge_style.arrow_width == 14.0
+    # Round 13 F5 / Round 15 F4 / Round 17 F3: arrow length/width
+    # progression 12/10 -> 14/12 -> 14/14 -> 18/12. Round 15's (14, 14)
+    # inverted dot's narrow-tall aspect (h/w 1.26) into wide-stubby
+    # (h/w 0.88) by bumping width while keeping length. Round 17 swaps
+    # the axes: length 14 -> 18 lifts head depth, width 14 -> 12 narrows
+    # the base. Target rendered h/w ~ 1.5 (vs dot's 1.26); slight over
+    # to recover filled-area lost in round 15 (audit said dagua had
+    # 19% less ink than dot at the (14,14) band).
+    assert edge_style.arrow_length == 18.0
+    assert edge_style.arrow_width == 12.0
     assert edge_style.arrow_node_fraction == pytest.approx(0.0)
     assert edge_style.arrow_width_ratio == pytest.approx(0.7)
     assert edge_style.label_font_size == pytest.approx(16.0)
@@ -301,8 +306,8 @@ def test_graphviz_strict_theme_loads() -> None:
     assert edge_style.curvature == pytest.approx(0.0)
     back_edge_style = theme.get_edge_style("back")
     assert back_edge_style.width == 1.0
-    assert back_edge_style.arrow_length == 14.0
-    assert back_edge_style.arrow_width == 14.0
+    assert back_edge_style.arrow_length == 18.0
+    assert back_edge_style.arrow_width == 12.0
     assert back_edge_style.label_font_size == pytest.approx(16.0)
     assert back_edge_style.curvature == pytest.approx(0.2)
 

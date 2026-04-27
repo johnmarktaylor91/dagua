@@ -1589,8 +1589,13 @@ def test_vee_arrow_is_open_polygon() -> None:
     plt.close(fig)
 
 
-def test_vee_arrowhead_builder_returns_open_chevron() -> None:
-    """The custom vee head should be an open chevron shape."""
+def test_vee_arrowhead_builder_returns_filled_notched_triangle() -> None:
+    """The custom vee head should be a FILLED notched triangle (Graphviz parity).
+
+    Round 17 F4: native Graphviz emits ``vee`` as a filled polygon. The
+    earlier dagua implementation rendered it as a stroked chevron, which
+    mismatched dot's silhouette on the ``arrow_types`` panel.
+    """
 
     result = build_arrowhead(
         "vee",
@@ -1601,12 +1606,14 @@ def test_vee_arrowhead_builder_returns_open_chevron() -> None:
         body_width=2.0,
     )
 
-    assert result.filled_paths == [], "Vee should not have filled paths"
-    assert len(result.stroked_paths) == 1, "Vee should have one stroked chevron path"
-    path = result.stroked_paths[0]
-    assert path.vertices.shape[0] >= 5, (
-        "Open vee keeps the chevron contour vertices for outline rendering"
+    assert len(result.filled_paths) == 1, "Vee should have one filled notched-triangle path"
+    assert result.stroked_paths == [], (
+        "Vee renders entirely through the fill pass after round-17 F4"
     )
+    path = result.filled_paths[0]
+    # The notched triangle has tip + two back wings + a back-axis notch
+    # vertex, plus the matplotlib closing vertex appended by _local_path.
+    assert path.vertices.shape[0] >= 4, "Filled vee retains the notched-triangle vertices"
 
 
 def test_straight_routing_has_arrowhead() -> None:
