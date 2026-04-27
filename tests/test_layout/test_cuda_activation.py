@@ -9,6 +9,8 @@ import pytest
 import torch
 
 from dagua.config import LayoutConfig
+from dagua.graph import DaguaGraph
+from dagua.layout import layout
 from dagua.layout.constraints import (
     edge_attraction_loss,
     edge_length_variance_loss,
@@ -24,6 +26,7 @@ from dagua.layout.engine import (
 )
 from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.layout.multilevel import _auto_cpu_edge_batch_size, coarsen_once
+from dagua.layout.ops.pipelines.dagua_native import _should_lattice_uniform_centered_slots
 from dagua.layout.projection import project_overlaps
 from dagua.layout.subset_gpu import EdgeAccessPattern, SubsetGPUExecutor, SubsetGPULossTerm
 from dagua.metrics import count_overlaps
@@ -100,6 +103,55 @@ def _make_projection_case(
     node_sizes = torch.full((num_layers * layer_width, 2), 12.0, dtype=torch.float32)
     layer_assignments = torch.arange(num_layers * layer_width, dtype=torch.long) // layer_width
     return pos, node_sizes, build_layer_index(layer_assignments)
+
+
+def _make_disconnected_polish_graph() -> DaguaGraph:
+    """Build a small disconnected graph that exercises component tiling polish.
+
+    Returns
+    -------
+    DaguaGraph
+        Graph with two non-trivial components and computed node sizes.
+    """
+    graph = DaguaGraph()
+    for node_id in range(5):
+        graph.add_node(str(node_id))
+    graph.add_edge("0", "1")
+    graph.add_edge("2", "3")
+    graph.add_edge("3", "4")
+    graph.compute_node_sizes()
+    return graph
+
+
+def _make_cuda_lattice_gate_case() -> tuple[torch.Tensor, torch.Tensor]:
+    """Create CUDA edge and LP-position tensors for the lattice polish gate.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Edge index shaped ``[2, E]`` and LP-like positions shaped ``[N, 2]``.
+    """
+    layer_width = 4
+    num_layers = 5
+    edges: list[tuple[int, int]] = []
+    for layer in range(num_layers - 1):
+        base = layer * layer_width
+        nxt = (layer + 1) * layer_width
+        for offset in range(layer_width):
+            edges.append((base + offset, nxt + offset))
+            if offset + 1 < layer_width:
+                edges.append((base + offset, nxt + offset + 1))
+    edge_index = torch.tensor(edges, dtype=torch.long, device="cuda").t().contiguous()
+    positions = torch.zeros((layer_width * num_layers, 2), dtype=torch.float32, device="cuda")
+    for layer in range(num_layers):
+        start = layer * layer_width
+        positions[start : start + layer_width, 0] = torch.arange(
+            layer_width,
+            dtype=torch.float32,
+            device="cuda",
+        )
+        positions[start : start + layer_width, 1] = float(layer * 25)
+    return edge_index, positions
 
 
 def _make_shared_edge_executor(
@@ -727,6 +779,25 @@ def test_gpu_coarsening_matches_cpu_exactly(
     )
 
     torch.testing.assert_close(cpu_result.fine_to_coarse.cpu(), gpu_result.fine_to_coarse.cpu())
+
+
+@CUDA_REQUIRED
+def test_cuda_component_tiling_polish_keeps_edges_on_device() -> None:
+    """Component tiling polish should use CUDA graph tensors end to end."""
+    graph = _make_disconnected_polish_graph()
+    pos = layout(graph, LayoutConfig(seed=42, device="cuda", steps=1))
+
+    assert pos.device.type == "cuda"
+    assert pos.shape == (graph.num_nodes, 2)
+    assert bool(torch.isfinite(pos).all().item())
+
+
+@CUDA_REQUIRED
+def test_cuda_lattice_uniform_slots_gate_keeps_degree_on_device() -> None:
+    """The lattice polish gate should not mix CPU degree tensors with CUDA edges."""
+    edge_index, positions = _make_cuda_lattice_gate_case()
+
+    assert _should_lattice_uniform_centered_slots(edge_index, positions.shape[0], positions)
 
 
 @CUDA_REQUIRED
