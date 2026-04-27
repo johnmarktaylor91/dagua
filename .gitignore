@@ -110,3 +110,6 @@ private-notes/plans/native_placement_algo/reviews/
 
 # Sprint 0.5: secret salts for opaque held-out / rolling graph suites
 private-notes/private/
+
+# Codex CLI tooling marker (empty file dropped by codex exec)
+.codex
