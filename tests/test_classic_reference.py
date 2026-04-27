@@ -1055,7 +1055,7 @@ def test_maxent_stress_pure_mode_drops_entropy_term() -> None:
 
 @pytest.mark.smoke
 def test_fmmm_force_model_matches_fr_coefficients() -> None:
-    """FM^3 refinement should match OGDF's FR-based force coefficients."""
+    """FM^3 refinement should match OGDF's default force coefficients."""
     from dagua.layout.classic.fmmm import _attractive_force as fmmm_attractive_force
     from dagua.layout.classic.fmmm import _barnes_hut_repulsion as fmmm_barnes_hut_repulsion
 
@@ -1073,7 +1073,13 @@ def test_fmmm_force_model_matches_fr_coefficients() -> None:
     )
     torch.testing.assert_close(
         attractive,
-        torch.tensor([[9.0 / 8.0, 0.0], [-(9.0 / 8.0), 0.0]], dtype=torch.float32),
+        torch.tensor(
+            [
+                [math.log2(3.0 / 2.0) * 9.0 / 8.0, 0.0],
+                [-(math.log2(3.0 / 2.0) * 9.0 / 8.0), 0.0],
+            ],
+            dtype=torch.float32,
+        ),
         atol=1.0e-5,
         rtol=1.0e-5,
     )
