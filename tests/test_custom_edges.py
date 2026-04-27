@@ -513,6 +513,22 @@ def test_odot_overlaps_into_body_instead_of_sitting_tangent() -> None:
     assert trim_midpoint_x < circle_back_x
 
 
+def test_circle_alias_builds_filled_dot_arrowhead() -> None:
+    """Graphviz circle aliases should render as filled dot markers."""
+    result = build_arrowhead(
+        "circle",
+        tip=(0.0, 0.0),
+        tangent=(1.0, 0.0),
+        length=8.0,
+        width=6.0,
+        body_width=4.0,
+        fill_mode="hollow",
+    )
+
+    assert result.filled_paths
+    assert not result.stroked_paths
+
+
 def test_stroked_head_linewidth_grows_with_thick_edges() -> None:
     """Open and hollow heads should gain outline weight as the body gets thicker."""
     outline_result = build_arrowhead(
