@@ -945,7 +945,7 @@ def _attractive_force(
     ideal_length: float,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Compute exact attractive forces along graph edges.
+    """Compute OGDF default attractive forces along graph edges.
 
     Parameters
     ----------
@@ -971,8 +971,9 @@ def _attractive_force(
     dst = edge_index[1].to(device=positions.device, dtype=torch.long)
     delta = positions[dst] - positions[src]
     distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
-    denominator = max(ideal_length**3, _MIN_DISTANCE)
-    edge_force = delta * (distances / denominator).unsqueeze(1)
+    desired_length = torch.full_like(distances, max(ideal_length, _MIN_DISTANCE))
+    force_scale = torch.log2(distances / desired_length) * (distances / desired_length.pow(3))
+    edge_force = delta * force_scale.unsqueeze(1)
     if edge_weights is not None:
         edge_force = edge_force * edge_weights.to(
             device=positions.device,
@@ -989,7 +990,7 @@ def _attractive_force_with_lengths(
     edge_lengths: torch.Tensor,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Compute OGDF-style attractive forces using per-edge desired lengths.
+    """Compute OGDF default attractive forces using per-edge desired lengths.
 
     Parameters
     ----------
@@ -1018,7 +1019,8 @@ def _attractive_force_with_lengths(
     )
     delta = positions[dst] - positions[src]
     distances = torch.linalg.norm(delta, dim=1).clamp(min=_MIN_DISTANCE)
-    edge_force = delta * (distances / desired_lengths.pow(3)).unsqueeze(1)
+    force_scale = torch.log2(distances / desired_lengths) * (distances / desired_lengths.pow(3))
+    edge_force = delta * force_scale.unsqueeze(1)
     if edge_weights is not None:
         edge_force = edge_force * edge_weights.to(
             device=positions.device,
@@ -1342,7 +1344,7 @@ def layout_fmmm(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
-    steps: int = 100,
+    steps: int = 200,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -1361,7 +1363,7 @@ def layout_fmmm(
         Number of nodes.
     node_sizes : torch.Tensor, optional
         Optional node sizes used only for final scaling.
-    steps : int, default=100
+    steps : int, default=200
         Total refinement budget across hierarchy levels.
     seed : int, default=42
         Random seed for coarse initialization and uncoarsening jitter.
