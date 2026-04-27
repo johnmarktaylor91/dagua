@@ -289,8 +289,8 @@ def test_open_arrowhead_becomes_stroked() -> None:
     assert len(result.stroked_paths) >= 1
 
 
-def test_graphviz_open_arrowhead_is_a_stroked_v_shape() -> None:
-    """Graphviz's ``open`` head should render as two stroked tines with no fill.
+def test_graphviz_open_arrowhead_is_filled_on_graphviz_8() -> None:
+    """Graphviz 8's named ``open`` head should render as filled geometry.
 
     Returns
     -------
@@ -299,12 +299,9 @@ def test_graphviz_open_arrowhead_is_a_stroked_v_shape() -> None:
     """
     result = build_arrowhead("open", tip=(0.0, 0.0), tangent=(-1.0, 0.0), length=8.0, width=5.0)
 
-    assert result.filled_paths == []
-    assert len(result.stroked_paths) == 2
-    for path in result.stroked_paths:
-        assert path.vertices.shape == (2, 2)
-        assert np.allclose(path.vertices[0], np.array([0.0, 0.0]))
-        assert path.vertices[1, 0] < 0.0
+    assert len(result.filled_paths) == 1
+    assert result.stroked_paths == []
+    assert result.filled_paths[0].vertices.shape[0] >= 4
 
 
 def test_hollow_arrowheads_gain_extra_size_for_visual_weight() -> None:
@@ -440,7 +437,7 @@ def test_note_shape_fold_is_large_enough_to_read_after_downscaling() -> None:
 
 
 def test_crow_arrowhead_tines_merge_at_the_neck() -> None:
-    """Crow heads should read as one forked marker instead of three detached tines."""
+    """Crow heads should render as one filled Graphviz-style polygon."""
     result = build_arrowhead(
         "crow",
         tip=(0.0, 0.0),
@@ -450,24 +447,11 @@ def test_crow_arrowhead_tines_merge_at_the_neck() -> None:
         body_width=6.0,
     )
 
-    assert len(result.filled_paths) == 3
-
-    neck_intervals = []
-    for path in result.filled_paths:
-        max_x = float(np.max(path.vertices[:, 0]))
-        y_values = sorted(
-            float(vertex[1]) for vertex in path.vertices if vertex[0] == pytest.approx(max_x)
-        )
-        neck_intervals.append((y_values[0], y_values[-1]))
-
-    lower_interval, center_interval, upper_interval = sorted(
-        neck_intervals,
-        key=lambda item: item[0],
-    )
-
-    assert center_interval[1] - center_interval[0] > 6.0
-    assert center_interval[1] >= upper_interval[0]
-    assert center_interval[0] <= lower_interval[1]
+    assert len(result.filled_paths) == 1
+    assert result.stroked_paths == []
+    vertices = result.filled_paths[0].vertices
+    assert vertices.shape[0] >= 7
+    assert float(np.max(vertices[:, 1]) - np.min(vertices[:, 1])) > 8.0
 
 
 @pytest.mark.parametrize(
