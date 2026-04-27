@@ -263,7 +263,7 @@ def test_redistribute_face_angles_spreads_evenly() -> None:
     )
 
 
-@pytest.mark.parametrize("spec", ["normal", "dot", "diamond", "vee", "crow", "box", "simple"])
+@pytest.mark.parametrize("spec", ["normal", "dot", "diamond", "box", "simple"])
 def test_arrowhead_result_separates_filled_and_stroked_geometry(spec: str) -> None:
     """Arrowheads should report fill geometry separately from stroke geometry."""
     result = build_arrowhead(spec, tip=(0.0, 0.0), tangent=(-1.0, 0.0), length=8.0, width=5.0)
@@ -271,6 +271,14 @@ def test_arrowhead_result_separates_filled_and_stroked_geometry(spec: str) -> No
     assert result.trim_contour.vertices.shape[0] >= 2
     # All standard arrowheads produce filled geometry.
     assert len(result.filled_paths) >= 1
+
+
+def test_vee_arrowhead_becomes_stroked() -> None:
+    """Graphviz vee arrowheads should render as open stroked geometry."""
+    result = build_arrowhead("vee", tip=(0.0, 0.0), tangent=(-1.0, 0.0), length=8.0, width=5.0)
+
+    assert result.filled_paths == []
+    assert len(result.stroked_paths) >= 1
 
 
 def test_open_arrowhead_becomes_stroked() -> None:
@@ -373,8 +381,8 @@ def test_open_and_hollow_arrowheads_increase_stroke_weight() -> None:
     assert hollow.stroke_width_scale > 1.0
 
 
-def test_vee_arrowhead_seats_on_full_body_width() -> None:
-    """Filled vee heads should still anchor on the full ribbon width."""
+def test_vee_arrowhead_stroked_trim_seats_on_full_body_width() -> None:
+    """Open vee heads should still trim against the full ribbon width."""
     result = build_arrowhead(
         "vee",
         tip=(0.0, 0.0),
@@ -384,14 +392,14 @@ def test_vee_arrowhead_seats_on_full_body_width() -> None:
         body_width=6.0,
     )
 
-    vertices = result.filled_paths[0].vertices
+    vertices = result.trim_contour.vertices
     max_x = float(np.max(vertices[:, 0]))
     anchor_values = sorted(
         float(vertex[1]) for vertex in vertices if vertex[0] == pytest.approx(max_x)
     )
 
     assert anchor_values[0] == pytest.approx(-anchor_values[1])
-    assert abs(anchor_values[0]) > 3.0
+    assert abs(anchor_values[0]) == pytest.approx(3.0)
 
 
 def test_tee_arrowhead_uses_bolder_crossbar_than_the_ribbon_body() -> None:
@@ -513,8 +521,8 @@ def test_odot_overlaps_into_body_instead_of_sitting_tangent() -> None:
     assert trim_midpoint_x < circle_back_x
 
 
-def test_circle_alias_builds_filled_dot_arrowhead() -> None:
-    """Graphviz circle aliases should render as filled dot markers."""
+def test_circle_alias_builds_hollow_dot_arrowhead() -> None:
+    """Dagua's circle compatibility alias should render as a hollow dot marker."""
     result = build_arrowhead(
         "circle",
         tip=(0.0, 0.0),
@@ -525,8 +533,8 @@ def test_circle_alias_builds_filled_dot_arrowhead() -> None:
         fill_mode="hollow",
     )
 
-    assert result.filled_paths
-    assert not result.stroked_paths
+    assert result.filled_paths == []
+    assert result.stroked_paths
 
 
 def test_stroked_head_linewidth_grows_with_thick_edges() -> None:
