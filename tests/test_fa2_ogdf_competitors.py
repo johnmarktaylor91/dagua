@@ -95,9 +95,12 @@ def test_fa2_layout_returns_positions() -> None:
     assert result.error is None
 
 
-def test_fa2_layout_seeds_python_random_and_numpy(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fa2_layout_seeds_python_random_and_numpy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Seed both RNGs so repeated FA2 reference runs are deterministic."""
     graph = _make_small_graph()
+    observed_kwargs: dict[str, object] = {}
 
     class _FakeGraph:
         """Minimal NetworkX-like graph for the adapter test."""
@@ -117,9 +120,34 @@ def test_fa2_layout_seeds_python_random_and_numpy(monkeypatch: pytest.MonkeyPatc
     class _FakeForceAtlas2:
         """Generate coordinates from Python and NumPy RNGs."""
 
-        def __init__(self, **kwargs: object) -> None:
-            """Accept adapter kwargs without using them."""
-            del kwargs
+        def __init__(
+            self,
+            outboundAttractionDistribution: bool = True,
+            edgeWeightInfluence: float = 1.0,
+            jitterTolerance: float = 1.0,
+            barnesHutOptimize: bool = True,
+            barnesHutTheta: float = 1.2,
+            scalingRatio: float = 2.0,
+            strongGravityMode: bool = False,
+            gravity: float = 1.0,
+            verbose: bool = False,
+            seed: Optional[int] = None,
+        ) -> None:
+            """Record constructor kwargs accepted by the reference package."""
+            observed_kwargs.update(
+                {
+                    "outboundAttractionDistribution": outboundAttractionDistribution,
+                    "edgeWeightInfluence": edgeWeightInfluence,
+                    "jitterTolerance": jitterTolerance,
+                    "barnesHutOptimize": barnesHutOptimize,
+                    "barnesHutTheta": barnesHutTheta,
+                    "scalingRatio": scalingRatio,
+                    "strongGravityMode": strongGravityMode,
+                    "gravity": gravity,
+                    "verbose": verbose,
+                    "seed": seed,
+                }
+            )
 
         def forceatlas2_networkx_layout(
             self,
@@ -145,6 +173,7 @@ def test_fa2_layout_seeds_python_random_and_numpy(monkeypatch: pytest.MonkeyPatc
     assert result_a.error is None
     assert result_b.error is None
     assert torch.equal(result_a.pos, result_b.pos)
+    assert observed_kwargs["seed"] == 42
 
 
 def test_ogdf_available_check_returns_bool() -> None:
