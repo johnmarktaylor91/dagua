@@ -913,7 +913,14 @@ _GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
     stroke="#000000",
     stroke_width=0.75,
     font_family="TeX Gyre Termes",
-    font_size=12.0,
+    # Round 9 F1: matplotlib's Termes glyph rasterization at the gallery's
+    # 210 DPI render path produces a cap-height ~73% of dot's at the same
+    # nominal point size. Empirical pixel measurement on tiny_graph.png and
+    # single_edge.png yields a 19/14 ratio between dot and dagua at 12pt;
+    # bumping the strict-theme node label to 16pt closes the visual gap
+    # without overshooting once matplotlib's tighter glyph hinting is
+    # accounted for. See REPORT_round_9.md for the measurement workflow.
+    font_size=16.0,
     font_color="#000000",
     padding=(8.0, 4.0),  # Graphviz margin: 0.11in x 0.055in = ~8pt x 4pt
     corner_radius=0.0,
@@ -935,17 +942,33 @@ GRAPHVIZ_STRICT_THEME = Theme(
     edge_styles={
         "default": EdgeStyle(
             color="#000000",
-            width=0.75,  # visually matches Graphviz hairlines under matplotlib AA
+            # Round 9 F3: matplotlib renders 0.75pt ribbon-fill bodies at ~2px
+            # at 210 DPI, while dot's PostScript stroke at the default 1.0pt
+            # penwidth measures ~3px. The round-6 audit's PASS at 0.75 was
+            # observing post-thumbnail panels that masked the 1px gap; at
+            # native render fidelity the body needs to match dot's effective
+            # weight. 1.0pt ribbon -> ~2.9px at 210 DPI matches dot's stroke.
+            width=1.0,
             arrow="normal",
             arrow_fill="filled",
-            arrow_length=8.0,  # Graphviz-like stout filled triangle
-            arrow_width=8.0,
+            # Round 9 F4: dot's filled-triangle arrowhead measures 24px wide
+            # x 30px tall at 210 DPI on single_edge.png. With the round-7
+            # ribbon-aware sublinear sqrt(width / 1.2pt) scaling, arrow
+            # dimensions of (12.0, 10.0) at width=1.0pt produce roughly
+            # (10.96, 9.13)pt visible -> ~32x27px at 210 DPI, recovering the
+            # round-6 PASS-grade stout-triangle silhouette that round-7
+            # inadvertently slimmed down.
+            arrow_length=12.0,
+            arrow_width=10.0,
             arrow_scale=None,
             arrow_node_fraction=0.0,  # fixed size, not node-relative
             arrow_width_ratio=0.7,
             style="solid",
             opacity=1.0,
-            label_font_size=12.0,
+            # Round 9 F1: edge labels share the cap-height ratio gap with
+            # node labels. 16pt matches the bumped node label so labels read
+            # at parity with dot.
+            label_font_size=16.0,
             label_font_color="#000000",
             label_background="#FFFFFF",
             label_font_family="TeX Gyre Termes",
@@ -953,17 +976,17 @@ GRAPHVIZ_STRICT_THEME = Theme(
         ),
         "back": EdgeStyle(
             color="#000000",
-            width=0.75,
+            width=1.0,
             arrow="normal",
             arrow_fill="filled",
-            arrow_length=8.0,
-            arrow_width=8.0,
+            arrow_length=12.0,
+            arrow_width=10.0,
             arrow_scale=None,
             arrow_node_fraction=0.0,
             arrow_width_ratio=0.7,
             style="solid",
             opacity=1.0,
-            label_font_size=12.0,
+            label_font_size=16.0,
             label_font_color="#000000",
             label_background="#FFFFFF",
             label_font_family="TeX Gyre Termes",
@@ -972,18 +995,29 @@ GRAPHVIZ_STRICT_THEME = Theme(
     },
     cluster_style=ClusterStyle(
         fill="#F2EFE9",  # faint warm tint matching dot's subdued clusters
-        stroke="#CCCCCC",  # very light gray hairline like Graphviz cluster borders
+        # Round 9 F5: dot's cluster borders at the gallery's 210 DPI read as
+        # near-invisible ghost lines. matplotlib's antialiased 0.5pt stroke
+        # at #CCCCCC with full opacity rendered slightly heavier than dot's
+        # softer hairline. Lightening the stroke to #DDDDDD plus easing
+        # border opacity to 0.7 closes the perceptual weight gap on
+        # microservices.png and data_pipeline.png without losing definition
+        # on the showcase panels.
+        stroke="#DDDDDD",
         stroke_width=0.5,  # thin border matching Graphviz
         corner_radius=0.0,
         padding=16.0,  # generous padding like Graphviz
         label_position="top-left",
+        # Cluster labels stay at 10pt -- dot renders cluster labels noticeably
+        # smaller than node labels, and the round-7 cluster panels read clean
+        # at 10pt. Only the node/edge label streams need the round-9 cap-height
+        # bump to close the dot parity gap.
         font_size=10.0,
         font_weight="regular",
         font_color="#000000",
         font_family="TeX Gyre Termes",
         opacity=0.15,
         fill_opacity=0.10,
-        border_opacity=1.0,
+        border_opacity=0.7,
         depth_fill_step=0.0,
         depth_stroke_step=0.0,
         font_size_scaling="fixed",
@@ -993,7 +1027,9 @@ GRAPHVIZ_STRICT_THEME = Theme(
         margin=18.0,
         title_font_size=14.0,
         title_font_color="#000000",
-        edge_label_font_size=12.0,
+        # Round 9 F1: edge label graph-level default tracks the per-edge
+        # default so labels keep parity with dot under graphviz_strict.
+        edge_label_font_size=16.0,
         edge_label_background="#FFFFFF",
         edge_label_background_opacity=1.0,
     ),
