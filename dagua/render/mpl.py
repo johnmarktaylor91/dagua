@@ -680,7 +680,7 @@ def _is_graphviz_strict_render(graph: Any) -> bool:
     return _render_theme_name(graph) == "graphviz_strict"
 
 
-_STRICT_EDGE_LABEL_NODE_RATIO = 9.3 / 14.0
+_STRICT_EDGE_LABEL_NODE_RATIO = 11.0 / 14.0
 
 
 def _strict_edge_label_font_size(graph: Any, fallback_points: float) -> float:
@@ -725,6 +725,14 @@ def _strict_edge_label_font_size(graph: Any, fallback_points: float) -> float:
     9.3/14 (= ~0.664) yields 16 * 0.664 = ~10.6pt, dropping edge labels
     fully below dot's measured cap height while keeping the
     subordination contract.
+
+    Round 17 F2: 9.3/14 over-corrected -- the round-16 audit measured
+    dagua edge labels at ~75% of dot's cap height (25% TOO SMALL).
+    Round 13's 10/14 made them 10-15% too large; round 15's 9.3/14 made
+    them 25% too small. Land between by going a hair LARGER than 10/14
+    -- ratio 11/14 (= ~0.786) yields 16 * 0.786 = ~12.6pt rendered.
+    The 0.6pt bump over round-13 compensates for matplotlib's pt-to-px
+    floor where 9.3pt and 10pt rounded to the same pixel-row glyph.
     """
     if not _is_graphviz_strict_render(graph):
         return fallback_points
