@@ -489,8 +489,26 @@ def _box(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _dot(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build a filled circular head."""
-    radius = min(length, width) * 0.5
+    """Build a filled circular head.
+
+    Notes
+    -----
+    Round 17 F4: native Graphviz emits ``dot`` and ``odot`` (which the
+    ``circle`` alias maps to) as a small filled/hollow circle with
+    radius ~= 0.4 * arrow_length (Graphviz 8.0.3 SVG: r=4 at the default
+    arrow_length=10). The previous implementation used
+    ``min(length, width) * 0.5`` which produced a circle that grew with
+    BOTH arrow_length and arrow_width. After round 15 lifted
+    arrow_width 12 -> 14, dagua's dot/circle markers visibly outgrew
+    dot's on arrow_types.png (P8). Lock the circle scale to a fraction
+    of ``length`` only and clamp to a body-width floor so thick edges
+    still resolve a head. ``length * 0.30`` keeps dot's small marker
+    silhouette while slightly larger than dot's literal 0.4 ratio
+    because dagua's authored length is now 18 (vs dot's reference 10).
+    """
+    # Decouple from arrow_width so the round-17 width bump (or any
+    # future width change) does not balloon the dot/circle markers.
+    radius = max(length * 0.30, body_width * 0.6)
     diameter = radius * 2.0
     join_x = max(diameter - _join_overlap(max(length, diameter), body_width), radius)
     return ArrowheadResult(
@@ -537,7 +555,7 @@ def _open(length: float, width: float, body_width: float) -> ArrowheadResult:
 
 
 def _tee(length: float, width: float, body_width: float) -> ArrowheadResult:
-    """Build a tee/bar head as a weighted stroked mark.
+    """Build a tee/bar head as a thin filled crossbar at the line tip.
 
     Parameters
     ----------
@@ -551,24 +569,48 @@ def _tee(length: float, width: float, body_width: float) -> ArrowheadResult:
     Returns
     -------
     ArrowheadResult
-        Stroke-only crossbar geometry trimmed at the bar centerline.
+        Filled crossbar geometry trimmed at the bar centerline.
 
     Notes
     -----
-    ``bar_x`` is intentionally tightened toward the tip compared with the older
-    placement so the bar reads as a terminal mark instead of a disconnected
-    mini-edge segment on short links.
+    Round 17 F4: native Graphviz emits ``tee`` as a filled rectangle
+    polygon at the line tip (Graphviz 8.0.3 SVG vertices for
+    ``arrowhead=tee``: ``(22,-37.47), (32,-37.47), (32,-39.47),
+    (22,-39.47)`` -- a 10-wide x 2-tall bar). The previous
+    implementation drew a stroked LINE rendered with a heavy stroke
+    weight, which read as a mini-edge segment "floating" rather than
+    a terminal mark. The width was also pumped up by ``length * 0.65``
+    causing the bar to overshoot horizontally (prior P7 in audit).
+
+    Switch to a thin filled rectangle: full ``width`` across (matching
+    dot's bar width) and a small thickness along the body axis so the
+    bar reads as a terminal stop. Place the bar with its tip-side edge
+    at the line tip (``bar_x = 0``) and back edge at the bar thickness;
+    the ribbon body will trim against the back edge.
     """
-    overlap = _join_overlap(length, body_width)
-    bar_x = max(length - overlap, length * 0.10)
-    # Ensure the crossbar is clearly visible even on thin edges.
-    neck_half_width = max(width * 0.55, body_width * 0.75, length * 0.65, FLOAT_EPSILON)
-    path = _local_path([(bar_x, neck_half_width), (bar_x, -neck_half_width)], closed=False)
+    # Bar thickness measured along the body axis -- thin so the tee
+    # reads as a single mark, not a chunky cap. Round to dot's 2px-of-10
+    # ratio (~20% of length), with a small lower bound to remain
+    # visible on short edges.
+    bar_thickness = max(length * 0.18, body_width * 1.2, 1.0)
+    half_width = max(width * 0.5, body_width * 0.5)
+    # Place the bar so its outer face sits AT the tip (x = 0) and the
+    # inner face sits at +bar_thickness (back toward the body). The
+    # ribbon body is trimmed against the inner face so there is no
+    # "floating bar" gap.
+    rect = _local_path(
+        [
+            (0.0, half_width),
+            (bar_thickness, half_width),
+            (bar_thickness, -half_width),
+            (0.0, -half_width),
+        ],
+        closed=True,
+    )
     return ArrowheadResult(
-        filled_paths=[],
-        stroked_paths=[path],
-        trim_contour=_local_trim_contour(bar_x, max(body_width, FLOAT_EPSILON)),
-        stroke_width_scale=_open_head_stroke_scale(body_width, base_scale=TEE_HEAD_STROKE_SCALE),
+        filled_paths=[rect],
+        stroked_paths=[],
+        trim_contour=_local_trim_contour(bar_thickness, max(body_width, FLOAT_EPSILON)),
     )
 
 
@@ -578,20 +620,33 @@ def _vee(length: float, width: float, body_width: float) -> ArrowheadResult:
     The vee is a filled V-shape: wide at the back, pointed at the tip,
     with a notch cut out of the back (creating the V shape). This matches
     Graphviz's filled vee rather than matplotlib's stroked-only vee.
+
+    Notes
+    -----
+    Round 17 F4: native Graphviz emits ``vee`` (and ``open``, which it
+    aliases to the same shape on Graphviz 8) as a FILLED notched
+    triangle. Reference SVG vertices for ``arrowhead=vee`` (length=10,
+    width=9): tip at ``(27,-36.47)``, wings at ``(31.5,-46.47)`` and
+    ``(22.5,-46.47)``, notch at ``(27,-41.47)``. dagua's vee was
+    registered with ``stroke_only=True`` -- the geometry was filled in
+    code but ``_resolve_fill`` then re-routed it to the stroked pass,
+    producing a hollow chevron that mismatched dot's filled silhouette
+    (audit P6). Round 17 removes the ``stroke_only`` flag so the filled
+    notched triangle renders as authored.
     """
     overlap = _join_overlap(length, body_width)
     join_x = max(length - overlap, length * 0.58)
     outer_half_width = _ornament_half_width(width, body_width)
-    neck_half = max(body_width * 0.5, FLOAT_EPSILON)
-    # Filled V-shape: tip at (0,0), wide arms at back, notch at ~60% back
-    notch_x = join_x * 0.55
+    # Notch depth: dot's notch is at 50% of head depth (matching vertex
+    # midway between tip and back wings). Use that ratio so the V is
+    # neither stubby nor too deep.
+    notch_x = join_x * 0.5
     path = _local_path(
         [
             (0.0, 0.0),  # tip
-            (join_x, outer_half_width),  # top-right arm
-            (notch_x, neck_half * 0.4),  # top notch
-            (notch_x, -neck_half * 0.4),  # bottom notch
-            (join_x, -outer_half_width),  # bottom-right arm
+            (join_x, outer_half_width),  # top-right arm (back wing)
+            (notch_x, 0.0),  # back-axis notch
+            (join_x, -outer_half_width),  # bottom-right arm (back wing)
         ],
         closed=True,
     )
@@ -1005,9 +1060,15 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
     "dot": PrimitiveSpec("dot", _dot),
     "diamond": PrimitiveSpec("diamond", _diamond),
     "box": PrimitiveSpec("box", _box),
-    "tee": PrimitiveSpec("tee", _tee, stroke_only=True),
-    "bar": PrimitiveSpec("bar", _tee, stroke_only=True),
-    "vee": PrimitiveSpec("vee", _vee, stroke_only=True),
+    # Round 17 F4: tee, bar, and vee match native Graphviz semantics --
+    # all three emit FILLED polygons in dot's reference SVG output.
+    # Removing stroke_only routes their authored filled geometry through
+    # the fill pass instead of being re-routed as outlines by
+    # _resolve_fill, which had the prior renderer drawing hollow
+    # chevrons (vee) and stroked lines (tee).
+    "tee": PrimitiveSpec("tee", _tee),
+    "bar": PrimitiveSpec("bar", _tee),
+    "vee": PrimitiveSpec("vee", _vee),
     "crow": PrimitiveSpec("crow", _crow),
     "crows_foot_one": PrimitiveSpec("crows_foot_one", _crows_foot_one, stroke_only=True),
     "crows_foot_many": PrimitiveSpec("crows_foot_many", _crows_foot_many, stroke_only=True),
