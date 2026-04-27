@@ -1591,8 +1591,8 @@ def test_vee_arrow_is_open_polygon() -> None:
     plt.close(fig)
 
 
-def test_vee_arrowhead_builder_returns_filled_chevron() -> None:
-    """The custom vee head should be a filled chevron shape."""
+def test_vee_arrowhead_builder_returns_open_chevron() -> None:
+    """The custom vee head should be an open chevron shape."""
 
     result = build_arrowhead(
         "vee",
@@ -1603,11 +1603,11 @@ def test_vee_arrowhead_builder_returns_filled_chevron() -> None:
         body_width=2.0,
     )
 
-    assert len(result.filled_paths) == 1, "Vee should have one filled chevron path"
-    assert not result.stroked_paths, "Filled vee should have no stroked paths"
-    path = result.filled_paths[0]
+    assert result.filled_paths == [], "Vee should not have filled paths"
+    assert len(result.stroked_paths) == 1, "Vee should have one stroked chevron path"
+    path = result.stroked_paths[0]
     assert path.vertices.shape[0] >= 5, (
-        "Filled vee needs at least 5 vertices (tip + 2 arms + 2 notch)"
+        "Open vee keeps the chevron contour vertices for outline rendering"
     )
 
 
