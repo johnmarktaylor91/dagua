@@ -254,7 +254,15 @@ def _resolve_fill(
     ArrowheadResult
         Paint-adjusted result.
     """
-    if stroke_only or fill_mode == "filled":
+    if stroke_only:
+        return ArrowheadResult(
+            filled_paths=[],
+            stroked_paths=[*result.stroked_paths, *result.filled_paths],
+            trim_contour=result.trim_contour,
+            trim_t=result.trim_t,
+            stroke_width_scale=max(result.stroke_width_scale, HOLLOW_HEAD_STROKE_SCALE),
+        )
+    if fill_mode == "filled":
         return result
     return ArrowheadResult(
         filled_paths=[],
@@ -1018,7 +1026,7 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
     "tee": PrimitiveSpec("tee", _tee, stroke_only=True),
     "bar": PrimitiveSpec("bar", _tee, stroke_only=True),
     "vee": PrimitiveSpec("vee", _vee, stroke_only=True),
-    "crow": PrimitiveSpec("crow", _crow, stroke_only=True),
+    "crow": PrimitiveSpec("crow", _crow),
     "crows_foot_one": PrimitiveSpec("crows_foot_one", _crows_foot_one, stroke_only=True),
     "crows_foot_many": PrimitiveSpec("crows_foot_many", _crows_foot_many, stroke_only=True),
     "crows_foot_one_mandatory": PrimitiveSpec(
@@ -1055,7 +1063,7 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
 }
 
 ARROWHEAD_ALIASES: Dict[str, str] = {
-    "circle": "dot",
+    "circle": "odot",
     "open": "open",
     "odot": "odot",
     "obox": "obox",
@@ -1237,9 +1245,6 @@ def build_arrowhead(
     body_direction = unit_vector(as_point(tangent))
     resolved_body_width = float(width if body_width is None else body_width)
     parsed = parse_arrowhead_spec(spec)
-    if spec == "circle":
-        fill_mode = "filled"
-
     local_results: List[ArrowheadResult] = []
     offset = 0.0
     for index, primitive in enumerate(parsed):
