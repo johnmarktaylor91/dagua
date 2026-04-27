@@ -273,12 +273,20 @@ def test_arrowhead_result_separates_filled_and_stroked_geometry(spec: str) -> No
     assert len(result.filled_paths) >= 1
 
 
-def test_vee_arrowhead_becomes_stroked() -> None:
-    """Graphviz vee arrowheads should render as open stroked geometry."""
+def test_vee_arrowhead_is_filled() -> None:
+    """Graphviz vee arrowheads should render as a FILLED notched triangle.
+
+    Round 17 F4: native dot emits ``vee`` as a filled polygon (Graphviz
+    8.0.3 SVG: ``fill="black"`` on the notched-triangle vertices).
+    Earlier dagua rounds rendered vee as an outline-only chevron, which
+    mismatched dot's silhouette on ``arrow_types`` panels.
+    """
     result = build_arrowhead("vee", tip=(0.0, 0.0), tangent=(-1.0, 0.0), length=8.0, width=5.0)
 
-    assert result.filled_paths == []
-    assert len(result.stroked_paths) >= 1
+    assert len(result.filled_paths) >= 1
+    # The vee primitive is now resolved via the fill pass; no stroked
+    # paths are emitted by the head itself.
+    assert result.stroked_paths == []
 
 
 def test_open_arrowhead_becomes_stroked() -> None:
@@ -356,7 +364,14 @@ def test_arrowhead_neck_matches_body_width_and_overlaps_body() -> None:
 
 
 def test_open_and_hollow_arrowheads_increase_stroke_weight() -> None:
-    """Open and hollow heads should request heavier outline strokes."""
+    """Open and hollow heads should request heavier outline strokes.
+
+    Round 17 F4: vee is now filled (matching native Graphviz), but its
+    primitive still seeds a non-default stroke scale that propagates
+    through composition and applies when a compound spec routes the
+    head's geometry through the stroked pass (e.g. ``ovee``). The
+    ``onormal`` hollow case exercises that path directly.
+    """
     vee = build_arrowhead(
         "vee",
         tip=(0.0, 0.0),
@@ -378,8 +393,14 @@ def test_open_and_hollow_arrowheads_increase_stroke_weight() -> None:
     assert hollow.stroke_width_scale > 1.0
 
 
-def test_vee_arrowhead_stroked_trim_seats_on_full_body_width() -> None:
-    """Open vee heads should still trim against the full ribbon width."""
+def test_vee_arrowhead_filled_trim_seats_on_full_body_width() -> None:
+    """Filled vee heads should still trim against the full ribbon width.
+
+    Round 17 F4: vee is now filled (matching native Graphviz). The trim
+    contour still anchors to the full ribbon body so the edge body
+    seats cleanly into the head's back-wing line without leaving a
+    visible gap.
+    """
     result = build_arrowhead(
         "vee",
         tip=(0.0, 0.0),
@@ -399,8 +420,15 @@ def test_vee_arrowhead_stroked_trim_seats_on_full_body_width() -> None:
     assert abs(anchor_values[0]) == pytest.approx(3.0)
 
 
-def test_tee_arrowhead_uses_bolder_crossbar_than_the_ribbon_body() -> None:
-    """Tee heads should read as a wide bar instead of disappearing into the edge."""
+def test_tee_arrowhead_is_filled_rectangle_at_line_tip() -> None:
+    """Tee heads should be a thin filled rectangle bar at the line tip.
+
+    Round 17 F4: native Graphviz emits ``tee`` as a filled rectangle
+    polygon at the line tip (Graphviz 8.0.3 SVG: 4-vertex polygon,
+    ``fill="black"``, full ``arrow_width`` across, thin along the body
+    axis). Earlier dagua rounds emitted a stroked LINE which read as
+    a disconnected mini-edge segment instead of a terminal mark.
+    """
     result = build_arrowhead(
         "tee",
         tip=(0.0, 0.0),
@@ -410,11 +438,17 @@ def test_tee_arrowhead_uses_bolder_crossbar_than_the_ribbon_body() -> None:
         body_width=6.0,
     )
 
-    bar = result.stroked_paths[0].vertices
-    trim_vertices = result.trim_contour.vertices[:2]
-
-    assert np.allclose(bar[:, 0], trim_vertices[0, 0])
-    assert np.linalg.norm(bar[0] - bar[1]) == pytest.approx(11.0)
+    # Tee is filled, not stroked.
+    assert len(result.filled_paths) == 1
+    assert result.stroked_paths == []
+    rect = result.filled_paths[0].vertices
+    # The rectangle spans the full arrow_width across the perpendicular
+    # axis. Account for the closing vertex that matplotlib appends.
+    perpendicular_extents = sorted({float(round(v, 4)) for v in rect[:, 1]})
+    bar_height = perpendicular_extents[-1] - perpendicular_extents[0]
+    # half_width = max(width * 0.5, body_width * 0.5) = 5.0; bar
+    # spans -5 to 5.
+    assert bar_height == pytest.approx(10.0)
 
 
 def test_note_shape_fold_is_large_enough_to_read_after_downscaling() -> None:
