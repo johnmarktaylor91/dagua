@@ -8,8 +8,18 @@ import pytest
 import torch
 
 from dagua.layout.classic.fr import layout_fr
-from dagua.layout.ops.pipelines.fr import build_fr_pipeline, layout_fr_pipeline
-from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.pipelines.fr import (
+    _choose_fr_default_layout,
+    build_fr_pipeline,
+    layout_fr_default_pipeline,
+    layout_fr_pipeline,
+)
+from dagua.layout.ops.state import (
+    ExecutionPlan,
+    LayoutProblem,
+    RuntimeContext,
+    SolveState,
+)
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -98,6 +108,38 @@ def _assert_exact_match(classic: torch.Tensor, pipeline: torch.Tensor) -> None:
     assert classic.dtype == pipeline.dtype
     assert classic.device == pipeline.device
     assert torch.equal(classic, pipeline)
+
+
+def test_default_selector_keeps_legacy_when_canonical_drops_score() -> None:
+    """The default selector should preserve stronger legacy Tier-1 layouts."""
+    edge_index = _path_edge_index(3)
+    legacy = torch.tensor([[0.0, 0.0], [0.0, 1.0], [0.0, 2.0]])
+    canonical = torch.tensor([[0.0, 0.0], [0.0, 0.1], [0.0, 10.0]])
+
+    selected = _choose_fr_default_layout(
+        legacy_pos=legacy,
+        canonical_pos=canonical,
+        edge_index=edge_index,
+        node_sizes=None,
+    )
+
+    assert selected is legacy
+
+
+def test_default_selector_uses_canonical_when_score_is_preserved() -> None:
+    """The default selector should use NetworkX-style FR when quality is safe."""
+    edge_index = _path_edge_index(3)
+    legacy = torch.tensor([[0.0, 2.0], [0.0, 1.0], [0.0, 0.0]])
+    canonical = torch.tensor([[0.0, 0.0], [0.0, 1.0], [0.0, 2.0]])
+
+    selected = _choose_fr_default_layout(
+        legacy_pos=legacy,
+        canonical_pos=canonical,
+        edge_index=edge_index,
+        node_sizes=None,
+    )
+
+    assert selected is canonical
 
 
 def _run_pipeline_direct(
@@ -246,3 +288,17 @@ class TestFRPipelineFidelity:
 
         with pytest.raises(ValueError, match=r"pos must have shape"):
             layout_fr_pipeline(edge_index=edge_index, num_nodes=6, steps=20, pos=torch.zeros(5, 2))
+
+    def test_layout_fr_default_pipeline_preserves_explicit_step_requests(self) -> None:
+        """Explicit non-default step counts should bypass default candidate selection."""
+        edge_index = _path_edge_index(5)
+
+        direct = layout_fr_pipeline(edge_index=edge_index, num_nodes=5, steps=50, seed=42)
+        default = layout_fr_default_pipeline(
+            edge_index=edge_index,
+            num_nodes=5,
+            steps=50,
+            seed=42,
+        )
+
+        _assert_exact_match(direct, default)
