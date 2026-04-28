@@ -85,6 +85,9 @@ DEFAULT_TOLERANCE: Dict[str, Any] = {
     "cluster_label_font_size_pt": 1.0,
 }
 
+#: Default Markdown report path consumed by the graphviz parity audit loop.
+DEFAULT_MARKDOWN_PATH = Path("eval_output/parity_metrics_summary.md")
+
 #: SVG namespace constants. Graphviz emits SVG 1.1 with a default namespace.
 SVG_NS = "http://www.w3.org/2000/svg"
 NS_MAP = {"svg": SVG_NS}
@@ -1831,7 +1834,228 @@ def run(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2))
+    write_markdown_report(payload, DEFAULT_MARKDOWN_PATH)
     return payload
+
+
+def _iter_feature_deltas(payload: Mapping[str, Any]) -> Iterable[Dict[str, Any]]:
+    """Yield flattened feature deltas from a parity report payload.
+
+    Parameters
+    ----------
+    payload : Mapping[str, Any]
+        Full JSON report produced by :func:`run`.
+
+    Yields
+    ------
+    dict[str, Any]
+        Flattened feature record with panel, element, feature, delta, and
+        tolerance status.
+    """
+
+    for panel in payload.get("panels", []):
+        slug = str(panel.get("slug", ""))
+        features = panel.get("features", {})
+        for group_name in ("nodes", "edges", "clusters"):
+            for entry in features.get(group_name, []):
+                element_id = str(
+                    entry.get("id")
+                    or entry.get("title")
+                    or entry.get("label")
+                    or entry.get("name")
+                    or "unknown"
+                )
+                for feature_name, value in entry.items():
+                    if not isinstance(value, dict) or "in_tolerance" not in value:
+                        continue
+                    yield {
+                        "panel": slug,
+                        "element_type": group_name[:-1],
+                        "element": element_id,
+                        "feature": feature_name,
+                        "delta": value.get("delta"),
+                        "in_tolerance": bool(value.get("in_tolerance")),
+                    }
+        graph_features = features.get("graph", {})
+        for feature_name, value in graph_features.items():
+            if not isinstance(value, dict) or "in_tolerance" not in value:
+                continue
+            yield {
+                "panel": slug,
+                "element_type": "graph",
+                "element": "graph",
+                "feature": feature_name,
+                "delta": value.get("delta"),
+                "in_tolerance": bool(value.get("in_tolerance")),
+            }
+
+
+def _numeric_abs_delta(record: Mapping[str, Any]) -> Optional[float]:
+    """Return an absolute numeric delta when a record has one.
+
+    Parameters
+    ----------
+    record : Mapping[str, Any]
+        Flattened feature record.
+
+    Returns
+    -------
+    float | None
+        Absolute delta, or ``None`` for textual/string exact-match features.
+    """
+
+    raw = record.get("delta")
+    if not isinstance(raw, (int, float)):
+        return None
+    return abs(float(raw))
+
+
+def _worst_delta_features(payload: Mapping[str, Any], limit: int = 10) -> List[Dict[str, Any]]:
+    """Return the largest numeric feature deltas in a payload.
+
+    Parameters
+    ----------
+    payload : Mapping[str, Any]
+        Full JSON report produced by :func:`run`.
+    limit : int, default=10
+        Maximum number of records to return.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Worst numeric deltas sorted descending.
+    """
+
+    records = [record for record in _iter_feature_deltas(payload) if _numeric_abs_delta(record)]
+    return sorted(records, key=lambda item: _numeric_abs_delta(item) or 0.0, reverse=True)[:limit]
+
+
+def _tail_signal_features(summary: Mapping[str, Any]) -> List[Tuple[str, Mapping[str, Any]]]:
+    """Identify features with small median deltas but large max deltas.
+
+    Parameters
+    ----------
+    summary : Mapping[str, Any]
+        Summary block produced by :func:`build_summary`.
+
+    Returns
+    -------
+    list[tuple[str, Mapping[str, Any]]]
+        Feature stats that look like tail failures rather than broad drift.
+    """
+
+    signals: List[Tuple[str, Mapping[str, Any]]] = []
+    for feature, stat in summary.get("by_feature_type", {}).items():
+        median = stat.get("median_delta")
+        max_delta = stat.get("max_delta")
+        if not isinstance(median, (int, float)) or not isinstance(max_delta, (int, float)):
+            continue
+        if median <= 1.0 and max_delta >= max(5.0, median * 5.0):
+            signals.append((str(feature), stat))
+    return sorted(signals, key=lambda item: float(item[1].get("max_delta", 0.0)), reverse=True)
+
+
+def write_markdown_report(payload: Mapping[str, Any], output_path: Path) -> None:
+    """Write a human-readable Markdown summary next to the JSON metrics.
+
+    Parameters
+    ----------
+    payload : Mapping[str, Any]
+        Full JSON report produced by :func:`run`.
+    output_path : pathlib.Path
+        Markdown destination.
+
+    Returns
+    -------
+    None
+        The report is written to ``output_path``.
+    """
+
+    summary = payload["summary"]
+    feature_rows = sorted(
+        summary["by_feature_type"].items(),
+        key=lambda item: item[1]["compared"] - item[1]["in_tolerance"],
+        reverse=True,
+    )
+    locked = [
+        (name, stat)
+        for name, stat in feature_rows
+        if stat["compared"] > 0 and stat["in_tolerance"] == stat["compared"]
+    ]
+    lines = [
+        "# Graphviz Strict Declarative Parity Summary",
+        "",
+        f"- Panels: {summary['total_panels']}",
+        f"- Panels in tolerance: {summary['panels_in_tolerance']}",
+        f"- Features compared: {summary['total_features_compared']}",
+        f"- Global in-tolerance: {summary['in_tolerance_pct']:.2f}%",
+        "",
+        "## Per-Feature Breakdown",
+        "",
+        "| Feature | Compared | In Tol | Miss | Percent | Median Delta | Max Delta |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for name, stat in feature_rows:
+        miss = stat["compared"] - stat["in_tolerance"]
+        median = stat["median_delta"]
+        max_delta = stat["max_delta"]
+        median_str = f"{median:.4f}" if isinstance(median, float) else "-"
+        max_str = f"{max_delta:.4f}" if isinstance(max_delta, float) else "-"
+        lines.append(
+            f"| `{name}` | {stat['compared']} | {stat['in_tolerance']} | {miss} | "
+            f"{stat['pct']:.2f}% | {median_str} | {max_str} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Top 10 Worst-Delta Features",
+            "",
+            "| Rank | Panel | Element | Feature | Delta | In Tolerance |",
+            "| ---: | --- | --- | --- | ---: | --- |",
+        ]
+    )
+    for rank, record in enumerate(_worst_delta_features(payload), start=1):
+        delta = _numeric_abs_delta(record)
+        delta_str = f"{delta:.4f}" if delta is not None else "-"
+        element = f"{record['element_type']}:{record['element']}"
+        lines.append(
+            f"| {rank} | `{record['panel']}` | `{element}` | `{record['feature']}` | "
+            f"{delta_str} | {record['in_tolerance']} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Locked Features",
+            "",
+        ]
+    )
+    if locked:
+        for name, stat in locked:
+            lines.append(f"- `{name}`: {stat['in_tolerance']}/{stat['compared']} in tolerance")
+    else:
+        lines.append("- None")
+
+    lines.extend(
+        [
+            "",
+            "## Suggested Next Investigations",
+            "",
+        ]
+    )
+    tail_signals = _tail_signal_features(summary)
+    if tail_signals:
+        for name, stat in tail_signals:
+            lines.append(
+                f"- `{name}`: median delta {stat['median_delta']}, max delta "
+                f"{stat['max_delta']} suggests a panel-specific tail."
+            )
+    else:
+        lines.append("- No small-median / large-max tail signals detected.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _print_summary_table(summary: Mapping[str, Any]) -> None:
