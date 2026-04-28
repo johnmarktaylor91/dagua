@@ -680,7 +680,13 @@ def _is_graphviz_strict_render(graph: Any) -> bool:
     return _render_theme_name(graph) == "graphviz_strict"
 
 
-_STRICT_EDGE_LABEL_NODE_RATIO = 11.0 / 14.0
+# Metric-driven (R19): theme value now matches dot's SVG-declared edge label
+# font_size (14pt) directly. Earlier rounds (13/15/17) applied a sub-1.0 ratio
+# to compensate for VLM-perceived size mismatches that turned out to be
+# AA / DPI artifacts in the matplotlib pipeline, not actual size discrepancies
+# in dot's output. The metric (parity_metrics.py) confirmed dot's edge-label
+# font-size is 14pt — same as node labels — so the ratio collapses to 1.0.
+_STRICT_EDGE_LABEL_NODE_RATIO = 1.0
 
 
 def _strict_edge_label_font_size(graph: Any, fallback_points: float) -> float:
