@@ -1245,7 +1245,12 @@ def render(
     graph.compute_node_sizes()
     sizes = graph.node_sizes.detach().cpu().numpy()
 
+    # Metric-driven (R19): on graphviz_strict, dot's SVG omits outer margin
+    # when the graph contains clusters (the cluster rectangle IS the boundary).
+    # On non-cluster panels dot still pads by ~18pt. Match this conditional.
     margin = gs.margin
+    if _is_graphviz_strict_render(graph) and getattr(graph, "clusters", None):
+        margin = 0.0
     x_min = (pos[:, 0] - sizes[:, 0] / 2).min() - margin
     x_max = (pos[:, 0] + sizes[:, 0] / 2).max() + margin
     y_min = (pos[:, 1] - sizes[:, 1] / 2).min() - margin
