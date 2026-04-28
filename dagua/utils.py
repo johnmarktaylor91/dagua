@@ -471,7 +471,10 @@ def _tex_gyre_termes_font_path(
     from pathlib import Path
 
     normalized_family = str(font_family).strip().lower().replace(" ", "")
-    if normalized_family not in {"texgyretermes", "times-roman"}:
+    # Accept dot's SVG-declared "Times,serif" and "Times" as aliases for the
+    # actual installed face (TeX Gyre Termes per fc-match on this system).
+    # Theme values match dot's declaration; physical font is the same.
+    if normalized_family not in {"texgyretermes", "times-roman", "times,serif", "times"}:
         return None
     normalized_weight = "bold" if str(font_weight).strip().lower() == "bold" else "regular"
     normalized_style = "italic" if _normalize_font_style(font_style) == "italic" else "normal"
