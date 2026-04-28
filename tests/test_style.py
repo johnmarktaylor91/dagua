@@ -269,61 +269,47 @@ def test_graphviz_strict_theme_loads() -> None:
     assert node_style.shape == "ellipse"
     assert node_style.fill == "#FFFFFF"
     assert node_style.stroke == "#000000"
-    assert node_style.font_size == 16.0
-    # Round 13 F6: stroke 0.75 -> 0.9 to match dot's heavier hairline weight.
-    assert node_style.stroke_width == 0.9
-    assert node_style.font_family == "TeX Gyre Termes"
-    # Round 11 F1 / Round 13 F1 / Round 15 F2: padding stays compact at (6,3)
-    # but min sizes are pulled back from round-11's 41/27 over-correction
-    # toward 50/38 so nodes track dot's silhouette without re-introducing
-    # puffiness. Round 15 lifted min_height 33 -> 38 to close the small
-    # ellipse height undershoot the round-14 audit measured (~14-18% short).
-    assert node_style.padding == (6.0, 3.0)
-    assert node_style.min_width == 50.0
-    # Round 17 F1: was 38.0; audit measured ellipses 5-20% too tall after
-    # round-15's overshoot. Pull min_height back toward dot's silhouette.
-    assert node_style.min_height == 35.0
+    # Metric-driven (R19): all values match dot's SVG declarations literally.
+    # See scripts/parity_metrics.py for the verification harness.
+    assert node_style.font_size == 14.0
+    assert node_style.stroke_width == 1.0
+    assert node_style.font_family == "Times,serif"
+    assert node_style.padding == (8.0, 4.0)
+    assert node_style.min_width == 54.0
+    assert node_style.min_height == 36.0
     assert node_style.overflow_policy == "expand_node"
 
     edge_style = theme.get_edge_style("default")
     assert edge_style.width == 1.0
     assert edge_style.opacity == 1.0
     assert edge_style.arrow_scale is None  # ignored; mpl uses unified point conversion
-    # Round 13 F5 / Round 15 F4 / Round 17 F3: arrow length/width
-    # progression 12/10 -> 14/12 -> 14/14 -> 18/12. Round 15's (14, 14)
-    # inverted dot's narrow-tall aspect (h/w 1.26) into wide-stubby
-    # (h/w 0.88) by bumping width while keeping length. Round 17 swaps
-    # the axes: length 14 -> 18 lifts head depth, width 14 -> 12 narrows
-    # the base. Target rendered h/w ~ 1.5 (vs dot's 1.26); slight over
-    # to recover filled-area lost in round 15 (audit said dagua had
-    # 19% less ink than dot at the (14,14) band).
-    assert edge_style.arrow_length == 18.0
-    assert edge_style.arrow_width == 12.0
+    assert edge_style.arrow_length == 10.0
+    assert edge_style.arrow_width == 7.0
     assert edge_style.arrow_node_fraction == pytest.approx(0.0)
     assert edge_style.arrow_width_ratio == pytest.approx(0.7)
-    assert edge_style.label_font_size == pytest.approx(16.0)
-    assert edge_style.label_font_family == "TeX Gyre Termes"
+    assert edge_style.label_font_size == pytest.approx(14.0)
+    assert edge_style.label_font_family == "Times,serif"
     assert edge_style.curvature == pytest.approx(0.0)
     back_edge_style = theme.get_edge_style("back")
     assert back_edge_style.width == 1.0
-    assert back_edge_style.arrow_length == 18.0
-    assert back_edge_style.arrow_width == 12.0
-    assert back_edge_style.label_font_size == pytest.approx(16.0)
+    assert back_edge_style.arrow_length == 10.0
+    assert back_edge_style.arrow_width == 7.0
+    assert back_edge_style.label_font_size == pytest.approx(14.0)
     assert back_edge_style.curvature == pytest.approx(0.2)
 
-    assert theme.cluster_style.fill == "#F2EFE9"
-    assert theme.cluster_style.stroke == "#DDDDDD"
-    assert theme.cluster_style.stroke_width == pytest.approx(0.5)
-    assert theme.cluster_style.font_size == 10.0
+    assert theme.cluster_style.fill == "none"
+    assert theme.cluster_style.stroke == "#000000"
+    assert theme.cluster_style.stroke_width == pytest.approx(1.0)
+    assert theme.cluster_style.font_size == 14.0
     assert theme.cluster_style.font_weight == "regular"
-    assert theme.cluster_style.font_family == "TeX Gyre Termes"
-    assert theme.cluster_style.opacity == pytest.approx(0.15)
-    assert theme.cluster_style.fill_opacity == pytest.approx(0.10)
-    assert theme.cluster_style.border_opacity == pytest.approx(0.7)
+    assert theme.cluster_style.font_family == "Times,serif"
+    assert theme.cluster_style.opacity == pytest.approx(1.0)
+    assert theme.cluster_style.fill_opacity == pytest.approx(0.0)
+    assert theme.cluster_style.border_opacity == pytest.approx(1.0)
     assert theme.cluster_style.font_size_scaling == "fixed"
     assert theme.cluster_style.depth_fill_step == pytest.approx(0.0)
     assert theme.cluster_style.depth_stroke_step == pytest.approx(0.0)
-    assert theme.graph_style.edge_label_font_size == pytest.approx(16.0)
+    assert theme.graph_style.edge_label_font_size == pytest.approx(14.0)
     assert theme.graph_style.edge_label_background_opacity == 1.0
 
 
