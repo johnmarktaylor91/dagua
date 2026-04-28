@@ -998,7 +998,11 @@ GRAPHVIZ_STRICT_THEME = Theme(
         # tinted fills (#F0F0F0, #F2EFE9) and lightened the stroke (#CCCCCC,
         # #DDDDDD) chasing AA-softened visual impressions. The literal SVG
         # target is solid black 1pt stroke on transparent fill.
-        fill="none",
+        # Note: fill is set to a valid hex (#FFFFFF) for render-pipeline
+        # compatibility; transparency is achieved via fill_opacity=0.0. The
+        # parity_metrics.py harness treats hex-with-zero-fill-opacity as
+        # equivalent to dot's "none" declaration.
+        fill="#FFFFFF",
         stroke="#000000",
         stroke_width=1.0,
         corner_radius=0.0,

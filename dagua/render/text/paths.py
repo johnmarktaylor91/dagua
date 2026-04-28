@@ -17,7 +17,13 @@ FONT_SCALE = 100.0
 LINE_SPACING = 1.2
 _CACHE_PRECISION = 3
 _TEXT_TO_PATH = TextToPath()
-_TEX_GYRE_TERMES_FAMILY_ALIASES = {"tex gyre termes", "texgyretermes", "times-roman"}
+_TEX_GYRE_TERMES_FAMILY_ALIASES = {
+    "tex gyre termes",
+    "texgyretermes",
+    "times-roman",
+    "times,serif",
+    "times",
+}
 _TEX_GYRE_TERMES_TYPE1_DIR = "/usr/share/texmf/fonts/type1/public/tex-gyre"
 _TEX_GYRE_TERMES_FACE_FILES = {
     ("regular", "normal"): "qtmr.pfb",
@@ -117,7 +123,8 @@ def _resolve_font_family(font_family: str) -> str:
     """
     requested_family = font_family or RESOLVED_FONT
     normalized_family = str(requested_family).strip().lower().replace(" ", "")
-    if normalized_family in {"texgyretermes", "times-roman"}:
+    # Map dot's SVG-declared aliases to the physical TeXGyreTermes face.
+    if normalized_family in {"texgyretermes", "times-roman", "times,serif", "times"}:
         return "TeXGyreTermes"
     return requested_family
 
