@@ -297,7 +297,7 @@ def test_graphviz_strict_theme_loads() -> None:
     assert back_edge_style.label_font_size == pytest.approx(14.0)
     assert back_edge_style.curvature == pytest.approx(0.2)
 
-    assert theme.cluster_style.fill == "none"
+    assert theme.cluster_style.fill == "#FFFFFF"
     assert theme.cluster_style.stroke == "#000000"
     assert theme.cluster_style.stroke_width == pytest.approx(1.0)
     assert theme.cluster_style.font_size == 14.0

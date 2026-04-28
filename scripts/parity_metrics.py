@@ -920,10 +920,16 @@ def _candidate_clusters(graph: DaguaGraph) -> List[CandidateCluster]:
     out: List[CandidateCluster] = []
     for name in graph.clusters:
         style = graph.get_style_for_cluster(name)
+        # Treat 0-opacity fills as equivalent to dot's "none" declaration.
+        # Render pipeline requires a valid hex for color math, so we use a
+        # hex-with-zero-fill-opacity sentinel instead of the literal "none"
+        # string in the theme.
+        fill_opacity = float(getattr(style, "fill_opacity", 1.0))
+        effective_fill = "none" if fill_opacity == 0.0 else style.fill
         out.append(
             CandidateCluster(
                 title=name,
-                fill=style.fill,
+                fill=effective_fill,
                 stroke=style.stroke,
                 stroke_width_pt=float(style.stroke_width),
                 label_font_size_pt=float(style.font_size),
