@@ -442,15 +442,26 @@ def _edge_record(edge_group: ET.Element) -> ReferenceEdge:
         vertices = _parse_polygon_points(polygon.attrib.get("points", ""))
         record.arrow_polygon_vertices = vertices
         if vertices:
-            min_x, min_y, max_x, max_y = _polygon_bbox(vertices)
-            width = max_x - min_x
-            height = max_y - min_y
-            # The polygon may be drawn pointing along either axis; treat the
-            # longer dimension as "length" (axial) and the shorter as "width"
-            # (lateral) so comparisons with EdgeStyle.arrow_length/arrow_width
-            # stay direction-agnostic.
-            record.arrow_length_pt = max(width, height)
-            record.arrow_width_pt = min(width, height)
+            # Compute principal-axis length/width to be rotation-invariant.
+            # Bbox-based measurement was rotation-dependent (R19 finding):
+            # a 10pt x 7pt arrow at 45 deg has bbox ~12pt x 12pt, blowing up
+            # the measured width far above the actual 7pt geometry. Project
+            # onto the polygon's principal axis (tip-to-centroid direction).
+            import math
+
+            cx = sum(v[0] for v in vertices) / len(vertices)
+            cy = sum(v[1] for v in vertices) / len(vertices)
+            # Tip = vertex farthest from centroid
+            tip = max(vertices, key=lambda v: (v[0] - cx) ** 2 + (v[1] - cy) ** 2)
+            ax_dx, ax_dy = tip[0] - cx, tip[1] - cy
+            ax_len = math.hypot(ax_dx, ax_dy) or 1.0
+            ux, uy = ax_dx / ax_len, ax_dy / ax_len
+            # Perpendicular unit vector
+            px, py = -uy, ux
+            axial_proj = [(v[0] - cx) * ux + (v[1] - cy) * uy for v in vertices]
+            lateral_proj = [(v[0] - cx) * px + (v[1] - cy) * py for v in vertices]
+            record.arrow_length_pt = max(axial_proj) - min(axial_proj)
+            record.arrow_width_pt = max(lateral_proj) - min(lateral_proj)
         fill = polygon.attrib.get("fill", "").strip().lower()
         record.arrow_filled = bool(fill) and fill != "none"
     else:
@@ -954,11 +965,15 @@ def extract_candidate_features(graph: DaguaGraph) -> CandidateGraph:
 
     themed = _apply_strict_theme(graph)
     theme = get_theme("graphviz_strict")
+    # Match the render pipeline's conditional margin (R19): graphviz_strict
+    # drops outer margin to 0 when clusters are present so the cluster
+    # rectangle defines the boundary, matching dot's SVG output.
+    effective_margin = float(theme.graph_style.margin)
+    if getattr(themed, "clusters", None):
+        effective_margin = 0.0
     return CandidateGraph(
         bg_color=theme.graph_style.background_color,
-        # Strict theme exposes a graph-level margin in points; dagua's render
-        # pipeline applies it symmetrically, so report it directly here.
-        margin=float(theme.graph_style.margin),
+        margin=effective_margin,
         nodes=_candidate_nodes(themed),
         edges=_candidate_edges(themed),
         clusters=_candidate_clusters(themed),
