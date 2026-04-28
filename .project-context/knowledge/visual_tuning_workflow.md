@@ -122,6 +122,53 @@ When all metrics in tolerance OR no actionable improvement direction, STOP. Don'
    - Acceptable residuals documented (e.g. font hinting differences)
 ```
 
+## Operational procedure
+
+Use this loop for the next graphviz_strict cosmetic parity phase. The goal is
+to combine declarative attribute parity, pixel-level parity, and VLM audit
+judgment without letting any single signal dominate.
+
+1. Make a small, scoped theme/render change. Do not mix typography, arrows,
+   clusters, and node geometry in one round unless the metric proves they are
+   coupled.
+2. Run `pytest tests/test_parity_metrics.py`. This is the regression gate for
+   already-locked declarative targets and must pass before broader inspection.
+3. Run `python scripts/parity_metrics.py`. Confirm the global declarative
+   in-tolerance percentage has not dropped, then read
+   `eval_output/parity_metrics_summary.md` for worst deltas, locked features,
+   and tail-signal features.
+4. Run `python scripts/parity_pixel_diff.py`. This renders native
+   `dot -Tpng -Gdpi=200`, renders Dagua strict at matching pixel dimensions,
+   computes L1 RGB error and SSIM, writes heatmaps, and emits
+   `eval_output/parity_pixel_diff/summary.md`.
+5. Identify the worst panels by L1 and SSIM. Render them as separate hi-res
+   audit inputs with
+   `python scripts/parity_pixel_diff.py --hires <slug,slug,...> --hires-dpi 400`.
+   The script reduces DPI when needed so each image stays within the 2000px
+   longest-side audit cap.
+6. Dispatch an Opus audit subagent using
+   `.project-context/knowledge/visual_audit_prompt_template.md`. Pass it the
+   declarative Markdown and JSON, the pixel-diff Markdown and JSON, the
+   side-by-side heatmap PNGs for the worst panels, and the hi-res dot/Dagua
+   image paths.
+7. Require the audit to classify every finding as `real_cosmetic_gap`,
+   `metric_or_measurement_artifact`, or `uncertain_needs_targeted_probe`; and
+   classify actionability as `fixable_theme_or_render`,
+   `rendering_stack_residual`, `needs_layout_scope`, or `not_actionable`.
+8. Apply fixes only for findings classified as `real_cosmetic_gap` plus
+   `fixable_theme_or_render`. Keep metric artifacts and rendering-stack
+   residuals documented, but do not chase them with theme values.
+9. Commit the round and repeat from step 2.
+10. Stop when the audit produces no findings classified as
+    `real_cosmetic_gap` plus `fixable_theme_or_render`. At that point, only
+    rendering-stack residuals, layout-scope issues, or metric artifacts should
+    remain.
+
+The audit is a precision tool, not the primary loss function. Declarative
+metrics define attribute targets, pixel diffs identify rendered-output panels
+worth inspecting, and Opus decides whether a visible difference is a real
+cosmetic gap or an artifact/residual.
+
 ## Sharpened plan to finish this sprint
 
 If/when resuming graphviz parity work after this postmortem:
