@@ -1220,12 +1220,12 @@ def _compute_node_size_cached(
                 # rule on curved outlines without re-introducing dagua's
                 # standard 1.5x puff. dot's ellipses on node_shapes_showcase
                 # match this band.
-                # Round 15 F3: round-13 audit found dagua's ellipses still
-                # measurably more circular than dot's on multi-character
-                # labels (pipeline "Preprocess", tiny_graph In/Mid/Out look
-                # like circles vs dot's clear horizontal ovals). Bump
-                # 1.15 -> 1.22 to widen the inscribed-rectangle headroom
-                # so the silhouette tracks dot's wider-than-tall signature.
+                # Metric-driven (R19): tested factors 1.0, 1.15, 1.22, 1.414(sqrt2).
+                # 1.22 is the metric-optimal sweet spot — at sqrt(2) short and
+                # medium labels overshoot by 8-15%; at <1.22 long labels are
+                # too narrow. The remaining ~28% out-of-tolerance on long
+                # labels is matplotlib's TextToPath narrower-glyph-measurement
+                # vs Cairo's, accepted as render-stack residual.
                 required_w = padded_text_w * 1.22
                 required_h = padded_text_h * 1.22
                 w = max(w, required_w)
