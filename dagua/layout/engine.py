@@ -66,6 +66,7 @@ from dagua.layout.constraints import (
     project_hard_pins,
     repulsion_loss,
     spacing_consistency_loss,
+    warn_legacy_cluster_loss_config,
 )
 from dagua.layout.graph_classify import GraphFamily, GraphStructure, classify_graph
 from dagua.layout.init_placement import init_positions
@@ -110,6 +111,124 @@ _PROGRESS_FILE_NODE_THRESHOLD = 1_000_000
 _DEFAULT_PROGRESS_FILENAME = "progress.json"
 OptimizerType = Literal["adam", "sgd_nesterov", "sgd"]
 ExecutionMode = Literal["standard", "subset_gpu"]
+
+
+def _build_cluster_inner_pipeline(algorithm: str, config: LayoutConfig) -> Optional[Any]:
+    """Build an op pipeline suitable for recursive cluster placement.
+
+    Parameters
+    ----------
+    algorithm : str
+        Configured algorithm name.
+    config : LayoutConfig
+        Layout configuration used to forward common algorithm parameters.
+
+    Returns
+    -------
+    Any or None
+        Pipeline object for supported algorithms, otherwise ``None``.
+    """
+    steps = config.steps if config.steps > 0 else 50
+    normalized = algorithm.lower()
+    if normalized == "fr":
+        from dagua.layout.ops.pipelines.fr import build_fr_pipeline
+
+        return build_fr_pipeline(steps=steps)
+    if normalized == "kk":
+        from dagua.layout.ops.pipelines.kk import build_kk_pipeline
+
+        return build_kk_pipeline(steps=steps)
+    if normalized == "fa2":
+        from dagua.layout.ops.pipelines.fa2 import FA2Config, build_fa2_pipeline
+
+        return build_fa2_pipeline(config=FA2Config(steps=steps))
+    if normalized == "sfdp":
+        from dagua.layout.ops.pipelines.sfdp import build_sfdp_pipeline
+
+        return build_sfdp_pipeline(steps=steps)
+    return None
+
+
+def _effective_cluster_side_padding(graph: Any, config: LayoutConfig) -> float:
+    """Resolve placement padding against currently rendered cluster styles.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing cluster style metadata.
+    config : LayoutConfig
+        Layout configuration with the public cluster padding knob.
+
+    Returns
+    -------
+    float
+        Padding value used for cluster placeholder footprints.
+    """
+    padding = float(config.cluster_side_padding_pt)
+    default_style = getattr(graph, "default_cluster_style", None)
+    if default_style is not None:
+        padding = max(padding, float(getattr(default_style, "padding", padding)))
+    theme = getattr(graph, "_theme", None)
+    theme_style = getattr(theme, "cluster_style", None)
+    if theme_style is not None:
+        padding = max(padding, float(getattr(theme_style, "padding", padding)))
+    for style in getattr(graph, "cluster_styles", {}).values():
+        padding = max(padding, float(getattr(style, "padding", padding)))
+    return padding
+
+
+def _layout_cluster_aware_pipeline(graph: Any, config: LayoutConfig) -> Optional[torch.Tensor]:
+    """Run the recursive cluster-aware driver for supported algorithms.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object exposing edge, node, and cluster metadata.
+    config : LayoutConfig
+        User layout configuration.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Final positions when the selected algorithm supports recursive cluster
+        placement, otherwise ``None`` so the caller can fall back.
+
+    Raises
+    ------
+    RuntimeError
+        If the recursive driver fails to produce positions.
+    """
+    if config.algorithm is None:
+        return None
+    inner_pipeline = _build_cluster_inner_pipeline(config.algorithm, config)
+    if inner_pipeline is None:
+        return None
+
+    from dagua.layout.ops.cluster_driver import ClusterAwareDriver
+    from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.node_sizes,
+        direction=config.direction,
+        clusters=graph.clusters,
+        cluster_parents=graph.cluster_parents,
+        edge_weights=getattr(graph, "edge_weights", None),
+        seed=config.seed or 42,
+    )
+    driver = ClusterAwareDriver(
+        inner_pipeline=inner_pipeline.ops,
+        side_padding_pt=_effective_cluster_side_padding(graph, config),
+        label_band_pt=config.cluster_label_band_pt,
+        external_clearance_pt=config.cluster_external_clearance_pt,
+        cluster_compactness_weight=config.w_cluster,
+    )
+    ctx = RuntimeContext(plan=ExecutionPlan(device=str(graph.node_sizes.device)))
+    final_state = driver.apply(problem, SolveState(), ctx)
+    if final_state.pos is None:
+        raise RuntimeError("Cluster-aware layout did not produce positions.")
+    return final_state.pos
 
 
 @dataclass
@@ -951,11 +1070,26 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
 
     if config.algorithm is not None:
         import inspect
+        import warnings
 
         from dagua.layout.ops.pipelines import get_pipeline_function
 
         pipeline_fn = get_pipeline_function(config.algorithm)
         graph.compute_node_sizes()
+        if getattr(config, "cluster_aware", True) and hasattr(graph, "clusters") and graph.clusters:
+            warn_legacy_cluster_loss_config(
+                cluster_aware=config.cluster_aware,
+                w_cluster_containment=config.w_cluster_contain,
+            )
+            cluster_pos = _layout_cluster_aware_pipeline(graph, config)
+            if cluster_pos is not None:
+                return cluster_pos
+            warnings.warn(
+                f"dagua.layout: cluster_aware=True is not yet supported for "
+                f"algorithm={config.algorithm!r}; falling back to legacy flat placement.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         kwargs: dict[str, object] = {
             "edge_index": graph.edge_index,
             "num_nodes": graph.num_nodes,
