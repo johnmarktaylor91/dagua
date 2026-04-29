@@ -495,6 +495,10 @@ class ClusterStyle:
     opacity: float = 0.32
     fill_opacity: Optional[float] = None
     border_opacity: Optional[float] = None
+    label_background: str = ""  # empty = no mask; "@background" = graph background
+    label_background_opacity: float = 0.85
+    label_background_padding: Tuple[float, float] = (3.0, 2.0)
+    label_background_corner_radius: float = 2.0
     # New fields (Part 2)
     font_family: str = ""  # empty = use FONT_FAMILY default, render-only
     label_offset: Tuple[float, float] = (
@@ -1010,7 +1014,10 @@ GRAPHVIZ_STRICT_THEME = Theme(
         stroke_width=1.0,
         corner_radius=0.0,
         padding=16.0,
-        label_position="top-left",
+        label_position="top-center",
+        label_background="@background",
+        label_background_opacity=1.0,
+        label_background_padding=(4.0, 2.0),
         # Metric-driven (R19): dot's SVG declares cluster label font-size=14pt
         # (same as node labels). Prior rounds dropped to 10pt for "subordination"
         # but the metric target is 14pt.
@@ -1110,7 +1117,10 @@ GRAPHVIZ_THEME = Theme(
         stroke_width=1.0,
         corner_radius=3.0,  # DEPARTURE: very subtle rounding
         padding=12.0,
-        label_position="top-left",
+        label_position="top-center",
+        label_background="@background",
+        label_background_opacity=1.0,
+        label_background_padding=(4.0, 2.0),
         font_size=12.0,  # DEPARTURE: matches node font size
         font_weight="bold",
         font_color="#333333",  # DEPARTURE: dark gray instead of black
