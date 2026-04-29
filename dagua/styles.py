@@ -1030,10 +1030,9 @@ GRAPHVIZ_STRICT_THEME = Theme(
         margin=4.0,
         title_font_size=14.0,
         title_font_color="#000000",
-        # Round B1: dot's arrow_types edge labels render visually smaller
-        # than node labels; keep strict edge labels subordinate while node and
-        # cluster font metrics continue to match dot's 14pt declarations.
-        edge_label_font_size=11.0,
+        # Graphviz defaults edge labels to the same 14pt Times face as node
+        # labels unless an edge-level fontsize is explicitly supplied.
+        edge_label_font_size=14.0,
         edge_label_background="#FFFFFF",
         edge_label_background_opacity=1.0,
     ),
