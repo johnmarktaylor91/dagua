@@ -234,6 +234,7 @@ _AUTO_CONTRAST_CLUSTER_FILL_BLEND = 0.16
 _AUTO_CONTRAST_CLUSTER_STROKE_BLEND = 0.5
 _AUTO_CONTRAST_LABEL_BACKGROUND_BLEND = 0.18
 _AUTO_CONTRAST_TEXT_BLEND = 0.9
+_CLUSTER_RENDER_BBOX_EXTRA_CAP_POINTS = 2.0
 
 
 def _font_size_user_scale(font_size_points: float, baseline_points: float) -> float:
@@ -1458,9 +1459,10 @@ def render(
     ax.set_aspect("auto" if _is_graphviz_strict_render(graph) else "equal")
     ax.axis("off")
     _expand_axes_for_clusters(ax, graph, pos, sizes, margin)
+    cluster_aware = bool(getattr(config, "cluster_aware", True))
 
     # --- Layer 0: Cluster backgrounds ---
-    _draw_clusters(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
+    _draw_clusters(ax, graph, pos, sizes, cluster_aware=cluster_aware, svg_hover_map=svg_hover_map)
 
     # --- Layer 1: Edges ---
     if curves is None:
@@ -1469,8 +1471,14 @@ def render(
     curves = _graphviz_strict_reclip_edge_terminals(graph, curves, pos)
     cluster_membership: Dict[int, List[str]] = {}
     cluster_bboxes: Dict[str, Tuple[float, float, float, float]] = {}
-    if bool(getattr(config, "cluster_aware", True)):
-        cluster_membership, cluster_bboxes = _render_cluster_edge_clip_data(ax, graph, pos, sizes)
+    if cluster_aware:
+        cluster_membership, cluster_bboxes = _render_cluster_edge_clip_data(
+            ax,
+            graph,
+            pos,
+            sizes,
+            cluster_aware=cluster_aware,
+        )
     edge_collection = _draw_edges(
         ax,
         graph,
@@ -6727,9 +6735,10 @@ def _build_custom_edge_collection(
                 cluster_membership,
                 cluster_bboxes,
             )
+        render_curve = body_curve if body_curve is not None else _curve_to_render_bezier(curve)
         edges.append(
             DaguaEdge(
-                curve=_curve_to_render_bezier(curve),
+                curve=render_curve,
                 body_curve=body_curve,
                 body_clip_terminal=body_clip_terminal,
                 width=_edge_width_data_units(ax, float(style.width)),
@@ -7887,6 +7896,7 @@ def _draw_clusters(
     graph: Any,
     pos: np.ndarray,
     sizes: np.ndarray,
+    cluster_aware: bool = True,
     svg_hover_map: Optional[Dict[str, str]] = None,
 ) -> None:
     """Draw cluster background boxes and labels.
@@ -7901,6 +7911,9 @@ def _draw_clusters(
         Node positions with shape ``[N, 2]`` in render coordinates.
     sizes : numpy.ndarray
         Node box sizes with shape ``[N, 2]`` in points.
+    cluster_aware : bool, default=True
+        Whether render-time cluster expansion should be capped to the
+        placement footprint used by cluster-aware layout.
     svg_hover_map : dict[str, str] | None, default=None
         Optional SVG hover-text map populated with cluster metadata.
 
@@ -7962,8 +7975,10 @@ def _draw_clusters(
         member_pos = pos[indices]
         member_sizes = sizes[indices]
 
-        x_min = (member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding
-        x_max = (member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding
+        x_min = float((member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding)
+        x_max = float((member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding)
+        base_x_min = x_min
+        base_x_max = x_max
         label = graph.cluster_labels.get(name, name)
         depth_fs_step = getattr(style, "depth_font_size_step", -0.5)
         label_font_points = max(style.font_size + depth * depth_fs_step, 5.0)
@@ -8020,6 +8035,10 @@ def _draw_clusters(
                 expand = (est_label_width - content_width) / 2
                 x_min -= expand
                 x_max += expand
+        if cluster_aware:
+            cap_x = _points_to_data_units(ax, _CLUSTER_RENDER_BBOX_EXTRA_CAP_POINTS, "x")
+            x_min = max(float(x_min), float(base_x_min) - cap_x)
+            x_max = min(float(x_max), float(base_x_max) + cap_x)
 
         # Progressive depth variation — each depth_*_step field is additive per level
         fill_color = darken_hex(style.fill, depth * style.depth_fill_step)
@@ -8150,6 +8169,7 @@ def _render_cluster_edge_clip_data(
     graph: Any,
     pos: np.ndarray,
     sizes: np.ndarray,
+    cluster_aware: bool = True,
 ) -> Tuple[Dict[int, List[str]], Dict[str, Tuple[float, float, float, float]]]:
     """Return node membership and visible cluster boxes for edge clipping.
 
@@ -8163,6 +8183,9 @@ def _render_cluster_edge_clip_data(
         Node positions with shape ``[N, 2]`` in render coordinates.
     sizes : numpy.ndarray
         Node sizes with shape ``[N, 2]`` in render coordinates.
+    cluster_aware : bool, default=True
+        Whether render-time min-width and label-fit expansion should be capped
+        to the placement footprint plus a small tolerance.
 
     Returns
     -------
@@ -8217,6 +8240,8 @@ def _render_cluster_edge_clip_data(
         member_sizes = sizes[indices]
         x_min = float((member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding)
         x_max = float((member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding)
+        base_x_min = x_min
+        base_x_max = x_max
         y_min = float(
             cluster_y_mins.get(
                 name,
@@ -8266,6 +8291,10 @@ def _render_cluster_edge_clip_data(
                 expand = (est_label_width - content_width) / 2.0
                 x_min -= expand
                 x_max += expand
+        if cluster_aware:
+            cap_x = _points_to_data_units(ax, _CLUSTER_RENDER_BBOX_EXTRA_CAP_POINTS, "x")
+            x_min = max(float(x_min), float(base_x_min) - cap_x)
+            x_max = min(float(x_max), float(base_x_max) + cap_x)
         bboxes[name] = (float(x_min), float(y_min), float(x_max), float(y_max))
 
     return membership, bboxes

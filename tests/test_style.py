@@ -309,7 +309,7 @@ def test_graphviz_strict_theme_loads() -> None:
     assert theme.cluster_style.label_position == "top-center"
     assert theme.cluster_style.label_background == "@background"
     assert theme.cluster_style.label_background_opacity == pytest.approx(1.0)
-    assert theme.cluster_style.label_background_padding == (4.0, 2.0)
+    assert theme.cluster_style.label_background_padding == (6.0, 4.0)
     assert theme.cluster_style.opacity == pytest.approx(1.0)
     assert theme.cluster_style.fill_opacity == pytest.approx(0.0)
     assert theme.cluster_style.border_opacity == pytest.approx(1.0)
@@ -363,7 +363,7 @@ def test_graphviz_improved_theme_loads() -> None:
     assert theme.cluster_style.label_position == "top-center"
     assert theme.cluster_style.label_background == "@background"
     assert theme.cluster_style.label_background_opacity == pytest.approx(1.0)
-    assert theme.cluster_style.label_background_padding == (4.0, 2.0)
+    assert theme.cluster_style.label_background_padding == (6.0, 4.0)
     assert theme.graph_style.edge_label_background_opacity == 1.0
 
 
