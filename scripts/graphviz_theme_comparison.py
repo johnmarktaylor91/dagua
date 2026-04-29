@@ -30,7 +30,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import dagua
-from dagua import DaguaGraph
+from dagua import DaguaGraph, LayoutConfig
 from dagua.graphs import list_graphs, load
 from dagua.graphviz_utils import layout_with_graphviz
 from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle, get_theme
@@ -1279,7 +1279,15 @@ def render_dagua_theme(
     themed_graph = _copy_graph_with_theme(graph, theme_name)
     themed_graph.compute_node_sizes()
     if use_dagua_placement:
-        positions = dagua.layout(themed_graph)
+        positions = dagua.layout(
+            themed_graph,
+            LayoutConfig(
+                algorithm="fr",
+                direction=themed_graph.direction,
+                cluster_aware=True,
+                steps=80,
+            ),
+        )
     else:
         positions = layout_with_graphviz(themed_graph, engine="dot")
         # layout_with_graphviz negates y for dagua's y-down/TB convention.
