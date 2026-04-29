@@ -22,9 +22,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
 import torch
+
+from dagua.layout.ops.cluster_geometry import ClusterTree
 
 
 @dataclass(frozen=True)
@@ -129,8 +132,11 @@ class LayoutProblem:
         Layout direction such as ``TB``, ``BT``, ``LR``, or ``RL``.
     clusters : dict[str, Any] | None
         Cluster membership mapping.
-    cluster_parents : dict[str, str] | None
+    cluster_parents : dict[str, str | None] | None
         Cluster hierarchy mapping.
+    cluster_tree : ClusterTree | None
+        Optional precomputed cluster hierarchy. When omitted, callers can use
+        :meth:`get_cluster_tree` to lazily construct it from cluster metadata.
     structure : GraphStructure | None
         Topology classification, usually computed lazily.
     flex : FlexConstraints | None
@@ -145,16 +151,45 @@ class LayoutProblem:
     node_labels: Optional[List[str]] = None
     direction: str = "BT"
     clusters: Optional[Dict[str, Any]] = None
-    cluster_parents: Optional[Dict[str, str]] = None
+    cluster_parents: Optional[Dict[str, Optional[str]]] = None
+    cluster_tree: Optional[ClusterTree] = None
     structure: Optional[GraphStructure] = None
     flex: Optional[FlexConstraints] = None
     edge_weights: Optional[torch.Tensor] = None
     seed: int = 42
+    _cluster_tree_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     # NOTE: LayoutProblem is intentionally NOT frozen -- some fields
     # (structure) are lazily computed.  However, ops SHOULD treat it
     # as read-only.  edge_weights lives here (not in config) because
     # 15 of 25 classic algorithms consume it.
+
+    def get_cluster_tree(self) -> Optional[ClusterTree]:
+        """Return the lazily memoized cluster hierarchy.
+
+        Returns
+        -------
+        ClusterTree | None
+            Tree built from ``clusters`` and ``cluster_parents`` when both are
+            populated, otherwise ``None``.
+
+        Notes
+        -----
+        LayoutProblem is shared across operations, so the cache fill uses a
+        simple lock. The computed tree is immutable and safe for concurrent
+        readers after construction.
+        """
+        if self.cluster_tree is not None:
+            return self.cluster_tree
+        if not self.clusters or not self.cluster_parents:
+            return None
+        with self._cluster_tree_lock:
+            if self.cluster_tree is None:
+                self.cluster_tree = ClusterTree.from_flat_membership(
+                    self.clusters,
+                    self.cluster_parents,
+                )
+        return self.cluster_tree
 
 
 @dataclass
