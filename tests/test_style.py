@@ -285,6 +285,7 @@ def test_graphviz_strict_theme_loads() -> None:
     assert edge_style.arrow_scale is None  # ignored; mpl uses unified point conversion
     assert edge_style.arrow_length == 10.0
     assert edge_style.arrow_width == 7.0
+    assert edge_style.arrowsize == pytest.approx(1.0)
     assert edge_style.arrow_node_fraction == pytest.approx(0.0)
     assert edge_style.arrow_width_ratio == pytest.approx(0.7)
     assert edge_style.label_font_size == pytest.approx(14.0)
@@ -309,7 +310,7 @@ def test_graphviz_strict_theme_loads() -> None:
     assert theme.cluster_style.font_size_scaling == "fixed"
     assert theme.cluster_style.depth_fill_step == pytest.approx(0.0)
     assert theme.cluster_style.depth_stroke_step == pytest.approx(0.0)
-    assert theme.graph_style.edge_label_font_size == pytest.approx(14.0)
+    assert theme.graph_style.edge_label_font_size == pytest.approx(11.0)
     assert theme.graph_style.edge_label_background_opacity == 1.0
 
 

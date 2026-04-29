@@ -1107,7 +1107,6 @@ ARROWHEAD_REGISTRY: Dict[str, PrimitiveSpec] = {
 
 ARROWHEAD_ALIASES: Dict[str, str] = {
     "circle": "odot",
-    "open": "normal",
     "odot": "odot",
     "obox": "obox",
     "odiamond": "odiamond",
@@ -1171,6 +1170,8 @@ def parse_arrowhead_spec(spec: str) -> List[ParsedPrimitive]:
         Parsed primitives from tip to body.
     """
     normalized = ARROWHEAD_ALIASES.get(spec, spec)
+    if normalized == "open":
+        return [ParsedPrimitive(shape="open", open_fill=False, side="both")]
     if normalized in {"odot", "obox", "odiamond"}:
         return [ParsedPrimitive(shape=normalized[1:], open_fill=True, side="both")]
     if normalized == "none":
@@ -1286,8 +1287,6 @@ def build_arrowhead(
     tip_point = as_point(tip)
     body_direction = unit_vector(as_point(tangent))
     resolved_body_width = float(width if body_width is None else body_width)
-    if spec == "open":
-        fill_mode = "filled"
     parsed = parse_arrowhead_spec(spec)
     local_results: List[ArrowheadResult] = []
     offset = 0.0

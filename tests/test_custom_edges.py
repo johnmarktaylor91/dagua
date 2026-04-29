@@ -297,8 +297,8 @@ def test_open_arrowhead_becomes_stroked() -> None:
     assert len(result.stroked_paths) >= 1
 
 
-def test_graphviz_open_arrowhead_is_filled_on_graphviz_8() -> None:
-    """Graphviz 8's named ``open`` head should render as filled geometry.
+def test_graphviz_open_arrowhead_is_stroked_chevron() -> None:
+    """Graphviz's named ``open`` head should render as an outline chevron.
 
     Returns
     -------
@@ -307,9 +307,8 @@ def test_graphviz_open_arrowhead_is_filled_on_graphviz_8() -> None:
     """
     result = build_arrowhead("open", tip=(0.0, 0.0), tangent=(-1.0, 0.0), length=8.0, width=5.0)
 
-    assert len(result.filled_paths) == 1
-    assert result.stroked_paths == []
-    assert result.filled_paths[0].vertices.shape[0] >= 4
+    assert result.filled_paths == []
+    assert len(result.stroked_paths) == 2
 
 
 def test_hollow_arrowheads_gain_extra_size_for_visual_weight() -> None:

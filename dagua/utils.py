@@ -758,6 +758,7 @@ MAX_LABEL_WIDTH = 200.0
 # mathematical inscribed rectangle, especially for ellipses.
 CURVED_SHAPE_INSCRIBE_FACTOR = 1.5
 MAX_EXPANDED_ELLIPSE_ASPECT_RATIO = 3.5
+GRAPHVIZ_STRICT_ELLIPSE_WIDTH_FACTOR = 1.28
 HEXAGON_INSCRIBE_WIDTH_FACTOR = 0.866
 STAR_INTERIOR_FACTOR = 3.5
 TAB_INTERIOR_WIDTH_FACTOR = 1.25
@@ -1220,18 +1221,16 @@ def _compute_node_size_cached(
                 # rule on curved outlines without re-introducing dagua's
                 # standard 1.5x puff. dot's ellipses on node_shapes_showcase
                 # match this band.
-                # Metric-driven (R19): tested factors 1.0, 1.15, 1.22, 1.414(sqrt2).
-                # 1.22 is the metric-optimal sweet spot — at sqrt(2) short and
-                # medium labels overshoot by 8-15%; at <1.22 long labels are
-                # too narrow. The remaining ~28% out-of-tolerance on long
-                # labels is matplotlib's TextToPath narrower-glyph-measurement
-                # vs Cairo's, accepted as render-stack residual.
-                required_w = padded_text_w * 1.22
+                # Round B1: single-line strict labels need a slightly wider
+                # ellipse than multiline labels. This absorbs the measured
+                # TextToPath-vs-dot width gap without making explicit-newline
+                # labels puffier.
+                line_count = label.count("\n") + 1
+                width_factor = GRAPHVIZ_STRICT_ELLIPSE_WIDTH_FACTOR if line_count == 1 else 1.22
+                required_w = padded_text_w * width_factor
                 required_h = padded_text_h * 1.22
                 w = max(w, required_w)
                 h = max(h, required_h)
-                if w / max(h, 1.0) > MAX_EXPANDED_ELLIPSE_ASPECT_RATIO:
-                    h = w / MAX_EXPANDED_ELLIPSE_ASPECT_RATIO
             else:
                 # Curved outlines only guarantee the inscribed rectangle, so expand
                 # the axes until that inner rectangle can fully contain the padded
@@ -1370,7 +1369,10 @@ def _compute_node_size_cached(
         w = max(w, padded_text_w * BOX3D_INTERIOR_WIDTH_FACTOR)
         h = max(h, padded_text_h * BOX3D_INTERIOR_HEIGHT_FACTOR)
 
-    max_ratio = 10.0 if overflow_policy == "expand_node" else MAX_NODE_ASPECT_RATIO
+    if compact_shape_factors and shape in CURVED_NODE_SHAPES and overflow_policy == "expand_node":
+        max_ratio = float("inf")
+    else:
+        max_ratio = 10.0 if overflow_policy == "expand_node" else MAX_NODE_ASPECT_RATIO
     if w / h > max_ratio:
         w = h * max_ratio
 
