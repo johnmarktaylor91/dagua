@@ -92,7 +92,10 @@ def test_external_to_internal_edge_body_terminates_at_cluster_perimeter() -> Non
     assert body_curve.p1[0] == pytest.approx(bboxes["C"][0], abs=0.75)
     assert body_curve.p1[1] == pytest.approx(0.0, abs=0.75)
     assert collection.prepared_edges[0].head_result is not None
-    assert collection.prepared_edges[0].edge.curve.p1[0] > body_curve.p1[0]
+    assert collection.prepared_edges[0].edge.curve.p1[0] == pytest.approx(
+        body_curve.p1[0],
+        abs=0.75,
+    )
 
 
 def test_nested_cluster_edge_clips_at_outer_perimeter() -> None:

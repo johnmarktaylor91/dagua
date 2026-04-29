@@ -11,10 +11,10 @@ optimization problem. For each test panel exposed by
     produce a reference SVG, and parses the SVG with stdlib XML to harvest
     target ellipse semi-axes, font sizes, arrow polygon geometry, cluster
     bounding boxes, and graph-level chrome.
-2.  Re-derives the same features from dagua's strict-theme internal state via
-    Python introspection only -- no image reads, no rendering. Node ellipse
-    semi-axes come from ``compute_node_size``; edge / cluster geometry comes
-    from ``EdgeStyle`` and ``ClusterStyle`` on the graphviz_strict theme.
+2.  Re-derives the same features from dagua's strict-theme internal state. Node
+    ellipse semi-axes come from ``compute_node_size``; edge / cluster style
+    geometry comes from ``EdgeStyle`` and ``ClusterStyle``; cluster rectangle
+    presence is validated against render-time cluster bounds.
 3.  Computes per-feature deltas with absolute / relative tolerance flags and
     aggregates into a JSON report keyed by panel slug.
 
@@ -56,6 +56,8 @@ if str(REPO_ROOT) not in sys.path:
 # accessible without copying their surface area into this script.
 import scripts.graphviz_theme_comparison as gthc  # noqa: E402
 from dagua import DaguaGraph  # noqa: E402
+from dagua.graphviz_utils import layout_with_graphviz  # noqa: E402
+from dagua.render import mpl as mpl_renderer  # noqa: E402
 from dagua.styles import get_theme  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -83,6 +85,7 @@ DEFAULT_TOLERANCE: Dict[str, Any] = {
     # cluster
     "cluster_stroke_width_pt": 0.2,
     "cluster_label_font_size_pt": 1.0,
+    "cluster_rect_missing": 0.0,
 }
 
 #: Default Markdown report path consumed by the graphviz parity audit loop.
@@ -220,6 +223,8 @@ class ReferenceCluster:
         Polygon stroke width in points.
     label_font_size_pt : float | None
         Font size of the cluster's text label.
+    rect_present : bool
+        Whether Graphviz emitted a non-empty cluster polygon.
     """
 
     cluster_id: str
@@ -232,6 +237,7 @@ class ReferenceCluster:
     stroke: str
     stroke_width_pt: float
     label_font_size_pt: Optional[float] = None
+    rect_present: bool = True
 
 
 @dataclass
@@ -769,6 +775,7 @@ class CandidateCluster:
     stroke: str
     stroke_width_pt: float
     label_font_size_pt: float
+    rect_present: bool
     rect_x: Optional[float] = None
     rect_y: Optional[float] = None
     rect_w: Optional[float] = None
@@ -916,6 +923,55 @@ def _candidate_edges(graph: DaguaGraph) -> List[CandidateEdge]:
     return out
 
 
+def _candidate_cluster_rect_presence(graph: DaguaGraph) -> Dict[str, bool]:
+    """Return whether each strict-theme cluster has drawable render bounds.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Strict-themed graph clone with computed node sizes.
+
+    Returns
+    -------
+    dict[str, bool]
+        Mapping of cluster name to finite, positive-area rectangle presence.
+    """
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not graph.clusters:
+        return {}
+    positions = layout_with_graphviz(graph, engine="dot")
+    positions[:, 1] = -positions[:, 1]
+    graph.direction = "BT"
+    pos_np = positions.detach().cpu().numpy()
+    sizes_np = graph.node_sizes.detach().cpu().numpy()
+    fig, ax = plt.subplots()
+    try:
+        _, bboxes = mpl_renderer._render_cluster_edge_clip_data(ax, graph, pos_np, sizes_np)
+    finally:
+        plt.close(fig)
+    out: Dict[str, bool] = {}
+    for name in graph.clusters:
+        bbox = bboxes.get(name)
+        if bbox is None:
+            out[name] = False
+            continue
+        x_min, y_min, x_max, y_max = bbox
+        out[name] = (
+            all(
+                value == value and abs(value) != float("inf")
+                for value in (x_min, y_min, x_max, y_max)
+            )
+            and x_max > x_min
+            and y_max > y_min
+        )
+    return out
+
+
 def _candidate_clusters(graph: DaguaGraph) -> List[CandidateCluster]:
     """Build the dagua-side cluster feature list for ``graph``.
 
@@ -932,6 +988,7 @@ def _candidate_clusters(graph: DaguaGraph) -> List[CandidateCluster]:
     """
 
     out: List[CandidateCluster] = []
+    rect_presence = _candidate_cluster_rect_presence(graph)
     for name in graph.clusters:
         style = graph.get_style_for_cluster(name)
         # Treat 0-opacity fills as equivalent to dot's "none" declaration.
@@ -947,6 +1004,7 @@ def _candidate_clusters(graph: DaguaGraph) -> List[CandidateCluster]:
                 stroke=style.stroke,
                 stroke_width_pt=float(style.stroke_width),
                 label_font_size_pt=float(style.font_size),
+                rect_present=rect_presence.get(name, False),
             )
         )
     return out
@@ -1470,6 +1528,14 @@ def _flatten_cluster_deltas(
         )
         if fs_delta is not None:
             deltas["cluster_label_font_size_pt"] = fs_delta.__dict__
+
+    missing_count = 0 if candidate.rect_present else 1
+    deltas["cluster_rect_missing"] = FeatureDelta(
+        target=0,
+        dagua=missing_count,
+        delta=missing_count,
+        in_tolerance=missing_count <= tolerance["cluster_rect_missing"],
+    ).__dict__
 
     return deltas
 
