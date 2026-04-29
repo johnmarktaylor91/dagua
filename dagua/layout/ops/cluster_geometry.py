@@ -98,6 +98,68 @@ class ClusterTree:
             roots=roots,
         )
 
+    def bottom_up_order(self) -> Tuple[str, ...]:
+        """Return cluster names in child-before-parent order.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Cluster names ordered so every child appears before its parent.
+        """
+        ordered: list[str] = []
+
+        def visit(name: str) -> None:
+            """Append ``name`` after all children have been visited.
+
+            Parameters
+            ----------
+            name : str
+                Cluster name to traverse.
+
+            Returns
+            -------
+            None
+                The traversal appends into ``ordered``.
+            """
+            for child_name in self.children_per_cluster[name]:
+                visit(child_name)
+            ordered.append(name)
+
+        for root_name in self.roots:
+            visit(root_name)
+        return tuple(ordered)
+
+    def top_down_order(self) -> Tuple[str, ...]:
+        """Return cluster names in parent-before-child order.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Cluster names ordered so every parent appears before descendants.
+        """
+        ordered: list[str] = []
+
+        def visit(name: str) -> None:
+            """Append ``name`` before all children are visited.
+
+            Parameters
+            ----------
+            name : str
+                Cluster name to traverse.
+
+            Returns
+            -------
+            None
+                The traversal appends into ``ordered``.
+            """
+            ordered.append(name)
+            for child_name in self.children_per_cluster[name]:
+                visit(child_name)
+
+        for root_name in self.roots:
+            visit(root_name)
+        return tuple(ordered)
+
 
 @dataclass(frozen=True)
 class ClusterLabelMetrics:

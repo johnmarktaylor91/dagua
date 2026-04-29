@@ -125,6 +125,46 @@ def test_cluster_tree_deep_nesting_four_levels() -> None:
     assert cluster_leaves_only_at_level(tree, "l3") == frozenset({3, 4})
 
 
+def test_cluster_tree_bottom_up_order_children_before_parents() -> None:
+    """Bottom-up traversal should visit every child before its parent."""
+    tree = ClusterTree.from_flat_membership(
+        {
+            "outer": [0, 1, 2, 3, 4],
+            "left": [0, 1],
+            "right": [2, 3, 4],
+            "right_inner": [3, 4],
+        },
+        {"outer": None, "left": "outer", "right": "outer", "right_inner": "right"},
+    )
+
+    order = tree.bottom_up_order()
+    positions = {name: index for index, name in enumerate(order)}
+
+    assert positions["left"] < positions["outer"]
+    assert positions["right"] < positions["outer"]
+    assert positions["right_inner"] < positions["right"]
+
+
+def test_cluster_tree_top_down_order_parents_before_children() -> None:
+    """Top-down traversal should visit every parent before descendants."""
+    tree = ClusterTree.from_flat_membership(
+        {
+            "outer": [0, 1, 2, 3, 4],
+            "left": [0, 1],
+            "right": [2, 3, 4],
+            "right_inner": [3, 4],
+        },
+        {"outer": None, "left": "outer", "right": "outer", "right_inner": "right"},
+    )
+
+    order = tree.top_down_order()
+    positions = {name: index for index, name in enumerate(order)}
+
+    assert positions["outer"] < positions["left"]
+    assert positions["outer"] < positions["right"]
+    assert positions["right"] < positions["right_inner"]
+
+
 def test_compute_cluster_placement_bbox_formula_sanity() -> None:
     """The placement bbox should include member sizes, padding, and label band."""
     box = compute_cluster_placement_bbox(

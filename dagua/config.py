@@ -126,6 +126,12 @@ class LayoutConfig:
     w_overlap: float = 5.0
     w_cluster: float = 1.0
     w_cluster_contain: float = 2.0  # child clusters stay within parent bbox
+    # Cluster-aware placement treats clusters as recursive placement
+    # primitives. Legacy cluster losses remain available when this is False.
+    cluster_aware: bool = True
+    cluster_side_padding_pt: float = 8.0
+    cluster_label_band_pt: float = 26.0
+    cluster_external_clearance_pt: float = 10.0
     w_align: float = 5.0
     w_crossing: float = 1.8
     # Dropped 2.2 -> 0.5 after a comprehensive 93-graph sweep.

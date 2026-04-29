@@ -14,12 +14,43 @@ Scaling strategy (Sprint 3 — fully vectorized):
 from __future__ import annotations
 
 import random
+import warnings
 from typing import Callable, Dict, List, Optional, Protocol, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 
 from dagua.layout.layers import LayerIndex
+
+_DEFAULT_W_CLUSTER_CONTAIN = 2.0
+
+
+def warn_legacy_cluster_loss_config(
+    cluster_aware: bool,
+    w_cluster_containment: float,
+) -> None:
+    """Warn when legacy cluster loss knobs are set under cluster-aware layout.
+
+    Parameters
+    ----------
+    cluster_aware : bool
+        Whether recursive cluster-aware placement is enabled.
+    w_cluster_containment : float
+        Configured legacy containment loss weight.
+
+    Returns
+    -------
+    None
+        Emits a ``DeprecationWarning`` only when a legacy knob is non-default.
+    """
+    if cluster_aware and w_cluster_containment != _DEFAULT_W_CLUSTER_CONTAIN:
+        warnings.warn(
+            "w_cluster_contain is ignored when cluster_aware=True; set "
+            "cluster_aware=False to use legacy cluster containment loss.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
 
 # ─── Edge-based losses (O(E), trivially parallelizable) ─────────────────────
 
