@@ -107,6 +107,24 @@ def _transform_path(path: Path, spec: DaguaText) -> Path:
     return path.transformed(transform)
 
 
+def _background_zorder(spec: DaguaText) -> float:
+    """Return the background patch z-order for one text spec.
+
+    Parameters
+    ----------
+    spec : DaguaText
+        Text render specification.
+
+    Returns
+    -------
+    float
+        Z-order used for the background patch.
+    """
+    if isinstance(spec.gid, str) and spec.gid.startswith("dagua-cluster-label-"):
+        return float(spec.zorder)
+    return float(spec.zorder) - 0.1
+
+
 def _segment_path(
     spec: DaguaText,
     block: TextBlock,
@@ -543,7 +561,7 @@ def render_text(
                 edgecolor="none",
                 linewidth=0.0,
                 alpha=spec.background_alpha,
-                zorder=spec.zorder - 0.1,
+                zorder=_background_zorder(spec),
             )
             background_gid = _patch_gid(spec, "background")
             if background_gid is not None:

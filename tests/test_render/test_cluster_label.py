@@ -10,6 +10,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+import torch
+from matplotlib.collections import PatchCollection
 from matplotlib.colors import to_rgba
 from matplotlib.patches import PathPatch
 from matplotlib.path import Path
@@ -189,4 +191,93 @@ def test_graphviz_strict_nested_cluster_labels_mask_strokes() -> None:
     for patch in backgrounds:
         assert patch.get_facecolor()[-1] == pytest.approx(1.0)
         assert any(patch.get_zorder() > border_zorder for border_zorder in border_zorders)
+    plt.close(fig)
+
+
+def test_cluster_label_background_renders_above_node_fills() -> None:
+    """Cluster label masks should stay above node fills when labels overlap nodes."""
+    graph = DaguaGraph()
+    graph._theme = get_theme("graphviz_strict")
+    graph.add_node("a")
+    graph.add_cluster("outer", ["a"], label="Outer Group")
+
+    fig, ax = mpl_renderer.render(
+        graph,
+        positions=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        show=False,
+    )
+
+    backgrounds = _background_patches(ax)
+    node_fill_zorders = [
+        float(collection.get_zorder())
+        for collection in ax.collections
+        if isinstance(collection, PatchCollection)
+        and abs(float(collection.get_zorder()) - 2.0) < 1e-6
+    ]
+    glyph_zorders = [
+        float(patch.get_zorder())
+        for patch in ax.patches
+        if isinstance(patch, PathPatch)
+        and isinstance(patch.get_gid(), str)
+        and patch.get_gid().startswith("dagua-cluster-label-outer")
+        and not patch.get_gid().endswith("-background")
+    ]
+
+    assert backgrounds
+    assert node_fill_zorders
+    assert glyph_zorders
+    assert min(float(patch.get_zorder()) for patch in backgrounds) > max(node_fill_zorders)
+    assert {float(patch.get_zorder()) for patch in backgrounds} == set(glyph_zorders)
+    plt.close(fig)
+
+
+def test_top_cap_does_not_collapse_cluster_render_height(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphviz top caps should preserve a visible label band and content height."""
+    graph = DaguaGraph()
+    graph._theme = get_theme("graphviz_strict")
+    graph.add_node("source")
+    graph.add_node("inside")
+    graph.add_edge("source", "inside")
+    graph.add_cluster("child", ["inside"], label="Child")
+
+    fig, ax = plt.subplots(figsize=(4.0, 3.0), dpi=100)
+    ax.set_xlim(-50.0, 50.0)
+    ax.set_ylim(-50.0, 50.0)
+    fig.canvas.draw()
+
+    ordered_clusters = mpl_renderer._cluster_render_order(graph)
+    cluster_depths = mpl_renderer._cluster_depths(graph, ordered_clusters)
+    pos = np.array([[0.0, 40.0], [0.0, 0.0]], dtype=float)
+    sizes = np.array([[20.0, 20.0], [20.0, 20.0]], dtype=float)
+    display_scale = mpl_renderer._compute_display_scale(ax)
+    label_gap = 2.0 * display_scale
+    cluster_y_mins = {"child": -10.0}
+    cluster_y_maxes = {"child": 10.0}
+
+    monkeypatch.setattr(
+        mpl_renderer,
+        "_graphviz_strict_cluster_top_cap",
+        lambda *args, **kwargs: -25.0,
+    )
+
+    boxes = mpl_renderer._compute_cluster_render_bboxes(
+        ax,
+        graph,
+        pos,
+        sizes,
+        ordered_clusters,
+        cluster_depths,
+        cluster_y_mins,
+        cluster_y_maxes,
+        display_scale,
+        cluster_aware=False,
+        label_gap=label_gap,
+    )
+    x_min, y_min, x_max, y_max = boxes["child"].bbox
+
+    assert x_max > x_min
+    assert y_max > y_min
+    assert y_max - y_min >= 20.0
     plt.close(fig)
