@@ -1250,8 +1250,13 @@ def _copy_graph_with_theme(graph: DaguaGraph, theme_name: str) -> DaguaGraph:
     return themed_graph
 
 
-def render_dagua_theme(graph: DaguaGraph, theme_name: str, output_path: Path) -> None:
-    """Render a graph with a specific Dagua theme on Graphviz positions.
+def render_dagua_theme(
+    graph: DaguaGraph,
+    theme_name: str,
+    output_path: Path,
+    use_dagua_placement: bool = False,
+) -> None:
+    """Render a graph with a specific Dagua theme.
 
     Parameters
     ----------
@@ -1261,6 +1266,9 @@ def render_dagua_theme(graph: DaguaGraph, theme_name: str, output_path: Path) ->
         Built-in theme name.
     output_path : Path
         Destination PNG path.
+    use_dagua_placement : bool, default=False
+        When ``True``, use Dagua's own layout instead of injecting Graphviz
+        positions into the renderer.
 
     Returns
     -------
@@ -1270,24 +1278,27 @@ def render_dagua_theme(graph: DaguaGraph, theme_name: str, output_path: Path) ->
 
     themed_graph = _copy_graph_with_theme(graph, theme_name)
     themed_graph.compute_node_sizes()
-    positions = layout_with_graphviz(themed_graph, engine="dot")
-    # layout_with_graphviz negates y for dagua's y-down/TB convention.
-    # Undo the negation to get Graphviz's native y-up coordinates,
-    # and set direction to BT so edge routing uses correct control points.
-    positions[:, 1] = -positions[:, 1]
-    themed_graph.direction = "BT"
-    # In BT mode with y-up coordinates, dagua puts the arrowhead at the
-    # "head" end (high y = source). We need it at the "tail" end (low y =
-    # target) to match Graphviz's visual direction. Swap arrow/tail_arrow
-    # on all edges so arrowheads point toward the target node.
-    for e_idx in range(int(themed_graph.edge_index.shape[1])):
-        style = themed_graph.get_style_for_edge(e_idx)
-        if style.arrow != "none" and style.tail_arrow == "none":
-            # Simple case: move the head arrow to the tail position
-            from dataclasses import replace as dc_replace
+    if use_dagua_placement:
+        positions = dagua.layout(themed_graph)
+    else:
+        positions = layout_with_graphviz(themed_graph, engine="dot")
+        # layout_with_graphviz negates y for dagua's y-down/TB convention.
+        # Undo the negation to get Graphviz's native y-up coordinates,
+        # and set direction to BT so edge routing uses correct control points.
+        positions[:, 1] = -positions[:, 1]
+        themed_graph.direction = "BT"
+        # In BT mode with y-up coordinates, dagua puts the arrowhead at the
+        # "head" end (high y = source). We need it at the "tail" end (low y =
+        # target) to match Graphviz's visual direction. Swap arrow/tail_arrow
+        # on all edges so arrowheads point toward the target node.
+        for e_idx in range(int(themed_graph.edge_index.shape[1])):
+            style = themed_graph.get_style_for_edge(e_idx)
+            if style.arrow != "none" and style.tail_arrow == "none":
+                # Simple case: move the head arrow to the tail position
+                from dataclasses import replace as dc_replace
 
-            swapped = dc_replace(style, arrow="none", tail_arrow=style.arrow)
-            themed_graph.edge_styles[e_idx] = swapped
+                swapped = dc_replace(style, arrow="none", tail_arrow=style.arrow)
+                themed_graph.edge_styles[e_idx] = swapped
 
     # Compute figsize so Graphviz's point-space positions render at the same
     # physical scale as native Graphviz (72 points = 1 inch).
@@ -1621,6 +1632,7 @@ def _render_case(
     case: GraphCase,
     directories: Mapping[str, Path],
     use_graphviz: bool,
+    use_dagua_placement: bool,
 ) -> None:
     """Render one graph case into all requested outputs.
 
@@ -1632,6 +1644,8 @@ def _render_case(
         Output directory mapping.
     use_graphviz : bool
         Whether to attempt the native Graphviz column.
+    use_dagua_placement : bool
+        Whether Dagua panels should use Dagua-computed positions.
 
     Returns
     -------
@@ -1644,8 +1658,18 @@ def _render_case(
     graphviz_path = directories[GRAPHVIZ_DIR] / f"{case.slug}.png"
     composed_path = directories[THREE_WAY_DIR] / f"{case.slug}.png"
 
-    render_dagua_theme(case.graph, STRICT_THEME_NAME, strict_path)
-    render_dagua_theme(case.graph, IMPROVED_THEME_NAME, improved_path)
+    render_dagua_theme(
+        case.graph,
+        STRICT_THEME_NAME,
+        strict_path,
+        use_dagua_placement=use_dagua_placement,
+    )
+    render_dagua_theme(
+        case.graph,
+        IMPROVED_THEME_NAME,
+        improved_path,
+        use_dagua_placement=use_dagua_placement,
+    )
 
     native_available = False
     if use_graphviz:
@@ -1690,6 +1714,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Skip native Graphviz rendering even if dot is installed.",
     )
+    parser.add_argument(
+        "--use-dagua-placement",
+        action="store_true",
+        help="Render Dagua panels with Dagua layout instead of Graphviz positions.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1715,7 +1744,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     for case in cases:
         print(f"Rendering {case.slug}...", flush=True)
-        _render_case(case, directories, use_graphviz)
+        _render_case(
+            case,
+            directories,
+            use_graphviz,
+            use_dagua_placement=bool(args.use_dagua_placement),
+        )
 
     _write_index_html(cases, output_dir)
     print(f"Wrote {len(cases)} comparison rows to {output_dir}", flush=True)

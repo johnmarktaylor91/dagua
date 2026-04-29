@@ -1017,7 +1017,7 @@ GRAPHVIZ_STRICT_THEME = Theme(
         label_position="top-center",
         label_background="@background",
         label_background_opacity=1.0,
-        label_background_padding=(4.0, 2.0),
+        label_background_padding=(6.0, 4.0),
         # Metric-driven (R19): dot's SVG declares cluster label font-size=14pt
         # (same as node labels). Prior rounds dropped to 10pt for "subordination"
         # but the metric target is 14pt.
@@ -1120,7 +1120,7 @@ GRAPHVIZ_THEME = Theme(
         label_position="top-center",
         label_background="@background",
         label_background_opacity=1.0,
-        label_background_padding=(4.0, 2.0),
+        label_background_padding=(6.0, 4.0),
         font_size=12.0,  # DEPARTURE: matches node font size
         font_weight="bold",
         font_color="#333333",  # DEPARTURE: dark gray instead of black

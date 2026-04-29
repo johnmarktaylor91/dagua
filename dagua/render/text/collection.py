@@ -29,6 +29,7 @@ from dagua.utils import prepare_label_text
 _MIN_VISIBLE_OUTLINE_WIDTH_POINTS = 2.0
 _BOLD_EMPHASIS_WIDTH_RATIO = 0.08
 _MIN_BOLD_EMPHASIS_WIDTH_POINTS = 0.75
+_POINTS_PER_INCH = 72.0
 
 
 @dataclass
@@ -259,6 +260,85 @@ def _add_patch(ax: Any, patch: PathPatch, spec: DaguaText, artists: List[Any]) -
     artists.append(patch)
 
 
+def _matplotlib_text_background_path(
+    ax: Any,
+    spec: DaguaText,
+    prepared_text: str,
+    font_family: str,
+    font_size_pts: float,
+) -> Optional[Path]:
+    """Return a data-space text background from Matplotlib's rasterized bbox.
+
+    Parameters
+    ----------
+    ax : Any
+        Axes used to resolve display and data transforms.
+    spec : DaguaText
+        Text render specification.
+    prepared_text : str
+        Final label string after wrapping and transforms.
+    font_family : str
+        Font family used for raster text measurement.
+    font_size_pts : float
+        Font size in typographic points.
+
+    Returns
+    -------
+    matplotlib.path.Path | None
+        Absolute data-coordinate background path, or ``None`` when the
+        fallback vector-layout measurement should be used.
+    """
+
+    if spec.rich or abs(float(spec.rotation)) > 1e-9:
+        return None
+    renderer = ax.figure.canvas.get_renderer()
+    if renderer is None:
+        ax.figure.canvas.draw()
+        renderer = ax.figure.canvas.get_renderer()
+    probe = ax.text(
+        spec.x,
+        spec.y,
+        prepared_text,
+        fontsize=font_size_pts,
+        fontfamily=font_family,
+        fontweight=spec.font_weight,
+        fontstyle=spec.font_style,
+        ha=spec.ha,
+        va=spec.va,
+        alpha=0.0,
+    )
+    try:
+        bbox = probe.get_window_extent(renderer=renderer)
+    finally:
+        probe.remove()
+    pad_x = spec.background_padding[0] * ax.figure.dpi / _POINTS_PER_INCH
+    pad_y = spec.background_padding[1] * ax.figure.dpi / _POINTS_PER_INCH
+    x0 = bbox.x0 - pad_x
+    x1 = bbox.x1 + pad_x
+    y0 = bbox.y0 - pad_y
+    y1 = bbox.y1 + pad_y
+    corners = ax.transData.inverted().transform(
+        [
+            [x0, y0],
+            [x1, y1],
+        ]
+    )
+    x_min, y_min = corners[0]
+    x_max, y_max = corners[1]
+    radius_px = spec.background_corner_radius * ax.figure.dpi / _POINTS_PER_INCH
+    radius_corners = ax.transData.inverted().transform([[0.0, 0.0], [radius_px, radius_px]])
+    corner_radius = abs(float(radius_corners[1][0]) - float(radius_corners[0][0]))
+    return background_rect_path(
+        (float(x_min) + float(x_max)) / 2.0,
+        (float(y_min) + float(y_max)) / 2.0,
+        abs(float(x_max) - float(x_min)),
+        abs(float(y_max) - float(y_min)),
+        0.0,
+        0.0,
+        corner_radius,
+    )
+
+
 def _is_bold_weight(font_weight: str) -> bool:
     """Return whether a font-weight token requests a bold face.
 
@@ -437,18 +517,26 @@ def render_text(
         )
 
         if spec.background is not None:
-            pad_x = spec.background_padding[0] * safe_scale
-            pad_y = spec.background_padding[1] * safe_scale
-            corner_radius = spec.background_corner_radius * safe_scale
-            background_path = background_rect_path(
-                spec.x + block.x_offset + block.width / 2.0,
-                spec.y + block.y_offset - block.height / 2.0,
-                block.width,
-                block.height,
-                pad_x,
-                pad_y,
-                corner_radius,
+            background_path = _matplotlib_text_background_path(
+                ax,
+                spec,
+                prepared_text,
+                font_family,
+                font_size_pts,
             )
+            if background_path is None:
+                pad_x = spec.background_padding[0] * safe_scale
+                pad_y = spec.background_padding[1] * safe_scale
+                corner_radius = spec.background_corner_radius * safe_scale
+                background_path = background_rect_path(
+                    spec.x + block.x_offset + block.width / 2.0,
+                    spec.y + block.y_offset - block.height / 2.0,
+                    block.width,
+                    block.height,
+                    pad_x,
+                    pad_y,
+                    corner_radius,
+                )
             background_patch = PathPatch(
                 _transform_path(background_path, spec),
                 facecolor=spec.background,
