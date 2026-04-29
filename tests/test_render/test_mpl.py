@@ -1677,6 +1677,29 @@ def test_arrowhead_size_scales_with_graph_range() -> None:
     assert wid2 / wid1 == pytest.approx(ratio)
 
 
+def test_arrowhead_size_applies_arrowsize_multiplier() -> None:
+    """Graphviz-style arrowsize should multiply fixed arrowhead dimensions."""
+
+    fig, ax = plt.subplots(figsize=(4.0, 3.0), dpi=100)
+    ax.set_xlim(0.0, 400.0)
+    ax.set_ylim(0.0, 300.0)
+    style = EdgeStyle(arrow_length=10.0, arrow_width=7.0, arrowsize=1.5, arrow_node_fraction=0.0)
+
+    length_data, width_data = mpl_renderer._resolved_marker_dimensions(
+        ax,
+        style,
+        node_width=36.0,
+        node_height=36.0,
+        is_self_loop=False,
+        scale_with_edge_width=False,
+    )
+
+    display_scale = mpl_renderer._compute_display_scale(ax)
+    assert length_data == pytest.approx(15.0 * display_scale)
+    assert width_data == pytest.approx(10.5 * display_scale)
+    plt.close(fig)
+
+
 def test_arrowhead_scales_with_node_height() -> None:
     """Node-relative arrowheads should be proportional to target node height."""
 

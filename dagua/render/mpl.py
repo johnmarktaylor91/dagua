@@ -1022,14 +1022,15 @@ def _save_figure(fig, output: str, bg: str, dpi: int, format: Optional[str] = No
     if fmt is None:
         fmt = "png"
     svg_hover_map = getattr(fig, "_dagua_svg_hover_map", None)
+    tight_bbox = bool(getattr(fig, "_dagua_tight_bbox", True))
 
     common = {
-        "bbox_inches": "tight",
-        "pad_inches": 0.05,
         "facecolor": bg,
         "edgecolor": bg,
         "transparent": False,
     }
+    if tight_bbox:
+        common.update({"bbox_inches": "tight", "pad_inches": 0.05})
 
     if fmt in _VECTOR_FORMATS:
         fig.savefig(output, format=fmt, **common)
@@ -1393,11 +1394,14 @@ def render(
     fig.patch.set_facecolor(bg)
     ax.set_facecolor(bg)
     setattr(fig, "_dagua_svg_hover_map", {} if svg_hover_text else None)
+    if _is_graphviz_strict_render(graph):
+        setattr(fig, "_dagua_tight_bbox", False)
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
     svg_hover_map = getattr(fig, "_dagua_svg_hover_map")
 
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
-    ax.set_aspect("equal")
+    ax.set_aspect("auto" if _is_graphviz_strict_render(graph) else "equal")
     ax.axis("off")
     _expand_axes_for_clusters(ax, graph, pos, sizes, margin)
 
@@ -4507,6 +4511,9 @@ def _resolved_marker_dimensions(
 
     length_points = float(style.arrow_length)
     width_points = float(style.arrow_width)
+    arrowsize = max(float(getattr(style, "arrowsize", 1.0)), 0.0)
+    length_points *= arrowsize
+    width_points *= arrowsize
     if scale_with_edge_width:
         length_points, width_points = _scaled_arrowhead_dimensions(
             length_points,
