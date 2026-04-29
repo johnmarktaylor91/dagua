@@ -201,6 +201,12 @@ class DaguaEdge:
         Source node index when available.
     target_node : int | None, default=None
         Target node index when available.
+    body_curve : CubicBezier | None, default=None
+        Optional edge-body centerline. Arrowheads and labels still use
+        ``curve`` so cluster clipping can shorten only the visible body.
+    body_clip_terminal : str | None, default=None
+        Endpoint clipped by ``body_curve``. Supported values are ``"head"``,
+        ``"tail"``, and ``"both"``.
     disable_curve_length_clamp : bool, default=False
         When ``True``, terminal arrowhead dimensions are not capped by the
         SHORT_EDGE_HEAD_FRACTION clamp. graphviz_strict sets this so arrow
@@ -239,6 +245,8 @@ class DaguaEdge:
     group_key: Optional[Tuple[int, int]] = None
     source_node: Optional[int] = None
     target_node: Optional[int] = None
+    body_curve: Optional[CubicBezier] = None
+    body_clip_terminal: Optional[str] = None
     disable_curve_length_clamp: bool = False
 
     def resolved_arrow_length(self) -> float:
@@ -1110,7 +1118,8 @@ def _trimmed_body_curve(
     """
     head_result: Optional[ArrowheadResult] = None
     tail_result: Optional[ArrowheadResult] = None
-    table = build_arc_length_table(curve)
+    body_curve = edge.body_curve or curve
+    table = build_arc_length_table(body_curve)
     has_head = edge.arrowhead != "none"
     has_tail = edge.tail_arrow != "none"
     has_both_terminals = has_head and has_tail
@@ -1152,12 +1161,13 @@ def _trimmed_body_curve(
     start_trim = 0.0
     end_trim = table.total_length
     if tail_result is not None:
-        start_trim = min(
-            vector_norm(arrowhead_back_point(tail_result) - curve.p0), table.total_length
-        )
-    if head_result is not None:
+        if edge.body_clip_terminal not in {"tail", "both"}:
+            start_trim = min(
+                vector_norm(arrowhead_back_point(tail_result) - curve.p0), table.total_length
+            )
+    if head_result is not None and edge.body_clip_terminal not in {"head", "both"}:
         end_trim = max(
-            table.total_length - vector_norm(arrowhead_back_point(head_result) - curve.p1),
+            table.total_length - vector_norm(arrowhead_back_point(head_result) - body_curve.p1),
             start_trim,
         )
 
@@ -1166,7 +1176,7 @@ def _trimmed_body_curve(
 
     start_t = t_at_arc_length(table, start_trim)
     end_t = t_at_arc_length(table, end_trim)
-    trimmed = subcurve(curve, start_t, end_t)
+    trimmed = subcurve(body_curve, start_t, end_t)
 
     if head_result is not None:
         head_result = ArrowheadResult(
@@ -1268,8 +1278,13 @@ def _apply_lane_offsets(edges: Sequence[DaguaEdge]) -> List[DaguaEdge]:
             ]
             retries += 1
 
-        for edge, lane_curve in zip(grouped_edges, centerlines):
-            updated_edges.append(replace(edge, curve=lane_curve))
+        for edge, lane_curve, offset in zip(grouped_edges, centerlines, offsets):
+            body_curve = (
+                offset_cubic_control_points(edge.body_curve, offset)
+                if edge.body_curve is not None
+                else None
+            )
+            updated_edges.append(replace(edge, curve=lane_curve, body_curve=body_curve))
     return updated_edges
 
 
