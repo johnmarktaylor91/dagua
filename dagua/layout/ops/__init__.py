@@ -293,6 +293,7 @@ def _register_all_ops() -> None:
         "state",
         "taxonomy",
         "graph_utils",
+        "cluster_geometry",
     }
 
     for module_path in ops_dir.glob("*.py"):
