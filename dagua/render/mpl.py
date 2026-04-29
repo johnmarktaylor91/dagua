@@ -114,7 +114,7 @@ _CLUSTER_LABEL_VERTICAL_GAP_POINTS = 2.0
 _GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE = 1.18
 _GRAPHVIZ_STRICT_ELLIPSE_ASPECT_CAP = 3.0
 _GRAPHVIZ_STRICT_MIN_OVAL_ASPECT = 1.50
-_GRAPHVIZ_STRICT_EDGE_WIDTH_RENDER_MULTIPLIER = 1.2
+_GRAPHVIZ_STRICT_EDGE_WIDTH_RENDER_MULTIPLIER = 1.5
 _GRAPHVIZ_STRICT_CLUSTER_HORIZONTAL_SEPARATION_POINTS = 18.0
 _GRAPHVIZ_STRICT_CLUSTER_LABEL_MASK_PADDING_POINTS = 4.0
 _GRAPHVIZ_STRICT_CLUSTER_EXTERNAL_NODE_GAP_POINTS = 36.0
@@ -944,6 +944,9 @@ def _edge_style_for_render(graph: Any, edge_idx: int) -> EdgeStyle:
         style = replace(
             style,
             width=float(style.width) * _GRAPHVIZ_STRICT_EDGE_WIDTH_RENDER_MULTIPLIER,
+            line_cap="butt",
+            line_join="miter",
+            opacity=1.0,
         )
     background_color = str(graph.graph_style.background_color)
     if not _should_auto_contrast(graph, background_color):
