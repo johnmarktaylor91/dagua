@@ -76,6 +76,7 @@ def _label_bbox(ax: Any, prefix: str) -> tuple[float, float, float, float]:
         if isinstance(patch, PathPatch)
         and isinstance(patch.get_gid(), str)
         and patch.get_gid().startswith(prefix)
+        and not patch.get_gid().endswith("-background")
     ]
     assert patches
     vertices = np.concatenate([patch.get_path().vertices for patch in patches], axis=0)
@@ -2408,7 +2409,7 @@ def test_cluster_labels_expand_bbox_using_measured_width(
     label_patches = [
         patch
         for patch in ax.patches
-        if isinstance(patch, PathPatch) and patch.get_gid() is not None
+        if isinstance(patch, PathPatch) and patch.get_gid() == "dagua-cluster-label-outer"
     ]
     assert len(label_patches) == 1
     assert ax.collections
@@ -2462,7 +2463,7 @@ def test_cluster_offsets_and_corner_radius_use_display_scale(
     label_patches = [
         patch
         for patch in ax.patches
-        if isinstance(patch, PathPatch) and patch.get_gid() is not None
+        if isinstance(patch, PathPatch) and patch.get_gid() == "dagua-cluster-label-outer"
     ]
     assert len(label_patches) == 1
     assert ax.collections
