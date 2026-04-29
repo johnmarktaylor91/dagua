@@ -3375,6 +3375,31 @@ def _cluster_label_text_max_width(
     return float(style.text_max_width) * display_scale
 
 
+def _resolve_cluster_label_background(graph: Any, style: ClusterStyle) -> Optional[str]:
+    """Resolve the configured cluster-label background color.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph exposing a graph-level background color.
+    style : ClusterStyle
+        Cluster style that may request an explicit label mask color or the
+        ``"@background"`` sentinel.
+
+    Returns
+    -------
+    str | None
+        Concrete Matplotlib color string, or ``None`` when no background mask
+        is configured.
+    """
+    background = str(getattr(style, "label_background", "") or "")
+    if not background:
+        return None
+    if background == "@background":
+        return str(_graph_style_for_render(graph).background_color)
+    return background
+
+
 def _measure_cluster_label_data(
     text: str,
     font_size_data: float,
@@ -7796,21 +7821,17 @@ def _draw_clusters(
         )
 
         if label:
-            label_background = None
-            label_background_alpha = 0.0
-            label_background_padding = (0.0, 0.0)
-            if _is_graphviz_strict_render(graph):
-                label_background = str(_graph_style_for_render(graph).background_color)
-                label_background_alpha = 1.0
-                label_background_padding_data = _points_to_data_units(
-                    ax,
-                    _GRAPHVIZ_STRICT_CLUSTER_LABEL_MASK_PADDING_POINTS,
-                    "x",
-                )
-                label_background_padding = (
-                    label_background_padding_data,
-                    label_background_padding_data,
-                )
+            label_background = _resolve_cluster_label_background(graph, style)
+            label_background_alpha = (
+                float(getattr(style, "label_background_opacity", 0.0))
+                if label_background is not None
+                else 0.0
+            )
+            label_background_padding = (
+                tuple(getattr(style, "label_background_padding", (0.0, 0.0)))
+                if label_background is not None
+                else (0.0, 0.0)
+            )
             label_spec = DaguaText(
                 x=lx,
                 y=ly,
@@ -7825,10 +7846,13 @@ def _draw_clusters(
                 background=label_background,
                 background_alpha=label_background_alpha,
                 background_padding=label_background_padding,
+                background_corner_radius=float(
+                    getattr(style, "label_background_corner_radius", 2.0)
+                ),
                 clip_on=False,
                 text_wrap=style.text_wrap,
                 text_max_width=label_text_max_width,
-                zorder=0.12 + depth * 0.01,
+                zorder=0.16 + depth * 0.01,
                 gid=f"dagua-cluster-label-{name}",
             )
             cluster_label_specs.append(label_spec)
