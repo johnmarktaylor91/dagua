@@ -28,6 +28,7 @@ import torch
 from dagua.edges import (
     BezierCurve,
     bezier_tangent,
+    clip_edge_at_cluster_boundaries,
     edge_endpoint_label_position,
     evaluate_bezier,
     preferred_edge_label_position,
@@ -55,7 +56,16 @@ from dagua.render.edges import CubicBezier as RenderBezier
 from dagua.render.edges import DaguaEdge, DaguaEdgeCollection
 from dagua.render.edges.collection import MIN_TAPER_WIDTH
 from dagua.render.edges.dashes import dash_curve, parse_dash_pattern
-from dagua.render.edges.geometry import adaptive_subdivide, polyline_from_samples
+from dagua.render.edges.geometry import (
+    adaptive_subdivide,
+    polyline_from_samples,
+)
+from dagua.render.edges.geometry import (
+    sample_curve as sample_render_curve,
+)
+from dagua.render.edges.geometry import (
+    subcurve as subcurve_render,
+)
 from dagua.render.edges.ribbon import polyline_ribbon_path
 from dagua.render.text import DaguaText, measure_text_data, render_text
 from dagua.styles import (
@@ -1457,7 +1467,19 @@ def render(
         curves = route_edges(positions, graph.edge_index, graph.node_sizes, graph.direction, graph)
     curves = _graphviz_strict_back_edge_curves(ax, graph, curves)
     curves = _graphviz_strict_reclip_edge_terminals(graph, curves, pos)
-    edge_collection = _draw_edges(ax, graph, curves, positions=pos, svg_hover_map=svg_hover_map)
+    cluster_membership: Dict[int, List[str]] = {}
+    cluster_bboxes: Dict[str, Tuple[float, float, float, float]] = {}
+    if bool(getattr(config, "cluster_aware", True)):
+        cluster_membership, cluster_bboxes = _render_cluster_edge_clip_data(ax, graph, pos, sizes)
+    edge_collection = _draw_edges(
+        ax,
+        graph,
+        curves,
+        positions=pos,
+        svg_hover_map=svg_hover_map,
+        cluster_membership=cluster_membership,
+        cluster_bboxes=cluster_bboxes,
+    )
 
     # --- Layer 2: Nodes ---
     clip_patches = _draw_nodes(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
@@ -4740,6 +4762,169 @@ def _curve_to_render_bezier(curve: BezierCurve) -> RenderBezier:
     return RenderBezier.from_points(curve.p0, curve.cp1, curve.cp2, curve.p1)
 
 
+def _polyline_arc_fraction_for_point(points: np.ndarray, point: Tuple[float, float]) -> float:
+    """Return the normalized arc-length fraction for a point on a polyline.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Polyline vertices with shape ``[N, 2]``.
+    point : tuple[float, float]
+        Point lying on or near one polyline segment.
+
+    Returns
+    -------
+    float
+        Normalized arc-length fraction in ``[0, 1]``.
+    """
+    if points.shape[0] < 2:
+        return 0.0
+    target = np.asarray(point, dtype=float)
+    deltas = np.diff(points, axis=0)
+    segment_lengths = np.linalg.norm(deltas, axis=1)
+    total_length = float(segment_lengths.sum())
+    if total_length <= 1e-9:
+        return 0.0
+
+    best_length = 0.0
+    best_distance = float("inf")
+    traversed = 0.0
+    for index, segment_length in enumerate(segment_lengths):
+        start = points[index]
+        delta = deltas[index]
+        if float(segment_length) <= 1e-9:
+            continue
+        local_t = float(np.dot(target - start, delta) / (segment_length * segment_length))
+        local_t = min(max(local_t, 0.0), 1.0)
+        projection = start + delta * local_t
+        distance = float(np.linalg.norm(projection - target))
+        if distance < best_distance:
+            best_distance = distance
+            best_length = traversed + float(segment_length) * local_t
+        traversed += float(segment_length)
+    return min(max(best_length / total_length, 0.0), 1.0)
+
+
+def _clip_render_body_curve_at_clusters(
+    curve: BezierCurve,
+    src_idx: int,
+    tgt_idx: int,
+    cluster_membership: Dict[int, List[str]],
+    cluster_bboxes: Dict[str, Tuple[float, float, float, float]],
+) -> Tuple[Optional[RenderBezier], Optional[str]]:
+    """Return a body-only curve clipped at a crossed cluster perimeter.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Original edge centerline whose terminals remain used for arrowheads.
+    src_idx : int
+        Source node index.
+    tgt_idx : int
+        Target node index.
+    cluster_membership : dict[int, list[str]]
+        Node index to containing cluster names.
+    cluster_bboxes : dict[str, tuple[float, float, float, float]]
+        Visible-stroke cluster rectangles.
+
+    Returns
+    -------
+    tuple[RenderBezier | None, str | None]
+        Body-only render curve and clipped terminal name, or ``(None, None)``
+        when no clipping is needed.
+    """
+    if src_idx == tgt_idx or not cluster_bboxes:
+        return None, None
+    render_curve = _curve_to_render_bezier(curve)
+    sampled = sample_render_curve(render_curve, 96)
+    sampled_points = [tuple(map(float, point)) for point in sampled]
+    clipped = clip_edge_at_cluster_boundaries(
+        edge_polyline=sampled_points,
+        src_idx=src_idx,
+        tgt_idx=tgt_idx,
+        cluster_membership=cluster_membership,
+        cluster_bboxes=cluster_bboxes,
+    )
+    if len(clipped) == len(sampled_points) and clipped == sampled_points:
+        return None, None
+
+    clipped_tail = clipped[0] != sampled_points[0]
+    clipped_head = clipped[-1] != sampled_points[-1]
+    t0 = _polyline_arc_fraction_for_point(sampled, clipped[0]) if clipped_tail else 0.0
+    t1 = _polyline_arc_fraction_for_point(sampled, clipped[-1]) if clipped_head else 1.0
+    if t1 - t0 <= 1e-6:
+        return None, None
+    if clipped_head and clipped_tail:
+        return subcurve_render(render_curve, t0, t1), "both"
+    if clipped_head:
+        return subcurve_render(render_curve, 0.0, t1), "head"
+    return subcurve_render(render_curve, t0, 1.0), "tail"
+
+
+def _clip_direct_body_curve_at_clusters(
+    curve: BezierCurve,
+    src_idx: int,
+    tgt_idx: int,
+    cluster_membership: Dict[int, List[str]],
+    cluster_bboxes: Dict[str, Tuple[float, float, float, float]],
+) -> Tuple[BezierCurve, Optional[str]]:
+    """Return a direct-render body curve clipped at cluster perimeters.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Original edge centerline whose terminals remain used for arrowheads.
+    src_idx : int
+        Source node index.
+    tgt_idx : int
+        Target node index.
+    cluster_membership : dict[int, list[str]]
+        Node index to containing cluster names.
+    cluster_bboxes : dict[str, tuple[float, float, float, float]]
+        Visible-stroke cluster rectangles.
+
+    Returns
+    -------
+    tuple[BezierCurve, str | None]
+        Body curve and clipped terminal name, or the original curve with
+        ``None`` when clipping is unnecessary.
+    """
+    if src_idx == tgt_idx or not cluster_bboxes:
+        return curve, None
+    if curve.waypoints is not None:
+        points = [tuple(map(float, point)) for point in curve.waypoints]
+    else:
+        render_curve = _curve_to_render_bezier(curve)
+        points = [tuple(map(float, point)) for point in sample_render_curve(render_curve, 96)]
+    clipped = clip_edge_at_cluster_boundaries(
+        edge_polyline=points,
+        src_idx=src_idx,
+        tgt_idx=tgt_idx,
+        cluster_membership=cluster_membership,
+        cluster_bboxes=cluster_bboxes,
+    )
+    if len(clipped) == len(points) and clipped == points:
+        return curve, None
+    clipped_tail = clipped[0] != points[0]
+    clipped_head = clipped[-1] != points[-1]
+    terminal = "both" if clipped_tail and clipped_head else "tail" if clipped_tail else "head"
+    first_bend = clipped[1] if len(clipped) > 2 else clipped[0]
+    last_bend = clipped[-2] if len(clipped) > 2 else clipped[-1]
+    return (
+        BezierCurve(
+            p0=clipped[0],
+            cp1=first_bend,
+            cp2=last_bend,
+            p1=clipped[-1],
+            waypoints=tuple(clipped),
+            routing=curve.routing,
+            direction=curve.direction,
+            step_fraction=curve.step_fraction,
+        ),
+        terminal,
+    )
+
+
 def _edge_requires_direct_render(style: Any) -> bool:
     """Return whether an edge style needs direct matplotlib rendering.
 
@@ -6127,6 +6312,8 @@ def _trim_curve_for_arrows(
     style: Any,
     graph: Any,
     edge_idx: int,
+    skip_head_trim: bool = False,
+    skip_tail_trim: bool = False,
 ) -> BezierCurve:
     """Shorten a direct-rendered curve so arrowheads occupy the endpoint gap.
 
@@ -6142,6 +6329,10 @@ def _trim_curve_for_arrows(
         Graph exposing edge endpoints and node sizes.
     edge_idx : int
         Edge index used to resolve source and target node heights.
+    skip_head_trim : bool, default=False
+        Do not shorten the target-side body endpoint for the arrowhead.
+    skip_tail_trim : bool, default=False
+        Do not shorten the source-side body endpoint for the tail arrow.
 
     Returns
     -------
@@ -6164,7 +6355,7 @@ def _trim_curve_for_arrows(
         end_trim = 0.0
         node_sizes = getattr(graph, "node_sizes", None)
 
-        if getattr(style, "tail_arrow", "none") != "none":
+        if getattr(style, "tail_arrow", "none") != "none" and not skip_tail_trim:
             src_idx = int(graph.edge_index[0, edge_idx])
             src_width = float(node_sizes[src_idx, 0]) if node_sizes is not None else 0.0
             src_height = float(node_sizes[src_idx, 1]) if node_sizes is not None else 0.0
@@ -6181,7 +6372,7 @@ def _trim_curve_for_arrows(
                 float(segment_lengths[0]) * _DIRECT_ARROW_TRIM_MAX_FRACTION,
             )
 
-        if getattr(style, "arrow", "none") != "none":
+        if getattr(style, "arrow", "none") != "none" and not skip_head_trim:
             tgt_idx = int(graph.edge_index[1, edge_idx])
             tgt_width = float(node_sizes[tgt_idx, 0]) if node_sizes is not None else 0.0
             tgt_height = float(node_sizes[tgt_idx, 1]) if node_sizes is not None else 0.0
@@ -6227,7 +6418,7 @@ def _trim_curve_for_arrows(
 
     node_sizes = getattr(graph, "node_sizes", None)
 
-    if getattr(style, "tail_arrow", "none") != "none":
+    if getattr(style, "tail_arrow", "none") != "none" and not skip_tail_trim:
         src_idx = int(graph.edge_index[0, edge_idx])
         src_width = float(node_sizes[src_idx, 0]) if node_sizes is not None else 0.0
         src_height = float(node_sizes[src_idx, 1]) if node_sizes is not None else 0.0
@@ -6250,7 +6441,7 @@ def _trim_curve_for_arrows(
             p0x += tail_dx * tail_fraction
             p0y += tail_dy * tail_fraction
 
-    if getattr(style, "arrow", "none") != "none":
+    if getattr(style, "arrow", "none") != "none" and not skip_head_trim:
         tgt_idx = int(graph.edge_index[1, edge_idx])
         tgt_width = float(node_sizes[tgt_idx, 0]) if node_sizes is not None else 0.0
         tgt_height = float(node_sizes[tgt_idx, 1]) if node_sizes is not None else 0.0
@@ -6287,6 +6478,8 @@ def _draw_edges_direct(
     curves: List[BezierCurve],
     crossings: Optional[List[EdgeCrossing]] = None,
     positions: Optional[np.ndarray] = None,
+    cluster_membership: Optional[Dict[int, List[str]]] = None,
+    cluster_bboxes: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
 ) -> None:
     """Draw all edges with direct matplotlib artists.
 
@@ -6302,10 +6495,34 @@ def _draw_edges_direct(
         Crossing records that should receive jump rendering.
     positions : numpy.ndarray | None, default=None
         Node positions with shape ``[N, 2]`` in data coordinates.
+    cluster_membership : dict[int, list[str]] | None, default=None
+        Node-to-cluster membership for edge-body clipping.
+    cluster_bboxes : dict[str, tuple[float, float, float, float]] | None, default=None
+        Visible cluster rectangles for edge-body clipping.
     """
     for e_idx, curve in enumerate(curves):
         style = _edge_style_for_render(graph, e_idx)
-        trimmed_curve = _trim_curve_for_arrows(ax, curve, style, graph, e_idx)
+        body_curve = curve
+        clipped_terminal: Optional[str] = None
+        if cluster_membership is not None and cluster_bboxes is not None:
+            src_idx = int(graph.edge_index[0, e_idx])
+            tgt_idx = int(graph.edge_index[1, e_idx])
+            body_curve, clipped_terminal = _clip_direct_body_curve_at_clusters(
+                curve,
+                src_idx,
+                tgt_idx,
+                cluster_membership,
+                cluster_bboxes,
+            )
+        trimmed_curve = _trim_curve_for_arrows(
+            ax,
+            body_curve,
+            style,
+            graph,
+            e_idx,
+            skip_head_trim=clipped_terminal in {"head", "both"},
+            skip_tail_trim=clipped_terminal in {"tail", "both"},
+        )
         _draw_direct_edge_body(ax, trimmed_curve, style)
 
     if crossings:
@@ -6426,6 +6643,8 @@ def _build_custom_edge_collection(
     graph: Any,
     curves: List[BezierCurve],
     positions: Optional[np.ndarray] = None,
+    cluster_membership: Optional[Dict[int, List[str]]] = None,
+    cluster_bboxes: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
 ) -> DaguaEdgeCollection:
     """Translate graph edge styles into the custom edge collection.
 
@@ -6439,6 +6658,10 @@ def _build_custom_edge_collection(
         Routed edge curves.
     positions : numpy.ndarray | None, default=None
         Node positions with shape ``[N, 2]`` in data coordinates.
+    cluster_membership : dict[int, list[str]] | None, default=None
+        Node-to-cluster membership for body-only clipping.
+    cluster_bboxes : dict[str, tuple[float, float, float, float]] | None, default=None
+        Visible cluster rectangles for body-only clipping.
 
     Returns
     -------
@@ -6494,9 +6717,21 @@ def _build_custom_edge_collection(
             # those marker-only edges back to a head for rendering.
             arrowhead = tail_arrow
             tail_arrow = "none"
+        body_curve: Optional[RenderBezier] = None
+        body_clip_terminal: Optional[str] = None
+        if cluster_membership is not None and cluster_bboxes is not None:
+            body_curve, body_clip_terminal = _clip_render_body_curve_at_clusters(
+                curve,
+                src_idx,
+                tgt_idx,
+                cluster_membership,
+                cluster_bboxes,
+            )
         edges.append(
             DaguaEdge(
                 curve=_curve_to_render_bezier(curve),
+                body_curve=body_curve,
+                body_clip_terminal=body_clip_terminal,
                 width=_edge_width_data_units(ax, float(style.width)),
                 tapered=bool(getattr(style, "taper", False)),
                 taper_width_start=taper_width_start,
@@ -7154,6 +7389,8 @@ def _draw_edges(
     curves: List[BezierCurve],
     positions: Optional[np.ndarray] = None,
     svg_hover_map: Optional[Dict[str, str]] = None,
+    cluster_membership: Optional[Dict[int, List[str]]] = None,
+    cluster_bboxes: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
 ) -> Optional[DaguaEdgeCollection]:
     """Draw edge bodies and arrowheads with the custom batched renderer.
 
@@ -7169,6 +7406,10 @@ def _draw_edges(
         Node positions with shape ``[N, 2]`` in data coordinates.
     svg_hover_map : dict[str, str], optional
         SVG hover text accumulator.
+    cluster_membership : dict[int, list[str]] | None, default=None
+        Node-to-cluster membership for edge-body clipping.
+    cluster_bboxes : dict[str, tuple[float, float, float, float]] | None, default=None
+        Visible cluster rectangles for edge-body clipping.
     Returns
     -------
     dagua.render.edges.collection.DaguaEdgeCollection | None
@@ -7191,9 +7432,24 @@ def _draw_edges(
         _edge_requires_direct_render(graph.get_style_for_edge(edge_idx))
         for edge_idx in range(len(curves))
     ):
-        _draw_edges_direct(ax, graph, curves, crossings=crossings, positions=positions)
+        _draw_edges_direct(
+            ax,
+            graph,
+            curves,
+            crossings=crossings,
+            positions=positions,
+            cluster_membership=cluster_membership,
+            cluster_bboxes=cluster_bboxes,
+        )
         return None
-    collection = _build_custom_edge_collection(ax, graph, curves, positions=positions)
+    collection = _build_custom_edge_collection(
+        ax,
+        graph,
+        curves,
+        positions=positions,
+        cluster_membership=cluster_membership,
+        cluster_bboxes=cluster_bboxes,
+    )
     collection.render_bodies(ax)
     collection.render_heads(ax)
     return collection
@@ -7887,3 +8143,129 @@ def _draw_clusters(
     if cluster_label_specs:
         _resolve_cluster_label_collisions(ax, cluster_label_placements)
         render_text(ax, cluster_label_specs, display_scale, svg_hover_map)
+
+
+def _render_cluster_edge_clip_data(
+    ax: Any,
+    graph: Any,
+    pos: np.ndarray,
+    sizes: np.ndarray,
+) -> Tuple[Dict[int, List[str]], Dict[str, Tuple[float, float, float, float]]]:
+    """Return node membership and visible cluster boxes for edge clipping.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes used for display-scale dependent label geometry.
+    graph : Any
+        Graph exposing cluster membership and styles.
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]`` in render coordinates.
+    sizes : numpy.ndarray
+        Node sizes with shape ``[N, 2]`` in render coordinates.
+
+    Returns
+    -------
+    tuple[dict[int, list[str]], dict[str, tuple[float, float, float, float]]]
+        Node-to-cluster membership and visible-stroke cluster rectangles.
+    """
+    if not getattr(graph, "clusters", None):
+        return {}, {}
+
+    ordered_clusters = _cluster_render_order(graph)
+    cluster_depths = _cluster_depths(graph, ordered_clusters)
+    display_scale = _compute_display_scale(ax)
+    label_gap = _points_to_data_units(ax, _CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y")
+    cluster_y_maxes = _compute_cluster_y_maxes(
+        graph,
+        pos,
+        sizes,
+        ordered_clusters,
+        cluster_depths,
+        label_gap=label_gap,
+        display_scale=display_scale,
+    )
+    cluster_y_mins = _compute_cluster_y_mins(
+        graph,
+        pos,
+        sizes,
+        ordered_clusters,
+        cluster_depths,
+        label_gap=label_gap,
+        display_scale=display_scale,
+    )
+    membership: Dict[int, List[str]] = {}
+    bboxes: Dict[str, Tuple[float, float, float, float]] = {}
+    min_node_height = float(sizes[:, 1].min()) if sizes.size else 0.0
+
+    for name in ordered_clusters:
+        members = graph.clusters[name]
+        indices = collect_cluster_leaves(members) if isinstance(members, dict) else members
+        if not indices:
+            continue
+        for index in indices:
+            membership.setdefault(int(index), []).append(name)
+
+        style = _cluster_style_for_render(graph, name)
+        depth = cluster_depths.get(name, 0)
+        if _cluster_border_alpha(style, depth) <= 0.0 or float(style.stroke_width) <= 0.0:
+            continue
+
+        depth_padding_step = getattr(style, "depth_padding_step", -3.0)
+        padding = max(float(style.padding) + depth * float(depth_padding_step), 5.0)
+        member_pos = pos[indices]
+        member_sizes = sizes[indices]
+        x_min = float((member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding)
+        x_max = float((member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding)
+        y_min = float(
+            cluster_y_mins.get(
+                name,
+                (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding,
+            )
+        )
+        y_max = float(
+            cluster_y_maxes.get(
+                name,
+                (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding,
+            )
+        )
+
+        label = graph.cluster_labels.get(name, name)
+        label_font_points = max(
+            float(style.font_size) + depth * float(getattr(style, "depth_font_size_step", -0.5)),
+            5.0,
+        )
+        label_font_data = _cluster_font_size_data(
+            label,
+            float(y_max - y_min),
+            min_node_height,
+            label_font_points,
+            str(style.font_size_scaling),
+            display_scale,
+        )
+        label_width = _measure_cluster_label_data(
+            label,
+            font_size_data=label_font_data,
+            font_family=str(style.font_family or RESOLVED_FONT),
+            font_weight=str(style.font_weight),
+            text_wrap=str(style.text_wrap),
+            text_max_width=_cluster_label_text_max_width(style, display_scale),
+        )[0]
+        cluster_height = y_max - y_min
+        cluster_width = x_max - x_min
+        min_cluster_width = cluster_height * 0.65
+        if cluster_width < min_cluster_width:
+            expand_w = (min_cluster_width - cluster_width) / 2.0
+            x_min -= expand_w
+            x_max += expand_w
+        if not _cluster_label_is_outside(str(style.label_position)):
+            label_ox = float(style.label_offset[0]) * display_scale
+            est_label_width = label_width + label_ox * 2.0
+            content_width = x_max - x_min
+            if est_label_width > content_width:
+                expand = (est_label_width - content_width) / 2.0
+                x_min -= expand
+                x_max += expand
+        bboxes[name] = (float(x_min), float(y_min), float(x_max), float(y_max))
+
+    return membership, bboxes
