@@ -52,6 +52,9 @@ class BezierCurve:
     step_fraction: Optional[Union[float, torch.Tensor]] = None
 
 
+Rect = Tuple[float, float, float, float]
+
+
 def _polyline_curve(
     points: Sequence[Tuple[float, float]],
     routing: str = "bezier",
@@ -162,6 +165,213 @@ def _polyline_point_at(points: Sequence[Tuple[float, float]], t: float) -> Tuple
 
     point = points[-1]
     return float(point[0]), float(point[1])
+
+
+def _rect_bounds(rect: Any) -> Rect:
+    """Return normalized rectangle bounds from a tuple or placement box.
+
+    Parameters
+    ----------
+    rect : Any
+        Rectangle as ``(x_min, y_min, x_max, y_max)`` or a
+        ``ClusterPlacementBox``-like object.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Normalized rectangle bounds.
+    """
+    if hasattr(rect, "inner_bbox") and hasattr(rect, "label_band_y_extent"):
+        inner_x_min, _, inner_x_max, _ = rect.inner_bbox
+        y_max = float(rect.label_band_y_extent[0])
+        y_min = y_max - float(rect.height)
+        center_x = (float(inner_x_min) + float(inner_x_max)) / 2.0
+        x_min = center_x - float(rect.width) / 2.0
+        x_max = center_x + float(rect.width) / 2.0
+    else:
+        x_min, y_min, x_max, y_max = rect
+    return (
+        min(float(x_min), float(x_max)),
+        min(float(y_min), float(y_max)),
+        max(float(x_min), float(x_max)),
+        max(float(y_min), float(y_max)),
+    )
+
+
+def _point_in_rect(point: Tuple[float, float], rect: Rect) -> bool:
+    """Return whether a point lies inside or on a rectangle.
+
+    Parameters
+    ----------
+    point : tuple[float, float]
+        Point to test.
+    rect : tuple[float, float, float, float]
+        Rectangle bounds as ``(x_min, y_min, x_max, y_max)``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the point is inside the rectangle.
+    """
+    x_min, y_min, x_max, y_max = rect
+    return x_min <= point[0] <= x_max and y_min <= point[1] <= y_max
+
+
+def _segment_rect_intersection(
+    p0: Tuple[float, float],
+    p1: Tuple[float, float],
+    rect: Rect,
+) -> Optional[Tuple[float, Tuple[float, float]]]:
+    """Return the first segment intersection with a rectangle perimeter.
+
+    Parameters
+    ----------
+    p0 : tuple[float, float]
+        Segment start.
+    p1 : tuple[float, float]
+        Segment end.
+    rect : tuple[float, float, float, float]
+        Rectangle bounds as ``(x_min, y_min, x_max, y_max)``.
+
+    Returns
+    -------
+    tuple[float, tuple[float, float]] | None
+        Segment parameter and point for the first intersection, or ``None``.
+    """
+    x_min, y_min, x_max, y_max = rect
+    x0, y0 = p0
+    x1, y1 = p1
+    dx = x1 - x0
+    dy = y1 - y0
+    candidates: List[Tuple[float, Tuple[float, float]]] = []
+
+    if abs(dx) > 1e-12:
+        for x_edge in (x_min, x_max):
+            t = (x_edge - x0) / dx
+            if 0.0 <= t <= 1.0:
+                y = y0 + t * dy
+                if y_min - 1e-9 <= y <= y_max + 1e-9:
+                    candidates.append((float(t), (float(x_edge), float(y))))
+    if abs(dy) > 1e-12:
+        for y_edge in (y_min, y_max):
+            t = (y_edge - y0) / dy
+            if 0.0 <= t <= 1.0:
+                x = x0 + t * dx
+                if x_min - 1e-9 <= x <= x_max + 1e-9:
+                    candidates.append((float(t), (float(x), float(y_edge))))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0]
+
+
+def polyline_intersect_rect(
+    polyline: Sequence[Tuple[float, float]],
+    rect: Any,
+) -> Optional[Tuple[int, Tuple[float, float]]]:
+    """Find the first intersection of a polyline with a rectangle perimeter.
+
+    Parameters
+    ----------
+    polyline : sequence[tuple[float, float]]
+        Ordered edge-body points.
+    rect : Any
+        Rectangle as ``(x_min, y_min, x_max, y_max)`` or a placement box.
+
+    Returns
+    -------
+    tuple[int, tuple[float, float]] | None
+        Segment index and intersection point, or ``None`` when the polyline
+        never crosses the perimeter.
+    """
+    if len(polyline) < 2:
+        return None
+    bounds = _rect_bounds(rect)
+    for index in range(len(polyline) - 1):
+        p0 = (float(polyline[index][0]), float(polyline[index][1]))
+        p1 = (float(polyline[index + 1][0]), float(polyline[index + 1][1]))
+        if _point_in_rect(p0, bounds) == _point_in_rect(p1, bounds):
+            continue
+        intersection = _segment_rect_intersection(p0, p1, bounds)
+        if intersection is not None:
+            _, point = intersection
+            return index, point
+    return None
+
+
+def clip_edge_at_cluster_boundaries(
+    edge_polyline: List[Tuple[float, float]],
+    src_idx: int,
+    tgt_idx: int,
+    cluster_membership: Dict[int, List[str]],
+    cluster_bboxes: Dict[str, Any],
+    skip_inner_cluster: bool = True,
+) -> List[Tuple[float, float]]:
+    """Clip an edge polyline at cluster perimeters.
+
+    Parameters
+    ----------
+    edge_polyline : list[tuple[float, float]]
+        Ordered points along the visible edge body from source to target.
+    src_idx : int
+        Source node index.
+    tgt_idx : int
+        Target node index.
+    cluster_membership : dict[int, list[str]]
+        Node index to cluster names containing that node.
+    cluster_bboxes : dict[str, Any]
+        Cluster name to rectangle bounds or ``ClusterPlacementBox``.
+    skip_inner_cluster : bool, default=True
+        When ``True``, clusters containing both endpoints are ignored.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        A possibly shorter polyline with the endpoint-side portion inside the
+        outermost crossed cluster removed.
+    """
+    if src_idx == tgt_idx or len(edge_polyline) < 2:
+        return edge_polyline
+
+    src_clusters = set(cluster_membership.get(int(src_idx), []))
+    tgt_clusters = set(cluster_membership.get(int(tgt_idx), []))
+    crossed_clusters = [
+        name
+        for name in cluster_bboxes
+        if (name in src_clusters) != (name in tgt_clusters)
+        and (not skip_inner_cluster or name not in src_clusters.intersection(tgt_clusters))
+    ]
+    if not crossed_clusters:
+        return edge_polyline
+
+    clipped = list(edge_polyline)
+    target_side_clusters = [name for name in crossed_clusters if name in tgt_clusters]
+    source_side_clusters = [name for name in crossed_clusters if name in src_clusters]
+
+    if target_side_clusters:
+        best: Optional[Tuple[int, Tuple[float, float]]] = None
+        for name in target_side_clusters:
+            hit = polyline_intersect_rect(clipped, cluster_bboxes[name])
+            if hit is not None and (best is None or hit[0] < best[0]):
+                best = hit
+        if best is not None:
+            segment_index, point = best
+            clipped = [*clipped[: segment_index + 1], point]
+
+    if source_side_clusters:
+        reversed_polyline = list(reversed(clipped))
+        best_reversed: Optional[Tuple[int, Tuple[float, float]]] = None
+        for name in source_side_clusters:
+            hit = polyline_intersect_rect(reversed_polyline, cluster_bboxes[name])
+            if hit is not None and (best_reversed is None or hit[0] < best_reversed[0]):
+                best_reversed = hit
+        if best_reversed is not None:
+            segment_index, point = best_reversed
+            retained_reversed = [*reversed_polyline[: segment_index + 1], point]
+            clipped = list(reversed(retained_reversed))
+
+    return clipped
 
 
 def _polyline_tangent_at(points: Sequence[Tuple[float, float]], t: float) -> Tuple[float, float]:
