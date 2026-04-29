@@ -155,6 +155,7 @@ _MULTILINE_LABEL_REDUCTION = 0.5
 # overpowering narrow ribbons or stacked parallel edges.
 _EDGE_LABEL_HEIGHT_FRACTION = 0.18
 _CLUSTER_LABEL_HEIGHT_FRACTION = 0.06
+_CLUSTER_LABEL_ZORDER = 2.12
 
 
 def _text_font_family(style: Any) -> str:
@@ -235,6 +236,7 @@ _AUTO_CONTRAST_CLUSTER_STROKE_BLEND = 0.5
 _AUTO_CONTRAST_LABEL_BACKGROUND_BLEND = 0.18
 _AUTO_CONTRAST_TEXT_BLEND = 0.9
 _CLUSTER_RENDER_BBOX_EXTRA_CAP_POINTS = 2.0
+_MIN_CLUSTER_INNER_HEIGHT_POINTS = 1.0
 
 
 def _font_size_user_scale(font_size_points: float, baseline_points: float) -> float:
@@ -3837,6 +3839,59 @@ def _cluster_bbox_from_inner_bounds(
     )
 
 
+def _cluster_min_render_height(
+    ax: Any,
+    style: ClusterStyle,
+    member_pos: np.ndarray,
+    member_sizes: np.ndarray,
+    label_height: float,
+    label_gap: float,
+) -> float:
+    """Return the minimum full render-box height for one cluster.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes used for point-to-data conversion.
+    style : ClusterStyle
+        Cluster style controlling label placement.
+    member_pos : numpy.ndarray
+        Member center positions with shape ``[N, 2]``.
+    member_sizes : numpy.ndarray
+        Member sizes with shape ``[N, 2]``.
+    label_height : float
+        Measured label height in data units.
+    label_gap : float
+        Extra vertical label gap in data units.
+
+    Returns
+    -------
+    float
+        Minimum full bbox height in data units.
+    """
+    if member_pos.size and member_sizes.size:
+        member_tops = member_pos[:, 1] + member_sizes[:, 1] / 2.0
+        member_bottoms = member_pos[:, 1] - member_sizes[:, 1] / 2.0
+        content_height = float(member_tops.max() - member_bottoms.min())
+        min_member_height = float(member_sizes[:, 1].min())
+    else:
+        content_height = 0.0
+        min_member_height = 0.0
+
+    min_inner_height = max(
+        content_height,
+        min_member_height,
+        _points_to_data_units(ax, _MIN_CLUSTER_INNER_HEIGHT_POINTS, "y"),
+    )
+    label_band = (
+        float(label_height) + float(label_gap)
+        if _cluster_label_expands_top(str(style.label_position))
+        or _cluster_label_expands_bottom(str(style.label_position))
+        else 0.0
+    )
+    return label_band + min_inner_height
+
+
 def _compute_cluster_render_bboxes(
     ax: Any,
     graph: Any,
@@ -3848,6 +3903,7 @@ def _compute_cluster_render_bboxes(
     cluster_y_maxes: Dict[str, float],
     display_scale: float,
     cluster_aware: bool,
+    label_gap: float = 0.0,
 ) -> Dict[str, _ClusterRenderBox]:
     """Return final rendered cluster boxes with parent containment enforced.
 
@@ -3874,6 +3930,9 @@ def _compute_cluster_render_bboxes(
     cluster_aware : bool
         Whether root-level label/min-width expansion is capped to the
         placement footprint.
+    label_gap : float, default=0.0
+        Extra vertical label gap in data units used to preserve the header
+        band when top caps are applied.
 
     Returns
     -------
@@ -3929,17 +3988,28 @@ def _compute_cluster_render_bboxes(
             str(style.font_size_scaling),
             display_scale,
         )
-        label_width = _measure_cluster_label_data(
+        label_width, label_height = _measure_cluster_label_data(
             label,
             font_size_data=label_font_data,
             font_family=str(style.font_family or RESOLVED_FONT),
             font_weight=str(style.font_weight),
             text_wrap=str(style.text_wrap),
             text_max_width=_cluster_label_text_max_width(style, display_scale),
-        )[0]
+        )
         top_cap = _graphviz_strict_cluster_top_cap(ax, graph, indices, pos, sizes)
         if top_cap is not None:
             y_max = min(float(y_max), top_cap)
+
+        min_cluster_height = _cluster_min_render_height(
+            ax,
+            style,
+            member_pos,
+            member_sizes,
+            label_height,
+            label_gap,
+        )
+        if y_max - y_min < min_cluster_height:
+            y_max = y_min + min_cluster_height
 
         cluster_height = y_max - y_min
         cluster_width = x_max - x_min
@@ -4161,6 +4231,7 @@ def _expand_axes_for_clusters(
             cluster_y_maxes,
             display_scale,
             cluster_aware=cluster_aware,
+            label_gap=_points_to_data_units(ax, _CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y"),
         )
         x_min, x_max = ax.get_xlim()
         y_min, y_max = ax.get_ylim()
@@ -8433,6 +8504,7 @@ def _draw_clusters(
         cluster_y_maxes,
         display_scale,
         cluster_aware,
+        label_gap=label_gap,
     )
 
     for name in ordered_clusters:
@@ -8562,7 +8634,7 @@ def _draw_clusters(
                 clip_on=False,
                 text_wrap=style.text_wrap,
                 text_max_width=label_text_max_width,
-                zorder=1.5 + depth * 0.01,
+                zorder=_CLUSTER_LABEL_ZORDER + depth * 0.01,
                 gid=f"dagua-cluster-label-{name}",
             )
             cluster_label_specs.append(label_spec)
@@ -8663,6 +8735,7 @@ def _render_cluster_edge_clip_data(
         cluster_y_maxes,
         display_scale,
         cluster_aware,
+        label_gap=label_gap,
     )
     membership: Dict[int, List[str]] = {}
     bboxes: Dict[str, Tuple[float, float, float, float]] = {}
