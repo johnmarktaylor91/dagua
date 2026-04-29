@@ -110,6 +110,8 @@ class TestClusterStyleNewFields:
     def test_defaults(self):
         s = ClusterStyle()
         assert s.padding == 38.0
+        assert s.label_position == "top-left"
+        assert s.label_background == ""
         assert s.font_family == ""
         assert s.label_offset == (10.0, 12.0)
         assert s.text_wrap == "none"
@@ -304,6 +306,10 @@ def test_graphviz_strict_theme_loads() -> None:
     assert theme.cluster_style.font_size == 14.0
     assert theme.cluster_style.font_weight == "regular"
     assert theme.cluster_style.font_family == "Times,serif"
+    assert theme.cluster_style.label_position == "top-center"
+    assert theme.cluster_style.label_background == "@background"
+    assert theme.cluster_style.label_background_opacity == pytest.approx(1.0)
+    assert theme.cluster_style.label_background_padding == (4.0, 2.0)
     assert theme.cluster_style.opacity == pytest.approx(1.0)
     assert theme.cluster_style.fill_opacity == pytest.approx(0.0)
     assert theme.cluster_style.border_opacity == pytest.approx(1.0)
@@ -354,6 +360,10 @@ def test_graphviz_improved_theme_loads() -> None:
     assert theme.get_edge_style("buffer").opacity == 0.7
     assert theme.cluster_style.stroke == "#999999"
     assert theme.cluster_style.opacity == 0.8
+    assert theme.cluster_style.label_position == "top-center"
+    assert theme.cluster_style.label_background == "@background"
+    assert theme.cluster_style.label_background_opacity == pytest.approx(1.0)
+    assert theme.cluster_style.label_background_padding == (4.0, 2.0)
     assert theme.graph_style.edge_label_background_opacity == 1.0
 
 
