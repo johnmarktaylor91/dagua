@@ -310,7 +310,7 @@ def test_graphviz_strict_theme_loads() -> None:
     assert theme.cluster_style.font_size_scaling == "fixed"
     assert theme.cluster_style.depth_fill_step == pytest.approx(0.0)
     assert theme.cluster_style.depth_stroke_step == pytest.approx(0.0)
-    assert theme.graph_style.edge_label_font_size == pytest.approx(11.0)
+    assert theme.graph_style.edge_label_font_size == pytest.approx(14.0)
     assert theme.graph_style.edge_label_background_opacity == 1.0
 
 

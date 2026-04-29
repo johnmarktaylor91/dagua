@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy as _copy
 from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
@@ -1129,6 +1130,38 @@ class DaguaGraph:
             global_default=global_default,
         )
 
+    def _apply_graphviz_strict_edge_attrs(self, idx: int, style: EdgeStyle) -> EdgeStyle:
+        """Apply strict Graphviz edge attributes that live outside Dagua style.
+
+        Parameters
+        ----------
+        idx : int
+            Edge index.
+        style : EdgeStyle
+            Cascaded Dagua edge style.
+
+        Returns
+        -------
+        EdgeStyle
+            Style with supported native Graphviz per-edge attributes applied.
+        """
+
+        if getattr(getattr(self, "_theme", None), "name", "") != "graphviz_strict":
+            return style
+        attrs = getattr(self, "_graphviz_edge_attrs", {}).get(idx, {})
+        if not isinstance(attrs, dict):
+            return style
+        arrowsize = attrs.get("arrowsize")
+        if arrowsize is None:
+            return style
+        try:
+            return dataclass_replace(
+                style,
+                arrowsize=max(float(str(arrowsize).strip('"')), 0.0),
+            )
+        except ValueError:
+            return style
+
     def get_style_for_edge(self, idx: int) -> EdgeStyle:
         """Get effective style for an edge via 5-level cascade.
 
@@ -1138,6 +1171,11 @@ class DaguaGraph:
         3. Graph default_edge_style
         4. Theme type lookup (back edge > edge_type > default)
         5. Global defaults (dagua.configure())
+
+        Returns
+        -------
+        EdgeStyle
+            Effective edge style after cascade and strict Graphviz attr shims.
         """
         per_element = self.edge_styles[idx] if idx < len(self.edge_styles) else None
 
@@ -1181,15 +1219,16 @@ class DaguaGraph:
             and self.default_edge_style is None
             and global_default is None
         ):
-            return theme_style
+            return self._apply_graphviz_strict_edge_attrs(idx, theme_style)
 
-        return resolve_edge_style(
+        resolved_style = resolve_edge_style(
             per_element=per_element,
             cluster_member_styles=cluster_member_styles,
             theme_style=theme_style,
             graph_default=self.default_edge_style,
             global_default=global_default,
         )
+        return self._apply_graphviz_strict_edge_attrs(idx, resolved_style)
 
     # --- Cluster member style helpers ---
 
