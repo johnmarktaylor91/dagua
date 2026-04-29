@@ -113,6 +113,7 @@ _SELF_LOOP_ARROWHEAD_MAX_WIDTH_RATIO = 0.55
 _CLUSTER_LABEL_VERTICAL_GAP_POINTS = 2.0
 _GRAPHVIZ_STRICT_ELLIPSE_CIRCUMSCRIBE = 1.18
 _GRAPHVIZ_STRICT_ELLIPSE_ASPECT_CAP = 3.0
+_GRAPHVIZ_STRICT_MIN_OVAL_ASPECT = 1.85
 _GRAPHVIZ_STRICT_CLUSTER_HORIZONTAL_SEPARATION_POINTS = 18.0
 _GRAPHVIZ_STRICT_CLUSTER_LABEL_MASK_PADDING_POINTS = 4.0
 _GRAPHVIZ_STRICT_CLUSTER_EXTERNAL_NODE_GAP_POINTS = 36.0
@@ -931,6 +932,14 @@ def _edge_style_for_render(graph: Any, edge_idx: int) -> EdgeStyle:
         Render-local edge style. The graph's stored style is not mutated.
     """
     style = graph.get_style_for_edge(edge_idx)
+    if _is_graphviz_strict_render(graph):
+        attrs = getattr(graph, "_graphviz_edge_attrs", {}).get(edge_idx, {})
+        arrowsize = attrs.get("arrowsize") if isinstance(attrs, dict) else None
+        if arrowsize is not None:
+            try:
+                style = replace(style, arrowsize=max(float(str(arrowsize).strip('"')), 0.0))
+            except ValueError:
+                pass
     background_color = str(graph.graph_style.background_color)
     if not _should_auto_contrast(graph, background_color):
         return style
@@ -1005,6 +1014,25 @@ def _cluster_style_for_render(graph: Any, cluster_name: str) -> ClusterStyle:
         return style
 
     return replace(style, **replacement_fields)
+
+
+def _strict_content_figsize(width_points: float, height_points: float) -> Tuple[float, float]:
+    """Return Graphviz-native figure inches for a strict content bbox.
+
+    Parameters
+    ----------
+    width_points : float
+        Rendered content width in typographic points, including strict margin.
+    height_points : float
+        Rendered content height in typographic points, including strict margin.
+
+    Returns
+    -------
+    tuple[float, float]
+        Matplotlib figure size in inches using Graphviz's 72pt/in convention.
+    """
+
+    return (max(width_points, 1.0) / 72.0, max(height_points, 1.0) / 72.0)
 
 
 def _detect_output_format(output: Optional[str], format: Optional[str]) -> Optional[str]:
@@ -1381,7 +1409,9 @@ def render(
         y_max += title_band_height * _TITLE_BAND_HEIGHT_MULTIPLIER
         height = y_max - y_min
 
-    if figsize is None:
+    if _is_graphviz_strict_render(graph) and figsize is None:
+        figsize = _strict_content_figsize(float(width), float(height))
+    elif figsize is None:
         max_w, max_h = gs.max_figsize
         min_w, min_h = gs.min_figsize
         scale = max(1.0, min(width / 100, max_w))
@@ -2864,6 +2894,11 @@ def _graphviz_strict_ellipse_shape_spec(spec: ShapeSpec, style: NodeStyle) -> Sh
         min_height = float(style.min_height) if style.min_height is not None else 0.0
         base_height = min(base_height, max(min_height, float(spec.height) / aspect))
     adjusted_height = base_height * scale
+    if str(style.shape) == "ellipse" and adjusted_width <= 70.0:
+        adjusted_width = max(
+            adjusted_width,
+            adjusted_height * _GRAPHVIZ_STRICT_MIN_OVAL_ASPECT,
+        )
     if str(style.shape) == "circle":
         adjusted_width = adjusted_height = max(adjusted_width, adjusted_height)
     return ShapeSpec(
