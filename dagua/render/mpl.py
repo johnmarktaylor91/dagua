@@ -1458,8 +1458,8 @@ def render(
     ax.set_ylim(y_min, y_max)
     ax.set_aspect("auto" if _is_graphviz_strict_render(graph) else "equal")
     ax.axis("off")
-    _expand_axes_for_clusters(ax, graph, pos, sizes, margin)
     cluster_aware = bool(getattr(config, "cluster_aware", True))
+    _expand_axes_for_clusters(ax, graph, pos, sizes, margin, cluster_aware=cluster_aware)
 
     # --- Layer 0: Cluster backgrounds ---
     _draw_clusters(ax, graph, pos, sizes, cluster_aware=cluster_aware, svg_hover_map=svg_hover_map)
@@ -3604,6 +3604,22 @@ class _ClusterLabelPlacement:
     parent_name: Optional[str]
 
 
+@dataclass(frozen=True)
+class _ClusterRenderBox:
+    """Rendered cluster bounds and padding metadata.
+
+    Parameters
+    ----------
+    bbox : tuple[float, float, float, float]
+        Rendered cluster bounds as ``(x_min, y_min, x_max, y_max)``.
+    padding : float
+        Effective cluster padding in render data units.
+    """
+
+    bbox: Tuple[float, float, float, float]
+    padding: float
+
+
 def _graphviz_strict_cluster_top_cap(
     ax: Any,
     graph: Any,
@@ -3821,6 +3837,158 @@ def _cluster_bbox_from_inner_bounds(
     )
 
 
+def _compute_cluster_render_bboxes(
+    ax: Any,
+    graph: Any,
+    pos: np.ndarray,
+    sizes: np.ndarray,
+    ordered_clusters: Sequence[str],
+    cluster_depths: Dict[str, int],
+    cluster_y_mins: Dict[str, float],
+    cluster_y_maxes: Dict[str, float],
+    display_scale: float,
+    cluster_aware: bool,
+) -> Dict[str, _ClusterRenderBox]:
+    """Return final rendered cluster boxes with parent containment enforced.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes used for point-to-data conversion.
+    graph : Any
+        Graph exposing cluster membership, labels, parents, and styles.
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]`` in data coordinates.
+    sizes : numpy.ndarray
+        Node sizes with shape ``[N, 2]`` in data coordinates.
+    ordered_clusters : sequence[str]
+        Parent-first cluster render order.
+    cluster_depths : dict[str, int]
+        Nesting depth per cluster name.
+    cluster_y_mins : dict[str, float]
+        Precomputed bottom bounds by cluster name.
+    cluster_y_maxes : dict[str, float]
+        Precomputed top bounds by cluster name.
+    display_scale : float
+        Point-to-data conversion for text and offsets.
+    cluster_aware : bool
+        Whether root-level label/min-width expansion is capped to the
+        placement footprint.
+
+    Returns
+    -------
+    dict[str, _ClusterRenderBox]
+        Final boxes keyed by cluster name. Parent boxes are expanded after the
+        first pass so every child sits strictly inside its parent padding.
+    """
+    cluster_parents = getattr(graph, "cluster_parents", {}) or {}
+    min_node_height = float(sizes[:, 1].min()) if sizes.size else 0.0
+    cap_x = _points_to_data_units(ax, _CLUSTER_RENDER_BBOX_EXTRA_CAP_POINTS, "x")
+    boxes: Dict[str, _ClusterRenderBox] = {}
+
+    for name in ordered_clusters:
+        members = graph.clusters[name]
+        indices = collect_cluster_leaves(members) if isinstance(members, dict) else members
+        if not indices:
+            continue
+
+        style = _cluster_style_for_render(graph, name)
+        depth = cluster_depths.get(name, 0)
+        depth_padding_step = getattr(style, "depth_padding_step", -3.0)
+        padding = max(float(style.padding) + depth * float(depth_padding_step), 5.0)
+        member_pos = pos[indices]
+        member_sizes = sizes[indices]
+
+        x_min = float((member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding)
+        x_max = float((member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding)
+        base_x_min = x_min
+        base_x_max = x_max
+        y_min = float(
+            cluster_y_mins.get(
+                name,
+                (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding,
+            )
+        )
+        y_max = float(
+            cluster_y_maxes.get(
+                name,
+                (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding,
+            )
+        )
+
+        label = graph.cluster_labels.get(name, name)
+        label_font_points = max(
+            float(style.font_size) + depth * float(getattr(style, "depth_font_size_step", -0.5)),
+            5.0,
+        )
+        label_font_data = _cluster_font_size_data(
+            label,
+            float(y_max - y_min),
+            min_node_height,
+            label_font_points,
+            str(style.font_size_scaling),
+            display_scale,
+        )
+        label_width = _measure_cluster_label_data(
+            label,
+            font_size_data=label_font_data,
+            font_family=str(style.font_family or RESOLVED_FONT),
+            font_weight=str(style.font_weight),
+            text_wrap=str(style.text_wrap),
+            text_max_width=_cluster_label_text_max_width(style, display_scale),
+        )[0]
+        top_cap = _graphviz_strict_cluster_top_cap(ax, graph, indices, pos, sizes)
+        if top_cap is not None:
+            y_max = min(float(y_max), top_cap)
+
+        cluster_height = y_max - y_min
+        cluster_width = x_max - x_min
+        min_cluster_width = cluster_height * 0.65
+        if cluster_width < min_cluster_width:
+            expand_w = (min_cluster_width - cluster_width) / 2.0
+            x_min -= expand_w
+            x_max += expand_w
+
+        if not _cluster_label_is_outside(str(style.label_position)):
+            label_ox = float(style.label_offset[0]) * display_scale
+            est_label_width = label_width + label_ox * 2.0
+            content_width = x_max - x_min
+            if est_label_width > content_width:
+                expand = (est_label_width - content_width) / 2.0
+                x_min -= expand
+                x_max += expand
+
+        if cluster_aware and cluster_parents.get(name) is None:
+            x_min = max(float(x_min), float(base_x_min) - cap_x)
+            x_max = min(float(x_max), float(base_x_max) + cap_x)
+
+        boxes[name] = _ClusterRenderBox(
+            bbox=(float(x_min), float(y_min), float(x_max), float(y_max)),
+            padding=float(padding),
+        )
+
+    for child_name in reversed(ordered_clusters):
+        child = boxes.get(child_name)
+        parent_name = cluster_parents.get(child_name)
+        parent = boxes.get(parent_name) if parent_name is not None else None
+        if child is None or parent is None:
+            continue
+        px_min, py_min, px_max, py_max = parent.bbox
+        cx_min, cy_min, cx_max, cy_max = child.bbox
+        containment_padding = max(min(parent.padding, child.padding), 1e-6)
+        boxes[parent_name] = _ClusterRenderBox(
+            bbox=(
+                min(px_min, cx_min - containment_padding),
+                min(py_min, cy_min - containment_padding),
+                max(px_max, cx_max + containment_padding),
+                max(py_max, cy_max + containment_padding),
+            ),
+            padding=parent.padding,
+        )
+
+    return boxes
+
+
 def _compute_cluster_y_mins(
     graph: Any,
     pos: np.ndarray,
@@ -3927,6 +4095,7 @@ def _expand_axes_for_clusters(
     pos: np.ndarray,
     sizes: np.ndarray,
     margin: float,
+    cluster_aware: bool = True,
 ) -> None:
     """Expand axes limits so cluster geometry fits after display scaling.
 
@@ -3942,6 +4111,9 @@ def _expand_axes_for_clusters(
         Node sizes with shape ``[N, 2]`` in data coordinates.
     margin : float
         Extra outer padding reserved around the cluster bounds.
+    cluster_aware : bool, default=True
+        Whether render-time root bbox caps should match the cluster-aware
+        renderer mode.
 
     Returns
     -------
@@ -3978,6 +4150,18 @@ def _expand_axes_for_clusters(
             label_gap=_points_to_data_units(ax, _CLUSTER_LABEL_VERTICAL_GAP_POINTS, "y"),
             display_scale=display_scale,
         )
+        cluster_render_boxes = _compute_cluster_render_bboxes(
+            ax,
+            graph,
+            pos,
+            sizes,
+            ordered_clusters,
+            cluster_depths,
+            cluster_y_mins,
+            cluster_y_maxes,
+            display_scale,
+            cluster_aware=cluster_aware,
+        )
         x_min, x_max = ax.get_xlim()
         y_min, y_max = ax.get_ylim()
 
@@ -3989,20 +4173,10 @@ def _expand_axes_for_clusters(
 
             style = _cluster_style_for_render(graph, name)
             depth = cluster_depths.get(name, 0)
-            depth_padding_step = getattr(style, "depth_padding_step", -3.0)
-            padding = max(style.padding + depth * depth_padding_step, 5.0)
-            member_pos = pos[indices]
-            member_sizes = sizes[indices]
-            cx_min = (member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding
-            cx_max = (member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding
-            cy_min = cluster_y_mins.get(
-                name,
-                (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding,
-            )
-            cy_max = cluster_y_maxes.get(
-                name,
-                (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding,
-            )
+            render_box = cluster_render_boxes.get(name)
+            if render_box is None:
+                continue
+            cx_min, cy_min, cx_max, cy_max = render_box.bbox
 
             label = graph.cluster_labels.get(name, name)
             label_font_points = max(
@@ -4027,22 +4201,9 @@ def _expand_axes_for_clusters(
                 text_wrap=str(style.text_wrap),
                 text_max_width=_cluster_label_text_max_width(style, display_scale),
             )
-            cluster_width = cx_max - cx_min
-            min_cluster_width = cluster_height * 0.65
-            if cluster_width < min_cluster_width:
-                expand_width = (min_cluster_width - cluster_width) / 2.0
-                cx_min -= expand_width
-                cx_max += expand_width
 
             label_offset_x = float(style.label_offset[0]) * display_scale
             label_offset_y = float(style.label_offset[1]) * display_scale
-            if not _cluster_label_is_outside(str(style.label_position)):
-                required_label_width = label_width + label_offset_x * 2.0
-                current_width = cx_max - cx_min
-                if required_label_width > current_width:
-                    expand_width = (required_label_width - current_width) / 2.0
-                    cx_min -= expand_width
-                    cx_max += expand_width
 
             x_min = min(x_min, float(cx_min) - margin)
             x_max = max(x_max, float(cx_max) + margin)
@@ -4813,6 +4974,258 @@ def _polyline_arc_fraction_for_point(points: np.ndarray, point: Tuple[float, flo
     return min(max(best_length / total_length, 0.0), 1.0)
 
 
+def _point_inside_bbox(point: np.ndarray, bbox: Tuple[float, float, float, float]) -> bool:
+    """Return whether a point lies inside a cluster bbox.
+
+    Parameters
+    ----------
+    point : numpy.ndarray
+        Point with shape ``[2]``.
+    bbox : tuple[float, float, float, float]
+        Rectangle bounds as ``(x_min, y_min, x_max, y_max)``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the point is inside or on the rectangle boundary.
+    """
+    x_min, y_min, x_max, y_max = bbox
+    return bool(x_min <= float(point[0]) <= x_max and y_min <= float(point[1]) <= y_max)
+
+
+def _transition_t(
+    points: np.ndarray,
+    index: int,
+    bbox: Tuple[float, float, float, float],
+) -> float:
+    """Approximate the parametric fraction where a sample segment crosses a bbox.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Uniformly parameterized samples with shape ``[N, 2]``.
+    index : int
+        Segment start index.
+    bbox : tuple[float, float, float, float]
+        Rectangle bounds as ``(x_min, y_min, x_max, y_max)``.
+
+    Returns
+    -------
+    float
+        Approximate curve parameter in ``[0, 1]`` at the perimeter crossing.
+    """
+    start = points[index]
+    end = points[index + 1]
+    x_min, y_min, x_max, y_max = bbox
+    candidates: List[float] = []
+    dx = float(end[0] - start[0])
+    dy = float(end[1] - start[1])
+    if abs(dx) > 1e-12:
+        candidates.extend([(x_min - float(start[0])) / dx, (x_max - float(start[0])) / dx])
+    if abs(dy) > 1e-12:
+        candidates.extend([(y_min - float(start[1])) / dy, (y_max - float(start[1])) / dy])
+    for alpha in sorted(value for value in candidates if 0.0 <= value <= 1.0):
+        probe = start + (end - start) * alpha
+        if _point_inside_bbox(probe, bbox):
+            return (float(index) + float(alpha)) / float(points.shape[0] - 1)
+    return float(index + 0.5) / float(points.shape[0] - 1)
+
+
+def _source_exit_t(points: np.ndarray, bbox: Tuple[float, float, float, float]) -> Optional[float]:
+    """Return the first exit parameter from a source-side cluster.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Uniformly parameterized curve samples with shape ``[N, 2]``.
+    bbox : tuple[float, float, float, float]
+        Cluster rectangle bounds.
+
+    Returns
+    -------
+    float | None
+        Exit parameter, or ``None`` when the sampled curve does not start
+        inside and leave the rectangle.
+    """
+    if not _point_inside_bbox(points[0], bbox):
+        return None
+    for index in range(points.shape[0] - 1):
+        if _point_inside_bbox(points[index], bbox) and not _point_inside_bbox(
+            points[index + 1], bbox
+        ):
+            return _transition_t(points, index, bbox)
+    return None
+
+
+def _target_entry_t(points: np.ndarray, bbox: Tuple[float, float, float, float]) -> Optional[float]:
+    """Return the last entry parameter into a target-side cluster.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Uniformly parameterized curve samples with shape ``[N, 2]``.
+    bbox : tuple[float, float, float, float]
+        Cluster rectangle bounds.
+
+    Returns
+    -------
+    float | None
+        Entry parameter, or ``None`` when the sampled curve does not enter and
+        end inside the rectangle.
+    """
+    if not _point_inside_bbox(points[-1], bbox):
+        return None
+    for index in range(points.shape[0] - 2, -1, -1):
+        if not _point_inside_bbox(points[index], bbox) and _point_inside_bbox(
+            points[index + 1], bbox
+        ):
+            return _transition_t(points, index, bbox)
+    return None
+
+
+def _foreign_inside_intervals(
+    points: np.ndarray,
+    bbox: Tuple[float, float, float, float],
+    t0: float,
+    t1: float,
+) -> List[Tuple[float, float]]:
+    """Return sampled parameter intervals that pass through a foreign cluster.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Uniformly parameterized curve samples with shape ``[N, 2]``.
+    bbox : tuple[float, float, float, float]
+        Cluster rectangle bounds.
+    t0 : float
+        Visible interval start.
+    t1 : float
+        Visible interval end.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Sorted ``(entry_t, exit_t)`` intervals inside the rectangle.
+    """
+    intervals: List[Tuple[float, float]] = []
+    inside = _point_inside_bbox(points[0], bbox)
+    entry_t = 0.0 if inside else None
+    for index in range(points.shape[0] - 1):
+        next_inside = _point_inside_bbox(points[index + 1], bbox)
+        if inside != next_inside:
+            crossing_t = _transition_t(points, index, bbox)
+            if not inside:
+                entry_t = crossing_t
+            elif entry_t is not None:
+                intervals.append((max(float(entry_t), t0), min(float(crossing_t), t1)))
+                entry_t = None
+        inside = next_inside
+    if inside and entry_t is not None:
+        intervals.append((max(float(entry_t), t0), t1))
+    return [(start, stop) for start, stop in intervals if stop - start > 1e-5]
+
+
+def _subtract_interval(
+    intervals: List[Tuple[float, float]],
+    removed: Tuple[float, float],
+) -> List[Tuple[float, float]]:
+    """Subtract one interval from visible edge-body intervals.
+
+    Parameters
+    ----------
+    intervals : list[tuple[float, float]]
+        Current visible intervals.
+    removed : tuple[float, float]
+        Interval to remove.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Remaining visible intervals.
+    """
+    remove_start, remove_stop = removed
+    remaining: List[Tuple[float, float]] = []
+    for start, stop in intervals:
+        if remove_stop <= start or remove_start >= stop:
+            remaining.append((start, stop))
+            continue
+        if remove_start - start > 1e-5:
+            remaining.append((start, remove_start))
+        if stop - remove_stop > 1e-5:
+            remaining.append((remove_stop, stop))
+    return remaining
+
+
+def _clip_render_body_segments_at_clusters(
+    curve: BezierCurve,
+    src_idx: int,
+    tgt_idx: int,
+    cluster_membership: Dict[int, List[str]],
+    cluster_bboxes: Dict[str, Tuple[float, float, float, float]],
+) -> Tuple[Optional[List[RenderBezier]], Optional[str]]:
+    """Return visible edge-body segments after cluster perimeter clipping.
+
+    Parameters
+    ----------
+    curve : BezierCurve
+        Original edge centerline.
+    src_idx : int
+        Source node index.
+    tgt_idx : int
+        Target node index.
+    cluster_membership : dict[int, list[str]]
+        Node index to containing cluster names.
+    cluster_bboxes : dict[str, tuple[float, float, float, float]]
+        Visible cluster rectangles.
+
+    Returns
+    -------
+    tuple[list[RenderBezier] | None, str | None]
+        Visible body segments and clipped terminal name. ``None`` segments
+        means the original body is unchanged.
+    """
+    if src_idx == tgt_idx or not cluster_bboxes:
+        return None, None
+
+    render_curve = _curve_to_render_bezier(curve)
+    points = sample_render_curve(render_curve, 160)
+    src_clusters = set(cluster_membership.get(int(src_idx), []))
+    tgt_clusters = set(cluster_membership.get(int(tgt_idx), []))
+    t0 = 0.0
+    t1 = 1.0
+
+    for name in src_clusters - tgt_clusters:
+        bbox = cluster_bboxes.get(name)
+        exit_t = _source_exit_t(points, bbox) if bbox is not None else None
+        if exit_t is not None:
+            t0 = max(t0, exit_t)
+    for name in tgt_clusters - src_clusters:
+        bbox = cluster_bboxes.get(name)
+        entry_t = _target_entry_t(points, bbox) if bbox is not None else None
+        if entry_t is not None:
+            t1 = min(t1, entry_t)
+
+    if t1 - t0 <= 1e-5:
+        return None, None
+
+    intervals: List[Tuple[float, float]] = [(t0, t1)]
+    for name, bbox in cluster_bboxes.items():
+        if name in src_clusters or name in tgt_clusters:
+            continue
+        for inside_interval in _foreign_inside_intervals(points, bbox, t0, t1):
+            intervals = _subtract_interval(intervals, inside_interval)
+            if not intervals:
+                return [], "both"
+
+    clipped_tail = t0 > 1e-5
+    clipped_head = t1 < 1.0 - 1e-5
+    terminal = "both" if clipped_tail and clipped_head else "tail" if clipped_tail else "head"
+    if not clipped_tail and not clipped_head and len(intervals) == 1:
+        return None, None
+    segments = [subcurve_render(render_curve, start, stop) for start, stop in intervals]
+    return segments, terminal if clipped_tail or clipped_head else None
+
+
 def _clip_render_body_curve_at_clusters(
     curve: BezierCurve,
     src_idx: int,
@@ -4841,32 +5254,16 @@ def _clip_render_body_curve_at_clusters(
         Body-only render curve and clipped terminal name, or ``(None, None)``
         when no clipping is needed.
     """
-    if src_idx == tgt_idx or not cluster_bboxes:
-        return None, None
-    render_curve = _curve_to_render_bezier(curve)
-    sampled = sample_render_curve(render_curve, 96)
-    sampled_points = [tuple(map(float, point)) for point in sampled]
-    clipped = clip_edge_at_cluster_boundaries(
-        edge_polyline=sampled_points,
-        src_idx=src_idx,
-        tgt_idx=tgt_idx,
-        cluster_membership=cluster_membership,
-        cluster_bboxes=cluster_bboxes,
+    segments, terminal = _clip_render_body_segments_at_clusters(
+        curve,
+        src_idx,
+        tgt_idx,
+        cluster_membership,
+        cluster_bboxes,
     )
-    if len(clipped) == len(sampled_points) and clipped == sampled_points:
+    if segments is None or len(segments) != 1:
         return None, None
-
-    clipped_tail = clipped[0] != sampled_points[0]
-    clipped_head = clipped[-1] != sampled_points[-1]
-    t0 = _polyline_arc_fraction_for_point(sampled, clipped[0]) if clipped_tail else 0.0
-    t1 = _polyline_arc_fraction_for_point(sampled, clipped[-1]) if clipped_head else 1.0
-    if t1 - t0 <= 1e-6:
-        return None, None
-    if clipped_head and clipped_tail:
-        return subcurve_render(render_curve, t0, t1), "both"
-    if clipped_head:
-        return subcurve_render(render_curve, 0.0, t1), "head"
-    return subcurve_render(render_curve, t0, 1.0), "tail"
+    return segments[0], terminal
 
 
 def _clip_direct_body_curve_at_clusters(
@@ -6725,16 +7122,82 @@ def _build_custom_edge_collection(
             # those marker-only edges back to a head for rendering.
             arrowhead = tail_arrow
             tail_arrow = "none"
-        body_curve: Optional[RenderBezier] = None
+        body_segments: Optional[List[RenderBezier]] = None
         body_clip_terminal: Optional[str] = None
         if cluster_membership is not None and cluster_bboxes is not None:
-            body_curve, body_clip_terminal = _clip_render_body_curve_at_clusters(
+            body_segments, body_clip_terminal = _clip_render_body_segments_at_clusters(
                 curve,
                 src_idx,
                 tgt_idx,
                 cluster_membership,
                 cluster_bboxes,
             )
+        if body_segments is not None and len(body_segments) > 1:
+            body_width = _edge_width_data_units(ax, float(style.width))
+            for segment_idx, segment in enumerate(body_segments):
+                edges.append(
+                    DaguaEdge(
+                        curve=segment,
+                        width=body_width,
+                        tapered=bool(getattr(style, "taper", False)),
+                        taper_width_start=taper_width_start,
+                        taper_width_end=taper_width_end,
+                        color=str(style.color or "#8C8C8C"),
+                        alpha=float(style.opacity if style.opacity is not None else 0.7),
+                        linestyle=style.style,
+                        arrowhead="none",
+                        tail_arrow="none",
+                        stroke_width=body_width,
+                        label=None,
+                        group_key=(e_idx, segment_idx),
+                        source_node=src_idx,
+                        target_node=tgt_idx,
+                        disable_curve_length_clamp=disable_curve_length_clamp,
+                    )
+                )
+            marker_curve = _curve_to_render_bezier(curve)
+            marker_body = RenderBezier.from_points(
+                marker_curve.p0,
+                marker_curve.p0,
+                marker_curve.p0,
+                marker_curve.p0,
+            )
+            edges.append(
+                DaguaEdge(
+                    curve=marker_curve,
+                    body_curve=marker_body,
+                    body_clip_terminal="both",
+                    width=body_width,
+                    color=str(style.color or "#8C8C8C"),
+                    alpha=float(style.opacity if style.opacity is not None else 0.7),
+                    linestyle=style.style,
+                    arrowhead=arrowhead,
+                    tail_arrow=tail_arrow,
+                    arrowhead_length=head_length,
+                    arrowhead_width=head_width,
+                    tail_arrow_length=tail_length,
+                    tail_arrow_width=tail_width,
+                    arrow_fill=str(style.arrow_fill),
+                    arrow_color=str(style.arrow_color) if style.arrow_color else None,
+                    stroke_width=body_width,
+                    label=label,
+                    label_position=float(style.label_position),
+                    label_offset=float(style.label_offset),
+                    label_rotate=False,
+                    label_side=str(style.label_side),
+                    label_font_size=float(style.label_font_size),
+                    label_font_color=str(style.label_font_color),
+                    label_background=str(style.label_background),
+                    label_font_family=str(style.label_font_family),
+                    label_font_weight=str(style.label_font_weight),
+                    group_key=(e_idx, -1),
+                    source_node=src_idx,
+                    target_node=tgt_idx,
+                    disable_curve_length_clamp=disable_curve_length_clamp,
+                )
+            )
+            continue
+        body_curve = body_segments[0] if body_segments else None
         render_curve = body_curve if body_curve is not None else _curve_to_render_bezier(curve)
         edges.append(
             DaguaEdge(
@@ -7959,6 +8422,18 @@ def _draw_clusters(
         label_gap=label_gap,
         display_scale=display_scale,
     )
+    cluster_render_boxes = _compute_cluster_render_bboxes(
+        ax,
+        graph,
+        pos,
+        sizes,
+        ordered_clusters,
+        cluster_depths,
+        cluster_y_mins,
+        cluster_y_maxes,
+        display_scale,
+        cluster_aware,
+    )
 
     for name in ordered_clusters:
         members = graph.clusters[name]
@@ -7969,16 +8444,11 @@ def _draw_clusters(
             continue
 
         style = _cluster_style_for_render(graph, name)
-        depth_padding_step = getattr(style, "depth_padding_step", -3.0)
-        padding = max(style.padding + depth * depth_padding_step, 5.0)
 
-        member_pos = pos[indices]
-        member_sizes = sizes[indices]
-
-        x_min = float((member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding)
-        x_max = float((member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding)
-        base_x_min = x_min
-        base_x_max = x_max
+        render_box = cluster_render_boxes.get(name)
+        if render_box is None:
+            continue
+        x_min, y_min, x_max, y_max = render_box.bbox
         label = graph.cluster_labels.get(name, name)
         depth_fs_step = getattr(style, "depth_font_size_step", -0.5)
         label_font_points = max(style.font_size + depth * depth_fs_step, 5.0)
@@ -7987,18 +8457,6 @@ def _draw_clusters(
         label_oy = style.label_offset[1] * display_scale
         label_text_max_width = _cluster_label_text_max_width(style, display_scale)
 
-        y_min = cluster_y_mins.get(
-            name,
-            (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding,
-        )
-        # Use precomputed y_max which accounts for child cluster headers
-        y_max = cluster_y_maxes.get(
-            name,
-            (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding,
-        )
-        # Enforce a modest minimum cluster width so tall vertical stacks do not
-        # collapse into needle-thin boxes, while still allowing nested
-        # clusters to stay closer to the matplotlib reference proportions.
         cluster_height = y_max - y_min
         label_font_data = _cluster_font_size_data(
             label,
@@ -8016,29 +8474,6 @@ def _draw_clusters(
             text_wrap=str(style.text_wrap),
             text_max_width=label_text_max_width,
         )
-        top_cap = _graphviz_strict_cluster_top_cap(ax, graph, indices, pos, sizes)
-        if top_cap is not None:
-            y_max = min(float(y_max), top_cap)
-        cluster_width = x_max - x_min
-        min_cluster_width = cluster_height * 0.65
-        if cluster_width < min_cluster_width:
-            expand_w = (min_cluster_width - cluster_width) / 2.0
-            x_min -= expand_w
-            x_max += expand_w
-
-        # Cluster labels are few and measure_text is cached, so use the actual
-        # measured width instead of a character-count heuristic.
-        if not _cluster_label_is_outside(str(style.label_position)):
-            est_label_width = label_width + label_ox * 2
-            content_width = x_max - x_min
-            if est_label_width > content_width:
-                expand = (est_label_width - content_width) / 2
-                x_min -= expand
-                x_max += expand
-        if cluster_aware:
-            cap_x = _points_to_data_units(ax, _CLUSTER_RENDER_BBOX_EXTRA_CAP_POINTS, "x")
-            x_min = max(float(x_min), float(base_x_min) - cap_x)
-            x_max = min(float(x_max), float(base_x_max) + cap_x)
 
         # Progressive depth variation — each depth_*_step field is additive per level
         fill_color = darken_hex(style.fill, depth * style.depth_fill_step)
@@ -8127,7 +8562,7 @@ def _draw_clusters(
                 clip_on=False,
                 text_wrap=style.text_wrap,
                 text_max_width=label_text_max_width,
-                zorder=0.16 + depth * 0.01,
+                zorder=1.5 + depth * 0.01,
                 gid=f"dagua-cluster-label-{name}",
             )
             cluster_label_specs.append(label_spec)
@@ -8217,9 +8652,20 @@ def _render_cluster_edge_clip_data(
         label_gap=label_gap,
         display_scale=display_scale,
     )
+    cluster_render_boxes = _compute_cluster_render_bboxes(
+        ax,
+        graph,
+        pos,
+        sizes,
+        ordered_clusters,
+        cluster_depths,
+        cluster_y_mins,
+        cluster_y_maxes,
+        display_scale,
+        cluster_aware,
+    )
     membership: Dict[int, List[str]] = {}
     bboxes: Dict[str, Tuple[float, float, float, float]] = {}
-    min_node_height = float(sizes[:, 1].min()) if sizes.size else 0.0
 
     for name in ordered_clusters:
         members = graph.clusters[name]
@@ -8234,67 +8680,8 @@ def _render_cluster_edge_clip_data(
         if _cluster_border_alpha(style, depth) <= 0.0 or float(style.stroke_width) <= 0.0:
             continue
 
-        depth_padding_step = getattr(style, "depth_padding_step", -3.0)
-        padding = max(float(style.padding) + depth * float(depth_padding_step), 5.0)
-        member_pos = pos[indices]
-        member_sizes = sizes[indices]
-        x_min = float((member_pos[:, 0] - member_sizes[:, 0] / 2).min() - padding)
-        x_max = float((member_pos[:, 0] + member_sizes[:, 0] / 2).max() + padding)
-        base_x_min = x_min
-        base_x_max = x_max
-        y_min = float(
-            cluster_y_mins.get(
-                name,
-                (member_pos[:, 1] - member_sizes[:, 1] / 2).min() - padding,
-            )
-        )
-        y_max = float(
-            cluster_y_maxes.get(
-                name,
-                (member_pos[:, 1] + member_sizes[:, 1] / 2).max() + padding,
-            )
-        )
-
-        label = graph.cluster_labels.get(name, name)
-        label_font_points = max(
-            float(style.font_size) + depth * float(getattr(style, "depth_font_size_step", -0.5)),
-            5.0,
-        )
-        label_font_data = _cluster_font_size_data(
-            label,
-            float(y_max - y_min),
-            min_node_height,
-            label_font_points,
-            str(style.font_size_scaling),
-            display_scale,
-        )
-        label_width = _measure_cluster_label_data(
-            label,
-            font_size_data=label_font_data,
-            font_family=str(style.font_family or RESOLVED_FONT),
-            font_weight=str(style.font_weight),
-            text_wrap=str(style.text_wrap),
-            text_max_width=_cluster_label_text_max_width(style, display_scale),
-        )[0]
-        cluster_height = y_max - y_min
-        cluster_width = x_max - x_min
-        min_cluster_width = cluster_height * 0.65
-        if cluster_width < min_cluster_width:
-            expand_w = (min_cluster_width - cluster_width) / 2.0
-            x_min -= expand_w
-            x_max += expand_w
-        if not _cluster_label_is_outside(str(style.label_position)):
-            label_ox = float(style.label_offset[0]) * display_scale
-            est_label_width = label_width + label_ox * 2.0
-            content_width = x_max - x_min
-            if est_label_width > content_width:
-                expand = (est_label_width - content_width) / 2.0
-                x_min -= expand
-                x_max += expand
-        if cluster_aware:
-            cap_x = _points_to_data_units(ax, _CLUSTER_RENDER_BBOX_EXTRA_CAP_POINTS, "x")
-            x_min = max(float(x_min), float(base_x_min) - cap_x)
-            x_max = min(float(x_max), float(base_x_max) + cap_x)
-        bboxes[name] = (float(x_min), float(y_min), float(x_max), float(y_max))
+        render_box = cluster_render_boxes.get(name)
+        if render_box is not None:
+            bboxes[name] = render_box.bbox
 
     return membership, bboxes
