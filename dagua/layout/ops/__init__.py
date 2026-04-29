@@ -26,6 +26,7 @@ from dagua.layout.ops.base import (
     Pipeline,
     Repeat,
 )
+from dagua.layout.ops.cluster_driver import ClusterAwareDriver, ClusterPlacement
 from dagua.layout.ops.edge_route import (
     BezierControlPointOpt,
     BezierControlPointOptConfig,
@@ -169,6 +170,8 @@ __all__ = [
     "BezierControlPointOptConfig",
     "ReconstructEdgeRoutes",
     # Composition patterns
+    "ClusterAwareDriver",
+    "ClusterPlacement",
     "Pipeline",
     "Repeat",
     "Conditional",
@@ -224,6 +227,7 @@ _EXPECTED_OP_MODULES = (
     "anneal",
     "barycenter",
     "cluster_arrange",
+    "cluster_driver",
     "coarsen",
     "context",
     "converge",
