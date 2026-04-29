@@ -125,6 +125,61 @@ def test_nested_cluster_edge_clips_at_outer_perimeter() -> None:
     assert body_curve.p1[0] < bboxes["inner"][0]
 
 
+def test_cross_cluster_edge_body_keeps_visible_span_between_perimeters() -> None:
+    """Edges between sibling clusters should keep the body between perimeters."""
+    graph = DaguaGraph(direction="LR")
+    graph.add_node("A")
+    graph.add_node("B")
+    graph.add_edge("A", "B")
+    graph.add_cluster(
+        "source",
+        ["A"],
+        style=ClusterStyle(padding=12.0, label_position="top-center"),
+    )
+    graph.add_cluster(
+        "target",
+        ["B"],
+        style=ClusterStyle(padding=12.0, label_position="top-center"),
+    )
+    positions = torch.tensor([[0.0, 0.0], [120.0, 0.0]], dtype=torch.float32)
+
+    collection, bboxes = _prepared_collection(graph, positions)
+
+    body_curve = collection.prepared_edges[0].body_curve
+    assert body_curve is not None
+    assert body_curve.p0[0] == pytest.approx(bboxes["source"][2], abs=0.75)
+    assert body_curve.p1[0] == pytest.approx(bboxes["target"][0], abs=0.75)
+    assert body_curve.p1[0] - body_curve.p0[0] > 40.0
+
+
+def test_bypass_edge_body_splits_around_foreign_cluster() -> None:
+    """Edges that pass through an unrelated cluster should render with a gap."""
+    graph = DaguaGraph(direction="LR")
+    graph.add_node("A")
+    graph.add_node("B")
+    graph.add_node("C")
+    graph.add_edge("A", "C")
+    graph.add_cluster(
+        "foreign",
+        ["B"],
+        style=ClusterStyle(padding=12.0, label_position="top-center"),
+    )
+    positions = torch.tensor([[0.0, 0.0], [60.0, 0.0], [120.0, 0.0]], dtype=torch.float32)
+
+    collection, bboxes = _prepared_collection(graph, positions)
+
+    body_edges = [
+        prepared
+        for prepared in collection.prepared_edges
+        if prepared.edge.arrowhead == "none" and prepared.edge.tail_arrow == "none"
+    ]
+    assert len(body_edges) >= 2
+    assert body_edges[0].body_curve is not None
+    assert body_edges[-1].body_curve is not None
+    assert body_edges[0].body_curve.p1[0] == pytest.approx(bboxes["foreign"][0], abs=1.0)
+    assert body_edges[-1].body_curve.p0[0] == pytest.approx(bboxes["foreign"][2], abs=1.0)
+
+
 def test_cluster_aware_false_preserves_unclipped_edge_body() -> None:
     """Disabled cluster awareness should preserve legacy full edge bodies."""
     graph, positions = _external_to_cluster_graph()
