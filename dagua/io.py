@@ -18,6 +18,7 @@ import dataclasses
 import io
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
 
@@ -1091,14 +1092,18 @@ def from_scipy(adj_matrix, labels=None, **kwargs) -> "DaguaGraph":
 def from_dot(dot_string: str, **kwargs) -> "DaguaGraph":
     """Build a DaguaGraph from a DOT string.
 
-    Parses DOT format via pydot (pure Python, no system Graphviz dependency).
+    Parameters
+    ----------
+    dot_string : str
+        DOT-format graph source.
+    **kwargs : Any
+        Extra keyword arguments passed to ``DaguaGraph``.
 
-    Args:
-        dot_string: A DOT-format string.
-        **kwargs: Extra keyword arguments passed to DaguaGraph().
-
-    Returns:
-        A DaguaGraph.
+    Returns
+    -------
+    DaguaGraph
+        Parsed graph with node labels, edge labels, clusters, and supported
+        Graphviz edge sizing attributes represented in Dagua styles.
     """
     try:
         import pydot
@@ -1140,7 +1145,17 @@ def from_dot(dot_string: str, **kwargs) -> "DaguaGraph":
         label = cast(Optional[str], edge_obj.get_label())
         if label:
             label = label.strip('"')
-        g.add_edge(src, dst, label=label)
+        style = None
+        arrowsize = cast(Optional[str], edge_obj.get_arrowsize())
+        if arrowsize:
+            try:
+                style = replace(
+                    g._theme.get_edge_style("default"),
+                    arrowsize=float(arrowsize.strip('"')),
+                )
+            except ValueError:
+                style = None
+        g.add_edge(src, dst, label=label, style=style)
 
     # Add clusters from subgraphs
     for sg in pg.get_subgraphs():
