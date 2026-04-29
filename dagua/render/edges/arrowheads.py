@@ -383,38 +383,40 @@ def _triangle(length: float, width: float, body_width: float) -> ArrowheadResult
 
     Notes
     -----
-    Thin edges render more cleanly with a plain three-point triangle because a
-    ribbon-width neck collapses into a kite at typical display sizes. Wider
-    ribbons keep the joined geometry so the shaft/head transition remains
-    continuous.
+    Graphviz's ``normal`` arrowhead is a filled isosceles triangle on ordinary
+    one-point edges. Thick ribbons still use the joined neck so the body/head
+    transition remains continuous when the stroke occupies much of the head.
     """
-    if body_width < (width * THIN_TRIANGLE_BODY_WIDTH_RATIO):
-        half_width = width * 0.5
+    if body_width >= width * 0.5:
+        shoulder_x = max(length * JOIN_SHOULDER_RATIO, body_width * 0.75)
         return ArrowheadResult(
             filled_paths=[
                 _local_path(
-                    [(0.0, 0.0), (length, half_width), (length, -half_width)],
-                    closed=True,
+                    _joined_polygon_points(
+                        length,
+                        body_width,
+                        shoulder_x=shoulder_x,
+                        upper_points=[(0.0, 0.0), (shoulder_x, width * 0.5)],
+                    )
                 )
             ],
             stroked_paths=[],
-            trim_contour=_local_trim_contour(length, body_width),
+            trim_contour=_local_trim_contour(
+                length - _join_overlap(length, body_width),
+                body_width,
+            ),
         )
 
-    shoulder_x = max(length * JOIN_SHOULDER_RATIO, body_width * 0.75)
+    half_width = width * 0.5
     return ArrowheadResult(
         filled_paths=[
             _local_path(
-                _joined_polygon_points(
-                    length,
-                    body_width,
-                    shoulder_x=shoulder_x,
-                    upper_points=[(0.0, 0.0), (shoulder_x, width * 0.5)],
-                )
+                [(0.0, 0.0), (length, half_width), (length, -half_width)],
+                closed=True,
             )
         ],
         stroked_paths=[],
-        trim_contour=_local_trim_contour(length - _join_overlap(length, body_width), body_width),
+        trim_contour=_local_trim_contour(length, body_width),
     )
 
 
