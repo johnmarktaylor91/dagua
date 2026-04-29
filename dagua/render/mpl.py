@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import numpy as np
+import torch
 
 from dagua.edges import (
     BezierCurve,
@@ -31,6 +32,11 @@ from dagua.edges import (
     evaluate_bezier,
     preferred_edge_label_position,
     route_edges,
+)
+from dagua.layout.ops.cluster_geometry import (
+    ClusterLabelMetrics,
+    ClusterPlacementBox,
+    compute_cluster_placement_bbox,
 )
 from dagua.render.borders import (
     ShapeSpec,
@@ -3682,12 +3688,82 @@ def _compute_cluster_y_maxes(
             text_wrap=str(style.text_wrap),
             text_max_width=_cluster_label_text_max_width(style, display_scale),
         )[1]
+        label_band = (
+            label_height + label_gap
+            if _cluster_label_expands_top(str(style.label_position))
+            else 0.0
+        )
+        bbox = _cluster_bbox_from_inner_bounds(
+            x_min=float((member_pos[:, 0] - member_sizes[:, 0] / 2).min()),
+            y_min=float((member_pos[:, 1] - member_sizes[:, 1] / 2).min()),
+            x_max=float((member_pos[:, 0] + member_sizes[:, 0] / 2).max()),
+            y_max=raw_y_max,
+            label_width=0.0,
+            label_height=label_height,
+            padding=padding,
+            label_band=label_band,
+        )
         if _cluster_label_expands_top(str(style.label_position)):
-            cluster_y_maxes[name] = raw_y_max + padding + label_height + label_gap
+            cluster_y_maxes[name] = bbox.label_band_y_extent[0]
         else:
-            cluster_y_maxes[name] = raw_y_max + padding
+            cluster_y_maxes[name] = bbox.inner_bbox[3] + padding
 
     return cluster_y_maxes
+
+
+def _cluster_bbox_from_inner_bounds(
+    x_min: float,
+    y_min: float,
+    x_max: float,
+    y_max: float,
+    label_width: float,
+    label_height: float,
+    padding: float,
+    label_band: float,
+) -> ClusterPlacementBox:
+    """Return shared cluster geometry for precomputed render bounds.
+
+    Parameters
+    ----------
+    x_min : float
+        Inner content left bound.
+    y_min : float
+        Inner content bottom bound.
+    x_max : float
+        Inner content right bound.
+    y_max : float
+        Inner content top bound.
+    label_width : float
+        Measured label width in render data units.
+    label_height : float
+        Measured label height in render data units.
+    padding : float
+        Cluster side padding in render data units.
+    label_band : float
+        Top label band to reserve in render data units.
+
+    Returns
+    -------
+    ClusterPlacementBox
+        Shared bbox helper result for the supplied render bounds.
+    """
+    inner_width = max(float(x_max) - float(x_min), 0.0)
+    inner_height = max(float(y_max) - float(y_min), 0.0)
+    inner_positions = torch.tensor(
+        [[float(x_min) + inner_width / 2.0, float(y_min) + inner_height / 2.0]],
+        dtype=torch.float64,
+    )
+    inner_sizes = torch.tensor([[inner_width, inner_height]], dtype=torch.float64)
+    return compute_cluster_placement_bbox(
+        inner_positions=inner_positions,
+        inner_sizes=inner_sizes,
+        label_metrics=ClusterLabelMetrics(
+            label_width_pt=float(label_width),
+            label_height_pt=float(label_height),
+        ),
+        side_padding_pt=float(padding),
+        label_band_pt=float(label_band),
+    )
 
 
 def _compute_cluster_y_mins(
@@ -3767,10 +3843,25 @@ def _compute_cluster_y_mins(
             text_wrap=str(style.text_wrap),
             text_max_width=_cluster_label_text_max_width(style, display_scale),
         )[1]
+        label_band = (
+            label_height + label_gap
+            if _cluster_label_expands_bottom(str(style.label_position))
+            else 0.0
+        )
+        bbox = _cluster_bbox_from_inner_bounds(
+            x_min=float((member_pos[:, 0] - member_sizes[:, 0] / 2).min()),
+            y_min=raw_y_min,
+            x_max=float((member_pos[:, 0] + member_sizes[:, 0] / 2).max()),
+            y_max=float((member_pos[:, 1] + member_sizes[:, 1] / 2).max()),
+            label_width=0.0,
+            label_height=label_height,
+            padding=padding,
+            label_band=label_band,
+        )
         if _cluster_label_expands_bottom(str(style.label_position)):
-            cluster_y_mins[name] = raw_y_min - padding - label_height - label_gap
+            cluster_y_mins[name] = bbox.inner_bbox[1] - padding - label_band
         else:
-            cluster_y_mins[name] = raw_y_min - padding
+            cluster_y_mins[name] = bbox.inner_bbox[1] - padding
 
     return cluster_y_mins
 
