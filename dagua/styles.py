@@ -424,6 +424,7 @@ class EdgeStyle:
     arrow_color: str = ""  # empty = use edge color
     arrow_length: float = 12.0
     arrow_width: float = 9.0
+    arrowsize: float = 1.0
     arrow_scale: Optional[float] = None  # Legacy field; matplotlib renderer ignores it
     arrow_node_fraction: float = 0.35  # fraction of target node height (0 = use fixed arrow_length)
     arrow_width_ratio: float = 0.85  # width = length * this ratio (for node-relative mode)
@@ -961,6 +962,7 @@ GRAPHVIZ_STRICT_THEME = Theme(
             # were render-layer artifacts. Set to dot's literal targets.
             arrow_length=10.0,
             arrow_width=7.0,
+            arrowsize=1.0,
             arrow_scale=None,
             arrow_node_fraction=0.0,
             arrow_width_ratio=0.7,
@@ -980,6 +982,7 @@ GRAPHVIZ_STRICT_THEME = Theme(
             arrow_fill="filled",
             arrow_length=10.0,
             arrow_width=7.0,
+            arrowsize=1.0,
             arrow_scale=None,
             arrow_node_fraction=0.0,
             arrow_width_ratio=0.7,
@@ -1024,12 +1027,13 @@ GRAPHVIZ_STRICT_THEME = Theme(
     ),
     graph_style=GraphStyle(
         background_color="#FFFFFF",
-        margin=18.0,
+        margin=4.0,
         title_font_size=14.0,
         title_font_color="#000000",
-        # Metric-driven (R19): edge label graph-level matches the per-edge
-        # default of 14pt.
-        edge_label_font_size=14.0,
+        # Round B1: dot's arrow_types edge labels render visually smaller
+        # than node labels; keep strict edge labels subordinate while node and
+        # cluster font metrics continue to match dot's 14pt declarations.
+        edge_label_font_size=11.0,
         edge_label_background="#FFFFFF",
         edge_label_background_opacity=1.0,
     ),
