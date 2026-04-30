@@ -905,6 +905,7 @@ def _build_spectral_adjacency(
     edge_index: torch.Tensor,
     num_nodes: int,
     edge_weights: Optional[torch.Tensor] = None,
+    duplicate_policy: str = "sum",
 ) -> sparse.csr_matrix:
     """Build a directed sparse adjacency matrix used by spectral layout.
 
@@ -916,6 +917,11 @@ def _build_spectral_adjacency(
         Number of graph nodes.
     edge_weights : torch.Tensor, optional
         Optional edge weights with shape ``[E]``.
+    duplicate_policy : {"sum", "last"}, default="sum"
+        Policy used when repeated directed edges are converted into the
+        simple adjacency matrix. NetworkX fidelity uses ``"last"`` because
+        the reference adapter builds a ``DiGraph`` with repeated ``add_edge``
+        calls.
 
     Returns
     -------
@@ -927,6 +933,9 @@ def _build_spectral_adjacency(
     ValueError
         If ``edge_index`` has an invalid shape or out-of-range endpoints.
     """
+    if duplicate_policy not in {"sum", "last"}:
+        raise ValueError("duplicate_policy must be one of 'sum' or 'last'.")
+
     if edge_index.ndim != 2 or edge_index.shape[0] != 2:
         raise ValueError("edge_index must have shape [2, E].")
 
@@ -949,11 +958,38 @@ def _build_spectral_adjacency(
     else:
         data = np.ones(rows.shape[0], dtype=np.float64)
 
+    if duplicate_policy == "last":
+        collapsed_edges: dict[tuple[int, int], float] = {}
+        for row, col, value in zip(rows, cols, data):
+            collapsed_edges[(int(row), int(col))] = float(value)
+        rows = np.fromiter((edge[0] for edge in collapsed_edges), dtype=np.int64)
+        cols = np.fromiter((edge[1] for edge in collapsed_edges), dtype=np.int64)
+        data = np.fromiter(collapsed_edges.values(), dtype=np.float64)
+
     return sparse.csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes), dtype=np.float64)
 
 
-def _symmetrize_spectral_adjacency(adjacency: sparse.csr_matrix) -> sparse.csr_matrix:
-    """Return symmetric adjacency by mirroring directed entries when needed."""
+def _symmetrize_spectral_adjacency(
+    adjacency: sparse.csr_matrix,
+    force_directed: bool = False,
+) -> sparse.csr_matrix:
+    """Return a symmetric spectral adjacency matrix.
+
+    Parameters
+    ----------
+    adjacency : scipy.sparse.csr_matrix
+        Directed adjacency matrix with shape ``[N, N]``.
+    force_directed : bool, default=False
+        Whether to always mirror the matrix as NetworkX does after converting
+        Dagua graphs to ``DiGraph`` for the spectral reference.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Symmetric adjacency matrix with shape ``[N, N]``.
+    """
+    if force_directed:
+        return (adjacency + adjacency.T).tocsr()
     difference = adjacency - adjacency.T
     if difference.nnz == 0:
         return adjacency
@@ -1098,9 +1134,13 @@ class SpectralPrepareState(Op):
             edge_index=problem.edge_index,
             num_nodes=problem.num_nodes,
             edge_weights=problem.edge_weights,
+            duplicate_policy="last" if self.networkx_fidelity else "sum",
         )
         laplacian, is_symmetric = _spectral_laplacian(
-            adjacency=_symmetrize_spectral_adjacency(adjacency),
+            adjacency=_symmetrize_spectral_adjacency(
+                adjacency,
+                force_directed=self.networkx_fidelity,
+            ),
             normalization=self.normalization,
         )
         state.laplacian = laplacian
@@ -1199,8 +1239,8 @@ class FRPrepareAdjacency(Op):
         if self.config.k is not None:
             if self.config.k <= 0.0:
                 raise ValueError("FRPrepareAdjacency k must be positive when provided.")
-            state.force_area = float(self.config.k) * float(self.config.k) * float(
-                max(problem.num_nodes, 1)
+            state.force_area = (
+                float(self.config.k) * float(self.config.k) * float(max(problem.num_nodes, 1))
             )
         else:
             state.force_area = self.config.default_force_area
