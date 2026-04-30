@@ -1,0 +1,491 @@
+{
+  "dagua_engine": "classic_classical_mds",
+  "effective_dagua_seeds": 1,
+  "graphs": {
+    "cluster_member_style_stress": {
+      "dagua_vs_graphviz": {
+        "mean": 0.02238457277417183,
+        "median": 0.02238457277417183,
+        "p95": 0.02238457277417183
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "clustered_longlabel_handoffs": {
+      "dagua_vs_graphviz": {
+        "mean": 0.09494395554065704,
+        "median": 0.09494395554065704,
+        "p95": 0.09494395554065704
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "densenet_block": {
+      "dagua_vs_graphviz": {
+        "mean": 0.26197847723960876,
+        "median": 0.26197847723960876,
+        "p95": 0.26197847723960876
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "disconnected_encoder_residual": {
+      "dagua_vs_graphviz": {
+        "mean": 0.20615476369857788,
+        "median": 0.20615476369857788,
+        "p95": 0.20615476369857788
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "disconnected_label_cycle_collage": {
+      "dagua_vs_graphviz": {
+        "mean": 0.21471065282821655,
+        "median": 0.21471065282821655,
+        "p95": 0.21471065282821655
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "edge_label_braid": {
+      "dagua_vs_graphviz": {
+        "mean": 0.28118544816970825,
+        "median": 0.28118544816970825,
+        "p95": 0.28118544816970825
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "extreme_mixed_width_transformer": {
+      "dagua_vs_graphviz": {
+        "mean": 0.12845709919929504,
+        "median": 0.12845709919929504,
+        "p95": 0.12845709919929504
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "hierarchical_residual_stage": {
+      "dagua_vs_graphviz": {
+        "mean": 0.09438584744930267,
+        "median": 0.09438584744930267,
+        "p95": 0.09438584744930267
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "hub_fanout_label_skew": {
+      "dagua_vs_graphviz": {
+        "mean": 0.16892148554325104,
+        "median": 0.16892148554325104,
+        "p95": 0.16892148554325104
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "inception_block": {
+      "dagua_vs_graphviz": {
+        "mean": 0.2690340280532837,
+        "median": 0.2690340280532837,
+        "p95": 0.2690340280532837
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "linear_3layer_mlp": {
+      "dagua_vs_graphviz": {
+        "mean": 0.035315800458192825,
+        "median": 0.035315800458192825,
+        "p95": 0.035315800458192825
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "mixed_width_labels": {
+      "dagua_vs_graphviz": {
+        "mean": 0.045276615768671036,
+        "median": 0.045276615768671036,
+        "p95": 0.045276615768671036
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "moe_router_sparse": {
+      "dagua_vs_graphviz": {
+        "mean": 0.061610303819179535,
+        "median": 0.061610303819179535,
+        "p95": 0.061610303819179535
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "nested_cluster_label_stack": {
+      "dagua_vs_graphviz": {
+        "mean": 0.013512936420738697,
+        "median": 0.013512936420738697,
+        "p95": 0.013512936420738697
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "nested_shallow_enc_dec": {
+      "dagua_vs_graphviz": {
+        "mean": 0.03531579673290253,
+        "median": 0.03531579673290253,
+        "p95": 0.03531579673290253
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "parallel_multiedge_bundle": {
+      "dagua_vs_graphviz": {
+        "mean": 0.001711454358883202,
+        "median": 0.001711454358883202,
+        "p95": 0.001711454358883202
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "petersen_10": {
+      "dagua_vs_graphviz": {
+        "mean": 0.3325675129890442,
+        "median": 0.3325675129890442,
+        "p95": 0.3325675129890442
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "residual_block": {
+      "dagua_vs_graphviz": {
+        "mean": 0.03611445054411888,
+        "median": 0.03611445054411888,
+        "p95": 0.03611445054411888
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "shape_and_routing_matrix": {
+      "dagua_vs_graphviz": {
+        "mean": 0.037791963666677475,
+        "median": 0.037791963666677475,
+        "p95": 0.037791963666677475
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "small_label_storm": {
+      "dagua_vs_graphviz": {
+        "mean": 0.03779155761003494,
+        "median": 0.03779155761003494,
+        "p95": 0.03779155761003494
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "tl_cnn_small": {
+      "dagua_vs_graphviz": {
+        "mean": 0.02443697489798069,
+        "median": 0.02443697489798069,
+        "p95": 0.02443697489798069
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "tl_mlp_3layer": {
+      "dagua_vs_graphviz": {
+        "mean": 0.03870121389627457,
+        "median": 0.03870121389627457,
+        "p95": 0.03870121389627457
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "unet_small": {
+      "dagua_vs_graphviz": {
+        "mean": 0.045488689094781876,
+        "median": 0.045488689094781876,
+        "p95": 0.045488689094781876
+      },
+      "deterministic_degenerate": true,
+      "n_dagua_seeds": 1,
+      "n_graphviz_seeds": 1,
+      "tost": {},
+      "within_dagua": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    }
+  },
+  "requested_seeds": 5,
+  "target_engine": "graphviz_neato"
+}
