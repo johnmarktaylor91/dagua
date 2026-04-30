@@ -26,13 +26,16 @@ from dagua.layout.ops.sugiyama import (
     _ValidateInputs,
 )
 
+_DOT_DEFAULT_RANK_CENTER_SEP = 72.0
+_DOT_DEFAULT_NODE_SEP = 18.0
+
 if TYPE_CHECKING:
     from dagua.config import LayoutConfig
 
 
 def build_sugiyama_pipeline(
-    rank_sep: float = 1.0,
-    node_sep: float = 1.0,
+    rank_sep: float = _DOT_DEFAULT_RANK_CENTER_SEP,
+    node_sep: float = _DOT_DEFAULT_NODE_SEP,
     barycenter_passes: int = 24,
     seed: int = 42,
     trace_every: int = 0,
@@ -42,10 +45,13 @@ def build_sugiyama_pipeline(
 
     Parameters
     ----------
-    rank_sep : float, default=1.0
-        Vertical spacing between layers.
-    node_sep : float, default=1.0
-        Horizontal spacing between nodes within a layer.
+    rank_sep : float, default=72.0
+        Vertical center-to-center spacing between layers. The default matches
+        Graphviz dot's common 0.5 inch rank gap plus a 0.5 inch node height in
+        point units.
+    node_sep : float, default=18.0
+        Horizontal gap between node bounding boxes, matching Graphviz dot's
+        default 0.25 inch ``nodesep`` in point units.
     barycenter_passes : int, default=24
         Number of up/down sweeps for crossing minimization.
     seed : int, default=42
@@ -113,11 +119,13 @@ def layout_sugiyama_pipeline(
     node_sizes : torch.Tensor, optional
         Optional node-size tensor with shape ``[N, 2]``.
     rank_sep : float, optional
-        Vertical spacing between layers. Defaults to unit spacing for direct
-        calls, or ``config.rank_sep`` when invoked through ``LayoutConfig``.
+        Vertical center-to-center spacing between layers. Defaults to a
+        Graphviz-dot-compatible point spacing for direct calls, or
+        ``config.rank_sep`` when invoked through ``LayoutConfig``.
     node_sep : float, optional
-        Horizontal spacing within layers. Defaults to unit spacing for direct
-        calls, or ``config.node_sep`` when invoked through ``LayoutConfig``.
+        Horizontal gap between node bounding boxes. Defaults to Graphviz dot's
+        point-unit ``nodesep`` for direct calls, or ``config.node_sep`` when
+        invoked through ``LayoutConfig``.
     layer_sep : float, optional
         Alias for ``rank_sep``. Overrides ``rank_sep`` when provided.
     seed : int
@@ -156,9 +164,9 @@ def layout_sugiyama_pipeline(
         if node_sep is None:
             node_sep = config.node_sep
     if rank_sep is None:
-        rank_sep = 1.0
+        rank_sep = _DOT_DEFAULT_RANK_CENTER_SEP
     if node_sep is None:
-        node_sep = 1.0
+        node_sep = _DOT_DEFAULT_NODE_SEP
     if layer_sep is not None:
         rank_sep = layer_sep
 
