@@ -4573,14 +4573,17 @@ def _draw_nodes(
 
             if border_width > 0.0 and edgecolor[-1] > 0.0:
                 if style.stroke_dash == "solid" and style.stroke_dash_pattern is None:
-                    border_outer_path, border_inner_path = _solid_border_ring_paths(
-                        shape_spec,
-                        outer_path,
-                        border_width,
-                        border_position,
-                    )
-                    border_paths.append(annular_path(border_outer_path, border_inner_path))
-                    border_colors.append(edgecolor)
+                    if border_position == "center":
+                        _draw_node_border_path(ax, outer_path, style, edgecolor)
+                    else:
+                        border_outer_path, border_inner_path = _solid_border_ring_paths(
+                            shape_spec,
+                            outer_path,
+                            border_width,
+                            border_position,
+                        )
+                        border_paths.append(annular_path(border_outer_path, border_inner_path))
+                        border_colors.append(edgecolor)
                 else:
                     centerline_path = _node_border_centerline_path(
                         shape_spec,
@@ -8608,6 +8611,7 @@ def _draw_clusters(
     fill_colors_by_depth: Dict[int, List[Any]] = {}
     border_paths_by_depth: Dict[int, List[Any]] = {}
     border_colors_by_depth: Dict[int, List[Any]] = {}
+    solid_border_specs_by_depth: Dict[int, List[Tuple[Any, Any, float, str]]] = {}
     cluster_label_specs: List[DaguaText] = []
     cluster_label_placements: List[_ClusterLabelPlacement] = []
     min_node_height = float(sizes[:, 1].min()) if sizes.size else 0.0
@@ -8725,7 +8729,24 @@ def _draw_clusters(
             fill_colors_by_depth.setdefault(depth, []).append(to_rgba(fill_color, fill_alpha))
         if border_width > 0.0:
             if style.stroke_dash == "solid":
-                border_paths = [annular_path(outer_path, fill_path)]
+                centerline_spec = ShapeSpec(
+                    center_x=shape_spec.center_x,
+                    center_y=shape_spec.center_y,
+                    width=max(width - border_width, 0.0),
+                    height=max(height - border_width, 0.0),
+                    shape=shape_spec.shape,
+                    corner_radius=add_corner_radius(shape_spec.corner_radius, -border_width / 2.0),
+                    aspect_ratio=shape_spec.aspect_ratio,
+                )
+                solid_border_specs_by_depth.setdefault(depth, []).append(
+                    (
+                        build_shape_path(centerline_spec),
+                        to_rgba(stroke_color, border_alpha),
+                        max(float(eff_stroke_width), 0.0),
+                        "miter",
+                    )
+                )
+                border_paths = []
             else:
                 centerline_path = inset_shape_path(shape_spec, border_width / 2.0)
                 border_paths = dash_ribbon_paths(centerline_path, style.stroke_dash, border_width)
@@ -8822,6 +8843,23 @@ def _draw_clusters(
             fill_zorder=0.0 + depth * 0.01,
             border_zorder=0.05 + depth * 0.01,
         )
+
+    if solid_border_specs_by_depth:
+        from matplotlib.patches import PathPatch
+
+        for depth in sorted(solid_border_specs_by_depth):
+            for path, color, linewidth, joinstyle in solid_border_specs_by_depth[depth]:
+                border_patch = PathPatch(
+                    path,
+                    facecolor="none",
+                    edgecolor=color,
+                    linewidth=linewidth,
+                    linestyle="-",
+                    capstyle="butt",
+                    joinstyle=joinstyle,
+                    zorder=0.05 + depth * 0.01,
+                )
+                ax.add_patch(border_patch)
 
     if cluster_label_specs:
         _resolve_cluster_label_collisions(ax, cluster_label_placements)
