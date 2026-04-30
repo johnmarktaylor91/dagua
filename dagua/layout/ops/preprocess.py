@@ -1226,6 +1226,10 @@ class FA2PrepareStateConfig:
         Initial FA2 speed-efficiency scalar.
     dtype : torch.dtype, default=torch.float32
         Floating-point dtype for FA2 mass, weights, and force history.
+    duplicate_weight_policy : str, default="sum"
+        Policy for collapsing duplicate undirected weighted edges. ``"sum"``
+        preserves dagua's historical behavior; ``"last"`` matches
+        ``networkx.Graph.add_edge`` for reference-fidelity comparisons.
     """
 
     outbound_attraction_distribution: bool = True
@@ -1234,6 +1238,7 @@ class FA2PrepareStateConfig:
     initial_speed: float = 1.0
     initial_speed_efficiency: float = 1.0
     dtype: torch.dtype = torch.float32
+    duplicate_weight_policy: str = "sum"
 
 
 @register_op
@@ -1338,7 +1343,16 @@ class FA2PrepareState(Op):
                         dtype=self.config.dtype,
                         device=device,
                     )
-                    undirected_weights.scatter_add_(0, inverse, weights)
+                    if self.config.duplicate_weight_policy == "sum":
+                        undirected_weights.scatter_add_(0, inverse, weights)
+                    elif self.config.duplicate_weight_policy == "last":
+                        # NetworkX simple graphs overwrite duplicate edge
+                        # attributes in insertion order, so fidelity mode keeps
+                        # the final observed weight for each undirected pair.
+                        for edge_offset in range(inverse.shape[0]):
+                            undirected_weights[inverse[edge_offset]] = weights[edge_offset]
+                    else:
+                        raise ValueError("duplicate_weight_policy must be either 'sum' or 'last'.")
             else:
                 undirected_edges = torch.empty((2, 0), dtype=torch.long, device=device)
                 undirected_weights = None
