@@ -48,10 +48,13 @@ class InitializeStressSGDStateConfig:
         Trace interval passed through from the public adapter.
     disconnected_fallback_scale : float, default=10.0
         Coordinate scale used by the disconnected-graph fallback layout.
+    reference_disconnected_policy : bool, default=False
+        Whether to mirror ``s_gd2`` adapter behavior for edge-case graphs.
     """
 
     trace_every: int = 0
     disconnected_fallback_scale: float = _DISCONNECTED_FALLBACK_SCALE
+    reference_disconnected_policy: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,10 +67,13 @@ class PrepareStressSGDTermsConfig:
         Maximum node count for materializing all-pairs exact terms.
     max_pivots : int, default=200
         Upper bound on the approximate-mode pivot count.
+    exact_float64_terms : bool, default=False
+        Whether exact distances and weights should be stored as ``float64``.
     """
 
     max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES
     max_pivots: int = _MAX_PIVOTS
+    exact_float64_terms: bool = False
 
 
 @dataclass(frozen=True)
@@ -468,6 +474,7 @@ def _pair_count(num_nodes: int) -> int:
 def _build_exact_terms(
     adjacency: list[list[tuple[int, float]]],
     weighted: bool,
+    exact_float64_terms: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build full upper-triangle stress-SGD term data.
 
@@ -477,6 +484,9 @@ def _build_exact_terms(
         Undirected adjacency list.
     weighted : bool
         Whether to use weighted shortest-path distances.
+    exact_float64_terms : bool, default=False
+        Store exact distance and weight parameters as ``float64`` to match the
+        native ``s_gd2`` term representation.
 
     Returns
     -------
@@ -487,8 +497,9 @@ def _build_exact_terms(
     num_terms = _pair_count(num_nodes)
     sources = np.empty((num_terms,), dtype=np.int32)
     targets = np.empty((num_terms,), dtype=np.int32)
-    distances = np.empty((num_terms,), dtype=np.float32)
-    weights = np.empty((num_terms,), dtype=np.float32)
+    float_dtype = np.float64 if exact_float64_terms else np.float32
+    distances = np.empty((num_terms,), dtype=float_dtype)
+    weights = np.empty((num_terms,), dtype=float_dtype)
 
     write_index = 0
     for source_index in range(num_nodes - 1):
@@ -625,6 +636,22 @@ def _disconnected_fallback_layout(
     return positions.to(device=device)
 
 
+def _has_usable_edges(adjacency: list[list[tuple[int, float]]]) -> bool:
+    """Return whether an adjacency list contains any non-self graph edge.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list after self-loop filtering.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one adjacency entry remains.
+    """
+    return any(len(neighbors) > 0 for neighbors in adjacency)
+
+
 @register_op
 class InitializeStressSGDState(Op):
     """Prepare graph-wide Stress-SGD state and disconnected fallback handling.
@@ -639,15 +666,21 @@ class InitializeStressSGDState(Op):
     writes: ClassVar[Tuple[str, ...]] = ("extras", "pos", "converged")
     requires: ClassVar[Tuple[str, ...]] = ("adjacency",)
 
-    def __init__(self, trace_every: int = 0) -> None:
+    def __init__(self, trace_every: int = 0, reference_disconnected_policy: bool = False) -> None:
         """Create an initializer with classic fallback and trace settings.
 
         Parameters
         ----------
         trace_every : int
             Trace interval passed through from the public adapter.
+        reference_disconnected_policy : bool, default=False
+            Return zeros for edgeless graphs and raise for disconnected graphs,
+            matching the reference adapter/native split.
         """
-        self.config = InitializeStressSGDStateConfig(trace_every=trace_every)
+        self.config = InitializeStressSGDStateConfig(
+            trace_every=trace_every,
+            reference_disconnected_policy=reference_disconnected_policy,
+        )
 
     def apply(
         self,
@@ -693,9 +726,20 @@ class InitializeStressSGDState(Op):
 
         if not isinstance(adjacency, list):
             raise ValueError("InitializeStressSGDState requires state.adjacency to be a list.")
+        if self.config.reference_disconnected_policy and not _has_usable_edges(adjacency):
+            fallback_position = torch.zeros((num_nodes, 2), dtype=torch.float32, device=device)
+            state.pos = fallback_position
+            state.extras[_STRESS_SGD_CONNECTED_KEY] = False
+            state.converged = True
+            if self.config.trace_every > 0:
+                state.extras[_STRESS_SGD_TRACE_KEY] = [fallback_position.clone()]
+            return state
+
         connected = _is_connected(adjacency)
         state.extras[_STRESS_SGD_CONNECTED_KEY] = bool(connected)
         if not connected:
+            if self.config.reference_disconnected_policy:
+                raise ValueError("Stress-SGD reference fidelity mode requires a connected graph.")
             fallback_position = _disconnected_fallback_layout(
                 num_nodes=num_nodes,
                 seed=problem.seed,
@@ -710,9 +754,8 @@ class InitializeStressSGDState(Op):
                 state.extras.pop(_STRESS_SGD_TRACE_KEY, None)
             return state
 
-        # The classic implementation seeds the module-level NumPy RNG and then
-        # threads ``np.random`` through later schedule ops. Preserve that exact
-        # state model for bit-for-bit parity.
+        # Initialization matches s_gd2's NumPy draw order; exact shuffle parity
+        # still differs because the native reference uses RandomKit.
         np.random.seed(problem.seed)
         state.extras[_STRESS_SGD_RNG_KEY] = np.random
         state.extras.pop(_STRESS_SGD_CONNECTED_KEY, None)
@@ -729,15 +772,25 @@ class PrepareStressSGDTerms(Op):
     writes: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
     requires: ClassVar[Tuple[str, ...]] = ("adjacency", "extras")
 
-    def __init__(self, max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES) -> None:
+    def __init__(
+        self,
+        max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES,
+        exact_float64_terms: bool = False,
+    ) -> None:
         """Create a configured term builder.
 
         Parameters
         ----------
         max_exact_nodes : int
             Maximum number of nodes for full all-pairs tensor construction.
+        exact_float64_terms : bool, default=False
+            Store exact distances and weights as ``float64`` for reference
+            fidelity.
         """
-        self.config = PrepareStressSGDTermsConfig(max_exact_nodes=max_exact_nodes)
+        self.config = PrepareStressSGDTermsConfig(
+            max_exact_nodes=max_exact_nodes,
+            exact_float64_terms=exact_float64_terms,
+        )
 
     def apply(
         self,
@@ -779,6 +832,7 @@ class PrepareStressSGDTerms(Op):
             sources, targets, distances, weights = _build_exact_terms(
                 adjacency=adjacency,
                 weighted=weighted,
+                exact_float64_terms=self.config.exact_float64_terms,
             )
             state.extras["stress_sgd_sources"] = sources
             state.extras["stress_sgd_targets"] = targets
