@@ -240,17 +240,38 @@ def _knn_from_distances(
     distances: torch.Tensor,
     n_neighbors: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Extract k-nearest neighbors from a dense distance matrix."""
+    """Extract k-nearest neighbors from a dense distance matrix.
+
+    Parameters
+    ----------
+    distances : torch.Tensor
+        Dense shortest-path distance matrix with shape ``[N, N]``.
+    n_neighbors : int
+        Number of neighbors requested by UMAP, including the self neighbor for
+        precomputed dense inputs.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Neighbor indices and distances, each with shape ``[N, K]``. Rows are
+        sorted using stable distance order so tied graph distances follow the
+        same index-order behavior as umap-learn's precomputed path.
+    """
     num_nodes = distances.shape[0]
     if num_nodes == 0:
         empty = torch.empty((0, 0), dtype=torch.long)
         return empty, empty.to(dtype=torch.float32)
 
-    k = min(n_neighbors, max(num_nodes - 1, 1))
-    adjusted = distances.clone()
-    diagonal = torch.eye(num_nodes, dtype=torch.bool)
-    adjusted = adjusted.masked_fill(diagonal, float("inf"))
-    knn_distances, knn_indices = torch.topk(adjusted, k=k, largest=False, dim=1)
+    k = min(n_neighbors, num_nodes)
+    distances_np = distances.detach().to(device="cpu", dtype=torch.float32).numpy()
+    # UMAP's dense precomputed path keeps the zero self-distance in the sorted
+    # neighborhood and uses stable mergesort, which preserves index order for
+    # the many tied distances found in unweighted graph shortest paths.
+    knn_indices_np = np.argsort(distances_np, axis=1, kind="mergesort")[:, :k]
+    row_indices = np.arange(num_nodes)[:, None]
+    knn_distances_np = distances_np[row_indices, knn_indices_np]
+    knn_indices = torch.from_numpy(knn_indices_np.copy()).to(dtype=torch.long)
+    knn_distances = torch.from_numpy(knn_distances_np.copy()).to(dtype=torch.float32)
     return knn_indices.to(dtype=torch.long), knn_distances.to(dtype=torch.float32)
 
 
