@@ -931,18 +931,19 @@ _GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
     # to match the literal dot-SVG declaration.
     font_size=14.0,
     font_color="#000000",
-    # Padding tuned for the 14pt font size to match dot's auto-sized ellipse
-    # silhouette. Empirically these values produce ellipses within ±5% of
-    # dot's rendered semi-axes (verified by parity_metrics.py).
-    padding=(8.0, 4.0),
+    # Padding tuned for the 14pt font size to match dot's rendered comparison
+    # panel footprint after Matplotlib's point-to-pixel conversion.
+    padding=(6.0, 4.0),
     corner_radius=0.0,
     opacity=1.0,
     base_color="#000000",
-    # Metric-driven (R19): dot's terminal ellipses on tiny_graph hit ~50/33
-    # at 14pt baseline; preserve this floor so single-character labels still
-    # produce dot-shaped ellipses.
-    min_width=54.0,  # Graphviz default: 0.75in = 54pt
-    min_height=36.0,  # Graphviz default: 0.5in = 36pt
+    # Dial-tuning round 5: comparison panels showed the literal 54x36pt SVG
+    # floor rendered too small in dagua's fixed-extent renderer. Use the
+    # panel-aligned Graphviz footprint so downstream graphviz_strict users
+    # inherit the same parity size that gallery fixtures previously had to
+    # override locally.
+    min_width=270.0,
+    min_height=120.0,
     overflow_policy="expand_node",
 )
 

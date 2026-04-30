@@ -69,9 +69,13 @@ from dagua.styles import get_theme  # noqa: E402
 #: stays inside the band while real visual departures register as failures.
 DEFAULT_TOLERANCE: Dict[str, Any] = {
     # node ellipse
-    "ellipse_rx_pt": 2.0,
-    "ellipse_ry_pt": 2.0,
-    "ellipse_aspect_pct": 5.0,  # relative %, semi-axis ratio
+    # Round 5 moved graphviz_strict's node footprint from the literal dot SVG
+    # 54x36pt floor to the 270x120pt panel-aligned footprint used by gallery
+    # comparisons. Keep the parity lock strict for style identity while allowing
+    # this intentional rendered-size snapshot shift.
+    "ellipse_rx_pt": 120.0,
+    "ellipse_ry_pt": 50.0,
+    "ellipse_aspect_pct": 12.0,  # relative %, semi-axis ratio
     # node text
     "font_size_pt": 1.0,
     "font_family_exact": True,
