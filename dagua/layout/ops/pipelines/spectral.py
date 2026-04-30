@@ -23,6 +23,7 @@ SPARSE_EIGEN_THRESHOLD = 500
 def build_spectral_pipeline(
     normalization: str = "symmetric",
     sparse_threshold: int = SPARSE_EIGEN_THRESHOLD,
+    networkx_fidelity: bool = False,
 ) -> Pipeline:
     """Build a spectral graph layout pipeline.
 
@@ -32,6 +33,9 @@ def build_spectral_pipeline(
         Laplacian normalization mode.
     sparse_threshold : int, default=500
         Node-count threshold for the sparse eigensolver branch.
+    networkx_fidelity : bool, default=False
+        Whether to mirror NetworkX spectral-layout edge cases and eigenvector
+        selection while preserving the public Dagua default when disabled.
 
     Returns
     -------
@@ -49,10 +53,14 @@ def build_spectral_pipeline(
     if sparse_threshold <= 0:
         raise ValueError("sparse_threshold must be positive.")
 
+    effective_normalization = "unnormalized" if networkx_fidelity else normalization
     return Pipeline(
         [
-            SpectralPrepareState(normalization=normalization),
-            SpectralEmbed(sparse_threshold=sparse_threshold),
+            SpectralPrepareState(
+                normalization=effective_normalization,
+                networkx_fidelity=networkx_fidelity,
+            ),
+            SpectralEmbed(sparse_threshold=sparse_threshold, networkx_fidelity=networkx_fidelity),
             SpectralFinalizePositions(),
         ],
         name="spectral_pipeline",
@@ -66,6 +74,7 @@ def layout_spectral_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     normalization: str = "symmetric",
+    networkx_fidelity: bool = False,
 ) -> torch.Tensor:
     """Run the spectral graph layout pipeline.
 
@@ -85,6 +94,9 @@ def layout_spectral_pipeline(
         Optional edge-weight tensor with shape ``[E]``.
     normalization : str, default="symmetric"
         Laplacian normalization mode.
+    networkx_fidelity : bool, default=False
+        Whether to mirror NetworkX's unnormalized Laplacian, trivial two-node
+        output, and eigenvector-selection behavior.
 
     Returns
     -------
@@ -118,7 +130,10 @@ def layout_spectral_pipeline(
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_spectral_pipeline(normalization=normalization).apply(problem, state, ctx)
+    final_state = build_spectral_pipeline(
+        normalization=normalization,
+        networkx_fidelity=networkx_fidelity,
+    ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("Spectral pipeline did not produce final positions.")
     return final_state.pos
