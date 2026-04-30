@@ -282,9 +282,9 @@ class InitializeStressMajorizationPositions(Op):
         """
         num_nodes = int(distances.shape[0])
         if num_nodes == 0:
-            return torch.empty((0, 2), dtype=torch.float32)
+            return torch.empty((0, 2), dtype=torch.float64)
         if num_nodes == 1:
-            return torch.zeros((1, 2), dtype=torch.float32)
+            return torch.zeros((1, 2), dtype=torch.float64)
 
         squared = distances * distances
         centering = np.eye(num_nodes, dtype=np.float64) - (
@@ -317,7 +317,7 @@ class InitializeStressMajorizationPositions(Op):
                 dtype=np.float64,
             )
 
-        return torch.from_numpy(coordinates).to(dtype=torch.float32)
+        return torch.from_numpy(coordinates)
 
     def _normalize_positions(self, positions: torch.Tensor, extent: float) -> torch.Tensor:
         """Center and scale coordinates into a stable drawing box.
