@@ -675,6 +675,7 @@ class KamadaKawaiAllPairsShortestPathsConfig:
 
     duplicate_policy: str = "last"
 
+
 @register_op
 class KamadaKawaiAllPairsShortestPaths(Op):
     """Compute directed shortest paths with KK-compatible unreachable fills.
@@ -730,6 +731,11 @@ class KamadaKawaiAllPairsShortestPaths(Op):
         -------
         SolveState
             State with ``distance_matrix`` populated in float64.
+
+        Raises
+        ------
+        ValueError
+            If weighted KK shortest paths receive negative edge weights.
         """
         del ctx
 
@@ -743,6 +749,9 @@ class KamadaKawaiAllPairsShortestPaths(Op):
             if self.config.weighted is None
             else bool(self.config.weighted)
         )
+        if weighted and problem.edge_weights is not None:
+            if bool(torch.any(problem.edge_weights < 0).item()):
+                raise ValueError("edge_weights must be nonnegative for KK shortest paths.")
         adjacency = _reference_build_directed_adjacency(
             edge_index=problem.edge_index,
             num_nodes=num_nodes,
@@ -852,10 +861,36 @@ class PivotSelectionConfig:
     method : str, default="maxmin"
         Pivot-selection strategy. Only ``"maxmin"`` is currently supported,
         matching the reference Pivot-MDS heuristic.
+    first_pivot_index : int | None, default=None
+        Optional deterministic first pivot. ``None`` preserves the historical
+        seeded torch-random first pivot.
+    first_pivot : str, default="random"
+        Named first-pivot strategy. ``"first_node"`` matches OGDF Pivot-MDS;
+        ``"random"`` preserves classic dagua behavior unless
+        ``first_pivot_index`` is explicitly set.
     """
 
     n_pivots: int = 50
     method: str = "maxmin"
+    first_pivot_index: Optional[int] = None
+    first_pivot: str = "random"
+
+
+@dataclass(frozen=True)
+class PivotDistanceQueriesConfig:
+    """Configuration for ``PivotDistanceQueries``.
+
+    Parameters
+    ----------
+    dtype : torch.dtype, default=torch.float32
+        Internal dtype used for stacked pivot-distance rows.
+    distance_scale : float, default=1.0
+        Multiplicative scale for graph distances. OGDF's unweighted Pivot-MDS
+        uses edge cost ``100`` while classic dagua uses ``1``.
+    """
+
+    dtype: torch.dtype = torch.float32
+    distance_scale: float = 1.0
 
 
 def _resolve_generator(ctx: RuntimeContext, problem: LayoutProblem) -> torch.Generator:
@@ -878,6 +913,44 @@ def _resolve_generator(ctx: RuntimeContext, problem: LayoutProblem) -> torch.Gen
     generator = torch.Generator(device="cpu")
     generator.manual_seed(problem.seed)
     return generator
+
+
+def _first_pivot_from_config(
+    config: PivotSelectionConfig,
+    num_nodes: int,
+    generator: torch.Generator,
+) -> int:
+    """Resolve the first Pivot-MDS landmark from config.
+
+    Parameters
+    ----------
+    config : PivotSelectionConfig
+        Pivot-selection configuration.
+    num_nodes : int
+        Number of nodes in the active graph.
+    generator : torch.Generator
+        CPU generator used by the random strategy.
+
+    Returns
+    -------
+    int
+        First pivot node index.
+
+    Raises
+    ------
+    ValueError
+        If the configured pivot strategy or index is invalid.
+    """
+    if config.first_pivot_index is not None:
+        first_pivot = int(config.first_pivot_index)
+        if first_pivot < 0 or first_pivot >= num_nodes:
+            raise ValueError("first_pivot_index must be in [0, num_nodes).")
+        return first_pivot
+    if config.first_pivot == "random":
+        return int(torch.randint(0, num_nodes, (1,), generator=generator).item())
+    if config.first_pivot == "first_node":
+        return 0
+    raise ValueError(f"Unsupported first_pivot strategy: {config.first_pivot!r}.")
 
 
 @register_op
@@ -960,12 +1033,12 @@ class PivotSelection(Op):
             return state
 
         n_pivots = min(self.config.n_pivots, num_nodes)
-        generator = _resolve_generator(ctx, problem)
         weighted = _is_weighted(problem, state, adjacency)
 
         selected = torch.zeros(num_nodes, dtype=torch.bool)
         pivot_indices: List[int] = []
-        first_pivot = int(torch.randint(0, num_nodes, (1,), generator=generator).item())
+        generator = _resolve_generator(ctx, problem)
+        first_pivot = _first_pivot_from_config(self.config, num_nodes, generator)
         pivot_indices.append(first_pivot)
         selected[first_pivot] = True
 
@@ -1011,6 +1084,16 @@ class PivotDistanceQueries(Op):
     writes = ("pivot_distances",)
     requires = ("adjacency",)
 
+    def __init__(self, config: Optional[PivotDistanceQueriesConfig] = None) -> None:
+        """Initialize the pivot-distance query op.
+
+        Parameters
+        ----------
+        config : PivotDistanceQueriesConfig | None, optional
+            Optional op configuration.
+        """
+        self.config = config or PivotDistanceQueriesConfig()
+
     def apply(
         self,
         problem: LayoutProblem,
@@ -1032,13 +1115,23 @@ class PivotDistanceQueries(Op):
         -------
         SolveState
             State with ``pivot_distances`` populated.
+
+        Raises
+        ------
+        ValueError
+            If the configured dtype or scale is invalid.
         """
         _ = ctx
+        if self.config.dtype not in (torch.float32, torch.float64):
+            raise ValueError("Pivot distance dtype must be torch.float32 or torch.float64.")
+        if self.config.distance_scale <= 0.0:
+            raise ValueError("Pivot distance_scale must be positive.")
+
         adjacency = _adjacency_to_list(state)
         num_nodes = len(adjacency)
         pivots = state.pivot_indices
         if pivots is None or int(pivots.numel()) == 0:
-            state.pivot_distances = torch.empty((0, num_nodes), dtype=torch.float32)
+            state.pivot_distances = torch.empty((0, num_nodes), dtype=self.config.dtype)
             return state
 
         weighted = _is_weighted(problem, state, adjacency)
@@ -1046,7 +1139,10 @@ class PivotDistanceQueries(Op):
             _graph_distances_for_pivot(adjacency, int(pivot.item()), weighted=weighted)
             for pivot in pivots.detach().to(device="cpu", dtype=torch.long)
         ]
-        state.pivot_distances = torch.stack(rows, dim=0)
+        distances = torch.stack(rows, dim=0).to(dtype=self.config.dtype)
+        if self.config.distance_scale != 1.0:
+            distances = distances * float(self.config.distance_scale)
+        state.pivot_distances = distances
         return state
 
 
