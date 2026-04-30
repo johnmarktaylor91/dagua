@@ -216,7 +216,8 @@ class IgraphRT(_IgraphBase):
     name = "igraph_rt"
     max_nodes = 10_000
     layout_algo = "reingold_tilford"
-    layout_kwargs = {}
+    layout_kwargs = {"mode": "out"}
+    variant_param_names = frozenset({"mode", "root", "rootlevel"})
 
 
 @register
