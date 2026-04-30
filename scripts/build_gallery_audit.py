@@ -75,9 +75,12 @@ OVERFLOW_DEMO_LABEL = "Processing validation stage output results"
 OVERFLOW_EXPAND_LABEL = "Processing validation stage output expanded"
 WRAP_DEMO_LABEL = "Process validation stage output results"
 ELLIPSIS_DEMO_LABEL = "A long label for truncation"
+PANEL_HALF_WIDTH = 800
+PANEL_HEIGHT = 600
+RENDER_DPI = 100
 CARD_DPI = 200
 CARD_SIZE: Tuple[int, int] = (1600, 1200)
-PANEL_SIZE: Tuple[int, int] = (800, 600)
+PANEL_SIZE: Tuple[int, int] = (PANEL_HALF_WIDTH, PANEL_HEIGHT)
 COMPARISON_SIZE: Tuple[int, int] = (1600, 600)
 STRIP_CARD_SIZE: Tuple[int, int] = (1568, 600)
 CARD_CONTENT_INSET: Tuple[int, int, int, int] = (72, 112, 72, 72)
@@ -101,7 +104,10 @@ STRIP_PANEL_INSET: Tuple[int, int, int, int] = (
     24,
 )
 CARD_FIGSIZE: Tuple[float, float] = (8.0, 6.0)
-PANEL_FIGSIZE: Tuple[float, float] = (4.0, 3.0)
+PANEL_FIGSIZE: Tuple[float, float] = (
+    PANEL_HALF_WIDTH / RENDER_DPI,
+    PANEL_HEIGHT / RENDER_DPI,
+)
 CONTENT_CROP_PADDING = 12
 PAIR_DEFAULT_GAP = 260.0
 PAIR_SCALAR_COMPARISON_GAP = 180.0
@@ -118,10 +124,10 @@ DECORATIVE_FILL_CARD_IDS = frozenset(
         "nodes_fills_gradient_radial",
     }
 )
-DECORATIVE_FILL_CARD_MIN_HEIGHT = 80.0
-DECORATIVE_FILL_CARD_PADDING: Tuple[float, float] = (11.0, 12.0)
-GRAPHVIZ_PARITY_MAX_NODE_WIDTH = 64.0
-GRAPHVIZ_PARITY_MAX_NODE_HEIGHT = 44.0
+DECORATIVE_FILL_CARD_MIN_HEIGHT = 50.0
+DECORATIVE_FILL_CARD_PADDING: Tuple[float, float] = (8.0, 4.0)
+GRAPHVIZ_PARITY_MAX_NODE_WIDTH = 75.0
+GRAPHVIZ_PARITY_MAX_NODE_HEIGHT = 50.0
 SCALAR_NODE_COMPARISON_FEATURES = frozenset(
     {
         "font_size",
@@ -1784,16 +1790,21 @@ def _apply_reference_card_tweaks(
     if item.card_id in DECORATIVE_FILL_CARD_IDS:
         for style in _node_styles(graph):
             style.min_height = max(float(style.min_height), DECORATIVE_FILL_CARD_MIN_HEIGHT)
-            style.min_width = min(float(style.min_width), 80.0)
-            # Decorative fills need more vertical breathing room so the label
-            # does not read as squashed against the painted fill treatment.
+            style.min_width = max(float(style.min_width), GRAPHVIZ_PARITY_MAX_NODE_WIDTH)
+            # Decorative fills must use the same footprint as plain nodes; the
+            # fixed-extent metric now treats fill-specific size drift as signal.
             style.padding = DECORATIVE_FILL_CARD_PADDING
     if item.spec.category == "nodes/shapes":
         for style in _node_styles(graph):
             if style.min_width is not None:
-                style.min_width = min(float(style.min_width), GRAPHVIZ_PARITY_MAX_NODE_WIDTH)
+                style.min_width = GRAPHVIZ_PARITY_MAX_NODE_WIDTH
             if style.min_height is not None:
-                style.min_height = min(float(style.min_height), GRAPHVIZ_PARITY_MAX_NODE_HEIGHT)
+                style.min_height = GRAPHVIZ_PARITY_MAX_NODE_HEIGHT
+    if item.spec.fixture == "pair" and item.spec.category.startswith("nodes/"):
+        for style in _edge_styles(graph):
+            style.arrow = "normal"
+            style.arrow_length = max(float(style.arrow_length), 28.0)
+            style.arrow_width = max(float(style.arrow_width), 20.0)
     if item.spec.feature == "external_label" and item.value.slug == "top":
         styles = _node_styles(graph)
         if len(styles) >= 2:
@@ -2164,16 +2175,27 @@ def _render_dagua_png(
     fig, ax = render(
         graph,
         positions,
-        dpi=CARD_DPI,
-        figsize=(size_px[0] / CARD_DPI, size_px[1] / CARD_DPI),
+        dpi=RENDER_DPI,
+        figsize=(size_px[0] / RENDER_DPI, size_px[1] / RENDER_DPI),
     )
     fig.patch.set_facecolor(bg_color)
     ax.set_facecolor(bg_color)
+    if graph.node_sizes is not None and graph.num_nodes:
+        pos = positions.detach().cpu()
+        sizes = graph.node_sizes.detach().cpu()
+        x_min = float((pos[:, 0] - sizes[:, 0] / 2.0).min())
+        x_max = float((pos[:, 0] + sizes[:, 0] / 2.0).max())
+        y_min = float((pos[:, 1] - sizes[:, 1] / 2.0).min())
+        y_max = float((pos[:, 1] + sizes[:, 1] / 2.0).max())
+        x_center = (x_min + x_max) / 2.0
+        y_center = (y_min + y_max) / 2.0
+        ax.set_xlim(x_center - size_px[0] / 2.0, x_center + size_px[0] / 2.0)
+        ax.set_ylim(y_center - size_px[1] / 2.0, y_center + size_px[1] / 2.0)
     fig.savefig(
         output_path,
-        dpi=CARD_DPI,
-        bbox_inches="tight",
-        pad_inches=0.05,
+        dpi=RENDER_DPI,
+        bbox_inches=None,
+        pad_inches=0.0,
         facecolor=bg_color,
         edgecolor=bg_color,
         transparent=False,
@@ -2253,8 +2275,9 @@ def _place_render_on_canvas(
     canvas_size: Tuple[int, int],
     inset: Tuple[int, int, int, int],
     canvas_color: str = WHITE,
+    downscale_overflow: bool = False,
 ) -> Image.Image:
-    """Normalize a render onto a fixed white canvas.
+    """Place a fixed-extent render onto a fixed canvas.
 
     Parameters
     ----------
@@ -2266,21 +2289,32 @@ def _place_render_on_canvas(
         Left, top, right, and bottom insets for the content area.
     canvas_color : str, default=WHITE
         Background color used for the normalized card canvas.
+    downscale_overflow : bool, default=False
+        Whether to shrink native renders that exceed the target canvas. Keep
+        disabled for Dagua so node-size signal is not normalized away; enable
+        for competitor tools that can emit oversized native canvases.
 
     Returns
     -------
     Image.Image
-        Normalized RGB image.
+        Fixed-size RGB image.
     """
 
     with Image.open(image_path) as opened:
         rgba = opened.convert("RGBA")
-        crop_box = _content_crop_box(rgba)
-        if crop_box is not None:
-            rgba = rgba.crop(crop_box)
         available_width = canvas_size[0] - inset[0] - inset[2]
         available_height = canvas_size[1] - inset[1] - inset[3]
-        rgba.thumbnail((available_width, available_height), Image.LANCZOS)
+        if rgba.width > canvas_size[0] or rgba.height > canvas_size[1]:
+            logging.warning(
+                "Fixed render %s overflows canvas %sx%s with native size %sx%s",
+                image_path,
+                canvas_size[0],
+                canvas_size[1],
+                rgba.width,
+                rgba.height,
+            )
+            if downscale_overflow:
+                rgba.thumbnail(canvas_size, Image.LANCZOS)
         canvas = Image.new("RGBA", canvas_size, canvas_color)
         paste_x = inset[0] + (available_width - rgba.width) // 2
         paste_y = inset[1] + (available_height - rgba.height) // 2
@@ -2717,7 +2751,12 @@ def _render_comparison_card(item: ReferenceCardItem, output_root: Path) -> None:
             canvas_color=_graph_background_color(graph),
         )
         try:
-            graphviz_panel = _place_render_on_canvas(graphviz_raw, PANEL_SIZE, PANEL_CONTENT_INSET)
+            graphviz_panel = _place_render_on_canvas(
+                graphviz_raw,
+                PANEL_SIZE,
+                PANEL_CONTENT_INSET,
+                downscale_overflow=True,
+            )
         except Exception as exc:
             logging.warning("Skipping Graphviz comparison for %s: %s", item.card_id, exc)
             destination.unlink(missing_ok=True)
@@ -4180,7 +4219,6 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                             "gradient": "linear",
                             "fill": GRADIENT_FILL,
                             "gradient_color": GRADIENT_COLOR,
-                            "min_height": 64.0,
                             "font_color": "#FFFFFF",
                         }
                     },
