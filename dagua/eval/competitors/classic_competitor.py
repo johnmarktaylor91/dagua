@@ -184,7 +184,7 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_spectral": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.spectral",
         function_name="layout_spectral_pipeline",
-        default_params={},
+        default_params={"networkx_fidelity": True},
     ),
     "classic_classical_mds": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.classical_mds",
@@ -1023,6 +1023,7 @@ class ClassicSpectral(_ClassicBase):
                 node_sizes=graph.node_sizes,
                 seed=self._layout_seed(seed),
                 edge_weights=graph.edge_weights,
+                networkx_fidelity=True,
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
