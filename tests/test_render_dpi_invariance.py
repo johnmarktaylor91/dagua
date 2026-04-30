@@ -12,7 +12,7 @@ from matplotlib.path import Path
 from dagua.edges import BezierCurve
 from dagua.graph import DaguaGraph
 from dagua.render.mpl import render
-from dagua.styles import ClusterStyle, NodeStyle
+from dagua.styles import ClusterStyle, EdgeStyle, NodeStyle
 
 
 def _build_pair_graph() -> Tuple[DaguaGraph, torch.Tensor]:
@@ -86,6 +86,97 @@ def _build_shape_graph(shape: str) -> Tuple[DaguaGraph, torch.Tensor]:
     graph.add_node("target", label="B", style=style)
     graph.add_edge("source", "target")
     positions = torch.tensor([[0.0, 0.0], [140.0, 0.0]], dtype=torch.float32)
+    return graph, positions
+
+
+def _build_text_outline_graph() -> Tuple[DaguaGraph, torch.Tensor]:
+    """Build a node fixture with text outline rendering enabled.
+
+    Returns
+    -------
+    tuple[DaguaGraph, torch.Tensor]
+        Graph and fixed node positions with shape ``[1, 2]``.
+    """
+    graph = DaguaGraph()
+    graph.add_node(
+        "outlined",
+        label="Outline",
+        style=NodeStyle(
+            fill="#FFFFFF",
+            stroke="#DDDDDD",
+            stroke_width=2.0,
+            min_width=140.0,
+            min_height=70.0,
+            font_color="#111111",
+            font_size=24.0,
+            text_outline=True,
+            text_outline_color="#FFFFFF",
+            text_outline_width=4.0,
+        ),
+    )
+    positions = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+    return graph, positions
+
+
+def _build_bold_text_graph() -> Tuple[DaguaGraph, torch.Tensor]:
+    """Build a node fixture that triggers synthetic bold emphasis ribbons.
+
+    Returns
+    -------
+    tuple[DaguaGraph, torch.Tensor]
+        Graph and fixed node positions with shape ``[1, 2]``.
+    """
+    graph = DaguaGraph()
+    graph.add_node(
+        "bold",
+        label="Bold",
+        style=NodeStyle(
+            fill="#FFFFFF",
+            stroke="#DDDDDD",
+            stroke_width=2.0,
+            min_width=120.0,
+            min_height=70.0,
+            font_color="#111111",
+            font_size=26.0,
+            font_family="cmr10",
+            font_weight="bold",
+        ),
+    )
+    positions = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+    return graph, positions
+
+
+def _build_port_indicator_graph() -> Tuple[DaguaGraph, torch.Tensor]:
+    """Build a two-node fixture with edge endpoint port indicators.
+
+    Returns
+    -------
+    tuple[DaguaGraph, torch.Tensor]
+        Graph and fixed node positions with shape ``[2, 2]``.
+    """
+    graph = DaguaGraph()
+    node_style = NodeStyle(
+        fill="#FFFFFF",
+        stroke="#444444",
+        stroke_width=2.0,
+        min_width=72.0,
+        min_height=54.0,
+    )
+    graph.add_node("source", label="S", style=node_style)
+    graph.add_node("target", label="T", style=node_style)
+    graph.add_edge(
+        "source",
+        "target",
+        style=EdgeStyle(
+            color="#111111",
+            width=8.0,
+            opacity=1.0,
+            port_indicator="circle",
+            port_indicator_size=14.0,
+            port_indicator_color="#111111",
+        ),
+    )
+    positions = torch.tensor([[0.0, 0.0], [160.0, 0.0]], dtype=torch.float32)
     return graph, positions
 
 
@@ -307,6 +398,70 @@ def _label_pixel_bbox(ax: Any, gid: str) -> Tuple[float, float, float, float]:
     )
 
 
+def _path_patch_pixel_bbox(ax: Any, gid: str) -> Tuple[float, float, float, float]:
+    """Return one path patch's bbox in display pixels.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes containing the path patch.
+    gid : str
+        Patch gid to measure.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Display-pixel bbox as ``(x_min, x_max, y_min, y_max)``.
+    """
+    patches = [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, PathPatch) and str(patch.get_gid()) == gid
+    ]
+    assert patches
+    vertices = ax.transData.transform(
+        np.concatenate([patch.get_path().vertices for patch in patches], axis=0)
+    )
+    return (
+        float(vertices[:, 0].min()),
+        float(vertices[:, 0].max()),
+        float(vertices[:, 1].min()),
+        float(vertices[:, 1].max()),
+    )
+
+
+def _bbox_height(bbox: Tuple[float, float, float, float]) -> float:
+    """Return a display-pixel bbox height.
+
+    Parameters
+    ----------
+    bbox : tuple[float, float, float, float]
+        Display-pixel bbox as ``(x_min, x_max, y_min, y_max)``.
+
+    Returns
+    -------
+    float
+        Absolute bbox height in pixels.
+    """
+    return abs(float(bbox[3] - bbox[2]))
+
+
+def _bbox_width(bbox: Tuple[float, float, float, float]) -> float:
+    """Return a display-pixel bbox width.
+
+    Parameters
+    ----------
+    bbox : tuple[float, float, float, float]
+        Display-pixel bbox as ``(x_min, x_max, y_min, y_max)``.
+
+    Returns
+    -------
+    float
+        Absolute bbox width in pixels.
+    """
+    return abs(float(bbox[1] - bbox[0]))
+
+
 def _render_ratios(dpi: int) -> Dict[str, float]:
     """Render the pair fixture and extract relative geometry ratios.
 
@@ -443,6 +598,117 @@ def _render_shape_inner_ring_ratio(shape: str, dpi: int) -> float:
     return ratio
 
 
+def _render_text_outline_ratios(dpi: int) -> Dict[str, float]:
+    """Render the outline fixture and measure text-outline ratios.
+
+    Parameters
+    ----------
+    dpi : int
+        Rasterization DPI for this render.
+
+    Returns
+    -------
+    dict[str, float]
+        Outline expansion ratio measured against label height.
+    """
+    graph, positions = _build_text_outline_graph()
+    graph.compute_node_sizes()
+    fig, ax = render(graph, positions, dpi=dpi, figsize=(4.0, 2.0), svg_hover_text=False)
+    label_bbox = _label_pixel_bbox(ax, "dagua-node-label-0")
+    outline_bbox = _path_patch_pixel_bbox(ax, "dagua-node-label-0-outline-0-0")
+    outline_pixel_width = max(
+        (_bbox_width(outline_bbox) - _bbox_width(label_bbox)) / 2.0,
+        (_bbox_height(outline_bbox) - _bbox_height(label_bbox)) / 2.0,
+    )
+    ratios = {"outline_to_label_height": outline_pixel_width / max(_bbox_height(label_bbox), 1.0)}
+    plt.close(fig)
+    return ratios
+
+
+def _render_bold_emphasis_ratios(dpi: int) -> Dict[str, float]:
+    """Render the bold fixture and measure bold-emphasis ratios.
+
+    Parameters
+    ----------
+    dpi : int
+        Rasterization DPI for this render.
+
+    Returns
+    -------
+    dict[str, float]
+        Bold-emphasis expansion ratio measured against label height.
+    """
+    graph, positions = _build_bold_text_graph()
+    graph.compute_node_sizes()
+    fig, ax = render(graph, positions, dpi=dpi, figsize=(4.0, 2.0), svg_hover_text=False)
+    label_bbox = _label_pixel_bbox(ax, "dagua-node-label-0")
+    emphasis_bbox = _path_patch_pixel_bbox(ax, "dagua-node-label-0-embolden-0-0")
+    emphasis_pixel_width = max(
+        (_bbox_width(emphasis_bbox) - _bbox_width(label_bbox)) / 2.0,
+        (_bbox_height(emphasis_bbox) - _bbox_height(label_bbox)) / 2.0,
+    )
+    ratios = {
+        "bold_emphasis_to_label_height": emphasis_pixel_width / max(_bbox_height(label_bbox), 1.0)
+    }
+    plt.close(fig)
+    return ratios
+
+
+def _render_port_indicator_ratios(dpi: int) -> Dict[str, float]:
+    """Render the port fixture and measure marker-to-edge ratios.
+
+    Parameters
+    ----------
+    dpi : int
+        Rasterization DPI for this render.
+
+    Returns
+    -------
+    dict[str, float]
+        Port marker dimensions measured relative to edge stroke width.
+    """
+    graph, positions = _build_port_indicator_graph()
+    graph.compute_node_sizes()
+    sizes = graph.node_sizes.detach().cpu().numpy()
+    source_x = float(positions[0, 0] + sizes[0, 0] / 2.0)
+    target_x = float(positions[1, 0] - sizes[1, 0] / 2.0)
+    curves = [
+        BezierCurve(
+            p0=(source_x, 0.0),
+            cp1=(source_x + (target_x - source_x) / 3.0, 0.0),
+            cp2=(source_x + 2.0 * (target_x - source_x) / 3.0, 0.0),
+            p1=(target_x, 0.0),
+        )
+    ]
+    fig, ax = render(
+        graph,
+        positions,
+        dpi=dpi,
+        figsize=(4.0, 2.0),
+        curves=curves,
+        svg_hover_text=False,
+    )
+    edge_path = next(
+        path
+        for collection in ax.collections
+        if (
+            isinstance(collection, PatchCollection)
+            and abs(float(collection.get_zorder()) - 1.0) < 1e-6
+        )
+        for path in collection.get_paths()
+    )
+    edge_vertices = ax.transData.transform(edge_path.vertices)
+    edge_width = float(edge_vertices[:, 1].max() - edge_vertices[:, 1].min())
+    source_marker_bbox = _path_patch_pixel_bbox(ax, "dagua-port-indicator-0-source")
+    target_marker_bbox = _path_patch_pixel_bbox(ax, "dagua-port-indicator-0-target")
+    ratios = {
+        "source_marker_to_edge": _bbox_width(source_marker_bbox) / max(edge_width, 1.0),
+        "target_marker_to_edge": _bbox_width(target_marker_bbox) / max(edge_width, 1.0),
+    }
+    plt.close(fig)
+    return ratios
+
+
 def _assert_dpi_invariant(values_by_dpi: Dict[int, float]) -> None:
     """Assert scalar ratios remain stable across DPI values.
 
@@ -477,6 +743,45 @@ def test_cluster_border_dpi_invariance() -> None:
     """Cluster solid borders should be filled data-coordinate ribbons."""
     ratios_by_dpi = {dpi: _render_cluster_border_ratio(dpi) for dpi in (100, 150, 200, 300)}
     _assert_dpi_invariant(ratios_by_dpi)
+
+
+def test_text_outline_dpi_invariance() -> None:
+    """Text outline ratio should stay stable across raster DPI."""
+    tolerance = 0.05
+    ratios_by_dpi = {dpi: _render_text_outline_ratios(dpi) for dpi in (100, 150, 200, 300)}
+    baseline = ratios_by_dpi[100]
+
+    for dpi, ratios in ratios_by_dpi.items():
+        for key, ratio in ratios.items():
+            assert ratio > 0.0, (dpi, key, ratio, ratios)
+            allowed_delta = max(abs(baseline[key]) * tolerance, 1e-6)
+            assert abs(ratio - baseline[key]) <= allowed_delta, (dpi, key, ratio, baseline[key])
+
+
+def test_port_indicator_dpi_invariance() -> None:
+    """Port indicator marker ratios should stay stable across raster DPI."""
+    tolerance = 0.05
+    ratios_by_dpi = {dpi: _render_port_indicator_ratios(dpi) for dpi in (100, 150, 200, 300)}
+    baseline = ratios_by_dpi[100]
+
+    for dpi, ratios in ratios_by_dpi.items():
+        for key, ratio in ratios.items():
+            assert ratio > 0.0, (dpi, key, ratio, ratios)
+            allowed_delta = max(abs(baseline[key]) * tolerance, 1e-6)
+            assert abs(ratio - baseline[key]) <= allowed_delta, (dpi, key, ratio, baseline[key])
+
+
+def test_bold_emphasis_dpi_invariance() -> None:
+    """Bold emphasis ratio should stay stable across raster DPI."""
+    tolerance = 0.05
+    ratios_by_dpi = {dpi: _render_bold_emphasis_ratios(dpi) for dpi in (100, 150, 200, 300)}
+    baseline = ratios_by_dpi[100]
+
+    for dpi, ratios in ratios_by_dpi.items():
+        for key, ratio in ratios.items():
+            assert ratio > 0.0, (dpi, key, ratio, ratios)
+            allowed_delta = max(abs(baseline[key]) * tolerance, 1e-6)
+            assert abs(ratio - baseline[key]) <= allowed_delta, (dpi, key, ratio, baseline[key])
 
 
 def test_double_circle_inner_ring_dpi_invariance() -> None:
