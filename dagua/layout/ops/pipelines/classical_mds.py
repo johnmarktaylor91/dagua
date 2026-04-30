@@ -8,8 +8,11 @@ import torch
 
 from dagua.layout.ops.base import Pipeline
 from dagua.layout.ops.distance import ClassicalMDSDistanceMatrix
-from dagua.layout.ops.embed import ClassicalMDSComputeEmbedding
-from dagua.layout.ops.postprocess import ClassicalMDSFinalizePositions
+from dagua.layout.ops.embed import ClassicalMDSComputeEmbedding, ClassicalMDSComputeEmbeddingConfig
+from dagua.layout.ops.postprocess import (
+    ClassicalMDSFinalizePositions,
+    ClassicalMDSFinalizePositionsConfig,
+)
 from dagua.layout.ops.state import (
     ExecutionPlan,
     LayoutProblem,
@@ -18,8 +21,14 @@ from dagua.layout.ops.state import (
 )
 
 
-def build_classical_mds_pipeline() -> Pipeline:
+def build_classical_mds_pipeline(*, igraph_fidelity: bool = False) -> Pipeline:
     """Build a classical multidimensional scaling pipeline.
+
+    Parameters
+    ----------
+    igraph_fidelity : bool, default=False
+        If ``True``, opt into igraph-compatible raw embedding and final scaling
+        semantics for benchmark parity checks.
 
     Returns
     -------
@@ -32,8 +41,12 @@ def build_classical_mds_pipeline() -> Pipeline:
     return Pipeline(
         [
             ClassicalMDSDistanceMatrix(),
-            ClassicalMDSComputeEmbedding(),
-            ClassicalMDSFinalizePositions(),
+            ClassicalMDSComputeEmbedding(
+                config=ClassicalMDSComputeEmbeddingConfig(igraph_fidelity=igraph_fidelity)
+            ),
+            ClassicalMDSFinalizePositions(
+                config=ClassicalMDSFinalizePositionsConfig(igraph_fidelity=igraph_fidelity)
+            ),
         ],
         name="classical_mds_pipeline",
     )
@@ -45,6 +58,7 @@ def layout_classical_mds_pipeline(
     node_sizes: Optional[torch.Tensor] = None,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
+    igraph_fidelity: bool = False,
 ) -> torch.Tensor:
     """Run the classical multidimensional scaling pipeline.
 
@@ -62,6 +76,10 @@ def layout_classical_mds_pipeline(
         once graph distances are fixed.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
+    igraph_fidelity : bool, default=False
+        If ``True``, ignore edge weights and use igraph-compatible embedding
+        and scaling semantics. This is intended for fidelity benchmarking
+        against ``igraph.layout("mds")``.
 
     Returns
     -------
@@ -91,11 +109,15 @@ def layout_classical_mds_pipeline(
         edge_index=edge_index,
         num_nodes=num_nodes,
         node_sizes=node_sizes,
-        edge_weights=edge_weights,
+        edge_weights=None if igraph_fidelity else edge_weights,
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_classical_mds_pipeline().apply(problem, state, ctx)
+    final_state = build_classical_mds_pipeline(igraph_fidelity=igraph_fidelity).apply(
+        problem,
+        state,
+        ctx,
+    )
     if final_state.pos is None:
         raise RuntimeError("Classical MDS pipeline did not produce final positions.")
     return final_state.pos

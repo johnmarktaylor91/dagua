@@ -1036,6 +1036,7 @@ class ClassicClassicalMDS(_ClassicBase):
 
     name = "classic_classical_mds"
     max_nodes = 5_000
+    variant_param_names = frozenset({"igraph_fidelity"})
 
     def layout(
         self,
