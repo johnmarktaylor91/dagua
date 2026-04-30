@@ -124,10 +124,8 @@ DECORATIVE_FILL_CARD_IDS = frozenset(
         "nodes_fills_gradient_radial",
     }
 )
-DECORATIVE_FILL_CARD_MIN_HEIGHT = 50.0
-DECORATIVE_FILL_CARD_PADDING: Tuple[float, float] = (8.0, 4.0)
-GRAPHVIZ_PARITY_MAX_NODE_WIDTH = 75.0
-GRAPHVIZ_PARITY_MAX_NODE_HEIGHT = 50.0
+GRAPHVIZ_PARITY_MAX_NODE_WIDTH = 270.0
+GRAPHVIZ_PARITY_MAX_NODE_HEIGHT = 120.0
 SCALAR_NODE_COMPARISON_FEATURES = frozenset(
     {
         "font_size",
@@ -1789,11 +1787,10 @@ def _apply_reference_card_tweaks(
 
     if item.card_id in DECORATIVE_FILL_CARD_IDS:
         for style in _node_styles(graph):
-            style.min_height = max(float(style.min_height), DECORATIVE_FILL_CARD_MIN_HEIGHT)
+            style.min_height = max(float(style.min_height), GRAPHVIZ_PARITY_MAX_NODE_HEIGHT)
             style.min_width = max(float(style.min_width), GRAPHVIZ_PARITY_MAX_NODE_WIDTH)
             # Decorative fills must use the same footprint as plain nodes; the
             # fixed-extent metric now treats fill-specific size drift as signal.
-            style.padding = DECORATIVE_FILL_CARD_PADDING
     if item.spec.category == "nodes/shapes":
         for style in _node_styles(graph):
             if style.min_width is not None:

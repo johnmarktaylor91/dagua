@@ -8804,6 +8804,19 @@ def _draw_clusters(
             ax=ax,
             fill_paths=fill_paths_by_depth.get(depth, []),
             fill_colors=fill_colors_by_depth.get(depth, []),
+            border_paths=[],
+            border_colors=[],
+            fill_zorder=0.0 + depth * 0.01,
+            border_zorder=0.05 + depth * 0.01,
+        )
+
+    # Draw all cluster strokes after all fills. With solid fill opacity, nested
+    # cluster fills can otherwise cover a previously emitted border collection.
+    for depth in sorted(border_paths_by_depth):
+        add_filled_collections(
+            ax=ax,
+            fill_paths=[],
+            fill_colors=[],
             border_paths=border_paths_by_depth.get(depth, []),
             border_colors=border_colors_by_depth.get(depth, []),
             fill_zorder=0.0 + depth * 0.01,

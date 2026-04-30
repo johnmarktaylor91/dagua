@@ -133,7 +133,7 @@ def main() -> None:
     if payload["delta_pct"] is not None:
         print(f"suite delta: {payload['delta_pct']:+.2f}%")
     print("\nPer-family deltas vs baseline:")
-    for fam, s in sorted(family_summary.items(), key=lambda kv: (kv[1]["delta_pct"] or 0)):
+    for fam, s in sorted(family_summary.items(), key=lambda kv: kv[1]["delta_pct"] or 0):
         delta_str = f"{s['delta_pct']:+6.2f}%" if s["delta_pct"] is not None else "  n/a"
         base_str = f"{s['mean_baseline']:6.2f}" if s["mean_baseline"] is not None else "  ?  "
         print(
