@@ -24,6 +24,7 @@ from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _FR_MIN_DISTANCE = 0.01
+_FR_LAST_DELTA_POS_KEY = "fr_last_delta_pos"
 _GRAPHOPT_COULOMBS_CONSTANT = 8_987_500_000.0
 _GRAPHOPT_MIN_DISTANCE = 1.0e-12
 _GRAPHOPT_MAX_REPULSION_DISTANCE = 500.0
@@ -2625,9 +2626,13 @@ class ApplyDisplacementConfig:
     ----------
     min_force_norm : float, default=0.01
         Safety floor applied before normalizing each node force vector.
+    fixed_indices : tuple[int, ...] | None, default=None
+        Node indices whose displacement should be zeroed, matching
+        NetworkX's ``fixed`` spring-layout semantics.
     """
 
     min_force_norm: float = _FR_MIN_DISTANCE
+    fixed_indices: Optional[Tuple[int, ...]] = None
 
 
 @register_op
@@ -2639,7 +2644,7 @@ class ApplyDisplacement(Op):
     name: ClassVar[str] = "apply_displacement"
     category: ClassVar[OpCategory] = OpCategory.FORCE
     reads: ClassVar[Tuple[str, ...]] = ("pos", "forces", "temperature")
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos", f"extras.{_FR_LAST_DELTA_POS_KEY}")
     requires: ClassVar[Tuple[str, ...]] = ("pos", "forces", "temperature")
 
     def __init__(self, config: Optional[ApplyDisplacementConfig] = None) -> None:
@@ -2691,6 +2696,15 @@ class ApplyDisplacement(Op):
             min=float(self.config.min_force_norm)
         )
         delta_pos = forces * (float(state.temperature) / length).unsqueeze(1)
+        if self.config.fixed_indices:
+            fixed = torch.tensor(
+                self.config.fixed_indices,
+                dtype=torch.long,
+                device=delta_pos.device,
+            )
+            if fixed.numel() > 0:
+                delta_pos[fixed] = 0.0
+        state.extras[_FR_LAST_DELTA_POS_KEY] = delta_pos.detach().clone()
         state.pos = pos + delta_pos
         return state
 
