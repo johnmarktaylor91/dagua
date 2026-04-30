@@ -377,17 +377,24 @@ def _cluster_font_size_data(
         Target cluster-label size in data units.
     """
     if font_size_scaling == "fixed":
-        return max(float(font_size_points), 1e-9) * max(float(display_scale), 1e-9)
+        fixed_size = max(float(font_size_points), 1e-9) * max(float(display_scale), 1e-9)
+        height_cap = max(float(cluster_height), 0.0) / 8.0
+        return min(fixed_size, height_cap) if height_cap > 0.0 else fixed_size
 
+    authored_size_data = max(float(font_size_points), 1e-9) * max(float(display_scale), 1e-9)
     base_size_data = max(
         max(float(cluster_height), 0.0) * _CLUSTER_LABEL_HEIGHT_FRACTION,
         max(float(min_node_height), 0.0) * _CLUSTER_LABEL_MIN_NODE_HEIGHT_FRACTION,
     )
-    return (
+    scaled_size = (
         base_size_data
         * _multiline_label_scale(text)
         * _font_size_user_scale(font_size_points, _DEFAULT_CLUSTER_LABEL_FONT_POINTS)
     )
+    height_cap = max(float(cluster_height), 0.0) / 8.0
+    if height_cap > 0.0:
+        scaled_size = min(scaled_size, height_cap)
+    return min(scaled_size, authored_size_data)
 
 
 def _cluster_fill_alpha(style: ClusterStyle, depth: int) -> float:
@@ -405,6 +412,9 @@ def _cluster_fill_alpha(style: ClusterStyle, depth: int) -> float:
     float
         Fill alpha clamped to Matplotlib's valid ``[0, 1]`` range.
     """
+    fill_color = str(getattr(style, "fill", "") or "").strip().lower()
+    if fill_color in {"", "none", "transparent"}:
+        return 0.0
     depth_opacity_step = float(getattr(style, "depth_opacity_step", -0.05))
     base_alpha = 1.0 if style.fill_opacity is None else float(style.fill_opacity)
     alpha = (base_alpha * float(style.opacity)) + float(depth) * depth_opacity_step
@@ -1088,6 +1098,8 @@ def _save_figure(fig, output: str, bg: str, dpi: int, format: Optional[str] = No
         "edgecolor": bg,
         "transparent": False,
     }
+    fig.patch.set_facecolor(bg)
+    fig.patch.set_alpha(1.0)
     if tight_bbox:
         common.update({"bbox_inches": "tight", "pad_inches": 0.05})
 
@@ -1297,6 +1309,7 @@ def render(
     if n == 0:
         fig, ax = plt.subplots(1, 1, figsize=figsize or (6, 4))
         fig.patch.set_facecolor(bg)
+        fig.patch.set_alpha(1.0)
         if output:
             _save_figure(fig, output, bg, dpi=dpi, format=format)
         return fig, ax
@@ -1453,6 +1466,7 @@ def render(
 
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     fig.patch.set_facecolor(bg)
+    fig.patch.set_alpha(1.0)
     ax.set_facecolor(bg)
     setattr(fig, "_dagua_svg_hover_map", {} if svg_hover_text else None)
     if _is_graphviz_strict_render(graph):
@@ -2320,8 +2334,9 @@ def _draw_striped_fill(
     projection_min = float(np.min(projection))
     projection_range = max(float(np.max(projection)) - projection_min, 1e-9)
     normalized = (projection - projection_min) / projection_range
-    stripe_count = max(len(colors), 1)
-    bands = np.minimum((normalized * stripe_count).astype(int), stripe_count - 1)
+    palette_count = max(len(colors), 1)
+    stripe_count = max(palette_count * 8, 8)
+    bands = np.mod((normalized * stripe_count).astype(int), palette_count)
     # Inset the image extent so anti-aliasing bleed at the clip
     # boundary stays inside the node outline.
     inset = min(w, h) * 0.03
@@ -2335,7 +2350,7 @@ def _draw_striped_fill(
         zorder=1.95,
         aspect="auto",
         vmin=0,
-        vmax=max(stripe_count - 1, 1),
+        vmax=max(palette_count - 1, 1),
     )
     image.set_clip_path(clip_patch)
 
@@ -3428,7 +3443,7 @@ def _resolve_cluster_label_background(graph: Any, style: ClusterStyle) -> Option
     if not background:
         return None
     if background == "@background":
-        return str(_graph_style_for_render(graph).background_color)
+        return None
     return background
 
 
@@ -5525,13 +5540,25 @@ def _curve_marker_direction(
         )
 
     if at_start:
-        return (
+        direction = (
             float(curve.p0[0] - curve.cp1[0]),
             float(curve.p0[1] - curve.cp1[1]),
         )
-    return (
+        if float(np.hypot(direction[0], direction[1])) > 1e-9:
+            return direction
+        return (
+            float(curve.p0[0] - curve.p1[0]),
+            float(curve.p0[1] - curve.p1[1]),
+        )
+    direction = (
         float(curve.p1[0] - curve.cp2[0]),
         float(curve.p1[1] - curve.cp2[1]),
+    )
+    if float(np.hypot(direction[0], direction[1])) > 1e-9:
+        return direction
+    return (
+        float(curve.p1[0] - curve.p0[0]),
+        float(curve.p1[1] - curve.p0[1]),
     )
 
 
@@ -6731,6 +6758,12 @@ def _draw_direct_edge_markers(
     """
     for e_idx, curve in enumerate(curves):
         style = _edge_style_for_render(graph, e_idx)
+        if getattr(style, "taper", False):
+            style = replace(
+                style,
+                arrow_length=max(float(style.arrow_length), 18.0),
+                arrow_width=max(float(style.arrow_width), 12.0),
+            )
         src_idx = int(graph.edge_index[0, e_idx])
         tgt_idx = int(graph.edge_index[1, e_idx])
         is_self_loop = src_idx == tgt_idx
@@ -6738,6 +6771,7 @@ def _draw_direct_edge_markers(
         src_node_height = float(graph.node_sizes[src_idx, 1])
         tgt_node_width = float(graph.node_sizes[tgt_idx, 0])
         tgt_node_height = float(graph.node_sizes[tgt_idx, 1])
+        display_scale = _compute_display_scale(ax)
         gradient_start_color = str(style.color)
         gradient_end_color = str(style.color_gradient_end or style.color)
 
@@ -6748,11 +6782,16 @@ def _draw_direct_edge_markers(
             ):
                 tail_style = replace(style, color=gradient_start_color)
             start_dx, start_dy = _curve_marker_direction(curve, at_start=True)
-            # Use original curve endpoint -- border offset disabled
-            # because it creates visible gaps.
+            tail_point = _offset_edge_terminal_point(
+                graph,
+                positions,
+                src_idx,
+                curve.p0,
+                display_scale,
+            )
             _draw_edge_marker(
                 ax=ax,
-                point=curve.p0,
+                point=tail_point,
                 direction=(start_dx, start_dy),
                 marker=str(style.tail_arrow),
                 style=tail_style,
@@ -6768,8 +6807,13 @@ def _draw_direct_edge_markers(
             ):
                 head_style = replace(style, color=gradient_end_color)
             end_dx, end_dy = _curve_marker_direction(curve, at_start=False)
-            # Use original curve endpoint -- border offset disabled.
-            head_point = curve.p1
+            head_point = _offset_edge_terminal_point(
+                graph,
+                positions,
+                tgt_idx,
+                curve.p1,
+                display_scale,
+            )
             _draw_edge_marker(
                 ax=ax,
                 point=head_point,
@@ -7655,7 +7699,7 @@ def _draw_external_labels(
         cy = float(pos[i, 1])
         half_width = float(sizes[i, 0]) / 2.0
         half_height = float(sizes[i, 1]) / 2.0
-        offset = float(style.external_label_offset) * display_scale
+        offset = max(float(style.external_label_offset), 6.0) * display_scale
         position = _normalize_external_label_position(style.external_label_position)
         font_weight = _normalize_text_font_weight(style.font_weight)
         font_size_data = _node_relative_font_size_data(
@@ -8641,8 +8685,13 @@ def _draw_clusters(
             text_max_width=label_text_max_width,
         )
 
-        # Progressive depth variation — each depth_*_step field is additive per level
-        fill_color = darken_hex(style.fill, depth * style.depth_fill_step)
+        # Progressive depth variation — each depth_*_step field is additive per level.
+        fill_enabled = _cluster_fill_alpha(style, depth) > 0.0
+        fill_color = (
+            darken_hex(style.fill, depth * style.depth_fill_step)
+            if fill_enabled
+            else str(style.fill)
+        )
         stroke_color = darken_hex(style.stroke, depth * style.depth_stroke_step)
 
         fill_alpha = _cluster_fill_alpha(style, depth)
@@ -8671,8 +8720,9 @@ def _draw_clusters(
         outer_path = build_shape_path(shape_spec)
         fill_path = inset_shape_path(shape_spec, border_width) if border_width > 0.0 else outer_path
 
-        fill_paths_by_depth.setdefault(depth, []).append(fill_path)
-        fill_colors_by_depth.setdefault(depth, []).append(to_rgba(fill_color, fill_alpha))
+        if fill_alpha > 0.0:
+            fill_paths_by_depth.setdefault(depth, []).append(fill_path)
+            fill_colors_by_depth.setdefault(depth, []).append(to_rgba(fill_color, fill_alpha))
         if border_width > 0.0:
             if style.stroke_dash == "solid":
                 border_paths = [annular_path(outer_path, fill_path)]
