@@ -309,21 +309,13 @@ def _pivot_mds_coordinates(distance_matrix: torch.Tensor) -> torch.Tensor:
     return coordinates.to(dtype=torch.float32)
 
 
-def _classical_mds_embedding(
-    distances: torch.Tensor,
-    *,
-    igraph_fidelity: bool = False,
-) -> torch.Tensor:
+def _classical_mds_embedding(distances: torch.Tensor) -> torch.Tensor:
     """Compute rank-2 classical MDS coordinates from a distance matrix.
 
     Parameters
     ----------
     distances : torch.Tensor
         Dense pairwise distances with shape ``[N, N]``.
-    igraph_fidelity : bool, default=False
-        If ``True``, match igraph's raw connected-component MDS semantics:
-        the two-node special case, largest algebraic eigenpairs,
-        ``sqrt(abs(lambda))`` scaling, and reversed output dimensions.
 
     Returns
     -------
@@ -339,13 +331,6 @@ def _classical_mds_embedding(
     if distances.shape[1] != num_nodes:
         raise ValueError("Classical-MDS embedding requires a square distance matrix.")
 
-    if igraph_fidelity and num_nodes == 2:
-        return torch.tensor(
-            [[0.0, 0.0], [1.0, 1.0]],
-            dtype=torch.float32,
-            device=distances.device,
-        )
-
     distances_np = distances.detach().to(dtype=torch.float64).numpy()
     squared = distances_np * distances_np
     centering = np.eye(num_nodes, dtype=np.float64) - (
@@ -355,16 +340,10 @@ def _classical_mds_embedding(
 
     eigenvalues, eigenvectors = np.linalg.eigh(gram)
     sorted_indices = np.argsort(eigenvalues)[::-1]
+    positive_indices = [index for index in sorted_indices if eigenvalues[index] > 0.0][:2]
 
     coordinates = np.zeros((num_nodes, 2), dtype=np.float64)
-    if igraph_fidelity:
-        selected_indices = sorted_indices[:2]
-        selected_values = eigenvalues[selected_indices]
-        selected_vectors = eigenvectors[:, selected_indices]
-        scaled = selected_vectors * np.sqrt(np.abs(selected_values))
-        coordinates[:, : len(selected_indices)] = scaled
-        coordinates = coordinates[:, ::-1].copy()
-    elif positive_indices := [index for index in sorted_indices if eigenvalues[index] > 0.0][:2]:
+    if positive_indices:
         selected_values = np.clip(eigenvalues[positive_indices], a_min=0.0, a_max=None)
         selected_vectors = eigenvectors[:, positive_indices]
         coordinates[:, : len(positive_indices)] = selected_vectors * np.sqrt(selected_values)
@@ -2018,19 +1997,11 @@ class FuzzySimplicialSet(Op):
 class ClassicalMDSComputeEmbeddingConfig:
     """Configuration for :class:`ClassicalMDSComputeEmbedding`.
 
-    Parameters
-    ----------
-    igraph_fidelity : bool, default=False
-        If ``True``, use igraph-compatible raw MDS eigensolver semantics.
-
     Notes
     -----
-    The classic-MDS embedding step is deterministic once graph distances are
-    fixed. The fidelity flag is opt-in so default Dagua layouts keep legacy
-    positive-eigenvalue filtering.
+    The classic-MDS embedding step is deterministic and currently accepts
+    no configurable behavior.
     """
-
-    igraph_fidelity: bool = False
 
 
 @register_op
@@ -2080,10 +2051,7 @@ class ClassicalMDSComputeEmbedding(Op):
 
         if state.distance_matrix.ndim != 2:
             raise ValueError("ClassicalMDSComputeEmbedding requires a square distance matrix.")
-        state.pos = _classical_mds_embedding(
-            state.distance_matrix,
-            igraph_fidelity=self.config.igraph_fidelity,
-        )
+        state.pos = _classical_mds_embedding(state.distance_matrix)
         return state
 
 

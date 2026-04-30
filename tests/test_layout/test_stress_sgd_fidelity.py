@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import sys
+import types
+from typing import Any
+
+import numpy as np
 import pytest
 import torch
 
-from dagua.layout.ops.pipelines.stress_sgd import build_stress_sgd_pipeline
+from dagua.eval.competitors.classic_competitor import _CLASSIC_LAYOUT_SPECS
+from dagua.eval.competitors.sgd2_competitor import SGD2
+from dagua.graph import DaguaGraph
+from dagua.layout.ops.pipelines.stress_sgd import (
+    build_stress_sgd_pipeline,
+    layout_stress_sgd_pipeline,
+)
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
 
@@ -111,3 +122,68 @@ def test_stress_sgd_fidelity_mode_rejects_disconnected_graphs() -> None:
 
     with pytest.raises(ValueError, match="connected graph"):
         _apply_pipeline(edges, 4, fidelity_mode=True)
+
+
+def test_stress_sgd_pipeline_accepts_initial_positions() -> None:
+    """Explicit ``init_pos`` bypasses the default NumPy initialization."""
+    edges = _edge_index([(0, 1), (1, 2)])
+    init_pos = torch.tensor([[0.0, 0.0], [2.0, 0.0], [4.0, 0.0]], dtype=torch.float64)
+
+    positions = layout_stress_sgd_pipeline(edges, 3, init_pos=init_pos, steps=0)
+
+    assert torch.equal(positions, init_pos.to(dtype=torch.float32))
+
+
+def test_stress_sgd_pipeline_rejects_bad_initial_position_shape() -> None:
+    """Initial coordinates must cover every node exactly once."""
+    edges = _edge_index([(0, 1)])
+    init_pos = torch.zeros((1, 2), dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="init_pos"):
+        layout_stress_sgd_pipeline(edges, 2, init_pos=init_pos, steps=0)
+
+
+def test_classic_stress_sgd_defaults_to_reference_exact_node_cap() -> None:
+    """The fidelity competitor keeps exact mode up to the ``s_gd2`` node cap."""
+    spec = _CLASSIC_LAYOUT_SPECS["classic_stress_sgd"]
+
+    assert spec.default_params["max_exact_nodes"] == SGD2.max_nodes
+
+
+def test_sgd2_adapter_rejects_trailing_isolated_node_outputs(monkeypatch: Any) -> None:
+    """The reference adapter reports mismatched output from trailing isolated nodes."""
+    fake_module = types.ModuleType("s_gd2")
+
+    def _layout_fake(
+        sources: list[int],
+        targets: list[int],
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Return the native shape produced from only edge endpoint IDs.
+
+        Parameters
+        ----------
+        sources : list[int]
+            Source endpoint IDs.
+        targets : list[int]
+            Target endpoint IDs.
+        **kwargs : Any
+            Ignored ``s_gd2`` compatibility arguments.
+
+        Returns
+        -------
+        np.ndarray
+            Two-node coordinate array, omitting the trailing isolated node.
+        """
+        del sources, targets, kwargs
+        return np.zeros((2, 2), dtype=np.float64)
+
+    fake_module.layout = _layout_fake
+    monkeypatch.setitem(sys.modules, "s_gd2", fake_module)
+    graph = DaguaGraph.from_edge_index(torch.tensor([[0], [1]], dtype=torch.long), num_nodes=3)
+
+    result = SGD2().layout(graph, seed=7)
+
+    assert result.pos is None
+    assert result.error is not None
+    assert "trailing isolated nodes" in result.error
