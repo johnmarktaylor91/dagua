@@ -1121,6 +1121,7 @@ def _bfs_forest(
     num_nodes: int,
     traversal_mode: str = "all",
     root_candidates: Optional[list[int]] = None,
+    root_depths: Optional[dict[int, int]] = None,
 ) -> tuple[list[int], list[list[int]], list[int]]:
     """Build a deterministic BFS forest from a possibly directed graph.
 
@@ -1135,6 +1136,9 @@ def _bfs_forest(
     root_candidates : list[int] | None, default=None
         Optional preordered root candidates. ``None`` uses Dagua's historical
         indegree ordering.
+    root_depths : dict[int, int] | None, default=None
+        Optional starting depth per root, used to mirror igraph ``rootlevel``
+        fixtures without rebuilding the augmented graph.
 
     Returns
     -------
@@ -1161,6 +1165,8 @@ def _bfs_forest(
             continue
         roots.append(root)
         visited[root] = True
+        if root_depths is not None:
+            depths[root] = root_depths.get(root, 0)
         queue: deque[int] = deque([root])
         while queue:
             node = queue.popleft()
@@ -1173,6 +1179,82 @@ def _bfs_forest(
                 queue.append(neighbor)
 
     return roots, children, depths
+
+
+def _validate_rt_roots(roots: Optional[Sequence[int]], num_nodes: int) -> Optional[list[int]]:
+    """Validate optional Reingold-Tilford root vertices.
+
+    Parameters
+    ----------
+    roots : sequence of int | None
+        Explicit root vertex ids, or ``None`` for automatic selection.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    list[int] | None
+        Deduplicated explicit roots, preserving caller order.
+
+    Raises
+    ------
+    ValueError
+        If any root id is outside ``[0, num_nodes)``.
+    """
+    if roots is None:
+        return None
+
+    validated_roots: list[int] = []
+    seen_roots: set[int] = set()
+    for root in roots:
+        root_idx = int(root)
+        if root_idx < 0 or root_idx >= num_nodes:
+            raise ValueError(f"Reingold-Tilford root out of range: {root_idx}")
+        if root_idx in seen_roots:
+            continue
+        seen_roots.add(root_idx)
+        validated_roots.append(root_idx)
+    return validated_roots
+
+
+def _validate_rt_rootlevels(
+    rootlevels: Optional[Sequence[int]],
+    roots: Optional[list[int]],
+) -> dict[int, int]:
+    """Validate optional igraph-style root levels.
+
+    Parameters
+    ----------
+    rootlevels : sequence of int | None
+        Explicit depth per supplied root.
+    roots : list[int] | None
+        Validated roots that root levels correspond to.
+
+    Returns
+    -------
+    dict[int, int]
+        Mapping from root vertex id to requested starting depth.
+
+    Raises
+    ------
+    ValueError
+        If levels are supplied without roots, have the wrong length, or are
+        negative.
+    """
+    if rootlevels is None:
+        return {}
+    if roots is None:
+        raise ValueError("Reingold-Tilford rootlevel requires explicit roots.")
+    if len(rootlevels) != len(roots):
+        raise ValueError("Reingold-Tilford rootlevel length must match roots length.")
+
+    root_depths: dict[int, int] = {}
+    for root, level in zip(roots, rootlevels):
+        level_idx = int(level)
+        if level_idx < 0:
+            raise ValueError(f"Reingold-Tilford rootlevel must be non-negative: {level_idx}")
+        root_depths[root] = level_idx
+    return root_depths
 
 
 @dataclass
@@ -1462,6 +1544,16 @@ class ReingoldTilfordTreeConfig:
     traversal_mode : str, default="out"
         Edge direction mode used by ``fidelity_mode="igraph"``. Supported
         values are ``"out"``, ``"in"``, and ``"all"``.
+    roots : sequence of int | None, default=None
+        Optional explicit root vertices for igraph-style controlled tests.
+    rootlevel : sequence of int | None, default=None
+        Optional depth per explicit root.
+    center_output : bool | None, default=None
+        Whether to mean-center final coordinates. ``None`` preserves
+        historical centering except in igraph fidelity mode.
+    output_scale : float | None, default=None
+        Uniform scale applied to final coordinates. ``None`` uses igraph's
+        adapter scale in igraph fidelity mode and ``1.0`` otherwise.
     recursion_limit_multiplier : int, default=2
         Multiplier used when raising Python's recursion limit for large trees.
     """
@@ -1473,6 +1565,10 @@ class ReingoldTilfordTreeConfig:
     horizontal: bool = False
     fidelity_mode: Optional[str] = None
     traversal_mode: str = "out"
+    roots: Optional[Sequence[int]] = None
+    rootlevel: Optional[Sequence[int]] = None
+    center_output: Optional[bool] = None
+    output_scale: Optional[float] = None
     recursion_limit_multiplier: int = 2
 
 
@@ -1876,6 +1972,10 @@ class ReingoldTilfordTree(Op):
             sibling_sep = 1.0 if self.config.sibling_sep is None else self.config.sibling_sep
             layer_sep = 1.0 if self.config.layer_sep is None else self.config.layer_sep
             component_gap = 0.0 if self.config.component_gap is None else self.config.component_gap
+            center_output = (
+                False if self.config.center_output is None else self.config.center_output
+            )
+            output_scale = 50.0 if self.config.output_scale is None else self.config.output_scale
         else:
             # When explicit spacing is absent, derive it from node extents so
             # larger labels reserve proportionally more room between subtrees.
@@ -1894,6 +1994,8 @@ class ReingoldTilfordTree(Op):
                 if self.config.component_gap is None
                 else self.config.component_gap
             )
+            center_output = True if self.config.center_output is None else self.config.center_output
+            output_scale = 1.0 if self.config.output_scale is None else self.config.output_scale
 
         sys.setrecursionlimit(
             max(
@@ -1901,24 +2003,38 @@ class ReingoldTilfordTree(Op):
                 problem.num_nodes * self.config.recursion_limit_multiplier,
             )
         )
-        root_candidates = (
-            _igraph_fidelity_root_candidates(
+        explicit_roots = _validate_rt_roots(roots=self.config.roots, num_nodes=problem.num_nodes)
+        root_depths = _validate_rt_rootlevels(
+            rootlevels=self.config.rootlevel,
+            roots=explicit_roots,
+        )
+        if explicit_roots is not None:
+            automatic_candidates = _igraph_fidelity_root_candidates(
                 edge_index=edge_index_cpu,
                 num_nodes=problem.num_nodes,
                 traversal_mode=self.config.traversal_mode,
             )
-            if fidelity_mode == "igraph"
-            else None
-        )
+            root_candidates = explicit_roots + [
+                candidate for candidate in automatic_candidates if candidate not in explicit_roots
+            ]
+        elif fidelity_mode == "igraph":
+            root_candidates = _igraph_fidelity_root_candidates(
+                edge_index=edge_index_cpu,
+                num_nodes=problem.num_nodes,
+                traversal_mode=self.config.traversal_mode,
+            )
+        else:
+            root_candidates = None
         roots, children, depths = _bfs_forest(
             edge_index=edge_index_cpu,
             num_nodes=problem.num_nodes,
             traversal_mode=self.config.traversal_mode if fidelity_mode == "igraph" else "all",
             root_candidates=root_candidates,
+            root_depths=root_depths,
         )
 
         preliminary_x = [0.0] * problem.num_nodes
-        if fidelity_mode == "igraph" and len(roots) > 1:
+        if fidelity_mode == "igraph" and len(roots) > 1 and not root_depths:
             artificial_root = problem.num_nodes
             augmented_children = [list(child_nodes) for child_nodes in children]
             augmented_children.append(list(roots))
@@ -1952,7 +2068,9 @@ class ReingoldTilfordTree(Op):
             positions[node_idx, 0] = float(preliminary_x[node_idx]) * sibling_sep
             positions[node_idx, 1] = float(depths[node_idx]) * layer_sep
 
-        positions -= positions.mean(dim=0, keepdim=True)
+        positions *= float(output_scale)
+        if center_output:
+            positions -= positions.mean(dim=0, keepdim=True)
         if self.config.horizontal:
             # Preserve the same coordinates but swap depth into x for
             # left-to-right tree renderers.
