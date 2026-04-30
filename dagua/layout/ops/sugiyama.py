@@ -69,6 +69,9 @@ class _BarycenterOrderingConfig:
     use_incidence_barycenters : bool, default=False
         If ``True``, average duplicate neighbor incidences directly. This
         matches igraph's unweighted crossing-reduction semantics.
+    center_coordinates : bool, default=True
+        If ``False``, leave horizontal coordinates in their compacted
+        left-anchored frame instead of centering the final span.
     """
 
     barycenter_passes: int = 24
@@ -76,6 +79,7 @@ class _BarycenterOrderingConfig:
     trace_every: int = 0
     stop_when_stable: bool = False
     use_incidence_barycenters: bool = False
+    center_coordinates: bool = True
 
 
 @dataclass(frozen=True)
@@ -536,6 +540,7 @@ def _barycenter_ordering(
     output_device: torch.device,
     stop_when_stable: bool,
     use_incidence_barycenters: bool,
+    center_coordinates: bool,
 ) -> Tuple[List[List[int]], List[torch.Tensor]]:
     """Minimize crossings via repeated barycenter sweeps.
 
@@ -575,6 +580,8 @@ def _barycenter_ordering(
     use_incidence_barycenters : bool
         Whether to ignore edge-weight maps and average duplicate neighbor
         incidences directly.
+    center_coordinates : bool
+        Whether trace coordinate snapshots should center their final X span.
 
     Returns
     -------
@@ -630,6 +637,7 @@ def _barycenter_ordering(
                     rank_sep=rank_sep,
                     node_sep=node_sep,
                     output_device=output_device,
+                    center_coordinates=center_coordinates,
                 )
             )
         if stop_when_stable and not changed:
@@ -719,6 +727,7 @@ def _coordinate_assignment(
     rank_sep: float,
     node_sep: float,
     output_device: torch.device,
+    center_coordinates: bool = True,
 ) -> torch.Tensor:
     """Assign ``(x, y)`` coordinates with Brandes-Kopf compaction.
 
@@ -743,6 +752,8 @@ def _coordinate_assignment(
         Horizontal gap between node bounding boxes.
     output_device : torch.device
         Device for the returned position tensor.
+    center_coordinates : bool, default=True
+        Whether to translate the final horizontal span to be centered at zero.
 
     Returns
     -------
@@ -766,6 +777,7 @@ def _coordinate_assignment(
         num_nodes=num_nodes,
         num_original_nodes=num_original_nodes,
         node_sep=node_sep,
+        center_coordinates=center_coordinates,
     )
     positions[:, 0] = torch.tensor(x_positions, dtype=torch.float32)
     return positions.to(output_device)
@@ -779,6 +791,7 @@ def _brandes_koepf_x_positions(
     num_nodes: int,
     num_original_nodes: int,
     node_sep: float,
+    center_coordinates: bool = True,
 ) -> List[float]:
     """Compute balanced horizontal coordinates with four BK passes.
 
@@ -798,6 +811,8 @@ def _brandes_koepf_x_positions(
         Count of non-dummy nodes.
     node_sep : float
         Horizontal gap between node bounding boxes.
+    center_coordinates : bool, default=True
+        Whether to translate the final horizontal span to be centered at zero.
 
     Returns
     -------
@@ -856,7 +871,9 @@ def _brandes_koepf_x_positions(
 
     _align_compacted_coordinates(x_by_alignment=x_by_alignment)
     balanced = _median_balanced_coordinates(x_by_alignment=x_by_alignment, num_nodes=num_nodes)
-    return _center_coordinates(values=balanced)
+    if center_coordinates:
+        return _center_coordinates(values=balanced)
+    return balanced
 
 
 def _transform_layers(
@@ -1706,6 +1723,7 @@ class _BarycenterOrdering(Op):
         trace_every: int = 0,
         stop_when_stable: bool = False,
         use_incidence_barycenters: bool = False,
+        center_coordinates: bool = True,
         *,
         config: Optional[_BarycenterOrderingConfig] = None,
     ) -> None:
@@ -1725,6 +1743,8 @@ class _BarycenterOrdering(Op):
         use_incidence_barycenters : bool, default=False
             Average duplicate neighbor incidences directly, matching igraph's
             crossing-reduction semantics.
+        center_coordinates : bool, default=True
+            Whether trace snapshots should center horizontal coordinates.
         config : _BarycenterOrderingConfig | None, optional
             Optional configuration. When provided, it takes precedence over
             the scalar arguments.
@@ -1740,6 +1760,7 @@ class _BarycenterOrdering(Op):
             trace_every=trace_every,
             stop_when_stable=stop_when_stable,
             use_incidence_barycenters=use_incidence_barycenters,
+            center_coordinates=center_coordinates,
         )
 
     def apply(
@@ -1791,6 +1812,7 @@ class _BarycenterOrdering(Op):
             output_device=output_device,
             stop_when_stable=self.config.stop_when_stable,
             use_incidence_barycenters=self.config.use_incidence_barycenters,
+            center_coordinates=self.config.center_coordinates,
         )
         state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY] = ordered_layers
         state.extras[_SUGIYAMA_TRACES_KEY] = traces
@@ -1817,6 +1839,22 @@ class _CoordinateAssignment(Op):
         f"extras.{_SUGIYAMA_ORDERED_LAYERS_KEY}",
     )
     access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, center_coordinates: bool = True) -> None:
+        """Store coordinate-frame options.
+
+        Parameters
+        ----------
+        center_coordinates : bool, default=True
+            Whether to translate the final horizontal span to be centered at
+            zero.
+
+        Returns
+        -------
+        None
+            The constructor stores configuration only.
+        """
+        self.center_coordinates = center_coordinates
 
     def apply(
         self,
@@ -1860,6 +1898,7 @@ class _CoordinateAssignment(Op):
             rank_sep=rank_sep,
             node_sep=node_sep,
             output_device=output_device,
+            center_coordinates=self.center_coordinates,
         )
         # Keep the expanded coordinates for downstream edge routing before
         # slicing back to the original node set.

@@ -174,7 +174,12 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_sugiyama": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.sugiyama",
         function_name="layout_sugiyama_pipeline",
-        default_params={},
+        default_params={
+            "barycenter_passes": 100,
+            "rank_sep": 1.0,
+            "node_sep": 1.0,
+            "fidelity_mode": "igraph",
+        },
     ),
     "classic_spectral": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.spectral",
@@ -935,6 +940,16 @@ class ClassicSugiyama(_ClassicBase):
 
     name = "classic_sugiyama"
     max_nodes = 50_000
+    variant_param_names = frozenset(
+        {
+            "barycenter_passes",
+            "rank_sep",
+            "node_sep",
+            "fidelity_mode",
+            "use_node_sizes_for_spacing",
+            "center_coordinates",
+        }
+    )
 
     def layout(
         self,
@@ -951,42 +966,15 @@ class ClassicSugiyama(_ClassicBase):
         timeout : float, default=300.0
             Unused compatibility parameter for the competitor interface.
         seed : int | None, default=None
-            Random seed for barycenter tie-breaking. ``None`` preserves the
-            historical default of ``42``.
+            API-compatible seed. Sugiyama is deterministic and does not
+            consume random numbers.
 
         Returns
         -------
         CompetitorResult
             Layout result and runtime information.
         """
-        del timeout
-
-        from dagua.layout.ops.pipelines.sugiyama import (
-            layout_sugiyama_pipeline as layout_sugiyama,
-        )
-
-        start = time.perf_counter()
-        try:
-            pos = layout_sugiyama(
-                graph.edge_index,
-                graph.num_nodes,
-                node_sizes=graph.node_sizes,
-                seed=self._layout_seed(seed),
-            )
-            elapsed = time.perf_counter() - start
-            return CompetitorResult(
-                name=self.name,
-                pos=cast("torch.Tensor", pos),
-                runtime_seconds=elapsed,
-            )
-        except Exception as exc:
-            elapsed = time.perf_counter() - start
-            return CompetitorResult(
-                name=self.name,
-                pos=None,
-                runtime_seconds=elapsed,
-                error=str(exc),
-            )
+        return self.layout_with_variant(graph=graph, timeout=timeout, seed=seed)
 
 
 @register
