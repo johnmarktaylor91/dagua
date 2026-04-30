@@ -242,6 +242,7 @@ _DENSITY_SHRINK_CLAMP_NODE_COUNT = 20
 _DENSITY_LABEL_FONT_FLOOR = 0.5
 _CLUSTER_RENDER_BBOX_EXTRA_CAP_POINTS = 2.0
 _MIN_CLUSTER_INNER_HEIGHT_POINTS = 1.0
+_MIN_VISIBLE_STROKE_POINTS = 2.3
 
 
 def _font_size_user_scale(font_size_points: float, baseline_points: float) -> float:
@@ -1175,6 +1176,27 @@ def _strict_content_figsize(width_points: float, height_points: float) -> Tuple[
     return (max(width_points, 1.0) / 72.0, max(height_points, 1.0) / 72.0)
 
 
+def _new_figure_axes(figsize: Optional[Tuple[float, float]]) -> Tuple[Any, Any]:
+    """Create a headless Matplotlib figure with an attached Agg canvas.
+
+    Parameters
+    ----------
+    figsize : tuple[float, float] | None
+        Figure size in inches.
+
+    Returns
+    -------
+    tuple[Any, Any]
+        Matplotlib ``(figure, axes)`` pair.
+    """
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    fig = Figure(figsize=figsize)
+    FigureCanvasAgg(fig)
+    return fig, fig.add_subplot(1, 1, 1)
+
+
 def _detect_output_format(output: Optional[str], format: Optional[str]) -> Optional[str]:
     if format is not None:
         return format.lower().lstrip(".")
@@ -1359,7 +1381,7 @@ def render(
     dpi : int, default=150
         Raster output resolution.
     show : bool, default=False
-        Whether to call ``plt.show()``.
+        Whether to request display of the returned figure.
     title : str, optional
         Figure title.
     curves : list[BezierCurve], optional
@@ -1379,7 +1401,6 @@ def render(
     import matplotlib
 
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 
     gs = _graph_style_for_render(graph)
 
@@ -1406,7 +1427,7 @@ def render(
     bg = gs.background_color
 
     if n == 0:
-        fig, ax = plt.subplots(1, 1, figsize=figsize or (6, 4))
+        fig, ax = _new_figure_axes(figsize or (6, 4))
         fig.patch.set_facecolor(bg)
         fig.patch.set_alpha(1.0)
         if output:
@@ -1575,7 +1596,7 @@ def render(
         fig_h = min(max(fig_w * aspect, min_h), max_h)
         figsize = (fig_w, fig_h)
 
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    fig, ax = _new_figure_axes(figsize)
     fig.patch.set_facecolor(bg)
     fig.patch.set_alpha(1.0)
     ax.set_facecolor(bg)
@@ -1676,13 +1697,13 @@ def render(
             svg_hover_map,
         )
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     if output:
         _save_figure(fig, output, bg, dpi=dpi, format=format)
 
     if show:
-        plt.show()
+        fig.show()
 
     if graph.node_sizes is not original_node_sizes:
         graph.node_sizes = original_node_sizes
@@ -5133,10 +5154,16 @@ def _edge_width_data_units(ax: Any, width_points: float) -> float:
     float
         Width in data units.
     """
+    if float(width_points) <= 0.0:
+        return 0.0
     width_x = _points_to_data_units(ax, width_points, "x")
     width_y = _points_to_data_units(ax, width_points, "y")
     width = min(width_x, width_y)
-    return width if width > 1e-6 else 1e-6
+    # Keep the edge body in the data-coordinate renderer while preventing
+    # sub-pixel underflow on small fixed gallery canvases. The authored style
+    # width remains unchanged; only the emitted render ribbon receives a floor.
+    min_visible_width = _compute_display_scale(ax) * _MIN_VISIBLE_STROKE_POINTS
+    return max(width, min_visible_width, 1e-6)
 
 
 def _curve_to_render_bezier(curve: BezierCurve) -> RenderBezier:
@@ -5570,7 +5597,7 @@ def _edge_requires_direct_render(style: Any) -> bool:
         batched renderer does not expose yet.
     """
     return bool(
-        _edge_uses_display_stroke_body(style)
+        _edge_uses_direct_data_ribbon(style)
         or getattr(style, "taper", False)
         or getattr(style, "color_gradient", "none") != "none"
         or getattr(style, "line_cap", "butt") != "butt"
@@ -5580,8 +5607,8 @@ def _edge_requires_direct_render(style: Any) -> bool:
     )
 
 
-def _edge_uses_display_stroke_body(style: Any) -> bool:
-    """Return whether a thin edge body should render as a point-width stroke.
+def _edge_uses_direct_data_ribbon(style: Any) -> bool:
+    """Return whether a thin simple edge should use direct data ribbons.
 
     Parameters
     ----------
@@ -5591,8 +5618,9 @@ def _edge_uses_display_stroke_body(style: Any) -> bool:
     Returns
     -------
     bool
-        ``True`` for simple low-width edges whose data-ribbon body can
-        underflow after gallery panels reset axes to a fixed pixel canvas.
+        ``True`` for simple low-width edges whose collection path can underflow
+        on fixed gallery canvases. The direct path still emits filled
+        data-coordinate ribbons; it does not use Matplotlib display strokes.
     """
     return (
         0.0 < float(getattr(style, "width", 0.0)) <= 1.5
@@ -6614,23 +6642,9 @@ def _draw_direct_edge_body(ax: Any, curve: BezierCurve, style: Any) -> List[Any]
         Added matplotlib artists.
     """
     from matplotlib.colors import to_rgba
-    from matplotlib.patches import PathPatch, Polygon
+    from matplotlib.patches import Polygon
 
     artists: List[Any] = []
-    if _edge_uses_display_stroke_body(style):
-        path_patch = PathPatch(
-            _curve_to_path(curve),
-            facecolor="none",
-            edgecolor=to_rgba(str(style.color), alpha=float(style.opacity)),
-            linewidth=max(float(style.width), 1.0),
-            linestyle=_edge_linestyle(style),
-            capstyle=_mpl_capstyle(str(getattr(style, "line_cap", "butt"))),
-            joinstyle=str(getattr(style, "line_join", "miter")),
-            zorder=1,
-        )
-        ax.add_patch(path_patch)
-        return [path_patch]
-
     data_width = _edge_width_data_units(ax, float(style.width))
     if curve.waypoints is not None:
         full_points = _sample_curve_points(curve)
