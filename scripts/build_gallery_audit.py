@@ -118,6 +118,8 @@ DECORATIVE_FILL_CARD_IDS = frozenset(
 )
 DECORATIVE_FILL_CARD_MIN_HEIGHT = 80.0
 DECORATIVE_FILL_CARD_PADDING: Tuple[float, float] = (11.0, 12.0)
+GRAPHVIZ_PARITY_MAX_NODE_WIDTH = 64.0
+GRAPHVIZ_PARITY_MAX_NODE_HEIGHT = 44.0
 SCALAR_NODE_COMPARISON_FEATURES = frozenset(
     {
         "font_size",
@@ -268,6 +270,9 @@ def _feature_competitor_tools(category: str, feature: str) -> Tuple[str, ...]:
         ("nodes/shapes", "shape"): ("graphviz", "mermaid"),
         ("nodes/fills", "gradient"): ("graphviz", "cytoscape"),
         ("nodes/fills", "fill_pattern"): ("graphviz", "cytoscape"),
+        ("nodes/fills", "opacity"): ("graphviz",),
+        ("nodes/borders", "stroke_width"): ("graphviz",),
+        ("nodes/borders", "border_opacity"): ("graphviz",),
         ("nodes/borders", "stroke_dash"): ("cytoscape",),
         ("nodes/borders", "border_count"): ("cytoscape",),
         ("nodes/borders", "border_position"): ("cytoscape",),
@@ -276,6 +281,9 @@ def _feature_competitor_tools(category: str, feature: str) -> Tuple[str, ...]:
         ("nodes/text", "font_size"): ("graphviz",),
         ("nodes/text", "font_family"): ("graphviz",),
         ("nodes/text", "font_color"): ("graphviz",),
+        ("nodes/text", "text_align"): ("graphviz",),
+        ("nodes/text", "text_valign"): ("graphviz",),
+        ("nodes/text", "external_label"): ("graphviz",),
         ("nodes/text", "text_wrap"): ("cytoscape",),
         ("nodes/text", "text_ellipsis"): ("cytoscape",),
         ("nodes/text", "text_transform"): ("cytoscape",),
@@ -286,15 +294,23 @@ def _feature_competitor_tools(category: str, feature: str) -> Tuple[str, ...]:
         ("edges/styles", "style"): ("graphviz",),
         ("edges/styles", "width"): ("graphviz", "mermaid"),
         ("edges/styles", "stroke_dash"): ("cytoscape",),
+        ("edges/advanced", "taper"): ("graphviz",),
         ("edges/advanced", "color_gradient"): ("cytoscape",),
         ("edges/advanced", "line_cap"): ("cytoscape",),
         ("edges/advanced", "line_join"): ("cytoscape",),
         ("edges/labels", "external_label"): ("graphviz",),
+        ("edges/labels", "label_position"): ("graphviz",),
         ("edges/labels", "head_tail_label"): ("graphviz",),
         ("clusters/styles", "cluster_style"): ("graphviz",),
         ("clusters/styles", "fill"): ("graphviz",),
         ("clusters/styles", "stroke"): ("graphviz",),
         ("clusters/styles", "border"): ("graphviz",),
+        ("clusters", "stroke_dash"): ("graphviz",),
+        ("clusters", "label_position"): ("graphviz",),
+        ("clusters", "opacity"): ("graphviz",),
+        ("graph", "background_color"): ("graphviz",),
+        ("graph", "direction"): ("graphviz",),
+        ("graph", "margin"): ("graphviz",),
     }
     return mapping.get(feature_key, ())
 
@@ -1373,6 +1389,7 @@ def _apply_dark_palette(graph: DaguaGraph) -> None:
         style.text_outline_color = DARK_LABEL_BG
     for style in _edge_styles(graph):
         style.color = DARK_EDGE_COLOR
+        style.width = max(float(style.width), 2.0)
         style.label_font_color = WHITE
         style.label_background = DARK_LABEL_BG
     for style in _cluster_styles(graph):
@@ -1769,6 +1786,12 @@ def _apply_reference_card_tweaks(
             # Decorative fills need more vertical breathing room so the label
             # does not read as squashed against the painted fill treatment.
             style.padding = DECORATIVE_FILL_CARD_PADDING
+    if item.spec.category == "nodes/shapes":
+        for style in _node_styles(graph):
+            if style.min_width is not None:
+                style.min_width = min(float(style.min_width), GRAPHVIZ_PARITY_MAX_NODE_WIDTH)
+            if style.min_height is not None:
+                style.min_height = min(float(style.min_height), GRAPHVIZ_PARITY_MAX_NODE_HEIGHT)
     if item.spec.feature == "external_label" and item.value.slug == "top":
         styles = _node_styles(graph)
         if len(styles) >= 2:
@@ -1900,6 +1923,28 @@ def _graphviz_node_attrs(
         "fontcolor": TEXT_COLOR,
         "penwidth": "2.0",
     }
+    node_params = value.params.get("node", {})
+    if isinstance(node_params, Mapping):
+        if "stroke_width" in node_params:
+            attrs["penwidth"] = str(node_params["stroke_width"])
+        if "border_opacity" in node_params:
+            opacity = min(max(float(node_params["border_opacity"]), 0.0), 1.0)
+            attrs["color"] = f"{NODE_STROKE}{int(round(opacity * 255.0)):02X}"
+        if "opacity" in node_params:
+            opacity = min(max(float(node_params["opacity"]), 0.0), 1.0)
+            attrs["fillcolor"] = f"{NODE_FILL}{int(round(opacity * 255.0)):02X}"
+        if "text_align" in node_params:
+            attrs["labeljust"] = {"left": "l", "center": "c", "right": "r"}.get(
+                str(node_params["text_align"]),
+                "c",
+            )
+        if "text_valign" in node_params:
+            attrs["labelloc"] = {"top": "t", "center": "c", "bottom": "b"}.get(
+                str(node_params["text_valign"]),
+                "c",
+            )
+        if "external_label" in node_params:
+            attrs["xlabel"] = str(node_params["external_label"])
     if value.graphviz_attrs is not None and "shape" in value.graphviz_attrs:
         attrs.update(value.graphviz_attrs)
     return attrs
@@ -1924,6 +1969,14 @@ def _graphviz_edge_attrs(value: FeatureValue) -> Dict[str, str]:
         "penwidth": "2.2",
         "arrowsize": "1.2",
     }
+    edge_params = value.params.get("edge", {})
+    if isinstance(edge_params, Mapping):
+        if "width" in edge_params:
+            attrs["penwidth"] = str(edge_params["width"])
+        if "label_position" in edge_params:
+            attrs["xlabel"] = value.params.get("edge_labels", [""])[0]
+        if bool(edge_params.get("taper")):
+            attrs["style"] = "tapered"
     if value.graphviz_attrs is not None:
         attrs.update(value.graphviz_attrs)
     return attrs
@@ -1963,8 +2016,18 @@ def _build_comparison_dot_source(graph: DaguaGraph, item: ReferenceCardItem) -> 
         DOT source string.
     """
 
+    graph_attrs = {"bgcolor": "white", "rankdir": "TB", "margin": "0.3"}
+    graph_params = item.value.params.get("graph", {})
+    if isinstance(graph_params, Mapping):
+        if "background_color" in graph_params:
+            graph_attrs["bgcolor"] = str(graph_params["background_color"])
+        if "margin" in graph_params:
+            graph_attrs["margin"] = str(graph_params["margin"])
+    if isinstance(item.value.params.get("direction"), str):
+        graph_attrs["rankdir"] = str(item.value.params["direction"]).upper()
+
     lines = ["digraph G {"]
-    lines.append('  graph [bgcolor="white", rankdir="TB", margin="0.3"];')
+    lines.append(f"  graph [{_dot_attr_list(graph_attrs)}];")
     lines.append(f"  node [{_dot_attr_list(_graphviz_node_attrs(graph, item.value))}];")
     lines.append(f"  edge [{_dot_attr_list(_graphviz_edge_attrs(item.value))}];")
     for index, label in enumerate(graph.node_labels):
@@ -2560,7 +2623,12 @@ def _render_comparison_card(item: ReferenceCardItem, output_root: Path) -> None:
             PANEL_CONTENT_INSET,
             canvas_color=_graph_background_color(graph),
         )
-        graphviz_panel = _place_render_on_canvas(graphviz_raw, PANEL_SIZE, PANEL_CONTENT_INSET)
+        try:
+            graphviz_panel = _place_render_on_canvas(graphviz_raw, PANEL_SIZE, PANEL_CONTENT_INSET)
+        except Exception as exc:
+            logging.warning("Skipping Graphviz comparison for %s: %s", item.card_id, exc)
+            destination.unlink(missing_ok=True)
+            return
     canvas = Image.new("RGB", COMPARISON_SIZE, WHITE)
     canvas.paste(dagua_panel, (0, 0))
     canvas.paste(graphviz_panel, (PANEL_SIZE[0], 0))
@@ -2884,14 +2952,18 @@ def build_reference_items() -> Tuple[ReferenceCardItem, ...]:
             )
             relative_path = f"cards/reference/{spec.category}/{stem}.png"
             comparison_path = None
-            if value.graphviz_attrs is not None and spec.category in {
-                "nodes/shapes",
-                "edges/arrows",
-            }:
+            probe_item = ReferenceCardItem(
+                card_id=_reference_card_id(spec, value),
+                spec=spec,
+                value=value,
+                relative_path=relative_path,
+                comparison_relative_path=None,
+            )
+            if "graphviz" in _card_competitor_tools(probe_item):
                 comparison_path = f"cards/comparisons/{spec.category}/{value.slug}_vs_graphviz.png"
             items.append(
                 ReferenceCardItem(
-                    card_id=_reference_card_id(spec, value),
+                    card_id=probe_item.card_id,
                     spec=spec,
                     value=value,
                     relative_path=relative_path,
@@ -3407,34 +3479,12 @@ def _combo_params(settings: Mapping[str, object], fixture: str) -> Dict[str, obj
         # pattern is visible without overwhelming the label text.
         node_block.setdefault("fill_pattern_colors", ["#90CAF9", "#FFAB91"])
         node_block.setdefault("fill_pattern_angle", 30.0)
-        # Striped fills hurt text readability -- add a solid white
-        # background behind labels so they remain legible.
-        node_block.setdefault("text_background", "#FFFFFF")
-        node_block.setdefault("text_background_opacity", 0.92)
-        node_block.setdefault("text_background_padding", (6.0, 3.0))
-        node_block.setdefault("text_background_corner_radius", 4.0)
     if str(node_block.get("fill_pattern", "solid")) == "hatched":
-        # Hatched fills also hurt label readability -- add text background.
-        node_block.setdefault("text_background", "#FFFFFF")
-        node_block.setdefault("text_background_opacity", 0.92)
-        node_block.setdefault("text_background_padding", (6.0, 3.0))
-        node_block.setdefault("text_background_corner_radius", 4.0)
+        node_block.setdefault("fill_pattern_colors", ["#F7FAFC", "#4A5568"])
     if str(node_block.get("fill_pattern", "solid")) == "pie":
         # Pie charts need enough space to show slices clearly.
         node_block.setdefault("min_width", 120.0)
         node_block.setdefault("min_height", 80.0)
-    corner_radius_value = node_block.get("corner_radius")
-    if isinstance(corner_radius_value, (list, tuple)) and (
-        str(node_block.get("gradient", "none")) != "none"
-        or str(node_block.get("fill_pattern", "solid")) in {"pie", "striped", "hatched"}
-    ):
-        # The renderer's auto label plate assumes a scalar node radius.
-        # Provide an explicit plate here so tuple-valued corner radii remain
-        # compatible with gradient and patterned fills.
-        node_block.setdefault("text_background", "#FFFFFF")
-        node_block.setdefault("text_background_opacity", 0.92)
-        node_block.setdefault("text_background_padding", (6.0, 3.0))
-        node_block.setdefault("text_background_corner_radius", 4.0)
     if "opacity" in node_block:
         node_block.setdefault("border_opacity", float(node_block["opacity"]))
     if str(edge_block.get("color_gradient", "none")) == "source_to_target":
@@ -5183,9 +5233,42 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
             ("opacity",),
             "cluster_nested",
             (
-                _value("0_3", "0.3", {"cluster": {"fill": SATURATED_CLUSTER_FILL, "opacity": 0.3}}),
-                _value("0_6", "0.6", {"cluster": {"fill": SATURATED_CLUSTER_FILL, "opacity": 0.6}}),
-                _value("1_0", "1.0", {"cluster": {"fill": SATURATED_CLUSTER_FILL, "opacity": 1.0}}),
+                _value(
+                    "0_3",
+                    "0.3",
+                    {
+                        "cluster": {
+                            "fill": SATURATED_CLUSTER_FILL,
+                            "fill_opacity": 1.0,
+                            "border_opacity": 1.0,
+                            "opacity": 0.3,
+                        }
+                    },
+                ),
+                _value(
+                    "0_6",
+                    "0.6",
+                    {
+                        "cluster": {
+                            "fill": SATURATED_CLUSTER_FILL,
+                            "fill_opacity": 1.0,
+                            "border_opacity": 1.0,
+                            "opacity": 0.6,
+                        }
+                    },
+                ),
+                _value(
+                    "1_0",
+                    "1.0",
+                    {
+                        "cluster": {
+                            "fill": SATURATED_CLUSTER_FILL,
+                            "fill_opacity": 1.0,
+                            "border_opacity": 1.0,
+                            "opacity": 1.0,
+                        }
+                    },
+                ),
             ),
             filename_prefix="opacity",
         ),

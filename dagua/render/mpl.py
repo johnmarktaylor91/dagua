@@ -406,8 +406,9 @@ def _cluster_fill_alpha(style: ClusterStyle, depth: int) -> float:
         Fill alpha clamped to Matplotlib's valid ``[0, 1]`` range.
     """
     depth_opacity_step = float(getattr(style, "depth_opacity_step", -0.05))
-    base_alpha = style.opacity if style.fill_opacity is None else style.fill_opacity
-    return min(max(float(base_alpha) + float(depth) * depth_opacity_step, 0.0), 1.0)
+    base_alpha = 1.0 if style.fill_opacity is None else float(style.fill_opacity)
+    alpha = (base_alpha * float(style.opacity)) + float(depth) * depth_opacity_step
+    return min(max(alpha, 0.0), 1.0)
 
 
 def _cluster_border_alpha(style: ClusterStyle, depth: int) -> float:
@@ -427,7 +428,10 @@ def _cluster_border_alpha(style: ClusterStyle, depth: int) -> float:
     """
     depth_opacity_step = float(getattr(style, "depth_opacity_step", -0.05))
     if style.border_opacity is not None:
-        return min(max(float(style.border_opacity) + float(depth) * depth_opacity_step, 0.0), 1.0)
+        alpha = (float(style.border_opacity) * float(style.opacity)) + (
+            float(depth) * depth_opacity_step
+        )
+        return min(max(alpha, 0.0), 1.0)
     legacy_alpha = min(
         max(float(style.opacity) * 2.5, 0.6) + float(depth) * depth_opacity_step,
         1.0,
@@ -2445,14 +2449,15 @@ def _draw_node_fill(
     from matplotlib.patches import PathPatch
 
     if style.fill_pattern == "pie":
-        fill_patch = PathPatch(
-            fill_path,
-            facecolor=facecolor,
-            edgecolor="none",
-            linewidth=0.0,
-            zorder=2.0,
-        )
-        ax.add_patch(fill_patch)
+        if float(getattr(style, "fill_pattern_hole", 0.0)) <= 0.0:
+            fill_patch = PathPatch(
+                fill_path,
+                facecolor=facecolor,
+                edgecolor="none",
+                linewidth=0.0,
+                zorder=2.0,
+            )
+            ax.add_patch(fill_patch)
         _draw_pie_fill(ax, shape_spec, style, clip_patch)
         if style.gradient != "none" and style.opacity > 0.0:
             # Pie wedges fully cover the base fill, so the gradient must be
@@ -2812,12 +2817,6 @@ def _offset_custom_edge_collection_terminals(
     None
         The collection is updated in place.
     """
-    # Disabled: the outward offset creates a visible gap between arrowheads
-    # and node boundaries. The mathematical boundary is close enough for
-    # correct visual appearance. The border half-width (~0.2 data units)
-    # is subpixel at most render scales and not worth the gap artifact.
-    return
-
     if positions is None:
         return
 
@@ -2876,8 +2875,9 @@ def _normalize_external_label_position(position: str) -> str:
         One of ``"top"``, ``"bottom"``, ``"left"``, or ``"right"``. Invalid
         values fall back to ``"bottom"``.
     """
-    if position in {"top", "bottom", "left", "right"}:
-        return position
+    normalized_position = str(position).replace("_", "-")
+    if normalized_position in {"top", "bottom", "left", "right"}:
+        return normalized_position
     return "bottom"
 
 
@@ -3491,7 +3491,7 @@ def _cluster_label_expands_top(position: str) -> bool:
     bool
         ``True`` when the label sits inside the top band of the cluster.
     """
-    return position.startswith("top-")
+    return str(position).replace("_", "-").startswith("top-")
 
 
 def _cluster_label_expands_bottom(position: str) -> bool:
@@ -3507,7 +3507,7 @@ def _cluster_label_expands_bottom(position: str) -> bool:
     bool
         ``True`` when the label sits inside the bottom band of the cluster.
     """
-    return position.startswith("bottom-")
+    return str(position).replace("_", "-").startswith("bottom-")
 
 
 def _cluster_label_is_outside(position: str) -> bool:
@@ -3523,7 +3523,7 @@ def _cluster_label_is_outside(position: str) -> bool:
     bool
         ``True`` when the label is outside the cluster box.
     """
-    return position.startswith("outside-")
+    return str(position).replace("_", "-").startswith("outside-")
 
 
 def _cluster_label_anchor(
@@ -3559,21 +3559,22 @@ def _cluster_label_anchor(
     tuple[float, float, str, str]
         ``(x, y, ha, va)`` anchor metadata.
     """
-    if position in {"top-center", "bottom-center"}:
+    normalized_position = str(position).replace("_", "-")
+    if normalized_position in {"top-center", "bottom-center"}:
         anchor_x = (x_min + x_max) / 2.0
         ha = "center"
-    elif position in {"top-right", "bottom-right"}:
+    elif normalized_position in {"top-right", "bottom-right"}:
         anchor_x = x_max - label_offset_x
         ha = "right"
     else:
         anchor_x = x_min + label_offset_x
         ha = "left"
 
-    if position == "outside-top":
+    if normalized_position == "outside-top":
         return anchor_x, y_max + label_offset_y, ha, "bottom"
-    if position == "outside-bottom":
+    if normalized_position == "outside-bottom":
         return anchor_x, y_min - label_offset_y, ha, "top"
-    if _cluster_label_expands_bottom(position):
+    if _cluster_label_expands_bottom(normalized_position):
         return anchor_x, y_min + label_offset_y, ha, "bottom"
     return anchor_x, y_max - label_offset_y, ha, "top"
 
@@ -4516,9 +4517,21 @@ def _draw_nodes(
             clip_patch = make_clip_proxy(rect_path, ax.transData)
         else:
             clip_patch = make_clip_proxy(fill_path, ax.transData)
+        fill_clip_patch = make_clip_proxy(fill_path, ax.transData)
         image_clip_patch = make_clip_proxy(outer_path, ax.transData)
         if _requires_custom_node_rendering(style):
-            _draw_node_fill(ax, shape_spec, fill_path, clip_patch, x, y, w, h, style, facecolor)
+            _draw_node_fill(
+                ax,
+                shape_spec,
+                fill_path,
+                fill_clip_patch,
+                x,
+                y,
+                w,
+                h,
+                style,
+                facecolor,
+            )
             _draw_image_node(ax, shape_spec, style, image_clip_patch)
             if border_width > 0.0 and edgecolor[-1] > 0.0:
                 border_path = _node_border_centerline_path(
@@ -6388,6 +6401,27 @@ def _tapered_edge_outline(
     return upper, lower
 
 
+def _taper_width_at_fraction(width_start: float, width_end: float, fraction: float) -> float:
+    """Interpolate a taper width at an edge arc-length fraction.
+
+    Parameters
+    ----------
+    width_start : float
+        Source-end ribbon width in data units.
+    width_end : float
+        Target-end ribbon width in data units.
+    fraction : float
+        Normalized arc-length fraction in ``[0, 1]``.
+
+    Returns
+    -------
+    float
+        Interpolated ribbon width.
+    """
+    clamped_fraction = min(max(float(fraction), 0.0), 1.0)
+    return float(width_start) * (1.0 - clamped_fraction) + float(width_end) * clamped_fraction
+
+
 def _draw_direct_edge_body(ax: Any, curve: BezierCurve, style: Any) -> List[Any]:
     """Draw a single edge body with direct matplotlib artists.
 
@@ -6416,6 +6450,48 @@ def _draw_direct_edge_body(ax: Any, curve: BezierCurve, style: Any) -> List[Any]
 
         if getattr(style, "taper", False):
             width_start, width_end = _resolved_taper_widths(ax, style)
+            if str(style.style) != "solid":
+                for segment_points, cap_start, cap_end in _dash_polyline(
+                    full_points,
+                    str(style.style),
+                    data_width,
+                ):
+                    start_fraction = _nearest_sample_fraction(
+                        full_points,
+                        full_params,
+                        segment_points[0],
+                    )
+                    end_fraction = _nearest_sample_fraction(
+                        full_points,
+                        full_params,
+                        segment_points[-1],
+                    )
+                    segment_start_width = _taper_width_at_fraction(
+                        width_start,
+                        width_end,
+                        start_fraction,
+                    )
+                    segment_end_width = _taper_width_at_fraction(
+                        width_start,
+                        width_end,
+                        end_fraction,
+                    )
+                    upper, lower = _tapered_edge_outline(
+                        segment_points,
+                        segment_start_width,
+                        segment_end_width,
+                    )
+                    patch = Polygon(
+                        np.vstack([upper, lower[::-1]]),
+                        closed=True,
+                        facecolor=to_rgba(str(style.color), alpha=float(style.opacity)),
+                        edgecolor="none",
+                        joinstyle=str(style.line_join),
+                        zorder=1,
+                    )
+                    ax.add_patch(patch)
+                    artists.append(patch)
+                return artists
             upper, lower = _tapered_edge_outline(full_points, width_start, width_end)
             start_color, end_color = _edge_gradient_colors(style)
 
@@ -6496,6 +6572,45 @@ def _draw_direct_edge_body(ax: Any, curve: BezierCurve, style: Any) -> List[Any]
     if getattr(style, "taper", False):
         points = _sample_curve_points(curve)
         width_start, width_end = _resolved_taper_widths(ax, style)
+        if str(style.style) != "solid":
+            for dash_segment in dash_curve(render_curve, str(style.style), data_width):
+                segment_points, _ = _sample_render_curve(dash_segment.curve, data_width)
+                start_fraction = _nearest_sample_fraction(
+                    full_points,
+                    full_params,
+                    segment_points[0],
+                )
+                end_fraction = _nearest_sample_fraction(
+                    full_points,
+                    full_params,
+                    segment_points[-1],
+                )
+                segment_start_width = _taper_width_at_fraction(
+                    width_start,
+                    width_end,
+                    start_fraction,
+                )
+                segment_end_width = _taper_width_at_fraction(
+                    width_start,
+                    width_end,
+                    end_fraction,
+                )
+                upper, lower = _tapered_edge_outline(
+                    segment_points,
+                    segment_start_width,
+                    segment_end_width,
+                )
+                patch = Polygon(
+                    np.vstack([upper, lower[::-1]]),
+                    closed=True,
+                    facecolor=to_rgba(str(style.color), alpha=float(style.opacity)),
+                    edgecolor="none",
+                    joinstyle=str(style.line_join),
+                    zorder=1,
+                )
+                ax.add_patch(patch)
+                artists.append(patch)
+            return artists
         upper, lower = _tapered_edge_outline(points, width_start, width_end)
         start_color, end_color = _edge_gradient_colors(style)
 
@@ -7461,30 +7576,9 @@ def _draw_node_labels(
         is_rich = style.label_format == "rich"
         secondary = gs.node_label_secondary_scale if not is_rich else 1.0
 
-        # Auto-add text backgrounds only when the node itself does not already
-        # request one. The cascade is tuned per fill treatment:
-        #
-        # - pie/striped -> white at 0.92 alpha because those fills can place
-        #   high-contrast color changes directly behind each glyph.
-        # - hatched -> background-colored plate at 0.75 alpha because the
-        #   underlying solid fill still provides contrast and fully opaque white
-        #   boxes looked too detached from the node body.
-        # - gradient -> white at 0.90 alpha because a slight tint from the
-        #   gradient preserves depth cues while still stabilizing readability.
         text_bg = style.text_background if style.text_background else None
         text_bg_alpha = style.text_background_opacity
-        if text_bg is None and style.fill_pattern in ("pie", "striped"):
-            text_bg = "#FFFFFF"
-            text_bg_alpha = 0.92
-        elif text_bg is None and style.fill_pattern == "hatched":
-            text_bg = gs.background_color or "#FAFAFA"
-            text_bg_alpha = 0.75
-        elif text_bg is None and style.gradient != "none":
-            text_bg = "#FFFFFF"
-            text_bg_alpha = 0.90
         text_bg_corner_radius = style.text_background_corner_radius
-        if text_bg is not None and not style.text_background:
-            text_bg_corner_radius = max(style.corner_radius * 0.8, 2.0)
 
         specs.append(
             DaguaText(
