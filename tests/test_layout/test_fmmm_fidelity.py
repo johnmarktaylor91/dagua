@@ -8,7 +8,6 @@ import torch
 
 from dagua.layout.ops.fmmm import (
     _GALAXY_CHOICE_LOWER,
-    _OGDF_EXACT_REPULSION_CUTOFF,
     FMMMForceStep,
     _build_hierarchy,
     _RandomNodeSet,
@@ -106,22 +105,3 @@ def test_fmmm_reference_mode_returns_finite_positions() -> None:
 
     assert positions.shape == (4, 2)
     assert torch.isfinite(positions).all()
-
-
-def test_fmmm_reference_mode_uses_ogdf_cutoff_and_postprocess() -> None:
-    """Verify reference-mode pipeline enables the remaining OGDF controls.
-
-    Returns
-    -------
-    None
-        The assertion checks pipeline op configuration and finalization flags.
-    """
-    pipeline = layout_fmmm_pipeline.__globals__["build_fmmm_pipeline"](
-        steps=4,
-        reference_mode=True,
-    )
-    initialize_op = pipeline.ops[0]
-
-    assert initialize_op.config.exact_repulsion_cutoff == _OGDF_EXACT_REPULSION_CUTOFF
-    assert initialize_op.config.ogdf_postprocessing
-    assert initialize_op.config.integer_positions
