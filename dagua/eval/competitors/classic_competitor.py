@@ -169,7 +169,7 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_stress_sgd": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.stress_sgd",
         function_name="layout_stress_sgd_pipeline",
-        default_params={"steps": 300},
+        default_params={"steps": 300, "fidelity_mode": True},
     ),
     "classic_sugiyama": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.sugiyama",
@@ -855,6 +855,7 @@ class ClassicStressSGD(_ClassicBase):
 
     name = "classic_stress_sgd"
     max_nodes = 50_000
+    variant_param_names = frozenset({"steps", "eps", "max_exact_nodes", "fidelity_mode"})
 
     def layout(
         self,
@@ -891,8 +892,10 @@ class ClassicStressSGD(_ClassicBase):
                 graph.edge_index,
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
+                edge_weights=graph.edge_weights,
                 steps=300,
                 seed=self._layout_seed(seed),
+                fidelity_mode=True,
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(
