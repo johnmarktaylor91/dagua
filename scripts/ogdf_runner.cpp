@@ -160,7 +160,8 @@ void validateEdges(
 void runLayout(
 	const std::string& algorithm,
 	ogdf::GraphAttributes& graphAttributes,
-	const int stressIterations
+	const int stressIterations,
+	const int numberOfPivots
 ) {
 	if (algorithm == "gem") {
 		ogdf::GEMLayout layout;
@@ -182,6 +183,9 @@ void runLayout(
 	}
 	if (algorithm == "pivot_mds") {
 		ogdf::PivotMDS layout;
+		if (numberOfPivots > 0) {
+			layout.setNumberOfPivots(numberOfPivots);
+		}
 		layout.call(graphAttributes);
 		return;
 	}
@@ -219,6 +223,7 @@ int main() {
 		validateEdges(edges, numNodes);
 		const std::string algorithm = parseAlgorithm(input);
 		const int stressIterations = parseOptionalInteger(input, "iterations", 0);
+		const int numberOfPivots = parseOptionalInteger(input, "numberOfPivots", 0);
 
 		ogdf::Graph graph;
 		ogdf::GraphAttributes graphAttributes(
@@ -247,7 +252,7 @@ int main() {
 				static_cast<double>(std::rand() % 1000) / 10.0;
 		}
 
-		runLayout(algorithm, graphAttributes, stressIterations);
+		runLayout(algorithm, graphAttributes, stressIterations, numberOfPivots);
 
 		std::cout << std::setprecision(17);
 		std::cout << "{\"positions\":[";
