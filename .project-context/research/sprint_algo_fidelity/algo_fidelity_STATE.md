@@ -1,14 +1,37 @@
 ---
 run: algo_fidelity
 created: 2026-04-29T19:16:57-04:00
-state: ROUND_1_DONE
-current_round: 1
-current_family: baseline
-codex_pid: 3695687
-codex_log: /tmp/algo_fid_round_1.log
-watchdog_pid: 3695836
-dispatched_at: 2026-04-29T19:30:00-04:00
-prompt_file: .project-context/research/sprint_algo_fidelity/PROMPT_round_1.md
+state: ROUND_3_DONE
+current_round: 3
+current_family: fdp
+codex_pid: 3793569
+codex_log: /tmp/algo_fid_round_3.log
+watchdog_pid: 3793728
+dispatched_at: 2026-04-29T19:55:00-04:00
+prompt_file: .project-context/research/sprint_algo_fidelity/PROMPT_round_3.md
+flail_count_dot: 1
+
+baseline_truth_change: |
+  ROUND 1 CACHED RMSDs ARE OBSOLETE. Cached benchmark used different
+  node sizes than current code. Use live_compare.py output as the new
+  ground truth from now on. Round 2's live baseline:
+    dot family median (live): 0.341942
+    mixed_width_labels (live): 0.404615
+    shape_and_routing_matrix (live): 0.456349
+    small_label_storm (live): 0.485187
+  Layer assignment + x-ordering already match dot on diagnostic graphs.
+  Remaining gap = coordinate values (Brandes-Köpf vs network-simplex).
+
+round_1_summary: |
+  baseline median RMSD per family:
+    dot:           0.3245 (worst family)  -- attack first
+    fdp:           0.2918 (second worst, ALL graphs > 0.15 floor)
+    sfdp:          0.0915
+    neato_mds:     0.0455
+    neato_stress:  0.0353
+  sugiyama PERFECT on simple/linear graphs (RMSD < 0.01),
+  cliffs at medium graphs. Smallest divergent reproducer:
+  mixed_width_labels (6 nodes, RMSD 0.35).
 ---
 
 # algo_fidelity -- Autonomous Loop State
@@ -176,4 +199,8 @@ Each prompt MUST include:
 
 | Round | Family | Start | End | Commit | Median RMSD before/after | Worst graph | Notes |
 |---|---|---|---|---|---|---|---|
+| 1 | baseline | 19:19 | 19:30 | 78e8529 | N/A baseline | dot/small_label_storm 0.4744 | Built cross-comparator + panels. Identified dot+fdp as worst families. |
+| 2 | dot | 19:33 | 19:50 | (no commit) | live 0.3419 (cached 0.3245 obsolete) | mixed_width_labels live 0.4046 | DIAGNOSIS_ONLY: cached vs live mismatch from node-size drift. Layer + x-ordering match dot; gap is in coordinate assignment (BK vs network-simplex). live_compare.py added. |
 | 1 | baseline | 2026-04-29T19:16:57-04:00 | 2026-04-29T19:26:04-04:00 | 0a9a957 | N/A baseline | center_port_backedge_hub | Round 1 = infrastructure |
+| 2 | dot | 2026-04-29T19:32:00-04:00 | 2026-04-29T19:47:27-04:00 | none | 0.3245 cached / 0.3419 live | small_label_storm 0.4852 live | Built live comparator; blocked before Sugiyama fix because live baseline differs from Round 1 cache on 8/22 graphs due node-size context drift. |
+| 3 | dot | 2026-04-29T19:55:00-04:00 | 2026-04-29T20:20:04-04:00 | feat(fidelity): round 3 | 0.3419 live / 0.0191 live | densenet_block 0.1679 live | COMMITTED: aligned classic Sugiyama direct defaults to dot point spacing (`rank_sep=72`, `node_sep=18`); diagnostics improved without simple-graph regression. Next family: fdp. |
