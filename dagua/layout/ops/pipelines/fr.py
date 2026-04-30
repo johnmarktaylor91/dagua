@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence, Union
 
 import torch
 
@@ -13,10 +13,10 @@ from dagua.layout.ops.converge import (
     FixedStepsConfig,
     FRConvergenceCheck,
 )  # noqa: E402
-from dagua.layout.ops.force import ApplyDisplacement, FRCombinedForce
+from dagua.layout.ops.force import ApplyDisplacement, ApplyDisplacementConfig, FRCombinedForce
 from dagua.layout.ops.init import RandomUniformInit, RandomUniformInitConfig
 from dagua.layout.ops.postprocess import FRFinalizePositions, FRFinalizePositionsConfig
-from dagua.layout.ops.preprocess import FRPrepareAdjacency
+from dagua.layout.ops.preprocess import FRPrepareAdjacency, FRPrepareAdjacencyConfig
 from dagua.layout.ops.state import (  # noqa: E402
     ExecutionPlan,
     LayoutProblem,
@@ -124,7 +124,47 @@ def _choose_fr_default_layout(
     return canonical_pos
 
 
-def build_fr_pipeline(steps: int = 50, networkx_compat: bool = False) -> Pipeline:
+def _normalize_fixed_indices(
+    fixed: Optional[Union[Sequence[int], torch.Tensor]],
+    num_nodes: int,
+) -> tuple[int, ...]:
+    """Validate and normalize fixed-node indices.
+
+    Parameters
+    ----------
+    fixed : sequence of int or torch.Tensor, optional
+        Node indices whose FR displacement should be zeroed.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Sorted unique fixed-node indices.
+
+    Raises
+    ------
+    ValueError
+        If any fixed index is outside ``[0, num_nodes)``.
+    """
+    if fixed is None:
+        return ()
+    if isinstance(fixed, torch.Tensor):
+        raw_indices = fixed.detach().to(device="cpu", dtype=torch.long).flatten().tolist()
+    else:
+        raw_indices = [int(index) for index in fixed]
+    normalized = tuple(sorted(set(int(index) for index in raw_indices)))
+    if any(index < 0 or index >= num_nodes for index in normalized):
+        raise ValueError("fixed contains a node index outside [0, num_nodes).")
+    return normalized
+
+
+def build_fr_pipeline(
+    steps: int = 50,
+    networkx_compat: bool = False,
+    k: Optional[float] = None,
+    fixed_indices: Optional[Sequence[int]] = None,
+) -> Pipeline:
     """Build a Fruchterman-Reingold force-directed layout pipeline.
 
     Parameters
@@ -134,6 +174,11 @@ def build_fr_pipeline(steps: int = 50, networkx_compat: bool = False) -> Pipelin
     networkx_compat : bool, default=False
         If ``True``, use NetworkX adapter-scale finalization instead of
         dagua's legacy ``50 * sqrt(N)`` display scale.
+    k : float, optional
+        Explicit NetworkX-style optimal node spacing.
+    fixed_indices : sequence of int, optional
+        Node indices whose displacement should be zeroed. When provided, final
+        centering/scaling is skipped to match NetworkX fixed-node semantics.
 
     Returns
     -------
@@ -165,13 +210,17 @@ def build_fr_pipeline(steps: int = 50, networkx_compat: bool = False) -> Pipelin
                     ),
                 ),
             ),
-            FRPrepareAdjacency(),
+            FRPrepareAdjacency(FRPrepareAdjacencyConfig(k=k)),
             InitTemperatureFromExtent(),
             Repeat(
                 n=steps,
                 ops=[
                     FRCombinedForce(),
-                    ApplyDisplacement(),
+                    ApplyDisplacement(
+                        ApplyDisplacementConfig(
+                            fixed_indices=tuple(fixed_indices or ()),
+                        ),
+                    ),
                     FRConvergenceCheck(),
                     LinearCool(),
                 ],
@@ -180,6 +229,7 @@ def build_fr_pipeline(steps: int = 50, networkx_compat: bool = False) -> Pipelin
                 FRFinalizePositionsConfig(
                     output_scale_factor=500.0 if networkx_compat else 50.0,
                     scale_by_sqrt_num_nodes=not networkx_compat,
+                    skip_rescale=bool(fixed_indices),
                 ),
             ),
         ],
@@ -196,6 +246,8 @@ def layout_fr_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     pos: Optional[torch.Tensor] = None,
     networkx_compat: bool = False,
+    k: Optional[float] = None,
+    fixed: Optional[Union[Sequence[int], torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Run the Fruchterman-Reingold pipeline as a drop-in replacement.
 
@@ -221,6 +273,12 @@ def layout_fr_pipeline(
     networkx_compat : bool, default=False
         If ``True``, use NetworkX-compatible adapter-scale finalization. This
         preserves the force loop while avoiding dagua's legacy display scale.
+    k : float, optional
+        Explicit NetworkX-style optimal node spacing. ``None`` preserves
+        ``sqrt(1 / num_nodes)``.
+    fixed : sequence of int or torch.Tensor, optional
+        Node indices to hold fixed during displacement. A full ``pos`` tensor
+        must also be provided, matching NetworkX's fixed-node requirement.
 
     Returns
     -------
@@ -247,6 +305,11 @@ def layout_fr_pipeline(
             )
     if pos is not None and pos.shape != (num_nodes, 2):
         raise ValueError(f"pos must have shape ({num_nodes}, 2), got {tuple(pos.shape)}")
+    if k is not None and k <= 0.0:
+        raise ValueError("k must be positive when provided.")
+    fixed_indices = _normalize_fixed_indices(fixed=fixed, num_nodes=num_nodes)
+    if fixed_indices and pos is None:
+        raise ValueError("fixed nodes require a full pos tensor.")
 
     problem = LayoutProblem(
         edge_index=edge_index,
@@ -268,7 +331,12 @@ def layout_fr_pipeline(
     if pos is not None and steps == 0:
         return state.pos.to(device=output_device, dtype=torch.float32)
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
-    final_state = build_fr_pipeline(steps=steps, networkx_compat=networkx_compat).apply(
+    final_state = build_fr_pipeline(
+        steps=steps,
+        networkx_compat=networkx_compat,
+        k=k,
+        fixed_indices=fixed_indices,
+    ).apply(
         problem,
         state,
         ctx,
@@ -287,6 +355,8 @@ def layout_fr_default_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     pos: Optional[torch.Tensor] = None,
     networkx_compat: bool = False,
+    k: Optional[float] = None,
+    fixed: Optional[Union[Sequence[int], torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Run the benchmark default FR layout with canonical-fidelity selection.
 
@@ -311,13 +381,17 @@ def layout_fr_default_pipeline(
     networkx_compat : bool, default=False
         If ``True``, forwarded to :func:`layout_fr_pipeline` for exact
         NetworkX adapter-style output scaling.
+    k : float, optional
+        Explicit NetworkX-style optimal node spacing.
+    fixed : sequence of int or torch.Tensor, optional
+        Node indices to hold fixed during displacement.
 
     Returns
     -------
     torch.Tensor
         Final position tensor with shape ``[N, 2]``.
     """
-    if steps != _LEGACY_CLASSIC_FR_STEPS or pos is not None:
+    if steps != _LEGACY_CLASSIC_FR_STEPS or pos is not None or k is not None or fixed is not None:
         return layout_fr_pipeline(
             edge_index=edge_index,
             num_nodes=num_nodes,
@@ -327,6 +401,8 @@ def layout_fr_default_pipeline(
             edge_weights=edge_weights,
             pos=pos,
             networkx_compat=networkx_compat,
+            k=k,
+            fixed=fixed,
         )
 
     legacy_pos = layout_fr_pipeline(
@@ -337,6 +413,8 @@ def layout_fr_default_pipeline(
         seed=seed,
         edge_weights=edge_weights,
         networkx_compat=networkx_compat,
+        k=k,
+        fixed=fixed,
     )
     canonical_pos = layout_fr_pipeline(
         edge_index=edge_index,
@@ -346,6 +424,8 @@ def layout_fr_default_pipeline(
         seed=seed,
         edge_weights=edge_weights,
         networkx_compat=networkx_compat,
+        k=k,
+        fixed=fixed,
     )
     return _choose_fr_default_layout(
         legacy_pos=legacy_pos,
