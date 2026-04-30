@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
 from typing import Any
@@ -9,10 +10,11 @@ from typing import Any
 import torch
 
 from dagua.eval.competitors import ogdf_competitor
+from dagua.eval.competitors.classic_competitor import ClassicMaxentStress
 from dagua.eval.competitors.ogdf_competitor import OGDFStress
 from dagua.eval.variants import VARIANT_REGISTRY
 from dagua.graph import DaguaGraph
-from dagua.layout.ops.maxent_stress import MaxentPrepareState
+from dagua.layout.ops.maxent_stress import MaxentInitializePositions, MaxentPrepareState
 from dagua.layout.ops.pipelines.maxent_stress import build_maxent_stress_pipeline
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 
@@ -86,6 +88,22 @@ def test_maxent_majorization_distances_stay_float64() -> None:
     assert state.distance_matrix.dtype == torch.float64
 
 
+def test_maxent_majorization_path_init_uses_line_fast_path() -> None:
+    """Majorization warm start should match OGDF's simple-path line layout."""
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=4, seed=123)
+
+    state = MaxentInitializePositions(for_majorization=True).apply(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+    )
+
+    assert state.pos is not None
+    assert torch.allclose(state.pos[:, 1], torch.zeros(4, dtype=torch.float64))
+    assert torch.allclose(state.pos[:, 0], torch.arange(4, dtype=torch.float64))
+
+
 def test_maxent_step_variants_forward_ogdf_iterations() -> None:
     """Maxent step variants should align the OGDF stress reference budget."""
     original_params = {
@@ -148,3 +166,38 @@ def test_ogdf_stress_variant_iterations_enter_runner_payload(monkeypatch: Any) -
     assert result.error is None
     assert captured_payload["algorithm"] == "stress"
     assert captured_payload["iterations"] == 50
+
+
+def test_direct_classic_maxent_wrapper_forwards_edge_weights(monkeypatch: Any) -> None:
+    """The registered direct wrapper should not drop weighted stress inputs."""
+    captured_kwargs: dict[str, Any] = {}
+
+    def fake_layout_maxent_stress(*args: Any, **kwargs: Any) -> torch.Tensor:
+        """Capture layout kwargs and return valid coordinates.
+
+        Parameters
+        ----------
+        *args : Any
+            Positional arguments forwarded to the layout function.
+        **kwargs : Any
+            Keyword arguments forwarded to the layout function.
+
+        Returns
+        -------
+        torch.Tensor
+            Dummy coordinates with shape ``[2, 2]``.
+        """
+        del args
+        captured_kwargs.update(kwargs)
+        return torch.zeros((2, 2), dtype=torch.float32)
+
+    maxent_pipeline = importlib.import_module("dagua.layout.ops.pipelines.maxent_stress")
+    monkeypatch.setattr(maxent_pipeline, "layout_maxent_stress_pipeline", fake_layout_maxent_stress)
+
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    edge_weights = torch.tensor([3.0], dtype=torch.float32)
+    graph = DaguaGraph.from_edge_index(edge_index, num_nodes=2, edge_weights=edge_weights)
+    result = ClassicMaxentStress().layout(graph)
+
+    assert result.error is None
+    assert captured_kwargs["edge_weights"] is edge_weights
