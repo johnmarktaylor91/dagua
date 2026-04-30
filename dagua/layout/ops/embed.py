@@ -310,7 +310,10 @@ def _pivot_mds_coordinates(
     if coord_dims == 0:
         return torch.zeros((distance_matrix.shape[1], 2), dtype=torch.float32)
 
-    scales = singular_values[:coord_dims].clamp_min(0.0)
+    # OGDF normalizes the right singular vectors and then applies sqrt(sigma),
+    # not sigma. Non-path graphs with two unequal components expose the
+    # aspect-ratio difference.
+    scales = singular_values[:coord_dims].clamp_min(0.0).sqrt()
     coordinates = vh[:coord_dims].transpose(0, 1) * scales.unsqueeze(0)
     if coord_dims == 1:
         zeros = torch.zeros((coordinates.shape[0], 1), dtype=coordinates.dtype)
