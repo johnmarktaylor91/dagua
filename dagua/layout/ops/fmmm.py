@@ -36,6 +36,12 @@ _WAGGLE_FACTOR = 0.05
 _FMMM_TEMPERATURE_KEY = "fmmm_temperature"
 _FORCE_MODEL_OGDF_NEW = "ogdf_new"
 _FORCE_MODEL_FR = "fr"
+_GALAXY_CHOICE_HIGHER = "higher"
+_GALAXY_CHOICE_LOWER = "lower"
+_COARSE_INIT_FR = "fr"
+_COARSE_INIT_RANDOM = "ogdf_random"
+_OGDF_FORCE_SCALING_FACTOR = 0.05
+_OGDF_FORCE_THRESHOLD = 0.01
 _TYPE_SUN = 1
 _TYPE_PLANET = 2
 _TYPE_PLANET_WITH_MOONS = 3
@@ -258,6 +264,49 @@ class _RandomNodeSet:
         )
         return selected_node
 
+    def get_random_node_with_lowest_star_mass(
+        self,
+        rng: random.Random,
+        random_tries: int,
+    ) -> int:
+        """Sample several distinct candidates and keep the one with lowest star mass.
+
+        Parameters
+        ----------
+        rng : random.Random
+            Pseudorandom generator.
+        random_tries : int
+            Number of distinct candidates to evaluate.
+
+        Returns
+        -------
+        int
+            Selected node index removed from the selectable prefix.
+        """
+        if self.empty():
+            raise ValueError("cannot select from an empty node set")
+
+        best_index = -1
+        best_mass = 0
+        last_try_index = self.last_selectable_index
+        max_tries = min(random_tries, last_try_index + 1)
+        for trial_index in range(1, max_tries + 1):
+            sampled_index = rng.randint(0, last_try_index)
+            mass = self.star_masses[self.nodes[sampled_index]]
+            _, last_try_index = self._get_random_node_common(sampled_index, last_try_index)
+            if trial_index == 1 or mass < best_mass:
+                best_index = last_try_index + 1
+                best_mass = mass
+
+        if best_index < 0:
+            raise RuntimeError("failed to select a sun node")
+
+        selected_node, self.last_selectable_index = self._get_random_node_common(
+            best_index,
+            self.last_selectable_index,
+        )
+        return selected_node
+
 
 def _fr_ideal_length(area: float, num_nodes: int) -> float:
     """Compute the FR ideal edge length for the current refinement level.
@@ -410,6 +459,7 @@ def _coarsen_level(
     level_graph: _LevelGraph,
     node_masses: torch.Tensor,
     rng: random.Random,
+    galaxy_choice: str = _GALAXY_CHOICE_HIGHER,
 ) -> tuple[_HierarchyStep, _LevelGraph, torch.Tensor]:
     """Collapse one FM^3 level using OGDF-style solar systems.
 
@@ -421,6 +471,9 @@ def _coarsen_level(
         Current-level node masses with shape ``[N]``.
     rng : random.Random
         Pseudorandom generator used for sun selection.
+    galaxy_choice : str, default="higher"
+        Sun selection strategy. ``"lower"`` follows OGDF's default
+        ``NonUniformProbLowerMass`` galaxy choice.
 
     Returns
     -------
@@ -447,10 +500,16 @@ def _coarsen_level(
     sun_to_coarse: dict[int, int] = {}
 
     while not selectable_nodes.empty():
-        sun_node = selectable_nodes.get_random_node_with_highest_star_mass(
-            rng,
-            _SOLAR_RANDOM_TRIES,
-        )
+        if galaxy_choice == _GALAXY_CHOICE_LOWER:
+            sun_node = selectable_nodes.get_random_node_with_lowest_star_mass(
+                rng,
+                _SOLAR_RANDOM_TRIES,
+            )
+        else:
+            sun_node = selectable_nodes.get_random_node_with_highest_star_mass(
+                rng,
+                _SOLAR_RANDOM_TRIES,
+            )
         coarse_node = len(sun_to_coarse)
         sun_to_coarse[sun_node] = coarse_node
         mapping[sun_node] = coarse_node
@@ -592,6 +651,7 @@ def _build_hierarchy(
     num_nodes: int,
     seed: int,
     edge_weights: Optional[torch.Tensor] = None,
+    galaxy_choice: str = _GALAXY_CHOICE_HIGHER,
 ) -> tuple[list[_LevelGraph], list[_HierarchyStep]]:
     """Build the FM^3 hierarchy with OGDF-style coarsening metadata.
 
@@ -605,6 +665,8 @@ def _build_hierarchy(
         Random seed used for sun selection.
     edge_weights : torch.Tensor, optional
         Optional per-edge attraction weights with shape ``[E]``.
+    galaxy_choice : str, default="higher"
+        Sun selection strategy used during solar-system coarsening.
 
     Returns
     -------
@@ -641,7 +703,12 @@ def _build_hierarchy(
                 else:
                     break
 
-        step, coarse_level, coarse_masses = _coarsen_level(levels[-1], current_masses, rng)
+        step, coarse_level, coarse_masses = _coarsen_level(
+            levels[-1],
+            current_masses,
+            rng,
+            galaxy_choice=galaxy_choice,
+        )
         if coarse_level.num_nodes >= current_nodes:
             break
 
@@ -1085,6 +1152,38 @@ def _refine_level_with_edge_lengths(
     return refined
 
 
+def _prevent_ogdf_oscillation(displacement: torch.Tensor, previous: torch.Tensor) -> torch.Tensor:
+    """Dampen FM^3 movements that reverse direction between iterations.
+
+    Parameters
+    ----------
+    displacement : torch.Tensor
+        Current movement vectors with shape ``[N, 2]``.
+    previous : torch.Tensor
+        Previous movement vectors with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Movement vectors after applying OGDF's angle-bucket damping factors.
+    """
+    current_norm = torch.linalg.norm(displacement, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
+    previous_norm = torch.linalg.norm(previous, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
+    cosine = (displacement * previous).sum(dim=1, keepdim=True) / (current_norm * previous_norm)
+    angle = torch.acos(cosine.clamp(-1.0, 1.0))
+    buckets = torch.ceil(angle / (math.pi / 6.0)).to(dtype=torch.long).clamp(0, 6)
+    factors = torch.tensor(
+        [1.0, 1.0, 0.9, 0.7, 0.4, 0.2, 0.1],
+        dtype=displacement.dtype,
+        device=displacement.device,
+    )
+    scale = torch.minimum(
+        torch.ones_like(current_norm),
+        previous_norm * factors[buckets] / current_norm,
+    )
+    return displacement * scale
+
+
 @register_op
 @dataclass(frozen=True)
 class FMMMForceStep(Op):
@@ -1103,6 +1202,7 @@ class FMMMForceStep(Op):
     edge_weights: Optional[torch.Tensor] = None
     use_exact: bool = True
     force_model: str = _FORCE_MODEL_OGDF_NEW
+    ogdf_force_scaling: bool = False
     temperature_key: str = _FMMM_TEMPERATURE_KEY
 
     def apply(
@@ -1160,6 +1260,20 @@ class FMMMForceStep(Op):
             )
 
         displacement = repulsive + attractive
+        if self.ogdf_force_scaling:
+            average_edge_length = (
+                float(self.edge_lengths.mean().item())
+                if self.edge_lengths is not None and self.edge_lengths.numel() > 0
+                else float(self.ideal_length)
+            )
+            displacement = displacement * (average_edge_length**2) * _OGDF_FORCE_SCALING_FACTOR
+            previous = state.extras.get("fmmm_previous_displacement")
+            if isinstance(previous, torch.Tensor) and previous.shape == displacement.shape:
+                displacement = _prevent_ogdf_oscillation(displacement, previous)
+            state.extras["fmmm_previous_displacement"] = displacement.detach().clone()
+            state.extras["fmmm_last_avg_force_norm"] = float(
+                torch.linalg.norm(displacement, dim=1).mean().item()
+            )
         norm = torch.linalg.norm(displacement, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
         limited_step = torch.minimum(norm, torch.full_like(norm, float(temperature)))
         state.pos = positions + (displacement / norm) * limited_step
@@ -1218,6 +1332,7 @@ class FMMMRefineLevel(Op):
     edge_weights: Optional[torch.Tensor] = None
     cooling_factor: float = _COOLING_FACTOR
     force_model: str = _FORCE_MODEL_OGDF_NEW
+    ogdf_force_scaling: bool = False
     temperature_key: str = _FMMM_TEMPERATURE_KEY
 
     def apply(
@@ -1259,6 +1374,7 @@ class FMMMRefineLevel(Op):
                 edge_weights=self.edge_weights,
                 use_exact=int(state.pos.shape[0]) <= 500,
                 force_model=self.force_model,
+                ogdf_force_scaling=self.ogdf_force_scaling,
                 temperature_key=self.temperature_key,
             )
             cool_step = FMMMCoolStep(
@@ -1266,12 +1382,19 @@ class FMMMRefineLevel(Op):
                 minimum_temperature=_MIN_DISTANCE,
                 temperature_key=self.temperature_key,
             )
+            state.extras.pop("fmmm_previous_displacement", None)
             for _ in range(self.steps):
                 state = force_step.apply(problem, state, ctx)
-                state = cool_step.apply(problem, state, ctx)
+                if self.ogdf_force_scaling:
+                    average_norm = state.extras.get("fmmm_last_avg_force_norm", float("inf"))
+                    if average_norm < _OGDF_FORCE_THRESHOLD:
+                        break
+                else:
+                    state = cool_step.apply(problem, state, ctx)
             return state
         finally:
             state.ideal_length = previous_ideal_length
+            state.extras.pop("fmmm_previous_displacement", None)
 
 
 def _create_random_position(
@@ -1460,6 +1583,32 @@ def _prolong_positions(
     return fine_positions
 
 
+def _ogdf_random_positions(num_nodes: int, extent: float, seed: int) -> torch.Tensor:
+    """Create OGDF-style random coarsest-level positions inside a square box.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of coarsest nodes to place.
+    extent : float
+        Half-width of the sampling box.
+    seed : int
+        Random seed for deterministic placement.
+
+    Returns
+    -------
+    torch.Tensor
+        Random positions with shape ``[N, 2]`` and dtype ``float32``.
+    """
+    rng = random.Random(seed)
+    box_width = max(float(extent) * 2.0, _MIN_DISTANCE)
+    values = [
+        (rng.random() * box_width - float(extent), rng.random() * box_width - float(extent))
+        for _ in range(num_nodes)
+    ]
+    return torch.tensor(values, dtype=torch.float32)
+
+
 @dataclass(frozen=True)
 class _InitializeFMMMStateConfig:
     """Configuration for :class:`_InitializeFMMMState`.
@@ -1470,10 +1619,19 @@ class _InitializeFMMMStateConfig:
         Total refinement budget across hierarchy levels.
     force_model : str, default="ogdf_new"
         Spring-force model used for edge attraction.
+    galaxy_choice : str, default="higher"
+        Sun selection strategy for coarsening.
+    coarsest_init : str, default="fr"
+        Coarsest-level initialization strategy.
+    ogdf_force_scaling : bool, default=False
+        Whether to use OGDF-compatible force scaling and damping.
     """
 
     steps: int = 200
     force_model: str = _FORCE_MODEL_OGDF_NEW
+    galaxy_choice: str = _GALAXY_CHOICE_HIGHER
+    coarsest_init: str = _COARSE_INIT_FR
+    ogdf_force_scaling: bool = False
 
 
 @register_op
@@ -1521,6 +1679,7 @@ class _InitializeFMMMState(Op):
             problem.num_nodes,
             seed=problem.seed,
             edge_weights=problem.edge_weights,
+            galaxy_choice=self.config.galaxy_choice,
         )
 
         state.extras["fmmm_levels"] = levels
@@ -1530,6 +1689,8 @@ class _InitializeFMMMState(Op):
         state.extras["fmmm_level_budget"] = max(10, self.config.steps // max(len(levels), 1))
         state.extras["fmmm_steps"] = self.config.steps
         state.extras["fmmm_force_model"] = self.config.force_model
+        state.extras["fmmm_coarsest_init"] = self.config.coarsest_init
+        state.extras["fmmm_ogdf_force_scaling"] = self.config.ogdf_force_scaling
         return state
 
 
@@ -1582,8 +1743,17 @@ class _InitializeCoarsestLevel(Op):
 
         levels = state.extras["fmmm_levels"]
         steps = state.extras["fmmm_steps"]
+        coarsest_init = state.extras["fmmm_coarsest_init"]
         coarsest_level = levels[-1]
         coarsest_nodes = coarsest_level.num_nodes
+
+        if coarsest_init == _COARSE_INIT_RANDOM:
+            state.pos = _ogdf_random_positions(
+                coarsest_nodes,
+                float(state.extras["fmmm_extent"]),
+                problem.seed,
+            )
+            return state
 
         coarse_positions = layout_fr_pipeline(
             coarsest_level.edge_index,
@@ -1643,6 +1813,7 @@ class _RefineCoarsestLevel(Op):
         level_budget = state.extras["fmmm_level_budget"]
         refinement_area = state.extras["fmmm_refinement_area"]
         force_model = state.extras["fmmm_force_model"]
+        ogdf_force_scaling = state.extras["fmmm_ogdf_force_scaling"]
 
         state = FMMMRefineLevel(
             edge_index=coarsest_level.edge_index,
@@ -1652,6 +1823,7 @@ class _RefineCoarsestLevel(Op):
             edge_lengths=coarsest_level.edge_lengths,
             edge_weights=coarsest_level.edge_weights,
             force_model=force_model,
+            ogdf_force_scaling=ogdf_force_scaling,
         ).apply(
             problem,
             state,
@@ -1711,6 +1883,7 @@ class FMMMUncoarsenLoop(Op):
         level_budget = state.extras["fmmm_level_budget"]
         refinement_area = state.extras["fmmm_refinement_area"]
         force_model = state.extras["fmmm_force_model"]
+        ogdf_force_scaling = state.extras["fmmm_ogdf_force_scaling"]
         rng = random.Random(problem.seed)
 
         positions = state.pos
@@ -1725,6 +1898,7 @@ class FMMMUncoarsenLoop(Op):
                 edge_lengths=levels[level].edge_lengths,
                 edge_weights=levels[level].edge_weights,
                 force_model=force_model,
+                ogdf_force_scaling=ogdf_force_scaling,
             ).apply(problem, state, ctx)
             positions = state.pos
 
@@ -1780,6 +1954,7 @@ class _SingleLevelFallback(Op):
         level_budget = state.extras["fmmm_level_budget"]
         refinement_area = state.extras["fmmm_refinement_area"]
         force_model = state.extras["fmmm_force_model"]
+        ogdf_force_scaling = state.extras["fmmm_ogdf_force_scaling"]
 
         state = FMMMRefineLevel(
             edge_index=levels[0].edge_index,
@@ -1788,6 +1963,7 @@ class _SingleLevelFallback(Op):
             area=refinement_area,
             edge_weights=levels[0].edge_weights,
             force_model=force_model,
+            ogdf_force_scaling=ogdf_force_scaling,
         ).apply(
             problem,
             state,
