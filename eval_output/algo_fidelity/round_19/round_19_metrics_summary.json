@@ -1,0 +1,462 @@
+{
+  "fdp": {
+    "aggregate_tost": {
+      "0.25x": {
+        "equivalent": true,
+        "margin": 0.06120108025973052,
+        "pvalue": 8.849758129032112e-145,
+        "verdict": "equivalent_at_0.25x"
+      },
+      "0.5x": {
+        "equivalent": true,
+        "margin": 0.12240216051946104,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_0.5x"
+      },
+      "1.5x": {
+        "equivalent": true,
+        "margin": 0.3672064815583831,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_1.5x"
+      },
+      "1x": {
+        "equivalent": true,
+        "margin": 0.24480432103892208,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_1x"
+      },
+      "2x": {
+        "equivalent": true,
+        "margin": 0.48960864207784416,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_2x"
+      }
+    },
+    "dagua_engine": "classic_fmmm",
+    "dagua_vs_graphviz": {
+      "mean": 0.2787499428852059,
+      "median": 0.27652475237846375,
+      "n": 32400,
+      "p95": 0.43097907602787017
+    },
+    "graphs": [
+      "binary_tree",
+      "edge_label_braid",
+      "inception_block",
+      "linear_3layer_mlp",
+      "mixed_width_labels",
+      "nested_shallow_enc_dec",
+      "parallel_multiedge_bundle",
+      "petersen_10",
+      "tl_mlp_3layer"
+    ],
+    "n_dagua_seeds_min": 60,
+    "n_graphs": 9,
+    "n_graphviz_seeds_min": 60,
+    "per_graph_tost_counts": {
+      "0.25x": {
+        "equivalent": 8,
+        "not_equivalent": 1
+      },
+      "0.5x": {
+        "equivalent": 8,
+        "not_equivalent": 1
+      },
+      "1.5x": {
+        "equivalent": 8,
+        "not_equivalent": 1
+      },
+      "1x": {
+        "equivalent": 8,
+        "not_equivalent": 1
+      },
+      "2x": {
+        "equivalent": 8,
+        "not_equivalent": 1
+      }
+    },
+    "rows": {
+      "dagua_vs_graphviz": 32400,
+      "within_dagua": 15930,
+      "within_graphviz": 15930
+    },
+    "target_engine": "graphviz_fdp",
+    "within_dagua": {
+      "mean": 0.13287257713322206,
+      "median": 0.07319565489888191,
+      "n": 15930,
+      "p95": 0.3649206489324569
+    },
+    "within_dagua_ci": {
+      "median_95_bootstrap": {
+        "high": 0.07440041657537222,
+        "low": 0.0720683990046382
+      },
+      "p95_95_bootstrap": {
+        "high": 0.3670759592950344,
+        "low": 0.3624435096979141
+      }
+    },
+    "within_graphviz": {
+      "mean": 0.24480432103892208,
+      "median": 0.26705601811408997,
+      "n": 15930,
+      "p95": 0.4077306762337684
+    },
+    "within_graphviz_ci": {
+      "median_95_bootstrap": {
+        "high": 0.2687978956848383,
+        "low": 0.26507847793400285
+      },
+      "p95_95_bootstrap": {
+        "high": 0.4107019305229187,
+        "low": 0.40504197936505076
+      }
+    }
+  },
+  "neato_mds": {
+    "aggregate_tost": {
+      "0.25x": {
+        "equivalent": true,
+        "margin": 0.028334319004170994,
+        "pvalue": 1.0092111913702115e-72,
+        "verdict": "equivalent_at_0.25x"
+      },
+      "0.5x": {
+        "equivalent": true,
+        "margin": 0.05666863800834199,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_0.5x"
+      },
+      "1.5x": {
+        "equivalent": true,
+        "margin": 0.17000591402502596,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_1.5x"
+      },
+      "1x": {
+        "equivalent": true,
+        "margin": 0.11333727601668397,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_1x"
+      },
+      "2x": {
+        "equivalent": true,
+        "margin": 0.22667455203336795,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_2x"
+      }
+    },
+    "dagua_engine": "classic_classical_mds",
+    "dagua_vs_graphviz": {
+      "mean": 0.11871327670911948,
+      "median": 0.04621845856308937,
+      "n": 32400,
+      "p95": 0.3306483045220374
+    },
+    "graphs": [
+      "binary_tree",
+      "edge_label_braid",
+      "inception_block",
+      "linear_3layer_mlp",
+      "mixed_width_labels",
+      "nested_shallow_enc_dec",
+      "parallel_multiedge_bundle",
+      "petersen_10",
+      "tl_mlp_3layer"
+    ],
+    "n_dagua_seeds_min": 60,
+    "n_graphs": 9,
+    "n_graphviz_seeds_min": 60,
+    "per_graph_tost_counts": {
+      "0.25x": {
+        "equivalent": 5,
+        "not_equivalent": 4
+      },
+      "0.5x": {
+        "equivalent": 5,
+        "not_equivalent": 4
+      },
+      "1.5x": {
+        "equivalent": 8,
+        "not_equivalent": 1
+      },
+      "1x": {
+        "equivalent": 8,
+        "not_equivalent": 1
+      },
+      "2x": {
+        "equivalent": 8,
+        "not_equivalent": 1
+      }
+    },
+    "rows": {
+      "dagua_vs_graphviz": 32400,
+      "within_dagua": 15930,
+      "within_graphviz": 15930
+    },
+    "target_engine": "graphviz_neato",
+    "within_dagua": {
+      "mean": 4.023707794422984e-10,
+      "median": 0.0,
+      "n": 15930,
+      "p95": 1.916772740528927e-09
+    },
+    "within_dagua_ci": {
+      "median_95_bootstrap": {
+        "high": 0.0,
+        "low": 0.0
+      },
+      "p95_95_bootstrap": {
+        "high": 1.916772740528927e-09,
+        "low": 1.916772740528927e-09
+      }
+    },
+    "within_graphviz": {
+      "mean": 0.11333727601668397,
+      "median": 0.02788099180907011,
+      "n": 15930,
+      "p95": 0.3805559679865837
+    },
+    "within_graphviz_ci": {
+      "median_95_bootstrap": {
+        "high": 0.028957506013102825,
+        "low": 0.026852420321665703
+      },
+      "p95_95_bootstrap": {
+        "high": 0.38107410073280334,
+        "low": 0.37293962866067887
+      }
+    }
+  },
+  "neato_stress": {
+    "aggregate_tost": {
+      "0.25x": {
+        "equivalent": true,
+        "margin": 0.028334319004170994,
+        "pvalue": 2.4823434009040055e-76,
+        "verdict": "equivalent_at_0.25x"
+      },
+      "0.5x": {
+        "equivalent": true,
+        "margin": 0.05666863800834199,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_0.5x"
+      },
+      "1.5x": {
+        "equivalent": true,
+        "margin": 0.17000591402502596,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_1.5x"
+      },
+      "1x": {
+        "equivalent": true,
+        "margin": 0.11333727601668397,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_1x"
+      },
+      "2x": {
+        "equivalent": true,
+        "margin": 0.22667455203336795,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_2x"
+      }
+    },
+    "dagua_engine": "classic_stress_maj",
+    "dagua_vs_graphviz": {
+      "mean": 0.11751271479132508,
+      "median": 0.03892161883413792,
+      "n": 32400,
+      "p95": 0.35963184982538077
+    },
+    "graphs": [
+      "binary_tree",
+      "edge_label_braid",
+      "inception_block",
+      "linear_3layer_mlp",
+      "mixed_width_labels",
+      "nested_shallow_enc_dec",
+      "parallel_multiedge_bundle",
+      "petersen_10",
+      "tl_mlp_3layer"
+    ],
+    "n_dagua_seeds_min": 60,
+    "n_graphs": 9,
+    "n_graphviz_seeds_min": 60,
+    "per_graph_tost_counts": {
+      "0.25x": {
+        "equivalent": 6,
+        "not_equivalent": 3
+      },
+      "0.5x": {
+        "equivalent": 6,
+        "not_equivalent": 3
+      },
+      "1.5x": {
+        "equivalent": 9,
+        "not_equivalent": 0
+      },
+      "1x": {
+        "equivalent": 9,
+        "not_equivalent": 0
+      },
+      "2x": {
+        "equivalent": 9,
+        "not_equivalent": 0
+      }
+    },
+    "rows": {
+      "dagua_vs_graphviz": 32400,
+      "within_dagua": 15930,
+      "within_graphviz": 15930
+    },
+    "target_engine": "graphviz_neato",
+    "within_dagua": {
+      "mean": 0.011965159754619727,
+      "median": 5.532048135137302e-07,
+      "n": 15930,
+      "p95": 0.12843738496303558
+    },
+    "within_dagua_ci": {
+      "median_95_bootstrap": {
+        "high": 6.03962295997462e-07,
+        "low": 5.06926624410653e-07
+      },
+      "p95_95_bootstrap": {
+        "high": 0.12843738496303558,
+        "low": 0.1284373700618744
+      }
+    },
+    "within_graphviz": {
+      "mean": 0.11333727601668397,
+      "median": 0.02788099180907011,
+      "n": 15930,
+      "p95": 0.3805559679865837
+    },
+    "within_graphviz_ci": {
+      "median_95_bootstrap": {
+        "high": 0.028938231989741325,
+        "low": 0.02686264063231647
+      },
+      "p95_95_bootstrap": {
+        "high": 0.38105387799441814,
+        "low": 0.37262664586305605
+      }
+    }
+  },
+  "sfdp": {
+    "aggregate_tost": {
+      "0.25x": {
+        "equivalent": false,
+        "margin": 0.02339885554774827,
+        "pvalue": 1.0,
+        "verdict": "not_equivalent"
+      },
+      "0.5x": {
+        "equivalent": false,
+        "margin": 0.04679771109549654,
+        "pvalue": 0.9317993765446263,
+        "verdict": "not_equivalent"
+      },
+      "1.5x": {
+        "equivalent": true,
+        "margin": 0.1403931332864896,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_1.5x"
+      },
+      "1x": {
+        "equivalent": true,
+        "margin": 0.09359542219099308,
+        "pvalue": 3.2439406974469345e-268,
+        "verdict": "equivalent_at_1x"
+      },
+      "2x": {
+        "equivalent": true,
+        "margin": 0.18719084438198616,
+        "pvalue": 0.0,
+        "verdict": "equivalent_at_2x"
+      }
+    },
+    "dagua_engine": "classic_sfdp",
+    "dagua_vs_graphviz": {
+      "mean": 0.1422866648690269,
+      "median": 0.1272132247686386,
+      "n": 32400,
+      "p95": 0.3638723000884056
+    },
+    "graphs": [
+      "binary_tree",
+      "edge_label_braid",
+      "inception_block",
+      "linear_3layer_mlp",
+      "mixed_width_labels",
+      "nested_shallow_enc_dec",
+      "parallel_multiedge_bundle",
+      "petersen_10",
+      "tl_mlp_3layer"
+    ],
+    "n_dagua_seeds_min": 60,
+    "n_graphs": 9,
+    "n_graphviz_seeds_min": 60,
+    "per_graph_tost_counts": {
+      "0.25x": {
+        "equivalent": 2,
+        "not_equivalent": 7
+      },
+      "0.5x": {
+        "equivalent": 3,
+        "not_equivalent": 6
+      },
+      "1.5x": {
+        "equivalent": 5,
+        "not_equivalent": 4
+      },
+      "1x": {
+        "equivalent": 4,
+        "not_equivalent": 5
+      },
+      "2x": {
+        "equivalent": 5,
+        "not_equivalent": 4
+      }
+    },
+    "rows": {
+      "dagua_vs_graphviz": 32400,
+      "within_dagua": 15930,
+      "within_graphviz": 15930
+    },
+    "target_engine": "graphviz_sfdp",
+    "within_dagua": {
+      "mean": 0.13754951381461145,
+      "median": 0.07042188942432404,
+      "n": 15930,
+      "p95": 0.3676721766591072
+    },
+    "within_dagua_ci": {
+      "median_95_bootstrap": {
+        "high": 0.08494087755680081,
+        "low": 0.06393894851207733
+      },
+      "p95_95_bootstrap": {
+        "high": 0.36898648019880054,
+        "low": 0.3662790337949991
+      }
+    },
+    "within_graphviz": {
+      "mean": 0.09359542219099308,
+      "median": 0.015211117453873158,
+      "n": 15930,
+      "p95": 0.358003631234169
+    },
+    "within_graphviz_ci": {
+      "median_95_bootstrap": {
+        "high": 0.0167082300176844,
+        "low": 0.013339457160327584
+      },
+      "p95_95_bootstrap": {
+        "high": 0.3584915712475777,
+        "low": 0.35732069723308085
+      }
+    }
+  }
+}
