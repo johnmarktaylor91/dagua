@@ -1,4 +1,5 @@
 #include <cctype>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -62,6 +63,20 @@ int parseInteger(const std::string& input, std::size_t& position) {
 int parseNodes(const std::string& input) {
 	std::size_t position = findValueStart(input, "nodes");
 	return parseInteger(input, position);
+}
+
+int parseOptionalInteger(const std::string& input, const std::string& key, const int defaultValue) {
+	const std::string needle = "\"" + key + "\"";
+	const std::size_t keyPosition = input.find(needle);
+	if (keyPosition == std::string::npos) {
+		return defaultValue;
+	}
+	const std::size_t colonPosition = input.find(':', keyPosition + needle.size());
+	if (colonPosition == std::string::npos) {
+		throw std::runtime_error("missing ':' for key: " + key);
+	}
+	std::size_t valuePosition = colonPosition + 1;
+	return parseInteger(input, valuePosition);
 }
 
 std::string parseAlgorithm(const std::string& input) {
@@ -144,7 +159,8 @@ void validateEdges(
 
 void runLayout(
 	const std::string& algorithm,
-	ogdf::GraphAttributes& graphAttributes
+	ogdf::GraphAttributes& graphAttributes,
+	const int stressIterations
 ) {
 	if (algorithm == "gem") {
 		ogdf::GEMLayout layout;
@@ -158,6 +174,9 @@ void runLayout(
 	}
 	if (algorithm == "stress") {
 		ogdf::StressMinimization layout;
+		if (stressIterations > 0) {
+			layout.setIterations(stressIterations);
+		}
 		layout.call(graphAttributes);
 		return;
 	}
@@ -199,6 +218,7 @@ int main() {
 		const std::vector<std::pair<int, int>> edges = parseEdges(input);
 		validateEdges(edges, numNodes);
 		const std::string algorithm = parseAlgorithm(input);
+		const int stressIterations = parseOptionalInteger(input, "iterations", 0);
 
 		ogdf::Graph graph;
 		ogdf::GraphAttributes graphAttributes(
@@ -227,8 +247,9 @@ int main() {
 				static_cast<double>(std::rand() % 1000) / 10.0;
 		}
 
-		runLayout(algorithm, graphAttributes);
+		runLayout(algorithm, graphAttributes, stressIterations);
 
+		std::cout << std::setprecision(17);
 		std::cout << "{\"positions\":[";
 		for (int index = 0; index < numNodes; ++index) {
 			if (index > 0) {

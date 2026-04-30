@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 import torch
 
@@ -102,7 +102,12 @@ def _is_connected_graph(graph: DaguaGraph) -> bool:
     return all(visited)
 
 
-def _run_ogdf(graph: DaguaGraph, algorithm: str, timeout: float) -> torch.Tensor:
+def _run_ogdf(
+    graph: DaguaGraph,
+    algorithm: str,
+    timeout: float,
+    options: Optional[Mapping[str, Any]] = None,
+) -> torch.Tensor:
     """Run an OGDF algorithm through the standalone subprocess wrapper.
 
     Parameters
@@ -113,6 +118,8 @@ def _run_ogdf(graph: DaguaGraph, algorithm: str, timeout: float) -> torch.Tensor
         OGDF algorithm selector understood by the C++ runner.
     timeout : float
         Wall-clock timeout in seconds for the subprocess.
+    options : Mapping[str, Any], optional
+        Optional algorithm-specific JSON options forwarded to the runner.
 
     Returns
     -------
@@ -135,13 +142,14 @@ def _run_ogdf(graph: DaguaGraph, algorithm: str, timeout: float) -> torch.Tensor
     if runner is None:
         raise FileNotFoundError("OGDF runner binary not found")
 
-    payload = json.dumps(
-        {
-            "nodes": graph.num_nodes,
-            "edges": _graph_edges(graph),
-            "algorithm": algorithm,
-        }
-    )
+    payload_data: dict[str, Any] = {
+        "nodes": graph.num_nodes,
+        "edges": _graph_edges(graph),
+        "algorithm": algorithm,
+    }
+    if options is not None:
+        payload_data.update(dict(options))
+    payload = json.dumps(payload_data)
     result = subprocess.run(
         [runner],
         input=payload,
@@ -241,6 +249,77 @@ class _OGDFBase(CompetitorBase):
             ``True`` when the compiled runner exists locally or on ``PATH``.
         """
         return _ogdf_available()
+
+    def layout_with_variant(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+        variant_params: Optional[Mapping[str, Any]] = None,
+    ) -> CompetitorResult:
+        """Run layout with optional OGDF runner parameters.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Input graph to lay out.
+        timeout : float, default=300.0
+            Wall-clock timeout budget for the subprocess.
+        seed : int | None, default=None
+            Accepted for interface compatibility but ignored because OGDF
+            layouts are deterministic in the helper binary.
+        variant_params : Mapping[str, Any] | None, default=None
+            Optional runner parameters. For ``ogdf_stress``, ``iterations``
+            selects the stress-majorization sweep count.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result with positions shaped ``[N, 2]`` on CPU, or an error
+            payload if execution fails.
+        """
+        del seed
+
+        options: dict[str, Any] = {}
+        if variant_params is not None and self.algorithm == "stress":
+            iterations = variant_params.get("iterations")
+            if iterations is not None:
+                options["iterations"] = int(iterations)
+
+        start = time.perf_counter()
+        try:
+            if self.algorithm == "pivot_mds" and not _is_connected_graph(graph):
+                elapsed = time.perf_counter() - start
+                return CompetitorResult(
+                    name=self.name,
+                    pos=None,
+                    runtime_seconds=elapsed,
+                    error="requires connected graph",
+                )
+            pos = _run_ogdf(
+                graph=graph,
+                algorithm=self.algorithm,
+                timeout=timeout,
+                options=options or None,
+            )
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
+        except subprocess.TimeoutExpired:
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=elapsed,
+                error="timeout",
+            )
+        except Exception as exc:
+            elapsed = time.perf_counter() - start
+            return CompetitorResult(
+                name=self.name,
+                pos=None,
+                runtime_seconds=elapsed,
+                error=str(exc),
+            )
 
 
 @register
