@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import torch
 
+from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.umap import (
+    StoreUMAPHyperparameters,
     _build_undirected_adjacency,
     _knn_from_distances,
     _optimize_embedding,
@@ -68,6 +70,21 @@ def test_knn_from_distances_uses_stable_index_tie_order() -> None:
         dtype=torch.long,
     )
     assert torch.equal(indices, expected_indices)
+
+
+def test_store_umap_hyperparameters_caps_neighbors_like_reference_adapter() -> None:
+    """Verify small graph UMAP neighborhoods use the adapter's ``N - 1`` cap."""
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=6,
+    )
+    state = StoreUMAPHyperparameters(n_neighbors=15).apply(
+        problem=problem,
+        state=SolveState(),
+        ctx=RuntimeContext(plan=ExecutionPlan(device="cpu")),
+    )
+
+    assert state.extras["umap_n_neighbors"] == 5
 
 
 def test_optimize_embedding_waits_until_first_sample_interval() -> None:
