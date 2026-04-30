@@ -15,9 +15,9 @@ from scripts.build_gallery_audit import (
     BOARD_GRID_TOP,
     CARD_CONTENT_INSET,
     CURVATURE_CARD_MARGIN,
-    DEFAULT_COMPARISON_STROKE,
     LABEL_BAR_DARK,
     LABEL_TEXT_DARK,
+    NODE_STROKE,
     PAIR_ARROW_GAP,
     PAIR_SCALAR_COMPARISON_GAP,
     STRIP_PANEL_DIVIDER_WIDTH,
@@ -367,7 +367,8 @@ def test_prepare_reference_render_strengthens_subtle_border_comparisons() -> Non
     assert left_style is not None
     assert right_style is not None
     assert left_style.stroke_width == pytest.approx(3.0)
-    assert left_style.stroke == DEFAULT_COMPARISON_STROKE
+    assert left_style.stroke == NODE_STROKE
+    assert right_style.stroke == NODE_STROKE
     assert right_style.border_opacity == pytest.approx(0.2)
 
     item = next(
@@ -379,9 +380,9 @@ def test_prepare_reference_render_strengthens_subtle_border_comparisons() -> Non
 
     assert left_style is not None
     assert right_style is not None
-    # stroke_width is now a scalar comparison feature: left is default (1.5),
+    # stroke_width is now a scalar comparison feature: left is default (1.0),
     # right is the swept value (0.5).
-    assert left_style.stroke_width == pytest.approx(1.5)
+    assert left_style.stroke_width == pytest.approx(1.0)
     assert right_style.stroke_width == pytest.approx(0.5)
 
     item = next(
@@ -482,18 +483,19 @@ def test_prepare_reference_render_applies_gallery_demo_tweaks() -> None:
     assert positions.shape == (7, 2)
 
 
-def test_cluster_nested_fixture_keeps_inner_nodes_far_enough_apart() -> None:
-    """The nested-cluster fixture should leave visible space between inner members.
+def test_cluster_nested_fixture_uses_graphviz_like_vertical_stack() -> None:
+    """The nested-cluster fixture should match Graphviz's tight vertical stack.
 
     Returns
     -------
     None
-        The inner-node spacing is asserted in place.
+        The cluster member positions are asserted in place.
     """
 
     _graph, positions = _build_fixture("cluster_nested")
 
-    assert float(positions[2, 0] - positions[1, 0]) == pytest.approx(120.0)
+    assert positions[:, 0].tolist() == pytest.approx([0.0, 0.0, 0.0, 0.0])
+    assert positions[:, 1].tolist() == pytest.approx([90.0, 30.0, -30.0, -90.0])
 
 
 def test_cluster_dotted_reference_cards_keep_visible_stroke_width() -> None:
