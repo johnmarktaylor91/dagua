@@ -546,7 +546,7 @@ def test_hatched_nodes_render_visible_overlay() -> None:
 
 
 def test_port_indicators_render_at_edge_endpoints() -> None:
-    """Port indicators should render above edges with a visible outline."""
+    """Port indicators should render above edges as data-coordinate fills."""
 
     graph = DaguaGraph()
     graph.add_node("A", label="")
@@ -566,18 +566,19 @@ def test_port_indicators_render_at_edge_endpoints() -> None:
     positions = torch.tensor([[-20.0, 0.0], [20.0, 0.0]], dtype=torch.float32)
 
     fig, ax = render(graph, positions=positions, show=False)
-    indicator_lines = [
-        line
-        for line in ax.lines
-        if isinstance(line.get_gid(), str) and line.get_gid().startswith("dagua-port-indicator-")
+    indicator_patches = [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, PathPatch)
+        and isinstance(patch.get_gid(), str)
+        and patch.get_gid().startswith("dagua-port-indicator-")
     ]
     plt.close(fig)
 
-    assert len(indicator_lines) == 2
-    assert all(float(line.get_zorder()) >= 4.0 for line in indicator_lines)
-    assert all(float(line.get_markeredgewidth()) == pytest.approx(1.0) for line in indicator_lines)
-    assert to_rgba(indicator_lines[0].get_markeredgecolor()) == pytest.approx(to_rgba("#ffffff"))
-    assert to_rgba(indicator_lines[0].get_markerfacecolor()) == pytest.approx(to_rgba("#334455"))
+    assert len(indicator_patches) == 2
+    assert all(float(patch.get_zorder()) >= 4.0 for patch in indicator_patches)
+    assert all(float(patch.get_linewidth()) == pytest.approx(0.0) for patch in indicator_patches)
+    assert to_rgba(indicator_patches[0].get_facecolor()) == pytest.approx(to_rgba("#334455"))
 
 
 def test_bevel_nodes_render_overlay_patches() -> None:
