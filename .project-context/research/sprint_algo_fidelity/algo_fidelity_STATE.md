@@ -1,17 +1,21 @@
 ---
 run: algo_fidelity
 created: 2026-04-29T19:16:57-04:00
-state: ROUND_8_DONE
-current_round: 8
-current_family: stochastic_re_eval
-codex_pid: 4119292
-codex_log: /tmp/algo_fid_round_8.log
-watchdog_pid: 4119443
-dispatched_at: 2026-04-29T22:30:00-04:00
-prompt_file: .project-context/research/sprint_algo_fidelity/PROMPT_round_8.md
+state: ROUND_DONE
+current_round: 9
+current_family: stochastic_seed_fix_complete
+codex_pid: 56771
+codex_log: /tmp/algo_fid_round_9.log
+watchdog_pid: 56929
+dispatched_at: 2026-04-29T22:15:00-04:00
+prompt_file: .project-context/research/sprint_algo_fidelity/PROMPT_round_9.md
 flail_count_dot: 1
 flail_count_fdp: 2
 flail_count_sfdp: 1
+fdp_status: CONVERGED
+fdp_residual_classification: stochastic_floor_match: aggregate_equivalent_at_0.5x_with_low_floor_graph_exceptions
+sfdp_status: CONVERGED
+sfdp_residual_classification: stochastic_floor_match: aggregate_equivalent_at_1x_with_low_floor_graph_exceptions
 neato_status: CONVERGED
 neato_residual_classification: numerical_residual: cyclic_graph_init_basin
 
@@ -254,6 +258,7 @@ Each prompt MUST include:
 | 5 | fdp | 21:06 | 21:35 | (no commit) | fdp median 0.247 -> 0.257 (regressed) | center_port_backedge_hub 0.440 unchanged | RESIDUAL #2 on fdp. Force-law alignment with graphviz tlayout.c old-form (rep K^2/d^2, attr d/L*weight) verbatim REGRESSED median by +0.01. parallel_multiedge_bundle (3 nodes) sits at 0.257 -- even smallest graph is uniform-floor, suggests random initialization is dominant remaining gap. PARKING fdp at flail=2; pivoting to sfdp/neato to maximize graphviz parity coverage. Final attempted lever (random init via lib/fdpgen/fdpinit.c) deferred to a later round. |
 | 6 | sfdp | 21:18 | 21:42 | (no commit) | sfdp median 0.092 baseline (matches Round 1) | center_port_backedge_hub 0.475 | RESIDUAL #1 on sfdp. **MAJORITY of graphviz defaults already aligned in dagua** (random_start=true, seed=123, C=0.2, bh=0.6, maxiter=500, K=avg_edge_length, K*0.75 finer levels, adaptive_cooling switch). Tried lever: attractive-force distance factor per graphviz spring_electrical.c -- improved p95 (0.418->0.404) but regressed median (0.092->0.106). Partial fix in wrong direction. PARKING sfdp at flail=1; pivoting to neato (already nearly converged). Future lever: sequential vs synchronous updates (invasive). |
 | 7 | neato | 22:00 | 22:11 | (no commit) | stress_maj 0.035, classical_mds 0.045 (both <= 0.05 ✓) | inception_block 0.382, petersen_10 0.333 (worst > 0.15 ✗) | OUTLIER_RESIDUAL: medians meet stop criterion. Worst-graphs are cyclic/dense/disconnected (basin differences from graphviz INIT_RANDOM vs dagua classical MDS+jitter). Classification: `numerical_residual: cyclic_graph_init_basin`. Validation determinism confirmed (cmp same outputs across 2 runs). Round 8 to multi-seed upgrade live_compare. |
+| 8 | stochastic_re_eval | 21:35 | 22:09 | 9205f36 | infra round | fdp 18/18 not_equivalent, sfdp 21/21 not_equivalent | Multi-seed comparator + TOST built. **fdp/sfdp residuals CONFIRMED real algorithmic divergence**, not stochastic noise. **Within-graphviz floor was ~0** because cached graphviz positions were generated with fixed seed (graphviz_competitor.py drops seed via `del seed` lines 342/402). Round 9 to fix competitor + regenerate true multi-seed cache. |
 | 1 | baseline | 2026-04-29T19:16:57-04:00 | 2026-04-29T19:26:04-04:00 | 0a9a957 | N/A baseline | center_port_backedge_hub | Round 1 = infrastructure |
 | 2 | dot | 2026-04-29T19:32:00-04:00 | 2026-04-29T19:47:27-04:00 | none | 0.3245 cached / 0.3419 live | small_label_storm 0.4852 live | Built live comparator; blocked before Sugiyama fix because live baseline differs from Round 1 cache on 8/22 graphs due node-size context drift. |
 | 3 | dot | 2026-04-29T19:55:00-04:00 | 2026-04-29T20:20:04-04:00 | feat(fidelity): round 3 | 0.3419 live / 0.0191 live | densenet_block 0.1679 live | COMMITTED: aligned classic Sugiyama direct defaults to dot point spacing (`rank_sep=72`, `node_sep=18`); diagnostics improved without simple-graph regression. Next family: fdp. |
@@ -262,3 +267,4 @@ Each prompt MUST include:
 | 6 | sfdp | 2026-04-29T21:42:00-04:00 | 2026-04-29T22:00:00-04:00 | none | 0.0915 live / 0.1062 attempted | center_port_backedge_hub 0.4798 attempted | RESIDUAL: Graphviz attractive distance-factor alignment regressed median and was reverted. `flail_count_sfdp=1`; stay on sfdp for one more lever, likely sequential update or random stream alignment. |
 | 7 | neato | 2026-04-29T22:00:00-04:00 | 2026-04-29T23:32:00-04:00 | none | stress 0.0353 live / MDS 0.0455 live | inception_block 0.3817 stress; petersen_10 0.3326 MDS | OUTLIER_RESIDUAL: medians satisfy `<=0.05`, worst-case fails on dense/cyclic/symmetric graphs. Graphviz defaults match Dagua on stress weights (`1/d^2`) and `maxiter=200`; residual is initialization-basin mismatch from Graphviz random start vs Dagua deterministic MDS start. Mark neato CONVERGED at family-median level and advance to Phase 2. |
 | 8 | stochastic_re_eval | 2026-04-29T22:30:00-04:00 | 2026-04-30T00:00:00-04:00 | this commit | fdp 0.2484 multi-seed; sfdp 0.1074 multi-seed; neato unchanged | fdp center_port_backedge_hub 0.3275 median; sfdp disconnected_label_cycle_collage 0.4135 median; neato cache unseeded | Built multi-seed `live_compare` with pairwise dagua-vs-graphviz, within-graphviz, within-dagua RMSD rows plus per-graph TOST. Re-eval verdicts: fdp `not_equivalent`, sfdp `not_equivalent`; graphviz-neato seeded cache absent so neato TOST is `not_tested`. No family reclassified as stochastic-floor faithful. |
+| 9 | stochastic_seed_fix | 2026-04-30T00:00:00-04:00 | 2026-04-30T00:00:00-04:00 | this commit | fdp aggregate TOST `equivalent_at_0.5x`; sfdp `equivalent_at_1x`; neato stress/MDS `equivalent_at_0.5x` | graph-level low-floor exceptions remain, but aggregate distributions match true Graphviz stochastic floors | Fixed Graphviz seed plumbing for fdp/sfdp/neato via `-Gseed` + `-Gstart`, generated Round 9 seeded cache for the comparator graph union, and reran all four multi-seed checks. Round 8's fdp/sfdp architectural-divergence conclusion was a fixed-seed cache artifact. Mark fdp and sfdp CONVERGED under stochastic-floor lens without incrementing flail counts. |
