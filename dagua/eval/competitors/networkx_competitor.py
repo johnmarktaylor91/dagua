@@ -250,3 +250,4 @@ class NetworkXSpectral(_NetworkXBase):
     layout_kwargs = {"dim": 2}
     variant_param_names = frozenset({"dim", "scale"})
     output_scale = 1.0
+    duplicate_policy = "last"

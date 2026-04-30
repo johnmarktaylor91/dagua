@@ -23,6 +23,7 @@ from dagua.layout.ops.embed import (
     _sparse_spectral_embedding,
 )
 from dagua.layout.ops.pipelines.spectral import layout_spectral_pipeline
+from dagua.layout.ops.preprocess import _build_spectral_adjacency
 
 embed_ops = importlib.import_module("dagua.layout.ops.embed")
 spectral_pipeline = importlib.import_module("dagua.layout.ops.pipelines.spectral")
@@ -143,9 +144,9 @@ def test_networkx_fidelity_variant_is_registered_against_nx_spectral() -> None:
 def test_classic_spectral_direct_adapter_forwards_edge_weights(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The direct spectral competitor path should preserve graph weights."""
+    """The direct spectral competitor path should preserve NetworkX parity inputs."""
     graph = _weighted_duplicate_graph()
-    seen: dict[str, torch.Tensor | None] = {}
+    seen: dict[str, torch.Tensor | bool | None] = {}
 
     def _layout_fake(
         edge_index: torch.Tensor,
@@ -153,8 +154,9 @@ def test_classic_spectral_direct_adapter_forwards_edge_weights(
         node_sizes: torch.Tensor | None = None,
         seed: int = 42,
         edge_weights: torch.Tensor | None = None,
+        networkx_fidelity: bool = False,
     ) -> torch.Tensor:
-        """Capture forwarded weights and return a valid position tensor.
+        """Capture forwarded parity inputs and return a valid position tensor.
 
         Parameters
         ----------
@@ -168,6 +170,9 @@ def test_classic_spectral_direct_adapter_forwards_edge_weights(
             Resolved layout seed. Unused by this fake.
         edge_weights : torch.Tensor | None, default=None
             Optional edge-weight tensor with shape ``[E]``.
+        networkx_fidelity : bool, default=False
+            Whether the direct adapter requested NetworkX-compatible layout
+            semantics.
 
         Returns
         -------
@@ -176,6 +181,7 @@ def test_classic_spectral_direct_adapter_forwards_edge_weights(
         """
         _ = edge_index, node_sizes, seed
         seen["edge_weights"] = edge_weights
+        seen["networkx_fidelity"] = networkx_fidelity
         return torch.zeros((num_nodes, 2), dtype=torch.float32)
 
     monkeypatch.setattr(spectral_pipeline, "layout_spectral_pipeline", _layout_fake)
@@ -186,16 +192,43 @@ def test_classic_spectral_direct_adapter_forwards_edge_weights(
     assert result.pos is not None
     assert seen["edge_weights"] is not None
     assert seen["edge_weights"].tolist() == [2.0, 3.0, 4.0]
+    assert seen["networkx_fidelity"] is True
 
 
-def test_networkx_spectral_reference_adapter_sums_parallel_edges() -> None:
-    """The NetworkX adapter should match Dagua's duplicate-edge CSR summation."""
+def test_networkx_graph_converter_default_sums_parallel_edges() -> None:
+    """The shared NetworkX converter should keep its duplicate-summing default."""
     graph = _weighted_duplicate_graph()
 
     nx_graph = _graph_to_nx(graph)
 
     assert nx_graph[0][1]["weight"] == 5.0
     assert nx_graph[1][2]["weight"] == 4.0
+
+
+def test_networkx_spectral_reference_uses_last_duplicate_edge() -> None:
+    """The spectral reference should match repeated ``DiGraph.add_edge`` semantics."""
+    assert NetworkXSpectral.duplicate_policy == "last"
+
+
+def test_networkx_fidelity_adjacency_keeps_last_duplicate_edge() -> None:
+    """NetworkX fidelity should mirror repeated ``DiGraph.add_edge`` semantics."""
+    graph = _weighted_duplicate_graph()
+
+    adjacency = _build_spectral_adjacency(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        edge_weights=graph.edge_weights,
+        duplicate_policy="last",
+    )
+    summed_adjacency = _build_spectral_adjacency(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        edge_weights=graph.edge_weights,
+    )
+
+    assert adjacency[0, 1] == 3.0
+    assert adjacency[1, 2] == 4.0
+    assert summed_adjacency[0, 1] == 5.0
 
 
 def test_networkx_spectral_adapter_uses_raw_algorithm_scale() -> None:
