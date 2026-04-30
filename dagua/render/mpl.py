@@ -2573,7 +2573,7 @@ def _requires_custom_node_rendering(style: Any) -> bool:
         or int(style.border_count) > 1
         or style.stroke_cap != "butt"
         or style.stroke_join != "miter"
-        or str(getattr(style, "shape", "")) in {"double_circle", "box3d"}
+        or str(getattr(style, "shape", "")) in {"rect", "roundrect", "double_circle", "box3d"}
     )
 
 
