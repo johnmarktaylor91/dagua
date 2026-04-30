@@ -125,15 +125,10 @@ def build_maxent_stress_pipeline(
     Pipeline
         Pipeline implementing maxent-stress with classical branch selection.
         The pipeline produces final node coordinates by choosing the
-        majorization branch for small default-parameter problems and otherwise
+        majorization branch for small non-entropy problems and otherwise
         dispatching to the gradient branch.
     """
-    if (
-        use_majorization
-        and not use_entropy
-        and num_nodes <= _MAJORIZATION_NODE_LIMIT
-        and steps == 200
-    ):
+    if use_majorization and not use_entropy and num_nodes <= _MAJORIZATION_NODE_LIMIT:
         return build_maxent_stress_majorization_pipeline(steps=steps)
     return build_maxent_stress_gradient_pipeline(
         steps=steps,
