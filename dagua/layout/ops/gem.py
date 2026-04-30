@@ -135,6 +135,94 @@ _GEM_BATCHED_EARLY_STOP_KEY = "gem_batched_early_stop"
 _GEM_BATCHED_STEP_INDEX_KEY = "gem_batched_step_index"
 
 
+def _glibc_rand_values(seed: int, count: int) -> list[int]:
+    """Generate values matching glibc ``rand()`` after ``srand(seed)``.
+
+    Parameters
+    ----------
+    seed : int
+        Initial unsigned seed. A zero seed follows glibc's canonical remap to
+        ``1``.
+    count : int
+        Number of pseudo-random values to emit.
+
+    Returns
+    -------
+    list[int]
+        Deterministic 31-bit values in the same sequence produced by glibc
+        ``rand()``.
+
+    Raises
+    ------
+    ValueError
+        If ``count`` is negative.
+    """
+    if count < 0:
+        raise ValueError("count must be non-negative.")
+    if count == 0:
+        return []
+
+    modulus = 2**32
+    seed_value = int(seed) & 0xFFFFFFFF
+    if seed_value == 0:
+        seed_value = 1
+
+    state: list[int] = [0] * 344
+    state[0] = seed_value
+    for index in range(1, 31):
+        state[index] = (16807 * state[index - 1]) % 2_147_483_647
+    for index in range(31, 34):
+        state[index] = state[index - 31]
+    for index in range(34, 344):
+        state[index] = (state[index - 31] + state[index - 3]) % modulus
+
+    values: list[int] = []
+    for _ in range(count):
+        next_value = (state[-31] + state[-3]) % modulus
+        state.append(next_value)
+        values.append(next_value >> 1)
+    return values
+
+
+def _ogdf_runner_initial_positions(
+    num_nodes: int,
+    seed: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Create OGDF runner-style initial GEM positions.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes to initialize.
+    seed : int
+        Random seed consumed through the glibc-compatible generator used by
+        the fidelity runner.
+    device : torch.device
+        Device for the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial position tensor with shape ``[N, 2]`` and dtype
+        ``torch.float32``. Coordinates are interleaved ``x, y`` values from
+        ``rand() % 1000 / 10.0``.
+
+    Raises
+    ------
+    ValueError
+        If ``num_nodes`` is negative.
+    """
+    if num_nodes < 0:
+        raise ValueError("num_nodes must be non-negative.")
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float32, device=device)
+
+    values = _glibc_rand_values(seed=seed, count=num_nodes * 2)
+    coords = [(value % 1000) / 10.0 for value in values]
+    return torch.tensor(coords, dtype=torch.float32, device=device).reshape(num_nodes, 2)
+
+
 def _compute_degree_weights(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -313,9 +401,11 @@ class InitializeGEMPositions(Op):
     """Seed the initial GEM coordinates exactly like classic GEM.
 
     The op preserves the original empty-graph and singleton shortcuts before
-    falling back to the deterministic CPU Gaussian initializer used by OGDF's
-    GEM implementation.
+    choosing either the historical deterministic Gaussian initializer or the
+    OGDF-runner-compatible fidelity initializer.
     """
+
+    fidelity_mode: bool = False
 
     name: ClassVar[str] = "gem_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
@@ -361,6 +451,14 @@ class InitializeGEMPositions(Op):
             state.converged = True
             return state
 
+        if self.fidelity_mode:
+            state.pos = _ogdf_runner_initial_positions(
+                num_nodes=problem.num_nodes,
+                seed=problem.seed,
+                device=output_device,
+            )
+            return state
+
         generator = torch.Generator(device="cpu")
         generator.manual_seed(problem.seed)
         state.pos = torch.randn(
@@ -383,6 +481,7 @@ class GEMPrepareState(Op):
     """
 
     config: GEMPrepareStateConfig = field(default_factory=GEMPrepareStateConfig)
+    fidelity_mode: bool = False
 
     name: ClassVar[str] = "gem_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
@@ -423,6 +522,7 @@ class GEMPrepareState(Op):
         state.extras["gem_capped_iters"] = capped_iters
         state.extras["gem_device"] = layout_device(problem.edge_index, problem.node_sizes)
         state.extras["gem_is_sequential"] = problem.num_nodes <= self.config.sequential_node_limit
+        state.extras["gem_fidelity_mode"] = self.fidelity_mode
 
         if not state.extras["gem_is_sequential"]:
             _initialize_batched_gem_cache(problem, state)
