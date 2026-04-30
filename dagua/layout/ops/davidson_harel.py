@@ -34,6 +34,8 @@ _DH_INITIAL_TEMPERATURE_KEY = "dh_initial_temperature"
 _DH_GENERATOR_KEY = "dh_generator"
 _DH_DEVICE_KEY = "dh_device"
 _DH_EXTENT_KEY = "dh_extent"
+_DH_NODE_EDGES_KEY = "dh_node_edges"
+_FINE_TUNING_FACTOR = 0.01
 
 
 def _unique_edges(
@@ -41,7 +43,22 @@ def _unique_edges(
     num_nodes: int,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> tuple[list[tuple[int, int]], torch.Tensor]:
-    """Return unique undirected edges with aggregated weights."""
+    """Return unique undirected edges with aggregated weights.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge endpoint tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    tuple[list[tuple[int, int]], torch.Tensor]
+        Sorted unique undirected edges and their aggregated weights.
+    """
     if edge_index.ndim != 2 or edge_index.shape[0] != 2:
         raise ValueError("edge_index must have shape [2, E].")
 
@@ -76,14 +93,42 @@ def _initialize_positions(
     device: torch.device,
     seed: int,
 ) -> torch.Tensor:
-    """Seed deterministic positions in ``[-extent, extent]``."""
+    """Seed deterministic positions in ``[-extent, extent]``.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes to initialize.
+    extent : float
+        Half-width and half-height of the initial square.
+    device : torch.device
+        Device for the returned coordinate tensor.
+    seed : int
+        CPU RNG seed.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial coordinates with shape ``[N, 2]``.
+    """
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
     return ((torch.rand((num_nodes, 2), generator=generator) * 2.0) - 1.0).to(device) * extent
 
 
 def _orientation(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> float:
-    """Return signed area for three points."""
+    """Return signed area for three points.
+
+    Parameters
+    ----------
+    a, b, c : torch.Tensor
+        Two-dimensional points with shape ``[2]``.
+
+    Returns
+    -------
+    float
+        Signed twice-area of triangle ``abc``.
+    """
     return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
 
 
@@ -93,7 +138,18 @@ def _segments_intersect(
     c: torch.Tensor,
     d: torch.Tensor,
 ) -> bool:
-    """Return ``True`` when two segments intersect in XY plane."""
+    """Return ``True`` when two segments intersect in XY plane.
+
+    Parameters
+    ----------
+    a, b, c, d : torch.Tensor
+        Segment endpoints with shape ``[2]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when segments ``ab`` and ``cd`` intersect.
+    """
     o1 = _orientation(a, b, c)
     o2 = _orientation(a, b, d)
     o3 = _orientation(c, d, a)
@@ -108,7 +164,22 @@ def _point_segment_distance(
     start: torch.Tensor,
     end: torch.Tensor,
 ) -> torch.Tensor:
-    """Compute distance from a point to a segment endpoint pair."""
+    """Compute distance from a point to a segment endpoint pair.
+
+    Parameters
+    ----------
+    point : torch.Tensor
+        Query point with shape ``[2]``.
+    start : torch.Tensor
+        Segment start with shape ``[2]``.
+    end : torch.Tensor
+        Segment end with shape ``[2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar Euclidean point-to-segment distance.
+    """
     segment = end - start
     denom = segment.dot(segment).clamp(min=_MIN_DISTANCE)
     projection = ((point - start).dot(segment) / denom).clamp(0.0, 1.0)
@@ -116,11 +187,62 @@ def _point_segment_distance(
     return torch.linalg.norm(point - nearest)
 
 
+def _node_edge_penalty(
+    point: torch.Tensor,
+    start: torch.Tensor,
+    end: torch.Tensor,
+) -> torch.Tensor:
+    """Return the Davidson-Harel node-edge reciprocal-distance penalty.
+
+    Parameters
+    ----------
+    point : torch.Tensor
+        Query point with shape ``[2]``.
+    start : torch.Tensor
+        Segment start with shape ``[2]``.
+    end : torch.Tensor
+        Segment end with shape ``[2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar ``1 / distance(point, segment)^2`` penalty.
+    """
+    distance = _point_segment_distance(point, start, end)
+    return distance.clamp(min=_MIN_DISTANCE).reciprocal().square()
+
+
+def _build_node_edges(
+    edges: list[tuple[int, int]],
+    num_nodes: int,
+) -> list[list[tuple[int, int, int]]]:
+    """Build per-node incident edge lookup for local DH deltas.
+
+    Parameters
+    ----------
+    edges : list[tuple[int, int]]
+        Undirected edge endpoints.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    list[list[tuple[int, int, int]]]
+        For each node, incident ``(edge_index, source, target)`` tuples.
+    """
+    node_edges: list[list[tuple[int, int, int]]] = [[] for _ in range(num_nodes)]
+    for edge_id, (source, target) in enumerate(edges):
+        node_edges[source].append((edge_id, source, target))
+        node_edges[target].append((edge_id, source, target))
+    return node_edges
+
+
 def _energy(
     positions: torch.Tensor,
     edges: List[Tuple[int, int]],
     extent: float,
     edge_weights: Optional[torch.Tensor] = None,
+    include_node_edge: bool = False,
 ) -> torch.Tensor:
     """Evaluate the Davidson-Harel objective for one candidate layout.
 
@@ -135,6 +257,9 @@ def _energy(
     edge_weights : torch.Tensor, optional
         Aggregated edge weights with shape ``[E]``. When omitted, each edge has
         unit weight.
+    include_node_edge : bool, default=False
+        Whether to include the node-edge term used only during igraph's
+        Davidson-Harel fine-tuning phase.
 
     Returns
     -------
@@ -186,17 +311,17 @@ def _energy(
     crossing_energy = torch.tensor(crossings, dtype=positions.dtype, device=positions.device)
 
     node_edge = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
-    penalties: list[torch.Tensor] = []
-    for node in range(num_nodes):
-        for source, target in edges:
-            if node in (source, target):
-                continue
-            distance = _point_segment_distance(
-                positions[node], positions[source], positions[target]
-            )
-            penalties.append(distance.clamp(min=_MIN_DISTANCE).reciprocal().square())
-    if penalties:
-        node_edge = torch.stack(penalties).sum()
+    if include_node_edge:
+        penalties: list[torch.Tensor] = []
+        for node in range(num_nodes):
+            for source, target in edges:
+                if node in (source, target):
+                    continue
+                penalties.append(
+                    _node_edge_penalty(positions[node], positions[source], positions[target])
+                )
+        if penalties:
+            node_edge = torch.stack(penalties).sum()
 
     return (
         _NODE_DIST_WEIGHT * distribution
@@ -205,6 +330,122 @@ def _energy(
         + _CROSSING_WEIGHT * crossing_energy
         + _NODE_EDGE_WEIGHT * node_edge
     )
+
+
+def _move_delta_energy(
+    positions: torch.Tensor,
+    node: int,
+    new_position: torch.Tensor,
+    edges: list[tuple[int, int]],
+    node_edges: list[list[tuple[int, int, int]]],
+    edge_weights: torch.Tensor,
+    extent: float,
+    fine_tuning: bool,
+) -> torch.Tensor:
+    """Compute igraph-style local energy delta for one moved node.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current node coordinates with shape ``[N, 2]``.
+    node : int
+        Index of the moved node.
+    new_position : torch.Tensor
+        Candidate coordinate for ``node`` with shape ``[2]``.
+    edges : list[tuple[int, int]]
+        Unique undirected edge endpoints used by the DH energy.
+    node_edges : list[list[tuple[int, int, int]]]
+        Per-node incident edge lookup built from ``edges``.
+    edge_weights : torch.Tensor
+        Aggregated edge weights with shape ``[E]``.
+    extent : float
+        Half-width and half-height of the square layout bounding box.
+    fine_tuning : bool
+        Whether node-edge terms should be included.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar candidate energy minus current energy for the local move.
+    """
+    dtype = positions.dtype
+    device = positions.device
+    old_position = positions[node]
+    delta = torch.tensor(0.0, dtype=dtype, device=device)
+
+    for other in range(int(positions.shape[0])):
+        if other == node:
+            continue
+        old_dist2 = (old_position - positions[other]).square().sum().clamp(min=_MIN_DISTANCE)
+        new_dist2 = (new_position - positions[other]).square().sum().clamp(min=_MIN_DISTANCE)
+        delta = delta + _NODE_DIST_WEIGHT * (new_dist2.reciprocal() - old_dist2.reciprocal())
+
+    old_border = torch.stack(
+        [
+            old_position[0] + extent,
+            extent - old_position[0],
+            old_position[1] + extent,
+            extent - old_position[1],
+        ]
+    ).clamp(min=_MIN_DISTANCE)
+    new_border = torch.stack(
+        [
+            new_position[0] + extent,
+            extent - new_position[0],
+            new_position[1] + extent,
+            extent - new_position[1],
+        ]
+    ).clamp(min=_MIN_DISTANCE)
+    delta = delta + _BORDER_WEIGHT * (
+        new_border.reciprocal().square().sum() - old_border.reciprocal().square().sum()
+    )
+
+    for edge_id, source, target in node_edges[node]:
+        other = target if source == node else source
+        old_length = (old_position - positions[other]).square().sum()
+        new_length = (new_position - positions[other]).square().sum()
+        delta = delta + _EDGE_LENGTH_WEIGHT * edge_weights[edge_id] * (new_length - old_length)
+
+        for other_source, other_target in edges:
+            if node in (other_source, other_target) or other in (other_source, other_target):
+                continue
+            old_crosses = _segments_intersect(
+                old_position,
+                positions[other],
+                positions[other_source],
+                positions[other_target],
+            )
+            new_crosses = _segments_intersect(
+                new_position,
+                positions[other],
+                positions[other_source],
+                positions[other_target],
+            )
+            delta = delta + _CROSSING_WEIGHT * (float(new_crosses) - float(old_crosses))
+
+    if not fine_tuning:
+        return delta
+
+    for source, target in edges:
+        if node in (source, target):
+            continue
+        old_penalty = _node_edge_penalty(old_position, positions[source], positions[target])
+        new_penalty = _node_edge_penalty(new_position, positions[source], positions[target])
+        delta = delta + _NODE_EDGE_WEIGHT * (new_penalty - old_penalty)
+
+    for _, source, target in node_edges[node]:
+        old_start = old_position if source == node else positions[source]
+        old_end = old_position if target == node else positions[target]
+        new_start = new_position if source == node else positions[source]
+        new_end = new_position if target == node else positions[target]
+        for other in range(int(positions.shape[0])):
+            if other in (source, target):
+                continue
+            old_penalty = _node_edge_penalty(positions[other], old_start, old_end)
+            new_penalty = _node_edge_penalty(positions[other], new_start, new_end)
+            delta = delta + _NODE_EDGE_WEIGHT * (new_penalty - old_penalty)
+
+    return delta
 
 
 @dataclass(frozen=True)
@@ -234,9 +475,13 @@ class DHAnnealingRoundConfig:
         the starting temperature.
         Deprecated for Davidson-Harel parity; igraph initializes the move
         radius to the full half-width of the layout square.
+    fine_tuning : bool, default=False
+        Whether this round should use igraph's fine-tuning radius, enable
+        node-edge energy, and reject uphill moves.
     """
 
     move_scale_fraction: float = 0.25
+    fine_tuning: bool = False
 
 
 @dataclass(frozen=True)
@@ -296,7 +541,23 @@ class PrepareDHState(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Precompute edge cache, generator, and initial energy estimate."""
+        """Precompute edge cache, generator, and initial energy estimate.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable graph layout problem.
+        state : SolveState
+            Mutable state containing initialized positions.
+        ctx : RuntimeContext
+            Execution context, unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State populated with Davidson-Harel edge, RNG, and temperature
+            caches.
+        """
         del ctx
 
         assert state.pos is not None
@@ -308,6 +569,7 @@ class PrepareDHState(Op):
         )
         state.extras[_DH_EDGES_KEY] = edges
         state.extras[_DH_UNIQUE_EDGE_WEIGHTS_KEY] = unique_edge_weights
+        state.extras[_DH_NODE_EDGES_KEY] = _build_node_edges(edges, problem.num_nodes)
 
         if problem.edge_weights is None:
             current_energy = _energy(state.pos, edges, state.extras[_DH_EXTENT_KEY])
@@ -338,7 +600,7 @@ class PrepareDHState(Op):
 @register_op
 @dataclass(frozen=True)
 class DHAnnealingRound(Op):
-    """Apply one Davidson-Harel annealing round."""
+    """Apply one Davidson-Harel proposal round."""
 
     config: DHAnnealingRoundConfig = field(default_factory=DHAnnealingRoundConfig)
 
@@ -354,24 +616,46 @@ class DHAnnealingRound(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Propose and accept/reject circular moves for each node."""
+        """Propose and accept/reject circular moves for each node.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable graph layout problem.
+        state : SolveState
+            Mutable state containing current positions and DH caches.
+        ctx : RuntimeContext
+            Execution context, unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State updated with accepted candidate positions.
+        """
         del ctx
 
         assert state.pos is not None
 
         positions = state.pos
         edges: List[Tuple[int, int]] = state.extras[_DH_EDGES_KEY]
+        node_edges: list[list[tuple[int, int, int]]] = state.extras[_DH_NODE_EDGES_KEY]
         unique_edge_weights: torch.Tensor = state.extras[_DH_UNIQUE_EDGE_WEIGHTS_KEY]
         extent: float = state.extras[_DH_EXTENT_KEY]
         current_energy: torch.Tensor = state.extras[_DH_CURRENT_ENERGY_KEY]
         temperature: float = state.temperature
         generator: torch.Generator = state.extras[_DH_GENERATOR_KEY]
         device: torch.device = state.extras[_DH_DEVICE_KEY]
+        fine_tuning = self.config.fine_tuning
+        edge_weights = unique_edge_weights.to(device=device, dtype=positions.dtype)
 
         node_order = torch.randperm(problem.num_nodes, generator=generator)
 
         for node in node_order.tolist():
-            move_scale = min(max(temperature, _MIN_DISTANCE), extent)
+            if fine_tuning:
+                span = positions.max(dim=0).values - positions.min(dim=0).values
+                move_scale = max(float(span.min().item()) * _FINE_TUNING_FACTOR, _MIN_DISTANCE)
+            else:
+                move_scale = min(max(temperature, _MIN_DISTANCE), extent)
             direction_order = torch.randperm(_MOVE_TRIES, generator=generator)
             for direction_id in direction_order.tolist():
                 delta = (
@@ -382,17 +666,23 @@ class DHAnnealingRound(Op):
                     )
                     * move_scale
                 )
-                candidate = positions.clone()
-                candidate[node] = (candidate[node] + delta).clamp(min=-extent, max=extent)
-                if problem.edge_weights is None:
-                    candidate_energy = _energy(candidate, edges, extent)
-                else:
-                    candidate_energy = _energy(candidate, edges, extent, unique_edge_weights)
-
-                delta_energy = candidate_energy - current_energy
-                if delta_energy <= 0:
-                    positions = candidate
-                    current_energy = candidate_energy
+                candidate_position = (positions[node] + delta).clamp(min=-extent, max=extent)
+                delta_energy = _move_delta_energy(
+                    positions=positions,
+                    node=node,
+                    new_position=candidate_position,
+                    edges=edges,
+                    node_edges=node_edges,
+                    edge_weights=edge_weights,
+                    extent=extent,
+                    fine_tuning=fine_tuning,
+                )
+                if delta_energy < 0:
+                    positions = positions.clone()
+                    positions[node] = candidate_position
+                    current_energy = current_energy + delta_energy
+                    continue
+                if fine_tuning:
                     continue
 
                 # Match simulated annealing semantics: uphill moves remain possible
@@ -402,8 +692,9 @@ class DHAnnealingRound(Op):
                 )
                 threshold = float(torch.rand((1,), generator=generator).item())
                 if threshold < float(acceptance.item()):
-                    positions = candidate
-                    current_energy = candidate_energy
+                    positions = positions.clone()
+                    positions[node] = candidate_position
+                    current_energy = current_energy + delta_energy
 
         state.pos = positions
         state.extras[_DH_CURRENT_ENERGY_KEY] = current_energy
