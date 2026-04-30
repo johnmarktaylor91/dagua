@@ -31,6 +31,7 @@ def build_stress_sgd_pipeline(
     max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES,
     sample_size: Union[int, str] = "auto",
     trace_every: int = 0,
+    fidelity_mode: bool = False,
 ) -> Pipeline:
     """Build a Stress-SGD layout pipeline.
 
@@ -46,6 +47,9 @@ def build_stress_sgd_pipeline(
         Sample budget for approximate mode.
     trace_every : int
         Optional snapshot interval.
+    fidelity_mode : bool, default=False
+        Enable reference-parity preprocessing and exact term precision for
+        ``classic_stress_sgd`` versus ``s_gd2`` comparisons.
 
     Returns
     -------
@@ -65,13 +69,19 @@ def build_stress_sgd_pipeline(
             BuildAdjacency(
                 BuildAdjacencyConfig(
                     weighted=True,
-                    dedup="min",
+                    dedup="sum" if fidelity_mode else "min",
                     format="list",
                     directed=False,
                 )
             ),
-            InitializeStressSGDState(trace_every=trace_every),
-            PrepareStressSGDTerms(max_exact_nodes=max_exact_nodes),
+            InitializeStressSGDState(
+                trace_every=trace_every,
+                reference_disconnected_policy=fidelity_mode,
+            ),
+            PrepareStressSGDTerms(
+                max_exact_nodes=max_exact_nodes,
+                exact_float64_terms=fidelity_mode,
+            ),
             RunStressSGDExactSchedule(steps=steps, eps=eps, trace_every=trace_every),
             RunStressSGDApproximateSchedule(
                 steps=steps,
@@ -95,6 +105,7 @@ def layout_stress_sgd_pipeline(
     eps: float = _DEFAULT_EPS,
     max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES,
     edge_weights: Optional[torch.Tensor] = None,
+    fidelity_mode: bool = False,
 ) -> Union[torch.Tensor, "tuple[torch.Tensor, list[torch.Tensor]]"]:
     """Run the Stress-SGD pipeline.
 
@@ -120,6 +131,9 @@ def layout_stress_sgd_pipeline(
         Exact-path cutoff.
     edge_weights : torch.Tensor | None
         Optional edge-weight tensor with shape ``[E]``.
+    fidelity_mode : bool, default=False
+        Enable reference-parity edge preprocessing, disconnected-graph policy,
+        and exact ``float64`` term storage for ``s_gd2`` fidelity runs.
 
     Returns
     -------
@@ -169,6 +183,7 @@ def layout_stress_sgd_pipeline(
         max_exact_nodes=max_exact_nodes,
         sample_size=sample_size,
         trace_every=trace_every,
+        fidelity_mode=fidelity_mode,
     ).apply(problem, state, ctx)
 
     if final_state.pos is None:
