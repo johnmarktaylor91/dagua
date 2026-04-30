@@ -157,6 +157,13 @@ def _node_attrs(node: Mapping[str, object]) -> Mapping[str, object]:
         "labeljust": labeljust,
         "labelloc": labelloc,
     }
+    gradient_kind = str(style_map.get("gradient", ""))
+    gradient_color = style_map.get("gradient_color")
+    if gradient_kind == "radial" and gradient_color:
+        attrs["style"] = "filled,radial"
+        fill = node.get("fill", style_map.get("fill", "#FFFFFF"))
+        # Graphviz's two-color radial fill syntax does not accept alpha hex suffixes.
+        attrs["fillcolor"] = f"{fill}:{gradient_color}"
     external_label = str(style_map.get("external_label", "") or "")
     if external_label:
         attrs["xlabel"] = external_label
