@@ -15,7 +15,7 @@ from dagua.layout.ops.converge import (
 )  # noqa: E402
 from dagua.layout.ops.force import ApplyDisplacement, FRCombinedForce
 from dagua.layout.ops.init import RandomUniformInit, RandomUniformInitConfig
-from dagua.layout.ops.postprocess import FRFinalizePositions
+from dagua.layout.ops.postprocess import FRFinalizePositions, FRFinalizePositionsConfig
 from dagua.layout.ops.preprocess import FRPrepareAdjacency
 from dagua.layout.ops.state import (  # noqa: E402
     ExecutionPlan,
@@ -124,13 +124,16 @@ def _choose_fr_default_layout(
     return canonical_pos
 
 
-def build_fr_pipeline(steps: int = 50) -> Pipeline:
+def build_fr_pipeline(steps: int = 50, networkx_compat: bool = False) -> Pipeline:
     """Build a Fruchterman-Reingold force-directed layout pipeline.
 
     Parameters
     ----------
     steps : int, default=50
         Maximum number of cooling iterations to run.
+    networkx_compat : bool, default=False
+        If ``True``, use NetworkX adapter-scale finalization instead of
+        dagua's legacy ``50 * sqrt(N)`` display scale.
 
     Returns
     -------
@@ -173,7 +176,12 @@ def build_fr_pipeline(steps: int = 50) -> Pipeline:
                     LinearCool(),
                 ],
             ),
-            FRFinalizePositions(),
+            FRFinalizePositions(
+                FRFinalizePositionsConfig(
+                    output_scale_factor=500.0 if networkx_compat else 50.0,
+                    scale_by_sqrt_num_nodes=not networkx_compat,
+                ),
+            ),
         ],
         name="fr_pipeline",
     )
@@ -187,6 +195,7 @@ def layout_fr_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     pos: Optional[torch.Tensor] = None,
+    networkx_compat: bool = False,
 ) -> torch.Tensor:
     """Run the Fruchterman-Reingold pipeline as a drop-in replacement.
 
@@ -209,6 +218,9 @@ def layout_fr_pipeline(
         Initial positions with shape ``[N, 2]``. When provided, the pipeline
         starts from these coordinates instead of sampling a random
         initialization.
+    networkx_compat : bool, default=False
+        If ``True``, use NetworkX-compatible adapter-scale finalization. This
+        preserves the force loop while avoiding dagua's legacy display scale.
 
     Returns
     -------
@@ -256,7 +268,11 @@ def layout_fr_pipeline(
     if pos is not None and steps == 0:
         return state.pos.to(device=output_device, dtype=torch.float32)
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
-    final_state = build_fr_pipeline(steps=steps).apply(problem, state, ctx)
+    final_state = build_fr_pipeline(steps=steps, networkx_compat=networkx_compat).apply(
+        problem,
+        state,
+        ctx,
+    )
     if final_state.pos is None:
         raise RuntimeError("FR pipeline did not produce final positions.")
     return final_state.pos
@@ -270,6 +286,7 @@ def layout_fr_default_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     pos: Optional[torch.Tensor] = None,
+    networkx_compat: bool = False,
 ) -> torch.Tensor:
     """Run the benchmark default FR layout with canonical-fidelity selection.
 
@@ -291,6 +308,9 @@ def layout_fr_default_pipeline(
     pos : torch.Tensor, optional
         Initial positions with shape ``[N, 2]``. Warm starts run exactly as
         requested and bypass the selector.
+    networkx_compat : bool, default=False
+        If ``True``, forwarded to :func:`layout_fr_pipeline` for exact
+        NetworkX adapter-style output scaling.
 
     Returns
     -------
@@ -306,6 +326,7 @@ def layout_fr_default_pipeline(
             seed=seed,
             edge_weights=edge_weights,
             pos=pos,
+            networkx_compat=networkx_compat,
         )
 
     legacy_pos = layout_fr_pipeline(
@@ -315,6 +336,7 @@ def layout_fr_default_pipeline(
         steps=_LEGACY_CLASSIC_FR_STEPS,
         seed=seed,
         edge_weights=edge_weights,
+        networkx_compat=networkx_compat,
     )
     canonical_pos = layout_fr_pipeline(
         edge_index=edge_index,
@@ -323,6 +345,7 @@ def layout_fr_default_pipeline(
         steps=_CANONICAL_NX_SPRING_STEPS,
         seed=seed,
         edge_weights=edge_weights,
+        networkx_compat=networkx_compat,
     )
     return _choose_fr_default_layout(
         legacy_pos=legacy_pos,
