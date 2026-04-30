@@ -1911,7 +1911,7 @@ class FA2ForceStep(Op):
 
         if self.config.strong_gravity:
             gravity_factor = torch.zeros_like(mass)
-            valid = (pos[:, 0] != 0) & (pos[:, 1] != 0)
+            valid = (pos != 0).any(dim=1)
             gravity_factor[valid] = self.config.scaling_ratio * mass[valid] * self.config.gravity
             gravity = -pos * gravity_factor.unsqueeze(1)
         else:
