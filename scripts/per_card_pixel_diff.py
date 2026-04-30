@@ -29,7 +29,7 @@ from scripts.competitor_renderers.utils import (  # noqa: E402
 
 DEFAULT_GALLERY_ROOT = Path("eval_output/gallery_audit")
 DEFAULT_OUT_DIR = DEFAULT_GALLERY_ROOT / "per_card_pixel_diff"
-DEFAULT_CARD_DIMS = (1600, 1200)
+DEFAULT_CARD_DIMS = (gallery.PANEL_HALF_WIDTH, gallery.PANEL_HEIGHT)
 HIRES_MAX_SIDE_PX = 1500
 
 

@@ -247,7 +247,9 @@ def graph_spec_from_dagua(graph: object) -> Dict[str, object]:
             }
         )
 
-    return {"nodes": nodes, "edges": edges, "clusters": clusters}
+    graph_style = getattr(graph, "graph_style", None)
+    style = _style_to_dict(graph_style) if graph_style is not None else {}
+    return {"nodes": nodes, "edges": edges, "clusters": clusters, "style": style}
 
 
 def node_by_id(graph_spec: Mapping[str, object]) -> Dict[str, Mapping[str, object]]:
