@@ -664,11 +664,16 @@ class KamadaKawaiAllPairsShortestPathsConfig:
         the operation follows ``problem.edge_weights is not None``.
     unreachable : float, default=1e6
         Replacement value for unreachable node pairs.
+    duplicate_policy : {"last", "min"}, default="last"
+        Policy for collapsing repeated directed edges. ``"last"`` matches
+        NetworkX ``DiGraph`` edge insertion semantics used by the KK reference
+        adapter.
     """
 
     weighted: Optional[bool] = None
     unreachable: float = 1.0e6
 
+    duplicate_policy: str = "last"
 
 @register_op
 class KamadaKawaiAllPairsShortestPaths(Op):
@@ -742,6 +747,7 @@ class KamadaKawaiAllPairsShortestPaths(Op):
             edge_index=problem.edge_index,
             num_nodes=num_nodes,
             edge_weights=problem.edge_weights if weighted else None,
+            duplicate_policy=self.config.duplicate_policy,
         )
 
         distances = np.full(
