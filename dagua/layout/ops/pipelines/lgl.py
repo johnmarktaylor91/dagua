@@ -70,12 +70,20 @@ def build_lgl_pipeline(
     Raises
     ------
     ValueError
-        If ``maxiter`` is negative or ``coolexp`` is not positive.
+        If an explicit scalar parameter is outside igraph LGL's valid range.
     """
     if maxiter < 0:
         raise ValueError("maxiter must be non-negative.")
+    if maxdelta is not None and maxdelta <= 0.0:
+        raise ValueError("maxdelta must be positive.")
+    if area is not None and area <= 0.0:
+        raise ValueError("area must be positive.")
     if coolexp <= 0.0:
         raise ValueError("coolexp must be positive.")
+    if repulserad is not None and repulserad <= 0.0:
+        raise ValueError("repulserad must be positive.")
+    if cellsize is not None and cellsize <= 0.0:
+        raise ValueError("cellsize must be positive.")
 
     return Pipeline(
         [
@@ -172,8 +180,18 @@ def layout_lgl_pipeline(
         raise ValueError("edge_index must have shape [2, E].")
     if maxiter < 0:
         raise ValueError("maxiter must be non-negative.")
+    if maxdelta is not None and maxdelta <= 0.0:
+        raise ValueError("maxdelta must be positive.")
+    if area is not None and area <= 0.0:
+        raise ValueError("area must be positive.")
     if coolexp <= 0.0:
         raise ValueError("coolexp must be positive.")
+    if repulserad is not None and repulserad <= 0.0:
+        raise ValueError("repulserad must be positive.")
+    if cellsize is not None and cellsize <= 0.0:
+        raise ValueError("cellsize must be positive.")
+    if root is not None and (root < 0 or root >= num_nodes):
+        raise ValueError("root must lie in [0, num_nodes).")
 
     if edge_weights is not None:
         if edge_weights.ndim != 1:
