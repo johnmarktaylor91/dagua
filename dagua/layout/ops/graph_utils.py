@@ -361,10 +361,12 @@ def build_directed_adjacency(
     edge_index: torch.Tensor,
     num_nodes: int,
     edge_weights: Optional[torch.Tensor] = None,
+    duplicate_policy: str = "min",
 ) -> list[list[tuple[int, float]]]:
     """Build a directed weighted adjacency list from edge_index.
 
-    Duplicate edges keep the minimum weight.
+    Duplicate edges keep the minimum weight by default, or the last observed
+    weight when ``duplicate_policy="last"``.
 
     Parameters
     ----------
@@ -374,12 +376,21 @@ def build_directed_adjacency(
         Number of nodes.
     edge_weights : torch.Tensor, optional
         Per-edge weights with shape ``[E]``. Defaults to 1.0 for all edges.
+    duplicate_policy : {"min", "last"}, default="min"
+        Policy for collapsing repeated directed edges.
 
     Returns
     -------
     list[list[tuple[int, float]]]
         Directed adjacency list where each entry is ``(neighbor, weight)``.
+
+    Raises
+    ------
+    ValueError
+        If ``duplicate_policy`` is unsupported.
     """
+    if duplicate_policy not in {"min", "last"}:
+        raise ValueError("duplicate_policy must be one of 'min' or 'last'.")
     adjacency: list[dict[int, float]] = [{} for _ in range(num_nodes)]
     if edge_index.numel() == 0:
         return [[] for _ in range(num_nodes)]
@@ -394,7 +405,9 @@ def build_directed_adjacency(
         weights = [1.0] * len(sources)
 
     for src, tgt, weight in zip(sources, targets, weights):
-        if tgt not in adjacency[src] or weight < adjacency[src][tgt]:
+        if duplicate_policy == "last":
+            adjacency[src][tgt] = weight
+        elif tgt not in adjacency[src] or weight < adjacency[src][tgt]:
             adjacency[src][tgt] = weight
 
     return [sorted(neighbors.items()) for neighbors in adjacency]

@@ -159,7 +159,7 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_kk": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.kk",
         function_name="layout_kk_pipeline",
-        default_params={"steps": 300},
+        default_params={"steps": None, "orient_to_direction": False},
     ),
     "classic_fa2": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.fa2",
@@ -628,7 +628,7 @@ class ClassicFR(_ClassicBase):
 class ClassicKK(_ClassicBase):
     """Competitor wrapper for the classic Kamada-Kawai reimplementation."""
 
-    variant_param_names = frozenset({"steps", "pos"})
+    variant_param_names = frozenset({"steps", "pos", "orient_to_direction"})
     name = "classic_kk"
     max_nodes = 5_000
 
@@ -665,10 +665,10 @@ class ClassicKK(_ClassicBase):
                 graph.edge_index,
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
-                steps=300,
+                steps=None,
                 seed=self._layout_seed(seed),
                 direction=graph.direction,
-                orient_to_direction=True,
+                orient_to_direction=False,
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(
@@ -1612,7 +1612,7 @@ def _quick_classic(
         if fn_name in {"layout_kk_pipeline", "layout_sfdp_pipeline"}:
             extra_kwargs.setdefault("direction", graph.direction)
         if fn_name == "layout_kk_pipeline":
-            extra_kwargs.setdefault("orient_to_direction", True)
+            extra_kwargs.setdefault("orient_to_direction", False)
         pos = fn(
             edge_index,
             graph.num_nodes,
