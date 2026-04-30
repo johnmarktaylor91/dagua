@@ -534,6 +534,7 @@ class GraphStyle:
 
     background_color: str = WARM_WHITE
     margin: float = 18.0
+    density_aware_node_shrink: bool = False
     title_font_size: float = 10.0
     title_font_weight: str = "regular"
     title_font_color: str = NEAR_BLACK
@@ -1027,6 +1028,7 @@ GRAPHVIZ_STRICT_THEME = Theme(
     graph_style=GraphStyle(
         background_color="#FFFFFF",
         margin=4.0,
+        density_aware_node_shrink=True,
         title_font_size=14.0,
         title_font_color="#000000",
         # Graphviz defaults edge labels to the same 14pt Times face as node
