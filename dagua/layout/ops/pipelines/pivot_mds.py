@@ -22,6 +22,7 @@ from dagua.layout.ops.state import (  # noqa: E402
 def build_pivot_mds_pipeline(
     n_pivots: int = 50,
     weighted: bool = False,
+    first_pivot_index: Optional[int] = None,
 ) -> Pipeline:
     """Build a Pivot-MDS pipeline.
 
@@ -31,6 +32,9 @@ def build_pivot_mds_pipeline(
         Maximum number of pivots to select.
     weighted : bool, default=False
         Whether to treat edges as weighted during adjacency construction.
+    first_pivot_index : int | None, default=None
+        Optional deterministic first pivot used by reference-compatible
+        callers. ``None`` preserves the seeded Pivot-MDS default.
 
     Returns
     -------
@@ -57,7 +61,12 @@ def build_pivot_mds_pipeline(
                     format="list",
                 ),
             ),
-            PivotSelection(PivotSelectionConfig(n_pivots=n_pivots)),
+            PivotSelection(
+                PivotSelectionConfig(
+                    n_pivots=n_pivots,
+                    first_pivot_index=first_pivot_index,
+                )
+            ),
             PivotDistanceQueries(),
             PivotMDSComputeCoordinates(),
             PivotMDSFinalizePositions(),
@@ -73,6 +82,7 @@ def layout_pivot_mds_pipeline(
     n_pivots: int = 50,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
+    first_pivot_index: Optional[int] = None,
 ) -> torch.Tensor:
     """Run the Pivot-MDS pipeline as a drop-in replacement.
 
@@ -91,6 +101,9 @@ def layout_pivot_mds_pipeline(
         Random seed for the first pivot.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
+    first_pivot_index : int | None, default=None
+        Optional deterministic first pivot used by reference-compatible
+        callers. ``None`` preserves the seeded Pivot-MDS default.
 
     Returns
     -------
@@ -128,6 +141,7 @@ def layout_pivot_mds_pipeline(
     final_state = build_pivot_mds_pipeline(
         n_pivots=n_pivots,
         weighted=problem.edge_weights is not None,
+        first_pivot_index=first_pivot_index,
     ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("Pivot-MDS pipeline did not produce final positions.")
