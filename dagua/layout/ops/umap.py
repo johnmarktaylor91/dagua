@@ -16,7 +16,6 @@ from scipy.sparse import linalg as sparse_linalg
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import (
     layout_device,
-    layout_extent,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -591,25 +590,6 @@ def _optimize_embedding(
     return embedding
 
 
-def _normalize_positions(positions: torch.Tensor, extent: float) -> torch.Tensor:
-    """Center and scale coordinates into a deterministic bounding box."""
-    if positions.shape[0] <= 1:
-        return torch.zeros_like(positions)
-
-    centered = positions - positions.mean(dim=0, keepdim=True)
-    span = float(centered.abs().max().item())
-    if span < _MIN_SPAN:
-        centered = centered.clone()
-        centered[:, 0] = torch.linspace(
-            -1.0,
-            1.0,
-            steps=positions.shape[0],
-            device=positions.device,
-        )
-        span = float(centered.abs().max().item())
-    return centered * (extent / max(span, _MIN_SPAN))
-
-
 @register_op
 class ValidateUMAPInputs(Op):
     """Validate the graph inputs required by the graph-UMAP pipeline."""
@@ -1152,7 +1132,7 @@ class OptimizeUMAPEmbedding(Op):
 
 @register_op
 class FinalizeUMAPPositions(Op):
-    """Apply deterministic centering and scaling to final positions."""
+    """Cast final UMAP positions to the requested output device and dtype."""
 
     name: ClassVar[str] = "umap_finalize_positions"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
@@ -1167,14 +1147,12 @@ class FinalizeUMAPPositions(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Normalize positions and cast output device/dtype."""
+        """Cast output positions without changing UMAP's final coordinate frame."""
         del ctx
         if state.pos is None:
             raise ValueError("FinalizeUMAPPositions requires state.pos to be set.")
         device = layout_device(edge_index=problem.edge_index, node_sizes=problem.node_sizes)
-        extent = layout_extent(num_nodes=problem.num_nodes, node_sizes=problem.node_sizes)
-        normalized = _normalize_positions(state.pos, extent=extent)
-        state.pos = normalized.to(dtype=torch.float32, device=device)
+        state.pos = state.pos.to(dtype=torch.float32, device=device)
         return state
 
 
