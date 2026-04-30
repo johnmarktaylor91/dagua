@@ -983,6 +983,7 @@ class ClassicSpectral(_ClassicBase):
 
     name = "classic_spectral"
     max_nodes = 100_000
+    variant_param_names = frozenset({"normalization", "networkx_fidelity"})
 
     def layout(
         self,
@@ -1020,6 +1021,7 @@ class ClassicSpectral(_ClassicBase):
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
                 seed=self._layout_seed(seed),
+                edge_weights=graph.edge_weights,
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
