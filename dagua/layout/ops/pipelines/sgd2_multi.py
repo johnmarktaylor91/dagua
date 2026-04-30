@@ -239,6 +239,7 @@ def layout_sgd2_multi_pipeline(
     grad_clamp: float = 4.0,
     batch_size: int = 16,
     edge_weights: Optional[torch.Tensor] = None,
+    use_reference_fallback: bool = False,
 ) -> torch.Tensor:
     """Run the ``(SGD)^2`` multicriteria pipeline.
 
@@ -269,6 +270,11 @@ def layout_sgd2_multi_pipeline(
         Mini-batch size.
     edge_weights : torch.Tensor, optional
         Optional per-edge weights with shape ``[E]``.
+    use_reference_fallback : bool, default=False
+        Whether direct default calls may substitute the optional canonical
+        ``s_gd2`` backend when it is importable. Fidelity comparisons keep this
+        disabled so ``classic_sgd2_multi`` always exercises the multicriteria
+        pipeline.
 
     Returns
     -------
@@ -311,6 +317,7 @@ def layout_sgd2_multi_pipeline(
         and criteria_schedules is None
         and steps > 0
         and uses_default_native_hyperparams
+        and use_reference_fallback
     ):
         reference_pos = _reference_sgd2_layout_if_available(
             edge_index=edge_index,
