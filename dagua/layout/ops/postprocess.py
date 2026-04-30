@@ -757,6 +757,19 @@ class NormalizePositions(Op):
 _KK_TRACE_KEY = "kk_traces"
 
 
+@dataclass(frozen=True)
+class KamadaKawaiFinalizePositionsConfig:
+    """Configuration for :class:`KamadaKawaiFinalizePositions`.
+
+    Parameters
+    ----------
+    output_dtype : torch.dtype, default=torch.float32
+        Floating-point dtype for final KK coordinates.
+    """
+
+    output_dtype: torch.dtype = torch.float32
+
+
 @register_op
 class KamadaKawaiFinalizePositions(Op):
     """Scale final Kamada-Kawai coordinates and move any cached traces to the output device."""
@@ -767,6 +780,16 @@ class KamadaKawaiFinalizePositions(Op):
     writes: ClassVar[Tuple[str, ...]] = ("pos", f"extras.{_KK_TRACE_KEY}")
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
     access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, config: Optional[KamadaKawaiFinalizePositionsConfig] = None) -> None:
+        """Store the finalization configuration.
+
+        Parameters
+        ----------
+        config : KamadaKawaiFinalizePositionsConfig, optional
+            Final coordinate dtype configuration.
+        """
+        self.config = config or KamadaKawaiFinalizePositionsConfig()
 
     def apply(
         self,
@@ -800,14 +823,15 @@ class KamadaKawaiFinalizePositions(Op):
             raise ValueError("KamadaKawaiFinalizePositions requires state.pos to be set.")
 
         output_device = _layout_device(edge_index=problem.edge_index, node_sizes=problem.node_sizes)
+        output_dtype = self.config.output_dtype
         traces = state.extras.get(_KK_TRACE_KEY, [])
         state.extras[_KK_TRACE_KEY] = [trace.to(device=output_device) for trace in traces]
 
         if state.pos.shape[0] <= 1 or state.pos.numel() == 0:
-            state.pos = state.pos.to(dtype=torch.float32, device=output_device)
+            state.pos = state.pos.to(dtype=output_dtype, device=output_device)
             return state
 
-        state.pos = _rescale_layout(state.pos).to(dtype=torch.float32, device=output_device)
+        state.pos = _rescale_layout(state.pos).to(dtype=output_dtype, device=output_device)
         return state
 
 
