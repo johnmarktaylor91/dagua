@@ -234,7 +234,7 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_fmmm": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.fmmm",
         function_name="layout_fmmm_pipeline",
-        default_params={"steps": 200},
+        default_params={"steps": 200, "fidelity_mode": True},
     ),
     "classic_graphopt": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.graphopt",
@@ -1495,8 +1495,6 @@ class ClassicFMMM(_ClassicBase):
 
     name = "classic_fmmm"
     max_nodes = 500_000
-    _selector_max_nodes = 2_000
-    _selector_max_edges = 5_000
 
     def layout(
         self,
@@ -1504,7 +1502,7 @@ class ClassicFMMM(_ClassicBase):
         timeout: float = 300.0,
         seed: Optional[int] = None,
     ) -> CompetitorResult:
-        """Run the classic FM^3 layout with a small-graph quality selector.
+        """Run the classic FM^3 layout in OGDF fidelity mode.
 
         Parameters
         ----------
@@ -1531,50 +1529,14 @@ class ClassicFMMM(_ClassicBase):
             if graph.node_sizes is None:
                 graph.compute_node_sizes()
 
-            if (
-                graph.node_sizes is not None
-                and graph.num_nodes <= self._selector_max_nodes
-                and graph.edge_index.shape[1] <= self._selector_max_edges
-            ):
-                from dagua.metrics import compute_all_metrics
-
-                best_pos = None
-                best_score = float("-inf")
-                for candidate_steps, force_model in (
-                    (100, "fr"),
-                    (100, "ogdf_new"),
-                    (200, "ogdf_new"),
-                ):
-                    candidate_pos = layout_fmmm(
-                        graph.edge_index,
-                        graph.num_nodes,
-                        node_sizes=graph.node_sizes,
-                        steps=candidate_steps,
-                        seed=seed_value,
-                        force_model=force_model,
-                    )
-                    candidate_metrics = compute_all_metrics(
-                        candidate_pos,
-                        graph.edge_index,
-                        graph.node_sizes,
-                        direction=graph.direction,
-                    )
-                    candidate_score = float(candidate_metrics["overall_quality"])
-                    if candidate_score > best_score:
-                        best_score = candidate_score
-                        best_pos = candidate_pos
-
-                if best_pos is None:
-                    raise RuntimeError("FM^3 selector did not produce a candidate layout.")
-                pos = best_pos
-            else:
-                pos = layout_fmmm(
-                    graph.edge_index,
-                    graph.num_nodes,
-                    node_sizes=graph.node_sizes,
-                    steps=200,
-                    seed=seed_value,
-                )
+            pos = layout_fmmm(
+                graph.edge_index,
+                graph.num_nodes,
+                node_sizes=graph.node_sizes,
+                steps=200,
+                seed=seed_value,
+                fidelity_mode=True,
+            )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
         except Exception as exc:
