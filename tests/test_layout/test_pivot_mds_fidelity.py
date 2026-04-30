@@ -8,6 +8,7 @@ import torch
 
 from dagua.eval.variants import VARIANT_REGISTRY
 from dagua.graph import DaguaGraph
+from dagua.layout.ops.embed import _pivot_mds_coordinates
 from dagua.layout.ops.pipelines.pivot_mds import build_pivot_mds_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
@@ -97,6 +98,38 @@ def test_pivot_mds_ogdf_path_special_case_returns_raw_line() -> None:
     )
 
     assert pos.tolist() == [[0.0, 0.0], [100.0, 0.0], [200.0, 0.0], [300.0, 0.0]]
+
+
+def test_pivot_mds_coordinates_use_ogdf_sqrt_singular_scale() -> None:
+    """Confirm Pivot-MDS coordinate recovery matches OGDF's final SVD scale."""
+    distance_matrix = torch.tensor(
+        [
+            [0.0, 1.0, 2.0, 1.0, 2.0, 3.0],
+            [3.0, 4.0, 3.0, 2.0, 1.0, 0.0],
+            [2.0, 1.0, 0.0, 1.0, 2.0, 3.0],
+            [1.0, 0.0, 1.0, 2.0, 3.0, 4.0],
+            [1.0, 2.0, 1.0, 0.0, 1.0, 2.0],
+            [2.0, 3.0, 2.0, 1.0, 0.0, 1.0],
+        ],
+        dtype=torch.float64,
+    )
+
+    coordinates = _pivot_mds_coordinates(distance_matrix, compute_dtype=torch.float64).to(
+        dtype=torch.float64
+    )
+    squared = distance_matrix.square()
+    centered = -0.5 * (
+        squared
+        - squared.mean(dim=1, keepdim=True)
+        - squared.mean(dim=0, keepdim=True)
+        + squared.mean()
+    )
+    _, singular_values, vh = torch.linalg.svd(centered, full_matrices=False)
+    expected = vh[:2].transpose(0, 1) * singular_values[:2].sqrt().unsqueeze(0)
+    old_scale = vh[:2].transpose(0, 1) * singular_values[:2].unsqueeze(0)
+
+    assert torch.allclose(coordinates, expected, atol=1e-6)
+    assert not torch.allclose(coordinates, old_scale, atol=1e-3)
 
 
 def test_ogdf_pivot_mds_variant_params_reach_runner(monkeypatch: Any) -> None:
