@@ -40,6 +40,7 @@ def build_sugiyama_pipeline(
     seed: int = 42,
     trace_every: int = 0,
     return_edge_routes: bool = False,
+    fidelity_mode: Optional[str] = None,
 ) -> Pipeline:
     """Build a Sugiyama layered graph-drawing pipeline.
 
@@ -60,6 +61,9 @@ def build_sugiyama_pipeline(
         If positive, emit a trace every N passes.
     return_edge_routes : bool, default=False
         If ``True``, include edge-route reconstruction in the pipeline.
+    fidelity_mode : str, optional
+        Optional reference-compatibility mode. ``"igraph"`` enables igraph's
+        stable-order early stop and incidence-average barycenters.
 
     Returns
     -------
@@ -70,6 +74,10 @@ def build_sugiyama_pipeline(
         layers, expanding dummy nodes, running barycenter ordering sweeps,
         assigning coordinates, and optionally reconstructing edge routes.
     """
+    if fidelity_mode not in (None, "igraph"):
+        raise ValueError("fidelity_mode must be None or 'igraph'.")
+    use_igraph_fidelity = fidelity_mode == "igraph"
+
     ops: list[Op] = [
         _ValidateInputs(),
         _StoreSpacingParams(rank_sep=rank_sep, node_sep=node_sep),
@@ -82,6 +90,8 @@ def build_sugiyama_pipeline(
             barycenter_passes=barycenter_passes,
             seed=seed,
             trace_every=trace_every,
+            stop_when_stable=use_igraph_fidelity,
+            use_incidence_barycenters=use_igraph_fidelity,
         ),
         _CoordinateAssignment(),
     ]
@@ -102,6 +112,7 @@ def layout_sugiyama_pipeline(
     trace_every: int = 0,
     edge_weights: Optional[torch.Tensor] = None,
     return_edge_routes: bool = False,
+    fidelity_mode: Optional[str] = None,
     config: Optional["LayoutConfig"] = None,
 ) -> Union[
     torch.Tensor,
@@ -138,6 +149,9 @@ def layout_sugiyama_pipeline(
         Optional edge-weight vector with shape ``[E]``.
     return_edge_routes : bool, default=False
         If ``True``, include edge-route polylines in output.
+    fidelity_mode : str, optional
+        Optional reference-compatibility mode. ``"igraph"`` enables igraph's
+        stable-order early stop and incidence-average barycenters.
     config : LayoutConfig, optional
         Full layout configuration supplied by the engine. Only spacing fields
         are read by this classic pipeline.
@@ -156,6 +170,8 @@ def layout_sugiyama_pipeline(
     RuntimeError
         If the pipeline fails to produce final positions.
     """
+    if fidelity_mode not in (None, "igraph"):
+        raise ValueError("fidelity_mode must be None or 'igraph'.")
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative.")
     if config is not None:
@@ -191,6 +207,7 @@ def layout_sugiyama_pipeline(
         seed=seed,
         trace_every=trace_every,
         return_edge_routes=return_edge_routes,
+        fidelity_mode=fidelity_mode,
     )
     final_state = pipeline.apply(problem, state, ctx)
 
