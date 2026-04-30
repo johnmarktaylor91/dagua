@@ -177,6 +177,9 @@ DECORATIVE_FILL_CARD_MIN_HEIGHT = 110.0
 DECORATIVE_FILL_CARD_PADDING: Tuple[float, float] = (8.0, 4.0)
 GRAPHVIZ_PARITY_MAX_NODE_WIDTH = 200.0
 GRAPHVIZ_PARITY_MAX_NODE_HEIGHT = DECORATIVE_FILL_CARD_MIN_HEIGHT
+GRAPHVIZ_COMPARISON_NODE_STROKE_WIDTH = 2.0
+GRAPHVIZ_COMPARISON_ARROW_LENGTH = 28.0
+GRAPHVIZ_COMPARISON_ARROW_WIDTH = 20.0
 SCALAR_NODE_COMPARISON_FEATURES = frozenset(
     {
         "font_size",
@@ -1849,11 +1852,23 @@ def _apply_reference_card_tweaks(
                 style.min_width = GRAPHVIZ_PARITY_MAX_NODE_WIDTH
             if style.min_height is not None:
                 style.min_height = GRAPHVIZ_PARITY_MAX_NODE_HEIGHT
+            style.fill = NODE_FILL
+            style.stroke = NODE_STROKE
+            style.stroke_width = max(
+                float(style.stroke_width),
+                GRAPHVIZ_COMPARISON_NODE_STROKE_WIDTH,
+            )
+    if item.spec.feature == "stroke_width" and item.spec.category == "nodes/borders":
+        for style in _node_styles(graph):
+            style.fill = NODE_FILL
+            style.stroke = NODE_STROKE
     if item.spec.fixture == "pair" and item.spec.category.startswith("nodes/"):
         for style in _edge_styles(graph):
             style.arrow = "normal"
-            style.arrow_length = max(float(style.arrow_length), 28.0)
-            style.arrow_width = max(float(style.arrow_width), 20.0)
+            style.arrow_fill = "filled"
+            style.arrow_color = EDGE_COLOR
+            style.arrow_length = max(float(style.arrow_length), GRAPHVIZ_COMPARISON_ARROW_LENGTH)
+            style.arrow_width = max(float(style.arrow_width), GRAPHVIZ_COMPARISON_ARROW_WIDTH)
     if item.spec.feature == "external_label" and item.value.slug == "top":
         styles = _node_styles(graph)
         if len(styles) >= 2:
