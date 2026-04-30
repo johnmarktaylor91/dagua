@@ -928,16 +928,6 @@ class SymmetrizeAdjacency(Op):
     requires: ClassVar[Tuple[str, ...]] = ("adjacency",)
     access_pattern: ClassVar[str] = "global"
 
-    def __init__(self, compute_dtype: torch.dtype = torch.float32) -> None:
-        """Initialize the Pivot-MDS coordinate recovery op.
-
-        Parameters
-        ----------
-        compute_dtype : torch.dtype, default=torch.float32
-            Dtype used for centering and SVD.
-        """
-        self.compute_dtype = compute_dtype
-
     def apply(
         self,
         problem: LayoutProblem,
@@ -1560,6 +1550,17 @@ class PivotMDSComputeCoordinates(Op):
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pivot_distances",)
     access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, compute_dtype: torch.dtype = torch.float32) -> None:
+        """Initialize the Pivot-MDS coordinate recovery op.
+
+        Parameters
+        ----------
+        compute_dtype : torch.dtype, default=torch.float32
+            Dtype used for centering and SVD. OGDF uses double precision; pass
+            ``torch.float64`` for fidelity-mode parity.
+        """
+        self.compute_dtype = compute_dtype
 
     def apply(
         self,
