@@ -12,7 +12,6 @@ from dagua.layout.ops.fmmm import (
     _InitializeCoarsestLevel,
     _InitializeFMMMState,
     _InitializeFMMMStateConfig,
-    _PostprocessFMMMPositions,
     _RefineCoarsestLevel,
     _SingleLevelFallback,
     _UncoarsenLoop,
@@ -69,16 +68,12 @@ def build_fmmm_pipeline(
             galaxy_choice="lower" if reference_mode else "higher",
             coarsest_init="ogdf_random" if reference_mode else "fr",
             ogdf_force_scaling=reference_mode,
-            exact_repulsion_cutoff=174 if reference_mode else 500,
-            ogdf_postprocessing=reference_mode,
-            integer_positions=reference_mode,
         )
     )
     initialize_coarsest = _InitializeCoarsestLevel()
     refine_coarsest = _RefineCoarsestLevel()
     uncoarsen_loop = _UncoarsenLoop()
     single_level_fallback = _SingleLevelFallback()
-    postprocess_positions = _PostprocessFMMMPositions()
     finalize_positions = _FinalizeFMMMPositions()
 
     return Pipeline(
@@ -88,7 +83,6 @@ def build_fmmm_pipeline(
             refine_coarsest,
             uncoarsen_loop,
             single_level_fallback,
-            postprocess_positions,
             finalize_positions,
         ],
         name="fmmm_pipeline",
