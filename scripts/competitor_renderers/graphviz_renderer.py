@@ -14,7 +14,11 @@ import tempfile
 from pathlib import Path
 from typing import Mapping, Optional, Sequence, Tuple
 
+from PIL import Image
+
 from .utils import command_available, ensure_png_dimensions, sanitize_id
+
+Image.MAX_IMAGE_PIXELS = None
 
 GRAPHVIZ_SHAPES = {
     "rect": "box",
@@ -193,6 +197,84 @@ def _edge_attrs(edge: Mapping[str, object]) -> Mapping[str, object]:
     }
 
 
+def _cluster_attrs(cluster: Mapping[str, object]) -> Mapping[str, object]:
+    """Return Graphviz subgraph attributes for a unified cluster spec.
+
+    Parameters
+    ----------
+    cluster : Mapping[str, object]
+        Unified cluster record.
+
+    Returns
+    -------
+    Mapping[str, object]
+        DOT attributes for a ``cluster_*`` subgraph.
+    """
+
+    style = cluster.get("style", {})
+    style_map = style if isinstance(style, Mapping) else {}
+    opacity = style_map.get("opacity", 1.0)
+    fill_opacity = style_map.get("fill_opacity", 0.0)
+    border_opacity = style_map.get("border_opacity", opacity)
+    fill = str(style_map.get("fill", "") or "")
+    attrs = {
+        "label": cluster.get("label", cluster.get("id", "")),
+        "color": _hex_with_alpha(style_map.get("stroke", "#000000"), border_opacity),
+        "penwidth": style_map.get("stroke_width", 1.0),
+        "fontname": style_map.get("font_family", "Times,serif"),
+        "fontsize": style_map.get("font_size", 14.0),
+        "fontcolor": style_map.get("font_color", "#000000"),
+        "labelloc": "t",
+    }
+    if fill and fill.lower() not in {"none", "transparent"} and float(fill_opacity or 0.0) > 0.0:
+        attrs["style"] = "filled"
+        attrs["fillcolor"] = _hex_with_alpha(fill, float(fill_opacity) * float(opacity))
+    return attrs
+
+
+def _cluster_lines(
+    clusters: Sequence[Mapping[str, object]],
+    parent: Optional[str],
+    indent: str = "  ",
+) -> Sequence[str]:
+    """Build nested DOT subgraph lines for cluster records.
+
+    Parameters
+    ----------
+    clusters : sequence[Mapping[str, object]]
+        Unified cluster records.
+    parent : str | None
+        Parent cluster id to render at this recursion level.
+    indent : str, default="  "
+        DOT indentation.
+
+    Returns
+    -------
+    sequence[str]
+        DOT lines for all child clusters under ``parent``.
+    """
+
+    children = [cluster for cluster in clusters if cluster.get("parent") == parent]
+    lines = []
+    for cluster in children:
+        cluster_id = sanitize_id(cluster.get("id", "cluster"))
+        lines.append(f"{indent}subgraph cluster_{cluster_id} {{")
+        lines.append(f"{indent}  graph [{_dot_attrs(_cluster_attrs(cluster))}];")
+        lines.extend(_cluster_lines(clusters, str(cluster.get("id")), indent=f"{indent}  "))
+        child_members = {
+            str(member)
+            for child in clusters
+            if child.get("parent") == cluster.get("id")
+            for member in child.get("members", [])
+        }
+        for member in cluster.get("members", []):
+            if str(member) in child_members:
+                continue
+            lines.append(f"{indent}  {sanitize_id(member)};")
+        lines.append(f"{indent}}}")
+    return lines
+
+
 def _build_dot(graph_spec: Mapping[str, object]) -> str:
     """Build DOT source from a unified graph spec.
 
@@ -213,6 +295,10 @@ def _build_dot(graph_spec: Mapping[str, object]) -> str:
             continue
         node_id = sanitize_id(node.get("id", "node"))
         lines.append(f"  {node_id} [{_dot_attrs(_node_attrs(node))}];")
+    clusters = [
+        cluster for cluster in graph_spec.get("clusters", []) if isinstance(cluster, Mapping)
+    ]
+    lines.extend(_cluster_lines(clusters, parent=None))
     for edge in graph_spec.get("edges", []):
         if not isinstance(edge, Mapping):
             continue
@@ -268,4 +354,13 @@ def render(
         )
     if result.returncode != 0:
         return None
+    with Image.open(output_path) as image:
+        fitted = image.convert("RGBA")
+        resample = getattr(Image, "Resampling", Image).BILINEAR
+        fitted.thumbnail(dimensions, resample)
+        canvas = Image.new("RGBA", dimensions, (255, 255, 255, 255))
+        left = max((dimensions[0] - fitted.width) // 2, 0)
+        top = max((dimensions[1] - fitted.height) // 2, 0)
+        canvas.paste(fitted, (left, top), fitted)
+        canvas.convert("RGB").save(output_path)
     return ensure_png_dimensions(output_path, dimensions)

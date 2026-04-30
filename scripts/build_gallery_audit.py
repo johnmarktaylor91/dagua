@@ -35,6 +35,8 @@ import matplotlib
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
+Image.MAX_IMAGE_PIXELS = None
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -2000,6 +2002,96 @@ def _dot_attr_list(attrs: Mapping[str, str]) -> str:
     return ", ".join(parts)
 
 
+def _graphviz_cluster_attrs(style: ClusterStyle, item: ReferenceCardItem) -> Dict[str, str]:
+    """Return Graphviz cluster attributes for one comparison card.
+
+    Parameters
+    ----------
+    style : ClusterStyle
+        Cluster style prepared for the current card.
+    item : ReferenceCardItem
+        Reference card metadata carrying feature overrides.
+
+    Returns
+    -------
+    dict[str, str]
+        DOT graph attributes for a cluster subgraph.
+    """
+
+    attrs = {
+        "color": str(style.stroke),
+        "penwidth": str(style.stroke_width),
+        "fontname": str(style.font_family or "Helvetica"),
+        "fontsize": str(style.font_size),
+        "fontcolor": str(style.font_color),
+        "labelloc": "t",
+    }
+    cluster_params = item.value.params.get("cluster", {})
+    if isinstance(cluster_params, Mapping):
+        opacity = min(max(float(cluster_params.get("opacity", style.opacity)), 0.0), 1.0)
+        border_opacity = min(
+            max(float(cluster_params.get("border_opacity", style.border_opacity or opacity)), 0.0),
+            1.0,
+        )
+        attrs["color"] = f"{style.stroke}{int(round(border_opacity * 255.0)):02X}"
+        fill = str(cluster_params.get("fill", "") or "")
+        fill_opacity = min(max(float(cluster_params.get("fill_opacity", 0.0)), 0.0), 1.0)
+        if fill:
+            attrs["style"] = "filled"
+            attrs["fillcolor"] = f"{fill}{int(round(fill_opacity * opacity * 255.0)):02X}"
+    return attrs
+
+
+def _cluster_dot_lines(
+    graph: DaguaGraph,
+    item: ReferenceCardItem,
+    parent: Optional[str] = None,
+    indent: str = "  ",
+) -> List[str]:
+    """Build DOT subgraph lines for Dagua clusters.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph with cluster membership.
+    item : ReferenceCardItem
+        Current comparison card metadata.
+    parent : str | None, default=None
+        Parent cluster identifier to render.
+    indent : str, default="  "
+        DOT indentation string.
+
+    Returns
+    -------
+    list[str]
+        DOT lines for nested cluster subgraphs.
+    """
+
+    cluster_parents = getattr(graph, "cluster_parents", {}) or {}
+    children = [name for name in graph.clusters if cluster_parents.get(name) == parent]
+    lines: List[str] = []
+    for name in children:
+        style = graph.get_style_for_cluster(name)
+        cluster_id = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(name))
+        lines.append(f"{indent}subgraph cluster_{cluster_id} {{")
+        attrs = _graphviz_cluster_attrs(style, item)
+        attrs["label"] = str(graph.cluster_labels.get(name, name))
+        lines.append(f"{indent}  graph [{_dot_attr_list(attrs)}];")
+        lines.extend(_cluster_dot_lines(graph, item, parent=name, indent=f"{indent}  "))
+        child_members = {
+            int(member)
+            for child_name, child_parent in cluster_parents.items()
+            if child_parent == name
+            for member in graph.leaf_cluster_members(child_name)
+        }
+        for member in graph.leaf_cluster_members(name):
+            if int(member) in child_members:
+                continue
+            lines.append(f"{indent}  n{int(member)};")
+        lines.append(f"{indent}}}")
+    return lines
+
+
 def _build_comparison_dot_source(graph: DaguaGraph, item: ReferenceCardItem) -> str:
     """Build DOT source for one Graphviz comparison card.
 
@@ -2033,6 +2125,7 @@ def _build_comparison_dot_source(graph: DaguaGraph, item: ReferenceCardItem) -> 
     for index, label in enumerate(graph.node_labels):
         node_label = "" if label is None else str(label)
         lines.append(f'  n{index} [label="{_escape_dot(node_label)}"];')
+    lines.extend(_cluster_dot_lines(graph, item))
     for edge_index in range(graph.edge_index.shape[1]):
         source = int(graph.edge_index[0, edge_index].item())
         target = int(graph.edge_index[1, edge_index].item())
@@ -4296,10 +4389,26 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
             ("opacity",),
             "pair",
             (
-                _value("0_2", "0.2", {"node": {"opacity": 0.2, "border_opacity": 0.2}}),
-                _value("0_5", "0.5", {"node": {"opacity": 0.5, "border_opacity": 0.5}}),
-                _value("0_8", "0.8", {"node": {"opacity": 0.8, "border_opacity": 0.8}}),
-                _value("1_0", "1.0", {"node": {"opacity": 1.0, "border_opacity": 1.0}}),
+                _value(
+                    "0_2",
+                    "0.2",
+                    {"node": {"fill": NODE_FILL, "opacity": 0.2, "border_opacity": 0.2}},
+                ),
+                _value(
+                    "0_5",
+                    "0.5",
+                    {"node": {"fill": NODE_FILL, "opacity": 0.5, "border_opacity": 0.5}},
+                ),
+                _value(
+                    "0_8",
+                    "0.8",
+                    {"node": {"fill": NODE_FILL, "opacity": 0.8, "border_opacity": 0.8}},
+                ),
+                _value(
+                    "1_0",
+                    "1.0",
+                    {"node": {"fill": NODE_FILL, "opacity": 1.0, "border_opacity": 1.0}},
+                ),
             ),
             filename_prefix="opacity",
         ),
@@ -4696,8 +4805,8 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                     "On",
                     {
                         "node": {
-                            "fill": DARK_NODE_FILL,
-                            "stroke": DARK_NODE_STROKE,
+                            "fill": NODE_FILL,
+                            "stroke": NODE_STROKE,
                             "text_outline": True,
                             "text_outline_color": TEXT_OUTLINE_COLOR,
                             "text_outline_width": 3.0,
