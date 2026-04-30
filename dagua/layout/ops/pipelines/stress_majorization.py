@@ -21,14 +21,20 @@ from dagua.layout.ops.stress import (
     CollectStressMajorizationTrace,
     FinalizeStressMajorizationPositions,
     InitializeStressMajorizationPositions,
+    InitializeStressMajorizationPositionsConfig,
     PrepareStressMajorizationState,
+    PrepareStressMajorizationStateConfig,
     SmacofStep,
+    SmacofStepConfig,
 )
+
+_FIDELITY_MODE_OGDF = "ogdf"
 
 
 def build_stress_majorization_pipeline(
     iterations: int = 200,
     trace_every: int = 0,
+    fidelity_mode: Optional[str] = None,
 ) -> Pipeline:
     """Build a stress-majorization (SMACOF) pipeline.
 
@@ -38,6 +44,9 @@ def build_stress_majorization_pipeline(
         Number of SMACOF majorization steps.
     trace_every : int, default=0
         If positive, collect position snapshots at this cadence.
+    fidelity_mode : str, optional
+        Optional reference-fidelity mode. ``"ogdf"`` enables OGDF-compatible
+        serial sweeps, disconnected-distance fill, and a no-jitter warm start.
 
     Returns
     -------
@@ -50,22 +59,33 @@ def build_stress_majorization_pipeline(
     Raises
     ------
     ValueError
-        If ``iterations`` or ``trace_every`` is negative.
+        If ``iterations`` or ``trace_every`` is negative, or if
+        ``fidelity_mode`` is unknown.
     """
     if iterations < 0:
         raise ValueError("iterations must be non-negative.")
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative.")
+    if fidelity_mode not in {None, _FIDELITY_MODE_OGDF}:
+        raise ValueError(f"Unknown stress_majorization fidelity_mode: {fidelity_mode!r}.")
+
+    prepare_config = PrepareStressMajorizationStateConfig()
+    init_config = InitializeStressMajorizationPositionsConfig()
+    step_config = SmacofStepConfig()
+    if fidelity_mode == _FIDELITY_MODE_OGDF:
+        prepare_config = PrepareStressMajorizationStateConfig(distance_fill="ogdf")
+        init_config = InitializeStressMajorizationPositionsConfig(jitter_scale=0.0)
+        step_config = SmacofStepConfig(update_mode="ogdf_serial")
 
     return Pipeline(
         [
             FixedSteps(FixedStepsConfig(n=iterations)),
-            PrepareStressMajorizationState(),
-            InitializeStressMajorizationPositions(),
+            PrepareStressMajorizationState(config=prepare_config),
+            InitializeStressMajorizationPositions(config=init_config),
             Repeat(
                 n=iterations,
                 ops=[
-                    SmacofStep(),
+                    SmacofStep(config=step_config),
                     CollectStressMajorizationTrace(),
                 ],
             ),
@@ -83,6 +103,7 @@ def layout_stress_majorization_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     trace_every: int = 0,
+    fidelity_mode: Optional[str] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
     """Run the stress-majorization pipeline as a drop-in replacement.
 
@@ -102,6 +123,10 @@ def layout_stress_majorization_pipeline(
         Optional edge-weight tensor with shape ``[E]``.
     trace_every : int, default=0
         If positive, return periodic position snapshots.
+    fidelity_mode : str, optional
+        Optional reference-fidelity mode. ``"ogdf"`` keeps the public API
+        opt-in while matching OGDF's serial sweep, disconnected fill, and
+        deterministic no-jitter warm start.
 
     Returns
     -------
@@ -112,8 +137,8 @@ def layout_stress_majorization_pipeline(
     Raises
     ------
     ValueError
-        If ``num_nodes``, ``iterations``, ``trace_every``, or ``edge_weights``
-        are invalid.
+        If ``num_nodes``, ``iterations``, ``trace_every``, ``fidelity_mode``,
+        or ``edge_weights`` are invalid.
     RuntimeError
         If the pipeline fails to populate final positions.
     """
@@ -123,6 +148,8 @@ def layout_stress_majorization_pipeline(
         raise ValueError("iterations must be non-negative.")
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative.")
+    if fidelity_mode not in {None, _FIDELITY_MODE_OGDF}:
+        raise ValueError(f"Unknown stress_majorization fidelity_mode: {fidelity_mode!r}.")
     if edge_weights is not None:
         if edge_weights.ndim != 1:
             raise ValueError("edge_weights must be shape [E].")
@@ -155,6 +182,7 @@ def layout_stress_majorization_pipeline(
     final_state = build_stress_majorization_pipeline(
         iterations=iterations,
         trace_every=trace_every,
+        fidelity_mode=fidelity_mode,
     ).apply(problem, state, ctx)
 
     if final_state.pos is None:
