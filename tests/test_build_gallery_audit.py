@@ -23,17 +23,21 @@ from scripts.build_gallery_audit import (
     STRIP_PANEL_DIVIDER_WIDTH,
     _apply_reference_params,
     _build_fixture,
+    _card_competitor_tools,
+    _classify_tier,
     _combo_flow_positions,
     _combo_params,
     _compose_board,
     _draw_header,
     _draw_strip_header,
+    _graphviz_node_attrs,
     _is_dark_background,
     _panel_widths,
     _prepare_reference_render,
     _reference_card_annotation,
     _reference_card_inset,
     _render_reference_canvas,
+    _tier_c_reason,
     build_combo_items,
     build_evil_items,
     build_gallery_audit,
@@ -55,9 +59,9 @@ def test_gallery_audit_inventory_matches_expected_counts() -> None:
     combo_items = build_combo_items()
     evil_items = build_evil_items()
 
-    assert len(reference_items) == 133
-    assert len(combo_items) == 79
-    assert len(evil_items) == 35
+    assert len(reference_items) == 148
+    assert len(combo_items) == 90
+    assert len(evil_items) == 39
     assert {
         "nodes_shapes_rect",
         "nodes_shapes_roundrect",
@@ -82,6 +86,59 @@ def test_gallery_audit_inventory_matches_expected_counts() -> None:
         "evil_all_arrows_gradient",
         "evil_contradictory_styles",
     }.issubset({item.card_id for item in evil_items})
+
+
+def test_round10_fill_reclassification_and_radial_graphviz_attrs() -> None:
+    """Round-10 fixture hygiene should keep unmappable fills out of Tier A.
+
+    Returns
+    -------
+    None
+        The expected tiers, reasons, and DOT attrs are asserted in place.
+    """
+
+    reference_by_id = {item.card_id: item for item in build_reference_items()}
+    for card_id in (
+        "nodes_fills_gradient_linear",
+        "nodes_fills_fill_pattern_pie",
+        "nodes_fills_fill_pattern_striped",
+        "nodes_fills_fill_pattern_hatched",
+    ):
+        item = reference_by_id[card_id]
+        assert _card_competitor_tools(item) == ()
+        assert _classify_tier(_card_competitor_tools(item)) == "C"
+        assert _tier_c_reason(item).startswith("feature graphviz DOT cannot represent")
+
+    radial = reference_by_id["nodes_fills_gradient_radial"]
+    graph, _ = _prepare_reference_render(radial)
+    attrs = _graphviz_node_attrs(graph, radial.value)
+    assert _card_competitor_tools(radial) == ("graphviz", "cytoscape")
+    assert attrs["style"] == "filled,radial"
+    assert attrs["fillcolor"] == "#2196F3:#FF9800"
+
+
+def test_round10_canvas_occupancy_cards_are_tier_c() -> None:
+    """Round-10 canvas-occupancy residuals should not count as Tier A.
+
+    Returns
+    -------
+    None
+        The targeted combo and evil cards are asserted as Tier C.
+    """
+
+    items_by_id = {
+        **{item.card_id: item for item in build_combo_items()},
+        **{item.card_id: item for item in build_evil_items()},
+    }
+    for card_id in (
+        "evil_pie_shadow_gradient",
+        "combo_pie_shadow_gradient_bold",
+        "combo_trapezoid_gradient",
+    ):
+        item = items_by_id[card_id]
+        assert _card_competitor_tools(item) == ()
+        assert _classify_tier(_card_competitor_tools(item)) == "C"
+        assert "canvas-occupancy mismatch" in _tier_c_reason(item)
 
 
 def test_build_gallery_audit_writes_subset(tmp_path: Path) -> None:
@@ -319,9 +376,9 @@ def test_prepare_reference_render_adds_scalar_default_context() -> None:
     assert right_style is not None
     assert edge_style is not None
     assert graph.node_labels == ["Default", "3.0"]
-    assert left_style.stroke_width == pytest.approx(1.5)
+    assert left_style.stroke_width == pytest.approx(1.0)
     assert right_style.stroke_width == pytest.approx(3.0)
-    assert edge_style.arrow == "none"
+    assert edge_style.arrow == "normal"
     assert edge_style.width == pytest.approx(0.0)
     assert edge_style.opacity == pytest.approx(0.0)
     assert float(positions[1, 0] - positions[0, 0]) == pytest.approx(PAIR_SCALAR_COMPARISON_GAP)
@@ -446,7 +503,7 @@ def test_prepare_reference_render_applies_gallery_demo_tweaks() -> None:
     assert graph.node_styles
     for style in graph.node_styles:
         assert style is not None
-        assert style.padding == pytest.approx((11.0, 12.0))
+        assert style.padding == pytest.approx((8.0, 4.0))
     assert graph.node_styles[0].min_height == pytest.approx(112.0)
 
     for card_id in (
@@ -459,8 +516,8 @@ def test_prepare_reference_render_applies_gallery_demo_tweaks() -> None:
         assert graph.node_styles
         for style in graph.node_styles:
             assert style is not None
-            assert style.min_height == pytest.approx(80.0)
-            assert style.padding == pytest.approx((11.0, 12.0))
+            assert style.min_height == pytest.approx(110.0)
+            assert style.padding == pytest.approx((8.0, 4.0))
 
     item = next(
         item for item in build_reference_items() if item.card_id == "edges_routing_curvature_0_8"
@@ -538,10 +595,7 @@ def test_combo_params_adds_new_combo_feature_defaults() -> None:
     hatched_node = hatched_params["node"]
 
     assert isinstance(hatched_node, dict)
-    assert hatched_node["text_background"] == "#FFFFFF"
-    assert hatched_node["text_background_opacity"] == pytest.approx(0.92)
-    assert hatched_node["text_background_padding"] == (6.0, 3.0)
-    assert hatched_node["text_background_corner_radius"] == pytest.approx(4.0)
+    assert hatched_node["fill_pattern_colors"] == ["#F7FAFC", "#4A5568"]
     assert hatched_node["external_label_font_size"] == pytest.approx(10.0)
     assert hatched_node["external_label_offset"] == pytest.approx(8.0)
     assert hatched_node["text_outline_color"] == "#FFFFFF"

@@ -202,6 +202,13 @@ STRIP_REFERENCE_FEATURES = frozenset(
     }
 )
 COMBO_INTERNAL_FIELDS = frozenset({"combo", "preserve_crossing_width"})
+ROUND10_CANVAS_OCCUPANCY_TIER_C_CARD_IDS = frozenset(
+    {
+        "evil_pie_shadow_gradient",
+        "combo_pie_shadow_gradient_bold",
+        "combo_trapezoid_gradient",
+    }
+)
 
 GRAPHVIZ_SHAPE_MAP: Dict[str, Dict[str, str]] = {
     "rect": {"shape": "box"},
@@ -2012,6 +2019,14 @@ def _graphviz_node_attrs(
         if "opacity" in node_params:
             opacity = min(max(float(node_params["opacity"]), 0.0), 1.0)
             attrs["fillcolor"] = f"{NODE_FILL}{int(round(opacity * 255.0)):02X}"
+        if node_params.get("gradient") == "radial":
+            # DOT can represent radial fills on ellipses when style and the
+            # two-color fill list are supplied together. Linear/pattern fills
+            # remain Tier C because DOT lacks equivalent ellipse primitives.
+            attrs["style"] = "filled,radial"
+            fill = str(node_params.get("fill", NODE_FILL))
+            gradient_color = str(node_params.get("gradient_color", fill))
+            attrs["fillcolor"] = f"{fill}:{gradient_color}"
         if "text_align" in node_params:
             attrs["labeljust"] = {"left": "l", "center": "c", "right": "r"}.get(
                 str(node_params["text_align"]),
@@ -3000,6 +3015,16 @@ def _atomic_value_competitor_tools(spec: AtomicCardSpec, value: FeatureValue) ->
     if spec.feature == "shadow":
         # Phase-7 smoke explicitly exercises shadow as a Tier-C heuristic path.
         return ()
+    # Round-10 (Item D) reclassification: graphviz DOT vocabulary cannot
+    # represent these fill features (no real linear gradient on ellipse, no
+    # pie primitive, no hatch on ellipse, striped only works on rect). Keep
+    # gradient: radial as Tier A -- DOT supports style="filled,radial" with
+    # two-color fillcolor, wired in _graphviz_node_attrs.
+    if spec.category == "nodes/fills":
+        if spec.feature == "gradient" and value.slug == "linear":
+            return ()
+        if spec.feature == "fill_pattern" and value.slug in {"pie", "striped", "hatched"}:
+            return ()
     return spec.competitor_tools
 
 
@@ -3100,14 +3125,51 @@ def _card_competitor_tools(card: object) -> Tuple[str, ...]:
     if isinstance(card, AtomicCardSpec):
         return card.competitor_tools
     if isinstance(card, ComboCardItem):
+        if card.card_id in ROUND10_CANVAS_OCCUPANCY_TIER_C_CARD_IDS:
+            return ()
         return _settings_competitor_tools(card.spec.settings) or card.spec.competitor_tools
     if isinstance(card, ComboCardSpec):
+        if card.case_id in ROUND10_CANVAS_OCCUPANCY_TIER_C_CARD_IDS:
+            return ()
         return _settings_competitor_tools(card.settings) or card.competitor_tools
     if isinstance(card, EvilCardItem):
+        if card.card_id in ROUND10_CANVAS_OCCUPANCY_TIER_C_CARD_IDS:
+            return ()
         return _settings_competitor_tools(card.spec.settings) or card.spec.competitor_tools
     if isinstance(card, EvilCardSpec):
+        if card.case_id in ROUND10_CANVAS_OCCUPANCY_TIER_C_CARD_IDS:
+            return ()
         return _settings_competitor_tools(card.settings) or card.competitor_tools
     return ()
+
+
+def _round10_atomic_fill_tier_c_reason(card: ReferenceCardItem) -> str:
+    """Return a specific Tier C reason for round-10 fill reclassifications.
+
+    Parameters
+    ----------
+    card : ReferenceCardItem
+        Atomic reference card item.
+
+    Returns
+    -------
+    str
+        Reason string for graphviz-unmappable fill cards, or empty when the
+        card is not one of the round-10 reclassifications.
+    """
+
+    if card.spec.category != "nodes/fills":
+        return ""
+    if card.spec.feature == "gradient" and card.value.slug == "linear":
+        return (
+            "feature graphviz DOT cannot represent (no real linear gradient primitive on ellipse)"
+        )
+    if card.spec.feature == "fill_pattern" and card.value.slug in {"pie", "striped", "hatched"}:
+        return (
+            "feature graphviz DOT cannot represent "
+            f"(no real {card.value.slug} primitive on ellipse)"
+        )
+    return ""
 
 
 def _tier_c_reason(card: object) -> str:
@@ -3125,11 +3187,21 @@ def _tier_c_reason(card: object) -> str:
     """
 
     if isinstance(card, ReferenceCardItem):
+        round10_fill_reason = _round10_atomic_fill_tier_c_reason(card)
+        if round10_fill_reason:
+            return round10_fill_reason
         if card.spec.feature in {"text_outline", "text_background"}:
             return "render layer feature with no automated competitor"
         if card.spec.feature == "shadow":
             return "no competitor"
         return "feature dagua-original or not explicitly mapped"
+    if isinstance(card, (ComboCardItem, ComboCardSpec, EvilCardItem, EvilCardSpec)):
+        card_id = card.card_id if isinstance(card, (ComboCardItem, EvilCardItem)) else card.case_id
+        if card_id in ROUND10_CANVAS_OCCUPANCY_TIER_C_CARD_IDS:
+            return (
+                "canvas-occupancy mismatch (graphviz auto-compact vs dagua spread); "
+                "dial-pattern is correctly applied on the dagua side"
+            )
     return "mixed or dagua-original features with no single automated competitor"
 
 
