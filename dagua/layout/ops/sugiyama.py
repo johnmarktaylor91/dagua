@@ -24,6 +24,7 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op  # noqa: E402
 _NO_SHIFT = float("inf")
 _SUGIYAMA_RESOLVED_SIZES_KEY = "sugiyama_resolved_sizes"
 _SUGIYAMA_ACYCLIC_EDGES_KEY = "sugiyama_acyclic_edges"
+_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY = "sugiyama_acyclic_edge_weights"
 _SUGIYAMA_REVERSED_MASK_KEY = "sugiyama_reversed_mask"
 _SUGIYAMA_LAYER_ASSIGNMENTS_KEY = "sugiyama_layer_assignments"
 _SUGIYAMA_EXPANDED_GRAPH_KEY = "sugiyama_expanded_graph"
@@ -62,11 +63,19 @@ class _BarycenterOrderingConfig:
         Retained for API compatibility with the classic entry point.
     trace_every : int, default=0
         Snapshot cadence in passes. Zero disables tracing.
+    stop_when_stable : bool, default=False
+        If ``True``, stop after the first full pass that leaves all layer
+        orders unchanged.
+    use_incidence_barycenters : bool, default=False
+        If ``True``, average duplicate neighbor incidences directly. This
+        matches igraph's unweighted crossing-reduction semantics.
     """
 
     barycenter_passes: int = 24
     seed: int = 42
     trace_every: int = 0
+    stop_when_stable: bool = False
+    use_incidence_barycenters: bool = False
 
 
 @dataclass(frozen=True)
@@ -145,28 +154,44 @@ def _resolve_node_sizes(node_sizes: Optional[torch.Tensor], num_nodes: int) -> t
 
 def _prepare_acyclic_edges(
     edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
     num_nodes: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
     """Return a CPU ``edge_index`` with a robust acyclic orientation.
 
     Parameters
     ----------
     edge_index : torch.Tensor
         Input edge list of shape ``[2, E]``.
+    edge_weights : torch.Tensor, optional
+        Optional input edge weights with shape ``[E]``.
     num_nodes : int
         Number of nodes.
 
     Returns
     -------
     tuple
-        ``(acyclic_edges, reversed_mask)`` where ``acyclic_edges`` is a CPU
-        long tensor with shape ``[2, E]`` suitable for Kahn layering and
-        ``reversed_mask`` marks input edges reversed during cycle breaking.
+        ``(acyclic_edges, acyclic_edge_weights, reversed_mask)`` where
+        ``acyclic_edges`` is a CPU long tensor suitable for Kahn layering,
+        ``acyclic_edge_weights`` is aligned to the filtered edge list when
+        weights are provided, and ``reversed_mask`` marks retained input edges
+        reversed during cycle breaking.
     """
     edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
     if edge_index_cpu.numel() == 0:
-        return edge_index_cpu, torch.zeros((0,), dtype=torch.bool)
-    return make_acyclic_robust(edge_index_cpu, num_nodes)
+        return edge_index_cpu, None, torch.zeros((0,), dtype=torch.bool)
+
+    non_loop_mask = edge_index_cpu[0] != edge_index_cpu[1]
+    filtered_edges = edge_index_cpu[:, non_loop_mask]
+    filtered_weights: Optional[torch.Tensor] = None
+    if edge_weights is not None:
+        weights_cpu = edge_weights.detach().to(device="cpu", dtype=torch.float32)
+        filtered_weights = weights_cpu[non_loop_mask]
+    if filtered_edges.numel() == 0:
+        return filtered_edges, filtered_weights, torch.zeros((0,), dtype=torch.bool)
+
+    acyclic_edges, reversed_mask = make_acyclic_robust(filtered_edges, num_nodes)
+    return acyclic_edges, filtered_weights, reversed_mask
 
 
 def _longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -509,6 +534,8 @@ def _barycenter_ordering(
     node_sep: float,
     trace_every: int,
     output_device: torch.device,
+    stop_when_stable: bool,
+    use_incidence_barycenters: bool,
 ) -> Tuple[List[List[int]], List[torch.Tensor]]:
     """Minimize crossings via repeated barycenter sweeps.
 
@@ -542,6 +569,12 @@ def _barycenter_ordering(
         Snapshot cadence in passes. Zero disables tracing.
     output_device : torch.device
         Device for the emitted trace tensors.
+    stop_when_stable : bool
+        Whether to stop when a full down/up pass leaves all layer orders
+        unchanged.
+    use_incidence_barycenters : bool
+        Whether to ignore edge-weight maps and average duplicate neighbor
+        incidences directly.
 
     Returns
     -------
@@ -557,6 +590,7 @@ def _barycenter_ordering(
 
     for pass_num in range(num_passes):
         order_index = _node_order_map(ordered_layers)
+        changed = False
 
         for layer_idx in range(1, len(ordered_layers)):
             barycenters = _neighbor_barycenters(
@@ -564,8 +598,11 @@ def _barycenter_ordering(
                 neighbors_by_node=parents,
                 neighbor_weights_by_node=parent_weights,
                 order_index=order_index,
+                use_incidence_barycenters=use_incidence_barycenters,
             )
+            previous_order = list(ordered_layers[layer_idx])
             ordered_layers[layer_idx].sort(key=lambda node: barycenters[node])
+            changed = changed or ordered_layers[layer_idx] != previous_order
             order_index = _node_order_map(ordered_layers)
 
         for layer_idx in range(len(ordered_layers) - 2, -1, -1):
@@ -574,8 +611,11 @@ def _barycenter_ordering(
                 neighbors_by_node=children,
                 neighbor_weights_by_node=child_weights,
                 order_index=order_index,
+                use_incidence_barycenters=use_incidence_barycenters,
             )
+            previous_order = list(ordered_layers[layer_idx])
             ordered_layers[layer_idx].sort(key=lambda node: barycenters[node])
+            changed = changed or ordered_layers[layer_idx] != previous_order
             order_index = _node_order_map(ordered_layers)
 
         if trace_every > 0 and (pass_num + 1) % trace_every == 0:
@@ -592,6 +632,8 @@ def _barycenter_ordering(
                     output_device=output_device,
                 )
             )
+        if stop_when_stable and not changed:
+            break
 
     return ordered_layers, traces
 
@@ -601,6 +643,7 @@ def _neighbor_barycenters(
     neighbors_by_node: Sequence[Sequence[int]],
     neighbor_weights_by_node: Sequence[Dict[int, float]],
     order_index: Dict[int, float],
+    use_incidence_barycenters: bool = False,
 ) -> Dict[int, float]:
     """Compute barycenter values from already ordered neighboring layers.
 
@@ -614,6 +657,10 @@ def _neighbor_barycenters(
         Parent or child edge-weight maps indexed by node.
     order_index : dict
         Current within-layer order position for every node.
+    use_incidence_barycenters : bool, default=False
+        If ``True``, compute an unweighted average over the adjacency list,
+        preserving duplicate incidences instead of aggregating them by
+        neighbor.
 
     Returns
     -------
@@ -624,6 +671,9 @@ def _neighbor_barycenters(
     for node in nodes:
         neighbor_positions = [order_index[neighbor] for neighbor in neighbors_by_node[node]]
         if neighbor_positions:
+            if use_incidence_barycenters:
+                barycenters[node] = sum(neighbor_positions) / float(len(neighbor_positions))
+                continue
             weighted_sum = 0.0
             total_weight = 0.0
             for neighbor in neighbors_by_node[node]:
@@ -1410,6 +1460,7 @@ class _PrepareAcyclicEdges(Op):
     reads: ClassVar[Tuple[str, ...]] = ()
     writes: ClassVar[Tuple[str, ...]] = (
         f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",
+        f"extras.{_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY}",
         f"extras.{_SUGIYAMA_REVERSED_MASK_KEY}",
     )
     access_pattern: ClassVar[str] = "global"
@@ -1438,11 +1489,13 @@ class _PrepareAcyclicEdges(Op):
         """
         del ctx
 
-        acyclic_edges, reversed_mask = _prepare_acyclic_edges(
+        acyclic_edges, acyclic_edge_weights, reversed_mask = _prepare_acyclic_edges(
             edge_index=problem.edge_index,
+            edge_weights=problem.edge_weights,
             num_nodes=problem.num_nodes,
         )
         state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY] = acyclic_edges
+        state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY] = acyclic_edge_weights
         state.extras[_SUGIYAMA_REVERSED_MASK_KEY] = reversed_mask
         return state
 
@@ -1504,6 +1557,7 @@ class _ExpandDummyNodes(Op):
     category: ClassVar[OpCategory] = OpCategory.LAYERING
     reads: ClassVar[Tuple[str, ...]] = (
         f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",
+        f"extras.{_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY}",
         f"extras.{_SUGIYAMA_LAYER_ASSIGNMENTS_KEY}",
         f"extras.{_SUGIYAMA_RESOLVED_SIZES_KEY}",
     )
@@ -1513,6 +1567,7 @@ class _ExpandDummyNodes(Op):
     )
     requires: ClassVar[Tuple[str, ...]] = (
         f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",
+        f"extras.{_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY}",
         f"extras.{_SUGIYAMA_LAYER_ASSIGNMENTS_KEY}",
         f"extras.{_SUGIYAMA_RESOLVED_SIZES_KEY}",
     )
@@ -1547,7 +1602,7 @@ class _ExpandDummyNodes(Op):
             layer_assignments=state.extras[_SUGIYAMA_LAYER_ASSIGNMENTS_KEY],
             node_sizes=state.extras[_SUGIYAMA_RESOLVED_SIZES_KEY],
             num_original_nodes=problem.num_nodes,
-            edge_weights=problem.edge_weights,
+            edge_weights=state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY],
         )
         state.extras[_SUGIYAMA_EXPANDED_GRAPH_KEY] = expanded_graph
         state.extras[_SUGIYAMA_EXPANDED_EDGE_WEIGHTS_KEY] = expanded_edge_weights
@@ -1649,6 +1704,8 @@ class _BarycenterOrdering(Op):
         barycenter_passes: int = 24,
         seed: int = 42,
         trace_every: int = 0,
+        stop_when_stable: bool = False,
+        use_incidence_barycenters: bool = False,
         *,
         config: Optional[_BarycenterOrderingConfig] = None,
     ) -> None:
@@ -1662,6 +1719,12 @@ class _BarycenterOrdering(Op):
             Retained for API compatibility.
         trace_every : int, default=0
             Snapshot cadence in passes. Zero disables tracing.
+        stop_when_stable : bool, default=False
+            Stop after the first full pass that leaves all layer orders
+            unchanged.
+        use_incidence_barycenters : bool, default=False
+            Average duplicate neighbor incidences directly, matching igraph's
+            crossing-reduction semantics.
         config : _BarycenterOrderingConfig | None, optional
             Optional configuration. When provided, it takes precedence over
             the scalar arguments.
@@ -1675,6 +1738,8 @@ class _BarycenterOrdering(Op):
             barycenter_passes=barycenter_passes,
             seed=seed,
             trace_every=trace_every,
+            stop_when_stable=stop_when_stable,
+            use_incidence_barycenters=use_incidence_barycenters,
         )
 
     def apply(
@@ -1724,6 +1789,8 @@ class _BarycenterOrdering(Op):
             node_sep=node_sep,
             trace_every=self.config.trace_every,
             output_device=output_device,
+            stop_when_stable=self.config.stop_when_stable,
+            use_incidence_barycenters=self.config.use_incidence_barycenters,
         )
         state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY] = ordered_layers
         state.extras[_SUGIYAMA_TRACES_KEY] = traces
