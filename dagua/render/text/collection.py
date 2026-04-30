@@ -10,6 +10,7 @@ from matplotlib.patches import PathPatch
 from matplotlib.path import Path
 from matplotlib.transforms import Affine2D
 
+from dagua.render.edges.ribbon import polyline_ribbon_path
 from dagua.render.text.decorations import (
     background_rect_path,
     strikethrough_path,
@@ -458,6 +459,66 @@ def _bold_emphasis_linewidth(spec: DaguaText) -> float:
     )
 
 
+def _dedupe_polyline(points: np.ndarray) -> np.ndarray:
+    """Remove adjacent duplicate points from a flattened path contour.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Contour vertices with shape ``[N, 2]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        De-duplicated contour vertices with shape ``[M, 2]``.
+    """
+    if points.shape[0] <= 1:
+        return points
+    keep = [True]
+    for index in range(1, points.shape[0]):
+        keep.append(not np.allclose(points[index], points[index - 1]))
+    return points[np.array(keep, dtype=bool)]
+
+
+def _glyph_stroke_ribbon_paths(path: Path, stroke_width: float) -> List[Path]:
+    """Build filled data-coordinate ribbons for a glyph-outline stroke.
+
+    Parameters
+    ----------
+    path : Path
+        Positioned glyph outline path in data coordinates.
+    stroke_width : float
+        Stroke body width in data units.
+
+    Returns
+    -------
+    list[Path]
+        Filled ribbon polygons approximating the glyph stroke.
+    """
+    if stroke_width <= 0.0 or _path_is_empty(path):
+        return []
+
+    ribbons: List[Path] = []
+    for polygon in path.to_polygons(closed_only=False):
+        points = _dedupe_polyline(np.asarray(polygon, dtype=np.float64))
+        if points.shape[0] < 2:
+            continue
+        if not np.allclose(points[0], points[-1]):
+            points = np.vstack([points, points[0]])
+        if points.shape[0] < 3:
+            continue
+        ribbons.append(
+            polyline_ribbon_path(
+                points,
+                width=stroke_width,
+                cap_start="butt",
+                cap_end="butt",
+                join_style="bevel",
+            )
+        )
+    return ribbons
+
+
 def render_text(
     ax: Any,
     specs: Sequence[DaguaText],
@@ -574,42 +635,48 @@ def render_text(
                 for segment_index, segment in enumerate(line.segments):
                     if _path_is_empty(segment.glyph_run.path):
                         continue
-                    outline_patch = PathPatch(
-                        _segment_path(spec, block, line, segment),
-                        facecolor="none",
-                        edgecolor=spec.outline_color,
-                        linewidth=_outline_linewidth(spec),
-                        alpha=spec.alpha,
-                        zorder=spec.zorder - 0.02,
-                        capstyle="round",
-                        joinstyle="round",
-                    )
                     outline_gid = _patch_gid(spec, "outline", line_index, segment_index)
-                    if outline_gid is not None:
-                        outline_patch.set_gid(outline_gid)
-                    _register_hover(svg_hover_map, outline_gid, spec.text)
-                    _add_patch(ax, outline_patch, spec, artists)
+                    outline_width = _outline_linewidth(spec) * safe_scale
+                    for outline_path in _glyph_stroke_ribbon_paths(
+                        _segment_path(spec, block, line, segment),
+                        outline_width,
+                    ):
+                        outline_patch = PathPatch(
+                            outline_path,
+                            facecolor=spec.outline_color,
+                            edgecolor="none",
+                            linewidth=0.0,
+                            alpha=spec.alpha,
+                            zorder=spec.zorder - 0.02,
+                        )
+                        if outline_gid is not None:
+                            outline_patch.set_gid(outline_gid)
+                        _register_hover(svg_hover_map, outline_gid, spec.text)
+                        _add_patch(ax, outline_patch, spec, artists)
 
         for line_index, line in enumerate(block.lines):
             for segment_index, segment in enumerate(line.segments):
                 if _path_is_empty(segment.glyph_run.path):
                     continue
                 if _segment_needs_bold_emphasis(spec, segment):
-                    emphasis_patch = PathPatch(
-                        _segment_path(spec, block, line, segment),
-                        facecolor="none",
-                        edgecolor=segment.color,
-                        linewidth=_bold_emphasis_linewidth(spec),
-                        alpha=spec.alpha,
-                        zorder=spec.zorder - 0.01,
-                        capstyle="round",
-                        joinstyle="round",
-                    )
                     emphasis_gid = _patch_gid(spec, "embolden", line_index, segment_index)
-                    if emphasis_gid is not None:
-                        emphasis_patch.set_gid(emphasis_gid)
-                    _register_hover(svg_hover_map, emphasis_gid, spec.text)
-                    _add_patch(ax, emphasis_patch, spec, artists)
+                    emphasis_width = _bold_emphasis_linewidth(spec) * safe_scale
+                    for emphasis_path in _glyph_stroke_ribbon_paths(
+                        _segment_path(spec, block, line, segment),
+                        emphasis_width,
+                    ):
+                        emphasis_patch = PathPatch(
+                            emphasis_path,
+                            facecolor=segment.color,
+                            edgecolor="none",
+                            linewidth=0.0,
+                            alpha=spec.alpha,
+                            zorder=spec.zorder - 0.01,
+                        )
+                        if emphasis_gid is not None:
+                            emphasis_patch.set_gid(emphasis_gid)
+                        _register_hover(svg_hover_map, emphasis_gid, spec.text)
+                        _add_patch(ax, emphasis_patch, spec, artists)
                 fill_patch = PathPatch(
                     _segment_path(spec, block, line, segment),
                     facecolor=segment.color,
