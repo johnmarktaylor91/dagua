@@ -1,0 +1,268 @@
+{
+  "dagua_engine": "classic_maxent_stress",
+  "effective_dagua_seeds": 3,
+  "graphs": {
+    "linear_3layer_mlp": {
+      "dagua_vs_graphviz": {
+        "mean": 6.500023778481061e-09,
+        "median": 8.834500242471677e-09,
+        "p95": 8.834500242471677e-09
+      },
+      "deterministic_degenerate": false,
+      "n_dagua_seeds": 3,
+      "n_graphviz_seeds": 1,
+      "tost": {
+        "0.25x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "0.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "2x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        }
+      },
+      "within_dagua": {
+        "mean": 4.671604436623511e-09,
+        "median": 7.0074066549352665e-09,
+        "p95": 7.0074066549352665e-09
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "mixed_width_labels": {
+      "dagua_vs_graphviz": {
+        "mean": 0.0001331248349742964,
+        "median": 0.00013285974273458123,
+        "p95": 0.00013357549178181217
+      },
+      "deterministic_degenerate": false,
+      "n_dagua_seeds": 3,
+      "n_graphviz_seeds": 1,
+      "tost": {
+        "0.25x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "0.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "2x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        }
+      },
+      "within_dagua": {
+        "mean": 1.1363972560000473e-06,
+        "median": 1.701554197097721e-06,
+        "p95": 1.701554197097721e-06
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "nested_shallow_enc_dec": {
+      "dagua_vs_graphviz": {
+        "mean": 3.5201917114591197e-07,
+        "median": 4.2551334900053916e-07,
+        "p95": 4.2551334900053916e-07
+      },
+      "deterministic_degenerate": false,
+      "n_dagua_seeds": 3,
+      "n_graphviz_seeds": 1,
+      "tost": {
+        "0.25x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "0.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "2x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        }
+      },
+      "within_dagua": {
+        "mean": 1.4698836518315753e-07,
+        "median": 2.204825477747363e-07,
+        "p95": 2.204825477747363e-07
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "parallel_multiedge_bundle": {
+      "dagua_vs_graphviz": {
+        "mean": 9.632088525298361e-07,
+        "median": 8.2256428868277e-07,
+        "p95": 1.2023046110698487e-06
+      },
+      "deterministic_degenerate": false,
+      "n_dagua_seeds": 3,
+      "n_graphviz_seeds": 1,
+      "tost": {
+        "0.25x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "0.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "2x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        }
+      },
+      "within_dagua": {
+        "mean": 1.0887985884740676e-06,
+        "median": 1.5729755205029505e-06,
+        "p95": 1.5729755205029505e-06
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "tl_mlp_3layer": {
+      "dagua_vs_graphviz": {
+        "mean": 8.917762917004524e-09,
+        "median": 1.3048800262538407e-08,
+        "p95": 1.3130322251697634e-08
+      },
+      "deterministic_degenerate": false,
+      "n_dagua_seeds": 3,
+      "n_graphviz_seeds": 1,
+      "tost": {
+        "0.25x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "0.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "2x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        }
+      },
+      "within_dagua": {
+        "mean": 8.974682182601631e-09,
+        "median": 1.3017595001940663e-08,
+        "p95": 1.3067013870937671e-08
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    }
+  },
+  "requested_seeds": 3,
+  "target_engine": "ogdf_stress"
+}
