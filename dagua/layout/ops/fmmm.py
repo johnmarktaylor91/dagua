@@ -42,9 +42,6 @@ _COARSE_INIT_FR = "fr"
 _COARSE_INIT_RANDOM = "ogdf_random"
 _OGDF_FORCE_SCALING_FACTOR = 0.05
 _OGDF_FORCE_THRESHOLD = 0.01
-_OGDF_EXACT_REPULSION_CUTOFF = 174
-_OGDF_POST_PRELIMINARY_STEPS = 10
-_OGDF_FINE_TUNING_STEPS = 20
 _TYPE_SUN = 1
 _TYPE_PLANET = 2
 _TYPE_PLANET_WITH_MOONS = 3
@@ -885,43 +882,6 @@ def _exact_repulsion(positions: torch.Tensor) -> torch.Tensor:
     return (delta * factor.unsqueeze(2)).sum(dim=1)
 
 
-def _ogdf_resized_positions(
-    positions: torch.Tensor,
-    edge_index: torch.Tensor,
-    edge_lengths: torch.Tensor,
-) -> torch.Tensor:
-    """Resize coordinates so actual edge lengths match OGDF's ideal average.
-
-    Parameters
-    ----------
-    positions : torch.Tensor
-        Position tensor with shape ``[N, 2]``.
-    edge_index : torch.Tensor
-        Unique undirected edges with shape ``[2, E]``.
-    edge_lengths : torch.Tensor
-        Ideal edge lengths with shape ``[E]``.
-
-    Returns
-    -------
-    torch.Tensor
-        Resized position tensor with shape ``[N, 2]``.
-    """
-    if edge_index.numel() == 0 or edge_lengths.numel() == 0:
-        return positions
-
-    src = edge_index[0].to(device=positions.device, dtype=torch.long)
-    dst = edge_index[1].to(device=positions.device, dtype=torch.long)
-    actual_lengths = torch.linalg.norm(positions[dst] - positions[src], dim=1)
-    actual_average = float(actual_lengths.mean().item())
-    if actual_average <= _MIN_DISTANCE:
-        return positions
-
-    ideal_average = float(
-        edge_lengths.to(device=positions.device, dtype=positions.dtype).mean().item()
-    )
-    return positions * (ideal_average / actual_average)
-
-
 def _barnes_hut_repulsion(
     positions: torch.Tensor,
     theta: float,
@@ -1373,7 +1333,6 @@ class FMMMRefineLevel(Op):
     cooling_factor: float = _COOLING_FACTOR
     force_model: str = _FORCE_MODEL_OGDF_NEW
     ogdf_force_scaling: bool = False
-    exact_repulsion_cutoff: int = 500
     temperature_key: str = _FMMM_TEMPERATURE_KEY
 
     def apply(
@@ -1413,7 +1372,7 @@ class FMMMRefineLevel(Op):
                 ideal_length=ideal_length,
                 edge_lengths=self.edge_lengths,
                 edge_weights=self.edge_weights,
-                use_exact=int(state.pos.shape[0]) <= self.exact_repulsion_cutoff,
+                use_exact=int(state.pos.shape[0]) <= 500,
                 force_model=self.force_model,
                 ogdf_force_scaling=self.ogdf_force_scaling,
                 temperature_key=self.temperature_key,
@@ -1666,12 +1625,6 @@ class _InitializeFMMMStateConfig:
         Coarsest-level initialization strategy.
     ogdf_force_scaling : bool, default=False
         Whether to use OGDF-compatible force scaling and damping.
-    exact_repulsion_cutoff : int, default=500
-        Maximum node count that uses exact pairwise repulsion.
-    ogdf_postprocessing : bool, default=False
-        Whether to run OGDF-style resize and fine-tuning before finalization.
-    integer_positions : bool, default=False
-        Whether to floor final coordinates before normalization.
     """
 
     steps: int = 200
@@ -1679,9 +1632,6 @@ class _InitializeFMMMStateConfig:
     galaxy_choice: str = _GALAXY_CHOICE_HIGHER
     coarsest_init: str = _COARSE_INIT_FR
     ogdf_force_scaling: bool = False
-    exact_repulsion_cutoff: int = 500
-    ogdf_postprocessing: bool = False
-    integer_positions: bool = False
 
 
 @register_op
@@ -1741,9 +1691,6 @@ class _InitializeFMMMState(Op):
         state.extras["fmmm_force_model"] = self.config.force_model
         state.extras["fmmm_coarsest_init"] = self.config.coarsest_init
         state.extras["fmmm_ogdf_force_scaling"] = self.config.ogdf_force_scaling
-        state.extras["fmmm_exact_repulsion_cutoff"] = self.config.exact_repulsion_cutoff
-        state.extras["fmmm_ogdf_postprocessing"] = self.config.ogdf_postprocessing
-        state.extras["fmmm_integer_positions"] = self.config.integer_positions
         return state
 
 
@@ -1867,7 +1814,6 @@ class _RefineCoarsestLevel(Op):
         refinement_area = state.extras["fmmm_refinement_area"]
         force_model = state.extras["fmmm_force_model"]
         ogdf_force_scaling = state.extras["fmmm_ogdf_force_scaling"]
-        exact_repulsion_cutoff = state.extras["fmmm_exact_repulsion_cutoff"]
 
         state = FMMMRefineLevel(
             edge_index=coarsest_level.edge_index,
@@ -1878,7 +1824,6 @@ class _RefineCoarsestLevel(Op):
             edge_weights=coarsest_level.edge_weights,
             force_model=force_model,
             ogdf_force_scaling=ogdf_force_scaling,
-            exact_repulsion_cutoff=exact_repulsion_cutoff,
         ).apply(
             problem,
             state,
@@ -1939,7 +1884,6 @@ class FMMMUncoarsenLoop(Op):
         refinement_area = state.extras["fmmm_refinement_area"]
         force_model = state.extras["fmmm_force_model"]
         ogdf_force_scaling = state.extras["fmmm_ogdf_force_scaling"]
-        exact_repulsion_cutoff = state.extras["fmmm_exact_repulsion_cutoff"]
         rng = random.Random(problem.seed)
 
         positions = state.pos
@@ -1955,7 +1899,6 @@ class FMMMUncoarsenLoop(Op):
                 edge_weights=levels[level].edge_weights,
                 force_model=force_model,
                 ogdf_force_scaling=ogdf_force_scaling,
-                exact_repulsion_cutoff=exact_repulsion_cutoff,
             ).apply(problem, state, ctx)
             positions = state.pos
 
@@ -2012,82 +1955,20 @@ class _SingleLevelFallback(Op):
         refinement_area = state.extras["fmmm_refinement_area"]
         force_model = state.extras["fmmm_force_model"]
         ogdf_force_scaling = state.extras["fmmm_ogdf_force_scaling"]
-        exact_repulsion_cutoff = state.extras["fmmm_exact_repulsion_cutoff"]
 
         state = FMMMRefineLevel(
             edge_index=levels[0].edge_index,
             steps=level_budget,
             theta=1.0,
             area=refinement_area,
-            edge_lengths=levels[0].edge_lengths,
             edge_weights=levels[0].edge_weights,
             force_model=force_model,
             ogdf_force_scaling=ogdf_force_scaling,
-            exact_repulsion_cutoff=exact_repulsion_cutoff,
         ).apply(
             problem,
             state,
             ctx,
         )
-        return state
-
-
-@register_op
-class _PostprocessFMMMPositions(Op):
-    """Run OGDF-style postprocessing when reference mode opts into it."""
-
-    name: ClassVar[str] = "fmmm_postprocess_positions"
-    category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
-    requires: ClassVar[Tuple[str, ...]] = ("pos",)
-
-    def apply(
-        self,
-        problem: LayoutProblem,
-        state: SolveState,
-        ctx: RuntimeContext,
-    ) -> SolveState:
-        """Apply OGDF's resize, preliminary post-iterations, and fine tuning.
-
-        Parameters
-        ----------
-        problem : LayoutProblem
-            Immutable layout inputs.
-        state : SolveState
-            Mutable solve state containing finest-level positions.
-        ctx : RuntimeContext
-            Execution infrastructure.
-
-        Returns
-        -------
-        SolveState
-            State with postprocessed positions when enabled.
-        """
-        if state.pos is None:
-            raise ValueError("_PostprocessFMMMPositions requires state.pos to be set.")
-        if not state.extras["fmmm_ogdf_postprocessing"]:
-            return state
-
-        level = state.extras["fmmm_levels"][0]
-        refinement_area = state.extras["fmmm_refinement_area"]
-        force_model = state.extras["fmmm_force_model"]
-        exact_repulsion_cutoff = state.extras["fmmm_exact_repulsion_cutoff"]
-        state.pos = _ogdf_resized_positions(state.pos, level.edge_index, level.edge_lengths)
-        for steps in (_OGDF_POST_PRELIMINARY_STEPS, _OGDF_FINE_TUNING_STEPS):
-            state = FMMMRefineLevel(
-                edge_index=level.edge_index,
-                steps=steps,
-                theta=1.0,
-                area=refinement_area,
-                edge_lengths=level.edge_lengths,
-                edge_weights=level.edge_weights,
-                force_model=force_model,
-                ogdf_force_scaling=True,
-                exact_repulsion_cutoff=exact_repulsion_cutoff,
-            ).apply(problem, state, ctx)
-            if state.pos is not None:
-                state.pos = _ogdf_resized_positions(state.pos, level.edge_index, level.edge_lengths)
         return state
 
 
@@ -2135,8 +2016,7 @@ class _FinalizeFMMMPositions(Op):
 
         device = _layout_device(problem.edge_index, problem.node_sizes)
         extent = state.extras["fmmm_extent"]
-        positions = state.pos.floor() if state.extras["fmmm_integer_positions"] else state.pos
-        state.pos = _normalize_positions(positions.to(device), extent).to(
+        state.pos = _normalize_positions(state.pos.to(device), extent).to(
             dtype=torch.float32, device=device
         )
         return state
