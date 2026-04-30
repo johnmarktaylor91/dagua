@@ -380,8 +380,8 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
     _variant(
         "classic_kk_steps100",
         "classic_kk",
-        "KK (steps=100)",
-        {"steps": 100},
+        "KK (SciPy default)",
+        {"steps": None, "orient_to_direction": False},
         "nx_kamada_kawai",
         {},
         False,
@@ -391,8 +391,8 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
     _variant(
         "classic_kk_steps300",
         "classic_kk",
-        "KK (steps=300)",
-        {"steps": 300},
+        "KK (SciPy default)",
+        {"steps": None, "orient_to_direction": False},
         "nx_kamada_kawai",
         {},
         False,
@@ -402,8 +402,8 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
     _variant(
         "classic_kk_steps1000",
         "classic_kk",
-        "KK (steps=1000)",
-        {"steps": 1000},
+        "KK (SciPy default)",
+        {"steps": None, "orient_to_direction": False},
         "nx_kamada_kawai",
         {},
         False,
