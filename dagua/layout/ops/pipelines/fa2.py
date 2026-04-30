@@ -108,6 +108,7 @@ def build_fa2_pipeline(config: Optional[FA2Config] = None) -> Pipeline:
                 FA2PrepareStateConfig(
                     outbound_attraction_distribution=resolved.outbound_attraction_distribution,
                     dtype=dtype,
+                    duplicate_weight_policy="last" if resolved.fidelity_mode else "sum",
                 )
             ),
             Repeat(

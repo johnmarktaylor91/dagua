@@ -6,7 +6,7 @@ import torch
 
 from dagua.eval.competitors.fa2_competitor import _FA2_REFERENCE_PACKAGE_ORDER
 from dagua.layout.ops.force import FA2ForceStep, FA2ForceStepConfig
-from dagua.layout.ops.pipelines.fa2 import layout_fa2_pipeline
+from dagua.layout.ops.pipelines.fa2 import FA2Config, build_fa2_pipeline, layout_fa2_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
 
@@ -86,3 +86,47 @@ def test_fa2_strong_gravity_moves_axis_aligned_nodes() -> None:
 def test_fa2_reference_prefers_live_fa2_package() -> None:
     """The ``fa2_ref`` comparator target should be explicit and stable."""
     assert _FA2_REFERENCE_PACKAGE_ORDER == ("fa2", "fa2_modified")
+
+
+def test_fa2_linlog_skips_coincident_edge_attraction() -> None:
+    """LinLog attraction should skip zero-distance endpoints like live ``fa2``."""
+    state = SolveState(
+        pos=torch.zeros((2, 2), dtype=torch.float64),
+        old_forces=torch.zeros((2, 2), dtype=torch.float64),
+        extras={
+            "fa2_undirected_edges": torch.tensor([[0], [1]], dtype=torch.long),
+            "fa2_undirected_weights": None,
+            "fa2_mass": torch.ones(2, dtype=torch.float64),
+            "fa2_outbound_att_compensation": 1.0,
+            "fa2_speed": 1.0,
+            "fa2_speed_efficiency": 1.0,
+        },
+    )
+
+    result = FA2ForceStep(FA2ForceStepConfig(linlog=True, gravity=0.0)).apply(
+        _empty_problem(num_nodes=2),
+        state,
+        _runtime_context(),
+    )
+
+    assert result.forces is not None
+    torch.testing.assert_close(result.forces, torch.zeros((2, 2), dtype=torch.float64))
+
+
+def test_fa2_fidelity_mode_keeps_last_duplicate_edge_weight() -> None:
+    """Fidelity mode should mirror NetworkX's duplicate edge overwrite policy."""
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 0, 1], [1, 1, 0]], dtype=torch.long),
+        num_nodes=2,
+        edge_weights=torch.tensor([2.0, 5.0, 7.0], dtype=torch.float64),
+        seed=42,
+    )
+    state = build_fa2_pipeline(FA2Config(steps=0, fidelity_mode=True)).apply(
+        problem,
+        SolveState(),
+        _runtime_context(),
+    )
+
+    weights = state.extras["fa2_undirected_weights"]
+    assert isinstance(weights, torch.Tensor)
+    torch.testing.assert_close(weights, torch.tensor([7.0], dtype=torch.float64))
