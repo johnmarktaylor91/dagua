@@ -13,6 +13,10 @@ import numpy as np
 import torch
 
 from dagua.layout.ops.base import Op
+from dagua.layout.ops.graph_utils import (
+    _shared_all_pairs_shortest_paths,
+    _shared_build_undirected_adjacency,
+)
 from dagua.layout.ops.graph_utils import layout_device as _layout_device
 from dagua.layout.ops.graph_utils import shortest_path_distances as _shortest_path_distances
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -20,6 +24,26 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _SM_MIN_DISTANCE = 1.0e-9
 _SM_MIN_SPAN = 1.0e-6
+_SM_DISTANCE_FILL_CLASSIC = "classic"
+_SM_DISTANCE_FILL_OGDF = "ogdf"
+_SM_UPDATE_DENSE = "dense"
+_SM_UPDATE_OGDF_SERIAL = "ogdf_serial"
+
+
+@dataclass(frozen=True)
+class PrepareStressMajorizationStateConfig:
+    """Configuration for :class:`PrepareStressMajorizationState`.
+
+    Parameters
+    ----------
+    distance_fill : str, default="classic"
+        Unreachable-distance fill policy. ``"classic"`` preserves dagua's
+        existing ``diameter + 1`` fill, while ``"ogdf"`` uses ``sqrt(N)`` in
+        unit-distance scale to match OGDF's ``100 * sqrt(N)`` after global
+        scale normalization.
+    """
+
+    distance_fill: str = _SM_DISTANCE_FILL_CLASSIC
 
 
 @dataclass(frozen=True)
@@ -65,11 +89,16 @@ class SmacofStepConfig:
         Maximum bisection halving attempts when the candidate increases stress.
     min_distance : float, default=1e-9
         Minimum Euclidean distance used to avoid division by zero in ``B(X)``.
+    update_mode : str, default="dense"
+        Majorization update implementation. ``"dense"`` uses dagua's existing
+        pseudoinverse SMACOF update, while ``"ogdf_serial"`` uses OGDF's
+        in-place serial weighted vote sweep.
     """
 
     stress_tolerance: float = 1.0e-8
     max_halving_steps: int = 8
     min_distance: float = 1.0e-9
+    update_mode: str = _SM_UPDATE_DENSE
 
 
 WEIGHTS_KEY = "sm_weights"
@@ -89,6 +118,10 @@ class PrepareStressMajorizationState(Op):
     Laplacian. The resulting tensors exactly match the classic dense
     stress-majorization implementation.
     """
+
+    config: PrepareStressMajorizationStateConfig = field(
+        default_factory=PrepareStressMajorizationStateConfig
+    )
 
     name: ClassVar[str] = "sm_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
@@ -118,13 +151,9 @@ class PrepareStressMajorizationState(Op):
         SolveState
             State with SMACOF precomputation in ``state.extras``.
         """
-        del self, ctx
+        del ctx
 
-        target_distances = _shortest_path_distances(
-            edge_index=problem.edge_index,
-            num_nodes=problem.num_nodes,
-            edge_weights=problem.edge_weights,
-        )
+        target_distances = self._target_distances(problem=problem)
         with np.errstate(divide="ignore"):
             # Classical stress majorization uses inverse-squared target distances
             # and explicitly zeroes the diagonal so self-pairs stay inactive.
@@ -143,6 +172,46 @@ class PrepareStressMajorizationState(Op):
         state.distance_matrix = torch.from_numpy(target_distances)
         state.laplacian = laplacian_pinv
         return state
+
+    def _target_distances(self, problem: LayoutProblem) -> np.ndarray:
+        """Compute shortest-path distances using the configured fill policy.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable graph layout inputs.
+
+        Returns
+        -------
+        numpy.ndarray
+            Dense finite distance matrix with shape ``[N, N]``.
+
+        Raises
+        ------
+        ValueError
+            If the configured fill policy is unknown.
+        """
+        if self.config.distance_fill == _SM_DISTANCE_FILL_CLASSIC:
+            return _shortest_path_distances(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+                edge_weights=problem.edge_weights,
+            )
+        if self.config.distance_fill != _SM_DISTANCE_FILL_OGDF:
+            raise ValueError(f"Unknown stress distance fill: {self.config.distance_fill!r}.")
+
+        adjacency = _shared_build_undirected_adjacency(
+            edge_index=problem.edge_index,
+            num_nodes=problem.num_nodes,
+            edge_weights=problem.edge_weights,
+        )
+        weighted = problem.edge_weights is not None
+        raw_distances = _shared_all_pairs_shortest_paths(adjacency, weighted=weighted)
+        finite_mask = np.isfinite(raw_distances) if weighted else raw_distances >= 0
+        fill_value = float(problem.num_nodes) ** 0.5 if problem.num_nodes > 1 else 0.0
+        cleaned = np.where(finite_mask, raw_distances, fill_value).astype(np.float64, copy=False)
+        np.fill_diagonal(cleaned, 0.0)
+        return cleaned
 
 
 @register_op
@@ -349,7 +418,7 @@ class InitializeStressMajorizationPositions(Op):
 @register_op
 @dataclass(frozen=True)
 class SmacofStep(Op):
-    """Apply one dense SMACOF update with the classic monotonicity safeguard."""
+    """Apply one stress-majorization update."""
 
     config: SmacofStepConfig = field(default_factory=SmacofStepConfig)
 
@@ -405,6 +474,18 @@ class SmacofStep(Op):
         if not isinstance(weights, np.ndarray):
             raise ValueError("sm_smacof_step requires sm_weights in state.extras.")
         target_distances_np = target_distances.to(dtype=torch.float64, device="cpu").numpy()
+        if self.config.update_mode == _SM_UPDATE_OGDF_SERIAL:
+            candidate, candidate_stress = self._ogdf_serial_sweep(
+                current=current,
+                target_distances=target_distances_np,
+                weights=weights,
+            )
+            state.extras[CURRENT_POSITIONS_KEY] = candidate
+            state.extras[CURRENT_STRESS_KEY] = candidate_stress
+            return state
+        if self.config.update_mode != _SM_UPDATE_DENSE:
+            raise ValueError(f"Unknown stress update mode: {self.config.update_mode!r}.")
+
         if isinstance(laplacian_pinv, torch.Tensor):
             laplacian_pinv_np = laplacian_pinv.to(dtype=torch.float64, device="cpu").numpy()
         elif isinstance(laplacian_pinv, np.ndarray):
@@ -474,6 +555,58 @@ class SmacofStep(Op):
         state.extras[CURRENT_POSITIONS_KEY] = candidate
         state.extras[CURRENT_STRESS_KEY] = candidate_stress
         return state
+
+    def _ogdf_serial_sweep(
+        self,
+        current: np.ndarray,
+        target_distances: np.ndarray,
+        weights: np.ndarray,
+    ) -> tuple[np.ndarray, float]:
+        """Run one OGDF-compatible in-place serial vote sweep.
+
+        Parameters
+        ----------
+        current : numpy.ndarray
+            Current coordinates with shape ``[N, 2]``.
+        target_distances : numpy.ndarray
+            Dense graph-distance matrix with shape ``[N, N]``.
+        weights : numpy.ndarray
+            Inverse-square stress weights with shape ``[N, N]``.
+
+        Returns
+        -------
+        tuple[numpy.ndarray, float]
+            Updated coordinates and their weighted stress value.
+        """
+        candidate = current.copy()
+        num_nodes = int(candidate.shape[0])
+        for node in range(num_nodes):
+            total_weight = 0.0
+            vote = np.zeros(2, dtype=np.float64)
+            current_coord = candidate[node].copy()
+            for other in range(num_nodes):
+                if other == node:
+                    continue
+                weight = float(weights[node, other])
+                if weight <= 0.0:
+                    continue
+                other_coord = candidate[other]
+                offset = current_coord - other_coord
+                euclidean_dist = float(np.linalg.norm(offset))
+                vote_coord = other_coord.copy()
+                if euclidean_dist > self.config.min_distance:
+                    vote_coord += target_distances[node, other] * offset / euclidean_dist
+                vote += weight * vote_coord
+                total_weight += weight
+            if total_weight > 0.0:
+                candidate[node] = vote / total_weight
+
+        deltas = candidate[:, None, :] - candidate[None, :, :]
+        candidate_distances = np.sqrt(np.sum(deltas * deltas, axis=2))
+        candidate_stress = 0.5 * float(
+            np.sum(weights * (candidate_distances - target_distances) ** 2)
+        )
+        return candidate, candidate_stress
 
 
 @register_op
