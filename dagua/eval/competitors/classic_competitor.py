@@ -854,6 +854,7 @@ class ClassicFA2(_ClassicBase):
                 graph.edge_index,
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
+                edge_weights=graph.edge_weights,
                 steps=200,
                 seed=self._layout_seed(seed),
             )
@@ -1404,6 +1405,7 @@ class ClassicMaxentStress(_ClassicBase):
                 graph.edge_index,
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
+                edge_weights=graph.edge_weights,
                 steps=200,
                 alpha=1.0,
                 seed=self._layout_seed(seed),
