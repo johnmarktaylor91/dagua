@@ -10,7 +10,12 @@ import torch
 from dagua.layout.ops.base import Pipeline, Repeat
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig
 from dagua.layout.ops.force import FA2ForceStep, FA2ForceStepConfig
-from dagua.layout.ops.init import FA2InitializePositions, ValidateFA2Inputs, ValidateFA2InputsConfig
+from dagua.layout.ops.init import (
+    FA2InitializePositions,
+    FA2InitializePositionsConfig,
+    ValidateFA2Inputs,
+    ValidateFA2InputsConfig,
+)
 from dagua.layout.ops.preprocess import FA2PrepareState, FA2PrepareStateConfig
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
@@ -43,6 +48,8 @@ class FA2Config:
         Acceptance threshold for Barnes-Hut.
     jitter_tolerance : float
         Jitter tolerance for adaptive speed control.
+    fidelity_mode : bool
+        Whether to run FA2 internal tensors in float64 for reference parity.
     """
 
     steps: int = 100
@@ -56,6 +63,7 @@ class FA2Config:
     barnes_hut: bool = False
     barnes_hut_theta: float = 1.2
     jitter_tolerance: float = 1.0
+    fidelity_mode: bool = False
 
 
 def build_fa2_pipeline(config: Optional[FA2Config] = None) -> Pipeline:
@@ -85,6 +93,7 @@ def build_fa2_pipeline(config: Optional[FA2Config] = None) -> Pipeline:
     if resolved.steps < 0:
         raise ValueError("steps must be non-negative.")
 
+    dtype = torch.float64 if resolved.fidelity_mode else torch.float32
     return Pipeline(
         [
             ValidateFA2Inputs(
@@ -94,10 +103,11 @@ def build_fa2_pipeline(config: Optional[FA2Config] = None) -> Pipeline:
                 )
             ),
             FixedSteps(FixedStepsConfig(n=resolved.steps)),
-            FA2InitializePositions(),
+            FA2InitializePositions(FA2InitializePositionsConfig(dtype=dtype)),
             FA2PrepareState(
                 FA2PrepareStateConfig(
                     outbound_attraction_distribution=resolved.outbound_attraction_distribution,
+                    dtype=dtype,
                 )
             ),
             Repeat(
@@ -140,6 +150,7 @@ def layout_fa2_pipeline(
     edge_weight_influence: float = 1.0,
     barnes_hut: bool = False,
     barnes_hut_theta: float = 1.2,
+    fidelity_mode: bool = False,
 ) -> torch.Tensor:
     """Run the ForceAtlas2 pipeline as a drop-in replacement.
 
@@ -176,6 +187,9 @@ def layout_fa2_pipeline(
         Whether to use Barnes-Hut approximation for repulsion.
     barnes_hut_theta : float, default=1.2
         Acceptance threshold for Barnes-Hut aggregation.
+    fidelity_mode : bool, default=False
+        Run FA2 internal tensors in float64 to better match the live
+        ForceAtlas2 reference. The default keeps the historical float32 path.
 
     Returns
     -------
@@ -202,6 +216,7 @@ def layout_fa2_pipeline(
         edge_weight_influence=edge_weight_influence,
         barnes_hut=barnes_hut,
         barnes_hut_theta=barnes_hut_theta,
+        fidelity_mode=fidelity_mode,
     )
     problem = LayoutProblem(
         edge_index=edge_index,
