@@ -354,11 +354,14 @@ def render(
         )
     if result.returncode != 0:
         return None
+    graph_attrs = _graph_attrs(graph_spec)
+    canvas_color = str(graph_attrs.get("bgcolor", "#FFFFFF"))
     with Image.open(output_path) as image:
         fitted = image.convert("RGBA")
         resample = getattr(Image, "Resampling", Image).BILINEAR
-        fitted.thumbnail(dimensions, resample)
-        canvas = Image.new("RGBA", dimensions, (255, 255, 255, 255))
+        if fitted.width > dimensions[0] or fitted.height > dimensions[1]:
+            fitted.thumbnail(dimensions, resample)
+        canvas = Image.new("RGBA", dimensions, canvas_color)
         left = max((dimensions[0] - fitted.width) // 2, 0)
         top = max((dimensions[1] - fitted.height) // 2, 0)
         canvas.paste(fitted, (left, top), fitted)
