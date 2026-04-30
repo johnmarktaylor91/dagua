@@ -197,7 +197,7 @@ class MaxentPrepareState(Op):
                 weighted=weighted,
             )
             if raw_distances.size == 0:
-                graph_distances = torch.empty((0, 0), dtype=torch.float32)
+                graph_distances = torch.empty((0, 0), dtype=torch.float64)
             else:
                 # Disconnected entries are replaced with the same heuristic scale
                 # used by the classic implementation so every pair remains finite.
@@ -209,9 +209,7 @@ class MaxentPrepareState(Op):
                     cleaned[np.isinf(cleaned)] = disconnected_distance
                 else:
                     cleaned[cleaned < 0] = disconnected_distance
-                graph_distances = torch.tensor(cleaned, dtype=torch.float32)
-
-            graph_distances = graph_distances.to(dtype=torch.float64)
+                graph_distances = torch.tensor(cleaned, dtype=torch.float64)
             weight_matrix = torch.zeros_like(graph_distances)
             off_diagonal = ~torch.eye(
                 problem.num_nodes, dtype=torch.bool, device=graph_distances.device
