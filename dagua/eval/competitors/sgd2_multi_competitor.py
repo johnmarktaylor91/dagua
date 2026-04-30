@@ -6,6 +6,7 @@ Runs the original (SGD)^2 code from github.com/tiga1231/graph-drawing
 
 from __future__ import annotations
 
+import random
 import sys
 import time
 from contextlib import contextmanager
@@ -25,7 +26,25 @@ _SGD2_REPO = Path("/tmp/graph-drawing")
 
 def _sgd2_multi_available() -> bool:
     """Check if the upstream (SGD)^2 code is available."""
-    return (_SGD2_REPO / "gd2.py").exists()
+    return (_SGD2_REPO / "gd2.py").exists() and (_SGD2_REPO / "criteria.py").exists()
+
+
+def _missing_sgd2_multi_sources() -> list[str]:
+    """List required upstream source files that are unavailable.
+
+    Returns
+    -------
+    list[str]
+        Missing upstream module filenames. Tests may provide in-memory module
+        stubs, so modules already present in ``sys.modules`` are treated as
+        available.
+    """
+    missing: list[str] = []
+    required = {"gd2": "gd2.py", "criteria": "criteria.py"}
+    for module_name, filename in required.items():
+        if module_name not in sys.modules and not (_SGD2_REPO / filename).exists():
+            missing.append(filename)
+    return missing
 
 
 @contextmanager
@@ -299,6 +318,18 @@ class SGD2MultiRef(CompetitorBase):
             from scipy.sparse import csr_matrix
             from scipy.sparse.csgraph import shortest_path
 
+            missing_sources = _missing_sgd2_multi_sources()
+            if missing_sources:
+                return CompetitorResult(
+                    name=self.name,
+                    pos=None,
+                    runtime_seconds=time.perf_counter() - start,
+                    error=(
+                        "missing upstream SGD2 source files at "
+                        f"{_SGD2_REPO}: {', '.join(missing_sources)}"
+                    ),
+                )
+
             # Add repo to path temporarily
             repo_str = str(_SGD2_REPO)
             if repo_str not in sys.path:
@@ -341,6 +372,7 @@ class SGD2MultiRef(CompetitorBase):
             if seed is not None:
                 torch.manual_seed(seed)
                 np.random.seed(seed)
+                random.seed(seed)
 
             optimize_kwargs: dict[str, Any] = {
                 "criteria_weights": {"stress": 1.0},
