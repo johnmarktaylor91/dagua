@@ -98,6 +98,7 @@ def layout_stress_sgd_pipeline(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
+    init_pos: Optional[torch.Tensor] = None,
     steps: int = 30,
     seed: int = 42,
     sample_size: Union[int, str] = "auto",
@@ -117,6 +118,10 @@ def layout_stress_sgd_pipeline(
         Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor | None
         Optional node-size tensor with shape ``[N, 2]``.
+    init_pos : torch.Tensor | None
+        Optional initial coordinates with shape ``[N, 2]``. When provided,
+        exact Stress-SGD starts from these coordinates instead of drawing from
+        NumPy.
     steps : int
         Number of optimization epochs.
     seed : int
@@ -166,6 +171,9 @@ def layout_stress_sgd_pipeline(
             raise ValueError(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
+    if init_pos is not None:
+        if init_pos.ndim != 2 or init_pos.shape != (num_nodes, 2):
+            raise ValueError("init_pos must be shape [N, 2].")
 
     problem = LayoutProblem(
         edge_index=edge_index,
@@ -174,8 +182,11 @@ def layout_stress_sgd_pipeline(
         edge_weights=edge_weights,
         seed=seed,
     )
-    state = SolveState()
     output_device = edge_index.device
+    prepared_init_pos = (
+        init_pos.to(device=output_device, dtype=torch.float32) if init_pos is not None else None
+    )
+    state = SolveState(pos=prepared_init_pos)
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
     final_state = build_stress_sgd_pipeline(
         steps=steps,

@@ -218,6 +218,12 @@ class SGD2(CompetitorBase):
             if edge_weights is not None:
                 layout_kwargs["V"] = edge_weights.tolist()
             coordinates = s_gd2.layout(sources.tolist(), targets.tolist(), **layout_kwargs)
+            if tuple(coordinates.shape) != (graph.num_nodes, 2):
+                raise ValueError(
+                    "s_gd2 returned coordinates for "
+                    f"{coordinates.shape[0]} nodes, expected {graph.num_nodes}; "
+                    "the graph likely has trailing isolated nodes."
+                )
             pos = torch.tensor(coordinates, dtype=torch.float32) * 100.0
 
             elapsed = time.perf_counter() - start
