@@ -149,8 +149,8 @@ class NetworkXSpring(_NetworkXBase):
     name = "nx_spring"
     max_nodes = 50_000
     layout_func = "spring_layout"
-    layout_kwargs = {"seed": 42, "iterations": 50}
-    variant_param_names = frozenset({"gravity", "iterations", "k", "scale"})
+    layout_kwargs = {"seed": 42, "iterations": 50, "method": "force"}
+    variant_param_names = frozenset({"gravity", "iterations", "k", "scale", "method"})
 
 
 @register

@@ -153,8 +153,8 @@ def _warn_on_unrecognized_variant_params(
 _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_fr": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.fr",
-        function_name="layout_fr_default_pipeline",
-        default_params={"steps": 200},
+        function_name="layout_fr_pipeline",
+        default_params={"steps": 50, "networkx_compat": True},
     ),
     "classic_kk": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.kk",
@@ -570,7 +570,7 @@ class ChainCompetitor(CompetitorBase):
 class ClassicFR(_ClassicBase):
     """Competitor wrapper for the classic Fruchterman-Reingold reimplementation."""
 
-    variant_param_names = frozenset({"steps", "pos"})
+    variant_param_names = frozenset({"steps", "pos", "networkx_compat"})
     name = "classic_fr"
     max_nodes = 50_000
 
@@ -599,9 +599,7 @@ class ClassicFR(_ClassicBase):
         """
         del timeout
 
-        from dagua.layout.ops.pipelines.fr import (
-            layout_fr_default_pipeline as layout_fr,
-        )
+        from dagua.layout.ops.pipelines.fr import layout_fr_pipeline as layout_fr
 
         start = time.perf_counter()
         try:
@@ -609,8 +607,10 @@ class ClassicFR(_ClassicBase):
                 graph.edge_index,
                 graph.num_nodes,
                 node_sizes=graph.node_sizes,
-                steps=200,
+                steps=50,
                 seed=self._layout_seed(seed),
+                edge_weights=graph.edge_weights,
+                networkx_compat=True,
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
