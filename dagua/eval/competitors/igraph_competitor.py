@@ -243,6 +243,7 @@ class IgraphMDS(_IgraphBase):
     max_nodes = 5_000
     layout_algo = "mds"
     layout_kwargs = {}
+    uses_igraph_rng = True
 
 
 @register
