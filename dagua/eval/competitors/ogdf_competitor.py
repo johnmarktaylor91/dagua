@@ -270,7 +270,9 @@ class _OGDFBase(CompetitorBase):
             layouts are deterministic in the helper binary.
         variant_params : Mapping[str, Any] | None, default=None
             Optional runner parameters. For ``ogdf_stress``, ``iterations``
-            selects the stress-majorization sweep count.
+            selects the stress-majorization sweep count. For
+            ``ogdf_pivot_mds``, ``n_pivots`` selects the Pivot-MDS landmark
+            count.
 
         Returns
         -------
@@ -285,6 +287,10 @@ class _OGDFBase(CompetitorBase):
             iterations = variant_params.get("iterations")
             if iterations is not None:
                 options["iterations"] = int(iterations)
+        if variant_params is not None and self.algorithm == "pivot_mds":
+            n_pivots = variant_params.get("n_pivots")
+            if n_pivots is not None:
+                options["numberOfPivots"] = int(n_pivots)
 
         start = time.perf_counter()
         try:
