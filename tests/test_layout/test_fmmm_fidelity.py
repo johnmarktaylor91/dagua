@@ -11,6 +11,7 @@ from dagua.layout.ops.fmmm import (
     FMMMForceStep,
     _build_hierarchy,
     _RandomNodeSet,
+    _unique_edges_with_lengths,
 )
 from dagua.layout.ops.pipelines.fmmm import layout_fmmm_pipeline
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -54,6 +55,29 @@ def test_fmmm_reference_mode_uses_lower_mass_hierarchy() -> None:
     )
 
     assert not torch.equal(reference_levels[-1].edge_index, legacy_levels[-1].edge_index)
+
+
+def test_fmmm_reference_mode_averages_parallel_edge_weights() -> None:
+    """Verify OGDF fidelity mode does not strengthen reduced parallel edges.
+
+    Returns
+    -------
+    None
+        The assertion checks the base graph collapse used by fidelity mode:
+        duplicate unweighted edges become one unit-strength spring.
+    """
+    edge_index = torch.tensor([[0, 0, 0, 1], [1, 1, 1, 2]], dtype=torch.long)
+
+    _, legacy_lengths, legacy_weights = _unique_edges_with_lengths(edge_index, 3)
+    _, reference_lengths, reference_weights = _unique_edges_with_lengths(
+        edge_index,
+        3,
+        sum_parallel_weights=False,
+    )
+
+    assert torch.equal(legacy_lengths, reference_lengths)
+    assert torch.allclose(legacy_weights, torch.tensor([3.0, 1.0]))
+    assert torch.allclose(reference_weights, torch.ones(2))
 
 
 def test_fmmm_force_step_reference_scaling_records_damped_movement() -> None:
@@ -104,4 +128,27 @@ def test_fmmm_reference_mode_returns_finite_positions() -> None:
     )
 
     assert positions.shape == (4, 2)
+    assert torch.isfinite(positions).all()
+
+
+def test_fmmm_fidelity_mode_alias_returns_finite_positions() -> None:
+    """Verify the evaluation alias enables the OGDF reference path.
+
+    Returns
+    -------
+    None
+        The assertion validates the public ``fidelity_mode`` alias used by
+        competitor defaults.
+    """
+    edge_index = torch.tensor([[0, 0, 1], [1, 2, 2]], dtype=torch.long)
+
+    positions = layout_fmmm_pipeline(
+        edge_index=edge_index,
+        num_nodes=3,
+        steps=4,
+        seed=7,
+        fidelity_mode=True,
+    )
+
+    assert positions.shape == (3, 2)
     assert torch.isfinite(positions).all()
