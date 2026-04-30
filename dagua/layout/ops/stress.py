@@ -26,6 +26,9 @@ _SM_MIN_DISTANCE = 1.0e-9
 _SM_MIN_SPAN = 1.0e-6
 _SM_DISTANCE_FILL_CLASSIC = "classic"
 _SM_DISTANCE_FILL_OGDF = "ogdf"
+_SM_DISTANCE_FILL_GRAPHVIZ_NEATO = "graphviz_neato"
+_SM_INIT_MDS = "mds"
+_SM_INIT_RANDOM = "random"
 _SM_UPDATE_DENSE = "dense"
 _SM_UPDATE_OGDF_SERIAL = "ogdf_serial"
 
@@ -40,7 +43,8 @@ class PrepareStressMajorizationStateConfig:
         Unreachable-distance fill policy. ``"classic"`` preserves dagua's
         existing ``diameter + 1`` fill, while ``"ogdf"`` uses ``sqrt(N)`` in
         unit-distance scale to match OGDF's ``100 * sqrt(N)`` after global
-        scale normalization.
+        scale normalization. ``"graphviz_neato"`` uses the per-source
+        Graphviz neato BFS fallback of farthest reachable distance plus 10.
     """
 
     distance_fill: str = _SM_DISTANCE_FILL_CLASSIC
@@ -52,6 +56,10 @@ class InitializeStressMajorizationPositionsConfig:
 
     Parameters
     ----------
+    init_mode : str, default="mds"
+        Initial coordinate policy. ``"mds"`` keeps dagua's historical
+        classical-MDS warm start; ``"random"`` starts from seeded random
+        coordinates for Graphviz neato's default ``start=random`` behavior.
     jitter_scale : float, default=0.05
         Standard deviation of the Gaussian jitter added to the MDS warm start.
     base_extent_scale : float, default=5.0
@@ -68,6 +76,7 @@ class InitializeStressMajorizationPositionsConfig:
         Minimum span accepted before the normalized embedding is re-expanded.
     """
 
+    init_mode: str = _SM_INIT_MDS
     jitter_scale: float = 0.05
     base_extent_scale: float = 5.0
     size_extent_multiplier: float = 2.0
@@ -104,6 +113,7 @@ class SmacofStepConfig:
 WEIGHTS_KEY = "sm_weights"
 CURRENT_POSITIONS_KEY = "sm_current_positions"
 CURRENT_STRESS_KEY = "sm_current_stress"
+PREVIOUS_STRESS_KEY = "sm_previous_stress"
 TRACES_KEY = "sm_traces"
 TRACE_EVERY_KEY = "sm_trace_every"
 
@@ -197,6 +207,8 @@ class PrepareStressMajorizationState(Op):
                 num_nodes=problem.num_nodes,
                 edge_weights=problem.edge_weights,
             )
+        if self.config.distance_fill == _SM_DISTANCE_FILL_GRAPHVIZ_NEATO:
+            return self._graphviz_neato_target_distances(problem=problem)
         if self.config.distance_fill != _SM_DISTANCE_FILL_OGDF:
             raise ValueError(f"Unknown stress distance fill: {self.config.distance_fill!r}.")
 
@@ -210,6 +222,37 @@ class PrepareStressMajorizationState(Op):
         finite_mask = np.isfinite(raw_distances) if weighted else raw_distances >= 0
         fill_value = float(problem.num_nodes) ** 0.5 if problem.num_nodes > 1 else 0.0
         cleaned = np.where(finite_mask, raw_distances, fill_value).astype(np.float64, copy=False)
+        np.fill_diagonal(cleaned, 0.0)
+        return cleaned
+
+    def _graphviz_neato_target_distances(self, problem: LayoutProblem) -> np.ndarray:
+        """Compute neato-style shortest-path distances.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable graph layout inputs.
+
+        Returns
+        -------
+        numpy.ndarray
+            Dense finite distance matrix with shape ``[N, N]`` using
+            Graphviz neato's per-source unreachable fallback.
+        """
+        adjacency = _shared_build_undirected_adjacency(
+            edge_index=problem.edge_index,
+            num_nodes=problem.num_nodes,
+            edge_weights=problem.edge_weights,
+        )
+        weighted = problem.edge_weights is not None
+        raw_distances = _shared_all_pairs_shortest_paths(adjacency, weighted=weighted)
+        cleaned = raw_distances.astype(np.float64, copy=True)
+        for node in range(problem.num_nodes):
+            row = cleaned[node]
+            finite_mask = np.isfinite(row) if weighted else row >= 0
+            farthest = float(row[finite_mask].max()) if bool(finite_mask.any()) else 0.0
+            fill_value = farthest + 10.0 if problem.num_nodes > 1 else 0.0
+            row[~finite_mask] = fill_value
         np.fill_diagonal(cleaned, 0.0)
         return cleaned
 
@@ -382,20 +425,38 @@ class InitializeStressMajorizationPositions(Op):
 
         target_distances = state.distance_matrix.to(dtype=torch.float64, device="cpu").numpy()
 
-        raw_positions = self._classical_mds_embedding(distances=target_distances)
-        extent = self._layout_extent(
-            num_nodes=problem.num_nodes,
-            node_sizes=problem.node_sizes,
-        )
-        device = _layout_device(
-            edge_index=problem.edge_index,
-            node_sizes=problem.node_sizes,
-        )
-        baseline = self._normalize_positions(raw_positions.to(device=device), extent=extent)
+        if self.config.init_mode == _SM_INIT_MDS:
+            raw_positions = self._classical_mds_embedding(distances=target_distances)
+            extent = self._layout_extent(
+                num_nodes=problem.num_nodes,
+                node_sizes=problem.node_sizes,
+            )
+            device = _layout_device(
+                edge_index=problem.edge_index,
+                node_sizes=problem.node_sizes,
+            )
+            baseline = self._normalize_positions(raw_positions.to(device=device), extent=extent)
 
-        rng = np.random.default_rng(problem.seed)
-        jitter = rng.normal(loc=0.0, scale=self.config.jitter_scale, size=(problem.num_nodes, 2))
-        initialized = baseline.detach().cpu().numpy().astype(np.float64) + jitter
+            rng = np.random.default_rng(problem.seed)
+            jitter = rng.normal(
+                loc=0.0,
+                scale=self.config.jitter_scale,
+                size=(problem.num_nodes, 2),
+            )
+            initialized = baseline.detach().cpu().numpy().astype(np.float64) + jitter
+        elif self.config.init_mode == _SM_INIT_RANDOM:
+            extent = self._layout_extent(
+                num_nodes=problem.num_nodes,
+                node_sizes=problem.node_sizes,
+            )
+            rng = np.random.default_rng(problem.seed)
+            initialized = rng.uniform(
+                low=-extent,
+                high=extent,
+                size=(problem.num_nodes, 2),
+            ).astype(np.float64, copy=False)
+        else:
+            raise ValueError(f"Unknown stress init mode: {self.config.init_mode!r}.")
         initialized = initialized - initialized.mean(axis=0, keepdims=True)
 
         # Keep the initial stress cached in extras so each SMACOF step can apply
@@ -607,6 +668,101 @@ class SmacofStep(Op):
             np.sum(weights * (candidate_distances - target_distances) ** 2)
         )
         return candidate, candidate_stress
+
+
+@register_op
+@dataclass(frozen=True)
+class CaptureStressMajorizationStress(Op):
+    """Capture the current SMACOF stress before an update."""
+
+    name: ClassVar[str] = "sm_capture_stress"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    requires: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Store the current stress for a later epsilon convergence check.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable state carrying the current SMACOF stress.
+        ctx : RuntimeContext
+            Runtime context. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with ``sm_previous_stress`` populated when current stress is
+            available.
+        """
+        del problem, ctx
+
+        current = state.extras.get(CURRENT_STRESS_KEY)
+        if current is not None:
+            state.extras[PREVIOUS_STRESS_KEY] = float(current)
+        return state
+
+
+@register_op
+@dataclass(frozen=True)
+class CheckStressMajorizationEpsilon(Op):
+    """Stop SMACOF when relative stress change falls below epsilon."""
+
+    epsilon: float = 1.0e-4
+
+    name: ClassVar[str] = "sm_check_epsilon"
+    category: ClassVar[OpCategory] = OpCategory.CONVERGE
+    reads: ClassVar[Tuple[str, ...]] = ("extras",)
+    writes: ClassVar[Tuple[str, ...]] = ("converged",)
+    requires: ClassVar[Tuple[str, ...]] = ("extras",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Update convergence from the current relative stress delta.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable state carrying previous and current SMACOF stress values.
+        ctx : RuntimeContext
+            Runtime context. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with ``state.converged`` set when the relative stress change
+            is less than or equal to ``epsilon``.
+        """
+        del problem, ctx
+
+        if self.epsilon <= 0.0:
+            return state
+        previous = state.extras.get(PREVIOUS_STRESS_KEY)
+        current = state.extras.get(CURRENT_STRESS_KEY)
+        if previous is None or current is None:
+            return state
+        previous_value = float(previous)
+        current_value = float(current)
+        scale = max(abs(previous_value), 1.0e-12)
+        relative_delta = abs(previous_value - current_value) / scale
+        if relative_delta <= self.epsilon or abs(current_value) <= self.epsilon:
+            state.converged = True
+        return state
 
 
 @register_op
