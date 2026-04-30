@@ -44,6 +44,9 @@ class LGLPrepareStateConfig:
         Sparse grid cell size for repulsion.
     root : int, optional
         Optional root vertex used by BFS shell growth.
+    use_edge_weights : bool, default=False
+        Whether edge weights scale attractive forces. Igraph LGL ignores
+        weights, so the default preserves fidelity with that reference.
     """
 
     maxiter: int = 150
@@ -53,6 +56,7 @@ class LGLPrepareStateConfig:
     repulserad: Optional[float] = None
     cellsize: Optional[float] = None
     root: Optional[int] = None
+    use_edge_weights: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,9 +68,86 @@ class LGLLayeredRefinementConfig:
     convergence_epsilon : float, default=1e-5
         Early-stop threshold for the maximum node movement inside one shell's
         local refinement loop.
+    igraph_positive_maxchange : bool, default=True
+        Match igraph LGL's historical convergence rule, which only considers
+        positive movement components when updating ``maxchange``.
     """
 
     convergence_epsilon: float = 1.0e-5
+    igraph_positive_maxchange: bool = True
+
+
+def _build_lgl_bfs_layers(
+    num_nodes: int,
+    root_node: int,
+    adjacency: List[List[int]],
+) -> Tuple[List[List[int]], List[int], List[int]]:
+    """Build BFS shells used by LGL shell growth.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the graph.
+    root_node : int
+        Root vertex for breadth-first traversal.
+    adjacency : List[List[int]]
+        Undirected adjacency list with one sorted neighbor list per node.
+
+    Returns
+    -------
+    Tuple[List[List[int]], List[int], List[int]]
+        Per-depth node layers, BFS parent list, and node-distance list. Nodes
+        unreachable from ``root_node`` keep parent and distance values of ``-1``.
+    """
+    layers: list[list[int]] = []
+    parents: list[int] = [-1] * num_nodes
+    distance: list[int] = [-1] * num_nodes
+    bfs_queue: deque[int] = deque([root_node])
+    parents[root_node] = root_node
+    distance[root_node] = 0
+    while bfs_queue:
+        node = bfs_queue.popleft()
+        depth = distance[node]
+        while len(layers) <= depth:
+            layers.append([])
+        layers[depth].append(node)
+        for neighbor in adjacency[node]:
+            if distance[neighbor] != -1:
+                continue
+            parents[neighbor] = node
+            distance[neighbor] = depth + 1
+            bfs_queue.append(neighbor)
+
+    return layers, parents, distance
+
+
+def _lgl_updated_maxchange(
+    maxchange: float,
+    movement: torch.Tensor,
+    *,
+    igraph_positive_only: bool,
+) -> float:
+    """Update shell-refinement convergence tracking.
+
+    Parameters
+    ----------
+    maxchange : float
+        Current maximum movement component.
+    movement : torch.Tensor
+        Movement vector with shape ``[2]`` for one node.
+    igraph_positive_only : bool
+        If true, preserve igraph LGL's positive-component convergence quirk.
+
+    Returns
+    -------
+    float
+        Updated maximum component value for convergence testing.
+    """
+    x_movement = float(movement[0].item())
+    y_movement = float(movement[1].item())
+    if igraph_positive_only:
+        return max(maxchange, x_movement, y_movement)
+    return max(maxchange, abs(x_movement), abs(y_movement))
 
 
 @register_op
@@ -130,7 +211,7 @@ class LGLPrepareState(Op):
             source_nodes = edge_index_cpu[0].tolist()
             target_nodes = edge_index_cpu[1].tolist()
             weight_list: Optional[list[float]] = None
-            if problem.edge_weights is not None:
+            if self.config.use_edge_weights and problem.edge_weights is not None:
                 spring_edge_weights = []
                 weight_list = (
                     problem.edge_weights.detach().to(device="cpu", dtype=torch.float64).tolist()
@@ -271,24 +352,7 @@ class LGLLayeredRefinement(Op):
         area = float(state.extras["lgl_area"])
         radius = math.sqrt(area / math.pi)
 
-        layers: list[list[int]] = []
-        parents: list[int] = [-1] * num_nodes
-        distance: list[int] = [-1] * num_nodes
-        bfs_queue: deque[int] = deque([root_node])
-        parents[root_node] = root_node
-        distance[root_node] = 0
-        while bfs_queue:
-            node = bfs_queue.popleft()
-            depth = distance[node]
-            while len(layers) <= depth:
-                layers.append([])
-            layers[depth].append(node)
-            for neighbor in adjacency[node]:
-                if distance[neighbor] != -1:
-                    continue
-                parents[neighbor] = node
-                distance[neighbor] = depth + 1
-                bfs_queue.append(neighbor)
+        layers, parents, _distance = _build_lgl_bfs_layers(num_nodes, root_node, adjacency)
 
         if not layers:
             state.pos = positions
@@ -492,10 +556,10 @@ class LGLLayeredRefinement(Op):
                     if magnitude > temperature and magnitude > _LGL_MIN_DISTANCE:
                         movement = movement * (temperature / magnitude)
                     positions[node] += movement
-                    maxchange = max(
+                    maxchange = _lgl_updated_maxchange(
                         maxchange,
-                        abs(float(movement[0].item())),
-                        abs(float(movement[1].item())),
+                        movement,
+                        igraph_positive_only=self.config.igraph_positive_maxchange,
                     )
 
                 if maxchange < self.config.convergence_epsilon:
@@ -543,4 +607,6 @@ __all__ = [
     "LGLLayeredRefinement",
     "LGLLayeredRefinementConfig",
     "LGLFinalizePositions",
+    "_build_lgl_bfs_layers",
+    "_lgl_updated_maxchange",
 ]
