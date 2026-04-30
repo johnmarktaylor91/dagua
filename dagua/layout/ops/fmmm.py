@@ -330,6 +330,7 @@ def _unique_edges_with_lengths(
     edge_index: torch.Tensor,
     num_nodes: int,
     edge_weights: Optional[torch.Tensor] = None,
+    sum_parallel_weights: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Convert an edge tensor into unique undirected edges with lengths and weights.
 
@@ -341,6 +342,10 @@ def _unique_edges_with_lengths(
         Number of nodes.
     edge_weights : torch.Tensor, optional
         Optional per-edge weights with shape ``[E]``.
+    sum_parallel_weights : bool, default=True
+        Whether parallel-edge weights are summed. ``False`` matches OGDF's
+        simple-graph reduction, where parallel edges contribute one averaged
+        edge rather than a stronger spring.
 
     Returns
     -------
@@ -388,7 +393,10 @@ def _unique_edges_with_lengths(
 
     ordered_pairs = sorted(seen)
     lengths = [seen[pair][0] / seen[pair][1] for pair in ordered_pairs]
-    weights = [seen[pair][2] for pair in ordered_pairs]
+    weights = [
+        seen[pair][2] if sum_parallel_weights else seen[pair][2] / seen[pair][1]
+        for pair in ordered_pairs
+    ]
     return (
         torch.tensor(ordered_pairs, dtype=torch.long).transpose(0, 1).contiguous(),
         torch.tensor(lengths, dtype=torch.float32),
@@ -652,6 +660,7 @@ def _build_hierarchy(
     seed: int,
     edge_weights: Optional[torch.Tensor] = None,
     galaxy_choice: str = _GALAXY_CHOICE_HIGHER,
+    sum_parallel_weights: bool = True,
 ) -> tuple[list[_LevelGraph], list[_HierarchyStep]]:
     """Build the FM^3 hierarchy with OGDF-style coarsening metadata.
 
@@ -667,6 +676,10 @@ def _build_hierarchy(
         Optional per-edge attraction weights with shape ``[E]``.
     galaxy_choice : str, default="higher"
         Sun selection strategy used during solar-system coarsening.
+    sum_parallel_weights : bool, default=True
+        Whether the base simple graph keeps parallel edges as summed
+        attraction weights. Fidelity mode disables this to mirror OGDF's
+        averaged reduced-edge semantics.
 
     Returns
     -------
@@ -678,6 +691,7 @@ def _build_hierarchy(
         edge_index,
         num_nodes,
         edge_weights=edge_weights,
+        sum_parallel_weights=sum_parallel_weights,
     )
     levels = [
         _LevelGraph(
@@ -1171,9 +1185,24 @@ def _prevent_ogdf_oscillation(displacement: torch.Tensor, previous: torch.Tensor
     previous_norm = torch.linalg.norm(previous, dim=1, keepdim=True).clamp(min=_MIN_DISTANCE)
     cosine = (displacement * previous).sum(dim=1, keepdim=True) / (current_norm * previous_norm)
     angle = torch.acos(cosine.clamp(-1.0, 1.0))
-    buckets = torch.ceil(angle / (math.pi / 6.0)).to(dtype=torch.long).clamp(0, 6)
+    buckets = torch.ceil(angle / (math.pi / 6.0)).to(dtype=torch.long).clamp(0, 13)
     factors = torch.tensor(
-        [1.0, 1.0, 0.9, 0.7, 0.4, 0.2, 0.1],
+        [
+            2.0,
+            2.0,
+            1.5,
+            1.0,
+            0.66666666,
+            0.5,
+            0.33333333,
+            0.33333333,
+            0.5,
+            0.66666666,
+            1.0,
+            1.5,
+            2.0,
+            2.0,
+        ],
         dtype=displacement.dtype,
         device=displacement.device,
     )
@@ -1625,6 +1654,9 @@ class _InitializeFMMMStateConfig:
         Coarsest-level initialization strategy.
     ogdf_force_scaling : bool, default=False
         Whether to use OGDF-compatible force scaling and damping.
+    sum_parallel_weights : bool, default=True
+        Whether parallel edges strengthen the reduced graph spring. OGDF
+        fidelity mode disables this because OGDF averages reduced edges.
     """
 
     steps: int = 200
@@ -1632,6 +1664,7 @@ class _InitializeFMMMStateConfig:
     galaxy_choice: str = _GALAXY_CHOICE_HIGHER
     coarsest_init: str = _COARSE_INIT_FR
     ogdf_force_scaling: bool = False
+    sum_parallel_weights: bool = True
 
 
 @register_op
@@ -1680,6 +1713,7 @@ class _InitializeFMMMState(Op):
             seed=problem.seed,
             edge_weights=problem.edge_weights,
             galaxy_choice=self.config.galaxy_choice,
+            sum_parallel_weights=self.config.sum_parallel_weights,
         )
 
         state.extras["fmmm_levels"] = levels
