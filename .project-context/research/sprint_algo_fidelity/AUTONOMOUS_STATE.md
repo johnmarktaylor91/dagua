@@ -1,17 +1,23 @@
 ---
 run: algo_fidelity_completionist
 created: 2026-04-30T15:00:00-04:00
-state: R28_RUNNING
-phase: r28_fixes_plus_ogdf_infra
-last_updated: 2026-04-30T15:00:00-04:00
+state: BENCHMARK_100SEED_RUNNING
+phase: full_benchmark_100seed
+last_updated: 2026-04-30T18:45:00-04:00
 parallel_codexes:
-  r28_sfdp:    {pid: 2590923, log: /tmp/algo_fid_28_sfdp.log,    status: running}
-  r28_neato:   {pid: 2591053, log: /tmp/algo_fid_28_neato.log,   status: running}
-  r28_dot:     {pid: 2591350, log: /tmp/algo_fid_28_dot.log,     status: running}
-  r28_ogdf:    {pid: 2591596, log: /tmp/algo_fid_28_ogdf.log,    status: running}
-benchmark_pid: null
-benchmark_log: null
-benchmark_progress_file: null
+  r28_sfdp:    {pid: 2590923, status: completed_committed}
+  r28_neato:   {pid: 2591053, status: completed_committed}
+  r28_dot:     {pid: 2591350, status: completed_committed}
+  r28_ogdf:    {pid: 2591596, status: completed_committed}
+supervisor_pid: 2925870
+supervisor_log: /tmp/benchmark_100seed_supervisor.log
+benchmark_pid: 2925893
+benchmark_log: /tmp/benchmark_100seed.log
+benchmark_output_dir: eval_output/benchmark_100seed_final
+benchmark_started_at: 2026-04-30T18:44:54-04:00
+benchmark_eta_days: 4-5
+post_pipeline_log: /tmp/post_pipeline_100seed.log
+fidelity_report_target: eval_output/fidelity_report_100seed_final/report.md
 stop_criterion: 100_seed_benchmark_completed_with_fidelity_pipeline_run
 max_phases: 8
 fallback_chain: [codex_medium_effort, codex_high_effort, claude_subagent_opus, schedule_wakeup]
@@ -125,4 +131,6 @@ EVERY new turn (Monitor event, schedule wakeup, user ping, anything):
 
 | phase | started | ended | commits | notes |
 |---|---|---|---|---|
-| R28_dispatch | 2026-04-30T15:00:00-04:00 | (running) | n/a | 4 parallel codexes (sfdp/neato/dot fixes + OGDF infra) |
+| R28_dispatch | 2026-04-30T15:00:00-04:00 | 2026-04-30T17:57:30-04:00 | 9eaf60f, f823183, 964445a, 102388c, a51814e, 9a7115b, 7eb3ca1, 0129e92, 52930fe, e0f9ad6 | 4 parallel codexes done. sfdp 0.019->0.0057, neato 0.035->0.0091, dot lattice spacing fix, OGDF runner rebuilt + 600-entry multi-seed cache. |
+| R29_verification | 2026-04-30T17:58:00-04:00 | 2026-04-30T18:38:48-04:00 | n/a (verification) | 17/17 passed. **8 DETERMINISTIC_PERFECT, 5 CONVERGED at TOST 0.25x-2x. fmmm flipped from R26 classification artifact to CONVERGED_at_2x.** Stragglers: gem (real, architectural), pivot_mds (TOST artifact, RMSD 0.0001), maxent_stress (4/5 eq_at_1x), fmmm (TOST 2x is fine). |
+| BENCHMARK_100SEED | 2026-04-30T18:44:54-04:00 | (running) | n/a | Supervisor 2925870, benchmark 2925893. Auto-restart on crash. iMessage at boundaries. |
