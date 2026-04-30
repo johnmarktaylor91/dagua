@@ -239,6 +239,7 @@ _AUTO_CONTRAST_TEXT_BLEND = 0.9
 _DENSITY_SHRINK_SPARSE_NODE_COUNT = 2
 _DENSITY_SHRINK_REFERENCE_NODE_COUNT = 0.3
 _DENSITY_SHRINK_CLAMP_NODE_COUNT = 20
+_DENSITY_LABEL_FONT_FLOOR = 0.6
 _CLUSTER_RENDER_BBOX_EXTRA_CAP_POINTS = 2.0
 _MIN_CLUSTER_INNER_HEIGHT_POINTS = 1.0
 
@@ -1626,7 +1627,15 @@ def render(
     _draw_port_indicators(ax, graph, curves)
 
     # --- Layer 3: Node labels ---
-    _draw_node_labels(ax, graph, pos, sizes, clip_patches, svg_hover_map=svg_hover_map)
+    _draw_node_labels(
+        ax,
+        graph,
+        pos,
+        sizes,
+        clip_patches,
+        svg_hover_map=svg_hover_map,
+        density_size_factor=density_size_factor,
+    )
 
     # --- Layer 3.5: External node labels ---
     _draw_external_labels(ax, graph, pos, sizes, svg_hover_map=svg_hover_map)
@@ -5561,12 +5570,34 @@ def _edge_requires_direct_render(style: Any) -> bool:
         batched renderer does not expose yet.
     """
     return bool(
-        getattr(style, "taper", False)
+        _edge_uses_display_stroke_body(style)
+        or getattr(style, "taper", False)
         or getattr(style, "color_gradient", "none") != "none"
         or getattr(style, "line_cap", "butt") != "butt"
         or getattr(style, "line_join", "miter") != "miter"
         or getattr(style, "crossing_style", "none") != "none"
         or getattr(style, "routing", "bezier") in {"ortho", "taxi"}
+    )
+
+
+def _edge_uses_display_stroke_body(style: Any) -> bool:
+    """Return whether a thin edge body should render as a point-width stroke.
+
+    Parameters
+    ----------
+    style : Any
+        Edge style object.
+
+    Returns
+    -------
+    bool
+        ``True`` for simple low-width edges whose data-ribbon body can
+        underflow after gallery panels reset axes to a fixed pixel canvas.
+    """
+    return (
+        0.0 < float(getattr(style, "width", 0.0)) <= 1.5
+        and not bool(getattr(style, "taper", False))
+        and str(getattr(style, "color_gradient", "none")) == "none"
     )
 
 
@@ -6583,9 +6614,23 @@ def _draw_direct_edge_body(ax: Any, curve: BezierCurve, style: Any) -> List[Any]
         Added matplotlib artists.
     """
     from matplotlib.colors import to_rgba
-    from matplotlib.patches import Polygon
+    from matplotlib.patches import PathPatch, Polygon
 
     artists: List[Any] = []
+    if _edge_uses_display_stroke_body(style):
+        path_patch = PathPatch(
+            _curve_to_path(curve),
+            facecolor="none",
+            edgecolor=to_rgba(str(style.color), alpha=float(style.opacity)),
+            linewidth=max(float(style.width), 1.0),
+            linestyle=_edge_linestyle(style),
+            capstyle=_mpl_capstyle(str(getattr(style, "line_cap", "butt"))),
+            joinstyle=str(getattr(style, "line_join", "miter")),
+            zorder=1,
+        )
+        ax.add_patch(path_patch)
+        return [path_patch]
+
     data_width = _edge_width_data_units(ax, float(style.width))
     if curve.waypoints is not None:
         full_points = _sample_curve_points(curve)
@@ -7647,6 +7692,7 @@ def _draw_node_labels(
     sizes: np.ndarray,
     clip_patches: Optional[Sequence[Any]] = None,
     svg_hover_map: Optional[Dict[str, str]] = None,
+    density_size_factor: float = 1.0,
 ) -> None:
     """Draw node labels with alignment, rich-text, and outline support.
 
@@ -7666,9 +7712,14 @@ def _draw_node_labels(
         internal utility callers.
     svg_hover_map : dict[str, str], optional
         SVG hover text accumulator.
+    density_size_factor : float, default=1.0
+        Render-time node-size multiplier from density-aware shrink. The label
+        pass applies this with a readability floor and does not mutate the
+        canonical node style.
     """
     gs = _graph_style_for_render(graph)
     display_scale = _compute_display_scale(ax)
+    density_font_factor = max(float(density_size_factor), _DENSITY_LABEL_FONT_FLOOR)
     clip_patch_seq: Sequence[Any] = clip_patches or []
     specs: List[DaguaText] = []
 
@@ -7688,6 +7739,8 @@ def _draw_node_labels(
             font_size_points = float(graph.node_font_sizes[i].item())
         else:
             font_size_points = float(style.font_size)
+        if abs(float(density_size_factor) - 1.0) > 1e-12:
+            font_size_points *= density_font_factor
         # Font sizes are in the same data-coordinate system as node
         # sizes.  compute_node_size already determined the correct font
         # (possibly shrunk for shrink_text policy) and sized the node
