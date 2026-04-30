@@ -47,7 +47,6 @@ from dagua.styles import GRAPHVIZ_STRICT_THEME, ClusterStyle, EdgeStyle, GraphSt
 from scripts.generate_cosmetic_album import VARIED_EXTERNAL_LABELS, build_case_catalog
 
 WHITE = "#FFFFFF"
-DEFAULT_COMPARISON_STROKE = "#222222"
 TEXT_COLOR = "#17212B"
 MUTED_TEXT_COLOR = "#4A5868"
 LABEL_BAR = "#F4F6F8"
@@ -1234,7 +1233,7 @@ def _build_cluster_nested_fixture() -> Tuple[DaguaGraph, torch.Tensor]:
     )
     _configure_fixture_defaults(graph)
     positions = torch.tensor(
-        [[-140.0, 160.0], [-60.0, 40.0], [60.0, -40.0], [140.0, -170.0]],
+        [[0.0, 90.0], [0.0, 30.0], [0.0, -30.0], [0.0, -90.0]],
         dtype=torch.float32,
     )
     return graph, positions
@@ -1652,7 +1651,7 @@ def _scalar_default_node_overrides(item: ReferenceCardItem) -> Dict[str, object]
 
     overrides: Dict[str, object] = {}
     if item.spec.feature == "border_opacity":
-        overrides.update({"stroke_width": 3.0, "stroke": DEFAULT_COMPARISON_STROKE})
+        overrides.update({"stroke_width": 3.0, "stroke": NODE_STROKE})
     if item.spec.feature == "border_position":
         overrides.update(
             {
@@ -1689,6 +1688,8 @@ def _scalar_value_node_overrides(item: ReferenceCardItem) -> Dict[str, object]:
     """
 
     overrides: Dict[str, object] = {}
+    if item.spec.feature == "border_opacity":
+        overrides.update({"stroke": NODE_STROKE})
     if item.spec.feature == "border_count" and item.value.slug == "1_vs_2":
         overrides.update({"border_count": 2})
     if item.spec.feature == "corner_radius" and item.value.slug == "12":
