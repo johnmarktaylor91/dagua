@@ -1204,7 +1204,7 @@ def _dense_spectral_embedding(
     symmetric : bool
         Whether the matrix can use a symmetric eigensolver.
     networkx_fidelity : bool, default=False
-        Whether to mirror NetworkX eigenvector selection.
+        Whether to mirror NetworkX dense eigensolver and eigenvector selection.
 
     Returns
     -------
@@ -1212,9 +1212,11 @@ def _dense_spectral_embedding(
         Dense spectral coordinates with shape ``[N, dim]``.
     """
     dense_laplacian = laplacian.toarray()
-    if symmetric:
+    if symmetric and not networkx_fidelity:
         eigenvalues, eigenvectors = np.linalg.eigh(dense_laplacian)
     else:
+        # NetworkX intentionally uses the generic solver even for symmetric
+        # dense Laplacians, so fidelity mode follows that numerical path.
         eigenvalues, eigenvectors = np.linalg.eig(dense_laplacian)
     return _select_embedding_columns(
         eigenvalues=eigenvalues,
@@ -1241,7 +1243,8 @@ def _sparse_spectral_embedding(
     symmetric : bool
         Whether the matrix can use the symmetric sparse eigensolver.
     networkx_fidelity : bool, default=False
-        Whether to mirror NetworkX eigenvector selection.
+        Whether to mirror NetworkX sparse eigensolver sizing and eigenvector
+        selection.
 
     Returns
     -------
@@ -1249,7 +1252,10 @@ def _sparse_spectral_embedding(
         Sparse spectral coordinates with shape ``[N, dim]``.
     """
     num_nodes = laplacian.shape[0]
-    eigen_count = min(num_nodes - 1, max(dim + _SPECTRAL_EXTRA_EIGENPAIRS, dim + 1))
+    if networkx_fidelity:
+        eigen_count = min(num_nodes - 1, dim + 1)
+    else:
+        eigen_count = min(num_nodes - 1, max(dim + _SPECTRAL_EXTRA_EIGENPAIRS, dim + 1))
     if eigen_count <= dim:
         return _dense_spectral_embedding(
             laplacian=laplacian,
@@ -1258,23 +1264,30 @@ def _sparse_spectral_embedding(
             networkx_fidelity=networkx_fidelity,
         )
 
-    lanczos_vectors = max(
-        (_SPECTRAL_LANCZOS_MULTIPLIER * eigen_count) + 1,
-        int(np.sqrt(num_nodes)),
-    )
+    if networkx_fidelity:
+        ncv = max((_SPECTRAL_LANCZOS_MULTIPLIER * eigen_count) + 1, int(np.sqrt(num_nodes)))
+    else:
+        lanczos_vectors = max(
+            (_SPECTRAL_LANCZOS_MULTIPLIER * eigen_count) + 1,
+            int(np.sqrt(num_nodes)),
+        )
+        ncv = min(
+            max(lanczos_vectors, eigen_count + _SPECTRAL_LANCZOS_PADDING),
+            num_nodes,
+        )
     if symmetric:
         eigenvalues, eigenvectors = sparse_linalg.eigsh(
             laplacian,
             k=eigen_count,
             which="SM",
-            ncv=min(max(lanczos_vectors, eigen_count + _SPECTRAL_LANCZOS_PADDING), num_nodes),
+            ncv=ncv,
         )
     else:
         eigenvalues, eigenvectors = sparse_linalg.eigs(
             laplacian,
             k=eigen_count,
             which="SR",
-            ncv=min(max(lanczos_vectors, eigen_count + _SPECTRAL_LANCZOS_PADDING), num_nodes),
+            ncv=ncv,
         )
     return _select_embedding_columns(
         eigenvalues=eigenvalues,
