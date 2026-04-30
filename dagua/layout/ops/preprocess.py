@@ -1037,6 +1037,7 @@ class SpectralPrepareState(Op):
         self,
         normalization: str,
         config: Optional[SpectralPrepareStateConfig] = None,
+        networkx_fidelity: bool = False,
     ) -> None:
         """Store the spectral normalization mode.
 
@@ -1046,9 +1047,12 @@ class SpectralPrepareState(Op):
             One of ``"symmetric"``, ``"random_walk"``, or ``"unnormalized"``.
         config : SpectralPrepareStateConfig, optional
             Spectral preprocessing settings.
+        networkx_fidelity : bool, default=False
+            Whether to apply NetworkX-compatible trivial graph handling.
         """
         self.normalization = normalization
         self.config = config or SpectralPrepareStateConfig()
+        self.networkx_fidelity = bool(networkx_fidelity)
 
     def apply(
         self,
@@ -1078,6 +1082,11 @@ class SpectralPrepareState(Op):
             return state
         if problem.num_nodes == 1:
             state.pos = torch.zeros((1, self.config.position_dim), dtype=torch.float32)
+            return state
+        if self.networkx_fidelity and problem.num_nodes == 2:
+            # NetworkX returns both nodes at the default center before any
+            # eigensolve, so preserve that exact degenerate edge case.
+            state.pos = torch.zeros((2, self.config.position_dim), dtype=torch.float32)
             return state
 
         adjacency = _build_spectral_adjacency(
