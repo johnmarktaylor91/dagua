@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from dagua.eval.variants import VARIANT_REGISTRY
 from dagua.layout.ops.pipelines.stress_majorization import layout_stress_majorization_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.stress import (
@@ -102,3 +103,32 @@ def test_stress_maj_ogdf_serial_sweep_updates_in_place() -> None:
     after = state.extras[CURRENT_POSITIONS_KEY]
     assert isinstance(after, np.ndarray)
     assert not np.allclose(after, before)
+
+
+def test_stress_maj_classical_mds_warm_start_keeps_float64() -> None:
+    """The internal MDS warm start should stay double precision like OGDF."""
+    distances = np.array(
+        [
+            [0.0, 1.0, 2.0],
+            [1.0, 0.0, 1.0],
+            [2.0, 1.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    positions = InitializeStressMajorizationPositions()._classical_mds_embedding(distances)
+
+    assert positions.dtype == torch.float64
+
+
+def test_stress_maj_variants_forward_ogdf_iterations() -> None:
+    """Stress-majorization iteration variants should align OGDF references."""
+    original_params = {
+        variant.variant_id: variant.original_params
+        for variant in VARIANT_REGISTRY
+        if variant.variant_id.startswith("classic_stress_maj")
+    }
+
+    assert original_params["classic_stress_maj_default"] == {"iterations": 200}
+    assert original_params["classic_stress_maj_iter50"] == {"iterations": 50}
+    assert original_params["classic_stress_maj_iter500"] == {"iterations": 500}
