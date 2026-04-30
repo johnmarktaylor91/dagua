@@ -1,0 +1,268 @@
+{
+  "dagua_engine": "classic_spectral",
+  "effective_dagua_seeds": 3,
+  "graphs": {
+    "linear_3layer_mlp": {
+      "dagua_vs_graphviz": {
+        "mean": 0.10048218816518784,
+        "median": 0.10048218816518784,
+        "p95": 0.10048218816518784
+      },
+      "deterministic_degenerate": false,
+      "n_dagua_seeds": 3,
+      "n_graphviz_seeds": 1,
+      "tost": {
+        "0.25x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "0.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "2x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        }
+      },
+      "within_dagua": {
+        "mean": 9.618657870191782e-09,
+        "median": 9.618657870191782e-09,
+        "p95": 9.618657870191782e-09
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "mixed_width_labels": {
+      "dagua_vs_graphviz": {
+        "mean": 0.346931517124176,
+        "median": 0.346931517124176,
+        "p95": 0.346931517124176
+      },
+      "deterministic_degenerate": false,
+      "n_dagua_seeds": 3,
+      "n_graphviz_seeds": 1,
+      "tost": {
+        "0.25x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "0.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "2x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        }
+      },
+      "within_dagua": {
+        "mean": 5.0792312578096244e-08,
+        "median": 5.0792312578096244e-08,
+        "p95": 5.0792312578096244e-08
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "nested_shallow_enc_dec": {
+      "dagua_vs_graphviz": {
+        "mean": 0.10048218816518784,
+        "median": 0.10048218816518784,
+        "p95": 0.10048218816518784
+      },
+      "deterministic_degenerate": false,
+      "n_dagua_seeds": 3,
+      "n_graphviz_seeds": 1,
+      "tost": {
+        "0.25x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "0.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "2x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        }
+      },
+      "within_dagua": {
+        "mean": 9.618657870191782e-09,
+        "median": 9.618657870191782e-09,
+        "p95": 9.618657870191782e-09
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "parallel_multiedge_bundle": {
+      "dagua_vs_graphviz": {
+        "mean": 0.11141584813594818,
+        "median": 0.11141584813594818,
+        "p95": 0.11141584813594818
+      },
+      "deterministic_degenerate": false,
+      "n_dagua_seeds": 3,
+      "n_graphviz_seeds": 1,
+      "tost": {
+        "0.25x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "0.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "2x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        }
+      },
+      "within_dagua": {
+        "mean": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    },
+    "tl_mlp_3layer": {
+      "dagua_vs_graphviz": {
+        "mean": 0.08929821103811264,
+        "median": 0.08929821103811264,
+        "p95": 0.08929821103811264
+      },
+      "deterministic_degenerate": false,
+      "n_dagua_seeds": 3,
+      "n_graphviz_seeds": 1,
+      "tost": {
+        "0.25x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "0.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1.5x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "1x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        },
+        "2x": {
+          "equivalent": false,
+          "margin": null,
+          "pvalue": null,
+          "verdict": "not_tested"
+        }
+      },
+      "within_dagua": {
+        "mean": 1.4796313063669686e-09,
+        "median": 1.4796313063669686e-09,
+        "p95": 1.4796313063669686e-09
+      },
+      "within_graphviz": {
+        "mean": null,
+        "median": null,
+        "p95": null
+      }
+    }
+  },
+  "requested_seeds": 3,
+  "target_engine": "nx_spectral"
+}
