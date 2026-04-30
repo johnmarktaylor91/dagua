@@ -23,13 +23,15 @@ from dagua.layout.ops.state import (  # noqa: E402
 )
 
 
-def build_gem_pipeline(max_iters: int = 500) -> Pipeline:
+def build_gem_pipeline(max_iters: int = 500, fidelity_mode: bool = False) -> Pipeline:
     """Build a GEM graph-embedder pipeline.
 
     Parameters
     ----------
     max_iters : int, default=500
         Maximum number of OGDF node updates.
+    fidelity_mode : bool, default=False
+        When ``True``, use OGDF runner-compatible initial positions.
 
     Returns
     -------
@@ -50,8 +52,8 @@ def build_gem_pipeline(max_iters: int = 500) -> Pipeline:
     return Pipeline(
         [
             FixedSteps(FixedStepsConfig(n=max_iters)),
-            InitializeGEMPositions(),
-            GEMPrepareState(),
+            InitializeGEMPositions(fidelity_mode=fidelity_mode),
+            GEMPrepareState(fidelity_mode=fidelity_mode),
             GEMSequentialSolve(),
             GEMBatchedSolve(),
             GEMFinalizePositions(),
@@ -67,6 +69,7 @@ def layout_gem_pipeline(
     max_iters: int = 500,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
+    fidelity_mode: bool = False,
 ) -> torch.Tensor:
     """Run the GEM pipeline as a drop-in replacement.
 
@@ -85,6 +88,8 @@ def layout_gem_pipeline(
         Random seed for initialization and permutations.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
+    fidelity_mode : bool, default=False
+        When ``True``, use OGDF runner-compatible initial positions.
 
     Returns
     -------
@@ -119,7 +124,11 @@ def layout_gem_pipeline(
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_gem_pipeline(max_iters=max_iters).apply(problem, state, ctx)
+    final_state = build_gem_pipeline(max_iters=max_iters, fidelity_mode=fidelity_mode).apply(
+        problem,
+        state,
+        ctx,
+    )
     if final_state.pos is None:
         raise RuntimeError("GEM pipeline did not produce final positions.")
     return final_state.pos
