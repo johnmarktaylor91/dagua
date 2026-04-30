@@ -13,6 +13,7 @@ from __future__ import annotations
 import colorsys
 import gzip
 import io
+import math
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from dataclasses import dataclass, replace
@@ -235,6 +236,9 @@ _AUTO_CONTRAST_CLUSTER_FILL_BLEND = 0.16
 _AUTO_CONTRAST_CLUSTER_STROKE_BLEND = 0.5
 _AUTO_CONTRAST_LABEL_BACKGROUND_BLEND = 0.18
 _AUTO_CONTRAST_TEXT_BLEND = 0.9
+_DENSITY_SHRINK_SPARSE_NODE_COUNT = 2
+_DENSITY_SHRINK_REFERENCE_NODE_COUNT = 0.3
+_DENSITY_SHRINK_CLAMP_NODE_COUNT = 20
 _CLUSTER_RENDER_BBOX_EXTRA_CAP_POINTS = 2.0
 _MIN_CLUSTER_INNER_HEIGHT_POINTS = 1.0
 
@@ -905,6 +909,100 @@ def _graph_style_for_render(graph: Any) -> GraphStyle:
     return replace(style, **replacement_fields)
 
 
+def density_aware_size_factor(
+    node_count: int,
+    layout_extent_pt: float,
+    target_density: float = 0.5,
+    min_factor: float = 0.25,
+    max_factor: float = 1.5,
+) -> float:
+    """Return a node-size multiplier for graph-density-aware rendering.
+
+    Parameters
+    ----------
+    node_count : int
+        Number of visible nodes in the rendered graph.
+    layout_extent_pt : float
+        Maximum layout extent in points. Reserved for future area-aware
+        calibration; the current graphviz parity fit depends on node count.
+    target_density : float, default=0.5
+        Target node-area/layout-area ratio reserved for future calibration.
+    min_factor : float, default=0.25
+        Lower bound for dense graphs.
+    max_factor : float, default=1.5
+        Upper bound for sparse graphs.
+
+    Returns
+    -------
+    float
+        Scalar applied to render-time node width and height.
+    """
+
+    if node_count <= _DENSITY_SHRINK_SPARSE_NODE_COUNT:
+        return 1.0
+    if node_count >= _DENSITY_SHRINK_CLAMP_NODE_COUNT:
+        return max(float(min_factor), 0.0)
+    _ = (layout_extent_pt, target_density)
+    factor = math.sqrt(_DENSITY_SHRINK_REFERENCE_NODE_COUNT / max(float(node_count), 1.0))
+    return max(float(min_factor), min(float(max_factor), factor))
+
+
+def _layout_extent_pt(pos: np.ndarray) -> float:
+    """Return the maximum node-center span for density calibration.
+
+    Parameters
+    ----------
+    pos : numpy.ndarray
+        Node positions with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Maximum x/y extent in the same point-like data units used by Dagua's
+        graphviz-strict gallery fixtures.
+    """
+
+    if pos.size == 0:
+        return 0.0
+    x_span = float(np.max(pos[:, 0]) - np.min(pos[:, 0]))
+    y_span = float(np.max(pos[:, 1]) - np.min(pos[:, 1]))
+    return max(x_span, y_span)
+
+
+def _density_scaled_node_sizes(
+    sizes: torch.Tensor,
+    node_count: int,
+    layout_extent_pt: float,
+    enabled: bool,
+) -> Tuple[torch.Tensor, float]:
+    """Return render-time node sizes and the density multiplier used.
+
+    Parameters
+    ----------
+    sizes : torch.Tensor
+        Base node sizes with shape ``[N, 2]``.
+    node_count : int
+        Number of visible graph nodes.
+    layout_extent_pt : float
+        Maximum layout extent in point-like render units.
+    enabled : bool
+        Whether density-aware shrink is enabled for the graph style.
+
+    Returns
+    -------
+    tuple[torch.Tensor, float]
+        Scaled node sizes and the multiplier. When disabled, the original
+        tensor is returned with factor ``1.0``.
+    """
+
+    if not enabled:
+        return sizes, 1.0
+    factor = density_aware_size_factor(node_count, layout_extent_pt)
+    if abs(factor - 1.0) <= 1e-12:
+        return sizes, 1.0
+    return sizes * factor, factor
+
+
 def _node_style_for_render(graph: Any, node_idx: int) -> NodeStyle:
     """Return a node style adapted for dark-background rendering.
 
@@ -1316,7 +1414,19 @@ def render(
 
     # Compute figure bounds
     graph.compute_node_sizes()
-    sizes = graph.node_sizes.detach().cpu().numpy()
+    original_node_sizes = graph.node_sizes
+    scaled_node_sizes, density_size_factor = _density_scaled_node_sizes(
+        original_node_sizes,
+        n,
+        _layout_extent_pt(pos),
+        bool(getattr(gs, "density_aware_node_shrink", False)),
+    )
+    if density_size_factor != 1.0:
+        # Route clipping, cluster bboxes, labels, and node fills all read
+        # graph.node_sizes; use the density-adjusted tensor consistently for
+        # this render pass so dense graphviz-strict panels shrink as a unit.
+        graph.node_sizes = scaled_node_sizes
+    sizes = scaled_node_sizes.detach().cpu().numpy()
 
     # Metric-driven (R19): on graphviz_strict, dot's SVG omits outer margin
     # when the graph contains clusters (the cluster rectangle IS the boundary).
@@ -1564,6 +1674,9 @@ def render(
 
     if show:
         plt.show()
+
+    if graph.node_sizes is not original_node_sizes:
+        graph.node_sizes = original_node_sizes
 
     return fig, ax
 

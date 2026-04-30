@@ -74,8 +74,7 @@ def _networkx_spring_tensor(
     nx_pos_input = None
     if pos is not None:
         nx_pos_input = {
-            node_index: pos[node_index].detach().cpu().numpy()
-            for node_index in range(num_nodes)
+            node_index: pos[node_index].detach().cpu().numpy() for node_index in range(num_nodes)
         }
     nx_pos = nx.spring_layout(
         graph,
