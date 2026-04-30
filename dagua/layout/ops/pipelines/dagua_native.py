@@ -43,6 +43,8 @@ from dagua.layout.ops.state import (
 from dagua.layout.resolve import build_flex_constraints, normalize_node_sizes
 
 _COMPONENT_DOMINANCE_SKIP_FRACTION = 0.85
+_DOT_DEFAULT_RANK_CENTER_SEP = 72.0
+_DOT_DEFAULT_NODE_SEP = 18.0
 
 
 def _selected_force_pipeline(config: LayoutConfig) -> Optional[str]:
@@ -1062,14 +1064,26 @@ def _dot_lattice_lp(
 
     Implements the Gansner-Koutsofios-North-Vo 1993 pipeline:
     rank-assignment LP -> virtual-node insertion -> median crossing
-    reduction -> x-coordinate LP. measured this
-    candidate at +9.28 composite on hexagonal_lattice_42, +16.56 on
-    grid_5x5, +10.97 on dependency_graph_100, +3.21 on
-    complete_bipartite_8x12 over current dagua HEAD positions.
+    reduction -> x-coordinate LP. The candidate uses Graphviz-dot-compatible
+    point-unit spacing constants instead of deriving gaps from node dimensions.
 
-    Inputs match the polish-candidate signature; the candidate ignores
-    ``pos`` and synthesizes coordinates from ``edge_index`` directly.
-    The picker's 0.5-margin gate handles regression risk.
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Input positions with shape ``[N, 2]``. The candidate ignores these
+        coordinates when the lattice gate accepts, and returns a clone when the
+        gate rejects or LP solving fails.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``. Retained for the polish-candidate
+        signature but not used for spacing, matching dot's point-unit
+        ``nodesep``/rank center separation defaults.
+
+    Returns
+    -------
+    torch.Tensor
+        Candidate positions with shape ``[N, 2]``.
     """
     n = int(pos.shape[0])
     cand = pos.detach().clone()
@@ -1194,10 +1208,8 @@ def _dot_lattice_lp(
 
                 layers[r_l] = sorted(layers[r_l], key=_key_up)
 
-    nodesep = float(node_sizes[:, 0].mean().item()) * 1.5 if node_sizes.numel() else 72.0
-    nodesep = max(nodesep, 1.0)
-    ranksep = float(node_sizes[:, 1].mean().item()) * 2.0 if node_sizes.numel() else 72.0
-    ranksep = max(ranksep, 1.0)
+    nodesep = _DOT_DEFAULT_NODE_SEP
+    ranksep = _DOT_DEFAULT_RANK_CENTER_SEP
 
     edges_pos_w = [(u, v, w) for (u, v, w) in new_edges if w > 0]
     e_count = len(edges_pos_w)
