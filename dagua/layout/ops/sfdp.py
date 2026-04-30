@@ -1026,10 +1026,7 @@ class SFDPSpringElectricalStep(Op):
             total_force / node_force_norm.clamp_min(self.config.epsilon),
             torch.zeros_like(total_force),
         )
-        # Re-center after each step to preserve the translation-invariant classic
-        # SFDP trajectory and keep the quadtree focused on relative structure.
         state.pos = state.pos + (current_step * direction)
-        state.pos = state.pos - state.pos.mean(dim=0, keepdim=True)
         state.extras[_SFDP_FORCE_NORM_KEY] = float(node_force_norm.sum().item())
         return state
 
