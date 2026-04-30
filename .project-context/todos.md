@@ -1,6 +1,15 @@
 # Task & Bug Tracker
 
 ## Active Tasks
+- [ ] [HIGH] **Round 13 -- data-coord-everything sweep.** Audit `dagua/render/mpl.py` for ALL display-point leakage and convert to data-coord with `display_scale` conversion at the rendering boundary. Specifically:
+  - Revert round-11 thin-edge fallback (`_edge_uses_display_stroke_body` at mpl.py:5583, fallback path at mpl.py:6620). Replace with data-coord ribbon + explicit `display_scale`-based minimum-width clamp on the existing data-ribbon path. Clamp activates at render time only; optimizer sees true data-coord value.
+  - Audit ALL `linewidth=` and `fontsize=` calls in `dagua/render/mpl.py`. Each one routes through `display_scale` or gets replaced with data-coord polygon path.
+  - `style.stroke_width` (border) -> data-coord ribbon (with display_scale clamp)
+  - `style.width` (edges) -> data-ribbon throughout, no display-point fallback
+  - `style.font_size` -> data-coord (per `feedback_data_coord_fonts.md`)
+  - Add regression test asserting calibrate-once invariant: render same graph at multiple `dpi` values, verify relative geometry (stroke-width-as-fraction-of-node-width, font-size-as-fraction-of-node-height) is identical across dpi values. Catches future display-point regressions automatically.
+  - Re-run gallery_audit + per_card_pixel_diff, verify round-11 wins preserved (edge stem visible on box3d/circle/etc, labels readable on combo_pie_bold) under the new data-coord path.
+  - **WAIT for JMT signal to begin.** Then do cairo-vs-Agg discussion next.
 - [ ] [HIGH] Benchmark finishing (~95.5%) -- run fidelity pipeline when done
 - [ ] [HIGH] Continue Graphviz theme calibration until critics reach min>=8, mean>=9
 - [ ] [MED] Close fidelity gaps -- add reimplementations for unpaired algorithms:
@@ -36,7 +45,7 @@
 
 ### Architecture
 - [ ] [HIGH] Original algorithm backend: `dagua.layout(g, algorithm="fr", backend="original")` -- user-facing transparency, runs literal originals via competitor adapters
-- [ ] [HIGH] Pixel-unit overrides: "2pt" syntax for fixed-size elements
+- [ ] [HIGH] Pixel-unit overrides as OPT-IN OVERRIDE: "2pt" / "1.5px" syntax for fixed-size elements (NodeStyle.stroke_width_override, EdgeStyle.width_override, NodeStyle.font_size_override). Default path stays data-coord (per `feedback_data_coord_everything_strict.md`); override values bypass data-coord and route directly to display-points. Document loud and clear that override values are NOT differentiable and break the calibrate-once invariant. Useful when users want literal point-perfect typography for paper figures.
 - [ ] [HIGH] Expose text rendering in style fields: text_background, text_underline, text_strikethrough, label_outline
 
 ### Layout Quality
