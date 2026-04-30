@@ -13,6 +13,7 @@ from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _PREV_POS_KEY = "converge_prev_pos"
+_FR_LAST_DELTA_POS_KEY = "fr_last_delta_pos"
 _STALL_LAST_LOSS_KEY = "stall_last_loss"
 
 
@@ -245,7 +246,11 @@ class FRConvergenceCheck(Op):
 
     name: ClassVar[str] = "fr_convergence_check"
     category: ClassVar[OpCategory] = OpCategory.CONVERGE
-    reads: ClassVar[Tuple[str, ...]] = ("forces", "temperature")
+    reads: ClassVar[Tuple[str, ...]] = (
+        "forces",
+        "temperature",
+        f"extras.{_FR_LAST_DELTA_POS_KEY}",
+    )
     writes: ClassVar[Tuple[str, ...]] = ("converged",)
     requires: ClassVar[Tuple[str, ...]] = ("forces", "temperature")
 
@@ -298,10 +303,14 @@ class FRConvergenceCheck(Op):
         if problem.num_nodes <= 0 or state.forces is None or state.temperature is None:
             return state
 
-        length = torch.linalg.vector_norm(state.forces, dim=1).clamp(
-            min=float(self.config.min_force_norm)
-        )
-        delta_pos = state.forces * (float(state.temperature) / length).unsqueeze(1)
+        cached_delta_pos = state.extras.get(_FR_LAST_DELTA_POS_KEY)
+        if isinstance(cached_delta_pos, torch.Tensor):
+            delta_pos = cached_delta_pos
+        else:
+            length = torch.linalg.vector_norm(state.forces, dim=1).clamp(
+                min=float(self.config.min_force_norm)
+            )
+            delta_pos = state.forces * (float(state.temperature) / length).unsqueeze(1)
         mean_displacement = float(torch.linalg.norm(delta_pos).item()) / float(problem.num_nodes)
         state.converged = state.converged or mean_displacement < self.config.threshold
         return state

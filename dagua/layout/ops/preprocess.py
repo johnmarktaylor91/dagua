@@ -305,9 +305,14 @@ def _build_fr_adjacency_matrix(
 
     if edge_weights is not None:
         weights = edge_weights.detach().to(device="cpu", dtype=torch.float64)
-        adjacency[sources, targets] = weights
     else:
-        adjacency[sources, targets] = 1.0
+        weights = torch.ones(edge_index_cpu.shape[1], dtype=torch.float64)
+
+    # NetworkX's DiGraph keeps the last inserted edge attribute for repeated
+    # directed pairs. Assign in input order instead of relying on repeated
+    # advanced-index writes, whose ordering is backend-dependent.
+    for source, target, weight in zip(sources.tolist(), targets.tolist(), weights.tolist()):
+        adjacency[int(source), int(target)] = float(weight)
     return adjacency
 
 
@@ -1112,9 +1117,14 @@ class FRPrepareAdjacencyConfig:
     default_force_area : float, default=1.0
         Default unit-square area used by FR force calculations when callers do
         not supply an override later in the pipeline.
+    k : float, optional
+        Explicit NetworkX-style optimal node spacing. When provided,
+        ``force_area`` is set to ``k * k * num_nodes`` so the force op resolves
+        the requested spacing through its existing area-based helper.
     """
 
     default_force_area: float = 1.0
+    k: Optional[float] = None
 
 
 @register_op
@@ -1186,7 +1196,14 @@ class FRPrepareAdjacency(Op):
                 num_nodes=problem.num_nodes,
                 edge_weights=problem.edge_weights,
             )
-        state.force_area = self.config.default_force_area
+        if self.config.k is not None:
+            if self.config.k <= 0.0:
+                raise ValueError("FRPrepareAdjacency k must be positive when provided.")
+            state.force_area = float(self.config.k) * float(self.config.k) * float(
+                max(problem.num_nodes, 1)
+            )
+        else:
+            state.force_area = self.config.default_force_area
         return state
 
 
