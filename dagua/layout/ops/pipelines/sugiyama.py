@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
 
 import torch
 
@@ -41,6 +41,7 @@ def build_sugiyama_pipeline(
     trace_every: int = 0,
     return_edge_routes: bool = False,
     fidelity_mode: Optional[str] = None,
+    center_coordinates: bool = True,
 ) -> Pipeline:
     """Build a Sugiyama layered graph-drawing pipeline.
 
@@ -64,6 +65,8 @@ def build_sugiyama_pipeline(
     fidelity_mode : str, optional
         Optional reference-compatibility mode. ``"igraph"`` enables igraph's
         stable-order early stop and incidence-average barycenters.
+    center_coordinates : bool, default=True
+        Whether to translate the final horizontal span to be centered at zero.
 
     Returns
     -------
@@ -92,8 +95,9 @@ def build_sugiyama_pipeline(
             trace_every=trace_every,
             stop_when_stable=use_igraph_fidelity,
             use_incidence_barycenters=use_igraph_fidelity,
+            center_coordinates=center_coordinates,
         ),
-        _CoordinateAssignment(),
+        _CoordinateAssignment(center_coordinates=center_coordinates),
     ]
     if return_edge_routes:
         ops.append(_BuildEdgeRoutes())
@@ -113,6 +117,8 @@ def layout_sugiyama_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     return_edge_routes: bool = False,
     fidelity_mode: Optional[str] = None,
+    use_node_sizes_for_spacing: Optional[bool] = None,
+    center_coordinates: Optional[bool] = None,
     config: Optional["LayoutConfig"] = None,
 ) -> Union[
     torch.Tensor,
@@ -152,6 +158,14 @@ def layout_sugiyama_pipeline(
     fidelity_mode : str, optional
         Optional reference-compatibility mode. ``"igraph"`` enables igraph's
         stable-order early stop and incidence-average barycenters.
+    use_node_sizes_for_spacing : bool, optional
+        Whether horizontal compaction should include node widths. Defaults to
+        ``False`` in igraph fidelity mode because the igraph reference adapter
+        receives topology only, and ``True`` otherwise.
+    center_coordinates : bool, optional
+        Whether to center final horizontal coordinates. Defaults to ``False``
+        in igraph fidelity mode to match igraph's left-anchored coordinate
+        frame, and ``True`` otherwise.
     config : LayoutConfig, optional
         Full layout configuration supplied by the engine. Only spacing fields
         are read by this classic pipeline.
@@ -174,6 +188,11 @@ def layout_sugiyama_pipeline(
         raise ValueError("fidelity_mode must be None or 'igraph'.")
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative.")
+    use_igraph_fidelity = fidelity_mode == "igraph"
+    if use_node_sizes_for_spacing is None:
+        use_node_sizes_for_spacing = not use_igraph_fidelity
+    if center_coordinates is None:
+        center_coordinates = not use_igraph_fidelity
     if config is not None:
         if rank_sep is None:
             rank_sep = config.rank_sep
@@ -186,14 +205,36 @@ def layout_sugiyama_pipeline(
     if layer_sep is not None:
         rank_sep = layer_sep
 
+    if (
+        use_igraph_fidelity
+        and not return_edge_routes
+        and trace_every == 0
+        and _has_multiple_weak_components(edge_index=edge_index, num_nodes=num_nodes)
+    ):
+        return _layout_igraph_packed_components(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            rank_sep=rank_sep,
+            node_sep=node_sep,
+            seed=seed,
+            barycenter_passes=barycenter_passes,
+            edge_weights=edge_weights,
+            use_node_sizes_for_spacing=use_node_sizes_for_spacing,
+            center_coordinates=center_coordinates,
+            config=config,
+        )
+
+    problem_node_sizes = node_sizes if use_node_sizes_for_spacing else None
+
     output_device = edge_index.device
-    if node_sizes is not None:
+    if problem_node_sizes is not None:
         output_device = node_sizes.device
 
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,
-        node_sizes=node_sizes,
+        node_sizes=problem_node_sizes,
         edge_weights=edge_weights,
         seed=seed,
     )
@@ -208,6 +249,7 @@ def layout_sugiyama_pipeline(
         trace_every=trace_every,
         return_edge_routes=return_edge_routes,
         fidelity_mode=fidelity_mode,
+        center_coordinates=center_coordinates,
     )
     final_state = pipeline.apply(problem, state, ctx)
 
@@ -230,6 +272,201 @@ def layout_sugiyama_pipeline(
     if trace_every > 0:
         return positions, visible_traces, edge_routes
     return positions, edge_routes
+
+
+def _has_multiple_weak_components(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Return whether the graph has more than one weak component.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes ``N`` in the graph.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least two weak components are present.
+    """
+    return len(_weak_components(edge_index=edge_index, num_nodes=num_nodes)) > 1
+
+
+def _weak_components(edge_index: torch.Tensor, num_nodes: int) -> List[List[int]]:
+    """Compute weak components in deterministic node-id order.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes ``N`` in the graph.
+
+    Returns
+    -------
+    list of list of int
+        Weak components, each sorted by original node id.
+    """
+    if num_nodes <= 0:
+        return []
+
+    adjacency: List[List[int]] = [[] for _ in range(num_nodes)]
+    edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+        if source == target:
+            continue
+        adjacency[source].append(target)
+        adjacency[target].append(source)
+
+    seen = [False] * num_nodes
+    components: List[List[int]] = []
+    for start in range(num_nodes):
+        if seen[start]:
+            continue
+        seen[start] = True
+        stack = [start]
+        component: List[int] = []
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            for neighbor in adjacency[node]:
+                if not seen[neighbor]:
+                    seen[neighbor] = True
+                    stack.append(neighbor)
+        components.append(sorted(component))
+    return components
+
+
+def _layout_igraph_packed_components(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    rank_sep: float,
+    node_sep: float,
+    seed: int,
+    barycenter_passes: int,
+    edge_weights: Optional[torch.Tensor],
+    use_node_sizes_for_spacing: bool,
+    center_coordinates: bool,
+    config: Optional["LayoutConfig"],
+) -> torch.Tensor:
+    """Lay out weak components independently and pack them along X.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes ``N`` in the graph.
+    node_sizes : torch.Tensor, optional
+        Optional node-size tensor with shape ``[N, 2]``.
+    rank_sep : float
+        Vertical center-to-center spacing between layers.
+    node_sep : float
+        Horizontal gap between components and adjacent vertices.
+    seed : int
+        Seed retained for API compatibility.
+    barycenter_passes : int
+        Maximum number of crossing-minimization sweeps.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight vector with shape ``[E]``.
+    use_node_sizes_for_spacing : bool
+        Whether component layouts should include node widths.
+    center_coordinates : bool
+        Whether component layouts should center horizontal coordinates before
+        the igraph-style component packing normalization.
+    config : LayoutConfig, optional
+        Full layout configuration supplied by the engine.
+
+    Returns
+    -------
+    torch.Tensor
+        Packed original-node positions with shape ``[N, 2]``.
+    """
+    output_device = node_sizes.device if node_sizes is not None else edge_index.device
+    packed = torch.zeros((num_nodes, 2), dtype=torch.float32, device=output_device)
+    edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    weights_cpu = (
+        None
+        if edge_weights is None
+        else edge_weights.detach().to(device="cpu", dtype=torch.float32)
+    )
+
+    dx = 0.0
+    for component in _weak_components(edge_index=edge_index_cpu, num_nodes=num_nodes):
+        component_edges, component_weights = _slice_component_edges(
+            edge_index=edge_index_cpu,
+            edge_weights=weights_cpu,
+            component=component,
+        )
+        component_sizes = node_sizes[component] if node_sizes is not None else None
+        component_pos = cast(
+            torch.Tensor,
+            layout_sugiyama_pipeline(
+                edge_index=component_edges.to(device=edge_index.device),
+                num_nodes=len(component),
+                node_sizes=component_sizes,
+                rank_sep=rank_sep,
+                node_sep=node_sep,
+                seed=seed,
+                barycenter_passes=barycenter_passes,
+                edge_weights=(
+                    None
+                    if component_weights is None
+                    else component_weights.to(device=edge_index.device)
+                ),
+                fidelity_mode="igraph",
+                use_node_sizes_for_spacing=use_node_sizes_for_spacing,
+                center_coordinates=center_coordinates,
+                config=config,
+            ),
+        ).to(device=output_device, dtype=torch.float32)
+        if component_pos.numel() > 0:
+            component_pos[:, 0] -= float(component_pos[:, 0].min().item())
+            component_pos[:, 0] += dx
+            dx += float(component_pos[:, 0].max().item()) - dx + node_sep
+        packed[component] = component_pos
+    return packed
+
+
+def _slice_component_edges(
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+    component: List[int],
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Return a component-local edge list and aligned weights.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU graph connectivity tensor with shape ``[2, E]``.
+    edge_weights : torch.Tensor, optional
+        Optional CPU edge-weight vector with shape ``[E]``.
+    component : list of int
+        Original node ids in one weak component.
+
+    Returns
+    -------
+    tuple
+        Component-local ``edge_index`` and optional aligned edge weights.
+    """
+    node_to_local: Dict[int, int] = {node: index for index, node in enumerate(component)}
+    sources: List[int] = []
+    targets: List[int] = []
+    weight_values: List[float] = []
+    for edge_id, (source, target) in enumerate(zip(edge_index[0].tolist(), edge_index[1].tolist())):
+        if source not in node_to_local or target not in node_to_local:
+            continue
+        sources.append(node_to_local[source])
+        targets.append(node_to_local[target])
+        if edge_weights is not None:
+            weight_values.append(float(edge_weights[edge_id].item()))
+
+    component_edges = torch.tensor([sources, targets], dtype=torch.long)
+    component_weights = (
+        None if edge_weights is None else torch.tensor(weight_values, dtype=torch.float32)
+    )
+    return component_edges, component_weights
 
 
 __all__ = ["build_sugiyama_pipeline", "layout_sugiyama_pipeline"]
