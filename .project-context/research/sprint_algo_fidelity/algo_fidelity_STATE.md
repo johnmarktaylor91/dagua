@@ -1,15 +1,19 @@
 ---
 run: algo_fidelity
 created: 2026-04-29T19:16:57-04:00
-state: ROUND_3_DONE
-current_round: 3
-current_family: fdp
-codex_pid: 3793569
-codex_log: /tmp/algo_fid_round_3.log
-watchdog_pid: 3793728
-dispatched_at: 2026-04-29T19:55:00-04:00
-prompt_file: .project-context/research/sprint_algo_fidelity/PROMPT_round_3.md
+state: ROUND_8_DONE
+current_round: 8
+current_family: stochastic_re_eval
+codex_pid: 4119292
+codex_log: /tmp/algo_fid_round_8.log
+watchdog_pid: 4119443
+dispatched_at: 2026-04-29T22:30:00-04:00
+prompt_file: .project-context/research/sprint_algo_fidelity/PROMPT_round_8.md
 flail_count_dot: 1
+flail_count_fdp: 2
+flail_count_sfdp: 1
+neato_status: CONVERGED
+neato_residual_classification: numerical_residual: cyclic_graph_init_basin
 
 baseline_truth_change: |
   ROUND 1 CACHED RMSDs ARE OBSOLETE. Cached benchmark used different
@@ -75,6 +79,50 @@ The cluster sprint uses Opus subagents for visual inspection. To avoid
 double-billing the user's Anthropic quota, **this sprint uses CODEX
 exclusively for execution**. Opus subagents only allowed if codex is
 quota-blocked AND the work is small (< ~50 lines).
+
+## Graphviz source reference (MANDATORY for every round)
+
+Authoritative graphviz source is cloned at:
+
+  `/home/jtaylor/projects/_references/graphviz`
+
+**Every round prompt MUST instruct codex to read the relevant graphviz
+C source as ground truth before proposing fixes.** Web-search and
+academic papers describe the algorithms in general terms; the C source
+is what the binary actually does. Defaults, force laws, initialization,
+and tie-breakers all live in the C code.
+
+Per-family source map:
+
+| Family | Graphviz source | Key files |
+|---|---|---|
+| dot (sugiyama) | `lib/dotgen/` | `rank.c` (network simplex rank), `mincross.c` (median + transpose crossing reduction), `position.c` (network simplex coord assignment), `dot.c` |
+| neato (stress, classical_mds) | `lib/neatogen/` | `stress.c` (stress majorization), `kkutils.c` (Kamada-Kawai), `neatoinit.c` (classical MDS init), `sgd.c`, `smart_ini_x.c` |
+| fdp (FMMM, FR-style force-directed) | `lib/fdpgen/` | `layout.c` + `tlayout.c` + `xlayout.c` (force-directed solver), `grid.c` (repulsion approx), `fdpinit.c` (defaults) |
+| sfdp (multilevel spring-electrical) | `lib/sfdpgen/` | `Multilevel.c` (multilevel framework), `spring_electrical.c` (spring-electrical method), `sfdpinit.c` (defaults), `stress_model.c`, `post_process.c` |
+
+Useful default-extraction commands codex can run:
+
+```bash
+# Find default values for a family (e.g. fdp K, MaxIter, etc.):
+grep -nE "^\s*(static\s+)?(double|int|float)\s+\w+\s*=" \
+  /home/jtaylor/projects/_references/graphviz/lib/fdpgen/*.c
+
+# Find force-law expressions (e.g. attraction/repulsion math):
+grep -nE "K\s*\*|d\s*\*\s*d|sqrt|log\(" \
+  /home/jtaylor/projects/_references/graphviz/lib/fdpgen/*.c
+
+# See what defaults are documented (cross-check):
+grep -nE "DEFAULT|default" \
+  /home/jtaylor/projects/_references/graphviz/lib/fdpgen/*.c
+```
+
+Confirmed graphviz binary version on this machine: 8.0.3
+(`dot -V`). Source clone is current main branch (cloned 2026-04-29) --
+slightly newer than 8.0.3 but the algorithms haven't changed
+substantively. If codex finds a defaults-divergence between source and
+8.0.3 binary, document it and use 8.0.3 as the truth (the binary is
+what produces our cached positions).
 
 ## Stop criteria (observable, quantitative)
 
@@ -201,6 +249,16 @@ Each prompt MUST include:
 |---|---|---|---|---|---|---|---|
 | 1 | baseline | 19:19 | 19:30 | 78e8529 | N/A baseline | dot/small_label_storm 0.4744 | Built cross-comparator + panels. Identified dot+fdp as worst families. |
 | 2 | dot | 19:33 | 19:50 | (no commit) | live 0.3419 (cached 0.3245 obsolete) | mixed_width_labels live 0.4046 | DIAGNOSIS_ONLY: cached vs live mismatch from node-size drift. Layer + x-ordering match dot; gap is in coordinate assignment (BK vs network-simplex). live_compare.py added. |
+| 3 | dot | 19:55 | 20:21 | 17521a3 | dot median 0.3419 -> **0.0191** (-20x) | densenet_block 0.168 (only 1 graph >0.15) | **CONVERGED** at median<<0.05. Fix: pipeline defaults rank_sep 1.0->72pt, node_sep 1.0->18pt to match graphviz dot point spacing. No simple-graph regressions. Width-aware BK now produces dot-like proportions. Residual: densenet_block barely over 0.15 worst-graph criterion -- accepted. |
+| 4 | fdp | 20:25 | 20:48 | (no commit) | fdp median 0.247 baseline (lower than Round 1 cached 0.292 but still uniform >0.15 floor) | center_port_backedge_hub 0.440 | RESIDUAL: K=0.3 alignment regressed slightly. Codex diagnosis: dagua FMMM uses OGDF logarithmic attraction, graphviz fdp uses FR force law (rep K^2/d^2, attr (d-len)/d). Force-law mismatch is the dominant gap. Round 5: add FR force model to FMMM, verify against `lib/fdpgen/tlayout.c`. |
+| 5 | fdp | 21:06 | 21:35 | (no commit) | fdp median 0.247 -> 0.257 (regressed) | center_port_backedge_hub 0.440 unchanged | RESIDUAL #2 on fdp. Force-law alignment with graphviz tlayout.c old-form (rep K^2/d^2, attr d/L*weight) verbatim REGRESSED median by +0.01. parallel_multiedge_bundle (3 nodes) sits at 0.257 -- even smallest graph is uniform-floor, suggests random initialization is dominant remaining gap. PARKING fdp at flail=2; pivoting to sfdp/neato to maximize graphviz parity coverage. Final attempted lever (random init via lib/fdpgen/fdpinit.c) deferred to a later round. |
+| 6 | sfdp | 21:18 | 21:42 | (no commit) | sfdp median 0.092 baseline (matches Round 1) | center_port_backedge_hub 0.475 | RESIDUAL #1 on sfdp. **MAJORITY of graphviz defaults already aligned in dagua** (random_start=true, seed=123, C=0.2, bh=0.6, maxiter=500, K=avg_edge_length, K*0.75 finer levels, adaptive_cooling switch). Tried lever: attractive-force distance factor per graphviz spring_electrical.c -- improved p95 (0.418->0.404) but regressed median (0.092->0.106). Partial fix in wrong direction. PARKING sfdp at flail=1; pivoting to neato (already nearly converged). Future lever: sequential vs synchronous updates (invasive). |
+| 7 | neato | 22:00 | 22:11 | (no commit) | stress_maj 0.035, classical_mds 0.045 (both <= 0.05 ✓) | inception_block 0.382, petersen_10 0.333 (worst > 0.15 ✗) | OUTLIER_RESIDUAL: medians meet stop criterion. Worst-graphs are cyclic/dense/disconnected (basin differences from graphviz INIT_RANDOM vs dagua classical MDS+jitter). Classification: `numerical_residual: cyclic_graph_init_basin`. Validation determinism confirmed (cmp same outputs across 2 runs). Round 8 to multi-seed upgrade live_compare. |
 | 1 | baseline | 2026-04-29T19:16:57-04:00 | 2026-04-29T19:26:04-04:00 | 0a9a957 | N/A baseline | center_port_backedge_hub | Round 1 = infrastructure |
 | 2 | dot | 2026-04-29T19:32:00-04:00 | 2026-04-29T19:47:27-04:00 | none | 0.3245 cached / 0.3419 live | small_label_storm 0.4852 live | Built live comparator; blocked before Sugiyama fix because live baseline differs from Round 1 cache on 8/22 graphs due node-size context drift. |
 | 3 | dot | 2026-04-29T19:55:00-04:00 | 2026-04-29T20:20:04-04:00 | feat(fidelity): round 3 | 0.3419 live / 0.0191 live | densenet_block 0.1679 live | COMMITTED: aligned classic Sugiyama direct defaults to dot point spacing (`rank_sep=72`, `node_sep=18`); diagnostics improved without simple-graph regression. Next family: fdp. |
+| 4 | fdp | 2026-04-29T20:30:00-04:00 | 2026-04-29T21:16:00-04:00 | none | 0.2475 live / 0.2520 attempted | center_port_backedge_hub 0.4432 attempted | RESIDUAL: Graphviz `K=0.3in` ideal-length alignment regressed median and was reverted. Stay on fdp; next lever should target Graphviz fdp force law or initialization. |
+| 5 | fdp | 2026-04-29T21:05:00-04:00 | 2026-04-29T21:47:00-04:00 | none | 0.2475 live / 0.2572 attempted | center_port_backedge_hub 0.4401 attempted | RESIDUAL: Graphviz `tlayout.c` force-law mode regressed median and was reverted. `flail_count_fdp=2`; advance to sfdp unless a final fdp random-init attempt is explicitly scheduled. |
+| 6 | sfdp | 2026-04-29T21:42:00-04:00 | 2026-04-29T22:00:00-04:00 | none | 0.0915 live / 0.1062 attempted | center_port_backedge_hub 0.4798 attempted | RESIDUAL: Graphviz attractive distance-factor alignment regressed median and was reverted. `flail_count_sfdp=1`; stay on sfdp for one more lever, likely sequential update or random stream alignment. |
+| 7 | neato | 2026-04-29T22:00:00-04:00 | 2026-04-29T23:32:00-04:00 | none | stress 0.0353 live / MDS 0.0455 live | inception_block 0.3817 stress; petersen_10 0.3326 MDS | OUTLIER_RESIDUAL: medians satisfy `<=0.05`, worst-case fails on dense/cyclic/symmetric graphs. Graphviz defaults match Dagua on stress weights (`1/d^2`) and `maxiter=200`; residual is initialization-basin mismatch from Graphviz random start vs Dagua deterministic MDS start. Mark neato CONVERGED at family-median level and advance to Phase 2. |
+| 8 | stochastic_re_eval | 2026-04-29T22:30:00-04:00 | 2026-04-30T00:00:00-04:00 | this commit | fdp 0.2484 multi-seed; sfdp 0.1074 multi-seed; neato unchanged | fdp center_port_backedge_hub 0.3275 median; sfdp disconnected_label_cycle_collage 0.4135 median; neato cache unseeded | Built multi-seed `live_compare` with pairwise dagua-vs-graphviz, within-graphviz, within-dagua RMSD rows plus per-graph TOST. Re-eval verdicts: fdp `not_equivalent`, sfdp `not_equivalent`; graphviz-neato seeded cache absent so neato TOST is `not_tested`. No family reclassified as stochastic-floor faithful. |
