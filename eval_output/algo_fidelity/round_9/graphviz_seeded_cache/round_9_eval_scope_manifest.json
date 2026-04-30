@@ -1,0 +1,22 @@
+{
+  "cache_scope": "Round 8 comparator graph union, not benchmark_full historical cache",
+  "engines": {
+    "graphviz_fdp": {
+      "actual_tensors": 630,
+      "expected_tensors": 189,
+      "graphs": 21
+    },
+    "graphviz_neato": {
+      "actual_tensors": 693,
+      "expected_tensors": 207,
+      "graphs": 23
+    },
+    "graphviz_sfdp": {
+      "actual_tensors": 693,
+      "expected_tensors": 216,
+      "graphs": 24
+    }
+  },
+  "seed_start": 42,
+  "seed_stop": 50
+}
