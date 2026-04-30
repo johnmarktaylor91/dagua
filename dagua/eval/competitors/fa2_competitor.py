@@ -204,6 +204,8 @@ class FA2Reference(CompetitorBase):
                 # global RNG seeding above only covers older reference packages.
                 engine_kwargs["seed"] = seed
             layout_kwargs: dict[str, Any] = {"pos": None, "iterations": 100}
+            if weights is not None:
+                layout_kwargs["weight_attr"] = "weight"
             if variant_params is not None:
                 for key, value in dict(variant_params).items():
                     if key == "iterations":
