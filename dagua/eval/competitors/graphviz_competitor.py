@@ -311,6 +311,99 @@ def _layout_with_dot(graph: DaguaGraph, timeout: float) -> torch.Tensor:
     return positions
 
 
+def _parse_graphviz_json_positions(data: dict[str, object], num_nodes: int) -> torch.Tensor:
+    """Parse Graphviz JSON node positions into a tensor.
+
+    Parameters
+    ----------
+    data : dict[str, object]
+        Parsed Graphviz JSON payload.
+    num_nodes : int
+        Number of expected graph nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Node positions with shape ``[N, 2]`` in Dagua's y-down coordinate
+        convention.
+    """
+    positions = torch.zeros(num_nodes, 2)
+    objects = data.get("objects", [])
+    if not isinstance(objects, list):
+        return positions
+
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        name = str(obj.get("name", ""))
+        if not name.startswith("n") or not name[1:].isdigit() or "pos" not in obj:
+            continue
+        node_index = int(name[1:])
+        if node_index >= num_nodes:
+            continue
+        x_str, y_str = str(obj["pos"]).split(",", maxsplit=1)
+        positions[node_index, 0] = float(x_str)
+        positions[node_index, 1] = -float(y_str)
+    return positions
+
+
+def _layout_with_graphviz_engine(
+    graph: DaguaGraph,
+    engine: str,
+    timeout: float,
+    seed: Optional[int],
+) -> torch.Tensor:
+    """Run a Graphviz engine and parse the resulting positions.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Graph to lay out.
+    engine : str
+        Graphviz layout engine name passed through ``dot -K``.
+    timeout : float
+        Maximum subprocess runtime in seconds.
+    seed : int | None
+        Optional stochastic seed. When provided, both ``seed`` and ``start``
+        graph attributes are passed because fdp reads ``seed`` while neato and
+        sfdp read ``start``.
+
+    Returns
+    -------
+    torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    """
+    from dagua.graphviz_utils import to_dot
+
+    command = ["dot", "-Tjson", f"-K{engine}"]
+    if seed is not None:
+        command.extend([f"-Gseed={int(seed)}", f"-Gstart={int(seed)}"])
+
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".dot",
+        delete=False,
+        encoding="utf-8",
+    ) as handle:
+        handle.write(to_dot(graph))
+        dot_path = Path(handle.name)
+
+    try:
+        result = subprocess.run(
+            [*command, str(dot_path)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Graphviz failed: {result.stderr}")
+        data = json.loads(result.stdout)
+    finally:
+        dot_path.unlink(missing_ok=True)
+
+    return _parse_graphviz_json_positions(data, graph.num_nodes)
+
+
 class _GraphvizBase(CompetitorBase):
     """Base class for Graphviz engine variants."""
 
@@ -331,21 +424,23 @@ class _GraphvizBase(CompetitorBase):
         timeout : float, default=300.0
             Maximum runtime in seconds.
         seed : int | None, default=None
-            Accepted for interface consistency but ignored because Graphviz's
-            Python entry points do not expose seed control here.
+            Optional Graphviz stochastic seed. The adapter passes this through
+            as both ``seed`` and ``start`` graph attributes because Graphviz
+            engines read different names.
 
         Returns
         -------
         CompetitorResult
             Layout result and timing information.
         """
-        del seed
-
-        from dagua.graphviz_utils import layout_with_graphviz
-
         start = time.perf_counter()
         try:
-            pos = layout_with_graphviz(graph, engine=self.engine, timeout=timeout)
+            pos = _layout_with_graphviz_engine(
+                graph=graph,
+                engine=self.engine,
+                timeout=timeout,
+                seed=seed,
+            )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
         except subprocess.TimeoutExpired:
@@ -391,14 +486,16 @@ class GraphvizDot(_GraphvizBase):
         timeout : float, default=300.0
             Maximum runtime in seconds.
         seed : int | None, default=None
-            Accepted for interface consistency but ignored because Graphviz's
-            ``dot`` JSON path does not expose seed control.
+            Accepted for interface consistency. Graphviz ``dot`` is
+            deterministic and does not use stochastic seed attributes.
 
         Returns
         -------
         CompetitorResult
             Layout result and timing information.
         """
+        # dot is deterministic; fdp/sfdp/neato seed plumbing lives in the
+        # shared Graphviz engine adapter above.
         del seed
 
         start = time.perf_counter()

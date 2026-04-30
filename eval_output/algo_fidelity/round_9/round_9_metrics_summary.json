@@ -1,0 +1,194 @@
+{
+  "fdp": {
+    "aggregate_tost": {
+      "0.5x": {
+        "equivalent": true,
+        "margin": 0.10428789715045003,
+        "pvalue": 1.3884339537850326e-09,
+        "verdict": "equivalent_at_0.5x"
+      },
+      "1.5x": {
+        "equivalent": true,
+        "margin": 0.31286369145135007,
+        "pvalue": 5.037329455030954e-90,
+        "verdict": "equivalent_at_1.5x"
+      },
+      "1x": {
+        "equivalent": true,
+        "margin": 0.20857579430090006,
+        "pvalue": 8.230151402205265e-49,
+        "verdict": "equivalent_at_1x"
+      },
+      "2x": {
+        "equivalent": true,
+        "margin": 0.4171515886018001,
+        "pvalue": 2.1573245804283072e-124,
+        "verdict": "equivalent_at_2x"
+      }
+    },
+    "aggregate_verdict": "equivalent_at_0.5x",
+    "dagua_engine": "classic_fmmm",
+    "dagua_vs_graphviz": {
+      "mean": 0.25781507567280815,
+      "median": 0.24953201413154602,
+      "p95": 0.3959122896194457
+    },
+    "graph_verdict_counts": {
+      "equivalent_at_0.5x": 15,
+      "equivalent_at_1x": 3,
+      "not_equivalent": 3
+    },
+    "graphs": 21,
+    "target_engine": "graphviz_fdp",
+    "within_graphviz": {
+      "mean": 0.20857579430090006,
+      "median": 0.23520731925964355,
+      "p95": 0.3830561727285385
+    }
+  },
+  "neato_mds": {
+    "aggregate_tost": {
+      "0.5x": {
+        "equivalent": true,
+        "margin": 0.05031774974413358,
+        "pvalue": 1.622160930957791e-05,
+        "verdict": "equivalent_at_0.5x"
+      },
+      "1.5x": {
+        "equivalent": true,
+        "margin": 0.15095324923240075,
+        "pvalue": 8.291193334369058e-31,
+        "verdict": "equivalent_at_1.5x"
+      },
+      "1x": {
+        "equivalent": true,
+        "margin": 0.10063549948826717,
+        "pvalue": 2.805399757091386e-16,
+        "verdict": "equivalent_at_1x"
+      },
+      "2x": {
+        "equivalent": true,
+        "margin": 0.20127099897653433,
+        "pvalue": 1.0967300035089293e-46,
+        "verdict": "equivalent_at_2x"
+      }
+    },
+    "aggregate_verdict": "equivalent_at_0.5x",
+    "dagua_engine": "classic_classical_mds",
+    "dagua_vs_graphviz": {
+      "mean": 0.09887797449229528,
+      "median": 0.046205244958400726,
+      "p95": 0.2678220838308334
+    },
+    "graph_verdict_counts": {
+      "equivalent_at_0.5x": 8,
+      "equivalent_at_1.5x": 1,
+      "equivalent_at_1x": 7,
+      "not_equivalent": 7
+    },
+    "graphs": 23,
+    "target_engine": "graphviz_neato",
+    "within_graphviz": {
+      "mean": 0.10063549948826717,
+      "median": 0.024223554879426956,
+      "p95": 0.31030976325273485
+    }
+  },
+  "neato_stress": {
+    "aggregate_tost": {
+      "0.5x": {
+        "equivalent": true,
+        "margin": 0.05031774974413358,
+        "pvalue": 1.0340364437457554e-07,
+        "verdict": "equivalent_at_0.5x"
+      },
+      "1.5x": {
+        "equivalent": true,
+        "margin": 0.15095324923240075,
+        "pvalue": 3.19186307632102e-47,
+        "verdict": "equivalent_at_1.5x"
+      },
+      "1x": {
+        "equivalent": true,
+        "margin": 0.10063549948826717,
+        "pvalue": 1.4591959310599681e-24,
+        "verdict": "equivalent_at_1x"
+      },
+      "2x": {
+        "equivalent": true,
+        "margin": 0.20127099897653433,
+        "pvalue": 9.66225185594135e-72,
+        "verdict": "equivalent_at_2x"
+      }
+    },
+    "aggregate_verdict": "equivalent_at_0.5x",
+    "dagua_engine": "classic_stress_maj",
+    "dagua_vs_graphviz": {
+      "mean": 0.09818075328751508,
+      "median": 0.031883105635643005,
+      "p95": 0.324993371963501
+    },
+    "graph_verdict_counts": {
+      "equivalent_at_0.5x": 10,
+      "equivalent_at_1.5x": 1,
+      "equivalent_at_1x": 10,
+      "not_equivalent": 2
+    },
+    "graphs": 23,
+    "target_engine": "graphviz_neato",
+    "within_graphviz": {
+      "mean": 0.10063549948826717,
+      "median": 0.024223554879426956,
+      "p95": 0.31030976325273485
+    }
+  },
+  "sfdp": {
+    "aggregate_tost": {
+      "0.5x": {
+        "equivalent": false,
+        "margin": 0.042291161419355676,
+        "pvalue": 0.8741256457782772,
+        "verdict": "not_equivalent"
+      },
+      "1.5x": {
+        "equivalent": true,
+        "margin": 0.12687348425806702,
+        "pvalue": 3.22041466630926e-14,
+        "verdict": "equivalent_at_1.5x"
+      },
+      "1x": {
+        "equivalent": true,
+        "margin": 0.08458232283871135,
+        "pvalue": 0.0005228471658819949,
+        "verdict": "equivalent_at_1x"
+      },
+      "2x": {
+        "equivalent": true,
+        "margin": 0.1691646456774227,
+        "pvalue": 5.267181116038785e-30,
+        "verdict": "equivalent_at_2x"
+      }
+    },
+    "aggregate_verdict": "equivalent_at_1x",
+    "dagua_engine": "classic_sfdp",
+    "dagua_vs_graphviz": {
+      "mean": 0.13778644020940797,
+      "median": 0.08890410885214806,
+      "p95": 0.3995703458786011
+    },
+    "graph_verdict_counts": {
+      "equivalent_at_0.5x": 4,
+      "equivalent_at_1.5x": 4,
+      "equivalent_at_1x": 2,
+      "equivalent_at_2x": 1,
+      "not_equivalent": 13
+    },
+    "graphs": 24,
+    "target_engine": "graphviz_sfdp",
+    "within_graphviz": {
+      "mean": 0.08458232283871135,
+      "median": 0.024147304706275463,
+      "p95": 0.35886035710573194
+    }
+  }
+}
