@@ -204,7 +204,7 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_rt": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.reingold_tilford",
         function_name="layout_reingold_tilford_pipeline",
-        default_params={},
+        default_params={"fidelity_mode": "igraph"},
     ),
     "classic_linlog": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.linlog",
@@ -1165,6 +1165,17 @@ class ClassicRT(_ClassicBase):
 
     name = "classic_rt"
     max_nodes = 500_000
+    variant_param_names = frozenset(
+        {
+            "center_output",
+            "fidelity_mode",
+            "horizontal",
+            "output_scale",
+            "rootlevel",
+            "roots",
+            "traversal_mode",
+        }
+    )
 
     def layout(
         self,
