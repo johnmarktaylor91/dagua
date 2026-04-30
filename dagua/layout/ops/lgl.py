@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import random
+import warnings
 from collections import deque
 from dataclasses import dataclass, field
 from typing import ClassVar, List, Optional, Tuple
@@ -22,6 +23,7 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _LGL_MIN_DISTANCE = 1.0e-12
 _LGL_BUCKET_NEIGHBORHOOD = (-1, 0, 1)
+_LGL_DISCONNECTED_WARNING = "LGL layout does not support disconnected graphs yet."
 
 
 @dataclass(frozen=True)
@@ -233,6 +235,8 @@ class LGLPrepareState(Op):
 
         rng = random.Random(problem.seed)
         root_node = rng.randrange(num_nodes) if self.config.root is None else self.config.root
+        if root_node < 0 or root_node >= num_nodes:
+            raise ValueError("root must lie in [0, num_nodes).")
         frk = math.sqrt(resolved_area / float(max(num_nodes, 1)))
 
         state.extras["lgl_maxiter"] = self.config.maxiter
@@ -352,11 +356,13 @@ class LGLLayeredRefinement(Op):
         area = float(state.extras["lgl_area"])
         radius = math.sqrt(area / math.pi)
 
-        layers, parents, _distance = _build_lgl_bfs_layers(num_nodes, root_node, adjacency)
+        layers, parents, distance = _build_lgl_bfs_layers(num_nodes, root_node, adjacency)
 
         if not layers:
             state.pos = positions
             return state
+        if any(node_distance < 0 for node_distance in distance):
+            warnings.warn(_LGL_DISCONNECTED_WARNING, UserWarning, stacklevel=2)
 
         placed = torch.zeros(num_nodes, dtype=torch.bool)
         placed[root_node] = True
