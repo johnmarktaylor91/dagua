@@ -1,53 +1,84 @@
 # Dagua Rendering Coordinate System
 
-## Summary
+## Default Rule
 
-Dagua uses two coordinate spaces. Understanding which space a property belongs
-to prevents scaling bugs.
+The renderer follows the 2026-03-23 data-coordinate-everything directive:
+rendered geometry belongs in data coordinates by default. Display-point values
+are allowed only as explicit opt-in overrides or documented internal residuals.
 
-### Data Space — Geometry (positions, sizes)
+Dagua is a differentiable layout engine. Node positions, sizes, edge routes,
+cluster boxes, and aesthetic losses live on the optimizer's data-coordinate
+manifold. A visible border or marker drawn in display points sits outside that
+manifold: it can change relative to the optimized geometry when DPI, figure
+size, or axis limits change. That makes visual output less predictable and can
+hide bugs from layout-side tests.
 
-- Node positions: `pos[i] = (x, y)`
-- Node sizes: `sizes[i] = (width, height)`
-- Edge bezier curves: control points
-- Cluster bounding boxes
-- Arrowhead polygon vertices (converted from points at render time)
+## Coordinate Spaces
 
-### Display Space — Appearance (visual properties)
+Data coordinates describe content:
 
-matplotlib handles these correctly as points (1/72 inch):
+- node positions and sizes
+- cluster bounding boxes
+- edge curves, arrowheads, and route decorations
+- node and cluster borders as filled rings or ribbons
+- text glyph fills, outlines, and synthetic bold emphasis
 
-- `linewidth` on all patches (nodes, edges, clusters)
-- `fontsize` on all text
-- `linestyle` dash/gap lengths
-- `text_outline_width` via path effects
+Display points describe author-facing size inputs:
 
-### The One Conversion: Polygon-Based Decorations
+- font-size tokens before glyph layout
+- style values historically named in points, such as stroke widths
+- explicit future override APIs whose name says they are display-point based
 
-Arrowheads and cluster corner radii are the main exceptions: they are drawn as
-data-coordinate geometry but should be specified in points. The
-`_compute_display_scale()` helper converts them at render time:
+Those point values are inputs, not the final rendering space.
+
+## The Display-Scale Pattern
+
+Matplotlib still needs an axes transform to convert a point-sized design token
+into data-coordinate geometry. `_compute_display_scale(ax)` returns the scalar:
 
 ```python
-display_scale = _compute_display_scale(ax)
-arrow_data_length = arrow_points_length * display_scale
+data_units = points * _compute_display_scale(ax)
 ```
 
-Cluster label offsets use the same conversion because they position text
-relative to a data-space cluster box.
+Use that conversion at the rendering boundary, then build a filled polygon,
+ring, or ribbon in data coordinates. The patch or collection should use:
 
-### Why Linewidth Doesn't Need Conversion
+```python
+linewidth=0.0
+edgecolor="none"
+```
 
-matplotlib's `linewidth` parameter is in points, not data units. A 1.4pt border
-stays 1.4pt regardless of the graph's `xlim` or `ylim`.
+Examples include node borders, cluster borders, arrowhead bodies, text outline
+ribbons, synthetic bold text ribbons, crossing bridges, and port indicators.
 
-If a border looks thicker on one graph than another, the cause is not linewidth
-scaling. The graph's nodes are simply smaller in data units relative to the
-figure, so the fixed-point border appears proportionally heavier. That is
-correct behavior.
+Font rendering is the inverse boundary: Dagua lays glyph paths out in data
+coordinates, so a user-facing font size is first converted to data units for
+glyph geometry. When a matplotlib text fallback is unavoidable, convert back to
+display points only at that hand-off.
 
-### Adding New Visual Properties
+## Minimum Visible Strokes
 
-- For `linewidth`, `fontsize`, and `linestyle`: use the value directly
-- For polygon geometry and patch radii: convert with `_compute_display_scale()`
-- When in doubt: if matplotlib's API docs say "points", do not convert it
+Some data-coordinate ribbons can underflow when the graph extent is tiny or the
+axis transform is extreme. In those cases, apply a render-time clamp such as:
+
+```python
+visible_width = max(data_width, _MIN_VISIBLE_STROKE_POINTS * display_scale)
+```
+
+The clamp is a rasterization guardrail. The optimizer-facing geometry and style
+meaning remain data-coordinate; only the emitted visual ribbon receives a floor
+so it does not disappear.
+
+## Legitimate Display-Point Residuals
+
+Display points are acceptable in two narrow categories:
+
+1. Explicit user overrides, such as a future `NodeStyle.*_override` field whose
+   name and documentation promise display-space behavior.
+2. Principled internal residuals where a backend primitive cannot be represented
+   faithfully as data geometry, and the code carries a nearby comment naming the
+   data-coordinate directive and explaining the exception.
+
+Residuals should be rare, named clearly, and easy to audit. A bare matplotlib
+`linewidth=style_value` or `markersize=style_value` is not acceptable for normal
+renderer output.

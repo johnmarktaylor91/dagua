@@ -8359,9 +8359,6 @@ def _draw_edge_marker(
 def _draw_port_indicators(ax: Any, graph: Any, curves: List[BezierCurve]) -> None:
     """Draw optional source/target port indicators at edge boundary contacts.
 
-    Uses ax.plot() with markersize in points so indicators are DPI-independent
-    and always visible regardless of data-coordinate scaling.
-
     Parameters
     ----------
     ax : Any
@@ -8373,11 +8370,9 @@ def _draw_port_indicators(ax: Any, graph: Any, curves: List[BezierCurve]) -> Non
     """
 
     from matplotlib.colors import to_rgba
+    from matplotlib.patches import PathPatch
 
-    # Matplotlib markers keep the port glyph size in display points instead of
-    # data units, which avoids the gallery DPI shrinkage that made them vanish.
-    _MARKER_MAP = {"circle": "o", "diamond": "D", "square": "s"}
-
+    display_scale = _compute_display_scale(ax)
     for edge_idx, curve in enumerate(curves):
         style = _edge_style_for_render(graph, edge_idx)
         indicator = str(getattr(style, "port_indicator", "none")).lower()
@@ -8388,23 +8383,93 @@ def _draw_port_indicators(ax: Any, graph: Any, curves: List[BezierCurve]) -> Non
         if size_points <= 0.0:
             continue
 
-        marker = _MARKER_MAP.get(indicator, "o")
         face_color = to_rgba(str(style.color), alpha=float(getattr(style, "opacity", 1.0)))
         outline_color = to_rgba("#ffffff")
+        outer_radius = size_points * display_scale * 0.5
+        border_width = min(
+            _PORT_INDICATOR_BORDER_WIDTH_POINTS * display_scale,
+            outer_radius * 0.45,
+        )
+        inner_radius = max(outer_radius - border_width, outer_radius * 0.2)
 
         for endpoint_name, point in (("source", curve.p0), ("target", curve.p1)):
-            ax.plot(
-                float(point[0]),
-                float(point[1]),
-                marker=marker,
-                markersize=size_points,
-                markerfacecolor=face_color,
-                markeredgecolor=outline_color,
-                markeredgewidth=_PORT_INDICATOR_BORDER_WIDTH_POINTS,
-                linestyle="none",
+            center = (float(point[0]), float(point[1]))
+            outer_path = _port_indicator_path(center, outer_radius, indicator)
+            inner_path = _port_indicator_path(center, inner_radius, indicator)
+            outline_patch = PathPatch(
+                outer_path,
+                facecolor=outline_color,
+                edgecolor="none",
+                linewidth=0.0,
                 zorder=_PORT_INDICATOR_ZORDER,
-                gid=f"dagua-port-indicator-{edge_idx}-{endpoint_name}",
             )
+            fill_patch = PathPatch(
+                inner_path,
+                facecolor=face_color,
+                edgecolor="none",
+                linewidth=0.0,
+                zorder=_PORT_INDICATOR_ZORDER + 0.01,
+            )
+            gid = f"dagua-port-indicator-{edge_idx}-{endpoint_name}"
+            fill_patch.set_gid(gid)
+            ax.add_patch(outline_patch)
+            ax.add_patch(fill_patch)
+
+
+def _port_indicator_path(center: Tuple[float, float], radius: float, indicator: str) -> Any:
+    """Return a filled data-coordinate path for a port indicator glyph.
+
+    Parameters
+    ----------
+    center : tuple[float, float]
+        Marker center in data coordinates.
+    radius : float
+        Marker half-size in data units.
+    indicator : str
+        Port indicator shape token.
+
+    Returns
+    -------
+    Any
+        Closed matplotlib path in data coordinates.
+    """
+    from matplotlib.path import Path
+
+    x, y = center
+    resolved_radius = max(float(radius), 0.0)
+    if indicator == "square":
+        points = np.array(
+            [
+                [x - resolved_radius, y - resolved_radius],
+                [x + resolved_radius, y - resolved_radius],
+                [x + resolved_radius, y + resolved_radius],
+                [x - resolved_radius, y + resolved_radius],
+                [x - resolved_radius, y - resolved_radius],
+            ],
+            dtype=float,
+        )
+    elif indicator == "diamond":
+        points = np.array(
+            [
+                [x, y + resolved_radius],
+                [x + resolved_radius, y],
+                [x, y - resolved_radius],
+                [x - resolved_radius, y],
+                [x, y + resolved_radius],
+            ],
+            dtype=float,
+        )
+    else:
+        angles = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False, dtype=float)
+        points = np.column_stack(
+            [
+                x + np.cos(angles) * resolved_radius,
+                y + np.sin(angles) * resolved_radius,
+            ]
+        )
+        points = np.vstack([points, points[:1]])
+    codes = [Path.MOVETO] + [Path.LINETO] * (points.shape[0] - 2) + [Path.CLOSEPOLY]
+    return Path(points, codes)
 
 
 def _draw_edges(
