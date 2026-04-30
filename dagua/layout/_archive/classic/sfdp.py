@@ -17,7 +17,7 @@ _DEFAULT_STEP = 0.1
 _MAX_QUADTREE_DEPTH = 10
 _MIN_COARSE_SIZE = 4
 _MIN_COARSEN_REDUCTION = 0.75
-_BARNES_HUT_THRESHOLD = 10_000
+_BARNES_HUT_THRESHOLD = 45
 _PROLONGATION_NOISE_SCALE = 1.0e-3
 _PROLONGATION_SMOOTHING = 0.5
 _REFINEMENT_K_DECAY = 0.75
@@ -950,7 +950,8 @@ def _spring_electrical_layout(
     repulsive_exponent : float
         SFDP repulsion exponent ``p``.
     adaptive_cooling : bool
-        Whether to adapt the step size from force progress.
+        Whether to adapt the step size from force progress. When disabled,
+        Graphviz still applies fixed ``0.90`` cooling.
     step_init : float
         Initial fixed movement length per iteration.
 
@@ -993,10 +994,11 @@ def _spring_electrical_layout(
             torch.zeros_like(total_force),
         )
         positions = positions + (current_step * direction)
-        positions = positions - positions.mean(dim=0, keepdim=True)
 
-        force_norm = float(torch.linalg.vector_norm(total_force).item())
-        if adaptive_cooling and previous_force_norm < float("inf"):
+        force_norm = float(node_force_norm.sum().item())
+        if not adaptive_cooling:
+            current_step *= 0.90
+        elif previous_force_norm < float("inf"):
             current_step = _update_step(
                 step=current_step,
                 force_norm=force_norm,
