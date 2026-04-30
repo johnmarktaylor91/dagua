@@ -135,34 +135,13 @@ def _build_undirected_adjacency(
     ):
         if source == target:
             continue
-        cost = 1.0 / max(float(weights_cpu[edge_id].item()), _EPSILON)
+        cost = max(float(weights_cpu[edge_id].item()), _EPSILON)
         previous = adjacency_maps[source].get(target)
-        adjacency_maps[source][target] = min(previous, cost) if previous is not None else cost
+        adjacency_maps[source][target] = previous + cost if previous is not None else cost
         previous = adjacency_maps[target].get(source)
-        adjacency_maps[target][source] = min(previous, cost) if previous is not None else cost
+        adjacency_maps[target][source] = previous + cost if previous is not None else cost
 
     return [sorted(neighbors.items()) for neighbors in adjacency_maps]
-
-
-def _undirected_edge_weight_lookup(
-    edge_index: torch.Tensor,
-    edge_weights: Optional[torch.Tensor],
-) -> dict[tuple[int, int], float]:
-    """Build an undirected edge-weight lookup table from the input graph."""
-    if edge_weights is None or edge_index.numel() == 0:
-        return {}
-
-    lookup: dict[tuple[int, int], float] = {}
-    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
-    weights_cpu = edge_weights.detach().to(device="cpu", dtype=torch.float32)
-    for edge_id, (source, target) in enumerate(
-        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
-    ):
-        if source == target:
-            continue
-        pair = (min(source, target), max(source, target))
-        lookup[pair] = lookup.get(pair, 0.0) + float(weights_cpu[edge_id].item())
-    return lookup
 
 
 def _bfs_distances(
@@ -990,22 +969,6 @@ class BuildFuzzySimplicialSet(Op):
             sigmas=sigmas,
             rhos=rhos,
         )
-
-        if problem.edge_weights is not None and weight.numel() > 0:
-            edge_weight_lookup = _undirected_edge_weight_lookup(
-                edge_index=problem.edge_index,
-                edge_weights=problem.edge_weights,
-            )
-            scaled_weight = weight.clone()
-            for index in range(weight.shape[0]):
-                # Preserve the classic behavior where explicit graph weights
-                # rescale the fuzzy-set membership after symmetrization.
-                pair = (
-                    min(int(head[index].item()), int(tail[index].item())),
-                    max(int(head[index].item()), int(tail[index].item())),
-                )
-                scaled_weight[index] = scaled_weight[index] * edge_weight_lookup.get(pair, 1.0)
-            weight = scaled_weight
 
         state.extras[_FUZZY_HEAD_KEY] = head
         state.extras[_FUZZY_TAIL_KEY] = tail
