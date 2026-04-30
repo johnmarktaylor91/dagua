@@ -141,11 +141,16 @@ def target_graphs(
     list of str
         Sorted graph names that have successful cached target positions.
     """
+    if requested_graphs is not None:
+        return [
+            graph
+            for graph in sorted(requested_graphs)
+            if select_ok_record(indexed=indexed, graph=graph, engine=target_engine) is not None
+        ]
+
     graph_names = sorted(
         key.rsplit("::", 1)[0] for key in indexed if key.endswith(f"::{target_engine}")
     )
-    if requested_graphs is not None:
-        graph_names = [graph for graph in graph_names if graph in requested_graphs]
     return [
         graph
         for graph in graph_names
