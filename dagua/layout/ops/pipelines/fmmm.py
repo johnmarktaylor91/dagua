@@ -25,7 +25,11 @@ from dagua.layout.ops.state import (
 )
 
 
-def build_fmmm_pipeline(steps: int = 200, force_model: str = "ogdf_new") -> Pipeline:
+def build_fmmm_pipeline(
+    steps: int = 200,
+    force_model: str = "ogdf_new",
+    reference_mode: bool = False,
+) -> Pipeline:
     """Build an FM^3 multilevel force-directed pipeline.
 
     Parameters
@@ -36,6 +40,9 @@ def build_fmmm_pipeline(steps: int = 200, force_model: str = "ogdf_new") -> Pipe
         Spring-force model for edge attraction. ``"ogdf_new"`` matches
         OGDF's default; ``"fr"`` preserves Dagua's earlier coefficient for
         benchmark fallback selection.
+    reference_mode : bool, default=False
+        Use OGDF-aligned coarsening, coarsest initialization, and force
+        scaling choices for fidelity comparisons.
 
     Returns
     -------
@@ -55,7 +62,13 @@ def build_fmmm_pipeline(steps: int = 200, force_model: str = "ogdf_new") -> Pipe
         raise ValueError("steps must be non-negative.")
 
     initialize_state = _InitializeFMMMState(
-        config=_InitializeFMMMStateConfig(steps=steps, force_model=force_model)
+        config=_InitializeFMMMStateConfig(
+            steps=steps,
+            force_model=force_model,
+            galaxy_choice="lower" if reference_mode else "higher",
+            coarsest_init="ogdf_random" if reference_mode else "fr",
+            ogdf_force_scaling=reference_mode,
+        )
     )
     initialize_coarsest = _InitializeCoarsestLevel()
     refine_coarsest = _RefineCoarsestLevel()
@@ -84,6 +97,7 @@ def layout_fmmm_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     force_model: str = "ogdf_new",
+    reference_mode: bool = False,
 ) -> torch.Tensor:
     """Run the FM^3 pipeline as a drop-in replacement.
 
@@ -105,6 +119,8 @@ def layout_fmmm_pipeline(
         Optional edge-weight tensor with shape ``[E]``.
     force_model : str, default="ogdf_new"
         Spring-force model for edge attraction.
+    reference_mode : bool, default=False
+        Use OGDF-aligned reference behavior for algorithm fidelity runs.
 
     Returns
     -------
@@ -148,7 +164,11 @@ def layout_fmmm_pipeline(
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_fmmm_pipeline(steps=steps, force_model=force_model).apply(
+    final_state = build_fmmm_pipeline(
+        steps=steps,
+        force_model=force_model,
+        reference_mode=reference_mode,
+    ).apply(
         problem,
         state,
         ctx,
