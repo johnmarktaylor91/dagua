@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass, field
-from typing import ClassVar, Tuple
+from typing import ClassVar, Optional, Tuple
 
 import numpy as np
 import torch
@@ -38,6 +38,66 @@ _MIN_DISTANCE: float = 1.0e-3
 _FULL_STRESS_LIMIT: int = 1_000
 _PIVOT_COUNT: int = 50
 _SAMPLED_REPULSION_NEIGHBORS: int = 96
+
+
+def _path_warm_start_positions(problem: LayoutProblem) -> Optional[torch.Tensor]:
+    """Return OGDF-style line coordinates for simple-path graphs.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable graph inputs for the maxent-stress run.
+
+    Returns
+    -------
+    torch.Tensor | None
+        Raw ``float32`` coordinates with shape ``[N, 2]`` when the simple
+        undirected graph is a path, otherwise ``None``.
+    """
+    if problem.num_nodes <= 1:
+        return torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+
+    adjacency = _shared_build_undirected_adjacency(
+        edge_index=problem.edge_index,
+        num_nodes=problem.num_nodes,
+        edge_weights=problem.edge_weights,
+    )
+    degrees = [len(neighbors) for neighbors in adjacency]
+    if any(degree > 2 for degree in degrees):
+        return None
+
+    edge_count = sum(degrees) // 2
+    if edge_count != problem.num_nodes - 1:
+        return None
+
+    endpoints = [index for index, degree in enumerate(degrees) if degree <= 1]
+    if len(endpoints) != 2:
+        return None
+
+    positions = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+    previous = -1
+    current = endpoints[0]
+    x_position = 0.0
+    visited = set()
+    while current not in visited:
+        visited.add(current)
+        positions[current, 0] = x_position
+        next_node = -1
+        next_weight = 1.0
+        for neighbor, weight in adjacency[current]:
+            if neighbor != previous:
+                next_node = neighbor
+                next_weight = float(weight)
+                break
+        if next_node < 0:
+            break
+        previous = current
+        current = next_node
+        x_position += next_weight
+
+    if len(visited) != problem.num_nodes:
+        return None
+    return positions
 
 
 @dataclass(frozen=True)
@@ -112,14 +172,19 @@ class MaxentInitializePositions(Op):
         """
         del ctx
 
-        positions = layout_pivot_mds(
-            edge_index=problem.edge_index,
-            num_nodes=problem.num_nodes,
-            node_sizes=problem.node_sizes,
-            n_pivots=min(self.config.pivot_count, problem.num_nodes),
-            seed=problem.seed,
-            edge_weights=problem.edge_weights,
-        )
+        positions = None
+        if self.for_majorization:
+            positions = _path_warm_start_positions(problem)
+        if positions is None:
+            positions = layout_pivot_mds(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+                node_sizes=problem.node_sizes,
+                n_pivots=min(self.config.pivot_count, problem.num_nodes),
+                seed=problem.seed,
+                edge_weights=problem.edge_weights,
+                first_pivot_index=0 if self.for_majorization else None,
+            )
         if self.for_majorization:
             state.pos = positions.to(device="cpu", dtype=torch.float64)
         else:
