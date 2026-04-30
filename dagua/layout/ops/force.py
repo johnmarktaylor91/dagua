@@ -1807,10 +1807,10 @@ class FA2ForceStep(Op):
                     distance = np.sqrt(((x_coord - center_x) ** 2) + ((y_coord - center_y) ** 2))
                     size = float(2.0 * distance.max())
                     quadrant_masks = (
-                        (x_coord < center_x) & (y_coord >= center_y),
                         (x_coord < center_x) & (y_coord < center_y),
-                        (x_coord >= center_x) & (y_coord >= center_y),
                         (x_coord >= center_x) & (y_coord < center_y),
+                        (x_coord < center_x) & (y_coord >= center_y),
+                        (x_coord >= center_x) & (y_coord >= center_y),
                     )
 
                     children: list[BarnesHutNode] = []
@@ -1928,12 +1928,14 @@ class FA2ForceStep(Op):
             target = undirected_edges[1]
             delta = pos.index_select(0, source) - pos.index_select(0, target)
             if self.config.linlog:
-                distance = torch.linalg.vector_norm(delta, dim=1, keepdim=True).clamp(
-                    min=float(self.config.linlog_min_distance)
+                distance = torch.linalg.vector_norm(delta, dim=1)
+                factor = torch.zeros_like(distance)
+                valid = distance > 0.0
+                factor[valid] = (
+                    -float(outbound_att_compensation)
+                    * torch.log1p(distance[valid])
+                    / distance[valid]
                 )
-                factor = (
-                    -float(outbound_att_compensation) * torch.log1p(distance) / distance
-                ).squeeze(1)
             else:
                 factor = torch.full(
                     (undirected_edges.shape[1],),
