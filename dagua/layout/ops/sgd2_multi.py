@@ -50,6 +50,7 @@ _NEIGHBORHOOD_K_DIST = 1.5
 _CROSSING_DETECTOR_TRAIN_STEPS = 2
 _CROSSING_DETECTOR_LR = 0.01
 _UNREACHED = -1
+_CROSSING_CRITERIA = frozenset({"crossings", "crossing_angle_maximization"})
 
 
 class SmoothSteps:
@@ -333,11 +334,56 @@ def _build_adjacency(
     list[list[tuple[int, float]]]
         Sorted neighbor lists for each node.
     """
+    if edge_weights is not None:
+        return _build_min_weight_undirected_adjacency(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            edge_weights=edge_weights,
+        )
     return _build_undirected_adjacency(
         edge_index=edge_index,
         num_nodes=num_nodes,
         edge_weights=edge_weights,
     )
+
+
+def _build_min_weight_undirected_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: torch.Tensor,
+) -> list[list[tuple[int, float]]]:
+    """Build weighted adjacency while deduplicating parallel edges by minimum.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    edge_weights : torch.Tensor
+        Positive per-edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    list[list[tuple[int, float]]]
+        Sorted neighbor lists for each node, using the minimum supplied weight
+        for parallel undirected edges.
+    """
+    best_weights: list[dict[int, float]] = [dict() for _ in range(num_nodes)]
+    edges = edge_index.detach().cpu().to(dtype=torch.long)
+    weights = edge_weights.detach().cpu().to(dtype=torch.float64)
+    for edge_idx in range(edges.shape[1]):
+        source = int(edges[0, edge_idx].item())
+        target = int(edges[1, edge_idx].item())
+        if source == target:
+            continue
+        weight = float(weights[edge_idx].item())
+        previous_forward = best_weights[source].get(target)
+        if previous_forward is None or weight < previous_forward:
+            best_weights[source][target] = weight
+            best_weights[target][source] = weight
+
+    return [sorted(neighbors.items()) for neighbors in best_weights]
 
 
 def _bfs_distances(
@@ -649,6 +695,44 @@ def _constant_schedule(weight: float) -> Callable[[int], float]:
         Schedule returning ``weight`` for every step.
     """
     return lambda _step: weight
+
+
+def _strip_empty_crossing_schedules(
+    schedules: Dict[str, Callable[[int], float]],
+    prepared: _PreparedState,
+) -> Dict[str, Callable[[int], float]]:
+    """Mirror the reference adapter when no non-incident edge pairs exist.
+
+    Parameters
+    ----------
+    schedules : dict[str, Callable[[int], float]]
+        Active criterion schedules keyed by criterion name.
+    prepared : _PreparedState
+        Precomputed graph structures, including optional non-incident edge
+        pairs with shape ``[2, 2, P]``.
+
+    Returns
+    -------
+    dict[str, Callable[[int], float]]
+        Criterion schedules with crossing-based objectives removed when the
+        graph has no non-incident edge pairs. If that removal leaves no active
+        objective, a stress-only fallback is returned to match the reference
+        wrapper.
+    """
+    if _CROSSING_CRITERIA.isdisjoint(schedules):
+        return schedules
+    pairs = prepared.non_incident_edge_pairs
+    if pairs is not None and pairs.shape[-1] > 0:
+        return schedules
+
+    stripped = {
+        criterion: schedule
+        for criterion, schedule in schedules.items()
+        if criterion not in _CROSSING_CRITERIA
+    }
+    if stripped:
+        return stripped
+    return {"stress": _constant_schedule(1.0)}
 
 
 def _resolve_schedules(
@@ -2028,6 +2112,18 @@ class _InitSGD2MultiState(Op):
             needs_non_incident_edge_pairs=needs_non_incident_edge_pairs,
             edge_weights=problem.edge_weights,
         )
+        schedules = _strip_empty_crossing_schedules(schedules=schedules, prepared=prepared)
+        active_names = set(schedules)
+        if "stress" in active_names and prepared.stress_pairs is None:
+            prepared = _prepare_state(
+                edge_index=problem.edge_index,
+                num_nodes=problem.num_nodes,
+                device=device,
+                needs_distances=True,
+                needs_incident_edge_pairs=needs_incident_edge_pairs,
+                needs_non_incident_edge_pairs=False,
+                edge_weights=problem.edge_weights,
+            )
 
         state.extras["sgd2_prepared"] = prepared
         state.extras["sgd2_schedules"] = schedules
