@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
+import pytest
 import torch
 
 from dagua.layout.ops.lgl import _build_lgl_bfs_layers, _lgl_updated_maxchange
@@ -110,3 +111,27 @@ def test_lgl_layer_boundaries_match_igraph_assumptions() -> None:
         assert processed_shell_sizes == [len(layer) for layer in layers[1:]]
         if len(boundaries) > 2:
             assert boundaries[2] - 1 == len(layers[1])
+
+
+def test_lgl_rejects_invalid_igraph_scalar_parameters() -> None:
+    """Verify LGL validates explicit scalar parameters like igraph."""
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+
+    invalid_kwargs = [
+        {"maxdelta": 0.0},
+        {"area": 0.0},
+        {"repulserad": -1.0},
+        {"cellsize": 0.0},
+        {"root": 2},
+    ]
+    for kwargs in invalid_kwargs:
+        with pytest.raises(ValueError):
+            layout_lgl_pipeline(edge_index=edge_index, num_nodes=2, **kwargs)
+
+
+def test_lgl_warns_on_disconnected_graph_like_igraph() -> None:
+    """Verify disconnected LGL inputs surface igraph's warning semantics."""
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+
+    with pytest.warns(UserWarning, match="disconnected graphs"):
+        layout_lgl_pipeline(edge_index=edge_index, num_nodes=4, seed=5, root=0, maxiter=1)
