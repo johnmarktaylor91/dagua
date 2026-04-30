@@ -636,6 +636,29 @@ def _disconnected_fallback_layout(
     return positions.to(device=device)
 
 
+def _initial_positions_from_state(state: SolveState, num_nodes: int) -> np.ndarray:
+    """Resolve exact-mode initial positions.
+
+    Parameters
+    ----------
+    state : SolveState
+        Current solve state, optionally carrying caller-provided warm-start
+        positions in ``state.pos``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    np.ndarray
+        Initial coordinates with shape ``[N, 2]`` and dtype ``float64``.
+    """
+    if state.pos is None:
+        return np.random.rand(num_nodes, 2)
+    if state.pos.ndim != 2 or tuple(state.pos.shape) != (num_nodes, 2):
+        raise ValueError("Stress-SGD init_pos must be shape [N, 2].")
+    return state.pos.detach().cpu().numpy().astype(np.float64, copy=True)
+
+
 def _has_usable_edges(adjacency: list[list[tuple[int, float]]]) -> bool:
     """Return whether an adjacency list contains any non-self graph edge.
 
@@ -927,9 +950,9 @@ class RunStressSGDExactSchedule(Op):
         weights = state.extras["stress_sgd_weights"]
         config = self.config
 
-        # Positions are initialized from the shared module-level NumPy RNG to
-        # match the classic routine's exact random draw order.
-        positions = np.random.rand(num_nodes, 2)
+        # Default positions use the shared NumPy RNG to match s_gd2's draw
+        # order; caller-provided positions enable direct parity probes.
+        positions = _initial_positions_from_state(state, num_nodes)
         traces: list[torch.Tensor] = []
         schedule = _schedule_from_weights(
             steps=config.steps,
