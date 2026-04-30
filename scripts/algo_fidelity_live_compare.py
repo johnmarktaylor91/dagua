@@ -23,7 +23,6 @@ if str(REPO_ROOT) not in sys.path:
 from dagua.eval.competitors import get_competitor  # noqa: E402
 from dagua.eval.graphs import TestGraph, get_test_graphs  # noqa: E402
 from dagua.eval.pipeline_io import load_position_tensor, validate_positions  # noqa: E402
-from dagua.eval.variants import engine_is_stochastic  # noqa: E402
 from dagua.graph import DaguaGraph  # noqa: E402
 from scripts.algo_fidelity_cross import (  # noqa: E402
     fidelity_procrustes,
@@ -35,8 +34,14 @@ from scripts.algo_fidelity_cross import (  # noqa: E402
 from scripts.algo_fidelity_panel import draw_layout, normalize_for_panel  # noqa: E402
 
 TOST_ALPHA = 0.05
-TOST_MARGIN_FACTORS: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0)
-TOST_MARGIN_LABELS: dict[float, str] = {0.5: "0.5x", 1.0: "1x", 1.5: "1.5x", 2.0: "2x"}
+TOST_MARGIN_FACTORS: tuple[float, ...] = (0.25, 0.5, 1.0, 1.5, 2.0)
+TOST_MARGIN_LABELS: dict[float, str] = {
+    0.25: "0.25x",
+    0.5: "0.5x",
+    1.0: "1x",
+    1.5: "1.5x",
+    2.0: "2x",
+}
 DEFAULT_SEED_START = 42
 CACHED_SEED_STOP = 50
 
@@ -224,12 +229,12 @@ def load_cached_target_seeds(
     expected_nodes : int
         Expected node count for position validation.
     max_seeds : int
-        Maximum number of cached seeds to load from the 42..50 cache window.
+        Maximum number of cached seeds to load.
     graphviz_cache_dir : Path, optional
         Optional flat directory containing graphviz seed tensors named
         ``<graph>__<engine>__seed<S>.pt``. When omitted, tensors are loaded
         from ``input_dir / "positions"`` using the historical benchmark cache
-        layout.
+        layout and the original 42..50 seed window.
 
     Returns
     -------
@@ -237,7 +242,13 @@ def load_cached_target_seeds(
         Loaded target positions keyed by seed.
     """
     positions_by_seed: dict[int, torch.Tensor] = {}
-    for seed in range(DEFAULT_SEED_START, CACHED_SEED_STOP + 1):
+    if graphviz_cache_dir is not None:
+        target_seeds = seed_sequence(max_seeds)
+    else:
+        historical_seed_count = CACHED_SEED_STOP - DEFAULT_SEED_START + 1
+        target_seeds = seed_sequence(min(max_seeds, historical_seed_count))
+
+    for seed in target_seeds:
         basename = f"{graph}__{target_engine}__seed{seed}.pt"
         if graphviz_cache_dir is not None:
             positions_path = graphviz_cache_dir / basename
@@ -634,9 +645,17 @@ def compare_live_multi_seed(
     ValueError
         If requested graph data is unavailable.
     """
-    dagua_seed_count = seed_count if engine_is_stochastic(dagua_engine) else 1
+    dagua_seed_count = seed_count
     dagua_seeds = seed_sequence(dagua_seed_count)
-    target_max_seeds = max(1, min(seed_count, CACHED_SEED_STOP - DEFAULT_SEED_START + 1))
+    target_max_seeds = max(
+        1,
+        seed_count
+        if graphviz_cache_dir is not None
+        else min(
+            seed_count,
+            CACHED_SEED_STOP - DEFAULT_SEED_START + 1,
+        ),
+    )
 
     rows: list[dict[str, Any]] = []
     summary: dict[str, Any] = {
@@ -891,9 +910,38 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--seeds",
         type=int,
         default=1,
-        help="Run multi-seed comparison with N seeds; deterministic dagua engines force N=1.",
+        help="Run multi-seed comparison with N seeds on both sides.",
     )
     return parser.parse_args(argv)
+
+
+def cache_backed_target_graphs(
+    requested_graphs: set[str],
+    test_graphs: Mapping[str, TestGraph],
+) -> list[str]:
+    """Select explicitly requested graphs for cache-backed target comparison.
+
+    Parameters
+    ----------
+    requested_graphs : set of str
+        Graph names supplied on the command line.
+    test_graphs : Mapping[str, TestGraph]
+        Test graph registry keyed by graph name.
+
+    Returns
+    -------
+    list of str
+        Requested graph names present in the local graph registry.
+
+    Raises
+    ------
+    ValueError
+        If any requested graph is absent from the local graph registry.
+    """
+    missing = sorted(graph for graph in requested_graphs if graph not in test_graphs)
+    if missing:
+        raise ValueError(f"Target graph is absent from graph registry: {', '.join(missing)}")
+    return sorted(requested_graphs)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -912,12 +960,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     indexed = load_results(args.input_dir)
     test_graphs = graph_registry()
-    selected_graphs = target_graphs(
-        indexed=indexed,
-        dagua_engine=args.dagua_engine,
-        target_engine=args.target_engine,
-        requested_graphs=parse_graph_filter(args.graphs),
-    )
+    requested_graphs = parse_graph_filter(args.graphs)
+    if args.graphviz_cache_dir is not None and requested_graphs is not None:
+        selected_graphs = cache_backed_target_graphs(
+            requested_graphs=requested_graphs,
+            test_graphs=test_graphs,
+        )
+    else:
+        selected_graphs = target_graphs(
+            indexed=indexed,
+            dagua_engine=args.dagua_engine,
+            target_engine=args.target_engine,
+            requested_graphs=requested_graphs,
+        )
     if args.seeds < 1:
         raise ValueError("--seeds must be >= 1")
     if args.seeds > 1:
