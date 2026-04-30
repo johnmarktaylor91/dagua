@@ -65,16 +65,23 @@ fi
 
 # --- Status summary ---
 if [ "$SUPERVISOR_ALIVE" -ge 1 ] && [ "$BENCHMARK_ALIVE" -ge 1 ]; then
-    STATUS="OK supervisor+benchmark both alive"
+    STATUS_LINE="OK -- still cooking (supervisor + benchmark both alive)"
 elif [ "$SUPERVISOR_ALIVE" -ge 1 ] && [ "$BENCHMARK_ALIVE" -eq 0 ]; then
-    STATUS="WARN supervisor alive but no benchmark process (between retries?)"
+    STATUS_LINE="WARN -- supervisor alive but no benchmark process (between retries?)"
 elif [ "$SUPERVISOR_ALIVE" -eq 0 ]; then
-    STATUS="PROBLEM supervisor DEAD"
+    STATUS_LINE="PROBLEM -- supervisor DEAD"
 else
-    STATUS="UNKNOWN"
+    STATUS_LINE="UNKNOWN status"
 fi
 
-MSG="100-seed daily check ${HOURS_RUN}h running. $STATUS. Progress: $STATS. Recent: ${RECENT:-(no notable events)}"
+MSG="$(cat <<EOM
+[7am check] 100-seed benchmark
+$STATUS_LINE
+Runtime: ${HOURS_RUN}h
+Progress: $STATS
+Recent: ${RECENT:-(no notable events)}
+EOM
+)"
 echo "$MSG"
 
 # --- Auto-restart if supervisor died and not done ---
