@@ -41,7 +41,7 @@ class SFDPAlgorithmConfig:
         Edge-length fallback for edgeless coarse graphs.
     max_quadtree_depth : int, default=10
         Maximum Barnes-Hut tree depth.
-    barnes_hut_threshold : int, default=10000
+    barnes_hut_threshold : int, default=45
         Node-count cutoff for switching from exact to approximate repulsion.
     prolongation_noise_scale : float, default=1e-3
         Small jitter scale used to split fine nodes that share a coarse parent.
@@ -59,7 +59,7 @@ class SFDPAlgorithmConfig:
     default_step: float = 0.1
     fallback_edge_length: float = 1.0
     max_quadtree_depth: int = 10
-    barnes_hut_threshold: int = 10_000
+    barnes_hut_threshold: int = 45
     prolongation_noise_scale: float = 1.0e-3
     prolongation_smoothing: float = 0.5
     refinement_k_decay: float = 0.75
