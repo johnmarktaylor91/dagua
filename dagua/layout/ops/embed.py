@@ -1125,6 +1125,7 @@ def _select_embedding_columns(
     eigenvalues: np.ndarray,
     eigenvectors: np.ndarray,
     dim: int,
+    skip_first: bool = False,
 ) -> np.ndarray:
     """Select the first non-trivial eigenvectors.
 
@@ -1136,6 +1137,10 @@ def _select_embedding_columns(
         Eigenvectors with shape ``[N, K]``.
     dim : int
         Requested output dimension.
+    skip_first : bool, default=False
+        Whether to mirror NetworkX by sorting eigenvalues, dropping only the
+        first column, and taking the next ``dim`` vectors. When ``False``, all
+        near-zero eigenvalues are skipped for Dagua's existing robust behavior.
 
     Returns
     -------
@@ -1143,11 +1148,14 @@ def _select_embedding_columns(
         Selected coordinates with shape ``[N, dim]``.
     """
     sorted_indices = np.argsort(np.real(eigenvalues))
-    nontrivial_indices = [
-        index
-        for index in sorted_indices
-        if abs(float(np.real(eigenvalues[index]))) > _SPECTRAL_EIGENVALUE_TOLERANCE
-    ][:dim]
+    if skip_first:
+        nontrivial_indices = list(sorted_indices[1 : dim + 1])
+    else:
+        nontrivial_indices = [
+            index
+            for index in sorted_indices
+            if abs(float(np.real(eigenvalues[index]))) > _SPECTRAL_EIGENVALUE_TOLERANCE
+        ][:dim]
 
     num_nodes = eigenvectors.shape[0]
     coordinates = np.zeros((num_nodes, dim), dtype=np.float64)
@@ -1162,26 +1170,72 @@ def _dense_spectral_embedding(
     laplacian: sparse.csr_matrix,
     dim: int,
     symmetric: bool,
+    networkx_fidelity: bool = False,
 ) -> np.ndarray:
-    """Compute dense spectral coordinates from a Laplacian matrix."""
+    """Compute dense spectral coordinates from a Laplacian matrix.
+
+    Parameters
+    ----------
+    laplacian : scipy.sparse.csr_matrix
+        Laplacian matrix with shape ``[N, N]``.
+    dim : int
+        Requested output dimension.
+    symmetric : bool
+        Whether the matrix can use a symmetric eigensolver.
+    networkx_fidelity : bool, default=False
+        Whether to mirror NetworkX eigenvector selection.
+
+    Returns
+    -------
+    numpy.ndarray
+        Dense spectral coordinates with shape ``[N, dim]``.
+    """
     dense_laplacian = laplacian.toarray()
     if symmetric:
         eigenvalues, eigenvectors = np.linalg.eigh(dense_laplacian)
     else:
         eigenvalues, eigenvectors = np.linalg.eig(dense_laplacian)
-    return _select_embedding_columns(eigenvalues=eigenvalues, eigenvectors=eigenvectors, dim=dim)
+    return _select_embedding_columns(
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        dim=dim,
+        skip_first=networkx_fidelity,
+    )
 
 
 def _sparse_spectral_embedding(
     laplacian: sparse.csr_matrix,
     dim: int,
     symmetric: bool,
+    networkx_fidelity: bool = False,
 ) -> np.ndarray:
-    """Compute sparse spectral coordinates from a Laplacian matrix."""
+    """Compute sparse spectral coordinates from a Laplacian matrix.
+
+    Parameters
+    ----------
+    laplacian : scipy.sparse.csr_matrix
+        Laplacian matrix with shape ``[N, N]``.
+    dim : int
+        Requested output dimension.
+    symmetric : bool
+        Whether the matrix can use the symmetric sparse eigensolver.
+    networkx_fidelity : bool, default=False
+        Whether to mirror NetworkX eigenvector selection.
+
+    Returns
+    -------
+    numpy.ndarray
+        Sparse spectral coordinates with shape ``[N, dim]``.
+    """
     num_nodes = laplacian.shape[0]
     eigen_count = min(num_nodes - 1, max(dim + _SPECTRAL_EXTRA_EIGENPAIRS, dim + 1))
     if eigen_count <= dim:
-        return _dense_spectral_embedding(laplacian=laplacian, dim=dim, symmetric=symmetric)
+        return _dense_spectral_embedding(
+            laplacian=laplacian,
+            dim=dim,
+            symmetric=symmetric,
+            networkx_fidelity=networkx_fidelity,
+        )
 
     lanczos_vectors = max(
         (_SPECTRAL_LANCZOS_MULTIPLIER * eigen_count) + 1,
@@ -1201,7 +1255,12 @@ def _sparse_spectral_embedding(
             which="SR",
             ncv=min(max(lanczos_vectors, eigen_count + _SPECTRAL_LANCZOS_PADDING), num_nodes),
         )
-    return _select_embedding_columns(eigenvalues=eigenvalues, eigenvectors=eigenvectors, dim=dim)
+    return _select_embedding_columns(
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        dim=dim,
+        skip_first=networkx_fidelity,
+    )
 
 
 @register_op
@@ -1215,15 +1274,18 @@ class SpectralEmbed(Op):
     requires: ClassVar[Tuple[str, ...]] = ("laplacian", f"extras.{_SYMMETRIC_FLAG_KEY}")
     access_pattern: ClassVar[str] = "global"
 
-    def __init__(self, sparse_threshold: int) -> None:
+    def __init__(self, sparse_threshold: int, networkx_fidelity: bool = False) -> None:
         """Store the dense-vs-sparse eigensolve threshold.
 
         Parameters
         ----------
         sparse_threshold : int
             Dense matrices smaller than this threshold use NumPy eigensolvers.
+        networkx_fidelity : bool, default=False
+            Whether to mirror NetworkX eigenvector-selection behavior.
         """
         self.sparse_threshold = int(sparse_threshold)
+        self.networkx_fidelity = bool(networkx_fidelity)
 
     def apply(
         self,
@@ -1269,12 +1331,14 @@ class SpectralEmbed(Op):
                 laplacian=state.laplacian,
                 dim=_EMBEDDING_OUTPUT_DIM,
                 symmetric=is_symmetric,
+                networkx_fidelity=self.networkx_fidelity,
             )
         else:
             coordinates = _sparse_spectral_embedding(
                 laplacian=state.laplacian,
                 dim=_EMBEDDING_OUTPUT_DIM,
                 symmetric=is_symmetric,
+                networkx_fidelity=self.networkx_fidelity,
             )
 
         state.pos = torch.from_numpy(coordinates)
