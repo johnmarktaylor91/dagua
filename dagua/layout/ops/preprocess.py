@@ -1198,6 +1198,8 @@ class FA2PrepareStateConfig:
         Initial FA2 speed scalar.
     initial_speed_efficiency : float, default=1.0
         Initial FA2 speed-efficiency scalar.
+    dtype : torch.dtype, default=torch.float32
+        Floating-point dtype for FA2 mass, weights, and force history.
     """
 
     outbound_attraction_distribution: bool = True
@@ -1205,6 +1207,7 @@ class FA2PrepareStateConfig:
     force_dim: int = 2
     initial_speed: float = 1.0
     initial_speed_efficiency: float = 1.0
+    dtype: torch.dtype = torch.float32
 
 
 @register_op
@@ -1300,10 +1303,13 @@ class FA2PrepareState(Op):
                 if problem.edge_weights is None:
                     undirected_weights = None
                 else:
-                    weights = problem.edge_weights[non_self].to(dtype=torch.float32, device=device)
+                    weights = problem.edge_weights[non_self].to(
+                        dtype=self.config.dtype,
+                        device=device,
+                    )
                     undirected_weights = torch.zeros(
                         unique_pairs.shape[0],
-                        dtype=torch.float32,
+                        dtype=self.config.dtype,
                         device=device,
                     )
                     undirected_weights.scatter_add_(0, inverse, weights)
@@ -1311,9 +1317,9 @@ class FA2PrepareState(Op):
                 undirected_edges = torch.empty((2, 0), dtype=torch.long, device=device)
                 undirected_weights = None
 
-        degree = torch.zeros(problem.num_nodes, dtype=torch.float32, device=device)
+        degree = torch.zeros(problem.num_nodes, dtype=self.config.dtype, device=device)
         if undirected_edges.numel() > 0:
-            ones = torch.ones(undirected_edges.shape[1], dtype=torch.float32, device=device)
+            ones = torch.ones(undirected_edges.shape[1], dtype=self.config.dtype, device=device)
             degree.scatter_add_(0, undirected_edges[0], ones)
             degree.scatter_add_(0, undirected_edges[1], ones)
 
@@ -1321,7 +1327,7 @@ class FA2PrepareState(Op):
         state.degree = degree
         state.old_forces = torch.zeros(
             (problem.num_nodes, self.config.force_dim),
-            dtype=torch.float32,
+            dtype=self.config.dtype,
             device=device,
         )
         state.extras["fa2_undirected_edges"] = undirected_edges
