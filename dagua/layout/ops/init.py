@@ -634,9 +634,12 @@ class FA2InitializePositionsConfig:
     ----------
     position_dim : int, default=2
         Output dimensionality for the initialized position tensor.
+    dtype : torch.dtype, default=torch.float32
+        Floating-point dtype for the initialized positions.
     """
 
     position_dim: int = 2
+    dtype: torch.dtype = torch.float32
 
 
 @register_op
@@ -649,7 +652,7 @@ class FA2InitializePositions(Op):
 
     Writes
     ------
-    ``state.pos`` as a float32 tensor on ``problem.edge_index.device``.
+    ``state.pos`` on ``problem.edge_index.device`` using the configured dtype.
 
     Use this when
     -------------
@@ -696,21 +699,21 @@ class FA2InitializePositions(Op):
         Returns
         -------
         SolveState
-            State with ``state.pos`` initialized as ``float32``.
+            State with ``state.pos`` initialized using the configured dtype.
         """
         _ = ctx
 
         if problem.num_nodes == 0:
             state.pos = torch.zeros(
                 (0, self.config.position_dim),
-                dtype=torch.float32,
+                dtype=self.config.dtype,
                 device=problem.edge_index.device,
             )
             return state
         if problem.num_nodes == 1:
             state.pos = torch.zeros(
                 (1, self.config.position_dim),
-                dtype=torch.float32,
+                dtype=self.config.dtype,
                 device=problem.edge_index.device,
             )
             return state
@@ -722,7 +725,7 @@ class FA2InitializePositions(Op):
         ]
         state.pos = torch.tensor(
             positions,
-            dtype=torch.float32,
+            dtype=self.config.dtype,
             device=problem.edge_index.device,
         )
         return state
