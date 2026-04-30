@@ -15,6 +15,9 @@ from dagua.layout.graph_classify import (
 from dagua.layout.graph_classify import classify_graph
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import (
+    build_directed_adjacency as _build_directed_adjacency,
+)
+from dagua.layout.ops.graph_utils import (
     build_undirected_adjacency as _build_undirected_adjacency,
 )
 from dagua.layout.ops.graph_utils import (
@@ -1033,9 +1036,91 @@ def _root_candidates(edge_index: torch.Tensor, num_nodes: int) -> list[int]:
     )
 
 
+def _rt_mode_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    traversal_mode: str,
+) -> list[list[tuple[int, float]]]:
+    """Build adjacency for an RT traversal mode.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    traversal_mode : str
+        One of ``"out"``, ``"in"``, or ``"all"``.
+
+    Returns
+    -------
+    list[list[tuple[int, float]]]
+        Sorted adjacency list.
+    """
+    if traversal_mode == "all":
+        return _build_undirected_adjacency(edge_index=edge_index, num_nodes=num_nodes)
+    if traversal_mode == "out":
+        return _build_directed_adjacency(edge_index=edge_index, num_nodes=num_nodes)
+    if traversal_mode == "in":
+        reversed_edges = edge_index[[1, 0], :] if edge_index.numel() > 0 else edge_index
+        return _build_directed_adjacency(edge_index=reversed_edges, num_nodes=num_nodes)
+    raise ValueError(f"Unsupported Reingold-Tilford traversal_mode: {traversal_mode!r}")
+
+
+def _igraph_fidelity_root_candidates(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    traversal_mode: str,
+) -> list[int]:
+    """Order RT roots with igraph-like reachability semantics.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    traversal_mode : str
+        One of ``"out"``, ``"in"``, or ``"all"``.
+
+    Returns
+    -------
+    list[int]
+        Candidate roots ordered by directed reachability, deduped degree, and
+        node id.
+    """
+    traversal_adjacency = _rt_mode_adjacency(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        traversal_mode=traversal_mode,
+    )
+    reach_counts: list[int] = []
+    for root in range(num_nodes):
+        reached = {root}
+        queue: deque[int] = deque([root])
+        while queue:
+            node = queue.popleft()
+            for neighbor, _ in traversal_adjacency[node]:
+                if neighbor in reached:
+                    continue
+                reached.add(neighbor)
+                queue.append(neighbor)
+        reach_counts.append(len(reached))
+    return sorted(
+        range(num_nodes),
+        key=lambda candidate: (
+            -reach_counts[candidate],
+            -len(traversal_adjacency[candidate]),
+            candidate,
+        ),
+    )
+
+
 def _bfs_forest(
     edge_index: torch.Tensor,
     num_nodes: int,
+    traversal_mode: str = "all",
+    root_candidates: Optional[list[int]] = None,
 ) -> tuple[list[int], list[list[int]], list[int]]:
     """Build a deterministic BFS forest from a possibly directed graph.
 
@@ -1045,23 +1130,33 @@ def _bfs_forest(
         CPU edge tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes.
+    traversal_mode : str, default="all"
+        Edge direction mode used while expanding the BFS tree.
+    root_candidates : list[int] | None, default=None
+        Optional preordered root candidates. ``None`` uses Dagua's historical
+        indegree ordering.
 
     Returns
     -------
     tuple[list[int], list[list[int]], list[int]]
         Forest roots, child lists, and BFS depth per node.
     """
-    adjacency = _build_undirected_adjacency(
+    adjacency = _rt_mode_adjacency(
         edge_index=edge_index,
         num_nodes=num_nodes,
-        edge_weights=None,
+        traversal_mode=traversal_mode,
     )
     children: list[list[int]] = [[] for _ in range(num_nodes)]
     depths = [0] * num_nodes
     visited = [False] * num_nodes
     roots: list[int] = []
 
-    for root in _root_candidates(edge_index=edge_index, num_nodes=num_nodes):
+    roots_to_try = (
+        _root_candidates(edge_index=edge_index, num_nodes=num_nodes)
+        if root_candidates is None
+        else root_candidates
+    )
+    for root in roots_to_try:
         if visited[root]:
             continue
         roots.append(root)
@@ -1360,6 +1455,13 @@ class ReingoldTilfordTreeConfig:
         ``component_gap`` is left unset.
     horizontal : bool, default=False
         Rotate the output so depth maps to x when ``True``.
+    fidelity_mode : str | None, default=None
+        Optional compatibility mode. ``"igraph"`` uses unit spacing,
+        mode-sensitive BFS traversal, and synthetic-root packing for closer
+        parity with igraph's RT implementation.
+    traversal_mode : str, default="out"
+        Edge direction mode used by ``fidelity_mode="igraph"``. Supported
+        values are ``"out"``, ``"in"``, and ``"all"``.
     recursion_limit_multiplier : int, default=2
         Multiplier used when raising Python's recursion limit for large trees.
     """
@@ -1369,6 +1471,8 @@ class ReingoldTilfordTreeConfig:
     component_gap: Optional[float] = None
     default_component_gap_multiplier: float = 2.0
     horizontal: bool = False
+    fidelity_mode: Optional[str] = None
+    traversal_mode: str = "out"
     recursion_limit_multiplier: int = 2
 
 
@@ -1760,23 +1864,36 @@ class ReingoldTilfordTree(Op):
             )
             return state
 
-        # When explicit spacing is absent, derive it from node extents so
-        # larger labels reserve proportionally more room between subtrees.
-        sibling_sep = (
-            _node_spacing(problem.node_sizes, axis=0, default=1.0)
-            if self.config.sibling_sep is None
-            else self.config.sibling_sep
-        )
-        layer_sep = (
-            _node_spacing(problem.node_sizes, axis=1, default=1.5)
-            if self.config.layer_sep is None
-            else self.config.layer_sep
-        )
-        component_gap = (
-            sibling_sep * self.config.default_component_gap_multiplier
-            if self.config.component_gap is None
-            else self.config.component_gap
-        )
+        fidelity_mode = self.config.fidelity_mode
+        if fidelity_mode not in {None, "igraph"}:
+            raise ValueError(f"Unsupported Reingold-Tilford fidelity_mode: {fidelity_mode!r}")
+        if self.config.traversal_mode not in {"out", "in", "all"}:
+            raise ValueError(
+                f"Unsupported Reingold-Tilford traversal_mode: {self.config.traversal_mode!r}"
+            )
+
+        if fidelity_mode == "igraph":
+            sibling_sep = 1.0 if self.config.sibling_sep is None else self.config.sibling_sep
+            layer_sep = 1.0 if self.config.layer_sep is None else self.config.layer_sep
+            component_gap = 0.0 if self.config.component_gap is None else self.config.component_gap
+        else:
+            # When explicit spacing is absent, derive it from node extents so
+            # larger labels reserve proportionally more room between subtrees.
+            sibling_sep = (
+                _node_spacing(problem.node_sizes, axis=0, default=1.0)
+                if self.config.sibling_sep is None
+                else self.config.sibling_sep
+            )
+            layer_sep = (
+                _node_spacing(problem.node_sizes, axis=1, default=1.5)
+                if self.config.layer_sep is None
+                else self.config.layer_sep
+            )
+            component_gap = (
+                sibling_sep * self.config.default_component_gap_multiplier
+                if self.config.component_gap is None
+                else self.config.component_gap
+            )
 
         sys.setrecursionlimit(
             max(
@@ -1784,22 +1901,51 @@ class ReingoldTilfordTree(Op):
                 problem.num_nodes * self.config.recursion_limit_multiplier,
             )
         )
+        root_candidates = (
+            _igraph_fidelity_root_candidates(
+                edge_index=edge_index_cpu,
+                num_nodes=problem.num_nodes,
+                traversal_mode=self.config.traversal_mode,
+            )
+            if fidelity_mode == "igraph"
+            else None
+        )
         roots, children, depths = _bfs_forest(
             edge_index=edge_index_cpu,
             num_nodes=problem.num_nodes,
+            traversal_mode=self.config.traversal_mode if fidelity_mode == "igraph" else "all",
+            root_candidates=root_candidates,
         )
 
         preliminary_x = [0.0] * problem.num_nodes
-        next_component_offset = 0.0
-        for root in roots:
-            next_component_offset = _assign_preliminary_x(
-                root_idx=root,
-                children=children,
-                depths=depths,
-                preliminary_x=preliminary_x,
-                component_offset=next_component_offset,
-                component_gap=component_gap,
+        if fidelity_mode == "igraph" and len(roots) > 1:
+            artificial_root = problem.num_nodes
+            augmented_children = [list(child_nodes) for child_nodes in children]
+            augmented_children.append(list(roots))
+            augmented_depths = [depth + 1 for depth in depths]
+            augmented_depths.append(0)
+            augmented_x = [0.0] * (problem.num_nodes + 1)
+            _assign_preliminary_x(
+                root_idx=artificial_root,
+                children=augmented_children,
+                depths=augmented_depths,
+                preliminary_x=augmented_x,
+                component_offset=0.0,
+                component_gap=0.0,
             )
+            preliminary_x = augmented_x[: problem.num_nodes]
+            depths = augmented_depths[: problem.num_nodes]
+        else:
+            next_component_offset = 0.0
+            for root in roots:
+                next_component_offset = _assign_preliminary_x(
+                    root_idx=root,
+                    children=children,
+                    depths=depths,
+                    preliminary_x=preliminary_x,
+                    component_offset=next_component_offset,
+                    component_gap=component_gap,
+                )
 
         positions = torch.zeros((problem.num_nodes, _POSITION_OUTPUT_DIM), dtype=torch.float32)
         for node_idx in range(problem.num_nodes):
