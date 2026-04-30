@@ -4,7 +4,25 @@ from __future__ import annotations
 
 import torch
 
-from dagua.layout.ops.umap import _knn_from_distances, _optimize_embedding
+from dagua.layout.ops.umap import (
+    _build_undirected_adjacency,
+    _knn_from_distances,
+    _optimize_embedding,
+)
+
+
+def test_build_undirected_adjacency_uses_weights_as_distances() -> None:
+    """Verify weighted UMAP graph distances match the reference adapter."""
+    edge_index = torch.tensor([[0, 0], [1, 1]], dtype=torch.long)
+    edge_weights = torch.tensor([2.0, 3.0], dtype=torch.float32)
+
+    adjacency = _build_undirected_adjacency(
+        edge_index=edge_index,
+        num_nodes=2,
+        edge_weights=edge_weights,
+    )
+
+    assert adjacency == [[(1, 5.0)], [(0, 5.0)]]
 
 
 def test_knn_from_distances_counts_self_neighbor() -> None:
