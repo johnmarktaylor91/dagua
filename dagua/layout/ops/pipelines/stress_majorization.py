@@ -18,6 +18,8 @@ from dagua.layout.ops.state import (
 from dagua.layout.ops.stress import (
     TRACE_EVERY_KEY,
     TRACES_KEY,
+    CaptureStressMajorizationStress,
+    CheckStressMajorizationEpsilon,
     CollectStressMajorizationTrace,
     FinalizeStressMajorizationPositions,
     InitializeStressMajorizationPositions,
@@ -29,12 +31,14 @@ from dagua.layout.ops.stress import (
 )
 
 _FIDELITY_MODE_OGDF = "ogdf"
+_FIDELITY_MODE_GRAPHVIZ_NEATO = "graphviz_neato"
 
 
 def build_stress_majorization_pipeline(
     iterations: int = 200,
     trace_every: int = 0,
     fidelity_mode: Optional[str] = None,
+    epsilon: Optional[float] = None,
 ) -> Pipeline:
     """Build a stress-majorization (SMACOF) pipeline.
 
@@ -47,6 +51,12 @@ def build_stress_majorization_pipeline(
     fidelity_mode : str, optional
         Optional reference-fidelity mode. ``"ogdf"`` enables OGDF-compatible
         serial sweeps, disconnected-distance fill, and a no-jitter warm start.
+        ``"graphviz_neato"`` enables neato defaults: shortest-path model,
+        seeded random init, Graphviz disconnected fill, unconstrained SMACOF
+        updates, and epsilon early termination.
+    epsilon : float, optional
+        Relative stress-delta convergence threshold. ``None`` disables the
+        extra convergence op.
 
     Returns
     -------
@@ -66,7 +76,9 @@ def build_stress_majorization_pipeline(
         raise ValueError("iterations must be non-negative.")
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative.")
-    if fidelity_mode not in {None, _FIDELITY_MODE_OGDF}:
+    if epsilon is not None and epsilon <= 0.0:
+        raise ValueError("epsilon must be positive when provided.")
+    if fidelity_mode not in {None, _FIDELITY_MODE_OGDF, _FIDELITY_MODE_GRAPHVIZ_NEATO}:
         raise ValueError(f"Unknown stress_majorization fidelity_mode: {fidelity_mode!r}.")
 
     prepare_config = PrepareStressMajorizationStateConfig()
@@ -76,6 +88,22 @@ def build_stress_majorization_pipeline(
         prepare_config = PrepareStressMajorizationStateConfig(distance_fill="ogdf")
         init_config = InitializeStressMajorizationPositionsConfig(jitter_scale=0.0)
         step_config = SmacofStepConfig(update_mode="ogdf_serial")
+    elif fidelity_mode == _FIDELITY_MODE_GRAPHVIZ_NEATO:
+        prepare_config = PrepareStressMajorizationStateConfig(distance_fill="graphviz_neato")
+        init_config = InitializeStressMajorizationPositionsConfig(init_mode="random")
+        step_config = SmacofStepConfig(stress_tolerance=float("inf"))
+
+    repeated_ops = []
+    if epsilon is not None:
+        repeated_ops.append(CaptureStressMajorizationStress())
+    repeated_ops.extend(
+        [
+            SmacofStep(config=step_config),
+            CollectStressMajorizationTrace(),
+        ]
+    )
+    if epsilon is not None:
+        repeated_ops.append(CheckStressMajorizationEpsilon(epsilon=epsilon))
 
     return Pipeline(
         [
@@ -84,10 +112,7 @@ def build_stress_majorization_pipeline(
             InitializeStressMajorizationPositions(config=init_config),
             Repeat(
                 n=iterations,
-                ops=[
-                    SmacofStep(config=step_config),
-                    CollectStressMajorizationTrace(),
-                ],
+                ops=repeated_ops,
             ),
             FinalizeStressMajorizationPositions(),
         ],
@@ -104,6 +129,8 @@ def layout_stress_majorization_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     trace_every: int = 0,
     fidelity_mode: Optional[str] = None,
+    epsilon: Optional[float] = None,
+    graphviz_neato_fidelity: bool = False,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
     """Run the stress-majorization pipeline as a drop-in replacement.
 
@@ -127,6 +154,13 @@ def layout_stress_majorization_pipeline(
         Optional reference-fidelity mode. ``"ogdf"`` keeps the public API
         opt-in while matching OGDF's serial sweep, disconnected fill, and
         deterministic no-jitter warm start.
+    epsilon : float, optional
+        Relative stress-delta convergence threshold. ``None`` disables early
+        termination beyond the fixed iteration budget.
+    graphviz_neato_fidelity : bool, default=False
+        Convenience switch for Graphviz neato defaults. When true, this sets
+        ``fidelity_mode="graphviz_neato"`` and ``epsilon=0.0001`` unless the
+        caller provided explicit values.
 
     Returns
     -------
@@ -148,7 +182,15 @@ def layout_stress_majorization_pipeline(
         raise ValueError("iterations must be non-negative.")
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative.")
-    if fidelity_mode not in {None, _FIDELITY_MODE_OGDF}:
+    if graphviz_neato_fidelity:
+        if fidelity_mode is None:
+            fidelity_mode = _FIDELITY_MODE_GRAPHVIZ_NEATO
+        if epsilon is None:
+            epsilon = 0.0001
+        iterations = 200
+    if epsilon is not None and epsilon <= 0.0:
+        raise ValueError("epsilon must be positive when provided.")
+    if fidelity_mode not in {None, _FIDELITY_MODE_OGDF, _FIDELITY_MODE_GRAPHVIZ_NEATO}:
         raise ValueError(f"Unknown stress_majorization fidelity_mode: {fidelity_mode!r}.")
     if edge_weights is not None:
         if edge_weights.ndim != 1:
@@ -183,6 +225,7 @@ def layout_stress_majorization_pipeline(
         iterations=iterations,
         trace_every=trace_every,
         fidelity_mode=fidelity_mode,
+        epsilon=epsilon,
     ).apply(problem, state, ctx)
 
     if final_state.pos is None:
