@@ -44,6 +44,8 @@ def layout_reingold_tilford_pipeline(
     node_sizes: Optional[torch.Tensor] = None,
     seed: int = 42,
     horizontal: bool = False,
+    fidelity_mode: Optional[str] = None,
+    traversal_mode: str = "out",
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Run the Reingold-Tilford tidy-tree pipeline.
@@ -60,6 +62,11 @@ def layout_reingold_tilford_pipeline(
         Accepted for interface compatibility. Reingold-Tilford is deterministic.
     horizontal : bool, default=False
         If ``True``, rotate the final layout so depth grows along x.
+    fidelity_mode : str | None, default=None
+        Optional compatibility mode. ``"igraph"`` uses unit spacing and
+        mode-sensitive traversal for reference-fidelity comparisons.
+    traversal_mode : str, default="out"
+        Edge traversal mode for ``fidelity_mode="igraph"``.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
 
@@ -95,7 +102,19 @@ def layout_reingold_tilford_pipeline(
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_reingold_tilford_pipeline(horizontal=horizontal).apply(problem, state, ctx)
+    pipeline = Pipeline(
+        [
+            ReingoldTilfordTree(
+                ReingoldTilfordTreeConfig(
+                    horizontal=horizontal,
+                    fidelity_mode=fidelity_mode,
+                    traversal_mode=traversal_mode,
+                )
+            )
+        ],
+        name="reingold_tilford_pipeline",
+    )
+    final_state = pipeline.apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("Reingold-Tilford pipeline did not produce final positions.")
     return final_state.pos
