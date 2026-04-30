@@ -333,11 +333,15 @@ class FRFinalizePositionsConfig:
     scale_by_sqrt_num_nodes : bool, default=True
         Whether to multiply ``output_scale_factor`` by ``sqrt(num_nodes)``.
         Disable this for NetworkX-compatible adapter scaling.
+    skip_rescale : bool, default=False
+        If ``True``, only cast the current coordinates to ``float32``.
+        NetworkX skips centering/rescaling when fixed nodes are provided.
     """
 
     scale_method: str = "max_abs"
     output_scale_factor: float = 50.0
     scale_by_sqrt_num_nodes: bool = True
+    skip_rescale: bool = False
 
 
 @register_op
@@ -396,6 +400,9 @@ class FRFinalizePositions(Op):
         _ = ctx
         if state.pos is None:
             raise ValueError("FRFinalizePositions requires state.pos to be set.")
+        if self.config.skip_rescale:
+            state.pos = state.pos.to(dtype=torch.float32)
+            return state
 
         # Compose the shared postprocess ops so FR keeps the same ordering and
         # numerics as the historical finalize path.
