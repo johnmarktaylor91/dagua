@@ -29,6 +29,7 @@ def build_fmmm_pipeline(
     steps: int = 200,
     force_model: str = "ogdf_new",
     reference_mode: bool = False,
+    fidelity_mode: bool = False,
 ) -> Pipeline:
     """Build an FM^3 multilevel force-directed pipeline.
 
@@ -43,6 +44,8 @@ def build_fmmm_pipeline(
     reference_mode : bool, default=False
         Use OGDF-aligned coarsening, coarsest initialization, and force
         scaling choices for fidelity comparisons.
+    fidelity_mode : bool, default=False
+        Alias for ``reference_mode`` used by evaluation competitors.
 
     Returns
     -------
@@ -61,13 +64,15 @@ def build_fmmm_pipeline(
     if steps < 0:
         raise ValueError("steps must be non-negative.")
 
+    effective_reference_mode = reference_mode or fidelity_mode
     initialize_state = _InitializeFMMMState(
         config=_InitializeFMMMStateConfig(
             steps=steps,
             force_model=force_model,
-            galaxy_choice="lower" if reference_mode else "higher",
-            coarsest_init="ogdf_random" if reference_mode else "fr",
-            ogdf_force_scaling=reference_mode,
+            galaxy_choice="lower" if effective_reference_mode else "higher",
+            coarsest_init="ogdf_random" if effective_reference_mode else "fr",
+            ogdf_force_scaling=effective_reference_mode,
+            sum_parallel_weights=not effective_reference_mode,
         )
     )
     initialize_coarsest = _InitializeCoarsestLevel()
@@ -98,6 +103,7 @@ def layout_fmmm_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     force_model: str = "ogdf_new",
     reference_mode: bool = False,
+    fidelity_mode: bool = False,
 ) -> torch.Tensor:
     """Run the FM^3 pipeline as a drop-in replacement.
 
@@ -121,6 +127,8 @@ def layout_fmmm_pipeline(
         Spring-force model for edge attraction.
     reference_mode : bool, default=False
         Use OGDF-aligned reference behavior for algorithm fidelity runs.
+    fidelity_mode : bool, default=False
+        Alias for ``reference_mode`` used by evaluation competitors.
 
     Returns
     -------
@@ -168,6 +176,7 @@ def layout_fmmm_pipeline(
         steps=steps,
         force_model=force_model,
         reference_mode=reference_mode,
+        fidelity_mode=fidelity_mode,
     ).apply(
         problem,
         state,
