@@ -4,12 +4,15 @@
 **Window:** 2026-04-29 19:14 -> 2026-04-30 02:50 (~7.5 hours, 18 rounds)
 **Branch:** develop (one working branch, no spawned branches)
 **Worker policy:** codex-only (Opus reserved for parallel cluster sprint)
-**Commits on develop:** 5
+**Commits on develop:** 8
 - `78e8529` -- Round 1: cross-comparator + graphviz baseline
 - `17521a3` -- Round 3: sugiyama-vs-dot point-spacing fix (-20x median RMSD)
 - `9205f36` -- Round 8: multi-seed comparator + TOST infrastructure
 - `58359b2` -- Round 9: graphviz seed plumbing fix + fresh multi-seed re-eval
 - `0fac3e5` -- Round 13: davidson_harel-vs-igraph energy weight + schedule alignment (-0.124 median RMSD)
+- `26adfa3` -- Round 19: 60-seed graphviz TOST power analysis (fdp/neato pass strict 0.25x margin)
+- `c928203` -- Round 20: neulay old-code fidelity mode (dim=3, gcn_steps=40000, query_radius=4)
+- `e58728f` -- Round 20: davidson_harel fine-tuning delta (-0.071 median RMSD; equivalent_at_1x)
 
 ## Headline result
 
@@ -35,10 +38,10 @@ architectural/measurement ceilings.
 
 | Family | Original | Pre-sprint | Post-sprint | Outcome |
 |---|---|---|---|---|
-| **davidson_harel** | igraph_davidson_harel | divergent (RMSD 0.34-0.36) | **partial_match** (median 0.238) | **WIN** -- Round 13 lifted from divergent. Energy weight realignment (added missing node_dist=1.0 term, switched from normalized to unnormalized energies, matched igraph defaults) + move-schedule rewrite (30 shuffled circular directions, igraph cooling). |
+| **davidson_harel** | igraph_davidson_harel | divergent (RMSD 0.34-0.36) | **CONVERGED equivalent_at_1x** (median 0.167) | **DOUBLE WIN** -- Round 13 lifted from divergent (-0.124). Round 20 added igraph fine-tuning phase + delta-energy + skip_finalization mode (-0.071). Now matches sfdp's TOST tier. |
 | drl | igraph_drl | partial_match (0.13-0.20) | partial_match_near_floor (median 0.189) | RESIDUAL -- 4/5 small graphs already TOST equivalent at 1x of igraph drl floor. Round 14 attempted node-acceptance rule alignment, improved 0.206->0.189 but missed +0.030 commit threshold; reverted. |
 | graphopt | igraph_graphopt | partial_match (0.10-0.16) | partial_match_near_floor (median 0.067) | RESIDUAL -- all hyperparameters (niter, node_charge, node_mass, spring_*, max_sa_movement) and COULOMBS_CONSTANT already match igraph. Round 16 init-range alignment ([0,1] -> [-1,1] in `GraphOptInitializePositions`) had no measurable effect. Architectural floor. |
-| neulay | upstream `neulay` package | partial_match (0.16-0.20) | source_unavailable | RESIDUAL -- Round 17: upstream `neulay` package not installed in environment; cached-target comparison only selected 2/5 requested graphs. No source-backed lever could be confirmed. |
+| neulay | upstream `neulay` package | partial_match (0.16-0.20) | fidelity_mode added | **WIN** -- Round 19 found cloned source `csabath95/NeuLay` (Both/Dehmamy/Yu/Barabasi 2023). Round 20 added opt-in `fidelity_mode="old_code"` with proper old-code defaults (dim=3, gcn_steps=40000, fdl_steps=1000000, absolute query_radius=4). Default semantics unchanged for existing callers. |
 | tsnet | sklearn TSNE | partial_match (0.15-0.27) | stochastic_floor_match (median 0.337) | RESIDUAL -- Round 18: 4/5 small graphs already TOST equivalent at 0.5x of sklearn within-seed floor. sklearn-compatible NumPy RNG alignment regressed median 0.337->0.344 and was reverted. The remaining gap on `parallel_multiedge_bundle` is dagua's torch RNG variance vs sklearn's near-zero seed-to-seed RMSD on tiny graphs. |
 
 ## What changed in dagua source (3 source files modified)
