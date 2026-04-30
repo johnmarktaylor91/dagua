@@ -116,16 +116,67 @@ CURVATURE_CARD_MARGIN = 140.0
 STRIP_CURVATURE_CARD_MARGIN = 80.0
 ARROW_DEMO_EDGE_WIDTH = 3.0
 ARROW_DEMO_NODE_FRACTION = 0.5
-DECORATIVE_FILL_CARD_IDS = frozenset(
-    {
-        "nodes_fills_fill_pattern_pie",
-        "nodes_fills_fill_pattern_striped",
-        "nodes_fills_gradient_linear",
-        "nodes_fills_gradient_radial",
-    }
+NODE_SHAPE_PARITY_CARD_IDS = frozenset(
+    f"nodes_shapes_{slug}"
+    for slug in (
+        "rect",
+        "roundrect",
+        "ellipse",
+        "diamond",
+        "circle",
+        "triangle",
+        "hexagon",
+        "pentagon",
+        "octagon",
+        "star",
+        "cylinder",
+        "parallelogram",
+        "trapezoid",
+        "double_circle",
+        "cloud",
+        "stadium",
+        "tab",
+        "note",
+        "document",
+        "box3d",
+    )
 )
-GRAPHVIZ_PARITY_MAX_NODE_WIDTH = 270.0
-GRAPHVIZ_PARITY_MAX_NODE_HEIGHT = 120.0
+NODE_PAIR_PARITY_CARD_IDS = frozenset(
+    f"nodes_{category}_{feature}_{slug}"
+    for category, feature, slugs in (
+        ("borders", "stroke_dash", ("solid", "dashed", "dotted")),
+        ("borders", "stroke_width", ("0_5", "1_5", "3_0", "5_0")),
+        ("borders", "border_opacity", ("0_2", "0_5", "0_8", "1_0")),
+        ("borders", "border_count", ("1_vs_2", "2_vs_3")),
+        ("borders", "border_position", ("inside", "outside")),
+        ("fills", "gradient", ("solid", "linear", "radial")),
+        ("fills", "fill_pattern", ("solid", "striped", "hatched", "pie")),
+        ("fills", "opacity", ("0_2", "0_5", "0_8", "1_0")),
+    )
+    for slug in slugs
+)
+EDGE_PAIR_PARITY_CARD_IDS = frozenset(
+    f"edges_{category}_{slug}" if feature == "" else f"edges_{category}_{feature}_{slug}"
+    for category, feature, slugs in (
+        (
+            "arrows",
+            "",
+            ("normal", "vee", "dot", "diamond", "tee", "crow", "circle", "open"),
+        ),
+        ("arrows", "arrow_fill", ("filled", "hollow")),
+        ("styles", "style", ("solid", "dashed", "dotted")),
+        ("styles", "port_indicator", ("circle", "diamond")),
+        ("styles", "width", ("0_5", "1_5", "3_0", "5_0")),
+    )
+    for slug in slugs
+)
+DECORATIVE_FILL_CARD_IDS = frozenset(
+    NODE_SHAPE_PARITY_CARD_IDS | NODE_PAIR_PARITY_CARD_IDS | EDGE_PAIR_PARITY_CARD_IDS
+)
+DECORATIVE_FILL_CARD_MIN_HEIGHT = 110.0
+DECORATIVE_FILL_CARD_PADDING: Tuple[float, float] = (8.0, 4.0)
+GRAPHVIZ_PARITY_MAX_NODE_WIDTH = 200.0
+GRAPHVIZ_PARITY_MAX_NODE_HEIGHT = DECORATIVE_FILL_CARD_MIN_HEIGHT
 SCALAR_NODE_COMPARISON_FEATURES = frozenset(
     {
         "font_size",
@@ -1787,11 +1838,12 @@ def _apply_reference_card_tweaks(
 
     if item.card_id in DECORATIVE_FILL_CARD_IDS:
         for style in _node_styles(graph):
-            style.min_height = max(float(style.min_height), GRAPHVIZ_PARITY_MAX_NODE_HEIGHT)
+            style.min_height = max(float(style.min_height), DECORATIVE_FILL_CARD_MIN_HEIGHT)
             style.min_width = max(float(style.min_width), GRAPHVIZ_PARITY_MAX_NODE_WIDTH)
             # Decorative fills must use the same footprint as plain nodes; the
             # fixed-extent metric now treats fill-specific size drift as signal.
-    if item.spec.category == "nodes/shapes":
+            style.padding = DECORATIVE_FILL_CARD_PADDING
+    if item.card_id in NODE_SHAPE_PARITY_CARD_IDS:
         for style in _node_styles(graph):
             if style.min_width is not None:
                 style.min_width = GRAPHVIZ_PARITY_MAX_NODE_WIDTH
