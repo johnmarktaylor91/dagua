@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import sqrt
 from typing import ClassVar, DefaultDict, Dict, List, Optional, Sequence, Tuple
 
@@ -33,6 +33,7 @@ _NORMALIZE_EXTENT_MIN = 1.0
 _SPECTRAL_RESCALE_UNIT = 1.0
 _CLASSICAL_FALLBACK_LEFT = -1.0
 _CLASSICAL_FALLBACK_RIGHT = 1.0
+_IGRAPH_LAYOUT_SCALE = 50.0
 _DIRECTION_TOP_TO_BOTTOM = "TB"
 _DIRECTION_BOTTOM_TO_TOP = "BT"
 _DIRECTION_LEFT_TO_RIGHT = "LR"
@@ -905,9 +906,28 @@ def _normalize_classical_positions(positions: torch.Tensor, extent: float) -> to
     return centered * (extent / max(span, _MIN_SPAN))
 
 
+@dataclass(frozen=True)
+class ClassicalMDSFinalizePositionsConfig:
+    """Configuration for final classical-MDS position scaling.
+
+    Parameters
+    ----------
+    igraph_fidelity : bool, default=False
+        If ``True``, skip Dagua's legacy span normalization and apply igraph's
+        adapter scale factor directly to raw MDS coordinates.
+    """
+
+    igraph_fidelity: bool = False
+
+
 @register_op
+@dataclass(frozen=True)
 class ClassicalMDSFinalizePositions(Op):
     """Apply legacy classical-MDS normalization and cast the result to ``float32``."""
+
+    config: ClassicalMDSFinalizePositionsConfig = field(
+        default_factory=ClassicalMDSFinalizePositionsConfig
+    )
 
     name: ClassVar[str] = "classical_mds_finalize_positions"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
@@ -948,6 +968,13 @@ class ClassicalMDSFinalizePositions(Op):
             raise ValueError("ClassicalMDSFinalizePositions requires state.pos to be set.")
 
         output_device = _layout_device(edge_index=problem.edge_index, node_sizes=problem.node_sizes)
+        if self.config.igraph_fidelity:
+            state.pos = (state.pos.to(device=output_device) * _IGRAPH_LAYOUT_SCALE).to(
+                dtype=torch.float32,
+                device=output_device,
+            )
+            return state
+
         extent = _layout_extent(num_nodes=problem.num_nodes, node_sizes=problem.node_sizes)
         normalized = _normalize_classical_positions(
             positions=state.pos.to(device=output_device),
