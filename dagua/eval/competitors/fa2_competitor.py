@@ -14,28 +14,33 @@ from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, regist
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
+_FA2_REFERENCE_PACKAGE_ORDER = ("fa2", "fa2_modified")
+
 
 def _load_forceatlas2() -> Type[Any]:
-    """Load the ForceAtlas2 implementation from either supported package name.
+    """Load the explicitly preferred ForceAtlas2 reference implementation.
 
     Returns
     -------
     type[Any]
-        ``ForceAtlas2`` class from ``fa2`` or ``fa2_modified``.
+        ``ForceAtlas2`` class from ``fa2`` first, falling back to
+        ``fa2_modified`` only when the maintained package is unavailable.
 
     Raises
     ------
     ImportError
         If neither supported package is importable.
     """
-    try:
-        from fa2 import ForceAtlas2
-
-        return ForceAtlas2
-    except ImportError:
-        from fa2_modified import ForceAtlas2
-
-        return ForceAtlas2
+    last_error: Optional[ImportError] = None
+    for package_name in _FA2_REFERENCE_PACKAGE_ORDER:
+        try:
+            module = __import__(package_name, fromlist=["ForceAtlas2"])
+            return module.ForceAtlas2
+        except ImportError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ImportError("No ForceAtlas2 reference package configured.")
 
 
 def _accepted_init_params(cls: Type[Any]) -> Set[str]:
