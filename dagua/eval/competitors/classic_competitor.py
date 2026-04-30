@@ -214,7 +214,7 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_gem": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.gem",
         function_name="layout_gem_pipeline",
-        default_params={"max_iters": 30_000, "fidelity_mode": True},
+        default_params={"max_iters": 30_000},
     ),
     "classic_tsnet": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.tsnet",
@@ -1301,7 +1301,6 @@ class ClassicGEM(_ClassicBase):
                 node_sizes=graph.node_sizes,
                 max_iters=30_000,
                 seed=self._layout_seed(seed),
-                fidelity_mode=True,
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
