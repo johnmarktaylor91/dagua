@@ -28,6 +28,12 @@ _NEULAY_LINEAR_STEPS_KEY = "neulay_linear_steps"
 _NEULAY_QUERY_RADIUS_KEY = "neulay_query_radius"
 _NEULAY_LOSS_WINDOW_KEY = "neulay_loss_window"
 _NEULAY_PAIRS_KEY = "neulay_pairs"
+_NEULAY_DEFAULT_DIM = 2
+_NEULAY_OLD_CODE_DIM = 3
+_NEULAY_DEFAULT_GCN_STEPS = 2_000
+_NEULAY_OLD_CODE_GCN_STEPS = 40_000
+_NEULAY_OLD_CODE_FDL_STEPS = 1_000_000
+_NEULAY_OLD_CODE_QUERY_RADIUS = 4.0
 
 
 @dataclass(frozen=True)
@@ -36,8 +42,8 @@ class NeuLayPrepareStateConfig:
 
     Parameters
     ----------
-    dim : int, default=2
-        Output dimensionality.
+    dim : int | None, default=None
+        Output dimensionality. ``None`` resolves from ``fidelity_mode``.
     lr : float, default=0.01
         Direct-phase optimizer learning rate.
     radius : float, default=0.4
@@ -46,25 +52,38 @@ class NeuLayPrepareStateConfig:
         NeuLay repulsion magnitude. ``None`` triggers adaptive resolution.
     use_gcn : bool, default=True
         Whether to run the optional GCN pre-phase.
-    gcn_steps : int, default=2_000
-        Number of gradient steps in the GCN phase.
+    gcn_steps : int | None, default=None
+        Number of gradient steps in the GCN phase. ``None`` resolves from
+        ``fidelity_mode``.
+    fdl_steps : int | None, default=None
+        Direct refinement step budget. ``None`` preserves the historical
+        total-budget interpretation except in old-code fidelity mode.
     total_steps : int, default=20_000
         Total optimization budget across both phases.
     magnitude_scale_base : float, default=100.0
         Base coefficient for the adaptive repulsion magnitude heuristic.
     query_radius_factor : float, default=4.0
         Multiplier that expands the KD-tree query radius beyond ``radius``.
+    query_radius : float | None, default=None
+        Absolute KD-tree query radius. When set, this overrides
+        ``query_radius_factor``.
+    fidelity_mode : {"old_code"} | None, default=None
+        Optional reference-default bundle. ``"old_code"`` targets
+        ``old_code/NeuLay-2.py`` defaults.
     """
 
-    dim: int = 2
+    dim: Optional[int] = None
     lr: float = 0.01
     radius: float = 0.4
     magnitude: Optional[float] = None
     use_gcn: bool = True
-    gcn_steps: int = 2_000
+    gcn_steps: Optional[int] = None
+    fdl_steps: Optional[int] = None
     total_steps: int = 20_000
     magnitude_scale_base: float = 100.0
     query_radius_factor: float = 4.0
+    query_radius: Optional[float] = None
+    fidelity_mode: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -285,6 +304,109 @@ def _kdtree_repulsion_loss(
     return magnitude * torch.exp(-sq_dist / (4.0 * radius * radius)).sum()
 
 
+def _is_old_code_fidelity(fidelity_mode: Optional[str]) -> bool:
+    """Return whether NeuLay should resolve old-code reference defaults.
+
+    Parameters
+    ----------
+    fidelity_mode : str | None
+        Optional fidelity mode name.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``fidelity_mode`` selects the old script defaults.
+
+    Raises
+    ------
+    ValueError
+        If the mode is not recognized.
+    """
+    if fidelity_mode is None:
+        return False
+    if fidelity_mode == "old_code":
+        return True
+    raise ValueError("NeuLay fidelity_mode must be None or 'old_code'.")
+
+
+def _resolve_dim(dim: Optional[int], fidelity_mode: Optional[str]) -> int:
+    """Resolve the output dimension from explicit config and fidelity mode.
+
+    Parameters
+    ----------
+    dim : int | None
+        Explicit output dimension, if supplied.
+    fidelity_mode : str | None
+        Optional fidelity mode name.
+
+    Returns
+    -------
+    int
+        Positive output dimension.
+    """
+    if dim is not None:
+        return dim
+    if _is_old_code_fidelity(fidelity_mode):
+        return _NEULAY_OLD_CODE_DIM
+    return _NEULAY_DEFAULT_DIM
+
+
+def _resolve_gcn_steps(gcn_steps: Optional[int], fidelity_mode: Optional[str]) -> int:
+    """Resolve the GCN step budget from explicit config and fidelity mode.
+
+    Parameters
+    ----------
+    gcn_steps : int | None
+        Explicit GCN step budget, if supplied.
+    fidelity_mode : str | None
+        Optional fidelity mode name.
+
+    Returns
+    -------
+    int
+        Non-negative GCN step budget.
+    """
+    if gcn_steps is not None:
+        return gcn_steps
+    if _is_old_code_fidelity(fidelity_mode):
+        return _NEULAY_OLD_CODE_GCN_STEPS
+    return _NEULAY_DEFAULT_GCN_STEPS
+
+
+def _resolve_linear_steps(
+    total_steps: int,
+    gcn_steps: int,
+    fdl_steps: Optional[int],
+    use_gcn: bool,
+    fidelity_mode: Optional[str],
+) -> int:
+    """Resolve the direct refinement budget.
+
+    Parameters
+    ----------
+    total_steps : int
+        Historical total optimization budget.
+    gcn_steps : int
+        Resolved GCN step budget.
+    fdl_steps : int | None
+        Explicit direct refinement budget, if supplied.
+    use_gcn : bool
+        Whether the GCN phase is enabled.
+    fidelity_mode : str | None
+        Optional fidelity mode name.
+
+    Returns
+    -------
+    int
+        Non-negative direct refinement step budget.
+    """
+    if fdl_steps is not None:
+        return fdl_steps
+    if _is_old_code_fidelity(fidelity_mode):
+        return _NEULAY_OLD_CODE_FDL_STEPS
+    return max(total_steps - gcn_steps, 0) if use_gcn else total_steps
+
+
 @register_op
 class NeuLaySeedRNG(Op):
     """Seed classic NeuLay RNG state (PyTorch and NumPy)."""
@@ -353,7 +475,17 @@ class NeuLayPrepareState(Op):
         """Resolve reusable NeuLay values into ``state.extras``."""
         del ctx
 
-        if self.config.dim <= 0:
+        old_code_fidelity = _is_old_code_fidelity(self.config.fidelity_mode)
+        dim = _resolve_dim(self.config.dim, self.config.fidelity_mode)
+        gcn_steps = _resolve_gcn_steps(self.config.gcn_steps, self.config.fidelity_mode)
+        linear_steps = _resolve_linear_steps(
+            total_steps=self.config.total_steps,
+            gcn_steps=gcn_steps,
+            fdl_steps=self.config.fdl_steps,
+            use_gcn=self.config.use_gcn,
+            fidelity_mode=self.config.fidelity_mode,
+        )
+        if dim <= 0:
             raise ValueError("NeuLay dim must be positive.")
         if self.config.lr <= 0.0:
             raise ValueError("NeuLay lr must be positive.")
@@ -361,10 +493,16 @@ class NeuLayPrepareState(Op):
             raise ValueError("NeuLay radius must be positive.")
         if self.config.magnitude is not None and self.config.magnitude < 0.0:
             raise ValueError("NeuLay magnitude must be non-negative.")
-        if self.config.gcn_steps < 0:
+        if gcn_steps < 0:
             raise ValueError("NeuLay gcn_steps must be non-negative.")
+        if linear_steps < 0:
+            raise ValueError("NeuLay fdl_steps must be non-negative.")
         if self.config.total_steps < 0:
             raise ValueError("NeuLay total_steps must be non-negative.")
+        if self.config.query_radius_factor <= 0.0:
+            raise ValueError("NeuLay query_radius_factor must be positive.")
+        if self.config.query_radius is not None and self.config.query_radius <= 0.0:
+            raise ValueError("NeuLay query_radius must be positive.")
 
         device = (
             problem.edge_index.device
@@ -389,24 +527,23 @@ class NeuLayPrepareState(Op):
         else:
             magnitude = float(self.config.magnitude)
 
-        linear_steps = (
-            max(self.config.total_steps - self.config.gcn_steps, 0)
-            if self.config.use_gcn
-            else self.config.total_steps
-        )
+        if self.config.query_radius is not None:
+            query_radius = self.config.query_radius
+        elif old_code_fidelity:
+            query_radius = _NEULAY_OLD_CODE_QUERY_RADIUS
+        else:
+            query_radius = self.config.query_radius_factor * self.config.radius
 
         state.extras[_NEULAY_CLEANED_EDGE_INDEX_KEY] = cleaned
         state.extras[_NEULAY_DEVICE_KEY] = device
-        state.extras[_NEULAY_DIM_KEY] = self.config.dim
+        state.extras[_NEULAY_DIM_KEY] = dim
         state.extras[_NEULAY_LR_KEY] = self.config.lr
         state.extras[_NEULAY_RADIUS_KEY] = self.config.radius
         state.extras[_NEULAY_MAGNITUDE_KEY] = magnitude
         state.extras[_NEULAY_USE_GCN_KEY] = self.config.use_gcn
-        state.extras[_NEULAY_GCN_STEPS_KEY] = self.config.gcn_steps
+        state.extras[_NEULAY_GCN_STEPS_KEY] = gcn_steps
         state.extras[_NEULAY_LINEAR_STEPS_KEY] = linear_steps
-        state.extras[_NEULAY_QUERY_RADIUS_KEY] = (
-            self.config.query_radius_factor * self.config.radius
-        )
+        state.extras[_NEULAY_QUERY_RADIUS_KEY] = query_radius
         return state
 
 
