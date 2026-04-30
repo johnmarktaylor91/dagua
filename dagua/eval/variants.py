@@ -790,6 +790,17 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
     ),
     _variant(
+        "classic_spectral_nx_fidelity",
+        "classic_spectral",
+        "Spectral (NetworkX fidelity)",
+        {"networkx_fidelity": True},
+        "nx_spectral",
+        {},
+        True,
+        False,
+        True,
+    ),
+    _variant(
         "classic_spectral_random_walk",
         "classic_spectral",
         "Spectral (random walk)",
