@@ -209,6 +209,7 @@ def load_cached_target_seeds(
     input_dir: Path,
     expected_nodes: int,
     max_seeds: int,
+    graphviz_cache_dir: Optional[Path] = None,
 ) -> dict[int, torch.Tensor]:
     """Load up to ``max_seeds`` cached target position tensors.
 
@@ -224,6 +225,11 @@ def load_cached_target_seeds(
         Expected node count for position validation.
     max_seeds : int
         Maximum number of cached seeds to load from the 42..50 cache window.
+    graphviz_cache_dir : Path, optional
+        Optional flat directory containing graphviz seed tensors named
+        ``<graph>__<engine>__seed<S>.pt``. When omitted, tensors are loaded
+        from ``input_dir / "positions"`` using the historical benchmark cache
+        layout.
 
     Returns
     -------
@@ -232,15 +238,29 @@ def load_cached_target_seeds(
     """
     positions_by_seed: dict[int, torch.Tensor] = {}
     for seed in range(DEFAULT_SEED_START, CACHED_SEED_STOP + 1):
-        positions_file = f"positions/{graph}__{target_engine}__seed{seed}.pt"
-        positions_path = input_dir / positions_file
-        if not positions_path.exists():
-            continue
-        positions, error = load_position_tensor(
-            record_key=None,
-            positions_file=positions_file,
-            input_dir=input_dir,
-        )
+        basename = f"{graph}__{target_engine}__seed{seed}.pt"
+        if graphviz_cache_dir is not None:
+            positions_path = graphviz_cache_dir / basename
+            if not positions_path.exists():
+                continue
+            try:
+                loaded = torch.load(positions_path, map_location="cpu")
+            except Exception:
+                continue
+            if not isinstance(loaded, torch.Tensor):
+                continue
+            positions = loaded.detach().to(dtype=torch.float32, device="cpu")
+            error = None
+        else:
+            positions_file = f"positions/{basename}"
+            positions_path = input_dir / positions_file
+            if not positions_path.exists():
+                continue
+            positions, error = load_position_tensor(
+                record_key=None,
+                positions_file=positions_file,
+                input_dir=input_dir,
+            )
         if error is not None or positions is None:
             continue
         validation_error = validate_positions(positions, expected_nodes=expected_nodes)
@@ -581,6 +601,7 @@ def compare_live_multi_seed(
     indexed: Mapping[str, list[Any]],
     input_dir: Path,
     seed_count: int,
+    graphviz_cache_dir: Optional[Path] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run multi-seed live comparison against cached target seeds.
 
@@ -600,6 +621,8 @@ def compare_live_multi_seed(
         Benchmark root containing cached target positions.
     seed_count : int
         Requested seed count. Deterministic dagua engines force this to one.
+    graphviz_cache_dir : Path, optional
+        Optional flat directory containing seeded graphviz target positions.
 
     Returns
     -------
@@ -635,6 +658,7 @@ def compare_live_multi_seed(
             input_dir=input_dir,
             expected_nodes=int(test_graph.graph.num_nodes),
             max_seeds=target_max_seeds,
+            graphviz_cache_dir=graphviz_cache_dir,
         )
         if not target_positions_by_seed:
             target_positions = load_cached_target(
@@ -856,6 +880,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--graphs", default=None)
     parser.add_argument("--output-dir", type=Path, default=Path("eval_output/algo_fidelity/live"))
     parser.add_argument("--input-dir", type=Path, default=Path("eval_output/benchmark_full"))
+    parser.add_argument(
+        "--graphviz-cache-dir",
+        type=Path,
+        default=None,
+        help="Flat directory of graphviz seed tensors to use for multi-seed target positions.",
+    )
     parser.add_argument("--render-panels", action="store_true")
     parser.add_argument(
         "--seeds",
@@ -899,6 +929,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             indexed=indexed,
             input_dir=args.input_dir,
             seed_count=args.seeds,
+            graphviz_cache_dir=args.graphviz_cache_dir,
         )
         csv_path, summary_path = write_multi_seed_outputs(args.output_dir, rows, summary)
         print(f"Wrote {len(rows)} rows to {csv_path}")
