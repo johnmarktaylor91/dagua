@@ -2207,6 +2207,102 @@ def _build_node_patch(
     )
 
 
+def _border_ribbon_paths(
+    shape_spec: ShapeSpec,
+    outer_path: Any,
+    border_width: float,
+    border_position: str,
+    dash_pattern: Any,
+) -> List[Any]:
+    """Build filled border paths for one shape outline.
+
+    Parameters
+    ----------
+    shape_spec : ShapeSpec
+        Shape geometry in data coordinates.
+    outer_path : Any
+        Outer shape path in data coordinates.
+    border_width : float
+        Border width in data coordinates.
+    border_position : str
+        Border placement mode.
+    dash_pattern : Any
+        ``"solid"`` for a continuous annular ring, or a dash pattern accepted
+        by :func:`dash_ribbon_paths`.
+
+    Returns
+    -------
+    list[Any]
+        Filled paths representing the border body in data coordinates.
+    """
+    if border_width <= 0.0:
+        return []
+    if dash_pattern == "solid":
+        border_outer_path, border_inner_path = _solid_border_ring_paths(
+            shape_spec,
+            outer_path,
+            border_width,
+            border_position,
+        )
+        return [annular_path(border_outer_path, border_inner_path)]
+    centerline_path = _node_border_centerline_path(
+        shape_spec,
+        outer_path,
+        border_width,
+        border_position,
+    )
+    return dash_ribbon_paths(centerline_path, dash_pattern, border_width)
+
+
+def _draw_border_ribbon(
+    ax: Any,
+    shape_spec: ShapeSpec,
+    outer_path: Any,
+    border_width: float,
+    border_position: str,
+    dash_pattern: Any,
+    color: Any,
+    zorder: float,
+) -> None:
+    """Draw one shape border as a filled data-coordinate ribbon.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes.
+    shape_spec : ShapeSpec
+        Shape geometry in data coordinates.
+    outer_path : Any
+        Outer shape path in data coordinates.
+    border_width : float
+        Border width in data coordinates.
+    border_position : str
+        Border placement mode.
+    dash_pattern : Any
+        ``"solid"`` or a dash pattern accepted by :func:`dash_ribbon_paths`.
+    color : Any
+        Matplotlib-compatible face color for the border body.
+    zorder : float
+        Artist z-order for the border collection.
+    """
+    border_paths = _border_ribbon_paths(
+        shape_spec,
+        outer_path,
+        border_width,
+        border_position,
+        dash_pattern,
+    )
+    add_filled_collections(
+        ax=ax,
+        fill_paths=[],
+        fill_colors=[],
+        border_paths=border_paths,
+        border_colors=[color] * len(border_paths),
+        fill_zorder=zorder,
+        border_zorder=zorder,
+    )
+
+
 def _draw_node_shape_extras(
     ax: Any,
     x: float,
@@ -2238,8 +2334,6 @@ def _draw_node_shape_extras(
     zorder : float
         Artist z-order.
     """
-    from matplotlib.patches import Ellipse
-
     if style.shape == "box3d":
         # Overlay darker tints on the top and right extrusion faces so the
         # 3D illusion reads at a glance.
@@ -2292,42 +2386,74 @@ def _draw_node_shape_extras(
         return
 
     if style.shape == "double_circle":
-        # Draw the inner concentric circle as a stroke-only ellipse.
+        # Draw the inner concentric circle as a filled data-coordinate ribbon
+        # so the width remains available to layout-space geometry.
         gap_ratio = 0.15
         inner_w = w * (1.0 - gap_ratio)
         inner_h = h * (1.0 - gap_ratio)
-        inner_ring = Ellipse(
-            (x, y),
+        display_scale = _compute_display_scale(ax)
+        border_width = clamp_border_width(
+            max(float(style.stroke_width), 1.0) * display_scale,
             inner_w,
             inner_h,
-            facecolor="none",
-            edgecolor=edgecolor,
-            linewidth=max(style.stroke_width, 1.0),
-            linestyle=_node_linestyle(style),
-            capstyle=_mpl_capstyle(style.stroke_cap),
-            joinstyle=style.stroke_join,
-            zorder=zorder,
         )
-        ax.add_patch(inner_ring)
+        shape_spec = ShapeSpec(
+            center_x=x,
+            center_y=y,
+            width=inner_w,
+            height=inner_h,
+            shape="ellipse",
+            corner_radius=0.0,
+            aspect_ratio=None,
+        )
+        dash_pattern = (
+            "solid"
+            if style.stroke_dash == "solid" and style.stroke_dash_pattern is None
+            else _node_border_pattern(style, display_scale)
+        )
+        _draw_border_ribbon(
+            ax,
+            shape_spec,
+            build_shape_path(shape_spec),
+            border_width,
+            "center",
+            dash_pattern,
+            edgecolor,
+            zorder,
+        )
         return
 
     if style.shape != "cylinder":
         return
 
     cap_h = max(h * 0.16, 1.0)
-    rim = Ellipse(
-        (x, y + h / 2 - cap_h),
-        w,
-        cap_h * 2,
-        facecolor="none",
-        edgecolor=edgecolor,
-        linewidth=style.stroke_width,
-        linestyle=_node_linestyle(style),
-        capstyle=_mpl_capstyle(style.stroke_cap),
-        joinstyle=style.stroke_join,
-        zorder=zorder,
+    display_scale = _compute_display_scale(ax)
+    rim_h = cap_h * 2.0
+    border_width = clamp_border_width(float(style.stroke_width) * display_scale, w, rim_h)
+    shape_spec = ShapeSpec(
+        center_x=x,
+        center_y=y + h / 2 - cap_h,
+        width=w,
+        height=rim_h,
+        shape="ellipse",
+        corner_radius=0.0,
+        aspect_ratio=None,
     )
-    ax.add_patch(rim)
+    dash_pattern = (
+        "solid"
+        if style.stroke_dash == "solid" and style.stroke_dash_pattern is None
+        else _node_border_pattern(style, display_scale)
+    )
+    _draw_border_ribbon(
+        ax,
+        shape_spec,
+        build_shape_path(shape_spec),
+        border_width,
+        "center",
+        dash_pattern,
+        edgecolor,
+        zorder,
+    )
 
 
 def _draw_gradient_fill(
@@ -2669,8 +2795,15 @@ def _draw_node_fill(
     ax.add_patch(fill_patch)
 
 
-def _draw_node_border_path(ax: Any, path: Any, style: Any, edgecolor: Any) -> None:
-    """Stroke one node border path with the requested cap and join settings.
+def _draw_node_border_path(
+    ax: Any,
+    path: Any,
+    style: Any,
+    edgecolor: Any,
+    border_width: float,
+    display_scale: float,
+) -> None:
+    """Draw one node border centerline as a filled data-coordinate ribbon.
 
     Parameters
     ----------
@@ -2682,20 +2815,26 @@ def _draw_node_border_path(ax: Any, path: Any, style: Any, edgecolor: Any) -> No
         Node style object.
     edgecolor : Any
         Matplotlib-compatible border color.
+    border_width : float
+        Border width in data coordinates.
+    display_scale : float
+        Point-to-data conversion factor for dash pattern scaling.
     """
-    from matplotlib.patches import PathPatch
-
-    border_patch = PathPatch(
-        path,
-        facecolor="none",
-        edgecolor=edgecolor,
-        linewidth=max(float(style.stroke_width), 0.0),
-        linestyle=_node_linestyle(style),
-        capstyle=_mpl_capstyle(style.stroke_cap),
-        joinstyle=style.stroke_join,
-        zorder=2.05,
+    dash_pattern = (
+        (1.0e9, 1.0e9)
+        if style.stroke_dash == "solid" and style.stroke_dash_pattern is None
+        else _node_border_pattern(style, display_scale)
     )
-    ax.add_patch(border_patch)
+    ribbons = dash_ribbon_paths(path, dash_pattern, border_width)
+    add_filled_collections(
+        ax=ax,
+        fill_paths=[],
+        fill_colors=[],
+        border_paths=ribbons,
+        border_colors=[edgecolor] * len(ribbons),
+        fill_zorder=2.05,
+        border_zorder=2.05,
+    )
 
 
 def _requires_custom_node_rendering(style: Any) -> bool:
@@ -4698,13 +4837,27 @@ def _draw_nodes(
                     border_width,
                     border_position,
                 )
-                _draw_node_border_path(ax, border_path, style, edgecolor)
+                _draw_node_border_path(
+                    ax,
+                    border_path,
+                    style,
+                    edgecolor,
+                    border_width,
+                    display_scale,
+                )
                 if int(style.border_count) >= 2:
                     inner_path = inset_shape_path(
                         shape_spec,
                         border_width * _DOUBLE_BORDER_INSET_FACTOR,
                     )
-                    _draw_node_border_path(ax, inner_path, style, edgecolor)
+                    _draw_node_border_path(
+                        ax,
+                        inner_path,
+                        style,
+                        edgecolor,
+                        border_width,
+                        display_scale,
+                    )
         else:
             if style.gradient == "none":
                 fill_paths.append(fill_path)
@@ -4717,7 +4870,14 @@ def _draw_nodes(
             if border_width > 0.0 and edgecolor[-1] > 0.0:
                 if style.stroke_dash == "solid" and style.stroke_dash_pattern is None:
                     if border_position == "center":
-                        _draw_node_border_path(ax, outer_path, style, edgecolor)
+                        border_outer_path, border_inner_path = _solid_border_ring_paths(
+                            shape_spec,
+                            outer_path,
+                            border_width,
+                            border_position,
+                        )
+                        border_paths.append(annular_path(border_outer_path, border_inner_path))
+                        border_colors.append(edgecolor)
                     else:
                         border_outer_path, border_inner_path = _solid_border_ring_paths(
                             shape_spec,
@@ -8791,7 +8951,6 @@ def _draw_clusters(
     fill_colors_by_depth: Dict[int, List[Any]] = {}
     border_paths_by_depth: Dict[int, List[Any]] = {}
     border_colors_by_depth: Dict[int, List[Any]] = {}
-    solid_border_specs_by_depth: Dict[int, List[Tuple[Any, Any, float, str]]] = {}
     cluster_label_specs: List[DaguaText] = []
     cluster_label_placements: List[_ClusterLabelPlacement] = []
     min_node_height = float(sizes[:, 1].min()) if sizes.size else 0.0
@@ -8909,24 +9068,13 @@ def _draw_clusters(
             fill_colors_by_depth.setdefault(depth, []).append(to_rgba(fill_color, fill_alpha))
         if border_width > 0.0:
             if style.stroke_dash == "solid":
-                centerline_spec = ShapeSpec(
-                    center_x=shape_spec.center_x,
-                    center_y=shape_spec.center_y,
-                    width=max(width - border_width, 0.0),
-                    height=max(height - border_width, 0.0),
-                    shape=shape_spec.shape,
-                    corner_radius=add_corner_radius(shape_spec.corner_radius, -border_width / 2.0),
-                    aspect_ratio=shape_spec.aspect_ratio,
+                border_outer_path, border_inner_path = _solid_border_ring_paths(
+                    shape_spec,
+                    outer_path,
+                    border_width,
+                    "center",
                 )
-                solid_border_specs_by_depth.setdefault(depth, []).append(
-                    (
-                        build_shape_path(centerline_spec),
-                        to_rgba(stroke_color, border_alpha),
-                        max(float(eff_stroke_width), 0.0),
-                        "miter",
-                    )
-                )
-                border_paths = []
+                border_paths = [annular_path(border_outer_path, border_inner_path)]
             else:
                 centerline_path = inset_shape_path(shape_spec, border_width / 2.0)
                 border_paths = dash_ribbon_paths(centerline_path, style.stroke_dash, border_width)
@@ -9023,23 +9171,6 @@ def _draw_clusters(
             fill_zorder=0.0 + depth * 0.01,
             border_zorder=0.05 + depth * 0.01,
         )
-
-    if solid_border_specs_by_depth:
-        from matplotlib.patches import PathPatch
-
-        for depth in sorted(solid_border_specs_by_depth):
-            for path, color, linewidth, joinstyle in solid_border_specs_by_depth[depth]:
-                border_patch = PathPatch(
-                    path,
-                    facecolor="none",
-                    edgecolor=color,
-                    linewidth=linewidth,
-                    linestyle="-",
-                    capstyle="butt",
-                    joinstyle=joinstyle,
-                    zorder=0.05 + depth * 0.01,
-                )
-                ax.add_patch(border_patch)
 
     if cluster_label_specs:
         _resolve_cluster_label_collisions(ax, cluster_label_placements)
