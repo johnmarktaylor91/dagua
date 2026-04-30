@@ -12,7 +12,10 @@ from dagua.layout.ops.distance import KamadaKawaiAllPairsShortestPaths
 from dagua.layout.ops.graph_utils import layout_device as _layout_device
 from dagua.layout.ops.init import KamadaKawaiInitializePositions
 from dagua.layout.ops.optimize import LBFGSStep, LBFGSStepConfig
-from dagua.layout.ops.postprocess import KamadaKawaiFinalizePositions
+from dagua.layout.ops.postprocess import (
+    KamadaKawaiFinalizePositions,
+    KamadaKawaiFinalizePositionsConfig,
+)
 from dagua.layout.ops.state import (
     ExecutionPlan,
     LayoutProblem,
@@ -121,6 +124,7 @@ def _orient_positions_to_direction(
 def build_kk_pipeline(
     steps: Optional[int] = None,
     trace_every: int = 0,
+    preserve_float64: bool = False,
 ) -> Pipeline:
     """Build a Kamada-Kawai spring-embedding pipeline.
 
@@ -131,6 +135,8 @@ def build_kk_pipeline(
         unset to match classic KK.
     trace_every : int, default=0
         Snapshot cadence for optimizer traces.
+    preserve_float64 : bool, default=False
+        When ``True``, keep final coordinates in float64 for fidelity audits.
 
     Returns
     -------
@@ -155,13 +161,16 @@ def build_kk_pipeline(
         trace_every=trace_every,
         trace_key="kk_traces" if trace_every > 0 else None,
     )
+    final_dtype = torch.float64 if preserve_float64 else torch.float32
     return Pipeline(
         [
             FixedSteps(FixedStepsConfig(n=0 if steps is None else steps)),
             KamadaKawaiAllPairsShortestPaths(),
             KamadaKawaiInitializePositions(),
             LBFGSStep(config=optimize_config),
-            KamadaKawaiFinalizePositions(),
+            KamadaKawaiFinalizePositions(
+                config=KamadaKawaiFinalizePositionsConfig(output_dtype=final_dtype)
+            ),
         ],
         name="kk_pipeline",
     )
@@ -179,6 +188,7 @@ def layout_kk_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     direction: str = "TB",
     orient_to_direction: bool = False,
+    preserve_float64: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
     """Run the Kamada-Kawai pipeline as a drop-in replacement.
 
@@ -214,6 +224,9 @@ def layout_kk_pipeline(
         Whether to choose the axis orientation that materially improves edge
         direction consistency. The default is disabled so direct pipeline calls
         remain bit-exact with the archived NetworkX-style KK port.
+    preserve_float64 : bool, default=False
+        When ``True``, preserve float64 final coordinates for sub-percent
+        fidelity audits. The default keeps historical float32 outputs.
 
     Returns
     -------
@@ -246,15 +259,18 @@ def layout_kk_pipeline(
             raise ValueError(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
+        if bool(torch.any(edge_weights < 0).item()):
+            raise ValueError("edge_weights must be nonnegative for KK shortest paths.")
     if pos is not None and pos.shape != (num_nodes, 2):
         raise ValueError(f"pos must have shape ({num_nodes}, 2), got {tuple(pos.shape)}")
 
     output_device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
+    output_dtype = torch.float64 if preserve_float64 else torch.float32
     if num_nodes == 0:
-        empty = torch.empty((0, 2), dtype=torch.float32, device=output_device)
+        empty = torch.empty((0, 2), dtype=output_dtype, device=output_device)
         return (empty, []) if trace_every > 0 else empty
     if num_nodes == 1:
-        single = torch.zeros((1, 2), dtype=torch.float32, device=output_device)
+        single = torch.zeros((1, 2), dtype=output_dtype, device=output_device)
         return (single, []) if trace_every > 0 else single
 
     problem = LayoutProblem(
@@ -268,7 +284,11 @@ def layout_kk_pipeline(
     if pos is not None:
         state.extras["kk_initial_pos"] = pos
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_kk_pipeline(steps=steps, trace_every=trace_every).apply(problem, state, ctx)
+    final_state = build_kk_pipeline(
+        steps=steps,
+        trace_every=trace_every,
+        preserve_float64=preserve_float64,
+    ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("KK pipeline did not produce final positions.")
     if orient_to_direction:

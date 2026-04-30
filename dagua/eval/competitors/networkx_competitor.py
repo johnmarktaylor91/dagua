@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Union
 
 import torch
 
@@ -17,13 +17,16 @@ if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
 
-def _graph_to_nx(graph: DaguaGraph) -> Any:
+def _graph_to_nx(graph: DaguaGraph, duplicate_policy: str = "sum") -> Any:
     """Convert a ``DaguaGraph`` to a weighted ``networkx.DiGraph``.
 
     Parameters
     ----------
     graph : DaguaGraph
         Source graph whose topology and optional edge weights should be copied.
+    duplicate_policy : {"sum", "last"}, default="sum"
+        Policy used when repeated directed edges are copied into the simple
+        ``DiGraph`` representation.
 
     Returns
     -------
@@ -32,29 +35,90 @@ def _graph_to_nx(graph: DaguaGraph) -> Any:
     """
     import networkx as nx
 
+    if duplicate_policy not in {"sum", "last"}:
+        raise ValueError("duplicate_policy must be one of 'sum' or 'last'.")
+
     G = nx.DiGraph()
     G.add_nodes_from(range(graph.num_nodes))
     if graph.edge_index.numel() > 0:
+        collapsed_weights: dict[tuple[int, int], float] = {}
         ei = graph.edge_index
         weights = graph.edge_weights
         for e in range(ei.shape[1]):
             source = ei[0, e].item()
             target = ei[1, e].item()
+            edge_key = (source, target)
             if weights is not None:
-                G.add_edge(source, target, weight=float(weights[e].item()))
+                edge_weight = float(weights[e].item())
             else:
-                G.add_edge(source, target)
+                edge_weight = 1.0
+            if duplicate_policy == "sum":
+                edge_weight += collapsed_weights.get(edge_key, 0.0)
+            collapsed_weights[edge_key] = edge_weight
+        for (source, target), edge_weight in collapsed_weights.items():
+            G.add_edge(source, target, weight=edge_weight)
     return G
 
 
-def _nx_pos_to_tensor(nx_pos: dict, num_nodes: int) -> torch.Tensor:
-    """Convert networkx position dict to [N, 2] tensor, scaled to dagua units."""
-    pos = torch.zeros(num_nodes, 2)
+def _normalize_output_dtype(output_dtype: Union[str, torch.dtype]) -> torch.dtype:
+    """Normalize user-facing dtype names to torch dtypes.
+
+    Parameters
+    ----------
+    output_dtype : str or torch.dtype
+        Requested floating-point output dtype.
+
+    Returns
+    -------
+    torch.dtype
+        Normalized torch dtype.
+
+    Raises
+    ------
+    ValueError
+        If ``output_dtype`` is not a supported floating-point dtype.
+    """
+    if isinstance(output_dtype, torch.dtype):
+        if output_dtype in {torch.float32, torch.float64}:
+            return output_dtype
+        raise ValueError("output_dtype must be torch.float32 or torch.float64.")
+    if output_dtype in {"float32", "torch.float32"}:
+        return torch.float32
+    if output_dtype in {"float64", "torch.float64"}:
+        return torch.float64
+    raise ValueError("output_dtype must be 'float32' or 'float64'.")
+
+
+def _nx_pos_to_tensor(
+    nx_pos: dict,
+    num_nodes: int,
+    output_scale: float,
+    output_dtype: Union[str, torch.dtype] = torch.float32,
+) -> torch.Tensor:
+    """Convert a NetworkX position mapping to a tensor.
+
+    Parameters
+    ----------
+    nx_pos : dict
+        Mapping from integer node IDs to two-dimensional coordinates.
+    num_nodes : int
+        Number of nodes ``N`` expected in the output tensor.
+    output_scale : float
+        Adapter-level multiplier applied after the NetworkX algorithm returns.
+    output_dtype : str or torch.dtype, default=torch.float32
+        Floating-point dtype for the returned tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    """
+    dtype = _normalize_output_dtype(output_dtype)
+    pos = torch.zeros(num_nodes, 2, dtype=dtype)
     for node_id, (x, y) in nx_pos.items():
         if node_id < num_nodes:
-            # NetworkX layouts return ~[-1, 1] range; scale up for comparability
-            pos[node_id, 0] = x * 500.0
-            pos[node_id, 1] = y * 500.0
+            pos[node_id, 0] = float(x) * output_scale
+            pos[node_id, 1] = float(y) * output_scale
     return pos
 
 
@@ -63,6 +127,9 @@ class _NetworkXBase(CompetitorBase):
 
     layout_func: str = "spring_layout"
     layout_kwargs: dict[str, Any] = {}
+    output_scale: float = 500.0
+    output_dtype: torch.dtype = torch.float32
+    duplicate_policy: str = "sum"
 
     def layout(
         self,
@@ -117,7 +184,7 @@ class _NetworkXBase(CompetitorBase):
 
         import networkx as nx
 
-        G = _graph_to_nx(graph)
+        G = _graph_to_nx(graph, duplicate_policy=self.duplicate_policy)
 
         start = time.perf_counter()
         try:
@@ -125,11 +192,20 @@ class _NetworkXBase(CompetitorBase):
             layout_kwargs = dict(self.layout_kwargs)
             if variant_params is not None:
                 layout_kwargs.update(dict(variant_params))
+            output_scale = float(layout_kwargs.pop("output_scale", self.output_scale))
+            output_dtype = _normalize_output_dtype(
+                layout_kwargs.pop("output_dtype", self.output_dtype)
+            )
             if seed is not None and "seed" in layout_kwargs:
                 layout_kwargs["seed"] = seed
             nx_pos = func(G, **layout_kwargs)
             elapsed = time.perf_counter() - start
-            pos = _nx_pos_to_tensor(nx_pos, graph.num_nodes)
+            pos = _nx_pos_to_tensor(
+                nx_pos,
+                graph.num_nodes,
+                output_scale=output_scale,
+                output_dtype=output_dtype,
+            )
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
         except Exception as e:
             elapsed = time.perf_counter() - start
@@ -159,7 +235,9 @@ class NetworkXKamadaKawai(_NetworkXBase):
     max_nodes = 5_000
     layout_func = "kamada_kawai_layout"
     layout_kwargs = {}
-    variant_param_names = frozenset()
+    output_scale = 1.0
+    duplicate_policy = "last"
+    variant_param_names = frozenset({"output_dtype", "output_scale"})
 
 
 @register
@@ -171,3 +249,4 @@ class NetworkXSpectral(_NetworkXBase):
     layout_func = "spectral_layout"
     layout_kwargs = {"dim": 2}
     variant_param_names = frozenset({"dim", "scale"})
+    output_scale = 1.0
