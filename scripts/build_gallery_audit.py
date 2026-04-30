@@ -41,7 +41,7 @@ import matplotlib.pyplot as plt
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 from dagua import DaguaGraph, render
-from dagua.styles import ClusterStyle, EdgeStyle, GraphStyle, NodeStyle
+from dagua.styles import GRAPHVIZ_STRICT_THEME, ClusterStyle, EdgeStyle, GraphStyle, NodeStyle
 from scripts.generate_cosmetic_album import VARIED_EXTERNAL_LABELS, build_case_catalog
 
 WHITE = "#FFFFFF"
@@ -150,8 +150,12 @@ GRAPHVIZ_SHAPE_MAP: Dict[str, Dict[str, str]] = {
     "circle": {"shape": "circle"},
     "triangle": {"shape": "triangle"},
     "hexagon": {"shape": "hexagon"},
+    "pentagon": {"shape": "pentagon"},
+    "octagon": {"shape": "octagon"},
     "star": {"shape": "star"},
     "cylinder": {"shape": "cylinder"},
+    "parallelogram": {"shape": "parallelogram"},
+    "trapezoid": {"shape": "trapezium"},
     "double_circle": {"shape": "doublecircle"},
     "tab": {"shape": "tab"},
     "note": {"shape": "note"},
@@ -168,6 +172,131 @@ GRAPHVIZ_ARROW_MAP: Dict[str, Dict[str, str]] = {
     "open": {"arrowhead": "open"},
 }
 GRAPH_DIRECTION_FIELDS = {"direction"}
+GRAPHVIZ_NODE_SHAPES = frozenset(
+    {
+        "rect",
+        "roundrect",
+        "ellipse",
+        "circle",
+        "diamond",
+        "triangle",
+        "hexagon",
+        "pentagon",
+        "octagon",
+        "star",
+        "cylinder",
+        "parallelogram",
+        "trapezoid",
+        "tab",
+        "note",
+        "box3d",
+    }
+)
+GRAPHVIZ_ARROWS = frozenset(
+    {
+        "normal",
+        "inv",
+        "dot",
+        "box",
+        "vee",
+        "tee",
+        "crow",
+        "diamond",
+        "curve",
+        "icurve",
+        "simple",
+        "fancy",
+        "wedge",
+        "bracket",
+        "none",
+        "open",
+        "circle",
+    }
+)
+CYTOSCAPE_ARROWS = frozenset(
+    {
+        "crows_foot_one",
+        "crows_foot_many",
+        "crows_foot_one_mandatory",
+        "crows_foot_many_mandatory",
+        "crows_foot_many_optional",
+        "triangle_tee",
+    }
+)
+
+
+def _classify_tier(competitor_tools: Sequence[str]) -> str:
+    """Classify a card or spec from its competitor tool availability.
+
+    Parameters
+    ----------
+    competitor_tools : Sequence[str]
+        Ordered competitor preference tuple.
+
+    Returns
+    -------
+    str
+        ``"A"`` for Graphviz-backed cards, ``"B"`` for non-Graphviz
+        automated references, and ``"C"`` for heuristic-only cards.
+    """
+
+    if "graphviz" in competitor_tools:
+        return "A"
+    if competitor_tools:
+        return "B"
+    return "C"
+
+
+def _feature_competitor_tools(category: str, feature: str) -> Tuple[str, ...]:
+    """Return conservative competitor tools for a feature family.
+
+    Parameters
+    ----------
+    category : str
+        Atomic spec category path.
+    feature : str
+        Atomic feature name.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Ordered preferred competitor names.
+    """
+
+    feature_key = (category, feature)
+    mapping: Dict[Tuple[str, str], Tuple[str, ...]] = {
+        ("nodes/shapes", "shape"): ("graphviz", "mermaid"),
+        ("nodes/fills", "gradient"): ("graphviz", "cytoscape"),
+        ("nodes/fills", "fill_pattern"): ("graphviz", "cytoscape"),
+        ("nodes/borders", "stroke_dash"): ("cytoscape",),
+        ("nodes/borders", "border_count"): ("cytoscape",),
+        ("nodes/borders", "border_position"): ("cytoscape",),
+        ("nodes/text", "font_weight"): ("graphviz",),
+        ("nodes/text", "font_style"): ("graphviz",),
+        ("nodes/text", "font_size"): ("graphviz",),
+        ("nodes/text", "font_family"): ("graphviz",),
+        ("nodes/text", "font_color"): ("graphviz",),
+        ("nodes/text", "text_wrap"): ("cytoscape",),
+        ("nodes/text", "text_ellipsis"): ("cytoscape",),
+        ("nodes/text", "text_transform"): ("cytoscape",),
+        ("nodes/text", "text_rotation"): ("cytoscape",),
+        ("nodes/labels", "external_label"): ("graphviz",),
+        ("edges/arrows", "arrow"): ("graphviz", "cytoscape"),
+        ("edges/routing", "routing"): ("graphviz", "cytoscape"),
+        ("edges/styles", "style"): ("graphviz",),
+        ("edges/styles", "width"): ("graphviz", "mermaid"),
+        ("edges/styles", "stroke_dash"): ("cytoscape",),
+        ("edges/advanced", "color_gradient"): ("cytoscape",),
+        ("edges/advanced", "line_cap"): ("cytoscape",),
+        ("edges/advanced", "line_join"): ("cytoscape",),
+        ("edges/labels", "external_label"): ("graphviz",),
+        ("edges/labels", "head_tail_label"): ("graphviz",),
+        ("clusters/styles", "cluster_style"): ("graphviz",),
+        ("clusters/styles", "fill"): ("graphviz",),
+        ("clusters/styles", "stroke"): ("graphviz",),
+        ("clusters/styles", "border"): ("graphviz",),
+    }
+    return mapping.get(feature_key, ())
 
 
 @dataclass(frozen=True)
@@ -214,6 +343,10 @@ class AtomicCardSpec:
         Optional stem prefix for categories that contain multiple features.
     sensitivity : str, default="coarse"
         Audit sensitivity classification written into the JSONL index.
+    competitor_tools : tuple[str, ...], default=()
+        Ordered competitor preference for this feature family.
+    tier : str, default=""
+        Audit tier. Empty values are derived from ``competitor_tools``.
     """
 
     target: str
@@ -224,6 +357,20 @@ class AtomicCardSpec:
     values: Tuple[FeatureValue, ...]
     filename_prefix: str = ""
     sensitivity: str = "coarse"
+    competitor_tools: Tuple[str, ...] = ()
+    tier: str = ""
+
+    def __post_init__(self) -> None:
+        """Derive the audit tier when the caller leaves it empty.
+
+        Returns
+        -------
+        None
+            Frozen dataclass fields are updated through ``object.__setattr__``.
+        """
+
+        if not self.tier:
+            object.__setattr__(self, "tier", _classify_tier(self.competitor_tools))
 
 
 @dataclass(frozen=True)
@@ -265,12 +412,30 @@ class ComboCardSpec:
         Human-readable combo title.
     settings : dict[str, object]
         JSON-serializable cosmetic settings imported from the source catalog.
+    competitor_tools : tuple[str, ...], default=()
+        Ordered competitor preference for this combo.
+    tier : str, default=""
+        Audit tier. Empty values are derived from ``competitor_tools``.
     """
 
     case_id: str
     combo_kind: str
     title: str
     settings: Dict[str, object]
+    competitor_tools: Tuple[str, ...] = ()
+    tier: str = ""
+
+    def __post_init__(self) -> None:
+        """Derive the audit tier when the caller leaves it empty.
+
+        Returns
+        -------
+        None
+            Frozen dataclass fields are updated through ``object.__setattr__``.
+        """
+
+        if not self.tier:
+            object.__setattr__(self, "tier", _classify_tier(self.competitor_tools))
 
 
 @dataclass(frozen=True)
@@ -308,6 +473,10 @@ class EvilCardSpec:
         Pre-built stress graph to render.
     positions : torch.Tensor
         Fixed node positions with shape ``[N, 2]``.
+    competitor_tools : tuple[str, ...], default=()
+        Ordered competitor preference for this evil stress card.
+    tier : str, default=""
+        Audit tier. Empty values are derived from ``competitor_tools``.
     """
 
     case_id: str
@@ -315,6 +484,20 @@ class EvilCardSpec:
     settings: Dict[str, object]
     graph: DaguaGraph
     positions: torch.Tensor
+    competitor_tools: Tuple[str, ...] = ()
+    tier: str = ""
+
+    def __post_init__(self) -> None:
+        """Derive the audit tier when the caller leaves it empty.
+
+        Returns
+        -------
+        None
+            Frozen dataclass fields are updated through ``object.__setattr__``.
+        """
+
+        if not self.tier:
+            object.__setattr__(self, "tier", _classify_tier(self.competitor_tools))
 
 
 @dataclass(frozen=True)
@@ -426,6 +609,8 @@ def _spec(
     fixture: str,
     values: Sequence[FeatureValue],
     filename_prefix: str = "",
+    competitor_tools: Optional[Sequence[str]] = None,
+    tier: str = "",
 ) -> AtomicCardSpec:
     """Build an atomic feature spec from simple constructor arguments.
 
@@ -445,6 +630,11 @@ def _spec(
         Ordered concrete values to render.
     filename_prefix : str, default=""
         Optional filename prefix for categories with several feature families.
+    competitor_tools : Sequence[str] | None, optional
+        Ordered competitor preference. Derived from the feature inventory when
+        omitted.
+    tier : str, default=""
+        Optional explicit tier.
 
     Returns
     -------
@@ -460,6 +650,10 @@ def _spec(
         fixture=fixture,
         values=tuple(values),
         filename_prefix=filename_prefix,
+        competitor_tools=tuple(competitor_tools)
+        if competitor_tools is not None
+        else _feature_competitor_tools(category, feature),
+        tier=tier,
     )
 
 
@@ -516,91 +710,51 @@ def _validate_reference_specs(specs: Sequence[AtomicCardSpec]) -> None:
 
 
 def _base_graph_style() -> GraphStyle:
-    """Return the shared graph style for gallery audit fixtures.
+    """Return the Graphviz-strict base graph style for audit fixtures.
 
     Returns
     -------
     GraphStyle
-        White-background graph style with modest margins.
+        Deep copy of the graph style from ``GRAPHVIZ_STRICT_THEME``.
     """
 
-    return GraphStyle(
-        background_color=WHITE,
-        margin=20.0,
-        min_figsize=(4.0, 3.0),
-        max_figsize=(8.0, 6.0),
-    )
+    return copy.deepcopy(GRAPHVIZ_STRICT_THEME.graph_style)
 
 
 def _base_node_style() -> NodeStyle:
-    """Return the shared node style for gallery audit fixtures.
+    """Return the Graphviz-strict base node style for audit fixtures.
 
     Returns
     -------
     NodeStyle
-        Readable node style with consistent defaults across fixtures.
+        Deep copy of the default node style from ``GRAPHVIZ_STRICT_THEME``.
     """
 
-    return NodeStyle(
-        shape="roundrect",
-        fill=NODE_FILL,
-        stroke=NODE_STROKE,
-        stroke_width=1.5,
-        font_color=TEXT_COLOR,
-        font_size=11.0,
-        min_width=108.0,
-        min_height=54.0,
-        corner_radius=8.0,
-        shadow=False,
-    )
+    return copy.deepcopy(GRAPHVIZ_STRICT_THEME.node_styles["default"])
 
 
 def _base_edge_style() -> EdgeStyle:
-    """Return the shared edge style for gallery audit fixtures.
+    """Return the Graphviz-strict base edge style for audit fixtures.
 
     Returns
     -------
     EdgeStyle
-        Readable edge style with visible arrowheads.
+        Deep copy of the default edge style from ``GRAPHVIZ_STRICT_THEME``.
     """
 
-    return EdgeStyle(
-        color=EDGE_COLOR,
-        width=2.5,
-        arrow="normal",
-        arrow_fill="filled",
-        arrow_length=18.0,
-        arrow_width=13.0,
-        opacity=0.9,
-        routing="bezier",
-        label_background=WHITE,
-        label_background_opacity=0.9,
-    )
+    return copy.deepcopy(GRAPHVIZ_STRICT_THEME.edge_styles["default"])
 
 
 def _base_cluster_style() -> ClusterStyle:
-    """Return the shared cluster style for gallery audit fixtures.
+    """Return the Graphviz-strict base cluster style for audit fixtures.
 
     Returns
     -------
     ClusterStyle
-        Visible cluster style with a readable header.
+        Deep copy of the cluster style from ``GRAPHVIZ_STRICT_THEME``.
     """
 
-    return ClusterStyle(
-        fill=CLUSTER_FILL,
-        stroke=CLUSTER_STROKE,
-        stroke_width=1.8,
-        stroke_dash="solid",
-        corner_radius=10.0,
-        padding=42.0,
-        label_position="top-left",
-        font_size=12.0,
-        font_weight="bold",
-        font_color=MUTED_TEXT_COLOR,
-        opacity=0.68,
-        label_offset=(12.0, 10.0),
-    )
+    return copy.deepcopy(GRAPHVIZ_STRICT_THEME.cluster_style)
 
 
 def _set_all_node_styles(graph: DaguaGraph, style: NodeStyle) -> None:
@@ -2294,6 +2448,9 @@ def _render_reference_card(item: ReferenceCardItem, output_root: Path) -> None:
         "fixture": item.spec.fixture,
         "fields": list(item.spec.fields),
         "params": item.value.params,
+        "competitor_tools": list(_card_competitor_tools(item)),
+        "tier": _classify_tier(_card_competitor_tools(item)),
+        "tier_c_reason": _tier_c_reason(item) if not _card_competitor_tools(item) else "",
     }
     _write_json(destination.with_suffix(".json"), sidecar)
 
@@ -2365,6 +2522,8 @@ def _render_strip_card(item: StripCardItem, output_root: Path) -> None:
         "member_card_ids": [member.card_id for member in item.members],
         "values": [member.value.label for member in item.members],
         "value_slugs": [member.value.slug for member in item.members],
+        "competitor_tools": list(item.spec.competitor_tools),
+        "tier": item.spec.tier,
     }
     _write_json(destination.with_suffix(".json"), sidecar)
 
@@ -2501,6 +2660,211 @@ def _strip_card_id(spec: AtomicCardSpec) -> str:
     parts = [segment.replace("-", "_") for segment in spec.category.split("/")]
     parts.append(f"strip_{spec.feature}".replace("-", "_"))
     return "_".join(parts)
+
+
+def _tuple_from_first_supported(candidates: Sequence[str]) -> Tuple[str, ...]:
+    """Return candidates as an immutable preference tuple.
+
+    Parameters
+    ----------
+    candidates : Sequence[str]
+        Candidate competitor names in preference order.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Candidate tuple with empty strings removed.
+    """
+
+    return tuple(candidate for candidate in candidates if candidate)
+
+
+def _atomic_value_competitor_tools(spec: AtomicCardSpec, value: FeatureValue) -> Tuple[str, ...]:
+    """Return value-specific competitor tools for an atomic card.
+
+    Parameters
+    ----------
+    spec : AtomicCardSpec
+        Atomic feature family.
+    value : FeatureValue
+        Concrete feature value.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Ordered competitor preference.
+    """
+
+    node_params = value.params.get("node", {})
+    edge_params = value.params.get("edge", {})
+    if not isinstance(node_params, Mapping):
+        node_params = {}
+    if not isinstance(edge_params, Mapping):
+        edge_params = {}
+
+    if spec.category == "nodes/shapes" and spec.feature == "shape":
+        shape = str(node_params.get("shape", value.slug))
+        if shape == "double_circle":
+            return ("graphviz", "mermaid")
+        if shape in {"cloud", "document", "stadium"}:
+            return ("mermaid",)
+        if shape in GRAPHVIZ_NODE_SHAPES:
+            return ("graphviz",)
+        return ()
+    if spec.category == "edges/arrows":
+        arrow = str(edge_params.get("arrow", value.slug))
+        if arrow in GRAPHVIZ_ARROWS:
+            return ("graphviz",)
+        if arrow in CYTOSCAPE_ARROWS:
+            return ("cytoscape",)
+        return ()
+    if spec.category == "edges/routing":
+        routing = str(edge_params.get("routing", value.slug))
+        if routing in {"bezier", "straight", "ortho"}:
+            return ("graphviz",)
+        if routing in {"taxi", "round-taxi"}:
+            return ("cytoscape",)
+        return ()
+    if spec.category == "edges/styles" and spec.feature == "style":
+        return ("graphviz",)
+    if spec.category == "edges/styles" and spec.feature == "width":
+        return ("graphviz", "mermaid")
+    if spec.feature in {"text_outline", "text_background"}:
+        return ()
+    if spec.feature == "shadow":
+        # Phase-7 smoke explicitly exercises shadow as a Tier-C heuristic path.
+        return ()
+    return spec.competitor_tools
+
+
+def _settings_competitor_tools(settings: Mapping[str, object]) -> Tuple[str, ...]:
+    """Return the best competitor tools for combo/evil settings.
+
+    Parameters
+    ----------
+    settings : Mapping[str, object]
+        Cosmetic settings dictionary.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Ordered competitor preference.
+    """
+
+    tools_by_feature: List[Tuple[str, ...]] = []
+    node_settings = settings.get("node", {})
+    edge_settings = settings.get("edge", {})
+    if isinstance(node_settings, Mapping):
+        for nested_name, nested_value in node_settings.items():
+            if nested_name in {"gradient", "fill_pattern"} and bool(nested_value):
+                tools_by_feature.append(("graphviz", "cytoscape"))
+            elif nested_name in {"border_count", "border_position"} and bool(nested_value):
+                tools_by_feature.append(("cytoscape",))
+            elif nested_name == "shadow" and bool(nested_value):
+                tools_by_feature.append(())
+    if isinstance(edge_settings, Mapping):
+        for nested_name, nested_value in edge_settings.items():
+            if nested_name == "routing" and bool(nested_value):
+                tools_by_feature.append(
+                    ("cytoscape",) if nested_value in {"taxi", "round-taxi"} else ("graphviz",)
+                )
+            elif nested_name in {"line_cap", "line_join", "color_gradient"} and bool(nested_value):
+                tools_by_feature.append(("cytoscape",))
+    for name, value in settings.items():
+        if name in COMBO_INTERNAL_FIELDS or not bool(value):
+            continue
+        if name == "cluster":
+            tools_by_feature.append(("graphviz",))
+        elif name == "edge_style":
+            tools_by_feature.append(("graphviz",))
+        elif name == "routing":
+            tools_by_feature.append(
+                ("cytoscape",) if value in {"taxi", "round-taxi"} else ("graphviz",)
+            )
+        elif name == "shape":
+            shape = str(value)
+            if shape in {"cloud", "document", "stadium"}:
+                tools_by_feature.append(("mermaid",))
+            elif shape in GRAPHVIZ_NODE_SHAPES:
+                tools_by_feature.append(("graphviz",))
+            else:
+                tools_by_feature.append(())
+        elif name in {"gradient", "fill_pattern"}:
+            tools_by_feature.append(("graphviz", "cytoscape"))
+        elif name in {"border_count", "border_position", "line_cap", "line_join", "color_gradient"}:
+            tools_by_feature.append(("cytoscape",))
+        elif name in {"font_weight", "font_style", "font_size", "font_family", "font_color"}:
+            tools_by_feature.append(("graphviz",))
+        elif name in {"text_outline", "text_background", "shadow", "bevel"}:
+            tools_by_feature.append(())
+
+    if not tools_by_feature:
+        return ()
+    coverage: Dict[str, int] = {}
+    for feature_tools in tools_by_feature:
+        for tool in feature_tools:
+            coverage[tool] = coverage.get(tool, 0) + 1
+    if not coverage:
+        return ()
+    preference = {"graphviz": 0, "cytoscape": 1, "mermaid": 2, "d3": 3, "gephi": 4}
+    max_coverage = max(coverage.values())
+    ordered = sorted(
+        (tool for tool, count in coverage.items() if count == max_coverage),
+        key=lambda tool: preference.get(tool, 99),
+    )
+    return _tuple_from_first_supported(ordered)
+
+
+def _card_competitor_tools(card: object) -> Tuple[str, ...]:
+    """Return competitor tools for a resolved card item or spec.
+
+    Parameters
+    ----------
+    card : object
+        Reference, combo, evil item, or spec.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Ordered competitor preference.
+    """
+
+    if isinstance(card, ReferenceCardItem):
+        return _atomic_value_competitor_tools(card.spec, card.value)
+    if isinstance(card, AtomicCardSpec):
+        return card.competitor_tools
+    if isinstance(card, ComboCardItem):
+        return _settings_competitor_tools(card.spec.settings) or card.spec.competitor_tools
+    if isinstance(card, ComboCardSpec):
+        return _settings_competitor_tools(card.settings) or card.competitor_tools
+    if isinstance(card, EvilCardItem):
+        return _settings_competitor_tools(card.spec.settings) or card.spec.competitor_tools
+    if isinstance(card, EvilCardSpec):
+        return _settings_competitor_tools(card.settings) or card.competitor_tools
+    return ()
+
+
+def _tier_c_reason(card: object) -> str:
+    """Return a one-line reason for Tier C cards.
+
+    Parameters
+    ----------
+    card : object
+        Card item or spec.
+
+    Returns
+    -------
+    str
+        Human-readable reason.
+    """
+
+    if isinstance(card, ReferenceCardItem):
+        if card.spec.feature in {"text_outline", "text_background"}:
+            return "render layer feature with no automated competitor"
+        if card.spec.feature == "shadow":
+            return "no competitor"
+        return "feature dagua-original or not explicitly mapped"
+    return "mixed or dagua-original features with no single automated competitor"
 
 
 def build_reference_items() -> Tuple[ReferenceCardItem, ...]:
@@ -2680,12 +3044,21 @@ def build_combo_specs() -> Tuple[ComboCardSpec, ...]:
                 combo_kind=case.category.removeprefix("combo_"),
                 title=case.title.removeprefix("Combo: "),
                 settings=dict(case.settings),
+                competitor_tools=_settings_competitor_tools(case.settings),
             )
         )
     seen_case_ids = {spec.case_id for spec in combo_specs}
     for spec in _gallery_extension_combo_specs():
         if spec.case_id not in seen_case_ids:
-            combo_specs.append(spec)
+            combo_specs.append(
+                ComboCardSpec(
+                    case_id=spec.case_id,
+                    combo_kind=spec.combo_kind,
+                    title=spec.title,
+                    settings=spec.settings,
+                    competitor_tools=_settings_competitor_tools(spec.settings),
+                )
+            )
     return tuple(combo_specs)
 
 
@@ -2852,6 +3225,30 @@ def _gallery_extension_evil_specs() -> Tuple[EvilCardSpec, ...]:
                 "node_labels": ["A", "B", "C", "D"],
             },
         ),
+        _build_local_evil_spec(
+            case_id="evil_taxi_gradient_multiborder",
+            title="Evil Combo: Taxi + Gradient + Multi-Border",
+            fixture="combo_flow",
+            params={
+                "node": {
+                    "shape": "roundrect",
+                    "gradient": "linear",
+                    "fill": GRADIENT_FILL,
+                    "gradient_color": GRADIENT_COLOR,
+                    "border_count": 3,
+                    "border_position": "outside",
+                    "stroke_width": 2.5,
+                    "min_width": 124.0,
+                    "min_height": 68.0,
+                    "font_color": "#FFFFFF",
+                },
+                "edge": {
+                    "routing": "taxi",
+                    "width": 2.4,
+                },
+                "node_labels": ["In", "Val", "Rev", "OK", "Out"],
+            },
+        ),
     )
 
 
@@ -2875,12 +3272,22 @@ def build_evil_specs() -> Tuple[EvilCardSpec, ...]:
                 settings=dict(case.settings),
                 graph=case.graph,
                 positions=case.positions,
+                competitor_tools=_settings_competitor_tools(case.settings),
             )
         )
     seen_case_ids = {spec.case_id for spec in specs}
     for spec in _gallery_extension_evil_specs():
         if spec.case_id not in seen_case_ids:
-            specs.append(spec)
+            specs.append(
+                EvilCardSpec(
+                    case_id=spec.case_id,
+                    title=spec.title,
+                    settings=spec.settings,
+                    graph=spec.graph,
+                    positions=spec.positions,
+                    competitor_tools=_settings_competitor_tools(spec.settings),
+                )
+            )
     return tuple(specs)
 
 
@@ -3161,6 +3568,9 @@ def _render_combo_card(item: ComboCardItem, output_root: Path) -> None:
         "value": item.spec.title,
         "fixture": fixture,
         "settings": item.spec.settings,
+        "competitor_tools": list(_card_competitor_tools(item)),
+        "tier": _classify_tier(_card_competitor_tools(item)),
+        "tier_c_reason": _tier_c_reason(item) if not _card_competitor_tools(item) else "",
     }
     _write_json(destination.with_suffix(".json"), sidecar)
 
@@ -3204,6 +3614,9 @@ def _render_evil_card(item: EvilCardItem, output_root: Path) -> None:
         "feature": "stress_test",
         "value": item.spec.title,
         "settings": item.spec.settings,
+        "competitor_tools": list(_card_competitor_tools(item)),
+        "tier": _classify_tier(_card_competitor_tools(item)),
+        "tier_c_reason": _tier_c_reason(item) if not _card_competitor_tools(item) else "",
     }
     _write_json(destination.with_suffix(".json"), sidecar)
 
@@ -3358,6 +3771,11 @@ def _write_index(
             "comparison_path": None,
             "is_primary_review_artifact": True,
             "member_card_ids": [member.card_id for member in item.members],
+            "competitor_tools": list(item.spec.competitor_tools),
+            "tier": item.spec.tier,
+            "tier_c_reason": ""
+            if item.spec.competitor_tools
+            else "strip has no single automated competitor",
         }
         lines.append(json.dumps(entry, sort_keys=True))
     for item in reference_items:
@@ -3372,6 +3790,9 @@ def _write_index(
             "sensitivity": item.spec.sensitivity,
             "has_comparison": item.card_id in comparison_lookup,
             "comparison_path": comparison_lookup.get(item.card_id),
+            "competitor_tools": list(_card_competitor_tools(item)),
+            "tier": _classify_tier(_card_competitor_tools(item)),
+            "tier_c_reason": _tier_c_reason(item) if not _card_competitor_tools(item) else "",
         }
         lines.append(json.dumps(entry, sort_keys=True))
     for item in combo_items:
@@ -3387,6 +3808,9 @@ def _write_index(
             "has_comparison": False,
             "comparison_path": None,
             "combo_features": item.spec.settings,
+            "competitor_tools": list(_card_competitor_tools(item)),
+            "tier": _classify_tier(_card_competitor_tools(item)),
+            "tier_c_reason": _tier_c_reason(item) if not _card_competitor_tools(item) else "",
         }
         lines.append(json.dumps(entry, sort_keys=True))
     for item in evil_items:
@@ -3400,6 +3824,9 @@ def _write_index(
             "has_comparison": False,
             "comparison_path": None,
             "settings": item.spec.settings,
+            "competitor_tools": list(_card_competitor_tools(item)),
+            "tier": _classify_tier(_card_competitor_tools(item)),
+            "tier_c_reason": _tier_c_reason(item) if not _card_competitor_tools(item) else "",
         }
         lines.append(json.dumps(entry, sort_keys=True))
     index_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
@@ -3477,6 +3904,18 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                     GRAPHVIZ_SHAPE_MAP["hexagon"],
                 ),
                 _value(
+                    "pentagon",
+                    "Pentagon",
+                    {"node": {"shape": "pentagon", "min_width": 124.0, "min_height": 90.0}},
+                    GRAPHVIZ_SHAPE_MAP["pentagon"],
+                ),
+                _value(
+                    "octagon",
+                    "Octagon",
+                    {"node": {"shape": "octagon", "min_width": 132.0, "min_height": 88.0}},
+                    GRAPHVIZ_SHAPE_MAP["octagon"],
+                ),
+                _value(
                     "star",
                     "Star",
                     {
@@ -3492,6 +3931,24 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                     GRAPHVIZ_SHAPE_MAP["cylinder"],
                 ),
                 _value(
+                    "parallelogram",
+                    "Parallelogram",
+                    {
+                        "node": {
+                            "shape": "parallelogram",
+                            "min_width": 140.0,
+                            "min_height": 76.0,
+                        }
+                    },
+                    GRAPHVIZ_SHAPE_MAP["parallelogram"],
+                ),
+                _value(
+                    "trapezoid",
+                    "Trapezoid",
+                    {"node": {"shape": "trapezoid", "min_width": 138.0, "min_height": 80.0}},
+                    GRAPHVIZ_SHAPE_MAP["trapezoid"],
+                ),
+                _value(
                     "double_circle",
                     "Double Circle",
                     {
@@ -3503,6 +3960,16 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                         }
                     },
                     GRAPHVIZ_SHAPE_MAP["double_circle"],
+                ),
+                _value(
+                    "cloud",
+                    "Cloud",
+                    {"node": {"shape": "cloud", "min_width": 136.0, "min_height": 86.0}},
+                ),
+                _value(
+                    "stadium",
+                    "Stadium",
+                    {"node": {"shape": "stadium", "min_width": 148.0, "min_height": 70.0}},
                 ),
                 _value(
                     "tab",
@@ -3529,6 +3996,11 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                         }
                     },
                     GRAPHVIZ_SHAPE_MAP["note"],
+                ),
+                _value(
+                    "document",
+                    "Document",
+                    {"node": {"shape": "document", "min_width": 136.0, "min_height": 90.0}},
                 ),
                 _value(
                     "box3d",

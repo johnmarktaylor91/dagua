@@ -61,8 +61,38 @@ npm install -g dagre 2>/dev/null || npm install -g dagre
 # elkjs: Eclipse Layout Kernel for JavaScript (used via subprocess)
 npm install -g elkjs 2>/dev/null || npm install -g elkjs
 
+# Mermaid CLI: documentation-diagram reference renderer used by the
+# cosmetic-feature gallery audit harness.
+npm install -g @mermaid-js/mermaid-cli 2>/dev/null || npm install -g @mermaid-js/mermaid-cli
+
+echo ""
+echo "--- Node.js packages (project dev dependencies) ---"
+
+# Tier-B cosmetic reference renderers. Keep these local to the project so
+# adapter subprocesses can resolve them with Node's normal module lookup.
+npm install --save-dev cytosnap d3 jsdom d3-graphviz canvas
+
 echo ""
 echo "--- Node.js packages done ---"
+
+# ─── Java libraries (current user) ──────────────────────────────────────────
+echo ""
+echo "--- Java libraries (current user) ---"
+
+GEPHI_TOOLKIT_DIR="${HOME}/.local/share/gephi-toolkit"
+GEPHI_TOOLKIT_JAR="${GEPHI_TOOLKIT_DIR}/gephi-toolkit-0.10.0-all.jar"
+mkdir -p "${GEPHI_TOOLKIT_DIR}"
+if [[ -s "${GEPHI_TOOLKIT_JAR}" ]]; then
+    echo "Gephi Toolkit already installed: ${GEPHI_TOOLKIT_JAR}"
+else
+    curl -fL --retry 1 \
+        -o "${GEPHI_TOOLKIT_JAR}" \
+        "https://repo1.maven.org/maven2/org/gephi/gephi-toolkit/0.10.0/gephi-toolkit-0.10.0-all.jar" \
+        || rm -f "${GEPHI_TOOLKIT_JAR}"
+fi
+
+echo ""
+echo "--- Java libraries done ---"
 
 # ─── Verify installations ───────────────────────────────────────────────────
 echo ""
@@ -72,6 +102,10 @@ echo -n "Graphviz (dot):    " && (dot -V 2>&1 | head -1) || echo "MISSING"
 echo -n "Node.js:           " && (node --version) || echo "MISSING"
 echo -n "dagre:             " && (node -e "require('dagre'); console.log('OK')" 2>/dev/null) || echo "MISSING"
 echo -n "elkjs:             " && (node -e "require('elkjs'); console.log('OK')" 2>/dev/null) || echo "MISSING"
+echo -n "Mermaid CLI:       " && (mmdc -h >/dev/null 2>&1 && echo "OK") || echo "MISSING"
+echo -n "cytosnap:          " && (node -e "require('cytosnap'); console.log('OK')" 2>/dev/null) || echo "MISSING"
+echo -n "d3/jsdom/canvas:   " && (node -e "require('d3'); require('jsdom'); require('canvas'); console.log('OK')" 2>/dev/null) || echo "MISSING"
+echo -n "Gephi Toolkit:     " && ([[ -s "${GEPHI_TOOLKIT_JAR}" ]] && echo "${GEPHI_TOOLKIT_JAR}") || echo "MISSING"
 
 echo ""
 python3 -c "
