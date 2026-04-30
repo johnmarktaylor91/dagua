@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from dagua.render.mpl import density_aware_size_factor
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -49,6 +51,14 @@ NEAR_LOCKED_FEATURES = {
 
 # Global in-tolerance gate.
 GLOBAL_IN_TOLERANCE_FLOOR_PCT = 85.0  # round-6 75x50pt theme floor leaves ellipse size strict
+
+
+def test_density_aware_size_factor_matches_graphviz_fixture_density() -> None:
+    """Assert sparse pair fixtures stay fixed while dense fixtures shrink."""
+
+    assert density_aware_size_factor(2, 400.0) == pytest.approx(1.0)
+    assert density_aware_size_factor(5, 400.0) < 1.0
+    assert density_aware_size_factor(20, 400.0) == pytest.approx(0.25)
 
 
 @pytest.mark.slow

@@ -885,6 +885,7 @@ def _configure_fixture_defaults(graph: DaguaGraph) -> None:
     """
 
     graph._theme.graph_style = _base_graph_style()
+    graph._theme.graph_style.density_aware_node_shrink = True
     _set_all_node_styles(graph, _base_node_style())
     if graph.edge_index.shape[1] > 0:
         _set_all_edge_styles(graph, _base_edge_style())
