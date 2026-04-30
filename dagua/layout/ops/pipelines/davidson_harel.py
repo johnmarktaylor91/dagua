@@ -10,6 +10,7 @@ from dagua.layout.ops.base import Pipeline, Repeat  # noqa: E402
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig  # noqa: E402
 from dagua.layout.ops.davidson_harel import (
     DHAnnealingRound,
+    DHAnnealingRoundConfig,
     DHCool,
     FinalizeDHPositions,
     InitializeDHPositions,
@@ -23,13 +24,22 @@ from dagua.layout.ops.state import (  # noqa: E402
 )
 
 
-def build_davidson_harel_pipeline(rounds: int = 100) -> Pipeline:
+def build_davidson_harel_pipeline(
+    rounds: int = 100,
+    fineiter: int = 10,
+    skip_finalization: bool = True,
+) -> Pipeline:
     """Build a Davidson-Harel simulated-annealing pipeline.
 
     Parameters
     ----------
     rounds : int, default=100
         Number of annealing rounds to execute.
+    fineiter : int, default=10
+        Number of igraph-style fine-tuning rounds to execute after annealing.
+    skip_finalization : bool, default=True
+        Whether to skip Dagua's legacy final centering/scaling pass. igraph
+        fidelity mode leaves the last accepted coordinates unchanged.
 
     Returns
     -------
@@ -42,25 +52,36 @@ def build_davidson_harel_pipeline(rounds: int = 100) -> Pipeline:
     Raises
     ------
     ValueError
-        If ``rounds`` is negative.
+        If ``rounds`` or ``fineiter`` is negative.
     """
     if rounds < 0:
         raise ValueError("rounds must be non-negative.")
+    if fineiter < 0:
+        raise ValueError("fineiter must be non-negative.")
+
+    ops = [
+        FixedSteps(FixedStepsConfig(n=rounds + fineiter)),
+        InitializeDHPositions(),
+        PrepareDHState(),
+        Repeat(
+            n=rounds,
+            ops=[
+                DHAnnealingRound(),
+                DHCool(),
+            ],
+        ),
+        Repeat(
+            n=fineiter,
+            ops=[
+                DHAnnealingRound(DHAnnealingRoundConfig(fine_tuning=True)),
+            ],
+        ),
+    ]
+    if not skip_finalization:
+        ops.append(FinalizeDHPositions())
 
     return Pipeline(
-        [
-            FixedSteps(FixedStepsConfig(n=rounds)),
-            InitializeDHPositions(),
-            PrepareDHState(),
-            Repeat(
-                n=rounds,
-                ops=[
-                    DHAnnealingRound(),
-                    DHCool(),
-                ],
-            ),
-            FinalizeDHPositions(),
-        ],
+        ops,
         name="davidson_harel_pipeline",
     )
 
@@ -70,8 +91,10 @@ def layout_davidson_harel_pipeline(
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
     rounds: int = 100,
+    fineiter: int = 10,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
+    skip_finalization: bool = True,
 ) -> torch.Tensor:
     """Run the Davidson-Harel pipeline as a drop-in replacement.
 
@@ -86,10 +109,14 @@ def layout_davidson_harel_pipeline(
         device and extent selection.
     rounds : int, default=100
         Number of annealing rounds.
+    fineiter : int, default=10
+        Number of igraph-style fine-tuning rounds.
     seed : int, default=42
         RNG seed for initialization and move proposals.
     edge_weights : torch.Tensor, optional
         Optional edge-weight vector with shape ``[E]``.
+    skip_finalization : bool, default=True
+        Whether to skip Dagua's legacy final centering/scaling pass.
 
     Returns
     -------
@@ -99,7 +126,8 @@ def layout_davidson_harel_pipeline(
     Raises
     ------
     ValueError
-        If ``num_nodes``, ``rounds``, or ``edge_weights`` are invalid.
+        If ``num_nodes``, ``rounds``, ``fineiter``, or ``edge_weights`` are
+        invalid.
     RuntimeError
         If the pipeline does not populate final positions.
     """
@@ -107,6 +135,8 @@ def layout_davidson_harel_pipeline(
         raise ValueError("num_nodes must be non-negative.")
     if rounds < 0:
         raise ValueError("rounds must be non-negative.")
+    if fineiter < 0:
+        raise ValueError("fineiter must be non-negative.")
     if edge_weights is not None:
         if edge_weights.ndim != 1:
             raise ValueError("edge_weights must have shape [E].")
@@ -136,7 +166,11 @@ def layout_davidson_harel_pipeline(
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(device)))
-    final_state = build_davidson_harel_pipeline(rounds=rounds).apply(problem, state, ctx)
+    final_state = build_davidson_harel_pipeline(
+        rounds=rounds,
+        fineiter=fineiter,
+        skip_finalization=skip_finalization,
+    ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("Davidson-Harel pipeline did not produce final positions.")
     return final_state.pos
