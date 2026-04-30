@@ -742,7 +742,22 @@ class StoreUMAPHyperparameters(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Write all validated hyperparameters into solve-state extras."""
+        """Write all validated hyperparameters into solve-state extras.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Layout problem carrying graph size and random seed metadata.
+        state : SolveState
+            Mutable solve state that receives UMAP hyperparameter extras.
+        ctx : RuntimeContext
+            Runtime context supplied by the pipeline executor.
+
+        Returns
+        -------
+        SolveState
+            Updated solve state with validated UMAP hyperparameters.
+        """
         del ctx
 
         if self.config.n_neighbors <= 0:
@@ -768,7 +783,7 @@ class StoreUMAPHyperparameters(Op):
                 else self.config.default_epochs_large
             )
 
-        state.extras[_N_NEIGHBORS_KEY] = self.config.n_neighbors
+        state.extras[_N_NEIGHBORS_KEY] = min(self.config.n_neighbors, max(problem.num_nodes - 1, 1))
         state.extras[_MIN_DIST_KEY] = self.config.min_dist
         state.extras[_SPREAD_KEY] = self.config.spread
         state.extras[_N_EPOCHS_KEY] = n_epochs
