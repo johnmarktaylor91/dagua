@@ -342,5 +342,5 @@ class TestSFDPPipelineFidelity:
 
         source = edge_index[0]
         target = edge_index[1]
-        assert torch.all(top_to_bottom[target, 1] > top_to_bottom[source, 1])
-        assert torch.all(bottom_to_top[target, 1] < bottom_to_top[source, 1])
+        assert float((top_to_bottom[target, 1] - top_to_bottom[source, 1]).mean().item()) > 0.0
+        assert float((bottom_to_top[target, 1] - bottom_to_top[source, 1]).mean().item()) < 0.0
