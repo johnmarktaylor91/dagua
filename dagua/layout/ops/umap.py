@@ -529,16 +529,47 @@ def _optimize_embedding(
     b: float,
     seed: int,
 ) -> torch.Tensor:
-    """Run the UMAP cross-entropy SGD with negative sampling."""
+    """Run the UMAP cross-entropy SGD with negative sampling.
+
+    Parameters
+    ----------
+    embedding : torch.Tensor
+        Initial low-dimensional coordinates with shape ``[N, 2]``.
+    head : torch.Tensor
+        Source vertex indices for positive fuzzy-graph edges with shape ``[E]``.
+    tail : torch.Tensor
+        Target vertex indices for positive fuzzy-graph edges with shape ``[E]``.
+    epochs_per_sample : torch.Tensor
+        Positive-edge sampling intervals with shape ``[E]``.
+    n_epochs : int
+        Number of optimization epochs.
+    learning_rate : float
+        Initial SGD learning rate.
+    negative_sample_rate : int
+        Negative samples scheduled per positive edge sample.
+    gamma : float
+        Repulsion multiplier for negative samples.
+    a : float
+        UMAP low-dimensional curve parameter.
+    b : float
+        UMAP low-dimensional curve parameter.
+    seed : int
+        Random seed for negative-sample selection.
+
+    Returns
+    -------
+    torch.Tensor
+        Optimized low-dimensional coordinates with shape ``[N, 2]``.
+    """
     if head.numel() == 0 or n_epochs <= 0:
         return embedding
 
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
 
-    next_sample_epoch = torch.zeros_like(epochs_per_sample)
     epochs_per_negative_sample = epochs_per_sample / float(max(negative_sample_rate, 1))
-    next_negative_epoch = torch.zeros_like(epochs_per_negative_sample)
+    next_sample_epoch = epochs_per_sample.clone()
+    next_negative_epoch = epochs_per_negative_sample.clone()
     num_nodes = embedding.shape[0]
 
     for epoch in range(n_epochs):
@@ -559,8 +590,10 @@ def _optimize_embedding(
             if negative_sample_rate <= 0:
                 continue
 
-            negatives = 0
-            while float(next_negative_epoch[edge_id].item()) <= float(epoch):
+            negative_interval = float(epochs_per_negative_sample[edge_id].item())
+            elapsed_negative_epochs = float(epoch) - float(next_negative_epoch[edge_id].item())
+            n_neg_samples = int(elapsed_negative_epochs / negative_interval)
+            for _ in range(n_neg_samples):
                 negative = int(torch.randint(0, num_nodes, (1,), generator=generator).item())
                 negative_diff = embedding[source] - embedding[negative]
                 negative_distance_sq = float(torch.dot(negative_diff, negative_diff).item())
@@ -572,12 +605,9 @@ def _optimize_embedding(
                     gamma=gamma,
                 )
                 embedding[source] = embedding[source] + (alpha * negative_grad)
-                next_negative_epoch[edge_id] = (
-                    next_negative_epoch[edge_id] + epochs_per_negative_sample[edge_id]
-                )
-                negatives += 1
-                if negatives >= negative_sample_rate:
-                    break
+            next_negative_epoch[edge_id] = next_negative_epoch[edge_id] + (
+                float(n_neg_samples) * epochs_per_negative_sample[edge_id]
+            )
 
     return embedding
 
