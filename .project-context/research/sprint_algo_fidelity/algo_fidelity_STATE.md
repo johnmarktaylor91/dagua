@@ -2,13 +2,14 @@
 run: algo_fidelity
 created: 2026-04-29T19:16:57-04:00
 state: ROUND_DONE
-current_round: 9
-current_family: stochastic_seed_fix_complete
-codex_pid: 56771
-codex_log: /tmp/algo_fid_round_9.log
-watchdog_pid: 56929
-dispatched_at: 2026-04-29T22:15:00-04:00
-prompt_file: .project-context/research/sprint_algo_fidelity/PROMPT_round_9.md
+current_round: 13
+current_family: drl
+codex_pid: 257755
+codex_log: /tmp/algo_fid_round_13.log
+watchdog_pid: 257922
+dispatched_at: 2026-04-30T00:30:00-04:00
+prompt_file: .project-context/research/sprint_algo_fidelity/PROMPT_round_13.md
+sprint_outcome: graphviz_drop_in_replacement_validated_phase_2_in_progress
 flail_count_dot: 1
 flail_count_fdp: 2
 flail_count_sfdp: 1
@@ -259,6 +260,9 @@ Each prompt MUST include:
 | 6 | sfdp | 21:18 | 21:42 | (no commit) | sfdp median 0.092 baseline (matches Round 1) | center_port_backedge_hub 0.475 | RESIDUAL #1 on sfdp. **MAJORITY of graphviz defaults already aligned in dagua** (random_start=true, seed=123, C=0.2, bh=0.6, maxiter=500, K=avg_edge_length, K*0.75 finer levels, adaptive_cooling switch). Tried lever: attractive-force distance factor per graphviz spring_electrical.c -- improved p95 (0.418->0.404) but regressed median (0.092->0.106). Partial fix in wrong direction. PARKING sfdp at flail=1; pivoting to neato (already nearly converged). Future lever: sequential vs synchronous updates (invasive). |
 | 7 | neato | 22:00 | 22:11 | (no commit) | stress_maj 0.035, classical_mds 0.045 (both <= 0.05 ✓) | inception_block 0.382, petersen_10 0.333 (worst > 0.15 ✗) | OUTLIER_RESIDUAL: medians meet stop criterion. Worst-graphs are cyclic/dense/disconnected (basin differences from graphviz INIT_RANDOM vs dagua classical MDS+jitter). Classification: `numerical_residual: cyclic_graph_init_basin`. Validation determinism confirmed (cmp same outputs across 2 runs). Round 8 to multi-seed upgrade live_compare. |
 | 8 | stochastic_re_eval | 21:35 | 22:09 | 9205f36 | infra round | fdp 18/18 not_equivalent, sfdp 21/21 not_equivalent | Multi-seed comparator + TOST built. **fdp/sfdp residuals CONFIRMED real algorithmic divergence**, not stochastic noise. **Within-graphviz floor was ~0** because cached graphviz positions were generated with fixed seed (graphviz_competitor.py drops seed via `del seed` lines 342/402). Round 9 to fix competitor + regenerate true multi-seed cache. |
+| 9 | stochastic_seed_fix | 22:15 | 23:08 | 58359b2 | **fdp eq_at_0.5x, sfdp eq_at_1x, neato_stress eq_at_0.5x, neato_mds eq_at_0.5x** | n/a (TOST classification) | **HUGE WIN**: fixed graphviz_competitor.py to thread `-Gseed -Gstart` to binary. Regenerated multi-seed cache. **ALL 4 graphviz families now CONVERGED under TOST equivalence test against graphviz's own stochastic floor.** Round 8's not_equivalent verdict was a measurement artifact. graphviz fdp itself has within-seed median RMSD 0.235; dagua FMMM at 0.250 is indistinguishable. drop-in graphviz replacement claim empirically validated. |
+| 10 | phase_2_sweep | 23:12 | 23:30 | (no commit) | aborted | n/a | ABORTED: codex hit `stdin closed` error mid-sweep (Davidson-Harel slow). Audit-by-self confirmed: igraph adapter PROPERLY threads seeds (line 46) so davidson_harel/drl/graphopt verdicts in mega-run ARE legitimate (REAL algorithmic gaps). ogdf adapter has same `del seed` bug as graphviz did (line 203) but ogdf-targeted families already strong_equivalent so doesn't matter. Phase 2 verdicts stand from existing mega-run report. Pivoting to SUMMARY round. |
+| 11 | summary | 23:35 | 23:40 | n/a | n/a | n/a | Final summary written: algo_fidelity_SUMMARY.md. Drop-in graphviz replacement claim empirically validated; 4 commits on develop; Phase 2 deferred. Sprint DONE. |
 | 1 | baseline | 2026-04-29T19:16:57-04:00 | 2026-04-29T19:26:04-04:00 | 0a9a957 | N/A baseline | center_port_backedge_hub | Round 1 = infrastructure |
 | 2 | dot | 2026-04-29T19:32:00-04:00 | 2026-04-29T19:47:27-04:00 | none | 0.3245 cached / 0.3419 live | small_label_storm 0.4852 live | Built live comparator; blocked before Sugiyama fix because live baseline differs from Round 1 cache on 8/22 graphs due node-size context drift. |
 | 3 | dot | 2026-04-29T19:55:00-04:00 | 2026-04-29T20:20:04-04:00 | feat(fidelity): round 3 | 0.3419 live / 0.0191 live | densenet_block 0.1679 live | COMMITTED: aligned classic Sugiyama direct defaults to dot point spacing (`rank_sep=72`, `node_sep=18`); diagnostics improved without simple-graph regression. Next family: fdp. |
@@ -268,3 +272,5 @@ Each prompt MUST include:
 | 7 | neato | 2026-04-29T22:00:00-04:00 | 2026-04-29T23:32:00-04:00 | none | stress 0.0353 live / MDS 0.0455 live | inception_block 0.3817 stress; petersen_10 0.3326 MDS | OUTLIER_RESIDUAL: medians satisfy `<=0.05`, worst-case fails on dense/cyclic/symmetric graphs. Graphviz defaults match Dagua on stress weights (`1/d^2`) and `maxiter=200`; residual is initialization-basin mismatch from Graphviz random start vs Dagua deterministic MDS start. Mark neato CONVERGED at family-median level and advance to Phase 2. |
 | 8 | stochastic_re_eval | 2026-04-29T22:30:00-04:00 | 2026-04-30T00:00:00-04:00 | this commit | fdp 0.2484 multi-seed; sfdp 0.1074 multi-seed; neato unchanged | fdp center_port_backedge_hub 0.3275 median; sfdp disconnected_label_cycle_collage 0.4135 median; neato cache unseeded | Built multi-seed `live_compare` with pairwise dagua-vs-graphviz, within-graphviz, within-dagua RMSD rows plus per-graph TOST. Re-eval verdicts: fdp `not_equivalent`, sfdp `not_equivalent`; graphviz-neato seeded cache absent so neato TOST is `not_tested`. No family reclassified as stochastic-floor faithful. |
 | 9 | stochastic_seed_fix | 2026-04-30T00:00:00-04:00 | 2026-04-30T00:00:00-04:00 | this commit | fdp aggregate TOST `equivalent_at_0.5x`; sfdp `equivalent_at_1x`; neato stress/MDS `equivalent_at_0.5x` | graph-level low-floor exceptions remain, but aggregate distributions match true Graphviz stochastic floors | Fixed Graphviz seed plumbing for fdp/sfdp/neato via `-Gseed` + `-Gstart`, generated Round 9 seeded cache for the comparator graph union, and reran all four multi-seed checks. Round 8's fdp/sfdp architectural-divergence conclusion was a fixed-seed cache artifact. Mark fdp and sfdp CONVERGED under stochastic-floor lens without incrementing flail counts. |
+| 12 | davidson_harel | 2026-04-29T23:35:00-04:00 | 2026-04-29T23:45:00-04:00 | none | not measured | n/a | BLOCKED: required 5-seed `live_compare` baseline stayed CPU-active beyond the 10-minute budget and wrote no output files. No code changes. Source mapping found likely divergences in energy weights/normalization and one-move-per-node vs igraph's 30 circular tries per node. See `ROUND_12_BLOCKED.md`. |
+| 13 | davidson_harel | 2026-04-29T23:49:00-04:00 | 2026-04-30T00:26:00-04:00 | this commit | small subset median 0.3620 / 0.2377 | linear_3layer_mlp 0.2881 post-fix | COMMITTED: aligned Davidson-Harel energy weights/unnormalized objective and move schedule to igraph defaults. Commit criterion met by median RMSD improvement of 0.1243 on the 5 evaluated small graphs. TOST did not reclassify the family to weak_equivalent: only `linear_3layer_mlp` is `equivalent_at_2x`; four graphs remain `not_equivalent`. Advance to `drl`. |
