@@ -12,6 +12,7 @@ from dagua.layout.ops.lgl import (
     LGLFinalizePositions,
     LGLInitializePositions,
     LGLLayeredRefinement,
+    LGLLayeredRefinementConfig,
     LGLPrepareState,
     LGLPrepareStateConfig,
 )
@@ -31,6 +32,8 @@ def build_lgl_pipeline(
     repulserad: Optional[float] = None,
     cellsize: Optional[float] = None,
     root: Optional[int] = None,
+    use_edge_weights: bool = False,
+    igraph_positive_maxchange: bool = True,
 ) -> Pipeline:
     """Build a Large Graph Layout pipeline.
 
@@ -50,6 +53,11 @@ def build_lgl_pipeline(
         Sparse-grid cell size. Defaults to ``area ** 0.25``.
     root : int, optional
         BFS root. When omitted, a seed-controlled random vertex is chosen.
+    use_edge_weights : bool, default=False
+        Whether edge weights scale attraction. Defaults to false because
+        igraph LGL ignores edge weights.
+    igraph_positive_maxchange : bool, default=True
+        Whether to use igraph's positive-component convergence rule.
 
     Returns
     -------
@@ -80,10 +88,15 @@ def build_lgl_pipeline(
                     repulserad=repulserad,
                     cellsize=cellsize,
                     root=root,
+                    use_edge_weights=use_edge_weights,
                 )
             ),
             LGLInitializePositions(),
-            LGLLayeredRefinement(),
+            LGLLayeredRefinement(
+                config=LGLLayeredRefinementConfig(
+                    igraph_positive_maxchange=igraph_positive_maxchange
+                )
+            ),
             LGLFinalizePositions(),
         ],
         name="lgl_pipeline",
@@ -103,6 +116,8 @@ def layout_lgl_pipeline(
     cellsize: Optional[float] = None,
     root: Optional[int] = None,
     edge_weights: Optional[torch.Tensor] = None,
+    use_edge_weights: bool = False,
+    igraph_positive_maxchange: bool = True,
 ) -> torch.Tensor:
     """Run the Large Graph Layout pipeline as a drop-in replacement.
 
@@ -133,6 +148,11 @@ def layout_lgl_pipeline(
         BFS root. When omitted, a seed-controlled random vertex is chosen.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
+    use_edge_weights : bool, default=False
+        Whether edge weights scale attraction. Defaults to false because
+        igraph LGL ignores edge weights.
+    igraph_positive_maxchange : bool, default=True
+        Whether to use igraph's positive-component convergence rule.
 
     Returns
     -------
@@ -196,6 +216,8 @@ def layout_lgl_pipeline(
         repulserad=repulserad,
         cellsize=cellsize,
         root=root,
+        use_edge_weights=use_edge_weights,
+        igraph_positive_maxchange=igraph_positive_maxchange,
     ).apply(problem, state, ctx)
 
     if final_state.pos is None:
