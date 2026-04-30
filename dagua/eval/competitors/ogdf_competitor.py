@@ -106,6 +106,7 @@ def _run_ogdf(
     graph: DaguaGraph,
     algorithm: str,
     timeout: float,
+    seed: Optional[int] = None,
     options: Optional[Mapping[str, Any]] = None,
 ) -> torch.Tensor:
     """Run an OGDF algorithm through the standalone subprocess wrapper.
@@ -118,6 +119,9 @@ def _run_ogdf(
         OGDF algorithm selector understood by the C++ runner.
     timeout : float
         Wall-clock timeout in seconds for the subprocess.
+    seed : int | None, optional
+        Seed forwarded to the runner. When omitted, the runner preserves its
+        historical default seed.
     options : Mapping[str, Any], optional
         Optional algorithm-specific JSON options forwarded to the runner.
 
@@ -147,6 +151,8 @@ def _run_ogdf(
         "edges": _graph_edges(graph),
         "algorithm": algorithm,
     }
+    if seed is not None:
+        payload_data["seed"] = int(seed)
     if options is not None:
         payload_data.update(dict(options))
     payload = json.dumps(payload_data)
@@ -199,8 +205,7 @@ class _OGDFBase(CompetitorBase):
         timeout : float, default=300.0
             Wall-clock timeout budget for the subprocess.
         seed : int | None, default=None
-            Accepted for interface compatibility but ignored because the helper
-            binary currently exposes no seed parameter.
+            Optional seed forwarded to the helper binary.
 
         Returns
         -------
@@ -208,8 +213,6 @@ class _OGDFBase(CompetitorBase):
             Layout result with positions shaped ``[N, 2]`` on CPU, or an error
             payload if execution fails.
         """
-        del seed
-
         start = time.perf_counter()
         try:
             if self.algorithm == "pivot_mds" and not _is_connected_graph(graph):
@@ -220,7 +223,7 @@ class _OGDFBase(CompetitorBase):
                     runtime_seconds=elapsed,
                     error="requires connected graph",
                 )
-            pos = _run_ogdf(graph, self.algorithm, timeout)
+            pos = _run_ogdf(graph, self.algorithm, timeout, seed=seed)
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
         except subprocess.TimeoutExpired:
@@ -266,8 +269,7 @@ class _OGDFBase(CompetitorBase):
         timeout : float, default=300.0
             Wall-clock timeout budget for the subprocess.
         seed : int | None, default=None
-            Accepted for interface compatibility but ignored because OGDF
-            layouts are deterministic in the helper binary.
+            Optional seed forwarded to the helper binary.
         variant_params : Mapping[str, Any] | None, default=None
             Optional runner parameters. For ``ogdf_stress``, ``iterations``
             selects the stress-majorization sweep count. For
@@ -280,8 +282,6 @@ class _OGDFBase(CompetitorBase):
             Layout result with positions shaped ``[N, 2]`` on CPU, or an error
             payload if execution fails.
         """
-        del seed
-
         options: dict[str, Any] = {}
         if variant_params is not None and self.algorithm == "stress":
             iterations = variant_params.get("iterations")
@@ -306,6 +306,7 @@ class _OGDFBase(CompetitorBase):
                 graph=graph,
                 algorithm=self.algorithm,
                 timeout=timeout,
+                seed=seed,
                 options=options or None,
             )
             elapsed = time.perf_counter() - start

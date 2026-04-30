@@ -1,6 +1,9 @@
 #include <cctype>
+#include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -16,6 +19,19 @@
 #include <ogdf/layered/SugiyamaLayout.h>
 
 namespace {
+
+struct RunnerOptions {
+	std::string algorithm;
+	std::string inputPath;
+	std::string outputPath;
+	int seed = 42;
+	int stressIterations = 0;
+	int numberOfPivots = 0;
+	bool hasAlgorithm = false;
+	bool hasSeed = false;
+	bool hasStressIterations = false;
+	bool hasNumberOfPivots = false;
+};
 
 void skipWhitespace(const std::string& input, std::size_t& position) {
 	while (position < input.size()
@@ -58,6 +74,16 @@ int parseInteger(const std::string& input, std::size_t& position) {
 		++position;
 	}
 	return negative ? -value : value;
+}
+
+int parseCliInteger(const std::string& input) {
+	std::size_t position = 0;
+	const int value = parseInteger(input, position);
+	skipWhitespace(input, position);
+	if (position != input.size()) {
+		throw std::runtime_error("invalid integer: " + input);
+	}
+	return value;
 }
 
 int parseNodes(const std::string& input) {
@@ -157,24 +183,126 @@ void validateEdges(
 	}
 }
 
+std::string requiredStringValue(const int argc, char** argv, int& index) {
+	if (index + 1 >= argc) {
+		throw std::runtime_error(std::string("missing value for ") + argv[index]);
+	}
+	++index;
+	return std::string(argv[index]);
+}
+
+int requiredIntegerValue(const int argc, char** argv, int& index) {
+	return parseCliInteger(requiredStringValue(argc, argv, index));
+}
+
+void printHelp() {
+	std::cout
+		<< "Usage: ogdf_runner [--algorithm NAME] [--seed N] [--input PATH] [--output PATH]\n"
+		<< "                   [--iterations N] [--number-of-pivots N]\n\n"
+		<< "Reads JSON from stdin or --input with keys: nodes, edges, algorithm, seed,\n"
+		<< "iterations, numberOfPivots. Writes JSON positions to stdout or --output.\n"
+		<< "Algorithms: gem, fmmm, stress, pivot_mds, davidson_harel, sugiyama.\n";
+}
+
+RunnerOptions parseArguments(const int argc, char** argv) {
+	RunnerOptions options;
+	for (int index = 1; index < argc; ++index) {
+		const std::string argument = argv[index];
+		if (argument == "--help" || argument == "-h") {
+			printHelp();
+			std::exit(0);
+		}
+		if (argument == "--algorithm") {
+			options.algorithm = requiredStringValue(argc, argv, index);
+			options.hasAlgorithm = true;
+			continue;
+		}
+		if (argument == "--seed") {
+			options.seed = requiredIntegerValue(argc, argv, index);
+			options.hasSeed = true;
+			continue;
+		}
+		if (argument == "--input") {
+			options.inputPath = requiredStringValue(argc, argv, index);
+			continue;
+		}
+		if (argument == "--output") {
+			options.outputPath = requiredStringValue(argc, argv, index);
+			continue;
+		}
+		if (argument == "--iterations") {
+			options.stressIterations = requiredIntegerValue(argc, argv, index);
+			options.hasStressIterations = true;
+			continue;
+		}
+		if (argument == "--number-of-pivots" || argument == "--numberOfPivots"
+			|| argument == "--n-pivots") {
+			options.numberOfPivots = requiredIntegerValue(argc, argv, index);
+			options.hasNumberOfPivots = true;
+			continue;
+		}
+		throw std::runtime_error("unknown argument: " + argument);
+	}
+	return options;
+}
+
+std::string readInput(const std::string& inputPath) {
+	std::string input;
+	std::string line;
+	if (inputPath.empty()) {
+		while (std::getline(std::cin, line)) {
+			input += line;
+		}
+		return input;
+	}
+
+	std::ifstream stream(inputPath);
+	if (!stream) {
+		throw std::runtime_error("could not open input file: " + inputPath);
+	}
+	while (std::getline(stream, line)) {
+		input += line;
+	}
+	return input;
+}
+
+void writeOutput(const std::string& outputPath, const std::string& payload) {
+	if (outputPath.empty()) {
+		std::cout << payload << std::endl;
+		return;
+	}
+
+	std::ofstream stream(outputPath);
+	if (!stream) {
+		throw std::runtime_error("could not open output file: " + outputPath);
+	}
+	stream << payload << std::endl;
+}
+
 void runLayout(
 	const std::string& algorithm,
 	ogdf::GraphAttributes& graphAttributes,
 	const int stressIterations,
-	const int numberOfPivots
+	const int numberOfPivots,
+	const int seed
 ) {
+	ogdf::setSeed(seed);
+	std::srand(static_cast<unsigned>(seed));
 	if (algorithm == "gem") {
+		ogdf::setSeed(seed);
 		ogdf::GEMLayout layout;
 		layout.call(graphAttributes);
 		return;
 	}
 	if (algorithm == "fmmm") {
 		ogdf::FMMMLayout layout;
+		layout.randSeed(seed);
 		layout.call(graphAttributes);
 		return;
 	}
 	if (algorithm == "stress") {
 		ogdf::StressMinimization layout;
+		layout.hasInitialLayout(true);
 		if (stressIterations > 0) {
 			layout.setIterations(stressIterations);
 		}
@@ -207,13 +335,10 @@ void runLayout(
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
 	try {
-		std::string input;
-		std::string line;
-		while (std::getline(std::cin, line)) {
-			input += line;
-		}
+		const RunnerOptions cliOptions = parseArguments(argc, argv);
+		const std::string input = readInput(cliOptions.inputPath);
 
 		const int numNodes = parseNodes(input);
 		if (numNodes < 0) {
@@ -221,9 +346,18 @@ int main() {
 		}
 		const std::vector<std::pair<int, int>> edges = parseEdges(input);
 		validateEdges(edges, numNodes);
-		const std::string algorithm = parseAlgorithm(input);
-		const int stressIterations = parseOptionalInteger(input, "iterations", 0);
-		const int numberOfPivots = parseOptionalInteger(input, "numberOfPivots", 0);
+		const std::string algorithm = cliOptions.hasAlgorithm
+			? cliOptions.algorithm
+			: parseAlgorithm(input);
+		const int seed = cliOptions.hasSeed
+			? cliOptions.seed
+			: parseOptionalInteger(input, "seed", 42);
+		const int stressIterations = cliOptions.hasStressIterations
+			? cliOptions.stressIterations
+			: parseOptionalInteger(input, "iterations", 0);
+		const int numberOfPivots = cliOptions.hasNumberOfPivots
+			? cliOptions.numberOfPivots
+			: parseOptionalInteger(input, "numberOfPivots", 0);
 
 		ogdf::Graph graph;
 		ogdf::GraphAttributes graphAttributes(
@@ -241,10 +375,10 @@ int main() {
 				nodes[static_cast<std::size_t>(edge.second)]);
 		}
 
-		// Seed OGDF's global RNG so algorithms like GEM get deterministic
-		// permutations. Also set C srand for initial positions.
-		ogdf::setSeed(42);
-		std::srand(static_cast<unsigned>(42));
+		// The runner-owned initial layout is part of the OGDF reference for
+		// stress and gives stochastic algorithms a deterministic starting point.
+		ogdf::setSeed(seed);
+		std::srand(static_cast<unsigned>(seed));
 		for (int index = 0; index < numNodes; ++index) {
 			graphAttributes.x(nodes[static_cast<std::size_t>(index)]) =
 				static_cast<double>(std::rand() % 1000) / 10.0;
@@ -252,18 +386,20 @@ int main() {
 				static_cast<double>(std::rand() % 1000) / 10.0;
 		}
 
-		runLayout(algorithm, graphAttributes, stressIterations, numberOfPivots);
+		runLayout(algorithm, graphAttributes, stressIterations, numberOfPivots, seed);
 
-		std::cout << std::setprecision(17);
-		std::cout << "{\"positions\":[";
+		std::ostringstream output;
+		output << std::setprecision(17);
+		output << "{\"positions\":[";
 		for (int index = 0; index < numNodes; ++index) {
 			if (index > 0) {
-				std::cout << ",";
+				output << ",";
 			}
-			std::cout << "[" << graphAttributes.x(nodes[static_cast<std::size_t>(index)]) << ","
-					  << graphAttributes.y(nodes[static_cast<std::size_t>(index)]) << "]";
+			output << "[" << graphAttributes.x(nodes[static_cast<std::size_t>(index)]) << ","
+				   << graphAttributes.y(nodes[static_cast<std::size_t>(index)]) << "]";
 		}
-		std::cout << "]}" << std::endl;
+		output << "]}";
+		writeOutput(cliOptions.outputPath, output.str());
 		return 0;
 	} catch (const std::exception& exception) {
 		std::cerr << exception.what() << std::endl;
