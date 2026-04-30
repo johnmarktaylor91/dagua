@@ -330,10 +330,14 @@ class FRFinalizePositionsConfig:
     output_scale_factor : float, default=50.0
         Multiplier applied to ``sqrt(num_nodes)`` before the final max-abs
         normalization step.
+    scale_by_sqrt_num_nodes : bool, default=True
+        Whether to multiply ``output_scale_factor`` by ``sqrt(num_nodes)``.
+        Disable this for NetworkX-compatible adapter scaling.
     """
 
     scale_method: str = "max_abs"
     output_scale_factor: float = 50.0
+    scale_by_sqrt_num_nodes: bool = True
 
 
 @register_op
@@ -396,10 +400,14 @@ class FRFinalizePositions(Op):
         # Compose the shared postprocess ops so FR keeps the same ordering and
         # numerics as the historical finalize path.
         state = CenterPositions().apply(problem=problem, state=state, ctx=ctx)
+        scale_factor = self.config.output_scale_factor
+        if self.config.scale_by_sqrt_num_nodes:
+            scale_factor *= sqrt(float(max(problem.num_nodes, 1)))
+
         state = ScalePositions(
             ScalePositionsConfig(
                 method=self.config.scale_method,
-                factor=(sqrt(float(max(problem.num_nodes, 1))) * self.config.output_scale_factor),
+                factor=scale_factor,
             ),
         ).apply(problem=problem, state=state, ctx=ctx)
         state.pos = state.pos.to(dtype=torch.float32)
