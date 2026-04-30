@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import ClassVar, List, Optional, Tuple
 
@@ -14,11 +15,17 @@ from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
 _MIN_DISTANCE = 1.0e-3
-_BORDER_WEIGHT = 0.1
-_EDGE_LENGTH_WEIGHT = 0.2
-_CROSSING_WEIGHT = 2.0
-_NODE_EDGE_WEIGHT = 0.5
+_NODE_DIST_WEIGHT = 1.0
+_BORDER_WEIGHT = 0.0
+_EDGE_LENGTH_WEIGHT = 0.0001
+_CROSSING_WEIGHT = 1.0
+_NODE_EDGE_WEIGHT = 0.2
 _COLLINEAR_EPSILON = 1.0e-10
+_MOVE_TRIES = 30
+_MOVE_DIRECTIONS = tuple(
+    (math.cos(2.0 * math.pi * index / _MOVE_TRIES), math.sin(2.0 * math.pi * index / _MOVE_TRIES))
+    for index in range(_MOVE_TRIES)
+)
 
 _DH_EDGES_KEY = "dh_edges"
 _DH_UNIQUE_EDGE_WEIGHTS_KEY = "dh_unique_edge_weights"
@@ -109,18 +116,32 @@ def _point_segment_distance(
     return torch.linalg.norm(point - nearest)
 
 
-def _scale_denominator(numerator_count: int) -> float:
-    """Return safe integer scaling denominator."""
-    return float(max(numerator_count, 1))
-
-
 def _energy(
     positions: torch.Tensor,
     edges: List[Tuple[int, int]],
     extent: float,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Evaluate the Davidson-Harel objective for one candidate layout."""
+    """Evaluate the Davidson-Harel objective for one candidate layout.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Candidate node coordinates with shape ``[N, 2]``.
+    edges : list of tuple of int
+        Undirected edge endpoints used by the layout energy.
+    extent : float
+        Half-width and half-height of the square layout bounding box.
+    edge_weights : torch.Tensor, optional
+        Aggregated edge weights with shape ``[E]``. When omitted, each edge has
+        unit weight.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar unnormalized Davidson-Harel energy using igraph's default
+        weights.
+    """
     num_nodes = int(positions.shape[0])
     distribution = torch.tensor(0.0, dtype=positions.dtype, device=positions.device)
     if num_nodes > 1:
@@ -177,19 +198,12 @@ def _energy(
     if penalties:
         node_edge = torch.stack(penalties).sum()
 
-    edge_count = len(edges)
-    distribution_scale = _scale_denominator(num_nodes * max(num_nodes - 1, 1) // 2)
-    border_scale = _scale_denominator(num_nodes)
-    edge_length_scale = _scale_denominator(edge_count)
-    crossing_scale = _scale_denominator(edge_count * edge_count)
-    node_edge_scale = _scale_denominator(num_nodes * edge_count)
-
     return (
-        distribution / distribution_scale
-        + _BORDER_WEIGHT * (border / border_scale)
-        + _EDGE_LENGTH_WEIGHT * (edge_length / edge_length_scale)
-        + _CROSSING_WEIGHT * (crossing_energy / crossing_scale)
-        + _NODE_EDGE_WEIGHT * (node_edge / node_edge_scale)
+        _NODE_DIST_WEIGHT * distribution
+        + _BORDER_WEIGHT * border
+        + _EDGE_LENGTH_WEIGHT * edge_length
+        + _CROSSING_WEIGHT * crossing_energy
+        + _NODE_EDGE_WEIGHT * node_edge
     )
 
 
@@ -202,6 +216,8 @@ class PrepareDHStateConfig:
     initial_temperature_scale : float, default=0.1
         Fraction of the starting energy used as the initial annealing
         temperature before the minimum-distance floor is applied.
+        Deprecated for Davidson-Harel parity; igraph uses the move radius as
+        the simulated-annealing denominator.
     """
 
     initial_temperature_scale: float = 0.1
@@ -216,6 +232,8 @@ class DHAnnealingRoundConfig:
     move_scale_fraction : float, default=0.25
         Fraction of the layout extent used for the maximum proposal radius at
         the starting temperature.
+        Deprecated for Davidson-Harel parity; igraph initializes the move
+        radius to the full half-width of the layout square.
     """
 
     move_scale_fraction: float = 0.25
@@ -302,10 +320,11 @@ class PrepareDHState(Op):
             )
         state.extras[_DH_CURRENT_ENERGY_KEY] = current_energy
 
-        initial_temperature = max(
-            self.config.initial_temperature_scale * float(current_energy.item()),
-            _MIN_DISTANCE,
-        )
+        # igraph's Davidson-Harel implementation uses ``move_radius`` both as
+        # proposal radius and as the denominator in exp(-dE / move_radius).
+        # The initial radius is width / 2, which is the same half-width stored
+        # in ``_DH_EXTENT_KEY`` for size-free layouts.
+        initial_temperature = max(float(state.extras[_DH_EXTENT_KEY]), _MIN_DISTANCE)
         state.extras[_DH_INITIAL_TEMPERATURE_KEY] = initial_temperature
         state.temperature = initial_temperature
 
@@ -335,7 +354,7 @@ class DHAnnealingRound(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Propose and accept/reject one move per node."""
+        """Propose and accept/reject circular moves for each node."""
         del ctx
 
         assert state.pos is not None
@@ -345,41 +364,46 @@ class DHAnnealingRound(Op):
         unique_edge_weights: torch.Tensor = state.extras[_DH_UNIQUE_EDGE_WEIGHTS_KEY]
         extent: float = state.extras[_DH_EXTENT_KEY]
         current_energy: torch.Tensor = state.extras[_DH_CURRENT_ENERGY_KEY]
-        initial_temperature: float = state.extras[_DH_INITIAL_TEMPERATURE_KEY]
         temperature: float = state.temperature
         generator: torch.Generator = state.extras[_DH_GENERATOR_KEY]
         device: torch.device = state.extras[_DH_DEVICE_KEY]
 
-        moves_per_round = problem.num_nodes
+        node_order = torch.randperm(problem.num_nodes, generator=generator)
 
-        for _ in range(moves_per_round):
-            node = int(torch.randint(0, problem.num_nodes, (1,), generator=generator).item())
-            move_scale = (
-                self.config.move_scale_fraction
-                * extent
-                * (temperature / max(initial_temperature, _MIN_DISTANCE))
-            )
-            delta = ((torch.rand((2,), generator=generator) * 2.0) - 1.0).to(device) * move_scale
-            candidate = positions.clone()
-            candidate[node] = (candidate[node] + delta).clamp(min=-extent, max=extent)
-            if problem.edge_weights is None:
-                candidate_energy = _energy(candidate, edges, extent)
-            else:
-                candidate_energy = _energy(candidate, edges, extent, unique_edge_weights)
+        for node in node_order.tolist():
+            move_scale = min(max(temperature, _MIN_DISTANCE), extent)
+            direction_order = torch.randperm(_MOVE_TRIES, generator=generator)
+            for direction_id in direction_order.tolist():
+                delta = (
+                    torch.tensor(
+                        _MOVE_DIRECTIONS[direction_id],
+                        dtype=positions.dtype,
+                        device=device,
+                    )
+                    * move_scale
+                )
+                candidate = positions.clone()
+                candidate[node] = (candidate[node] + delta).clamp(min=-extent, max=extent)
+                if problem.edge_weights is None:
+                    candidate_energy = _energy(candidate, edges, extent)
+                else:
+                    candidate_energy = _energy(candidate, edges, extent, unique_edge_weights)
 
-            delta_energy = candidate_energy - current_energy
-            if delta_energy <= 0:
-                positions = candidate
-                current_energy = candidate_energy
-                continue
+                delta_energy = candidate_energy - current_energy
+                if delta_energy <= 0:
+                    positions = candidate
+                    current_energy = candidate_energy
+                    continue
 
-            # Match simulated annealing semantics: uphill moves remain possible
-            # while the temperature is positive, but become exponentially rarer.
-            acceptance = torch.exp(-delta_energy / max(temperature, _MIN_DISTANCE)).clamp(max=1.0)
-            threshold = float(torch.rand((1,), generator=generator).item())
-            if threshold < float(acceptance.item()):
-                positions = candidate
-                current_energy = candidate_energy
+                # Match simulated annealing semantics: uphill moves remain possible
+                # while the move radius is positive, but become exponentially rarer.
+                acceptance = torch.exp(-delta_energy / max(temperature, _MIN_DISTANCE)).clamp(
+                    max=1.0
+                )
+                threshold = float(torch.rand((1,), generator=generator).item())
+                if threshold < float(acceptance.item()):
+                    positions = candidate
+                    current_energy = candidate_energy
 
         state.pos = positions
         state.extras[_DH_CURRENT_ENERGY_KEY] = current_energy
