@@ -1001,22 +1001,15 @@ GRAPHVIZ_STRICT_THEME = Theme(
     },
     cluster_style=ClusterStyle(
         # Metric-driven (R19): dot's SVG cluster declares fill="none" (no fill,
-        # transparent), stroke="black", stroke-width=1pt. Prior rounds added
-        # tinted fills (#F0F0F0, #F2EFE9) and lightened the stroke (#CCCCCC,
-        # #DDDDDD) chasing AA-softened visual impressions. The literal SVG
-        # target is solid black 1pt stroke on transparent fill.
-        # Note: fill is set to a valid hex (#FFFFFF) for render-pipeline
-        # compatibility; transparency is achieved via fill_opacity=0.0. The
-        # parity_metrics.py harness treats hex-with-zero-fill-opacity as
-        # equivalent to dot's "none" declaration.
-        fill="#FFFFFF",
+        # transparent), stroke="black", stroke-width=1pt.
+        fill="",
         stroke="#000000",
         stroke_width=1.0,
         corner_radius=0.0,
         padding=16.0,
         label_position="top-center",
-        label_background="@background",
-        label_background_opacity=1.0,
+        label_background="",
+        label_background_opacity=0.0,
         label_background_padding=(6.0, 4.0),
         # Metric-driven (R19): dot's SVG declares cluster label font-size=14pt
         # (same as node labels). Prior rounds dropped to 10pt for "subordination"

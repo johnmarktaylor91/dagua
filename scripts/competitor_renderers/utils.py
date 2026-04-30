@@ -14,6 +14,7 @@ from PIL import Image
 
 LOGGER = logging.getLogger(__name__)
 MAX_COMPARISON_SIDE_PX = 2000
+Image.MAX_IMAGE_PIXELS = None
 
 
 def command_available(command: str) -> bool:
@@ -207,7 +208,46 @@ def graph_spec_from_dagua(graph: object) -> Dict[str, object]:
                 }
             )
 
-    return {"nodes": nodes, "edges": edges, "clusters": []}
+    clusters: List[Dict[str, object]] = []
+    cluster_map = getattr(graph, "clusters", {}) or {}
+    cluster_labels = getattr(graph, "cluster_labels", {}) or {}
+    cluster_parents = getattr(graph, "cluster_parents", {}) or {}
+
+    def _cluster_leaf_ids(members: object) -> List[str]:
+        """Return node ids contained by one cluster membership object.
+
+        Parameters
+        ----------
+        members : object
+            Cluster membership record from ``DaguaGraph.clusters``.
+
+        Returns
+        -------
+        list[str]
+            Leaf node ids suitable for DOT subgraph bodies.
+        """
+
+        if isinstance(members, Mapping):
+            leaf_indices: List[int] = []
+            for value in members.values():
+                leaf_indices.extend(int(index) for index in value)
+        else:
+            leaf_indices = [int(index) for index in members]  # type: ignore[union-attr]
+        return [node_ids[index] if index < len(node_ids) else str(index) for index in leaf_indices]
+
+    for name, members in cluster_map.items():
+        style = _style_to_dict(graph.get_style_for_cluster(name))  # type: ignore[attr-defined]
+        clusters.append(
+            {
+                "id": str(name),
+                "label": str(cluster_labels.get(name, name)),
+                "members": _cluster_leaf_ids(members),
+                "parent": cluster_parents.get(name),
+                "style": style,
+            }
+        )
+
+    return {"nodes": nodes, "edges": edges, "clusters": clusters}
 
 
 def node_by_id(graph_spec: Mapping[str, object]) -> Dict[str, Mapping[str, object]]:
