@@ -88,7 +88,8 @@ class SFDPAdaptiveCoolConfig:
     Parameters
     ----------
     adaptive_cooling : bool, default=True
-        Whether to apply Graphviz-style step adaptation.
+        Whether to apply Graphviz-style force-norm-based step adaptation.
+        When disabled, Graphviz still applies fixed ``shrink_factor`` cooling.
     tolerance : float, default=1e-3
         Convergence threshold on the adaptive step size.
     shrink_factor : float, default=0.9
@@ -1075,16 +1076,15 @@ class SFDPAdaptiveCool(Op):
             State with updated step size metadata.
         """
         del problem
-        if not self.config.adaptive_cooling:
-            return state
-
         force_norm = float(state.extras.get(_SFDP_FORCE_NORM_KEY, 0.0))
         previous_force_norm = float(state.extras.get(_SFDP_PREVIOUS_FORCE_NORM_KEY, float("inf")))
         current_step = float(
             state.extras.get(_SFDP_CURRENT_STEP_KEY, _SFDP_ALGORITHM_CONFIG.default_step)
         )
 
-        if previous_force_norm < float("inf"):
+        if not self.config.adaptive_cooling:
+            current_step *= self.config.shrink_factor
+        elif previous_force_norm < float("inf"):
             current_step = _update_step(
                 step=current_step,
                 force_norm=force_norm,
