@@ -274,13 +274,19 @@ def _restore_adjacency_type(
     raise TypeError(f"Unsupported adjacency type: {type(original)!r}.")
 
 
-def _pivot_mds_coordinates(distance_matrix: torch.Tensor) -> torch.Tensor:
+def _pivot_mds_coordinates(
+    distance_matrix: torch.Tensor,
+    compute_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
     """Recover a 2D pivot-MDS embedding from pivot distance rows.
 
     Parameters
     ----------
     distance_matrix : torch.Tensor
         Pivot-to-node distances with shape ``[P, N]``.
+    compute_dtype : torch.dtype, default=torch.float32
+        Dtype used for centering and SVD. OGDF uses double precision for these
+        operations, so fidelity mode requests ``torch.float64``.
 
     Returns
     -------
@@ -289,8 +295,11 @@ def _pivot_mds_coordinates(distance_matrix: torch.Tensor) -> torch.Tensor:
     """
     if distance_matrix.shape[0] == 0:
         return torch.zeros((distance_matrix.shape[1], 2), dtype=torch.float32)
+    if compute_dtype not in (torch.float32, torch.float64):
+        raise ValueError("compute_dtype must be torch.float32 or torch.float64.")
 
-    squared = distance_matrix.square()
+    working = distance_matrix.to(dtype=compute_dtype)
+    squared = working.square()
     row_means = squared.mean(dim=1, keepdim=True)
     col_means = squared.mean(dim=0, keepdim=True)
     grand_mean = squared.mean()
@@ -918,6 +927,16 @@ class SymmetrizeAdjacency(Op):
     writes: ClassVar[Tuple[str, ...]] = ("adjacency",)
     requires: ClassVar[Tuple[str, ...]] = ("adjacency",)
     access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, compute_dtype: torch.dtype = torch.float32) -> None:
+        """Initialize the Pivot-MDS coordinate recovery op.
+
+        Parameters
+        ----------
+        compute_dtype : torch.dtype, default=torch.float32
+            Dtype used for centering and SVD.
+        """
+        self.compute_dtype = compute_dtype
 
     def apply(
         self,
@@ -1569,7 +1588,10 @@ class PivotMDSComputeCoordinates(Op):
         if state.pivot_distances is None:
             raise ValueError("PivotMDSComputeCoordinates requires state.pivot_distances to be set.")
 
-        state.pos = _pivot_mds_coordinates(state.pivot_distances)
+        state.pos = _pivot_mds_coordinates(
+            state.pivot_distances,
+            compute_dtype=self.compute_dtype,
+        )
         return state
 
 
