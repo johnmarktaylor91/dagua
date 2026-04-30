@@ -196,6 +196,11 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
         function_name="layout_stress_majorization_pipeline",
         default_params={"iterations": 200},
     ),
+    "classic_neato": _ClassicLayoutSpec(
+        import_path="dagua.layout.ops.pipelines.neato",
+        function_name="layout_neato_pipeline",
+        default_params={"maxiter": 200, "epsilon": 0.0001, "pack": True},
+    ),
     "classic_pivot_mds": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.pivot_mds",
         function_name="layout_pivot_mds_pipeline",
@@ -1094,6 +1099,38 @@ class ClassicStressMajorization(_ClassicBase):
             Unused compatibility parameter for the competitor interface.
         seed : int | None, default=None
             Random seed for the stochastic warm-start jitter.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        return self.layout_with_variant(graph, timeout=timeout, seed=seed, variant_params=None)
+
+
+@register
+class ClassicNeato(_ClassicBase):
+    """Competitor wrapper for the Graphviz-neato-fidelity stress pipeline."""
+
+    name = "classic_neato"
+    max_nodes = 2_000
+
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the neato-compatible layout with benchmark defaults.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for Graphviz-neato-style random initialization.
 
         Returns
         -------

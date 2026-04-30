@@ -28,6 +28,7 @@ EXPECTED_CLASSIC_NAMES = {
     "classic_spectral",
     "classic_classical_mds",
     "classic_stress_maj",
+    "classic_neato",
     "classic_pivot_mds",
     "classic_rt",
     "classic_linlog",
