@@ -1030,7 +1030,7 @@ class SFDPSpringElectricalStep(Op):
         # SFDP trajectory and keep the quadtree focused on relative structure.
         state.pos = state.pos + (current_step * direction)
         state.pos = state.pos - state.pos.mean(dim=0, keepdim=True)
-        state.extras[_SFDP_FORCE_NORM_KEY] = float(torch.linalg.vector_norm(total_force).item())
+        state.extras[_SFDP_FORCE_NORM_KEY] = float(node_force_norm.sum().item())
         return state
 
 
