@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 
@@ -46,6 +46,10 @@ def layout_reingold_tilford_pipeline(
     horizontal: bool = False,
     fidelity_mode: Optional[str] = None,
     traversal_mode: str = "out",
+    roots: Optional[Sequence[int]] = None,
+    rootlevel: Optional[Sequence[int]] = None,
+    center_output: Optional[bool] = None,
+    output_scale: Optional[float] = None,
     edge_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Run the Reingold-Tilford tidy-tree pipeline.
@@ -67,6 +71,14 @@ def layout_reingold_tilford_pipeline(
         mode-sensitive traversal for reference-fidelity comparisons.
     traversal_mode : str, default="out"
         Edge traversal mode for ``fidelity_mode="igraph"``.
+    roots : sequence of int | None, default=None
+        Optional explicit root vertices for controlled RT comparisons.
+    rootlevel : sequence of int | None, default=None
+        Optional depth per explicit root.
+    center_output : bool | None, default=None
+        Optional override for final mean-centering.
+    output_scale : float | None, default=None
+        Optional uniform output scale.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
 
@@ -109,6 +121,10 @@ def layout_reingold_tilford_pipeline(
                     horizontal=horizontal,
                     fidelity_mode=fidelity_mode,
                     traversal_mode=traversal_mode,
+                    roots=roots,
+                    rootlevel=rootlevel,
+                    center_output=center_output,
+                    output_scale=output_scale,
                 )
             )
         ],
