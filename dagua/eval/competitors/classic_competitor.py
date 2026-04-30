@@ -800,6 +800,21 @@ class ClassicFA2(_ClassicBase):
 
     name = "classic_fa2"
     max_nodes = 50_000
+    variant_param_names = frozenset(
+        {
+            "barnes_hut",
+            "barnes_hut_theta",
+            "dissuade_hubs",
+            "edge_weight_influence",
+            "fidelity_mode",
+            "gravity",
+            "linlog",
+            "outbound_attraction_distribution",
+            "scaling_ratio",
+            "steps",
+            "strong_gravity",
+        }
+    )
 
     def layout(
         self,
