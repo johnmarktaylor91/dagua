@@ -19,7 +19,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
@@ -1356,6 +1356,97 @@ def _expand_bounds_for_external_labels(
     return x_min, x_max, y_min, y_max
 
 
+def _coerce_canvas_fit_margin(fit_to_canvas: Union[bool, float]) -> Optional[float]:
+    """Return the canvas-fit margin fraction requested by the caller.
+
+    Parameters
+    ----------
+    fit_to_canvas : bool or float
+        ``False`` disables canvas fitting, ``True`` uses the default 5 percent
+        margin on each side, and a float supplies the explicit margin fraction.
+
+    Returns
+    -------
+    float or None
+        Margin fraction when canvas fitting is enabled, otherwise ``None``.
+
+    Raises
+    ------
+    ValueError
+        Raised when an explicit margin is outside ``[0.0, 0.5)``.
+    TypeError
+        Raised when ``fit_to_canvas`` is not a bool or number.
+    """
+    if fit_to_canvas is False:
+        return None
+    if fit_to_canvas is True:
+        return 0.05
+    if isinstance(fit_to_canvas, (int, float)) and not isinstance(fit_to_canvas, bool):
+        margin = float(fit_to_canvas)
+        if not 0.0 <= margin < 0.5:
+            raise ValueError("fit_to_canvas margin must be in the range [0.0, 0.5).")
+        return margin
+    raise TypeError("fit_to_canvas must be a bool or a margin fraction float.")
+
+
+def _canvas_fit_bounds(
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+    figsize: Tuple[float, float],
+    margin_fraction: float,
+) -> Tuple[float, float, float, float]:
+    """Expand bounds so data-to-display scaling is uniform and canvas-filling.
+
+    Parameters
+    ----------
+    x_min : float
+        Minimum content x coordinate in data units.
+    x_max : float
+        Maximum content x coordinate in data units.
+    y_min : float
+        Minimum content y coordinate in data units.
+    y_max : float
+        Maximum content y coordinate in data units.
+    figsize : tuple[float, float]
+        Target figure size in inches.
+    margin_fraction : float
+        Fraction of each canvas dimension reserved as outer padding.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Aspect-adjusted axes bounds as ``(x_min, x_max, y_min, y_max)``.
+
+    Notes
+    -----
+    Matplotlib fills the axes independently in x and y. Expanding the shorter
+    data dimension to match the target figure aspect keeps the resulting
+    data-to-pixel scale uniform while still letting the layout fill the panel.
+    """
+    content_width = max(float(x_max) - float(x_min), 1.0)
+    content_height = max(float(y_max) - float(y_min), 1.0)
+    inner_fraction = max(1.0 - (2.0 * margin_fraction), 1.0e-6)
+    target_aspect = max(float(figsize[0]), 1.0e-6) / max(float(figsize[1]), 1.0e-6)
+    desired_width = content_width / inner_fraction
+    desired_height = content_height / inner_fraction
+
+    if desired_width / desired_height < target_aspect:
+        desired_width = desired_height * target_aspect
+    else:
+        desired_height = desired_width / target_aspect
+
+    x_center = (float(x_min) + float(x_max)) / 2.0
+    y_center = (float(y_min) + float(y_max)) / 2.0
+    return (
+        x_center - desired_width / 2.0,
+        x_center + desired_width / 2.0,
+        y_center - desired_height / 2.0,
+        y_center + desired_height / 2.0,
+    )
+
+
 def render(
     graph: Any,
     positions: Any = None,
@@ -1370,6 +1461,7 @@ def render(
     label_positions: Optional[List[Optional[Tuple[float, float]]]] = None,
     svg_hover_text: bool = True,
     backend: Optional[str] = None,
+    fit_to_canvas: Union[bool, float] = False,
 ) -> Tuple[Any, Any]:
     """Render a graph with computed node positions.
 
@@ -1404,6 +1496,10 @@ def render(
     backend : str, optional
         Matplotlib canvas backend: ``"agg"``, ``"cairo"``, or ``None`` for the
         auto-detected/global default.
+    fit_to_canvas : bool or float, default=False
+        When truthy, map the resolved render bounds to the target figure canvas.
+        ``True`` uses a 5 percent margin on each side; a float supplies an
+        explicit margin fraction.
 
     Returns
     -------
@@ -1417,6 +1513,7 @@ def render(
     matplotlib.use("Agg")
 
     gs = _graph_style_for_render(graph)
+    canvas_fit_margin = _coerce_canvas_fit_margin(fit_to_canvas)
 
     if positions is None:
         if graph.has_fresh_layout:
@@ -1610,22 +1707,47 @@ def render(
         fig_h = min(max(fig_w * aspect, min_h), max_h)
         figsize = (fig_w, fig_h)
 
+    if canvas_fit_margin is not None:
+        x_min, x_max, y_min, y_max = _canvas_fit_bounds(
+            float(x_min),
+            float(x_max),
+            float(y_min),
+            float(y_max),
+            figsize,
+            canvas_fit_margin,
+        )
+
     fig, ax = _new_figure_axes(figsize, backend=backend)
     fig.patch.set_facecolor(bg)
     fig.patch.set_alpha(1.0)
     ax.set_facecolor(bg)
     setattr(fig, "_dagua_svg_hover_map", {} if svg_hover_text else None)
-    if _is_graphviz_strict_render(graph):
+    if _is_graphviz_strict_render(graph) or canvas_fit_margin is not None:
         setattr(fig, "_dagua_tight_bbox", False)
         fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
     svg_hover_map = getattr(fig, "_dagua_svg_hover_map")
 
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
-    ax.set_aspect("auto" if _is_graphviz_strict_render(graph) else "equal")
+    fills_canvas = _is_graphviz_strict_render(graph) or canvas_fit_margin is not None
+    aspect_mode = "auto" if fills_canvas else "equal"
+    ax.set_aspect(aspect_mode)
     ax.axis("off")
     cluster_aware = bool(getattr(config, "cluster_aware", True))
     _expand_axes_for_clusters(ax, graph, pos, sizes, margin, cluster_aware=cluster_aware)
+    if canvas_fit_margin is not None:
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+        x_min, x_max, y_min, y_max = _canvas_fit_bounds(
+            float(x_min),
+            float(x_max),
+            float(y_min),
+            float(y_max),
+            figsize,
+            canvas_fit_margin,
+        )
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
 
     # --- Layer 0: Cluster backgrounds ---
     _draw_clusters(ax, graph, pos, sizes, cluster_aware=cluster_aware, svg_hover_map=svg_hover_map)
@@ -1711,7 +1833,8 @@ def render(
             svg_hover_map,
         )
 
-    fig.tight_layout()
+    if canvas_fit_margin is None:
+        fig.tight_layout()
 
     if output:
         _save_figure(fig, output, bg, dpi=dpi, format=format)
