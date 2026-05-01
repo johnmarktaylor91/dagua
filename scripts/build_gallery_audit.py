@@ -1660,7 +1660,7 @@ def _scalar_default_node_overrides(item: ReferenceCardItem) -> Dict[str, object]
 
     overrides: Dict[str, object] = {}
     if item.spec.feature == "border_opacity":
-        overrides.update({"stroke_width": 3.0, "stroke": NODE_STROKE})
+        overrides.update({"stroke": NODE_STROKE})
     if item.spec.feature == "border_position":
         overrides.update(
             {
@@ -1787,8 +1787,11 @@ def _apply_scalar_node_comparison_context(
     )
     _apply_reference_params(graph, _pair_positions(), non_node_params, item.spec.fixture)
     left_style, right_style = _node_styles(graph)
+    context_overrides, variant_overrides = _split_feature_style_overrides(item, node_overrides)
+    _apply_overrides(left_style, context_overrides)
+    _apply_overrides(right_style, context_overrides)
     _apply_overrides(left_style, _scalar_default_node_overrides(item))
-    _apply_overrides(right_style, node_overrides)
+    _apply_overrides(right_style, variant_overrides)
     _apply_overrides(right_style, _scalar_value_node_overrides(item))
     graph.node_labels = _scalar_comparison_labels(item)
 
@@ -1802,6 +1805,106 @@ def _apply_scalar_node_comparison_context(
     # between center/inside/outside is immediately obvious.
     gap = 140.0 if item.spec.feature == "border_position" else PAIR_SCALAR_COMPARISON_GAP
     return _pair_positions(node_gap=gap, layout="horizontal")
+
+
+def _split_feature_style_overrides(
+    item: ReferenceCardItem,
+    overrides: Mapping[str, object],
+) -> Tuple[Dict[str, object], Dict[str, object]]:
+    """Split fixture context from the feature value being demonstrated.
+
+    Parameters
+    ----------
+    item : ReferenceCardItem
+        Reference card metadata.
+    overrides : Mapping[str, object]
+        Style overrides from the card value.
+
+    Returns
+    -------
+    tuple[dict[str, object], dict[str, object]]
+        Context overrides that belong on both panels, then feature overrides
+        that belong only on the variant panel.
+    """
+
+    feature_fields = set(item.spec.fields)
+    context_overrides: Dict[str, object] = {}
+    variant_overrides: Dict[str, object] = {}
+    for field_name, field_value in overrides.items():
+        target = variant_overrides if field_name in feature_fields else context_overrides
+        target[field_name] = copy.deepcopy(field_value)
+    return context_overrides, variant_overrides
+
+
+def _is_node_pair_default_variant_card(item: ReferenceCardItem) -> bool:
+    """Return whether a node pair card should show Default | Variant nodes.
+
+    Parameters
+    ----------
+    item : ReferenceCardItem
+        Reference card metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` when node feature overrides can be isolated to the right-hand
+        variant node.
+    """
+
+    return (
+        item.spec.target == "node"
+        and item.spec.fixture == "pair"
+        and "graphviz" in _card_competitor_tools(item)
+        and item.spec.feature != "gradient"
+        and not _is_scalar_node_comparison_card(item)
+    )
+
+
+def _apply_node_pair_default_variant_context(
+    graph: DaguaGraph,
+    item: ReferenceCardItem,
+) -> torch.Tensor:
+    """Render a node pair card as theme default versus variant.
+
+    Parameters
+    ----------
+    graph : DaguaGraph
+        Pair fixture graph to mutate.
+    item : ReferenceCardItem
+        Reference card metadata.
+
+    Returns
+    -------
+    torch.Tensor
+        Pair positions with shape ``[2, 2]``.
+
+    Raises
+    ------
+    ValueError
+        Raised when the card does not carry node overrides.
+    """
+
+    node_overrides = item.value.params.get("node")
+    if not isinstance(node_overrides, Mapping):
+        raise ValueError("Default-vs-variant node pair cards require node overrides.")
+
+    non_node_params = _copy_params_without_keys(
+        item.value.params,
+        excluded_keys=("node", "node_labels", "blank_node_labels"),
+    )
+    positions = _apply_reference_params(
+        graph,
+        _pair_positions(),
+        non_node_params,
+        item.spec.fixture,
+    )
+    left_style, right_style = _node_styles(graph)
+    context_overrides, variant_overrides = _split_feature_style_overrides(item, node_overrides)
+    _apply_overrides(left_style, context_overrides)
+    _apply_overrides(right_style, context_overrides)
+    _apply_overrides(right_style, variant_overrides)
+    graph.node_labels = _scalar_comparison_labels(item)
+    return positions
 
 
 def _build_reference_fixture(item: ReferenceCardItem) -> Tuple[DaguaGraph, torch.Tensor]:
@@ -1872,10 +1975,6 @@ def _apply_reference_card_tweaks(
             style.arrow_color = EDGE_COLOR
             style.arrow_length = max(float(style.arrow_length), GRAPHVIZ_COMPARISON_ARROW_LENGTH)
             style.arrow_width = max(float(style.arrow_width), GRAPHVIZ_COMPARISON_ARROW_WIDTH)
-    if item.spec.feature == "external_label" and item.value.slug == "top":
-        styles = _node_styles(graph)
-        if len(styles) >= 2:
-            styles[1].external_label = ""
     if item.spec.feature == "curvature" and item.value.slug == "0_8":
         margin_target = (
             STRIP_CURVATURE_CARD_MARGIN if render_context == "strip" else CURVATURE_CARD_MARGIN
@@ -1951,6 +2050,8 @@ def _prepare_reference_render(
     graph, positions = _build_reference_fixture(item)
     if _is_scalar_node_comparison_card(item):
         positions = _apply_scalar_node_comparison_context(graph, item)
+    elif _is_node_pair_default_variant_card(item):
+        positions = _apply_node_pair_default_variant_context(graph, item)
     else:
         positions = _apply_reference_params(graph, positions, item.value.params, item.spec.fixture)
     positions = _apply_arrow_demo_tweaks(item, graph, positions)
@@ -2037,6 +2138,97 @@ def _graphviz_node_attrs(
             attrs["xlabel"] = str(node_params["external_label"])
     if value.graphviz_attrs is not None and "shape" in value.graphviz_attrs:
         attrs.update(value.graphviz_attrs)
+    return attrs
+
+
+def _graphviz_font_name_from_node_style(style: NodeStyle) -> str:
+    """Return a Graphviz font name for a prepared node style.
+
+    Parameters
+    ----------
+    style : NodeStyle
+        Prepared Dagua node style.
+
+    Returns
+    -------
+    str
+        Graphviz-compatible font name.
+    """
+
+    family = str(style.font_family or "Times-Roman")
+    normalized_family = family.replace(" ", "").lower()
+    is_times = "times" in normalized_family
+    is_bold = str(style.font_weight).lower() in {"bold", "700", "heavy"}
+    is_italic = str(style.font_style).lower() in {"italic", "oblique"}
+    if is_times and is_bold and is_italic:
+        return "Times-BoldItalic"
+    if is_times and is_bold:
+        return "Times-Bold"
+    if is_times and is_italic:
+        return "Times-Italic"
+    if is_times:
+        return "Times-Roman"
+    return family
+
+
+def _hex_with_alpha(color: object, opacity: float) -> str:
+    """Return a color string with an appended alpha channel when useful.
+
+    Parameters
+    ----------
+    color : object
+        Base color value.
+    opacity : float
+        Opacity in ``[0, 1]``.
+
+    Returns
+    -------
+    str
+        Color string suitable for DOT attributes.
+    """
+
+    color_text = str(color)
+    bounded_opacity = min(max(float(opacity), 0.0), 1.0)
+    if color_text.startswith("#") and len(color_text) == 7 and bounded_opacity < 1.0:
+        return f"{color_text}{int(round(bounded_opacity * 255.0)):02X}"
+    return color_text
+
+
+def _graphviz_node_attrs_from_style(style: NodeStyle) -> Dict[str, str]:
+    """Return Graphviz node attrs from a prepared Dagua node style.
+
+    Parameters
+    ----------
+    style : NodeStyle
+        Prepared Dagua node style.
+
+    Returns
+    -------
+    dict[str, str]
+        DOT node attributes.
+    """
+
+    attrs = {
+        "style": "filled",
+        "fillcolor": _hex_with_alpha(style.fill, float(style.opacity)),
+        "color": _hex_with_alpha(style.stroke, float(style.border_opacity)),
+        "fontname": _graphviz_font_name_from_node_style(style),
+        "fontsize": str(style.font_size),
+        "fontcolor": str(style.font_color),
+        "penwidth": str(style.stroke_width),
+    }
+    shape_attrs = GRAPHVIZ_SHAPE_MAP.get(str(style.shape))
+    if shape_attrs is not None:
+        attrs.update(shape_attrs)
+    if str(style.gradient) == "radial":
+        attrs["style"] = "filled,radial"
+        attrs["fillcolor"] = f"{style.fill}:{style.gradient_color}"
+    if str(style.text_align) != "center":
+        attrs["labeljust"] = {"left": "l", "right": "r"}.get(str(style.text_align), "c")
+    if str(style.text_valign) != "center":
+        attrs["labelloc"] = {"top": "t", "bottom": "b"}.get(str(style.text_valign), "c")
+    if style.external_label:
+        attrs["xlabel"] = str(style.external_label)
     return attrs
 
 
@@ -2208,11 +2400,13 @@ def _build_comparison_dot_source(graph: DaguaGraph, item: ReferenceCardItem) -> 
 
     lines = ["digraph G {"]
     lines.append(f"  graph [{_dot_attr_list(graph_attrs)}];")
-    lines.append(f"  node [{_dot_attr_list(_graphviz_node_attrs(graph, item.value))}];")
+    lines.append(f"  node [{_dot_attr_list(_graphviz_node_attrs_from_style(_base_node_style()))}];")
     lines.append(f"  edge [{_dot_attr_list(_graphviz_edge_attrs(item.value))}];")
     for index, label in enumerate(graph.node_labels):
         node_label = "" if label is None else str(label)
-        lines.append(f'  n{index} [label="{_escape_dot(node_label)}"];')
+        node_attrs = _graphviz_node_attrs_from_style(_node_styles(graph)[index])
+        node_attrs["label"] = node_label
+        lines.append(f"  n{index} [{_dot_attr_list(node_attrs)}];")
     lines.extend(_cluster_dot_lines(graph, item))
     for edge_index in range(graph.edge_index.shape[1]):
         source = int(graph.edge_index[0, edge_index].item())
@@ -3077,6 +3271,12 @@ def _atomic_value_competitor_tools(spec: AtomicCardSpec, value: FeatureValue) ->
         return ("graphviz",)
     if spec.category == "edges/styles" and spec.feature == "width":
         return ("graphviz", "mermaid")
+    if (
+        spec.category == "nodes/borders"
+        and spec.feature == "border_position"
+        and value.slug in {"inside", "outside"}
+    ):
+        return ()
     if spec.feature in {"text_outline", "text_background"}:
         return ()
     if spec.feature == "shadow":
@@ -3239,6 +3439,33 @@ def _round10_atomic_fill_tier_c_reason(card: ReferenceCardItem) -> str:
     return ""
 
 
+def _border_position_tier_c_reason(card: ReferenceCardItem) -> str:
+    """Return the Tier C reason for graphviz-unmappable border positions.
+
+    Parameters
+    ----------
+    card : ReferenceCardItem
+        Atomic reference card item.
+
+    Returns
+    -------
+    str
+        Reason string for inside/outside border-position cards, or empty when
+        the card is not part of this reclassification.
+    """
+
+    if (
+        card.spec.category == "nodes/borders"
+        and card.spec.feature == "border_position"
+        and card.value.slug in {"inside", "outside"}
+    ):
+        return (
+            "dagua-specific feature; graphviz lacks inside/outside border modes "
+            "(Graphviz++ extension)"
+        )
+    return ""
+
+
 def _tier_c_reason(card: object) -> str:
     """Return a one-line reason for Tier C cards.
 
@@ -3254,6 +3481,9 @@ def _tier_c_reason(card: object) -> str:
     """
 
     if isinstance(card, ReferenceCardItem):
+        border_position_reason = _border_position_tier_c_reason(card)
+        if border_position_reason:
+            return border_position_reason
         round10_fill_reason = _round10_atomic_fill_tier_c_reason(card)
         if round10_fill_reason:
             return round10_fill_reason
