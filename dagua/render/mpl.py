@@ -1182,6 +1182,7 @@ def _strict_content_figsize(width_points: float, height_points: float) -> Tuple[
 def _new_figure_axes(
     figsize: Optional[Tuple[float, float]],
     backend: Optional[str] = None,
+    dpi: Optional[float] = None,
 ) -> Tuple[Any, Any]:
     """Create a headless Matplotlib figure with an attached canvas.
 
@@ -1191,6 +1192,8 @@ def _new_figure_axes(
         Figure size in inches.
     backend : str, optional
         Render backend selector. ``None`` uses Dagua's auto-detected default.
+    dpi : float, optional
+        Figure DPI. When omitted, Matplotlib's figure default is used.
 
     Returns
     -------
@@ -1201,12 +1204,115 @@ def _new_figure_axes(
 
     from dagua.render._backend import _resolve_backend
 
-    fig = Figure(figsize=figsize)
+    fig = Figure(figsize=figsize, dpi=dpi)
     canvas_cls, resolved_backend = _resolve_backend(backend)
     canvas_cls(fig)
     ax = fig.add_subplot(1, 1, 1)
     setattr(ax, "_dagua_backend_name", resolved_backend)
     return fig, ax
+
+
+def _resolve_render_dpi(dpi: Optional[int], style: GraphStyle) -> int:
+    """Return the raster DPI for the current render pass.
+
+    Parameters
+    ----------
+    dpi : int or None
+        Explicit DPI passed to ``render``.
+    style : GraphStyle
+        Graph-level style carrying graphviz-compatible defaults.
+
+    Returns
+    -------
+    int
+        Positive DPI value used for the Matplotlib figure and raster save.
+    """
+    resolved = int(dpi if dpi is not None else style.dpi)
+    if resolved <= 0:
+        raise ValueError("dpi must be a positive integer.")
+    return resolved
+
+
+def _graphviz_canvas_bounds_and_figsize(
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+    style: GraphStyle,
+) -> Tuple[float, float, float, float, Tuple[float, float], str]:
+    """Apply graphviz canvas attributes to content bounds.
+
+    Parameters
+    ----------
+    x_min : float
+        Minimum content x coordinate in data/point units.
+    x_max : float
+        Maximum content x coordinate in data/point units.
+    y_min : float
+        Minimum content y coordinate in data/point units.
+    y_max : float
+        Maximum content y coordinate in data/point units.
+    style : GraphStyle
+        Graph style containing graphviz canvas fields.
+
+    Returns
+    -------
+    tuple[float, float, float, float, tuple[float, float], str]
+        Axis bounds, figure size in inches, and Matplotlib aspect mode.
+
+    Notes
+    -----
+    Dagua layout geometry is stored in graphviz-compatible points for this
+    renderer. Canvas fields are authored in inches, so 72 pt/in is the only
+    conversion needed at the render boundary.
+    """
+    pad_points = max(float(style.pad_inches), 0.0) * 72.0
+    margin_points = max(float(style.margin_inches), 0.0) * 72.0
+
+    content_x_min = float(x_min) - pad_points
+    content_x_max = float(x_max) + pad_points
+    content_y_min = float(y_min) - pad_points
+    content_y_max = float(y_max) + pad_points
+    content_width = max(content_x_max - content_x_min, 1.0)
+    content_height = max(content_y_max - content_y_min, 1.0)
+
+    figure_width = (content_width + 2.0 * margin_points) / 72.0
+    figure_height = (content_height + 2.0 * margin_points) / 72.0
+    axis_width = content_width + 2.0 * margin_points
+    axis_height = content_height + 2.0 * margin_points
+    aspect_mode = "auto"
+
+    size_inches = style.size_inches
+    ratio = None if style.ratio is None else str(style.ratio).strip().lower()
+    if size_inches is not None:
+        target_width = max(float(size_inches[0]), 1.0 / 72.0)
+        target_height = max(float(size_inches[1]), 1.0 / 72.0)
+        if style.size_force_fit or ratio == "fill":
+            figure_width = target_width
+            figure_height = target_height
+            aspect_mode = "auto"
+        elif ratio == "expand" and figure_width < target_width and figure_height < target_height:
+            scale = min(target_width / figure_width, target_height / figure_height)
+            figure_width *= scale
+            figure_height *= scale
+            axis_width *= scale
+            axis_height *= scale
+        elif ratio in {"compress", "auto"}:
+            scale = min(target_width / figure_width, target_height / figure_height, 1.0)
+            figure_width *= scale
+            figure_height *= scale
+        else:
+            scale = min(target_width / figure_width, target_height / figure_height, 1.0)
+            figure_width *= scale
+            figure_height *= scale
+
+    center_x = (content_x_min + content_x_max) / 2.0
+    center_y = (content_y_min + content_y_max) / 2.0
+    x_min_out = center_x - axis_width / 2.0
+    x_max_out = center_x + axis_width / 2.0
+    y_min_out = center_y - axis_height / 2.0
+    y_max_out = center_y + axis_height / 2.0
+    return x_min_out, x_max_out, y_min_out, y_max_out, (figure_width, figure_height), aspect_mode
 
 
 def _detect_output_format(output: Optional[str], format: Optional[str]) -> Optional[str]:
@@ -1457,7 +1563,7 @@ def render(
     output: Optional[str] = None,
     format: Optional[str] = None,
     figsize: Optional[Tuple[float, float]] = None,
-    dpi: int = 150,
+    dpi: Optional[int] = None,
     show: bool = False,
     title: Optional[str] = None,
     curves: Optional[List[BezierCurve]] = None,
@@ -1484,8 +1590,10 @@ def render(
         format from ``output``.
     figsize : tuple[float, float], optional
         Figure size in inches.
-    dpi : int, default=150
-        Raster output resolution.
+    dpi : int, optional
+        Raster output resolution. When omitted, ``graph.graph_style.dpi`` is
+        used; the default ``GraphStyle`` value matches graphviz's 96 DPI PNG
+        output.
     show : bool, default=False
         Whether to request display of the returned figure.
     title : str, optional
@@ -1500,9 +1608,11 @@ def render(
         Matplotlib canvas backend: ``"agg"``, ``"cairo"``, or ``None`` for the
         auto-detected/global default.
     fit_to_canvas : bool or float, default=False
-        When truthy, map the resolved render bounds to the target figure canvas.
-        ``True`` uses a 5 percent margin on each side; a float supplies an
-        explicit margin fraction.
+        Explicit fixed-panel override. Use this for a Jupyter cell, dashboard,
+        or gallery panel where the layout should fill an existing canvas.
+        ``True`` uses Dagua's default panel margin; a float supplies an explicit
+        margin fraction. When truthy, this ignores graphviz natural-canvas
+        fields such as ``margin_inches``, ``size_inches``, and ``ratio``.
 
     Returns
     -------
@@ -1516,6 +1626,7 @@ def render(
     matplotlib.use("Agg")
 
     gs = _graph_style_for_render(graph)
+    render_dpi = _resolve_render_dpi(dpi, gs)
     canvas_fit_margin = _coerce_canvas_fit_margin(fit_to_canvas)
 
     if positions is None:
@@ -1541,11 +1652,11 @@ def render(
     bg = gs.background_color
 
     if n == 0:
-        fig, ax = _new_figure_axes(figsize or (6, 4), backend=backend)
+        fig, ax = _new_figure_axes(figsize or (6, 4), backend=backend, dpi=render_dpi)
         fig.patch.set_facecolor(bg)
         fig.patch.set_alpha(1.0)
         if output:
-            _save_figure(fig, output, bg, dpi=dpi, format=format)
+            _save_figure(fig, output, bg, dpi=render_dpi, format=format)
         return fig, ax
 
     # Compute figure bounds
@@ -1564,12 +1675,7 @@ def render(
         graph.node_sizes = scaled_node_sizes
     sizes = scaled_node_sizes.detach().cpu().numpy()
 
-    # Metric-driven (R19): on graphviz_strict, dot's SVG omits outer margin
-    # when the graph contains clusters (the cluster rectangle IS the boundary).
-    # On non-cluster panels dot still pads by ~18pt. Match this conditional.
-    margin = gs.margin
-    if _is_graphviz_strict_render(graph) and getattr(graph, "clusters", None):
-        margin = 0.0
+    margin = gs.margin if canvas_fit_margin is not None else 0.0
     x_min = (pos[:, 0] - sizes[:, 0] / 2).min() - margin
     x_max = (pos[:, 0] + sizes[:, 0] / 2).max() + margin
     y_min = (pos[:, 1] - sizes[:, 1] / 2).min() - margin
@@ -1703,8 +1809,19 @@ def render(
         y_max += title_band_height * _TITLE_BAND_HEIGHT_MULTIPLIER
         height = y_max - y_min
 
-    if _is_graphviz_strict_render(graph) and figsize is None:
-        figsize = _strict_content_figsize(float(width), float(height))
+    natural_aspect_mode = "equal"
+    if canvas_fit_margin is None:
+        x_min, x_max, y_min, y_max, natural_figsize, natural_aspect_mode = (
+            _graphviz_canvas_bounds_and_figsize(
+                float(x_min),
+                float(x_max),
+                float(y_min),
+                float(y_max),
+                gs,
+            )
+        )
+        if figsize is None:
+            figsize = natural_figsize
     elif figsize is None:
         max_w, max_h = gs.max_figsize
         min_w, min_h = gs.min_figsize
@@ -1724,24 +1841,33 @@ def render(
             canvas_fit_margin,
         )
 
-    fig, ax = _new_figure_axes(figsize, backend=backend)
+    figure_dpi = render_dpi if canvas_fit_margin is None else None
+    fig, ax = _new_figure_axes(figsize, backend=backend, dpi=figure_dpi)
     fig.patch.set_facecolor(bg)
     fig.patch.set_alpha(1.0)
     ax.set_facecolor(bg)
     setattr(fig, "_dagua_svg_hover_map", {} if svg_hover_text else None)
-    if _is_graphviz_strict_render(graph) or canvas_fit_margin is not None:
-        setattr(fig, "_dagua_tight_bbox", False)
-        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
+    setattr(fig, "_dagua_tight_bbox", False)
+    fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
     svg_hover_map = getattr(fig, "_dagua_svg_hover_map")
 
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
-    fills_canvas = _is_graphviz_strict_render(graph) or canvas_fit_margin is not None
-    aspect_mode = "auto" if fills_canvas else "equal"
+    aspect_mode = "auto" if canvas_fit_margin is not None else natural_aspect_mode
     ax.set_aspect(aspect_mode)
     ax.axis("off")
     cluster_aware = bool(getattr(config, "cluster_aware", True))
-    _expand_axes_for_clusters(ax, graph, pos, sizes, margin, cluster_aware=cluster_aware)
+    cluster_axis_margin = margin
+    if canvas_fit_margin is None:
+        cluster_axis_margin = max(cluster_axis_margin, float(gs.margin_inches) * 72.0)
+    _expand_axes_for_clusters(
+        ax,
+        graph,
+        pos,
+        sizes,
+        cluster_axis_margin,
+        cluster_aware=cluster_aware,
+    )
     if canvas_fit_margin is not None:
         x_min, x_max = ax.get_xlim()
         y_min, y_max = ax.get_ylim()
@@ -1840,11 +1966,11 @@ def render(
             svg_hover_map,
         )
 
-    if canvas_fit_margin is None:
+    if canvas_fit_margin is None and figsize != natural_figsize:
         fig.tight_layout()
 
     if output:
-        _save_figure(fig, output, bg, dpi=dpi, format=format)
+        _save_figure(fig, output, bg, dpi=render_dpi, format=format)
 
     if show:
         fig.show()

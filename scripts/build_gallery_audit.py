@@ -2607,7 +2607,14 @@ def _render_reference_canvas(
     graph, positions = _prepare_reference_render(item, render_context=render_context)
     with tempfile.TemporaryDirectory() as temp_dir:
         raw_path = Path(temp_dir) / "reference.png"
-        _render_dagua_png(graph, positions, raw_path, size_px, backend=backend)
+        _render_dagua_png(
+            graph,
+            positions,
+            raw_path,
+            size_px,
+            backend=backend,
+            fit_to_canvas=True,
+        )
         return _place_render_on_canvas(
             raw_path,
             size_px,
@@ -4002,6 +4009,7 @@ def _render_evil_card(
             raw_path,
             CARD_SIZE,
             backend=backend,
+            fit_to_canvas=True,
         )
         card = _place_render_on_canvas(raw_path, CARD_SIZE, CARD_CONTENT_INSET)
     _draw_header(
