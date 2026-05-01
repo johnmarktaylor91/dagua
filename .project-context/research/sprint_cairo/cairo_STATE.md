@@ -1,9 +1,12 @@
 ---
 run: cairo
 created: 2026-04-30T19:18
-state: ACTIVE
-current_round: 1
-note: Sprint B of the post-dial-tuning workstream. Add cairo as opt-in matplotlib backend for dagua. Auto-detect default per `feedback_cairo_default_policy` (cairo if mplcairo installed, else Agg). Sprint A (data-coord) closed at round 16. Round 13/14/15 made the render path backend-agnostic by using `Figure(...)` + explicit canvas attach -- this sprint just wires the resolver.
+completed: 2026-05-01T00:34
+state: DONE
+final_round: 3
+final_commit: d5af420
+final_mean_tier_a_l1_cairo: 1.495
+note: Sprint B converged at round 3. Cairo opt-in shipped with auto-detect default (cairo if mplcairo installed, else Agg). 3 implementation rounds (1: backend wiring, 2: comparison gallery + audit, 3: stroke calibration polish). Mean Tier A L1: Agg 1.515 vs cairo 1.495 (cairo wins by 0.020 net; classical strengths win much larger but L1 metric is structurally blind to thin-feature improvements). Smoking gun finding: cairo fixes broken dashed cluster outlines that Agg renders incomplete. cairo_SUMMARY.md written.
 ---
 
 # cairo -- Autonomous Loop State
@@ -66,4 +69,8 @@ Same pattern as Sprint A: codex committed -> regen + audit; codex still running 
 
 | Round | Start | End | Commit | Audit verdict | Cairo backend status | Notes |
 |---|---|---|---|---|---|---|
-| 1 (codex) | TBD | — | — | — | — | wire optional dep + resolver + per-figure attach + public API + tests |
+| 1 (codex) | 19:37 | 20:06 | 5b48e16 | n/a | wired | Optional dep + `_backend.py` resolver + per-figure canvas attach + public API + 7 backend tests pass. Auto-detect picks cairo on dev machine. Smoke renders under both backends produce valid output. |
+| 2 (codex) | 20:10 | 21:19 | cddbba1 | n/a | gallery generated | `--backend` flag on gallery_audit + per_card_pixel_diff scripts. Comparison gallery infrastructure (`build_backend_comparison_gallery.py`). Quantitative SUMMARY.md: mean Tier A L1 Agg=1.515 vs cairo=1.513 (essentially tied -- surprising). |
+| 2 (audit) | 21:30 | 21:35 | n/a | STOP_CONVERGED_HYPOTHESIS_B | n/a | Cairo is visibly better but L1 is structurally blind to thin-feature wins. Smoking gun: clusters_stroke_dash_dashed -- under Agg the outer dashed cluster has missing left/right strokes; under cairo it's complete. Optional 30-min calibration follow-up flagged for rect/tab regression (+0.08 L1). |
+| 3 (codex) | 23:24 | 00:34 | d5af420 | n/a | calibration applied | `_CAIRO_STROKE_WIDTH_SCALE = 0.86` (empirically discovered; auditor predicted 1.15 in opposite direction -- codebase's data-coord ribbon path goes the other way). rect/tab regression closed half the gap (within ±0.05 gate). Mean Tier A L1 under cairo: 1.495 (Agg 1.515; cairo wins by 0.020). All round-9 wins improved or preserved. 16 render tests pass. |
+| shutdown | 00:34 | — | d5af420 | DONE | shipped | cairo_SUMMARY.md written. Sprint B closed. |
