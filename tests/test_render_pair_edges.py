@@ -43,7 +43,12 @@ def _render_pair_fixture(tmp_path: Path, edge_width: float) -> Path:
     return output_path
 
 
-def _dark_pixel_count(path: Path, x_range: Tuple[int, int], y_range: Tuple[int, int]) -> int:
+def _dark_pixel_count(
+    path: Path,
+    x_range: Tuple[int, int],
+    y_range: Tuple[int, int],
+    threshold: int = 80,
+) -> int:
     """Count dark pixels in an image corridor.
 
     Parameters
@@ -54,6 +59,8 @@ def _dark_pixel_count(path: Path, x_range: Tuple[int, int], y_range: Tuple[int, 
         Half-open pixel-column range.
     y_range : tuple[int, int]
         Half-open pixel-row range.
+    threshold : int, default=80
+        Exclusive RGB upper bound used to classify a pixel as dark.
 
     Returns
     -------
@@ -62,7 +69,11 @@ def _dark_pixel_count(path: Path, x_range: Tuple[int, int], y_range: Tuple[int, 
     """
     image = np.asarray(Image.open(path).convert("RGB"))
     region = image[y_range[0] : y_range[1], x_range[0] : x_range[1]]
-    mask = (region[:, :, 0] < 80) & (region[:, :, 1] < 80) & (region[:, :, 2] < 80)
+    mask = (
+        (region[:, :, 0] < threshold)
+        & (region[:, :, 1] < threshold)
+        & (region[:, :, 2] < threshold)
+    )
     return int(mask.sum())
 
 
@@ -71,9 +82,16 @@ def test_pair_fixture_edge_stem_visible_at_thin_widths(tmp_path: Path) -> None:
     counts = []
     for edge_width in (0.5, 1.0, 1.5):
         path = _render_pair_fixture(tmp_path, edge_width)
-        counts.append(_dark_pixel_count(path, x_range=(380, 420), y_range=(270, 330)))
+        counts.append(
+            _dark_pixel_count(
+                path,
+                x_range=(370, 430),
+                y_range=(160, 440),
+                threshold=160,
+            )
+        )
 
-    assert counts[0] >= 50
-    assert counts[1] >= 50
-    assert counts[2] >= 50
+    assert counts[0] >= 150
+    assert counts[1] >= 150
+    assert counts[2] >= 150
     assert counts[0] <= counts[1] <= counts[2]

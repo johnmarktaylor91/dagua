@@ -16,6 +16,7 @@ from dagua.render._backend import (
     _resolve_backend,
     set_default_backend,
 )
+from dagua.styles import GRAPHVIZ_STRICT_THEME, NodeStyle
 
 
 def _two_node_graph() -> Tuple[DaguaGraph, torch.Tensor]:
@@ -105,6 +106,66 @@ def test_set_default_backend_overrides_auto_detect() -> None:
         assert name == "agg"
     finally:
         set_default_backend(None)
+
+
+def test_auto_size_to_label_expands_fixed_overflow_node() -> None:
+    """auto_size_to_label should turn min dimensions into floors."""
+    fixed_graph = DaguaGraph()
+    fixed_graph.add_node(
+        "n",
+        label="A very long node label",
+        style=NodeStyle(
+            shape="rect",
+            font_size=14.0,
+            padding=(4.0, 2.0),
+            min_width=30.0,
+            min_height=18.0,
+            overflow_policy="shrink_text",
+            auto_expand_on_floor_overflow=False,
+        ),
+    )
+    fixed_graph.compute_node_sizes()
+
+    auto_graph = DaguaGraph()
+    auto_graph.add_node(
+        "n",
+        label="A very long node label",
+        style=NodeStyle(
+            shape="rect",
+            font_size=14.0,
+            padding=(4.0, 2.0),
+            min_width=30.0,
+            min_height=18.0,
+            overflow_policy="shrink_text",
+            auto_size_to_label=True,
+        ),
+    )
+    auto_graph.compute_node_sizes()
+
+    assert fixed_graph.node_sizes is not None
+    assert auto_graph.node_sizes is not None
+    assert float(fixed_graph.node_sizes[0, 0]) == 30.0
+    assert float(fixed_graph.node_sizes[0, 1]) == 18.0
+    assert float(auto_graph.node_sizes[0, 0]) > 30.0
+    assert float(auto_graph.node_sizes[0, 1]) >= 18.0
+
+
+def test_graphviz_strict_theme_enables_compact_auto_sizing() -> None:
+    """Graphviz strict nodes should use dot-style auto-sized floors."""
+    graph = DaguaGraph(_theme=GRAPHVIZ_STRICT_THEME.copy())
+    graph.add_node("source", label="Source")
+    graph.compute_node_sizes()
+
+    assert graph.node_sizes is not None
+    style = graph.get_style_for_node(0)
+    width = float(graph.node_sizes[0, 0])
+    height = float(graph.node_sizes[0, 1])
+
+    assert style.auto_size_to_label is True
+    assert style.min_width == 54.0
+    assert style.min_height == 36.0
+    assert 54.0 <= width < 100.0
+    assert 36.0 <= height < 70.0
 
 
 @pytest.mark.parametrize(
