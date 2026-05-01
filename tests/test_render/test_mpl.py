@@ -2322,9 +2322,8 @@ def test_graph_title_font_size_tracks_graph_height(
 
     assert graph.node_sizes is not None
     sizes = graph.node_sizes.detach().cpu().numpy()
-    margin = float(graph.graph_style.margin)
-    y_min = float((positions[:, 1].detach().cpu().numpy() - sizes[:, 1] / 2.0).min() - margin)
-    y_max = float((positions[:, 1].detach().cpu().numpy() + sizes[:, 1] / 2.0).max() + margin)
+    y_min = float((positions[:, 1].detach().cpu().numpy() - sizes[:, 1] / 2.0).min())
+    y_max = float((positions[:, 1].detach().cpu().numpy() + sizes[:, 1] / 2.0).max())
     graph_height = y_max - y_min
     expected = graph_height * 0.03 * (15.0 / 10.0)
 

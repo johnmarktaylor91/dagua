@@ -121,7 +121,7 @@ def _dict_to_graph_style(d: Dict[str, Any]) -> GraphStyle:
     for k, v in d.items():
         if k not in valid:
             continue
-        if k in ("max_figsize", "min_figsize") and isinstance(v, list):
+        if k in ("max_figsize", "min_figsize", "size_inches") and isinstance(v, list):
             v = tuple(v)
         filtered[k] = v
     return GraphStyle(**filtered)
