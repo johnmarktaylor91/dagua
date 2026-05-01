@@ -1,9 +1,11 @@
 ---
 run: override
 created: 2026-05-01T07:15
-state: ACTIVE
-current_round: 1
-note: Sprint F of the graphviz-drop-in push. Add pixel-unit override API per the standing 2026-03-23 directive (data-coord by default; pixel-points OPT-IN OVERRIDE only). Users who want literal point-perfect typography for paper figures can specify NodeStyle.stroke_width_override / EdgeStyle.width_override / NodeStyle.font_size_override fields that bypass data-coord and route directly to display-points.
+completed: 2026-05-01T08:50
+state: DONE
+final_round: 2
+final_commit: d7e5617
+note: Sprint F converged at round 2. Round 1 added 6 *_override_points fields on NodeStyle/EdgeStyle/ClusterStyle but accidentally collapsed default-path branches, breaking 11 tests. Round 2 restored explicit if-override-is-None-default-else-override branching. All 162 tests pass; default-path metric unchanged (1.232). Override fields work as designed: literal point-perfect rendering when set, NOT differentiable, documented in SCALING.md.
 ---
 
 # override -- Autonomous Loop State
