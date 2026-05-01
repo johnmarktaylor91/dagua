@@ -495,6 +495,7 @@ def _render_ratios(dpi: int) -> Dict[str, float]:
         figsize=(4.0, 2.0),
         curves=curves,
         svg_hover_text=False,
+        fit_to_canvas=True,
     )
     image = _canvas_rgb(fig)
 
