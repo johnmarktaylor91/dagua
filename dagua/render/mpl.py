@@ -5490,8 +5490,24 @@ def _edge_width_data_units(ax: Any, width_points: float) -> float:
     # Keep the edge body in the data-coordinate renderer while preventing
     # sub-pixel underflow on small fixed gallery canvases. The authored style
     # width remains unchanged; only the emitted render ribbon receives a floor.
-    min_visible_width = _compute_display_scale(ax) * _MIN_VISIBLE_STROKE_POINTS
+    min_visible_width = _minimum_visible_edge_width_data_units(ax)
     return max(width, min_visible_width, 1e-6)
+
+
+def _minimum_visible_edge_width_data_units(ax: Any) -> float:
+    """Return the configured visible edge-width floor in data units.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes with established limits and aspect ratio.
+
+    Returns
+    -------
+    float
+        Data-coordinate width corresponding to ``_MIN_VISIBLE_STROKE_POINTS``.
+    """
+    return _compute_display_scale(ax) * _MIN_VISIBLE_STROKE_POINTS
 
 
 def _curve_to_render_bezier(curve: BezierCurve) -> RenderBezier:
@@ -7867,6 +7883,7 @@ def _build_custom_edge_collection(
             )
         if body_segments is not None and len(body_segments) > 1:
             body_width = _edge_width_data_units(ax, float(style.width))
+            min_visible_width = _minimum_visible_edge_width_data_units(ax)
             for segment_idx, segment in enumerate(body_segments):
                 edges.append(
                     DaguaEdge(
@@ -7886,6 +7903,7 @@ def _build_custom_edge_collection(
                         source_node=src_idx,
                         target_node=tgt_idx,
                         disable_curve_length_clamp=disable_curve_length_clamp,
+                        min_visible_width=min_visible_width,
                     )
                 )
             marker_curve = _curve_to_render_bezier(curve)
@@ -7927,17 +7945,20 @@ def _build_custom_edge_collection(
                     source_node=src_idx,
                     target_node=tgt_idx,
                     disable_curve_length_clamp=disable_curve_length_clamp,
+                    min_visible_width=min_visible_width,
                 )
             )
             continue
         body_curve = body_segments[0] if body_segments else None
-        render_curve = body_curve if body_curve is not None else _curve_to_render_bezier(curve)
+        render_curve = _curve_to_render_bezier(curve)
+        body_width = _edge_width_data_units(ax, float(style.width))
+        min_visible_width = _minimum_visible_edge_width_data_units(ax)
         edges.append(
             DaguaEdge(
                 curve=render_curve,
                 body_curve=body_curve,
                 body_clip_terminal=body_clip_terminal,
-                width=_edge_width_data_units(ax, float(style.width)),
+                width=body_width,
                 tapered=bool(getattr(style, "taper", False)),
                 taper_width_start=taper_width_start,
                 taper_width_end=taper_width_end,
@@ -7952,7 +7973,7 @@ def _build_custom_edge_collection(
                 tail_arrow_width=tail_width,
                 arrow_fill=str(style.arrow_fill),
                 arrow_color=str(style.arrow_color) if style.arrow_color else None,
-                stroke_width=_edge_width_data_units(ax, float(style.width)),
+                stroke_width=body_width,
                 label=label,
                 label_position=float(style.label_position),
                 label_offset=float(style.label_offset),
@@ -7967,6 +7988,7 @@ def _build_custom_edge_collection(
                 source_node=src_idx,
                 target_node=tgt_idx,
                 disable_curve_length_clamp=disable_curve_length_clamp,
+                min_visible_width=min_visible_width,
             )
         )
     collection = DaguaEdgeCollection(edges)
