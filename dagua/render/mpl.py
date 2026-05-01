@@ -1380,7 +1380,7 @@ def _coerce_canvas_fit_margin(fit_to_canvas: Union[bool, float]) -> Optional[flo
     if fit_to_canvas is False:
         return None
     if fit_to_canvas is True:
-        return 0.05
+        return 0.02
     if isinstance(fit_to_canvas, (int, float)) and not isinstance(fit_to_canvas, bool):
         margin = float(fit_to_canvas)
         if not 0.0 <= margin < 0.5:
@@ -1429,13 +1429,14 @@ def _canvas_fit_bounds(
     content_height = max(float(y_max) - float(y_min), 1.0)
     inner_fraction = max(1.0 - (2.0 * margin_fraction), 1.0e-6)
     target_aspect = max(float(figsize[0]), 1.0e-6) / max(float(figsize[1]), 1.0e-6)
+    content_aspect = content_width / content_height
+    if content_aspect < target_aspect:
+        content_width = content_height * target_aspect
+    elif content_aspect > target_aspect:
+        content_height = content_width / target_aspect
+
     desired_width = content_width / inner_fraction
     desired_height = content_height / inner_fraction
-
-    if desired_width / desired_height < target_aspect:
-        desired_width = desired_height * target_aspect
-    else:
-        desired_height = desired_width / target_aspect
 
     x_center = (float(x_min) + float(x_max)) / 2.0
     y_center = (float(y_min) + float(y_max)) / 2.0

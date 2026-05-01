@@ -26,7 +26,9 @@ from dagua.render.edges.arrowheads import build_arrowhead
 from dagua.render.mpl import (
     _build_custom_edge_collection,
     _build_node_patch,
+    _canvas_fit_bounds,
     _cluster_linestyle,
+    _coerce_canvas_fit_margin,
     _compute_display_scale,
     _crossing_span_data_units,
     _draw_bridge_crossing,
@@ -2864,3 +2866,25 @@ def test_deep_cluster_bounds_stay_inside_render_axes() -> None:
         assert float(vertices[:, 1].min()) >= y_min - tolerance
         assert float(vertices[:, 1].max()) <= y_max + tolerance
     plt.close(fig)
+
+
+def test_fit_to_canvas_true_uses_tight_default_margin() -> None:
+    """Canvas-fit shorthand should reserve only the graphviz parity margin."""
+
+    assert _coerce_canvas_fit_margin(True) == pytest.approx(0.02)
+
+
+def test_canvas_fit_bounds_pad_to_figure_aspect_before_margin() -> None:
+    """Narrow layouts should receive horizontal padding before fit margins."""
+
+    x_min, x_max, y_min, y_max = _canvas_fit_bounds(
+        0.0,
+        50.0,
+        0.0,
+        100.0,
+        figsize=(4.0, 2.0),
+        margin_fraction=0.02,
+    )
+
+    assert (x_max - x_min) == pytest.approx(100.0 * 2.0 / 0.96)
+    assert (y_max - y_min) == pytest.approx(100.0 / 0.96)
