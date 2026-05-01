@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -11,8 +12,11 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFile
 from skimage.metrics import structural_similarity
+
+Image.MAX_IMAGE_PIXELS = None
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -212,6 +216,7 @@ def _save_dagua_render(
     context: CardRenderContext,
     output_path: Path,
     dimensions: Tuple[int, int],
+    backend: Optional[str] = None,
 ) -> Path:
     """Render the Dagua side of a comparison.
 
@@ -223,6 +228,8 @@ def _save_dagua_render(
         PNG destination.
     dimensions : tuple[int, int]
         Requested output dimensions.
+    backend : str | None, optional
+        Matplotlib backend selector passed through to Dagua rendering.
 
     Returns
     -------
@@ -233,7 +240,13 @@ def _save_dagua_render(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="dagua-card-diff-") as tmp:
         raw_path = Path(tmp) / "dagua.png"
-        gallery._render_dagua_png(context.graph, context.positions, raw_path, dimensions)
+        gallery._render_dagua_png(
+            context.graph,
+            context.positions,
+            raw_path,
+            dimensions,
+            backend=backend,
+        )
         placed = gallery._place_render_on_canvas(raw_path, dimensions, (42, 42, 42, 42))
         placed.save(output_path)
     return ensure_png_dimensions(output_path, dimensions)
@@ -388,6 +401,7 @@ def _render_competitor_first_available(
     context: CardRenderContext,
     output_root: Path,
     dimensions: Tuple[int, int],
+    reference_cache_root: Optional[Path] = None,
 ) -> Tuple[Optional[Path], Optional[str]]:
     """Render the first available competitor for a card.
 
@@ -399,6 +413,10 @@ def _render_competitor_first_available(
         Pixel-diff output root.
     dimensions : tuple[int, int]
         Requested image dimensions.
+    reference_cache_root : pathlib.Path | None, optional
+        Existing gallery root whose competitor renders can be reused when a
+        fresh competitor invocation fails. This keeps cairo-vs-Agg comparisons
+        anchored to the same reference set.
 
     Returns
     -------
@@ -410,7 +428,27 @@ def _render_competitor_first_available(
     position_pairs = [(float(x), float(y)) for x, y in context.positions.detach().cpu().tolist()]
     for tool in context.competitor_tools:
         candidate = output_root / "competitors" / tool / f"{context.card_id}.png"
-        rendered = render_competitor(tool, graph_spec, position_pairs, candidate, dimensions)
+        try:
+            rendered = render_competitor(tool, graph_spec, position_pairs, candidate, dimensions)
+        except Exception as exc:
+            print(
+                f"warning: {context.card_id}: competitor {tool} failed: {exc}",
+                file=sys.stderr,
+            )
+            if reference_cache_root is not None:
+                cached = (
+                    reference_cache_root
+                    / "per_card_pixel_diff"
+                    / "competitors"
+                    / tool
+                    / f"{context.card_id}.png"
+                )
+                if cached.exists():
+                    candidate.parent.mkdir(parents=True, exist_ok=True)
+                    if cached.resolve() != candidate.resolve():
+                        shutil.copy2(cached, candidate)
+                    return ensure_png_dimensions(candidate, dimensions), tool
+            continue
         if rendered is not None and rendered.exists():
             return rendered, tool
         print(
@@ -424,6 +462,7 @@ def _process_card(
     context: CardRenderContext,
     gallery_root: Path,
     output_root: Path,
+    backend: Optional[str] = None,
 ) -> Dict[str, object]:
     """Process one card and write its JSON/heatmap artifacts.
 
@@ -435,6 +474,8 @@ def _process_card(
         Gallery root path.
     output_root : pathlib.Path
         Pixel-diff output root.
+    backend : str | None, optional
+        Matplotlib backend selector passed through to Dagua rendering.
 
     Returns
     -------
@@ -458,11 +499,12 @@ def _process_card(
     if max(dimensions) > MAX_COMPARISON_SIDE_PX:
         raise ValueError(f"Card dimensions exceed cap: {dimensions}")
     dagua_path = output_root / "dagua" / f"{context.card_id}.png"
-    _save_dagua_render(context, dagua_path, dimensions)
+    _save_dagua_render(context, dagua_path, dimensions, backend=backend)
     competitor_path, tool_used = _render_competitor_first_available(
         context,
         output_root,
         dimensions,
+        reference_cache_root=DEFAULT_GALLERY_ROOT,
     )
     if competitor_path is None or tool_used is None:
         payload = {
@@ -553,6 +595,7 @@ def _emit_hires(
     card_ids: Sequence[str],
     gallery_root: Path,
     output_root: Path,
+    backend: Optional[str] = None,
 ) -> None:
     """Emit separate hi-res Dagua and competitor PNGs for requested cards.
 
@@ -566,6 +609,8 @@ def _emit_hires(
         Gallery root path.
     output_root : pathlib.Path
         Pixel-diff output root.
+    backend : str | None, optional
+        Matplotlib backend selector passed through to Dagua rendering.
 
     Returns
     -------
@@ -578,7 +623,7 @@ def _emit_hires(
     for card_id in card_ids:
         context = contexts[card_id]
         destination = gallery_root / "hires" / card_id
-        _save_dagua_render(context, destination / "dagua.png", dimensions)
+        _save_dagua_render(context, destination / "dagua.png", dimensions, backend=backend)
         if context.tier == "C":
             continue
         graph_spec = graph_spec_from_dagua(context.graph)
@@ -605,9 +650,30 @@ def parse_args() -> argparse.Namespace:
     """
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--gallery-root", type=Path, default=DEFAULT_GALLERY_ROOT)
+    parser.add_argument(
+        "--gallery-dir",
+        "--gallery-root",
+        dest="gallery_root",
+        type=Path,
+        default=DEFAULT_GALLERY_ROOT,
+        help="Gallery audit root to evaluate",
+    )
     parser.add_argument("--cards", type=str, default=None, help="Comma-separated card IDs")
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument(
+        "--output-dir",
+        "--out",
+        dest="out",
+        type=Path,
+        default=DEFAULT_OUT_DIR,
+        help="Output directory for per-card pixel-diff artifacts",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default=None,
+        choices=[None, "agg", "cairo"],
+        help="Matplotlib backend (default: auto-detect cairo if installed, else agg)",
+    )
     parser.add_argument(
         "--hires",
         type=str,
@@ -631,10 +697,13 @@ def main() -> None:
     hires_filter = _parse_csv(args.hires)
     contexts = _build_contexts(card_filter)
     args.out.mkdir(parents=True, exist_ok=True)
-    results = [_process_card(context, args.gallery_root, args.out) for context in contexts.values()]
+    results = [
+        _process_card(context, args.gallery_root, args.out, backend=args.backend)
+        for context in contexts.values()
+    ]
     summary_path = _write_summary(results, args.out)
     if hires_filter:
-        _emit_hires(contexts, hires_filter, args.gallery_root, args.out)
+        _emit_hires(contexts, hires_filter, args.gallery_root, args.out, backend=args.backend)
     counts: Dict[str, int] = {"A": 0, "B": 0, "C": 0}
     for result in results:
         tier = str(result.get("tier", "C"))
