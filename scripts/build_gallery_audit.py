@@ -2231,6 +2231,7 @@ def _render_dagua_png(
     positions: torch.Tensor,
     output_path: Path,
     size_px: Tuple[int, int],
+    backend: Optional[str] = None,
 ) -> None:
     """Render a Dagua graph to a PNG file.
 
@@ -2244,6 +2245,8 @@ def _render_dagua_png(
         Target PNG path.
     size_px : tuple[int, int]
         Requested raw canvas size in pixels.
+    backend : str | None, optional
+        Matplotlib backend selector passed through to :func:`dagua.render`.
 
     Returns
     -------
@@ -2258,6 +2261,7 @@ def _render_dagua_png(
         positions,
         dpi=RENDER_DPI,
         figsize=(size_px[0] / RENDER_DPI, size_px[1] / RENDER_DPI),
+        backend=backend,
     )
     fig.patch.set_facecolor(bg_color)
     ax.set_facecolor(bg_color)
@@ -2551,6 +2555,7 @@ def _render_reference_canvas(
     size_px: Tuple[int, int],
     inset: Tuple[int, int, int, int],
     render_context: str = "reference",
+    backend: Optional[str] = None,
 ) -> Image.Image:
     """Render a reference item onto a normalized fixed-size canvas.
 
@@ -2564,6 +2569,8 @@ def _render_reference_canvas(
         Left, top, right, and bottom content insets.
     render_context : str, default="reference"
         Rendering context used to prepare the graph.
+    backend : str | None, optional
+        Matplotlib backend selector passed through to Dagua rendering.
 
     Returns
     -------
@@ -2574,7 +2581,7 @@ def _render_reference_canvas(
     graph, positions = _prepare_reference_render(item, render_context=render_context)
     with tempfile.TemporaryDirectory() as temp_dir:
         raw_path = Path(temp_dir) / "reference.png"
-        _render_dagua_png(graph, positions, raw_path, size_px)
+        _render_dagua_png(graph, positions, raw_path, size_px, backend=backend)
         return _place_render_on_canvas(
             raw_path,
             size_px,
@@ -2670,7 +2677,11 @@ def _save_image(image: Image.Image, destination: Path) -> None:
     image.save(destination)
 
 
-def _render_reference_card(item: ReferenceCardItem, output_root: Path) -> None:
+def _render_reference_card(
+    item: ReferenceCardItem,
+    output_root: Path,
+    backend: Optional[str] = None,
+) -> None:
     """Render one atomic reference card and its JSON sidecar.
 
     Parameters
@@ -2679,6 +2690,8 @@ def _render_reference_card(item: ReferenceCardItem, output_root: Path) -> None:
         Card metadata.
     output_root : Path
         Gallery audit root directory.
+    backend : str | None, optional
+        Matplotlib backend selector passed through to Dagua rendering.
 
     Returns
     -------
@@ -2688,7 +2701,7 @@ def _render_reference_card(item: ReferenceCardItem, output_root: Path) -> None:
 
     destination = output_root / item.relative_path
     destination.parent.mkdir(parents=True, exist_ok=True)
-    card = _render_reference_canvas(item, CARD_SIZE, _reference_card_inset(item))
+    card = _render_reference_canvas(item, CARD_SIZE, _reference_card_inset(item), backend=backend)
     _draw_header(
         card,
         title=f"{item.spec.feature}: {item.value.label}",
@@ -2726,7 +2739,11 @@ def _render_reference_card(item: ReferenceCardItem, output_root: Path) -> None:
     _write_json(destination.with_suffix(".json"), sidecar)
 
 
-def _render_strip_card(item: StripCardItem, output_root: Path) -> None:
+def _render_strip_card(
+    item: StripCardItem,
+    output_root: Path,
+    backend: Optional[str] = None,
+) -> None:
     """Render one strip card and its JSON sidecar.
 
     Parameters
@@ -2735,6 +2752,8 @@ def _render_strip_card(item: StripCardItem, output_root: Path) -> None:
         Strip card metadata.
     output_root : Path
         Gallery audit root directory.
+    backend : str | None, optional
+        Matplotlib backend selector passed through to Dagua rendering.
 
     Returns
     -------
@@ -2764,6 +2783,7 @@ def _render_strip_card(item: StripCardItem, output_root: Path) -> None:
             (panel_width, body_height),
             STRIP_PANEL_INSET,
             render_context="strip",
+            backend=backend,
         )
         draw = ImageDraw.Draw(panel)
         label_box = draw.textbbox((0, 0), member.value.label, font=label_font)
@@ -2799,7 +2819,11 @@ def _render_strip_card(item: StripCardItem, output_root: Path) -> None:
     _write_json(destination.with_suffix(".json"), sidecar)
 
 
-def _render_comparison_card(item: ReferenceCardItem, output_root: Path) -> None:
+def _render_comparison_card(
+    item: ReferenceCardItem,
+    output_root: Path,
+    backend: Optional[str] = None,
+) -> None:
     """Render one Dagua-vs-Graphviz comparison card.
 
     Parameters
@@ -2808,6 +2832,8 @@ def _render_comparison_card(item: ReferenceCardItem, output_root: Path) -> None:
         Reference card metadata with a comparison path.
     output_root : Path
         Gallery audit root directory.
+    backend : str | None, optional
+        Matplotlib backend selector passed through to Dagua rendering.
 
     Returns
     -------
@@ -2823,7 +2849,7 @@ def _render_comparison_card(item: ReferenceCardItem, output_root: Path) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         dagua_raw = Path(temp_dir) / "dagua.png"
         graphviz_raw = Path(temp_dir) / "graphviz.png"
-        _render_dagua_png(graph, positions, dagua_raw, PANEL_SIZE)
+        _render_dagua_png(graph, positions, dagua_raw, PANEL_SIZE, backend=backend)
         _render_graphviz_png(_build_comparison_dot_source(graph, item), graphviz_raw)
         dagua_panel = _place_render_on_canvas(
             dagua_raw,
@@ -3840,7 +3866,11 @@ def _combo_params(settings: Mapping[str, object], fixture: str) -> Dict[str, obj
     return params
 
 
-def _render_combo_card(item: ComboCardItem, output_root: Path) -> None:
+def _render_combo_card(
+    item: ComboCardItem,
+    output_root: Path,
+    backend: Optional[str] = None,
+) -> None:
     """Render one combo card and its JSON sidecar.
 
     Parameters
@@ -3849,6 +3879,8 @@ def _render_combo_card(item: ComboCardItem, output_root: Path) -> None:
         Combo card metadata.
     output_root : Path
         Gallery audit root directory.
+    backend : str | None, optional
+        Matplotlib backend selector passed through to Dagua rendering.
 
     Returns
     -------
@@ -3865,7 +3897,7 @@ def _render_combo_card(item: ComboCardItem, output_root: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temp_dir:
         raw_path = Path(temp_dir) / "combo.png"
-        _render_dagua_png(graph, positions, raw_path, CARD_SIZE)
+        _render_dagua_png(graph, positions, raw_path, CARD_SIZE, backend=backend)
         card = _place_render_on_canvas(raw_path, CARD_SIZE, CARD_CONTENT_INSET)
     features = ", ".join(
         name.replace("_", " ")
@@ -3895,7 +3927,11 @@ def _render_combo_card(item: ComboCardItem, output_root: Path) -> None:
     _write_json(destination.with_suffix(".json"), sidecar)
 
 
-def _render_evil_card(item: EvilCardItem, output_root: Path) -> None:
+def _render_evil_card(
+    item: EvilCardItem,
+    output_root: Path,
+    backend: Optional[str] = None,
+) -> None:
     """Render one evil stress-test card using its pre-built graph.
 
     Parameters
@@ -3904,6 +3940,8 @@ def _render_evil_card(item: EvilCardItem, output_root: Path) -> None:
         Evil-card metadata.
     output_root : Path
         Gallery audit root directory.
+    backend : str | None, optional
+        Matplotlib backend selector passed through to Dagua rendering.
 
     Returns
     -------
@@ -3915,7 +3953,13 @@ def _render_evil_card(item: EvilCardItem, output_root: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temp_dir:
         raw_path = Path(temp_dir) / "evil.png"
-        _render_dagua_png(item.spec.graph, item.spec.positions, raw_path, CARD_SIZE)
+        _render_dagua_png(
+            item.spec.graph,
+            item.spec.positions,
+            raw_path,
+            CARD_SIZE,
+            backend=backend,
+        )
         card = _place_render_on_canvas(raw_path, CARD_SIZE, CARD_CONTENT_INSET)
     _draw_header(
         card,
@@ -5658,6 +5702,7 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
 def build_gallery_audit(
     output_dir: str = "eval_output/gallery_audit",
     *,
+    backend: Optional[str] = None,
     cards: bool = True,
     boards: bool = True,
     comparisons: bool = True,
@@ -5674,6 +5719,9 @@ def build_gallery_audit(
     ----------
     output_dir : str, default="eval_output/gallery_audit"
         Root output directory.
+    backend : str | None, optional
+        Matplotlib backend selector for Dagua cards. ``None`` uses Dagua's
+        auto-detected default.
     cards : bool, default=True
         Whether to build atomic reference cards.
     boards : bool, default=True
@@ -5728,10 +5776,10 @@ def build_gallery_audit(
     if cards:
         _reset_output_dir(output_root / "cards" / "reference")
         for item in reference_items:
-            _render_reference_card(item, output_root)
+            _render_reference_card(item, output_root, backend=backend)
             written_reference_items.append(item)
         for item in build_strip_items(written_reference_items):
-            _render_strip_card(item, output_root)
+            _render_strip_card(item, output_root, backend=backend)
             written_strip_items.append(item)
             reference_pairs.append((item.spec.category, output_root / item.relative_path))
         for item in written_reference_items:
@@ -5742,20 +5790,20 @@ def build_gallery_audit(
         for item in reference_items:
             if item.comparison_relative_path is None:
                 continue
-            _render_comparison_card(item, output_root)
+            _render_comparison_card(item, output_root, backend=backend)
             comparison_lookup[item.card_id] = item.comparison_relative_path
 
     if combos:
         _reset_output_dir(output_root / "cards" / "combos")
         for item in combo_items:
-            _render_combo_card(item, output_root)
+            _render_combo_card(item, output_root, backend=backend)
             written_combo_items.append(item)
             combo_pairs.append((item.spec.combo_kind, output_root / item.relative_path))
 
     if evil:
         _reset_output_dir(output_root / "cards" / "evil")
         for item in evil_items:
-            _render_evil_card(item, output_root)
+            _render_evil_card(item, output_root, backend=backend)
             written_evil_items.append(item)
 
     if boards:
@@ -5805,6 +5853,28 @@ def build_gallery_audit(
     )
 
 
+def _output_dir_with_suffix(output_dir: str, suffix: str) -> str:
+    """Append a suffix to the output directory name.
+
+    Parameters
+    ----------
+    output_dir : str
+        Base output directory.
+    suffix : str
+        Suffix to append to the final path component.
+
+    Returns
+    -------
+    str
+        Output directory with ``suffix`` appended to its name.
+    """
+
+    if not suffix:
+        return output_dir
+    path = Path(output_dir)
+    return str(path.with_name(f"{path.name}{suffix}"))
+
+
 def main() -> int:
     """Parse CLI arguments and build the requested artifact set.
 
@@ -5816,6 +5886,21 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", default="eval_output/gallery_audit")
+    parser.add_argument(
+        "--output-dir-suffix",
+        type=str,
+        default="",
+        help=(
+            "Append suffix to output dirs to keep multi-backend galleries separate (e.g., '_cairo')"
+        ),
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default=None,
+        choices=[None, "agg", "cairo"],
+        help="Matplotlib backend (default: auto-detect cairo if installed, else agg)",
+    )
     parser.add_argument("--cards", action="store_true")
     parser.add_argument("--boards", action="store_true")
     parser.add_argument("--comparisons", action="store_true")
@@ -5836,7 +5921,8 @@ def main() -> int:
         args.index = True
 
     result = build_gallery_audit(
-        output_dir=args.output_dir,
+        output_dir=_output_dir_with_suffix(args.output_dir, args.output_dir_suffix),
+        backend=args.backend,
         cards=args.cards,
         boards=args.boards,
         comparisons=args.comparisons,
