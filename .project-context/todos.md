@@ -1,6 +1,16 @@
 # Task & Bug Tracker
 
 ## Active Tasks
+- [ ] [HIGH] **Sprint B -- Cairo opt-in (post-data-coord sprint).** Add cairo as a matplotlib backend option:
+  - `pyproject.toml` optional dep: `[project.optional-dependencies] cairo = ["mplcairo>=0.6"]`
+  - Auto-detect default per `feedback_cairo_default_policy.md`: try `import mplcairo` -> use cairo; else fall back to Agg. NO explicit user config required for default selection. `pip install dagua` -> Agg; `pip install 'dagua[cairo]'` -> cairo.
+  - Public override: `dagua.render(g, pos, backend="agg" | "cairo")` and `dagua.set_default_backend(...)` for global override
+  - Per-figure canvas attach (no `pyplot` reliance; uses `Figure(...)` + `FigureCanvasAgg(fig)` or `mplcairo.FigureCanvas(fig)`). Round 13 prepares for this by auditing `pyplot` leakage.
+  - Comparison gallery: render existing Tier A cards under both backends side-by-side; quantify the visual delta (Sprint B ceiling-test).
+  - Tests parametrized over both backends; cairo tests `pytest.mark.skipif(not has_mplcairo)`.
+  - README docs explaining the install paths + libcairo system-dep note for Linux/Mac.
+  - Iterate on cairo gallery until Opus 4.7 visual auditor returns no fixable findings ("ceiling" same as data-coord sprint).
+  - **WAIT for Sprint A (round 13) to fully converge before kicking off.**
 - [ ] [HIGH] **Round 13 -- data-coord-everything sweep.** Audit `dagua/render/mpl.py` for ALL display-point leakage and convert to data-coord with `display_scale` conversion at the rendering boundary. Specifically:
   - Revert round-11 thin-edge fallback (`_edge_uses_display_stroke_body` at mpl.py:5583, fallback path at mpl.py:6620). Replace with data-coord ribbon + explicit `display_scale`-based minimum-width clamp on the existing data-ribbon path. Clamp activates at render time only; optimizer sees true data-coord value.
   - Audit ALL `linewidth=` and `fontsize=` calls in `dagua/render/mpl.py`. Each one routes through `display_scale` or gets replaced with data-coord polygon path.
@@ -11,6 +21,9 @@
   - Re-run gallery_audit + per_card_pixel_diff, verify round-11 wins preserved (edge stem visible on box3d/circle/etc, labels readable on combo_pie_bold) under the new data-coord path.
   - **WAIT for JMT signal to begin.** Then do cairo-vs-Agg discussion next.
 - [ ] [HIGH] Benchmark finishing (~95.5%) -- run fidelity pipeline when done
+- [ ] [HIGH] **Investigate dagua native CUDA OOM** seen in 100-seed benchmark run (2026-04-30 to ~2026-05-04).
+  33 errors of "CUDA driver error: out of memory" all on the `dagua` native engine.
+  Should NOT be happening; suggests a graph or batch size that exceeds GPU memory. After the 100-seed benchmark finishes, query `eval_output/benchmark_100seed_final/results.json` for entries with `engine=dagua status=error error_message="CUDA driver error: out of memory"` to find the offending (graph, seed) pairs, reproduce, fix the OOM (likely batching or fallback to CPU on memory pressure).
 - [ ] [HIGH] Continue Graphviz theme calibration until critics reach min>=8, mean>=9
 - [ ] [MED] Close fidelity gaps -- add reimplementations for unpaired algorithms:
   - [ ] Reimplement fcose (Cytoscape force-directed) in PyTorch
