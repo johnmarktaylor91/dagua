@@ -26,6 +26,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
+    "scikit-image>=0.20",
     "torch>=1.9",
 ]
 
