@@ -935,12 +935,27 @@ class DaguaGraph:
         font_family: str = "",
         font_size: float = 8.5,
     ) -> None:
-        """Compute node sizes from labels if not already set.
+        """Compute node sizes from labels if not already cached.
 
-        Uses per-node style for padding, shape, font_weight, font_style,
-        text wrapping/transform/rotation, min_width, min_height,
-        overflow_policy, and min_font_size. Populates both node_sizes and
-        node_font_sizes tensors.
+        Parameters
+        ----------
+        font_family : str, default=""
+            Fallback font family used when a node style does not specify one.
+        font_size : float, default=8.5
+            Fallback font size in points.
+
+        Returns
+        -------
+        None
+            Populates ``node_sizes`` with shape ``[N, 2]`` and
+            ``node_font_sizes`` with shape ``[N]``.
+
+        Notes
+        -----
+        Uses per-node style for padding, shape, font weight/style, wrapping,
+        transform, rotation, min dimensions, overflow policy, and
+        ``auto_size_to_label``. Auto-sized nodes treat min dimensions as floors
+        even when the overflow policy would otherwise cap the node box.
         """
         if (
             self.node_sizes is not None
@@ -975,6 +990,9 @@ class DaguaGraph:
             padding = style.padding
             ff = font_family if style.font_family in ("", font_family) else style.font_family
             fs = style.font_size if style.font_size != 8.5 else font_size
+            sizing_overflow_policy = (
+                "expand_node" if style.auto_size_to_label else style.overflow_policy
+            )
             w, h, efs = compute_node_size(
                 label,
                 ff,
@@ -986,17 +1004,21 @@ class DaguaGraph:
                 text_wrap=style.text_wrap,
                 text_max_width=style.text_max_width,
                 text_transform=style.text_transform,
-                overflow_policy=style.overflow_policy,
+                overflow_policy=sizing_overflow_policy,
                 min_font_size=style.min_font_size,
                 label_format=style.label_format,
                 text_rotation=style.text_rotation,
                 compact_shape_factors=compact_shape_factors,
             )
-            # For shrink_text/overflow, min_width and min_height act as both
-            # floor AND cap: the node stays at that size and text adapts
-            # (shrinks or overflows).  For expand_node (default), they are
-            # floors only -- the node can grow beyond them.
-            if style.overflow_policy in ("shrink_text", "overflow"):
+            # Auto-sized nodes treat min_width/min_height as Graphviz-style
+            # floors. Existing fixed-size overflow policies keep their cap
+            # behavior unless the explicit auto-size switch is enabled.
+            if style.auto_size_to_label:
+                if style.min_width is not None:
+                    w = max(w, style.min_width)
+                if style.min_height is not None:
+                    h = max(h, style.min_height)
+            elif style.overflow_policy in ("shrink_text", "overflow"):
                 if style.min_width is not None:
                     w = style.min_width
                 if style.min_height is not None:

@@ -1850,17 +1850,9 @@ def _apply_reference_card_tweaks(
 
     if item.card_id in DECORATIVE_FILL_CARD_IDS:
         for style in _node_styles(graph):
-            style.min_height = max(float(style.min_height), DECORATIVE_FILL_CARD_MIN_HEIGHT)
-            style.min_width = max(float(style.min_width), GRAPHVIZ_PARITY_MAX_NODE_WIDTH)
-            # Decorative fills must use the same footprint as plain nodes; the
-            # fixed-extent metric now treats fill-specific size drift as signal.
             style.padding = DECORATIVE_FILL_CARD_PADDING
     if item.card_id in NODE_SHAPE_PARITY_CARD_IDS:
         for style in _node_styles(graph):
-            if style.min_width is not None:
-                style.min_width = GRAPHVIZ_PARITY_MAX_NODE_WIDTH
-            if style.min_height is not None:
-                style.min_height = GRAPHVIZ_PARITY_MAX_NODE_HEIGHT
             style.fill = NODE_FILL
             style.stroke = NODE_STROKE
             style.stroke_width = max(
@@ -2004,9 +1996,11 @@ def _graphviz_node_attrs(
         "style": "filled",
         "fillcolor": NODE_FILL,
         "color": NODE_STROKE,
-        "fontname": "Helvetica",
-        "fontsize": "18",
-        "fontcolor": TEXT_COLOR,
+        # Match dot's native defaults so graphviz comparison panels use the
+        # same text metrics as GRAPHVIZ_STRICT_THEME's auto-sized Dagua nodes.
+        "fontname": "Times-Roman",
+        "fontsize": "14",
+        "fontcolor": "#000000",
         "penwidth": "2.0",
     }
     node_params = value.params.get("node", {})
@@ -4234,14 +4228,14 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                 _value(
                     "ellipse",
                     "Ellipse",
-                    {"node": {"shape": "ellipse", "min_width": 116.0, "min_height": 72.0}},
+                    {"node": {"shape": "ellipse"}},
                     GRAPHVIZ_SHAPE_MAP["ellipse"],
                 ),
                 _value(
                     "diamond",
                     "Diamond",
                     {
-                        "node": {"shape": "diamond", "min_width": 124.0, "min_height": 88.0},
+                        "node": {"shape": "diamond"},
                         "node_labels": ["A", "B"],
                     },
                     GRAPHVIZ_SHAPE_MAP["diamond"],
@@ -4249,14 +4243,14 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                 _value(
                     "circle",
                     "Circle",
-                    {"node": {"shape": "circle", "min_width": 108.0, "min_height": 108.0}},
+                    {"node": {"shape": "circle"}},
                     GRAPHVIZ_SHAPE_MAP["circle"],
                 ),
                 _value(
                     "triangle",
                     "Triangle",
                     {
-                        "node": {"shape": "triangle", "min_width": 120.0, "min_height": 102.0},
+                        "node": {"shape": "triangle"},
                         "node_labels": ["A", "B"],
                     },
                     GRAPHVIZ_SHAPE_MAP["triangle"],
@@ -4264,26 +4258,26 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                 _value(
                     "hexagon",
                     "Hexagon",
-                    {"node": {"shape": "hexagon", "min_width": 132.0, "min_height": 80.0}},
+                    {"node": {"shape": "hexagon"}},
                     GRAPHVIZ_SHAPE_MAP["hexagon"],
                 ),
                 _value(
                     "pentagon",
                     "Pentagon",
-                    {"node": {"shape": "pentagon", "min_width": 124.0, "min_height": 90.0}},
+                    {"node": {"shape": "pentagon"}},
                     GRAPHVIZ_SHAPE_MAP["pentagon"],
                 ),
                 _value(
                     "octagon",
                     "Octagon",
-                    {"node": {"shape": "octagon", "min_width": 132.0, "min_height": 88.0}},
+                    {"node": {"shape": "octagon"}},
                     GRAPHVIZ_SHAPE_MAP["octagon"],
                 ),
                 _value(
                     "star",
                     "Star",
                     {
-                        "node": {"shape": "star", "min_width": 128.0, "min_height": 128.0},
+                        "node": {"shape": "star"},
                         "node_labels": ["A", "B"],
                     },
                     GRAPHVIZ_SHAPE_MAP["star"],
@@ -4291,7 +4285,7 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                 _value(
                     "cylinder",
                     "Cylinder",
-                    {"node": {"shape": "cylinder", "min_width": 120.0, "min_height": 88.0}},
+                    {"node": {"shape": "cylinder"}},
                     GRAPHVIZ_SHAPE_MAP["cylinder"],
                 ),
                 _value(
@@ -4300,8 +4294,6 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                     {
                         "node": {
                             "shape": "parallelogram",
-                            "min_width": 140.0,
-                            "min_height": 76.0,
                         }
                     },
                     GRAPHVIZ_SHAPE_MAP["parallelogram"],
@@ -4309,7 +4301,7 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                 _value(
                     "trapezoid",
                     "Trapezoid",
-                    {"node": {"shape": "trapezoid", "min_width": 138.0, "min_height": 80.0}},
+                    {"node": {"shape": "trapezoid"}},
                     GRAPHVIZ_SHAPE_MAP["trapezoid"],
                 ),
                 _value(
@@ -4318,8 +4310,6 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                     {
                         "node": {
                             "shape": "double_circle",
-                            "min_width": 116.0,
-                            "min_height": 116.0,
                             "stroke_width": 0.0,
                         }
                     },
@@ -4328,12 +4318,12 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                 _value(
                     "cloud",
                     "Cloud",
-                    {"node": {"shape": "cloud", "min_width": 136.0, "min_height": 86.0}},
+                    {"node": {"shape": "cloud"}},
                 ),
                 _value(
                     "stadium",
                     "Stadium",
-                    {"node": {"shape": "stadium", "min_width": 148.0, "min_height": 70.0}},
+                    {"node": {"shape": "stadium"}},
                 ),
                 _value(
                     "tab",
@@ -4341,8 +4331,6 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                     {
                         "node": {
                             "shape": "tab",
-                            "min_width": 126.0,
-                            "min_height": 82.0,
                             "stroke_width": 0.0,
                         }
                     },
@@ -4354,8 +4342,6 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                     {
                         "node": {
                             "shape": "note",
-                            "min_width": 126.0,
-                            "min_height": 94.0,
                             "stroke_width": 0.0,
                         }
                     },
@@ -4364,7 +4350,7 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                 _value(
                     "document",
                     "Document",
-                    {"node": {"shape": "document", "min_width": 136.0, "min_height": 90.0}},
+                    {"node": {"shape": "document"}},
                 ),
                 _value(
                     "box3d",
@@ -4372,8 +4358,6 @@ def build_reference_specs() -> Tuple[AtomicCardSpec, ...]:
                     {
                         "node": {
                             "shape": "box3d",
-                            "min_width": 126.0,
-                            "min_height": 84.0,
                             "stroke_width": 1.5,
                         }
                     },

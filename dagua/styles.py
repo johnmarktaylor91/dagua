@@ -348,6 +348,10 @@ class NodeStyle:
     shadow_blur: float = 0.0
     min_width: Optional[float] = None  # Layout-affecting: floor on node width
     min_height: Optional[float] = None  # Layout-affecting: floor on node height
+    # When True, compute W/H from the rendered label plus ``padding``, using
+    # min_width/min_height only as floors. Graphviz-strict enables this to
+    # match dot's auto-sized node semantics.
+    auto_size_to_label: bool = False
     aspect_ratio: Optional[float] = (
         None  # Layout-affecting: width/height ratio, enforced after text measurement
     )
@@ -939,10 +943,11 @@ _GRAPHVIZ_STRICT_DEFAULT_NODE_STYLE = NodeStyle(
     corner_radius=0.0,
     opacity=1.0,
     base_color="#000000",
-    # Graphviz default floor, kept small here because dot shrinks dense graphs;
-    # large pair-card comparison panels apply their parity footprint locally.
-    min_width=75.0,
-    min_height=50.0,
+    # Dot's default node floors are width=0.75in and height=0.5in. Keep those
+    # as floors while auto-sizing lets labels grow naturally.
+    min_width=54.0,
+    min_height=36.0,
+    auto_size_to_label=True,
     overflow_policy="expand_node",
 )
 
