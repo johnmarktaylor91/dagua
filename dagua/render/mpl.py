@@ -1634,7 +1634,11 @@ def render(
                     graph.cluster_labels.get(cname, cname),
                     float(ch),
                     float(sizes[:, 1].min()) if sizes.size else 0.0,
-                    float(cstyle.font_size),
+                    float(
+                        cstyle.font_size_override_points
+                        if cstyle.font_size_override_points is not None
+                        else cstyle.font_size
+                    ),
                     str(cstyle.font_size_scaling),
                 )
                 label_width, label_height = _measure_cluster_label_data(
@@ -3751,6 +3755,175 @@ def _node_border_pattern(style: Any, display_scale: float) -> Any:
     return tuple(float(value) * display_scale for value in style.stroke_dash_pattern)
 
 
+def _display_point_linestyle(style_name: Any, dash_pattern: Optional[Tuple[float, ...]]) -> Any:
+    """Return a matplotlib linestyle for display-point stroke overrides.
+
+    Parameters
+    ----------
+    style_name : Any
+        Style token such as ``"solid"``, ``"dashed"``, or ``"dotted"``.
+    dash_pattern : tuple[float, ...] | None
+        Optional custom dash pattern already authored in display points.
+
+    Returns
+    -------
+    Any
+        Matplotlib-compatible linestyle.
+    """
+    if dash_pattern is not None:
+        return (0.0, tuple(float(value) for value in dash_pattern))
+    return str(style_name)
+
+
+def _draw_display_point_path_stroke(
+    ax: Any,
+    path: Any,
+    color: Any,
+    linewidth_points: float,
+    zorder: float,
+    linestyle: Any = "solid",
+    capstyle: str = "butt",
+    joinstyle: str = "miter",
+    gid: Optional[str] = None,
+) -> Any:
+    """Draw a path with a native matplotlib display-point stroke.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes receiving the patch.
+    path : Any
+        Path in data coordinates.
+    color : Any
+        Matplotlib-compatible edge color.
+    linewidth_points : float
+        Stroke width in display points.
+    zorder : float
+        Artist z-order.
+    linestyle : Any, default="solid"
+        Matplotlib line style or dash tuple in display points.
+    capstyle : str, default="butt"
+        Stroke cap style.
+    joinstyle : str, default="miter"
+        Stroke join style.
+    gid : str | None, default=None
+        Optional SVG/test identifier.
+
+    Returns
+    -------
+    Any
+        Added matplotlib patch.
+
+    Notes
+    -----
+    This is the explicit opt-in escape hatch from data-coordinate ribbon
+    construction. The value is not visible to the optimizer's manifold.
+    """
+    from matplotlib.patches import PathPatch
+
+    linewidth = max(float(linewidth_points), 0.0)
+    patch = PathPatch(
+        path,
+        facecolor="none",
+        edgecolor=color,
+        linewidth=linewidth,
+        linestyle=linestyle,
+        capstyle=_mpl_capstyle(capstyle),
+        joinstyle=joinstyle,
+        zorder=zorder,
+    )
+    if gid is not None:
+        patch.set_gid(gid)
+    ax.add_patch(patch)
+    return patch
+
+
+def _draw_display_point_text(
+    ax: Any,
+    spec: DaguaText,
+    svg_hover_map: Optional[Dict[str, str]] = None,
+) -> Any:
+    """Draw a text label with native matplotlib display-point font sizing.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes receiving the text artist.
+    spec : DaguaText
+        Text specification whose ``font_size`` is interpreted as display
+        points without data-coordinate conversion.
+    svg_hover_map : dict[str, str] | None, default=None
+        Optional SVG hover-text accumulator.
+
+    Returns
+    -------
+    Any
+        Added matplotlib ``Text`` artist.
+
+    Notes
+    -----
+    This helper is used only for explicit ``*_override_points`` fields. Native
+    matplotlib text is not differentiable and intentionally bypasses Dagua's
+    data-coordinate glyph manifold.
+    """
+    bbox = None
+    if spec.background is not None:
+        bbox = {
+            "boxstyle": f"round,pad=0.2,rounding_size={float(spec.background_corner_radius)}",
+            "facecolor": spec.background,
+            "edgecolor": "none",
+            "alpha": float(spec.background_alpha),
+        }
+    artist = ax.text(
+        spec.x,
+        spec.y,
+        spec.text,
+        fontsize=max(float(spec.font_size), 1e-9),
+        fontfamily=spec.font_family or RESOLVED_FONT,
+        fontweight=spec.font_weight,
+        fontstyle=spec.font_style,
+        color=spec.font_color,
+        alpha=spec.alpha,
+        ha=spec.ha,
+        va=spec.va,
+        rotation=spec.rotation,
+        clip_on=spec.clip_on,
+        zorder=spec.zorder,
+        bbox=bbox,
+    )
+    if spec.clip_patch is not None:
+        artist.set_clip_path(spec.clip_patch)
+    if spec.gid is not None:
+        artist.set_gid(spec.gid)
+        _register_svg_hover_text(svg_hover_map, spec.gid, spec.text)
+    return artist
+
+
+def _register_svg_hover_text(
+    svg_hover_map: Optional[Dict[str, str]],
+    gid: str,
+    text: str,
+) -> None:
+    """Register hover text for a native matplotlib text override.
+
+    Parameters
+    ----------
+    svg_hover_map : dict[str, str] | None
+        Optional SVG hover-text accumulator.
+    gid : str
+        Artist identifier.
+    text : str
+        Hover text to associate with the artist.
+
+    Returns
+    -------
+    None
+        Mutates ``svg_hover_map`` in place when provided.
+    """
+    if svg_hover_map is not None:
+        svg_hover_map[gid] = text
+
+
 def _cluster_render_order(graph: Any) -> List[str]:
     """Return clusters in parent-first depth-first traversal order.
 
@@ -4917,7 +5090,11 @@ def _draw_nodes(
         style = _node_style_for_render(graph, i)
         scaled_style = _scaled_node_style(style, display_scale)
         corner_radius = _node_corner_radius_data(style, display_scale, w, h)
-        border_width = clamp_border_width(float(style.stroke_width) * stroke_scale, w, h)
+        stroke_override = getattr(style, "stroke_width_override_points", None)
+        if stroke_override is None:
+            border_width = clamp_border_width(float(style.stroke_width) * stroke_scale, w, h)
+        else:
+            border_width = 0.0
         border_position = _normalize_border_position(getattr(style, "border_position", "center"))
         shape_spec = ShapeSpec(
             center_x=x,
@@ -4973,7 +5150,45 @@ def _draw_nodes(
                 facecolor,
             )
             _draw_image_node(ax, shape_spec, style, image_clip_patch)
-            if border_width > 0.0 and edgecolor[-1] > 0.0:
+            if stroke_override is not None and float(stroke_override) > 0.0 and edgecolor[-1] > 0.0:
+                border_path = _node_border_centerline_path(
+                    shape_spec,
+                    outer_path,
+                    float(stroke_override) * display_scale,
+                    border_position,
+                )
+                _draw_display_point_path_stroke(
+                    ax,
+                    border_path,
+                    edgecolor,
+                    float(stroke_override),
+                    zorder=2.05,
+                    linestyle=_display_point_linestyle(
+                        style.stroke_dash,
+                        style.stroke_dash_pattern,
+                    ),
+                    capstyle=str(getattr(style, "stroke_cap", "butt")),
+                    joinstyle=str(getattr(style, "stroke_join", "miter")),
+                )
+                if int(style.border_count) >= 2:
+                    inner_path = inset_shape_path(
+                        shape_spec,
+                        float(stroke_override) * display_scale * _DOUBLE_BORDER_INSET_FACTOR,
+                    )
+                    _draw_display_point_path_stroke(
+                        ax,
+                        inner_path,
+                        edgecolor,
+                        float(stroke_override),
+                        zorder=2.05,
+                        linestyle=_display_point_linestyle(
+                            style.stroke_dash,
+                            style.stroke_dash_pattern,
+                        ),
+                        capstyle=str(getattr(style, "stroke_cap", "butt")),
+                        joinstyle=str(getattr(style, "stroke_join", "miter")),
+                    )
+            elif border_width > 0.0 and edgecolor[-1] > 0.0:
                 border_path = _node_border_centerline_path(
                     shape_spec,
                     outer_path,
@@ -5010,7 +5225,45 @@ def _draw_nodes(
 
             _draw_image_node(ax, shape_spec, style, image_clip_patch)
 
-            if border_width > 0.0 and edgecolor[-1] > 0.0:
+            if stroke_override is not None and float(stroke_override) > 0.0 and edgecolor[-1] > 0.0:
+                centerline_path = _node_border_centerline_path(
+                    shape_spec,
+                    outer_path,
+                    float(stroke_override) * display_scale,
+                    border_position,
+                )
+                _draw_display_point_path_stroke(
+                    ax,
+                    centerline_path,
+                    edgecolor,
+                    float(stroke_override),
+                    zorder=2.05,
+                    linestyle=_display_point_linestyle(
+                        style.stroke_dash,
+                        style.stroke_dash_pattern,
+                    ),
+                    capstyle=str(getattr(style, "stroke_cap", "butt")),
+                    joinstyle=str(getattr(style, "stroke_join", "miter")),
+                )
+                if int(style.border_count) >= 2:
+                    inner_path = inset_shape_path(
+                        shape_spec,
+                        float(stroke_override) * display_scale * _DOUBLE_BORDER_INSET_FACTOR,
+                    )
+                    _draw_display_point_path_stroke(
+                        ax,
+                        inner_path,
+                        edgecolor,
+                        float(stroke_override),
+                        zorder=2.05,
+                        linestyle=_display_point_linestyle(
+                            style.stroke_dash,
+                            style.stroke_dash_pattern,
+                        ),
+                        capstyle=str(getattr(style, "stroke_cap", "butt")),
+                        joinstyle=str(getattr(style, "stroke_join", "miter")),
+                    )
+            elif border_width > 0.0 and edgecolor[-1] > 0.0:
                 if style.stroke_dash == "solid" and style.stroke_dash_pattern is None:
                     if border_position == "center":
                         border_outer_path, border_inner_path = _solid_border_ring_paths(
@@ -5942,6 +6195,7 @@ def _edge_requires_direct_render(style: Any) -> bool:
     """
     return bool(
         _edge_uses_direct_data_ribbon(style)
+        or getattr(style, "width_override_points", None) is not None
         or getattr(style, "taper", False)
         or getattr(style, "color_gradient", "none") != "none"
         or getattr(style, "line_cap", "butt") != "butt"
@@ -6989,6 +7243,22 @@ def _draw_direct_edge_body(ax: Any, curve: BezierCurve, style: Any) -> List[Any]
     from matplotlib.patches import Polygon
 
     artists: List[Any] = []
+    width_override = getattr(style, "width_override_points", None)
+    if width_override is not None:
+        edge_path = _curve_to_path(curve)
+        patch = _draw_display_point_path_stroke(
+            ax,
+            edge_path,
+            to_rgba(str(style.color), alpha=float(style.opacity)),
+            float(width_override),
+            zorder=1,
+            linestyle=str(style.style),
+            capstyle=str(getattr(style, "line_cap", "butt")),
+            joinstyle=str(getattr(style, "line_join", "miter")),
+        )
+        artists.append(patch)
+        return artists
+
     data_width = _edge_width_data_units(ax, float(style.width))
     if curve.waypoints is not None:
         full_points = _sample_curve_points(curve)
@@ -8099,11 +8369,16 @@ def _draw_node_labels(
         clip_patch = clip_patch_seq[i] if i < len(clip_patch_seq) else None
         label_y = _label_reference_y(y, h, style.shape)
 
-        if graph.node_font_sizes is not None and i < graph.node_font_sizes.shape[0]:
+        font_size_override = getattr(style, "font_size_override_points", None)
+        if font_size_override is not None:
+            # Pixel-unit overrides intentionally bypass density shrink and
+            # label-fit feedback so the requested display size is authoritative.
+            font_size_points = float(font_size_override)
+        elif graph.node_font_sizes is not None and i < graph.node_font_sizes.shape[0]:
             font_size_points = float(graph.node_font_sizes[i].item())
         else:
             font_size_points = float(style.font_size)
-        if abs(float(density_size_factor) - 1.0) > 1e-12:
+        if font_size_override is None and abs(float(density_size_factor) - 1.0) > 1e-12:
             font_size_points *= density_font_factor
         # Font sizes are in the same data-coordinate system as node
         # sizes.  compute_node_size already determined the correct font
@@ -8111,7 +8386,7 @@ def _draw_node_labels(
         # to contain it.  Use that font directly -- no height-based
         # rescaling needed.
         font_size_data = font_size_points
-        if _is_bold_font_weight(font_weight):
+        if font_size_override is None and _is_bold_font_weight(font_weight):
             font_size_data *= _BOLD_NODE_LABEL_SIZE_MULTIPLIER
 
         pad_x = float(style.padding[0]) * display_scale
@@ -8157,13 +8432,46 @@ def _draw_node_labels(
         text_bg_alpha = style.text_background_opacity
         text_bg_corner_radius = style.text_background_corner_radius
 
+        if font_size_override is not None:
+            _draw_display_point_text(
+                ax,
+                DaguaText(
+                    x=text_x,
+                    y=text_y,
+                    text=label,
+                    font_size=font_size_points,
+                    font_family=_text_font_family(style),
+                    font_weight=font_weight,
+                    font_style=style.font_style,
+                    font_color=style.font_color,
+                    alpha=1.0,
+                    ha=style.text_align,
+                    va=style.text_valign,
+                    rotation=float(style.text_rotation),
+                    background=text_bg,
+                    background_alpha=text_bg_alpha,
+                    background_padding=style.text_background_padding,
+                    background_corner_radius=text_bg_corner_radius,
+                    clip_patch=clip_patch if style.overflow_policy != "overflow" else None,
+                    clip_on=style.overflow_policy != "overflow",
+                    zorder=3.0,
+                    gid=f"dagua-node-label-{i}",
+                ),
+                svg_hover_map,
+            )
+            continue
+
         specs.append(
             DaguaText(
                 x=text_x,
                 y=text_y,
                 text=label,
                 # ``render_text`` multiplies by display_scale to recover data units.
-                font_size=_effective_font_size_points(font_size_data, display_scale),
+                font_size=(
+                    font_size_points
+                    if font_size_override is not None
+                    else _effective_font_size_points(font_size_data, display_scale)
+                ),
                 font_family=_text_font_family(style),
                 font_weight=font_weight,
                 font_style=style.font_style,
@@ -8783,6 +9091,7 @@ def _endpoint_label_offset_data(
 
 
 def _append_endpoint_edge_label_specs(
+    ax: Any,
     specs: List[DaguaText],
     graph: Any,
     curves: List[BezierCurve],
@@ -8794,6 +9103,8 @@ def _append_endpoint_edge_label_specs(
 
     Parameters
     ----------
+    ax : Any
+        Matplotlib axes receiving native override text when requested.
     specs : list[DaguaText]
         Text specs being accumulated for the render pass.
     graph : Any
@@ -8832,15 +9143,22 @@ def _append_endpoint_edge_label_specs(
                 ),
             ),
         )
-        endpoint_label_font_size_points = _strict_edge_label_font_size(
-            graph, float(style.label_font_size)
+        font_size_override = getattr(style, "font_size_override_points", None)
+        endpoint_label_font_size_points = (
+            float(font_size_override)
+            if font_size_override is not None
+            else _strict_edge_label_font_size(graph, float(style.label_font_size))
         )
         for endpoint_name, label_text, label_offset in endpoint_specs:
             if not label_text:
                 continue
             x, y = edge_endpoint_label_position(curve, endpoint_name, label_offset=label_offset)
             gid = f"dagua-edge-{endpoint_name}-label-{e_idx}"
-            scaled_endpoint_pts = endpoint_label_font_size_points * 0.85
+            scaled_endpoint_pts = (
+                endpoint_label_font_size_points
+                if font_size_override is not None
+                else endpoint_label_font_size_points * 0.85
+            )
             absolute_font_data = _strict_absolute_edge_label_font_data(
                 graph, scaled_endpoint_pts, display_scale
             )
@@ -8853,26 +9171,32 @@ def _append_endpoint_edge_label_specs(
                     scaled_endpoint_pts,
                 )
             )
-            specs.append(
-                DaguaText(
-                    x=x,
-                    y=y,
-                    text=label_text,
-                    font_size=_effective_font_size_points(label_font_data, display_scale),
-                    font_family=str(style.label_font_family or RESOLVED_FONT),
-                    font_weight=str(style.label_font_weight),
-                    font_color=str(style.label_font_color),
-                    ha="center",
-                    va="center",
-                    background=style.label_background if style.label_background else None,
-                    background_alpha=float(style.label_background_opacity),
-                    background_padding=style.label_background_padding,
-                    background_corner_radius=float(style.label_background_corner_radius),
-                    clip_on=False,
-                    zorder=4.0,
-                    gid=gid,
-                )
+            label_spec = DaguaText(
+                x=x,
+                y=y,
+                text=label_text,
+                font_size=(
+                    scaled_endpoint_pts
+                    if font_size_override is not None
+                    else _effective_font_size_points(label_font_data, display_scale)
+                ),
+                font_family=str(style.label_font_family or RESOLVED_FONT),
+                font_weight=str(style.label_font_weight),
+                font_color=str(style.label_font_color),
+                ha="center",
+                va="center",
+                background=style.label_background if style.label_background else None,
+                background_alpha=float(style.label_background_opacity),
+                background_padding=style.label_background_padding,
+                background_corner_radius=float(style.label_background_corner_radius),
+                clip_on=False,
+                zorder=4.0,
+                gid=gid,
             )
+            if font_size_override is not None:
+                _draw_display_point_text(ax, label_spec, svg_hover_map)
+            else:
+                specs.append(label_spec)
             if svg_hover_map is not None:
                 svg_hover_map[gid] = hover_text
                 svg_hover_map[f"{gid}-background"] = hover_text
@@ -9029,8 +9353,11 @@ def _draw_edge_labels(
                 continue
 
             style = _edge_style_for_render(graph, e_idx)
-            label_font_size_points = _strict_edge_label_font_size(
-                graph, float(style.label_font_size)
+            font_size_override = getattr(style, "font_size_override_points", None)
+            label_font_size_points = (
+                float(font_size_override)
+                if font_size_override is not None
+                else _strict_edge_label_font_size(graph, float(style.label_font_size))
             )
             absolute_font_data = _strict_absolute_edge_label_font_data(
                 graph, label_font_size_points, display_scale
@@ -9044,27 +9371,33 @@ def _draw_edge_labels(
                     label_font_size_points,
                 )
             )
-            specs.append(
-                DaguaText(
-                    x=placement.x,
-                    y=placement.y,
-                    text=label,
-                    font_size=_effective_font_size_points(label_font_data, display_scale),
-                    font_family=str(style.label_font_family or RESOLVED_FONT),
-                    font_weight=str(style.label_font_weight),
-                    font_color=str(style.label_font_color),
-                    ha="center",
-                    va="center",
-                    rotation=placement.angle_degrees if prepared.edge.label_rotate else 0.0,
-                    background=style.label_background if style.label_background else None,
-                    background_alpha=float(style.label_background_opacity),
-                    background_padding=style.label_background_padding,
-                    background_corner_radius=float(style.label_background_corner_radius),
-                    clip_on=False,
-                    zorder=4.0,
-                    gid=f"dagua-edge-label-{e_idx}",
-                )
+            label_spec = DaguaText(
+                x=placement.x,
+                y=placement.y,
+                text=label,
+                font_size=(
+                    label_font_size_points
+                    if font_size_override is not None
+                    else _effective_font_size_points(label_font_data, display_scale)
+                ),
+                font_family=str(style.label_font_family or RESOLVED_FONT),
+                font_weight=str(style.label_font_weight),
+                font_color=str(style.label_font_color),
+                ha="center",
+                va="center",
+                rotation=placement.angle_degrees if prepared.edge.label_rotate else 0.0,
+                background=style.label_background if style.label_background else None,
+                background_alpha=float(style.label_background_opacity),
+                background_padding=style.label_background_padding,
+                background_corner_radius=float(style.label_background_corner_radius),
+                clip_on=False,
+                zorder=4.0,
+                gid=f"dagua-edge-label-{e_idx}",
             )
+            if font_size_override is not None:
+                _draw_display_point_text(ax, label_spec, svg_hover_map)
+            else:
+                specs.append(label_spec)
             reference_curve = prepared.body_curve or prepared.lane_curve
             label_directions.append(
                 (
@@ -9101,8 +9434,11 @@ def _draw_edge_labels(
                     label_side=style.label_side,
                 )
 
-            label_font_size_points = _strict_edge_label_font_size(
-                graph, float(style.label_font_size)
+            font_size_override = getattr(style, "font_size_override_points", None)
+            label_font_size_points = (
+                float(font_size_override)
+                if font_size_override is not None
+                else _strict_edge_label_font_size(graph, float(style.label_font_size))
             )
             absolute_font_data = _strict_absolute_edge_label_font_data(
                 graph, label_font_size_points, display_scale
@@ -9116,26 +9452,32 @@ def _draw_edge_labels(
                     label_font_size_points,
                 )
             )
-            specs.append(
-                DaguaText(
-                    x=lx,
-                    y=ly,
-                    text=label,
-                    font_size=_effective_font_size_points(label_font_data, display_scale),
-                    font_family=str(style.label_font_family or RESOLVED_FONT),
-                    font_weight=str(style.label_font_weight),
-                    font_color=str(style.label_font_color),
-                    ha="center",
-                    va="center",
-                    background=style.label_background if style.label_background else None,
-                    background_alpha=float(style.label_background_opacity),
-                    background_padding=style.label_background_padding,
-                    background_corner_radius=float(style.label_background_corner_radius),
-                    clip_on=False,
-                    zorder=4.0,
-                    gid=f"dagua-edge-label-{e_idx}",
-                )
+            label_spec = DaguaText(
+                x=lx,
+                y=ly,
+                text=label,
+                font_size=(
+                    label_font_size_points
+                    if font_size_override is not None
+                    else _effective_font_size_points(label_font_data, display_scale)
+                ),
+                font_family=str(style.label_font_family or RESOLVED_FONT),
+                font_weight=str(style.label_font_weight),
+                font_color=str(style.label_font_color),
+                ha="center",
+                va="center",
+                background=style.label_background if style.label_background else None,
+                background_alpha=float(style.label_background_opacity),
+                background_padding=style.label_background_padding,
+                background_corner_radius=float(style.label_background_corner_radius),
+                clip_on=False,
+                zorder=4.0,
+                gid=f"dagua-edge-label-{e_idx}",
             )
+            if font_size_override is not None:
+                _draw_display_point_text(ax, label_spec, svg_hover_map)
+            else:
+                specs.append(label_spec)
             label_directions.append(
                 (
                     float(curve.p1[0] - curve.p0[0]),
@@ -9151,6 +9493,7 @@ def _draw_edge_labels(
         _resolve_edge_label_collisions(specs, label_directions, display_scale)
 
     _append_endpoint_edge_label_specs(
+        ax,
         specs,
         graph,
         curves,
@@ -9260,21 +9603,28 @@ def _draw_clusters(
         x_min, y_min, x_max, y_max = render_box.bbox
         label = graph.cluster_labels.get(name, name)
         depth_fs_step = getattr(style, "depth_font_size_step", -0.5)
-        label_font_points = max(style.font_size + depth * depth_fs_step, 5.0)
+        font_size_override = getattr(style, "font_size_override_points", None)
+        if font_size_override is not None:
+            label_font_points = max(float(font_size_override), 1e-9)
+        else:
+            label_font_points = max(style.font_size + depth * depth_fs_step, 5.0)
         label_ff = style.font_family or RESOLVED_FONT
         label_ox = style.label_offset[0] * display_scale
         label_oy = style.label_offset[1] * display_scale
         label_text_max_width = _cluster_label_text_max_width(style, display_scale)
 
         cluster_height = y_max - y_min
-        label_font_data = _cluster_font_size_data(
-            label,
-            float(cluster_height),
-            min_node_height,
-            float(label_font_points),
-            str(style.font_size_scaling),
-            display_scale,
-        )
+        if font_size_override is not None:
+            label_font_data = float(label_font_points) * display_scale
+        else:
+            label_font_data = _cluster_font_size_data(
+                label,
+                float(cluster_height),
+                min_node_height,
+                float(label_font_points),
+                str(style.font_size_scaling),
+                display_scale,
+            )
         label_width, label_height = _measure_cluster_label_data(
             label,
             font_size_data=label_font_data,
@@ -9301,7 +9651,11 @@ def _draw_clusters(
 
         width = x_max - x_min
         height = y_max - y_min
-        border_width = clamp_border_width(eff_stroke_width * stroke_scale, width, height)
+        stroke_override = getattr(style, "stroke_width_override_points", None)
+        if stroke_override is None:
+            border_width = clamp_border_width(eff_stroke_width * stroke_scale, width, height)
+        else:
+            border_width = 0.0
         shape_spec = ShapeSpec(
             center_x=(x_min + x_max) / 2.0,
             center_y=(y_min + y_max) / 2.0,
@@ -9322,7 +9676,21 @@ def _draw_clusters(
         if fill_alpha > 0.0:
             fill_paths_by_depth.setdefault(depth, []).append(fill_path)
             fill_colors_by_depth.setdefault(depth, []).append(to_rgba(fill_color, fill_alpha))
-        if border_width > 0.0:
+        if stroke_override is not None and float(stroke_override) > 0.0:
+            centerline_path = inset_shape_path(
+                shape_spec,
+                float(stroke_override) * display_scale / 2.0,
+            )
+            _draw_display_point_path_stroke(
+                ax,
+                centerline_path,
+                to_rgba(stroke_color, border_alpha),
+                float(stroke_override),
+                zorder=0.05 + depth * 0.01,
+                linestyle=_display_point_linestyle(style.stroke_dash, None),
+                joinstyle="round",
+            )
+        elif border_width > 0.0:
             if style.stroke_dash == "solid":
                 border_outer_path, border_inner_path = _solid_border_ring_paths(
                     shape_spec,
@@ -9367,7 +9735,11 @@ def _draw_clusters(
                 x=lx,
                 y=ly,
                 text=label,
-                font_size=_effective_font_size_points(label_font_data, display_scale),
+                font_size=(
+                    label_font_points
+                    if font_size_override is not None
+                    else _effective_font_size_points(label_font_data, display_scale)
+                ),
                 font_family=label_ff,
                 font_weight=style.font_weight,
                 font_color=style.font_color,
@@ -9386,17 +9758,20 @@ def _draw_clusters(
                 zorder=_CLUSTER_LABEL_ZORDER + depth * 0.01,
                 gid=f"dagua-cluster-label-{name}",
             )
-            cluster_label_specs.append(label_spec)
-            cluster_label_placements.append(
-                _ClusterLabelPlacement(
-                    name=name,
-                    spec=label_spec,
-                    width=label_width,
-                    height=label_height,
-                    depth=depth,
-                    parent_name=cluster_parents.get(name),
+            if font_size_override is not None:
+                _draw_display_point_text(ax, label_spec, svg_hover_map)
+            else:
+                cluster_label_specs.append(label_spec)
+                cluster_label_placements.append(
+                    _ClusterLabelPlacement(
+                        name=name,
+                        spec=label_spec,
+                        width=label_width,
+                        height=label_height,
+                        depth=depth,
+                        parent_name=cluster_parents.get(name),
+                    )
                 )
-            )
             if svg_hover_map is not None:
                 svg_hover_map[f"dagua-cluster-label-{name}"] = _cluster_hover_text(
                     name,
@@ -9512,7 +9887,13 @@ def _render_cluster_edge_clip_data(
 
         style = _cluster_style_for_render(graph, name)
         depth = cluster_depths.get(name, 0)
-        if _cluster_border_alpha(style, depth) <= 0.0 or float(style.stroke_width) <= 0.0:
+        stroke_override = getattr(style, "stroke_width_override_points", None)
+        has_border_width = (
+            float(stroke_override) > 0.0
+            if stroke_override is not None
+            else float(style.stroke_width) > 0.0
+        )
+        if _cluster_border_alpha(style, depth) <= 0.0 or not has_border_width:
             continue
 
         render_box = cluster_render_boxes.get(name)
