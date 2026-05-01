@@ -80,6 +80,7 @@ from dagua.styles import (
     DEFAULT_THEME_OBJ,
     GRAPHVIZ_MATCH_NODE_STYLES,
     GRAPHVIZ_MATCH_THEME,
+    GRAPHVIZ_STRICT_THEME,
     MINIMAL_THEME,
     PALETTE,
     TORCHLENS_THEME,
@@ -249,6 +250,7 @@ __all__ = [
     "DEFAULT_NODE_STYLES",
     "GRAPHVIZ_MATCH_THEME",
     "GRAPHVIZ_MATCH_NODE_STYLES",
+    "GRAPHVIZ_STRICT_THEME",
     # Flex system
     "Flex",
     "LayoutFlex",
