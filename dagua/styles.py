@@ -32,11 +32,6 @@ Aesthetics: publication-quality defaults — muted fills, strong borders, quiet 
 # ``linewidth`` and ``fontsize`` still receive point values directly because the
 # backend interprets those in display space on its own.
 
-# TODO: Add support for pixel-unit overrides (e.g., "2pt") for users who want
-# fixed-size elements regardless of zoom/data scale. This would require a
-# unit-aware value type like Union[float, str] where strings like "2pt" are
-# parsed as display-point values and floats remain data-coordinate values.
-#
 # TODO: Expose additional text rendering capabilities as style fields:
 # - NodeStyle.text_underline, text_strikethrough (text decorations)
 # - EdgeStyle.label_outline (outline on edge labels for readability)
@@ -305,11 +300,41 @@ class NodeStyle:
     fill: str = ""  # empty = computed from base_color
     stroke: str = ""  # empty = computed from base_color
     stroke_width: float = 0.57
+    stroke_width_override_points: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": (
+                "Optional pixel/point override for border stroke width. When set, bypasses "
+                "the data-coord ribbon construction and routes directly to matplotlib "
+                "linewidth= (display points). NOT DIFFERENTIABLE -- the optimizer cannot "
+                "see this value. Use for paper-figure typography where literal "
+                "point-perfect strokes matter more than scale-consistency."
+            )
+        },
+    )
+    """Optional pixel/point override for border stroke width. When set, bypasses
+    the data-coord ribbon construction and routes directly to matplotlib
+    ``linewidth=`` (display points). NOT DIFFERENTIABLE -- the optimizer cannot
+    see this value. Use for paper-figure typography where literal point-perfect
+    strokes matter more than scale-consistency."""
     stroke_dash: str = "solid"  # solid, dashed, dotted
     stroke_dash_pattern: Optional[Tuple[float, ...]] = None  # custom (on, off, ...)
     border_opacity: float = 1.0
     font_family: str = ""  # empty = use FONT_FAMILY default
     font_size: float = 9.0
+    font_size_override_points: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": (
+                "Optional pixel/point override for label font size. When set, bypasses "
+                "data-coord font sizing and routes directly to matplotlib fontsize= "
+                "(display points). NOT DIFFERENTIABLE."
+            )
+        },
+    )
+    """Optional pixel/point override for label font size. When set, bypasses
+    data-coord font sizing and routes directly to matplotlib ``fontsize=``
+    (display points). NOT DIFFERENTIABLE."""
     font_color: str = NEAR_BLACK
     text_align: str = "center"  # left, center, right
     text_valign: str = "center"  # top, center, bottom
@@ -422,6 +447,13 @@ class EdgeStyle:
 
     color: str = "#6B7280"  # medium gray — visible but recedes behind nodes
     width: float = 1.4
+    width_override_points: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": "Optional pixel/point override for edge stroke width. NOT DIFFERENTIABLE."
+        },
+    )
+    """Optional pixel/point override for edge stroke width. NOT DIFFERENTIABLE."""
     arrow: str = "normal"  # normal, vee, dot, diamond, tee, crow, circle, open, none
     tail_arrow: str = "none"
     arrow_fill: str = "filled"  # filled, hollow
@@ -439,6 +471,13 @@ class EdgeStyle:
     # New fields (Part 2)
     routing: str = "bezier"  # bezier, straight, ortho, taxi — post-layout
     label_font_size: float = 7.0  # render-only
+    font_size_override_points: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": ("Optional pixel/point override for edge label font size. NOT DIFFERENTIABLE.")
+        },
+    )
+    """Optional pixel/point override for edge label font size. NOT DIFFERENTIABLE."""
     label_font_color: str = NEAR_BLACK  # render-only
     label_background: str = WARM_WHITE  # render-only
     label_background_opacity: float = 0.85
@@ -487,6 +526,15 @@ class ClusterStyle:
     fill: str = PAPER
     stroke: str = LIGHT_GRAY
     stroke_width: float = 0.7
+    stroke_width_override_points: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": (
+                "Optional pixel/point override for cluster border stroke width. NOT DIFFERENTIABLE."
+            )
+        },
+    )
+    """Optional pixel/point override for cluster border stroke width. NOT DIFFERENTIABLE."""
     stroke_dash: str = "solid"
     corner_radius: float = 8.0
     padding: float = 38.0
@@ -494,6 +542,15 @@ class ClusterStyle:
     # outside: outside-top/outside-bottom
     label_position: str = "top-left"
     font_size: float = 9.5
+    font_size_override_points: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": (
+                "Optional pixel/point override for cluster label font size. NOT DIFFERENTIABLE."
+            )
+        },
+    )
+    """Optional pixel/point override for cluster label font size. NOT DIFFERENTIABLE."""
     font_weight: str = "bold"
     font_color: str = DARK_GRAY
     opacity: float = 0.32
