@@ -16,6 +16,8 @@ On Linux/Mac, mplcairo also requires the libcairo system library:
 """
 
 _DEFAULT_BACKEND_OVERRIDE: Optional[BackendName] = None
+_CAIRO_STROKE_WIDTH_SCALE = 0.86
+_AGG_STROKE_WIDTH_SCALE = 1.0
 
 
 def _preload_cairo_library() -> None:
@@ -118,6 +120,38 @@ def _coerce_backend_name(name: str) -> BackendName:
     if normalized == "cairo":
         return "cairo"
     raise ValueError(f"Unknown render backend {name!r}; expected 'agg', 'cairo', or None.")
+
+
+def stroke_width_scale_for(backend_name: str) -> float:
+    """Return the per-backend stroke-width calibration factor.
+
+    Parameters
+    ----------
+    backend_name : str
+        Resolved Matplotlib backend name.
+
+    Returns
+    -------
+    float
+        Multiplicative stroke-width calibration factor for render-time
+        data-coordinate ribbons.
+
+    Notes
+    -----
+    Cairo distributes stroke ink differently from Agg at the same nominal
+    filled-ribbon width. Multiplying the data-coordinate ribbon width by this
+    constant under cairo restores effective ink density parity with Agg and the
+    graphviz reference. Empirically calibrated to 0.86 during Sprint B Round 3
+    on 2026-04-30 after the proposed 1.15 nudge moved
+    ``nodes_shapes_rect`` / ``nodes_shapes_tab`` farther from graphviz; the
+    lower value closes the L1 regression on ``nodes_shapes_rect`` and
+    ``nodes_shapes_tab`` without regressing cairo's wins on dashed strokes,
+    curve anti-aliasing, or text hinting. The optimizer still sees the user's
+    ``style.stroke_width`` value unchanged.
+    """
+    if backend_name == "cairo":
+        return _CAIRO_STROKE_WIDTH_SCALE
+    return _AGG_STROKE_WIDTH_SCALE
 
 
 def _resolve_backend(name: Optional[str]) -> Tuple[Type, str]:
