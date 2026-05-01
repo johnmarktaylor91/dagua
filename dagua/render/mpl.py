@@ -40,6 +40,7 @@ from dagua.layout.ops.cluster_geometry import (
     ClusterPlacementBox,
     compute_cluster_placement_bbox,
 )
+from dagua.render._backend import stroke_width_scale_for
 from dagua.render.borders import (
     ShapeSpec,
     add_corner_radius,
@@ -1199,9 +1200,11 @@ def _new_figure_axes(
     from dagua.render._backend import _resolve_backend
 
     fig = Figure(figsize=figsize)
-    canvas_cls, _resolved_backend = _resolve_backend(backend)
+    canvas_cls, resolved_backend = _resolve_backend(backend)
     canvas_cls(fig)
-    return fig, fig.add_subplot(1, 1, 1)
+    ax = fig.add_subplot(1, 1, 1)
+    setattr(ax, "_dagua_backend_name", resolved_backend)
+    return fig, ax
 
 
 def _detect_output_format(output: Optional[str], format: Optional[str]) -> Optional[str]:
@@ -2403,8 +2406,9 @@ def _draw_node_shape_extras(
         inner_w = w * (1.0 - gap_ratio)
         inner_h = h * (1.0 - gap_ratio)
         display_scale = _compute_display_scale(ax)
+        stroke_scale = _effective_stroke_scale(ax)
         border_width = clamp_border_width(
-            max(float(style.stroke_width), 1.0) * display_scale,
+            max(float(style.stroke_width), 1.0) * stroke_scale,
             inner_w,
             inner_h,
         )
@@ -2439,8 +2443,9 @@ def _draw_node_shape_extras(
 
     cap_h = max(h * 0.16, 1.0)
     display_scale = _compute_display_scale(ax)
+    stroke_scale = _effective_stroke_scale(ax)
     rim_h = cap_h * 2.0
-    border_width = clamp_border_width(float(style.stroke_width) * display_scale, w, rim_h)
+    border_width = clamp_border_width(float(style.stroke_width) * stroke_scale, w, rim_h)
     shape_spec = ShapeSpec(
         center_x=x,
         center_y=y + h / 2 - cap_h,
@@ -2954,15 +2959,15 @@ def _normalize_border_position(border_position: str) -> str:
     return "center"
 
 
-def _node_border_outward_offset(style: Any, display_scale: float) -> float:
+def _node_border_outward_offset(style: Any, stroke_scale: float) -> float:
     """Return how far a border extends beyond the node boundary.
 
     Parameters
     ----------
     style : Any
         Node style object exposing ``stroke_width`` and ``border_position``.
-    display_scale : float
-        Point-to-data conversion factor for the current axes.
+    stroke_scale : float
+        Backend-calibrated point-to-data conversion factor for stroke ribbons.
 
     Returns
     -------
@@ -2970,7 +2975,7 @@ def _node_border_outward_offset(style: Any, display_scale: float) -> float:
         Outward border extent in data units. ``inside`` borders do not extend
         beyond the mathematical node boundary.
     """
-    stroke_width = max(float(getattr(style, "stroke_width", 0.0)), 0.0) * display_scale
+    stroke_width = max(float(getattr(style, "stroke_width", 0.0)), 0.0) * stroke_scale
     border_position = _normalize_border_position(getattr(style, "border_position", "center"))
     if border_position == "inside":
         return 0.0
@@ -3017,7 +3022,7 @@ def _offset_edge_terminal_point(
     positions: Optional[np.ndarray],
     node_idx: int,
     point: Tuple[float, float],
-    display_scale: float,
+    stroke_scale: float,
 ) -> Tuple[float, float]:
     """Return a marker tip translated to the node border's visible outer edge.
 
@@ -3031,8 +3036,9 @@ def _offset_edge_terminal_point(
         Node index owning the terminal.
     point : tuple[float, float]
         Original terminal point on the mathematical node boundary.
-    display_scale : float
-        Point-to-data conversion factor for the current axes.
+    stroke_scale : float
+        Backend-calibrated point-to-data conversion factor for node border
+        strokes.
 
     Returns
     -------
@@ -3043,7 +3049,7 @@ def _offset_edge_terminal_point(
     if positions is None or node_idx < 0 or node_idx >= int(len(positions)):
         return point
     style = _node_style_for_render(graph, node_idx)
-    offset = _node_border_outward_offset(style, display_scale)
+    offset = _node_border_outward_offset(style, stroke_scale)
     if offset <= 0.0:
         return point
     node_center = (float(positions[node_idx, 0]), float(positions[node_idx, 1]))
@@ -3105,7 +3111,7 @@ def _offset_custom_edge_collection_terminals(
     collection: DaguaEdgeCollection,
     graph: Any,
     positions: Optional[np.ndarray],
-    display_scale: float,
+    stroke_scale: float,
 ) -> None:
     """Shift custom-rendered arrowheads to the visible node border.
 
@@ -3117,8 +3123,9 @@ def _offset_custom_edge_collection_terminals(
         Graph exposing node-style lookup.
     positions : numpy.ndarray | None
         Node positions with shape ``[N, 2]`` in data coordinates.
-    display_scale : float
-        Point-to-data conversion factor for the current axes.
+    stroke_scale : float
+        Backend-calibrated point-to-data conversion factor for node border
+        strokes.
 
     Returns
     -------
@@ -3140,7 +3147,7 @@ def _offset_custom_edge_collection_terminals(
                 positions,
                 int(edge.target_node),
                 (float(prepared.lane_curve.p1[0]), float(prepared.lane_curve.p1[1])),
-                display_scale,
+                stroke_scale,
             )
             dx = shifted_tip[0] - float(prepared.lane_curve.p1[0])
             dy = shifted_tip[1] - float(prepared.lane_curve.p1[1])
@@ -3152,7 +3159,7 @@ def _offset_custom_edge_collection_terminals(
                 positions,
                 int(edge.source_node),
                 (float(prepared.lane_curve.p0[0]), float(prepared.lane_curve.p0[1])),
-                display_scale,
+                stroke_scale,
             )
             dx = shifted_tip[0] - float(prepared.lane_curve.p0[0])
             dy = shifted_tip[1] - float(prepared.lane_curve.p0[1])
@@ -4773,6 +4780,7 @@ def _draw_nodes(
     from matplotlib.colors import to_rgba
 
     display_scale = _compute_display_scale(ax)
+    stroke_scale = _effective_stroke_scale(ax)
     clip_patches: List[Any] = []
     fill_paths: List[Any] = []
     fill_colors: List[Any] = []
@@ -4785,7 +4793,7 @@ def _draw_nodes(
         style = _node_style_for_render(graph, i)
         scaled_style = _scaled_node_style(style, display_scale)
         corner_radius = _node_corner_radius_data(style, display_scale, w, h)
-        border_width = clamp_border_width(float(style.stroke_width) * display_scale, w, h)
+        border_width = clamp_border_width(float(style.stroke_width) * stroke_scale, w, h)
         border_position = _normalize_border_position(getattr(style, "border_position", "center"))
         shape_spec = ShapeSpec(
             center_x=x,
@@ -5161,6 +5169,31 @@ def _compute_display_scale(ax: Any) -> float:
     scale_y = _points_to_data_units(ax, 1.0, "y")
     scale = min(scale_x, scale_y)
     return scale if scale > 1e-9 else 1.0
+
+
+def _effective_stroke_scale(ax: Any) -> float:
+    """Return the backend-calibrated point-to-data scale for stroke ribbons.
+
+    Parameters
+    ----------
+    ax : Any
+        Matplotlib axes with the resolved Dagua backend name stashed by
+        :func:`_new_figure_axes`.
+
+    Returns
+    -------
+    float
+        Point-to-data scale multiplied by the backend's stroke-width
+        calibration factor.
+
+    Notes
+    -----
+    Sprint B Round 3 keeps the authored style width and optimizer geometry
+    unchanged, but cairo needs a small render-time ribbon-width nudge to match
+    Agg / graphviz effective stroke ink density.
+    """
+    backend_name = str(getattr(ax, "_dagua_backend_name", "agg"))
+    return _compute_display_scale(ax) * stroke_width_scale_for(backend_name)
 
 
 def _marker_data_size(
@@ -7117,7 +7150,7 @@ def _draw_direct_edge_markers(
         src_node_height = float(graph.node_sizes[src_idx, 1])
         tgt_node_width = float(graph.node_sizes[tgt_idx, 0])
         tgt_node_height = float(graph.node_sizes[tgt_idx, 1])
-        display_scale = _compute_display_scale(ax)
+        stroke_scale = _effective_stroke_scale(ax)
         gradient_start_color = str(style.color)
         gradient_end_color = str(style.color_gradient_end or style.color)
 
@@ -7133,7 +7166,7 @@ def _draw_direct_edge_markers(
                 positions,
                 src_idx,
                 curve.p0,
-                display_scale,
+                stroke_scale,
             )
             _draw_edge_marker(
                 ax=ax,
@@ -7158,7 +7191,7 @@ def _draw_direct_edge_markers(
                 positions,
                 tgt_idx,
                 curve.p1,
-                display_scale,
+                stroke_scale,
             )
             _draw_edge_marker(
                 ax=ax,
@@ -7817,7 +7850,7 @@ def _build_custom_edge_collection(
         collection,
         graph,
         positions,
-        _compute_display_scale(ax),
+        _effective_stroke_scale(ax),
     )
     return collection
 
@@ -9021,6 +9054,7 @@ def _draw_clusters(
     ordered_clusters = _cluster_render_order(graph)
     cluster_depths = _cluster_depths(graph, ordered_clusters)
     display_scale = _compute_display_scale(ax)
+    stroke_scale = _effective_stroke_scale(ax)
     cluster_parents = getattr(graph, "cluster_parents", {}) or {}
 
     fill_paths_by_depth: Dict[int, List[Any]] = {}
@@ -9121,7 +9155,7 @@ def _draw_clusters(
 
         width = x_max - x_min
         height = y_max - y_min
-        border_width = clamp_border_width(eff_stroke_width * display_scale, width, height)
+        border_width = clamp_border_width(eff_stroke_width * stroke_scale, width, height)
         shape_spec = ShapeSpec(
             center_x=(x_min + x_max) / 2.0,
             center_y=(y_min + y_max) / 2.0,

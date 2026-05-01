@@ -10,6 +10,7 @@ from matplotlib.patches import PathPatch
 from matplotlib.path import Path
 from matplotlib.transforms import Affine2D
 
+from dagua.render._backend import stroke_width_scale_for
 from dagua.render.edges.ribbon import polyline_ribbon_path
 from dagua.render.text.decorations import (
     background_rect_path,
@@ -544,6 +545,8 @@ def render_text(
         Artists created for all labels.
     """
     safe_scale = max(float(display_scale), 1e-9)
+    backend_name = str(getattr(ax, "_dagua_backend_name", "agg"))
+    stroke_scale = safe_scale * stroke_width_scale_for(backend_name)
     artists: List[Any] = []
 
     for spec in specs:
@@ -636,7 +639,7 @@ def render_text(
                     if _path_is_empty(segment.glyph_run.path):
                         continue
                     outline_gid = _patch_gid(spec, "outline", line_index, segment_index)
-                    outline_width = _outline_linewidth(spec) * safe_scale
+                    outline_width = _outline_linewidth(spec) * stroke_scale
                     for outline_path in _glyph_stroke_ribbon_paths(
                         _segment_path(spec, block, line, segment),
                         outline_width,
@@ -660,7 +663,7 @@ def render_text(
                     continue
                 if _segment_needs_bold_emphasis(spec, segment):
                     emphasis_gid = _patch_gid(spec, "embolden", line_index, segment_index)
-                    emphasis_width = _bold_emphasis_linewidth(spec) * safe_scale
+                    emphasis_width = _bold_emphasis_linewidth(spec) * stroke_scale
                     for emphasis_path in _glyph_stroke_ribbon_paths(
                         _segment_path(spec, block, line, segment),
                         emphasis_width,
