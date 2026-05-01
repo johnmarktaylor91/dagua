@@ -107,7 +107,7 @@ _STYLE_REPR_PRIORITY_FIELDS: Dict[str, List[str]] = {
     "NodeStyle": ["shape", "fill", "stroke", "font_size", "font_family", "font_color"],
     "EdgeStyle": ["color", "width", "arrow", "routing", "style", "opacity"],
     "ClusterStyle": ["fill", "stroke", "font_size", "padding", "opacity"],
-    "GraphStyle": ["background_color", "margin"],
+    "GraphStyle": ["background_color", "margin_inches", "dpi"],
 }
 
 NODE_SHAPE_NAMES: Tuple[str, ...] = (
@@ -595,6 +595,24 @@ class GraphStyle:
 
     background_color: str = WARM_WHITE
     margin: float = 18.0
+    margin_inches: float = 0.11
+    """Per-side margin in inches around the graph bbox. Matches graphviz ``margin``."""
+
+    dpi: int = 96
+    """Dots per inch for raster output. Matches graphviz ``dpi`` default for PNG."""
+
+    size_inches: Optional[Tuple[float, float]] = None
+    """Maximum image dimensions in inches as ``(width, height)``. Matches graphviz ``size``."""
+
+    size_force_fit: bool = False
+    """Force-fit to ``size_inches`` exactly, corresponding to graphviz ``size="W,H!"``."""
+
+    pad_inches: float = 0.0
+    """Additional padding inside the bbox. Matches graphviz ``pad``."""
+
+    ratio: Optional[str] = None
+    """Aspect handling: ``fill``, ``compress``, ``expand``, ``auto``, or ``None``."""
+
     density_aware_node_shrink: bool = False
     title_font_size: float = 10.0
     title_font_weight: str = "regular"
