@@ -109,6 +109,7 @@ PANEL_FIGSIZE: Tuple[float, float] = (
 )
 CONTENT_CROP_PADDING = 12
 PAIR_DEFAULT_GAP = 260.0
+PAIR_SHAPE_COMPARISON_GAP = 110.0  # Match graphviz's natural rank spacing for shape parity.
 PAIR_SCALAR_COMPARISON_GAP = 180.0
 PAIR_ARROW_GAP = 130.0
 CURVATURE_CARD_MARGIN = 140.0
@@ -1852,6 +1853,7 @@ def _apply_reference_card_tweaks(
         for style in _node_styles(graph):
             style.padding = DECORATIVE_FILL_CARD_PADDING
     if item.card_id in NODE_SHAPE_PARITY_CARD_IDS:
+        positions = _pair_positions(node_gap=PAIR_SHAPE_COMPARISON_GAP)
         for style in _node_styles(graph):
             style.fill = NODE_FILL
             style.stroke = NODE_STROKE
