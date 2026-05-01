@@ -213,6 +213,10 @@ class DaguaEdge:
         markers stay at a constant absolute size across panels (matching
         dot's PostScript renderer, which never scales arrow markers with
         edge length). Round 11 F3.
+    min_visible_width : float | None, default=None
+        Optional data-coordinate body-width floor computed from the active
+        axes. This lets the matplotlib adapter enforce its display-space
+        visibility floor before dashed/dotted bodies are split into ribbons.
     """
 
     curve: CubicBezier
@@ -248,6 +252,7 @@ class DaguaEdge:
     body_curve: Optional[CubicBezier] = None
     body_clip_terminal: Optional[str] = None
     disable_curve_length_clamp: bool = False
+    min_visible_width: Optional[float] = None
 
     def resolved_arrow_length(self) -> float:
         """Return the effective arrowhead length.
@@ -306,7 +311,7 @@ class DaguaEdge:
         renderer's general body-width floor, not the narrow tip floor.
         """
         if self.taper_width_start is None:
-            return _render_width(self.width)
+            return _render_width(self.width, self.min_visible_width)
         return max(float(self.taper_width_start), MIN_RENDER_WIDTH)
 
     def resolved_taper_width_end(self) -> float:
@@ -323,7 +328,7 @@ class DaguaEdge:
         fine tip without degenerating into zero-area geometry at export time.
         """
         if self.taper_width_end is None:
-            return max(_render_width(self.width), MIN_TAPER_WIDTH)
+            return max(_render_width(self.width, self.min_visible_width), MIN_TAPER_WIDTH)
         return max(float(self.taper_width_end), MIN_TAPER_WIDTH)
 
     def resolved_tail_arrow_length(self) -> float:
@@ -384,20 +389,40 @@ def choose_rendering_tier(num_edges: int) -> RenderTier:
     return "bundled"
 
 
-def _render_width(width: float) -> float:
+def _render_width(width: float, min_visible_width: Optional[float] = None) -> float:
     """Return the visible body width used for rasterized ribbon rendering.
 
     Parameters
     ----------
     width : float
         Requested body width in data units.
+    min_visible_width : float | None, default=None
+        Optional caller-supplied visibility floor in data units.
 
     Returns
     -------
     float
         Width clamped to a minimum visible floor.
     """
-    return max(float(width), MIN_RENDER_WIDTH)
+    if min_visible_width is None:
+        return max(float(width), MIN_RENDER_WIDTH)
+    return max(float(width), MIN_RENDER_WIDTH, float(min_visible_width))
+
+
+def _edge_render_width(edge: DaguaEdge) -> float:
+    """Return the visibility-clamped render width for an edge.
+
+    Parameters
+    ----------
+    edge : DaguaEdge
+        Edge whose body width should be resolved.
+
+    Returns
+    -------
+    float
+        Width in data units after the local and caller-supplied floors.
+    """
+    return _render_width(edge.width, edge.min_visible_width)
 
 
 def _curve_length(curve: CubicBezier) -> float:
@@ -452,7 +477,7 @@ def _coincident_endpoint_loop(edge: DaguaEdge) -> CubicBezier:
     )
     loop_radius = max(
         ZERO_LENGTH_LOOP_FLOOR,
-        _render_width(edge.width) * 3.0,
+        _edge_render_width(edge) * 3.0,
         terminal_extent * ZERO_LENGTH_LOOP_SCALE,
     )
     return CubicBezier.from_points(
@@ -494,7 +519,7 @@ def _segment_render_width(edge: DaguaEdge) -> float:
     float
         Width used for filled dash ribbons.
     """
-    render_width = _render_width(edge.width)
+    render_width = _edge_render_width(edge)
     if not isinstance(edge.linestyle, str):
         return render_width
     if render_width < THICK_DASH_THRESHOLD:
@@ -583,7 +608,7 @@ def _needs_dash_connector(edge: DaguaEdge) -> bool:
     return (
         isinstance(edge.linestyle, str)
         and edge.linestyle in {"dashed", "dashdot"}
-        and _render_width(edge.width) >= THICK_DASH_THRESHOLD
+        and _edge_render_width(edge) >= THICK_DASH_THRESHOLD
     )
 
 
@@ -632,11 +657,12 @@ def _terminal_dimensions(
         SHORT_EDGE_HEAD_FRACTION_BOTH_TERMINALS if has_both_terminals else SHORT_EDGE_HEAD_FRACTION
     )
     capped_length = min(base_length, curve_length * max_fraction)
-    min_length = _render_width(edge.width) * MIN_ARROW_LENGTH_FACTOR
+    render_width = _edge_render_width(edge)
+    min_length = render_width * MIN_ARROW_LENGTH_FACTOR
     resolved_length = max(capped_length, min_length)
-    max_width = max(_render_width(edge.width) * MIN_ARROW_WIDTH_FACTOR, resolved_length * 0.9)
+    max_width = max(render_width * MIN_ARROW_WIDTH_FACTOR, resolved_length * 0.9)
     resolved_width = min(base_width, max_width)
-    resolved_width = max(resolved_width, _render_width(edge.width) * MIN_ARROW_WIDTH_FACTOR)
+    resolved_width = max(resolved_width, render_width * MIN_ARROW_WIDTH_FACTOR)
     return resolved_length, resolved_width
 
 
@@ -683,7 +709,7 @@ def _label_offset(edge: DaguaEdge) -> float:
     """
     return max(
         edge.label_offset,
-        _render_width(edge.width) * LABEL_CLEARANCE_WIDTH_RATIO,
+        _edge_render_width(edge) * LABEL_CLEARANCE_WIDTH_RATIO,
         LABEL_CLEARANCE_FLOOR,
     )
 
@@ -970,8 +996,9 @@ def _scaled_head_size(edge: DaguaEdge, scale: float, terminal: str) -> Tuple[flo
     else:
         base_length = edge.resolved_tail_arrow_length()
         base_width = edge.resolved_tail_arrow_width()
-    scaled_length = max(_render_width(edge.width) * MIN_ARROW_LENGTH_FACTOR, base_length * scale)
-    scaled_width = max(_render_width(edge.width) * MIN_ARROW_WIDTH_FACTOR, base_width * scale)
+    render_width = _edge_render_width(edge)
+    scaled_length = max(render_width * MIN_ARROW_LENGTH_FACTOR, base_length * scale)
+    scaled_width = max(render_width * MIN_ARROW_WIDTH_FACTOR, base_width * scale)
     return scaled_length, scaled_width
 
 
@@ -1123,7 +1150,7 @@ def _trimmed_body_curve(
     has_head = edge.arrowhead != "none"
     has_tail = edge.tail_arrow != "none"
     has_both_terminals = has_head and has_tail
-    render_width = _render_width(edge.width)
+    render_width = _edge_render_width(edge)
 
     if has_head:
         head_length, head_width = _terminal_dimensions(
@@ -1379,7 +1406,7 @@ class DaguaEdgeCollection:
             if prepared.body_curve is None:
                 continue
             edge = prepared.edge
-            render_width = _render_width(edge.width)
+            render_width = _edge_render_width(edge)
             if edge.uses_taper():
                 body_paths.append(
                     PathPatch(
