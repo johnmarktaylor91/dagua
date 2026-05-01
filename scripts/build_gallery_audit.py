@@ -2226,6 +2226,7 @@ def _render_dagua_png(
     output_path: Path,
     size_px: Tuple[int, int],
     backend: Optional[str] = None,
+    fit_to_canvas: bool | float = False,
 ) -> None:
     """Render a Dagua graph to a PNG file.
 
@@ -2241,6 +2242,9 @@ def _render_dagua_png(
         Requested raw canvas size in pixels.
     backend : str | None, optional
         Matplotlib backend selector passed through to :func:`dagua.render`.
+    fit_to_canvas : bool or float, default=False
+        Whether Dagua should fit the resolved layout bounds to the requested
+        raw canvas before the gallery compositor places it in a card.
 
     Returns
     -------
@@ -2256,10 +2260,11 @@ def _render_dagua_png(
         dpi=RENDER_DPI,
         figsize=(size_px[0] / RENDER_DPI, size_px[1] / RENDER_DPI),
         backend=backend,
+        fit_to_canvas=fit_to_canvas,
     )
     fig.patch.set_facecolor(bg_color)
     ax.set_facecolor(bg_color)
-    if graph.node_sizes is not None and graph.num_nodes:
+    if not fit_to_canvas and graph.node_sizes is not None and graph.num_nodes:
         pos = positions.detach().cpu()
         sizes = graph.node_sizes.detach().cpu()
         x_min = float((pos[:, 0] - sizes[:, 0] / 2.0).min())
@@ -2280,6 +2285,31 @@ def _render_dagua_png(
         transparent=False,
     )
     plt.close(fig)
+
+
+def _content_size(
+    canvas_size: Tuple[int, int],
+    inset: Tuple[int, int, int, int],
+) -> Tuple[int, int]:
+    """Return the drawable content dimensions inside a card inset.
+
+    Parameters
+    ----------
+    canvas_size : tuple[int, int]
+        Full card or panel dimensions in pixels.
+    inset : tuple[int, int, int, int]
+        Left, top, right, and bottom insets.
+
+    Returns
+    -------
+    tuple[int, int]
+        Positive content width and height in pixels.
+    """
+
+    return (
+        max(canvas_size[0] - inset[0] - inset[2], 1),
+        max(canvas_size[1] - inset[1] - inset[3], 1),
+    )
 
 
 def _render_graphviz_png(dot_source: str, output_path: Path) -> None:
@@ -2843,7 +2873,15 @@ def _render_comparison_card(
     with tempfile.TemporaryDirectory() as temp_dir:
         dagua_raw = Path(temp_dir) / "dagua.png"
         graphviz_raw = Path(temp_dir) / "graphviz.png"
-        _render_dagua_png(graph, positions, dagua_raw, PANEL_SIZE, backend=backend)
+        dagua_size = _content_size(PANEL_SIZE, PANEL_CONTENT_INSET)
+        _render_dagua_png(
+            graph,
+            positions,
+            dagua_raw,
+            dagua_size,
+            backend=backend,
+            fit_to_canvas=True,
+        )
         _render_graphviz_png(_build_comparison_dot_source(graph, item), graphviz_raw)
         dagua_panel = _place_render_on_canvas(
             dagua_raw,
@@ -3891,7 +3929,16 @@ def _render_combo_card(
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temp_dir:
         raw_path = Path(temp_dir) / "combo.png"
-        _render_dagua_png(graph, positions, raw_path, CARD_SIZE, backend=backend)
+        fit_combo = fixture == "combo_flow"
+        raw_size = _content_size(CARD_SIZE, CARD_CONTENT_INSET) if fit_combo else CARD_SIZE
+        _render_dagua_png(
+            graph,
+            positions,
+            raw_path,
+            raw_size,
+            backend=backend,
+            fit_to_canvas=fit_combo,
+        )
         card = _place_render_on_canvas(raw_path, CARD_SIZE, CARD_CONTENT_INSET)
     features = ", ".join(
         name.replace("_", " ")
