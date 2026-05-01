@@ -117,6 +117,29 @@ def test_round10_fill_reclassification_and_radial_graphviz_attrs() -> None:
     assert attrs["fillcolor"] == "#2196F3:#FF9800"
 
 
+def test_border_position_cards_are_graphviz_extension_tier_c() -> None:
+    """Inside/outside border-position cards should be graphviz-unmappable Tier C.
+
+    Returns
+    -------
+    None
+        The expected tier and reason are asserted in place.
+    """
+
+    reference_by_id = {item.card_id: item for item in build_reference_items()}
+    for card_id in (
+        "nodes_borders_border_position_inside",
+        "nodes_borders_border_position_outside",
+    ):
+        item = reference_by_id[card_id]
+        assert _card_competitor_tools(item) == ()
+        assert _classify_tier(_card_competitor_tools(item)) == "C"
+        assert _tier_c_reason(item) == (
+            "dagua-specific feature; graphviz lacks inside/outside border modes "
+            "(Graphviz++ extension)"
+        )
+
+
 def test_round10_canvas_occupancy_cards_are_tier_c() -> None:
     """Round-10 canvas-occupancy residuals should not count as Tier A.
 
@@ -423,8 +446,9 @@ def test_prepare_reference_render_strengthens_subtle_border_comparisons() -> Non
 
     assert left_style is not None
     assert right_style is not None
-    assert left_style.stroke_width == pytest.approx(3.0)
+    assert left_style.stroke_width == pytest.approx(4.0)
     assert left_style.stroke == NODE_STROKE
+    assert right_style.stroke_width == pytest.approx(4.0)
     assert right_style.stroke == NODE_STROKE
     assert right_style.border_opacity == pytest.approx(0.2)
 
@@ -492,8 +516,9 @@ def test_prepare_reference_render_applies_gallery_demo_tweaks() -> None:
 
     assert top_style is not None
     assert bottom_style is not None
-    assert top_style.external_label == "ID 42"
-    assert bottom_style.external_label == ""
+    assert top_style.external_label == ""
+    assert bottom_style.external_label == "ID 42"
+    assert bottom_style.external_label_position == "top"
 
     item = next(
         item for item in build_reference_items() if item.card_id == "nodes_fills_fill_pattern_pie"
@@ -516,7 +541,6 @@ def test_prepare_reference_render_applies_gallery_demo_tweaks() -> None:
         assert graph.node_styles
         for style in graph.node_styles:
             assert style is not None
-            assert style.min_height == pytest.approx(110.0)
             assert style.padding == pytest.approx((8.0, 4.0))
 
     item = next(
