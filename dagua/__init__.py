@@ -11,6 +11,7 @@ if "PYTORCH_CUDA_ALLOC_CONF" not in _os.environ:
     _os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 from dataclasses import replace
+from typing import Any, Optional, Tuple
 
 from dagua.animation import (
     AnimationConfig,
@@ -70,6 +71,7 @@ from dagua.layout import layout
 from dagua.metrics import evaluate, layout_similarity
 from dagua.playground import launch_playground
 from dagua.render import render
+from dagua.render._backend import get_default_backend, set_default_backend
 from dagua.styles import (
     DARK_THEME,
     DEFAULT_NODE_STYLES,
@@ -93,15 +95,42 @@ from dagua.styles import (
 
 
 def draw(
-    graph, config=None, output=None, relayout=None, use_cached=False, direction=None, **kwargs
-):
-    """Layout + render in one call. Convenience function.
+    graph: Any,
+    config: Optional[LayoutConfig] = None,
+    output: Optional[str] = None,
+    relayout: Optional[bool] = None,
+    use_cached: bool = False,
+    direction: Optional[str] = None,
+    backend: Optional[str] = None,
+    **kwargs: Any,
+) -> Tuple[Any, Any]:
+    """Layout and render a graph in one convenience call.
 
-    Full pipeline: layout → route_edges → optimize_edges → place_edge_labels → render.
-    Edge optimization is controlled by config.edge_opt_steps (0=auto, -1=skip, >0=explicit).
+    Parameters
+    ----------
+    graph : Any
+        Dagua graph object to lay out and render.
+    config : LayoutConfig, optional
+        Layout configuration. When omitted, global defaults provide device,
+        layout overrides, and theme settings.
+    output : str, optional
+        Output file path passed to the renderer.
+    relayout : bool, optional
+        Force or skip layout recomputation.
+    use_cached : bool, default=False
+        Reuse cached graph layout positions.
+    direction : str, optional
+        Layout direction override.
+    backend : str, optional
+        Matplotlib render backend: ``"agg"``, ``"cairo"``, or ``None`` for the
+        auto-detected/global default.
+    **kwargs : Any
+        Additional keyword arguments forwarded to ``dagua.render``.
 
-    When config=None, consults global defaults (dagua.configure()) for
-    device, layout overrides, and theme settings.
+    Returns
+    -------
+    tuple[Any, Any]
+        Matplotlib ``(figure, axes)`` pair from ``dagua.render``.
     """
     user_supplied_config = config is not None
     if config is None:
@@ -181,6 +210,7 @@ def draw(
         output=output,
         curves=curves,
         label_positions=label_positions,
+        backend=backend,
         **kwargs,
     )
 
@@ -234,6 +264,8 @@ __all__ = [
     "get_defaults",
     "export_config",
     "reset",
+    "set_default_backend",
+    "get_default_backend",
     # IO
     "route_edges",
     "place_edge_labels",

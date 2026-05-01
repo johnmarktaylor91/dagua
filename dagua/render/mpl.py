@@ -1176,24 +1176,31 @@ def _strict_content_figsize(width_points: float, height_points: float) -> Tuple[
     return (max(width_points, 1.0) / 72.0, max(height_points, 1.0) / 72.0)
 
 
-def _new_figure_axes(figsize: Optional[Tuple[float, float]]) -> Tuple[Any, Any]:
-    """Create a headless Matplotlib figure with an attached Agg canvas.
+def _new_figure_axes(
+    figsize: Optional[Tuple[float, float]],
+    backend: Optional[str] = None,
+) -> Tuple[Any, Any]:
+    """Create a headless Matplotlib figure with an attached canvas.
 
     Parameters
     ----------
     figsize : tuple[float, float] | None
         Figure size in inches.
+    backend : str, optional
+        Render backend selector. ``None`` uses Dagua's auto-detected default.
 
     Returns
     -------
     tuple[Any, Any]
         Matplotlib ``(figure, axes)`` pair.
     """
-    from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
+    from dagua.render._backend import _resolve_backend
+
     fig = Figure(figsize=figsize)
-    FigureCanvasAgg(fig)
+    canvas_cls, _resolved_backend = _resolve_backend(backend)
+    canvas_cls(fig)
     return fig, fig.add_subplot(1, 1, 1)
 
 
@@ -1347,9 +1354,9 @@ def _expand_bounds_for_external_labels(
 
 
 def render(
-    graph,
-    positions=None,
-    config=None,
+    graph: Any,
+    positions: Any = None,
+    config: Any = None,
     output: Optional[str] = None,
     format: Optional[str] = None,
     figsize: Optional[Tuple[float, float]] = None,
@@ -1359,7 +1366,8 @@ def render(
     curves: Optional[List[BezierCurve]] = None,
     label_positions: Optional[List[Optional[Tuple[float, float]]]] = None,
     svg_hover_text: bool = True,
-):
+    backend: Optional[str] = None,
+) -> Tuple[Any, Any]:
     """Render a graph with computed node positions.
 
     Parameters
@@ -1390,6 +1398,9 @@ def render(
         Pre-computed positions for edge labels.
     svg_hover_text : bool, default=True
         Whether to embed hover tooltips in SVG outputs.
+    backend : str, optional
+        Matplotlib canvas backend: ``"agg"``, ``"cairo"``, or ``None`` for the
+        auto-detected/global default.
 
     Returns
     -------
@@ -1427,7 +1438,7 @@ def render(
     bg = gs.background_color
 
     if n == 0:
-        fig, ax = _new_figure_axes(figsize or (6, 4))
+        fig, ax = _new_figure_axes(figsize or (6, 4), backend=backend)
         fig.patch.set_facecolor(bg)
         fig.patch.set_alpha(1.0)
         if output:
@@ -1596,7 +1607,7 @@ def render(
         fig_h = min(max(fig_w * aspect, min_h), max_h)
         figsize = (fig_w, fig_h)
 
-    fig, ax = _new_figure_axes(figsize)
+    fig, ax = _new_figure_axes(figsize, backend=backend)
     fig.patch.set_facecolor(bg)
     fig.patch.set_alpha(1.0)
     ax.set_facecolor(bg)
