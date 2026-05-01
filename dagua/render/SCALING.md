@@ -69,6 +69,32 @@ The clamp is a rasterization guardrail. The optimizer-facing geometry and style
 meaning remain data-coordinate; only the emitted visual ribbon receives a floor
 so it does not disappear.
 
+## Pixel-Unit Override (Opt-In)
+
+The default render path routes everything through data coordinates (per the
+2026-03-23 directive). For users who need literal point-perfect typography
+or stroke widths -- typically when preparing figures for academic papers
+or print -- six override fields are available:
+
+- `NodeStyle.stroke_width_override_points`
+- `NodeStyle.font_size_override_points`
+- `EdgeStyle.width_override_points`
+- `EdgeStyle.font_size_override_points`
+- `ClusterStyle.stroke_width_override_points`
+- `ClusterStyle.font_size_override_points`
+
+When set, these bypass data-coord conversion and route directly to
+matplotlib's display-point rendering. Override values are **NOT
+differentiable** -- the optimizer cannot see them, so they cannot
+participate in loss terms. This is the explicit trade-off:
+calibrate-once-correct-everywhere (data-coord default) vs literal
+point-perfect rendering (override).
+
+Use overrides sparingly and intentionally. The default data-coord path
+is correct for differentiable layout; overrides are for the small
+class of cases where exact pt-to-px mapping matters more than
+scale-consistency.
+
 ## Legitimate Display-Point Residuals
 
 Display points are acceptable in two narrow categories:
