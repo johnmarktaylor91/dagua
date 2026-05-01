@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+from pathlib import Path
 from typing import Literal, Optional, Tuple, Type
 
 BackendName = Literal["agg", "cairo"]
@@ -13,6 +14,10 @@ _CAIRO_INSTALL_MESSAGE = """Cairo backend requires mplcairo. Install with:
 On Linux/Mac, mplcairo also requires the libcairo system library:
     apt install libcairo2-dev   # Ubuntu/Debian
     brew install cairo          # macOS
+"""
+
+_BIT_EQUIVALENT_INSTALL_MESSAGE = """Bit-equivalent rendering requires cairosvg. Install with:
+    pip install 'dagua[bit_equivalent]'
 """
 
 _DEFAULT_BACKEND_OVERRIDE: Optional[BackendName] = None
@@ -60,6 +65,52 @@ def _cairo_available() -> bool:
     except Exception:
         return False
     return True
+
+
+def _is_bit_equivalent_available() -> bool:
+    """Return True when cairosvg can be imported.
+
+    Returns
+    -------
+    bool
+        True when ``cairosvg`` imports cleanly, otherwise False.
+    """
+    try:
+        import cairosvg  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _render_via_cairosvg(svg_bytes: bytes, output: str | Path, dpi: int = 96) -> None:
+    """Rasterize SVG bytes to PNG through cairosvg.
+
+    Parameters
+    ----------
+    svg_bytes : bytes
+        Serialized SVG document.
+    output : str or pathlib.Path
+        Destination PNG path.
+    dpi : int, default=96
+        Rasterization DPI. Graphviz's default PNG output is 96 DPI, so Dagua
+        uses the same default for the opt-in bit-equivalent path.
+
+    Returns
+    -------
+    None
+        Writes a PNG file to ``output``.
+
+    Raises
+    ------
+    ImportError
+        If cairosvg is unavailable.
+    """
+    try:
+        import cairosvg
+    except ImportError as exc:
+        raise ImportError(_BIT_EQUIVALENT_INSTALL_MESSAGE) from exc
+
+    cairosvg.svg2png(bytestring=svg_bytes, write_to=str(output), dpi=dpi)
 
 
 def _agg_canvas_cls() -> Type:

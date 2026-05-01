@@ -40,7 +40,7 @@ from dagua.layout.ops.cluster_geometry import (
     ClusterPlacementBox,
     compute_cluster_placement_bbox,
 )
-from dagua.render._backend import stroke_width_scale_for
+from dagua.render._backend import _render_via_cairosvg, stroke_width_scale_for
 from dagua.render.borders import (
     ShapeSpec,
     add_corner_radius,
@@ -1377,6 +1377,90 @@ def _save_figure(fig, output: str, bg: str, dpi: int, format: Optional[str] = No
         img.save(output, format=target_format, **clean_kwargs)
 
 
+def _validate_bit_equivalent_output(
+    output: Optional[Union[str, Path]],
+    format: Optional[str],
+) -> None:
+    """Validate the destination for bit-equivalent rasterization.
+
+    Parameters
+    ----------
+    output : str or pathlib.Path, optional
+        Output path supplied to ``render``.
+    format : str, optional
+        Explicit output format override.
+
+    Returns
+    -------
+    None
+        Raises if the opt-in raster path cannot write a PNG destination.
+
+    Raises
+    ------
+    ValueError
+        If no output path is supplied or the requested output format is not PNG.
+    """
+    if output is None:
+        raise ValueError("bit_equivalent=True requires a PNG output path.")
+    fmt = _detect_output_format(str(output), format)
+    if fmt != "png":
+        raise ValueError("bit_equivalent=True only supports PNG output.")
+
+
+def _figure_to_svg_bytes(fig: Any, bg: str) -> bytes:
+    """Serialize a Matplotlib figure to SVG bytes.
+
+    Parameters
+    ----------
+    fig : Any
+        Matplotlib figure containing the fully drawn graph.
+    bg : str
+        Figure background color.
+
+    Returns
+    -------
+    bytes
+        SVG document bytes suitable for cairosvg rasterization.
+    """
+    tight_bbox = bool(getattr(fig, "_dagua_tight_bbox", True))
+    common: Dict[str, Any] = {
+        "facecolor": bg,
+        "edgecolor": bg,
+        "transparent": False,
+    }
+    if tight_bbox:
+        common.update({"bbox_inches": "tight", "pad_inches": 0.05})
+
+    fig.patch.set_facecolor(bg)
+    fig.patch.set_alpha(1.0)
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="svg", **common)
+    return buffer.getvalue()
+
+
+def _save_bit_equivalent_png(fig: Any, output: Union[str, Path], bg: str, dpi: int) -> None:
+    """Save a figure through SVG serialization followed by cairosvg PNG output.
+
+    Parameters
+    ----------
+    fig : Any
+        Matplotlib figure containing the fully drawn graph.
+    output : str or pathlib.Path
+        Destination PNG path.
+    bg : str
+        Figure background color.
+    dpi : int
+        cairosvg rasterization DPI.
+
+    Returns
+    -------
+    None
+        Writes the rasterized PNG to ``output``.
+    """
+    svg_bytes = _figure_to_svg_bytes(fig, bg)
+    _render_via_cairosvg(svg_bytes, output, dpi=dpi)
+
+
 def _expand_bounds_for_external_labels(
     graph: Any,
     pos: np.ndarray,
@@ -1560,7 +1644,7 @@ def render(
     graph: Any,
     positions: Any = None,
     config: Any = None,
-    output: Optional[str] = None,
+    output: Optional[Union[str, Path]] = None,
     format: Optional[str] = None,
     figsize: Optional[Tuple[float, float]] = None,
     dpi: Optional[int] = None,
@@ -1571,6 +1655,7 @@ def render(
     svg_hover_text: bool = True,
     backend: Optional[str] = None,
     fit_to_canvas: Union[bool, float] = False,
+    bit_equivalent: bool = False,
 ) -> Tuple[Any, Any]:
     """Render a graph with computed node positions.
 
@@ -1583,7 +1668,7 @@ def render(
         a fresh cached layout.
     config : Any, optional
         Unused render-time layout config placeholder kept for API compatibility.
-    output : str, optional
+    output : str or pathlib.Path, optional
         Output file path.
     format : str, optional
         Explicit output format override. When omitted, the renderer infers the
@@ -1613,6 +1698,12 @@ def render(
         ``True`` uses Dagua's default panel margin; a float supplies an explicit
         margin fraction. When truthy, this ignores graphviz natural-canvas
         fields such as ``margin_inches``, ``size_inches``, and ``ratio``.
+    bit_equivalent : bool, default=False
+        Opt-in PNG path for pixel-parity use cases. When True, Dagua renders
+        the graph to SVG using the existing Matplotlib drawing stack, then
+        rasterizes the SVG bytes through cairosvg. This requires
+        ``pip install 'dagua[bit_equivalent]'`` and is intentionally not the
+        default rendering path.
 
     Returns
     -------
@@ -1628,6 +1719,8 @@ def render(
     gs = _graph_style_for_render(graph)
     render_dpi = _resolve_render_dpi(dpi, gs)
     canvas_fit_margin = _coerce_canvas_fit_margin(fit_to_canvas)
+    if bit_equivalent:
+        _validate_bit_equivalent_output(output, format)
 
     if positions is None:
         if graph.has_fresh_layout:
@@ -1656,7 +1749,10 @@ def render(
         fig.patch.set_facecolor(bg)
         fig.patch.set_alpha(1.0)
         if output:
-            _save_figure(fig, output, bg, dpi=render_dpi, format=format)
+            if bit_equivalent:
+                _save_bit_equivalent_png(fig, output, bg, dpi=render_dpi)
+            else:
+                _save_figure(fig, str(output), bg, dpi=render_dpi, format=format)
         return fig, ax
 
     # Compute figure bounds
@@ -1970,7 +2066,10 @@ def render(
         fig.tight_layout()
 
     if output:
-        _save_figure(fig, output, bg, dpi=render_dpi, format=format)
+        if bit_equivalent:
+            _save_bit_equivalent_png(fig, output, bg, dpi=render_dpi)
+        else:
+            _save_figure(fig, str(output), bg, dpi=render_dpi, format=format)
 
     if show:
         fig.show()
