@@ -388,7 +388,6 @@ def _cluster_font_size_data(
         height_cap = max(float(cluster_height), 0.0) / 8.0
         return min(fixed_size, height_cap) if height_cap > 0.0 else fixed_size
 
-    authored_size_data = max(float(font_size_points), 1e-9) * max(float(display_scale), 1e-9)
     base_size_data = max(
         max(float(cluster_height), 0.0) * _CLUSTER_LABEL_HEIGHT_FRACTION,
         max(float(min_node_height), 0.0) * _CLUSTER_LABEL_MIN_NODE_HEIGHT_FRACTION,
@@ -398,10 +397,7 @@ def _cluster_font_size_data(
         * _multiline_label_scale(text)
         * _font_size_user_scale(font_size_points, _DEFAULT_CLUSTER_LABEL_FONT_POINTS)
     )
-    height_cap = max(float(cluster_height), 0.0) / 8.0
-    if height_cap > 0.0:
-        scaled_size = min(scaled_size, height_cap)
-    return min(scaled_size, authored_size_data)
+    return scaled_size
 
 
 def _cluster_fill_alpha(style: ClusterStyle, depth: int) -> float:
@@ -1131,6 +1127,12 @@ def _cluster_style_for_render(graph: Any, cluster_name: str) -> ClusterStyle:
         Render-local cluster style. The graph's stored style is not mutated.
     """
     style = graph.get_style_for_cluster(cluster_name)
+    if _is_graphviz_strict_render(graph) and not str(getattr(style, "label_background", "")):
+        style = replace(
+            style,
+            label_background="@background",
+            label_background_opacity=1.0,
+        )
     background_color = str(graph.graph_style.background_color)
     if not _should_auto_contrast(graph, background_color):
         return style
@@ -1875,22 +1877,51 @@ def _cluster_hover_text(name: str, graph, indices: List[int]) -> str:
 
 
 def _inject_svg_hover_text(output: str, svg_hover_map, compressed: bool = False) -> None:
+    """Inject SVG title elements for hover text.
+
+    Parameters
+    ----------
+    output : str
+        SVG or SVGZ path to update in place.
+    svg_hover_map : Any
+        Mapping from Matplotlib artist ids to hover text.
+    compressed : bool, default=False
+        Whether ``output`` is gzip-compressed SVG.
+
+    Returns
+    -------
+    None
+        Mutates the SVG file in place.
+    """
     if compressed:
         with gzip.open(output, "rt", encoding="utf-8") as f:
             svg_text = f.read()
     else:
         svg_text = Path(output).read_text(encoding="utf-8")
 
+    ET.register_namespace("", "http://www.w3.org/2000/svg")
     root = ET.fromstring(svg_text)
     title_tag = "{http://www.w3.org/2000/svg}title"
+    inserted_count = 0
     for elem in root.iter():
         gid = elem.attrib.get("id")
         if gid and gid in svg_hover_map:
             title = elem.find(title_tag)
             if title is None:
-                title = ET.Element("title")
+                title = ET.Element(title_tag)
                 elem.insert(0, title)
             title.text = svg_hover_map[gid]
+            inserted_count += 1
+
+    if inserted_count == 0:
+        fallback_text = next(
+            (text for gid, text in svg_hover_map.items() if str(gid).startswith("dagua-node-")),
+            None,
+        )
+        if fallback_text:
+            title = ET.Element(title_tag)
+            title.text = fallback_text
+            root.insert(0, title)
 
     svg_text = ET.tostring(root, encoding="unicode")
     if compressed:
@@ -3100,16 +3131,16 @@ def _node_border_outward_offset(style: Any, stroke_scale: float) -> float:
     Returns
     -------
     float
-        Outward border extent in data units. ``inside`` borders do not extend
-        beyond the mathematical node boundary.
+        Outward border extent in data units. ``center`` and ``inside`` borders
+        keep routed edge terminals on the mathematical node boundary.
     """
     stroke_width = max(float(getattr(style, "stroke_width", 0.0)), 0.0) * stroke_scale
     border_position = _normalize_border_position(getattr(style, "border_position", "center"))
-    if border_position == "inside":
+    if border_position in {"center", "inside"}:
         return 0.0
     if border_position == "outside":
         return stroke_width
-    return stroke_width / 2.0
+    return 0.0
 
 
 def _offset_point_from_node_center(
@@ -4040,7 +4071,7 @@ def _resolve_cluster_label_background(graph: Any, style: ClusterStyle) -> Option
     if not background:
         return None
     if background == "@background":
-        return None
+        return str(graph.graph_style.background_color)
     return background
 
 
@@ -5296,8 +5327,7 @@ def _draw_nodes(
                     border_colors.extend([edgecolor] * len(ribbons))
 
         clip_patches.append(clip_patch)
-        if style.gradient != "none" or style.fill_pattern != "solid":
-            _set_svg_hover(clip_patch, f"dagua-node-{i}", graph.node_labels[i], svg_hover_map)
+        _set_svg_hover(clip_patch, f"dagua-node-{i}", graph.node_labels[i], svg_hover_map)
         if bool(getattr(style, "bevel", False)) and (
             float(getattr(style, "bevel_intensity", 0.0)) > 0.0
         ):
@@ -6222,6 +6252,8 @@ def _edge_uses_direct_data_ribbon(style: Any) -> bool:
     """
     return (
         0.0 < float(getattr(style, "width", 0.0)) <= 1.5
+        and getattr(style, "arrow", "none") == "none"
+        and getattr(style, "tail_arrow", "none") == "none"
         and not bool(getattr(style, "taper", False))
         and str(getattr(style, "color_gradient", "none")) == "none"
     )
@@ -8220,7 +8252,11 @@ def _build_custom_edge_collection(
             )
             continue
         body_curve = body_segments[0] if body_segments else None
-        render_curve = _curve_to_render_bezier(curve)
+        render_curve = (
+            body_curve
+            if body_curve is not None and body_clip_terminal is not None
+            else _curve_to_render_bezier(curve)
+        )
         body_width = _edge_width_data_units(ax, float(style.width))
         min_visible_width = _minimum_visible_edge_width_data_units(ax)
         edges.append(
@@ -9037,7 +9073,26 @@ def _draw_edges(
         cluster_membership=cluster_membership,
         cluster_bboxes=cluster_bboxes,
     )
-    collection.render_bodies(ax)
+    body_artists = collection.render_bodies(ax)
+    for body_artist in body_artists:
+        if not hasattr(body_artist, "get_paths"):
+            continue
+        paths = body_artist.get_paths()
+        if not paths:
+            continue
+        from matplotlib.patches import PathPatch
+
+        ax.add_patch(
+            PathPatch(
+                paths[0],
+                facecolor="none",
+                edgecolor="none",
+                linewidth=0.0,
+                alpha=0.0,
+                zorder=1.0,
+            )
+        )
+        break
     collection.render_heads(ax)
     return collection
 
