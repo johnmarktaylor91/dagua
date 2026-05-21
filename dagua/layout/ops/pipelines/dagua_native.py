@@ -47,6 +47,125 @@ _DOT_DEFAULT_RANK_CENTER_SEP = 72.0
 _DOT_DEFAULT_NODE_SEP = 18.0
 
 
+def _is_cuda_oom_error(exc: BaseException) -> bool:
+    """Return whether an exception is a CUDA out-of-memory failure.
+
+    Parameters
+    ----------
+    exc : BaseException
+        Exception raised while preparing or running a CUDA layout path.
+
+    Returns
+    -------
+    bool
+        ``True`` when the exception text identifies a CUDA OOM condition.
+    """
+    message = str(exc).lower()
+    return "cuda" in message and "out of memory" in message
+
+
+def _prepare_native_tensors_for_device(
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    init_pos: Optional[torch.Tensor],
+    edge_weights: Optional[torch.Tensor],
+    layer_assignments: Optional[torch.Tensor],
+    target_device: torch.device,
+) -> tuple[
+    torch.device,
+    torch.Tensor,
+    torch.Tensor,
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+]:
+    """Materialize native layout tensors on the requested device.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    init_pos : torch.Tensor, optional
+        Optional initial positions with shape ``[N, 2]``.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+    layer_assignments : torch.Tensor, optional
+        Optional layer assignments with shape ``[N]``.
+    target_device : torch.device
+        Requested execution device.
+
+    Returns
+    -------
+    tuple
+        Effective device, normalized node sizes, edge index, initial
+        positions, edge weights, and layer assignments. If the first CUDA
+        materialization fails before real layout work starts, the tensors are
+        prepared on CPU so tiny graphs are not failed by CUDA context or cache
+        preallocation pressure from the surrounding benchmark process.
+    """
+
+    def prepare_on(
+        device: torch.device,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
+        """Prepare all native tensors on one concrete device.
+
+        Parameters
+        ----------
+        device : torch.device
+            Device receiving the native layout tensors.
+
+        Returns
+        -------
+        tuple
+            Normalized node sizes, edge index, initial positions, edge
+            weights, and layer assignments on ``device``.
+        """
+        normalized_node_sizes = normalize_node_sizes(node_sizes=node_sizes, device=device)
+        prepared_edge_index = edge_index.to(device=device, dtype=torch.long)
+        prepared_init_pos = (
+            init_pos.to(device=device, dtype=torch.float32) if init_pos is not None else None
+        )
+        prepared_edge_weights = (
+            edge_weights.to(device=device, dtype=torch.float32)
+            if edge_weights is not None
+            else None
+        )
+        prepared_layer_assignments = (
+            layer_assignments.to(device=device, dtype=torch.long)
+            if layer_assignments is not None
+            else None
+        )
+        return (
+            normalized_node_sizes,
+            prepared_edge_index,
+            prepared_init_pos,
+            prepared_edge_weights,
+            prepared_layer_assignments,
+        )
+
+    try:
+        prepared = prepare_on(target_device)
+        return (target_device, *prepared)
+    except RuntimeError as exc:
+        if target_device.type != "cuda" or not _is_cuda_oom_error(exc):
+            raise
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        cpu_device = torch.device("cpu")
+        prepared = prepare_on(cpu_device)
+        return (cpu_device, *prepared)
+
+
 def _selected_force_pipeline(config: LayoutConfig) -> Optional[str]:
     """Return the user-selected native sub-pipeline override.
 
@@ -3061,20 +3180,20 @@ def layout_dagua_native_pipeline(
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32, device=target_device)
 
-    normalized_node_sizes = normalize_node_sizes(node_sizes=node_sizes, device=target_device)
-    prepared_edge_index = edge_index.to(device=target_device, dtype=torch.long)
-    prepared_init_pos = (
-        init_pos.to(device=target_device, dtype=torch.float32) if init_pos is not None else None
-    )
-    prepared_edge_weights = (
-        edge_weights.to(device=target_device, dtype=torch.float32)
-        if edge_weights is not None
-        else None
-    )
-    prepared_layer_assignments = (
-        layer_assignments.to(device=target_device, dtype=torch.long)
-        if layer_assignments is not None
-        else None
+    (
+        target_device,
+        normalized_node_sizes,
+        prepared_edge_index,
+        prepared_init_pos,
+        prepared_edge_weights,
+        prepared_layer_assignments,
+    ) = _prepare_native_tensors_for_device(
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        init_pos=init_pos,
+        edge_weights=edge_weights,
+        layer_assignments=layer_assignments,
+        target_device=target_device,
     )
     resolved_seed = seed if seed is not None else effective_config.seed
     if resolved_seed is not None:
