@@ -427,28 +427,29 @@ class TsnetGradientStep(Op):
         gains = state.extras[_TSNET_GAINS_KEY]
 
         step = state.step
-        exaggeration = early_exag if step < early_steps else 1.0
-        effective_probabilities = probabilities * exaggeration
-        delta = state.pos.unsqueeze(1) - state.pos.unsqueeze(0)
-        squared_distances = delta.square().sum(dim=2)
-        numerators = (1.0 + squared_distances).reciprocal()
-        # Self-similarities stay zero so the Student-t normalization matches
-        # classic t-SNE and only covers off-diagonal mass.
-        diagonal_mask = ~torch.eye(
-            state.pos.shape[0],
-            dtype=torch.bool,
-            device=state.pos.device,
-        )
-        numerators = numerators * diagonal_mask.to(dtype=numerators.dtype)
-        q = numerators / numerators.sum().clamp(min=min_distance)
-        loss = (
-            effective_probabilities
-            * (
-                effective_probabilities.clamp(min=min_distance).log()
-                - q.clamp(min=min_distance).log()
+        with torch.enable_grad():
+            exaggeration = early_exag if step < early_steps else 1.0
+            effective_probabilities = probabilities * exaggeration
+            delta = state.pos.unsqueeze(1) - state.pos.unsqueeze(0)
+            squared_distances = delta.square().sum(dim=2)
+            numerators = (1.0 + squared_distances).reciprocal()
+            # Self-similarities stay zero so the Student-t normalization matches
+            # classic t-SNE and only covers off-diagonal mass.
+            diagonal_mask = ~torch.eye(
+                state.pos.shape[0],
+                dtype=torch.bool,
+                device=state.pos.device,
             )
-        ).sum()
-        loss.backward()
+            numerators = numerators * diagonal_mask.to(dtype=numerators.dtype)
+            q = numerators / numerators.sum().clamp(min=min_distance)
+            loss = (
+                effective_probabilities
+                * (
+                    effective_probabilities.clamp(min=min_distance).log()
+                    - q.clamp(min=min_distance).log()
+                )
+            ).sum()
+            loss.backward()
 
         grad = state.pos.grad.detach().clone()
         momentum = self.config.early_momentum if step < early_steps else self.config.late_momentum
