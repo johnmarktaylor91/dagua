@@ -614,32 +614,33 @@ class NeuLayRunGCNPhase(Op):
 
             for step in range(gcn_steps):
                 optimizer.zero_grad(set_to_none=True)
-                output = model()
-                if step % self.config.pair_refresh_interval == 0:
-                    pairs = _query_pairs(output, query_radius)
+                with torch.enable_grad():
+                    output = model()
+                    if step % self.config.pair_refresh_interval == 0:
+                        pairs = _query_pairs(output, query_radius)
 
-                if cleaned.numel() == 0:
-                    elastic = output.sum() * 0.0
-                else:
-                    src = cleaned[0]
-                    dst = cleaned[1]
-                    low = torch.minimum(src, dst)
-                    high = torch.maximum(src, dst)
-                    pairs_matrix = torch.stack([low, high], dim=0)
-                    # NeuLay treats edges as undirected in the elastic term,
-                    # so parallel opposite directions must collapse here.
-                    unique_pairs = torch.unique(pairs_matrix, dim=1)
-                    diff = output[unique_pairs[0]] - output[unique_pairs[1]]
-                    elastic = diff.square().sum() * 0.5
+                    if cleaned.numel() == 0:
+                        elastic = output.sum() * 0.0
+                    else:
+                        src = cleaned[0]
+                        dst = cleaned[1]
+                        low = torch.minimum(src, dst)
+                        high = torch.maximum(src, dst)
+                        pairs_matrix = torch.stack([low, high], dim=0)
+                        # NeuLay treats edges as undirected in the elastic term,
+                        # so parallel opposite directions must collapse here.
+                        unique_pairs = torch.unique(pairs_matrix, dim=1)
+                        diff = output[unique_pairs[0]] - output[unique_pairs[1]]
+                        elastic = diff.square().sum() * 0.5
 
-                repulsion = _kdtree_repulsion_loss(
-                    output,
-                    pairs=pairs,
-                    radius=radius,
-                    magnitude=magnitude,
-                )
-                loss = elastic + repulsion
-                loss.backward()
+                    repulsion = _kdtree_repulsion_loss(
+                        output,
+                        pairs=pairs,
+                        radius=radius,
+                        magnitude=magnitude,
+                    )
+                    loss = elastic + repulsion
+                    loss.backward()
                 optimizer.step()
                 loss_window.append(float(loss.detach().item()))
                 loss_window.pop(0)
@@ -766,32 +767,33 @@ class NeuLayDirectStep(Op):
         pairs = state.extras[_NEULAY_PAIRS_KEY]
 
         state.optimizer.zero_grad(set_to_none=True)
-        if state.step % self.config.pair_refresh_interval == 0:
-            pairs = _query_pairs(state.pos, query_radius)
-            state.extras[_NEULAY_PAIRS_KEY] = pairs
+        with torch.enable_grad():
+            if state.step % self.config.pair_refresh_interval == 0:
+                pairs = _query_pairs(state.pos, query_radius)
+                state.extras[_NEULAY_PAIRS_KEY] = pairs
 
-        if cleaned.numel() == 0:
-            elastic = state.pos.sum() * 0.0
-        else:
-            src = cleaned[0]
-            dst = cleaned[1]
-            low = torch.minimum(src, dst)
-            high = torch.maximum(src, dst)
-            pairs_matrix = torch.stack([low, high], dim=0)
-            # The direct phase uses the same undirected elastic energy as the
-            # GCN warm start, so mirror edges collapse to one spring.
-            unique_pairs = torch.unique(pairs_matrix, dim=1)
-            diff = state.pos[unique_pairs[0]] - state.pos[unique_pairs[1]]
-            elastic = diff.square().sum() * 0.5
+            if cleaned.numel() == 0:
+                elastic = state.pos.sum() * 0.0
+            else:
+                src = cleaned[0]
+                dst = cleaned[1]
+                low = torch.minimum(src, dst)
+                high = torch.maximum(src, dst)
+                pairs_matrix = torch.stack([low, high], dim=0)
+                # The direct phase uses the same undirected elastic energy as the
+                # GCN warm start, so mirror edges collapse to one spring.
+                unique_pairs = torch.unique(pairs_matrix, dim=1)
+                diff = state.pos[unique_pairs[0]] - state.pos[unique_pairs[1]]
+                elastic = diff.square().sum() * 0.5
 
-        repulsion = _kdtree_repulsion_loss(
-            state.pos,
-            pairs=pairs,
-            radius=radius,
-            magnitude=magnitude,
-        )
-        loss = elastic + repulsion
-        loss.backward()
+            repulsion = _kdtree_repulsion_loss(
+                state.pos,
+                pairs=pairs,
+                radius=radius,
+                magnitude=magnitude,
+            )
+            loss = elastic + repulsion
+            loss.backward()
         state.optimizer.step()
 
         loss_window.append(float(loss.detach().item()))
