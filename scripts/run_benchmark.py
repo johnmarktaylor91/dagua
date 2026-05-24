@@ -872,6 +872,7 @@ def _build_engine_instance(
             name=variant.variant_id,
             display_name=variant.display_name,
             is_heavy=variant.is_heavy,
+            max_nodes=variant.max_nodes,
         )
 
     original_variant = get_variant_for_original_name(engine_name)
@@ -883,6 +884,7 @@ def _build_engine_instance(
             name=engine_name,
             display_name=f"{original_variant.display_name} [original]",
             is_heavy=engine_is_heavy(engine_name),
+            max_nodes=original_variant.max_nodes,
         )
 
     return competitor_by_name[engine_name]
