@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
 _SGD2_REPO = Path("/tmp/graph-drawing")
+# Round 31 tracking: the upstream repository is optional and may be absent.
+# Missing files must remain explicit adapter errors, not silent zero-pair rows.
 
 
 def _sgd2_multi_available() -> bool:
