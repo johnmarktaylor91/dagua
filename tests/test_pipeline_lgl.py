@@ -207,6 +207,7 @@ class TestLGLPipelineFidelity:
             num_nodes=6,
             seed=17,
             edge_weights=edge_weights,
+            use_edge_weights=True,
         )
 
         _assert_exact_match(classic, pipeline)
