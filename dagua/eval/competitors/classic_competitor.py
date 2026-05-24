@@ -224,7 +224,7 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_tsnet": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.tsnet",
         function_name="layout_tsnet_pipeline",
-        default_params={"perplexity": 30, "steps": 500},
+        default_params={"perplexity": 30, "steps": 500, "fidelity_mode": True},
     ),
     "classic_maxent_stress": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.maxent_stress",
@@ -1363,7 +1363,7 @@ class ClassicTsNET(_ClassicBase):
 
     name = "classic_tsnet"
     max_nodes = 10_000
-    variant_param_names = frozenset({"perplexity", "steps"})
+    variant_param_names = frozenset({"perplexity", "steps", "fidelity_mode"})
 
     def layout(
         self,
@@ -1403,6 +1403,7 @@ class ClassicTsNET(_ClassicBase):
                 perplexity=30,
                 steps=500,
                 seed=self._layout_seed(seed),
+                fidelity_mode=True,
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)

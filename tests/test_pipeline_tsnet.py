@@ -4,13 +4,20 @@ from __future__ import annotations
 
 from typing import Iterable
 
+import numpy as np
 import pytest
 import torch
 
 from dagua.layout.classic.tsnet import layout_tsnet
 from dagua.layout.ops.pipelines.tsnet import build_tsnet_pipeline, layout_tsnet_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
-from dagua.layout.ops.tsnet import TsnetPrepareState
+from dagua.layout.ops.tsnet import (
+    TsnetGradientStep,
+    TsnetGradientStepConfig,
+    TsnetInitializePositions,
+    TsnetInitializePositionsConfig,
+    TsnetPrepareState,
+)
 
 
 def _edge_index_from_edges(edges: Iterable[tuple[int, int]]) -> torch.Tensor:
@@ -166,6 +173,95 @@ def test_tsnet_prepare_state_populates_typed_distance_matrix() -> None:
         [3.0, 2.0, 1.0, 0.0],
     ]
     assert "tsnet_probabilities" in prepared.extras
+
+
+def test_tsnet_fidelity_initializer_uses_numpy_random_state() -> None:
+    """Fidelity initialization should match sklearn's NumPy MT draws."""
+    problem = LayoutProblem(
+        edge_index=_path_edge_index(4),
+        num_nodes=4,
+        seed=17,
+    )
+
+    initialized = TsnetInitializePositions(
+        TsnetInitializePositionsConfig(fidelity_mode=True)
+    ).apply(problem, SolveState(), RuntimeContext())
+
+    assert initialized.pos is not None
+    expected = torch.from_numpy(
+        (1.0e-4 * np.random.RandomState(17).standard_normal((4, 2))).astype(np.float32)
+    )
+    torch.testing.assert_close(initialized.pos.detach().cpu(), expected)
+
+
+def test_tsnet_gradient_step_applies_sklearn_gradient_scale() -> None:
+    """The default TSNET step should scale the KL gradient like sklearn."""
+    initial_pos = torch.tensor(
+        [[-0.1, 0.2], [0.3, -0.4], [0.5, 0.1]],
+        dtype=torch.float32,
+    )
+    probabilities = torch.tensor(
+        [
+            [1.0e-12, 0.18, 0.22],
+            [0.18, 1.0e-12, 0.10],
+            [0.22, 0.10, 1.0e-12],
+        ],
+        dtype=torch.float32,
+    )
+
+    unit_state = _tsnet_gradient_state(initial_pos, probabilities)
+    scaled_state = _tsnet_gradient_state(initial_pos, probabilities)
+
+    unit_result = TsnetGradientStep(TsnetGradientStepConfig(gradient_scale=1.0)).apply(
+        LayoutProblem(edge_index=_path_edge_index(3), num_nodes=3),
+        unit_state,
+        RuntimeContext(),
+    )
+    scaled_result = TsnetGradientStep().apply(
+        LayoutProblem(edge_index=_path_edge_index(3), num_nodes=3),
+        scaled_state,
+        RuntimeContext(),
+    )
+
+    assert unit_result.pos is not None
+    assert scaled_result.pos is not None
+    unit_delta = unit_result.pos.detach() - initial_pos
+    scaled_delta = scaled_result.pos.detach() - initial_pos
+    torch.testing.assert_close(scaled_delta, unit_delta * 4.0)
+
+
+def _tsnet_gradient_state(initial_pos: torch.Tensor, probabilities: torch.Tensor) -> SolveState:
+    """Build the minimal state needed by :class:`TsnetGradientStep`.
+
+    Parameters
+    ----------
+    initial_pos : torch.Tensor
+        Initial positions with shape ``[N, 2]``.
+    probabilities : torch.Tensor
+        High-dimensional affinity matrix with shape ``[N, N]``.
+
+    Returns
+    -------
+    SolveState
+        State populated with TSNET optimizer extras.
+    """
+    pos = initial_pos.clone().requires_grad_(True)
+    return SolveState(
+        pos=pos,
+        extras={
+            "tsnet_probabilities": probabilities,
+            "tsnet_early_exaggeration": 1.0,
+            "tsnet_early_exaggeration_steps": 0,
+            "tsnet_min_gain": 0.01,
+            "tsnet_min_distance": 1.0e-12,
+            "tsnet_early_learning_rate": 1.0,
+            "tsnet_late_learning_rate": 1.0,
+            "tsnet_update": torch.zeros_like(pos),
+            "tsnet_gains": torch.ones_like(pos),
+            "tsnet_best_error": float("inf"),
+            "tsnet_best_iter": 0,
+        },
+    )
 
 
 class TestTsnetPipelineFidelity:
