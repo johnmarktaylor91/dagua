@@ -304,6 +304,30 @@ def _kdtree_repulsion_loss(
     return magnitude * torch.exp(-sq_dist / (4.0 * radius * radius)).sum()
 
 
+def _raise_if_nonfinite_tensor(tensor: torch.Tensor, context: str) -> None:
+    """Raise when NeuLay optimization produces non-finite values.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Tensor to validate. For positions this is typically shaped ``[N, 2]``.
+    context : str
+        Human-readable optimizer phase included in the error message.
+
+    Returns
+    -------
+    None
+        Returns only when all tensor entries are finite.
+
+    Raises
+    ------
+    FloatingPointError
+        If any entry in ``tensor`` is NaN or infinite.
+    """
+    if not torch.isfinite(tensor).all():
+        raise FloatingPointError(f"{context} produced non-finite values.")
+
+
 def _is_old_code_fidelity(fidelity_mode: Optional[str]) -> bool:
     """Return whether NeuLay should resolve old-code reference defaults.
 
@@ -642,6 +666,8 @@ class NeuLayRunGCNPhase(Op):
                     loss = elastic + repulsion
                     loss.backward()
                 optimizer.step()
+                for parameter in model.parameters():
+                    _raise_if_nonfinite_tensor(parameter, "NeuLay GCN phase")
                 loss_window.append(float(loss.detach().item()))
                 loss_window.pop(0)
                 if _relative_window_difference(loss_window) < (
@@ -795,6 +821,7 @@ class NeuLayDirectStep(Op):
             loss = elastic + repulsion
             loss.backward()
         state.optimizer.step()
+        _raise_if_nonfinite_tensor(state.pos, "NeuLay direct phase")
 
         loss_window.append(float(loss.detach().item()))
         loss_window.pop(0)
