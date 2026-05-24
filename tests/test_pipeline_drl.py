@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Iterable
 
+import numpy as np
 import pytest
 import torch
 
-from dagua.layout.classic.drl import layout_drl
+from dagua.layout.ops.drl import _initialize_positions, _maybe_cut_long_edge
 from dagua.layout.ops.pipelines.drl import build_drl_pipeline, layout_drl_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
@@ -96,26 +97,24 @@ def _star_edge_index(num_nodes: int) -> torch.Tensor:
     return _edge_index_from_edges((0, target) for target in range(1, num_nodes))
 
 
-def _assert_exact_match(classic: torch.Tensor, pipeline: torch.Tensor) -> None:
+def _assert_exact_match(direct: torch.Tensor, pipeline: torch.Tensor) -> None:
     """Assert that two DrL outputs match exactly.
 
     Parameters
     ----------
-    classic : torch.Tensor
-        Reference output from classic DrL.
+    direct : torch.Tensor
+        Reference output from the raw composable pipeline.
     pipeline : torch.Tensor
-        Output from the composable pipeline.
+        Output from the public pipeline wrapper.
 
     Returns
     -------
     None
         This helper asserts exact equality.
     """
-    assert classic.dtype == pipeline.dtype
-    assert classic.device == pipeline.device
-    assert torch.equal(classic, pipeline), (
-        f"Max abs diff: {(classic - pipeline).abs().max().item()}"
-    )
+    assert direct.dtype == pipeline.dtype
+    assert direct.device == pipeline.device
+    assert torch.equal(direct, pipeline), f"Max abs diff: {(direct - pipeline).abs().max().item()}"
 
 
 def _run_pipeline_direct(
@@ -160,21 +159,68 @@ def _run_pipeline_direct(
 
 
 class TestDRLPipelineFidelity:
-    """Bit-exact regression coverage for the DrL pipeline."""
+    """Bit-exact wrapper coverage and igraph-fidelity regressions for DrL."""
+
+    def test_igraph_fidelity_init_matches_seed_matrix_contract(self) -> None:
+        """The igraph fidelity initializer should match NumPy ``uniform(-1, 1)``."""
+        seed = 13
+        expected = torch.tensor(
+            np.random.RandomState(seed).uniform(-1.0, 1.0, size=(5, 2)),
+            dtype=torch.float64,
+        )
+
+        actual = _initialize_positions(num_nodes=5, seed=seed, fidelity_mode="igraph")
+
+        torch.testing.assert_close(actual, expected)
+
+    def test_initial_positions_override_generated_drl_seed_matrix(self) -> None:
+        """Explicit seed matrices should override generated fidelity initialization."""
+        initial_positions = torch.tensor(
+            [[-1.0, 0.5], [0.25, -0.75], [1.0, 0.0]],
+            dtype=torch.float64,
+        )
+
+        actual = _initialize_positions(
+            num_nodes=3,
+            seed=99,
+            fidelity_mode="igraph",
+            initial_positions=initial_positions,
+        )
+
+        torch.testing.assert_close(actual, initial_positions)
+
+    def test_drl_edge_cutting_removes_only_current_neighbor_entry(self) -> None:
+        """DrL edge cutting should preserve the reverse neighbor map like igraph."""
+        positions = torch.tensor(
+            [[0.0, 0.0], [10.0, 0.0], [0.0, 0.0]],
+            dtype=torch.float64,
+        )
+        adjacency = [{1: 1.0, 2: 9.0}, {0: 1.0}, {0: 9.0}]
+
+        _maybe_cut_long_edge(
+            node=0,
+            positions=positions,
+            adjacency=adjacency,
+            min_edges=1.0,
+            cut_off_length=0.0,
+        )
+
+        assert 1 not in adjacency[0]
+        assert adjacency[1][0] == 1.0
 
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),
         [(0, 42), (1, 42), (2, 42), (5, 42), (5, 99), (10, 42), (20, 7)],
     )
-    def test_layout_drl_pipeline_matches_classic_for_requested_sizes(
+    def test_layout_drl_pipeline_matches_direct_pipeline_for_requested_sizes(
         self,
         num_nodes: int,
         seed: int,
     ) -> None:
-        """The adapter should match classic DrL exactly for path graphs."""
+        """The public wrapper should match the raw pipeline for path graphs."""
         edge_index = _path_edge_index(num_nodes)
 
-        classic = layout_drl(
+        direct = _run_pipeline_direct(
             edge_index=edge_index,
             num_nodes=num_nodes,
             seed=seed,
@@ -185,14 +231,14 @@ class TestDRLPipelineFidelity:
             seed=seed,
         )
 
-        _assert_exact_match(classic, pipeline)
+        _assert_exact_match(direct, pipeline)
 
-    def test_layout_drl_pipeline_matches_classic_with_edge_weights(self) -> None:
-        """Weighted DrL should remain bit-identical in the pipeline."""
+    def test_layout_drl_pipeline_matches_direct_pipeline_with_edge_weights(self) -> None:
+        """Weighted DrL should remain bit-identical through the wrapper."""
         edge_index = _edge_index_from_edges([(0, 1), (0, 2), (1, 3), (2, 4), (4, 5), (3, 5)])
         edge_weights = torch.tensor([0.25, 1.5, 2.0, 0.75, 1.25, 3.0], dtype=torch.float64)
 
-        classic = layout_drl(
+        direct = _run_pipeline_direct(
             edge_index=edge_index,
             num_nodes=6,
             seed=17,
@@ -205,13 +251,13 @@ class TestDRLPipelineFidelity:
             edge_weights=edge_weights,
         )
 
-        _assert_exact_match(classic, pipeline)
+        _assert_exact_match(direct, pipeline)
 
-    def test_layout_drl_pipeline_matches_classic_on_disconnected_graph(self) -> None:
+    def test_layout_drl_pipeline_matches_direct_pipeline_on_disconnected_graph(self) -> None:
         """Disconnected components and isolated nodes should match exactly."""
         edge_index = _disconnected_edge_index()
 
-        classic = layout_drl(
+        direct = _run_pipeline_direct(
             edge_index=edge_index,
             num_nodes=7,
             seed=99,
@@ -222,30 +268,30 @@ class TestDRLPipelineFidelity:
             seed=99,
         )
 
-        _assert_exact_match(classic, pipeline)
+        _assert_exact_match(direct, pipeline)
 
-    def test_build_drl_pipeline_matches_classic_on_complete_graph(self) -> None:
-        """The raw pipeline object should match classic DrL on a dense graph."""
+    def test_build_drl_pipeline_is_deterministic_on_complete_graph(self) -> None:
+        """The raw pipeline object should be deterministic on a dense graph."""
         edge_index = _complete_edge_index(5)
 
-        classic = layout_drl(
+        first = _run_pipeline_direct(
             edge_index=edge_index,
             num_nodes=5,
             seed=7,
         )
-        pipeline = _run_pipeline_direct(
+        second = _run_pipeline_direct(
             edge_index=edge_index,
             num_nodes=5,
             seed=7,
         )
 
-        _assert_exact_match(classic, pipeline)
+        _assert_exact_match(first, second)
 
-    def test_layout_drl_pipeline_matches_classic_on_star_graph(self) -> None:
+    def test_layout_drl_pipeline_matches_direct_pipeline_on_star_graph(self) -> None:
         """Star topology exercises hub-spoke attraction dynamics."""
         edge_index = _star_edge_index(8)
 
-        classic = layout_drl(
+        direct = _run_pipeline_direct(
             edge_index=edge_index,
             num_nodes=8,
             seed=42,
@@ -256,14 +302,14 @@ class TestDRLPipelineFidelity:
             seed=42,
         )
 
-        _assert_exact_match(classic, pipeline)
+        _assert_exact_match(direct, pipeline)
 
     @pytest.mark.parametrize("preset", ["default", "coarsen", "coarsest", "refine", "final"])
-    def test_layout_drl_pipeline_matches_classic_for_presets(self, preset: str) -> None:
-        """All 5 DrL presets should produce bit-identical output."""
+    def test_layout_drl_pipeline_matches_direct_pipeline_for_presets(self, preset: str) -> None:
+        """All 5 DrL presets should produce bit-identical wrapper output."""
         edge_index = _path_edge_index(8)
 
-        classic = layout_drl(
+        direct = _run_pipeline_direct(
             edge_index=edge_index,
             num_nodes=8,
             seed=42,
@@ -276,9 +322,9 @@ class TestDRLPipelineFidelity:
             options=preset,
         )
 
-        _assert_exact_match(classic, pipeline)
+        _assert_exact_match(direct, pipeline)
 
-    def test_layout_drl_pipeline_matches_classic_with_custom_options(self) -> None:
+    def test_layout_drl_pipeline_matches_direct_pipeline_with_custom_options(self) -> None:
         """Custom per-phase overrides via mapping should match exactly."""
         edge_index = _path_edge_index(6)
         custom_options = {
@@ -287,7 +333,7 @@ class TestDRLPipelineFidelity:
             "cooldown_temperature": 500.0,
         }
 
-        classic = layout_drl(
+        direct = _run_pipeline_direct(
             edge_index=edge_index,
             num_nodes=6,
             seed=42,
@@ -300,36 +346,36 @@ class TestDRLPipelineFidelity:
             options=custom_options,
         )
 
-        _assert_exact_match(classic, pipeline)
+        _assert_exact_match(direct, pipeline)
 
     def test_layout_drl_pipeline_empty_graph(self) -> None:
         """Zero-node graph should return empty tensor with correct shape."""
         edge_index = torch.empty((2, 0), dtype=torch.long)
 
-        classic = layout_drl(edge_index=edge_index, num_nodes=0)
+        direct = _run_pipeline_direct(edge_index=edge_index, num_nodes=0, seed=42)
         pipeline = layout_drl_pipeline(edge_index=edge_index, num_nodes=0)
 
-        assert classic.shape == (0, 2)
+        assert direct.shape == (0, 2)
         assert pipeline.shape == (0, 2)
-        assert classic.dtype == pipeline.dtype
+        assert direct.dtype == pipeline.dtype
 
     def test_layout_drl_pipeline_single_node_no_edges(self) -> None:
-        """Single isolated node should match classic exactly."""
+        """Single isolated node should match the raw pipeline exactly."""
         edge_index = torch.empty((2, 0), dtype=torch.long)
 
-        classic = layout_drl(edge_index=edge_index, num_nodes=1, seed=42)
+        direct = _run_pipeline_direct(edge_index=edge_index, num_nodes=1, seed=42)
         pipeline = layout_drl_pipeline(edge_index=edge_index, num_nodes=1, seed=42)
 
-        _assert_exact_match(classic, pipeline)
+        _assert_exact_match(direct, pipeline)
 
     def test_layout_drl_pipeline_self_loop_filtered(self) -> None:
         """Self-loops should be filtered identically by both paths."""
         edge_index = _edge_index_from_edges([(0, 0), (0, 1), (1, 2)])
 
-        classic = layout_drl(edge_index=edge_index, num_nodes=3, seed=42)
+        direct = _run_pipeline_direct(edge_index=edge_index, num_nodes=3, seed=42)
         pipeline = layout_drl_pipeline(edge_index=edge_index, num_nodes=3, seed=42)
 
-        _assert_exact_match(classic, pipeline)
+        _assert_exact_match(direct, pipeline)
 
     def test_build_drl_pipeline_rejects_unknown_preset(self) -> None:
         """Unknown preset name should raise ValueError from the resolver."""
