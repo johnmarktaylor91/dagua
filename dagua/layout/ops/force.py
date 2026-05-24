@@ -1240,9 +1240,13 @@ class GraphOptPrepareStateConfig:
     ----------
     spring_max_distance : float, default=500.0
         Maximum pairwise distance for GraphOpt coulomb repulsion.
+    fidelity_mode : bool, default=False
+        When ``True``, ignore edge weights because igraph GraphOpt has no
+        weighted-spring parameter.
     """
 
     spring_max_distance: float = 500.0
+    fidelity_mode: bool = False
 
 
 @register_op
@@ -1253,8 +1257,9 @@ class GraphOptPrepareState(Op):
     Notes
     -----
     This op filters self-loops from the spring edge set (preserving duplicate
-    and reciprocal edges), stores edge-level spring weights, and precomputes the
-    all-pairs upper-triangle index pairs for repulsion.
+    and reciprocal edges), stores edge-level spring weights unless fidelity mode
+    is active, and precomputes the all-pairs upper-triangle index pairs for
+    repulsion.
     """
 
     config: GraphOptPrepareStateConfig = field(default_factory=GraphOptPrepareStateConfig)
@@ -1307,7 +1312,7 @@ class GraphOptPrepareState(Op):
                 filtered_edges = edges[:, non_self].contiguous()
                 state.extras[_GRAPHOPT_SPRING_EDGES_KEY] = filtered_edges
 
-                if problem.edge_weights is not None:
+                if problem.edge_weights is not None and not self.config.fidelity_mode:
                     spring_weights = (
                         problem.edge_weights.detach()
                         .to(device="cpu", dtype=torch.float64)[non_self]
@@ -1442,7 +1447,7 @@ class GraphOptIteration(Op):
             # evaluates the explicit force law, not the pair enumeration.
             delta = positions[pair_source] - positions[pair_target]
             distance_sq = delta.square().sum(dim=1)
-            mask = (distance_sq > _GRAPHOPT_MIN_DISTANCE) & (
+            mask = (distance_sq != 0.0) & (
                 distance_sq < torch.as_tensor(max_repulsion_distance_sq, device=distance_sq.device)
             )
             if bool(mask.any().item()):
@@ -1464,7 +1469,7 @@ class GraphOptIteration(Op):
             target = spring_edges[1]
             delta = positions[source] - positions[target]
             distance = torch.linalg.vector_norm(delta, dim=1)
-            mask = distance > _GRAPHOPT_MIN_DISTANCE
+            mask = distance != 0.0
             if bool(mask.any().item()):
                 masked_distance = distance[mask]
                 direction = delta[mask] / masked_distance.unsqueeze(1)
