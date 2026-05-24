@@ -148,6 +148,13 @@ def layout_umap_layout_pipeline(
     RuntimeError
         If the pipeline does not populate final positions.
     """
+    if num_nodes <= 3:
+        # The fidelity target bypasses umap-learn for tiny graphs because
+        # spectral initialization asks ARPACK for too many eigenvectors.
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(seed)
+        return torch.randn((num_nodes, 2), generator=generator, dtype=torch.float32)
+
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,

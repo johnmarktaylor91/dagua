@@ -11,6 +11,7 @@ from typing import ClassVar, Optional, Tuple, Union, cast
 import numpy as np
 import torch
 from scipy import optimize, sparse
+from scipy.sparse import csgraph
 from scipy.sparse import linalg as sparse_linalg
 
 from dagua.layout.ops.base import Op
@@ -25,9 +26,12 @@ _MIN_SPAN = 1.0e-6
 _MIN_SIGMA_SCALE = 1.0e-3
 _SMOOTH_K_TOLERANCE = 1.0e-5
 _SMOOTH_K_BINARY_SEARCH_STEPS = 64
-_SPECTRAL_SPARSE_THRESHOLD = 512
 _GRADIENT_CLIP_VALUE = 4.0
 _NEGATIVE_SAMPLE_RATE = 5
+_SPECTRAL_DIMENSIONS = 2
+_SPECTRAL_EIGENVECTOR_COUNT = _SPECTRAL_DIMENSIONS + 1
+_SPECTRAL_NOISE_SCALE = 1.0e-4
+_UMAP_INIT_MAX_COORD = 10.0
 
 _KNN_INDICES_KEY = "umap_knn_indices"
 _KNN_DISTANCES_KEY = "umap_knn_distances"
@@ -257,7 +261,21 @@ def _smooth_knn_dist(
     knn_distances: torch.Tensor,
     n_neighbors: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Solve the UMAP smooth-kNN bandwidth for every graph node."""
+    """Solve the UMAP smooth-kNN bandwidth for every graph node.
+
+    Parameters
+    ----------
+    knn_distances : torch.Tensor
+        Neighbor distances with shape ``[N, K]``.
+    n_neighbors : int
+        Neighborhood size ``k`` used by the fuzzy simplicial set.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Smooth bandwidth ``sigma`` and local connectivity radius ``rho`` vectors
+        with shape ``[N]``.
+    """
     num_nodes = knn_distances.shape[0]
     if num_nodes == 0:
         empty = torch.empty((0,), dtype=torch.float32)
@@ -266,47 +284,42 @@ def _smooth_knn_dist(
     sigmas = torch.empty((num_nodes,), dtype=torch.float32)
     rhos = torch.empty((num_nodes,), dtype=torch.float32)
     target = log2(float(max(n_neighbors, 2)))
+    distances_np = knn_distances.detach().to(device="cpu", dtype=torch.float32).numpy()
+    mean_distances = float(np.mean(distances_np)) if distances_np.size > 0 else 0.0
 
     for index in range(num_nodes):
-        distances = knn_distances[index]
-        finite = distances[torch.isfinite(distances)]
-        if finite.numel() == 0:
+        finite = distances_np[index][np.isfinite(distances_np[index])]
+        if finite.size == 0:
             sigmas[index] = 1.0
             rhos[index] = 0.0
             continue
 
-        positive = finite[finite > 0]
-        rho = float(positive.min().item()) if positive.numel() > 0 else 0.0
+        positive = finite[finite > 0.0]
+        rho = float(positive[0]) if positive.shape[0] > 0 else 0.0
         rhos[index] = rho
-        mean_distance = max(float(finite.mean().item()), _MIN_SPAN)
-        sigma_min = mean_distance * _MIN_SIGMA_SCALE
+
         lower = 0.0
-        upper = 1.0
-
-        def _membership_sum(sigma: float) -> float:
-            if sigma <= 0.0:
-                return float(finite[1:].numel())
-            shifted = torch.clamp(finite[1:] - rho, min=0.0)
-            values = torch.exp(-shifted / sigma)
-            return float(values.sum().item())
-
-        while _membership_sum(upper) < target:
-            upper *= 2.0
-            if upper > 1.0e6:
-                break
-
-        sigma = upper
+        upper = np.inf
+        sigma = 1.0
         for _ in range(_SMOOTH_K_BINARY_SEARCH_STEPS):
-            sigma = 0.5 * (lower + upper)
-            estimate = _membership_sum(max(sigma, sigma_min))
+            estimate = 0.0
+            for distance in finite[1:]:
+                shifted = float(distance) - rho
+                estimate += float(np.exp(-(shifted / sigma))) if shifted > 0.0 else 1.0
             if abs(estimate - target) <= _SMOOTH_K_TOLERANCE:
                 break
             if estimate > target:
                 upper = sigma
+                sigma = 0.5 * (lower + upper)
             else:
                 lower = sigma
+                sigma = sigma * 2.0 if np.isinf(upper) else 0.5 * (lower + upper)
 
-        sigmas[index] = max(sigma, sigma_min)
+        if rho > 0.0:
+            sigma_floor = _MIN_SIGMA_SCALE * float(np.mean(finite))
+        else:
+            sigma_floor = _MIN_SIGMA_SCALE * mean_distances
+        sigmas[index] = max(float(sigma), sigma_floor)
 
     return sigmas, rhos
 
@@ -385,20 +398,290 @@ def _fit_ab(min_dist: float, spread: float) -> tuple[float, float]:
         return 1.93, 0.79
 
 
+def _normalize_laplacian(graph: sparse.csr_matrix) -> sparse.csr_matrix:
+    """Build UMAP's normalized Laplacian for a weighted fuzzy graph.
+
+    Parameters
+    ----------
+    graph : scipy.sparse.csr_matrix
+        Symmetric sparse fuzzy graph with shape ``[N, N]``.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Normalized graph Laplacian with shape ``[N, N]``.
+    """
+    degree = np.asarray(graph.sum(axis=1)).reshape(-1)
+    inv_sqrt_degree = np.zeros_like(degree, dtype=np.float64)
+    nonzero = degree > 0.0
+    inv_sqrt_degree[nonzero] = 1.0 / np.sqrt(degree[nonzero])
+    d_inv_sqrt = sparse.diags(inv_sqrt_degree)
+    identity = sparse.identity(graph.shape[0], dtype=np.float64, format="csr")
+    return identity - (d_inv_sqrt @ graph @ d_inv_sqrt)
+
+
+def _connected_spectral_embedding(graph: sparse.csr_matrix) -> np.ndarray:
+    """Compute raw connected-component spectral coordinates with ARPACK.
+
+    Parameters
+    ----------
+    graph : scipy.sparse.csr_matrix
+        Connected symmetric sparse fuzzy graph with shape ``[N, N]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Raw non-trivial eigenvectors with shape ``[N, 2]``.
+    """
+    num_nodes = graph.shape[0]
+    if num_nodes <= _SPECTRAL_DIMENSIONS + 1:
+        return np.zeros((num_nodes, _SPECTRAL_DIMENSIONS), dtype=np.float32)
+
+    laplacian = _normalize_laplacian(graph=graph)
+    ncv = max(2 * _SPECTRAL_EIGENVECTOR_COUNT + 1, int(np.sqrt(num_nodes)))
+    eigenvalues, eigenvectors = sparse_linalg.eigsh(
+        laplacian,
+        k=_SPECTRAL_EIGENVECTOR_COUNT,
+        which="SM",
+        ncv=ncv,
+        v0=np.ones(num_nodes, dtype=np.float64),
+        tol=1.0e-4,
+        maxiter=num_nodes * 5,
+    )
+    order = np.argsort(eigenvalues)[1:_SPECTRAL_EIGENVECTOR_COUNT]
+    coordinates = np.real(eigenvectors[:, order])
+    if coordinates.shape[1] < _SPECTRAL_DIMENSIONS:
+        coordinates = np.pad(
+            coordinates,
+            ((0, 0), (0, _SPECTRAL_DIMENSIONS - coordinates.shape[1])),
+            mode="constant",
+        )
+    return coordinates.astype(np.float32, copy=False)
+
+
+def _component_meta_embedding(
+    n_components: int,
+    component_labels: np.ndarray,
+    distance_matrix: Optional[np.ndarray],
+) -> np.ndarray:
+    """Place disconnected fuzzy-graph components before local embeddings.
+
+    Parameters
+    ----------
+    n_components : int
+        Number of connected components in the fuzzy graph.
+    component_labels : numpy.ndarray
+        Component label for every node with shape ``[N]``.
+    distance_matrix : numpy.ndarray | None
+        Precomputed graph-distance matrix with shape ``[N, N]``. When
+        available, average inter-component distances drive the meta layout.
+
+    Returns
+    -------
+    numpy.ndarray
+        Component-level coordinates with shape ``[C, 2]``.
+    """
+    if n_components <= 2 * _SPECTRAL_DIMENSIONS:
+        half_components = int(np.ceil(n_components / 2.0))
+        base = np.hstack(
+            [
+                np.eye(half_components),
+                np.zeros((half_components, _SPECTRAL_DIMENSIONS - half_components)),
+            ]
+        )
+        return np.vstack([base, -base])[:n_components].astype(np.float32, copy=False)
+
+    if distance_matrix is None:
+        fallback = np.arange(n_components * _SPECTRAL_DIMENSIONS, dtype=np.float32).reshape(
+            n_components,
+            _SPECTRAL_DIMENSIONS,
+        )
+        return fallback / max(float(fallback.max()), 1.0)
+
+    component_distances = np.zeros((n_components, n_components), dtype=np.float64)
+    for source_label in range(n_components):
+        source_rows = distance_matrix[component_labels == source_label]
+        for target_label in range(source_label + 1, n_components):
+            between = source_rows[:, component_labels == target_label]
+            distance = float(np.mean(between)) if between.size > 0 else 0.0
+            component_distances[source_label, target_label] = distance
+            component_distances[target_label, source_label] = distance
+
+    affinity = np.exp(-(component_distances**2))
+    np.fill_diagonal(affinity, 0.0)
+    meta_graph = sparse.csr_matrix(affinity, dtype=np.float64)
+    meta_embedding = _connected_spectral_embedding(graph=meta_graph)
+    max_abs = float(np.max(np.abs(meta_embedding))) if meta_embedding.size > 0 else 0.0
+    if max_abs > _MIN_SPAN:
+        meta_embedding = meta_embedding / max_abs
+    return meta_embedding.astype(np.float32, copy=False)
+
+
+def _multi_component_spectral_embedding(
+    graph: sparse.csr_matrix,
+    n_components: int,
+    component_labels: np.ndarray,
+    seed: int,
+    distance_matrix: Optional[np.ndarray],
+) -> np.ndarray:
+    """Compute UMAP-style initialization for disconnected fuzzy graphs.
+
+    Parameters
+    ----------
+    graph : scipy.sparse.csr_matrix
+        Symmetric fuzzy graph with shape ``[N, N]``.
+    n_components : int
+        Number of connected components.
+    component_labels : numpy.ndarray
+        Component labels with shape ``[N]``.
+    seed : int
+        Seed for small-component random placement.
+    distance_matrix : numpy.ndarray | None
+        Dense precomputed graph distances with shape ``[N, N]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Raw multi-component spectral coordinates with shape ``[N, 2]``.
+    """
+    rng = np.random.RandomState(seed)
+    result = np.empty((graph.shape[0], _SPECTRAL_DIMENSIONS), dtype=np.float32)
+    meta_embedding = _component_meta_embedding(
+        n_components=n_components,
+        component_labels=component_labels,
+        distance_matrix=distance_matrix,
+    )
+
+    for label in range(n_components):
+        component_mask = component_labels == label
+        component_graph = graph.tocsr()[component_mask, :].tocsc()[:, component_mask].tocsr()
+        distances = np.linalg.norm(meta_embedding - meta_embedding[label], axis=1)
+        positive_distances = distances[distances > 0.0]
+        data_range = float(positive_distances.min() / 2.0) if positive_distances.size > 0 else 1.0
+
+        if (
+            component_graph.shape[0] < 2 * _SPECTRAL_DIMENSIONS
+            or component_graph.shape[0] <= _SPECTRAL_DIMENSIONS + 1
+        ):
+            component_embedding = rng.uniform(
+                low=-data_range,
+                high=data_range,
+                size=(component_graph.shape[0], _SPECTRAL_DIMENSIONS),
+            )
+        else:
+            component_embedding = _connected_spectral_embedding(graph=component_graph)
+            max_abs = (
+                float(np.max(np.abs(component_embedding))) if component_embedding.size > 0 else 0.0
+            )
+            if max_abs > _MIN_SPAN:
+                component_embedding = component_embedding * (data_range / max_abs)
+
+        result[component_mask] = component_embedding + meta_embedding[label]
+
+    return result
+
+
+def _scale_umap_initial_coordinates(coordinates: np.ndarray, seed: int) -> torch.Tensor:
+    """Apply UMAP's noisy max-abs scale and per-axis ``[0, 10]`` rescale.
+
+    Parameters
+    ----------
+    coordinates : numpy.ndarray
+        Raw initialization coordinates with shape ``[N, 2]``.
+    seed : int
+        Seed for the small noise added after max-abs scaling.
+
+    Returns
+    -------
+    torch.Tensor
+        Rescaled initial embedding with shape ``[N, 2]``.
+    """
+    coords = coordinates.astype(np.float32, copy=True)
+    max_abs = float(np.max(np.abs(coords))) if coords.size > 0 else 0.0
+    if max_abs > _MIN_SPAN:
+        coords = coords * (_UMAP_INIT_MAX_COORD / max_abs)
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    noise = (
+        torch.randn(coords.shape, generator=generator, dtype=torch.float32) * _SPECTRAL_NOISE_SCALE
+    )
+    coords = coords + noise.numpy()
+
+    axis_min = coords.min(axis=0)
+    axis_span = coords.max(axis=0) - axis_min
+    safe_span = np.maximum(axis_span, _MIN_SPAN)
+    coords = _UMAP_INIT_MAX_COORD * (coords - axis_min) / safe_span
+    return torch.from_numpy(coords.astype(np.float32, copy=False))
+
+
+def _rescale_umap_random_initial_coordinates(coordinates: np.ndarray) -> torch.Tensor:
+    """Apply UMAP's unconditional per-axis ``[0, 10]`` rescale to random init.
+
+    Parameters
+    ----------
+    coordinates : numpy.ndarray
+        Random initial coordinates with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Rescaled initial embedding with shape ``[N, 2]``.
+    """
+    coords = coordinates.astype(np.float32, copy=True)
+    axis_min = coords.min(axis=0)
+    axis_span = coords.max(axis=0) - axis_min
+    safe_span = np.maximum(axis_span, _MIN_SPAN)
+    coords = _UMAP_INIT_MAX_COORD * (coords - axis_min) / safe_span
+    return torch.from_numpy(coords.astype(np.float32, copy=False))
+
+
 def _spectral_initialization(
     num_nodes: int,
     head: torch.Tensor,
     tail: torch.Tensor,
     weight: torch.Tensor,
     seed: int,
+    distance_matrix: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Compute the normalized-Laplacian spectral initialization."""
+    """Compute the normalized-Laplacian spectral initialization.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    head : torch.Tensor
+        Fuzzy-graph edge heads with shape ``[E]``.
+    tail : torch.Tensor
+        Fuzzy-graph edge tails with shape ``[E]``.
+    weight : torch.Tensor
+        Fuzzy-graph edge weights with shape ``[E]``.
+    seed : int
+        Seed for initialization noise and small-component placement.
+    distance_matrix : torch.Tensor | None, optional
+        Dense graph-distance matrix with shape ``[N, N]`` used to place
+        disconnected fuzzy-graph components.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial embedding with shape ``[N, 2]``.
+    """
     if num_nodes == 0:
         return torch.empty((0, 2), dtype=torch.float32)
     if num_nodes == 1:
         return torch.zeros((1, 2), dtype=torch.float32)
     if num_nodes == 2:
         return torch.tensor([[-10.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+
+    if num_nodes < 10:
+        rng = np.random.RandomState(seed)
+        coordinates = rng.uniform(
+            low=-_UMAP_INIT_MAX_COORD,
+            high=_UMAP_INIT_MAX_COORD,
+            size=(num_nodes, _SPECTRAL_DIMENSIONS),
+        )
+        return _rescale_umap_random_initial_coordinates(coordinates=coordinates)
 
     if head.numel() == 0:
         generator = torch.Generator(device="cpu")
@@ -410,39 +693,24 @@ def _spectral_initialization(
     data = torch.cat([weight, weight]).numpy().astype(np.float64, copy=False)
     graph = sparse.csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes), dtype=np.float64)
 
-    degree = np.asarray(graph.sum(axis=1)).reshape(-1)
-    inv_sqrt_degree = np.zeros_like(degree)
-    nonzero = degree > 0.0
-    inv_sqrt_degree[nonzero] = 1.0 / np.sqrt(degree[nonzero])
-    d_inv_sqrt = sparse.diags(inv_sqrt_degree)
-    laplacian = sparse.identity(num_nodes, dtype=np.float64) - (d_inv_sqrt @ graph @ d_inv_sqrt)
-
-    if num_nodes < _SPECTRAL_SPARSE_THRESHOLD:
-        dense_laplacian = laplacian.toarray()
-        eigenvalues, eigenvectors = np.linalg.eigh(dense_laplacian)
-    else:
-        eigenvalues, eigenvectors = sparse_linalg.eigsh(laplacian, k=3, which="SM")
-
-    order = np.argsort(eigenvalues)
-    eigenvectors = eigenvectors[:, order]
-    coordinates = np.real(eigenvectors[:, 1:3])
-    if coordinates.shape[1] == 1:
-        coordinates = np.concatenate(
-            [coordinates, np.zeros((num_nodes, 1), dtype=coordinates.dtype)],
-            axis=1,
+    n_components, component_labels = csgraph.connected_components(graph)
+    if n_components > 1:
+        distances_np = (
+            distance_matrix.detach().to(device="cpu", dtype=torch.float32).numpy()
+            if distance_matrix is not None
+            else None
         )
-
-    min_value = float(coordinates.min())
-    max_value = float(coordinates.max())
-    if max_value - min_value > _MIN_SPAN:
-        coordinates = ((coordinates - min_value) / (max_value - min_value) * 20.0) - 10.0
+        coordinates = _multi_component_spectral_embedding(
+            graph=graph,
+            n_components=int(n_components),
+            component_labels=component_labels,
+            seed=seed,
+            distance_matrix=distances_np,
+        )
     else:
-        coordinates = np.zeros((num_nodes, 2), dtype=np.float32)
+        coordinates = _connected_spectral_embedding(graph=graph)
 
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed)
-    noise = torch.randn((num_nodes, 2), generator=generator, dtype=torch.float32) * 1.0e-4
-    return torch.from_numpy(coordinates.astype(np.float32, copy=False)) + noise
+    return _scale_umap_initial_coordinates(coordinates=coordinates, seed=seed)
 
 
 def _select_positive_edges(
@@ -978,6 +1246,7 @@ class SpectralInitialization(Op):
     name: ClassVar[str] = "umap_spectral_init"
     category: ClassVar[OpCategory] = OpCategory.INIT
     reads: ClassVar[Tuple[str, ...]] = (
+        "distance_matrix",
         f"extras.{_FUZZY_HEAD_KEY}",
         f"extras.{_FUZZY_TAIL_KEY}",
         f"extras.{_FUZZY_WEIGHT_KEY}",
@@ -1007,6 +1276,7 @@ class SpectralInitialization(Op):
             tail=tail,
             weight=weight,
             seed=problem.seed,
+            distance_matrix=state.distance_matrix,
         )
         return state
 

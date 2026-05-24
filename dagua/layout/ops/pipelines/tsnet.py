@@ -20,17 +20,20 @@ from dagua.layout.ops.tsnet import (  # noqa: E402
     TsnetGradientStep,
     TsnetInitializeOptimizer,
     TsnetInitializePositions,
+    TsnetInitializePositionsConfig,
     TsnetPrepareState,
 )
 
 
-def build_tsnet_pipeline(steps: int = 1000) -> Pipeline:
+def build_tsnet_pipeline(steps: int = 1000, fidelity_mode: bool = False) -> Pipeline:
     """Build a tsNET layout pipeline.
 
     Parameters
     ----------
     steps : int, default=1000
         Number of optimization updates.
+    fidelity_mode : bool, default=False
+        Use sklearn-compatible NumPy initialization when ``True``.
 
     Returns
     -------
@@ -51,7 +54,7 @@ def build_tsnet_pipeline(steps: int = 1000) -> Pipeline:
     return Pipeline(
         [
             FixedSteps(FixedStepsConfig(n=steps)),
-            TsnetInitializePositions(),
+            TsnetInitializePositions(TsnetInitializePositionsConfig(fidelity_mode=fidelity_mode)),
             TsnetPrepareState(),
             TsnetInitializeOptimizer(),
             Repeat(
@@ -74,6 +77,7 @@ def layout_tsnet_pipeline(
     steps: int = 1000,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
+    fidelity_mode: bool = False,
 ) -> torch.Tensor:
     """Run the tsNET pipeline as a drop-in replacement.
 
@@ -96,6 +100,8 @@ def layout_tsnet_pipeline(
         Random seed for the torch generator initialization.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
+    fidelity_mode : bool, default=False
+        Use sklearn-compatible NumPy initialization when ``True``.
 
     Returns
     -------
@@ -142,7 +148,11 @@ def layout_tsnet_pipeline(
     state = SolveState()
     state.extras["tsnet_perplexity"] = perplexity
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_tsnet_pipeline(steps=steps).apply(problem, state, ctx)
+    final_state = build_tsnet_pipeline(steps=steps, fidelity_mode=fidelity_mode).apply(
+        problem,
+        state,
+        ctx,
+    )
     if final_state.pos is None:
         raise RuntimeError("tsNET pipeline did not produce final positions.")
     return final_state.pos
