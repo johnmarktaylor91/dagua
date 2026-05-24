@@ -42,6 +42,8 @@ class AlgorithmVariant:
         Whether the reimplementation variant should run across multiple seeds.
     is_heavy : bool
         Whether the variant should be scheduled in the throttled heavy lane.
+    max_nodes : int | None
+        Optional per-variant graph-size cap for benchmark scheduling.
     """
 
     variant_id: str
@@ -53,6 +55,7 @@ class AlgorithmVariant:
     is_true_original: bool
     is_stochastic: bool
     is_heavy: bool
+    max_nodes: Optional[int] = None
 
 
 def _variant(
@@ -65,6 +68,7 @@ def _variant(
     is_true_original: bool,
     is_stochastic: bool,
     is_heavy: bool,
+    max_nodes: Optional[int] = None,
 ) -> AlgorithmVariant:
     """Build one immutable registry entry.
 
@@ -88,6 +92,8 @@ def _variant(
         Whether the reimplementation variant is stochastic.
     is_heavy : bool
         Whether the variant needs throttled scheduling.
+    max_nodes : int | None, default=None
+        Optional per-variant graph-size cap for benchmark scheduling.
 
     Returns
     -------
@@ -104,6 +110,7 @@ def _variant(
         is_true_original=is_true_original,
         is_stochastic=is_stochastic,
         is_heavy=is_heavy,
+        max_nodes=max_nodes,
     )
 
 
@@ -1129,6 +1136,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         False,
         True,
         False,
+        max_nodes=300,
     ),
     _variant(
         "classic_davidson_harel_rounds100",
@@ -1140,6 +1148,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         False,
         True,
         False,
+        max_nodes=300,
     ),
     _variant(
         "classic_davidson_harel_rounds200",
@@ -1151,6 +1160,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         False,
         True,
         False,
+        max_nodes=300,
     ),
     _variant(
         "classic_linlog_default",
@@ -1604,6 +1614,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         True,
+        max_nodes=1500,
     ),
     _variant(
         "classic_neulay_lr001",
@@ -1615,6 +1626,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         True,
+        max_nodes=1500,
     ),
     _variant(
         "classic_neulay_lr05",
@@ -1626,6 +1638,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         True,
+        max_nodes=1500,
     ),
     _variant(
         "classic_neulay_radius02",
@@ -1637,6 +1650,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         True,
+        max_nodes=1500,
     ),
     _variant(
         "classic_neulay_radius08",
@@ -1648,6 +1662,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         True,
+        max_nodes=1500,
     ),
     _variant(
         "classic_neulay_no_gcn",
@@ -1659,6 +1674,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         True,
+        max_nodes=1500,
     ),
     _variant(
         "classic_sgd2_multi_default",
@@ -1680,6 +1696,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         False,
+        max_nodes=2000,
     ),
     _variant(
         "classic_sgd2_multi_stress_only",
@@ -1696,6 +1713,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         False,
+        max_nodes=2000,
     ),
     _variant(
         "classic_sgd2_multi_with_crossing",
@@ -1717,6 +1735,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         False,
+        max_nodes=500,
     ),
     _variant(
         "classic_sgd2_multi_with_aspect",
@@ -1738,6 +1757,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         False,
+        max_nodes=2000,
     ),
     _variant(
         "classic_sgd2_multi_lr001",
@@ -1759,6 +1779,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         False,
+        max_nodes=2000,
     ),
     _variant(
         "classic_sgd2_multi_lr01",
@@ -1780,6 +1801,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         False,
+        max_nodes=2000,
     ),
     _variant(
         "classic_sgd2_multi_batch8",
@@ -1803,6 +1825,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         False,
+        max_nodes=2000,
     ),
     _variant(
         "classic_sgd2_multi_batch128",
@@ -1826,6 +1849,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         True,
         True,
         False,
+        max_nodes=2000,
     ),
     _variant(
         "cytoscape_fcose_default",

@@ -249,6 +249,34 @@ def test_sgd2_multi_variants_pin_steps_and_grad_clamp() -> None:
         assert variant.original_params["grad_clamp"] == 5.0
 
 
+def test_round31_infra_variant_max_node_caps() -> None:
+    """Sample-recovery variants should cap graph sizes before dispatch."""
+    expected_caps = {
+        "classic_neulay_default": 1500,
+        "classic_neulay_lr001": 1500,
+        "classic_neulay_lr05": 1500,
+        "classic_neulay_radius02": 1500,
+        "classic_neulay_radius08": 1500,
+        "classic_neulay_no_gcn": 1500,
+        "classic_sgd2_multi_default": 2000,
+        "classic_sgd2_multi_stress_only": 2000,
+        "classic_sgd2_multi_with_crossing": 500,
+        "classic_sgd2_multi_with_aspect": 2000,
+        "classic_sgd2_multi_lr001": 2000,
+        "classic_sgd2_multi_lr01": 2000,
+        "classic_sgd2_multi_batch8": 2000,
+        "classic_sgd2_multi_batch128": 2000,
+        "classic_davidson_harel_rounds50": 300,
+        "classic_davidson_harel_rounds100": 300,
+        "classic_davidson_harel_rounds200": 300,
+    }
+
+    for variant_id, max_nodes in expected_caps.items():
+        variant = get_variant(variant_id)
+        assert variant is not None
+        assert variant.max_nodes == max_nodes
+
+
 def test_original_params_mappable_where_claimed() -> None:
     """Original-side params should only use adapter-supported names."""
     for variant in VARIANT_REGISTRY:
