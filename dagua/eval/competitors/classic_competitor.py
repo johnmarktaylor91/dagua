@@ -304,6 +304,8 @@ class VariantCompetitor(CompetitorBase):
         Human-readable label for manifests and reports.
     is_heavy : bool, default=False
         Whether this wrapper belongs to the heavy scheduling lane.
+    max_nodes : int | None, default=None
+        Optional per-variant graph-size cap.
     """
 
     def __init__(
@@ -313,12 +315,18 @@ class VariantCompetitor(CompetitorBase):
         name: str,
         display_name: Optional[str] = None,
         is_heavy: bool = False,
+        max_nodes: Optional[int] = None,
     ) -> None:
         self._base = base_competitor
         self._variant_params = dict(variant_params)
         self.name = name
         self.display_name = name if display_name is None else display_name
-        self.max_nodes = base_competitor.max_nodes
+        if max_nodes is None:
+            self.max_nodes = base_competitor.max_nodes
+        elif base_competitor.max_nodes > 0:
+            self.max_nodes = min(base_competitor.max_nodes, max_nodes)
+        else:
+            self.max_nodes = max_nodes
         self.supports_clusters = base_competitor.supports_clusters
         self.variant_param_names = base_competitor.variant_param_names
         self.is_heavy = is_heavy
