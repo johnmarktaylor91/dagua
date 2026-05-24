@@ -31,11 +31,12 @@ import statistics
 import sys
 import tempfile
 import time
+from collections import deque
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, MutableMapping, Optional, Sequence
 
 import torch
 
@@ -91,6 +92,72 @@ CONSECUTIVE_FAILURE_SKIP_THRESHOLD = 3  # skip remaining seeds after N consecuti
 MIN_TIMEOUT_SECONDS = 30.0
 # Graph size at which the full global timeout applies.
 FULL_TIMEOUT_NODE_COUNT = 500
+
+
+def refresh_watchdog_start_times(
+    inflight: dict[Future[list[dict[str, Any]]], Sequence["WorkItem"]],
+    watchdog_started_at: MutableMapping[Future[list[dict[str, Any]]], float],
+    max_active: int,
+    now: float,
+) -> None:
+    """Start watchdog timers for futures that can be occupying workers.
+
+    Parameters
+    ----------
+    inflight : dict[Future[list[dict[str, Any]]], Sequence[WorkItem]]
+        Submitted futures in scheduler order.
+    watchdog_started_at : MutableMapping[Future[list[dict[str, Any]]], float]
+        Per-future watchdog start times updated in place.
+    max_active : int
+        Maximum number of futures that can be running at once.
+    now : float
+        Monotonic timestamp to assign to newly active futures.
+
+    Returns
+    -------
+    None
+        The ``watchdog_started_at`` mapping is updated in place.
+    """
+    active_futures = set(list(inflight.keys())[:max_active])
+    for fut in active_futures:
+        watchdog_started_at.setdefault(fut, now)
+    for fut in list(watchdog_started_at):
+        if fut not in inflight:
+            watchdog_started_at.pop(fut, None)
+
+
+def expired_watchdog_futures(
+    inflight: dict[Future[list[dict[str, Any]]], Sequence["WorkItem"]],
+    watchdog_started_at: MutableMapping[Future[list[dict[str, Any]]], float],
+    max_active: int,
+    watchdog_timeout: float,
+    now: float,
+) -> list[Future[list[dict[str, Any]]]]:
+    """Return active futures whose individual watchdog budget has expired.
+
+    Parameters
+    ----------
+    inflight : dict[Future[list[dict[str, Any]]], Sequence[WorkItem]]
+        Submitted futures in scheduler order.
+    watchdog_started_at : MutableMapping[Future[list[dict[str, Any]]], float]
+        Per-future watchdog start times.
+    max_active : int
+        Maximum number of futures that can be running at once.
+    watchdog_timeout : float
+        Maximum allowed active time in seconds for one future.
+    now : float
+        Current monotonic timestamp.
+
+    Returns
+    -------
+    list[Future[list[dict[str, Any]]]]
+        Active futures whose elapsed watchdog time is at least
+        ``watchdog_timeout``.
+    """
+    active_futures = list(inflight.keys())[:max_active]
+    return [
+        fut for fut in active_futures if now - watchdog_started_at.get(fut, now) >= watchdog_timeout
+    ]
 
 
 class _WorkerLayoutTimeoutError(TimeoutError):
@@ -2320,74 +2387,184 @@ def main() -> int:
             # at all times.  As each completes, immediately submit the next
             # group.  This eliminates idle gaps between batches.
             inflight: dict[Future[list[dict[str, Any]]], Sequence[WorkItem]] = {}
+            watchdog_started_at: dict[Future[list[dict[str, Any]]], float] = {}
+            resubmit_groups: deque[Sequence[WorkItem]] = deque()
             group_iter = iter(light_groups)
 
             def _fill_inflight() -> None:
-                """Submit work groups until the inflight window is full."""
+                """Submit work groups until the inflight window is full.
+
+                Returns
+                -------
+                None
+                    The shared ``inflight`` mapping is updated in place.
+                """
                 while len(inflight) < MAX_INFLIGHT_GROUPS and not _shutdown_requested:
-                    try:
-                        work_group = next(group_iter)
-                    except StopIteration:
-                        break
+                    if resubmit_groups:
+                        work_group = resubmit_groups.popleft()
+                    else:
+                        try:
+                            work_group = next(group_iter)
+                        except StopIteration:
+                            break
                     _mark_group_running(work_group)
                     fut = executor.submit(_run_work_group, work_group)
                     inflight[fut] = work_group
+                refresh_watchdog_start_times(
+                    inflight,
+                    watchdog_started_at,
+                    max_active=args.resolved_workers,
+                    now=time.monotonic(),
+                )
+
+            def _collect_inflight_future(fut: Future[list[dict[str, Any]]]) -> None:
+                """Collect one completed future and submit replacement work.
+
+                Parameters
+                ----------
+                fut : Future[list[dict[str, Any]]]
+                    Completed future to remove from the inflight window.
+
+                Returns
+                -------
+                None
+                    Results are recorded through ``_collect_future``.
+                """
+                watchdog_started_at.pop(fut, None)
+                _collect_future(fut, inflight.pop(fut))
+                _fill_inflight()
+
+            def _record_watchdog_expiry(
+                fut: Future[list[dict[str, Any]]],
+                stuck_group: Sequence[WorkItem],
+            ) -> None:
+                """Record watchdog errors for one expired future.
+
+                Parameters
+                ----------
+                fut : Future[list[dict[str, Any]]]
+                    Future whose individual watchdog timer expired.
+                stuck_group : Sequence[WorkItem]
+                    Work items represented by ``fut``.
+
+                Returns
+                -------
+                None
+                    Records are appended through ``_process_record``.
+                """
+                fut.cancel()
+                watchdog_started_at.pop(fut, None)
+                for wi in stuck_group:
+                    record = _record_with_pairings(
+                        graph_name=wi.graph_name,
+                        engine_name=wi.engine_name,
+                        seed=wi.seed,
+                        num_nodes=graph_summaries[wi.graph_name].num_nodes,
+                        num_edges=graph_summaries[wi.graph_name].num_edges,
+                        status="error",
+                        runtime_seconds=None,
+                        error="watchdog: future exceeded timeout",
+                        positions_file=None,
+                        skip_reason=None,
+                    )
+                    _process_record(record)
+
+            def _rebuild_executor_with_pending_groups(
+                pending_groups: Sequence[Sequence[WorkItem]],
+            ) -> None:
+                """Rebuild the worker pool while preserving unexpired work.
+
+                Parameters
+                ----------
+                pending_groups : Sequence[Sequence[WorkItem]]
+                    Work groups that were submitted but did not individually
+                    exceed the watchdog timeout.
+
+                Returns
+                -------
+                None
+                    The shared executor and inflight window are replaced.
+                """
+                nonlocal executor
+
+                for fut in list(inflight):
+                    fut.cancel()
+                inflight.clear()
+                watchdog_started_at.clear()
+                resubmit_groups.extend(pending_groups)
+                executor.shutdown(wait=False, cancel_futures=True)
+                executor = ProcessPoolExecutor(
+                    max_workers=args.resolved_workers,
+                    mp_context=_MP_CONTEXT,
+                    initializer=_worker_init,
+                )
+                _fill_inflight()
+
+            def _handle_watchdog_timeout() -> None:
+                """Expire only active futures that exceeded the watchdog budget.
+
+                Returns
+                -------
+                None
+                    Expired futures are recorded as errors, while unexpired
+                    groups remain eligible for execution.
+                """
+                now = time.monotonic()
+                active_futures = list(inflight.keys())[: args.resolved_workers]
+                expired_futures = expired_watchdog_futures(
+                    inflight,
+                    watchdog_started_at,
+                    max_active=args.resolved_workers,
+                    watchdog_timeout=watchdog_timeout,
+                    now=now,
+                )
+                if not expired_futures:
+                    refresh_watchdog_start_times(
+                        inflight,
+                        watchdog_started_at,
+                        max_active=args.resolved_workers,
+                        now=now,
+                    )
+                    return
+
+                expired_set = set(expired_futures)
+                active_expired = len(expired_set) == len(active_futures)
+                pending_groups = [
+                    group for fut, group in inflight.items() if fut not in expired_set
+                ]
+                print(
+                    f"[benchmark] WATCHDOG: {len(expired_futures)} future(s) exceeded "
+                    f"{watchdog_timeout:.0f}s; preserving {len(pending_groups)} peer futures"
+                )
+                save_results(results_path, results)
+                for fut in expired_futures:
+                    stuck_group = inflight.pop(fut)
+                    _record_watchdog_expiry(fut, stuck_group)
+
+                if active_expired:
+                    _rebuild_executor_with_pending_groups(pending_groups)
+                else:
+                    _fill_inflight()
 
             try:
                 _fill_inflight()
                 while inflight and not _shutdown_requested:
-                    # Wait for any one future, with watchdog timeout.
-                    # If no future completes within WATCHDOG_TIMEOUT, a worker
-                    # likely died (C-level crash in igraph/DRL/etc.).  Record
-                    # the stuck futures as errors and rebuild the executor.
                     got_result = False
                     try:
                         for fut in as_completed(inflight, timeout=watchdog_timeout):
-                            _collect_future(fut, inflight.pop(fut))
-                            _fill_inflight()
+                            _collect_inflight_future(fut)
                             got_result = True
                             if _shutdown_requested:
                                 break
                             break  # Process one at a time to stay responsive.
                     except TimeoutError:
-                        pass  # Watchdog fired -- handled below.
+                        pass
                     if not got_result and not _shutdown_requested:
-                        # Watchdog fired -- worker pool is stuck.
-                        print(
-                            f"[benchmark] WATCHDOG: no future completed in "
-                            f"{watchdog_timeout:.0f}s, recycling executor "
-                            f"({len(inflight)} stuck futures)"
-                        )
-                        save_results(results_path, results)
-                        # Record stuck futures as errors.
-                        for stuck_fut, stuck_group in list(inflight.items()):
-                            for wi in stuck_group:
-                                record = _record_with_pairings(
-                                    graph_name=wi.graph_name,
-                                    engine_name=wi.engine_name,
-                                    seed=wi.seed,
-                                    num_nodes=graph_summaries[wi.graph_name].num_nodes,
-                                    num_edges=graph_summaries[wi.graph_name].num_edges,
-                                    status="error",
-                                    runtime_seconds=None,
-                                    error="watchdog: worker pool stuck",
-                                    positions_file=None,
-                                    skip_reason=None,
-                                )
-                                _process_record(record)
-                        inflight.clear()
-                        # Kill and rebuild the executor.
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        executor = ProcessPoolExecutor(
-                            max_workers=args.resolved_workers,
-                            mp_context=_MP_CONTEXT,
-                            initializer=_worker_init,
-                        )
-                        _fill_inflight()
+                        _handle_watchdog_timeout()
                     # If shutdown requested, drain remaining inflight futures.
                     if _shutdown_requested:
                         for fut in as_completed(inflight):
-                            _collect_future(fut, inflight.pop(fut))
+                            _collect_inflight_future(fut)
             finally:
                 executor.shutdown(wait=True, cancel_futures=False)
 
@@ -2404,14 +2581,15 @@ def main() -> int:
                     initializer=_worker_init,
                 )
                 group_iter = iter(heavy_groups)
+                resubmit_groups.clear()
+                watchdog_started_at.clear()
                 try:
                     _fill_inflight()
                     while inflight and not _shutdown_requested:
                         got_result = False
                         try:
                             for fut in as_completed(inflight, timeout=watchdog_timeout):
-                                _collect_future(fut, inflight.pop(fut))
-                                _fill_inflight()
+                                _collect_inflight_future(fut)
                                 got_result = True
                                 if _shutdown_requested:
                                     break
@@ -2419,38 +2597,10 @@ def main() -> int:
                         except TimeoutError:
                             pass
                         if not got_result and not _shutdown_requested:
-                            print(
-                                f"[benchmark] WATCHDOG: no future completed in "
-                                f"{watchdog_timeout:.0f}s, recycling executor "
-                                f"({len(inflight)} stuck futures)"
-                            )
-                            save_results(results_path, results)
-                            for stuck_fut, stuck_group in list(inflight.items()):
-                                for wi in stuck_group:
-                                    record = _record_with_pairings(
-                                        graph_name=wi.graph_name,
-                                        engine_name=wi.engine_name,
-                                        seed=wi.seed,
-                                        num_nodes=graph_summaries[wi.graph_name].num_nodes,
-                                        num_edges=graph_summaries[wi.graph_name].num_edges,
-                                        status="error",
-                                        runtime_seconds=None,
-                                        error="watchdog: worker pool stuck",
-                                        positions_file=None,
-                                        skip_reason=None,
-                                    )
-                                    _process_record(record)
-                            inflight.clear()
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            executor = ProcessPoolExecutor(
-                                max_workers=args.resolved_workers,
-                                mp_context=_MP_CONTEXT,
-                                initializer=_worker_init,
-                            )
-                            _fill_inflight()
+                            _handle_watchdog_timeout()
                         if _shutdown_requested:
                             for fut in as_completed(inflight):
-                                _collect_future(fut, inflight.pop(fut))
+                                _collect_inflight_future(fut)
                 finally:
                     executor.shutdown(wait=True, cancel_futures=False)
 
