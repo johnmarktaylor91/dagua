@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar, Optional, Tuple
 
+import numpy as np
 import torch
 
 from dagua.layout.ops.base import Op
@@ -28,6 +29,9 @@ _TSNET_EARLY_LR_KEY = "tsnet_early_learning_rate"
 _TSNET_LATE_LR_KEY = "tsnet_late_learning_rate"
 _TSNET_UPDATE_KEY = "tsnet_update"
 _TSNET_GAINS_KEY = "tsnet_gains"
+_TSNET_BEST_ERROR_KEY = "tsnet_best_error"
+_TSNET_BEST_ITER_KEY = "tsnet_best_iter"
+_TSNET_GRAD_NORM_KEY = "tsnet_grad_norm"
 
 
 @dataclass(frozen=True)
@@ -38,9 +42,13 @@ class TsnetInitializePositionsConfig:
     ----------
     noise_scale : float, default=1e-4
         Standard deviation of the Gaussian initialization noise.
+    fidelity_mode : bool, default=False
+        When ``True``, use NumPy ``RandomState`` draws to match sklearn
+        ``TSNE(init="random")`` seed semantics.
     """
 
     noise_scale: float = 1.0e-4
+    fidelity_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -94,12 +102,24 @@ class TsnetGradientStepConfig:
         Additive gain bump when the gradient sign flips.
     gain_decrease : float, default=0.8
         Multiplicative gain decay when the gradient sign is consistent.
+    gradient_scale : float, default=4.0
+        Scale factor applied to the KL objective before backpropagation.
+    convergence_check_interval : int, default=50
+        Number of iterations between sklearn-style convergence checks.
+    n_iter_without_progress : int, default=300
+        Maximum iterations without KL improvement before stopping.
+    min_grad_norm : float, default=1e-7
+        Gradient-norm floor below which optimization stops.
     """
 
     early_momentum: float = 0.5
     late_momentum: float = 0.8
     gain_increase: float = 0.2
     gain_decrease: float = 0.8
+    gradient_scale: float = 4.0
+    convergence_check_interval: int = 50
+    n_iter_without_progress: int = 300
+    min_grad_norm: float = 1.0e-7
 
 
 @register_op
@@ -147,17 +167,21 @@ class TsnetInitializePositions(Op):
         """
         del ctx
         device = layout_device(problem.edge_index, problem.node_sizes)
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(problem.seed)
-        state.pos = (
-            (
+        if self.config.fidelity_mode:
+            random_state = np.random.RandomState(problem.seed)
+            initial = torch.from_numpy(
+                (
+                    self.config.noise_scale * random_state.standard_normal((problem.num_nodes, 2))
+                ).astype(np.float32, copy=False)
+            )
+        else:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(problem.seed)
+            initial = (
                 torch.randn(problem.num_nodes, 2, generator=generator, dtype=torch.float32)
                 * self.config.noise_scale
             )
-            .to(device=device)
-            .clone()
-            .requires_grad_(True)
-        )
+        state.pos = initial.to(device=device).clone().requires_grad_(True)
         return state
 
 
@@ -303,6 +327,9 @@ class TsnetInitializeOptimizer(Op):
     writes: ClassVar[Tuple[str, ...]] = (
         f"extras.{_TSNET_UPDATE_KEY}",
         f"extras.{_TSNET_GAINS_KEY}",
+        f"extras.{_TSNET_BEST_ERROR_KEY}",
+        f"extras.{_TSNET_BEST_ITER_KEY}",
+        f"extras.{_TSNET_GRAD_NORM_KEY}",
     )
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
     access_pattern: ClassVar[str] = "global"
@@ -339,6 +366,9 @@ class TsnetInitializeOptimizer(Op):
             raise ValueError("TsnetInitializeOptimizer requires state.pos to be set.")
         state.extras[_TSNET_UPDATE_KEY] = torch.zeros_like(state.pos)
         state.extras[_TSNET_GAINS_KEY] = torch.ones_like(state.pos)
+        state.extras[_TSNET_BEST_ERROR_KEY] = float("inf")
+        state.extras[_TSNET_BEST_ITER_KEY] = 0
+        state.extras[_TSNET_GRAD_NORM_KEY] = float("inf")
         return state
 
 
@@ -361,11 +391,18 @@ class TsnetGradientStep(Op):
         f"extras.{_TSNET_LATE_LR_KEY}",
         f"extras.{_TSNET_UPDATE_KEY}",
         f"extras.{_TSNET_GAINS_KEY}",
+        f"extras.{_TSNET_BEST_ERROR_KEY}",
+        f"extras.{_TSNET_BEST_ITER_KEY}",
     )
     writes: ClassVar[Tuple[str, ...]] = (
         "pos",
+        "prev_loss",
+        "converged",
         f"extras.{_TSNET_UPDATE_KEY}",
         f"extras.{_TSNET_GAINS_KEY}",
+        f"extras.{_TSNET_BEST_ERROR_KEY}",
+        f"extras.{_TSNET_BEST_ITER_KEY}",
+        f"extras.{_TSNET_GRAD_NORM_KEY}",
     )
     requires: ClassVar[Tuple[str, ...]] = (
         "pos",
@@ -449,7 +486,7 @@ class TsnetGradientStep(Op):
                     - q.clamp(min=min_distance).log()
                 )
             ).sum()
-            loss.backward()
+            (loss * self.config.gradient_scale).backward()
 
         grad = state.pos.grad.detach().clone()
         momentum = self.config.early_momentum if step < early_steps else self.config.late_momentum
@@ -464,12 +501,28 @@ class TsnetGradientStep(Op):
             gains[dec] *= self.config.gain_decrease
             gains.clamp_(min=min_gain)
             grad = grad * gains
+            grad_norm = float(torch.linalg.vector_norm(grad).item())
             update = momentum * update - learning_rate * grad
             state.pos.add_(update)
             state.pos.grad.zero_()
 
         state.extras[_TSNET_UPDATE_KEY] = update
         state.extras[_TSNET_GAINS_KEY] = gains
+        state.extras[_TSNET_GRAD_NORM_KEY] = grad_norm
+        state.prev_loss = float(loss.detach().item())
+        if step == early_steps:
+            state.extras[_TSNET_BEST_ERROR_KEY] = float("inf")
+            state.extras[_TSNET_BEST_ITER_KEY] = step
+        if (step + 1) % self.config.convergence_check_interval == 0:
+            best_error = float(state.extras.get(_TSNET_BEST_ERROR_KEY, float("inf")))
+            best_iter = int(state.extras.get(_TSNET_BEST_ITER_KEY, step))
+            if state.prev_loss < best_error:
+                state.extras[_TSNET_BEST_ERROR_KEY] = state.prev_loss
+                state.extras[_TSNET_BEST_ITER_KEY] = step
+            elif step - best_iter > self.config.n_iter_without_progress:
+                state.converged = True
+            if grad_norm <= self.config.min_grad_norm:
+                state.converged = True
         return state
 
 

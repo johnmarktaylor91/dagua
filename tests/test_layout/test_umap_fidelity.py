@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import torch
 
+from dagua.layout.ops.pipelines.umap_layout import layout_umap_layout_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.umap import (
     StoreUMAPHyperparameters,
     _build_undirected_adjacency,
     _knn_from_distances,
     _optimize_embedding,
+    _smooth_knn_dist,
+    _spectral_initialization,
 )
 
 
@@ -106,3 +109,73 @@ def test_optimize_embedding_waits_until_first_sample_interval() -> None:
     )
 
     assert torch.equal(optimized, embedding)
+
+
+def test_smooth_knn_dist_uses_reference_global_floor_when_rho_is_zero() -> None:
+    """Verify zero-radius rows use UMAP's global smooth-kNN sigma floor."""
+    knn_distances = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 2.0, 4.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    sigmas, rhos = _smooth_knn_dist(knn_distances=knn_distances, n_neighbors=3)
+
+    assert rhos[0].item() == 0.0
+    assert torch.isclose(sigmas[0], torch.tensor(0.001), atol=1.0e-7)
+
+
+def test_spectral_initialization_uses_umap_per_axis_unit_square_frame() -> None:
+    """Verify spectral init is rescaled per axis into UMAP's ``[0, 10]`` frame."""
+    head = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+    tail = torch.tensor([1, 2, 3, 4], dtype=torch.long)
+    weight = torch.ones((4,), dtype=torch.float32)
+
+    coordinates = _spectral_initialization(
+        num_nodes=5,
+        head=head,
+        tail=tail,
+        weight=weight,
+        seed=42,
+    )
+
+    assert coordinates.shape == (5, 2)
+    assert torch.allclose(coordinates.min(dim=0).values, torch.zeros(2), atol=1.0e-5)
+    assert torch.allclose(coordinates.max(dim=0).values, torch.full((2,), 10.0), atol=1.0e-5)
+
+
+def test_spectral_initialization_uses_random_init_for_small_umap_graphs() -> None:
+    """Verify ``4 <= N < 10`` follows the reference adapter's random init policy."""
+    head = torch.tensor([0, 1, 2, 3, 4], dtype=torch.long)
+    tail = torch.tensor([1, 2, 3, 4, 5], dtype=torch.long)
+    weight = torch.ones((5,), dtype=torch.float32)
+
+    coordinates = _spectral_initialization(
+        num_nodes=6,
+        head=head,
+        tail=tail,
+        weight=weight,
+        seed=42,
+    )
+
+    assert coordinates.shape == (6, 2)
+    assert torch.allclose(coordinates.min(dim=0).values, torch.zeros(2), atol=1.0e-5)
+    assert torch.allclose(coordinates.max(dim=0).values, torch.full((2,), 10.0), atol=1.0e-5)
+
+
+def test_layout_umap_tiny_graph_uses_reference_adapter_bypass() -> None:
+    """Verify ``N <= 3`` uses the seeded random adapter fallback."""
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(123)
+    expected = torch.randn((3, 2), generator=generator, dtype=torch.float32)
+
+    coordinates = layout_umap_layout_pipeline(
+        edge_index=edge_index,
+        num_nodes=3,
+        seed=123,
+    )
+
+    assert torch.equal(coordinates, expected)
