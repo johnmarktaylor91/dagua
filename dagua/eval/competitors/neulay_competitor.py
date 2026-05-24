@@ -11,6 +11,10 @@ from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, regist
 if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
+# Round 31 tracking: this reference is optional and often absent from local
+# environments. Keep missing-package cases explicit so fidelity analysis does
+# not silently interpret NeuLay as having zero paired rows.
+
 
 def _pyg_available() -> bool:
     """Return whether PyTorch Geometric is importable.
