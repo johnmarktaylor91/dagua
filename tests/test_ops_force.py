@@ -33,6 +33,10 @@ from dagua.layout.ops.force import (
     DesiredLengthSpringAttraction,
     FA2DegreeCompensatedAttraction,
     GEMNodeTick,
+    GraphOptIteration,
+    GraphOptIterationConfig,
+    GraphOptPrepareState,
+    GraphOptPrepareStateConfig,
     GravityToBarycenter,
     GravityToOrigin,
     GravityToOriginConfig,
@@ -300,6 +304,97 @@ def _fresh_ctx() -> RuntimeContext:
     generator = torch.Generator(device="cpu")
     generator.manual_seed(7)
     return RuntimeContext(generator=generator)
+
+
+def test_graphopt_fidelity_mode_ignores_edge_weights() -> None:
+    """GraphOpt fidelity mode should leave weighted springs at igraph strength."""
+
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    weights = torch.tensor([10.0, 0.1], dtype=torch.float64)
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=3, edge_weights=weights)
+    unweighted_problem = LayoutProblem(edge_index=edge_index, num_nodes=3)
+    pos = torch.tensor([[0.0, 0.0], [2.0, 0.0], [2.0, 3.0]], dtype=torch.float64)
+
+    fidelity_state = SolveState(pos=pos.clone())
+    GraphOptPrepareState(GraphOptPrepareStateConfig(fidelity_mode=True)).apply(
+        problem,
+        fidelity_state,
+        _fresh_ctx(),
+    )
+    GraphOptIteration(GraphOptIterationConfig(node_charge=0.0)).apply(
+        problem,
+        fidelity_state,
+        _fresh_ctx(),
+    )
+
+    unweighted_state = SolveState(pos=pos.clone())
+    GraphOptPrepareState().apply(unweighted_problem, unweighted_state, _fresh_ctx())
+    GraphOptIteration(GraphOptIterationConfig(node_charge=0.0)).apply(
+        unweighted_problem,
+        unweighted_state,
+        _fresh_ctx(),
+    )
+
+    weighted_state = SolveState(pos=pos.clone())
+    GraphOptPrepareState().apply(problem, weighted_state, _fresh_ctx())
+    GraphOptIteration(GraphOptIterationConfig(node_charge=0.0)).apply(
+        problem,
+        weighted_state,
+        _fresh_ctx(),
+    )
+
+    assert fidelity_state.pos is not None
+    assert unweighted_state.pos is not None
+    assert weighted_state.pos is not None
+    torch.testing.assert_close(fidelity_state.pos, unweighted_state.pos)
+    assert not torch.allclose(fidelity_state.pos, weighted_state.pos)
+
+
+def test_graphopt_repulsion_uses_exact_zero_distance_predicate() -> None:
+    """Near-coincident nonzero node pairs should still repel like igraph."""
+
+    problem = _problem_from_edges([], num_nodes=2)
+    state = SolveState(
+        pos=torch.tensor([[0.0, 0.0], [1.0e-8, 0.0]], dtype=torch.float64),
+    )
+
+    GraphOptPrepareState().apply(problem, state, _fresh_ctx())
+    GraphOptIteration(GraphOptIterationConfig(node_charge=0.001)).apply(
+        problem,
+        state,
+        _fresh_ctx(),
+    )
+
+    assert state.pos is not None
+    torch.testing.assert_close(
+        state.pos,
+        torch.tensor([[-5.0, 0.0], [5.00000001, 0.0]], dtype=torch.float64),
+    )
+
+
+def test_graphopt_spring_uses_exact_zero_distance_predicate() -> None:
+    """Near-coincident nonzero spring endpoints should still apply Hooke force."""
+
+    problem = _problem_from_edges([(0, 1)], num_nodes=2)
+    state = SolveState(
+        pos=torch.tensor([[0.0, 0.0], [1.0e-8, 0.0]], dtype=torch.float64),
+    )
+
+    GraphOptPrepareState().apply(problem, state, _fresh_ctx())
+    GraphOptIteration(
+        GraphOptIterationConfig(
+            node_charge=0.0,
+            node_mass=1.0,
+            spring_constant=1.0,
+            max_sa_movement=5.0,
+        )
+    ).apply(problem, state, _fresh_ctx())
+
+    assert state.pos is not None
+    torch.testing.assert_close(
+        state.pos,
+        torch.tensor([[5.0e-9, 0.0], [5.0e-9, 0.0]], dtype=torch.float64),
+    )
 
 
 def test_force_pipeline_matches_manual_fr_update() -> None:

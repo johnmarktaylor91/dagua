@@ -214,3 +214,22 @@ class TestGraphOptPipelineFidelity:
         pipeline = layout_graphopt_pipeline(edge_index=edge_index, num_nodes=3, niter=60, seed=5)
 
         _assert_exact_match(classic, pipeline)
+
+    def test_layout_graphopt_pipeline_accepts_initial_positions(self) -> None:
+        """The public pipeline should use a supplied GraphOpt seed matrix."""
+        edge_index = _path_edge_index(3)
+        initial_pos = torch.tensor(
+            [[-1.0, 0.5], [0.0, 0.0], [1.0, -0.5]],
+            dtype=torch.float64,
+        )
+
+        pos = layout_graphopt_pipeline(
+            edge_index=edge_index,
+            num_nodes=3,
+            niter=0,
+            seed=99,
+            initial_pos=initial_pos,
+            fidelity_mode=True,
+        )
+
+        torch.testing.assert_close(pos, initial_pos.to(dtype=torch.float32))
