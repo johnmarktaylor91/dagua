@@ -321,12 +321,7 @@ class VariantCompetitor(CompetitorBase):
         self._variant_params = dict(variant_params)
         self.name = name
         self.display_name = name if display_name is None else display_name
-        if max_nodes is None:
-            self.max_nodes = base_competitor.max_nodes
-        elif base_competitor.max_nodes > 0:
-            self.max_nodes = min(base_competitor.max_nodes, max_nodes)
-        else:
-            self.max_nodes = max_nodes
+        self.max_nodes = base_competitor.max_nodes if max_nodes is None else max_nodes
         self.supports_clusters = base_competitor.supports_clusters
         self.variant_param_names = base_competitor.variant_param_names
         self.is_heavy = is_heavy
