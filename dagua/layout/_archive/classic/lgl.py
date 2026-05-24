@@ -15,6 +15,8 @@ from typing import Optional
 import torch
 
 _MIN_DISTANCE = 1.0e-12
+_REPULSION_MIN_DISTANCE = 1.0e-5
+_BUCKET_NEIGHBOR_OFFSETS = ((0, 0), (1, 0), (0, 1), (1, 1))
 _CONVERGENCE_EPSILON = 1.0e-5
 
 
@@ -153,7 +155,13 @@ def _build_undirected_graph(
     return adjacency, edges, weights if weight_list is not None else None
 
 
-def _initialize_positions(num_nodes: int, radius: float, seed: int) -> torch.Tensor:
+def _initialize_positions(
+    num_nodes: int,
+    radius: float,
+    seed: int,
+    *,
+    root_was_random: bool,
+) -> torch.Tensor:
     """Create the random LGL starting positions.
 
     Parameters
@@ -164,6 +172,9 @@ def _initialize_positions(num_nodes: int, radius: float, seed: int) -> torch.Ten
         Characteristic radius of the drawing box.
     seed : int
         Random seed for the initial placement.
+    root_was_random : bool
+        Whether the reference RNG consumed a random-root draw before layout
+        initialization.
 
     Returns
     -------
@@ -171,8 +182,13 @@ def _initialize_positions(num_nodes: int, radius: float, seed: int) -> torch.Ten
         Initial positions with shape ``[N, 2]`` and dtype ``float64``.
     """
     rng = random.Random(seed)
-    data = [[rng.uniform(-radius, radius), rng.uniform(-radius, radius)] for _ in range(num_nodes)]
-    return torch.tensor(data, dtype=torch.float64)
+    if root_was_random:
+        rng.randrange(num_nodes)
+    positions = torch.empty((num_nodes, 2), dtype=torch.float64)
+    for axis in range(2):
+        for node in range(num_nodes):
+            positions[node, axis] = rng.uniform(-1.0, 1.0) * radius
+    return positions
 
 
 def _normalize(vector: torch.Tensor) -> torch.Tensor:
@@ -368,46 +384,45 @@ def _run_refinement(
         sorted_cells = sorted(buckets)
         for cell in sorted_cells:
             nodes_here = buckets[cell]
-            for offset_y in (-1, 0, 1):
-                for offset_x in (-1, 0, 1):
-                    neighbor_cell = (cell[0] + offset_x, cell[1] + offset_y)
-                    if neighbor_cell not in buckets or neighbor_cell < cell:
-                        continue
-                    nodes_there = buckets[neighbor_cell]
-                    if neighbor_cell == cell:
-                        for left_index in range(len(nodes_here)):
-                            for right_index in range(left_index + 1, len(nodes_here)):
-                                left = nodes_here[left_index]
-                                right = nodes_here[right_index]
-                                delta = positions[left] - positions[right]
-                                distance = float(torch.linalg.norm(delta).item())
-                                if distance >= cellsize:
-                                    continue
-                                safe_distance = max(distance, _MIN_DISTANCE)
-                                direction = delta / safe_distance
-                                magnitude = (frk * frk) * (
-                                    (1.0 / safe_distance)
-                                    - ((safe_distance * safe_distance) / repulserad)
-                                )
-                                contribution = direction * magnitude
-                                forces[left] += contribution
-                                forces[right] -= contribution
-                    else:
-                        for left in nodes_here:
-                            for right in nodes_there:
-                                delta = positions[left] - positions[right]
-                                distance = float(torch.linalg.norm(delta).item())
-                                if distance >= cellsize:
-                                    continue
-                                safe_distance = max(distance, _MIN_DISTANCE)
-                                direction = delta / safe_distance
-                                magnitude = (frk * frk) * (
-                                    (1.0 / safe_distance)
-                                    - ((safe_distance * safe_distance) / repulserad)
-                                )
-                                contribution = direction * magnitude
-                                forces[left] += contribution
-                                forces[right] -= contribution
+            for offset_x, offset_y in _BUCKET_NEIGHBOR_OFFSETS:
+                neighbor_cell = (cell[0] + offset_x, cell[1] + offset_y)
+                if neighbor_cell not in buckets:
+                    continue
+                nodes_there = buckets[neighbor_cell]
+                if neighbor_cell == cell:
+                    for left_index in range(len(nodes_here)):
+                        for right_index in range(left_index + 1, len(nodes_here)):
+                            left = nodes_here[left_index]
+                            right = nodes_here[right_index]
+                            delta = positions[left] - positions[right]
+                            distance = float(torch.linalg.norm(delta).item())
+                            if distance >= cellsize:
+                                continue
+                            safe_distance = max(distance, _REPULSION_MIN_DISTANCE)
+                            direction = delta / safe_distance
+                            magnitude = (frk * frk) * (
+                                (1.0 / safe_distance)
+                                - ((safe_distance * safe_distance) / repulserad)
+                            )
+                            contribution = direction * magnitude
+                            forces[left] += contribution
+                            forces[right] -= contribution
+                else:
+                    for left in nodes_here:
+                        for right in nodes_there:
+                            delta = positions[left] - positions[right]
+                            distance = float(torch.linalg.norm(delta).item())
+                            if distance >= cellsize:
+                                continue
+                            safe_distance = max(distance, _REPULSION_MIN_DISTANCE)
+                            direction = delta / safe_distance
+                            magnitude = (frk * frk) * (
+                                (1.0 / safe_distance)
+                                - ((safe_distance * safe_distance) / repulserad)
+                            )
+                            contribution = direction * magnitude
+                            forces[left] += contribution
+                            forces[right] -= contribution
 
         for node in active_nodes:
             movement = forces[node]
@@ -417,8 +432,8 @@ def _run_refinement(
             positions[node] += movement
             maxchange = max(
                 maxchange,
-                abs(float(movement[0].item())),
-                abs(float(movement[1].item())),
+                float(movement[0].item()),
+                float(movement[1].item()),
             )
 
         if maxchange < _CONVERGENCE_EPSILON:
@@ -503,13 +518,19 @@ def layout_lgl(
         edge_weights=edge_weights,
     )
     rng = random.Random(seed)
-    root_node = rng.randrange(num_nodes) if root is None else root
+    root_was_random = root is None
+    root_node = rng.randrange(num_nodes) if root_was_random else root
     if root_node < 0 or root_node >= num_nodes:
         raise ValueError("root must lie in [0, num_nodes).")
 
     frk = math.sqrt(resolved_area / float(max(num_nodes, 1)))
     radius = math.sqrt(resolved_area / math.pi)
-    positions = _initialize_positions(num_nodes=num_nodes, radius=radius, seed=seed)
+    positions = _initialize_positions(
+        num_nodes=num_nodes,
+        radius=radius,
+        seed=seed,
+        root_was_random=root_was_random,
+    )
     positions[root_node] = 0.0
 
     layers, parents = _bfs_layers(adjacency=adjacency, root=root_node)
@@ -526,6 +547,8 @@ def layout_lgl(
         incident_edge_indices[source].append(edge_idx)
         incident_edge_indices[target].append(edge_idx)
     shell_scale = radius / _harmonic_number(max(len(layers) - 1, 1))
+    for _ in range(2 * num_nodes):
+        rng.uniform(-1.0, 1.0)
 
     for layer_index in range(len(layers) - 1):
         current_layer = layers[layer_index]
@@ -541,8 +564,6 @@ def layout_lgl(
         )
         center_direction = _normalize(center_of_mass)
         next_depth = layer_index + 1
-        total_layer_children = len(next_layer)
-        layer_child_index = 0
 
         for parent in current_layer:
             children = [node for node in next_layer if parents[node] == parent]
@@ -557,36 +578,25 @@ def layout_lgl(
 
             anchor = positions[parent] + center_direction + parent_direction
             for child in children:
-                if next_depth == 1:
-                    angle = (2.0 * math.pi * layer_child_index) / float(
-                        max(total_layer_children, 1)
-                    )
-                    direction = torch.tensor(
-                        [math.cos(angle), math.sin(angle)],
-                        dtype=torch.float64,
-                    )
-                else:
-                    direction = torch.tensor(
-                        [rng.uniform(-1.0, 1.0), rng.uniform(-1.0, 1.0)],
-                        dtype=torch.float64,
-                    )
-                    direction = _normalize(direction)
-                    if float(torch.linalg.norm(direction).item()) <= _MIN_DISTANCE:
-                        direction = torch.tensor([1.0, 0.0], dtype=torch.float64)
+                direction = torch.tensor(
+                    [rng.uniform(-1.0, 1.0), rng.uniform(-1.0, 1.0)],
+                    dtype=torch.float64,
+                )
+                direction = _normalize(direction)
+                if float(torch.linalg.norm(direction).item()) <= _MIN_DISTANCE:
+                    direction = torch.tensor([1.0, 0.0], dtype=torch.float64)
 
                 offset = direction * (shell_scale / float(max(next_depth, 1)))
                 positions[child] = anchor + offset
                 placed[child] = True
-                layer_child_index += 1
 
                 for edge_idx in incident_edge_indices[child]:
                     if edge_active[edge_idx]:
                         continue
                     edge = spring_edges[edge_idx]
-                    source, target = edge
-                    other = target if source == child else source
-                    if not bool(placed[other].item()):
-                        continue
+                    # igraph_2dgrid_in() is effectively true for all
+                    # vertices, so LGL activates incident springs even when
+                    # the opposite endpoint is in a later shell.
                     edge_active[edge_idx] = True
                     active_edges.append(edge)
                     if active_edge_weights is not None:
