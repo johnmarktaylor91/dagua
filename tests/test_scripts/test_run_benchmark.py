@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import sys
+from concurrent.futures import Future
 from pathlib import Path
 
 from pytest import MonkeyPatch
 
 from scripts.run_benchmark import (
     BenchmarkRecord,
+    expired_watchdog_futures,
     is_record_complete,
     parse_args,
     position_relative_path,
+    refresh_watchdog_start_times,
     seeds_for_engine,
 )
 
@@ -93,3 +96,31 @@ def test_is_record_complete_treats_running_records_as_incomplete(tmp_path: Path)
     )
 
     assert not is_record_complete(record, output_dir=tmp_path, save_positions=True)
+
+
+def test_watchdog_timers_scope_to_active_worker_slots() -> None:
+    """Watchdog expiry should not poison queued rolling-window peers."""
+    active_future: Future[list[dict[str, object]]] = Future()
+    queued_future: Future[list[dict[str, object]]] = Future()
+    inflight = {
+        active_future: (),
+        queued_future: (),
+    }
+    started_at: dict[Future[list[dict[str, object]]], float] = {}
+
+    refresh_watchdog_start_times(
+        inflight,
+        started_at,
+        max_active=1,
+        now=10.0,
+    )
+
+    assert started_at == {active_future: 10.0}
+    assert expired_watchdog_futures(
+        inflight,
+        started_at,
+        max_active=1,
+        watchdog_timeout=5.0,
+        now=16.0,
+    ) == [active_future]
+    assert queued_future not in started_at
