@@ -1,7 +1,8 @@
 """Registered operations implementing the classic DrL algorithm.
 
-The implementation is intentionally exact-equivalent to ``layout.classic.drl``
-and therefore keeps the same procedural state updates and local search behavior.
+The implementation keeps DrL's procedural state updates and local search
+behavior inside composable ops so fidelity fixes can target the igraph reference
+without changing unrelated layout machinery.
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
-from typing import ClassVar, Mapping, Optional, Protocol, Tuple, Union, cast
+from typing import ClassVar, Mapping, Optional, Protocol, Sequence, Tuple, Union, cast
 
 import torch
 
@@ -135,6 +136,7 @@ class OptionObject(Protocol):
 
 
 DrLOptions = Union[str, Mapping[str, object], OptionObject]
+DRLInitialPositions = Union[torch.Tensor, Sequence[Sequence[float]]]
 
 
 @dataclass(frozen=True)
@@ -203,10 +205,10 @@ _DRL_PRESETS: dict[str, _DrlParameters] = {
     ),
     "refine": _DrlParameters(
         edge_cut=32.0 / 40.0,
-        init=_PhaseParameters(0, 50.0, 0.5, 1.0),
+        init=_PhaseParameters(0, 50.0, 0.5, 0.0),
         liquid=_PhaseParameters(0, 2000.0, 2.0, 1.0),
         expansion=_PhaseParameters(50, 500.0, 0.1, 0.25),
-        cooldown=_PhaseParameters(50, 250.0, 1.0, 0.1),
+        cooldown=_PhaseParameters(50, 200.0, 1.0, 0.1),
         crunch=_PhaseParameters(50, 250.0, 1.0, 0.25),
         simmer=_PhaseParameters(0, 250.0, 0.5, 0.0),
     ),
@@ -214,7 +216,7 @@ _DRL_PRESETS: dict[str, _DrlParameters] = {
         edge_cut=32.0 / 40.0,
         init=_PhaseParameters(0, 50.0, 0.5, 0.0),
         liquid=_PhaseParameters(0, 2000.0, 2.0, 1.0),
-        expansion=_PhaseParameters(50, 2000.0, 2.0, 1.0),
+        expansion=_PhaseParameters(50, 50.0, 0.1, 0.25),
         cooldown=_PhaseParameters(50, 200.0, 1.0, 0.1),
         crunch=_PhaseParameters(50, 250.0, 1.0, 0.25),
         simmer=_PhaseParameters(25, 250.0, 0.5, 0.0),
@@ -387,7 +389,44 @@ def _build_undirected_adjacency(
     return adjacency
 
 
-def _initialize_positions(num_nodes: int, seed: int) -> torch.Tensor:
+def _coerce_initial_positions(
+    initial_positions: DRLInitialPositions,
+    num_nodes: int,
+) -> torch.Tensor:
+    """Validate and copy caller-supplied DrL seed coordinates.
+
+    Parameters
+    ----------
+    initial_positions : torch.Tensor or sequence of sequence of float
+        Initial coordinate matrix with shape ``[N, 2]``.
+    num_nodes : int
+        Expected node count ``N``.
+
+    Returns
+    -------
+    torch.Tensor
+        CPU ``float64`` initial positions with shape ``[N, 2]``.
+
+    Raises
+    ------
+    ValueError
+        If the supplied matrix does not have shape ``[N, 2]``.
+    """
+    positions = torch.as_tensor(initial_positions, dtype=torch.float64, device="cpu")
+    expected_shape = (num_nodes, 2)
+    if tuple(positions.shape) != expected_shape:
+        raise ValueError(
+            f"initial_positions must have shape {expected_shape}, got {tuple(positions.shape)}."
+        )
+    return positions.clone()
+
+
+def _initialize_positions(
+    num_nodes: int,
+    seed: int,
+    fidelity_mode: Optional[str] = None,
+    initial_positions: Optional[DRLInitialPositions] = None,
+) -> torch.Tensor:
     """Create default DRL initialization coordinates.
 
     Parameters
@@ -396,12 +435,39 @@ def _initialize_positions(num_nodes: int, seed: int) -> torch.Tensor:
         Number of nodes.
     seed : int
         Seed value for deterministic ``random.Random`` draws.
+    fidelity_mode : {"igraph"} or None, default=None
+        Optional reference-fidelity initialization contract. ``"igraph"`` uses
+        NumPy ``RandomState(seed).uniform(-1, 1)`` when no explicit seed matrix
+        is supplied, matching the igraph comparator's ``seed=`` matrix.
+    initial_positions : torch.Tensor or sequence of sequence of float, optional
+        Explicit seed matrix with shape ``[N, 2]``. When provided, it overrides
+        generated initialization for both default and fidelity modes.
 
     Returns
     -------
     torch.Tensor
         Initial positions with shape ``[N, 2]`` and dtype ``float64``.
+
+    Raises
+    ------
+    ValueError
+        If ``fidelity_mode`` is unknown or ``initial_positions`` has the wrong
+        shape.
     """
+    if initial_positions is not None:
+        return _coerce_initial_positions(initial_positions=initial_positions, num_nodes=num_nodes)
+
+    if fidelity_mode == "igraph":
+        import numpy as np
+
+        rng = np.random.RandomState(seed)
+        return torch.tensor(rng.uniform(-1.0, 1.0, size=(num_nodes, 2)), dtype=torch.float64)
+    if fidelity_mode is not None:
+        raise ValueError(f"Unsupported DrL fidelity_mode: {fidelity_mode!r}.")
+
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float64)
+
     rng = random.Random(seed)
     data = [[rng.random(), rng.random()] for _ in range(num_nodes)]
     return torch.tensor(data, dtype=torch.float64)
@@ -646,7 +712,27 @@ def _maybe_cut_long_edge(
     min_edges: float,
     cut_off_length: float,
 ) -> None:
-    """Prune at most one long, high-stress edge for one node."""
+    """Prune at most one long, high-stress outgoing edge for one node.
+
+    Parameters
+    ----------
+    node : int
+        Current node whose neighbor map may be cut.
+    positions : torch.Tensor
+        Current coordinates with shape ``[N, 2]``.
+    adjacency : list[dict[int, float]]
+        Mutable weighted adjacency. igraph cuts only ``adjacency[node]``, so the
+        reverse neighbor map intentionally remains intact.
+    min_edges : float
+        Minimum current-node degree required before cutting is attempted.
+    cut_off_length : float
+        Score threshold above which one neighbor entry is removed.
+
+    Returns
+    -------
+    None
+        The current node's adjacency may be mutated in place.
+    """
     neighbors = adjacency[node]
     if float(len(neighbors)) < min_edges or not neighbors:
         return
@@ -654,8 +740,8 @@ def _maybe_cut_long_edge(
     centroid = _weighted_centroid(node=node, positions=positions, adjacency=adjacency)
     worst_neighbor = -1
     worst_score = -1.0
+    degree_factor = math.sqrt(float(len(neighbors)))
     for neighbor in neighbors:
-        degree_factor = math.sqrt(float(max(len(adjacency[neighbor]), 1)))
         delta = positions[neighbor] - centroid
         score = float(delta.dot(delta).item()) * degree_factor
         if score > worst_score:
@@ -664,7 +750,6 @@ def _maybe_cut_long_edge(
 
     if worst_neighbor >= 0 and worst_score > cut_off_length:
         adjacency[node].pop(worst_neighbor, None)
-        adjacency[worst_neighbor].pop(node, None)
 
 
 class DRLNodeUpdate:
@@ -784,8 +869,8 @@ class DRLNodeUpdate:
         jump_length = self._energy_config.jump_temperature_scale * temperature
         random_offset = torch.tensor(
             [
-                rng.uniform(-0.5, 0.5) * jump_length,
-                rng.uniform(-0.5, 0.5) * jump_length,
+                (0.5 - rng.random()) * jump_length,
+                (0.5 - rng.random()) * jump_length,
             ],
             dtype=torch.float64,
         )
@@ -1038,6 +1123,8 @@ class DRLInitializePositions(Op):
     reads: ClassVar[tuple[str, ...]] = ()
     writes: ClassVar[tuple[str, ...]] = ("pos",)
     requires: ClassVar[tuple[str, ...]] = ()
+    fidelity_mode: Optional[str] = None
+    initial_positions: Optional[DRLInitialPositions] = None
 
     def apply(
         self,
@@ -1063,7 +1150,12 @@ class DRLInitializePositions(Op):
         """
         del ctx
 
-        state.pos = _initialize_positions(num_nodes=problem.num_nodes, seed=problem.seed)
+        state.pos = _initialize_positions(
+            num_nodes=problem.num_nodes,
+            seed=problem.seed,
+            fidelity_mode=self.fidelity_mode,
+            initial_positions=self.initial_positions,
+        )
         return state
 
 
