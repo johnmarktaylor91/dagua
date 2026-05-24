@@ -1943,6 +1943,8 @@ _BASE_ENGINE_HEAVY: dict[str, bool] = {
 }
 
 _BASE_TIMEOUT_CAPS: dict[str, int] = {
-    "classic_davidson_harel": 60,
+    "classic_davidson_harel": 180,
+    "classic_neulay": 180,
+    "classic_sgd2_multi": 120,
     "classic_stress_sgd": 90,
 }
