@@ -244,7 +244,7 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_graphopt": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.graphopt",
         function_name="layout_graphopt_pipeline",
-        default_params={},
+        default_params={"fidelity_mode": True},
     ),
     "classic_drl": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.drl",
@@ -1634,6 +1634,14 @@ def _quick_classic(
     try:
         if graph.edge_weights is not None:
             extra_kwargs.setdefault("edge_weights", graph.edge_weights)
+        if fn_name == "layout_graphopt_pipeline" and bool(extra_kwargs.get("fidelity_mode")):
+            import numpy as np
+
+            # Match the igraph reference adapter's seeded matrix exactly.
+            extra_kwargs.setdefault(
+                "initial_pos",
+                np.random.RandomState(seed).uniform(-1.0, 1.0, size=(graph.num_nodes, 2)),
+            )
         if fn_name in {"layout_kk_pipeline", "layout_sfdp_pipeline"}:
             extra_kwargs.setdefault("direction", graph.direction)
         if fn_name == "layout_kk_pipeline":
@@ -1659,6 +1667,18 @@ def _quick_classic(
 class ClassicGraphOpt(_ClassicBase):
     name = "classic_graphopt"
     max_nodes = 20_000
+    variant_param_names = frozenset(
+        {
+            "niter",
+            "node_charge",
+            "node_mass",
+            "spring_constant",
+            "spring_length",
+            "max_sa_movement",
+            "fidelity_mode",
+            "initial_pos",
+        }
+    )
 
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
@@ -1670,6 +1690,7 @@ class ClassicGraphOpt(_ClassicBase):
             "layout_graphopt_pipeline",
             graph,
             self._layout_seed(seed),
+            fidelity_mode=True,
         )
 
 

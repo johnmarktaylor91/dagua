@@ -12,6 +12,7 @@ import torch
 from dagua.layout.classic.fr import layout_fr
 from dagua.layout.ops.base import Pipeline
 from dagua.layout.ops.init import (
+    GRAPHOPT_INITIAL_POS_KEY,
     CircularInit,
     CircularInitConfig,
     ClassicalMDSInit,
@@ -20,6 +21,8 @@ from dagua.layout.ops.init import (
     DeterministicInitConfig,
     FromAlgorithmInit,
     FromAlgorithmInitConfig,
+    GraphOptInitializePositions,
+    GraphOptInitializePositionsConfig,
     PivotMDSInit,
     PivotMDSInitConfig,
     RandomNormalInit,
@@ -220,6 +223,47 @@ def test_random_uniform_init_numpy_backend_matches_randomstate_exactly() -> None
 
     assert result.pos is not None
     assert torch.equal(result.pos.cpu(), expected)
+
+
+def test_graphopt_fidelity_init_matches_igraph_adapter_seed_matrix() -> None:
+    """GraphOpt fidelity init should match the igraph benchmark seed matrix."""
+
+    problem = _make_problem(num_nodes=6, seed=13)
+
+    result = GraphOptInitializePositions(
+        GraphOptInitializePositionsConfig(fidelity_mode=True)
+    ).apply(
+        problem,
+        SolveState(),
+        _make_context(),
+    )
+
+    expected = torch.from_numpy(np.random.RandomState(13).uniform(-1.0, 1.0, size=(6, 2)))
+
+    assert result.pos is not None
+    torch.testing.assert_close(result.pos.cpu(), expected)
+
+
+def test_graphopt_init_uses_supplied_matrix_before_rng() -> None:
+    """GraphOpt init should honor an explicit ``graphopt_initial_pos`` matrix."""
+
+    problem = _make_problem(num_nodes=3, seed=13)
+    initial_pos = torch.tensor(
+        [[4.0, 3.0], [2.0, 1.0], [-1.0, -2.0]],
+        dtype=torch.float32,
+    )
+    state = SolveState(extras={GRAPHOPT_INITIAL_POS_KEY: initial_pos})
+
+    result = GraphOptInitializePositions(
+        GraphOptInitializePositionsConfig(fidelity_mode=True)
+    ).apply(
+        problem,
+        state,
+        _make_context(),
+    )
+
+    assert result.pos is not None
+    torch.testing.assert_close(result.pos.cpu(), initial_pos.to(dtype=torch.float64))
 
 
 def test_random_normal_init_matches_seeded_torch_randn_exactly() -> None:
