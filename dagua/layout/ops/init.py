@@ -34,6 +34,7 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 from dagua.utils import longest_path_layering
 
 _SPECTRAL_EIGEN_TOLERANCE = 1.0e-9
+GRAPHOPT_INITIAL_POS_KEY = "graphopt_initial_pos"
 
 
 def _target_device(problem: LayoutProblem, ctx: RuntimeContext) -> torch.device:
@@ -440,18 +441,23 @@ class GraphOptInitializePositionsConfig:
     ----------
     position_dim : int, default=2
         Output dimensionality for the initialized position tensor.
+    fidelity_mode : bool, default=False
+        When ``True``, initialize from the NumPy seed matrix used by the
+        igraph benchmark adapter if no explicit matrix is supplied.
     """
 
     position_dim: int = 2
+    fidelity_mode: bool = False
 
 
 @register_op
 class GraphOptInitializePositions(Op):
-    """Seed ``state.pos`` with GraphOpt's historical Python-random recipe.
+    """Seed ``state.pos`` for GraphOpt iterations.
 
     Reads
     -----
-    No ``SolveState`` fields. Uses ``problem.seed`` and ``problem.num_nodes``.
+    ``state.extras["graphopt_initial_pos"]`` when present. Otherwise uses
+    ``problem.seed`` and ``problem.num_nodes``.
 
     Writes
     ------
@@ -459,12 +465,14 @@ class GraphOptInitializePositions(Op):
 
     Use this when
     -------------
-    You need GraphOpt-compatible random starts before running the classic
-    GraphOpt force updates.
+    You need GraphOpt-compatible random starts before running classic GraphOpt
+    force updates. Fidelity mode mirrors the benchmark reference adapter's
+    NumPy ``RandomState(seed).uniform(-1, 1, size=(N, 2))`` matrix.
     """
 
     name = "graphopt_initialize_positions"
     category = OpCategory.INIT
+    reads = (f"extras.{GRAPHOPT_INITIAL_POS_KEY}",)
     writes = ("pos",)
 
     def __init__(self, config: Optional[GraphOptInitializePositionsConfig] = None) -> None:
@@ -488,7 +496,7 @@ class GraphOptInitializePositions(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Initialize positions on ``[0, 1]^2`` with ``random.Random``.
+        """Initialize positions from a supplied matrix or a seeded RNG.
 
         Parameters
         ----------
@@ -504,6 +512,18 @@ class GraphOptInitializePositions(Op):
         SolveState
             State with ``state.pos`` initialized.
         """
+        initial_pos = state.extras.get(GRAPHOPT_INITIAL_POS_KEY)
+        if initial_pos is not None:
+            initial_tensor = torch.as_tensor(initial_pos, dtype=torch.float64)
+            expected_shape = (problem.num_nodes, self.config.position_dim)
+            if tuple(initial_tensor.shape) != expected_shape:
+                raise ValueError(
+                    f"{GRAPHOPT_INITIAL_POS_KEY} must have shape "
+                    f"{expected_shape}, got {tuple(initial_tensor.shape)}"
+                )
+            state.pos = initial_tensor.to(device=_target_device(problem, ctx))
+            return state
+
         if problem.num_nodes == 0:
             state.pos = torch.empty(
                 (0, self.config.position_dim),
@@ -512,11 +532,18 @@ class GraphOptInitializePositions(Op):
             )
             return state
 
-        rng = random.Random(problem.seed)
-        positions = [
-            [rng.random() for _ in range(self.config.position_dim)]
-            for _ in range(problem.num_nodes)
-        ]
+        if self.config.fidelity_mode:
+            positions = np.random.RandomState(problem.seed).uniform(
+                -1.0,
+                1.0,
+                size=(problem.num_nodes, self.config.position_dim),
+            )
+        else:
+            rng = random.Random(problem.seed)
+            positions = [
+                [rng.random() for _ in range(self.config.position_dim)]
+                for _ in range(problem.num_nodes)
+            ]
         state.pos = torch.tensor(
             positions, dtype=torch.float64, device=_target_device(problem, ctx)
         )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -12,9 +12,15 @@ from dagua.layout.ops.force import (
     GraphOptIteration,
     GraphOptIterationConfig,
     GraphOptPrepareState,
+    GraphOptPrepareStateConfig,
     ZeroForces,
 )
-from dagua.layout.ops.init import GraphOptInitializePositions, ValidateGraphOptInputs
+from dagua.layout.ops.init import (
+    GRAPHOPT_INITIAL_POS_KEY,
+    GraphOptInitializePositions,
+    GraphOptInitializePositionsConfig,
+    ValidateGraphOptInputs,
+)
 from dagua.layout.ops.postprocess import GraphOptFinalizePositions
 from dagua.layout.ops.state import (
     ExecutionPlan,
@@ -31,6 +37,7 @@ def build_graphopt_pipeline(
     spring_length: float = 0.0,
     spring_constant: float = 1.0,
     max_sa_movement: float = 5.0,
+    fidelity_mode: bool = False,
 ) -> Pipeline:
     """Build a GraphOpt force-directed layout pipeline.
 
@@ -48,6 +55,10 @@ def build_graphopt_pipeline(
         Spring constant for the attraction term.
     max_sa_movement : float, default=5.0
         Maximum per-axis movement allowed in one step.
+    fidelity_mode : bool, default=False
+        Match the igraph benchmark path by using NumPy ``[-1, 1]`` seeded
+        initial positions when no explicit matrix is supplied and by ignoring
+        GraphOpt edge weights.
 
     Returns
     -------
@@ -83,8 +94,10 @@ def build_graphopt_pipeline(
         [
             FixedSteps(FixedStepsConfig(n=niter)),
             ValidateGraphOptInputs(),
-            GraphOptInitializePositions(),
-            GraphOptPrepareState(),
+            GraphOptInitializePositions(
+                GraphOptInitializePositionsConfig(fidelity_mode=fidelity_mode)
+            ),
+            GraphOptPrepareState(GraphOptPrepareStateConfig(fidelity_mode=fidelity_mode)),
             Repeat(
                 n=niter,
                 ops=[
@@ -110,6 +123,8 @@ def layout_graphopt_pipeline(
     spring_constant: float = 1.0,
     max_sa_movement: float = 5.0,
     edge_weights: Optional[torch.Tensor] = None,
+    initial_pos: Optional[Any] = None,
+    fidelity_mode: bool = False,
 ) -> torch.Tensor:
     """Run the GraphOpt force-directed layout pipeline.
 
@@ -138,6 +153,14 @@ def layout_graphopt_pipeline(
         Maximum per-axis movement allowed in one iteration.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
+    initial_pos : Any, optional
+        Optional initial coordinate matrix with shape ``[N, 2]``. Tensor,
+        NumPy array, and nested-sequence inputs are accepted and converted to
+        float64 by ``GraphOptInitializePositions``.
+    fidelity_mode : bool, default=False
+        Match igraph benchmark semantics by using the supplied seed matrix, or
+        the adapter-compatible NumPy seed matrix fallback, and by ignoring
+        GraphOpt edge weights.
 
     Returns
     -------
@@ -175,6 +198,8 @@ def layout_graphopt_pipeline(
         seed=seed,
     )
     state = SolveState()
+    if initial_pos is not None:
+        state.extras[GRAPHOPT_INITIAL_POS_KEY] = initial_pos
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
     final_state = build_graphopt_pipeline(
         niter=niter,
@@ -183,6 +208,7 @@ def layout_graphopt_pipeline(
         spring_length=spring_length,
         spring_constant=spring_constant,
         max_sa_movement=max_sa_movement,
+        fidelity_mode=fidelity_mode,
     ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("GraphOpt pipeline did not produce final positions.")
