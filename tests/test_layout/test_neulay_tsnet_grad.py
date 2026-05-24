@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+from dagua.layout.ops.neulay import _raise_if_nonfinite_tensor
 from dagua.layout.ops.pipelines.neulay import layout_neulay_pipeline
 from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline
 
@@ -45,6 +46,18 @@ def test_neulay_pipeline_backward_survives_outer_no_grad() -> None:
     assert positions.shape == (6, 2)
     assert positions.dtype == torch.float32
     assert torch.isfinite(positions).all()
+
+
+def test_neulay_nonfinite_guard_raises_on_nan() -> None:
+    """NeuLay should fail fast when optimizer updates diverge to NaN."""
+    positions = torch.tensor([[0.0, float("nan")]], dtype=torch.float32)
+
+    try:
+        _raise_if_nonfinite_tensor(positions, "test phase")
+    except FloatingPointError as exc:
+        assert "test phase produced non-finite values" in str(exc)
+    else:
+        raise AssertionError("NeuLay non-finite guard accepted NaN positions")
 
 
 def test_tsnet_pipeline_backward_survives_outer_no_grad() -> None:
