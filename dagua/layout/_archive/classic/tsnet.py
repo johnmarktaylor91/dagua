@@ -20,6 +20,10 @@ from dagua.layout._archive.classic._graph_distances import (
 )
 
 _MIN_DISTANCE = 1.0e-12
+_SKLEARN_GRADIENT_SCALE = 4.0
+_SKLEARN_CONVERGENCE_CHECK_INTERVAL = 50
+_SKLEARN_N_ITER_WITHOUT_PROGRESS = 300
+_SKLEARN_MIN_GRAD_NORM = 1.0e-7
 
 
 def _layout_device(
@@ -376,11 +380,13 @@ def layout_tsnet(
     late_learning_rate = early_learning_rate
     update = torch.zeros_like(positions)
     gains = torch.ones_like(positions)
+    best_error = float("inf")
+    best_iter = 0
 
     for step in range(steps):
         exaggeration = early_exaggeration if step < early_exaggeration_steps else 1.0
         loss = _tsne_loss(positions, probabilities * exaggeration)
-        loss.backward()
+        (loss * _SKLEARN_GRADIENT_SCALE).backward()
 
         grad = positions.grad.detach().clone()
         momentum = 0.5 if step < early_exaggeration_steps else 0.8
@@ -397,7 +403,20 @@ def layout_tsnet(
                 momentum=momentum,
                 min_gain=min_gain,
             )
+            grad_norm = float(torch.linalg.vector_norm(grad * gains).item())
             positions.grad.zero_()
+        if step == early_exaggeration_steps:
+            best_error = float("inf")
+            best_iter = step
+        if (step + 1) % _SKLEARN_CONVERGENCE_CHECK_INTERVAL == 0:
+            error = float(loss.detach().item())
+            if error < best_error:
+                best_error = error
+                best_iter = step
+            elif step - best_iter > _SKLEARN_N_ITER_WITHOUT_PROGRESS:
+                break
+            if grad_norm <= _SKLEARN_MIN_GRAD_NORM:
+                break
 
     extent = _layout_extent(num_nodes, node_sizes)
     return _normalize_positions(positions.detach(), extent).to(dtype=torch.float32, device=device)
