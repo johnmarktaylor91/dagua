@@ -12,7 +12,11 @@ from typing import Any, Mapping, Optional
 import torch
 
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, get_competitor
-from dagua.eval.competitors.classic_competitor import _CLASSIC_LAYOUT_SPECS, ChainCompetitor
+from dagua.eval.competitors.classic_competitor import (
+    _CLASSIC_LAYOUT_SPECS,
+    ChainCompetitor,
+    VariantCompetitor,
+)
 from dagua.eval.variants import (
     VARIANT_REGISTRY,
     engine_is_stochastic,
@@ -275,6 +279,19 @@ def test_round31_infra_variant_max_node_caps() -> None:
         variant = get_variant(variant_id)
         assert variant is not None
         assert variant.max_nodes == max_nodes
+
+
+def test_variant_competitor_honors_explicit_max_nodes() -> None:
+    """Variant caps should be able to widen overly conservative base caps."""
+    base = _FakeCompetitor(name="base", pos=None, max_nodes=50)
+    variant = VariantCompetitor(
+        base_competitor=base,
+        variant_params={},
+        name="base_variant",
+        max_nodes=300,
+    )
+
+    assert variant.max_nodes == 300
 
 
 def test_original_params_mappable_where_claimed() -> None:
