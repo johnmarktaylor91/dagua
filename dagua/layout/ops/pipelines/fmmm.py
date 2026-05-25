@@ -835,7 +835,6 @@ class _FdpCompoundEdgeAttachmentOp(Op):
 _GRAPHVIZ_FDP_PACK_MARGIN = 4.0
 _GRAPHVIZ_PACK_AVERAGE_POLYOMINO_SIZE = 100.0
 _GRAPHVIZ_FDP_PORT_ANGLE_STEP = math.pi / 90.0
-_GRAPHVIZ_FDP_RECURSIVE_PACK_GAP = 36.0
 
 
 @dataclass(frozen=True)
@@ -1468,7 +1467,7 @@ def _fdp_recursion_shift_to_origin(
 def _fdp_recursion_component_offsets(
     component_boxes: Sequence[Tuple[float, float]],
 ) -> List[torch.Tensor]:
-    """Pack recursive components with deterministic fixed-first ordering.
+    """Pack recursive components with Graphviz fdp tile packing.
 
     Parameters
     ----------
@@ -1482,16 +1481,14 @@ def _fdp_recursion_component_offsets(
 
     Notes
     -----
-    Graphviz uses ``packGraphs`` here. This port preserves the recursion and
-    fixed-first component contract but uses a small deterministic row packer
-    until the C packer is independently ported.
+    The R36 tile-packing port covers Graphviz ``packGraphs`` behavior for
+    component bounding boxes. Reusing it here keeps the clustered recursion path
+    on the same fdp fidelity component instead of the earlier row-pack fallback.
     """
-    offsets: List[torch.Tensor] = []
-    cursor = 0.0
-    for width, _height in component_boxes:
-        offsets.append(torch.tensor([cursor, 0.0], dtype=torch.float32))
-        cursor += float(width) + _GRAPHVIZ_FDP_RECURSIVE_PACK_GAP
-    return offsets
+    boxes = [(0.0, 0.0, float(width), float(height)) for width, height in component_boxes]
+    return [
+        torch.tensor(offset, dtype=torch.float32) for offset in _graphviz_tile_pack_offsets(boxes)
+    ]
 
 
 def _fdp_recursion_layout_level(

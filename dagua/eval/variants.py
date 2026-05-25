@@ -877,7 +877,7 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         "classic_neato_graphviz_fidelity",
         "classic_neato",
         "Graphviz neato fidelity (Graphviz mode)",
-        {"maxiter": 200, "epsilon": 0.0001, "pack": True, "fidelity_mode": "graphviz"},
+        {"maxiter": 200, "epsilon": 0.0001, "pack": True, "fidelity_mode": "graphviz_neato"},
         "graphviz_neato",
         {},
         True,
