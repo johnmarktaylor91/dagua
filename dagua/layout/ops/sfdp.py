@@ -8,7 +8,7 @@ compose only registered operations.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import ClassVar, List, Optional, Tuple
+from typing import ClassVar, List, Optional, Tuple, Union
 
 import torch
 
@@ -118,6 +118,143 @@ _BASE_GRAPH_KEY = "sfdp_base_graph"
 _SFDP_CURRENT_STEP_KEY = "sfdp_current_step"
 _SFDP_PREVIOUS_FORCE_NORM_KEY = "sfdp_previous_force_norm"
 _SFDP_FORCE_NORM_KEY = "sfdp_force_norm"
+
+_GRAPHVIZ_RAND_MAX = 2_147_483_647
+_GRAPHVIZ_RANDOM_WARMUP = 344
+
+
+class GraphvizRandom:
+    """Stateful port of Graphviz's ``srand``/``rand``-backed RNG stream.
+
+    Parameters
+    ----------
+    seed : int
+        Seed passed to Graphviz's ``srand`` before SFDP random initialization.
+    """
+
+    def __init__(self, seed: int) -> None:
+        """Initialize the Graphviz-compatible RNG state.
+
+        Parameters
+        ----------
+        seed : int
+            Seed passed to Graphviz's ``srand``. Glibc treats seed ``0`` as
+            seed ``1`` for this additive-feedback generator.
+        """
+        self._state = self._initialize_state(seed=seed)
+
+    @staticmethod
+    def _initialize_state(seed: int) -> list[int]:
+        """Build the glibc ``random`` state used by ``rand``.
+
+        Parameters
+        ----------
+        seed : int
+            Seed supplied to ``srand``.
+
+        Returns
+        -------
+        list[int]
+            Warmed additive-feedback RNG state. The last 31 values are retained
+            so subsequent calls can advance the same recurrence.
+        """
+        normalized_seed = int(seed) & 0xFFFFFFFF
+        if normalized_seed == 0:
+            normalized_seed = 1
+
+        values = [0 for _ in range(_GRAPHVIZ_RANDOM_WARMUP)]
+        values[0] = normalized_seed
+        for index in range(1, 31):
+            previous = values[index - 1]
+            if previous >= 2**31:
+                previous -= 2**32
+            values[index] = (16807 * previous) % _GRAPHVIZ_RAND_MAX
+
+        values[31] = values[0]
+        values[32] = values[1]
+        values[33] = values[2]
+        for index in range(34, _GRAPHVIZ_RANDOM_WARMUP):
+            values[index] = (values[index - 31] + values[index - 3]) & 0xFFFFFFFF
+        return values[-31:]
+
+    def rand(self) -> int:
+        """Return the next Graphviz ``rand`` integer.
+
+        Returns
+        -------
+        int
+            Pseudo-random integer in ``[0, RAND_MAX]``.
+        """
+        next_value = (self._state[0] + self._state[28]) & 0xFFFFFFFF
+        del self._state[0]
+        self._state.append(next_value)
+        return next_value >> 1
+
+    def drand(self) -> float:
+        """Return Graphviz ``drand`` as ``rand() / RAND_MAX``.
+
+        Returns
+        -------
+        float
+            Pseudo-random floating-point value in ``[0.0, 1.0]``.
+        """
+        return self.rand() / float(_GRAPHVIZ_RAND_MAX)
+
+    def random(self, bound: int) -> int:
+        """Return Graphviz ``gv_random(bound)`` with rejection sampling.
+
+        Parameters
+        ----------
+        bound : int
+            Exclusive upper bound. Must be positive.
+
+        Returns
+        -------
+        int
+            Pseudo-random integer in ``[0, bound - 1]``.
+
+        Raises
+        ------
+        ValueError
+            If ``bound`` is not positive or exceeds the ported small-bound
+            Graphviz path.
+        """
+        if bound <= 0:
+            raise ValueError("bound must be positive.")
+        if bound > _GRAPHVIZ_RAND_MAX:
+            raise ValueError("GraphvizRandom only supports bounds up to RAND_MAX.")
+
+        discard_threshold = _GRAPHVIZ_RAND_MAX - ((_GRAPHVIZ_RAND_MAX + 1) % bound)
+        random_value = self.rand()
+        while random_value > discard_threshold:
+            random_value = self.rand()
+        return random_value % bound
+
+    def permutation(self, bound: int) -> list[int]:
+        """Return Graphviz ``gv_permutation(bound)`` order.
+
+        Parameters
+        ----------
+        bound : int
+            Number of integer indices to permute.
+
+        Returns
+        -------
+        list[int]
+            Fisher-Yates permutation of ``range(bound)`` using
+            :meth:`random` for each swap index.
+        """
+        if bound <= 0:
+            return []
+
+        values = list(range(bound))
+        for index in range(bound - 1, 0, -1):
+            swap_index = self.random(index + 1)
+            values[index], values[swap_index] = values[swap_index], values[index]
+        return values
+
+
+SFDPRandomGenerator = Union[torch.Generator, GraphvizRandom]
 
 
 @dataclass
@@ -555,6 +692,28 @@ def _random_positions(num_nodes: int, generator: torch.Generator) -> torch.Tenso
     if num_nodes == 0:
         return torch.empty((0, 2), dtype=torch.float32)
     return torch.rand((num_nodes, 2), generator=generator, dtype=torch.float32)
+
+
+def _graphviz_random_positions(num_nodes: int, generator: GraphvizRandom) -> torch.Tensor:
+    """Initialize positions with Graphviz ``drand`` semantics.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    generator : GraphvizRandom
+        Graphviz-compatible RNG stream seeded from the layout problem.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial positions with shape ``[N, 2]`` and dtype ``float64``.
+    """
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float64)
+
+    values = [generator.drand() for _ in range(num_nodes * 2)]
+    return torch.tensor(values, dtype=torch.float64).reshape(num_nodes, 2)
 
 
 def _average_edge_length(graph: GraphData, positions: torch.Tensor) -> float:
@@ -1121,7 +1280,7 @@ def _prolongate_positions(
     fine_to_coarse: torch.Tensor,
     coarse_positions: torch.Tensor,
     ideal_length: float,
-    generator: torch.Generator,
+    generator: SFDPRandomGenerator,
 ) -> torch.Tensor:
     """Interpolate, smooth, and perturb positions for a finer graph level.
 
@@ -1135,8 +1294,9 @@ def _prolongate_positions(
         Coarse positions with shape ``[N_coarse, 2]``.
     ideal_length : float
         Current ideal edge length ``K``.
-    generator : torch.Generator
-        Deterministic CPU random generator.
+    generator : torch.Generator or GraphvizRandom
+        Deterministic random generator. Fidelity mode supplies
+        :class:`GraphvizRandom` to match Graphviz ``drand`` calls.
 
     Returns
     -------
@@ -1167,7 +1327,14 @@ def _prolongate_positions(
     noise_scale = ideal_length * _SFDP_ALGORITHM_CONFIG.prolongation_noise_scale
     for group in groups.values():
         for fine_index in group[1:]:
-            noise = (torch.rand((2,), generator=generator, dtype=torch.float32) - 0.5) * noise_scale
+            if isinstance(generator, GraphvizRandom):
+                noise = torch.tensor(
+                    [generator.drand() - 0.5, generator.drand() - 0.5],
+                    dtype=torch.float32,
+                )
+            else:
+                noise = torch.rand((2,), generator=generator, dtype=torch.float32) - 0.5
+            noise = noise * noise_scale
             smoothed[fine_index] = smoothed[fine_index] + noise
 
     return smoothed
@@ -1318,10 +1485,16 @@ class InitSFDPCoarsestPositions(Op):
         """
         del ctx
         graphs: List[GraphData] = state.extras[_GRAPH_KEY]
-        generator: torch.Generator = state.extras[_GENERATOR_KEY]
+        generator: SFDPRandomGenerator = state.extras[_GENERATOR_KEY]
 
         coarsest = graphs[-1]
-        positions = _random_positions(num_nodes=coarsest.num_nodes, generator=generator)
+        if isinstance(generator, GraphvizRandom):
+            positions = _graphviz_random_positions(
+                num_nodes=coarsest.num_nodes,
+                generator=generator,
+            )
+        else:
+            positions = _random_positions(num_nodes=coarsest.num_nodes, generator=generator)
         ideal_length = _average_edge_length(graph=coarsest, positions=positions)
 
         state.pos = positions
@@ -1464,7 +1637,7 @@ class SFDPProlongateAndRefineLevels(Op):
         """
         graphs: List[GraphData] = state.extras[_GRAPH_KEY]
         mappings: list[torch.Tensor] = state.extras[_MAPPING_KEY]
-        generator: torch.Generator = state.extras[_GENERATOR_KEY]
+        generator: SFDPRandomGenerator = state.extras[_GENERATOR_KEY]
         if state.ideal_length is None:
             raise ValueError("SFDPProlongateAndRefineLevels requires state.ideal_length.")
         ideal_length: float = float(state.ideal_length)
@@ -1581,6 +1754,7 @@ class SFDPFinalizePositions(Op):
 
 __all__ = [
     "GraphData",
+    "GraphvizRandom",
     "QuadTreeNode",
     "BuildSFDPGraph",
     "BuildSFDPHierarchy",

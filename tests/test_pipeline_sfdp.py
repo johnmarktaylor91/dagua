@@ -14,7 +14,13 @@ from dagua.layout.ops.pipelines.sfdp import (
     build_sfdp_pipeline,
     layout_sfdp_pipeline,
 )
-from dagua.layout.ops.sfdp import _GRAPH_KEY, _MAPPING_KEY, GraphData, SFDPHierarchyConfig
+from dagua.layout.ops.sfdp import (
+    _GRAPH_KEY,
+    _MAPPING_KEY,
+    GraphData,
+    GraphvizRandom,
+    SFDPHierarchyConfig,
+)
 from dagua.layout.ops.state import (
     ExecutionPlan,
     LayoutProblem,
@@ -230,6 +236,33 @@ def _run_pipeline_direct(
 class TestSFDPPipelineFidelity:
     """Bit-exact regression coverage for the SFDP pipeline."""
 
+    def test_graphviz_random_matches_glibc_rand_golden_sequence(self) -> None:
+        """Graphviz RNG should match the ``srand(1)``/``rand`` C sequence."""
+        generator = GraphvizRandom(seed=1)
+
+        values = [generator.rand() for _ in range(10)]
+
+        assert values == [
+            1804289383,
+            846930886,
+            1681692777,
+            1714636915,
+            1957747793,
+            424238335,
+            719885386,
+            1649760492,
+            596516649,
+            1189641421,
+        ]
+
+    def test_graphviz_random_permutation_matches_gv_permutation_golden(self) -> None:
+        """Graphviz permutation should use ``gv_random`` Fisher-Yates swaps."""
+        generator = GraphvizRandom(seed=1)
+
+        order = generator.permutation(8)
+
+        assert order == [2, 6, 5, 1, 0, 3, 4, 7]
+
     def test_graphviz_supervariable_decomposition_matches_reference_groups(self) -> None:
         """Graphviz supervariables should group identical matrix column patterns."""
         graph = _complete_multipartite_graph([[0, 1], [2, 3], [4, 5], [6, 7]])
@@ -243,8 +276,7 @@ class TestSFDPPipelineFidelity:
     ) -> None:
         """Matrix coarsening should match Graphviz ``R * A * P`` golden values."""
         graph = _complete_multipartite_graph([[0, 1], [2, 3], [4, 5], [6, 7]])
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(123)
+        generator = GraphvizRandom(seed=123)
 
         coarsened = _graphviz_sfdp_coarsen(
             graph=graph,
