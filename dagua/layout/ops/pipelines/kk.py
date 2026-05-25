@@ -420,6 +420,7 @@ def layout_kk_pipeline(
     orient_to_direction: bool = False,
     preserve_float64: bool = False,
     fidelity_mode: bool | str = False,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
     """Run the Kamada-Kawai pipeline as a drop-in replacement.
 

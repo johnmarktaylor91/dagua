@@ -143,7 +143,10 @@ def layout_gem_pipeline(
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_gem_pipeline(max_iters=max_iters, fidelity_mode=fidelity_mode).apply(
+    final_state = build_gem_pipeline(
+        max_iters=max_iters,
+        fidelity_mode=fidelity_mode,
+    ).apply(
         problem,
         state,
         ctx,

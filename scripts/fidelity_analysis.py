@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
+from scipy.optimize import linear_sum_assignment
 from scipy.stats import ks_2samp, mannwhitneyu, ttest_ind
 from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.weightstats import ttost_ind
@@ -96,6 +97,7 @@ FIDELITY_STRESS_N_TARGETS = 128
 FIDELITY_CROSSING_N_SAMPLES = 50_000
 COMPUTE_SAMPLED_METRICS = True
 MIN_PROCRUSTES_NODE_COUNT = 5
+MAX_HUNGARIAN_NODE_COUNT = 2_000
 MIN_STOCHASTIC_SEEDS = 10
 PAIRWISE_SAMPLE_SIZE = 30
 PAIRWISE_PROGRESS_INTERVAL = 1_000
@@ -246,6 +248,8 @@ class PairwiseComparison:
         Seed on the second side.
     procrustes_rmsd : float
         RMSD after alignment with proper rotation only.
+    hungarian_rmsd : float
+        RMSD after Procrustes alignment plus optimal point assignment.
     scale_ratio : float
         Frobenius scale ratio between centered layouts.
     reflected : bool
@@ -260,6 +264,7 @@ class PairwiseComparison:
     seed_a: Optional[int] = None
     seed_b: Optional[int] = None
     procrustes_rmsd: float = 0.0
+    hungarian_rmsd: float = 0.0
     scale_ratio: float = 0.0
     reflected: bool = False
     max_node_displacement: float = 0.0
@@ -945,6 +950,90 @@ def fidelity_procrustes(
     return rmsd, scale_ratio, False, per_node
 
 
+def _procrustes_aligned_normalized_points(
+    pos_a: torch.Tensor,
+    pos_b: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return scale-normalized Procrustes-aligned point clouds.
+
+    Parameters
+    ----------
+    pos_a : torch.Tensor
+        First position tensor shaped ``[N, 2]``.
+    pos_b : torch.Tensor
+        Second position tensor shaped ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        ``pos_a`` aligned to ``pos_b`` using the same scale-normalized
+        Procrustes behavior as :func:`fidelity_procrustes`, followed by the
+        normalized ``pos_b`` reference points.
+    """
+    a_centered = pos_a - pos_a.mean(dim=0, keepdim=True)
+    b_centered = pos_b - pos_b.mean(dim=0, keepdim=True)
+    norm_a = float(a_centered.norm().item())
+    norm_b = float(b_centered.norm().item())
+
+    if norm_a > 0.0:
+        a_centered = a_centered / norm_a
+    if norm_b > 0.0:
+        b_centered = b_centered / norm_b
+
+    covariance = a_centered.t() @ b_centered
+    left_singular, _, right_singular_t = torch.linalg.svd(covariance)
+    det_value = torch.det(left_singular @ right_singular_t)
+    correction = torch.diag(
+        torch.tensor(
+            [1.0, float(torch.sign(det_value).item())],
+            dtype=a_centered.dtype,
+            device=a_centered.device,
+        )
+    )
+    rotation = left_singular @ correction @ right_singular_t
+    aligned = a_centered @ rotation
+
+    reflected_rotation = left_singular @ right_singular_t
+    reflected_aligned = a_centered @ reflected_rotation
+    rotation_rmsd = torch.sqrt(((aligned - b_centered).square()).sum(dim=1).mean())
+    reflection_rmsd = torch.sqrt(((reflected_aligned - b_centered).square()).sum(dim=1).mean())
+    if reflection_rmsd < rotation_rmsd:
+        return reflected_aligned, b_centered
+    return aligned, b_centered
+
+
+def hungarian_matched_rmsd(
+    positions_a: torch.Tensor,
+    positions_b: torch.Tensor,
+) -> float:
+    """Return RMSD after Procrustes alignment and optimal point assignment.
+
+    Parameters
+    ----------
+    positions_a : torch.Tensor
+        First position tensor shaped ``[N, 2]``.
+    positions_b : torch.Tensor
+        Second position tensor shaped ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Scale-normalized RMSD after assigning aligned points with the Hungarian
+        algorithm. Returns ``math.nan`` when shapes differ or the exact
+        assignment would exceed the configured node-count guardrail.
+    """
+    if positions_a.shape != positions_b.shape or positions_a.ndim != 2:
+        return math.nan
+    if positions_a.shape[0] > MAX_HUNGARIAN_NODE_COUNT:
+        return math.nan
+
+    aligned_a, normalized_b = _procrustes_aligned_normalized_points(positions_a, positions_b)
+    cost_matrix = torch.cdist(aligned_a, normalized_b).detach().cpu().numpy()
+    row_indices, column_indices = linear_sum_assignment(cost_matrix)
+    matched_costs = cost_matrix[row_indices, column_indices]
+    return float(np.sqrt(np.mean(np.square(matched_costs))))
+
+
 def procrustes_align_rigid(
     pos_a: torch.Tensor,
     pos_b: torch.Tensor,
@@ -1446,6 +1535,9 @@ def per_graph_fieldnames() -> list[str]:
         "procrustes_rmsd_mean",
         "procrustes_rmsd_std",
         "procrustes_rmsd_max",
+        "hungarian_rmsd_mean",
+        "hungarian_rmsd_std",
+        "hungarian_rmsd_max",
         "scale_ratio_mean",
         "scale_ratio_std",
         "reflected",
@@ -1522,6 +1614,7 @@ def pairwise_fieldnames() -> list[str]:
         "seed_b",
         "comparison_type",
         "procrustes_rmsd",
+        "hungarian_rmsd",
         "scale_ratio",
         "variant_id",
         "reflected",
@@ -1548,6 +1641,9 @@ def algorithm_summary_fieldnames() -> list[str]:
         "procrustes_rmsd_mean",
         "procrustes_rmsd_median",
         "procrustes_rmsd_max",
+        "hungarian_rmsd_mean",
+        "hungarian_rmsd_median",
+        "hungarian_rmsd_max",
         "scale_ratio_mean",
         "scale_ratio_std",
         "num_mirror_matches",
@@ -1591,12 +1687,14 @@ def compute_pairwise_comparisons(
                 layout_a.positions,
                 layout_b.positions,
             )
+            matched_rmsd = hungarian_matched_rmsd(layout_a.positions, layout_b.positions)
             comparisons.append(
                 PairwiseComparison(
                     comparison_type=comparison_type,
                     seed_a=layout_a.seed,
                     seed_b=layout_b.seed,
                     procrustes_rmsd=rmsd,
+                    hungarian_rmsd=matched_rmsd,
                     scale_ratio=scale_ratio,
                     reflected=reflected,
                     max_node_displacement=float(per_node.max().item()),
@@ -2068,6 +2166,9 @@ def process_group(
         "procrustes_rmsd_mean": math.nan,
         "procrustes_rmsd_std": math.nan,
         "procrustes_rmsd_max": math.nan,
+        "hungarian_rmsd_mean": math.nan,
+        "hungarian_rmsd_std": math.nan,
+        "hungarian_rmsd_max": math.nan,
         "scale_ratio_mean": math.nan,
         "scale_ratio_std": math.nan,
         "reflected": False,
@@ -2233,6 +2334,7 @@ def process_group(
                     "seed_b": comparison.seed_b,
                     "comparison_type": comparison.comparison_type,
                     "procrustes_rmsd": comparison.procrustes_rmsd,
+                    "hungarian_rmsd": comparison.hungarian_rmsd,
                     "scale_ratio": comparison.scale_ratio,
                     "variant_id": comparison.variant_id,
                     "reflected": str(comparison.reflected),
@@ -2241,6 +2343,9 @@ def process_group(
             )
         if descriptor.num_nodes >= MIN_PROCRUSTES_NODE_COUNT:
             rmsd_values = [comparison.procrustes_rmsd for comparison in pairwise_orig_reimpl]
+            matched_rmsd_values = finite_values(
+                comparison.hungarian_rmsd for comparison in pairwise_orig_reimpl
+            )
             scale_values = [comparison.scale_ratio for comparison in pairwise_orig_reimpl]
             max_displacements = [
                 comparison.max_node_displacement for comparison in pairwise_orig_reimpl
@@ -2250,6 +2355,10 @@ def process_group(
             row["procrustes_rmsd_mean"] = pairwise_summary["mean"]
             row["procrustes_rmsd_std"] = pairwise_summary["std"]
             row["procrustes_rmsd_max"] = pairwise_summary["max"]
+            matched_pairwise_summary = pairwise_statistics(matched_rmsd_values)
+            row["hungarian_rmsd_mean"] = matched_pairwise_summary["mean"]
+            row["hungarian_rmsd_std"] = matched_pairwise_summary["std"]
+            row["hungarian_rmsd_max"] = matched_pairwise_summary["max"]
             row["scale_ratio_mean"] = safe_mean(scale_values)
             row["scale_ratio_std"] = safe_std(scale_values)
             row["reflected"] = reflected
@@ -2401,6 +2510,10 @@ def process_group(
         row["procrustes_rmsd_mean"] = rmsd
         row["procrustes_rmsd_std"] = 0.0
         row["procrustes_rmsd_max"] = rmsd
+        matched_rmsd = hungarian_matched_rmsd(original_layout.positions, reimpl_layout.positions)
+        row["hungarian_rmsd_mean"] = matched_rmsd
+        row["hungarian_rmsd_std"] = 0.0 if math.isfinite(matched_rmsd) else math.nan
+        row["hungarian_rmsd_max"] = matched_rmsd
         row["scale_ratio_mean"] = scale_ratio
         row["scale_ratio_std"] = 0.0
         row["reflected"] = reflected
@@ -2411,6 +2524,7 @@ def process_group(
                 seed_a=original_layout.seed,
                 seed_b=reimpl_layout.seed,
                 procrustes_rmsd=rmsd,
+                hungarian_rmsd=matched_rmsd,
                 scale_ratio=scale_ratio,
                 reflected=reflected,
                 max_node_displacement=float(per_node.max().item()),
@@ -2425,6 +2539,7 @@ def process_group(
                 "seed_b": reimpl_layout.seed,
                 "comparison_type": "orig-reimpl",
                 "procrustes_rmsd": rmsd,
+                "hungarian_rmsd": matched_rmsd,
                 "scale_ratio": scale_ratio,
                 "variant_id": variant.variant_id,
                 "reflected": str(reflected),
@@ -2801,6 +2916,7 @@ def family_summary_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
         paired_ok = [row for row in family_rows if row["verdict"] != "insufficient_data"]
         insufficient = [row for row in family_rows if row["verdict"] == "insufficient_data"]
         procrustes_values = finite_values(float(row["procrustes_rmsd_mean"]) for row in paired_ok)
+        matched_values = finite_values(float(row["hungarian_rmsd_mean"]) for row in paired_ok)
         scale_values = finite_values(float(row["scale_ratio_mean"]) for row in paired_ok)
         runtime_values = finite_values(float(row["runtime_ratio"]) for row in paired_ok)
         anomalies = [row for row in paired_ok if str(row["anomaly_reason"])]
@@ -2874,6 +2990,9 @@ def family_summary_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
                 "procrustes_rmsd_mean": safe_mean(procrustes_values),
                 "procrustes_rmsd_median": safe_median(procrustes_values),
                 "procrustes_rmsd_max": max(procrustes_values) if procrustes_values else math.nan,
+                "hungarian_rmsd_mean": safe_mean(matched_values),
+                "hungarian_rmsd_median": safe_median(matched_values),
+                "hungarian_rmsd_max": max(matched_values) if matched_values else math.nan,
                 "scale_ratio_mean": safe_mean(scale_values),
                 "scale_ratio_std": safe_std(scale_values),
                 "num_mirror_matches": sum(
@@ -2967,6 +3086,17 @@ def write_readme(
             "reports the lower RMSD, and flags when the reflected solution wins."
         ),
         (
+            "- Hungarian RMSD is reported beside raw Procrustes RMSD as an "
+            "alternative geometric-only metric: it uses the same alignment, "
+            "then optimally assigns point labels with "
+            "`scipy.optimize.linear_sum_assignment`."
+        ),
+        (
+            f"- Exact Hungarian assignment is skipped above `{MAX_HUNGARIAN_NODE_COUNT}` "
+            "nodes and reported as `NaN` to avoid quadratic cost matrices in "
+            "large benchmark runs."
+        ),
+        (
             "- Stochastic comparisons require at least 10 valid seeds on each "
             "side; otherwise the group is marked `insufficient_data`."
         ),
@@ -2999,8 +3129,8 @@ def write_readme(
             "with quick metrics and nearest cross-side Procrustes distance."
         ),
         (
-            "- `pairwise_similarity.csv`: downsampled pairwise Procrustes "
-            "comparisons. Deterministic groups emit the single "
+            "- `pairwise_similarity.csv`: downsampled pairwise Procrustes and "
+            "Hungarian-matched comparisons. Deterministic groups emit the single "
             "`orig-reimpl` pair."
         ),
     ]

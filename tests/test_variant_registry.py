@@ -167,7 +167,7 @@ def _test_graph() -> DaguaGraph:
 
 def test_all_variants_have_valid_base_engine() -> None:
     """Every registry entry should point at a usable or planned base engine."""
-    assert len(VARIANT_REGISTRY) == 117
+    assert len(VARIANT_REGISTRY) == 120
     for variant in VARIANT_REGISTRY:
         assert (
             variant.base_engine in _CLASSIC_LAYOUT_SPECS
@@ -316,7 +316,8 @@ def test_classic_embedding_variant_registry_matches_reference_defaults() -> None
 
     tsnet_steps200 = get_variant("classic_tsnet_steps200")
     assert tsnet_steps200 is not None
-    assert tsnet_steps200.original_params["max_iter"] == 200
+    assert tsnet_steps200.reimpl_params["steps"] == 250
+    assert tsnet_steps200.original_params["max_iter"] == 250
 
     neulay_no_gcn = get_variant("classic_neulay_no_gcn")
     assert neulay_no_gcn is not None

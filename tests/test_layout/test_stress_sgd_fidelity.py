@@ -186,6 +186,47 @@ def test_classic_stress_sgd_defaults_to_reference_exact_node_cap() -> None:
     assert spec.default_params["max_exact_nodes"] == SGD2.max_nodes
 
 
+def test_stress_sgd_ogdf_mode_matches_seed_42_path_fixture() -> None:
+    """OGDF fidelity mode matches the local runner fixture for a path graph."""
+    edges = _edge_index([(0, 1), (1, 2), (2, 3), (3, 4)])
+    expected = torch.tensor(
+        [
+            [157.48316461972911, -96.39363027933655],
+            [87.42398954824397, -24.617892170241596],
+            [27.61844541205235, 56.00507809849135],
+            [-18.675736594414914, 145.076183262894],
+            [-52.64898253054323, 239.4451229507347],
+        ],
+        dtype=torch.float32,
+    )
+
+    actual = layout_stress_sgd_pipeline(
+        edges,
+        5,
+        steps=200,
+        seed=42,
+        fidelity_mode="ogdf",
+    )
+
+    assert torch.allclose(actual, expected, atol=1.0e-4, rtol=1.0e-6)
+
+
+def test_stress_sgd_ogdf_mode_accepts_disconnected_graph() -> None:
+    """OGDF fidelity uses finite fallback distances for disconnected pairs."""
+    edges = _edge_index([(0, 1), (2, 3)])
+
+    positions = layout_stress_sgd_pipeline(
+        edges,
+        4,
+        steps=3,
+        seed=7,
+        fidelity_mode="ogdf",
+    )
+
+    assert positions.shape == (4, 2)
+    assert torch.isfinite(positions).all()
+
+
 def test_sgd2_adapter_rejects_trailing_isolated_node_outputs(monkeypatch: Any) -> None:
     """The reference adapter reports mismatched output from trailing isolated nodes."""
     fake_module = types.ModuleType("s_gd2")
