@@ -166,6 +166,11 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
         function_name="layout_fa2_pipeline",
         default_params={"steps": 200, "barnes_hut": True, "barnes_hut_theta": 1.2},
     ),
+    "classic_fcose": _ClassicLayoutSpec(
+        import_path="dagua.layout.ops.pipelines.fcose",
+        function_name="layout_fcose_pipeline",
+        default_params={"quality": "default", "steps": 2500},
+    ),
     "classic_stress_sgd": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.stress_sgd",
         function_name="layout_stress_sgd_pipeline",
@@ -249,12 +254,12 @@ _CLASSIC_LAYOUT_SPECS: dict[str, _ClassicLayoutSpec] = {
     "classic_drl": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.drl",
         function_name="layout_drl_pipeline",
-        default_params={},
+        default_params={"fidelity_mode": True},
     ),
     "classic_lgl": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.lgl",
         function_name="layout_lgl_pipeline",
-        default_params={},
+        default_params={"fidelity_mode": True},
     ),
     "classic_sfdp": _ClassicLayoutSpec(
         import_path="dagua.layout.ops.pipelines.sfdp",
@@ -879,6 +884,64 @@ class ClassicFA2(_ClassicBase):
 
 
 @register
+class ClassicFCoSE(_ClassicBase):
+    """Competitor wrapper for the fCoSE reimplementation."""
+
+    name = "classic_fcose"
+    max_nodes = 50_000
+    variant_param_names = frozenset(
+        {
+            "barnes_hut_theta",
+            "edgeElasticity",
+            "gravity",
+            "gravity_range",
+            "idealEdgeLength",
+            "max_exact_repulsion_nodes",
+            "nodeRepulsion",
+            "node_separation",
+            "output_extent",
+            "pos",
+            "quality",
+            "randomize",
+            "steps",
+        }
+    )
+
+    def layout(
+        self,
+        graph: DaguaGraph,
+        timeout: float = 300.0,
+        seed: Optional[int] = None,
+    ) -> CompetitorResult:
+        """Run the classic fCoSE layout.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility parameter for the competitor interface.
+        seed : int | None, default=None
+            Random seed for stochastic fallback initialization.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
+        del timeout
+        return _quick_classic(
+            self.name,
+            "dagua.layout.ops.pipelines.fcose",
+            "layout_fcose_pipeline",
+            graph,
+            self._layout_seed(seed),
+            quality="default",
+            steps=2500,
+        )
+
+
+@register
 class ClassicStressSGD(_ClassicBase):
     """Competitor wrapper for the classic Stress-SGD reimplementation."""
 
@@ -1249,6 +1312,7 @@ class ClassicLinLog(_ClassicBase):
 
     name = "classic_linlog"
     max_nodes = 50_000
+    variant_param_names = frozenset({"a", "r", "steps"})
 
     def layout(
         self,
@@ -1699,7 +1763,7 @@ class ClassicGraphOpt(_ClassicBase):
 class ClassicDRL(_ClassicBase):
     name = "classic_drl"
     max_nodes = 100_000
-    variant_param_names = frozenset({"options"})
+    variant_param_names = frozenset({"options", "fidelity_mode"})
 
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
@@ -1727,6 +1791,7 @@ class ClassicDRL(_ClassicBase):
             "layout_drl_pipeline",
             graph,
             self._layout_seed(seed),
+            fidelity_mode=True,
         )
 
 
@@ -1734,6 +1799,7 @@ class ClassicDRL(_ClassicBase):
 class ClassicLGL(_ClassicBase):
     name = "classic_lgl"
     max_nodes = 100_000
+    variant_param_names = frozenset({"maxiter", "coolexp", "fidelity_mode"})
 
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
@@ -1745,6 +1811,7 @@ class ClassicLGL(_ClassicBase):
             "layout_lgl_pipeline",
             graph,
             self._layout_seed(seed),
+            fidelity_mode=True,
         )
 
 

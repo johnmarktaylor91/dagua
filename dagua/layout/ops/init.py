@@ -18,6 +18,7 @@ from scipy.sparse import linalg as sparse_linalg
 from dagua.layout.graph_classify import GraphFamily, GraphStructure
 from dagua.layout.init_placement import init_positions
 from dagua.layout.layers import LayerIndex, build_layer_index
+from dagua.layout.ops._igraph_rng import make_igraph_default_rng
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.distance import (
     AllPairsShortestPaths,
@@ -442,8 +443,8 @@ class GraphOptInitializePositionsConfig:
     position_dim : int, default=2
         Output dimensionality for the initialized position tensor.
     fidelity_mode : bool, default=False
-        When ``True``, initialize from the NumPy seed matrix used by the
-        igraph benchmark adapter if no explicit matrix is supplied.
+        When ``True``, initialize from igraph's compiled default RNG stream if
+        no explicit matrix is supplied.
     """
 
     position_dim: int = 2
@@ -466,8 +467,8 @@ class GraphOptInitializePositions(Op):
     Use this when
     -------------
     You need GraphOpt-compatible random starts before running classic GraphOpt
-    force updates. Fidelity mode mirrors the benchmark reference adapter's
-    NumPy ``RandomState(seed).uniform(-1, 1, size=(N, 2))`` matrix.
+    force updates. Fidelity mode mirrors igraph's native fallback random
+    layout when the benchmark adapter has not supplied a seed matrix.
     """
 
     name = "graphopt_initialize_positions"
@@ -533,11 +534,11 @@ class GraphOptInitializePositions(Op):
             return state
 
         if self.config.fidelity_mode:
-            positions = np.random.RandomState(problem.seed).uniform(
-                -1.0,
-                1.0,
-                size=(problem.num_nodes, self.config.position_dim),
-            )
+            rng = make_igraph_default_rng(problem.seed)
+            positions = [
+                [rng.uniform(-1.0, 1.0) for _ in range(self.config.position_dim)]
+                for _ in range(problem.num_nodes)
+            ]
         else:
             rng = random.Random(problem.seed)
             positions = [

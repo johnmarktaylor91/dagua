@@ -167,6 +167,19 @@ def build_fr_pipeline(
 ) -> Pipeline:
     """Build a Fruchterman-Reingold force-directed layout pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: NetworkX 3.6.1 ``spring_layout`` / Fruchterman and Reingold
+        (1991), "Graph Drawing by Force-directed Placement".
+    Fidelity mode: ``networkx_compat=True`` switches final scaling to the
+        NetworkX adapter contract; fixed nodes additionally suppress rescaling.
+    Verified at: final 100-seed report, strong equivalent; median RMSD 0.088
+        to 0.136 across step-count variants.
+    Known divergences:
+        - Default dagua display scaling remains larger than NetworkX output.
+        - Directed graph selection still happens in the wrapper, not this
+          builder.
+
     Parameters
     ----------
     steps : int, default=50

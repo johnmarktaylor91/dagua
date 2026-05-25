@@ -24,6 +24,19 @@ from dagua.layout.ops.state import (
 def build_classical_mds_pipeline(*, igraph_fidelity: bool = False) -> Pipeline:
     """Build a classical multidimensional scaling pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: igraph 1.0.0 MDS layout / Torgerson (1952) classical metric MDS.
+    Fidelity mode: ``igraph_fidelity=True`` uses igraph-compatible raw
+        embedding and final scaling semantics.
+    Verified at: final 100-seed report, strong equivalent; median RMSD 0.000
+        for both default and igraph-fidelity variants.
+    Known divergences:
+        - Graph distances are prepared in Dagua tensor ops rather than through
+          igraph's C path.
+        - Disconnected-graph behavior follows the benchmark distance matrix
+          contract, not arbitrary user-provided dissimilarities.
+
     Parameters
     ----------
     igraph_fidelity : bool, default=False

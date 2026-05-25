@@ -19,6 +19,17 @@ from dagua.layout.ops.state import (  # noqa: E402
 def build_reingold_tilford_pipeline(horizontal: bool = False) -> Pipeline:
     """Build a Reingold-Tilford tidy-tree pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: igraph 1.0.0 Reingold-Tilford / Reingold and Tilford (1981),
+        "Tidier Drawings of Trees".
+    Fidelity mode: public wrapper supports ``fidelity_mode="igraph"`` for
+        igraph traversal semantics; this builder only controls orientation.
+    Verified at: final 100-seed report, strong equivalent; median RMSD 0.000.
+    Known divergences:
+        - Non-tree inputs are normalized by wrapper-level graph traversal.
+        - Horizontal orientation is a Dagua presentation option.
+
     Parameters
     ----------
     horizontal : bool, default=False

@@ -28,6 +28,9 @@ _SMOOTH_K_TOLERANCE = 1.0e-5
 _SMOOTH_K_BINARY_SEARCH_STEPS = 64
 _GRADIENT_CLIP_VALUE = 4.0
 _NEGATIVE_SAMPLE_RATE = 5
+_INT32_MIN = np.iinfo(np.int32).min + 1
+_INT32_MAX = np.iinfo(np.int32).max - 1
+_TAU_RAND_MASK = 0xFFFFFFFF
 _SPECTRAL_DIMENSIONS = 2
 _SPECTRAL_EIGENVECTOR_COUNT = _SPECTRAL_DIMENSIONS + 1
 _SPECTRAL_NOISE_SCALE = 1.0e-4
@@ -390,7 +393,6 @@ def _fit_ab(min_dist: float, spread: float) -> tuple[float, float]:
             _curve_function,
             xv,
             yv,
-            p0=(1.93, 0.79),
             maxfev=10_000,
         )
         return float(params[0]), float(params[1])
@@ -438,17 +440,18 @@ def _connected_spectral_embedding(graph: sparse.csr_matrix) -> np.ndarray:
         return np.zeros((num_nodes, _SPECTRAL_DIMENSIONS), dtype=np.float32)
 
     laplacian = _normalize_laplacian(graph=graph)
-    ncv = max(2 * _SPECTRAL_EIGENVECTOR_COUNT + 1, int(np.sqrt(num_nodes)))
+    k = _SPECTRAL_EIGENVECTOR_COUNT
+    ncv = max(7, int(np.sqrt(num_nodes)))
     eigenvalues, eigenvectors = sparse_linalg.eigsh(
         laplacian,
-        k=_SPECTRAL_EIGENVECTOR_COUNT,
+        k=k,
         which="SM",
         ncv=ncv,
         v0=np.ones(num_nodes, dtype=np.float64),
         tol=1.0e-4,
         maxiter=num_nodes * 5,
     )
-    order = np.argsort(eigenvalues)[1:_SPECTRAL_EIGENVECTOR_COUNT]
+    order = np.argsort(eigenvalues)[1:k]
     coordinates = np.real(eigenvectors[:, order])
     if coordinates.shape[1] < _SPECTRAL_DIMENSIONS:
         coordinates = np.pad(
@@ -762,6 +765,82 @@ def _negative_gradient(
     return torch.clamp(grad_coeff * diff, min=-_GRADIENT_CLIP_VALUE, max=_GRADIENT_CLIP_VALUE)
 
 
+def _to_signed_int32(value: int) -> int:
+    """Convert an unsigned 32-bit integer to signed int32 range.
+
+    Parameters
+    ----------
+    value : int
+        Integer value carrying the low 32 bits of a Tausworthe draw.
+
+    Returns
+    -------
+    int
+        Signed int32 interpretation of ``value``.
+    """
+    masked = value & _TAU_RAND_MASK
+    if masked >= (1 << 31):
+        return masked - (1 << 32)
+    return masked
+
+
+def _make_tau_state(embedding: torch.Tensor, seed: int) -> np.ndarray:
+    """Create umap-learn-compatible per-source Tausworthe states.
+
+    Parameters
+    ----------
+    embedding : torch.Tensor
+        Initial low-dimensional coordinates with shape ``[N, 2]``.
+    seed : int
+        Random seed used to draw UMAP's base three-int RNG state.
+
+    Returns
+    -------
+    numpy.ndarray
+        Mutable Tausworthe state array with shape ``[N, 3]`` and dtype
+        ``int64``. Each source row is offset by the first embedding coordinate
+        cast to float64 and reinterpreted as int64, matching umap-learn.
+    """
+    random_state = np.random.RandomState(seed)
+    base_state = random_state.randint(_INT32_MIN, _INT32_MAX, 3).astype(np.int64)
+    first_coordinate = embedding.detach().to(device="cpu", dtype=torch.float32)[:, 0].numpy()
+    coordinate_state = first_coordinate.astype(np.float64).view(np.int64).reshape(-1, 1)
+    return np.full((embedding.shape[0], base_state.shape[0]), base_state, dtype=np.int64) + (
+        coordinate_state
+    )
+
+
+def _tau_rand_int(state: np.ndarray) -> int:
+    """Draw a signed int32 from UMAP's combined Tausworthe generator.
+
+    Parameters
+    ----------
+    state : numpy.ndarray
+        Mutable per-source RNG state with shape ``[3]`` and dtype ``int64``.
+
+    Returns
+    -------
+    int
+        Signed int32 random integer matching ``umap.utils.tau_rand_int``.
+    """
+    state_0 = int(state[0])
+    state_1 = int(state[1])
+    state_2 = int(state[2])
+    state_0 = (((state_0 & 4294967294) << 12) & _TAU_RAND_MASK) ^ (
+        (((state_0 << 13) & _TAU_RAND_MASK) ^ state_0) >> 19
+    )
+    state_1 = (((state_1 & 4294967288) << 4) & _TAU_RAND_MASK) ^ (
+        (((state_1 << 2) & _TAU_RAND_MASK) ^ state_1) >> 25
+    )
+    state_2 = (((state_2 & 4294967280) << 17) & _TAU_RAND_MASK) ^ (
+        (((state_2 << 3) & _TAU_RAND_MASK) ^ state_2) >> 11
+    )
+    state[0] = state_0
+    state[1] = state_1
+    state[2] = state_2
+    return _to_signed_int32(state_0 ^ state_1 ^ state_2)
+
+
 def _optimize_embedding(
     embedding: torch.Tensor,
     head: torch.Tensor,
@@ -800,7 +879,7 @@ def _optimize_embedding(
     b : float
         UMAP low-dimensional curve parameter.
     seed : int
-        Random seed for negative-sample selection.
+        Random seed for negative-sample Tausworthe state initialization.
 
     Returns
     -------
@@ -810,13 +889,11 @@ def _optimize_embedding(
     if head.numel() == 0 or n_epochs <= 0:
         return embedding
 
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed)
-
     epochs_per_negative_sample = epochs_per_sample / float(max(negative_sample_rate, 1))
     next_sample_epoch = epochs_per_sample.clone()
     next_negative_epoch = epochs_per_negative_sample.clone()
     num_nodes = embedding.shape[0]
+    rng_state_per_source = _make_tau_state(embedding=embedding, seed=seed)
 
     for epoch in range(n_epochs):
         alpha = learning_rate * (1.0 - (float(epoch) / float(max(n_epochs, 1))))
@@ -840,7 +917,7 @@ def _optimize_embedding(
             elapsed_negative_epochs = float(epoch) - float(next_negative_epoch[edge_id].item())
             n_neg_samples = int(elapsed_negative_epochs / negative_interval)
             for _ in range(n_neg_samples):
-                negative = int(torch.randint(0, num_nodes, (1,), generator=generator).item())
+                negative = _tau_rand_int(state=rng_state_per_source[source]) % num_nodes
                 negative_diff = embedding[source] - embedding[negative]
                 negative_distance_sq = float(torch.dot(negative_diff, negative_diff).item())
                 negative_grad = _negative_gradient(

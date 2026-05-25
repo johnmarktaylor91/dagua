@@ -7,12 +7,13 @@ Runs the original (SGD)^2 code from github.com/tiga1231/graph-drawing
 from __future__ import annotations
 
 import random
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
 from inspect import signature
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
 import torch
 
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
     from dagua.graph import DaguaGraph
 
 _SGD2_REPO = Path("/tmp/graph-drawing")
+_SGD2_REMOTE_URL = "https://github.com/tiga1231/graph-drawing"
+_SGD2_BRANCH = "sgd"
 # Round 31 tracking: the upstream repository is optional and may be absent.
 # Missing files must remain explicit adapter errors, not silent zero-pair rows.
 
@@ -47,6 +50,69 @@ def _missing_sgd2_multi_sources() -> list[str]:
         if module_name not in sys.modules and not (_SGD2_REPO / filename).exists():
             missing.append(filename)
     return missing
+
+
+def _run_sgd2_source_command(args: Sequence[str], cwd: Path) -> tuple[bool, str]:
+    """Run a bounded git command while recovering upstream SGD2 sources.
+
+    Parameters
+    ----------
+    args : Sequence[str]
+        Command vector to execute.
+    cwd : Path
+        Working directory for the command.
+
+    Returns
+    -------
+    tuple[bool, str]
+        ``True`` plus combined command output on success, otherwise ``False``
+        and the failure text.
+    """
+    try:
+        completed = subprocess.run(
+            list(args),
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+    return completed.returncode == 0, output
+
+
+def _ensure_sgd2_multi_sources() -> list[str]:
+    """Recover missing upstream SGD2 source files from the published branch.
+
+    Returns
+    -------
+    list[str]
+        Missing source filenames after a best-effort recovery attempt.
+    """
+    missing_sources = _missing_sgd2_multi_sources()
+    if not missing_sources:
+        return []
+    if not (_SGD2_REPO / ".git").exists():
+        return missing_sources
+
+    # The paper points at /tree/sgd, while the default branch only contains
+    # notebooks and the TensorFlow.js demo. Refresh that branch when the local
+    # checkout is present but missing Python sources.
+    fetch_ok, _ = _run_sgd2_source_command(
+        ["git", "fetch", "origin", f"{_SGD2_BRANCH}:refs/remotes/origin/{_SGD2_BRANCH}"],
+        cwd=_SGD2_REPO,
+    )
+    if not fetch_ok:
+        return _missing_sgd2_multi_sources()
+    checkout_ok, _ = _run_sgd2_source_command(
+        ["git", "checkout", "-B", _SGD2_BRANCH, f"refs/remotes/origin/{_SGD2_BRANCH}"],
+        cwd=_SGD2_REPO,
+    )
+    if not checkout_ok:
+        return _missing_sgd2_multi_sources()
+    return _missing_sgd2_multi_sources()
 
 
 @contextmanager
@@ -320,7 +386,7 @@ class SGD2MultiRef(CompetitorBase):
             from scipy.sparse import csr_matrix
             from scipy.sparse.csgraph import shortest_path
 
-            missing_sources = _missing_sgd2_multi_sources()
+            missing_sources = _ensure_sgd2_multi_sources()
             if missing_sources:
                 return CompetitorResult(
                     name=self.name,
@@ -328,7 +394,8 @@ class SGD2MultiRef(CompetitorBase):
                     runtime_seconds=time.perf_counter() - start,
                     error=(
                         "missing upstream SGD2 source files at "
-                        f"{_SGD2_REPO}: {', '.join(missing_sources)}"
+                        f"{_SGD2_REPO}: {', '.join(missing_sources)} "
+                        f"(expected {_SGD2_REMOTE_URL}/tree/{_SGD2_BRANCH})"
                     ),
                 )
 

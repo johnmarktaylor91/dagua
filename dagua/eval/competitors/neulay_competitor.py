@@ -2,63 +2,42 @@
 
 from __future__ import annotations
 
-import importlib
 import time
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
 from dagua.eval.competitors.base import CompetitorBase, CompetitorResult, register
 
 if TYPE_CHECKING:
+    import torch
+
     from dagua.graph import DaguaGraph
 
-# Round 31 tracking: this reference is optional and often absent from local
-# environments. Keep missing-package cases explicit so fidelity analysis does
-# not silently interpret NeuLay as having zero paired rows.
+# Round 34 recovery: the installable ``neulay``/``NeuLay`` packages are absent,
+# and the script clone no longer contains an importable ``NeuLay-2.py`` file.
+# Point the reference competitor at the side-effect-free wrapper recovered from
+# the monolithic port that was previously factored from that script.
 
 
-def _pyg_available() -> bool:
-    """Return whether PyTorch Geometric is importable.
-
-    Returns
-    -------
-    bool
-        ``True`` when PyTorch Geometric imports successfully.
-    """
-    try:
-        import torch_geometric  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-def _load_upstream_neulay() -> Optional[Callable[..., Any]]:
-    """Load an installed upstream NeuLay entry point when available.
+def _load_upstream_neulay() -> Optional[Callable[..., "torch.Tensor"]]:
+    """Load the recovered NeuLay reference entry point when available.
 
     Returns
     -------
-    Callable[..., Any] | None
-        Callable reference entry point, or ``None`` when no upstream package is
-        installed in the environment.
+    Callable[..., torch.Tensor] | None
+        Callable reference entry point, or ``None`` when the recovered wrapper
+        cannot be imported.
 
     Notes
     -----
-    This adapter must never fall back to Dagua's own implementation because it
-    exists to benchmark an independent reference.
+    The function name is preserved for tests and older monkeypatches, but the
+    entry point is the recovered script wrapper rather than an installed package.
     """
-    if not _pyg_available():
+    try:
+        from dagua.eval.competitors.neulay_wrapper import layout_neulay_reference
+    except Exception:
         return None
-
-    module_names = ("neulay", "NeuLay")
-    function_names = ("layout_neulay", "layout")
-    for module_name in module_names:
-        try:
-            module = importlib.import_module(module_name)
-        except Exception:
-            continue
-        for function_name in function_names:
-            candidate = getattr(module, function_name, None)
-            if callable(candidate):
-                return candidate
+    if callable(layout_neulay_reference):
+        return layout_neulay_reference
     return None
 
 
@@ -76,7 +55,7 @@ class NeuLayReference(CompetitorBase):
         timeout: float = 300.0,
         seed: Optional[int] = None,
     ) -> CompetitorResult:
-        """Run the upstream NeuLay reference implementation.
+        """Run the recovered NeuLay reference implementation.
 
         Parameters
         ----------
@@ -101,7 +80,7 @@ class NeuLayReference(CompetitorBase):
         seed: Optional[int] = None,
         variant_params: Optional[Mapping[str, Any]] = None,
     ) -> CompetitorResult:
-        """Run the upstream NeuLay reference implementation.
+        """Run the recovered NeuLay reference implementation.
 
         Parameters
         ----------
@@ -111,6 +90,8 @@ class NeuLayReference(CompetitorBase):
             Unused compatibility parameter for the benchmark interface.
         seed : int | None, default=None
             Random seed for the stochastic solver.
+        variant_params : Mapping[str, Any] | None, default=None
+            Optional NeuLay parameter overrides.
 
         Returns
         -------
@@ -136,6 +117,8 @@ class NeuLayReference(CompetitorBase):
                 "steps": 20_000,
                 "gcn_steps": 2_000,
                 "use_gcn": True,
+                "lr": 0.1,
+                "radius": 0.4,
             }
             if variant_params is not None:
                 layout_kwargs.update(dict(variant_params))
@@ -158,12 +141,16 @@ class NeuLayReference(CompetitorBase):
             )
 
     def available(self) -> bool:
-        """Report whether an upstream NeuLay reference can be executed.
+        """Report whether the recovered NeuLay reference can be executed.
+
+        Parameters
+        ----------
+        None
+            This method reads no caller-supplied parameters.
 
         Returns
         -------
         bool
-            ``True`` only when PyTorch Geometric and an upstream NeuLay package
-            are both importable.
+            ``True`` when the recovered wrapper can be imported.
         """
         return _load_upstream_neulay() is not None

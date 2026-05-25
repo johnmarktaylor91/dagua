@@ -148,8 +148,8 @@ class _IgraphBase(CompetitorBase):
         timeout : float, default=300.0
             Unused compatibility timeout parameter.
         seed : int | None, default=None
-            Random seed forwarded only for igraph layouts that expose a
-            ``seed`` keyword, currently Fruchterman-Reingold.
+            Random seed forwarded as a seeded starting matrix and/or temporary
+            igraph RNG override for stochastic igraph layouts.
 
         Returns
         -------
@@ -208,6 +208,7 @@ class IgraphFR(_IgraphBase):
     layout_algo = "fruchterman_reingold"
     layout_kwargs = {"niter": 500}
     accepts_seed_matrix = True
+    uses_igraph_rng = True
     variant_param_names = frozenset({"area", "grid", "niter"})
 
 
@@ -226,6 +227,8 @@ class IgraphDavidsonHarel(_IgraphBase):
     max_nodes = 500
     layout_algo = "davidson_harel"
     layout_kwargs = {}
+    accepts_seed_matrix = True
+    uses_igraph_rng = True
     variant_param_names = frozenset({"cool_fact", "fineiter", "maxiter"})
 
 
@@ -235,6 +238,7 @@ class IgraphKamadaKawai(_IgraphBase):
     max_nodes = 5_000
     layout_algo = "kamada_kawai"
     layout_kwargs = {}
+    accepts_seed_matrix = True
     variant_param_names = frozenset()
 
 

@@ -33,6 +33,22 @@ def build_fmmm_pipeline(
 ) -> Pipeline:
     """Build an FM^3 multilevel force-directed pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: Graphviz 7.0.5 fdp / Hachul and Junger (2004), "Drawing Large
+        Graphs with a Potential-Field-Based Multilevel Algorithm".
+    Fidelity mode: ``reference_mode=True`` or ``fidelity_mode=True`` enables
+        OGDF/Graphviz-aligned coarsening, coarsest initialization, and force
+        scaling choices used by evaluation competitors.
+    Verified at: final 100-seed report, strong equivalent; median RMSD 0.067
+        to 0.179 across step-count variants. Round 33 fdp bounded subset
+        remained 0.121966.
+    Known divergences:
+        - Graphviz fdp derived-graph recursion, cluster expansion, and overlap
+          removal remain unported.
+        - Dagua keeps a fallback single-level solve when multilevel setup is
+          unsuitable.
+
     Parameters
     ----------
     steps : int, default=200

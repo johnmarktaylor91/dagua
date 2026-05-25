@@ -238,6 +238,7 @@ _EXPECTED_OP_MODULES = (
     "drl",
     "edge_route",
     "embed",
+    "fcose",
     "fmmm",
     "force",
     "force_2d_init",
@@ -265,6 +266,7 @@ _EXPECTED_OP_MODULES = (
     "umap",
     "utility",
     "vcycle",
+    "yifanhu",
 )
 
 log = logging.getLogger(__name__)

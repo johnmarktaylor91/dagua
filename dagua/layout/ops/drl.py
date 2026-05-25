@@ -14,6 +14,7 @@ from typing import ClassVar, Mapping, Optional, Protocol, Tuple, Union, cast
 
 import torch
 
+from dagua.layout.ops._igraph_rng import IgraphPCG32, make_igraph_default_rng
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import layout_device
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -136,6 +137,7 @@ class OptionObject(Protocol):
 
 
 DrLOptions = Union[str, Mapping[str, object], OptionObject]
+RandomLike = Union[random.Random, IgraphPCG32]
 
 
 @dataclass(frozen=True)
@@ -390,7 +392,7 @@ def _build_undirected_adjacency(
     return adjacency
 
 
-def _initialize_positions(num_nodes: int, seed: int) -> torch.Tensor:
+def _initialize_positions(num_nodes: int, seed: int, fidelity_mode: bool = False) -> torch.Tensor:
     """Create default DRL initialization coordinates.
 
     Parameters
@@ -399,6 +401,9 @@ def _initialize_positions(num_nodes: int, seed: int) -> torch.Tensor:
         Number of nodes.
     seed : int
         Seed value for deterministic ``random.Random`` draws.
+    fidelity_mode : bool, default=False
+        When ``True``, use igraph's compiled default RNG stream.
+
     Returns
     -------
     torch.Tensor
@@ -408,7 +413,7 @@ def _initialize_positions(num_nodes: int, seed: int) -> torch.Tensor:
     if num_nodes == 0:
         return torch.empty((0, 2), dtype=torch.float64)
 
-    rng = random.Random(seed)
+    rng: RandomLike = make_igraph_default_rng(seed) if fidelity_mode else random.Random(seed)
     data = [[rng.random(), rng.random()] for _ in range(num_nodes)]
     return torch.tensor(data, dtype=torch.float64)
 
@@ -733,7 +738,7 @@ class DRLNodeUpdate:
         node: int,
         positions: torch.Tensor,
         adjacency: list[dict[int, float]],
-        rng: random.Random,
+        rng: RandomLike,
         attraction: float,
         temperature: float,
         damping_mult: float,
@@ -752,7 +757,7 @@ class DRLNodeUpdate:
             Shared node coordinate tensor with shape ``[N, 2]``.
         adjacency : list[dict[int, float]]
             Mutable adjacency used for attraction and edge-cut updates.
-        rng : random.Random
+        rng : random.Random or IgraphPCG32
             Deterministic RNG used for node perturbation.
         attraction : float
             Current phase attraction weight.
@@ -990,7 +995,7 @@ class DRLPhaseStep:
         self,
         positions: torch.Tensor,
         adjacency: list[dict[int, float]],
-        rng: random.Random,
+        rng: RandomLike,
         density_grid: _DensityGrid,
         cut_end: float,
         cut_rate: float,
@@ -1128,6 +1133,8 @@ class DRLPrepareState(Op):
 class DRLInitializePositions(Op):
     """Seed the deterministic random starting layout used by classic DrL."""
 
+    fidelity_mode: bool = False
+
     name: ClassVar[str] = "drl_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
     reads: ClassVar[tuple[str, ...]] = ()
@@ -1158,7 +1165,11 @@ class DRLInitializePositions(Op):
         """
         del ctx
 
-        state.pos = _initialize_positions(num_nodes=problem.num_nodes, seed=problem.seed)
+        state.pos = _initialize_positions(
+            num_nodes=problem.num_nodes,
+            seed=problem.seed,
+            fidelity_mode=self.fidelity_mode,
+        )
         return state
 
 
@@ -1180,6 +1191,9 @@ class DRLPhaseSolveConfig:
         Base value multiplied by ``1 - edge_cut`` to derive ``cut_end``.
     density_grid : DRLDensityGridConfig, optional
         Density-grid resolution and view parameters.
+    fidelity_mode : bool, default=False
+        When ``True``, use igraph's compiled default RNG stream for random
+        node perturbations.
     energy : DRLEnergyConfig, optional
         Energy-function constants used during node updates.
     phase_dynamics : DRLPhaseDynamicsConfig, optional
@@ -1192,6 +1206,7 @@ class DRLPhaseSolveConfig:
     cut_rate_divisor: float = 400.0
     cut_base: float = 40_000.0
     density_grid: DRLDensityGridConfig = field(default_factory=DRLDensityGridConfig)
+    fidelity_mode: bool = False
     energy: DRLEnergyConfig = field(default_factory=DRLEnergyConfig)
     phase_dynamics: DRLPhaseDynamicsConfig = field(default_factory=DRLPhaseDynamicsConfig)
 
@@ -1253,7 +1268,11 @@ class DRLPhaseSolve(Op):
         for node in range(num_nodes):
             density_grid.add_node(node=node, position=positions[node])
 
-        rng = random.Random(problem.seed)
+        rng: RandomLike = (
+            make_igraph_default_rng(problem.seed)
+            if self.config.fidelity_mode
+            else random.Random(problem.seed)
+        )
         cut_end = self.config.cut_base * (1.0 - params.edge_cut)
         cut_off_length = self.config.cut_off_multiplier * cut_end
         cut_rate = (
