@@ -20,9 +20,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from dagua.eval.competitors import get_competitor  # noqa: E402
+from dagua.eval.competitors import CompetitorBase, get_competitor  # noqa: E402
+from dagua.eval.competitors.classic_competitor import VariantCompetitor  # noqa: E402
 from dagua.eval.graphs import TestGraph, get_test_graphs  # noqa: E402
 from dagua.eval.pipeline_io import load_position_tensor, validate_positions  # noqa: E402
+from dagua.eval.variants import get_variant, get_variant_for_original_name  # noqa: E402
 from dagua.graph import DaguaGraph  # noqa: E402
 from scripts.algo_fidelity_cross import (  # noqa: E402
     fidelity_procrustes,
@@ -44,6 +46,54 @@ TOST_MARGIN_LABELS: dict[float, str] = {
 }
 DEFAULT_SEED_START = 42
 CACHED_SEED_STOP = 50
+
+
+def resolve_competitor(engine_name: str) -> Optional[CompetitorBase]:
+    """Return a base, reimplementation-variant, or original-variant competitor.
+
+    Parameters
+    ----------
+    engine_name : str
+        Registered base competitor name, reimplementation variant name, or
+        synthetic original-side variant name.
+
+    Returns
+    -------
+    CompetitorBase | None
+        Runnable competitor instance, or ``None`` when the name cannot be
+        resolved in the local registry.
+    """
+    base_competitor = get_competitor(engine_name)
+    if base_competitor is not None:
+        return base_competitor
+
+    variant = get_variant(engine_name)
+    if variant is not None:
+        variant_base = get_competitor(variant.base_engine)
+        if variant_base is None:
+            return None
+        return VariantCompetitor(
+            base_competitor=variant_base,
+            variant_params=variant.reimpl_params,
+            name=variant.variant_id,
+            display_name=variant.display_name,
+            is_heavy=variant.is_heavy,
+            max_nodes=variant.max_nodes,
+        )
+
+    original_variant = get_variant_for_original_name(engine_name)
+    if original_variant is None or original_variant.original_engine is None:
+        return None
+    original_base = get_competitor(original_variant.original_engine)
+    if original_base is None:
+        return None
+    return VariantCompetitor(
+        base_competitor=original_base,
+        variant_params=original_variant.original_params,
+        name=engine_name,
+        display_name=f"{original_variant.display_name} [original]",
+        max_nodes=original_variant.max_nodes,
+    )
 
 
 def parse_graph_filter(raw_graphs: Optional[str]) -> Optional[set[str]]:
@@ -293,12 +343,12 @@ def run_dagua_seeded_layouts(
     test_graph: TestGraph,
     seeds: Sequence[int],
 ) -> dict[int, torch.Tensor]:
-    """Run live dagua layouts for each requested seed.
+    """Run live layouts for each requested seed.
 
     Parameters
     ----------
     dagua_engine : str
-        Registered dagua competitor name to run.
+        Registered base competitor name or variant name to run.
     test_graph : TestGraph
         Evaluation graph payload.
     seeds : sequence of int
@@ -314,9 +364,9 @@ def run_dagua_seeded_layouts(
     ValueError
         If the competitor is unavailable or a layout run fails.
     """
-    competitor = get_competitor(dagua_engine)
+    competitor = resolve_competitor(dagua_engine)
     if competitor is None:
-        raise ValueError(f"Unknown dagua competitor: {dagua_engine}")
+        raise ValueError(f"Unknown competitor: {dagua_engine}")
 
     positions_by_seed: dict[int, torch.Tensor] = {}
     for seed in seeds:
@@ -556,7 +606,7 @@ def compare_live(
     ValueError
         If the competitor or requested graph data is unavailable.
     """
-    competitor = get_competitor(dagua_engine)
+    competitor = resolve_competitor(dagua_engine)
     if competitor is None:
         raise ValueError(f"Unknown dagua competitor: {dagua_engine}")
 
@@ -567,12 +617,21 @@ def compare_live(
             raise ValueError(f"Target graph is absent from get_test_graphs(): {graph_name}")
 
         test_graph.graph.compute_node_sizes()
-        target_positions = load_cached_target(
-            indexed=indexed,
-            graph=graph_name,
-            target_engine=target_engine,
-            input_dir=input_dir,
-        )
+        target_positions: Optional[torch.Tensor]
+        try:
+            target_positions = load_cached_target(
+                indexed=indexed,
+                graph=graph_name,
+                target_engine=target_engine,
+                input_dir=input_dir,
+            )
+        except ValueError:
+            target_positions_by_seed = run_dagua_seeded_layouts(
+                dagua_engine=target_engine,
+                test_graph=test_graph,
+                seeds=[DEFAULT_SEED_START],
+            )
+            target_positions = target_positions_by_seed[DEFAULT_SEED_START]
         result = competitor.layout(test_graph.graph, seed=42)
         if result.error is not None or result.pos is None:
             raise ValueError(f"Live layout failed for {graph_name}/{dagua_engine}: {result.error}")
@@ -685,15 +744,25 @@ def compare_live_multi_seed(
             graphviz_cache_dir=graphviz_cache_dir,
         )
         if not target_positions_by_seed:
-            target_positions = load_cached_target(
-                indexed=indexed,
-                graph=graph_name,
-                target_engine=target_engine,
-                input_dir=input_dir,
-            )
-            target_positions_by_seed = {
-                DEFAULT_SEED_START: target_positions.detach().to(device="cpu", dtype=torch.float32)
-            }
+            if resolve_competitor(target_engine) is not None:
+                target_positions_by_seed = run_dagua_seeded_layouts(
+                    dagua_engine=target_engine,
+                    test_graph=test_graph,
+                    seeds=dagua_seeds,
+                )
+            else:
+                target_positions = load_cached_target(
+                    indexed=indexed,
+                    graph=graph_name,
+                    target_engine=target_engine,
+                    input_dir=input_dir,
+                )
+                target_positions_by_seed = {
+                    DEFAULT_SEED_START: target_positions.detach().to(
+                        device="cpu",
+                        dtype=torch.float32,
+                    )
+                }
 
         dagua_positions_by_seed = run_dagua_seeded_layouts(
             dagua_engine=dagua_engine,
@@ -966,7 +1035,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     indexed = load_results(args.input_dir)
     test_graphs = graph_registry()
     requested_graphs = parse_graph_filter(args.graphs)
-    if args.graphviz_cache_dir is not None and requested_graphs is not None:
+    if requested_graphs is not None and (
+        args.graphviz_cache_dir is not None or resolve_competitor(args.target_engine) is not None
+    ):
         selected_graphs = cache_backed_target_graphs(
             requested_graphs=requested_graphs,
             test_graphs=test_graphs,
