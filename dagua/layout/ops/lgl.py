@@ -16,6 +16,7 @@ from typing import ClassVar, List, Optional, Tuple
 
 import torch
 
+from dagua.layout.ops._igraph_rng import IgraphPCG32, make_igraph_default_rng
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import layout_device
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -25,6 +26,7 @@ _LGL_MIN_DISTANCE = 1.0e-12
 _LGL_REPULSION_MIN_DISTANCE = 1.0e-5
 _LGL_BUCKET_NEIGHBOR_OFFSETS = ((0, 0), (1, 0), (0, 1), (1, 1))
 _LGL_DISCONNECTED_WARNING = "LGL layout does not support disconnected graphs yet."
+RandomLike = random.Random | IgraphPCG32
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,8 @@ class LGLPrepareStateConfig:
     use_edge_weights : bool, default=False
         Whether edge weights scale attractive forces. Igraph LGL ignores
         weights, so the default preserves fidelity with that reference.
+    fidelity_mode : bool, default=False
+        When ``True``, use igraph's compiled default RNG stream.
     """
 
     maxiter: int = 150
@@ -60,6 +64,7 @@ class LGLPrepareStateConfig:
     cellsize: Optional[float] = None
     root: Optional[int] = None
     use_edge_weights: bool = False
+    fidelity_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,10 +79,13 @@ class LGLLayeredRefinementConfig:
     igraph_positive_maxchange : bool, default=True
         Match igraph LGL's historical convergence rule, which only considers
         positive movement components when updating ``maxchange``.
+    fidelity_mode : bool, default=False
+        When ``True``, use igraph's compiled default RNG stream.
     """
 
     convergence_epsilon: float = 1.0e-5
     igraph_positive_maxchange: bool = True
+    fidelity_mode: bool = False
 
 
 def _build_lgl_bfs_layers(
@@ -151,6 +159,96 @@ def _lgl_updated_maxchange(
     if igraph_positive_only:
         return max(maxchange, x_movement, y_movement)
     return max(maxchange, abs(x_movement), abs(y_movement))
+
+
+def _lgl_grid_steps(radius: float, cellsize: float) -> int:
+    """Compute igraph's bounded two-dimensional grid size.
+
+    Parameters
+    ----------
+    radius : float
+        Positive half-width of the LGL grid bounds.
+    cellsize : float
+        Positive grid cell width.
+
+    Returns
+    -------
+    int
+        Number of cells along one axis, with a minimum of one cell.
+    """
+    safe_cellsize = max(float(cellsize), _LGL_MIN_DISTANCE)
+    return max(int(math.ceil((2.0 * float(radius)) / safe_cellsize)), 1)
+
+
+def _lgl_clamped_grid_axis(
+    value: float,
+    lower_bound: float,
+    upper_bound: float,
+    cellsize: float,
+    steps: int,
+) -> int:
+    """Map one coordinate axis into igraph's bounded grid.
+
+    Parameters
+    ----------
+    value : float
+        Coordinate value to place.
+    lower_bound : float
+        Inclusive lower grid bound.
+    upper_bound : float
+        Inclusive upper grid bound.
+    cellsize : float
+        Positive grid cell width.
+    steps : int
+        Number of cells along the axis.
+
+    Returns
+    -------
+    int
+        Clamped integer cell index.
+    """
+    max_index = max(int(steps) - 1, 0)
+    if value <= lower_bound:
+        return 0
+    if value >= upper_bound:
+        return max_index
+    safe_cellsize = max(float(cellsize), _LGL_MIN_DISTANCE)
+    return min(int(math.floor((value - lower_bound) / safe_cellsize)), max_index)
+
+
+def _lgl_clamped_grid_cell(
+    x_value: float,
+    y_value: float,
+    radius: float,
+    cellsize: float,
+    steps: int,
+) -> tuple[int, int]:
+    """Map a point into igraph's bounded LGL grid cell.
+
+    Parameters
+    ----------
+    x_value : float
+        X coordinate of the point.
+    y_value : float
+        Y coordinate of the point.
+    radius : float
+        Positive half-width of the LGL grid bounds.
+    cellsize : float
+        Positive grid cell width.
+    steps : int
+        Number of cells along each axis.
+
+    Returns
+    -------
+    tuple[int, int]
+        Clamped integer grid cell ``(x, y)``.
+    """
+    lower_bound = -float(radius)
+    upper_bound = float(radius)
+    return (
+        _lgl_clamped_grid_axis(x_value, lower_bound, upper_bound, cellsize, steps),
+        _lgl_clamped_grid_axis(y_value, lower_bound, upper_bound, cellsize, steps),
+    )
 
 
 @register_op
@@ -234,7 +332,11 @@ class LGLPrepareState(Op):
 
         adjacency = [sorted(neighbors) for neighbors in adjacency_sets]
 
-        rng = random.Random(problem.seed)
+        rng: RandomLike = (
+            make_igraph_default_rng(problem.seed)
+            if self.config.fidelity_mode
+            else random.Random(problem.seed)
+        )
         root_node = rng.randrange(num_nodes) if self.config.root is None else self.config.root
         if root_node < 0 or root_node >= num_nodes:
             raise ValueError("root must lie in [0, num_nodes).")
@@ -254,9 +356,25 @@ class LGLPrepareState(Op):
         return state
 
 
+@dataclass(frozen=True)
+class LGLInitializePositionsConfig:
+    """Configuration for :class:`LGLInitializePositions`.
+
+    Parameters
+    ----------
+    fidelity_mode : bool, default=False
+        When ``True``, use igraph's compiled default RNG stream.
+    """
+
+    fidelity_mode: bool = False
+
+
 @register_op
+@dataclass(frozen=True)
 class LGLInitializePositions(Op):
     """Initialize layout positions with the classic LGL random seed behavior."""
+
+    config: LGLInitializePositionsConfig = field(default_factory=LGLInitializePositionsConfig)
 
     name: ClassVar[str] = "lgl_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
@@ -289,7 +407,11 @@ class LGLInitializePositions(Op):
 
         area = float(state.extras["lgl_area"])
         radius = math.sqrt(area / math.pi)
-        rng = random.Random(problem.seed)
+        rng: RandomLike = (
+            make_igraph_default_rng(problem.seed)
+            if self.config.fidelity_mode
+            else random.Random(problem.seed)
+        )
         if bool(state.extras.get("lgl_root_was_random", True)):
             rng.randrange(problem.num_nodes)
         positions = torch.empty((problem.num_nodes, 2), dtype=torch.float64)
@@ -385,7 +507,11 @@ class LGLLayeredRefinement(Op):
             sum(1.0 / float(index) for index in range(1, num_terms + 1)) if num_terms > 0 else 1.0
         )
 
-        rng = random.Random(problem.seed)
+        rng: RandomLike = (
+            make_igraph_default_rng(problem.seed)
+            if self.config.fidelity_mode
+            else random.Random(problem.seed)
+        )
         if bool(state.extras.get("lgl_root_was_random", True)):
             rng.randrange(num_nodes)
         for _ in range(2 * num_nodes):
@@ -491,14 +617,26 @@ class LGLLayeredRefinement(Op):
                         forces.index_add_(0, target[mask], contribution)
 
                 buckets: dict[tuple[int, int], list[int]] = {}
+                grid_steps = _lgl_grid_steps(radius=radius, cellsize=cellsize)
                 safe_cell_size = max(cellsize, _LGL_MIN_DISTANCE)
                 for node in refinement_nodes:
                     x_value = float(positions[node, 0].item())
                     y_value = float(positions[node, 1].item())
-                    key = (
-                        int(math.floor(x_value / safe_cell_size)),
-                        int(math.floor(y_value / safe_cell_size)),
-                    )
+                    if self.config.fidelity_mode:
+                        # igraph uses a finite 2D grid and clamps out-of-bounds
+                        # coordinates into boundary cells before pair enumeration.
+                        key = _lgl_clamped_grid_cell(
+                            x_value=x_value,
+                            y_value=y_value,
+                            radius=radius,
+                            cellsize=cellsize,
+                            steps=grid_steps,
+                        )
+                    else:
+                        key = (
+                            int(math.floor(x_value / safe_cell_size)),
+                            int(math.floor(y_value / safe_cell_size)),
+                        )
                     buckets.setdefault(key, []).append(node)
 
                 sorted_cells = sorted(buckets)
@@ -611,5 +749,7 @@ __all__ = [
     "_LGL_BUCKET_NEIGHBOR_OFFSETS",
     "_LGL_REPULSION_MIN_DISTANCE",
     "_build_lgl_bfs_layers",
+    "_lgl_clamped_grid_cell",
+    "_lgl_grid_steps",
     "_lgl_updated_maxchange",
 ]

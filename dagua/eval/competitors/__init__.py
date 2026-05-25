@@ -16,6 +16,7 @@ from dagua.eval.competitors import (
     gephi_competitor,  # noqa: F401
     graphviz_competitor,  # noqa: F401
     igraph_competitor,  # noqa: F401
+    linlog_competitor,  # noqa: F401
     networkx_competitor,  # noqa: F401
     neulay_competitor,  # noqa: F401
     ogdf_competitor,  # noqa: F401
@@ -25,6 +26,7 @@ from dagua.eval.competitors import (
     umap_competitor,  # noqa: F401
 )
 from dagua.eval.competitors.base import (
+    _COMPETITORS,
     CompetitorBase,
     CompetitorResult,
     get_available_competitors,
@@ -34,6 +36,7 @@ from dagua.eval.competitors.base import (
 )
 
 __all__ = [
+    "_COMPETITORS",
     "CompetitorBase",
     "CompetitorResult",
     "get_available_competitors",

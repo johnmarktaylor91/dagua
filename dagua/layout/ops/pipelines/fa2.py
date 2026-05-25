@@ -70,6 +70,20 @@ class FA2Config:
 def build_fa2_pipeline(config: Optional[FA2Config] = None) -> Pipeline:
     """Build a ForceAtlas2 pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: ``fa2`` 1.1.2 / Jacomy et al. (2014), "ForceAtlas2, a Continuous
+        Graph Layout Algorithm for Handy Network Visualization".
+    Fidelity mode: ``FA2Config.fidelity_mode=True`` uses float64 state and
+        reference duplicate-edge overwrite semantics instead of Dagua's summed
+        edge weights.
+    Verified at: final 100-seed report, strong equivalent for most variants;
+        median RMSD 0.048 to 0.173, with dissuade-hubs partial at 0.104.
+    Known divergences:
+        - Barnes-Hut is native PyTorch/ops code, not the reference Cython tree.
+        - Dagua keeps explicit tensor-device handling and optional weighted
+          behavior outside fidelity mode.
+
     Parameters
     ----------
     config : FA2Config, optional

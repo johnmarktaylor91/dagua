@@ -107,6 +107,20 @@ def build_maxent_stress_pipeline(
 ) -> Pipeline:
     """Build the classical maxent-stress dispatch pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: OGDF maxent-stress / Gansner, Hu, and North (2013), "A
+        Maxent-Stress Model for Graph Layout".
+    Fidelity mode: no dedicated flag; ``alpha``, ``use_entropy``, step count,
+        and majorization dispatch define the benchmark variants.
+    Verified at: final 100-seed report, strong equivalent; median RMSD 0.055
+        to 0.095 across alpha, entropy, and step-count variants.
+    Known divergences:
+        - Dagua dispatches between majorization and gradient branches by graph
+          size and entropy setting.
+        - Large-graph gradient behavior follows Dagua's optimizer stack rather
+          than an OGDF call-through.
+
     Parameters
     ----------
     steps : int, default=200

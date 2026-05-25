@@ -1,4 +1,4 @@
-"""SFDP multilevel force-directed layout pipeline."""
+"""Yifan Hu multilevel force-directed layout pipeline."""
 
 from __future__ import annotations
 
@@ -7,67 +7,59 @@ from typing import Optional
 import torch
 
 from dagua.layout.ops.base import Pipeline
-from dagua.layout.ops.graph_utils import (
-    layout_device as _layout_device,
-)
-from dagua.layout.ops.sfdp import (
-    BuildSFDPGraph,
-    BuildSFDPHierarchy,
-    InitSFDPCoarsestPositions,
-    SFDPFinalizePositions,
-    SFDPProlongateAndRefineLevels,
-    SFDPRefineCoarsestLevel,
-)
-from dagua.layout.ops.state import (
-    ExecutionPlan,
-    LayoutProblem,
-    RuntimeContext,
-    SolveState,
+from dagua.layout.ops.graph_utils import layout_device as _layout_device
+from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.yifanhu import (
+    BuildYifanHuGraph,
+    BuildYifanHuHierarchy,
+    InitYifanHuCoarsestPositions,
+    YifanHuFinalizePositions,
+    YifanHuFinalTuning,
+    YifanHuProlongateAndRefineLevels,
+    YifanHuRefineCoarsestLevel,
+    final_tuning_steps,
 )
 
-_DEFAULT_THETA = 0.6
-_DEFAULT_P = -1.0
+_DEFAULT_THETA = 1.2
+_DEFAULT_REPULSIVE_EXPONENT = 0.0
 
 
-def build_sfdp_pipeline(
+def build_yifanhu_pipeline(
     steps: int = 500,
     theta: float = _DEFAULT_THETA,
-    repulsive_exponent: float = _DEFAULT_P,
+    repulsive_exponent: float = _DEFAULT_REPULSIVE_EXPONENT,
 ) -> Pipeline:
-    """Build an SFDP multilevel force-directed pipeline.
+    """Build a native YifanHu multilevel force-directed pipeline.
 
     Reference fidelity
     ------------------
-    Targets: Graphviz 7.0.5 sfdp / Hu (2005), "Efficient, High-Quality
-        Force-Directed Graph Drawing".
-    Fidelity mode: no dedicated flag; exposed parameters map to Graphviz
-        ``K``, Barnes-Hut ``theta``, and repulsive exponent variants used by
-        the benchmark.
-    Verified at: final 100-seed report, strong equivalent; median RMSD 0.079
-        to 0.100. Round 33 force-law alignment improved the bounded subset to
-        median RMSD 0.004724.
+    Targets: Gephi Yifan Hu-style multilevel layout / Hu (2005), "Efficient,
+        High-Quality Force-Directed Graph Drawing".
+    Fidelity mode: no reference mode; Round 33 found no importable Python
+        YifanHu reference, so this is a Dagua-only native implementation.
+    Verified at: round_33 smoke evaluation on five bounded graphs; no paired
+        RMSD/TOST result was available.
     Known divergences:
-        - Remaining residual is dominated by ``parallel_multiedge_bundle``.
-        - Sequential in-place updates and matrix-style coarsening are still
-          unported.
+        - No Python reference was available for paired fidelity comparison.
+        - Uses Dagua's existing multilevel and Barnes-Hut force skeleton with
+          YifanHu-style defaults.
 
     Parameters
     ----------
     steps : int, default=500
-        Maximum number of spring-electrical iterations per level.
-    theta : float, default=0.6
+        Maximum number of force-directed iterations per hierarchy level.
+    theta : float, default=1.2
         Barnes-Hut opening angle threshold.
-    repulsive_exponent : float, default=-1.0
-        SFDP repulsion exponent ``p``.
+    repulsive_exponent : float, default=0.0
+        Repulsive force exponent. The default gives inverse-distance Hu-style
+        repulsion through the shared spring-electrical force primitive.
 
     Returns
     -------
     Pipeline
-        Pipeline implementing the classical SFDP algorithm. The pipeline
-        produces final node coordinates by building the multilevel graph,
-        initializing the coarsest level, refining with spring-electrical
-        updates, prolongating through finer levels, and normalizing the final
-        positions.
+        Pipeline that coarsens with heavy-edge matching, embeds the coarsest
+        graph, prolongates through finer levels, performs a final tuning pass,
+        and normalizes the output coordinates.
 
     Raises
     ------
@@ -79,37 +71,42 @@ def build_sfdp_pipeline(
 
     return Pipeline(
         [
-            BuildSFDPGraph(),
-            BuildSFDPHierarchy(),
-            InitSFDPCoarsestPositions(),
-            SFDPRefineCoarsestLevel(
+            BuildYifanHuGraph(),
+            BuildYifanHuHierarchy(),
+            InitYifanHuCoarsestPositions(),
+            YifanHuRefineCoarsestLevel(
                 steps=steps,
                 theta=theta,
                 repulsive_exponent=repulsive_exponent,
             ),
-            SFDPProlongateAndRefineLevels(
+            YifanHuProlongateAndRefineLevels(
                 steps=steps,
                 theta=theta,
                 repulsive_exponent=repulsive_exponent,
             ),
-            SFDPFinalizePositions(),
+            YifanHuFinalTuning(
+                steps=final_tuning_steps(steps),
+                theta=theta,
+                repulsive_exponent=repulsive_exponent,
+            ),
+            YifanHuFinalizePositions(),
         ],
-        name="sfdp_pipeline",
+        name="yifanhu_pipeline",
     )
 
 
-def layout_sfdp_pipeline(
+def layout_yifanhu_pipeline(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: Optional[torch.Tensor] = None,
     steps: int = 500,
     seed: int = 123,
     theta: float = _DEFAULT_THETA,
-    repulsive_exponent: float = _DEFAULT_P,
+    repulsive_exponent: float = _DEFAULT_REPULSIVE_EXPONENT,
     edge_weights: Optional[torch.Tensor] = None,
     direction: str = "TB",
 ) -> torch.Tensor:
-    """Run the SFDP pipeline as a drop-in replacement.
+    """Run the native YifanHu layout pipeline.
 
     Parameters
     ----------
@@ -118,17 +115,16 @@ def layout_sfdp_pipeline(
     num_nodes : int
         Number of nodes ``N`` in the graph.
     node_sizes : torch.Tensor, optional
-        Optional node-size tensor with shape ``[N, 2]`` used only for output
-        scaling.
+        Optional node-size tensor with shape ``[N, 2]`` used for output extent.
     steps : int, default=500
-        Maximum number of spring-electrical iterations per level.
+        Maximum number of force-directed iterations per hierarchy level.
     seed : int, default=123
         Random seed for coarsening order, coarsest initialization, and
-        prolongation noise.
-    theta : float, default=0.6
+        prolongation jitter.
+    theta : float, default=1.2
         Barnes-Hut opening angle threshold.
-    repulsive_exponent : float, default=-1.0
-        SFDP repulsion exponent ``p``.
+    repulsive_exponent : float, default=0.0
+        Repulsive force exponent.
     edge_weights : torch.Tensor, optional
         Optional edge weights with shape ``[E]``.
     direction : str, default="TB"
@@ -188,15 +184,15 @@ def layout_sfdp_pipeline(
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_sfdp_pipeline(
+    final_state = build_yifanhu_pipeline(
         steps=steps,
         theta=theta,
         repulsive_exponent=repulsive_exponent,
     ).apply(problem, state, ctx)
 
     if final_state.pos is None:
-        raise RuntimeError("SFDP pipeline did not produce final positions.")
+        raise RuntimeError("YifanHu pipeline did not produce final positions.")
     return final_state.pos
 
 
-__all__ = ["build_sfdp_pipeline", "layout_sfdp_pipeline"]
+__all__ = ["build_yifanhu_pipeline", "layout_yifanhu_pipeline"]
