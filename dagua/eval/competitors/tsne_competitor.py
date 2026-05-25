@@ -142,6 +142,11 @@ class TSNEGraph(CompetitorBase):
                 "init": "random",
                 "random_state": seed if seed is not None else 42,
                 "perplexity": min(30.0, float(num_nodes - 1)),
+                # R32: force exact method to match dagua's dense-exact KL gradient
+                # path. Without this sklearn defaults to "barnes_hut" which uses
+                # NN-sparse P and approximate gradient -- fundamental algorithm
+                # mismatch from dagua's tsnet (per R32 tsnet_bh research codex).
+                "method": "exact",
             }
             if variant_params is not None:
                 tsne_kwargs.update(dict(variant_params))
