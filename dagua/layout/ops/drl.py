@@ -876,6 +876,114 @@ class DRLPhaseStep:
         self._energy_config = energy_config
         self._phase_dynamics_config = phase_dynamics_config
 
+    def _update_count(self) -> int:
+        """Return the number of node-update sweeps for this phase.
+
+        Returns
+        -------
+        int
+            Sweep count including igraph's pre-control init, boundary, and final
+            updates.
+        """
+        if self._phase_name == "init":
+            return 1
+        if self._phase_name == "liquid":
+            return int(self._phase.iterations)
+        if self._phase_name == "simmer":
+            return int(self._phase.iterations) + 2
+        return int(self._phase.iterations) + 1
+
+    def _advance_after_update(
+        self,
+        update_index: int,
+        attraction: float,
+        temperature: float,
+        damping_mult: float,
+        min_edges: float,
+        cut_end: float,
+        cut_rate: float,
+        cut_off_length: float,
+    ) -> Tuple[float, float, float, float, float]:
+        """Advance igraph's automatic scheduler after one node-update sweep.
+
+        Parameters
+        ----------
+        update_index : int
+            Zero-based sweep index within this Dagua phase.
+        attraction : float
+            Current attraction value.
+        temperature : float
+            Current temperature value.
+        damping_mult : float
+            Current damping multiplier.
+        min_edges : float
+            Current edge-cut degree threshold.
+        cut_end : float
+            Final cut threshold.
+        cut_rate : float
+            Per-iteration cut cooling rate.
+        cut_off_length : float
+            Current cut-off length.
+
+        Returns
+        -------
+        tuple[float, float, float, float, float]
+            Updated ``(attraction, temperature, damping_mult, min_edges,
+            cut_off_length)`` values.
+        """
+        if update_index >= int(self._phase.iterations):
+            if self._phase_name == "cooldown":
+                cut_off_length = cut_end
+                min_edges = self._phase_dynamics_config.cooldown_min_edges_floor
+            elif self._phase_name == "crunch":
+                min_edges = 99.0
+            return attraction, temperature, damping_mult, min_edges, cut_off_length
+
+        if self._phase_name == "expansion":
+            if attraction > self._phase_dynamics_config.expansion_attraction_floor:
+                attraction = max(
+                    self._phase_dynamics_config.expansion_attraction_floor,
+                    attraction - self._phase_dynamics_config.expansion_attraction_delta,
+                )
+            if min_edges > self._phase_dynamics_config.expansion_min_edges_floor:
+                min_edges = max(
+                    self._phase_dynamics_config.expansion_min_edges_floor,
+                    min_edges - self._phase_dynamics_config.expansion_min_edges_delta,
+                )
+            if cut_end > 0.0:
+                cut_off_length = max(cut_end, cut_off_length - cut_rate)
+            if damping_mult > self._phase_dynamics_config.expansion_damping_floor:
+                damping_mult = max(
+                    self._phase_dynamics_config.expansion_damping_floor,
+                    damping_mult - self._phase_dynamics_config.expansion_damping_delta,
+                )
+        elif self._phase_name == "cooldown":
+            if temperature > self._phase_dynamics_config.cooldown_temperature_floor:
+                temperature = max(
+                    self._phase_dynamics_config.cooldown_temperature_floor,
+                    temperature - self._phase_dynamics_config.cooldown_temperature_delta,
+                )
+            if cut_end > 0.0:
+                cut_off_length = max(
+                    cut_end,
+                    cut_off_length
+                    - (self._phase_dynamics_config.cooldown_cut_rate_multiplier * cut_rate),
+                )
+            if min_edges > self._phase_dynamics_config.cooldown_min_edges_floor:
+                min_edges = max(
+                    self._phase_dynamics_config.cooldown_min_edges_floor,
+                    min_edges - self._phase_dynamics_config.cooldown_min_edges_delta,
+                )
+        elif (
+            self._phase_name == "simmer"
+            and temperature > self._phase_dynamics_config.simmer_temperature_floor
+        ):
+            temperature = max(
+                self._phase_dynamics_config.simmer_temperature_floor,
+                temperature - self._phase_dynamics_config.simmer_temperature_delta,
+            )
+        return attraction, temperature, damping_mult, min_edges, cut_off_length
+
     def apply(
         self,
         positions: torch.Tensor,
@@ -924,51 +1032,7 @@ class DRLPhaseStep:
         num_nodes = len(positions)
 
         temperature = float(self._phase.temperature)
-        for _ in range(self._phase.iterations):
-            if self._phase_name == "expansion":
-                if attraction > self._phase_dynamics_config.expansion_attraction_floor:
-                    attraction = max(
-                        self._phase_dynamics_config.expansion_attraction_floor,
-                        attraction - self._phase_dynamics_config.expansion_attraction_delta,
-                    )
-                if min_edges > self._phase_dynamics_config.expansion_min_edges_floor:
-                    min_edges = max(
-                        self._phase_dynamics_config.expansion_min_edges_floor,
-                        min_edges - self._phase_dynamics_config.expansion_min_edges_delta,
-                    )
-                if cut_end > 0.0:
-                    cut_off_length = max(cut_end, cut_off_length - cut_rate)
-                if damping_mult > self._phase_dynamics_config.expansion_damping_floor:
-                    damping_mult = max(
-                        self._phase_dynamics_config.expansion_damping_floor,
-                        damping_mult - self._phase_dynamics_config.expansion_damping_delta,
-                    )
-            elif self._phase_name == "cooldown":
-                if temperature > self._phase_dynamics_config.cooldown_temperature_floor:
-                    temperature = max(
-                        self._phase_dynamics_config.cooldown_temperature_floor,
-                        temperature - self._phase_dynamics_config.cooldown_temperature_delta,
-                    )
-                if cut_end > 0.0:
-                    cut_off_length = max(
-                        cut_end,
-                        cut_off_length
-                        - (self._phase_dynamics_config.cooldown_cut_rate_multiplier * cut_rate),
-                    )
-                if min_edges > self._phase_dynamics_config.cooldown_min_edges_floor:
-                    min_edges = max(
-                        self._phase_dynamics_config.cooldown_min_edges_floor,
-                        min_edges - self._phase_dynamics_config.cooldown_min_edges_delta,
-                    )
-            elif (
-                self._phase_name == "simmer"
-                and temperature > self._phase_dynamics_config.simmer_temperature_floor
-            ):
-                temperature = max(
-                    self._phase_dynamics_config.simmer_temperature_floor,
-                    temperature - self._phase_dynamics_config.simmer_temperature_delta,
-                )
-
+        for update_index in range(self._update_count()):
             for node in range(num_nodes):
                 node_update.apply(
                     node=node,
@@ -983,6 +1047,23 @@ class DRLPhaseStep:
                     cut_off_length=cut_off_length,
                     density_grid=density_grid,
                 )
+
+            (
+                attraction,
+                temperature,
+                damping_mult,
+                min_edges,
+                cut_off_length,
+            ) = self._advance_after_update(
+                update_index=update_index,
+                attraction=attraction,
+                temperature=temperature,
+                damping_mult=damping_mult,
+                min_edges=min_edges,
+                cut_end=cut_end,
+                cut_rate=cut_rate,
+                cut_off_length=cut_off_length,
+            )
 
         return temperature, min_edges, cut_off_length
 
