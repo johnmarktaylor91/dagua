@@ -10,6 +10,7 @@ from dagua.layout.ops.pipelines.stress_majorization import (
     _graphviz_normalize_pca_positions,
     _graphviz_packed_index,
     _graphviz_pca_project_distances,
+    _graphviz_random_initialize_positions,
     layout_stress_majorization_pipeline,
 )
 
@@ -86,8 +87,25 @@ def test_graphviz_packed_cg_solves_centered_complete3_golden() -> None:
     assert np.allclose(x, expected, rtol=0.0, atol=1.0e-6)
 
 
-def test_graphviz_fidelity_zero_iterations_uses_pca_init() -> None:
-    """The ``graphviz`` fidelity mode should initialize from Graphviz PCA."""
+def test_graphviz_random_initialization_matches_source_derived_path4() -> None:
+    """Graphviz random initialization should match ``srand48``/``drand48``."""
+    initialized = _graphviz_random_initialize_positions(num_nodes=4, dimensions=2, seed=1)
+
+    expected = np.array(
+        [
+            [-0.36575127, 0.00882258],
+            [0.4274356, -0.10968383],
+            [0.15810779, -0.44390294],
+            [-0.2197921, 0.5447642],
+        ],
+        dtype=np.float32,
+    )
+
+    assert np.allclose(initialized, expected, rtol=0.0, atol=1.0e-7)
+
+
+def test_graphviz_fidelity_zero_iterations_uses_graphviz_default_random_init() -> None:
+    """The ``graphviz`` fidelity mode should initialize like default neato."""
     positions = layout_stress_majorization_pipeline(
         edge_index=_path4_edge_index(),
         num_nodes=4,
@@ -97,10 +115,10 @@ def test_graphviz_fidelity_zero_iterations_uses_pca_init() -> None:
 
     expected = torch.tensor(
         [
-            [1.0, 0.70710677],
-            [0.41421354, -0.70710677],
-            [-0.41421354, -0.70710677],
-            [-1.0, 0.70710677],
+            [0.3856448, -0.18237238],
+            [-0.24779494, -0.1027349],
+            [-0.27776906, 0.33136684],
+            [0.1399192, -0.04625957],
         ],
         dtype=torch.float32,
     )
