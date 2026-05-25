@@ -818,7 +818,10 @@ def layout_neato_pipeline(
     resolved_iterations = maxiter if iterations is None else iterations
     use_graphviz_solver = fidelity_mode == "graphviz"
     stress_fidelity_mode = "graphviz" if use_graphviz_solver else "graphviz_neato"
-    postprocess_fidelity = bool(fidelity_mode)
+    # Graphviz default neato does not run VPSC unless the graph's overlap
+    # adjustment mode requests it. The compatibility path keeps the older
+    # opt-in behavior; the packed-CG solver path follows the default reference.
+    postprocess_fidelity = bool(fidelity_mode) and not use_graphviz_solver
     if not pack or num_nodes <= 1:
         direct_result = layout_stress_majorization_pipeline(
             edge_index=edge_index,
