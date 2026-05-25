@@ -57,13 +57,13 @@ def test_rt_igraph_fidelity_returns_igraph_scaled_uncentered_units() -> None:
 
     fidelity_pos = layout_reingold_tilford_pipeline(edge_index, 3, fidelity_mode="igraph")
 
-    torch.testing.assert_close(fidelity_pos[0], torch.tensor([25.0, 0.0]))
-    torch.testing.assert_close(fidelity_pos[1], torch.tensor([0.0, 50.0]))
-    torch.testing.assert_close(fidelity_pos[2], torch.tensor([50.0, 50.0]))
+    torch.testing.assert_close(fidelity_pos[0], torch.tensor([0.0, 0.0]))
+    torch.testing.assert_close(fidelity_pos[1], torch.tensor([-25.0, 50.0]))
+    torch.testing.assert_close(fidelity_pos[2], torch.tensor([25.0, 50.0]))
 
 
-def test_rt_igraph_fidelity_accepts_explicit_roots_and_rootlevel() -> None:
-    """Verify explicit roots and rootlevel control directed traversal fixtures."""
+def test_rt_igraph_fidelity_ignores_single_rootlevel_like_igraph() -> None:
+    """Verify igraph ignores rootlevel for a single explicit root."""
     edge_index = torch.tensor([[0, 1], [2, 2]], dtype=torch.long)
 
     rooted_pos = layout_reingold_tilford_pipeline(
@@ -74,8 +74,25 @@ def test_rt_igraph_fidelity_accepts_explicit_roots_and_rootlevel() -> None:
         rootlevel=[2],
     )
 
-    torch.testing.assert_close(rooted_pos[1, 1], torch.tensor(100.0))
-    torch.testing.assert_close(rooted_pos[2, 1], torch.tensor(150.0))
+    torch.testing.assert_close(rooted_pos[1, 1], torch.tensor(0.0))
+    torch.testing.assert_close(rooted_pos[2, 1], torch.tensor(50.0))
+
+
+def test_rt_igraph_fidelity_accepts_multi_rootlevel() -> None:
+    """Verify multi-root rootlevel follows igraph's hidden-chain behavior."""
+    edge_index = torch.tensor([[0, 1], [2, 2]], dtype=torch.long)
+
+    rooted_pos = layout_reingold_tilford_pipeline(
+        edge_index,
+        3,
+        fidelity_mode="igraph",
+        roots=[0, 1],
+        rootlevel=[0, 2],
+    )
+
+    torch.testing.assert_close(rooted_pos[0], torch.tensor([-25.0, 50.0]))
+    torch.testing.assert_close(rooted_pos[1], torch.tensor([25.0, 150.0]))
+    torch.testing.assert_close(rooted_pos[2], torch.tensor([-25.0, 100.0]))
 
 
 def test_rt_igraph_fidelity_rejects_unknown_mode() -> None:
