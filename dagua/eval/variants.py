@@ -1013,10 +1013,10 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
     _variant(
         "classic_tsnet_steps200",
         "classic_tsnet",
-        "tsNET (steps=200)",
-        {"perplexity": 30.0, "steps": 200},
+        "tsNET (steps=250; sklearn min)",
+        {"perplexity": 30.0, "steps": 250},
         "tsne_graph",
-        {"perplexity": 30.0, "max_iter": 200},
+        {"perplexity": 30.0, "max_iter": 250},
         False,
         True,
         True,

@@ -45,10 +45,13 @@ class TsnetInitializePositionsConfig:
     fidelity_mode : bool, default=False
         When ``True``, use NumPy ``RandomState`` draws to match sklearn
         ``TSNE(init="random")`` seed semantics.
+    dtype : torch.dtype, default=torch.float32
+        Position dtype used for fidelity-mode precision experiments.
     """
 
     noise_scale: float = 1.0e-4
     fidelity_mode: bool = False
+    dtype: torch.dtype = torch.float32
 
 
 @dataclass(frozen=True)
@@ -169,16 +172,17 @@ class TsnetInitializePositions(Op):
         device = layout_device(problem.edge_index, problem.node_sizes)
         if self.config.fidelity_mode:
             random_state = np.random.RandomState(problem.seed)
+            np_dtype = np.float64 if self.config.dtype is torch.float64 else np.float32
             initial = torch.from_numpy(
                 (
                     self.config.noise_scale * random_state.standard_normal((problem.num_nodes, 2))
-                ).astype(np.float32, copy=False)
+                ).astype(np_dtype, copy=False)
             )
         else:
             generator = torch.Generator(device="cpu")
             generator.manual_seed(problem.seed)
             initial = (
-                torch.randn(problem.num_nodes, 2, generator=generator, dtype=torch.float32)
+                torch.randn(problem.num_nodes, 2, generator=generator, dtype=self.config.dtype)
                 * self.config.noise_scale
             )
         state.pos = initial.to(device=device).clone().requires_grad_(True)
