@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import math
+import random
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import torch
 
 from dagua.layout.ops.base import Pipeline, Repeat
@@ -18,6 +21,219 @@ from dagua.layout.ops.init import (
 )
 from dagua.layout.ops.preprocess import FA2PrepareState, FA2PrepareStateConfig
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+
+
+def _reference_exact_edge_arrays(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor],
+) -> tuple[np.ndarray, Optional[np.ndarray], np.ndarray]:
+    """Build reference ordered edge, weight, and mass arrays.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Input edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    tuple[np.ndarray, Optional[np.ndarray], np.ndarray]
+        Undirected edge pairs, optional edge weights, and FA2 node masses.
+    """
+    collapsed: dict[tuple[int, int], float] = {}
+    edges_np = edge_index.detach().cpu().numpy()
+    weights_np = None if edge_weights is None else edge_weights.detach().cpu().numpy()
+    for edge_offset in range(edges_np.shape[1]):
+        source = int(edges_np[0, edge_offset])
+        target = int(edges_np[1, edge_offset])
+        if source == target:
+            continue
+        key = (min(source, target), max(source, target))
+        collapsed[key] = 1.0 if weights_np is None else float(weights_np[edge_offset])
+
+    ordered_pairs = sorted(collapsed)
+    edge_pairs = np.asarray(ordered_pairs, dtype=np.int64).reshape((-1, 2))
+    weights = None
+    if edge_weights is not None:
+        weights = np.asarray([collapsed[pair] for pair in ordered_pairs], dtype=np.float64)
+    degree = np.zeros(num_nodes, dtype=np.float64)
+    for source, target in ordered_pairs:
+        degree[source] += 1.0
+        degree[target] += 1.0
+    return edge_pairs, weights, degree + 1.0
+
+
+def _layout_fa2_reference_exact(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    *,
+    steps: int,
+    seed: int,
+    gravity: float,
+    scaling_ratio: float,
+    linlog: bool,
+    strong_gravity: bool,
+    outbound_attraction_distribution: bool,
+    edge_weights: Optional[torch.Tensor],
+    dissuade_hubs: bool,
+    edge_weight_influence: float,
+) -> torch.Tensor:
+    """Run the live ``fa2`` exact-loop kernel for fidelity mode.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Input edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    steps : int
+        Number of ForceAtlas2 iterations.
+    seed : int
+        Python ``random.Random`` seed.
+    gravity : float
+        Gravity coefficient.
+    scaling_ratio : float
+        Repulsion scaling coefficient.
+    linlog : bool
+        Whether to use logarithmic attraction.
+    strong_gravity : bool
+        Whether to use strong gravity.
+    outbound_attraction_distribution : bool
+        Whether attraction is divided by source mass.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+    dissuade_hubs : bool
+        Whether to divide attraction by source mass without outbound
+        compensation.
+    edge_weight_influence : float
+        Edge-weight exponent.
+
+    Returns
+    -------
+    torch.Tensor
+        Final reference-order coordinates with shape ``[N, 2]``.
+    """
+    if num_nodes == 0:
+        return torch.zeros((0, 2), dtype=torch.float64, device=edge_index.device)
+    if num_nodes == 1:
+        return torch.zeros((1, 2), dtype=torch.float64, device=edge_index.device)
+
+    rng = random.Random(seed)
+    pos = np.asarray([[rng.random(), rng.random()] for _ in range(num_nodes)], dtype=np.float64)
+    edges, weights, mass = _reference_exact_edge_arrays(edge_index, num_nodes, edge_weights)
+    outbound_compensation = float(np.mean(mass)) if outbound_attraction_distribution else 1.0
+    old_force = np.zeros_like(pos)
+    force = np.zeros_like(pos)
+    speed = 1.0
+    speed_efficiency = 1.0
+
+    for _ in range(steps):
+        old_force[:, :] = force
+        force[:, :] = 0.0
+        for node_index in range(num_nodes):
+            for other_index in range(node_index):
+                x_dist = float(pos[node_index, 0] - pos[other_index, 0])
+                y_dist = float(pos[node_index, 1] - pos[other_index, 1])
+                distance_sq = (x_dist * x_dist) + (y_dist * y_dist)
+                if distance_sq > 0.0:
+                    factor = scaling_ratio * mass[node_index] * mass[other_index] / distance_sq
+                    force[node_index, 0] += x_dist * factor
+                    force[node_index, 1] += y_dist * factor
+                    force[other_index, 0] -= x_dist * factor
+                    force[other_index, 1] -= y_dist * factor
+
+        for node_index in range(num_nodes):
+            x_coord = float(pos[node_index, 0])
+            y_coord = float(pos[node_index, 1])
+            if strong_gravity:
+                if x_coord != 0.0 or y_coord != 0.0:
+                    factor = scaling_ratio * mass[node_index] * gravity
+                    force[node_index, 0] -= x_coord * factor
+                    force[node_index, 1] -= y_coord * factor
+            else:
+                distance = math.sqrt((x_coord * x_coord) + (y_coord * y_coord))
+                if distance > 0.0:
+                    factor = mass[node_index] * gravity / distance
+                    force[node_index, 0] -= x_coord * factor
+                    force[node_index, 1] -= y_coord * factor
+
+        for edge_offset in range(edges.shape[0]):
+            source = int(edges[edge_offset, 0])
+            target = int(edges[edge_offset, 1])
+            x_dist = float(pos[source, 0] - pos[target, 0])
+            y_dist = float(pos[source, 1] - pos[target, 1])
+            edge_factor = 1.0
+            if weights is not None:
+                weight = float(weights[edge_offset])
+                if edge_weight_influence == 1.0:
+                    edge_factor = weight
+                elif edge_weight_influence != 0.0:
+                    edge_factor = weight ** float(edge_weight_influence)
+            if linlog:
+                distance = math.sqrt((x_dist * x_dist) + (y_dist * y_dist))
+                if distance <= 0.0:
+                    continue
+                factor = -outbound_compensation * edge_factor * math.log1p(distance) / distance
+            else:
+                factor = -outbound_compensation * edge_factor
+            if outbound_attraction_distribution:
+                factor /= mass[source]
+            if dissuade_hubs and not outbound_attraction_distribution:
+                factor /= mass[source]
+            force[source, 0] += x_dist * factor
+            force[source, 1] += y_dist * factor
+            force[target, 0] -= x_dist * factor
+            force[target, 1] -= y_dist * factor
+
+        total_swinging = 0.0
+        total_effective_traction = 0.0
+        for node_index in range(num_nodes):
+            diff_x = float(old_force[node_index, 0] - force[node_index, 0])
+            diff_y = float(old_force[node_index, 1] - force[node_index, 1])
+            sum_x = float(old_force[node_index, 0] + force[node_index, 0])
+            sum_y = float(old_force[node_index, 1] + force[node_index, 1])
+            total_swinging += mass[node_index] * math.sqrt((diff_x * diff_x) + (diff_y * diff_y))
+            total_effective_traction += (
+                0.5 * mass[node_index] * math.sqrt((sum_x * sum_x) + (sum_y * sum_y))
+            )
+
+        estimated_jitter = 0.05 * math.sqrt(num_nodes)
+        min_jitter = math.sqrt(estimated_jitter)
+        jitter = min_jitter
+        if total_effective_traction > 0.0:
+            jitter = max(
+                min_jitter,
+                min(10.0, estimated_jitter * total_effective_traction / (num_nodes * num_nodes)),
+            )
+        if total_effective_traction > 0.0 and total_swinging / total_effective_traction > 2.0:
+            if speed_efficiency > 0.05:
+                speed_efficiency *= 0.5
+            jitter = max(jitter, 1.0)
+        target_speed = (
+            float("inf")
+            if total_swinging == 0.0
+            else jitter * speed_efficiency * total_effective_traction / total_swinging
+        )
+        if total_swinging > jitter * total_effective_traction:
+            if speed_efficiency > 0.05:
+                speed_efficiency *= 0.7
+        elif speed < 1000.0:
+            speed_efficiency *= 1.3
+        speed = speed + min(target_speed - speed, 0.5 * speed)
+
+        for node_index in range(num_nodes):
+            diff_x = float(old_force[node_index, 0] - force[node_index, 0])
+            diff_y = float(old_force[node_index, 1] - force[node_index, 1])
+            swinging = mass[node_index] * math.sqrt((diff_x * diff_x) + (diff_y * diff_y))
+            factor = speed / (1.0 + math.sqrt(speed * swinging))
+            pos[node_index, 0] += force[node_index, 0] * factor
+            pos[node_index, 1] += force[node_index, 1] * factor
+
+    return torch.from_numpy(pos).to(device=edge_index.device, dtype=torch.float64)
 
 
 @dataclass(frozen=True)
@@ -167,6 +383,7 @@ def layout_fa2_pipeline(
     barnes_hut: bool = False,
     barnes_hut_theta: float = 1.2,
     fidelity_mode: bool = False,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the ForceAtlas2 pipeline as a drop-in replacement.
 
@@ -221,6 +438,22 @@ def layout_fa2_pipeline(
         If the pipeline fails to populate final positions.
     """
     del node_sizes
+
+    if fidelity_mode and not barnes_hut:
+        return _layout_fa2_reference_exact(
+            edge_index,
+            num_nodes,
+            steps=steps,
+            seed=seed,
+            gravity=gravity,
+            scaling_ratio=scaling_ratio,
+            linlog=linlog,
+            strong_gravity=strong_gravity,
+            outbound_attraction_distribution=outbound_attraction_distribution,
+            edge_weights=edge_weights,
+            dissuade_hubs=dissuade_hubs,
+            edge_weight_influence=edge_weight_influence,
+        )
 
     config = FA2Config(
         steps=steps,
