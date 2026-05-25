@@ -28,6 +28,9 @@ _NEULAY_LINEAR_STEPS_KEY = "neulay_linear_steps"
 _NEULAY_QUERY_RADIUS_KEY = "neulay_query_radius"
 _NEULAY_LOSS_WINDOW_KEY = "neulay_loss_window"
 _NEULAY_PAIRS_KEY = "neulay_pairs"
+_NEULAY_OLD_CODE_FIDELITY_KEY = "neulay_old_code_fidelity"
+_NEULAY_DIRECT_EPOCH_OFFSET_KEY = "neulay_direct_epoch_offset"
+_NEULAY_LAST_DIRECT_OUTPUT_KEY = "neulay_last_direct_output"
 _NEULAY_DEFAULT_DIM = 2
 _NEULAY_OLD_CODE_DIM = 3
 _NEULAY_DEFAULT_GCN_STEPS = 2_000
@@ -568,6 +571,8 @@ class NeuLayPrepareState(Op):
         state.extras[_NEULAY_GCN_STEPS_KEY] = gcn_steps
         state.extras[_NEULAY_LINEAR_STEPS_KEY] = linear_steps
         state.extras[_NEULAY_QUERY_RADIUS_KEY] = query_radius
+        state.extras[_NEULAY_OLD_CODE_FIDELITY_KEY] = old_code_fidelity
+        state.extras[_NEULAY_DIRECT_EPOCH_OFFSET_KEY] = 0
         return state
 
 
@@ -588,8 +593,14 @@ class NeuLayRunGCNPhase(Op):
         f"extras.{_NEULAY_GCN_STEPS_KEY}",
         f"extras.{_NEULAY_USE_GCN_KEY}",
         f"extras.{_NEULAY_QUERY_RADIUS_KEY}",
+        f"extras.{_NEULAY_OLD_CODE_FIDELITY_KEY}",
     )
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        f"extras.{_NEULAY_LOSS_WINDOW_KEY}",
+        f"extras.{_NEULAY_PAIRS_KEY}",
+        f"extras.{_NEULAY_DIRECT_EPOCH_OFFSET_KEY}",
+    )
     requires: ClassVar[Tuple[str, ...]] = (
         f"extras.{_NEULAY_CLEANED_EDGE_INDEX_KEY}",
         f"extras.{_NEULAY_DEVICE_KEY}",
@@ -624,6 +635,7 @@ class NeuLayRunGCNPhase(Op):
         gcn_steps = state.extras[_NEULAY_GCN_STEPS_KEY]
         use_gcn = state.extras[_NEULAY_USE_GCN_KEY]
         query_radius = state.extras[_NEULAY_QUERY_RADIUS_KEY]
+        old_code_fidelity = state.extras[_NEULAY_OLD_CODE_FIDELITY_KEY]
 
         if use_gcn and gcn_steps > 0:
             model = _ResGCN(
@@ -635,11 +647,19 @@ class NeuLayRunGCNPhase(Op):
             optimizer = torch.optim.RMSprop(model.parameters(), lr=self.config.optimizer_lr)
             loss_window = [0.0] * self.config.patience
             pairs = np.empty((0, 2), dtype=np.int64)
+            final_epoch = 0
+            last_output = torch.empty(
+                (problem.num_nodes, dim),
+                dtype=torch.float32,
+                device=device,
+            )
 
             for step in range(gcn_steps):
+                final_epoch = step
                 optimizer.zero_grad(set_to_none=True)
                 with torch.enable_grad():
                     output = model()
+                    last_output = output.detach()
                     if step % self.config.pair_refresh_interval == 0:
                         pairs = _query_pairs(output, query_radius)
 
@@ -676,7 +696,14 @@ class NeuLayRunGCNPhase(Op):
                     break
 
             with torch.no_grad():
-                state.pos = model().detach()
+                state.pos = last_output if old_code_fidelity else model().detach()
+            if old_code_fidelity:
+                # NeuLay-2.py carries these local variables directly into the
+                # post-GCN LayoutLinear loop, including epoch modulo-5 refresh
+                # parity and the rolling convergence window.
+                state.extras[_NEULAY_LOSS_WINDOW_KEY] = loss_window
+                state.extras[_NEULAY_PAIRS_KEY] = pairs
+                state.extras[_NEULAY_DIRECT_EPOCH_OFFSET_KEY] = final_epoch
             return state
 
         state.pos = _initial_positions(
@@ -684,6 +711,7 @@ class NeuLayRunGCNPhase(Op):
             dim=dim,
             device=device,
         )
+        state.extras[_NEULAY_DIRECT_EPOCH_OFFSET_KEY] = 0
         return state
 
 
@@ -695,7 +723,11 @@ class NeuLayPrepareDirectOptimizer(Op):
 
     name: ClassVar[str] = "neulay_init_direct_optimizer"
     category: ClassVar[OpCategory] = OpCategory.OPTIMIZE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", f"extras.{_NEULAY_LR_KEY}")
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        f"extras.{_NEULAY_LR_KEY}",
+        f"extras.{_NEULAY_OLD_CODE_FIDELITY_KEY}",
+    )
     writes: ClassVar[Tuple[str, ...]] = (
         "pos",
         "optimizer",
@@ -728,10 +760,13 @@ class NeuLayPrepareDirectOptimizer(Op):
             raise ValueError("NeuLayPrepareDirectOptimizer requires state.pos.")
 
         lr = state.extras[_NEULAY_LR_KEY]
+        old_code_fidelity = state.extras.get(_NEULAY_OLD_CODE_FIDELITY_KEY, False)
         state.pos = nn.Parameter(state.pos.clone())
         state.optimizer = torch.optim.RMSprop([state.pos], lr=lr)
-        state.extras[_NEULAY_LOSS_WINDOW_KEY] = [0.0] * self.config.patience
-        state.extras[_NEULAY_PAIRS_KEY] = np.empty((0, 2), dtype=np.int64)
+        if not old_code_fidelity or _NEULAY_LOSS_WINDOW_KEY not in state.extras:
+            state.extras[_NEULAY_LOSS_WINDOW_KEY] = [0.0] * self.config.patience
+        if not old_code_fidelity or _NEULAY_PAIRS_KEY not in state.extras:
+            state.extras[_NEULAY_PAIRS_KEY] = np.empty((0, 2), dtype=np.int64)
         return state
 
 
@@ -752,11 +787,14 @@ class NeuLayDirectStep(Op):
         f"extras.{_NEULAY_QUERY_RADIUS_KEY}",
         f"extras.{_NEULAY_LOSS_WINDOW_KEY}",
         f"extras.{_NEULAY_PAIRS_KEY}",
+        f"extras.{_NEULAY_OLD_CODE_FIDELITY_KEY}",
+        f"extras.{_NEULAY_DIRECT_EPOCH_OFFSET_KEY}",
     )
     writes: ClassVar[Tuple[str, ...]] = (
         "pos",
         f"extras.{_NEULAY_LOSS_WINDOW_KEY}",
         f"extras.{_NEULAY_PAIRS_KEY}",
+        f"extras.{_NEULAY_LAST_DIRECT_OUTPUT_KEY}",
     )
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
     access_pattern: ClassVar[str] = "global"
@@ -791,12 +829,17 @@ class NeuLayDirectStep(Op):
         query_radius = state.extras[_NEULAY_QUERY_RADIUS_KEY]
         loss_window = state.extras[_NEULAY_LOSS_WINDOW_KEY]
         pairs = state.extras[_NEULAY_PAIRS_KEY]
+        old_code_fidelity = state.extras[_NEULAY_OLD_CODE_FIDELITY_KEY]
+        direct_epoch_offset = state.extras[_NEULAY_DIRECT_EPOCH_OFFSET_KEY]
 
         state.optimizer.zero_grad(set_to_none=True)
         with torch.enable_grad():
-            if state.step % self.config.pair_refresh_interval == 0:
+            refresh_step = direct_epoch_offset + state.step if old_code_fidelity else state.step
+            if refresh_step % self.config.pair_refresh_interval == 0:
                 pairs = _query_pairs(state.pos, query_radius)
                 state.extras[_NEULAY_PAIRS_KEY] = pairs
+            if old_code_fidelity:
+                state.extras[_NEULAY_LAST_DIRECT_OUTPUT_KEY] = state.pos.detach().clone()
 
             if cleaned.numel() == 0:
                 elastic = state.pos.sum() * 0.0
@@ -876,7 +919,11 @@ class NeuLayFinalizePositions(Op):
 
     name: ClassVar[str] = "neulay_finalize_positions"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
-    reads: ClassVar[Tuple[str, ...]] = ("pos",)
+    reads: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        f"extras.{_NEULAY_OLD_CODE_FIDELITY_KEY}",
+        f"extras.{_NEULAY_LAST_DIRECT_OUTPUT_KEY}",
+    )
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
     access_pattern: ClassVar[str] = "global"
@@ -891,7 +938,11 @@ class NeuLayFinalizePositions(Op):
         del problem, ctx
         if state.pos is None:
             raise ValueError("NeuLayFinalizePositions requires state.pos.")
-        state.pos = state.pos.detach()
+        old_code_fidelity = state.extras.get(_NEULAY_OLD_CODE_FIDELITY_KEY, False)
+        if old_code_fidelity and _NEULAY_LAST_DIRECT_OUTPUT_KEY in state.extras:
+            state.pos = state.extras[_NEULAY_LAST_DIRECT_OUTPUT_KEY].detach()
+        else:
+            state.pos = state.pos.detach()
         return state
 
 
