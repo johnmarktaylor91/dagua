@@ -8,7 +8,7 @@ from typing import Iterable
 import pytest
 import torch
 
-from dagua.layout.ops.drl import DRLEnergyConfig, DRLNodeUpdate
+from dagua.layout.ops.drl import DRLEnergyConfig, DRLNodeUpdate, _maybe_cut_long_edge
 from dagua.layout.ops.pipelines.drl import build_drl_pipeline, layout_drl_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
@@ -278,6 +278,25 @@ class TestDRLPipelineFidelity:
             dtype=torch.float64,
         )
         torch.testing.assert_close(positions[0], expected)
+
+    def test_drl_edge_cutting_removes_only_current_neighbor_entry(self) -> None:
+        """DrL edge cutting should preserve the reverse neighbor map like igraph."""
+        positions = torch.tensor(
+            [[0.0, 0.0], [10.0, 0.0], [0.0, 0.0]],
+            dtype=torch.float64,
+        )
+        adjacency = [{1: 1.0, 2: 9.0}, {0: 1.0}, {0: 9.0}]
+
+        _maybe_cut_long_edge(
+            node=0,
+            positions=positions,
+            adjacency=adjacency,
+            min_edges=1.0,
+            cut_off_length=0.0,
+        )
+
+        assert 1 not in adjacency[0]
+        assert adjacency[1][0] == 1.0
 
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),
