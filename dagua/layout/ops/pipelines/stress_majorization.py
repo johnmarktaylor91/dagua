@@ -860,6 +860,7 @@ def build_stress_majorization_pipeline(
     iterations: int = 200,
     trace_every: int = 0,
     fidelity_mode: Optional[str] = None,
+    fidelity_dtype: torch.dtype = torch.float32,
     epsilon: Optional[float] = None,
 ) -> Pipeline:
     """Build a stress-majorization (SMACOF) pipeline.
@@ -1016,6 +1017,7 @@ def layout_stress_majorization_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     trace_every: int = 0,
     fidelity_mode: Optional[str] = None,
+    fidelity_dtype: torch.dtype = torch.float32,
     epsilon: Optional[float] = None,
     graphviz_neato_fidelity: bool = False,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
@@ -1112,6 +1114,7 @@ def layout_stress_majorization_pipeline(
         iterations=iterations,
         trace_every=trace_every,
         fidelity_mode=fidelity_mode,
+        fidelity_dtype=fidelity_dtype,
         epsilon=epsilon,
     ).apply(problem, state, ctx)
 

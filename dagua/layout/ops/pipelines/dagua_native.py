@@ -4494,6 +4494,7 @@ def layout_dagua_native_pipeline(
     seed: Optional[int] = None,
     edge_weights: Optional[torch.Tensor] = None,
     fidelity_mode: Optional[Any] = None,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the topology-dispatched native pipeline.
 
@@ -4533,6 +4534,8 @@ def layout_dagua_native_pipeline(
         Fidelity selector. ``True``, ``"dot"``, ``"graphviz_dot"``, and
         ``"graphviz-dot"`` enable Graphviz-dot flat/self/multi-edge
         preprocessing. ``None`` preserves existing behavior.
+    fidelity_dtype : torch.dtype, default=torch.float32
+        Fidelity-mode internal dtype stored on the effective config.
 
     Returns
     -------
@@ -4545,6 +4548,7 @@ def layout_dagua_native_pipeline(
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
     if fidelity_mode is not None:
         setattr(effective_config, "fidelity_mode", fidelity_mode)
+    effective_config.fidelity_dtype = fidelity_dtype
     dot_cluster_fidelity = _is_graphviz_dot_cluster_fidelity_mode(
         getattr(effective_config, "fidelity_mode", None)
     )

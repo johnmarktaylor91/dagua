@@ -478,6 +478,7 @@ def layout_fr_pipeline(
     k: Optional[float] = None,
     fixed: Optional[Union[Sequence[int], torch.Tensor]] = None,
     fidelity_mode: Optional[Union[bool, str]] = None,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the Fruchterman-Reingold pipeline as a drop-in replacement.
 
@@ -613,6 +614,7 @@ def layout_fr_default_pipeline(
     k: Optional[float] = None,
     fixed: Optional[Union[Sequence[int], torch.Tensor]] = None,
     fidelity_mode: Optional[Union[bool, str]] = None,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the benchmark default FR layout with canonical-fidelity selection.
 
@@ -668,6 +670,7 @@ def layout_fr_default_pipeline(
             k=k,
             fixed=fixed,
             fidelity_mode=fidelity_mode,
+            fidelity_dtype=fidelity_dtype,
         )
 
     legacy_pos = layout_fr_pipeline(

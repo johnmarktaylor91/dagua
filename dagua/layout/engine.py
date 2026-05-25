@@ -1099,6 +1099,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         if graph.edge_weights is not None:
             kwargs["edge_weights"] = graph.edge_weights
         kwargs.update(config.algorithm_params)
+        kwargs["fidelity_dtype"] = config.fidelity_dtype
         # Forward steps if the pipeline accepts it
         sig = inspect.signature(pipeline_fn)
         if "steps" in sig.parameters:

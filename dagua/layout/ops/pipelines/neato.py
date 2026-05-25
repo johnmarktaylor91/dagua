@@ -747,6 +747,7 @@ def layout_neato_pipeline(
     pack: bool = True,
     trace_every: int = 0,
     fidelity_mode: Union[bool, str] = False,
+    fidelity_dtype: torch.dtype = torch.float32,
     overlap_removal: bool = True,
     overlap_method: str = "vpsc",
     overlap_gap: float = _GRAPHVIZ_VPSC_DEFAULT_GAP,
