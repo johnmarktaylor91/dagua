@@ -54,6 +54,10 @@ _GRAPHVIZ_LAP2_KEY = "sm_graphviz_lap2_packed"
 _GRAPHVIZ_OLD_STRESS_KEY = "sm_graphviz_old_stress"
 _GRAPHVIZ_CG_TOLERANCE = 1.0e-3
 _GRAPHVIZ_MIN_DISTANCE = 1.0e-30
+_GRAPHVIZ_DRAND48_MULTIPLIER = 0x5DEECE66D
+_GRAPHVIZ_DRAND48_INCREMENT = 0xB
+_GRAPHVIZ_DRAND48_MASK = (1 << 48) - 1
+_GRAPHVIZ_DRAND48_SEED_SUFFIX = 0x330E
 
 
 def _is_graphviz_fidelity(fidelity_mode: Optional[str]) -> bool:
@@ -254,6 +258,71 @@ def _graphviz_normalize_pca_positions(positions: np.ndarray) -> np.ndarray:
     return normalized
 
 
+def _graphviz_drand48_values(seed: int, count: int) -> np.ndarray:
+    """Generate Graphviz-compatible ``drand48`` values.
+
+    Parameters
+    ----------
+    seed : int
+        Integer passed to ``srand48``.
+    count : int
+        Number of random values to generate.
+
+    Returns
+    -------
+    numpy.ndarray
+        Double-precision values in ``[0, 1)`` with shape ``[count]``.
+    """
+    if count < 0:
+        raise ValueError("count must be non-negative.")
+    state = (((int(seed) & 0xFFFFFFFF) << 16) + _GRAPHVIZ_DRAND48_SEED_SUFFIX) & (
+        _GRAPHVIZ_DRAND48_MASK
+    )
+    values = np.empty(count, dtype=np.float64)
+    denominator = float(1 << 48)
+    for index in range(count):
+        state = (
+            _GRAPHVIZ_DRAND48_MULTIPLIER * state + _GRAPHVIZ_DRAND48_INCREMENT
+        ) & _GRAPHVIZ_DRAND48_MASK
+        values[index] = float(state) / denominator
+    return values
+
+
+def _graphviz_random_initialize_positions(
+    num_nodes: int,
+    dimensions: int,
+    seed: int,
+) -> np.ndarray:
+    """Initialize coordinates like Graphviz neato's default ``initLayout``.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    dimensions : int
+        Coordinate dimensionality. Neato uses two dimensions for this pipeline.
+    seed : int
+        Seed passed through Graphviz's ``srand48``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Single-precision centered positions with shape ``[num_nodes, dimensions]``.
+    """
+    if num_nodes < 0:
+        raise ValueError("num_nodes must be non-negative.")
+    if dimensions <= 0:
+        raise ValueError("dimensions must be positive.")
+    values = _graphviz_drand48_values(seed=seed, count=num_nodes * dimensions)
+    initialized = np.empty((num_nodes, dimensions), dtype=np.float64)
+    for node in range(num_nodes):
+        start = node * dimensions
+        initialized[node, :] = values[start : start + dimensions]
+    for axis in range(dimensions):
+        initialized[:, axis] -= initialized[:, axis].mean()
+    return initialized.astype(np.float32)
+
+
 def _graphviz_conjugate_gradient_packed(
     packed_matrix: np.ndarray,
     x: np.ndarray,
@@ -386,10 +455,10 @@ class GraphvizPrepareStressMajorizationState(Op):
 
 
 @dataclass(frozen=True)
-class GraphvizPcaInitializePositions(Op):
-    """Initialize positions from Graphviz-style PCA of graph distances."""
+class GraphvizInitializePositions(Op):
+    """Initialize positions from Graphviz neato's default random start."""
 
-    name: ClassVar[str] = "sm_graphviz_pca_initialize_positions"
+    name: ClassVar[str] = "sm_graphviz_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
     reads: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
     writes: ClassVar[Tuple[str, ...]] = ("extras",)
@@ -401,12 +470,12 @@ class GraphvizPcaInitializePositions(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Set the current positions to a two-dimensional PCA projection.
+        """Set current positions to Graphviz-compatible random coordinates.
 
         Parameters
         ----------
         problem : LayoutProblem
-            Immutable layout inputs. Unused.
+            Immutable layout inputs, including node count and seed.
         state : SolveState
             Mutable state with prepared target distances.
         ctx : RuntimeContext
@@ -417,13 +486,15 @@ class GraphvizPcaInitializePositions(Op):
         SolveState
             State with ``sm_current_positions`` initialized.
         """
-        del problem, ctx
+        del ctx
 
         if not isinstance(state.distance_matrix, torch.Tensor):
-            raise ValueError("Graphviz PCA init requires state.distance_matrix.")
-        distances = state.distance_matrix.to(dtype=torch.float64, device="cpu").numpy()
-        projected = _graphviz_pca_project_distances(target_distances=distances, dimensions=2)
-        initialized = _graphviz_normalize_pca_positions(positions=projected)
+            raise ValueError("Graphviz initialization requires state.distance_matrix.")
+        initialized = _graphviz_random_initialize_positions(
+            num_nodes=problem.num_nodes,
+            dimensions=2,
+            seed=problem.seed,
+        )
         state.extras[CURRENT_POSITIONS_KEY] = initialized
         state.extras[CURRENT_STRESS_KEY] = float("inf")
         state.extras[_GRAPHVIZ_OLD_STRESS_KEY] = float("inf")
@@ -643,6 +714,8 @@ def build_stress_majorization_pipeline(
         Koren, and North (2004), "Graph Drawing by Stress Majorization".
     Fidelity mode: ``"ogdf"`` enables OGDF-style serial sweeps,
         disconnected-distance fill, and no-jitter warm starts;
+        ``"graphviz"`` enables Graphviz neato's default random start and
+        packed conjugate-gradient stress solver;
         ``"graphviz_neato"`` enables neato shortest-path defaults, seeded
         random initialization, Graphviz disconnected fill, unconstrained
         SMACOF updates, and epsilon early termination.
@@ -662,6 +735,8 @@ def build_stress_majorization_pipeline(
     fidelity_mode : str, optional
         Optional reference-fidelity mode. ``"ogdf"`` enables OGDF-compatible
         serial sweeps, disconnected-distance fill, and a no-jitter warm start.
+        ``"graphviz"`` enables Graphviz neato's default random initialization
+        and packed conjugate-gradient stress solver.
         ``"graphviz_neato"`` enables neato defaults: shortest-path model,
         seeded random init, Graphviz disconnected fill, unconstrained SMACOF
         updates, and epsilon early termination.
@@ -697,7 +772,7 @@ def build_stress_majorization_pipeline(
             [
                 FixedSteps(FixedStepsConfig(n=iterations)),
                 GraphvizPrepareStressMajorizationState(),
-                GraphvizPcaInitializePositions(),
+                GraphvizInitializePositions(),
                 Repeat(
                     n=iterations,
                     ops=[
