@@ -1180,6 +1180,7 @@ class ClassicNeato(_ClassicBase):
 
     name = "classic_neato"
     max_nodes = 2_000
+    variant_param_names = frozenset({"epsilon", "fidelity_mode", "maxiter", "pack"})
 
     def layout(
         self,
@@ -1603,6 +1604,7 @@ class ClassicFMMM(_ClassicBase):
 
     name = "classic_fmmm"
     max_nodes = 500_000
+    variant_param_names = frozenset({"fidelity_mode", "force_model", "reference_mode", "steps"})
 
     def layout(
         self,
@@ -1699,6 +1701,9 @@ def _quick_classic(
     try:
         if graph.edge_weights is not None:
             extra_kwargs.setdefault("edge_weights", graph.edge_weights)
+        if fn_name == "layout_fmmm_pipeline" and graph.clusters:
+            extra_kwargs.setdefault("clusters", graph.clusters)
+            extra_kwargs.setdefault("cluster_parents", graph.cluster_parents)
         if fn_name == "layout_graphopt_pipeline" and bool(extra_kwargs.get("fidelity_mode")):
             import numpy as np
 
@@ -1819,6 +1824,7 @@ class ClassicLGL(_ClassicBase):
 class ClassicSFDP(_ClassicBase):
     name = "classic_sfdp"
     max_nodes = 100_000
+    variant_param_names = frozenset({"fidelity_mode", "repulsive_exponent", "steps", "theta"})
 
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
