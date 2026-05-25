@@ -8,9 +8,11 @@ building blocks.
 
 from __future__ import annotations
 
+import heapq
 import math
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional, Tuple, Union
+from typing import Any, ClassVar, Iterator, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -69,11 +71,14 @@ class PrepareStressSGDTermsConfig:
         Upper bound on the approximate-mode pivot count.
     exact_float64_terms : bool, default=False
         Whether exact distances and weights should be stored as ``float64``.
+    reference_term_order : bool, default=False
+        Whether to materialize exact terms in native ``s_gd2`` traversal order.
     """
 
     max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES
     max_pivots: int = _MAX_PIVOTS
     exact_float64_terms: bool = False
+    reference_term_order: bool = False
 
 
 @dataclass(frozen=True)
@@ -475,6 +480,7 @@ def _build_exact_terms(
     adjacency: list[list[tuple[int, float]]],
     weighted: bool,
     exact_float64_terms: bool = False,
+    reference_term_order: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build full upper-triangle stress-SGD term data.
 
@@ -487,12 +493,22 @@ def _build_exact_terms(
     exact_float64_terms : bool, default=False
         Store exact distance and weight parameters as ``float64`` to match the
         native ``s_gd2`` term representation.
+    reference_term_order : bool, default=False
+        Build terms in native ``s_gd2`` BFS/Dijkstra discovery order instead of
+        target-index order.
 
     Returns
     -------
     tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
         ``(sources, targets, distances, weights)`` with matching shapes.
     """
+    if reference_term_order:
+        return _build_exact_terms_reference_order(
+            adjacency=adjacency,
+            weighted=weighted,
+            exact_float64_terms=exact_float64_terms,
+        )
+
     num_nodes = len(adjacency)
     num_terms = _pair_count(num_nodes)
     sources = np.empty((num_terms,), dtype=np.int32)
@@ -516,6 +532,131 @@ def _build_exact_terms(
             write_index += 1
 
     return sources, targets, distances, weights
+
+
+def _build_exact_terms_reference_order(
+    adjacency: list[list[tuple[int, float]]],
+    weighted: bool,
+    exact_float64_terms: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build exact stress terms in native ``s_gd2`` traversal order.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list.
+    weighted : bool
+        Whether to use weighted Dijkstra traversal.
+    exact_float64_terms : bool, default=False
+        Store exact distance and weight parameters as ``float64``.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        ``(sources, targets, distances, weights)`` with matching shapes.
+    """
+    num_nodes = len(adjacency)
+    num_terms = _pair_count(num_nodes)
+    sources = np.empty((num_terms,), dtype=np.int32)
+    targets = np.empty((num_terms,), dtype=np.int32)
+    float_dtype = np.float64 if exact_float64_terms else np.float32
+    distances = np.empty((num_terms,), dtype=float_dtype)
+    weights = np.empty((num_terms,), dtype=float_dtype)
+
+    write_index = 0
+    terms_size_goal = 0
+    for source_index in range(num_nodes - 1):
+        terms_size_goal += num_nodes - source_index - 1
+        stream = (
+            _weighted_reference_term_stream(adjacency, source_index)
+            if weighted
+            else _unweighted_reference_term_stream(adjacency, source_index)
+        )
+        for target_index, graph_distance in stream:
+            sources[write_index] = source_index
+            targets[write_index] = target_index
+            distances[write_index] = graph_distance
+            weights[write_index] = 1.0 / (graph_distance * graph_distance)
+            write_index += 1
+            if write_index == terms_size_goal:
+                break
+
+        if write_index != terms_size_goal:
+            raise ValueError("Stress-SGD requires a connected graph.")
+
+    return sources, targets, distances, weights
+
+
+def _unweighted_reference_term_stream(
+    adjacency: list[list[tuple[int, float]]],
+    source: int,
+) -> Iterator[tuple[int, float]]:
+    """Yield unweighted terms in native ``s_gd2`` BFS discovery order.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Undirected adjacency list.
+    source : int
+        Source node for the BFS traversal.
+
+    Yields
+    ------
+    tuple[int, float]
+        ``(target, graph_distance)`` for pairs with ``source < target``.
+    """
+    distances = [_UNREACHED] * len(adjacency)
+    distances[source] = 0
+    queue: deque[int] = deque([source])
+
+    while queue:
+        current = queue.popleft()
+        next_distance = distances[current] + 1
+        for neighbor, _ in adjacency[current]:
+            if distances[neighbor] != _UNREACHED:
+                continue
+            distances[neighbor] = next_distance
+            queue.append(neighbor)
+            if source < neighbor:
+                yield neighbor, float(next_distance)
+
+
+def _weighted_reference_term_stream(
+    adjacency: list[list[tuple[int, float]]],
+    source: int,
+) -> Iterator[tuple[int, float]]:
+    """Yield weighted terms in native ``s_gd2`` Dijkstra pop order.
+
+    Parameters
+    ----------
+    adjacency : list[list[tuple[int, float]]]
+        Undirected weighted adjacency list.
+    source : int
+        Source node for the Dijkstra traversal.
+
+    Yields
+    ------
+    tuple[int, float]
+        ``(target, graph_distance)`` for pairs with ``source < target``.
+    """
+    distances = [math.inf] * len(adjacency)
+    visited = [False] * len(adjacency)
+    distances[source] = 0.0
+    heap: list[tuple[float, int]] = [(0.0, source)]
+
+    while heap:
+        graph_distance, current = heapq.heappop(heap)
+        if visited[current]:
+            continue
+        visited[current] = True
+        if source < current:
+            yield current, graph_distance
+
+        for neighbor, weight in adjacency[current]:
+            new_distance = graph_distance + weight
+            if new_distance < distances[neighbor]:
+                distances[neighbor] = new_distance
+                heapq.heappush(heap, (new_distance, neighbor))
 
 
 def _sample_pairs(
@@ -799,6 +940,7 @@ class PrepareStressSGDTerms(Op):
         self,
         max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES,
         exact_float64_terms: bool = False,
+        reference_term_order: bool = False,
     ) -> None:
         """Create a configured term builder.
 
@@ -809,10 +951,13 @@ class PrepareStressSGDTerms(Op):
         exact_float64_terms : bool, default=False
             Store exact distances and weights as ``float64`` for reference
             fidelity.
+        reference_term_order : bool, default=False
+            Build exact terms in native ``s_gd2`` traversal order.
         """
         self.config = PrepareStressSGDTermsConfig(
             max_exact_nodes=max_exact_nodes,
             exact_float64_terms=exact_float64_terms,
+            reference_term_order=reference_term_order,
         )
 
     def apply(
@@ -856,6 +1001,7 @@ class PrepareStressSGDTerms(Op):
                 adjacency=adjacency,
                 weighted=weighted,
                 exact_float64_terms=self.config.exact_float64_terms,
+                reference_term_order=self.config.reference_term_order,
             )
             state.extras["stress_sgd_sources"] = sources
             state.extras["stress_sgd_targets"] = targets

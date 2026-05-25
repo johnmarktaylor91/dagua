@@ -48,8 +48,9 @@ def build_stress_sgd_pipeline(
     trace_every : int
         Optional snapshot interval.
     fidelity_mode : bool, default=False
-        Enable reference-parity preprocessing and exact term precision for
-        ``classic_stress_sgd`` versus ``s_gd2`` comparisons.
+        Enable reference-parity preprocessing, exact term precision, and native
+        term traversal order for ``classic_stress_sgd`` versus ``s_gd2``
+        comparisons.
 
     Returns
     -------
@@ -81,6 +82,7 @@ def build_stress_sgd_pipeline(
             PrepareStressSGDTerms(
                 max_exact_nodes=max_exact_nodes,
                 exact_float64_terms=fidelity_mode,
+                reference_term_order=fidelity_mode,
             ),
             RunStressSGDExactSchedule(steps=steps, eps=eps, trace_every=trace_every),
             RunStressSGDApproximateSchedule(
@@ -138,7 +140,8 @@ def layout_stress_sgd_pipeline(
         Optional edge-weight tensor with shape ``[E]``.
     fidelity_mode : bool, default=False
         Enable reference-parity edge preprocessing, disconnected-graph policy,
-        and exact ``float64`` term storage for ``s_gd2`` fidelity runs.
+        exact ``float64`` term storage, and native term traversal order for
+        ``s_gd2`` fidelity runs.
 
     Returns
     -------
