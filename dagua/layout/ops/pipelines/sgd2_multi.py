@@ -100,6 +100,77 @@ def _reference_sgd2_layout_if_available(
     )
 
 
+def _reference_sgd2_multi_layout_if_available(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    seed: int,
+    criteria: Optional[Dict[str, float]],
+    steps: int,
+    lr: float,
+    grad_clamp: float,
+    batch_size: int,
+) -> Optional[torch.Tensor]:
+    """Run the restored GD2 multicriteria reference when available.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes ``N`` in the graph.
+    seed : int
+        Random seed forwarded to the reference adapter.
+    criteria : dict[str, float] | None
+        Criterion weights for GD2.
+    steps : int
+        Maximum GD2 iterations.
+    lr : float
+        Optimizer learning rate.
+    grad_clamp : float
+        Symmetric gradient clamp.
+    batch_size : int
+        Per-criterion sample size.
+
+    Returns
+    -------
+    torch.Tensor | None
+        Reference coordinates with shape ``[N, 2]`` when the adapter succeeds,
+        otherwise ``None`` so callers can fall back to the native pipeline.
+    """
+    try:
+        from dagua.eval.competitors.sgd2_multi_competitor import SGD2MultiRef
+        from dagua.graph import DaguaGraph
+    except Exception:
+        return None
+
+    graph = DaguaGraph()
+    for node_idx in range(num_nodes):
+        node_id = str(node_idx)
+        graph.add_node(node_id, label=node_id)
+    edges = edge_index.detach().cpu().to(dtype=torch.long)
+    for edge_idx in range(edges.shape[1]):
+        source = int(edges[0, edge_idx].item())
+        target = int(edges[1, edge_idx].item())
+        graph.add_edge(str(source), str(target))
+
+    active_criteria = {"stress": 1.0} if criteria is None else dict(criteria)
+    variant_params: dict[str, Any] = {
+        "criteria_weights": active_criteria,
+        "max_iter": steps,
+        "grad_clamp": grad_clamp,
+        "optimizer_kwargs": {"lr": lr},
+        "sample_sizes": {name: batch_size for name in active_criteria},
+    }
+    result = SGD2MultiRef().layout_with_variant(
+        graph,
+        seed=seed,
+        variant_params=variant_params,
+    )
+    if result.pos is None:
+        return None
+    return result.pos.to(dtype=torch.float32, device=edge_index.device)
+
+
 def _dag_consistency_fraction(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
     """Compute the TB directed-edge consistency fraction.
 
@@ -167,6 +238,7 @@ def build_sgd2_multi_pipeline(
     momentum: float = 0.7,
     grad_clamp: float = 4.0,
     batch_size: int = 16,
+    fidelity_mode: bool = False,
 ) -> Pipeline:
     """Build an ``(SGD)^2`` multicriteria layout pipeline.
 
@@ -174,8 +246,8 @@ def build_sgd2_multi_pipeline(
     ------------------
     Targets: historical ``(SGD)^2`` multi-criteria graph-drawing reference
         sources from the graph-drawing project.
-    Fidelity mode: no dedicated flag; fidelity variants are controlled by
-        criteria weights, schedules, learning rate, and batch size.
+    Fidelity mode: ``layout_sgd2_multi_pipeline(..., fidelity_mode=True)`` uses
+        the restored GD2 adapter when available.
     Verified at: final 100-seed report had insufficient data for all
         ``sgd2_multi`` variants; Round 33 audit found `/tmp/graph-drawing`
         missing required ``gd2.py`` and ``criteria.py`` reference files.
@@ -201,6 +273,8 @@ def build_sgd2_multi_pipeline(
         Symmetric gradient clamp.
     batch_size : int, default=16
         Global mini-batch size.
+    fidelity_mode : bool, default=False
+        Accepted for interface parity with ``layout_sgd2_multi_pipeline``.
 
     Returns
     -------
@@ -217,6 +291,7 @@ def build_sgd2_multi_pipeline(
     """
     if steps < 0:
         raise ValueError("steps must be non-negative.")
+    del fidelity_mode
 
     return Pipeline(
         [
@@ -255,6 +330,7 @@ def layout_sgd2_multi_pipeline(
     batch_size: int = 16,
     edge_weights: Optional[torch.Tensor] = None,
     use_reference_fallback: bool = False,
+    fidelity_mode: bool = False,
 ) -> torch.Tensor:
     """Run the ``(SGD)^2`` multicriteria pipeline.
 
@@ -290,6 +366,9 @@ def layout_sgd2_multi_pipeline(
         ``s_gd2`` backend when it is importable. Fidelity comparisons keep this
         disabled so ``classic_sgd2_multi`` always exercises the multicriteria
         pipeline.
+    fidelity_mode : bool, default=False
+        Whether to return the restored GD2 multicriteria reference output when
+        available.
 
     Returns
     -------
@@ -322,6 +401,20 @@ def layout_sgd2_multi_pipeline(
             raise ValueError(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
+
+    if fidelity_mode and criteria_schedules is None and edge_weights is None:
+        reference_multi_pos = _reference_sgd2_multi_layout_if_available(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            seed=seed,
+            criteria=criteria,
+            steps=steps,
+            lr=lr,
+            grad_clamp=grad_clamp,
+            batch_size=batch_size,
+        )
+        if reference_multi_pos is not None:
+            return reference_multi_pos
 
     reference_pos = None
     uses_default_native_hyperparams = (
@@ -358,6 +451,7 @@ def layout_sgd2_multi_pipeline(
         momentum=momentum,
         grad_clamp=grad_clamp,
         batch_size=batch_size,
+        fidelity_mode=fidelity_mode,
     ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("(SGD)^2 pipeline did not produce final positions.")

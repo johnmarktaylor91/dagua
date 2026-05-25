@@ -295,6 +295,7 @@ def test_layout_umap_tiny_graph_matches_classic_adapter() -> None:
         n_neighbors=1,
         n_epochs=50,
         seed=123,
+        fidelity_mode=False,
     )
 
     assert torch.equal(coordinates, expected)

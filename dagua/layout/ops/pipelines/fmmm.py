@@ -2861,6 +2861,7 @@ def build_fmmm_pipeline(
     force_model: str = "ogdf_new",
     reference_mode: bool = False,
     fidelity_mode: bool = False,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> Pipeline:
     """Build an FM^3 multilevel force-directed pipeline.
 
@@ -2955,6 +2956,7 @@ def _run_fmmm_pipeline_once(
     force_model: str,
     reference_mode: bool,
     fidelity_mode: bool,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the FMMM op pipeline once without component decomposition.
 
@@ -2978,6 +2980,8 @@ def _run_fmmm_pipeline_once(
         Whether to use reference coarsening and force scaling.
     fidelity_mode : bool
         Evaluation alias for ``reference_mode``.
+    fidelity_dtype : torch.dtype, default=torch.float32
+        Fidelity-mode internal dtype requested by the public wrapper.
 
     Returns
     -------
@@ -3003,6 +3007,7 @@ def _run_fmmm_pipeline_once(
         force_model=force_model,
         reference_mode=reference_mode,
         fidelity_mode=fidelity_mode,
+        fidelity_dtype=fidelity_dtype,
     ).apply(
         problem,
         state,
@@ -3024,6 +3029,7 @@ def _layout_fmmm_fidelity_components(
     force_model: str,
     reference_mode: bool,
     fidelity_mode: bool,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Lay out weak components independently and pack them like Graphviz fdp.
 
@@ -3051,13 +3057,15 @@ def _layout_fmmm_fidelity_components(
         Whether to use reference coarsening and force scaling.
     fidelity_mode : bool
         Evaluation alias for ``reference_mode``.
+    fidelity_dtype : torch.dtype, default=torch.float32
+        Fidelity-mode internal dtype requested by the public wrapper.
 
     Returns
     -------
     torch.Tensor
         Packed parent coordinates with shape ``[N, 2]``.
     """
-    del steps, force_model, reference_mode, fidelity_mode
+    del steps, force_model, reference_mode, fidelity_mode, fidelity_dtype
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     component_positions: list[torch.Tensor] = []
     boxes: list[tuple[float, float, float, float]] = []
@@ -3096,6 +3104,7 @@ def layout_fmmm_pipeline(
     force_model: str = "ogdf_new",
     reference_mode: bool = False,
     fidelity_mode: bool = False,
+    fidelity_dtype: torch.dtype = torch.float32,
     clusters: Optional[Mapping[str, Sequence[int]]] = None,
     cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
     **kwargs: Any,
@@ -3189,6 +3198,7 @@ def layout_fmmm_pipeline(
             force_model=force_model,
             reference_mode=reference_mode,
             fidelity_mode=fidelity_mode,
+            fidelity_dtype=fidelity_dtype,
         )
 
     return _run_fmmm_pipeline_once(
@@ -3201,6 +3211,7 @@ def layout_fmmm_pipeline(
         force_model=force_model,
         reference_mode=reference_mode,
         fidelity_mode=fidelity_mode,
+        fidelity_dtype=fidelity_dtype,
     )
 
 
