@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from dagua.layout.classic.lgl import layout_lgl
+from dagua.layout.ops.lgl import LGLPrepareState, LGLPrepareStateConfig
 from dagua.layout.ops.pipelines.lgl import build_lgl_pipeline, layout_lgl_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
@@ -165,6 +166,19 @@ def _run_pipeline_direct(
 
 class TestLGLPipelineFidelity:
     """Bit-exact regression coverage for the LGL pipeline."""
+
+    def test_lgl_fidelity_root_uses_igraph_rng(self) -> None:
+        """LGL fidelity root selection should draw from igraph's default RNG."""
+        edge_index = _path_edge_index(10)
+        problem = LayoutProblem(edge_index=edge_index, num_nodes=10, seed=42)
+        state = SolveState()
+        ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
+
+        updated = LGLPrepareState(config=LGLPrepareStateConfig(fidelity_mode=True)).apply(
+            problem, state, ctx
+        )
+
+        assert updated.extras["lgl_root"] == 1
 
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),

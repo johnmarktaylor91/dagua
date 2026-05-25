@@ -20,6 +20,14 @@ const cytoscape = require('cytoscape');
 const fcose = require('cytoscape-fcose');
 cytoscape.use(fcose);
 
+function seededRandom(seed) {
+    let state = (Number(seed) >>> 0) || 1;
+    return function() {
+        state = (1664525 * state + 1013904223) >>> 0;
+        return state / 4294967296;
+    };
+}
+
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
@@ -40,8 +48,16 @@ process.stdin.on('end', () => {
     if (data.seed !== undefined && data.seed !== null) {
         layoutOpts.randomize = true;
     }
-    const layout = cy.layout(layoutOpts);
-    layout.run();
+    const originalRandom = Math.random;
+    if (data.seed !== undefined && data.seed !== null) {
+        Math.random = seededRandom(data.seed);
+    }
+    try {
+        const layout = cy.layout(layoutOpts);
+        layout.run();
+    } finally {
+        Math.random = originalRandom;
+    }
     const positions = {};
     cy.nodes().forEach(n => {
         positions[n.id()] = [n.position().x, n.position().y];

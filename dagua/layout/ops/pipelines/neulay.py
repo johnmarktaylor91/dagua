@@ -33,6 +33,22 @@ def build_neulay_pipeline(
 ) -> Pipeline:
     """Build a NeuLay two-phase graph layout pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: NeuLay ``old_code/NeuLay-2.py`` / two-phase GCN plus
+        force-directed layout reference scripts.
+    Fidelity mode: ``fidelity_mode="old_code"`` selects the cloned old-code
+        defaults for dimensionality, GCN/direct step split, query radius, and
+        direct-force parameters.
+    Verified at: final 100-seed report had insufficient data for all NeuLay
+        variants; Round 33 audit found the installed editable ``neulay``
+        wrapper broken and no importable upstream callable.
+    Known divergences:
+        - Paired reference rows are unavailable until a side-effect-free
+          NeuLay reference wrapper is built.
+        - Current Dagua implementation is an independent native approximation,
+          not a call-through to the research script.
+
     Parameters
     ----------
     steps : int, default=20000

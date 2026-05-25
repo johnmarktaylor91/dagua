@@ -12,6 +12,7 @@ from dagua.layout.ops.drl import (
     DRLInitializePositions,
     DrLOptions,
     DRLPhaseSolve,
+    DRLPhaseSolveConfig,
     DRLPrepareState,
     DRLPrepareStateConfig,
 )
@@ -19,14 +20,33 @@ from dagua.layout.ops.graph_utils import layout_device
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
 
-def build_drl_pipeline(options: DrLOptions = "default") -> Pipeline:
+def build_drl_pipeline(options: DrLOptions = "default", fidelity_mode: bool = False) -> Pipeline:
     """Build a Distributed Recursive Layout pipeline.
+
+    Reference fidelity
+    ------------------
+    Targets: igraph 1.0.0 DrL / Martin, Brown, and Klavans (2008),
+        "OpenOrd: An Open-Source Toolbox for Large Graph Layout".
+    Fidelity mode: ``fidelity_mode=True`` uses igraph's compiled default RNG
+        stream and the narrowed igraph preset/random-jump semantics kept after
+        the Round 32 rollback.
+    Verified at: round_32 bounded subset median RMSD 0.138649; final
+        100-seed report marks DrL variants partial match at median RMSD 0.121
+        to 0.213.
+    Known divergences:
+        - Density-grid lifecycle, candidate acceptance, scheduler semantics,
+          and duplicate-edge behavior remain likely residuals.
+        - Round 33 density-grid candidates were reverted after subset
+          regressions.
 
     Parameters
     ----------
     options : str or Mapping[str, object] or OptionObject, default="default"
         DrL preset name or per-phase override container controlling the coarse,
         liquid, expansion, and final smoothing phases.
+    fidelity_mode : bool, default=False
+        When ``True``, use igraph's compiled default RNG stream for stochastic
+        DrL draws.
 
     Returns
     -------
@@ -38,8 +58,8 @@ def build_drl_pipeline(options: DrLOptions = "default") -> Pipeline:
     return Pipeline(
         [
             DRLPrepareState(config=DRLPrepareStateConfig(options=options)),
-            DRLInitializePositions(),
-            DRLPhaseSolve(),
+            DRLInitializePositions(fidelity_mode=fidelity_mode),
+            DRLPhaseSolve(config=DRLPhaseSolveConfig(fidelity_mode=fidelity_mode)),
             DRLFinalizePositions(),
         ],
         name="drl_pipeline",
@@ -53,6 +73,7 @@ def layout_drl_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     options: DrLOptions = "default",
+    fidelity_mode: bool = False,
 ) -> torch.Tensor:
     """Run the Distributed Recursive Layout pipeline.
 
@@ -71,6 +92,9 @@ def layout_drl_pipeline(
         Optional positive edge-weight vector with shape ``[E]``.
     options : str or Mapping[str, object] or OptionObject, default="default"
         Preset name or mapping/object of per-phase overrides.
+    fidelity_mode : bool, default=False
+        When ``True``, use igraph's compiled default RNG stream for stochastic
+        DrL draws.
 
     Returns
     -------
@@ -118,7 +142,9 @@ def layout_drl_pipeline(
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_drl_pipeline(options=options).apply(problem, state, ctx)
+    final_state = build_drl_pipeline(options=options, fidelity_mode=fidelity_mode).apply(
+        problem, state, ctx
+    )
 
     if final_state.pos is None:
         raise RuntimeError("DRL pipeline did not produce final positions.")

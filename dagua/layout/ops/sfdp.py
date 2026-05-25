@@ -287,7 +287,7 @@ def _edge_flow_score(
     Returns
     -------
     float
-        Mean normalized signed edge advance. Larger is better.
+        Mean signed edge advance along the requested flow axis. Larger is better.
     """
     if edge_index.numel() == 0 or positions.shape[0] <= 1:
         return 0.0
@@ -296,15 +296,13 @@ def _edge_flow_score(
     source = edges[0]
     target = edges[1]
     delta = positions[target] - positions[source]
-    length = torch.linalg.vector_norm(delta, dim=1).clamp_min(_SFDP_ALGORITHM_CONFIG.epsilon)
-
     if direction in {"LR", "RL"}:
         advance = delta[:, 0]
     else:
         advance = delta[:, 1]
     if direction in {"BT", "RL"}:
         advance = -advance
-    return float((advance / length).mean().item())
+    return float(advance.mean().item())
 
 
 def _orient_positions_to_flow(
@@ -611,7 +609,10 @@ def _spring_forces(
     target = graph.edge_index[1]
     delta = positions[source] - positions[target]
     weight = graph.edge_weight.unsqueeze(1)
-    edge_force = attractive_scale * weight * delta
+    distance = torch.linalg.vector_norm(delta, dim=1, keepdim=True)
+    # Graphviz spring_electrical.c scales attraction by the current edge
+    # distance before normalizing the total per-node force vector.
+    edge_force = attractive_scale * weight * delta * distance
     force.index_add_(0, source, -edge_force)
     force.index_add_(0, target, edge_force)
     return force
@@ -646,7 +647,7 @@ def _exact_repulsive_forces(
     distance = torch.sqrt(distance_sq)
     diagonal = torch.eye(positions.shape[0], dtype=torch.bool)
     distance = distance.masked_fill(diagonal, float("inf"))
-    denominator = distance.pow(2.0 - repulsive_exponent).unsqueeze(-1)
+    denominator = distance.pow(1.0 - repulsive_exponent).unsqueeze(-1)
     pairwise_force = repulsive_scale * delta / denominator
     pairwise_force = pairwise_force.masked_fill(diagonal.unsqueeze(-1), 0.0)
     return pairwise_force.sum(dim=1)
@@ -805,7 +806,7 @@ def _barnes_hut_force_for_index(
             and (width / distance) < theta
         ):
             denominator = max(distance, _SFDP_ALGORITHM_CONFIG.epsilon) ** (
-                2.0 - repulsive_exponent
+                1.0 - repulsive_exponent
             )
             return repulsive_scale * node.mass * delta / denominator
 
@@ -831,7 +832,7 @@ def _barnes_hut_force_for_index(
     coords = positions[torch.tensor(leaf_indices, dtype=torch.long)]
     delta = query.unsqueeze(0) - coords
     distance = torch.linalg.vector_norm(delta, dim=1).clamp_min(_SFDP_ALGORITHM_CONFIG.epsilon)
-    denominator = distance.pow(2.0 - repulsive_exponent).unsqueeze(1)
+    denominator = distance.pow(1.0 - repulsive_exponent).unsqueeze(1)
     return (repulsive_scale * delta / denominator).sum(dim=0)
 
 
