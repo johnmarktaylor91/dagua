@@ -74,6 +74,23 @@ METRIC_MARGIN_FLOORS: dict[str, float] = {
     "sampled_stress": 1e-3,
     "crossing_rate": 1e-4,
 }
+QUALITY_GATE_STRONG_MAX_REGRESSION_PCT = 10.0
+QUALITY_GATE_WEAK_MAX_REGRESSION_PCT = 25.0
+HIGHER_IS_BETTER_QUALITY_METRICS: frozenset[str] = frozenset(
+    {
+        "dag_consistency",
+        "depth_spearman_rho",
+    }
+)
+LOWER_IS_BETTER_QUALITY_METRICS: frozenset[str] = frozenset(
+    {
+        "edge_length_cv",
+        "edge_straightness_mean_deg",
+        "overlap_count",
+        "sampled_stress",
+        "crossing_rate",
+    }
+)
 FIDELITY_STRESS_N_SOURCES = 32
 FIDELITY_STRESS_N_TARGETS = 128
 FIDELITY_CROSSING_N_SAMPLES = 50_000
@@ -602,7 +619,10 @@ def safe_std(values: Sequence[float]) -> float:
     """
     if len(values) < 2:
         return 0.0
-    return float(statistics.stdev(values))
+    import numpy as np
+
+    arr = np.asarray(values, dtype=np.float64)
+    return float(np.std(arr, ddof=1))
 
 
 def finite_values(values: Iterable[float]) -> list[float]:
@@ -1219,6 +1239,93 @@ def margin_for_metric(
     return max(factor * std_orig, floor)
 
 
+def relative_delta_pct(reference_value: float, candidate_value: float, floor: float) -> float:
+    """Return percent difference from a reference value.
+
+    Parameters
+    ----------
+    reference_value : float
+        Reference-side mean value.
+    candidate_value : float
+        Reimplementation-side mean value.
+    floor : float
+        Minimum denominator used for near-zero reference metrics.
+
+    Returns
+    -------
+    float
+        Percent delta ``(candidate - reference) / denominator * 100``.
+    """
+    if not math.isfinite(reference_value) or not math.isfinite(candidate_value):
+        return math.nan
+    denominator = max(abs(reference_value), floor)
+    return ((candidate_value - reference_value) / denominator) * 100.0
+
+
+def metric_regression_pct(
+    metric_name: str,
+    reference_value: float,
+    candidate_value: float,
+) -> float:
+    """Return directional quality regression as a non-negative percentage.
+
+    Parameters
+    ----------
+    metric_name : str
+        Quality metric identifier.
+    reference_value : float
+        Reference-side mean metric value.
+    candidate_value : float
+        Reimplementation-side mean metric value.
+
+    Returns
+    -------
+    float
+        Regression percentage where ``0`` means equal or improved quality.
+    """
+    floor = METRIC_MARGIN_FLOORS[metric_name]
+    if metric_name == "aspect_ratio":
+        reference_deviation = abs(math.log(max(reference_value, 1e-12)))
+        candidate_deviation = abs(math.log(max(candidate_value, 1e-12)))
+        return max(relative_delta_pct(reference_deviation, candidate_deviation, floor), 0.0)
+    if metric_name in HIGHER_IS_BETTER_QUALITY_METRICS:
+        return max(relative_delta_pct(reference_value, candidate_value, floor) * -1.0, 0.0)
+    if metric_name in LOWER_IS_BETTER_QUALITY_METRICS:
+        return max(relative_delta_pct(reference_value, candidate_value, floor), 0.0)
+    raise KeyError(f"unknown quality metric direction: {metric_name}")
+
+
+def quality_gate_status(
+    row: Mapping[str, Any],
+    threshold_pct: float,
+) -> tuple[bool, float, list[str]]:
+    """Evaluate a directional quality-regression gate for one row.
+
+    Parameters
+    ----------
+    row : Mapping[str, Any]
+        Per-graph row containing metric mean columns.
+    threshold_pct : float
+        Maximum allowed regression percentage for each metric.
+
+    Returns
+    -------
+    tuple[bool, float, list[str]]
+        Whether all available metrics pass, the maximum observed regression
+        percentage, and metric names that exceed the threshold.
+    """
+    regressions: list[tuple[str, float]] = []
+    for metric_name in ALL_QUALITY_METRICS:
+        regression = _safe_float(row.get(f"{metric_name}_regression_pct"))
+        if math.isfinite(regression):
+            regressions.append((metric_name, regression))
+    if not regressions:
+        return False, math.nan, ["quality_metrics_unavailable"]
+    failing = [metric_name for metric_name, value in regressions if value > threshold_pct]
+    max_regression = max(value for _, value in regressions)
+    return not failing, max_regression, failing
+
+
 def tost_pvalue(
     original_values: np.ndarray,
     reimpl_values: np.ndarray,
@@ -1268,6 +1375,9 @@ def metric_test_columns(metric_name: str) -> list[str]:
         f"{metric_name}_orig_std",
         f"{metric_name}_reimpl_mean",
         f"{metric_name}_reimpl_std",
+        f"{metric_name}_delta",
+        f"{metric_name}_delta_pct",
+        f"{metric_name}_regression_pct",
         f"{metric_name}_cohens_d",
         f"{metric_name}_cliffs_delta",
         f"{metric_name}_rank_biserial",
@@ -1365,6 +1475,10 @@ def per_graph_fieldnames() -> list[str]:
         "_deterministic_tier",
         "verdict",
         "anomaly_reason",
+        "quality_gate_strong_pass",
+        "quality_gate_weak_pass",
+        "quality_regression_max_pct",
+        "quality_gate_failures",
     ]
     columns.extend(procrustes_tost_columns())
     for metric_name in ALL_QUALITY_METRICS:
@@ -1800,6 +1914,19 @@ def add_metric_tests_to_row(
         row[f"{metric_name}_reimpl_mean"] = float(reimpl_values.mean())
         row[f"{metric_name}_reimpl_std"] = (
             float(reimpl_values.std(ddof=1)) if reimpl_values.size > 1 else 0.0
+        )
+        row[f"{metric_name}_delta"] = float(row[f"{metric_name}_reimpl_mean"]) - float(
+            row[f"{metric_name}_orig_mean"]
+        )
+        row[f"{metric_name}_delta_pct"] = relative_delta_pct(
+            float(row[f"{metric_name}_orig_mean"]),
+            float(row[f"{metric_name}_reimpl_mean"]),
+            METRIC_MARGIN_FLOORS[metric_name],
+        )
+        row[f"{metric_name}_regression_pct"] = metric_regression_pct(
+            metric_name,
+            float(row[f"{metric_name}_orig_mean"]),
+            float(row[f"{metric_name}_reimpl_mean"]),
         )
         row[f"{metric_name}_cohens_d"] = cohens_d(original_values, reimpl_values)
         row[f"{metric_name}_cliffs_delta"] = delta
@@ -2553,35 +2680,32 @@ def finalize_group_row(row: dict[str, Any]) -> None:
                 # difference" heuristic. The between-engine distribution now
                 # has to be statistically equivalent to within-original
                 # variation, not merely non-significantly different.
-                def _tost_pass(column_name: str) -> bool:
-                    """Return whether one corrected Procrustes TOST p-value passes."""
+                def _procrustes_tost_pass(label: str) -> bool:
+                    """Return whether one Procrustes TOST p-value passes."""
 
-                    value = _safe_float(row.get(column_name))
-                    return math.isfinite(value) and value < 0.05
+                    corrected = _safe_float(row.get(f"procrustes_tost_pvalue_{label}_bh"))
+                    if math.isfinite(corrected):
+                        return corrected < 0.05
+                    raw = _safe_float(row.get(f"procrustes_tost_pvalue_{label}_raw"))
+                    return math.isfinite(raw) and raw < 0.05
 
-                procrustes_1x_pass = _tost_pass("procrustes_tost_pvalue_1x_bh")
-                procrustes_2x_pass = _tost_pass("procrustes_tost_pvalue_2x_bh")
-
-                metric_pass_count = 0
-                metric_total = 0
-                for metric_name in ALL_QUALITY_METRICS:
-                    value = _safe_float(row.get(f"{metric_name}_tost_pvalue_1x_bh"))
-                    if math.isfinite(value):
-                        metric_total += 1
-                        if value < 0.05:
-                            metric_pass_count += 1
-                metric_tost_1x_pass_rate = (
-                    metric_pass_count / metric_total if metric_total > 0 else 0.0
+                procrustes_0_5x_pass = _procrustes_tost_pass("0_5x")
+                procrustes_1x_pass = _procrustes_tost_pass("1x")
+                strong_quality_pass, _, _ = quality_gate_status(
+                    row,
+                    QUALITY_GATE_STRONG_MAX_REGRESSION_PCT,
+                )
+                weak_quality_pass, _, _ = quality_gate_status(
+                    row,
+                    QUALITY_GATE_WEAK_MAX_REGRESSION_PCT,
                 )
 
-                if procrustes_1x_pass and metric_tost_1x_pass_rate >= 0.8:
+                if procrustes_0_5x_pass and strong_quality_pass:
                     row["verdict"] = "strong_equivalent"
-                elif procrustes_2x_pass and metric_tost_1x_pass_rate >= 0.5:
+                elif procrustes_1x_pass and weak_quality_pass:
                     row["verdict"] = "weak_equivalent"
-                elif procrustes_2x_pass:
-                    row["verdict"] = "partial_match"
                 else:
-                    row["verdict"] = "divergent"
+                    row["verdict"] = "partial_match"
         else:
             deterministic_tier = int(row.get("_deterministic_tier", 0) or 0)
             deterministic_verdict = str(row.get("_deterministic_verdict", ""))
@@ -2615,6 +2739,20 @@ def finalize_group_row(row: dict[str, Any]) -> None:
 
     reasons = sorted(set(reason for reason in anomaly_reasons if reason))
     row["anomaly_reason"] = "; ".join(reasons)
+    strong_quality_pass, max_regression, strong_failures = quality_gate_status(
+        row,
+        QUALITY_GATE_STRONG_MAX_REGRESSION_PCT,
+    )
+    weak_quality_pass, _, weak_failures = quality_gate_status(
+        row,
+        QUALITY_GATE_WEAK_MAX_REGRESSION_PCT,
+    )
+    row["quality_gate_strong_pass"] = strong_quality_pass
+    row["quality_gate_weak_pass"] = weak_quality_pass
+    row["quality_regression_max_pct"] = max_regression
+    row["quality_gate_failures"] = "; ".join(
+        sorted(set(strong_failures if not strong_quality_pass else weak_failures))
+    )
     row["_tost_pass_1x"] = bool(
         row["verdict"]
         in {"strong_equivalent", "identical", "geometric_equivalent", "metric_equivalent"}

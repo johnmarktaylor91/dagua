@@ -33,6 +33,8 @@ QUALITY_METRICS: tuple[str, ...] = (
     "sampled_stress",
     "crossing_rate",
 )
+QUALITY_GATE_STRONG_MAX_REGRESSION_PCT = 10.0
+QUALITY_GATE_WEAK_MAX_REGRESSION_PCT = 25.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,6 +104,28 @@ def fmt_num(value: Any, precision: int = 3) -> str:
     return f"{parsed:.{precision}f}"
 
 
+def parse_float(value: Any) -> float:
+    """Parse a value as a finite float when possible.
+
+    Parameters
+    ----------
+    value : Any
+        Raw CSV value.
+
+    Returns
+    -------
+    float
+        Parsed float, or ``nan`` when parsing fails.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return math.nan
+    if math.isnan(parsed) or math.isinf(parsed):
+        return math.nan
+    return parsed
+
+
 def column_pass_rate(rows: list[dict[str, Any]], column_name: str) -> float:
     """Compute the fraction of rows whose numeric column value is below 0.05.
 
@@ -133,6 +157,33 @@ def column_pass_rate(rows: list[dict[str, Any]], column_name: str) -> float:
     if eligible == 0:
         return math.nan
     return passes / eligible
+
+
+def worst_quality_metric(row: dict[str, Any]) -> tuple[str, float, float]:
+    """Return the largest quality regression on one per-graph row.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Per-graph detail row.
+
+    Returns
+    -------
+    tuple[str, float, float]
+        Metric name, directional regression percent, and raw delta percent.
+    """
+    worst_metric = "-"
+    worst_regression = math.nan
+    worst_delta = math.nan
+    for metric_name in QUALITY_METRICS:
+        regression = parse_float(row.get(f"{metric_name}_regression_pct"))
+        if not math.isfinite(regression):
+            continue
+        if not math.isfinite(worst_regression) or regression > worst_regression:
+            worst_metric = metric_name
+            worst_regression = regression
+            worst_delta = parse_float(row.get(f"{metric_name}_delta_pct"))
+    return worst_metric, worst_regression, worst_delta
 
 
 def build_executive_summary_table(algorithm_summary: list[dict[str, Any]]) -> str:
@@ -183,6 +234,81 @@ def build_executive_summary_table(algorithm_summary: list[dict[str, Any]]) -> st
             )
             + " |"
         )
+    return "\n".join(lines)
+
+
+def build_quality_delta_section(per_graph_detail: list[dict[str, Any]]) -> str:
+    """Build a markdown section showing quality deltas versus reference.
+
+    Parameters
+    ----------
+    per_graph_detail : list[dict[str, Any]]
+        Rows from ``per_graph_detail.csv``.
+
+    Returns
+    -------
+    str
+        Markdown section with gate thresholds and worst per-variant deltas.
+    """
+    eligible: list[tuple[float, dict[str, Any], str, float]] = []
+    for row in per_graph_detail:
+        metric_name, regression, delta_pct = worst_quality_metric(row)
+        if math.isfinite(regression):
+            eligible.append((regression, row, metric_name, delta_pct))
+    if not eligible:
+        return "## Quality gate deltas\n\n_(no quality delta columns found)_"
+
+    strong_pass = sum(
+        str(row.get("quality_gate_strong_pass", "")).lower() in {"true", "1"}
+        for _, row, _, _ in eligible
+    )
+    weak_pass = sum(
+        str(row.get("quality_gate_weak_pass", "")).lower() in {"true", "1"}
+        for _, row, _, _ in eligible
+    )
+    lines = [
+        "## Quality gate deltas",
+        "",
+        (
+            f"- Strong gate: no quality metric regresses by more than "
+            f"{QUALITY_GATE_STRONG_MAX_REGRESSION_PCT:.0f}% versus reference."
+        ),
+        (
+            f"- Weak gate: no quality metric regresses by more than "
+            f"{QUALITY_GATE_WEAK_MAX_REGRESSION_PCT:.0f}% versus reference."
+        ),
+        f"- Strong quality pass rate: {fmt_num(strong_pass / len(eligible), 4)}.",
+        f"- Weak quality pass rate: {fmt_num(weak_pass / len(eligible), 4)}.",
+        (
+            "- Sidecar columns include `*_delta`, `*_delta_pct`, "
+            "`*_regression_pct`, `quality_regression_max_pct`, and "
+            "`quality_gate_failures`."
+        ),
+        "",
+        "| Variant | Graph | Verdict | Worst metric | Regression % | Delta % |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for regression, row, metric_name, delta_pct in sorted(
+        eligible,
+        key=lambda item: item[0],
+        reverse=True,
+    )[:50]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row.get("variant_id", row.get("variant", "-"))),
+                    str(row.get("graph_name", "-")),
+                    str(row.get("verdict", "-")),
+                    metric_name,
+                    fmt_num(regression, 1),
+                    fmt_num(delta_pct, 1),
+                ]
+            )
+            + " |"
+        )
+    if len(eligible) > 50:
+        lines.extend(["", f"_({len(eligible) - 50} more rows in per_graph_detail.csv)_"])
     return "\n".join(lines)
 
 
@@ -318,8 +444,8 @@ def build_metric_surface_section() -> str:
                 "`*_welch_pvalue_bh`."
             ),
             (
-                "- The markdown keeps these as sidecar evidence instead of inlining a large "
-                "table for every metric-family combination."
+                "- The report inlines the worst per-variant quality delta; the full "
+                "per-metric surface remains in sidecar CSVs."
             ),
         ]
     )
@@ -360,6 +486,8 @@ def build_markdown_report(data_dir: Path, output_path: Path) -> str:
         "",
         build_metric_surface_section(),
         "",
+        build_quality_delta_section(per_graph_detail),
+        "",
         build_failures_section(per_graph_detail, per_seed_detail, pairwise_similarity),
         "",
         "## Methodology",
@@ -375,6 +503,11 @@ def build_markdown_report(data_dir: Path, output_path: Path) -> str:
         (
             "- **Equivalence tests**: TOST at factors 0.5x, 1.0x, 1.5x, and 2.0x of "
             "std(within-original) for Procrustes distances, plus per-metric TOST."
+        ),
+        (
+            "- **Quality verdict gates**: strong_equivalent requires Procrustes TOST at "
+            "0.5x and no metric regression above 10%; weak_equivalent requires "
+            "Procrustes TOST at 1x and no metric regression above 25%."
         ),
         (
             "- **Difference tests**: KS, Mann-Whitney U, Welch t-test per metric, plus "
