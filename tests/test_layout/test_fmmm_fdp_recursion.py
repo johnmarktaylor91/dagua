@@ -8,10 +8,12 @@ import torch
 
 from dagua.layout.ops.cluster_geometry import ClusterTree
 from dagua.layout.ops.pipelines.fmmm import (
+    _fdp_recursion_component_offsets,
     _fdp_recursion_components,
     _fdp_recursion_derive_graph,
     _fdp_recursion_expand_cluster_ports,
     _FdpRecursionPort,
+    _graphviz_tile_pack_offsets,
     graphviz_fdp_fidelity,
     layout_fmmm_pipeline,
 )
@@ -83,6 +85,25 @@ def test_fdp_components_merge_all_port_components_first() -> None:
 
     assert [node.kind for node in derived.nodes] == ["leaf", "leaf", "port"]
     assert components == ((2, 0), (1,))
+
+
+def test_fdp_recursion_component_offsets_use_graphviz_tile_pack() -> None:
+    """Recursive fdp levels should reuse the Graphviz component packer.
+
+    Returns
+    -------
+    None
+        Assertion validates that recursion-level sibling component offsets stay
+        wired to the R36 tile-packing port instead of the old row packer.
+    """
+    component_boxes = [(10.0, 4.0), (6.0, 6.0), (3.0, 12.0)]
+    expected = _graphviz_tile_pack_offsets(
+        [(0.0, 0.0, width, height) for width, height in component_boxes],
+    )
+
+    offsets = _fdp_recursion_component_offsets(component_boxes)
+
+    assert [tuple(float(value) for value in offset.tolist()) for offset in offsets] == expected
 
 
 def test_fdp_expand_cluster_ports_matches_reference_edge_order_and_angles() -> None:
