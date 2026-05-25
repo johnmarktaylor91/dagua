@@ -16,6 +16,74 @@ from dagua.layout.ops.state import (  # noqa: E402
 )
 
 
+def _layout_igraph_reference_reingold_tilford(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    traversal_mode: str,
+    roots: Optional[Sequence[int]],
+    rootlevel: Optional[Sequence[int]],
+    horizontal: bool,
+    center_output: Optional[bool],
+    output_scale: Optional[float],
+) -> torch.Tensor:
+    """Run python-igraph's Reingold-Tilford layout with Dagua adapter scaling.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph vertices.
+    traversal_mode : str
+        Igraph traversal mode: ``"out"``, ``"in"``, or ``"all"``.
+    roots : sequence of int | None
+        Optional explicit root vertices.
+    rootlevel : sequence of int | None
+        Optional root levels for explicit multi-root layouts.
+    horizontal : bool
+        Whether to swap output axes after layout.
+    center_output : bool | None
+        Optional mean-centering override. ``None`` preserves igraph's raw origin.
+    output_scale : float | None
+        Optional uniform scale. ``None`` uses the igraph competitor adapter's
+        scale factor of ``50.0``.
+
+    Returns
+    -------
+    torch.Tensor
+        Scaled coordinates with shape ``[N, 2]``.
+    """
+    import igraph as ig
+
+    graph = ig.Graph(directed=True)
+    graph.add_vertices(num_nodes)
+    if edge_index.numel() > 0:
+        edge_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+        edges = [
+            (int(edge_cpu[0, edge_id]), int(edge_cpu[1, edge_id]))
+            for edge_id in range(edge_cpu.shape[1])
+        ]
+        graph.add_edges(edges)
+
+    kwargs: dict[str, object] = {"mode": traversal_mode}
+    if roots is not None:
+        kwargs["root"] = [int(root) for root in roots]
+    if rootlevel is not None:
+        kwargs["rootlevel"] = [int(level) for level in rootlevel]
+    layout = graph.layout("reingold_tilford", **kwargs)
+
+    scale = 50.0 if output_scale is None else float(output_scale)
+    positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
+    for node in range(num_nodes):
+        positions[node, 0] = float(layout[node][0]) * scale
+        positions[node, 1] = float(layout[node][1]) * scale
+    if center_output:
+        positions -= positions.mean(dim=0, keepdim=True)
+    if horizontal:
+        positions = positions[:, [1, 0]]
+    return positions
+
+
 def build_reingold_tilford_pipeline(horizontal: bool = False) -> Pipeline:
     """Build a Reingold-Tilford tidy-tree pipeline.
 
@@ -116,6 +184,18 @@ def layout_reingold_tilford_pipeline(
             raise ValueError(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
+
+    if fidelity_mode == "igraph":
+        return _layout_igraph_reference_reingold_tilford(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            traversal_mode=traversal_mode,
+            roots=roots,
+            rootlevel=rootlevel,
+            horizontal=horizontal,
+            center_output=center_output,
+            output_scale=output_scale,
+        )
 
     problem = LayoutProblem(
         edge_index=edge_index,
