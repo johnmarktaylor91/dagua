@@ -23,7 +23,7 @@ from dagua.layout.ops.embed import (
     _sparse_spectral_embedding,
 )
 from dagua.layout.ops.pipelines.spectral import layout_spectral_pipeline
-from dagua.layout.ops.preprocess import _build_spectral_adjacency
+from dagua.layout.ops.preprocess import _build_spectral_adjacency, _spectral_laplacian
 
 embed_ops = importlib.import_module("dagua.layout.ops.embed")
 spectral_pipeline = importlib.import_module("dagua.layout.ops.pipelines.spectral")
@@ -229,6 +229,41 @@ def test_networkx_fidelity_adjacency_keeps_last_duplicate_edge() -> None:
     assert adjacency[0, 1] == 3.0
     assert adjacency[1, 2] == 4.0
     assert summed_adjacency[0, 1] == 5.0
+
+
+def test_igraph_fidelity_normalized_laplacian_zeros_isolated_diagonal() -> None:
+    """igraph fidelity should mirror normalized isolated-node diagonal handling."""
+    edge_index = _path_edge_index(3)
+    adjacency = _build_spectral_adjacency(edge_index=edge_index, num_nodes=4)
+    symmetric_adjacency = adjacency + adjacency.T
+
+    default_laplacian, _ = _spectral_laplacian(
+        adjacency=symmetric_adjacency,
+        normalization="symmetric",
+    )
+    igraph_laplacian, _ = _spectral_laplacian(
+        adjacency=symmetric_adjacency,
+        normalization="symmetric",
+        igraph_fidelity=True,
+    )
+
+    assert default_laplacian[3, 3] == 1.0
+    assert igraph_laplacian[3, 3] == 0.0
+
+
+def test_igraph_fidelity_mode_keeps_disconnected_zero_mode() -> None:
+    """The opt-in igraph path should retain one extra zero mode after the first."""
+    edge_index = _path_edge_index(3)
+
+    default_positions = layout_spectral_pipeline(edge_index=edge_index, num_nodes=4)
+    igraph_positions = layout_spectral_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        fidelity_mode="igraph",
+    )
+
+    assert not torch.equal(default_positions, igraph_positions)
+    assert torch.count_nonzero(igraph_positions[3]).item() > 0
 
 
 def test_networkx_spectral_adapter_uses_raw_algorithm_scale() -> None:

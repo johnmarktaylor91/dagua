@@ -999,6 +999,7 @@ def _symmetrize_spectral_adjacency(
 def _spectral_laplacian(
     adjacency: sparse.csr_matrix,
     normalization: str,
+    igraph_fidelity: bool = False,
 ) -> tuple[sparse.csr_matrix, bool]:
     """Build the requested graph Laplacian.
 
@@ -1008,6 +1009,10 @@ def _spectral_laplacian(
         Symmetric adjacency matrix with shape ``[N, N]``.
     normalization : str
         One of ``"symmetric"``, ``"random_walk"``, or ``"unnormalized"``.
+    igraph_fidelity : bool, default=False
+        Whether normalized Laplacians should mirror igraph's isolated-vertex
+        convention. igraph writes a normalized diagonal only for non-isolated
+        vertices, while the NetworkX-style path starts from a full identity.
 
     Returns
     -------
@@ -1024,14 +1029,20 @@ def _spectral_laplacian(
         nonzero_mask = degrees > 0.0
         inv_sqrt[nonzero_mask] = 1.0 / np.sqrt(degrees[nonzero_mask])
         normalized = sparse.diags(inv_sqrt, offsets=0, format="csr")
-        identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
+        if igraph_fidelity:
+            identity = sparse.diags(nonzero_mask.astype(np.float64), offsets=0, format="csr")
+        else:
+            identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
         return (identity - (normalized @ adjacency @ normalized)).tocsr(), True
     if normalization == "random_walk":
         inv_degree = np.zeros_like(degrees)
         nonzero_mask = degrees > 0.0
         inv_degree[nonzero_mask] = 1.0 / degrees[nonzero_mask]
         normalized = sparse.diags(inv_degree, offsets=0, format="csr")
-        identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
+        if igraph_fidelity:
+            identity = sparse.diags(nonzero_mask.astype(np.float64), offsets=0, format="csr")
+        else:
+            identity = sparse.identity(adjacency.shape[0], format="csr", dtype=np.float64)
         return (identity - (normalized @ adjacency)).tocsr(), False
     raise ValueError("normalization must be one of 'symmetric', 'random_walk', or 'unnormalized'.")
 
@@ -1079,6 +1090,7 @@ class SpectralPrepareState(Op):
         normalization: str,
         config: Optional[SpectralPrepareStateConfig] = None,
         networkx_fidelity: bool = False,
+        igraph_fidelity: bool = False,
     ) -> None:
         """Store the spectral normalization mode.
 
@@ -1090,10 +1102,13 @@ class SpectralPrepareState(Op):
             Spectral preprocessing settings.
         networkx_fidelity : bool, default=False
             Whether to apply NetworkX-compatible trivial graph handling.
+        igraph_fidelity : bool, default=False
+            Whether to mirror igraph Laplacian construction details.
         """
         self.normalization = normalization
         self.config = config or SpectralPrepareStateConfig()
         self.networkx_fidelity = bool(networkx_fidelity)
+        self.igraph_fidelity = bool(igraph_fidelity)
 
     def apply(
         self,
@@ -1142,6 +1157,7 @@ class SpectralPrepareState(Op):
                 force_directed=self.networkx_fidelity,
             ),
             normalization=self.normalization,
+            igraph_fidelity=self.igraph_fidelity,
         )
         state.laplacian = laplacian
         state.extras[_SYMMETRIC_FLAG_KEY] = is_symmetric
