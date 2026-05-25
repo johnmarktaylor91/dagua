@@ -8,7 +8,14 @@ from typing import Iterable
 import pytest
 import torch
 
-from dagua.layout.ops.drl import DRLEnergyConfig, DRLNodeUpdate, _maybe_cut_long_edge
+from dagua.layout.ops.drl import (
+    DRLEnergyConfig,
+    DRLNodeUpdate,
+    DRLPhaseDynamicsConfig,
+    DRLPhaseStep,
+    _maybe_cut_long_edge,
+    _PhaseParameters,
+)
 from dagua.layout.ops.pipelines.drl import build_drl_pipeline, layout_drl_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
@@ -264,6 +271,38 @@ class _ScriptedDensityGrid:
         return 0.0
 
 
+class _CountingDensityGrid(_NoopDensityGrid):
+    """Density-grid stub that counts node update sweeps."""
+
+    remove_count: int
+
+    def __init__(self) -> None:
+        """Initialize the removal counter.
+
+        Returns
+        -------
+        None
+            Instances start with zero removals.
+        """
+        self.remove_count = 0
+
+    def remove_node(self, node: int) -> None:
+        """Count one node removal.
+
+        Parameters
+        ----------
+        node : int
+            Node index being removed.
+
+        Returns
+        -------
+        None
+            The counter is incremented in place.
+        """
+        del node
+        self.remove_count += 1
+
+
 def _assert_exact_match(direct: torch.Tensor, pipeline: torch.Tensor) -> None:
     """Assert that two DrL outputs match exactly.
 
@@ -388,6 +427,39 @@ class TestDRLPipelineFidelity:
         )
 
         torch.testing.assert_close(positions[0], torch.tensor([1.0, 0.0], dtype=torch.float64))
+
+    @pytest.mark.parametrize(
+        ("phase_name", "iterations", "expected_updates"),
+        [("init", 0, 1), ("liquid", 3, 3), ("expansion", 3, 4), ("simmer", 0, 2)],
+    )
+    def test_drl_phase_step_includes_reference_boundary_sweeps(
+        self,
+        phase_name: str,
+        iterations: int,
+        expected_updates: int,
+    ) -> None:
+        """DRL phase stepping should include igraph's boundary update sweeps."""
+        positions = torch.zeros((1, 2), dtype=torch.float64)
+        phase_step = DRLPhaseStep(
+            phase_name=phase_name,
+            phase=_PhaseParameters(iterations, 0.0, 0.0, 0.0),
+            energy_config=DRLEnergyConfig(),
+            phase_dynamics_config=DRLPhaseDynamicsConfig(),
+        )
+        density_grid = _CountingDensityGrid()
+
+        phase_step.apply(
+            positions=positions,
+            adjacency=[{}],
+            rng=random.Random(7),
+            density_grid=density_grid,
+            cut_end=0.0,
+            cut_rate=0.0,
+            min_edges=99.0,
+            cut_off_length=0.0,
+        )
+
+        assert density_grid.remove_count == expected_updates
 
     def test_drl_edge_cutting_removes_only_current_neighbor_entry(self) -> None:
         """DrL edge cutting should preserve the reverse neighbor map like igraph."""
