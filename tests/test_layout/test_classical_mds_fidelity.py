@@ -123,3 +123,36 @@ def test_igraph_fidelity_variant_is_registered_against_igraph_mds() -> None:
     assert variant.is_stochastic is True
     assert default_variant is not None
     assert default_variant.is_stochastic is True
+
+
+def test_ogdf_fidelity_uses_path_special_case() -> None:
+    """OGDF fidelity should return PivotMDS's raw path layout."""
+    edge_index = _path_edge_index(4)
+
+    positions = layout_classical_mds_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        ogdf_fidelity=True,
+    )
+
+    torch.testing.assert_close(
+        positions,
+        torch.tensor([[0.0, 0.0], [100.0, 0.0], [200.0, 0.0], [300.0, 0.0]]),
+    )
+
+
+def test_classical_mds_fidelity_modes_are_mutually_exclusive() -> None:
+    """Reference-specific fidelity modes should not be combined."""
+    edge_index = _single_edge_index()
+
+    try:
+        layout_classical_mds_pipeline(
+            edge_index=edge_index,
+            num_nodes=2,
+            igraph_fidelity=True,
+            ogdf_fidelity=True,
+        )
+    except ValueError as exc:
+        assert "mutually exclusive" in str(exc)
+    else:
+        raise AssertionError("Expected mutually exclusive fidelity modes to fail.")
