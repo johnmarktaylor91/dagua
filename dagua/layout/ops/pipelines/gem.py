@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -22,16 +22,19 @@ from dagua.layout.ops.state import (  # noqa: E402
     SolveState,
 )
 
+GEMFidelityMode = Optional[Union[bool, str]]
 
-def build_gem_pipeline(max_iters: int = 500, fidelity_mode: bool = False) -> Pipeline:
+
+def build_gem_pipeline(max_iters: int = 500, fidelity_mode: GEMFidelityMode = False) -> Pipeline:
     """Build a GEM graph-embedder pipeline.
 
     Parameters
     ----------
     max_iters : int, default=500
         Maximum number of OGDF node updates.
-    fidelity_mode : bool, default=False
-        When ``True``, use OGDF runner-compatible initial positions.
+    fidelity_mode : bool or str or None, default=False
+        When ``"ogdf"`` or ``True``, use OGDF runner-compatible semantics for
+        sequential-size graphs.
 
     Returns
     -------
@@ -69,7 +72,7 @@ def layout_gem_pipeline(
     max_iters: int = 500,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
-    fidelity_mode: bool = False,
+    fidelity_mode: GEMFidelityMode = False,
 ) -> torch.Tensor:
     """Run the GEM pipeline as a drop-in replacement.
 
@@ -88,8 +91,9 @@ def layout_gem_pipeline(
         Random seed for initialization and permutations.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
-    fidelity_mode : bool, default=False
-        When ``True``, use OGDF runner-compatible initial positions.
+    fidelity_mode : bool or str or None, default=False
+        When ``"ogdf"`` or ``True``, use OGDF runner-compatible semantics for
+        sequential-size graphs.
 
     Returns
     -------
