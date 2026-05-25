@@ -1630,7 +1630,8 @@ class FA2ForceStepConfig:
     outbound_attraction_distribution : bool, default=True
         Whether to divide attraction by source-node mass.
     dissuade_hubs : bool, default=False
-        Whether to divide attraction by source-node mass a second time.
+        Whether to divide attraction by source-node mass when outbound
+        attraction distribution is disabled.
     edge_weight_influence : float, default=1.0
         Exponent applied to edge weights before attraction.
     barnes_hut : bool, default=False
@@ -1951,7 +1952,7 @@ class FA2ForceStep(Op):
 
             if self.config.outbound_attraction_distribution:
                 factor = factor / mass.index_select(0, source)
-            if self.config.dissuade_hubs:
+            if self.config.dissuade_hubs and not self.config.outbound_attraction_distribution:
                 factor = factor / mass.index_select(0, source)
             if undirected_weights is not None:
                 transformed_weights = undirected_weights
@@ -2035,7 +2036,7 @@ class FA2DegreeCompensatedAttractionConfig:
     linlog : bool, default=False
         Use the linlog attraction law.
     dissuade_hubs : bool, default=False
-        Divide by source-node mass a second time.
+        Divide by source-node mass when outbound compensation is disabled.
     outbound_compensation : bool, default=True
         Apply FA2's mean-mass compensation.
     """
@@ -2148,7 +2149,7 @@ class FA2DegreeCompensatedAttraction(Op):
                 )
             if self.config.outbound_compensation:
                 factor = factor / mass.index_select(0, source)
-            if self.config.dissuade_hubs:
+            if self.config.dissuade_hubs and not self.config.outbound_compensation:
                 factor = factor / mass.index_select(0, source)
             if undirected_weights is not None:
                 factor = factor * undirected_weights
