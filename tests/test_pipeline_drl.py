@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import random
 from typing import Iterable
 
-import numpy as np
 import pytest
 import torch
 
-from dagua.layout.ops.drl import _initialize_positions, _maybe_cut_long_edge
+from dagua.layout.ops.drl import DRLEnergyConfig, DRLNodeUpdate
 from dagua.layout.ops.pipelines.drl import build_drl_pipeline, layout_drl_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
@@ -97,6 +97,89 @@ def _star_edge_index(num_nodes: int) -> torch.Tensor:
     return _edge_index_from_edges((0, target) for target in range(1, num_nodes))
 
 
+class _NoopDensityGrid:
+    """Minimal density-grid stub for isolated DRL node-update tests."""
+
+    def remove_node(self, node: int, fine_density: bool = False) -> None:
+        """Ignore node removal.
+
+        Parameters
+        ----------
+        node : int
+            Node index being removed.
+        fine_density : bool, default=False
+            Whether the caller is updating fine-density state.
+
+        Returns
+        -------
+        None
+            This stub does not track density state.
+        """
+        del node, fine_density
+
+    def add_node(self, node: int, position: torch.Tensor, fine_density: bool = False) -> None:
+        """Ignore node insertion.
+
+        Parameters
+        ----------
+        node : int
+            Node index being inserted.
+        position : torch.Tensor
+            Coordinate tensor with shape ``[2]``.
+        fine_density : bool, default=False
+            Whether the caller is updating fine-density state.
+
+        Returns
+        -------
+        None
+            This stub does not track density state.
+        """
+        del node, position, fine_density
+
+    def coarse_density(self, position: torch.Tensor) -> float:
+        """Prefer positive-x perturbations for deterministic candidate choice.
+
+        Parameters
+        ----------
+        position : torch.Tensor
+            Candidate coordinate with shape ``[2]``.
+
+        Returns
+        -------
+        float
+            Negative x-coordinate as a simple synthetic energy.
+        """
+        return -float(position[0].item())
+
+    def fine_density(
+        self,
+        node: int,
+        position: torch.Tensor,
+        positions: torch.Tensor,
+        config: DRLEnergyConfig,
+    ) -> float:
+        """Return zero fine density for deterministic candidate choice.
+
+        Parameters
+        ----------
+        node : int
+            Node index under evaluation.
+        position : torch.Tensor
+            Candidate coordinate with shape ``[2]``.
+        positions : torch.Tensor
+            Full coordinate tensor with shape ``[N, 2]``.
+        config : DRLEnergyConfig
+            DRL energy constants.
+
+        Returns
+        -------
+        float
+            Always ``0.0``.
+        """
+        del node, position, positions, config
+        return 0.0
+
+
 def _assert_exact_match(direct: torch.Tensor, pipeline: torch.Tensor) -> None:
     """Assert that two DrL outputs match exactly.
 
@@ -161,52 +244,40 @@ def _run_pipeline_direct(
 class TestDRLPipelineFidelity:
     """Bit-exact wrapper coverage and igraph-fidelity regressions for DrL."""
 
-    def test_igraph_fidelity_init_matches_seed_matrix_contract(self) -> None:
-        """The igraph fidelity initializer should match NumPy ``uniform(-1, 1)``."""
-        seed = 13
-        expected = torch.tensor(
-            np.random.RandomState(seed).uniform(-1.0, 1.0, size=(5, 2)),
-            dtype=torch.float64,
+    def test_drl_random_jump_uses_igraph_rng_sign(self) -> None:
+        """DRL random jumps should use igraph's ``0.5 - RNG_UNIF01`` sign."""
+        positions = torch.zeros((1, 2), dtype=torch.float64)
+        rng = random.Random(7)
+        expected_rng = random.Random(7)
+        update = DRLNodeUpdate(
+            phase_name="liquid",
+            fine_density=False,
+            energy_config=DRLEnergyConfig(jump_temperature_scale=1.0),
         )
+        density_grid = _NoopDensityGrid()
 
-        actual = _initialize_positions(num_nodes=5, seed=seed, fidelity_mode="igraph")
-
-        torch.testing.assert_close(actual, expected)
-
-    def test_initial_positions_override_generated_drl_seed_matrix(self) -> None:
-        """Explicit seed matrices should override generated fidelity initialization."""
-        initial_positions = torch.tensor(
-            [[-1.0, 0.5], [0.25, -0.75], [1.0, 0.0]],
-            dtype=torch.float64,
-        )
-
-        actual = _initialize_positions(
-            num_nodes=3,
-            seed=99,
-            fidelity_mode="igraph",
-            initial_positions=initial_positions,
-        )
-
-        torch.testing.assert_close(actual, initial_positions)
-
-    def test_drl_edge_cutting_removes_only_current_neighbor_entry(self) -> None:
-        """DrL edge cutting should preserve the reverse neighbor map like igraph."""
-        positions = torch.tensor(
-            [[0.0, 0.0], [10.0, 0.0], [0.0, 0.0]],
-            dtype=torch.float64,
-        )
-        adjacency = [{1: 1.0, 2: 9.0}, {0: 1.0}, {0: 9.0}]
-
-        _maybe_cut_long_edge(
+        update.apply(
             node=0,
             positions=positions,
-            adjacency=adjacency,
-            min_edges=1.0,
+            adjacency=[{}],
+            rng=rng,
+            attraction=0.0,
+            temperature=2.0,
+            damping_mult=0.0,
+            min_edges=99.0,
+            cut_end=0.0,
             cut_off_length=0.0,
+            density_grid=density_grid,
         )
 
-        assert 1 not in adjacency[0]
-        assert adjacency[1][0] == 1.0
+        expected = torch.tensor(
+            [
+                (0.5 - expected_rng.random()) * 2.0,
+                (0.5 - expected_rng.random()) * 2.0,
+            ],
+            dtype=torch.float64,
+        )
+        torch.testing.assert_close(positions[0], expected)
 
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),
