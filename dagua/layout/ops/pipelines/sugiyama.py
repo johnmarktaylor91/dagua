@@ -51,7 +51,8 @@ def build_sugiyama_pipeline(
         Tagawa, and Toda (1981), "Methods for Visual Understanding of
         Hierarchical System Structures".
     Fidelity mode: ``fidelity_mode="igraph"`` enables igraph stable-order
-        early stop and incidence-average barycenters.
+        early stop and incidence-average barycenters. ``"dot"`` and
+        ``"graphviz_dot"`` enable Graphviz dot median/transpose mincross.
     Verified at: final 100-seed report, strong equivalent; median RMSD 0.031
         across default, pass-count, tight, and wide variants. Round 33 dot
         bit-exact subset median remained 0.006317.
@@ -93,16 +94,20 @@ def build_sugiyama_pipeline(
         layers, expanding dummy nodes, running barycenter ordering sweeps,
         assigning coordinates, and optionally reconstructing edge routes.
     """
-    if fidelity_mode not in (None, "igraph"):
-        raise ValueError("fidelity_mode must be None or 'igraph'.")
+    if fidelity_mode not in (None, "igraph", "dot", "graphviz_dot", "graphviz"):
+        raise ValueError(
+            "fidelity_mode must be None, 'igraph', 'dot', 'graphviz_dot', or 'graphviz'."
+        )
     use_igraph_fidelity = fidelity_mode == "igraph"
+    use_graphviz_mincross = fidelity_mode in {"dot", "graphviz_dot", "graphviz"}
+    use_graphviz_rank = fidelity_mode in {"dot", "graphviz_dot", "graphviz"}
 
     ops: list[Op] = [
         _ValidateInputs(),
         _StoreSpacingParams(rank_sep=rank_sep, node_sep=node_sep),
         _ResolveNodeSizes(),
         _PrepareAcyclicEdges(),
-        _AssignLayers(),
+        _AssignLayers(fidelity_mode="graphviz" if use_graphviz_rank else fidelity_mode),
         _ExpandDummyNodes(),
         _BuildNeighborStructures(),
         _BarycenterOrdering(
@@ -112,6 +117,7 @@ def build_sugiyama_pipeline(
             stop_when_stable=use_igraph_fidelity,
             use_incidence_barycenters=use_igraph_fidelity,
             center_coordinates=center_coordinates,
+            use_graphviz_mincross=use_graphviz_mincross,
         ),
         _CoordinateAssignment(center_coordinates=center_coordinates),
     ]
@@ -173,7 +179,8 @@ def layout_sugiyama_pipeline(
         If ``True``, include edge-route polylines in output.
     fidelity_mode : str, optional
         Optional reference-compatibility mode. ``"igraph"`` enables igraph's
-        stable-order early stop and incidence-average barycenters.
+        stable-order early stop and incidence-average barycenters. ``"dot"``
+        and ``"graphviz_dot"`` enable Graphviz dot median/transpose mincross.
     use_node_sizes_for_spacing : bool, optional
         Whether horizontal compaction should include node widths. Defaults to
         ``False`` in igraph fidelity mode because the igraph reference adapter
@@ -200,8 +207,10 @@ def layout_sugiyama_pipeline(
     RuntimeError
         If the pipeline fails to produce final positions.
     """
-    if fidelity_mode not in (None, "igraph"):
-        raise ValueError("fidelity_mode must be None or 'igraph'.")
+    if fidelity_mode not in (None, "igraph", "dot", "graphviz_dot", "graphviz"):
+        raise ValueError(
+            "fidelity_mode must be None, 'igraph', 'dot', 'graphviz_dot', or 'graphviz'."
+        )
     if trace_every < 0:
         raise ValueError("trace_every must be non-negative.")
     use_igraph_fidelity = fidelity_mode == "igraph"

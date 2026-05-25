@@ -256,6 +256,7 @@ _EXPECTED_OP_MODULES = (
     "preprocess",
     "project",
     "prolong",
+    "quadtree",
     "sfdp",
     "sgd2_multi",
     "spatial_hash",

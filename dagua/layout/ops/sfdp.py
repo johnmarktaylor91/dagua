@@ -15,6 +15,7 @@ import torch
 from dagua.layout.ops.base import Op, Repeat
 from dagua.layout.ops.graph_utils import layout_device as _layout_device
 from dagua.layout.ops.graph_utils import layout_extent as _layout_extent
+from dagua.layout.ops.quadtree import graphviz_spring_electrical_repulsive_forces
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
@@ -882,6 +883,7 @@ def _repulsive_forces(
     repulsive_scale: float,
     repulsive_exponent: float,
     theta: float,
+    fidelity_mode: bool = False,
 ) -> torch.Tensor:
     """Choose exact or Barnes-Hut repulsion based on graph size.
 
@@ -895,12 +897,25 @@ def _repulsive_forces(
         SFDP repulsion exponent ``p``.
     theta : float
         Barnes-Hut opening angle threshold.
+    fidelity_mode : bool, default=False
+        When true, use the Graphviz sparse quadtree port for Barnes-Hut
+        repulsion while preserving the existing Dagua implementation by
+        default.
 
     Returns
     -------
     torch.Tensor
         Repulsive force tensor with shape ``[N, 2]``.
     """
+    if fidelity_mode:
+        return graphviz_spring_electrical_repulsive_forces(
+            positions=positions,
+            repulsive_scale=repulsive_scale,
+            repulsive_exponent=repulsive_exponent,
+            theta=theta,
+            max_level=_SFDP_ALGORITHM_CONFIG.max_quadtree_depth,
+            quadtree_size=_SFDP_ALGORITHM_CONFIG.barnes_hut_threshold,
+        )
     if positions.shape[0] < _SFDP_ALGORITHM_CONFIG.barnes_hut_threshold:
         return _exact_repulsive_forces(
             positions=positions,
@@ -963,6 +978,8 @@ class SFDPSpringElectricalStep(Op):
         Barnes-Hut opening angle threshold.
     repulsive_exponent : float, default=-1.0
         SFDP repulsion exponent.
+    fidelity_mode : bool, default=False
+        Use the Graphviz sparse quadtree port for repulsion.
     config : SFDPAlgorithmConfig, optional
         Shared numerical constants for step-size and distance guards.
     """
@@ -972,6 +989,7 @@ class SFDPSpringElectricalStep(Op):
     repulsive_scale: float
     theta: float = _SFDP_ALGORITHM_CONFIG.default_theta
     repulsive_exponent: float = _SFDP_ALGORITHM_CONFIG.default_repulsive_exponent
+    fidelity_mode: bool = False
     config: SFDPAlgorithmConfig = field(default_factory=SFDPAlgorithmConfig)
 
     name: ClassVar[str] = "sfdp_spring_electrical_step"
@@ -1019,6 +1037,7 @@ class SFDPSpringElectricalStep(Op):
             repulsive_scale=self.repulsive_scale,
             repulsive_exponent=self.repulsive_exponent,
             theta=self.theta,
+            fidelity_mode=self.fidelity_mode,
         )
         total_force = attractive + repulsive
         node_force_norm = torch.linalg.vector_norm(total_force, dim=1, keepdim=True)
@@ -1328,6 +1347,7 @@ class SFDPRefineCoarsestLevel(Op):
     steps: int = 500
     theta: float = _SFDP_ALGORITHM_CONFIG.default_theta
     repulsive_exponent: float = _SFDP_ALGORITHM_CONFIG.default_repulsive_exponent
+    fidelity_mode: bool = False
 
     def apply(
         self,
@@ -1383,6 +1403,7 @@ class SFDPRefineCoarsestLevel(Op):
                     repulsive_scale=repulsive_scale,
                     theta=self.theta,
                     repulsive_exponent=self.repulsive_exponent,
+                    fidelity_mode=self.fidelity_mode,
                 ),
                 SFDPAdaptiveCool(),
             ],
@@ -1417,6 +1438,7 @@ class SFDPProlongateAndRefineLevels(Op):
     steps: int = 500
     theta: float = _SFDP_ALGORITHM_CONFIG.default_theta
     repulsive_exponent: float = _SFDP_ALGORITHM_CONFIG.default_repulsive_exponent
+    fidelity_mode: bool = False
 
     def apply(
         self,
@@ -1485,6 +1507,7 @@ class SFDPProlongateAndRefineLevels(Op):
                             repulsive_scale=repulsive_scale,
                             theta=self.theta,
                             repulsive_exponent=self.repulsive_exponent,
+                            fidelity_mode=self.fidelity_mode,
                         ),
                         SFDPAdaptiveCool(config=SFDPAdaptiveCoolConfig(adaptive_cooling=False)),
                     ],
