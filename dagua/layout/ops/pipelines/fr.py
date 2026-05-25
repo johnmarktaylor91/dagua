@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import math
+import random
 from typing import Optional, Sequence, Union
 
+import numpy as np
 import torch
 
 from dagua.layout.ops.anneal import InitTemperatureFromExtent, LinearCool
@@ -26,6 +29,9 @@ from dagua.layout.ops.state import (  # noqa: E402
 
 _LEGACY_CLASSIC_FR_STEPS = 200
 _CANONICAL_NX_SPRING_STEPS = 50
+_IGRAPH_FR_DEFAULT_STEPS = 500
+_IGRAPH_ADAPTER_SCALE = 50.0
+_IGRAPH_JITTER = 1.0e-9
 _FR_DAG_DROP_TOLERANCE = 0.1
 _FR_SCORE_DROP_TOLERANCE = 1.0e-6
 
@@ -159,6 +165,216 @@ def _normalize_fixed_indices(
     return normalized
 
 
+def _is_igraph_fidelity_mode(fidelity_mode: Optional[Union[bool, str]]) -> bool:
+    """Return whether the igraph C-reference FR loop is requested.
+
+    Parameters
+    ----------
+    fidelity_mode : bool or str, optional
+        Fidelity selector. ``True`` and ``"igraph"`` enable igraph fidelity;
+        ``False`` and ``None`` preserve the existing NetworkX-compatible path.
+
+    Returns
+    -------
+    bool
+        Whether to use the igraph-compatible solver.
+
+    Raises
+    ------
+    ValueError
+        If ``fidelity_mode`` is an unsupported string or value.
+    """
+    if fidelity_mode in (None, False):
+        return False
+    if fidelity_mode is True:
+        return True
+    if isinstance(fidelity_mode, str) and fidelity_mode == "igraph":
+        return True
+    raise ValueError("FR fidelity_mode must be None, False, True, or 'igraph'.")
+
+
+def _weakly_connected(edge_index: torch.Tensor, num_nodes: int) -> bool:
+    """Evaluate igraph's weak-connectivity branch condition.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    bool
+        ``True`` when all nodes are in one weak component.
+    """
+    if num_nodes <= 1:
+        return True
+    if edge_index.numel() == 0:
+        return False
+
+    neighbors: list[list[int]] = [[] for _ in range(num_nodes)]
+    for source, target in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        source_index = int(source)
+        target_index = int(target)
+        if source_index == target_index:
+            continue
+        neighbors[source_index].append(target_index)
+        neighbors[target_index].append(source_index)
+
+    seen = {0}
+    stack = [0]
+    while stack:
+        node = stack.pop()
+        for neighbor in neighbors[node]:
+            if neighbor not in seen:
+                seen.add(neighbor)
+                stack.append(neighbor)
+    return len(seen) == num_nodes
+
+
+def _igraph_seed_positions(num_nodes: int, seed: int) -> np.ndarray:
+    """Create the python-igraph adapter's seeded initial FR matrix.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    seed : int
+        Integer seed supplied to the benchmark adapter.
+
+    Returns
+    -------
+    numpy.ndarray
+        Initial positions with shape ``[N, 2]`` sampled from ``[-1, 1]``.
+    """
+    rng = np.random.RandomState(seed)
+    return np.asarray(rng.uniform(-1.0, 1.0, size=(num_nodes, 2)), dtype=np.float64)
+
+
+def _igraph_fr_reference_positions(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    steps: int,
+    seed: int,
+    edge_weights: Optional[torch.Tensor] = None,
+    pos: Optional[torch.Tensor] = None,
+    start_temp: Optional[float] = None,
+) -> torch.Tensor:
+    """Run the igraph 2D Fruchterman-Reingold C-reference loop.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``. Edge order is preserved.
+    num_nodes : int
+        Number of graph nodes.
+    steps : int
+        Number of igraph FR iterations.
+    seed : int
+        Seed for initial positions and displacement jitter.
+    edge_weights : torch.Tensor, optional
+        Optional positive edge weights with shape ``[E]``.
+    pos : torch.Tensor, optional
+        Optional initial positions with shape ``[N, 2]``.
+    start_temp : float, optional
+        Initial temperature. ``None`` uses python-igraph's
+        ``sqrt(num_nodes) / 10`` default.
+
+    Returns
+    -------
+    torch.Tensor
+        Adapter-scaled positions with shape ``[N, 2]`` and dtype ``float32``.
+    """
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float32)
+    if pos is None:
+        positions = _igraph_seed_positions(num_nodes=num_nodes, seed=seed)
+    else:
+        positions = pos.detach().to(device="cpu", dtype=torch.float64).numpy().copy()
+
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist()
+    for source, target in edges:
+        source_index = int(source)
+        target_index = int(target)
+        if (
+            source_index < 0
+            or source_index >= num_nodes
+            or target_index < 0
+            or target_index >= num_nodes
+        ):
+            raise ValueError("edge_index contains a node index outside [0, num_nodes).")
+
+    if edge_weights is None:
+        weights = [1.0] * len(edges)
+    else:
+        weight_tensor = edge_weights.detach().to(device="cpu", dtype=torch.float64)
+        weights = [float(weight) for weight in weight_tensor.tolist()]
+        if any(weight <= 0.0 for weight in weights):
+            raise ValueError("Weights must be positive for igraph FR fidelity mode.")
+
+    if steps == 0:
+        return torch.from_numpy(positions * _IGRAPH_ADAPTER_SCALE).to(dtype=torch.float32)
+
+    temp = math.sqrt(float(num_nodes)) / 10.0 if start_temp is None else float(start_temp)
+    difftemp = temp / float(steps)
+    connected = _weakly_connected(edge_index=edge_index, num_nodes=num_nodes)
+    component_constant = float(num_nodes) * math.sqrt(float(num_nodes))
+    jitter_rng = random.Random(seed)
+    dispx = np.zeros(num_nodes, dtype=np.float64)
+    dispy = np.zeros(num_nodes, dtype=np.float64)
+
+    for _ in range(steps):
+        dispx.fill(0.0)
+        dispy.fill(0.0)
+
+        for source in range(num_nodes):
+            for target in range(source + 1, num_nodes):
+                dx = positions[source, 0] - positions[target, 0]
+                dy = positions[source, 1] - positions[target, 1]
+                dlen = dx * dx + dy * dy
+                while dlen == 0.0:
+                    dx = jitter_rng.uniform(-_IGRAPH_JITTER, _IGRAPH_JITTER)
+                    dy = jitter_rng.uniform(-_IGRAPH_JITTER, _IGRAPH_JITTER)
+                    dlen = dx * dx + dy * dy
+                if connected:
+                    factor = 1.0 / dlen
+                else:
+                    factor = (component_constant - dlen * math.sqrt(dlen)) / (
+                        dlen * component_constant
+                    )
+                dispx[source] += dx * factor
+                dispy[source] += dy * factor
+                dispx[target] -= dx * factor
+                dispy[target] -= dy * factor
+
+        for (source, target), weight in zip(edges, weights):
+            source_index = int(source)
+            target_index = int(target)
+            dx = positions[source_index, 0] - positions[target_index, 0]
+            dy = positions[source_index, 1] - positions[target_index, 1]
+            dlen = math.sqrt(dx * dx + dy * dy) * float(weight)
+            dispx[source_index] -= dx * dlen
+            dispy[source_index] -= dy * dlen
+            dispx[target_index] += dx * dlen
+            dispy[target_index] += dy * dlen
+
+        for node in range(num_nodes):
+            dx = dispx[node] + jitter_rng.uniform(-_IGRAPH_JITTER, _IGRAPH_JITTER)
+            dy = dispy[node] + jitter_rng.uniform(-_IGRAPH_JITTER, _IGRAPH_JITTER)
+            displen = math.sqrt(dx * dx + dy * dy)
+            if displen > temp:
+                dx *= temp / displen
+                dy *= temp / displen
+            if displen > 0.0:
+                positions[node, 0] += dx
+                positions[node, 1] += dy
+
+        temp -= difftemp
+
+    return torch.from_numpy(positions * _IGRAPH_ADAPTER_SCALE).to(dtype=torch.float32)
+
+
 def build_fr_pipeline(
     steps: int = 50,
     networkx_compat: bool = False,
@@ -261,6 +477,7 @@ def layout_fr_pipeline(
     networkx_compat: bool = False,
     k: Optional[float] = None,
     fixed: Optional[Union[Sequence[int], torch.Tensor]] = None,
+    fidelity_mode: Optional[Union[bool, str]] = None,
 ) -> torch.Tensor:
     """Run the Fruchterman-Reingold pipeline as a drop-in replacement.
 
@@ -292,6 +509,10 @@ def layout_fr_pipeline(
     fixed : sequence of int or torch.Tensor, optional
         Node indices to hold fixed during displacement. A full ``pos`` tensor
         must also be provided, matching NetworkX's fixed-node requirement.
+    fidelity_mode : bool or str, optional
+        ``True`` or ``"igraph"`` uses the igraph C-reference force loop. The
+        unchanged NetworkX default of ``steps=50`` maps to python-igraph's
+        default ``niter=500`` in this mode.
 
     Returns
     -------
@@ -323,6 +544,27 @@ def layout_fr_pipeline(
     fixed_indices = _normalize_fixed_indices(fixed=fixed, num_nodes=num_nodes)
     if fixed_indices and pos is None:
         raise ValueError("fixed nodes require a full pos tensor.")
+    if _is_igraph_fidelity_mode(fidelity_mode=fidelity_mode):
+        if fixed_indices:
+            raise ValueError("fixed nodes are not supported in igraph FR fidelity mode.")
+        if k is not None:
+            raise ValueError("k is not supported in igraph FR fidelity mode.")
+        output_device = (
+            edge_index.device
+            if edge_index.numel() > 0
+            else node_sizes.device
+            if node_sizes is not None
+            else torch.device("cpu")
+        )
+        igraph_steps = _IGRAPH_FR_DEFAULT_STEPS if steps == _CANONICAL_NX_SPRING_STEPS else steps
+        return _igraph_fr_reference_positions(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            steps=igraph_steps,
+            seed=seed,
+            edge_weights=edge_weights,
+            pos=pos,
+        ).to(device=output_device)
 
     problem = LayoutProblem(
         edge_index=edge_index,
@@ -370,6 +612,7 @@ def layout_fr_default_pipeline(
     networkx_compat: bool = False,
     k: Optional[float] = None,
     fixed: Optional[Union[Sequence[int], torch.Tensor]] = None,
+    fidelity_mode: Optional[Union[bool, str]] = None,
 ) -> torch.Tensor:
     """Run the benchmark default FR layout with canonical-fidelity selection.
 
@@ -398,13 +641,21 @@ def layout_fr_default_pipeline(
         Explicit NetworkX-style optimal node spacing.
     fixed : sequence of int or torch.Tensor, optional
         Node indices to hold fixed during displacement.
+    fidelity_mode : bool or str, optional
+        Forwarded to :func:`layout_fr_pipeline`.
 
     Returns
     -------
     torch.Tensor
         Final position tensor with shape ``[N, 2]``.
     """
-    if steps != _LEGACY_CLASSIC_FR_STEPS or pos is not None or k is not None or fixed is not None:
+    if (
+        steps != _LEGACY_CLASSIC_FR_STEPS
+        or pos is not None
+        or k is not None
+        or fixed is not None
+        or _is_igraph_fidelity_mode(fidelity_mode=fidelity_mode)
+    ):
         return layout_fr_pipeline(
             edge_index=edge_index,
             num_nodes=num_nodes,
@@ -416,6 +667,7 @@ def layout_fr_default_pipeline(
             networkx_compat=networkx_compat,
             k=k,
             fixed=fixed,
+            fidelity_mode=fidelity_mode,
         )
 
     legacy_pos = layout_fr_pipeline(
