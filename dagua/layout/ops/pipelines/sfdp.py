@@ -3,27 +3,35 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import ClassVar, Optional, Tuple
+from typing import ClassVar, Optional, Tuple, Union
 
 import torch
 
-from dagua.layout.ops.base import Op, Pipeline
+from dagua.layout.ops.base import Op, Pipeline, Repeat
 from dagua.layout.ops.graph_utils import (
     layout_device as _layout_device,
 )
+from dagua.layout.ops.quadtree import GraphvizQuadTree, graphviz_supernode_repulsive_force
 from dagua.layout.ops.sfdp import (
     _BASE_GRAPH_KEY,
     _GENERATOR_KEY,
     _GRAPH_KEY,
     _MAPPING_KEY,
+    _SFDP_ALGORITHM_CONFIG,
+    _SFDP_CURRENT_STEP_KEY,
+    _SFDP_FORCE_NORM_KEY,
+    _SFDP_PREVIOUS_FORCE_NORM_KEY,
     BuildSFDPGraph,
     BuildSFDPHierarchy,
     GraphData,
     InitSFDPCoarsestPositions,
+    SFDPAdaptiveCool,
+    SFDPAdaptiveCoolConfig,
     SFDPFinalizePositions,
     SFDPHierarchyConfig,
     SFDPProlongateAndRefineLevels,
     SFDPRefineCoarsestLevel,
+    _prolongate_positions,
 )
 from dagua.layout.ops.state import (
     ExecutionPlan,
@@ -36,6 +44,9 @@ from dagua.layout.ops.taxonomy import OpCategory
 _DEFAULT_THETA = 0.6
 _DEFAULT_P = -1.0
 _GRAPHVIZ_MAX_CLUSTER_SIZE = 4
+_GRAPHVIZ_FIDELITY_MODE = "graphviz"
+_GRAPHVIZ_MIN_DISTANCE = 1.0e-15
+SFDPFidelityMode = Optional[Union[bool, str]]
 
 
 def _decompose_graphviz_supervariables(graph: GraphData) -> list[list[int]]:
@@ -343,11 +354,416 @@ class BuildGraphvizSFDPMatrixHierarchy(Op):
         return state
 
 
+def _is_graphviz_fidelity_mode(fidelity_mode: SFDPFidelityMode) -> bool:
+    """Return whether the SFDP Graphviz fidelity path is enabled.
+
+    Parameters
+    ----------
+    fidelity_mode : bool or str or None
+        Fidelity selector. ``True`` is kept as a backwards-compatible alias for
+        the Graphviz path already used by the matrix-coarsening slice;
+        ``"graphviz"`` is the explicit public selector for this sprint.
+
+    Returns
+    -------
+    bool
+        ``True`` when Graphviz fidelity behavior should be used.
+
+    Raises
+    ------
+    ValueError
+        If a string selector other than ``"graphviz"`` is supplied.
+    """
+    if fidelity_mode is None or fidelity_mode is False:
+        return False
+    if fidelity_mode is True or fidelity_mode == _GRAPHVIZ_FIDELITY_MODE:
+        return True
+    raise ValueError("fidelity_mode must be False, True, None, or 'graphviz'.")
+
+
+def _sfdp_force_scales(ideal_length: float, repulsive_exponent: float) -> tuple[float, float]:
+    """Compute Graphviz SFDP attractive and repulsive scale constants.
+
+    Parameters
+    ----------
+    ideal_length : float
+        Current ideal edge length ``K``.
+    repulsive_exponent : float
+        SFDP repulsive exponent ``p``.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(CRK, KP)`` scale constants from ``spring_electrical.c``.
+    """
+    bounded_ideal_length = max(ideal_length, _SFDP_ALGORITHM_CONFIG.min_span)
+    attractive_scale = (
+        _SFDP_ALGORITHM_CONFIG.force_scaling ** ((2.0 - repulsive_exponent) / 3.0)
+    ) / bounded_ideal_length
+    repulsive_scale = bounded_ideal_length ** (1.0 - repulsive_exponent)
+    return attractive_scale, repulsive_scale
+
+
+@dataclass(frozen=True)
+class _SFDPGraphvizSequentialStep(Op):
+    """Apply one Graphviz-style sequential spring-electrical iteration.
+
+    Parameters
+    ----------
+    graph : GraphData
+        Current SFDP graph level.
+    attractive_scale : float
+        Graphviz ``CRK`` attractive-force coefficient.
+    repulsive_scale : float
+        Graphviz ``KP`` repulsive-force coefficient.
+    theta : float, default=0.6
+        Barnes-Hut opening angle threshold used by Graphviz's quadtree path.
+    repulsive_exponent : float, default=-1.0
+        SFDP repulsion exponent ``p``.
+
+    Notes
+    -----
+    This ports the non-fast ``spring_electrical_embedding`` update order: each
+    vertex force is computed from the latest coordinate array and immediately
+    written back before the next vertex is evaluated.
+    """
+
+    graph: GraphData
+    attractive_scale: float
+    repulsive_scale: float
+    theta: float = _DEFAULT_THETA
+    repulsive_exponent: float = _SFDP_ALGORITHM_CONFIG.default_repulsive_exponent
+
+    name: ClassVar[str] = "sfdp_graphviz_sequential_step"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Move vertices one at a time using Graphviz's SFDP force order.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this op.
+        state : SolveState
+            Mutable state containing positions with shape ``[N, 2]`` and the
+            current SFDP step size in ``extras``.
+        ctx : RuntimeContext
+            Execution infrastructure. Unused by this op.
+
+        Returns
+        -------
+        SolveState
+            State with updated positions and current total force norm.
+
+        Raises
+        ------
+        ValueError
+            If positions are missing.
+        """
+        del problem, ctx
+        if state.pos is None:
+            raise ValueError("_SFDPGraphvizSequentialStep requires state.pos to be set.")
+
+        positions = state.pos.to(dtype=torch.float64, device="cpu").clone()
+        current_step = float(
+            state.extras.get(_SFDP_CURRENT_STEP_KEY, _SFDP_ALGORITHM_CONFIG.default_step)
+        )
+        force_norm = 0.0
+        quadtree = (
+            GraphvizQuadTree.from_points(
+                coordinates=positions,
+                max_level=_SFDP_ALGORITHM_CONFIG.max_quadtree_depth,
+            )
+            if self.graph.num_nodes >= _SFDP_ALGORITHM_CONFIG.barnes_hut_threshold
+            else None
+        )
+
+        for node in range(self.graph.num_nodes):
+            force = torch.zeros((2,), dtype=torch.float64)
+
+            for neighbor, _weight in self.graph.adjacency[node]:
+                if neighbor == node:
+                    continue
+                delta = positions[node] - positions[neighbor]
+                distance = torch.linalg.vector_norm(delta)
+                force = force - (self.attractive_scale * delta * distance)
+
+            if quadtree is not None:
+                force = force + graphviz_supernode_repulsive_force(
+                    tree=quadtree,
+                    positions=positions,
+                    node_index=node,
+                    theta=self.theta,
+                    repulsive_scale=self.repulsive_scale,
+                    repulsive_exponent=self.repulsive_exponent,
+                ).to(dtype=torch.float64, device="cpu")
+            else:
+                for other in range(self.graph.num_nodes):
+                    if other == node:
+                        continue
+                    delta = positions[node] - positions[other]
+                    distance = max(
+                        float(torch.linalg.vector_norm(delta).item()),
+                        _GRAPHVIZ_MIN_DISTANCE,
+                    )
+                    denominator = distance ** (1.0 - self.repulsive_exponent)
+                    force = force + (self.repulsive_scale * delta / denominator)
+
+            node_force_norm = float(torch.linalg.vector_norm(force).item())
+            force_norm += node_force_norm
+            if node_force_norm > 0.0:
+                positions[node] = positions[node] + (current_step * force / node_force_norm)
+
+        state.pos = positions
+        state.extras[_SFDP_FORCE_NORM_KEY] = force_norm
+        return state
+
+
+def _apply_graphviz_sequential_refinement(
+    problem: LayoutProblem,
+    state: SolveState,
+    ctx: RuntimeContext,
+    *,
+    graph: GraphData,
+    steps: int,
+    ideal_length: float,
+    theta: float,
+    repulsive_exponent: float,
+    adaptive_cooling: bool,
+) -> SolveState:
+    """Run Graphviz-style sequential refinement for one SFDP level.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable layout inputs forwarded to inner ops.
+    state : SolveState
+        Mutable solve state containing current positions.
+    ctx : RuntimeContext
+        Execution infrastructure forwarded to inner ops.
+    graph : GraphData
+        Current SFDP graph level.
+    steps : int
+        Maximum spring-electrical iterations for this level.
+    ideal_length : float
+        Current ideal edge length ``K``.
+    theta : float
+        Barnes-Hut opening angle threshold.
+    repulsive_exponent : float
+        SFDP repulsive exponent ``p``.
+    adaptive_cooling : bool
+        Whether to use Graphviz's force-norm adaptive cooling.
+
+    Returns
+    -------
+    SolveState
+        State with refined positions.
+    """
+    if state.pos is None:
+        raise ValueError("Graphviz SFDP refinement requires state.pos to be set.")
+    if steps == 0 or state.pos.shape[0] <= 1:
+        return state
+
+    attractive_scale, repulsive_scale = _sfdp_force_scales(
+        ideal_length=ideal_length,
+        repulsive_exponent=repulsive_exponent,
+    )
+    state.extras[_SFDP_CURRENT_STEP_KEY] = _SFDP_ALGORITHM_CONFIG.default_step
+    state.extras[_SFDP_PREVIOUS_FORCE_NORM_KEY] = float("inf")
+    state = Repeat(
+        n=steps,
+        ops=[
+            _SFDPGraphvizSequentialStep(
+                graph=graph,
+                attractive_scale=attractive_scale,
+                repulsive_scale=repulsive_scale,
+                theta=theta,
+                repulsive_exponent=repulsive_exponent,
+            ),
+            SFDPAdaptiveCool(config=SFDPAdaptiveCoolConfig(adaptive_cooling=adaptive_cooling)),
+        ],
+    ).apply(problem, state, ctx)
+    state.converged = False
+    return state
+
+
+@dataclass(frozen=True)
+class _SFDPGraphvizRefineCoarsestLevel(Op):
+    """Refine the coarsest level with Graphviz sequential node updates.
+
+    Parameters
+    ----------
+    steps : int, default=500
+        Maximum number of spring-electrical iterations.
+    theta : float, default=0.6
+        Barnes-Hut opening angle threshold.
+    repulsive_exponent : float, default=-1.0
+        SFDP repulsion exponent ``p``.
+    """
+
+    steps: int = 500
+    theta: float = _DEFAULT_THETA
+    repulsive_exponent: float = _SFDP_ALGORITHM_CONFIG.default_repulsive_exponent
+
+    name: ClassVar[str] = "sfdp_graphviz_refine_coarsest"
+    category: ClassVar[OpCategory] = OpCategory.FORCE
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "ideal_length", "extras", "converged")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "extras", "converged")
+    requires: ClassVar[Tuple[str, ...]] = ("pos", "ideal_length", f"extras.{_GRAPH_KEY}")
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Run sequential refinement on the coarsest hierarchy graph.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state containing coarsest positions and ideal length.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with coarsest positions refined.
+
+        Raises
+        ------
+        ValueError
+            If ``ideal_length`` is missing.
+        """
+        if state.ideal_length is None:
+            raise ValueError("_SFDPGraphvizRefineCoarsestLevel requires state.ideal_length.")
+        graphs: list[GraphData] = state.extras[_GRAPH_KEY]
+        return _apply_graphviz_sequential_refinement(
+            problem=problem,
+            state=state,
+            ctx=ctx,
+            graph=graphs[-1],
+            steps=self.steps,
+            ideal_length=float(state.ideal_length),
+            theta=self.theta,
+            repulsive_exponent=self.repulsive_exponent,
+            adaptive_cooling=True,
+        )
+
+
+@dataclass(frozen=True)
+class _SFDPGraphvizProlongateAndRefineLevels(Op):
+    """Prolongate levels and refine each with Graphviz sequential updates.
+
+    Parameters
+    ----------
+    steps : int, default=500
+        Maximum number of spring-electrical iterations per level.
+    theta : float, default=0.6
+        Barnes-Hut opening angle threshold.
+    repulsive_exponent : float, default=-1.0
+        SFDP repulsion exponent ``p``.
+    """
+
+    steps: int = 500
+    theta: float = _DEFAULT_THETA
+    repulsive_exponent: float = _SFDP_ALGORITHM_CONFIG.default_repulsive_exponent
+
+    name: ClassVar[str] = "sfdp_graphviz_prolongate_and_refine"
+    category: ClassVar[OpCategory] = OpCategory.PROLONG
+    reads: ClassVar[Tuple[str, ...]] = ("pos", "ideal_length", "extras", "converged")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "ideal_length", "extras", "converged")
+    requires: ClassVar[Tuple[str, ...]] = (
+        "pos",
+        "ideal_length",
+        f"extras.{_GRAPH_KEY}",
+        f"extras.{_MAPPING_KEY}",
+        f"extras.{_GENERATOR_KEY}",
+    )
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Walk from coarse to fine levels with sequential refinement.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state containing coarsest positions.
+        ctx : RuntimeContext
+            Execution infrastructure.
+
+        Returns
+        -------
+        SolveState
+            State with positions on the finest graph level.
+
+        Raises
+        ------
+        ValueError
+            If ``ideal_length`` is missing.
+        """
+        graphs: list[GraphData] = state.extras[_GRAPH_KEY]
+        mappings: list[torch.Tensor] = state.extras[_MAPPING_KEY]
+        generator: torch.Generator = state.extras[_GENERATOR_KEY]
+        if state.ideal_length is None:
+            raise ValueError("_SFDPGraphvizProlongateAndRefineLevels requires state.ideal_length.")
+
+        positions = state.pos
+        ideal_length = float(state.ideal_length)
+        for level_index in range(len(mappings) - 1, -1, -1):
+            ideal_length = max(
+                ideal_length * _SFDP_ALGORITHM_CONFIG.refinement_k_decay,
+                _SFDP_ALGORITHM_CONFIG.min_span,
+            )
+            fine_graph = graphs[level_index]
+            positions = _prolongate_positions(
+                graph=fine_graph,
+                fine_to_coarse=mappings[level_index],
+                coarse_positions=positions,
+                ideal_length=ideal_length,
+                generator=generator,
+            )
+            state.pos = positions
+            state = _apply_graphviz_sequential_refinement(
+                problem=problem,
+                state=state,
+                ctx=ctx,
+                graph=fine_graph,
+                steps=self.steps,
+                ideal_length=ideal_length,
+                theta=self.theta,
+                repulsive_exponent=self.repulsive_exponent,
+                adaptive_cooling=False,
+            )
+            positions = state.pos
+
+        state.pos = positions
+        state.ideal_length = ideal_length
+        return state
+
+
 def build_sfdp_pipeline(
     steps: int = 500,
     theta: float = _DEFAULT_THETA,
     repulsive_exponent: float = _DEFAULT_P,
-    fidelity_mode: bool = False,
+    fidelity_mode: SFDPFidelityMode = False,
 ) -> Pipeline:
     """Build an SFDP multilevel force-directed pipeline.
 
@@ -355,14 +771,16 @@ def build_sfdp_pipeline(
     ------------------
     Targets: Graphviz 7.0.5 sfdp / Hu (2005), "Efficient, High-Quality
         Force-Directed Graph Drawing".
-    Fidelity mode: ``fidelity_mode=True`` switches the hierarchy builder to
-        Graphviz SFDP's supervariable-first matrix coarsening path.
+    Fidelity mode: ``fidelity_mode=True`` or ``"graphviz"`` enables the
+        Graphviz matrix hierarchy and sequential spring-electrical node update
+        path.
     Verified at: final 100-seed report, strong equivalent; median RMSD 0.079
         to 0.100. Round 33 force-law alignment improved the bounded subset to
         median RMSD 0.004724.
     Known divergences:
         - Remaining residual is dominated by ``parallel_multiedge_bundle``.
-        - Sequential in-place updates remain unported.
+        - The fidelity path still uses Dagua's current random initialization
+          and output normalization.
         - Unmatched-node permutation still uses Dagua's seeded torch generator
           rather than Graphviz's process-global ``gv_random`` stream.
 
@@ -374,10 +792,9 @@ def build_sfdp_pipeline(
         Barnes-Hut opening angle threshold.
     repulsive_exponent : float, default=-1.0
         SFDP repulsion exponent ``p``.
-    fidelity_mode : bool, default=False
-        When ``True``, build the coarsening hierarchy with Graphviz SFDP's
-        matrix-based supervariable clustering instead of Dagua's historical
-        heavy-edge matching path.
+    fidelity_mode : bool or str or None, default=False
+        ``True`` or ``"graphviz"`` enables Graphviz-compatible matrix
+        coarsening and sequential in-place updates.
 
     Returns
     -------
@@ -396,27 +813,42 @@ def build_sfdp_pipeline(
     if steps < 0:
         raise ValueError("steps must be non-negative.")
 
+    graphviz_fidelity = _is_graphviz_fidelity_mode(fidelity_mode=fidelity_mode)
     hierarchy_op: Op
-    if fidelity_mode:
+    refine_op: Op
+    prolongate_op: Op
+    if graphviz_fidelity:
         hierarchy_op = BuildGraphvizSFDPMatrixHierarchy()
+        refine_op = _SFDPGraphvizRefineCoarsestLevel(
+            steps=steps,
+            theta=theta,
+            repulsive_exponent=repulsive_exponent,
+        )
+        prolongate_op = _SFDPGraphvizProlongateAndRefineLevels(
+            steps=steps,
+            theta=theta,
+            repulsive_exponent=repulsive_exponent,
+        )
     else:
         hierarchy_op = BuildSFDPHierarchy()
+        refine_op = SFDPRefineCoarsestLevel(
+            steps=steps,
+            theta=theta,
+            repulsive_exponent=repulsive_exponent,
+        )
+        prolongate_op = SFDPProlongateAndRefineLevels(
+            steps=steps,
+            theta=theta,
+            repulsive_exponent=repulsive_exponent,
+        )
 
     return Pipeline(
         [
             BuildSFDPGraph(),
             hierarchy_op,
             InitSFDPCoarsestPositions(),
-            SFDPRefineCoarsestLevel(
-                steps=steps,
-                theta=theta,
-                repulsive_exponent=repulsive_exponent,
-            ),
-            SFDPProlongateAndRefineLevels(
-                steps=steps,
-                theta=theta,
-                repulsive_exponent=repulsive_exponent,
-            ),
+            refine_op,
+            prolongate_op,
             SFDPFinalizePositions(),
         ],
         name="sfdp_pipeline",
@@ -433,7 +865,7 @@ def layout_sfdp_pipeline(
     repulsive_exponent: float = _DEFAULT_P,
     edge_weights: Optional[torch.Tensor] = None,
     direction: str = "TB",
-    fidelity_mode: bool = False,
+    fidelity_mode: SFDPFidelityMode = False,
 ) -> torch.Tensor:
     """Run the SFDP pipeline as a drop-in replacement.
 
@@ -459,8 +891,9 @@ def layout_sfdp_pipeline(
         Optional edge weights with shape ``[E]``.
     direction : str, default="TB"
         Requested layout flow direction: ``TB``, ``BT``, ``LR``, or ``RL``.
-    fidelity_mode : bool, default=False
-        Enable Graphviz-compatible matrix coarsening. Existing behavior remains
+    fidelity_mode : bool or str or None, default=False
+        ``True`` or ``"graphviz"`` enables Graphviz-compatible matrix
+        coarsening and sequential in-place updates. Existing behavior remains
         unchanged when this flag is ``False``.
 
     Returns
@@ -494,6 +927,7 @@ def layout_sfdp_pipeline(
             f"edge_weights length {edge_weights.shape[0]} does not match "
             f"edge count {edge_index.shape[1]}"
         )
+    _is_graphviz_fidelity_mode(fidelity_mode=fidelity_mode)
     if edge_index.numel() != 0:
         edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
         if int(edge_index_cpu.min().item()) < 0:
