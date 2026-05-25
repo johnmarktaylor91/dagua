@@ -10,7 +10,6 @@ from dagua.layout.ops.base import Pipeline
 from dagua.layout.ops.drl import (
     DRLFinalizePositions,
     DRLInitializePositions,
-    DRLInitialPositions,
     DrLOptions,
     DRLPhaseSolve,
     DRLPrepareState,
@@ -20,11 +19,7 @@ from dagua.layout.ops.graph_utils import layout_device
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
 
-def build_drl_pipeline(
-    options: DrLOptions = "default",
-    fidelity_mode: Optional[str] = None,
-    initial_positions: Optional[DRLInitialPositions] = None,
-) -> Pipeline:
+def build_drl_pipeline(options: DrLOptions = "default") -> Pipeline:
     """Build a Distributed Recursive Layout pipeline.
 
     Parameters
@@ -32,12 +27,6 @@ def build_drl_pipeline(
     options : str or Mapping[str, object] or OptionObject, default="default"
         DrL preset name or per-phase override container controlling the coarse,
         liquid, expansion, and final smoothing phases.
-    fidelity_mode : {"igraph"} or None, default=None
-        Optional reference-fidelity mode for initialization. ``"igraph"`` uses
-        the seed-matrix contract expected by igraph's DrL adapter.
-    initial_positions : torch.Tensor or sequence of sequence of float, optional
-        Explicit initial coordinate matrix with shape ``[N, 2]``. This is
-        forwarded to the initializer and overrides generated seed positions.
 
     Returns
     -------
@@ -49,10 +38,7 @@ def build_drl_pipeline(
     return Pipeline(
         [
             DRLPrepareState(config=DRLPrepareStateConfig(options=options)),
-            DRLInitializePositions(
-                fidelity_mode=fidelity_mode,
-                initial_positions=initial_positions,
-            ),
+            DRLInitializePositions(),
             DRLPhaseSolve(),
             DRLFinalizePositions(),
         ],
@@ -67,8 +53,6 @@ def layout_drl_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     options: DrLOptions = "default",
-    fidelity_mode: Optional[str] = None,
-    initial_positions: Optional[DRLInitialPositions] = None,
 ) -> torch.Tensor:
     """Run the Distributed Recursive Layout pipeline.
 
@@ -87,12 +71,6 @@ def layout_drl_pipeline(
         Optional positive edge-weight vector with shape ``[E]``.
     options : str or Mapping[str, object] or OptionObject, default="default"
         Preset name or mapping/object of per-phase overrides.
-    fidelity_mode : {"igraph"} or None, default=None
-        Optional reference-fidelity mode. ``"igraph"`` initializes with NumPy
-        ``RandomState(seed).uniform(-1, 1)`` when ``initial_positions`` is not
-        supplied.
-    initial_positions : torch.Tensor or sequence of sequence of float, optional
-        Explicit seed coordinate matrix with shape ``[N, 2]``.
 
     Returns
     -------
@@ -140,11 +118,7 @@ def layout_drl_pipeline(
     )
     state = SolveState()
     ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
-    final_state = build_drl_pipeline(
-        options=options,
-        fidelity_mode=fidelity_mode,
-        initial_positions=initial_positions,
-    ).apply(problem, state, ctx)
+    final_state = build_drl_pipeline(options=options).apply(problem, state, ctx)
 
     if final_state.pos is None:
         raise RuntimeError("DRL pipeline did not produce final positions.")
