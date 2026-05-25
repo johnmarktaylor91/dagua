@@ -28,6 +28,21 @@ from dagua.layout.ops.tsnet import (  # noqa: E402
 def build_tsnet_pipeline(steps: int = 1000, fidelity_mode: bool = False) -> Pipeline:
     """Build a tsNET layout pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: scikit-learn 1.8.0 t-SNE graph adapter / van der Maaten and
+        Hinton (2008), "Visualizing Data using t-SNE".
+    Fidelity mode: ``fidelity_mode=True`` uses sklearn-compatible NumPy
+        ``RandomState`` initialization and sklearn-style convergence checks.
+    Verified at: round_32 bounded subset median RMSD 0.398822; final
+        100-seed report marks TSNET variants partial match at median RMSD
+        0.151 to 0.276.
+    Known divergences:
+        - Dagua optimizes a dense exact objective, while sklearn's benchmark
+          target uses the Barnes-Hut path over a nearest-neighbor graph.
+        - The Round 31 ``c=4`` gradient-scale hypothesis was reverted after
+          direct gradient parity checks.
+
     Parameters
     ----------
     steps : int, default=1000

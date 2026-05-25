@@ -34,6 +34,19 @@ def build_pivot_mds_pipeline(
 ) -> Pipeline:
     """Build a Pivot-MDS pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: OGDF PivotMDS / Brandes and Pich (2007), "Eigensolver Methods
+        for Progressive Multidimensional Scaling of Large Data".
+    Fidelity mode: no single flag; reference callers use ``first_pivot`` /
+        ``first_pivot_index``, dtype, and ``distance_scale`` to match OGDF
+        variants.
+    Verified at: final 100-seed report, strong equivalent; median RMSD 0.000
+        across 10, 50, 100, and 200 pivot variants.
+    Known divergences:
+        - Pivot selection and distance preparation are native tensor/Python ops.
+        - Path graphs have an OGDF-style special case in the public wrapper.
+
     Parameters
     ----------
     n_pivots : int, default=50

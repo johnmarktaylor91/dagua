@@ -170,6 +170,21 @@ def build_sgd2_multi_pipeline(
 ) -> Pipeline:
     """Build an ``(SGD)^2`` multicriteria layout pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: historical ``(SGD)^2`` multi-criteria graph-drawing reference
+        sources from the graph-drawing project.
+    Fidelity mode: no dedicated flag; fidelity variants are controlled by
+        criteria weights, schedules, learning rate, and batch size.
+    Verified at: final 100-seed report had insufficient data for all
+        ``sgd2_multi`` variants; Round 33 audit found `/tmp/graph-drawing`
+        missing required ``gd2.py`` and ``criteria.py`` reference files.
+    Known divergences:
+        - Paired reference comparison cannot run until the historical upstream
+          source files or an equivalent wrapper are restored.
+        - Dagua's native multi-objective optimizer remains separate from the
+          installed ``s_gd2`` stress-only package.
+
     Parameters
     ----------
     steps : int, default=10000

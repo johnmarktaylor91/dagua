@@ -758,9 +758,16 @@ class CheckStressMajorizationEpsilon(Op):
             return state
         previous_value = float(previous)
         current_value = float(current)
-        scale = max(abs(previous_value), 1.0e-12)
-        relative_delta = abs(previous_value - current_value) / scale
-        if relative_delta <= self.epsilon or abs(current_value) <= self.epsilon:
+        # Graphviz neato divides by the previous stress value
+        # (``old_stress`` in stress.c) and uses only the absolute-stress guard
+        # as the zero-stress escape hatch.
+        if abs(current_value) <= self.epsilon:
+            state.converged = True
+            return state
+        if previous_value == 0.0:
+            return state
+        relative_delta = abs(previous_value - current_value) / previous_value
+        if relative_delta <= self.epsilon:
             state.converged = True
         return state
 

@@ -27,6 +27,7 @@ _FR_MIN_DISTANCE = 0.01
 _FR_LAST_DELTA_POS_KEY = "fr_last_delta_pos"
 _GRAPHOPT_COULOMBS_CONSTANT = 8_987_500_000.0
 _GRAPHOPT_MIN_DISTANCE = 1.0e-12
+_GRAPHOPT_MIN_DISTANCE_SQ = 1.0e-5
 _GRAPHOPT_MAX_REPULSION_DISTANCE = 500.0
 _LGL_MIN_DISTANCE = 1.0e-12
 _DENSITY_EPSILON_SCALE = 1.0
@@ -975,7 +976,9 @@ class InverseSquareRepulsion(Op):
         delta = pos[pair_source] - pos[pair_target]
         distance_sq = delta.square().sum(dim=1)
         max_repulsion_distance_sq = self.config.cutoff * self.config.cutoff
-        mask = (distance_sq > _GRAPHOPT_MIN_DISTANCE) & (distance_sq < max_repulsion_distance_sq)
+        mask = (distance_sq >= _GRAPHOPT_MIN_DISTANCE_SQ) & (
+            distance_sq < max_repulsion_distance_sq
+        )
         if not bool(mask.any().item()):
             return state
 
@@ -1140,10 +1143,11 @@ class UniformSpringAttraction(Op):
                 edge_weights * torch.linalg.vector_norm(delta, dim=1) / optimal_distance
             ).unsqueeze(1)
         elif self.config.k_formula == "explicit":
-            distance = torch.linalg.vector_norm(delta, dim=1)
-            mask = distance > _GRAPHOPT_MIN_DISTANCE
+            distance_sq = delta.square().sum(dim=1)
+            mask = distance_sq >= _GRAPHOPT_MIN_DISTANCE_SQ
             if not bool(mask.any().item()):
                 return state
+            distance = torch.sqrt(distance_sq)
             masked_distance = distance[mask]
             direction = delta[mask] / masked_distance.unsqueeze(1)
             stretch = (masked_distance - self.config.spring_length).abs()
@@ -1447,7 +1451,7 @@ class GraphOptIteration(Op):
             # evaluates the explicit force law, not the pair enumeration.
             delta = positions[pair_source] - positions[pair_target]
             distance_sq = delta.square().sum(dim=1)
-            mask = (distance_sq != 0.0) & (
+            mask = (distance_sq >= _GRAPHOPT_MIN_DISTANCE_SQ) & (
                 distance_sq < torch.as_tensor(max_repulsion_distance_sq, device=distance_sq.device)
             )
             if bool(mask.any().item()):
@@ -1468,9 +1472,10 @@ class GraphOptIteration(Op):
             source = spring_edges[0]
             target = spring_edges[1]
             delta = positions[source] - positions[target]
-            distance = torch.linalg.vector_norm(delta, dim=1)
-            mask = distance != 0.0
+            distance_sq = delta.square().sum(dim=1)
+            mask = distance_sq >= _GRAPHOPT_MIN_DISTANCE_SQ
             if bool(mask.any().item()):
+                distance = torch.sqrt(distance_sq)
                 masked_distance = distance[mask]
                 direction = delta[mask] / masked_distance.unsqueeze(1)
                 stretch = (masked_distance - float(self.config.spring_length)).abs()

@@ -47,7 +47,7 @@ def test_embedding_competitors_registered() -> None:
 
 @pytest.mark.smoke
 class TestNeuLay:
-    """Smoke coverage for the PyG-gated NeuLay competitor."""
+    """Smoke coverage for the recovered NeuLay competitor."""
 
     def test_available_check(self) -> None:
         """The availability probe should return a boolean.
@@ -64,7 +64,7 @@ class TestNeuLay:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The adapter should not benchmark Dagua's own NeuLay implementation."""
+        """The adapter should surface recovered-reference import failures."""
         monkeypatch.setattr(neulay_competitor, "_load_upstream_neulay", lambda: None)
         competitor = NeuLayReference()
         assert competitor.available() is False
@@ -86,8 +86,37 @@ class TestNeuLay:
             steps: int,
             gcn_steps: int,
             use_gcn: bool,
+            lr: float,
+            radius: float,
         ) -> torch.Tensor:
-            """Capture NeuLay adapter arguments for the regression test."""
+            """Capture NeuLay adapter arguments for the regression test.
+
+            Parameters
+            ----------
+            edge_index : torch.Tensor
+                Graph connectivity tensor with shape ``[2, E]``.
+            num_nodes : int
+                Number of graph nodes.
+            node_sizes : object
+                Node-size payload forwarded by the adapter.
+            seed : int
+                Random seed forwarded by the adapter.
+            steps : int
+                Total NeuLay optimization budget.
+            gcn_steps : int
+                GCN warm-start optimization budget.
+            use_gcn : bool
+                Whether the GCN phase is enabled.
+            lr : float
+                Direct-refinement learning rate.
+            radius : float
+                Gaussian repulsion radius.
+
+            Returns
+            -------
+            torch.Tensor
+                Zero-valued position tensor with shape ``[N, 2]``.
+            """
             observed["edge_shape"] = tuple(edge_index.shape)
             observed["num_nodes"] = num_nodes
             observed["node_sizes"] = node_sizes
@@ -95,6 +124,8 @@ class TestNeuLay:
             observed["steps"] = steps
             observed["gcn_steps"] = gcn_steps
             observed["use_gcn"] = use_gcn
+            observed["lr"] = lr
+            observed["radius"] = radius
             return torch.zeros((num_nodes, 2), dtype=torch.float32)
 
         monkeypatch.setattr(neulay_competitor, "_load_upstream_neulay", lambda: _fake_upstream)
@@ -109,10 +140,12 @@ class TestNeuLay:
         assert observed["steps"] == 20_000
         assert observed["gcn_steps"] == 2_000
         assert observed["use_gcn"] is True
+        assert observed["lr"] == 0.1
+        assert observed["radius"] == 0.4
 
     @pytest.mark.skipif(
         not NEULAY_AVAILABLE,
-        reason="torch_geometric not installed",
+        reason="recovered NeuLay reference unavailable",
     )
     def test_layout_returns_positions(self) -> None:
         """The adapter should return positions for a small graph.
@@ -123,7 +156,11 @@ class TestNeuLay:
             This test asserts on the returned position tensor.
         """
         graph = _make_small_graph()
-        result = NeuLayReference().layout(graph, timeout=30.0)
+        result = NeuLayReference().layout_with_variant(
+            graph,
+            timeout=30.0,
+            variant_params={"steps": 4, "gcn_steps": 0, "use_gcn": False},
+        )
         assert result.pos is not None
         assert result.pos.shape == (6, 2)
         assert result.error is None
