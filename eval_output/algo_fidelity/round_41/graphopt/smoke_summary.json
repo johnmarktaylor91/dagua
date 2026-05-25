@@ -1,0 +1,13 @@
+{
+  "overall_max_full_rmsd": 9.950840347330515e-09,
+  "overall_mean_full_rmsd": 7.089731185828302e-09,
+  "rows": 12,
+  "threshold": 0.005,
+  "topology_mean_full_rmsd": {
+    "clustered": 7.035760874545845e-09,
+    "grid": 6.903189589412268e-09,
+    "path": 6.7942804891681745e-09,
+    "star": 7.62569379018692e-09
+  },
+  "verdict": "pass"
+}
