@@ -463,7 +463,8 @@ def _attraction_force(
     edge_weights : torch.Tensor, optional
         Per-edge weights with shape ``[E]``.
     dissuade_hubs : bool, default=False
-        Whether to divide attraction by source-node mass a second time.
+        Whether to divide attraction by source-node mass when outbound
+        attraction distribution is disabled.
     edge_weight_influence : float, default=1.0
         Exponent applied to edge weights before attraction.
 
@@ -492,7 +493,7 @@ def _attraction_force(
 
     if outbound_attraction_distribution:
         factor = factor / mass.index_select(0, source)
-    if dissuade_hubs:
+    if dissuade_hubs and not outbound_attraction_distribution:
         factor = factor / mass.index_select(0, source)
     if edge_weights is not None:
         transformed_weights = edge_weights.to(dtype=pos.dtype, device=pos.device)
