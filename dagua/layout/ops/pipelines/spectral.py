@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -20,10 +20,55 @@ from dagua.layout.ops.state import (  # noqa: E402
 SPARSE_EIGEN_THRESHOLD = 500
 
 
+def _resolve_spectral_fidelity_mode(
+    fidelity_mode: Optional[Union[str, bool]],
+    networkx_fidelity: bool,
+) -> tuple[bool, bool]:
+    """Resolve reference-specific spectral compatibility flags.
+
+    Parameters
+    ----------
+    fidelity_mode : str | bool | None
+        Optional fidelity target. ``"networkx"`` preserves the historical
+        NetworkX path, ``"igraph"`` enables igraph Laplacian and eigenvector
+        selection semantics, and ``True`` maps to ``"igraph"`` for consistency
+        with other igraph-targeted pipelines.
+    networkx_fidelity : bool
+        Legacy NetworkX compatibility flag.
+
+    Returns
+    -------
+    tuple[bool, bool]
+        Resolved ``(networkx_fidelity, igraph_fidelity)`` flags.
+
+    Raises
+    ------
+    ValueError
+        If the requested fidelity mode is unsupported or conflicting.
+    """
+    if fidelity_mode is None or fidelity_mode is False:
+        return bool(networkx_fidelity), False
+    if fidelity_mode is True:
+        if networkx_fidelity:
+            raise ValueError("fidelity_mode=True conflicts with networkx_fidelity=True.")
+        return False, True
+
+    normalized_mode = str(fidelity_mode).lower()
+    if normalized_mode == "networkx":
+        return True, False
+    if normalized_mode == "igraph":
+        if networkx_fidelity:
+            raise ValueError("fidelity_mode='igraph' conflicts with networkx_fidelity=True.")
+        return False, True
+    raise ValueError("fidelity_mode must be one of None, False, True, 'networkx', or 'igraph'.")
+
+
 def build_spectral_pipeline(
     normalization: str = "symmetric",
     sparse_threshold: int = SPARSE_EIGEN_THRESHOLD,
     networkx_fidelity: bool = False,
+    fidelity_mode: Optional[Union[str, bool]] = None,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> Pipeline:
     """Build a spectral graph layout pipeline.
 
@@ -48,6 +93,10 @@ def build_spectral_pipeline(
     networkx_fidelity : bool, default=False
         Whether to mirror NetworkX spectral-layout edge cases and eigenvector
         selection while preserving the public Dagua default when disabled.
+    fidelity_mode : str | bool | None, default=None
+        Optional reference target. ``"igraph"`` mirrors igraph normalized
+        Laplacian and eigenvector selection details; ``"networkx"`` is
+        equivalent to ``networkx_fidelity=True``.
 
     Returns
     -------
@@ -65,14 +114,23 @@ def build_spectral_pipeline(
     if sparse_threshold <= 0:
         raise ValueError("sparse_threshold must be positive.")
 
-    effective_normalization = "unnormalized" if networkx_fidelity else normalization
+    networkx_mode, igraph_mode = _resolve_spectral_fidelity_mode(
+        fidelity_mode=fidelity_mode,
+        networkx_fidelity=networkx_fidelity,
+    )
+    effective_normalization = "unnormalized" if networkx_mode else normalization
     return Pipeline(
         [
             SpectralPrepareState(
                 normalization=effective_normalization,
-                networkx_fidelity=networkx_fidelity,
+                networkx_fidelity=networkx_mode,
+                igraph_fidelity=igraph_mode,
             ),
-            SpectralEmbed(sparse_threshold=sparse_threshold, networkx_fidelity=networkx_fidelity),
+            SpectralEmbed(
+                sparse_threshold=sparse_threshold,
+                networkx_fidelity=networkx_mode,
+                igraph_fidelity=igraph_mode,
+            ),
             SpectralFinalizePositions(),
         ],
         name="spectral_pipeline",
@@ -87,6 +145,8 @@ def layout_spectral_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     normalization: str = "symmetric",
     networkx_fidelity: bool = False,
+    fidelity_mode: Optional[Union[str, bool]] = None,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the spectral graph layout pipeline.
 
@@ -109,6 +169,10 @@ def layout_spectral_pipeline(
     networkx_fidelity : bool, default=False
         Whether to mirror NetworkX's unnormalized Laplacian, trivial two-node
         output, and eigenvector-selection behavior.
+    fidelity_mode : str | bool | None, default=None
+        Optional reference target. ``"igraph"`` mirrors igraph normalized
+        Laplacian and eigenvector selection details; ``"networkx"`` is
+        equivalent to ``networkx_fidelity=True``.
 
     Returns
     -------
@@ -145,6 +209,7 @@ def layout_spectral_pipeline(
     final_state = build_spectral_pipeline(
         normalization=normalization,
         networkx_fidelity=networkx_fidelity,
+        fidelity_mode=fidelity_mode,
     ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("Spectral pipeline did not produce final positions.")
