@@ -180,6 +180,90 @@ class _NoopDensityGrid:
         return 0.0
 
 
+class _ScriptedDensityGrid:
+    """Density-grid stub that makes igraph's candidate rule observable."""
+
+    def remove_node(self, node: int) -> None:
+        """Ignore node removal.
+
+        Parameters
+        ----------
+        node : int
+            Node index being removed.
+
+        Returns
+        -------
+        None
+            This stub does not track density state.
+        """
+        del node
+
+    def add_node(self, node: int, position: torch.Tensor) -> None:
+        """Ignore node insertion.
+
+        Parameters
+        ----------
+        node : int
+            Node index being inserted.
+        position : torch.Tensor
+            Coordinate tensor with shape ``[2]``.
+
+        Returns
+        -------
+        None
+            This stub does not track density state.
+        """
+        del node, position
+
+    def coarse_density(self, position: torch.Tensor) -> float:
+        """Return energies that favor old over perturbed coordinates.
+
+        Parameters
+        ----------
+        position : torch.Tensor
+            Candidate coordinate with shape ``[2]``.
+
+        Returns
+        -------
+        float
+            Synthetic energy keyed by x-coordinate.
+        """
+        x_value = float(position[0].item())
+        if abs(x_value) < 1.0e-12:
+            return 0.0
+        if abs(x_value - 1.0) < 1.0e-12:
+            return 10.0
+        return 1.0
+
+    def fine_density(
+        self,
+        node: int,
+        position: torch.Tensor,
+        positions: torch.Tensor,
+        config: DRLEnergyConfig,
+    ) -> float:
+        """Return zero fine density for non-simmer candidate tests.
+
+        Parameters
+        ----------
+        node : int
+            Node index under evaluation.
+        position : torch.Tensor
+            Candidate coordinate with shape ``[2]``.
+        positions : torch.Tensor
+            Full coordinate tensor with shape ``[N, 2]``.
+        config : DRLEnergyConfig
+            DRL energy constants.
+
+        Returns
+        -------
+        float
+            Always ``0.0``.
+        """
+        del node, position, positions, config
+        return 0.0
+
+
 def _assert_exact_match(direct: torch.Tensor, pipeline: torch.Tensor) -> None:
     """Assert that two DrL outputs match exactly.
 
@@ -278,6 +362,32 @@ class TestDRLPipelineFidelity:
             dtype=torch.float64,
         )
         torch.testing.assert_close(positions[0], expected)
+
+    def test_drl_candidate_acceptance_uses_old_vs_perturbed_energy(self) -> None:
+        """DrL should write analytic position when old energy beats perturbation."""
+        positions = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float64)
+        adjacency = [{1: 1.0}, {0: 1.0}]
+        update = DRLNodeUpdate(
+            phase_name="liquid",
+            fine_density=False,
+            energy_config=DRLEnergyConfig(jump_temperature_scale=1.0),
+        )
+
+        update.apply(
+            node=0,
+            positions=positions,
+            adjacency=adjacency,
+            rng=random.Random(7),
+            attraction=0.0,
+            temperature=1.0,
+            damping_mult=1.0,
+            min_edges=99.0,
+            cut_end=0.0,
+            cut_off_length=0.0,
+            density_grid=_ScriptedDensityGrid(),
+        )
+
+        torch.testing.assert_close(positions[0], torch.tensor([1.0, 0.0], dtype=torch.float64))
 
     def test_drl_edge_cutting_removes_only_current_neighbor_entry(self) -> None:
         """DrL edge cutting should preserve the reverse neighbor map like igraph."""
