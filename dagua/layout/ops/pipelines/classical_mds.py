@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
-import math
 from typing import Optional
 
 import torch
@@ -22,17 +20,8 @@ from dagua.layout.ops.state import (
     SolveState,
 )
 
-_OGDF_EDGE_COST = 100.0
-_OGDF_POWER_EPSILON = 1.0 - 1e-10
-_OGDF_CENTERING_FACTOR = -0.5
-_LIBC_RAND_MAX = 2_147_483_647
 
-
-def build_classical_mds_pipeline(
-    *,
-    igraph_fidelity: bool = False,
-    ogdf_fidelity: bool = False,
-) -> Pipeline:
+def build_classical_mds_pipeline(*, igraph_fidelity: bool = False) -> Pipeline:
     """Build a classical multidimensional scaling pipeline.
 
     Reference fidelity
@@ -53,8 +42,6 @@ def build_classical_mds_pipeline(
     igraph_fidelity : bool, default=False
         If ``True``, opt into igraph-compatible raw embedding and final scaling
         semantics for benchmark parity checks.
-    ogdf_fidelity : bool, default=False
-        Reserved for the public wrapper's OGDF-compatible full-PivotMDS path.
 
     Returns
     -------
@@ -64,8 +51,6 @@ def build_classical_mds_pipeline(
         the double-centered eigendecomposition, and finalizing the embedding
         into a 2D layout.
     """
-    if ogdf_fidelity:
-        raise ValueError("ogdf_fidelity is only supported by layout_classical_mds_pipeline.")
     return Pipeline(
         [
             ClassicalMDSDistanceMatrix(),
@@ -87,7 +72,6 @@ def layout_classical_mds_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     igraph_fidelity: bool = False,
-    ogdf_fidelity: bool = False,
 ) -> torch.Tensor:
     """Run the classical multidimensional scaling pipeline.
 
@@ -109,10 +93,6 @@ def layout_classical_mds_pipeline(
         If ``True``, ignore edge weights and use igraph-compatible embedding
         and scaling semantics. This is intended for fidelity benchmarking
         against ``igraph.layout("mds")``.
-    ogdf_fidelity : bool, default=False
-        If ``True``, run OGDF ``PivotMDS`` with all nodes as pivots. This
-        matches OGDF's documented classical-MDS mode and uses uniform edge cost
-        ``100`` plus OGDF's fixed ``srand(0)`` power-iteration basis.
 
     Returns
     -------
@@ -130,8 +110,6 @@ def layout_classical_mds_pipeline(
 
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
-    if igraph_fidelity and ogdf_fidelity:
-        raise ValueError("igraph_fidelity and ogdf_fidelity are mutually exclusive.")
     if edge_weights is not None:
         if edge_weights.ndim != 1:
             raise ValueError("edge_weights must have shape [E].")
@@ -139,8 +117,6 @@ def layout_classical_mds_pipeline(
             raise ValueError(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
-    if ogdf_fidelity:
-        return _layout_ogdf_classical_mds(edge_index=edge_index, num_nodes=num_nodes)
 
     problem = LayoutProblem(
         edge_index=edge_index,
@@ -158,204 +134,6 @@ def layout_classical_mds_pipeline(
     if final_state.pos is None:
         raise RuntimeError("Classical MDS pipeline did not produce final positions.")
     return final_state.pos
-
-
-def _layout_ogdf_classical_mds(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
-    """Run OGDF's all-pivots PivotMDS implementation.
-
-    Parameters
-    ----------
-    edge_index : torch.Tensor
-        Graph connectivity tensor with shape ``[2, E]``.
-    num_nodes : int
-        Number of graph nodes ``N``.
-
-    Returns
-    -------
-    torch.Tensor
-        Raw OGDF-compatible coordinates with shape ``[N, 2]``.
-
-    Raises
-    ------
-    ValueError
-        If the graph is disconnected, matching OGDF PivotMDS' connected-graph
-        precondition.
-    RuntimeError
-        If OGDF's power iteration diverges numerically.
-    """
-    if num_nodes == 0:
-        return torch.zeros((0, 2), dtype=torch.float32)
-    if num_nodes == 1:
-        return torch.zeros((1, 2), dtype=torch.float32)
-
-    adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
-    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
-    for edge_pos in range(int(edges.shape[1])):
-        source = int(edges[0, edge_pos].item())
-        target = int(edges[1, edge_pos].item())
-        if source == target:
-            continue
-        adjacency[source].append(target)
-        adjacency[target].append(source)
-
-    simple_neighbors = [list(dict.fromkeys(neighbors)) for neighbors in adjacency]
-    endpoints = [node for node, neighbors in enumerate(simple_neighbors) if len(neighbors) == 1]
-    if len(endpoints) == 2 and not any(
-        len(neighbors) > 2 or len(neighbors) == 0 for neighbors in simple_neighbors
-    ):
-        positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
-        previous = -1
-        current = endpoints[0]
-        for path_index in range(num_nodes):
-            positions[current, 0] = float(path_index) * _OGDF_EDGE_COST
-            next_nodes = [
-                neighbor for neighbor in simple_neighbors[current] if neighbor != previous
-            ]
-            previous, current = current, next_nodes[0] if next_nodes else -1
-            if current == -1 and path_index == num_nodes - 1:
-                return positions
-
-    visited = [False] * num_nodes
-    queue = [0]
-    visited[0] = True
-    head = 0
-    while head < len(queue):
-        node = queue[head]
-        head += 1
-        for neighbor in adjacency[node]:
-            if visited[neighbor]:
-                continue
-            visited[neighbor] = True
-            queue.append(neighbor)
-    if not all(visited):
-        raise ValueError("OGDF classical MDS fidelity requires a connected graph.")
-
-    pivot_matrix: list[list[float]] = []
-    min_distances = [math.inf] * num_nodes
-    pivot_node = 0
-    for _ in range(num_nodes):
-        distances = [math.inf] * num_nodes
-        distances[pivot_node] = 0.0
-        queue = [pivot_node]
-        head = 0
-        while head < len(queue):
-            node = queue[head]
-            head += 1
-            next_distance = distances[node] + _OGDF_EDGE_COST
-            for neighbor in adjacency[node]:
-                if math.isfinite(distances[neighbor]):
-                    continue
-                distances[neighbor] = next_distance
-                queue.append(neighbor)
-        pivot_matrix.append(distances)
-        min_distances[pivot_node] = 0.0
-        for node in range(num_nodes):
-            min_distances[node] = min(min_distances[node], distances[node])
-            if min_distances[node] > min_distances[pivot_node]:
-                pivot_node = node
-
-    normalization_factor = 0.0
-    col_normalization = [0.0] * num_nodes
-    for pivot_idx in range(num_nodes):
-        row_col_normalizer = 0.0
-        for node_idx in range(num_nodes):
-            row_col_normalizer += (
-                pivot_matrix[pivot_idx][node_idx] * pivot_matrix[pivot_idx][node_idx]
-            )
-        normalization_factor += row_col_normalizer
-        col_normalization[pivot_idx] = row_col_normalizer / float(num_nodes)
-    normalization_factor /= float(num_nodes * num_nodes)
-    for node_idx in range(num_nodes):
-        row_col_normalizer = 0.0
-        for pivot_idx in range(num_nodes):
-            square = pivot_matrix[pivot_idx][node_idx] * pivot_matrix[pivot_idx][node_idx]
-            pivot_matrix[pivot_idx][node_idx] = (
-                square + normalization_factor - col_normalization[pivot_idx]
-            )
-            row_col_normalizer += square
-        row_col_normalizer /= float(num_nodes)
-        for pivot_idx in range(num_nodes):
-            pivot_matrix[pivot_idx][node_idx] = _OGDF_CENTERING_FACTOR * (
-                pivot_matrix[pivot_idx][node_idx] - row_col_normalizer
-            )
-
-    product_matrix = [[0.0 for _ in range(num_nodes)] for _ in range(num_nodes)]
-    for row_idx in range(num_nodes):
-        for col_idx in range(row_idx + 1):
-            total = 0.0
-            for node_idx in range(num_nodes):
-                total += pivot_matrix[row_idx][node_idx] * pivot_matrix[col_idx][node_idx]
-            product_matrix[row_idx][col_idx] = total
-            product_matrix[col_idx][row_idx] = total
-
-    libc = ctypes.CDLL(None)
-    libc.srand(0)
-    eigenvectors = [
-        [float(libc.rand()) / float(_LIBC_RAND_MAX) for _ in range(num_nodes)] for _ in range(2)
-    ]
-    eigenvalues = [0.0, 0.0]
-    for dim_idx in range(2):
-        norm = math.sqrt(sum(value * value for value in eigenvectors[dim_idx]))
-        eigenvalues[dim_idx] = norm
-        if norm != 0.0:
-            eigenvectors[dim_idx] = [value / norm for value in eigenvectors[dim_idx]]
-
-    convergence = 0.0
-    while convergence < _OGDF_POWER_EPSILON:
-        if math.isnan(convergence) or math.isinf(convergence):
-            raise RuntimeError("OGDF classical MDS power iteration diverged.")
-        previous = [row.copy() for row in eigenvectors]
-        eigenvectors = [[0.0 for _ in range(num_nodes)] for _ in range(2)]
-        for dim_idx in range(2):
-            for row_idx in range(num_nodes):
-                for col_idx in range(num_nodes):
-                    eigenvectors[dim_idx][col_idx] += (
-                        product_matrix[row_idx][col_idx] * previous[dim_idx][row_idx]
-                    )
-        denominator = sum(value * value for value in eigenvectors[0])
-        factor = (
-            sum(eigenvectors[0][index] * eigenvectors[1][index] for index in range(num_nodes))
-            / denominator
-        )
-        for node_idx in range(num_nodes):
-            eigenvectors[1][node_idx] -= factor * eigenvectors[0][node_idx]
-        for dim_idx in range(2):
-            norm = math.sqrt(sum(value * value for value in eigenvectors[dim_idx]))
-            eigenvalues[dim_idx] = norm
-            if norm != 0.0:
-                eigenvectors[dim_idx] = [value / norm for value in eigenvectors[dim_idx]]
-        convergence = 1.0
-        for dim_idx in range(2):
-            product = sum(
-                eigenvectors[dim_idx][index] * previous[dim_idx][index]
-                for index in range(num_nodes)
-            )
-            convergence = min(convergence, abs(product))
-
-    coordinate_rows = [[0.0 for _ in range(num_nodes)] for _ in range(2)]
-    for dim_idx in range(2):
-        eigenvalues[dim_idx] = math.sqrt(eigenvalues[dim_idx])
-        for node_idx in range(num_nodes):
-            for pivot_idx in range(num_nodes):
-                coordinate_rows[dim_idx][node_idx] += (
-                    pivot_matrix[pivot_idx][node_idx] * eigenvectors[dim_idx][pivot_idx]
-                )
-    for dim_idx in range(2):
-        norm = math.sqrt(sum(value * value for value in coordinate_rows[dim_idx]))
-        if norm != 0.0:
-            coordinate_rows[dim_idx] = [value / norm for value in coordinate_rows[dim_idx]]
-    for dim_idx in range(2):
-        eigenvalues[dim_idx] = math.sqrt(eigenvalues[dim_idx])
-        for node_idx in range(num_nodes):
-            coordinate_rows[dim_idx][node_idx] *= eigenvalues[dim_idx]
-
-    return torch.tensor(
-        [
-            [coordinate_rows[0][node_idx], coordinate_rows[1][node_idx]]
-            for node_idx in range(num_nodes)
-        ],
-        dtype=torch.float32,
-    )
 
 
 __all__ = ["build_classical_mds_pipeline", "layout_classical_mds_pipeline"]
