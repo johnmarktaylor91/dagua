@@ -13,7 +13,9 @@ from typing import ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 import torch
 
 from dagua.layout.cycle import make_acyclic_robust
+from dagua.layout.ops._dot_mincross import graphviz_mincross
 from dagua.layout.ops.base import Op
+from dagua.layout.ops.pipelines.dot_rank import GraphvizVirtualEdge, graphviz_rank_assignment
 from dagua.layout.ops.state import (  # noqa: E402
     LayoutProblem,
     RuntimeContext,
@@ -38,6 +40,7 @@ _SUGIYAMA_TRACES_KEY = "sugiyama_traces"
 _SUGIYAMA_EXPANDED_POSITIONS_KEY = "sugiyama_expanded_positions"
 _SUGIYAMA_RANK_SEP_KEY = "sugiyama_rank_sep"
 _SUGIYAMA_NODE_SEP_KEY = "sugiyama_node_sep"
+_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY = "sugiyama_graphviz_virtual_edges"
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,9 @@ class _BarycenterOrderingConfig:
     center_coordinates : bool, default=True
         If ``False``, leave horizontal coordinates in their compacted
         left-anchored frame instead of centering the final span.
+    use_graphviz_mincross : bool, default=False
+        If ``True``, replace the default barycenter sweeps with Graphviz dot's
+        median/transpose mincross heuristic on the expanded adjacent-rank DAG.
     """
 
     barycenter_passes: int = 24
@@ -80,6 +86,7 @@ class _BarycenterOrderingConfig:
     stop_when_stable: bool = False
     use_incidence_barycenters: bool = False
     center_coordinates: bool = True
+    use_graphviz_mincross: bool = False
 
 
 @dataclass(frozen=True)
@@ -247,6 +254,72 @@ def _longest_path_layering(edge_index: torch.Tensor, num_nodes: int) -> torch.Te
         raise ValueError("graph must be acyclic after back-edge reversal")
 
     return torch.tensor(layers, dtype=torch.long)
+
+
+def _graphviz_layer_assignments(
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+    num_nodes: int,
+) -> Tuple[torch.Tensor, List[GraphvizVirtualEdge]]:
+    """Assign layers with the Graphviz dot network-simplex ranker.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Acyclic edge list with shape ``[2, E]`` on CPU.
+    edge_weights : torch.Tensor, optional
+        Optional edge-weight vector aligned to ``edge_index``.
+    num_nodes : int
+        Number of original graph nodes.
+
+    Returns
+    -------
+    tuple
+        Layer assignment tensor with shape ``[N]`` and virtual-edge
+        descriptors for long edges. The descriptors are stored for downstream
+        integration, while the existing dummy-expansion op still materializes
+        the actual dummy nodes used by this pipeline.
+    """
+    virtual_counter = 0
+
+    def virtual_node_factory(
+        tail: int,
+        head: int,
+        rank: int,
+        original_edge_index: int,
+    ) -> str:
+        """Return a deterministic Graphviz-style virtual node id.
+
+        Parameters
+        ----------
+        tail : int
+            Original edge tail.
+        head : int
+            Original edge head.
+        rank : int
+            Intermediate rank.
+        original_edge_index : int
+            Original edge index.
+
+        Returns
+        -------
+        str
+            Stable virtual node identifier for metadata.
+        """
+        nonlocal virtual_counter
+        value = f"_gv_v{virtual_counter}_{tail}_{head}_{rank}_{original_edge_index}"
+        virtual_counter += 1
+        return value
+
+    ranks, virtual_edges = graphviz_rank_assignment(
+        edges=edge_index,
+        virtual_node_factory=virtual_node_factory,
+        num_nodes=num_nodes,
+        edge_weights=edge_weights,
+        balance=True,
+    )
+    layers = [int(ranks.get(node, 0)) for node in range(num_nodes)]
+    return torch.tensor(layers, dtype=torch.long), virtual_edges
 
 
 def _group_nodes_by_layer(layer_assignments: torch.Tensor, num_nodes: int) -> List[List[int]]:
@@ -541,6 +614,7 @@ def _barycenter_ordering(
     stop_when_stable: bool,
     use_incidence_barycenters: bool,
     center_coordinates: bool,
+    use_graphviz_mincross: bool,
 ) -> Tuple[List[List[int]], List[torch.Tensor]]:
     """Minimize crossings via repeated barycenter sweeps.
 
@@ -582,6 +656,9 @@ def _barycenter_ordering(
         incidences directly.
     center_coordinates : bool
         Whether trace coordinate snapshots should center their final X span.
+    use_graphviz_mincross : bool
+        Whether to use Graphviz dot's median/transpose mincross heuristic
+        instead of the existing barycenter sweep.
 
     Returns
     -------
@@ -594,6 +671,32 @@ def _barycenter_ordering(
 
     del seed
     traces: List[torch.Tensor] = []
+    if use_graphviz_mincross:
+        edge_sources, edge_targets = _expanded_edge_index_from_neighbors(children)
+        edge_pairs = [
+            (int(source), int(target)) for source, target in zip(edge_sources, edge_targets)
+        ]
+        ordered_layers = graphviz_mincross(
+            ranks=ordered_layers,
+            edges=edge_pairs,
+            iterations=num_passes,
+        )
+        if trace_every > 0:
+            traces.append(
+                _coordinate_assignment(
+                    layers=ordered_layers,
+                    parents=parents,
+                    children=children,
+                    node_sizes=node_sizes,
+                    num_nodes=num_nodes,
+                    num_original_nodes=num_original_nodes,
+                    rank_sep=rank_sep,
+                    node_sep=node_sep,
+                    output_device=output_device,
+                    center_coordinates=center_coordinates,
+                )
+            )
+        return ordered_layers, traces
 
     for pass_num in range(num_passes):
         order_index = _node_order_map(ordered_layers)
@@ -644,6 +747,30 @@ def _barycenter_ordering(
             break
 
     return ordered_layers, traces
+
+
+def _expanded_edge_index_from_neighbors(
+    children: Sequence[Sequence[int]],
+) -> Tuple[List[int], List[int]]:
+    """Reconstruct edge pairs from child adjacency lists.
+
+    Parameters
+    ----------
+    children : sequence of sequence of int
+        Child adjacency indexed by source node.
+
+    Returns
+    -------
+    tuple of list[int]
+        Source and target node ids preserving adjacency-list order.
+    """
+    sources: List[int] = []
+    targets: List[int] = []
+    for source, target_nodes in enumerate(children):
+        for target in target_nodes:
+            sources.append(source)
+            targets.append(target)
+    return sources, targets
 
 
 def _neighbor_barycenters(
@@ -1519,14 +1646,29 @@ class _PrepareAcyclicEdges(Op):
 
 @register_op
 class _AssignLayers(Op):
-    """Assign nodes to layers via longest-path layering with promotion."""
+    """Assign nodes to layers via longest-path or Graphviz rank simplex."""
 
     name: ClassVar[str] = "sugiyama_assign_layers"
     category: ClassVar[OpCategory] = OpCategory.LAYERING
     reads: ClassVar[Tuple[str, ...]] = (f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",)
-    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_SUGIYAMA_LAYER_ASSIGNMENTS_KEY}",)
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_SUGIYAMA_LAYER_ASSIGNMENTS_KEY}",
+        f"extras.{_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY}",
+    )
     requires: ClassVar[Tuple[str, ...]] = (f"extras.{_SUGIYAMA_ACYCLIC_EDGES_KEY}",)
     access_pattern: ClassVar[str] = "global"
+
+    def __init__(self, fidelity_mode: Optional[str] = None) -> None:
+        """Initialize the layer-assignment operation.
+
+        Parameters
+        ----------
+        fidelity_mode : str, optional
+            Optional reference mode. ``"graphviz"`` uses the dot
+            network-simplex rank assignment; all other values keep the
+            existing longest-path-plus-promotion behavior.
+        """
+        self.fidelity_mode = fidelity_mode
 
     def apply(
         self,
@@ -1553,15 +1695,24 @@ class _AssignLayers(Op):
         del ctx
 
         acyclic_edges = state.extras[_SUGIYAMA_ACYCLIC_EDGES_KEY]
-        layer_assignments = _longest_path_layering(
-            edge_index=acyclic_edges,
-            num_nodes=problem.num_nodes,
-        )
-        layer_assignments = _promote_layer_assignments(
-            edge_index=acyclic_edges,
-            layer_assignments=layer_assignments,
-            num_nodes=problem.num_nodes,
-        )
+        if self.fidelity_mode == "graphviz":
+            layer_assignments, virtual_edges = _graphviz_layer_assignments(
+                edge_index=acyclic_edges,
+                edge_weights=state.extras[_SUGIYAMA_ACYCLIC_EDGE_WEIGHTS_KEY],
+                num_nodes=problem.num_nodes,
+            )
+            state.extras[_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY] = virtual_edges
+        else:
+            layer_assignments = _longest_path_layering(
+                edge_index=acyclic_edges,
+                num_nodes=problem.num_nodes,
+            )
+            layer_assignments = _promote_layer_assignments(
+                edge_index=acyclic_edges,
+                layer_assignments=layer_assignments,
+                num_nodes=problem.num_nodes,
+            )
+            state.extras[_SUGIYAMA_GRAPHVIZ_VIRTUAL_EDGES_KEY] = []
         state.extras[_SUGIYAMA_LAYER_ASSIGNMENTS_KEY] = layer_assignments
         return state
 
@@ -1724,6 +1875,7 @@ class _BarycenterOrdering(Op):
         stop_when_stable: bool = False,
         use_incidence_barycenters: bool = False,
         center_coordinates: bool = True,
+        use_graphviz_mincross: bool = False,
         *,
         config: Optional[_BarycenterOrderingConfig] = None,
     ) -> None:
@@ -1745,6 +1897,9 @@ class _BarycenterOrdering(Op):
             crossing-reduction semantics.
         center_coordinates : bool, default=True
             Whether trace snapshots should center horizontal coordinates.
+        use_graphviz_mincross : bool, default=False
+            Use Graphviz dot's median/transpose mincross heuristic instead of
+            the default barycenter ordering.
         config : _BarycenterOrderingConfig | None, optional
             Optional configuration. When provided, it takes precedence over
             the scalar arguments.
@@ -1761,6 +1916,7 @@ class _BarycenterOrdering(Op):
             stop_when_stable=stop_when_stable,
             use_incidence_barycenters=use_incidence_barycenters,
             center_coordinates=center_coordinates,
+            use_graphviz_mincross=use_graphviz_mincross,
         )
 
     def apply(
@@ -1813,6 +1969,7 @@ class _BarycenterOrdering(Op):
             stop_when_stable=self.config.stop_when_stable,
             use_incidence_barycenters=self.config.use_incidence_barycenters,
             center_coordinates=self.config.center_coordinates,
+            use_graphviz_mincross=self.config.use_graphviz_mincross,
         )
         state.extras[_SUGIYAMA_ORDERED_LAYERS_KEY] = ordered_layers
         state.extras[_SUGIYAMA_TRACES_KEY] = traces
