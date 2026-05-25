@@ -41,6 +41,7 @@ def build_sugiyama_pipeline(
     trace_every: int = 0,
     return_edge_routes: bool = False,
     fidelity_mode: Optional[str] = None,
+    fidelity_dtype: torch.dtype = torch.float32,
     center_coordinates: bool = True,
 ) -> Pipeline:
     """Build a Sugiyama layered graph-drawing pipeline.
@@ -139,6 +140,7 @@ def layout_sugiyama_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     return_edge_routes: bool = False,
     fidelity_mode: Optional[str] = None,
+    fidelity_dtype: torch.dtype = torch.float32,
     use_node_sizes_for_spacing: Optional[bool] = None,
     center_coordinates: Optional[bool] = None,
     config: Optional["LayoutConfig"] = None,
@@ -274,6 +276,7 @@ def layout_sugiyama_pipeline(
         trace_every=trace_every,
         return_edge_routes=return_edge_routes,
         fidelity_mode=fidelity_mode,
+        fidelity_dtype=fidelity_dtype,
         center_coordinates=center_coordinates,
     )
     final_state = pipeline.apply(problem, state, ctx)

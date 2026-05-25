@@ -36,6 +36,7 @@ def build_lgl_pipeline(
     use_edge_weights: bool = False,
     igraph_positive_maxchange: bool = True,
     fidelity_mode: bool = False,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> Pipeline:
     """Build a Large Graph Layout pipeline.
 
@@ -152,6 +153,7 @@ def layout_lgl_pipeline(
     use_edge_weights: bool = False,
     igraph_positive_maxchange: bool = True,
     fidelity_mode: bool = False,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the Large Graph Layout pipeline as a drop-in replacement.
 
@@ -266,6 +268,7 @@ def layout_lgl_pipeline(
         use_edge_weights=use_edge_weights,
         igraph_positive_maxchange=igraph_positive_maxchange,
         fidelity_mode=fidelity_mode,
+        fidelity_dtype=fidelity_dtype,
     ).apply(problem, state, ctx)
 
     if final_state.pos is None:

@@ -766,6 +766,7 @@ def build_sfdp_pipeline(
     theta: float = _DEFAULT_THETA,
     repulsive_exponent: float = _DEFAULT_P,
     fidelity_mode: SFDPFidelityMode = False,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> Pipeline:
     """Build an SFDP multilevel force-directed pipeline.
 
@@ -867,6 +868,7 @@ def layout_sfdp_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     direction: str = "TB",
     fidelity_mode: SFDPFidelityMode = False,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the SFDP pipeline as a drop-in replacement.
 
@@ -957,6 +959,7 @@ def layout_sfdp_pipeline(
         theta=theta,
         repulsive_exponent=repulsive_exponent,
         fidelity_mode=fidelity_mode,
+        fidelity_dtype=fidelity_dtype,
     ).apply(problem, state, ctx)
 
     if final_state.pos is None:

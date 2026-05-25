@@ -107,6 +107,7 @@ def layout_linlog_pipeline(
     r: float = 0.0,
     edge_weights: Optional[torch.Tensor] = None,
     fidelity_mode: bool = True,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the LinLog pipeline as a drop-in replacement.
 

@@ -30,6 +30,7 @@ def build_neulay_pipeline(
     magnitude: float | None = None,
     query_radius: float | None = None,
     fidelity_mode: str | None = None,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> Pipeline:
     """Build a NeuLay two-phase graph layout pipeline.
 
@@ -167,6 +168,7 @@ def layout_neulay_pipeline(
     magnitude: float | None = None,
     query_radius: float | None = None,
     fidelity_mode: str | None = None,
+    fidelity_dtype: torch.dtype = torch.float32,
     edge_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run the NeuLay two-phase graph layout pipeline.
@@ -299,6 +301,7 @@ def layout_neulay_pipeline(
         magnitude=magnitude,
         query_radius=query_radius,
         fidelity_mode=fidelity_mode,
+        fidelity_dtype=fidelity_dtype,
     ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("NeuLay pipeline did not produce final positions.")
