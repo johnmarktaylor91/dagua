@@ -814,17 +814,6 @@ class DRLNodeUpdate:
         )
         perturbed = analytic + random_offset
 
-        analytic_energy = _compute_energy(
-            node=node,
-            candidate=analytic,
-            positions=positions,
-            adjacency=adjacency,
-            attraction=attraction,
-            phase_name=self._phase_name,
-            density_grid=density_grid,
-            fine_density=self._fine_density,
-            config=self._energy_config,
-        )
         perturbed_energy = _compute_energy(
             node=node,
             candidate=perturbed,
@@ -837,12 +826,12 @@ class DRLNodeUpdate:
             config=self._energy_config,
         )
 
-        if analytic_energy < current_energy:
-            current = analytic
-            current_energy = analytic_energy
-        if perturbed_energy < current_energy:
-            current = perturbed
-        positions[node] = current
+        # igraph compares old-position energy to perturbed-position energy, but
+        # writes the analytic position when the old energy wins.
+        if current_energy < perturbed_energy:
+            positions[node] = analytic
+        else:
+            positions[node] = perturbed
         density_grid.add_node(node=node, position=positions[node])
 
 
