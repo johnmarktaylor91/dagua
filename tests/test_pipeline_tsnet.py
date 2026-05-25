@@ -194,8 +194,8 @@ def test_tsnet_fidelity_initializer_uses_numpy_random_state() -> None:
     torch.testing.assert_close(initialized.pos.detach().cpu(), expected)
 
 
-def test_tsnet_gradient_step_applies_sklearn_gradient_scale() -> None:
-    """The default TSNET step should scale the KL gradient like sklearn."""
+def test_tsnet_gradient_step_defaults_to_unit_gradient_scale() -> None:
+    """The default TSNET step should keep the native autograd gradient scale."""
     initial_pos = torch.tensor(
         [[-0.1, 0.2], [0.3, -0.4], [0.5, 0.1]],
         dtype=torch.float32,
@@ -209,25 +209,23 @@ def test_tsnet_gradient_step_applies_sklearn_gradient_scale() -> None:
         dtype=torch.float32,
     )
 
-    unit_state = _tsnet_gradient_state(initial_pos, probabilities)
-    scaled_state = _tsnet_gradient_state(initial_pos, probabilities)
+    explicit_state = _tsnet_gradient_state(initial_pos, probabilities)
+    default_state = _tsnet_gradient_state(initial_pos, probabilities)
 
-    unit_result = TsnetGradientStep(TsnetGradientStepConfig(gradient_scale=1.0)).apply(
+    explicit_result = TsnetGradientStep(TsnetGradientStepConfig(gradient_scale=1.0)).apply(
         LayoutProblem(edge_index=_path_edge_index(3), num_nodes=3),
-        unit_state,
+        explicit_state,
         RuntimeContext(),
     )
-    scaled_result = TsnetGradientStep().apply(
+    default_result = TsnetGradientStep().apply(
         LayoutProblem(edge_index=_path_edge_index(3), num_nodes=3),
-        scaled_state,
+        default_state,
         RuntimeContext(),
     )
 
-    assert unit_result.pos is not None
-    assert scaled_result.pos is not None
-    unit_delta = unit_result.pos.detach() - initial_pos
-    scaled_delta = scaled_result.pos.detach() - initial_pos
-    torch.testing.assert_close(scaled_delta, unit_delta * 4.0)
+    assert explicit_result.pos is not None
+    assert default_result.pos is not None
+    torch.testing.assert_close(default_result.pos.detach(), explicit_result.pos.detach())
 
 
 def _tsnet_gradient_state(initial_pos: torch.Tensor, probabilities: torch.Tensor) -> SolveState:
