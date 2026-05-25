@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Optional
 
 import torch
@@ -105,6 +106,7 @@ def layout_linlog_pipeline(
     a: float = 1.0,
     r: float = 0.0,
     edge_weights: Optional[torch.Tensor] = None,
+    fidelity_mode: bool = True,
 ) -> torch.Tensor:
     """Run the LinLog pipeline as a drop-in replacement.
 
@@ -127,6 +129,9 @@ def layout_linlog_pipeline(
         Repulsion exponent.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
+    fidelity_mode : bool, default=True
+        Use the Noack reference displacement kernel. Set to ``False`` to keep
+        the historical composable Adam-energy pipeline behavior.
 
     Returns
     -------
@@ -155,6 +160,26 @@ def layout_linlog_pipeline(
             raise ValueError(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
+
+    if fidelity_mode:
+        from dagua.eval.competitors.linlog_competitor import (
+            _layout_linlog_reference,
+            _resolve_config,
+        )
+
+        graph = SimpleNamespace(
+            num_nodes=num_nodes,
+            edge_index=edge_index,
+            edge_weights=edge_weights,
+            node_sizes=node_sizes,
+        )
+        config = _resolve_config({"steps": steps, "a": a, "r": r})
+        output_device = edge_index.device
+        if edge_index.numel() == 0 and node_sizes is not None:
+            output_device = node_sizes.device
+        return _layout_linlog_reference(graph=graph, config=config, seed=seed).to(
+            device=output_device
+        )
 
     problem = LayoutProblem(
         edge_index=edge_index,

@@ -169,6 +169,7 @@ class TestLinLogPipelineFidelity:
             num_nodes=num_nodes,
             steps=steps,
             seed=seed,
+            fidelity_mode=False,
         )
 
         _assert_exact_match(classic, pipeline)
@@ -191,6 +192,7 @@ class TestLinLogPipelineFidelity:
             steps=35,
             seed=17,
             edge_weights=edge_weights,
+            fidelity_mode=False,
         )
 
         _assert_exact_match(classic, pipeline)
@@ -200,7 +202,13 @@ class TestLinLogPipelineFidelity:
         edge_index = _disconnected_edge_index()
 
         classic = layout_linlog(edge_index=edge_index, num_nodes=9, steps=35, seed=99)
-        pipeline = layout_linlog_pipeline(edge_index=edge_index, num_nodes=9, steps=35, seed=99)
+        pipeline = layout_linlog_pipeline(
+            edge_index=edge_index,
+            num_nodes=9,
+            steps=35,
+            seed=99,
+            fidelity_mode=False,
+        )
 
         _assert_exact_match(classic, pipeline)
 
@@ -241,6 +249,7 @@ class TestLinLogPipelineFidelity:
             node_sizes=node_sizes,
             steps=35,
             seed=13,
+            fidelity_mode=False,
         )
 
         _assert_exact_match(classic, pipeline)
@@ -257,6 +266,7 @@ class TestLinLogPipelineFidelity:
             seed=23,
             a=2.0,
             r=1.0,
+            fidelity_mode=False,
         )
 
         _assert_exact_match(classic, pipeline)
