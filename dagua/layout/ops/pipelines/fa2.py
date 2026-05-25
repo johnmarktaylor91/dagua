@@ -39,7 +39,8 @@ class FA2Config:
     outbound_attraction_distribution : bool
         Whether to normalize attraction by source mass.
     dissuade_hubs : bool
-        Whether to further penalize hub attraction.
+        Whether to divide attraction by source mass when outbound attraction
+        distribution is disabled.
     edge_weight_influence : float
         Exponent applied to edge weights.
     barnes_hut : bool
@@ -181,7 +182,8 @@ def layout_fa2_pipeline(
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
     dissuade_hubs : bool, default=False
-        Whether to further penalize hub attraction.
+        Whether to divide attraction by source mass when outbound attraction
+        distribution is disabled.
     edge_weight_influence : float, default=1.0
         Exponent applied to edge weights during attraction.
     barnes_hut : bool, default=False
