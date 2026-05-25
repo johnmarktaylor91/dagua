@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple, Union
+import ctypes
+import math
+from typing import ClassVar, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from dagua.layout.ops.base import Pipeline
+from dagua.layout.ops.base import Op, Pipeline
 from dagua.layout.ops.distance import (
     PivotDistanceQueries,
     PivotDistanceQueriesConfig,
@@ -22,6 +24,11 @@ from dagua.layout.ops.state import (  # noqa: E402
     RuntimeContext,
     SolveState,
 )
+from dagua.layout.ops.taxonomy import OpCategory
+
+_OGDF_EPSILON = 1.0 - 1.0e-10
+_OGDF_FACTOR = -0.5
+_OGDF_RAND_MAX = 2147483647.0
 
 
 def build_pivot_mds_pipeline(
@@ -82,6 +89,16 @@ def build_pivot_mds_pipeline(
     if distance_scale <= 0.0:
         raise ValueError("distance_scale must be positive.")
     resolved_dtype = _resolve_compute_dtype(compute_dtype)
+    coordinate_op: Op
+    if _uses_ogdf_fidelity_coordinates(
+        first_pivot=first_pivot,
+        first_pivot_index=first_pivot_index,
+        compute_dtype=resolved_dtype,
+        distance_scale=distance_scale,
+    ):
+        coordinate_op = _OGDFPivotMDSComputeCoordinates()
+    else:
+        coordinate_op = PivotMDSComputeCoordinates(compute_dtype=resolved_dtype)
 
     return Pipeline(
         [
@@ -105,11 +122,347 @@ def build_pivot_mds_pipeline(
                     distance_scale=distance_scale,
                 ),
             ),
-            PivotMDSComputeCoordinates(compute_dtype=resolved_dtype),
+            coordinate_op,
             PivotMDSFinalizePositions(),
         ],
         name="pivot_mds_pipeline",
     )
+
+
+def _uses_ogdf_fidelity_coordinates(
+    first_pivot: str,
+    first_pivot_index: Optional[int],
+    compute_dtype: torch.dtype,
+    distance_scale: float,
+) -> bool:
+    """Return whether the pipeline is in the OGDF Pivot-MDS fidelity profile.
+
+    Parameters
+    ----------
+    first_pivot : str
+        Configured first-pivot strategy.
+    first_pivot_index : int | None
+        Explicit first-pivot override.
+    compute_dtype : torch.dtype
+        Internal distance and coordinate dtype.
+    distance_scale : float
+        Uniform graph-distance scale.
+
+    Returns
+    -------
+    bool
+        ``True`` when variant parameters match OGDF's unweighted Pivot-MDS
+        semantics closely enough to use the ported OGDF eigensolver.
+    """
+    return (
+        first_pivot == "first_node"
+        and first_pivot_index is None
+        and compute_dtype == torch.float64
+        and distance_scale == 100.0
+    )
+
+
+def _ogdf_center_pivot_matrix(distance_matrix: torch.Tensor) -> torch.Tensor:
+    """Apply OGDF's in-place Pivot-MDS centering formula.
+
+    Parameters
+    ----------
+    distance_matrix : torch.Tensor
+        Pivot-to-node distance matrix with shape ``[P, N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Centered pivot matrix with shape ``[P, N]`` and dtype ``float64``.
+    """
+    pivot_matrix = distance_matrix.detach().to(device="cpu", dtype=torch.float64).clone()
+    number_of_pivots = int(pivot_matrix.shape[0])
+    node_count = int(pivot_matrix.shape[1])
+    if number_of_pivots == 0 or node_count == 0:
+        return pivot_matrix
+
+    normalization_factor = 0.0
+    column_normalization = [0.0 for _ in range(number_of_pivots)]
+    for pivot_index in range(number_of_pivots):
+        row_col_normalizer = 0.0
+        for node_index in range(node_count):
+            value = float(pivot_matrix[pivot_index, node_index].item())
+            row_col_normalizer += value * value
+        normalization_factor += row_col_normalizer
+        column_normalization[pivot_index] = row_col_normalizer / float(node_count)
+    normalization_factor /= float(node_count * number_of_pivots)
+
+    for node_index in range(node_count):
+        row_col_normalizer = 0.0
+        for pivot_index in range(number_of_pivots):
+            value = float(pivot_matrix[pivot_index, node_index].item())
+            square = value * value
+            pivot_matrix[pivot_index, node_index] = (
+                square + normalization_factor - column_normalization[pivot_index]
+            )
+            row_col_normalizer += square
+        row_col_normalizer /= float(number_of_pivots)
+        for pivot_index in range(number_of_pivots):
+            pivot_matrix[pivot_index, node_index] = _OGDF_FACTOR * (
+                float(pivot_matrix[pivot_index, node_index].item()) - row_col_normalizer
+            )
+    return pivot_matrix
+
+
+def _ogdf_prod(left: torch.Tensor, right: torch.Tensor) -> float:
+    """Compute OGDF-style vector dot product in index order.
+
+    Parameters
+    ----------
+    left : torch.Tensor
+        First vector with shape ``[N]``.
+    right : torch.Tensor
+        Second vector with shape ``[N]``.
+
+    Returns
+    -------
+    float
+        Dot product accumulated in Python ``float`` precision.
+    """
+    result = 0.0
+    for index in range(int(left.shape[0])):
+        result += float(left[index].item()) * float(right[index].item())
+    return result
+
+
+def _ogdf_normalize(vector: torch.Tensor) -> float:
+    """Normalize a vector in place using OGDF's helper semantics.
+
+    Parameters
+    ----------
+    vector : torch.Tensor
+        Mutable vector with shape ``[N]`` and dtype ``float64``.
+
+    Returns
+    -------
+    float
+        Vector norm before normalization.
+    """
+    norm = math.sqrt(_ogdf_prod(vector, vector))
+    if norm != 0.0:
+        for index in range(int(vector.shape[0])):
+            vector[index] = float(vector[index].item()) / norm
+    return norm
+
+
+def _ogdf_random_matrix(row_count: int, column_count: int) -> torch.Tensor:
+    """Return OGDF's ``srand(0); rand() / RAND_MAX`` random matrix.
+
+    Parameters
+    ----------
+    row_count : int
+        Number of matrix rows.
+    column_count : int
+        Number of matrix columns.
+
+    Returns
+    -------
+    torch.Tensor
+        Random matrix with shape ``[row_count, column_count]``.
+    """
+    libc = ctypes.CDLL(None)
+    libc.srand(ctypes.c_uint(0))
+    matrix = torch.empty((row_count, column_count), dtype=torch.float64)
+    for row_index in range(row_count):
+        for column_index in range(column_count):
+            matrix[row_index, column_index] = float(libc.rand()) / _OGDF_RAND_MAX
+    return matrix
+
+
+def _ogdf_self_product(matrix: torch.Tensor) -> torch.Tensor:
+    """Compute ``matrix * matrix.T`` with OGDF's loop order.
+
+    Parameters
+    ----------
+    matrix : torch.Tensor
+        Input matrix with shape ``[P, N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Symmetric self product with shape ``[P, P]``.
+    """
+    row_count = int(matrix.shape[0])
+    column_count = int(matrix.shape[1])
+    result = torch.empty((row_count, row_count), dtype=torch.float64)
+    for row_index in range(row_count):
+        for other_index in range(row_index + 1):
+            value_sum = 0.0
+            for column_index in range(column_count):
+                value_sum += float(matrix[row_index, column_index].item()) * float(
+                    matrix[other_index, column_index].item()
+                )
+            result[row_index, other_index] = value_sum
+            result[other_index, row_index] = value_sum
+    return result
+
+
+def _ogdf_eigen_value_decomposition(
+    kernel: torch.Tensor,
+    dimension_count: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Run OGDF's simultaneous power-iteration eigensolver.
+
+    Parameters
+    ----------
+    kernel : torch.Tensor
+        Symmetric kernel matrix with shape ``[P, P]``.
+    dimension_count : int
+        Number of leading eigenvectors to compute.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Eigenvector rows with shape ``[dimension_count, P]`` and their norms.
+
+    Raises
+    ------
+    RuntimeError
+        If the OGDF convergence scalar becomes non-finite.
+    """
+    pivot_count = int(kernel.shape[0])
+    eigenvectors = _ogdf_random_matrix(dimension_count, pivot_count)
+    eigenvalues = torch.empty((dimension_count,), dtype=torch.float64)
+    for dimension_index in range(dimension_count):
+        eigenvalues[dimension_index] = _ogdf_normalize(eigenvectors[dimension_index])
+
+    convergence = 0.0
+    while convergence < _OGDF_EPSILON:
+        if math.isnan(convergence) or math.isinf(convergence):
+            raise RuntimeError("OGDF Pivot-MDS eigensolver failed to converge.")
+
+        old_vectors = eigenvectors.clone()
+        eigenvectors.zero_()
+        for dimension_index in range(dimension_count):
+            for row_index in range(pivot_count):
+                old_value = float(old_vectors[dimension_index, row_index].item())
+                for column_index in range(pivot_count):
+                    eigenvectors[dimension_index, column_index] += (
+                        float(kernel[row_index, column_index].item()) * old_value
+                    )
+
+        for dimension_index in range(dimension_count):
+            for previous_index in range(dimension_index):
+                denominator = _ogdf_prod(eigenvectors[previous_index], eigenvectors[previous_index])
+                factor = (
+                    _ogdf_prod(eigenvectors[previous_index], eigenvectors[dimension_index])
+                    / denominator
+                    if denominator != 0.0
+                    else 0.0
+                )
+                for column_index in range(pivot_count):
+                    eigenvectors[dimension_index, column_index] -= factor * float(
+                        eigenvectors[previous_index, column_index].item()
+                    )
+
+        for dimension_index in range(dimension_count):
+            eigenvalues[dimension_index] = _ogdf_normalize(eigenvectors[dimension_index])
+
+        convergence = 1.0
+        for dimension_index in range(dimension_count):
+            candidate = _ogdf_prod(eigenvectors[dimension_index], old_vectors[dimension_index])
+            if candidate < 0.0:
+                candidate *= -1.0
+            convergence = min(convergence, candidate)
+    return eigenvectors, eigenvalues
+
+
+def _ogdf_pivot_mds_coordinates(distance_matrix: torch.Tensor) -> torch.Tensor:
+    """Recover coordinates using OGDF's Pivot-MDS centering and SVD routine.
+
+    Parameters
+    ----------
+    distance_matrix : torch.Tensor
+        Pivot-to-node distance matrix with shape ``[P, N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Raw coordinates with shape ``[N, 2]`` and dtype ``float32``.
+    """
+    if int(distance_matrix.shape[0]) == 0:
+        return torch.zeros((int(distance_matrix.shape[1]), 2), dtype=torch.float32)
+
+    pivot_matrix = _ogdf_center_pivot_matrix(distance_matrix)
+    pivot_count = int(pivot_matrix.shape[0])
+    node_count = int(pivot_matrix.shape[1])
+    dimension_count = min(2, pivot_count)
+    if dimension_count == 0:
+        return torch.zeros((node_count, 2), dtype=torch.float32)
+
+    kernel = _ogdf_self_product(pivot_matrix)
+    temporary_vectors, eigenvalues = _ogdf_eigen_value_decomposition(kernel, dimension_count)
+
+    coordinates = torch.zeros((2, node_count), dtype=torch.float64)
+    singular_values = torch.empty((dimension_count,), dtype=torch.float64)
+    for dimension_index in range(dimension_count):
+        singular_values[dimension_index] = math.sqrt(
+            max(float(eigenvalues[dimension_index].item()), 0.0)
+        )
+        for node_index in range(node_count):
+            value_sum = 0.0
+            for pivot_index in range(pivot_count):
+                value_sum += float(pivot_matrix[pivot_index, node_index].item()) * float(
+                    temporary_vectors[dimension_index, pivot_index].item()
+                )
+            coordinates[dimension_index, node_index] = value_sum
+
+    for dimension_index in range(dimension_count):
+        _ogdf_normalize(coordinates[dimension_index])
+        scale = math.sqrt(max(float(singular_values[dimension_index].item()), 0.0))
+        for node_index in range(node_count):
+            coordinates[dimension_index, node_index] *= scale
+    return coordinates.transpose(0, 1).contiguous().to(dtype=torch.float32)
+
+
+class _OGDFPivotMDSComputeCoordinates(Op):
+    """Recover Pivot-MDS coordinates with the OGDF reference eigensolver."""
+
+    name: ClassVar[str] = "ogdf_pivot_mds_compute_coordinates"
+    category: ClassVar[OpCategory] = OpCategory.EMBED
+    reads: ClassVar[Tuple[str, ...]] = ("pivot_distances",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    requires: ClassVar[Tuple[str, ...]] = ("pivot_distances",)
+    access_pattern: ClassVar[str] = "global"
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compute raw coordinates from stored pivot distances.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs. Unused by this deterministic op.
+        state : SolveState
+            Mutable solve state containing ``pivot_distances``.
+        ctx : RuntimeContext
+            Execution context. Unused by this deterministic op.
+
+        Returns
+        -------
+        SolveState
+            State with ``state.pos`` populated.
+
+        Raises
+        ------
+        ValueError
+            If pivot distances are missing.
+        """
+        _ = problem
+        _ = ctx
+        if state.pivot_distances is None:
+            raise ValueError("_OGDFPivotMDSComputeCoordinates requires state.pivot_distances.")
+        state.pos = _ogdf_pivot_mds_coordinates(state.pivot_distances)
+        return state
 
 
 def _resolve_compute_dtype(compute_dtype: Union[torch.dtype, str]) -> torch.dtype:
