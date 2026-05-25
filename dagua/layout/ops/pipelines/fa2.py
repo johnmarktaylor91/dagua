@@ -267,6 +267,8 @@ class FA2Config:
         Jitter tolerance for adaptive speed control.
     fidelity_mode : bool
         Whether to run FA2 internal tensors in float64 for reference parity.
+    fidelity_dtype : torch.dtype
+        Internal dtype used when fidelity mode is enabled.
     """
 
     steps: int = 100
@@ -281,6 +283,7 @@ class FA2Config:
     barnes_hut_theta: float = 1.2
     jitter_tolerance: float = 1.0
     fidelity_mode: bool = False
+    fidelity_dtype: torch.dtype = torch.float64
 
 
 def build_fa2_pipeline(config: Optional[FA2Config] = None) -> Pipeline:
@@ -324,7 +327,7 @@ def build_fa2_pipeline(config: Optional[FA2Config] = None) -> Pipeline:
     if resolved.steps < 0:
         raise ValueError("steps must be non-negative.")
 
-    dtype = torch.float64 if resolved.fidelity_mode else torch.float32
+    dtype = resolved.fidelity_dtype if resolved.fidelity_mode else torch.float32
     return Pipeline(
         [
             ValidateFA2Inputs(
@@ -467,6 +470,7 @@ def layout_fa2_pipeline(
         barnes_hut=barnes_hut,
         barnes_hut_theta=barnes_hut_theta,
         fidelity_mode=fidelity_mode,
+        fidelity_dtype=fidelity_dtype,
     )
     problem = LayoutProblem(
         edge_index=edge_index,

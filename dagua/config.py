@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
+import torch
+
 if TYPE_CHECKING:
     from dagua.flex import LayoutFlex
 
@@ -25,7 +27,16 @@ class TunableParam:
 
 @dataclass
 class LayoutConfig:
-    """All tunable parameters for the layout engine."""
+    """All tunable parameters for the layout engine.
+
+    Parameters
+    ----------
+    fidelity_dtype : torch.dtype, default=torch.float32
+        Internal dtype used only by fidelity-mode engine adapters. Use
+        ``torch.float64`` to reproduce external double-precision references
+        more closely at additional runtime and memory cost. Public layout
+        outputs remain ``float32``.
+    """
 
     # Spacing
     # Bumped 28 -> 60, 50 -> 80 after holdout sweep
@@ -70,6 +81,7 @@ class LayoutConfig:
     lr: float = 0.05
     device: str = "cpu"
     seed: Optional[int] = 42
+    fidelity_dtype: torch.dtype = torch.float32
     multi_start_k: int = 1
     # Route degenerate-layering cyclic graphs (e.g. small_world)
     # to the stress-majorization pipeline instead of the layered native path.

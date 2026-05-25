@@ -38,6 +38,7 @@ def build_graphopt_pipeline(
     spring_constant: float = 1.0,
     max_sa_movement: float = 5.0,
     fidelity_mode: bool = False,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> Pipeline:
     """Build a GraphOpt force-directed layout pipeline.
 
@@ -142,6 +143,7 @@ def layout_graphopt_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     initial_pos: Optional[Any] = None,
     fidelity_mode: bool = False,
+    fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the GraphOpt force-directed layout pipeline.
 
@@ -226,6 +228,7 @@ def layout_graphopt_pipeline(
         spring_constant=spring_constant,
         max_sa_movement=max_sa_movement,
         fidelity_mode=fidelity_mode,
+        fidelity_dtype=fidelity_dtype,
     ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("GraphOpt pipeline did not produce final positions.")

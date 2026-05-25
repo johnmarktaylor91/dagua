@@ -1,0 +1,13 @@
+topology,seed,nodes,edges,before_rmsd,after_rmsd,dominant_component
+path,41,12,11,0.000000000,0.000000000,contour_offset_kernel
+path,42,12,11,0.000000000,0.000000000,contour_offset_kernel
+path,43,12,11,0.000000000,0.000000000,contour_offset_kernel
+star,41,13,12,0.000000000,0.000000000,contour_offset_kernel
+star,42,13,12,0.000000000,0.000000000,contour_offset_kernel
+star,43,13,12,0.000000000,0.000000000,contour_offset_kernel
+clustered,41,10,4,0.341828458,0.000000000,contour_offset_kernel
+clustered,42,10,4,0.341828458,0.000000000,contour_offset_kernel
+clustered,43,10,4,0.341828458,0.000000000,contour_offset_kernel
+grid,41,12,17,0.000000000,0.000000000,contour_offset_kernel
+grid,42,12,17,0.000000000,0.000000000,contour_offset_kernel
+grid,43,12,17,0.000000000,0.000000000,contour_offset_kernel

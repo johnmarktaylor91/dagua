@@ -210,6 +210,7 @@ def layout_spectral_pipeline(
         normalization=normalization,
         networkx_fidelity=networkx_fidelity,
         fidelity_mode=fidelity_mode,
+        fidelity_dtype=fidelity_dtype,
     ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("Spectral pipeline did not produce final positions.")
