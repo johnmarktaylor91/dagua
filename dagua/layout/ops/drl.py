@@ -650,7 +650,7 @@ def _maybe_cut_long_edge(
     min_edges: float,
     cut_off_length: float,
 ) -> None:
-    """Prune at most one long, high-stress edge for one node.
+    """Prune at most one long, high-stress outgoing edge for one node.
 
     Parameters
     ----------
@@ -659,7 +659,8 @@ def _maybe_cut_long_edge(
     positions : torch.Tensor
         Current coordinates with shape ``[N, 2]``.
     adjacency : list[dict[int, float]]
-        Mutable weighted adjacency.
+        Mutable weighted adjacency. igraph cuts only ``adjacency[node]``, so the
+        reverse neighbor map intentionally remains intact.
     min_edges : float
         Minimum current-node degree required before cutting is attempted.
     cut_off_length : float
@@ -668,7 +669,7 @@ def _maybe_cut_long_edge(
     Returns
     -------
     None
-        The adjacency may be mutated in place.
+        The current node's adjacency may be mutated in place.
     """
     neighbors = adjacency[node]
     if float(len(neighbors)) < min_edges or not neighbors:
@@ -677,8 +678,8 @@ def _maybe_cut_long_edge(
     centroid = _weighted_centroid(node=node, positions=positions, adjacency=adjacency)
     worst_neighbor = -1
     worst_score = -1.0
+    degree_factor = math.sqrt(float(len(neighbors)))
     for neighbor in neighbors:
-        degree_factor = math.sqrt(float(max(len(adjacency[neighbor]), 1)))
         delta = positions[neighbor] - centroid
         score = float(delta.dot(delta).item()) * degree_factor
         if score > worst_score:
@@ -687,7 +688,6 @@ def _maybe_cut_long_edge(
 
     if worst_neighbor >= 0 and worst_score > cut_off_length:
         adjacency[node].pop(worst_neighbor, None)
-        adjacency[worst_neighbor].pop(node, None)
 
 
 class DRLNodeUpdate:
