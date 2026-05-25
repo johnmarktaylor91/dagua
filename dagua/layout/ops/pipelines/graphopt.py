@@ -48,14 +48,15 @@ def build_graphopt_pipeline(
     Fidelity mode: ``fidelity_mode=True`` uses NumPy ``[-1, 1]`` seeded
         initial positions, ignores edge weights, and applies igraph-style
         near-zero force skip predicates.
-    Verified at: round_33 bounded subset median RMSD 0.043382; final
-        100-seed report ranges from partial to weak equivalent at median RMSD
-        0.105 to 0.173 depending on parameters.
+    Verified at: round_41 same-seed smoke mean Procrustes RMSD below 1e-8
+        against python-igraph 1.0.0 on path, star, clustered, and grid
+        topologies. All-seed-pair live-comparison summaries remain non-zero
+        because they intentionally include different seed pairings.
     Known divergences:
-        - The final 100-seed report still marks default/low-charge variants as
-          partial matches.
-        - Dagua retains explicit tensor ops and optional weighted behavior
-          outside fidelity mode.
+        - Raw coordinate frames can differ by rotation/reflection/translation
+          from python-igraph's returned Layout object; the fidelity metric is
+          Procrustes-aligned RMSD.
+        - Dagua retains optional weighted behavior outside fidelity mode.
 
     Parameters
     ----------
