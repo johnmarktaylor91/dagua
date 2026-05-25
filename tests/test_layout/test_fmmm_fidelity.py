@@ -13,7 +13,7 @@ from dagua.layout.ops.fmmm import (
     _RandomNodeSet,
     _unique_edges_with_lengths,
 )
-from dagua.layout.ops.pipelines.fmmm import layout_fmmm_pipeline
+from dagua.layout.ops.pipelines.fmmm import _graphviz_tile_pack_offsets, layout_fmmm_pipeline
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 
 
@@ -152,3 +152,73 @@ def test_fmmm_fidelity_mode_alias_returns_finite_positions() -> None:
 
     assert positions.shape == (3, 2)
     assert torch.isfinite(positions).all()
+
+
+def test_fmmm_graphviz_tile_pack_offsets_match_pack_c_golden_vectors() -> None:
+    """Verify the bbox tile packer against hand-captured pack.c vectors.
+
+    Returns
+    -------
+    None
+        The assertion validates offsets from Graphviz's ``computeStep``,
+        ``genBox``, perimeter sort, and spiral placement logic.
+    """
+    boxes = [
+        (0.0, 0.0, 10.0, 4.0),
+        (0.0, 0.0, 6.0, 6.0),
+        (0.0, 0.0, 3.0, 12.0),
+    ]
+
+    offsets = _graphviz_tile_pack_offsets(boxes)
+
+    assert offsets == [(7.0, -7.0), (7.0, 6.0), (-5.0, -10.0)]
+
+
+def test_fmmm_graphviz_tile_pack_offsets_handle_nonzero_box_origins() -> None:
+    """Verify pack translations preserve Graphviz's rounded lower-left shift.
+
+    Returns
+    -------
+    None
+        The assertion covers non-zero component boxes, including negative
+        lower-left coordinates.
+    """
+    boxes = [
+        (-2.0, -1.0, 7.0, 3.0),
+        (4.0, -3.0, 8.0, 10.0),
+        (0.0, 0.0, 2.0, 2.0),
+    ]
+
+    offsets = _graphviz_tile_pack_offsets(boxes)
+
+    assert offsets == [(9.0, -6.0), (-10.0, -7.0), (7.0, 6.0)]
+
+
+def test_fmmm_fidelity_mode_packs_disconnected_components_only_in_fidelity() -> None:
+    """Verify fdp tile packing is gated behind fidelity mode.
+
+    Returns
+    -------
+    None
+        The assertion checks that default behavior is preserved while fidelity
+        mode creates separated component boxes.
+    """
+    edge_index = torch.tensor([[0, 1, 3], [1, 2, 4]], dtype=torch.long)
+
+    default_positions = layout_fmmm_pipeline(
+        edge_index=edge_index,
+        num_nodes=6,
+        steps=4,
+        seed=13,
+    )
+    fidelity_positions = layout_fmmm_pipeline(
+        edge_index=edge_index,
+        num_nodes=6,
+        steps=4,
+        seed=13,
+        fidelity_mode=True,
+    )
+
+    assert default_positions.shape == fidelity_positions.shape == (6, 2)
+    assert torch.isfinite(fidelity_positions).all()
+    assert not torch.equal(default_positions, fidelity_positions)
