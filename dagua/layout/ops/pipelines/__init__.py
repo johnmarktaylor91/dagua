@@ -29,6 +29,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     ),
     "fa2": ("dagua.layout.ops.pipelines.fa2", "layout_fa2_pipeline"),
     "fmmm": ("dagua.layout.ops.pipelines.fmmm", "layout_fmmm_pipeline"),
+    "fcose": ("dagua.layout.ops.pipelines.fcose", "layout_fcose_pipeline"),
     "fr": ("dagua.layout.ops.pipelines.fr", "layout_fr_pipeline"),
     "gem": ("dagua.layout.ops.pipelines.gem", "layout_gem_pipeline"),
     "graphopt": ("dagua.layout.ops.pipelines.graphopt", "layout_graphopt_pipeline"),
@@ -86,6 +87,7 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
     "sugiyama": ("dagua.layout.ops.pipelines.sugiyama", "layout_sugiyama_pipeline"),
     "tsnet": ("dagua.layout.ops.pipelines.tsnet", "layout_tsnet_pipeline"),
     "umap": ("dagua.layout.ops.pipelines.umap_layout", "layout_umap_layout_pipeline"),
+    "yifanhu": ("dagua.layout.ops.pipelines.yifanhu", "layout_yifanhu_pipeline"),
 }
 
 

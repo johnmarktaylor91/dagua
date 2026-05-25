@@ -42,6 +42,22 @@ def build_stress_majorization_pipeline(
 ) -> Pipeline:
     """Build a stress-majorization (SMACOF) pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: OGDF stress majorization and Graphviz 7.0.5 neato / Gansner,
+        Koren, and North (2004), "Graph Drawing by Stress Majorization".
+    Fidelity mode: ``"ogdf"`` enables OGDF-style serial sweeps,
+        disconnected-distance fill, and no-jitter warm starts;
+        ``"graphviz_neato"`` enables neato shortest-path defaults, seeded
+        random initialization, Graphviz disconnected fill, unconstrained
+        SMACOF updates, and epsilon early termination.
+    Verified at: final 100-seed report, strong equivalent; median RMSD 0.059
+        to 0.092 across stress-majorization variants.
+    Known divergences:
+        - Exact Graphviz CG behavior and post-processing remain outside this
+          pipeline.
+        - OGDF and Graphviz modes share Dagua's composable tensor operators.
+
     Parameters
     ----------
     iterations : int, default=200

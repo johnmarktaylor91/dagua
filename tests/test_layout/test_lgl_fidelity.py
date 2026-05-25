@@ -14,6 +14,8 @@ from dagua.layout.ops.lgl import (
     _LGL_REPULSION_MIN_DISTANCE,
     LGLInitializePositions,
     _build_lgl_bfs_layers,
+    _lgl_clamped_grid_cell,
+    _lgl_grid_steps,
     _lgl_updated_maxchange,
 )
 from dagua.layout.ops.pipelines.lgl import layout_lgl_pipeline
@@ -198,9 +200,21 @@ def test_lgl_shell_one_uses_random_vectors_like_deeper_shells() -> None:
 
 
 def test_lgl_grid_and_repulsion_constants_match_igraph() -> None:
-    """Verify LGL uses igraph's sparse-grid neighbor set and repulsion epsilon."""
+    """Verify LGL uses igraph's neighbor-cell set and repulsion epsilon."""
     assert _LGL_BUCKET_NEIGHBOR_OFFSETS == ((0, 0), (1, 0), (0, 1), (1, 1))
     assert _LGL_REPULSION_MIN_DISTANCE == 1.0e-5
+
+
+def test_lgl_grid_cells_clamp_to_igraph_bounds() -> None:
+    """Verify LGL maps coordinates through igraph's bounded dense grid."""
+    radius = 5.0
+    cellsize = 3.0
+    steps = _lgl_grid_steps(radius=radius, cellsize=cellsize)
+
+    assert steps == 4
+    assert _lgl_clamped_grid_cell(-9.0, -5.0, radius, cellsize, steps) == (0, 0)
+    assert _lgl_clamped_grid_cell(9.0, 5.0, radius, cellsize, steps) == (3, 3)
+    assert _lgl_clamped_grid_cell(0.0, 0.0, radius, cellsize, steps) == (1, 1)
 
 
 def test_lgl_layer_boundaries_match_igraph_assumptions() -> None:

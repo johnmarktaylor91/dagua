@@ -35,6 +35,20 @@ def build_stress_sgd_pipeline(
 ) -> Pipeline:
     """Build a Stress-SGD layout pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: ``s_gd2`` 1.8.1 stress SGD / Zheng, Pawar, and Goodman (2018),
+        "Graph Drawing by Stochastic Gradient Descent".
+    Fidelity mode: ``fidelity_mode=True`` enables reference preprocessing,
+        disconnected-distance policy, float64 exact terms, and native term
+        traversal order for ``classic_stress_sgd`` comparisons.
+    Verified at: final 100-seed report, weak equivalent; median RMSD 0.035 to
+        0.049 across epsilon and step-count variants.
+    Known divergences:
+        - Approximate large-graph mode still uses Dagua's sample-budget policy.
+        - The fidelity contract is for stress-only SGD, not the unavailable
+          historical multi-criteria reference.
+
     Parameters
     ----------
     steps : int

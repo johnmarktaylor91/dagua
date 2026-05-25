@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 from dagua.eval.competitors import get_competitors
 from dagua.eval.competitors.cytoscape_fcose_competitor import CytoscapeFcose
 from dagua.eval.competitors.gephi_competitor import GephiYifanHu
-from dagua.eval.graphs import get_test_graphs
 from dagua.graph import DaguaGraph
 
 pytestmark = pytest.mark.smoke
@@ -22,9 +22,14 @@ def _small_test_graph() -> DaguaGraph:
     Returns
     -------
     DaguaGraph
-        First graph from the small evaluation corpus slice.
+        Six-node path graph with stable node IDs.
     """
-    return get_test_graphs(max_nodes=50)[0].graph
+    graph = DaguaGraph()
+    for node_idx in range(6):
+        graph.add_node(str(node_idx), label=str(node_idx))
+    for node_idx in range(5):
+        graph.add_edge(str(node_idx), str(node_idx + 1))
+    return graph
 
 
 def test_cytoscape_and_gephi_registered() -> None:
@@ -88,6 +93,33 @@ def test_cytoscape_fcose_layout() -> None:
     assert result.pos is not None, f"fcose failed: {result.error}"
     assert result.pos.shape == (graph.num_nodes, 2)
     assert result.error is None
+
+
+@pytest.mark.skipif(not FCOSE_AVAILABLE, reason="cytoscape-fcose not installed")
+def test_cytoscape_fcose_seed_changes_layout() -> None:
+    """The fcose helper should use the benchmark seed to drive random layout.
+
+    Returns
+    -------
+    None
+        Assertions validate same-seed reproducibility and different-seed
+        divergence through the Node.js helper.
+    """
+    graph = _small_test_graph()
+    competitor = CytoscapeFcose()
+
+    first = competitor.layout(graph, seed=42)
+    second = competitor.layout(graph, seed=42)
+    third = competitor.layout(graph, seed=43)
+
+    assert first.pos is not None, first.error
+    assert second.pos is not None, second.error
+    assert third.pos is not None, third.error
+    assert first.error is None
+    assert second.error is None
+    assert third.error is None
+    torch.testing.assert_close(first.pos, second.pos)
+    assert not torch.allclose(first.pos, third.pos)
 
 
 @pytest.mark.skipif(not GEPHI_AVAILABLE, reason="Gephi toolkit not available")

@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
-import torch
+from typing import Any
 
+import numpy as np
+import pytest
+import torch
+from scipy import sparse
+
+from dagua.layout.classic.umap_layout import layout_umap
+from dagua.layout.ops import umap as umap_ops
 from dagua.layout.ops.pipelines.umap_layout import layout_umap_layout_pipeline
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.umap import (
     StoreUMAPHyperparameters,
     _build_undirected_adjacency,
+    _connected_spectral_embedding,
+    _fit_ab,
     _knn_from_distances,
+    _make_tau_state,
     _optimize_embedding,
     _smooth_knn_dist,
     _spectral_initialization,
+    _tau_rand_int,
 )
 
 
@@ -90,6 +101,108 @@ def test_store_umap_hyperparameters_caps_neighbors_like_reference_adapter() -> N
     assert state.extras["umap_n_neighbors"] == 5
 
 
+def test_connected_spectral_embedding_uses_reference_arpack_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify connected spectral initialization uses umap-learn ARPACK settings."""
+    num_nodes = 100
+    rows = np.arange(num_nodes - 1)
+    cols = rows + 1
+    graph = sparse.csr_matrix(
+        (
+            np.ones((2 * (num_nodes - 1),), dtype=np.float64),
+            (np.concatenate([rows, cols]), np.concatenate([cols, rows])),
+        ),
+        shape=(num_nodes, num_nodes),
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_eigsh(
+        matrix: sparse.csr_matrix,
+        k: int,
+        which: str,
+        ncv: int,
+        v0: np.ndarray,
+        tol: float,
+        maxiter: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Capture ARPACK arguments and return deterministic eigenvectors."""
+        captured.update(
+            {
+                "shape": matrix.shape,
+                "k": k,
+                "which": which,
+                "ncv": ncv,
+                "v0": v0.copy(),
+                "tol": tol,
+                "maxiter": maxiter,
+            }
+        )
+        eigenvalues = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+        eigenvectors = np.column_stack(
+            [
+                np.ones((num_nodes,), dtype=np.float64),
+                np.linspace(0.0, 1.0, num_nodes),
+                np.linspace(1.0, 0.0, num_nodes),
+            ]
+        )
+        return eigenvalues, eigenvectors
+
+    monkeypatch.setattr(umap_ops.sparse_linalg, "eigsh", fake_eigsh)
+
+    coordinates = _connected_spectral_embedding(graph=graph)
+
+    assert coordinates.shape == (num_nodes, 2)
+    assert captured["shape"] == (num_nodes, num_nodes)
+    assert captured["k"] == 3
+    assert captured["which"] == "SM"
+    assert captured["ncv"] == 10
+    assert np.array_equal(captured["v0"], np.ones((num_nodes,), dtype=np.float64))
+    assert captured["tol"] == pytest.approx(1.0e-4)
+    assert captured["maxiter"] == 5 * num_nodes
+
+
+def test_fit_ab_uses_scipy_default_initial_guess(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify UMAP curve fitting leaves ``p0`` at SciPy's default ``(1, 1)``."""
+    captured: dict[str, Any] = {}
+
+    def fake_curve_fit(
+        function: object,
+        xdata: np.ndarray,
+        ydata: np.ndarray,
+        **kwargs: Any,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Capture curve-fit keyword arguments and return positive parameters."""
+        captured.update(kwargs)
+        assert function is umap_ops._curve_function
+        assert xdata.shape == ydata.shape
+        return np.array([1.0, 1.0], dtype=np.float64), np.eye(2, dtype=np.float64)
+
+    monkeypatch.setattr(umap_ops.optimize, "curve_fit", fake_curve_fit)
+
+    assert _fit_ab(min_dist=0.5, spread=2.0) == (1.0, 1.0)
+    assert "p0" not in captured
+    assert captured["maxfev"] == 10_000
+
+
+def test_tau_rand_int_uses_umap_per_source_state_sequence() -> None:
+    """Verify negative-sampling RNG states match umap-learn source rows."""
+    embedding = torch.tensor(
+        [[0.0, 0.0], [1.5, 0.0], [-2.25, 0.0], [10.0, 0.0]],
+        dtype=torch.float32,
+    )
+
+    state = _make_tau_state(embedding=embedding, seed=42)
+    draws = [[_tau_rand_int(state=state[row]) for _ in range(3)] for row in range(state.shape[0])]
+
+    assert draws == [
+        [1512524284, -1869814856, -86469464],
+        [-1507374596, 1334627390, 417043368],
+        [-1691923972, 2005724090, -447646465],
+        [-936949252, -562855019, -769362841],
+    ]
+
+
 def test_optimize_embedding_waits_until_first_sample_interval() -> None:
     """Verify UMAP SGD does not perform reference-forbidden epoch-zero updates."""
     embedding = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
@@ -165,16 +278,22 @@ def test_spectral_initialization_uses_random_init_for_small_umap_graphs() -> Non
     assert torch.allclose(coordinates.max(dim=0).values, torch.full((2,), 10.0), atol=1.0e-5)
 
 
-def test_layout_umap_tiny_graph_uses_reference_adapter_bypass() -> None:
-    """Verify ``N <= 3`` uses the seeded random adapter fallback."""
-    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(123)
-    expected = torch.randn((3, 2), generator=generator, dtype=torch.float32)
+def test_layout_umap_tiny_graph_matches_classic_adapter() -> None:
+    """Verify single-node handling remains bit-exact with classic UMAP."""
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+    expected = layout_umap(
+        edge_index=edge_index,
+        num_nodes=1,
+        n_neighbors=1,
+        n_epochs=50,
+        seed=123,
+    )
 
     coordinates = layout_umap_layout_pipeline(
         edge_index=edge_index,
-        num_nodes=3,
+        num_nodes=1,
+        n_neighbors=1,
+        n_epochs=50,
         seed=123,
     )
 

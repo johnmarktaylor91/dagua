@@ -14,6 +14,7 @@ from dagua.layout.ops.drl import (
     DRLPhaseDynamicsConfig,
     DRLPhaseStep,
     _build_undirected_adjacency,
+    _initialize_positions,
     _maybe_cut_long_edge,
     _PhaseParameters,
 )
@@ -367,6 +368,19 @@ def _run_pipeline_direct(
 
 class TestDRLPipelineFidelity:
     """Bit-exact wrapper coverage and igraph-fidelity regressions for DrL."""
+
+    def test_drl_fidelity_initialization_uses_igraph_rng(self) -> None:
+        """DrL fidelity initialization should draw from igraph's default RNG."""
+        positions = _initialize_positions(num_nodes=2, seed=42, fidelity_mode=True)
+
+        expected = torch.tensor(
+            [
+                [0.1372833197340555, 0.8403944871350837],
+                [0.984180570752184, 0.9225374031868425],
+            ],
+            dtype=torch.float64,
+        )
+        torch.testing.assert_close(positions, expected, rtol=0.0, atol=0.0)
 
     def test_drl_random_jump_uses_igraph_rng_sign(self) -> None:
         """DRL random jumps should use igraph's ``0.5 - RNG_UNIF01`` sign."""

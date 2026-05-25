@@ -128,6 +128,20 @@ def build_kk_pipeline(
 ) -> Pipeline:
     """Build a Kamada-Kawai spring-embedding pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: NetworkX 3.6.1 ``kamada_kawai_layout`` / Kamada and Kawai
+        (1989), "An Algorithm for Drawing General Undirected Graphs".
+    Fidelity mode: no dedicated flag; ``preserve_float64=True`` keeps audit
+        output in double precision.
+    Verified at: final 100-seed report, strong equivalent; median RMSD 0.000
+        across 100, 300, and 1000 iteration variants.
+    Known divergences:
+        - Wrapper-level post-flip may orient directed graphs top-to-bottom for
+          Dagua ergonomics.
+        - The pipeline is tensor-native after shortest-path preparation rather
+          than a direct NetworkX call.
+
     Parameters
     ----------
     steps : int, optional

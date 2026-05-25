@@ -31,6 +31,21 @@ def build_davidson_harel_pipeline(
 ) -> Pipeline:
     """Build a Davidson-Harel simulated-annealing pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: igraph 1.0.0 Davidson-Harel / Davidson and Harel (1996), "Drawing
+        Graphs Nicely Using Simulated Annealing".
+    Fidelity mode: no explicit flag; ``skip_finalization=True`` preserves the
+        igraph-style final coordinate contract used by benchmark variants.
+    Verified at: final 100-seed report, partial match; median RMSD 0.168 for
+        100 rounds and 0.194 for 50 rounds. The 200-round variant had
+        insufficient data.
+    Known divergences:
+        - Several final-report failures are from skipped or errored
+          reimplementation rows on bounded graphs.
+        - Seed forwarding is handled by the shared OGDF/igraph adapter path,
+          not this builder.
+
     Parameters
     ----------
     rounds : int, default=100
