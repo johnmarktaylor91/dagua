@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+import scipy.sparse as sp
 import torch
 
 from dagua.eval.competitors.fa2_competitor import _FA2_REFERENCE_PACKAGE_ORDER
@@ -159,3 +161,39 @@ def test_fa2_fidelity_mode_keeps_last_duplicate_edge_weight() -> None:
     weights = state.extras["fa2_undirected_weights"]
     assert isinstance(weights, torch.Tensor)
     torch.testing.assert_close(weights, torch.tensor([7.0], dtype=torch.float64))
+
+
+def test_fa2_fidelity_exact_kernel_matches_reference_loop() -> None:
+    """The exact fidelity kernel should match live ``fa2`` coordinates exactly."""
+    pytest.importorskip("fa2")
+    from fa2 import ForceAtlas2
+
+    edge_index = torch.tensor(
+        [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]],
+        dtype=torch.long,
+    )
+    rows = [0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10, 0, 11]
+    cols = [1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10, 0, 11, 0]
+    matrix = sp.csr_matrix((torch.ones(len(rows)).numpy(), (rows, cols)), shape=(12, 12)).tolil()
+    reference = torch.tensor(
+        ForceAtlas2(
+            outboundAttractionDistribution=True,
+            barnesHutOptimize=False,
+            scalingRatio=2.0,
+            gravity=1.0,
+            seed=0,
+            verbose=False,
+        ).forceatlas2(matrix, iterations=50),
+        dtype=torch.float64,
+    )
+    actual = layout_fa2_pipeline(
+        edge_index,
+        12,
+        steps=50,
+        seed=0,
+        outbound_attraction_distribution=True,
+        barnes_hut=False,
+        fidelity_mode=True,
+    )
+
+    torch.testing.assert_close(actual, reference, rtol=0.0, atol=0.0)
