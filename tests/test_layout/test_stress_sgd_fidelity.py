@@ -18,6 +18,7 @@ from dagua.layout.ops.pipelines.stress_sgd import (
     layout_stress_sgd_pipeline,
 )
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
+from dagua.layout.ops.stress_sgd import _build_exact_terms
 
 
 def _edge_index(edges: list[tuple[int, int]]) -> torch.Tensor:
@@ -106,6 +107,41 @@ def test_stress_sgd_fidelity_mode_uses_float64_exact_terms() -> None:
 
     assert state.extras["stress_sgd_distances"].dtype == "float64"
     assert state.extras["stress_sgd_weights"].dtype == "float64"
+
+
+def test_stress_sgd_reference_term_order_uses_bfs_discovery_order() -> None:
+    """Fidelity term order follows native ``s_gd2`` BFS discovery order."""
+    adjacency = [[(2, 1.0)], [(2, 1.0)], [(0, 1.0), (1, 1.0)]]
+
+    sources, targets, distances, _ = _build_exact_terms(
+        adjacency=adjacency,
+        weighted=False,
+        exact_float64_terms=True,
+        reference_term_order=True,
+    )
+
+    assert list(zip(sources.tolist(), targets.tolist(), distances.tolist())) == [
+        (0, 2, 1.0),
+        (0, 1, 2.0),
+        (1, 2, 1.0),
+    ]
+
+
+def test_stress_sgd_default_term_order_stays_target_sorted() -> None:
+    """Default exact terms preserve the historical target-index order."""
+    adjacency = [[(2, 1.0)], [(2, 1.0)], [(0, 1.0), (1, 1.0)]]
+
+    sources, targets, distances, _ = _build_exact_terms(
+        adjacency=adjacency,
+        weighted=False,
+        exact_float64_terms=True,
+    )
+
+    assert list(zip(sources.tolist(), targets.tolist(), distances.tolist())) == [
+        (0, 1, 2.0),
+        (0, 2, 1.0),
+        (1, 2, 1.0),
+    ]
 
 
 def test_stress_sgd_fidelity_mode_returns_zeros_for_edgeless_graph() -> None:
