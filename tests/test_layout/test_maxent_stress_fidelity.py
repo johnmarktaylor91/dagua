@@ -88,8 +88,24 @@ def test_maxent_majorization_distances_stay_float64() -> None:
     assert state.distance_matrix.dtype == torch.float64
 
 
-def test_maxent_majorization_path_init_uses_line_fast_path() -> None:
-    """Majorization warm start should match OGDF's simple-path line layout."""
+def test_maxent_majorization_unweighted_distances_use_ogdf_edge_cost() -> None:
+    """Unweighted majorization distances should match OGDF's edge cost scale."""
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=3, seed=42)
+
+    state = MaxentPrepareState(for_majorization=True).apply(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+    )
+
+    assert state.distance_matrix is not None
+    assert float(state.distance_matrix[0, 1].item()) == 100.0
+    assert float(state.distance_matrix[0, 2].item()) == 200.0
+
+
+def test_maxent_majorization_init_uses_runner_glibc_rand() -> None:
+    """Majorization warm start should match the OGDF runner-owned layout."""
     edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
     problem = LayoutProblem(edge_index=edge_index, num_nodes=4, seed=123)
 
@@ -100,8 +116,11 @@ def test_maxent_majorization_path_init_uses_line_fast_path() -> None:
     )
 
     assert state.pos is not None
-    assert torch.allclose(state.pos[:, 1], torch.zeros(4, dtype=torch.float64))
-    assert torch.allclose(state.pos[:, 0], torch.arange(4, dtype=torch.float64))
+    expected = torch.tensor(
+        [[39.3, 1.3], [87.3, 63.0], [27.9, 33.1], [19.5, 2.2]],
+        dtype=torch.float64,
+    )
+    assert torch.allclose(state.pos, expected)
 
 
 def test_maxent_step_variants_forward_ogdf_iterations() -> None:
