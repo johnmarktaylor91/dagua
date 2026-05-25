@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import networkx as nx
+import numpy as np
+import pytest
 import torch
+from scipy.spatial import procrustes
 
 from dagua.eval.competitors.classic_competitor import ClassicFR
+from dagua.eval.competitors.igraph_competitor import IgraphFR
 from dagua.graph import DaguaGraph
 from dagua.layout.ops.pipelines.fr import layout_fr_pipeline
 from dagua.layout.ops.preprocess import _build_fr_adjacency_matrix
@@ -27,6 +31,27 @@ def _edge_index(edges: list[tuple[int, int]]) -> torch.Tensor:
     if not edges:
         return torch.empty((2, 0), dtype=torch.long)
     return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+
+def _procrustes_rmsd(left: torch.Tensor, right: torch.Tensor) -> float:
+    """Compute Procrustes-aligned RMSD for two layouts.
+
+    Parameters
+    ----------
+    left : torch.Tensor
+        First position tensor with shape ``[N, 2]``.
+    right : torch.Tensor
+        Second position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Root mean squared aligned distance.
+    """
+    left_array = left.detach().cpu().numpy()
+    right_array = right.detach().cpu().numpy()
+    _, _, disparity = procrustes(left_array, right_array)
+    return float(np.sqrt(disparity / float(left_array.shape[0])))
 
 
 def _networkx_spring_tensor(
@@ -183,3 +208,22 @@ def test_fr_networkx_compat_honors_fixed_nodes_without_rescale() -> None:
 
     torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-4)
     torch.testing.assert_close(actual[0], initial[0].to(dtype=torch.float32))
+
+
+def test_fr_igraph_fidelity_matches_reference_adapter() -> None:
+    """The igraph fidelity path should match python-igraph's FR adapter."""
+    pytest.importorskip("igraph")
+    edges = [(index, index + 1) for index in range(7)] + [(0, 4), (2, 6)]
+    edge_index = _edge_index(edges)
+    graph = DaguaGraph.from_edge_index(edge_index, num_nodes=8)
+
+    actual = layout_fr_pipeline(
+        edge_index=edge_index,
+        num_nodes=8,
+        seed=3,
+        fidelity_mode="igraph",
+    )
+    expected = IgraphFR().layout(graph, seed=3).pos
+
+    assert expected is not None
+    assert _procrustes_rmsd(actual, expected) < 1.0e-3
