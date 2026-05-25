@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Callable, Optional
+import math
+from dataclasses import dataclass
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import torch
 
@@ -45,6 +47,118 @@ from dagua.layout.resolve import build_flex_constraints, normalize_node_sizes
 _COMPONENT_DOMINANCE_SKIP_FRACTION = 0.85
 _DOT_DEFAULT_RANK_CENTER_SEP = 72.0
 _DOT_DEFAULT_NODE_SEP = 18.0
+_DOT_AUX_EDGE_MINLEN = 1.0
+_DOT_VIRTUAL_EDGE_WEIGHT = 8.0
+
+
+@dataclass(frozen=True)
+class _DotClusterSkeleton:
+    """Graphviz-dot cluster skeleton counters for one cluster.
+
+    Parameters
+    ----------
+    name : str
+        Cluster name.
+    min_rank : int
+        Lowest member rank.
+    max_rank : int
+        Highest member rank.
+    rankleader_ranks : tuple[int, ...]
+        Rank represented by each virtual rankleader.
+    rankleader_uf_sizes : tuple[int, ...]
+        Union-find size counters after Graphviz's ``if size > 1: size--``
+        adjustment in ``build_skeleton``.
+    skeleton_edge_counts : tuple[int, ...]
+        Counts on virtual skeleton edges between adjacent ranks. Entry ``i``
+        is the count for ``rankleader_ranks[i] -> rankleader_ranks[i + 1]``.
+    """
+
+    name: str
+    min_rank: int
+    max_rank: int
+    rankleader_ranks: tuple[int, ...]
+    rankleader_uf_sizes: tuple[int, ...]
+    skeleton_edge_counts: tuple[int, ...]
+
+
+_GRAPHVIZ_DOT_FIDELITY_MODES = {
+    True,
+    "dot",
+    "graphviz_dot",
+    "graphviz-dot",
+    "dot_clusters",
+    "graphviz_dot_clusters",
+    "graphviz-dot-clusters",
+    "dot_position",
+    "graphviz_dot_position",
+    "graphviz-dot-position",
+}
+_GRAPHVIZ_DOT_FLAT_FIDELITY_MODES = {
+    True,
+    "dot",
+    "graphviz_dot",
+    "graphviz-dot",
+    "dot_flat",
+    "graphviz_dot_flat",
+    "graphviz-dot-flat",
+}
+
+
+@dataclass(frozen=True)
+class _DotFlatMetadata:
+    """Graphviz-dot flat/self/multi-edge preprocessing metadata.
+
+    Parameters
+    ----------
+    original_edge_count : int
+        Number of input edges before fidelity preprocessing.
+    representative_edge_ids : torch.Tensor
+        Original edge ids kept for node-placement constraints with shape
+        ``[E_kept]``.
+    self_loop_edge_ids : torch.Tensor
+        Original self-loop edge ids with shape ``[E_self]``.
+    duplicate_edge_ids : torch.Tensor
+        Original non-representative multi-edge ids with shape ``[E_dup]``.
+    flat_edge_ids : torch.Tensor
+        Original same-rank, non-self edge ids with shape ``[E_flat]``.
+    flat_adjacent_mask : torch.Tensor
+        Boolean adjacency flags aligned with ``flat_edge_ids``. The flag
+        mirrors Graphviz ``checkFlatAdjacent``: endpoints are adjacent if no
+        normal node or labeled virtual node lies between them on the rank.
+    flat_representative_edge_ids : torch.Tensor
+        Representative original edge id for each flat edge in
+        ``flat_edge_ids``. Duplicate flat edges inherit their class
+        representative, matching Graphviz's ``ND_other`` handling.
+    """
+
+    original_edge_count: int
+    representative_edge_ids: torch.Tensor
+    self_loop_edge_ids: torch.Tensor
+    duplicate_edge_ids: torch.Tensor
+    flat_edge_ids: torch.Tensor
+    flat_adjacent_mask: torch.Tensor
+    flat_representative_edge_ids: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _DotFlatPreprocessResult:
+    """Result of Graphviz-dot edge preprocessing for native layout.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor after fidelity-only self-loop and multi-edge filtering
+        with shape ``[2, E_kept]``.
+    edge_weights : torch.Tensor, optional
+        Edge weights aligned with ``edge_index`` when input weights were
+        supplied.
+    metadata : _DotFlatMetadata
+        Edge-classification metadata retained for route/label integration.
+    """
+
+    edge_index: torch.Tensor
+    edge_weights: Optional[torch.Tensor]
+    metadata: _DotFlatMetadata
 
 
 def _is_cuda_oom_error(exc: BaseException) -> bool:
@@ -62,6 +176,876 @@ def _is_cuda_oom_error(exc: BaseException) -> bool:
     """
     message = str(exc).lower()
     return "cuda" in message and "out of memory" in message
+
+
+def _is_graphviz_dot_fidelity_mode(fidelity_mode: Any) -> bool:
+    """Return whether a fidelity selector requests Graphviz dot semantics.
+
+    Parameters
+    ----------
+    fidelity_mode : Any
+        User or caller supplied fidelity selector. Supported selectors are
+        ``True``, ``"dot"``, ``"graphviz_dot"``, and ``"graphviz-dot"``.
+
+    Returns
+    -------
+    bool
+        ``True`` when Graphviz-dot fidelity preprocessing should run.
+    """
+    if isinstance(fidelity_mode, str):
+        return fidelity_mode.strip().lower() in _GRAPHVIZ_DOT_FIDELITY_MODES
+    return fidelity_mode in _GRAPHVIZ_DOT_FIDELITY_MODES
+
+
+def _is_graphviz_dot_position_fidelity_mode(fidelity_mode: Any) -> bool:
+    """Return whether fidelity mode requests the dot x-position port.
+
+    Parameters
+    ----------
+    fidelity_mode : Any
+        User or caller supplied fidelity selector.
+
+    Returns
+    -------
+    bool
+        ``True`` for the narrow position-simplex selectors. Broader
+        Graphviz-dot selectors are left to the integration codex so this
+        sub-component does not hijack sibling cluster, flat-edge, or rank
+        ports while they are being developed in parallel.
+    """
+    if not isinstance(fidelity_mode, str):
+        return False
+    return fidelity_mode.strip().lower() in {
+        "dot_position",
+        "graphviz_dot_position",
+        "graphviz-dot-position",
+    }
+
+
+def _is_graphviz_dot_flat_fidelity_mode(fidelity_mode: Any) -> bool:
+    """Return whether fidelity mode requests the dot flat-edge port.
+
+    Parameters
+    ----------
+    fidelity_mode : Any
+        User or caller supplied fidelity selector.
+
+    Returns
+    -------
+    bool
+        ``True`` for Graphviz-dot's flat/self/multi-edge preprocessing
+        selectors. Sibling narrow modes such as ``"dot_position"`` are left
+        alone so parallel sub-components can be tested independently.
+    """
+    if isinstance(fidelity_mode, str):
+        return fidelity_mode.strip().lower() in _GRAPHVIZ_DOT_FLAT_FIDELITY_MODES
+    return fidelity_mode in _GRAPHVIZ_DOT_FLAT_FIDELITY_MODES
+
+
+def _is_graphviz_dot_cluster_fidelity_mode(fidelity_mode: Any) -> bool:
+    """Return whether fidelity mode requests the dot cluster port.
+
+    Parameters
+    ----------
+    fidelity_mode : Any
+        User or caller supplied fidelity selector.
+
+    Returns
+    -------
+    bool
+        ``True`` for Graphviz-dot's cluster skeleton/layout selectors.
+    """
+    if isinstance(fidelity_mode, str):
+        return fidelity_mode.strip().lower() in {
+            "dot",
+            "graphviz_dot",
+            "graphviz-dot",
+            "dot_clusters",
+            "graphviz_dot_clusters",
+            "graphviz-dot-clusters",
+        }
+    return fidelity_mode is True
+
+
+def _empty_long_tensor(device: torch.device) -> torch.Tensor:
+    """Return an empty long tensor on ``device``.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device for the tensor allocation.
+
+    Returns
+    -------
+    torch.Tensor
+        Empty ``torch.long`` tensor with shape ``[0]``.
+    """
+    return torch.empty(0, dtype=torch.long, device=device)
+
+
+def _edge_id_tensor(edge_ids: list[int], device: torch.device) -> torch.Tensor:
+    """Materialize edge ids as a long tensor.
+
+    Parameters
+    ----------
+    edge_ids : list[int]
+        Edge identifiers in original input order.
+    device : torch.device
+        Device for the output tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Long tensor with shape ``[len(edge_ids)]``.
+    """
+    if not edge_ids:
+        return _empty_long_tensor(device)
+    return torch.tensor(edge_ids, dtype=torch.long, device=device)
+
+
+def _dot_flat_adjacency_mask(
+    edge_index: torch.Tensor,
+    layer_assignments: torch.Tensor,
+    order_assignments: torch.Tensor,
+    node_is_normal: Optional[torch.Tensor] = None,
+    virtual_label_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Mark Graphviz-dot adjacent same-rank edges.
+
+    This is the tensor-facing port of ``checkFlatAdjacent`` in
+    ``lib/dotgen/flat.c``. A flat edge is adjacent when no normal node and no
+    labeled virtual node lies strictly between its endpoints in rank order.
+    Unlabeled virtual nodes do not block adjacency.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    layer_assignments : torch.Tensor
+        Rank id for each node with shape ``[N]``.
+    order_assignments : torch.Tensor
+        Within-rank order for each node with shape ``[N]``.
+    node_is_normal : torch.Tensor, optional
+        Boolean mask with shape ``[N]``. ``True`` nodes block adjacency.
+        Defaults to all nodes normal, which is correct for Dagua's current
+        pre-routing node-placement interface.
+    virtual_label_mask : torch.Tensor, optional
+        Boolean mask with shape ``[N]``. Labeled virtual nodes block adjacency.
+
+    Returns
+    -------
+    torch.Tensor
+        Boolean mask with shape ``[E]``. Only non-self same-rank edges can be
+        marked ``True``.
+    """
+    device = edge_index.device
+    edge_count = int(edge_index.shape[1]) if edge_index.numel() > 0 else 0
+    adjacent = torch.zeros(edge_count, dtype=torch.bool, device=device)
+    if edge_count == 0:
+        return adjacent
+
+    ranks = layer_assignments.to(device=device, dtype=torch.long)
+    orders = order_assignments.to(device=device, dtype=torch.long)
+    node_count = int(ranks.numel())
+    if node_is_normal is None:
+        normal = torch.ones(node_count, dtype=torch.bool, device=device)
+    else:
+        normal = node_is_normal.to(device=device, dtype=torch.bool)
+    if virtual_label_mask is None:
+        labeled_virtual = torch.zeros(node_count, dtype=torch.bool, device=device)
+    else:
+        labeled_virtual = virtual_label_mask.to(device=device, dtype=torch.bool)
+    blockers = normal | labeled_virtual
+    nodes = torch.arange(node_count, dtype=torch.long, device=device)
+
+    src = edge_index[0].to(dtype=torch.long)
+    tgt = edge_index[1].to(dtype=torch.long)
+    for edge_id in range(edge_count):
+        tail = int(src[edge_id].item())
+        head = int(tgt[edge_id].item())
+        if tail == head or int(ranks[tail].item()) != int(ranks[head].item()):
+            continue
+        lo = min(int(orders[tail].item()), int(orders[head].item()))
+        hi = max(int(orders[tail].item()), int(orders[head].item()))
+        if hi - lo <= 1:
+            adjacent[edge_id] = True
+            continue
+        between = (ranks == ranks[tail]) & (orders > lo) & (orders < hi)
+        if not bool((blockers[nodes[between]]).any().item()):
+            adjacent[edge_id] = True
+    return adjacent
+
+
+def _default_rank_order(layer_assignments: torch.Tensor) -> torch.Tensor:
+    """Return stable within-rank order derived from node id order.
+
+    Parameters
+    ----------
+    layer_assignments : torch.Tensor
+        Rank id for each node with shape ``[N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Within-rank order tensor with shape ``[N]``.
+    """
+    ranks = layer_assignments.to(dtype=torch.long)
+    order = torch.zeros_like(ranks)
+    for rank in torch.unique(ranks, sorted=True):
+        idx = torch.nonzero(ranks == rank, as_tuple=False).squeeze(1)
+        if idx.numel() > 0:
+            order[idx] = torch.arange(idx.numel(), dtype=torch.long, device=ranks.device)
+    return order
+
+
+def _dot_flat_preprocess_edges(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor] = None,
+    layer_assignments: Optional[torch.Tensor] = None,
+    order_assignments: Optional[torch.Tensor] = None,
+) -> _DotFlatPreprocessResult:
+    """Apply Graphviz-dot flat/self/multi-edge handling for placement.
+
+    Graphviz dot does not let self-loops or duplicate non-representative
+    edges multiply rank/coordinate constraints. The representative edge is
+    kept for node placement; self-loops and duplicate class members remain in
+    metadata for later edge routing. Same-rank edge adjacency is recorded
+    using the exact ``checkFlatAdjacent`` blocker rule from ``flat.c`` when
+    rank assignments are available.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Original edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+    layer_assignments : torch.Tensor, optional
+        Optional rank id for each node with shape ``[N]``.
+    order_assignments : torch.Tensor, optional
+        Optional within-rank node order with shape ``[N]``. When omitted and
+        ranks are available, node id order within each rank is used.
+
+    Returns
+    -------
+    _DotFlatPreprocessResult
+        Filtered edge tensor, aligned weights, and Graphviz-dot metadata.
+    """
+    device = edge_index.device
+    edge_count = int(edge_index.shape[1]) if edge_index.numel() > 0 else 0
+    if edge_count == 0:
+        metadata = _DotFlatMetadata(
+            original_edge_count=0,
+            representative_edge_ids=_empty_long_tensor(device),
+            self_loop_edge_ids=_empty_long_tensor(device),
+            duplicate_edge_ids=_empty_long_tensor(device),
+            flat_edge_ids=_empty_long_tensor(device),
+            flat_adjacent_mask=torch.empty(0, dtype=torch.bool, device=device),
+            flat_representative_edge_ids=_empty_long_tensor(device),
+        )
+        return _DotFlatPreprocessResult(
+            edge_index=edge_index,
+            edge_weights=edge_weights,
+            metadata=metadata,
+        )
+
+    src = edge_index[0].to(dtype=torch.long)
+    tgt = edge_index[1].to(dtype=torch.long)
+    representative_by_pair: dict[tuple[int, int], int] = {}
+    keep_ids: list[int] = []
+    self_loop_ids: list[int] = []
+    duplicate_ids: list[int] = []
+    flat_ids: list[int] = []
+    flat_rep_ids: list[int] = []
+
+    has_ranks = layer_assignments is not None and int(layer_assignments.numel()) == num_nodes
+    ranks = layer_assignments.to(device=device, dtype=torch.long) if has_ranks else None
+    for edge_id in range(edge_count):
+        tail = int(src[edge_id].item())
+        head = int(tgt[edge_id].item())
+        if tail == head:
+            self_loop_ids.append(edge_id)
+            continue
+        key = (tail, head)
+        representative = representative_by_pair.get(key)
+        if representative is None:
+            representative_by_pair[key] = edge_id
+            representative = edge_id
+            keep_ids.append(edge_id)
+        else:
+            duplicate_ids.append(edge_id)
+        if ranks is not None and int(ranks[tail].item()) == int(ranks[head].item()):
+            flat_ids.append(edge_id)
+            flat_rep_ids.append(representative)
+
+    keep_tensor = _edge_id_tensor(keep_ids, device)
+    if keep_tensor.numel() == 0:
+        filtered_edge_index = torch.empty((2, 0), dtype=edge_index.dtype, device=device)
+        filtered_weights = (
+            torch.empty(0, dtype=edge_weights.dtype, device=edge_weights.device)
+            if edge_weights is not None
+            else None
+        )
+    else:
+        filtered_edge_index = edge_index[:, keep_tensor]
+        filtered_weights = edge_weights[keep_tensor] if edge_weights is not None else None
+
+    flat_edge_tensor = _edge_id_tensor(flat_ids, device)
+    if ranks is None or flat_edge_tensor.numel() == 0:
+        flat_adjacent = torch.empty(0, dtype=torch.bool, device=device)
+    else:
+        resolved_order = (
+            _default_rank_order(ranks)
+            if order_assignments is None
+            else order_assignments.to(device=device, dtype=torch.long)
+        )
+        all_adjacent = _dot_flat_adjacency_mask(
+            edge_index=edge_index,
+            layer_assignments=ranks,
+            order_assignments=resolved_order,
+        )
+        flat_adjacent = all_adjacent[flat_edge_tensor]
+
+    metadata = _DotFlatMetadata(
+        original_edge_count=edge_count,
+        representative_edge_ids=keep_tensor,
+        self_loop_edge_ids=_edge_id_tensor(self_loop_ids, device),
+        duplicate_edge_ids=_edge_id_tensor(duplicate_ids, device),
+        flat_edge_ids=flat_edge_tensor,
+        flat_adjacent_mask=flat_adjacent,
+        flat_representative_edge_ids=_edge_id_tensor(flat_rep_ids, device),
+    )
+    return _DotFlatPreprocessResult(
+        edge_index=filtered_edge_index,
+        edge_weights=filtered_weights,
+        metadata=metadata,
+    )
+
+
+def _flatten_dot_cluster_members(members: Any) -> tuple[int, ...]:
+    """Return integer leaf node ids from a dagua cluster membership value.
+
+    Parameters
+    ----------
+    members : Any
+        Cluster membership from ``DaguaGraph.clusters``. Existing callers use
+        flat sequences, but older import paths can produce nested mappings.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Sorted, de-duplicated integer node ids.
+    """
+    out: set[int] = set()
+
+    def visit(value: Any) -> None:
+        """Collect integer leaves from one nested membership value.
+
+        Parameters
+        ----------
+        value : Any
+            Membership fragment to inspect.
+
+        Returns
+        -------
+        None
+            The function mutates ``out``.
+        """
+        if isinstance(value, torch.Tensor):
+            for item in value.detach().cpu().reshape(-1).tolist():
+                out.add(int(item))
+            return
+        if isinstance(value, Mapping):
+            for child in value.values():
+                visit(child)
+            return
+        if isinstance(value, (str, bytes)):
+            return
+        try:
+            out.add(int(value))
+            return
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, (Sequence, set, frozenset)):
+            for child in value:
+                visit(child)
+
+    visit(members)
+    return tuple(sorted(out))
+
+
+def _normalize_dot_clusters(
+    clusters: Optional[Mapping[str, Any]],
+    num_nodes: int,
+) -> dict[str, tuple[int, ...]]:
+    """Normalize cluster metadata into filtered descendant leaf ids.
+
+    Parameters
+    ----------
+    clusters : Mapping[str, Any], optional
+        Raw dagua cluster membership.
+    num_nodes : int
+        Number of nodes in the graph.
+
+    Returns
+    -------
+    dict[str, tuple[int, ...]]
+        Cluster names mapped to valid node ids.
+    """
+    if not clusters:
+        return {}
+    normalized: dict[str, tuple[int, ...]] = {}
+    for name, members in clusters.items():
+        filtered = tuple(
+            idx for idx in _flatten_dot_cluster_members(members) if 0 <= idx < num_nodes
+        )
+        if filtered:
+            normalized[str(name)] = filtered
+    return normalized
+
+
+def _normalize_dot_cluster_parents(
+    cluster_names: Sequence[str],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+) -> dict[str, Optional[str]]:
+    """Normalize cluster parent metadata to known cluster names.
+
+    Parameters
+    ----------
+    cluster_names : Sequence[str]
+        Known cluster names.
+    cluster_parents : Mapping[str, str | None], optional
+        Raw parent mapping.
+
+    Returns
+    -------
+    dict[str, str | None]
+        Parent mapping where missing and unknown parents become ``None``.
+    """
+    known = set(cluster_names)
+    raw = cluster_parents or {}
+    parents: dict[str, Optional[str]] = {}
+    for name in cluster_names:
+        parent = raw.get(name)
+        parents[name] = parent if parent in known else None
+    return parents
+
+
+def _dot_cluster_depth(name: str, parents: Mapping[str, Optional[str]]) -> int:
+    """Return the nesting depth for one cluster.
+
+    Parameters
+    ----------
+    name : str
+        Cluster name.
+    parents : Mapping[str, str | None]
+        Normalized parent mapping.
+
+    Returns
+    -------
+    int
+        Number of valid parent hops above ``name``.
+    """
+    depth = 0
+    seen: set[str] = set()
+    parent = parents.get(name)
+    while parent is not None and parent not in seen:
+        seen.add(parent)
+        depth += 1
+        parent = parents.get(parent)
+    return depth
+
+
+def _dot_rank_assignment(edge_index: torch.Tensor, num_nodes: int) -> tuple[int, ...]:
+    """Return deterministic dot-style integer ranks for node placement.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Longest-path ranks. Cyclic leftovers keep rank ``0`` unless they have
+        already-ranked predecessors, matching the conservative sub-component
+        use here where exact cycle reversal is handled by sibling tasks.
+    """
+    if num_nodes <= 0:
+        return ()
+    if edge_index.numel() == 0:
+        return tuple(0 for _ in range(num_nodes))
+    src = edge_index[0].detach().cpu().to(dtype=torch.long)
+    tgt = edge_index[1].detach().cpu().to(dtype=torch.long)
+    outgoing: list[list[int]] = [[] for _ in range(num_nodes)]
+    incoming: list[list[int]] = [[] for _ in range(num_nodes)]
+    indegree = [0] * num_nodes
+    for tail_t, head_t in zip(src.tolist(), tgt.tolist()):
+        tail = int(tail_t)
+        head = int(head_t)
+        if tail == head or not (0 <= tail < num_nodes and 0 <= head < num_nodes):
+            continue
+        outgoing[tail].append(head)
+        incoming[head].append(tail)
+        indegree[head] += 1
+
+    ranks = [0] * num_nodes
+    queue = [node for node, degree in enumerate(indegree) if degree == 0]
+    visited = [False] * num_nodes
+    cursor = 0
+    while cursor < len(queue):
+        node = queue[cursor]
+        cursor += 1
+        visited[node] = True
+        for head in outgoing[node]:
+            if ranks[head] < ranks[node] + 1:
+                ranks[head] = ranks[node] + 1
+            indegree[head] -= 1
+            if indegree[head] == 0:
+                queue.append(head)
+
+    for node in range(num_nodes):
+        if visited[node]:
+            continue
+        ranked_predecessors = [ranks[pred] for pred in incoming[node] if visited[pred]]
+        ranks[node] = (max(ranked_predecessors) + 1) if ranked_predecessors else 0
+    min_rank = min(ranks)
+    return tuple(rank - min_rank for rank in ranks)
+
+
+def _build_dot_cluster_skeletons(
+    clusters: Mapping[str, Sequence[int]],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+    ranks: Sequence[int],
+    edge_index: torch.Tensor,
+) -> tuple[_DotClusterSkeleton, ...]:
+    """Build Graphviz ``build_skeleton`` counters for cluster subgraphs.
+
+    Parameters
+    ----------
+    clusters : Mapping[str, Sequence[int]]
+        Normalized cluster membership.
+    cluster_parents : Mapping[str, str | None], optional
+        Normalized cluster parents. Used only for deterministic child-before-
+        parent ordering of the returned skeletons.
+    ranks : Sequence[int]
+        Integer rank per node.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+
+    Returns
+    -------
+    tuple[_DotClusterSkeleton, ...]
+        Skeleton metadata mirroring the counters filled in Graphviz
+        ``lib/dotgen/cluster.c:build_skeleton``.
+    """
+    if not clusters:
+        return ()
+    parents = _normalize_dot_cluster_parents(tuple(clusters.keys()), cluster_parents)
+    ordered_names = sorted(
+        clusters.keys(),
+        key=lambda name: (-_dot_cluster_depth(name, parents), name),
+    )
+    edge_pairs = (
+        [(int(t), int(h)) for t, h in edge_index.detach().cpu().t().tolist()]
+        if edge_index.numel() > 0
+        else []
+    )
+    skeletons: list[_DotClusterSkeleton] = []
+    for name in ordered_names:
+        member_tuple = tuple(int(idx) for idx in clusters[name] if 0 <= int(idx) < len(ranks))
+        if not member_tuple:
+            continue
+        members = set(member_tuple)
+        member_ranks = [int(ranks[node]) for node in member_tuple]
+        min_rank = min(member_ranks)
+        max_rank = max(member_ranks)
+        span = max_rank - min_rank + 1
+        uf_sizes = [0] * span
+        edge_counts = [0] * max(span - 1, 0)
+        for node in sorted(members):
+            uf_sizes[int(ranks[node]) - min_rank] += 1
+        for tail, head in edge_pairs:
+            if tail not in members or head not in members:
+                continue
+            tail_rank = int(ranks[tail])
+            head_rank = int(ranks[head])
+            if head_rank <= tail_rank:
+                continue
+            for rank in range(tail_rank, head_rank):
+                if min_rank <= rank < max_rank:
+                    edge_counts[rank - min_rank] += 1
+        adjusted_uf_sizes = tuple(size - 1 if size > 1 else size for size in uf_sizes)
+        rankleader_ranks = tuple(range(min_rank, max_rank + 1))
+        skeletons.append(
+            _DotClusterSkeleton(
+                name=name,
+                min_rank=min_rank,
+                max_rank=max_rank,
+                rankleader_ranks=rankleader_ranks,
+                rankleader_uf_sizes=adjusted_uf_sizes,
+                skeleton_edge_counts=tuple(edge_counts),
+            )
+        )
+    return tuple(skeletons)
+
+
+def _rank_order_dot_layout(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    ranks: Sequence[int],
+) -> torch.Tensor:
+    """Place nodes on dot rank rows with stable within-rank order.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Seed positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``. Present for a shared
+        helper signature; rank order uses only positions and ranks.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    ranks : Sequence[int]
+        Integer rank per node.
+
+    Returns
+    -------
+    torch.Tensor
+        Rank-row position tensor with shape ``[N, 2]``.
+    """
+    del edge_index
+    out = pos.detach().clone()
+    if out.numel() == 0:
+        return out
+    pitch_x = (
+        float(node_sizes[:, 0].median().item()) + _DOT_DEFAULT_NODE_SEP
+        if node_sizes.numel() > 0
+        else _DOT_DEFAULT_NODE_SEP
+    )
+    pitch_x = max(pitch_x, _DOT_DEFAULT_NODE_SEP)
+    rank_tensor = torch.as_tensor(ranks, dtype=torch.long, device=out.device)
+    for rank in torch.unique(rank_tensor, sorted=True):
+        idx = torch.nonzero(rank_tensor == rank, as_tuple=False).squeeze(1)
+        order = torch.argsort(out[idx, 0], stable=True)
+        ordered = idx[order]
+        offsets = torch.arange(ordered.numel(), dtype=out.dtype, device=out.device)
+        offsets = (offsets - (ordered.numel() - 1) / 2.0) * pitch_x
+        out[ordered, 0] = offsets
+        out[ordered, 1] = float(int(rank.item())) * _DOT_DEFAULT_RANK_CENTER_SEP
+    return out - out.mean(dim=0, keepdim=True)
+
+
+def _dot_cluster_bbox(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    members: Sequence[int],
+    padding: float,
+) -> tuple[float, float, float, float]:
+    """Return a padded node bbox for cluster placement.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    members : Sequence[int]
+        Node ids included in the cluster.
+    padding : float
+        Uniform padding around member boxes.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Bounding box as ``(xmin, ymin, xmax, ymax)``.
+    """
+    idx = torch.tensor(list(members), dtype=torch.long, device=pos.device)
+    if idx.numel() == 0:
+        return (0.0, 0.0, 0.0, 0.0)
+    half = node_sizes[idx].to(dtype=pos.dtype, device=pos.device) * 0.5
+    lo = (pos[idx] - half).min(dim=0).values
+    hi = (pos[idx] + half).max(dim=0).values
+    return (
+        float(lo[0].item()) - padding,
+        float(lo[1].item()) - padding,
+        float(hi[0].item()) + padding,
+        float(hi[1].item()) + padding,
+    )
+
+
+def _shift_dot_cluster_members(
+    pos: torch.Tensor,
+    members: Sequence[int],
+    dx: float,
+) -> None:
+    """Shift cluster member x-coordinates in place.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    members : Sequence[int]
+        Node ids to shift.
+    dx : float
+        X displacement.
+
+    Returns
+    -------
+    None
+        ``pos`` is modified in place.
+    """
+    if not members or abs(dx) <= 1e-9:
+        return
+    idx = torch.tensor(list(members), dtype=torch.long, device=pos.device)
+    pos[idx, 0] += float(dx)
+
+
+def _separate_dot_cluster_siblings(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    clusters: Mapping[str, Sequence[int]],
+    parents: Mapping[str, Optional[str]],
+    padding: float,
+) -> torch.Tensor:
+    """Separate sibling cluster boxes along x with Graphviz-like slots.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    clusters : Mapping[str, Sequence[int]]
+        Normalized cluster membership.
+    parents : Mapping[str, str | None]
+        Normalized parent mapping.
+    padding : float
+        Padded cluster clearance.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with sibling cluster bboxes made disjoint when
+        possible via deterministic x shifts.
+    """
+    out = pos.detach().clone()
+    parent_values = sorted({parent for parent in parents.values() if parent is not None})
+    parent_groups: list[Optional[str]] = [None, *parent_values]
+    for parent_name in parent_groups:
+        siblings = [name for name, parent in parents.items() if parent == parent_name]
+        if len(siblings) < 2:
+            continue
+        siblings.sort(
+            key=lambda name: (
+                _dot_cluster_bbox(out, node_sizes, clusters[name], padding)[0],
+                name,
+            )
+        )
+        cursor_right: Optional[float] = None
+        for name in siblings:
+            bbox = _dot_cluster_bbox(out, node_sizes, clusters[name], padding)
+            if cursor_right is None:
+                cursor_right = bbox[2]
+                continue
+            needed_left = cursor_right + padding
+            dx = max(0.0, needed_left - bbox[0])
+            if dx > 0.0:
+                _shift_dot_cluster_members(out, clusters[name], dx)
+                bbox = _dot_cluster_bbox(out, node_sizes, clusters[name], padding)
+            cursor_right = max(cursor_right, bbox[2])
+    return out
+
+
+def _apply_dot_cluster_fidelity_layout(
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: torch.Tensor,
+    clusters: Optional[Mapping[str, Any]],
+    cluster_parents: Optional[Mapping[str, Optional[str]]],
+) -> torch.Tensor:
+    """Apply the Graphviz-dot cluster skeleton layout pass.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Existing native layout with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    clusters : Mapping[str, Any], optional
+        Cluster membership metadata.
+    cluster_parents : Mapping[str, str | None], optional
+        Parent-cluster metadata.
+
+    Returns
+    -------
+    torch.Tensor
+        Cluster-aware position tensor with shape ``[N, 2]``. The helper
+        returns ``pos`` unchanged when there are no clusters.
+    """
+    num_nodes = int(pos.shape[0])
+    normalized_clusters = _normalize_dot_clusters(clusters, num_nodes)
+    if not normalized_clusters:
+        return pos
+    parents = _normalize_dot_cluster_parents(tuple(normalized_clusters.keys()), cluster_parents)
+    ranks = _dot_rank_assignment(edge_index, num_nodes)
+    skeletons = _build_dot_cluster_skeletons(
+        normalized_clusters,
+        parents,
+        ranks,
+        edge_index,
+    )
+    out = _rank_order_dot_layout(pos, edge_index, node_sizes, ranks)
+    pitch_x = (
+        float(node_sizes[:, 0].median().item()) + _DOT_DEFAULT_NODE_SEP
+        if node_sizes.numel() > 0
+        else _DOT_DEFAULT_NODE_SEP
+    )
+    pitch_x = max(pitch_x, _DOT_DEFAULT_NODE_SEP)
+
+    for skeleton in skeletons:
+        members = normalized_clusters[skeleton.name]
+        center_x = float(out[list(members), 0].median().item())
+        for rank in skeleton.rankleader_ranks:
+            nodes = [node for node in members if int(ranks[node]) == rank]
+            if not nodes:
+                continue
+            rank_offset = rank - skeleton.min_rank
+            reserve_slots = max(
+                len(nodes),
+                int(skeleton.rankleader_uf_sizes[rank_offset]) + 1,
+            )
+            ordered = sorted(nodes, key=lambda node: (float(out[node, 0].item()), node))
+            start = -(reserve_slots - 1) / 2.0
+            used_start = start + (reserve_slots - len(ordered)) / 2.0
+            for slot, node in enumerate(ordered):
+                out[node, 0] = center_x + (used_start + slot) * pitch_x
+                out[node, 1] = float(rank) * _DOT_DEFAULT_RANK_CENTER_SEP
+
+    clearance = max(float(node_sizes[:, 0].median().item()) * 0.25, _DOT_DEFAULT_NODE_SEP)
+    # A bottom-up x-separation pass approximates Graphviz's merge_ranks slot
+    # insertion: child clusters reserve a contiguous rank segment before their
+    # parent and sibling clusters are merged into the root ranks.
+    parent_order = sorted(
+        normalized_clusters.keys(),
+        key=lambda name: (-_dot_cluster_depth(name, parents), name),
+    )
+    for _ in parent_order:
+        out = _separate_dot_cluster_siblings(
+            out,
+            node_sizes,
+            normalized_clusters,
+            parents,
+            clearance,
+        )
+    return out - out.mean(dim=0, keepdim=True)
 
 
 def _prepare_native_tensors_for_device(
@@ -1103,6 +2087,524 @@ def _per_layer_x_kmeans(
             centers = new_centers
         cand[idx, 0] = centers[labels]
     return cand
+
+
+def _graphviz_round(value: float) -> int:
+    """Round a positive Graphviz distance the way ``ROUND`` does in C.
+
+    Parameters
+    ----------
+    value : float
+        Positive point-unit distance.
+
+    Returns
+    -------
+    int
+        Nearest integer, with half values rounded away from zero for the
+        positive distances used by dot's auxiliary ``ED_minlen`` fields.
+    """
+    return int(math.floor(float(value) + 0.5))
+
+
+def _fallback_rank_order_x_positions(
+    rank_ordering: Sequence[Sequence[int]],
+    node_widths: torch.Tensor,
+    node_sep: float,
+    center: bool,
+) -> torch.Tensor:
+    """Place nodes from left-to-right constraints without edge balancing.
+
+    Parameters
+    ----------
+    rank_ordering : sequence of sequences of int
+        Node ids in Graphviz mincross order for each rank.
+    node_widths : torch.Tensor
+        Node widths in points with shape ``[N]``.
+    node_sep : float
+        Horizontal node separation in points.
+    center : bool
+        Whether to center returned coordinates around zero.
+
+    Returns
+    -------
+    torch.Tensor
+        X coordinates with shape ``[N]``. This path is used only when SciPy's
+        LP solver is unavailable; it preserves Graphviz's rounded same-rank
+        separation constraints but ignores weighted edge-pair compaction.
+    """
+    widths = node_widths.detach().cpu().to(dtype=torch.float64)
+    out = torch.zeros(int(widths.numel()), dtype=torch.float64)
+    for rank_nodes in rank_ordering:
+        if not rank_nodes:
+            continue
+        current = 0.0
+        out[int(rank_nodes[0])] = current
+        for left, right in zip(rank_nodes, rank_nodes[1:]):
+            gap = _graphviz_round(
+                float(widths[int(left)].item()) * 0.5
+                + float(widths[int(right)].item()) * 0.5
+                + node_sep
+            )
+            current += float(gap)
+            out[int(right)] = current
+    if center and out.numel() > 0:
+        out = out - out.mean()
+    return out.to(device=node_widths.device, dtype=node_widths.dtype)
+
+
+def _validate_rank_ordering(rank_ordering: Sequence[Sequence[int]], num_nodes: int) -> None:
+    """Validate that each node appears exactly once in rank ordering.
+
+    Parameters
+    ----------
+    rank_ordering : sequence of sequences of int
+        Ordered node ids grouped by rank.
+    num_nodes : int
+        Number of nodes expected in the ordering.
+
+    Returns
+    -------
+    None
+        The function raises on invalid input.
+
+    Raises
+    ------
+    ValueError
+        If an id is out of range, duplicated, or missing.
+    """
+    seen: set[int] = set()
+    for rank_nodes in rank_ordering:
+        for node_id in rank_nodes:
+            node = int(node_id)
+            if node < 0 or node >= num_nodes:
+                raise ValueError("rank_ordering contains a node id outside [0, num_nodes).")
+            if node in seen:
+                raise ValueError("rank_ordering contains a duplicate node id.")
+            seen.add(node)
+    if len(seen) != num_nodes:
+        raise ValueError("rank_ordering must contain every node exactly once.")
+
+
+def _graphviz_dot_x_position_network_simplex(
+    rank_ordering: Sequence[Sequence[int]],
+    node_widths: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sep: float = _DOT_DEFAULT_NODE_SEP,
+    edge_weights: Optional[torch.Tensor] = None,
+    center: bool = True,
+) -> torch.Tensor:
+    """Solve Graphviz dot's auxiliary x-position network-simplex problem.
+
+    This ports the simple, non-cluster part of ``position.c``:
+    ``make_LR_constraints`` creates zero-weight same-rank left-to-right
+    constraints, ``make_edge_pairs`` creates one slack node per original edge,
+    and ``rank(g, 2, ...)`` minimizes weighted slack while preserving those
+    integer ``minlen`` constraints. The tensor-facing formulation solves the
+    same difference-constraint objective as an LP; it is deliberately gated by
+    fidelity mode at call sites and is not used by default native layout.
+
+    Parameters
+    ----------
+    rank_ordering : sequence of sequences of int
+        Node ids grouped by rank, in final mincross order.
+    node_widths : torch.Tensor
+        Node widths in points with shape ``[N]``. Widths are split evenly into
+        Graphviz ``ND_lw`` and ``ND_rw`` halves.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]`` over the same node ids.
+    node_sep : float, default=18.0
+        Graphviz ``nodesep`` in points.
+    edge_weights : torch.Tensor, optional
+        Edge weights with shape ``[E]``. Defaults to one for each edge.
+    center : bool, default=True
+        Whether to center returned x coordinates around zero. Graphviz applies
+        later canvas translation outside ``position.c``; centered coordinates
+        are the stable comparison frame used by Dagua fidelity metrics.
+
+    Returns
+    -------
+    torch.Tensor
+        X coordinates with shape ``[N]`` on ``node_widths.device``.
+    """
+    if node_widths.ndim != 1:
+        raise ValueError("node_widths must be a one-dimensional tensor with shape [N].")
+    num_nodes = int(node_widths.numel())
+    _validate_rank_ordering(rank_ordering, num_nodes)
+    if edge_index.ndim != 2 or int(edge_index.shape[0]) != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+    edge_count = int(edge_index.shape[1]) if edge_index.numel() > 0 else 0
+    if edge_weights is not None and int(edge_weights.numel()) != edge_count:
+        raise ValueError("edge_weights must have one entry per edge.")
+    if num_nodes == 0:
+        return torch.zeros(0, dtype=node_widths.dtype, device=node_widths.device)
+
+    try:
+        import numpy as np
+        from scipy.optimize import linprog
+    except Exception:
+        return _fallback_rank_order_x_positions(rank_ordering, node_widths, node_sep, center)
+
+    widths = node_widths.detach().cpu().to(dtype=torch.float64)
+    edges_cpu = edge_index.detach().cpu().to(dtype=torch.long)
+    if edge_weights is None:
+        weights_cpu = torch.ones(edge_count, dtype=torch.float64)
+    else:
+        weights_cpu = edge_weights.detach().cpu().to(dtype=torch.float64)
+
+    slack_offset = num_nodes
+    num_vars = num_nodes + edge_count
+    objective = np.zeros(num_vars, dtype=np.float64)
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+
+    for rank_nodes in rank_ordering:
+        for left, right in zip(rank_nodes, rank_nodes[1:]):
+            left_i = int(left)
+            right_i = int(right)
+            min_gap = _graphviz_round(
+                float(widths[left_i].item()) * 0.5 + float(widths[right_i].item()) * 0.5 + node_sep
+            )
+            row = np.zeros(num_vars, dtype=np.float64)
+            row[left_i] = 1.0
+            row[right_i] = -1.0
+            rows.append(row)
+            rhs.append(-float(min_gap))
+
+    for edge_id in range(edge_count):
+        tail = int(edges_cpu[0, edge_id].item())
+        head = int(edges_cpu[1, edge_id].item())
+        if tail == head:
+            continue
+        if tail < 0 or tail >= num_nodes or head < 0 or head >= num_nodes:
+            raise ValueError("edge_index contains a node id outside [0, N).")
+        weight = float(weights_cpu[edge_id].item())
+        if weight <= 0.0:
+            continue
+        slack_var = slack_offset + edge_id
+        objective[tail] += weight
+        objective[head] += weight
+        objective[slack_var] -= 2.0 * weight
+        for endpoint in (tail, head):
+            row = np.zeros(num_vars, dtype=np.float64)
+            row[slack_var] = 1.0
+            row[endpoint] = -1.0
+            rows.append(row)
+            rhs.append(-_DOT_AUX_EDGE_MINLEN)
+
+    anchor = next((int(rank_nodes[0]) for rank_nodes in rank_ordering if rank_nodes), 0)
+    equality = np.zeros((1, num_vars), dtype=np.float64)
+    equality[0, anchor] = 1.0
+    try:
+        result = linprog(
+            c=objective,
+            A_ub=np.array(rows, dtype=np.float64) if rows else None,
+            b_ub=np.array(rhs, dtype=np.float64) if rhs else None,
+            A_eq=equality,
+            b_eq=np.array([0.0], dtype=np.float64),
+            bounds=[(None, None)] * num_vars,
+            method="highs",
+        )
+    except Exception:
+        return _fallback_rank_order_x_positions(rank_ordering, node_widths, node_sep, center)
+    if not result.success:
+        return _fallback_rank_order_x_positions(rank_ordering, node_widths, node_sep, center)
+
+    x_values = np.asarray(result.x[:num_nodes], dtype=np.float64)
+    rounded = np.rint(x_values)
+    if np.max(np.abs(x_values - rounded)) <= 1.0e-7:
+        x_values = rounded
+    out = torch.tensor(x_values, dtype=torch.float64)
+    if center:
+        out = out - out.mean()
+    return out.to(device=node_widths.device, dtype=node_widths.dtype)
+
+
+def _dot_rank_assignment_lp(edge_index: torch.Tensor, num_nodes: int) -> Optional[list[int]]:
+    """Assign dot-like integer ranks for the narrow position fidelity path.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    list[int] | None
+        Integer rank for each node, or ``None`` when the graph is cyclic or
+        SciPy's LP solver is unavailable. This helper is intentionally small:
+        full Graphviz rank assignment is owned by a separate sprint task.
+    """
+    if num_nodes == 0:
+        return []
+    if edge_index.numel() == 0:
+        return [0] * num_nodes
+    try:
+        import numpy as np
+        from scipy.optimize import linprog
+    except Exception:
+        return None
+
+    edges = edge_index.detach().cpu().to(dtype=torch.long)
+    c_rank = np.zeros(num_nodes, dtype=np.float64)
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    for edge_id in range(int(edges.shape[1])):
+        tail = int(edges[0, edge_id].item())
+        head = int(edges[1, edge_id].item())
+        if tail == head:
+            continue
+        c_rank[head] += 1.0
+        c_rank[tail] -= 1.0
+        row = np.zeros(num_nodes, dtype=np.float64)
+        row[tail] = 1.0
+        row[head] = -1.0
+        rows.append(row)
+        rhs.append(-1.0)
+    if not rows:
+        return [0] * num_nodes
+    try:
+        result = linprog(
+            c=c_rank,
+            A_ub=np.array(rows, dtype=np.float64),
+            b_ub=np.array(rhs, dtype=np.float64),
+            bounds=[(0, None)] * num_nodes,
+            method="highs",
+        )
+    except Exception:
+        return None
+    if not result.success:
+        return None
+    ranks = [int(round(float(value))) for value in result.x]
+    min_rank = min(ranks)
+    return [rank - min_rank for rank in ranks]
+
+
+def _rank_ordering_from_rank_values(rank_values: Sequence[int]) -> list[list[int]]:
+    """Build stable node-id order grouped by rank.
+
+    Parameters
+    ----------
+    rank_values : sequence of int
+        Rank for each node.
+
+    Returns
+    -------
+    list[list[int]]
+        Node ids grouped by increasing rank.
+    """
+    layers: dict[int, list[int]] = {}
+    for node_id, rank in enumerate(rank_values):
+        layers.setdefault(int(rank), []).append(node_id)
+    return [layers[rank] for rank in sorted(layers)]
+
+
+def _median_ordering_for_dot_position(
+    rank_values: Sequence[int],
+    edge_index: torch.Tensor,
+    passes: int = 24,
+) -> list[list[int]]:
+    """Run Graphviz-style median sweeps for the position fidelity wrapper.
+
+    Parameters
+    ----------
+    rank_values : sequence of int
+        Rank for each node, including virtual nodes.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    passes : int, default=24
+        Number of alternating down/up median sweeps.
+
+    Returns
+    -------
+    list[list[int]]
+        Node ids grouped by rank after deterministic median ordering.
+    """
+    layers = _rank_ordering_from_rank_values(rank_values)
+    if len(layers) <= 1 or edge_index.numel() == 0:
+        return layers
+    rank_of = [int(value) for value in rank_values]
+    edges = edge_index.detach().cpu().to(dtype=torch.long)
+    in_neighbors: list[list[int]] = [[] for _ in rank_values]
+    out_neighbors: list[list[int]] = [[] for _ in rank_values]
+    for tail, head in edges.t().tolist():
+        tail_i = int(tail)
+        head_i = int(head)
+        if tail_i == head_i:
+            continue
+        out_neighbors[tail_i].append(head_i)
+        in_neighbors[head_i].append(tail_i)
+
+    def positions() -> dict[int, int]:
+        """Return current within-rank positions for all nodes.
+
+        Returns
+        -------
+        dict[int, int]
+            Mapping from node id to rank-local order.
+        """
+        return {node: order for rank_nodes in layers for order, node in enumerate(rank_nodes)}
+
+    for sweep in range(passes):
+        if sweep % 2 == 0:
+            rank_range = range(1, len(layers))
+            neighbor_lists = in_neighbors
+            rank_delta = -1
+        else:
+            rank_range = range(len(layers) - 2, -1, -1)
+            neighbor_lists = out_neighbors
+            rank_delta = 1
+        for rank in rank_range:
+            pos_of = positions()
+
+            def median_key(node_id: int, rank: int = rank) -> tuple[float, int]:
+                """Return median-neighbor ordering key for one node.
+
+                Parameters
+                ----------
+                node_id : int
+                    Node being sorted.
+                rank : int
+                    Current rank index.
+
+                Returns
+                -------
+                tuple[float, int]
+                    Median neighbor position and stable previous order.
+                """
+                target_rank = rank + rank_delta
+                neighbor_positions = sorted(
+                    pos_of[nbr]
+                    for nbr in neighbor_lists[node_id]
+                    if 0 <= target_rank < len(layers) and rank_of[nbr] == target_rank
+                )
+                if not neighbor_positions:
+                    return (float(pos_of[node_id]), pos_of[node_id])
+                count = len(neighbor_positions)
+                if count % 2 == 1:
+                    median = float(neighbor_positions[count // 2])
+                else:
+                    median = 0.5 * (
+                        neighbor_positions[count // 2 - 1] + neighbor_positions[count // 2]
+                    )
+                return (median, pos_of[node_id])
+
+            layers[rank] = sorted(layers[rank], key=median_key)
+    return layers
+
+
+def _expand_long_edges_for_dot_position(
+    edge_index: torch.Tensor,
+    rank_values: Sequence[int],
+    edge_weights: Optional[torch.Tensor],
+) -> tuple[list[int], torch.Tensor, torch.Tensor]:
+    """Insert zero-width virtual nodes on long edges for dot x-positioning.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]`` over original nodes.
+    rank_values : sequence of int
+        Rank for each original node.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    tuple[list[int], torch.Tensor, torch.Tensor]
+        Expanded rank values, expanded edge tensor, and expanded edge weights.
+    """
+    expanded_ranks = [int(value) for value in rank_values]
+    expanded_edges: list[tuple[int, int]] = []
+    expanded_weights: list[float] = []
+    edges = edge_index.detach().cpu().to(dtype=torch.long)
+    weights = (
+        edge_weights.detach().cpu().to(dtype=torch.float64)
+        if edge_weights is not None
+        else torch.ones(int(edges.shape[1]), dtype=torch.float64)
+    )
+    for edge_id in range(int(edges.shape[1])):
+        tail = int(edges[0, edge_id].item())
+        head = int(edges[1, edge_id].item())
+        weight = float(weights[edge_id].item())
+        tail_rank = expanded_ranks[tail]
+        head_rank = expanded_ranks[head]
+        if head_rank <= tail_rank + 1:
+            expanded_edges.append((tail, head))
+            expanded_weights.append(weight)
+            continue
+        previous = tail
+        for rank in range(tail_rank + 1, head_rank):
+            virtual_node = len(expanded_ranks)
+            expanded_ranks.append(rank)
+            expanded_edges.append((previous, virtual_node))
+            expanded_weights.append(max(weight, _DOT_VIRTUAL_EDGE_WEIGHT))
+            previous = virtual_node
+        expanded_edges.append((previous, head))
+        expanded_weights.append(max(weight, _DOT_VIRTUAL_EDGE_WEIGHT))
+    if expanded_edges:
+        expanded_edge_index = torch.tensor(expanded_edges, dtype=torch.long).t().contiguous()
+        expanded_edge_weights = torch.tensor(expanded_weights, dtype=torch.float64)
+    else:
+        expanded_edge_index = torch.zeros((2, 0), dtype=torch.long)
+        expanded_edge_weights = torch.zeros(0, dtype=torch.float64)
+    return expanded_ranks, expanded_edge_index, expanded_edge_weights
+
+
+def _try_graphviz_dot_position_fidelity_layout(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    edge_weights: Optional[torch.Tensor] = None,
+) -> Optional[torch.Tensor]:
+    """Return a narrow Graphviz-dot position-fidelity layout when supported.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of original graph nodes.
+    node_sizes : torch.Tensor
+        Node size tensor with shape ``[N, 2]`` in points.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    torch.Tensor | None
+        Position tensor with shape ``[N, 2]`` when the narrow DAG path can be
+        solved, otherwise ``None`` so default native behavior can continue.
+    """
+    rank_values = _dot_rank_assignment_lp(edge_index, num_nodes)
+    if rank_values is None:
+        return None
+    expanded_ranks, expanded_edges, expanded_weights = _expand_long_edges_for_dot_position(
+        edge_index=edge_index,
+        rank_values=rank_values,
+        edge_weights=edge_weights,
+    )
+    extra_count = len(expanded_ranks) - num_nodes
+    original_widths = node_sizes.detach().cpu().to(dtype=torch.float64)[:, 0]
+    if extra_count > 0:
+        widths = torch.cat((original_widths, torch.zeros(extra_count, dtype=torch.float64)))
+    else:
+        widths = original_widths
+    rank_ordering = _median_ordering_for_dot_position(expanded_ranks, expanded_edges)
+    x_values = _graphviz_dot_x_position_network_simplex(
+        rank_ordering=rank_ordering,
+        node_widths=widths,
+        edge_index=expanded_edges,
+        edge_weights=expanded_weights,
+        node_sep=_DOT_DEFAULT_NODE_SEP,
+        center=True,
+    )
+    out = torch.zeros((num_nodes, 2), dtype=torch.float32)
+    out[:, 0] = x_values[:num_nodes].to(dtype=torch.float32)
+    out[:, 1] = torch.tensor(rank_values, dtype=torch.float32) * _DOT_DEFAULT_RANK_CENTER_SEP
+    out = out - out.mean(dim=0, keepdim=True)
+    return out.to(device=node_sizes.device, dtype=torch.float32)
 
 
 def _should_dot_lattice_lp(
@@ -2984,13 +4486,14 @@ def layout_dagua_native_pipeline(
     optimizer_type: str = "adam",
     init_pos: Optional[torch.Tensor] = None,
     clusters: Optional[dict[str, Any]] = None,
-    cluster_parents: Optional[dict[str, str]] = None,
+    cluster_parents: Optional[dict[str, Optional[str]]] = None,
     layer_assignments: Optional[torch.Tensor] = None,
     prebuilt_layer_index: Optional[Any] = None,
     graph_structure: Optional[GraphStructure] = None,
     skip_classification: bool = False,
     seed: Optional[int] = None,
     edge_weights: Optional[torch.Tensor] = None,
+    fidelity_mode: Optional[Any] = None,
 ) -> torch.Tensor:
     """Run the topology-dispatched native pipeline.
 
@@ -3026,6 +4529,10 @@ def layout_dagua_native_pipeline(
         RNG seed override.
     edge_weights : torch.Tensor, optional
         Optional edge weights with shape ``[E]``.
+    fidelity_mode : Any, optional
+        Fidelity selector. ``True``, ``"dot"``, ``"graphviz_dot"``, and
+        ``"graphviz-dot"`` enable Graphviz-dot flat/self/multi-edge
+        preprocessing. ``None`` preserves existing behavior.
 
     Returns
     -------
@@ -3036,8 +4543,13 @@ def layout_dagua_native_pipeline(
         raise ValueError("num_nodes must be non-negative.")
 
     effective_config = copy.copy(config) if config is not None else LayoutConfig()
+    if fidelity_mode is not None:
+        setattr(effective_config, "fidelity_mode", fidelity_mode)
+    dot_cluster_fidelity = _is_graphviz_dot_cluster_fidelity_mode(
+        getattr(effective_config, "fidelity_mode", None)
+    )
     if _selected_force_pipeline(effective_config) == "legacy_monolith":
-        return dagua_native_legacy.layout_dagua_native_pipeline(
+        legacy_pos = dagua_native_legacy.layout_dagua_native_pipeline(
             edge_index=edge_index,
             num_nodes=num_nodes,
             node_sizes=node_sizes,
@@ -3054,6 +4566,15 @@ def layout_dagua_native_pipeline(
             seed=seed,
             edge_weights=edge_weights,
         )
+        if dot_cluster_fidelity:
+            return _apply_dot_cluster_fidelity_layout(
+                legacy_pos,
+                edge_index,
+                node_sizes,
+                clusters,
+                cluster_parents,
+            )
+        return legacy_pos
 
     # Stress route for degenerate-layering cyclic graphs. Ported
     # from the legacy monolith (legacy monolith) which was lost during a
@@ -3066,6 +4587,9 @@ def layout_dagua_native_pipeline(
     # closing the -8.51 gap to igraph_sugiyama).
     if (
         _selected_force_pipeline(effective_config) is None
+        and not _is_graphviz_dot_flat_fidelity_mode(
+            getattr(effective_config, "fidelity_mode", None)
+        )
         and getattr(effective_config, "route_flat_to_stress", True)
         and getattr(effective_config, "algorithm", None) in (None, "dagua_native")
         and num_nodes >= 20
@@ -3129,6 +4653,14 @@ def layout_dagua_native_pipeline(
                                     edge_index,
                                     node_sizes,
                                 )
+                            if dot_cluster_fidelity:
+                                stress_pos = _apply_dot_cluster_fidelity_layout(
+                                    stress_pos,
+                                    edge_index,
+                                    node_sizes,
+                                    clusters,
+                                    cluster_parents,
+                                )
                             return stress_pos
         except Exception:
             # Stress route is best-effort; fall through to the layered path.
@@ -3162,6 +4694,7 @@ def layout_dagua_native_pipeline(
                 skip_classification=skip_classification,
                 seed=candidate_seed,
                 edge_weights=edge_weights,
+                fidelity_mode=getattr(effective_config, "fidelity_mode", None),
             )
             candidate_score = _score_native_result(candidate_pos, edge_index, node_sizes)
             if candidate_score > best_score:
@@ -3195,6 +4728,26 @@ def layout_dagua_native_pipeline(
         layer_assignments=layer_assignments,
         target_device=target_device,
     )
+    dot_flat_metadata: Optional[_DotFlatMetadata] = None
+    if _is_graphviz_dot_flat_fidelity_mode(getattr(effective_config, "fidelity_mode", None)):
+        flat_preprocess = _dot_flat_preprocess_edges(
+            edge_index=prepared_edge_index,
+            num_nodes=num_nodes,
+            edge_weights=prepared_edge_weights,
+            layer_assignments=prepared_layer_assignments,
+        )
+        prepared_edge_index = flat_preprocess.edge_index
+        prepared_edge_weights = flat_preprocess.edge_weights
+        dot_flat_metadata = flat_preprocess.metadata
+    if _is_graphviz_dot_position_fidelity_mode(getattr(effective_config, "fidelity_mode", None)):
+        dot_position = _try_graphviz_dot_position_fidelity_layout(
+            edge_index=prepared_edge_index,
+            num_nodes=num_nodes,
+            node_sizes=normalized_node_sizes,
+            edge_weights=prepared_edge_weights,
+        )
+        if dot_position is not None:
+            return dot_position.to(device=target_device, dtype=torch.float32)
     resolved_seed = seed if seed is not None else effective_config.seed
     if resolved_seed is not None:
         torch.manual_seed(int(resolved_seed))
@@ -3212,6 +4765,8 @@ def layout_dagua_native_pipeline(
         graph_structure=graph_structure,
         skip_classification=skip_classification,
     )
+    if dot_flat_metadata is not None:
+        setattr(prepared_config, "_dagua_graphviz_dot_flat_metadata", dot_flat_metadata)
     flex_constraints = build_flex_constraints(
         config=prepared_config,
         num_nodes=num_nodes,
@@ -3326,13 +4881,43 @@ def layout_dagua_native_pipeline(
             and normalized_node_sizes is not None
         ):
             result = _best_of_polish(result, prepared_edge_index, normalized_node_sizes)
+        if dot_cluster_fidelity:
+            result = _apply_dot_cluster_fidelity_layout(
+                result,
+                prepared_edge_index,
+                normalized_node_sizes,
+                clusters,
+                cluster_parents,
+            )
         return result
 
-    return _run_native_problem(problem, state, ctx, prepared_config)
+    result = _run_native_problem(problem, state, ctx, prepared_config)
+    if dot_cluster_fidelity:
+        result = _apply_dot_cluster_fidelity_layout(
+            result,
+            prepared_edge_index,
+            normalized_node_sizes,
+            clusters,
+            cluster_parents,
+        )
+    return result
 
 
 __all__ = [
+    "_DotClusterSkeleton",
+    "_DotFlatMetadata",
+    "_DotFlatPreprocessResult",
+    "_apply_dot_cluster_fidelity_layout",
+    "_build_dot_cluster_skeletons",
     "_choose_native_pipeline",
+    "_dot_flat_adjacency_mask",
+    "_dot_flat_preprocess_edges",
+    "_dot_rank_assignment",
+    "_graphviz_dot_x_position_network_simplex",
+    "_is_graphviz_dot_flat_fidelity_mode",
+    "_is_graphviz_dot_cluster_fidelity_mode",
+    "_is_graphviz_dot_fidelity_mode",
+    "_is_graphviz_dot_position_fidelity_mode",
     "_prepare_native_config",
     "_run_native_problem",
     "_should_apply_brandes_koepf_refine",
