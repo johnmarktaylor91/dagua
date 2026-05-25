@@ -113,6 +113,35 @@ def test_fa2_linlog_skips_coincident_edge_attraction() -> None:
     torch.testing.assert_close(result.forces, torch.zeros((2, 2), dtype=torch.float64))
 
 
+def test_fa2_dissuade_hubs_aliases_outbound_distribution() -> None:
+    """Avoid applying the reference Dissuade Hubs mass divisor twice."""
+    state = SolveState(
+        pos=torch.tensor([[0.0, 0.0], [2.0, 0.0]], dtype=torch.float64),
+        old_forces=torch.zeros((2, 2), dtype=torch.float64),
+        extras={
+            "fa2_undirected_edges": torch.tensor([[0], [1]], dtype=torch.long),
+            "fa2_undirected_weights": None,
+            "fa2_mass": torch.tensor([3.0, 1.0], dtype=torch.float64),
+            "fa2_outbound_att_compensation": 1.0,
+            "fa2_speed": 1.0,
+            "fa2_speed_efficiency": 1.0,
+        },
+    )
+
+    result = FA2ForceStep(
+        FA2ForceStepConfig(
+            gravity=0.0,
+            scaling_ratio=0.0,
+            outbound_attraction_distribution=True,
+            dissuade_hubs=True,
+        )
+    ).apply(_empty_problem(num_nodes=2), state, _runtime_context())
+
+    assert result.forces is not None
+    expected = torch.tensor([[2.0 / 3.0, 0.0], [-2.0 / 3.0, 0.0]], dtype=torch.float64)
+    torch.testing.assert_close(result.forces, expected)
+
+
 def test_fa2_fidelity_mode_keeps_last_duplicate_edge_weight() -> None:
     """Fidelity mode should mirror NetworkX's duplicate edge overwrite policy."""
     problem = LayoutProblem(
