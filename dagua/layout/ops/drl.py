@@ -383,8 +383,10 @@ def _build_undirected_adjacency(
         if source == target:
             continue
         weight = float(weights_cpu[edge_id].item())
-        adjacency[source][target] = adjacency[source].get(target, 0.0) + weight
-        adjacency[target][source] = adjacency[target].get(source, 0.0) + weight
+        # igraph stores neighbors in a map and assigns duplicate keys, so the
+        # last parallel edge weight wins instead of summing multiedges.
+        adjacency[source][target] = weight
+        adjacency[target][source] = weight
     return adjacency
 
 
