@@ -102,7 +102,7 @@ class TsnetGradientStepConfig:
         Additive gain bump when the gradient sign flips.
     gain_decrease : float, default=0.8
         Multiplicative gain decay when the gradient sign is consistent.
-    gradient_scale : float, default=4.0
+    gradient_scale : float, default=1.0
         Scale factor applied to the KL objective before backpropagation.
     convergence_check_interval : int, default=50
         Number of iterations between sklearn-style convergence checks.
@@ -116,7 +116,7 @@ class TsnetGradientStepConfig:
     late_momentum: float = 0.8
     gain_increase: float = 0.2
     gain_decrease: float = 0.8
-    gradient_scale: float = 4.0
+    gradient_scale: float = 1.0
     convergence_check_interval: int = 50
     n_iter_without_progress: int = 300
     min_grad_norm: float = 1.0e-7
