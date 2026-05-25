@@ -993,29 +993,9 @@ def layout_maxent_stress(
     if alpha < 0:
         raise ValueError("alpha must be non-negative.")
 
-    device = _layout_device(edge_index, node_sizes)
-    if num_nodes == 0:
-        return torch.empty((0, 2), dtype=torch.float32, device=device)
-    if num_nodes == 1:
-        return torch.zeros((1, 2), dtype=torch.float32, device=device)
+    from dagua.layout.ops.pipelines.maxent_stress import layout_maxent_stress_pipeline
 
-    if (
-        use_majorization
-        and not use_entropy
-        and num_nodes <= _MAJORIZATION_NODE_LIMIT
-        and steps == 200
-    ):
-        return _layout_stress_majorization(
-            edge_index=edge_index,
-            num_nodes=num_nodes,
-            node_sizes=node_sizes,
-            steps=steps,
-            seed=seed,
-            device=device,
-            edge_weights=edge_weights,
-        )
-
-    return _layout_maxent_stress_gradient(
+    return layout_maxent_stress_pipeline(
         edge_index=edge_index,
         num_nodes=num_nodes,
         node_sizes=node_sizes,
@@ -1023,6 +1003,6 @@ def layout_maxent_stress(
         alpha=alpha,
         seed=seed,
         use_entropy=use_entropy,
-        device=device,
+        use_majorization=use_majorization,
         edge_weights=edge_weights,
     )
