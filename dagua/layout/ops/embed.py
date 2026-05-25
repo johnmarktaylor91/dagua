@@ -1204,6 +1204,7 @@ def _dense_spectral_embedding(
     dim: int,
     symmetric: bool,
     networkx_fidelity: bool = False,
+    igraph_fidelity: bool = False,
 ) -> np.ndarray:
     """Compute dense spectral coordinates from a Laplacian matrix.
 
@@ -1217,6 +1218,9 @@ def _dense_spectral_embedding(
         Whether the matrix can use a symmetric eigensolver.
     networkx_fidelity : bool, default=False
         Whether to mirror NetworkX dense eigensolver and eigenvector selection.
+    igraph_fidelity : bool, default=False
+        Whether to mirror igraph-style non-trivial eigenvector selection while
+        retaining the symmetric dense eigensolver.
 
     Returns
     -------
@@ -1234,7 +1238,7 @@ def _dense_spectral_embedding(
         eigenvalues=eigenvalues,
         eigenvectors=eigenvectors,
         dim=dim,
-        skip_first=networkx_fidelity,
+        skip_first=networkx_fidelity or igraph_fidelity,
     )
 
 
@@ -1243,6 +1247,7 @@ def _sparse_spectral_embedding(
     dim: int,
     symmetric: bool,
     networkx_fidelity: bool = False,
+    igraph_fidelity: bool = False,
 ) -> np.ndarray:
     """Compute sparse spectral coordinates from a Laplacian matrix.
 
@@ -1257,6 +1262,9 @@ def _sparse_spectral_embedding(
     networkx_fidelity : bool, default=False
         Whether to mirror NetworkX sparse eigensolver sizing and eigenvector
         selection.
+    igraph_fidelity : bool, default=False
+        Whether to mirror igraph ARPACK sizing and non-trivial eigenvector
+        selection.
 
     Returns
     -------
@@ -1264,7 +1272,7 @@ def _sparse_spectral_embedding(
         Sparse spectral coordinates with shape ``[N, dim]``.
     """
     num_nodes = laplacian.shape[0]
-    if networkx_fidelity:
+    if networkx_fidelity or igraph_fidelity:
         eigen_count = min(num_nodes - 1, dim + 1)
     else:
         eigen_count = min(num_nodes - 1, max(dim + _SPECTRAL_EXTRA_EIGENPAIRS, dim + 1))
@@ -1274,10 +1282,13 @@ def _sparse_spectral_embedding(
             dim=dim,
             symmetric=symmetric,
             networkx_fidelity=networkx_fidelity,
+            igraph_fidelity=igraph_fidelity,
         )
 
     if networkx_fidelity:
         ncv = max((_SPECTRAL_LANCZOS_MULTIPLIER * eigen_count) + 1, int(np.sqrt(num_nodes)))
+    elif igraph_fidelity:
+        ncv = min(eigen_count + 3, num_nodes)
     else:
         lanczos_vectors = max(
             (_SPECTRAL_LANCZOS_MULTIPLIER * eigen_count) + 1,
@@ -1305,7 +1316,7 @@ def _sparse_spectral_embedding(
         eigenvalues=eigenvalues,
         eigenvectors=eigenvectors,
         dim=dim,
-        skip_first=networkx_fidelity,
+        skip_first=networkx_fidelity or igraph_fidelity,
     )
 
 
@@ -1320,7 +1331,12 @@ class SpectralEmbed(Op):
     requires: ClassVar[Tuple[str, ...]] = ("laplacian", f"extras.{_SYMMETRIC_FLAG_KEY}")
     access_pattern: ClassVar[str] = "global"
 
-    def __init__(self, sparse_threshold: int, networkx_fidelity: bool = False) -> None:
+    def __init__(
+        self,
+        sparse_threshold: int,
+        networkx_fidelity: bool = False,
+        igraph_fidelity: bool = False,
+    ) -> None:
         """Store the dense-vs-sparse eigensolve threshold.
 
         Parameters
@@ -1329,9 +1345,12 @@ class SpectralEmbed(Op):
             Dense matrices smaller than this threshold use NumPy eigensolvers.
         networkx_fidelity : bool, default=False
             Whether to mirror NetworkX eigenvector-selection behavior.
+        igraph_fidelity : bool, default=False
+            Whether to mirror igraph eigenvector-selection and ARPACK sizing.
         """
         self.sparse_threshold = int(sparse_threshold)
         self.networkx_fidelity = bool(networkx_fidelity)
+        self.igraph_fidelity = bool(igraph_fidelity)
 
     def apply(
         self,
@@ -1378,6 +1397,7 @@ class SpectralEmbed(Op):
                 dim=_EMBEDDING_OUTPUT_DIM,
                 symmetric=is_symmetric,
                 networkx_fidelity=self.networkx_fidelity,
+                igraph_fidelity=self.igraph_fidelity,
             )
         else:
             coordinates = _sparse_spectral_embedding(
@@ -1385,6 +1405,7 @@ class SpectralEmbed(Op):
                 dim=_EMBEDDING_OUTPUT_DIM,
                 symmetric=is_symmetric,
                 networkx_fidelity=self.networkx_fidelity,
+                igraph_fidelity=self.igraph_fidelity,
             )
 
         state.pos = torch.from_numpy(coordinates)
