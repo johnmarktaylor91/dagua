@@ -835,6 +835,45 @@ class _FdpCompoundEdgeAttachmentOp(Op):
 _GRAPHVIZ_FDP_PACK_MARGIN = 4.0
 _GRAPHVIZ_PACK_AVERAGE_POLYOMINO_SIZE = 100.0
 _GRAPHVIZ_FDP_PORT_ANGLE_STEP = math.pi / 90.0
+_GRAPHVIZ_FDP_EXPANSION_FACTOR = 1.2
+_GRAPHVIZ_FDP_DEFAULT_MAX_ITERS = 600
+_GRAPHVIZ_FDP_DEFAULT_K = 0.3
+_GRAPHVIZ_FDP_DEFAULT_UNSCALED = 50
+_GRAPHVIZ_FDP_DEFAULT_TFACT = 1.0
+_GRAPHVIZ_FDP_DEFAULT_C = 0.0
+_GRAPHVIZ_FDP_DEFAULT_X_C = 1.5
+_GRAPHVIZ_FDP_DEFAULT_X_TRIES = 9
+_GRAPHVIZ_FDP_POINTS_PER_INCH = 72.0
+_GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES = 0.75
+_GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES = 0.5
+
+
+class _GraphvizDrand48:
+    """Minimal POSIX ``drand48`` generator used by Graphviz fdp.
+
+    Parameters
+    ----------
+    seed : int
+        Seed value passed through Graphviz's ``seed`` graph attribute.
+    """
+
+    _MODULUS = 1 << 48
+    _MULTIPLIER = 0x5DEECE66D
+    _INCREMENT = 0xB
+
+    def __init__(self, seed: int) -> None:
+        self.state = ((int(seed) & 0xFFFFFFFF) << 16) + 0x330E
+
+    def random(self) -> float:
+        """Return the next Graphviz-compatible random value in ``[0, 1)``.
+
+        Returns
+        -------
+        float
+            The next ``drand48`` value.
+        """
+        self.state = (self._MULTIPLIER * self.state + self._INCREMENT) % self._MODULUS
+        return self.state / float(self._MODULUS)
 
 
 @dataclass(frozen=True)
@@ -1259,7 +1298,7 @@ def _fdp_recursion_layout_component(
     steps: int,
     seed: int,
 ) -> torch.Tensor:
-    """Lay out a derived component with Dagua's FM^3 primitive.
+    """Lay out a derived component with Graphviz fdp ``tLayout``/``xLayout``.
 
     Parameters
     ----------
@@ -1270,7 +1309,8 @@ def _fdp_recursion_layout_component(
     node_sizes : torch.Tensor, optional
         Original node sizes with shape ``[N, 2]``.
     steps : int
-        FM^3 iteration budget.
+        Compatibility parameter retained for the public FMMM variant. Graphviz
+        fdp fidelity uses Graphviz's default ``maxiter`` constant.
     seed : int
         Deterministic seed.
 
@@ -1281,20 +1321,13 @@ def _fdp_recursion_layout_component(
     """
     if len(component) == 0:
         return torch.empty((0, 2), dtype=torch.float32)
-    if len(component) == 1:
-        return torch.zeros((1, 2), dtype=torch.float32)
-    return (
-        layout_fmmm_pipeline(
-            edge_index=_fdp_recursion_component_edges(derived, component),
-            num_nodes=len(component),
-            node_sizes=_fdp_recursion_component_sizes(derived, component, node_sizes, {}),
-            steps=steps,
-            seed=seed,
-            reference_mode=True,
-            fidelity_mode=False,
-        )
-        .detach()
-        .to(dtype=torch.float32, device="cpu")
+    del steps
+    return _graphviz_fdp_component_layout(
+        edge_index=_fdp_recursion_component_edges(derived, component),
+        num_nodes=len(component),
+        node_sizes=_fdp_recursion_component_sizes(derived, component, node_sizes, {}),
+        seed=seed,
+        flip_y=False,
     )
 
 
@@ -1536,13 +1569,13 @@ def _fdp_recursion_layout_level(
     component_positions: List[Dict[int, torch.Tensor]] = []
     component_boxes: List[Tuple[float, float]] = []
 
-    for component_offset, component in enumerate(components):
+    for component in components:
         local_tensor = _fdp_recursion_layout_component(
             derived=derived,
             component=component,
             node_sizes=node_sizes,
             steps=steps,
-            seed=seed + component_offset,
+            seed=seed,
         )
         local_positions = {
             derived_index: local_tensor[local_index]
@@ -1565,7 +1598,7 @@ def _fdp_recursion_layout_level(
                 tree=tree,
                 cluster_name=str(node.key),
                 steps=steps,
-                seed=seed + component_offset + 1,
+                seed=seed,
                 ports=child_ports,
             )
 
@@ -1663,8 +1696,9 @@ def graphviz_fdp_fidelity(
     Notes
     -----
     This ports Graphviz fdp's derived-graph recursion and boundary-port
-    expansion. Graphviz's exact ``tLayout``, ``xLayout``, and ``packGraphs``
-    numerical kernels remain integration assumptions for later R36 slices.
+    expansion. Round 39 ports the flat ``tLayout`` and ``xLayout`` component
+    kernels, but clustered recursion still has known residual divergence from
+    Graphviz's derived-node sizing and cluster bbox interactions.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
@@ -1692,6 +1726,7 @@ def graphviz_fdp_fidelity(
     positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
     for node_index, position in layout.positions.items():
         positions[int(node_index)] = position.to(dtype=torch.float32, device="cpu")
+    positions[:, 1] *= -1.0
     return positions.to(device=_layout_device(edge_index=edge_index, node_sizes=node_sizes))
 
 
@@ -1783,6 +1818,630 @@ def _slice_component_edges(
         return local_edges, None
     local_weights = torch.tensor(weights, dtype=edge_weights.dtype, device=edge_weights.device)
     return local_edges, local_weights
+
+
+def _graphviz_fdp_edge_lists(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weights: Optional[torch.Tensor],
+) -> tuple[list[list[int]], list[tuple[int, int, float, float]]]:
+    """Build Graphviz-style outgoing edge lists for FDP kernels.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in the local graph.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``. Missing weights use
+        Graphviz's default ``ED_factor(e) = 1``.
+
+    Returns
+    -------
+    tuple[list[list[int]], list[tuple[int, int, float, float]]]
+        Outgoing edge ids per source node and edge records as
+        ``(source, target, factor, dist)``. The default edge distance is
+        Graphviz fdp's ``K`` in inches.
+    """
+    outgoing: list[list[int]] = [[] for _ in range(num_nodes)]
+    edges: list[tuple[int, int, float, float]] = []
+    edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
+    weights_cpu = None if edge_weights is None else edge_weights.detach().to(device="cpu")
+    for edge_id, (source, target) in enumerate(
+        zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist())
+    ):
+        source_index = int(source)
+        target_index = int(target)
+        if not (0 <= source_index < num_nodes and 0 <= target_index < num_nodes):
+            continue
+        factor = 1.0 if weights_cpu is None else float(weights_cpu[edge_id].item())
+        edges.append((source_index, target_index, factor, _GRAPHVIZ_FDP_DEFAULT_K))
+        outgoing[source_index].append(len(edges) - 1)
+    return outgoing, edges
+
+
+def _graphviz_fdp_initial_positions(num_nodes: int, seed: int) -> torch.Tensor:
+    """Initialize positions as Graphviz ``fdp_tLayout`` does without ports.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of local nodes.
+    seed : int
+        Graphviz ``seed`` attribute value.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial positions in inches with shape ``[N, 2]``.
+    """
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float64)
+    rng = _GraphvizDrand48(seed)
+    size = _GRAPHVIZ_FDP_DEFAULT_K * (math.sqrt(num_nodes) + 1.0)
+    half_extent = _GRAPHVIZ_FDP_EXPANSION_FACTOR * (size / 2.0)
+    positions = torch.empty((num_nodes, 2), dtype=torch.float64)
+    for node_index in range(num_nodes):
+        positions[node_index, 0] = half_extent * (2.0 * rng.random() - 1.0)
+        positions[node_index, 1] = half_extent * (2.0 * rng.random() - 1.0)
+    return positions
+
+
+def _graphviz_fdp_disperse_zero_delta(
+    source: int,
+    target: int,
+    phase: int,
+) -> tuple[float, float]:
+    """Return a deterministic replacement for Graphviz's rare zero-distance jitter.
+
+    Parameters
+    ----------
+    source : int
+        First node index.
+    target : int
+        Second node index.
+    phase : int
+        Iteration or phase counter mixed into the deterministic fallback.
+
+    Returns
+    -------
+    tuple[float, float]
+        Non-zero displacement components.
+
+    Notes
+    -----
+    Graphviz calls C ``rand()`` here without a local ``srand``. Exact libc
+    state is not portable, and this branch only fires on exact coordinate
+    equality, so the port uses stable non-zero jitter.
+    """
+    mixed = (source + 1) * 1103515245 + (target + 1) * 12345 + phase * 2654435761
+    x_delta = float(5 - mixed % 10)
+    y_delta = float(5 - (mixed // 10) % 10)
+    if x_delta == 0.0 and y_delta == 0.0:
+        x_delta = 1.0
+    return x_delta, y_delta
+
+
+def _graphviz_fdp_apply_tlayout_repulsion(
+    positions: torch.Tensor,
+    displacement: torch.Tensor,
+    source: int,
+    target: int,
+    phase: int,
+) -> None:
+    """Apply Graphviz ``tLayout`` pair repulsion.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current positions in inches with shape ``[N, 2]``.
+    displacement : torch.Tensor
+        Mutable displacement tensor with shape ``[N, 2]``.
+    source : int
+        First node index.
+    target : int
+        Second node index.
+    phase : int
+        Iteration counter for deterministic zero-distance fallback.
+
+    Returns
+    -------
+    None
+        Updates ``displacement`` in place.
+    """
+    x_delta = float(positions[target, 0] - positions[source, 0])
+    y_delta = float(positions[target, 1] - positions[source, 1])
+    dist2 = x_delta * x_delta + y_delta * y_delta
+    if dist2 == 0.0:
+        x_delta, y_delta = _graphviz_fdp_disperse_zero_delta(source, target, phase)
+        dist2 = x_delta * x_delta + y_delta * y_delta
+    dist = math.sqrt(dist2)
+    force = _GRAPHVIZ_FDP_DEFAULT_K * _GRAPHVIZ_FDP_DEFAULT_K / (dist * dist2)
+    displacement[target, 0] += x_delta * force
+    displacement[target, 1] += y_delta * force
+    displacement[source, 0] -= x_delta * force
+    displacement[source, 1] -= y_delta * force
+
+
+def _graphviz_fdp_apply_tlayout_attraction(
+    positions: torch.Tensor,
+    displacement: torch.Tensor,
+    edge: tuple[int, int, float, float],
+    phase: int,
+) -> None:
+    """Apply Graphviz ``tLayout`` edge attraction.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Current positions in inches with shape ``[N, 2]``.
+    displacement : torch.Tensor
+        Mutable displacement tensor with shape ``[N, 2]``.
+    edge : tuple[int, int, float, float]
+        Edge record as ``(source, target, factor, dist)``.
+    phase : int
+        Iteration counter for deterministic zero-distance fallback.
+
+    Returns
+    -------
+    None
+        Updates ``displacement`` in place.
+    """
+    source, target, factor, edge_dist = edge
+    if source == target:
+        return
+    x_delta = float(positions[target, 0] - positions[source, 0])
+    y_delta = float(positions[target, 1] - positions[source, 1])
+    dist2 = x_delta * x_delta + y_delta * y_delta
+    if dist2 == 0.0:
+        x_delta, y_delta = _graphviz_fdp_disperse_zero_delta(source, target, phase)
+        dist2 = x_delta * x_delta + y_delta * y_delta
+    dist = math.sqrt(dist2)
+    force = factor * (dist - edge_dist) / dist
+    displacement[target, 0] -= x_delta * force
+    displacement[target, 1] -= y_delta * force
+    displacement[source, 0] += x_delta * force
+    displacement[source, 1] += y_delta * force
+
+
+def _graphviz_fdp_update_positions(
+    positions: torch.Tensor,
+    displacement: torch.Tensor,
+    temperature: float,
+) -> None:
+    """Apply Graphviz's temperature-limited position update.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Mutable positions in inches with shape ``[N, 2]``.
+    displacement : torch.Tensor
+        Displacement tensor with shape ``[N, 2]``.
+    temperature : float
+        Current cooling temperature.
+
+    Returns
+    -------
+    None
+        Updates ``positions`` in place.
+    """
+    temp2 = temperature * temperature
+    for node_index in range(positions.shape[0]):
+        dx = float(displacement[node_index, 0])
+        dy = float(displacement[node_index, 1])
+        len2 = dx * dx + dy * dy
+        if len2 < temp2:
+            positions[node_index, 0] += dx
+            positions[node_index, 1] += dy
+        else:
+            factor = temperature / math.sqrt(len2)
+            positions[node_index, 0] += dx * factor
+            positions[node_index, 1] += dy * factor
+
+
+def _graphviz_fdp_tlayout(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    seed: int,
+    edge_weights: Optional[torch.Tensor],
+) -> tuple[torch.Tensor, tuple[float, float, float, int, int]]:
+    """Run Graphviz ``fdp_tLayout`` for one connected component.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Local edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of local nodes.
+    seed : int
+        Graphviz ``seed`` attribute value.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, tuple[float, float, float, int, int]]
+        Positions in inches and xLayout parameters
+        ``(T0, K, C, numIters, loopcnt)``.
+    """
+    positions = _graphviz_fdp_initial_positions(num_nodes=num_nodes, seed=seed)
+    outgoing, edges = _graphviz_fdp_edge_lists(edge_index, num_nodes, edge_weights)
+    max_iters = _GRAPHVIZ_FDP_DEFAULT_MAX_ITERS
+    pass1 = _GRAPHVIZ_FDP_DEFAULT_UNSCALED * max_iters // 100
+    t0 = _GRAPHVIZ_FDP_DEFAULT_TFACT * _GRAPHVIZ_FDP_DEFAULT_K * math.sqrt(num_nodes) / 5.0
+    loop_count = pass1
+    cell_size = 3.0 * _GRAPHVIZ_FDP_DEFAULT_K
+
+    for iteration in range(loop_count):
+        temperature = t0 * (max_iters - iteration) / max_iters
+        if temperature <= 0.0:
+            continue
+        displacement = torch.zeros_like(positions)
+        grid: dict[tuple[int, int], list[int]] = {}
+        for node_index in range(num_nodes):
+            cell = (
+                math.floor(float(positions[node_index, 0]) / cell_size),
+                math.floor(float(positions[node_index, 1]) / cell_size),
+            )
+            grid.setdefault(cell, []).append(node_index)
+        for source in range(num_nodes):
+            for edge_id in outgoing[source]:
+                _graphviz_fdp_apply_tlayout_attraction(
+                    positions=positions,
+                    displacement=displacement,
+                    edge=edges[edge_id],
+                    phase=iteration,
+                )
+        for (cell_x, cell_y), nodes in grid.items():
+            for source in nodes:
+                for target in nodes:
+                    if source != target:
+                        _graphviz_fdp_apply_tlayout_repulsion(
+                            positions, displacement, source, target, iteration
+                        )
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        for target in grid.get((cell_x + dx, cell_y + dy), []):
+                            x_delta = float(positions[target, 0] - positions[source, 0])
+                            y_delta = float(positions[target, 1] - positions[source, 1])
+                            if x_delta * x_delta + y_delta * y_delta < cell_size * cell_size:
+                                _graphviz_fdp_apply_tlayout_repulsion(
+                                    positions, displacement, source, target, iteration
+                                )
+        _graphviz_fdp_update_positions(positions, displacement, temperature)
+
+    x_t0 = t0 * (max_iters - pass1) / max_iters
+    return positions, (
+        x_t0,
+        _GRAPHVIZ_FDP_DEFAULT_K,
+        _GRAPHVIZ_FDP_DEFAULT_C,
+        max_iters - pass1,
+        max_iters - pass1,
+    )
+
+
+def _graphviz_fdp_node_sizes_in_inches(
+    node_sizes: Optional[torch.Tensor],
+    num_nodes: int,
+) -> torch.Tensor:
+    """Return node sizes in Graphviz fdp's internal inch units.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor, optional
+        Node sizes in points with shape ``[N, 2]``.
+    num_nodes : int
+        Number of local nodes.
+
+    Returns
+    -------
+    torch.Tensor
+        Node sizes in inches with shape ``[N, 2]``.
+    """
+    if node_sizes is None:
+        sizes = torch.zeros((num_nodes, 2), dtype=torch.float64)
+    else:
+        sizes = node_sizes.detach().to(device="cpu", dtype=torch.float64) / (
+            _GRAPHVIZ_FDP_POINTS_PER_INCH
+        )
+    floors = torch.tensor(
+        [_GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES, _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES],
+        dtype=torch.float64,
+    )
+    return torch.maximum(sizes, floors)
+
+
+def _graphviz_fdp_x_overlap(
+    positions: torch.Tensor,
+    sizes_in_inches: torch.Tensor,
+    source: int,
+    target: int,
+) -> bool:
+    """Return whether two nodes overlap under Graphviz ``xLayout`` margins.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Positions in inches with shape ``[N, 2]``.
+    sizes_in_inches : torch.Tensor
+        Node sizes in inches with shape ``[N, 2]``.
+    source : int
+        First node index.
+    target : int
+        Second node index.
+
+    Returns
+    -------
+    bool
+        ``True`` when axis-aligned node boxes overlap.
+    """
+    x_delta = abs(float(positions[target, 0] - positions[source, 0]))
+    y_delta = abs(float(positions[target, 1] - positions[source, 1]))
+    width = float((sizes_in_inches[source, 0] + sizes_in_inches[target, 0]) / 2.0)
+    height = float((sizes_in_inches[source, 1] + sizes_in_inches[target, 1]) / 2.0)
+    return x_delta <= width and y_delta <= height
+
+
+def _graphviz_fdp_apply_xlayout_repulsion(
+    positions: torch.Tensor,
+    displacement: torch.Tensor,
+    sizes_in_inches: torch.Tensor,
+    source: int,
+    target: int,
+    x_overlap_force: float,
+    x_nonoverlap_force: float,
+    phase: int,
+) -> int:
+    """Apply Graphviz ``xLayout`` pair repulsion.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Positions in inches with shape ``[N, 2]``.
+    displacement : torch.Tensor
+        Mutable displacement tensor with shape ``[N, 2]``.
+    sizes_in_inches : torch.Tensor
+        Node sizes in inches with shape ``[N, 2]``.
+    source : int
+        First node index.
+    target : int
+        Second node index.
+    x_overlap_force : float
+        Overlap repulsion numerator.
+    x_nonoverlap_force : float
+        Non-overlap repulsion numerator.
+    phase : int
+        Iteration counter for deterministic zero-distance fallback.
+
+    Returns
+    -------
+    int
+        ``1`` if nodes overlapped before movement, otherwise ``0``.
+    """
+    x_delta = float(positions[target, 0] - positions[source, 0])
+    y_delta = float(positions[target, 1] - positions[source, 1])
+    dist2 = x_delta * x_delta + y_delta * y_delta
+    if dist2 == 0.0:
+        x_delta, y_delta = _graphviz_fdp_disperse_zero_delta(source, target, phase)
+        dist2 = x_delta * x_delta + y_delta * y_delta
+    overlaps = _graphviz_fdp_x_overlap(positions, sizes_in_inches, source, target)
+    force = (x_overlap_force if overlaps else x_nonoverlap_force) / dist2
+    displacement[target, 0] += x_delta * force
+    displacement[target, 1] += y_delta * force
+    displacement[source, 0] -= x_delta * force
+    displacement[source, 1] -= y_delta * force
+    return 1 if overlaps else 0
+
+
+def _graphviz_fdp_apply_xlayout_attraction(
+    positions: torch.Tensor,
+    displacement: torch.Tensor,
+    sizes_in_inches: torch.Tensor,
+    edge: tuple[int, int, float, float],
+) -> None:
+    """Apply Graphviz ``xLayout`` edge attraction.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Positions in inches with shape ``[N, 2]``.
+    displacement : torch.Tensor
+        Mutable displacement tensor with shape ``[N, 2]``.
+    sizes_in_inches : torch.Tensor
+        Node sizes in inches with shape ``[N, 2]``.
+    edge : tuple[int, int, float, float]
+        Edge record as ``(source, target, factor, dist)``.
+
+    Returns
+    -------
+    None
+        Updates ``displacement`` in place.
+    """
+    source, target, _factor, _edge_dist = edge
+    if source == target or _graphviz_fdp_x_overlap(positions, sizes_in_inches, source, target):
+        return
+    x_delta = float(positions[target, 0] - positions[source, 0])
+    y_delta = float(positions[target, 1] - positions[source, 1])
+    dist = math.hypot(x_delta, y_delta)
+    if dist == 0.0:
+        return
+    source_radius = math.hypot(
+        float(sizes_in_inches[source, 0]) / 2.0,
+        float(sizes_in_inches[source, 1]) / 2.0,
+    )
+    target_radius = math.hypot(
+        float(sizes_in_inches[target, 0]) / 2.0,
+        float(sizes_in_inches[target, 1]) / 2.0,
+    )
+    din = source_radius + target_radius
+    dout = dist - din
+    force = dout * dout / ((_GRAPHVIZ_FDP_DEFAULT_K + din) * dist)
+    displacement[target, 0] -= x_delta * force
+    displacement[target, 1] -= y_delta * force
+    displacement[source, 0] += x_delta * force
+    displacement[source, 1] += y_delta * force
+
+
+def _graphviz_fdp_count_overlaps(
+    positions: torch.Tensor,
+    sizes_in_inches: torch.Tensor,
+) -> int:
+    """Count pairwise Graphviz ``xLayout`` overlaps.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Positions in inches with shape ``[N, 2]``.
+    sizes_in_inches : torch.Tensor
+        Node sizes in inches with shape ``[N, 2]``.
+
+    Returns
+    -------
+    int
+        Number of overlapping node pairs.
+    """
+    overlaps = 0
+    for source in range(positions.shape[0]):
+        for target in range(source + 1, positions.shape[0]):
+            overlaps += int(_graphviz_fdp_x_overlap(positions, sizes_in_inches, source, target))
+    return overlaps
+
+
+def _graphviz_fdp_xlayout(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_sizes: Optional[torch.Tensor],
+    edge_weights: Optional[torch.Tensor],
+    xpms: tuple[float, float, float, int, int],
+) -> torch.Tensor:
+    """Run Graphviz ``fdp_xLayout``'s iterative overlap phase.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Initial positions in inches with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Local edge tensor with shape ``[2, E]``.
+    node_sizes : torch.Tensor, optional
+        Node sizes in points with shape ``[N, 2]``.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+    xpms : tuple[float, float, float, int, int]
+        Parameters returned by ``fdp_tLayout`` as
+        ``(T0, K, C, numIters, loopcnt)``.
+
+    Returns
+    -------
+    torch.Tensor
+        Expanded positions in inches with shape ``[N, 2]``.
+    """
+    num_nodes = int(positions.shape[0])
+    if num_nodes <= 1:
+        return positions
+    sizes_in_inches = _graphviz_fdp_node_sizes_in_inches(node_sizes, num_nodes)
+    outgoing, edges = _graphviz_fdp_edge_lists(edge_index, num_nodes, edge_weights)
+    ov = _graphviz_fdp_count_overlaps(positions, sizes_in_inches)
+    if ov == 0:
+        return positions
+
+    x_t0, x_k, x_c, x_num_iters, x_loopcnt = xpms
+    if x_c <= 0.0:
+        x_c = _GRAPHVIZ_FDP_DEFAULT_X_C
+    base_k = x_k
+    for try_index in range(_GRAPHVIZ_FDP_DEFAULT_X_TRIES):
+        if ov == 0:
+            break
+        k2 = x_k * x_k
+        x_overlap_force = x_c * k2
+        x_nonoverlap_force = len(edges) * x_overlap_force * 2.0 / (num_nodes * (num_nodes - 1))
+        for iteration in range(x_loopcnt):
+            temperature = x_t0 * (x_num_iters - iteration) / x_num_iters
+            if temperature <= 0.0:
+                break
+            displacement = torch.zeros_like(positions)
+            overlaps_this_pass = 0
+            for source in range(num_nodes):
+                for target in range(source + 1, num_nodes):
+                    overlaps_this_pass += _graphviz_fdp_apply_xlayout_repulsion(
+                        positions=positions,
+                        displacement=displacement,
+                        sizes_in_inches=sizes_in_inches,
+                        source=source,
+                        target=target,
+                        x_overlap_force=x_overlap_force,
+                        x_nonoverlap_force=x_nonoverlap_force,
+                        phase=try_index * x_loopcnt + iteration,
+                    )
+                for edge_id in outgoing[source]:
+                    _graphviz_fdp_apply_xlayout_attraction(
+                        positions=positions,
+                        displacement=displacement,
+                        sizes_in_inches=sizes_in_inches,
+                        edge=edges[edge_id],
+                    )
+            ov = overlaps_this_pass
+            if ov == 0:
+                break
+            _graphviz_fdp_update_positions(positions, displacement, temperature)
+        x_k += base_k
+    return positions
+
+
+def _graphviz_fdp_component_layout(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+    seed: int,
+    edge_weights: Optional[torch.Tensor] = None,
+    flip_y: bool = True,
+) -> torch.Tensor:
+    """Run the Graphviz fdp ``tLayout`` plus ``xLayout`` kernels.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Local edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of local nodes.
+    node_sizes : torch.Tensor, optional
+        Node sizes in points with shape ``[N, 2]``.
+    seed : int
+        Graphviz ``seed`` attribute value.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+    flip_y : bool, default=True
+        Whether to convert Graphviz's internal y-up coordinates to the
+        benchmark adapter's y-down convention.
+
+    Returns
+    -------
+    torch.Tensor
+        Component positions in points with shape ``[N, 2]``.
+    """
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float32)
+    if num_nodes == 1:
+        return torch.zeros((1, 2), dtype=torch.float32)
+    positions, xpms = _graphviz_fdp_tlayout(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        seed=seed,
+        edge_weights=edge_weights,
+    )
+    positions = _graphviz_fdp_xlayout(
+        positions=positions,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        edge_weights=edge_weights,
+        xpms=xpms,
+    )
+    result = positions * _GRAPHVIZ_FDP_POINTS_PER_INCH
+    if flip_y:
+        result[:, 1] *= -1.0
+    return result.to(dtype=torch.float32)
 
 
 def _c_round(value: float) -> int:
@@ -2218,8 +2877,8 @@ def build_fmmm_pipeline(
         to 0.179 across step-count variants. Round 33 fdp bounded subset
         remained 0.121966.
     Known divergences:
-        - Graphviz fdp exact ``tLayout``/``xLayout`` numeric kernels remain
-          approximated by Dagua's FM^3 component solve.
+        - Graphviz fdp clustered recursion still diverges in derived-node
+          sizing and cluster bbox interactions.
         - Dagua keeps a fallback single-level solve when multilevel setup is
           unsuitable.
 
@@ -2379,9 +3038,11 @@ def _layout_fmmm_fidelity_components(
     node_sizes : torch.Tensor, optional
         Optional parent node sizes with shape ``[N, 2]``.
     steps : int
-        Total refinement budget for each component solve.
+        Compatibility parameter retained for the public FMMM variant. Graphviz
+        fdp fidelity uses Graphviz's default ``maxiter`` constant.
     seed : int
-        Random seed reused for each component, matching fdp_tLayout seeding.
+        Random seed reused for each component, matching ``fdp_tLayout``
+        reseeding from ``T_seed``.
     edge_weights : torch.Tensor, optional
         Optional parent edge weights with shape ``[E]``.
     force_model : str
@@ -2396,22 +3057,20 @@ def _layout_fmmm_fidelity_components(
     torch.Tensor
         Packed parent coordinates with shape ``[N, 2]``.
     """
+    del steps, force_model, reference_mode, fidelity_mode
     device = _layout_device(edge_index=edge_index, node_sizes=node_sizes)
     component_positions: list[torch.Tensor] = []
     boxes: list[tuple[float, float, float, float]] = []
     for component in components:
         local_edges, local_weights = _slice_component_edges(edge_index, edge_weights, component)
         local_sizes = node_sizes[component] if node_sizes is not None else None
-        local_pos = _run_fmmm_pipeline_once(
+        local_pos = _graphviz_fdp_component_layout(
             edge_index=local_edges,
             num_nodes=len(component),
             node_sizes=local_sizes,
-            steps=steps,
             seed=seed,
             edge_weights=local_weights,
-            force_model=force_model,
-            reference_mode=reference_mode,
-            fidelity_mode=fidelity_mode,
+            flip_y=False,
         )
         component_positions.append(local_pos)
         boxes.append(_component_box(local_pos, local_sizes))
@@ -2422,7 +3081,9 @@ def _layout_fmmm_fidelity_components(
     for component, local_pos, offset in zip(components, component_positions, offsets):
         offset_tensor = torch.tensor(offset, dtype=dtype, device=local_pos.device)
         packed[component] = (local_pos + offset_tensor).to(device=device, dtype=dtype)
-    return _translate_packed_components_to_origin(packed, node_sizes).to(dtype=torch.float32)
+    translated = _translate_packed_components_to_origin(packed, node_sizes).to(dtype=torch.float32)
+    translated[:, 1] *= -1.0
+    return translated
 
 
 def layout_fmmm_pipeline(
@@ -2517,19 +3178,18 @@ def layout_fmmm_pipeline(
     effective_reference_mode = reference_mode or fidelity_mode
     if effective_reference_mode:
         components = _weak_components(edge_index=edge_index, num_nodes=num_nodes)
-        if len(components) > 1:
-            return _layout_fmmm_fidelity_components(
-                edge_index=edge_index,
-                components=components,
-                num_nodes=num_nodes,
-                node_sizes=node_sizes,
-                steps=steps,
-                seed=seed,
-                edge_weights=edge_weights,
-                force_model=force_model,
-                reference_mode=reference_mode,
-                fidelity_mode=fidelity_mode,
-            )
+        return _layout_fmmm_fidelity_components(
+            edge_index=edge_index,
+            components=components,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            steps=steps,
+            seed=seed,
+            edge_weights=edge_weights,
+            force_model=force_model,
+            reference_mode=reference_mode,
+            fidelity_mode=fidelity_mode,
+        )
 
     return _run_fmmm_pipeline_once(
         edge_index=edge_index,
