@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
 from typing import ClassVar, List, Optional, Tuple, Union
 
@@ -58,6 +59,46 @@ _GRAPHVIZ_DRAND48_MULTIPLIER = 0x5DEECE66D
 _GRAPHVIZ_DRAND48_INCREMENT = 0xB
 _GRAPHVIZ_DRAND48_MASK = (1 << 48) - 1
 _GRAPHVIZ_DRAND48_SEED_SUFFIX = 0x330E
+_OGDF_EDGE_COSTS = 100.0
+_OGDF_RAND_BUCKETS = 1000
+_OGDF_RAND_SCALE = 10.0
+
+
+def _ogdf_runner_initial_positions(num_nodes: int, seed: int) -> np.ndarray:
+    """Return the OGDF runner-owned initial GraphAttributes coordinates.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    seed : int
+        Seed passed to the standalone OGDF runner before ``std::rand`` is
+        consumed for initial x/y coordinates.
+
+    Returns
+    -------
+    numpy.ndarray
+        Double-precision initial coordinates with shape ``[N, 2]``.
+
+    Notes
+    -----
+    The repository's OGDF adapter calls ``std::srand(seed)`` and then assigns
+    ``std::rand() % 1000 / 10.0`` to x and y for each node before invoking
+    ``StressMinimization::hasInitialLayout(true)``. Calling libc directly keeps
+    this path bit-aligned with the compiled runner on the Linux benchmark host.
+    """
+    if num_nodes < 0:
+        raise ValueError("num_nodes must be non-negative.")
+
+    libc = ctypes.CDLL(None)
+    libc.srand(ctypes.c_uint(int(seed)))
+    libc.rand.restype = ctypes.c_int
+
+    positions = np.empty((num_nodes, 2), dtype=np.float64)
+    for node in range(num_nodes):
+        positions[node, 0] = float(libc.rand() % _OGDF_RAND_BUCKETS) / _OGDF_RAND_SCALE
+        positions[node, 1] = float(libc.rand() % _OGDF_RAND_BUCKETS) / _OGDF_RAND_SCALE
+    return positions
 
 
 def _is_graphviz_fidelity(fidelity_mode: Optional[str]) -> bool:
@@ -455,6 +496,121 @@ class GraphvizPrepareStressMajorizationState(Op):
 
 
 @dataclass(frozen=True)
+class OgdfPrepareStressMajorizationState(Op):
+    """Prepare OGDF ``StressMinimization`` distances and weights."""
+
+    name: ClassVar[str] = "sm_ogdf_prepare_state"
+    category: ClassVar[OpCategory] = OpCategory.PREPROCESS
+    reads: ClassVar[Tuple[str, ...]] = ()
+    writes: ClassVar[Tuple[str, ...]] = ("distance_matrix", "laplacian", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compute OGDF unit-edge shortest paths scaled by ``edgeCosts=100``.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable graph layout inputs.
+        state : SolveState
+            Mutable solve state.
+        ctx : RuntimeContext
+            Runtime context. Unused.
+
+        Returns
+        -------
+        SolveState
+            State with OGDF-scaled target distances and inverse-square weights.
+        """
+        del ctx
+
+        adjacency = _shared_build_undirected_adjacency(
+            edge_index=problem.edge_index,
+            num_nodes=problem.num_nodes,
+            edge_weights=None,
+        )
+        raw_distances = _shared_all_pairs_shortest_paths(adjacency, weighted=False)
+        reachable_mask = raw_distances >= 0
+        fill_value = (
+            _OGDF_EDGE_COSTS * float(problem.num_nodes) ** 0.5 if problem.num_nodes > 1 else 0.0
+        )
+        distances = np.where(
+            reachable_mask,
+            raw_distances.astype(np.float64) * _OGDF_EDGE_COSTS,
+            fill_value,
+        )
+        np.fill_diagonal(distances, 0.0)
+
+        with np.errstate(divide="ignore"):
+            weights = np.where(distances > 0.0, 1.0 / np.square(distances), 0.0)
+        np.fill_diagonal(weights, 0.0)
+
+        state.distance_matrix = torch.from_numpy(distances)
+        state.extras[WEIGHTS_KEY] = weights
+        state.laplacian = np.empty((0, 0), dtype=np.float64)
+        return state
+
+
+@dataclass(frozen=True)
+class OgdfInitializePositions(Op):
+    """Initialize positions from the OGDF runner's seeded ``std::rand`` grid."""
+
+    name: ClassVar[str] = "sm_ogdf_initialize_positions"
+    category: ClassVar[OpCategory] = OpCategory.INIT
+    reads: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
+    writes: ClassVar[Tuple[str, ...]] = ("extras",)
+    requires: ClassVar[Tuple[str, ...]] = ("distance_matrix", "extras")
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Set the current layout to the adapter-owned OGDF initial layout.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable graph layout inputs, including node count and seed.
+        state : SolveState
+            Mutable solve state with target distances and weights prepared.
+        ctx : RuntimeContext
+            Runtime context. Unused.
+
+        Returns
+        -------
+        SolveState
+            State with ``sm_current_positions`` and ``sm_current_stress`` set.
+        """
+        del ctx
+
+        if not isinstance(state.distance_matrix, torch.Tensor):
+            raise ValueError("OGDF initialization requires state.distance_matrix.")
+        weights = state.extras.get(WEIGHTS_KEY)
+        if not isinstance(weights, np.ndarray):
+            raise ValueError("OGDF initialization requires sm_weights in state.extras.")
+
+        initialized = _ogdf_runner_initial_positions(
+            num_nodes=problem.num_nodes,
+            seed=problem.seed,
+        )
+        target_distances = state.distance_matrix.to(dtype=torch.float64, device="cpu").numpy()
+        deltas = initialized[:, None, :] - initialized[None, :, :]
+        current_distances = np.sqrt(np.sum(deltas * deltas, axis=2))
+        errors = current_distances - target_distances
+
+        state.extras[CURRENT_POSITIONS_KEY] = initialized
+        state.extras[CURRENT_STRESS_KEY] = 0.5 * float(np.sum(weights * errors * errors))
+        return state
+
+
+@dataclass(frozen=True)
 class GraphvizInitializePositions(Op):
     """Initialize positions from Graphviz neato's default random start."""
 
@@ -785,14 +941,41 @@ def build_stress_majorization_pipeline(
             name="stress_majorization_pipeline",
         )
 
+    if fidelity_mode == _FIDELITY_MODE_OGDF:
+        repeated_ops = [
+            SmacofStep(
+                config=SmacofStepConfig(
+                    update_mode="ogdf_serial",
+                    min_distance=0.0,
+                )
+            ),
+            CollectStressMajorizationTrace(),
+        ]
+        if epsilon is not None:
+            repeated_ops = [
+                CaptureStressMajorizationStress(),
+                *repeated_ops,
+                CheckStressMajorizationEpsilon(epsilon=epsilon),
+            ]
+
+        return Pipeline(
+            [
+                FixedSteps(FixedStepsConfig(n=iterations)),
+                OgdfPrepareStressMajorizationState(),
+                OgdfInitializePositions(),
+                Repeat(
+                    n=iterations,
+                    ops=repeated_ops,
+                ),
+                FinalizeStressMajorizationPositions(),
+            ],
+            name="stress_majorization_pipeline",
+        )
+
     prepare_config = PrepareStressMajorizationStateConfig()
     init_config = InitializeStressMajorizationPositionsConfig()
     step_config = SmacofStepConfig()
-    if fidelity_mode == _FIDELITY_MODE_OGDF:
-        prepare_config = PrepareStressMajorizationStateConfig(distance_fill="ogdf")
-        init_config = InitializeStressMajorizationPositionsConfig(jitter_scale=0.0)
-        step_config = SmacofStepConfig(update_mode="ogdf_serial")
-    elif fidelity_mode == _FIDELITY_MODE_GRAPHVIZ_NEATO:
+    if fidelity_mode == _FIDELITY_MODE_GRAPHVIZ_NEATO:
         prepare_config = PrepareStressMajorizationStateConfig(distance_fill="graphviz_neato")
         init_config = InitializeStressMajorizationPositionsConfig(init_mode="random")
         step_config = SmacofStepConfig(stress_tolerance=float("inf"))
