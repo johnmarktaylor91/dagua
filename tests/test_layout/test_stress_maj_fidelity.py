@@ -61,8 +61,8 @@ def test_stress_maj_default_fill_remains_classic_diameter_plus_one() -> None:
     assert np.isclose(float(distances[0, 3].item()), 3.0)
 
 
-def test_stress_maj_ogdf_mode_is_seed_independent() -> None:
-    """The OGDF fidelity path disables dagua's seeded warm-start jitter."""
+def test_stress_maj_ogdf_mode_uses_runner_seeded_initial_layout() -> None:
+    """The OGDF fidelity path uses the runner's seeded initial coordinates."""
     edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long)
     first = layout_stress_majorization_pipeline(
         edge_index=edge_index,
@@ -81,7 +81,7 @@ def test_stress_maj_ogdf_mode_is_seed_independent() -> None:
 
     assert isinstance(first, torch.Tensor)
     assert isinstance(second, torch.Tensor)
-    assert torch.allclose(first, second)
+    assert not torch.allclose(first, second)
 
 
 def test_stress_maj_ogdf_serial_sweep_updates_in_place() -> None:
