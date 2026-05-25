@@ -8,7 +8,13 @@ import pytest
 import torch
 
 from dagua.layout.classic.sfdp import layout_sfdp
-from dagua.layout.ops.pipelines.sfdp import build_sfdp_pipeline, layout_sfdp_pipeline
+from dagua.layout.ops.pipelines.sfdp import (
+    _decompose_graphviz_supervariables,
+    _graphviz_sfdp_coarsen,
+    build_sfdp_pipeline,
+    layout_sfdp_pipeline,
+)
+from dagua.layout.ops.sfdp import _GRAPH_KEY, _MAPPING_KEY, GraphData, SFDPHierarchyConfig
 from dagua.layout.ops.state import (
     ExecutionPlan,
     LayoutProblem,
@@ -83,6 +89,67 @@ def _complete_edge_index(num_nodes: int) -> torch.Tensor:
         for target in range(num_nodes)
         if source != target
     )
+
+
+def _complete_multipartite_graph(groups: list[list[int]]) -> GraphData:
+    """Build a weighted undirected complete multipartite graph.
+
+    Parameters
+    ----------
+    groups : list[list[int]]
+        Partition members. Nodes in the same group are not connected to each
+        other, and every cross-group pair has unit weight.
+
+    Returns
+    -------
+    GraphData
+        SFDP graph data with unique undirected edges and sorted adjacency lists.
+    """
+    num_nodes = sum(len(group) for group in groups)
+    node_to_group: dict[int, int] = {}
+    for group_index, group in enumerate(groups):
+        for node in group:
+            node_to_group[node] = group_index
+
+    edge_pairs: list[tuple[int, int]] = []
+    adjacency: list[list[tuple[int, float]]] = [[] for _ in range(num_nodes)]
+    for source in range(num_nodes):
+        for target in range(source + 1, num_nodes):
+            if node_to_group[source] == node_to_group[target]:
+                continue
+            edge_pairs.append((source, target))
+            adjacency[source].append((target, 1.0))
+            adjacency[target].append((source, 1.0))
+
+    edge_index = torch.tensor(edge_pairs, dtype=torch.long).transpose(0, 1).contiguous()
+    edge_weight = torch.ones((len(edge_pairs),), dtype=torch.float32)
+    return GraphData(
+        num_nodes=num_nodes,
+        edge_index=edge_index,
+        edge_weight=edge_weight,
+        adjacency=adjacency,
+    )
+
+
+def _edge_weight_dict(graph: GraphData) -> dict[tuple[int, int], float]:
+    """Convert graph edges to a dictionary for golden-vector assertions.
+
+    Parameters
+    ----------
+    graph : GraphData
+        Graph whose unique undirected edges should be indexed.
+
+    Returns
+    -------
+    dict[tuple[int, int], float]
+        Mapping from ``(source, target)`` edge tuple to edge weight.
+    """
+    return {
+        (int(graph.edge_index[0, edge_id].item()), int(graph.edge_index[1, edge_id].item())): float(
+            graph.edge_weight[edge_id].item()
+        )
+        for edge_id in range(graph.edge_index.shape[1])
+    }
 
 
 def _assert_exact_match(classic: torch.Tensor, pipeline: torch.Tensor) -> None:
@@ -162,6 +229,64 @@ def _run_pipeline_direct(
 
 class TestSFDPPipelineFidelity:
     """Bit-exact regression coverage for the SFDP pipeline."""
+
+    def test_graphviz_supervariable_decomposition_matches_reference_groups(self) -> None:
+        """Graphviz supervariables should group identical matrix column patterns."""
+        graph = _complete_multipartite_graph([[0, 1], [2, 3], [4, 5], [6, 7]])
+
+        groups = _decompose_graphviz_supervariables(graph)
+
+        assert groups == [[0, 1], [2, 3], [4, 5], [6, 7]]
+
+    def test_graphviz_matrix_coarsening_matches_reference_complete_multipartite(
+        self,
+    ) -> None:
+        """Matrix coarsening should match Graphviz ``R * A * P`` golden values."""
+        graph = _complete_multipartite_graph([[0, 1], [2, 3], [4, 5], [6, 7]])
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(123)
+
+        coarsened = _graphviz_sfdp_coarsen(
+            graph=graph,
+            generator=generator,
+            config=SFDPHierarchyConfig(),
+        )
+
+        assert coarsened is not None
+        fine_to_coarse, coarse_graph = coarsened
+        assert fine_to_coarse.tolist() == [0, 0, 1, 1, 2, 2, 3, 3]
+        assert coarse_graph.num_nodes == 4
+        assert _edge_weight_dict(coarse_graph) == {
+            (0, 1): 4.0,
+            (0, 2): 4.0,
+            (0, 3): 4.0,
+            (1, 2): 4.0,
+            (1, 3): 4.0,
+            (2, 3): 4.0,
+        }
+
+    def test_build_sfdp_pipeline_fidelity_mode_uses_matrix_hierarchy(self) -> None:
+        """The public fidelity flag should select the matrix coarsening op."""
+        default_names = [op.name for op in build_sfdp_pipeline(steps=0).ops]
+        fidelity_names = [op.name for op in build_sfdp_pipeline(steps=0, fidelity_mode=True).ops]
+
+        assert default_names[1] == "sfdp_coarsen_hierarchy"
+        assert fidelity_names[1] == "sfdp_graphviz_matrix_coarsen_hierarchy"
+
+    def test_graphviz_matrix_hierarchy_populates_pipeline_extras(self) -> None:
+        """Fidelity hierarchy construction should expose Graphviz mappings."""
+        graph = _complete_multipartite_graph([[0, 1], [2, 3], [4, 5], [6, 7]])
+        edge_index = graph.edge_index
+        problem = LayoutProblem(edge_index=edge_index, num_nodes=8, seed=123)
+        state = SolveState()
+        ctx = RuntimeContext(plan=ExecutionPlan(device="cpu"))
+
+        final_state = build_sfdp_pipeline(steps=0, fidelity_mode=True).apply(problem, state, ctx)
+
+        graphs: list[GraphData] = final_state.extras[_GRAPH_KEY]
+        mappings: list[torch.Tensor] = final_state.extras[_MAPPING_KEY]
+        assert [level.num_nodes for level in graphs] == [8, 4]
+        assert mappings[0].tolist() == [0, 0, 1, 1, 2, 2, 3, 3]
 
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),
