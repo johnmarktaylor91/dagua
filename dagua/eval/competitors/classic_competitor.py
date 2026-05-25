@@ -1699,10 +1699,27 @@ class ClassicGraphOpt(_ClassicBase):
 class ClassicDRL(_ClassicBase):
     name = "classic_drl"
     max_nodes = 100_000
+    variant_param_names = frozenset({"options"})
 
     def layout(
         self, graph: DaguaGraph, timeout: float = 300.0, seed: Optional[int] = None
     ) -> CompetitorResult:
+        """Run the DrL reimplementation.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph to lay out.
+        timeout : float, default=300.0
+            Unused compatibility parameter.
+        seed : int | None, default=None
+            Random seed forwarded to the DrL layout.
+
+        Returns
+        -------
+        CompetitorResult
+            Layout result and runtime information.
+        """
         del timeout
         return _quick_classic(
             self.name,
