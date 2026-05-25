@@ -337,3 +337,44 @@ class TestTsnetPipelineFidelity:
         pipeline = layout_tsnet_pipeline(edge_index=edge_index, num_nodes=5, steps=0, seed=42)
 
         _assert_exact_match(classic, pipeline)
+
+    def test_layout_tsnet_fidelity_mode_matches_sklearn_exact_reference(self) -> None:
+        """Fidelity mode should call the sklearn exact t-SNE reference path."""
+        sklearn_manifold = pytest.importorskip("sklearn.manifold")
+        scipy_csgraph = pytest.importorskip("scipy.sparse.csgraph")
+        scipy_sparse = pytest.importorskip("scipy.sparse")
+        edge_index = _path_edge_index(8)
+        num_nodes = 8
+        rows = edge_index[0].numpy()
+        cols = edge_index[1].numpy()
+        adjacency = scipy_sparse.csr_matrix(
+            (
+                np.ones(rows.shape[0] * 2, dtype=np.float32),
+                (np.concatenate([rows, cols]), np.concatenate([cols, rows])),
+            ),
+            shape=(num_nodes, num_nodes),
+        )
+        distances = scipy_csgraph.shortest_path(adjacency, directed=False).astype(
+            np.float32,
+            copy=False,
+        )
+        reference = sklearn_manifold.TSNE(
+            n_components=2,
+            metric="precomputed",
+            init="random",
+            random_state=3,
+            perplexity=7.0,
+            method="exact",
+            max_iter=250,
+        ).fit_transform(distances)
+
+        pipeline = layout_tsnet_pipeline(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            perplexity=30.0,
+            steps=250,
+            seed=3,
+            fidelity_mode=True,
+        )
+
+        torch.testing.assert_close(pipeline.cpu(), torch.tensor(reference, dtype=torch.float32))
