@@ -6,6 +6,7 @@ branches of the maxent-stress algorithm.
 
 from __future__ import annotations
 
+import ctypes
 import math
 from collections import deque
 from dataclasses import dataclass, field
@@ -38,6 +39,43 @@ _MIN_DISTANCE: float = 1.0e-3
 _FULL_STRESS_LIMIT: int = 1_000
 _PIVOT_COUNT: int = 50
 _SAMPLED_REPULSION_NEIGHBORS: int = 96
+_OGDF_RUNNER_RANDOM_MODULUS: int = 1_000
+_OGDF_RUNNER_RANDOM_SCALE: float = 10.0
+
+
+def _ogdf_runner_initial_positions(num_nodes: int, seed: int) -> torch.Tensor:
+    """Return the OGDF runner-owned stress initial layout.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes ``N`` in the graph.
+    seed : int
+        Seed forwarded to ``std::srand`` before drawing coordinates.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial coordinates with shape ``[N, 2]`` and dtype ``float64``.
+
+    Notes
+    -----
+    ``scripts/ogdf_runner.cpp`` sets ``StressMinimization::hasInitialLayout``
+    and fills each coordinate with ``(std::rand() % 1000) / 10.0``. That
+    bypasses OGDF's internal PivotMDS warm start for this fidelity target, so
+    matching the runner's libc RNG stream is the dominant bit-exact component.
+    """
+    libc = ctypes.CDLL(None)
+    libc.srand(ctypes.c_uint(seed))
+    positions = torch.empty((num_nodes, 2), dtype=torch.float64)
+    for node_index in range(num_nodes):
+        positions[node_index, 0] = (
+            float(libc.rand() % _OGDF_RUNNER_RANDOM_MODULUS) / _OGDF_RUNNER_RANDOM_SCALE
+        )
+        positions[node_index, 1] = (
+            float(libc.rand() % _OGDF_RUNNER_RANDOM_MODULUS) / _OGDF_RUNNER_RANDOM_SCALE
+        )
+    return positions
 
 
 def _path_warm_start_positions(problem: LayoutProblem) -> Optional[torch.Tensor]:
@@ -172,10 +210,9 @@ class MaxentInitializePositions(Op):
         """
         del ctx
 
-        positions = None
         if self.for_majorization:
-            positions = _path_warm_start_positions(problem)
-        if positions is None:
+            positions = _ogdf_runner_initial_positions(problem.num_nodes, problem.seed)
+        else:
             positions = layout_pivot_mds(
                 edge_index=problem.edge_index,
                 num_nodes=problem.num_nodes,
@@ -183,7 +220,6 @@ class MaxentInitializePositions(Op):
                 n_pivots=min(self.config.pivot_count, problem.num_nodes),
                 seed=problem.seed,
                 edge_weights=problem.edge_weights,
-                first_pivot_index=0 if self.for_majorization else None,
             )
         if self.for_majorization:
             state.pos = positions.to(device="cpu", dtype=torch.float64)
@@ -242,7 +278,7 @@ class MaxentPrepareState(Op):
 
         weighted = problem.edge_weights is not None
         if problem.edge_weights is None or problem.edge_weights.numel() == 0:
-            average_edge_cost = 1.0
+            average_edge_cost = 100.0 if self.for_majorization else 1.0
         else:
             average_edge_cost = float(
                 problem.edge_weights.detach().to(device="cpu", dtype=torch.float32).mean().item()
@@ -273,7 +309,8 @@ class MaxentPrepareState(Op):
                 if weighted:
                     cleaned[np.isinf(cleaned)] = disconnected_distance
                 else:
-                    cleaned[cleaned < 0] = disconnected_distance
+                    cleaned[cleaned < 0] = math.sqrt(float(max(problem.num_nodes, 1)))
+                    cleaned *= average_edge_cost
                 graph_distances = torch.tensor(cleaned, dtype=torch.float64)
             weight_matrix = torch.zeros_like(graph_distances)
             off_diagonal = ~torch.eye(
