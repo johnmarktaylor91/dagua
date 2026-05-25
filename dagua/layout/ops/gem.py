@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import ClassVar, Tuple
+from typing import ClassVar, Optional, Tuple, Union
 
 import torch
 
@@ -70,6 +70,10 @@ class GEMPhysicsConfig:
     oscillation_sensitivity: float = 0.3
     rotation_sine_threshold: float = math.sin((math.pi / 2.0) + (math.pi / 6.0))
     oscillation_cosine_threshold: float = math.cos(math.pi / 4.0)
+    default_node_width: float = 20.0
+    default_node_height: float = 20.0
+    component_separation: float = 30.0
+    page_ratio: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -133,6 +137,204 @@ _GEM_BATCHED_IMPULSE_KEY = "gem_batched_impulse"
 _GEM_BATCHED_MOVEMENT_KEY = "gem_batched_movement"
 _GEM_BATCHED_EARLY_STOP_KEY = "gem_batched_early_stop"
 _GEM_BATCHED_STEP_INDEX_KEY = "gem_batched_step_index"
+_FIDELITY_MODE_OGDF = "ogdf"
+_OGDF_EPSILON = 1.0e-8
+GEMFidelityMode = Optional[Union[bool, str]]
+
+
+class _OgdfMinStdRand:
+    """Minimal C++ ``std::minstd_rand`` reproducer.
+
+    Parameters
+    ----------
+    seed : int
+        Seed passed to the C++ linear congruential engine.
+    """
+
+    _MODULUS: ClassVar[int] = 2_147_483_647
+    _MULTIPLIER: ClassVar[int] = 48_271
+
+    def __init__(self, seed: int) -> None:
+        """Initialize the linear congruential state.
+
+        Parameters
+        ----------
+        seed : int
+            Seed value supplied to ``std::minstd_rand``.
+
+        Returns
+        -------
+        None
+            The RNG state is initialized in-place.
+        """
+        self.state = int(seed) % self._MODULUS
+        if self.state == 0:
+            self.state = 1
+
+    def next(self) -> int:
+        """Return the next C++ ``minstd_rand`` value.
+
+        Returns
+        -------
+        int
+            Pseudo-random integer in ``[1, 2147483646]``.
+        """
+        self.state = (self.state * self._MULTIPLIER) % self._MODULUS
+        return self.state
+
+
+def _is_ogdf_fidelity_mode(fidelity_mode: GEMFidelityMode) -> bool:
+    """Return whether a GEM fidelity flag selects the OGDF path.
+
+    Parameters
+    ----------
+    fidelity_mode : bool or str or None
+        Public fidelity selector.
+
+    Returns
+    -------
+    bool
+        ``True`` when OGDF fidelity semantics should be used.
+
+    Raises
+    ------
+    ValueError
+        If ``fidelity_mode`` is an unsupported string.
+    """
+    if fidelity_mode is True:
+        return True
+    if fidelity_mode in (False, None):
+        return False
+    if fidelity_mode == _FIDELITY_MODE_OGDF:
+        return True
+    raise ValueError("GEM fidelity_mode must be None, False, True, or 'ogdf'.")
+
+
+def _mt19937_first_uint32(seed: int) -> int:
+    """Return the first C++ ``std::mt19937`` output after ``seed``.
+
+    Parameters
+    ----------
+    seed : int
+        Unsigned 32-bit seed supplied to ``std::mt19937::seed``.
+
+    Returns
+    -------
+    int
+        First tempered 32-bit output from the Mersenne Twister.
+    """
+    state = [0] * 624
+    state[0] = int(seed) & 0xFFFFFFFF
+    for index in range(1, 624):
+        previous = state[index - 1]
+        state[index] = (1_812_433_253 * (previous ^ (previous >> 30)) + index) & 0xFFFFFFFF
+
+    for index in range(624):
+        mixed = (state[index] & 0x80000000) | (state[(index + 1) % 624] & 0x7FFFFFFF)
+        state[index] = state[(index + 397) % 624] ^ (mixed >> 1)
+        if mixed & 1:
+            state[index] ^= 0x9908B0DF
+
+    value = state[0]
+    value ^= value >> 11
+    value ^= (value << 7) & 0x9D2C5680
+    value ^= (value << 15) & 0xEFC60000
+    value ^= value >> 18
+    return value & 0xFFFFFFFF
+
+
+def _ogdf_gem_rng_seed(seed: int) -> int:
+    """Reproduce the runner's ``ogdf::randomSeed()`` used by GEM.
+
+    Parameters
+    ----------
+    seed : int
+        User seed forwarded to ``ogdf::setSeed`` before constructing
+        ``GEMLayout``.
+
+    Returns
+    -------
+    int
+        Seed passed by OGDF into ``std::minstd_rand``.
+    """
+    return 7 * _mt19937_first_uint32(seed) + 3
+
+
+def _ogdf_uniform_int(rng: _OgdfMinStdRand, low: int, high: int) -> int:
+    """Draw like libstdc++ ``std::uniform_int_distribution<int>``.
+
+    Parameters
+    ----------
+    rng : _OgdfMinStdRand
+        Random-number engine used by OGDF GEM.
+    low : int
+        Inclusive lower bound.
+    high : int
+        Inclusive upper bound.
+
+    Returns
+    -------
+    int
+        Uniform integer in ``[low, high]``.
+
+    Raises
+    ------
+    ValueError
+        If the bounds are invalid.
+    """
+    if low > high:
+        raise ValueError("low must be <= high.")
+
+    urng_min = 1
+    urng_max = _OgdfMinStdRand._MODULUS - 1
+    urng_range = urng_max - urng_min
+    target_range = int(high) - int(low)
+    if target_range <= urng_range:
+        user_range = target_range + 1
+        scaling = urng_range // user_range
+        past = user_range * scaling
+        while True:
+            value = rng.next() - urng_min
+            if value < past:
+                return int(low) + int(value // scaling)
+
+    while True:
+        high_part = _ogdf_uniform_int(rng, 0, urng_range)
+        low_part = rng.next() - urng_min
+        value = high_part * (urng_range + 1) + low_part
+        if value <= target_range:
+            return int(low) + int(value)
+
+
+def _ogdf_permutation(num_nodes: int, rng: _OgdfMinStdRand) -> list[int]:
+    """Permute node ids like OGDF ``SList::permute``.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of local component nodes.
+    rng : _OgdfMinStdRand
+        OGDF GEM random engine.
+
+    Returns
+    -------
+    list[int]
+        Permuted node ids in the order consumed by ``popFrontRet``.
+
+    Raises
+    ------
+    ValueError
+        If ``num_nodes`` is negative.
+    """
+    if num_nodes < 0:
+        raise ValueError("num_nodes must be non-negative.")
+    permutation = list(range(num_nodes))
+    if num_nodes == 0:
+        return permutation
+    for index in range(num_nodes):
+        swap_index = _ogdf_uniform_int(rng, 0, num_nodes - 1)
+        permutation[index], permutation[swap_index] = permutation[swap_index], permutation[index]
+    return permutation
 
 
 def _glibc_rand_values(seed: int, count: int) -> list[int]:
@@ -188,6 +390,7 @@ def _ogdf_runner_initial_positions(
     num_nodes: int,
     seed: int,
     device: torch.device,
+    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Create OGDF runner-style initial GEM positions.
 
@@ -200,13 +403,14 @@ def _ogdf_runner_initial_positions(
         the fidelity runner.
     device : torch.device
         Device for the returned tensor.
+    dtype : torch.dtype, default=torch.float32
+        Floating dtype for the returned tensor.
 
     Returns
     -------
     torch.Tensor
-        Initial position tensor with shape ``[N, 2]`` and dtype
-        ``torch.float32``. Coordinates are interleaved ``x, y`` values from
-        ``rand() % 1000 / 10.0``.
+        Initial position tensor with shape ``[N, 2]``. Coordinates are
+        interleaved ``x, y`` values from ``rand() % 1000 / 10.0``.
 
     Raises
     ------
@@ -216,11 +420,11 @@ def _ogdf_runner_initial_positions(
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
     if num_nodes == 0:
-        return torch.empty((0, 2), dtype=torch.float32, device=device)
+        return torch.empty((0, 2), dtype=dtype, device=device)
 
     values = _glibc_rand_values(seed=seed, count=num_nodes * 2)
     coords = [(value % 1000) / 10.0 for value in values]
-    return torch.tensor(coords, dtype=torch.float32, device=device).reshape(num_nodes, 2)
+    return torch.tensor(coords, dtype=dtype, device=device).reshape(num_nodes, 2)
 
 
 def _compute_degree_weights(
@@ -308,6 +512,512 @@ def _compute_node_desired_lengths(
         node_desired_lengths.to(device=device, dtype=dtype) + config.base_desired_length
     )
     return node_desired_lengths
+
+
+def _ogdf_default_node_desired_lengths(
+    num_nodes: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float64,
+    config: GEMPhysicsConfig = _GEM_PHYSICS_CONFIG,
+) -> torch.Tensor:
+    """Return OGDF runner desired lengths for default-sized nodes.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of local component nodes.
+    device : torch.device
+        Device for the returned tensor.
+    dtype : torch.dtype, default=torch.float64
+        Floating dtype for the returned tensor.
+    config : GEMPhysicsConfig, default=GEMPhysicsConfig()
+        GEM constants containing OGDF default node dimensions.
+
+    Returns
+    -------
+    torch.Tensor
+        Per-node desired lengths with shape ``[N]``.
+    """
+    diagonal = math.hypot(config.default_node_height, config.default_node_width)
+    return torch.full(
+        (num_nodes,),
+        config.base_desired_length + diagonal,
+        dtype=dtype,
+        device=device,
+    )
+
+
+def _build_ogdf_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> list[list[tuple[int, float]]]:
+    """Build an OGDF-style adjacency list preserving parallel adjEntries.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of local component nodes.
+
+    Returns
+    -------
+    list[list[tuple[int, float]]]
+        One adjacency list per node. Parallel edges are represented by
+        repeated entries in input order.
+    """
+    adjacency: list[list[tuple[int, float]]] = [[] for _ in range(num_nodes)]
+    if edge_index.numel() == 0:
+        return adjacency
+
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+        source_id = int(source)
+        target_id = int(target)
+        if source_id == target_id:
+            continue
+        adjacency[source_id].append((target_id, 1.0))
+        adjacency[target_id].append((source_id, 1.0))
+    return adjacency
+
+
+def _connected_components_from_edges(edge_index: torch.Tensor, num_nodes: int) -> list[list[int]]:
+    """Return weak connected components in node-order discovery order.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+
+    Returns
+    -------
+    list[list[int]]
+        Components as lists of original node ids.
+    """
+    adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
+    if edge_index.numel() > 0:
+        edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+        for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+            source_id = int(source)
+            target_id = int(target)
+            if source_id == target_id:
+                continue
+            adjacency[source_id].append(target_id)
+            adjacency[target_id].append(source_id)
+
+    components: list[list[int]] = []
+    visited = [False] * num_nodes
+    for start in range(num_nodes):
+        if visited[start]:
+            continue
+        visited[start] = True
+        component: list[int] = []
+        stack = [start]
+        while stack:
+            node_index = stack.pop()
+            component.append(node_index)
+            for neighbor in adjacency[node_index]:
+                if visited[neighbor]:
+                    continue
+                visited[neighbor] = True
+                stack.append(neighbor)
+        component.sort()
+        components.append(component)
+    return components
+
+
+def _extract_component_edges(edge_index: torch.Tensor, component_nodes: list[int]) -> torch.Tensor:
+    """Extract and relabel edges whose endpoints lie in one component.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Parent edge tensor with shape ``[2, E]``.
+    component_nodes : list[int]
+        Parent node ids in the component.
+
+    Returns
+    -------
+    torch.Tensor
+        Relabeled component edge tensor with shape ``[2, Ec]``.
+    """
+    if edge_index.numel() == 0:
+        return torch.empty((2, 0), dtype=torch.long)
+
+    local_by_global = {node_id: index for index, node_id in enumerate(component_nodes)}
+    relabeled_edges: list[tuple[int, int]] = []
+    edge_index_cpu = edge_index.to(device="cpu", dtype=torch.long)
+    for source, target in zip(edge_index_cpu[0].tolist(), edge_index_cpu[1].tolist()):
+        source_id = int(source)
+        target_id = int(target)
+        if source_id not in local_by_global or target_id not in local_by_global:
+            continue
+        relabeled_edges.append((local_by_global[source_id], local_by_global[target_id]))
+    if not relabeled_edges:
+        return torch.empty((2, 0), dtype=torch.long)
+    sources, targets = zip(*relabeled_edges)
+    return torch.tensor([list(sources), list(targets)], dtype=torch.long)
+
+
+def _ogdf_find_best_row(
+    row_widths: list[float],
+    row_heights: list[float],
+    rect: tuple[float, float],
+    page_ratio: float,
+) -> int:
+    """Find the TileToRows row receiving a component rectangle.
+
+    Parameters
+    ----------
+    row_widths : list[float]
+        Current row widths.
+    row_heights : list[float]
+        Current row heights.
+    rect : tuple[float, float]
+        Component bounding-box width and height.
+    page_ratio : float
+        Desired page ratio as width divided by height.
+
+    Returns
+    -------
+    int
+        Row index, or ``-1`` when adding a new row is best.
+    """
+    rect_width, rect_height = rect
+    total_width = max(row_widths, default=0.0)
+    total_height = sum(row_heights)
+    total_width = max(total_width, rect_width)
+    total_height += rect_height
+    best_area = max(
+        page_ratio * total_height * total_height,
+        total_width * total_width / page_ratio,
+    )
+    best_row = -1
+    for row_index, (row_width, row_height) in enumerate(zip(row_widths, row_heights)):
+        width = row_width + rect_width
+        height = max(row_height, rect_height)
+        area = max(page_ratio * height * height, width * width / page_ratio)
+        if area < best_area:
+            best_area = area
+            best_row = row_index
+    return best_row
+
+
+def _ogdf_tile_to_rows_offsets(
+    boxes: list[tuple[float, float]],
+    page_ratio: float,
+) -> list[tuple[float, float]]:
+    """Pack component boxes like OGDF ``TileToRowsCCPacker``.
+
+    Parameters
+    ----------
+    boxes : list[tuple[float, float]]
+        Component bounding boxes as ``(width, height)``.
+    page_ratio : float
+        Desired page ratio as width divided by height.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Offsets for each component box.
+
+    Raises
+    ------
+    ValueError
+        If ``page_ratio`` is not positive.
+    """
+    if page_ratio <= 0.0:
+        raise ValueError("page_ratio must be positive.")
+
+    offsets = [(0.0, 0.0) for _ in boxes]
+    row_boxes: list[list[int]] = []
+    row_widths: list[float] = []
+    row_heights: list[float] = []
+    sorted_indices = sorted(range(len(boxes)), key=lambda index: -boxes[index][1])
+    for box_index in sorted_indices:
+        rect = boxes[box_index]
+        best_row = _ogdf_find_best_row(row_widths, row_heights, rect, page_ratio)
+        if best_row < 0:
+            row_boxes.append([box_index])
+            row_widths.append(rect[0])
+            row_heights.append(rect[1])
+            continue
+        row_boxes[best_row].append(box_index)
+        row_widths[best_row] += rect[0]
+        row_heights[best_row] = max(row_heights[best_row], rect[1])
+
+    y_offset = 0.0
+    for boxes_in_row, row_height in zip(row_boxes, row_heights):
+        x_offset = 0.0
+        for box_index in boxes_in_row:
+            offsets[box_index] = (x_offset, y_offset)
+            x_offset += boxes[box_index][0]
+        y_offset += row_height
+    return offsets
+
+
+def _consume_ogdf_disturbance(
+    rng: _OgdfMinStdRand,
+    config: GEMPhysicsConfig,
+) -> tuple[float, float]:
+    """Consume OGDF GEM disturbance draws and return their offsets.
+
+    Parameters
+    ----------
+    rng : _OgdfMinStdRand
+        OGDF GEM random engine.
+    config : GEMPhysicsConfig
+        GEM constants containing the maximal disturbance.
+
+    Returns
+    -------
+    tuple[float, float]
+        Disturbance offsets for x and y.
+    """
+    max_int_disturbance = int(config.maximal_disturbance * 10_000)
+    disturbance_x = _ogdf_uniform_int(rng, -max_int_disturbance, max_int_disturbance) / 10_000.0
+    disturbance_y = _ogdf_uniform_int(rng, -max_int_disturbance, max_int_disturbance) / 10_000.0
+    return disturbance_x, disturbance_y
+
+
+def _run_ogdf_component_gem(
+    positions: torch.Tensor,
+    edge_index: torch.Tensor,
+    rng: _OgdfMinStdRand,
+    max_iters: int,
+    config: GEMPhysicsConfig = _GEM_PHYSICS_CONFIG,
+) -> torch.Tensor:
+    """Run OGDF GEM's per-component node-update loop.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Initial local positions with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Relabeled component edge tensor with shape ``[2, E]``.
+    rng : _OgdfMinStdRand
+        Shared OGDF GEM random engine.
+    max_iters : int
+        Maximum number of node updates for this component.
+    config : GEMPhysicsConfig, default=GEMPhysicsConfig()
+        GEM constants translated from OGDF.
+
+    Returns
+    -------
+    torch.Tensor
+        Solved component positions with shape ``[N, 2]`` and dtype
+        ``torch.float64``.
+    """
+    num_nodes = int(positions.shape[0])
+    local_positions = positions.to(dtype=torch.float64, device="cpu").clone()
+    if num_nodes == 0:
+        return local_positions
+
+    degree_weights = _compute_degree_weights(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        device=torch.device("cpu"),
+        dtype=torch.float64,
+        config=config,
+    )
+    node_desired_lengths = _ogdf_default_node_desired_lengths(
+        num_nodes=num_nodes,
+        device=torch.device("cpu"),
+        dtype=torch.float64,
+        config=config,
+    )
+    adjacency = _build_ogdf_adjacency(edge_index=edge_index, num_nodes=num_nodes)
+    local_temperatures = torch.full((num_nodes,), config.initial_temperature, dtype=torch.float64)
+    previous_impulse = torch.zeros((num_nodes, 2), dtype=torch.float64)
+    skew_gauge = torch.zeros((num_nodes,), dtype=torch.float64)
+    barycenter = (local_positions * degree_weights.unsqueeze(1)).sum(dim=0)
+    global_temperature = config.initial_temperature
+
+    permutation: list[int] = []
+    permutation_index = 0
+    rounds_remaining = max_iters
+    while global_temperature > config.minimal_temperature + _OGDF_EPSILON and rounds_remaining > 0:
+        if permutation_index >= len(permutation):
+            permutation = _ogdf_permutation(num_nodes, rng)
+            permutation_index = 0
+        node_index = permutation[permutation_index]
+        permutation_index += 1
+
+        x_coord = float(local_positions[node_index, 0].item())
+        y_coord = float(local_positions[node_index, 1].item())
+        desired_length = float(node_desired_lengths[node_index].item())
+        desired_square = desired_length * desired_length
+        impulse_x = (
+            float(barycenter[0].item()) / max(num_nodes, 1) - x_coord
+        ) * config.gravitational_constant
+        impulse_y = (
+            float(barycenter[1].item()) / max(num_nodes, 1) - y_coord
+        ) * config.gravitational_constant
+        disturbance_x, disturbance_y = _consume_ogdf_disturbance(rng=rng, config=config)
+        impulse_x += disturbance_x
+        impulse_y += disturbance_y
+
+        for other_index in range(num_nodes):
+            if other_index == node_index:
+                continue
+            delta_x = x_coord - float(local_positions[other_index, 0].item())
+            delta_y = y_coord - float(local_positions[other_index, 1].item())
+            distance = math.hypot(delta_x, delta_y)
+            if distance > _OGDF_EPSILON:
+                distance_square = distance * distance
+                impulse_x += delta_x * desired_square / distance_square
+                impulse_y += delta_y * desired_square / distance_square
+
+        node_weight = float(degree_weights[node_index].item())
+        for neighbor_index, edge_weight in adjacency[node_index]:
+            delta_x = x_coord - float(local_positions[neighbor_index, 0].item())
+            delta_y = y_coord - float(local_positions[neighbor_index, 1].item())
+            distance = math.hypot(delta_x, delta_y)
+            if config.attraction_formula == 1:
+                impulse_x -= edge_weight * delta_x * distance / (desired_length * node_weight)
+                impulse_y -= edge_weight * delta_y * distance / (desired_length * node_weight)
+            else:
+                distance_square = distance * distance
+                impulse_x -= (
+                    edge_weight * delta_x * distance_square / (desired_square * node_weight)
+                )
+                impulse_y -= (
+                    edge_weight * delta_y * distance_square / (desired_square * node_weight)
+                )
+
+        impulse_length = math.hypot(impulse_x, impulse_y)
+        if impulse_length > _OGDF_EPSILON:
+            local_temperature = float(local_temperatures[node_index].item())
+            move_x = impulse_x * local_temperature / impulse_length
+            move_y = impulse_y * local_temperature / impulse_length
+            local_positions[node_index, 0] += move_x
+            local_positions[node_index, 1] += move_y
+            barycenter[0] += node_weight * move_x
+            barycenter[1] += node_weight * move_y
+
+            old_x = float(previous_impulse[node_index, 0].item())
+            old_y = float(previous_impulse[node_index, 1].item())
+            product = math.hypot(move_x, move_y) * math.hypot(old_x, old_y)
+            if product > _OGDF_EPSILON:
+                global_temperature -= local_temperature / max(num_nodes, 1)
+                sin_beta = (move_x * old_x - move_y * old_y) / product
+                cos_beta = (move_x * old_x + move_y * old_y) / product
+                skew_value = float(skew_gauge[node_index].item())
+                if sin_beta > config.rotation_sine_threshold + _OGDF_EPSILON:
+                    skew_value += config.rotation_sensitivity
+                if abs(cos_beta) > config.oscillation_cosine_threshold + _OGDF_EPSILON:
+                    local_temperature *= 1.0 + cos_beta * config.oscillation_sensitivity
+                local_temperature *= 1.0 - abs(skew_value)
+                if local_temperature > config.initial_temperature - _OGDF_EPSILON:
+                    local_temperature = config.initial_temperature
+                skew_gauge[node_index] = skew_value
+                local_temperatures[node_index] = local_temperature
+                global_temperature += local_temperature / max(num_nodes, 1)
+
+            previous_impulse[node_index, 0] = move_x
+            previous_impulse[node_index, 1] = move_y
+        rounds_remaining -= 1
+
+    return local_positions
+
+
+def _ogdf_shift_component_to_origin(
+    positions: torch.Tensor,
+    config: GEMPhysicsConfig = _GEM_PHYSICS_CONFIG,
+) -> tuple[torch.Tensor, tuple[float, float]]:
+    """Apply OGDF's per-component lower-left shift and box calculation.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Component positions with shape ``[N, 2]``.
+    config : GEMPhysicsConfig, default=GEMPhysicsConfig()
+        GEM constants containing default node dimensions and CC separation.
+
+    Returns
+    -------
+    tuple[torch.Tensor, tuple[float, float]]
+        Shifted positions and component box ``(width, height)``.
+    """
+    if positions.shape[0] == 0:
+        return positions, (0.0, 0.0)
+
+    half_width = config.default_node_width / 2.0
+    half_height = config.default_node_height / 2.0
+    min_x = float(positions[0, 0].item())
+    max_x = float(positions[0, 0].item())
+    min_y = float(positions[0, 1].item())
+    max_y = float(positions[0, 1].item())
+    for node_index in range(int(positions.shape[0])):
+        x_coord = float(positions[node_index, 0].item())
+        y_coord = float(positions[node_index, 1].item())
+        min_x = min(min_x, x_coord - half_width)
+        max_x = max(max_x, x_coord + half_width)
+        min_y = min(min_y, y_coord - half_height)
+        max_y = max(max_y, y_coord + half_height)
+
+    min_x -= config.component_separation
+    min_y -= config.component_separation
+    shifted = positions.clone()
+    shifted[:, 0] -= min_x
+    shifted[:, 1] -= min_y
+    return shifted, (max_x - min_x, max_y - min_y)
+
+
+def _layout_ogdf_fidelity(
+    problem: LayoutProblem,
+    initial_positions: torch.Tensor,
+    max_iters: int,
+    config: GEMPhysicsConfig = _GEM_PHYSICS_CONFIG,
+) -> torch.Tensor:
+    """Lay out all components with OGDF GEM semantics.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable layout inputs.
+    initial_positions : torch.Tensor
+        Runner-compatible initial positions with shape ``[N, 2]``.
+    max_iters : int
+        Maximum node updates per component.
+    config : GEMPhysicsConfig, default=GEMPhysicsConfig()
+        GEM constants translated from OGDF.
+
+    Returns
+    -------
+    torch.Tensor
+        Packed OGDF-style coordinates with shape ``[N, 2]`` and dtype
+        ``torch.float64``.
+    """
+    components = _connected_components_from_edges(problem.edge_index, problem.num_nodes)
+    rng = _OgdfMinStdRand(_ogdf_gem_rng_seed(problem.seed))
+    final_positions = torch.zeros((problem.num_nodes, 2), dtype=torch.float64, device="cpu")
+    bounding_boxes: list[tuple[float, float]] = []
+    shifted_components: list[tuple[list[int], torch.Tensor]] = []
+    initial_cpu = initial_positions.to(dtype=torch.float64, device="cpu")
+
+    for component_nodes in components:
+        component_edges = _extract_component_edges(problem.edge_index, component_nodes)
+        solved = _run_ogdf_component_gem(
+            positions=initial_cpu[component_nodes],
+            edge_index=component_edges,
+            rng=rng,
+            max_iters=max_iters,
+            config=config,
+        )
+        shifted, box = _ogdf_shift_component_to_origin(solved, config=config)
+        shifted_components.append((component_nodes, shifted))
+        bounding_boxes.append(box)
+
+    offsets = _ogdf_tile_to_rows_offsets(bounding_boxes, config.page_ratio)
+    for component_index, (component_nodes, shifted) in enumerate(shifted_components):
+        dx, dy = offsets[component_index]
+        for local_index, node_index in enumerate(component_nodes):
+            final_positions[node_index, 0] = shifted[local_index, 0] + dx
+            final_positions[node_index, 1] = shifted[local_index, 1] + dy
+    return final_positions
 
 
 def _initialize_batched_gem_cache(
@@ -405,7 +1115,7 @@ class InitializeGEMPositions(Op):
     OGDF-runner-compatible fidelity initializer.
     """
 
-    fidelity_mode: bool = False
+    fidelity_mode: GEMFidelityMode = False
 
     name: ClassVar[str] = "gem_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
@@ -446,16 +1156,19 @@ class InitializeGEMPositions(Op):
             state.converged = True
             return state
 
-        if problem.num_nodes == 1:
+        ogdf_fidelity = _is_ogdf_fidelity_mode(self.fidelity_mode)
+
+        if problem.num_nodes == 1 and not ogdf_fidelity:
             state.pos = torch.zeros((1, 2), dtype=torch.float32, device=output_device)
             state.converged = True
             return state
 
-        if self.fidelity_mode:
+        if ogdf_fidelity:
             state.pos = _ogdf_runner_initial_positions(
                 num_nodes=problem.num_nodes,
                 seed=problem.seed,
                 device=output_device,
+                dtype=torch.float64,
             )
             return state
 
@@ -481,7 +1194,7 @@ class GEMPrepareState(Op):
     """
 
     config: GEMPrepareStateConfig = field(default_factory=GEMPrepareStateConfig)
-    fidelity_mode: bool = False
+    fidelity_mode: GEMFidelityMode = False
 
     name: ClassVar[str] = "gem_prepare_state"
     category: ClassVar[OpCategory] = OpCategory.PREPROCESS
@@ -516,13 +1229,17 @@ class GEMPrepareState(Op):
         if state.converged:
             return state
 
+        ogdf_fidelity = _is_ogdf_fidelity_mode(self.fidelity_mode)
         extent = layout_extent(problem.num_nodes, problem.node_sizes)
         capped_iters = min(int(state.total_steps), self.config.max_rounds)
+        is_sequential = problem.num_nodes <= self.config.sequential_node_limit
         state.extras["gem_extent"] = extent
         state.extras["gem_capped_iters"] = capped_iters
         state.extras["gem_device"] = layout_device(problem.edge_index, problem.node_sizes)
-        state.extras["gem_is_sequential"] = problem.num_nodes <= self.config.sequential_node_limit
-        state.extras["gem_fidelity_mode"] = self.fidelity_mode
+        state.extras["gem_is_sequential"] = is_sequential
+        state.extras["gem_fidelity_mode"] = (
+            _FIDELITY_MODE_OGDF if ogdf_fidelity and is_sequential else None
+        )
 
         if not state.extras["gem_is_sequential"]:
             _initialize_batched_gem_cache(problem, state)
@@ -583,6 +1300,15 @@ class GEMSequentialStep(Op):
 
         num_nodes = problem.num_nodes
         capped_iters = int(state.extras.get("gem_capped_iters", 0))
+        if state.extras.get("gem_fidelity_mode") == _FIDELITY_MODE_OGDF:
+            state.pos = _layout_ogdf_fidelity(
+                problem=problem,
+                initial_positions=state.pos,
+                max_iters=capped_iters,
+                config=self.config,
+            ).to(dtype=torch.float32)
+            state.local_temperatures = None
+            return state
 
         positions = state.pos.to(dtype=torch.float64, device="cpu")
 
@@ -1233,6 +1959,10 @@ class GEMFinalizePositions(Op):
         device = state.extras.get("gem_device")
         if not isinstance(device, torch.device):
             device = layout_device(torch.empty((2, 0), dtype=torch.long), None)
+
+        if state.extras.get("gem_fidelity_mode") == _FIDELITY_MODE_OGDF:
+            state.pos = state.pos.to(dtype=torch.float32, device=device)
+            return state
 
         extent = float(state.extras.get("gem_extent", self.config.default_extent))
         state.pos = normalize_positions(state.pos, extent).to(dtype=torch.float32, device=device)
