@@ -24,6 +24,7 @@ from dagua.layout.ops.sfdp import (
     BuildSFDPGraph,
     BuildSFDPHierarchy,
     GraphData,
+    GraphvizRandom,
     InitSFDPCoarsestPositions,
     SFDPAdaptiveCool,
     SFDPAdaptiveCoolConfig,
@@ -105,7 +106,7 @@ def _decompose_graphviz_supervariables(graph: GraphData) -> list[list[int]]:
 
 def _graphviz_sfdp_cluster_nodes(
     graph: GraphData,
-    generator: torch.Generator,
+    generator: GraphvizRandom,
     config: SFDPHierarchyConfig,
 ) -> Optional[torch.Tensor]:
     """Build Graphviz SFDP fine-to-coarse clusters for one internal pass.
@@ -114,8 +115,8 @@ def _graphviz_sfdp_cluster_nodes(
     ----------
     graph : GraphData
         Fine graph for the current internal coarsening pass.
-    generator : torch.Generator
-        CPU generator used for the unmatched-node permutation.
+    generator : GraphvizRandom
+        Graphviz-compatible RNG stream used for the unmatched-node permutation.
     config : SFDPHierarchyConfig
         Graphviz-compatible coarsening stop thresholds.
 
@@ -141,7 +142,7 @@ def _graphviz_sfdp_cluster_nodes(
                 matched[node] = True
             clusters.append(chunk)
 
-    for node in torch.randperm(num_nodes, generator=generator).tolist():
+    for node in generator.permutation(num_nodes):
         if matched[node]:
             continue
 
@@ -237,7 +238,7 @@ def _build_graphviz_matrix_coarse_graph(
 
 def _graphviz_sfdp_coarsen(
     graph: GraphData,
-    generator: torch.Generator,
+    generator: GraphvizRandom,
     config: SFDPHierarchyConfig,
 ) -> Optional[tuple[torch.Tensor, GraphData]]:
     """Coarsen one Graphviz SFDP multilevel edge using matrix aggregation.
@@ -246,8 +247,8 @@ def _graphviz_sfdp_coarsen(
     ----------
     graph : GraphData
         Fine graph at the current hierarchy level.
-    generator : torch.Generator
-        CPU generator used by unmatched-node heavy-edge passes.
+    generator : GraphvizRandom
+        Graphviz-compatible RNG stream used by unmatched-node heavy-edge passes.
     config : SFDPHierarchyConfig
         Coarsening thresholds. ``min_coarsen_reduction`` controls the wrapper
         loop that forces sufficient reduction across internal passes.
@@ -326,8 +327,7 @@ class BuildGraphvizSFDPMatrixHierarchy(Op):
             State with SFDP graph levels, mappings, and generator populated.
         """
         del ctx
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(problem.seed)
+        permutation_generator = GraphvizRandom(seed=1)
 
         base_graph: GraphData = state.extras[_BASE_GRAPH_KEY]
         graphs: list[GraphData] = [base_graph]
@@ -337,7 +337,7 @@ class BuildGraphvizSFDPMatrixHierarchy(Op):
         while True:
             coarsened = _graphviz_sfdp_coarsen(
                 graph=current_graph,
-                generator=generator,
+                generator=permutation_generator,
                 config=self.config,
             )
             if coarsened is None:
@@ -350,7 +350,9 @@ class BuildGraphvizSFDPMatrixHierarchy(Op):
 
         state.extras[_GRAPH_KEY] = graphs
         state.extras[_MAPPING_KEY] = mappings
-        state.extras[_GENERATOR_KEY] = generator
+        # Graphviz coarsening consumes the process-default rand stream before
+        # spring_electrical.c resets srand(ctrl->random_seed) for random_start.
+        state.extras[_GENERATOR_KEY] = GraphvizRandom(seed=problem.seed)
         return state
 
 
@@ -721,7 +723,7 @@ class _SFDPGraphvizProlongateAndRefineLevels(Op):
         """
         graphs: list[GraphData] = state.extras[_GRAPH_KEY]
         mappings: list[torch.Tensor] = state.extras[_MAPPING_KEY]
-        generator: torch.Generator = state.extras[_GENERATOR_KEY]
+        generator: GraphvizRandom = state.extras[_GENERATOR_KEY]
         if state.ideal_length is None:
             raise ValueError("_SFDPGraphvizProlongateAndRefineLevels requires state.ideal_length.")
 
@@ -779,10 +781,9 @@ def build_sfdp_pipeline(
         median RMSD 0.004724.
     Known divergences:
         - Remaining residual is dominated by ``parallel_multiedge_bundle``.
-        - The fidelity path still uses Dagua's current random initialization
-          and output normalization.
-        - Unmatched-node permutation still uses Dagua's seeded torch generator
-          rather than Graphviz's process-global ``gv_random`` stream.
+        - Output normalization remains Dagua-specific.
+        - Random initialization, unmatched-node permutation, and prolongation
+          jitter use the Graphviz ``srand``/``rand`` stream under fidelity mode.
 
     Parameters
     ----------
