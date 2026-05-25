@@ -56,7 +56,7 @@ from dagua.layout.ops.init import RandomUniformInit, RandomUniformInitConfig
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 
 _GRAPHOPT_COULOMBS_CONSTANT = 8_987_500_000.0
-_GRAPHOPT_MIN_DISTANCE = 1.0e-12
+_GRAPHOPT_MIN_DISTANCE_SQ = 1.0e-5
 _LGL_MIN_DISTANCE = 1.0e-12
 
 
@@ -156,7 +156,7 @@ def _expected_inverse_square(pos: torch.Tensor, charge: float, cutoff: float) ->
     pair_source, pair_target = torch.triu_indices(pos.shape[0], pos.shape[0], offset=1)
     delta = pos[pair_source] - pos[pair_target]
     distance_sq = delta.square().sum(dim=1)
-    mask = (distance_sq > _GRAPHOPT_MIN_DISTANCE) & (distance_sq < (cutoff * cutoff))
+    mask = (distance_sq >= _GRAPHOPT_MIN_DISTANCE_SQ) & (distance_sq < (cutoff * cutoff))
     expected = torch.zeros_like(pos)
     if not bool(mask.any().item()):
         return expected
@@ -350,8 +350,8 @@ def test_graphopt_fidelity_mode_ignores_edge_weights() -> None:
     assert not torch.allclose(fidelity_state.pos, weighted_state.pos)
 
 
-def test_graphopt_repulsion_uses_exact_zero_distance_predicate() -> None:
-    """Near-coincident nonzero node pairs should still repel like igraph."""
+def test_graphopt_repulsion_uses_igraph_squared_distance_predicate() -> None:
+    """Near-coincident node pairs should be skipped like igraph."""
 
     problem = _problem_from_edges([], num_nodes=2)
     state = SolveState(
@@ -368,12 +368,12 @@ def test_graphopt_repulsion_uses_exact_zero_distance_predicate() -> None:
     assert state.pos is not None
     torch.testing.assert_close(
         state.pos,
-        torch.tensor([[-5.0, 0.0], [5.00000001, 0.0]], dtype=torch.float64),
+        torch.tensor([[0.0, 0.0], [1.0e-8, 0.0]], dtype=torch.float64),
     )
 
 
-def test_graphopt_spring_uses_exact_zero_distance_predicate() -> None:
-    """Near-coincident nonzero spring endpoints should still apply Hooke force."""
+def test_graphopt_spring_uses_igraph_squared_distance_predicate() -> None:
+    """Near-coincident spring endpoints should be skipped like igraph."""
 
     problem = _problem_from_edges([(0, 1)], num_nodes=2)
     state = SolveState(
@@ -393,7 +393,7 @@ def test_graphopt_spring_uses_exact_zero_distance_predicate() -> None:
     assert state.pos is not None
     torch.testing.assert_close(
         state.pos,
-        torch.tensor([[5.0e-9, 0.0], [5.0e-9, 0.0]], dtype=torch.float64),
+        torch.tensor([[0.0, 0.0], [1.0e-8, 0.0]], dtype=torch.float64),
     )
 
 

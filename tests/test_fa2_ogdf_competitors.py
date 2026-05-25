@@ -5,13 +5,13 @@ from __future__ import annotations
 import random
 import sys
 import types
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pytest
 import torch
 
-from dagua.eval.competitors import fa2_competitor, get_competitors
+from dagua.eval.competitors import fa2_competitor, get_competitors, ogdf_competitor
 from dagua.eval.competitors.fa2_competitor import FA2Reference
 from dagua.eval.competitors.networkx_competitor import NetworkXSpectral
 from dagua.eval.competitors.ogdf_competitor import (
@@ -185,6 +185,40 @@ def test_ogdf_available_check_returns_bool() -> None:
         This test asserts on the availability probe result.
     """
     assert isinstance(OGDFGem().available(), bool)
+
+
+def test_ogdf_adapters_forward_seed_to_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All OGDF adapters should preserve benchmark seeds."""
+    graph = _make_small_graph()
+    observed: list[tuple[str, Optional[int]]] = []
+
+    def fake_run_ogdf(
+        graph: DaguaGraph,
+        algorithm: str,
+        timeout: float,
+        seed: Optional[int] = None,
+        options: Optional[dict[str, Any]] = None,
+    ) -> torch.Tensor:
+        """Capture runner arguments without launching OGDF."""
+        del timeout, options
+        observed.append((algorithm, seed))
+        return torch.zeros((graph.num_nodes, 2), dtype=torch.float32)
+
+    monkeypatch.setattr(ogdf_competitor, "_run_ogdf", fake_run_ogdf)
+
+    adapters = [
+        OGDFGem(),
+        OGDFFMMM(),
+        OGDFStress(),
+        OGDFPivotMDS(),
+        OGDFDavidsonHarel(),
+        OGDFSugiyama(),
+    ]
+    for adapter in adapters:
+        result = adapter.layout(graph, timeout=1.0, seed=123)
+        assert result.error is None
+
+    assert observed == [(adapter.algorithm, 123) for adapter in adapters]
 
 
 def test_networkx_available_check_returns_bool() -> None:

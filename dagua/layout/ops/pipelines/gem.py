@@ -28,6 +28,21 @@ GEMFidelityMode = Optional[Union[bool, str]]
 def build_gem_pipeline(max_iters: int = 500, fidelity_mode: GEMFidelityMode = False) -> Pipeline:
     """Build a GEM graph-embedder pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: OGDF GEMLayout / Frick, Ludwig, and Mehldau (1995), "A Fast
+        Adaptive Layout Algorithm for Undirected Graphs".
+    Fidelity mode: ``fidelity_mode=True`` or ``"ogdf"`` enables the
+        OGDF-compatible seed bridge, update order, node geometry, component
+        solving, packing, and final coordinate contract for sequential-size
+        graphs.
+    Verified at: round_32 bounded subset median RMSD 0.037209; final 100-seed
+        report also showed strong equivalent GEM variants at 0.128 to 0.224.
+    Known divergences:
+        - Larger graphs still use Dagua's historical batched approximation.
+        - A small direct-coordinate residual remains before Procrustes
+          alignment on at least a 3-node path.
+
     Parameters
     ----------
     max_iters : int, default=500

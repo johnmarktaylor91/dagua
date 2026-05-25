@@ -40,6 +40,23 @@ def build_umap_layout_pipeline(
 ) -> Pipeline:
     """Build a UMAP graph layout pipeline.
 
+    Reference fidelity
+    ------------------
+    Targets: umap-learn 0.5.11 graph layout / McInnes, Healy, and Melville
+        (2018), "UMAP: Uniform Manifold Approximation and Projection".
+    Fidelity mode: no public flag; this pipeline incorporates reference-style
+        smooth-kNN search, spectral initialization scaling, tiny-graph random
+        policy, per-source Tausworthe negative sampling, and SciPy default
+        curve-fit initialization from the fidelity rounds.
+    Verified at: round_33 bounded subset median RMSD 0.195290 after leftovers;
+        final 100-seed report marks UMAP variants partial match at median RMSD
+        0.120 to 0.174.
+    Known divergences:
+        - Dagua still emits one undirected optimizer row per pair, while
+          umap-learn optimizes both COO orientations after fuzzy union.
+        - Tiny benchmark graphs exercise the random-init path more than the
+          spectral changes.
+
     Parameters
     ----------
     n_neighbors : int, default=15
@@ -149,11 +166,24 @@ def layout_umap_layout_pipeline(
         If the pipeline does not populate final positions.
     """
     if num_nodes <= 3:
-        # The fidelity target bypasses umap-learn for tiny graphs because
-        # spectral initialization asks ARPACK for too many eigenvectors.
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(seed)
-        return torch.randn((num_nodes, 2), generator=generator, dtype=torch.float32)
+        # The classic adapter already carries the tiny-graph normalization
+        # behavior; keep this compatibility branch out of the general op path.
+        from dagua.layout.classic.umap_layout import layout_umap
+
+        return layout_umap(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            spread=spread,
+            n_epochs=n_epochs,
+            learning_rate=learning_rate,
+            negative_sample_rate=negative_sample_rate,
+            repulsion_strength=repulsion_strength,
+            seed=seed,
+            edge_weights=edge_weights,
+        )
 
     problem = LayoutProblem(
         edge_index=edge_index,

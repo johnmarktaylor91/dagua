@@ -9,6 +9,7 @@ from dagua.eval.competitors.igraph_competitor import (  # noqa: E402
     IgraphDavidsonHarel,
     IgraphDRL,
     IgraphFR,
+    IgraphGraphOpt,
     IgraphKamadaKawai,
     IgraphLGL,
     IgraphMDS,
@@ -37,6 +38,32 @@ def _make_simple_graph() -> DaguaGraph:
     g.add_edge(3, 4)
     g.add_edge(0, 2)
     return g
+
+
+def _assert_seed_changes_layout(competitor: object, graph: DaguaGraph) -> None:
+    """Assert an igraph competitor is deterministic per seed and seed-sensitive.
+
+    Parameters
+    ----------
+    competitor : object
+        Competitor adapter exposing ``layout(graph, seed=...)``.
+    graph : DaguaGraph
+        Graph to lay out for the seed-threading check.
+
+    Returns
+    -------
+    None
+        Assertions validate same-seed equality and different-seed divergence.
+    """
+    first = competitor.layout(graph, seed=42)
+    second = competitor.layout(graph, seed=42)
+    third = competitor.layout(graph, seed=43)
+
+    assert first.pos is not None, first.error
+    assert second.pos is not None, second.error
+    assert third.pos is not None, third.error
+    torch.testing.assert_close(first.pos, second.pos)
+    assert not torch.allclose(first.pos, third.pos)
 
 
 class TestIgraphConversion:
@@ -111,6 +138,10 @@ class TestIgraphCompetitors:
         assert result.pos is not None
         assert result.pos.shape == (5, 2)
 
+    def test_fr_layout_is_reproducible_for_same_seed(self) -> None:
+        """The FR adapter should seed both its start matrix and igraph RNG."""
+        _assert_seed_changes_layout(IgraphFR(), _make_simple_graph())
+
     def test_rt_layout(self) -> None:
         """The Reingold-Tilford adapter should return positions.
 
@@ -139,6 +170,10 @@ class TestIgraphCompetitors:
         assert result.pos is not None
         assert result.pos.shape == (5, 2)
 
+    def test_davidson_harel_layout_is_reproducible_for_same_seed(self) -> None:
+        """The Davidson-Harel adapter should seed igraph's annealing RNG."""
+        _assert_seed_changes_layout(IgraphDavidsonHarel(), _make_simple_graph())
+
     def test_kamada_kawai_layout(self) -> None:
         """The Kamada-Kawai adapter should return positions.
 
@@ -152,6 +187,14 @@ class TestIgraphCompetitors:
         result = comp.layout(g)
         assert result.pos is not None
         assert result.pos.shape == (5, 2)
+
+    def test_kamada_kawai_layout_uses_seeded_start_matrix(self) -> None:
+        """The Kamada-Kawai adapter should pass igraph's seed matrix."""
+        _assert_seed_changes_layout(IgraphKamadaKawai(), _make_simple_graph())
+
+    def test_graphopt_layout_is_reproducible_for_same_seed(self) -> None:
+        """The GraphOpt adapter should keep forwarding igraph's seed matrix."""
+        _assert_seed_changes_layout(IgraphGraphOpt(), _make_simple_graph())
 
     def test_mds_layout(self) -> None:
         """The MDS adapter should return positions.

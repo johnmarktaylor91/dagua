@@ -11,6 +11,7 @@ from dagua.layout.ops.graph_utils import layout_device
 from dagua.layout.ops.lgl import (
     LGLFinalizePositions,
     LGLInitializePositions,
+    LGLInitializePositionsConfig,
     LGLLayeredRefinement,
     LGLLayeredRefinementConfig,
     LGLPrepareState,
@@ -34,8 +35,25 @@ def build_lgl_pipeline(
     root: Optional[int] = None,
     use_edge_weights: bool = False,
     igraph_positive_maxchange: bool = True,
+    fidelity_mode: bool = False,
 ) -> Pipeline:
     """Build a Large Graph Layout pipeline.
+
+    Reference fidelity
+    ------------------
+    Targets: igraph 1.0.0 LGL / Adai et al. (2004), "LGL: Creating a Map of
+        Protein Function with an Algorithm for Visualizing Very Large
+        Biological Networks".
+    Fidelity mode: ``fidelity_mode=True`` uses igraph's compiled default RNG
+        stream, column-major initialization, shell RNG advancement, igraph grid
+        constants, future-shell spring activation, and bounded-grid clamping.
+    Verified at: round_33 bounded subset median RMSD 0.181326; final
+        100-seed report marks LGL variants weak equivalent at median RMSD
+        0.132 to 0.146.
+    Known divergences:
+        - The bounded subset missed the expected 0.05 to 0.08 RMSD range.
+        - Default fidelity ignores edge weights; weighted behavior is retained
+          as an explicit Dagua option.
 
     Parameters
     ----------
@@ -58,6 +76,9 @@ def build_lgl_pipeline(
         igraph LGL ignores edge weights.
     igraph_positive_maxchange : bool, default=True
         Whether to use igraph's positive-component convergence rule.
+    fidelity_mode : bool, default=False
+        When ``True``, use igraph's compiled default RNG stream for stochastic
+        LGL draws.
 
     Returns
     -------
@@ -97,12 +118,16 @@ def build_lgl_pipeline(
                     cellsize=cellsize,
                     root=root,
                     use_edge_weights=use_edge_weights,
+                    fidelity_mode=fidelity_mode,
                 )
             ),
-            LGLInitializePositions(),
+            LGLInitializePositions(
+                config=LGLInitializePositionsConfig(fidelity_mode=fidelity_mode)
+            ),
             LGLLayeredRefinement(
                 config=LGLLayeredRefinementConfig(
-                    igraph_positive_maxchange=igraph_positive_maxchange
+                    igraph_positive_maxchange=igraph_positive_maxchange,
+                    fidelity_mode=fidelity_mode,
                 )
             ),
             LGLFinalizePositions(),
@@ -126,6 +151,7 @@ def layout_lgl_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     use_edge_weights: bool = False,
     igraph_positive_maxchange: bool = True,
+    fidelity_mode: bool = False,
 ) -> torch.Tensor:
     """Run the Large Graph Layout pipeline as a drop-in replacement.
 
@@ -161,6 +187,9 @@ def layout_lgl_pipeline(
         igraph LGL ignores edge weights.
     igraph_positive_maxchange : bool, default=True
         Whether to use igraph's positive-component convergence rule.
+    fidelity_mode : bool, default=False
+        When ``True``, use igraph's compiled default RNG stream for stochastic
+        LGL draws.
 
     Returns
     -------
@@ -236,6 +265,7 @@ def layout_lgl_pipeline(
         root=root,
         use_edge_weights=use_edge_weights,
         igraph_positive_maxchange=igraph_positive_maxchange,
+        fidelity_mode=fidelity_mode,
     ).apply(problem, state, ctx)
 
     if final_state.pos is None:

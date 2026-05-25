@@ -144,6 +144,27 @@ def _run_pipeline_direct(
 class TestGraphOptPipelineFidelity:
     """Bit-exact regression coverage for the GraphOpt pipeline."""
 
+    def test_graphopt_fidelity_fallback_uses_igraph_rng(self) -> None:
+        """GraphOpt fidelity fallback initialization should use igraph's RNG."""
+        edge_index = _path_edge_index(2)
+
+        pos = layout_graphopt_pipeline(
+            edge_index=edge_index,
+            num_nodes=2,
+            niter=0,
+            seed=42,
+            fidelity_mode=True,
+        )
+
+        expected = torch.tensor(
+            [
+                [-0.725433349609375, 0.6807889938354492],
+                [0.9683611392974854, 0.8450748324394226],
+            ],
+            dtype=torch.float32,
+        )
+        torch.testing.assert_close(pos, expected, rtol=0.0, atol=0.0)
+
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),
         [(0, 42), (1, 42), (2, 42), (5, 42), (5, 99), (20, 42), (50, 7)],
