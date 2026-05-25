@@ -13,6 +13,7 @@ from dagua.layout.ops.drl import (
     DRLNodeUpdate,
     DRLPhaseDynamicsConfig,
     DRLPhaseStep,
+    _build_undirected_adjacency,
     _maybe_cut_long_edge,
     _PhaseParameters,
 )
@@ -479,6 +480,20 @@ class TestDRLPipelineFidelity:
 
         assert 1 not in adjacency[0]
         assert adjacency[1][0] == 1.0
+
+    def test_drl_multiedge_weights_overwrite_duplicate_neighbors(self) -> None:
+        """DRL adjacency should let the last duplicate edge weight win."""
+        edge_index = _edge_index_from_edges([(0, 1), (1, 0), (0, 1)])
+        edge_weights = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+
+        adjacency = _build_undirected_adjacency(
+            edge_index=edge_index,
+            num_nodes=2,
+            edge_weights=edge_weights,
+        )
+
+        assert adjacency[0][1] == 3.0
+        assert adjacency[1][0] == 3.0
 
     @pytest.mark.parametrize(
         ("num_nodes", "seed"),
