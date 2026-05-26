@@ -1594,6 +1594,108 @@ def _graphviz_fdp_initial_positions_with_ports(
     return positions, half_width, half_height
 
 
+def _graphviz_fdp_initial_position_lists_with_ports(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    seed: int,
+    port_alphas: Mapping[int, float],
+) -> Tuple[List[float], List[float], float, float]:
+    """Initialize recursive ``tLayout`` positions as Python float lists.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Local edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of local derived nodes.
+    seed : int
+        Graphviz ``seed`` attribute value.
+    port_alphas : Mapping[int, float]
+        Local port node index to boundary angle in radians.
+
+    Returns
+    -------
+    tuple[list[float], list[float], float, float]
+        X positions, Y positions, and boundary half-width/half-height in
+        Graphviz internal inches.
+    """
+    port_indices = set(port_alphas)
+    interior_count = max(num_nodes - len(port_indices), 0)
+    size = _GRAPHVIZ_FDP_DEFAULT_K * (math.sqrt(interior_count) + 1.0)
+    half_width = _GRAPHVIZ_FDP_EXPANSION_FACTOR * (size / 2.0)
+    half_height = half_width
+    x_positions = [0.0] * num_nodes
+    y_positions = [0.0] * num_nodes
+    has_position = [False] * num_nodes
+    for node_index, alpha in port_alphas.items():
+        x_positions[node_index] = half_width * math.cos(alpha)
+        y_positions[node_index] = half_height * math.sin(alpha)
+        has_position[node_index] = True
+
+    adjacency: List[List[int]] = [[] for _node in range(num_nodes)]
+    for source, target in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        adjacency[int(source)].append(int(target))
+        adjacency[int(target)].append(int(source))
+
+    rng = _GraphvizDrand48(seed)
+    for node_index in range(num_nodes):
+        if node_index in port_indices:
+            continue
+        positioned_neighbors = [
+            other
+            for other in adjacency[node_index]
+            if 0 <= other < num_nodes and has_position[other]
+        ]
+        if len(positioned_neighbors) > 1:
+            x_position = x_positions[positioned_neighbors[0]]
+            y_position = y_positions[positioned_neighbors[0]]
+            for neighbor_count, other in enumerate(positioned_neighbors[1:], start=1):
+                x_position = (x_position * neighbor_count + x_positions[other]) / (
+                    neighbor_count + 1
+                )
+                y_position = (y_position * neighbor_count + y_positions[other]) / (
+                    neighbor_count + 1
+                )
+            x_positions[node_index] = x_position
+            y_positions[node_index] = y_position
+        elif len(positioned_neighbors) == 1:
+            neighbor = positioned_neighbors[0]
+            x_positions[node_index] = 0.98 * x_positions[neighbor]
+            y_positions[node_index] = 0.90 * y_positions[neighbor]
+        else:
+            angle = 2.0 * math.pi * rng.random()
+            radius = 0.9 * rng.random()
+            x_positions[node_index] = radius * half_width * math.cos(angle)
+            y_positions[node_index] = radius * half_height * math.sin(angle)
+        has_position[node_index] = True
+    return x_positions, y_positions, half_width, half_height
+
+
+def _graphviz_fdp_positions_from_lists(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+) -> torch.Tensor:
+    """Convert Python float coordinate lists to a position tensor.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]`` and dtype ``float64``.
+    """
+    positions = torch.empty((len(x_positions), 2), dtype=torch.float64)
+    for node_index, (x_value, y_value) in enumerate(zip(x_positions, y_positions)):
+        positions[node_index, 0] = x_value
+        positions[node_index, 1] = y_value
+    return positions
+
+
 def _graphviz_fdp_update_positions_with_ports(
     positions: torch.Tensor,
     displacement: torch.Tensor,
@@ -1680,37 +1782,44 @@ def _graphviz_fdp_tlayout_with_ports(
     tuple[torch.Tensor, tuple[float, float, float, int, int]]
         Positions in inches and xLayout parameters.
     """
-    positions, half_width, half_height = _graphviz_fdp_initial_positions_with_ports(
-        edge_index=edge_index,
-        num_nodes=num_nodes,
-        seed=seed,
-        port_alphas=port_alphas,
+    x_positions, y_positions, half_width, half_height = (
+        _graphviz_fdp_initial_position_lists_with_ports(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            seed=seed,
+            port_alphas=port_alphas,
+        )
     )
+    x_displacements = [0.0] * num_nodes
+    y_displacements = [0.0] * num_nodes
     outgoing, edges = _graphviz_fdp_edge_lists(edge_index, num_nodes, None)
     max_iters = _GRAPHVIZ_FDP_DEFAULT_MAX_ITERS
     pass1 = _GRAPHVIZ_FDP_DEFAULT_UNSCALED * max_iters // 100
     t0 = _GRAPHVIZ_FDP_DEFAULT_TFACT * _GRAPHVIZ_FDP_DEFAULT_K * math.sqrt(num_nodes) / 5.0
     loop_count = pass1
     cell_size = 3.0 * _GRAPHVIZ_FDP_DEFAULT_K
+    cell_size2 = cell_size * cell_size
     port_indices = frozenset(int(index) for index in port_alphas)
 
     for iteration in range(loop_count):
         temperature = t0 * (max_iters - iteration) / max_iters
         if temperature <= 0.0:
             continue
-        displacement = torch.zeros_like(positions)
+        _graphviz_fdp_reset_displacements(x_displacements, y_displacements)
         grid: dict[tuple[int, int], list[int]] = {}
         for node_index in range(num_nodes):
             cell = (
-                math.floor(float(positions[node_index, 0]) / cell_size),
-                math.floor(float(positions[node_index, 1]) / cell_size),
+                math.floor(x_positions[node_index] / cell_size),
+                math.floor(y_positions[node_index] / cell_size),
             )
             grid.setdefault(cell, []).insert(0, node_index)
         for source in range(num_nodes):
             for edge_id in outgoing[source]:
-                _graphviz_fdp_apply_tlayout_attraction(
-                    positions=positions,
-                    displacement=displacement,
+                _graphviz_fdp_apply_tlayout_attraction_lists(
+                    x_positions=x_positions,
+                    y_positions=y_positions,
+                    x_displacements=x_displacements,
+                    y_displacements=y_displacements,
                     edge=edges[edge_id],
                     phase=iteration,
                 )
@@ -1718,43 +1827,61 @@ def _graphviz_fdp_tlayout_with_ports(
             for source in nodes:
                 for target in nodes:
                     if source != target:
-                        _graphviz_fdp_apply_tlayout_repulsion(
-                            positions,
-                            displacement,
-                            source,
-                            target,
-                            iteration,
+                        _graphviz_fdp_apply_tlayout_repulsion_lists(
+                            x_positions=x_positions,
+                            y_positions=y_positions,
+                            x_displacements=x_displacements,
+                            y_displacements=y_displacements,
+                            source=source,
+                            target=target,
+                            phase=iteration,
                             port_indices=port_indices,
                         )
-                for dx in (-1, 0, 1):
-                    for dy in (-1, 0, 1):
-                        if dx == 0 and dy == 0:
-                            continue
-                        for target in grid.get((cell_x + dx, cell_y + dy), []):
-                            x_delta = float(positions[target, 0] - positions[source, 0])
-                            y_delta = float(positions[target, 1] - positions[source, 1])
-                            if x_delta * x_delta + y_delta * y_delta < cell_size * cell_size:
-                                _graphviz_fdp_apply_tlayout_repulsion(
-                                    positions,
-                                    displacement,
-                                    source,
-                                    target,
-                                    iteration,
-                                    port_indices=port_indices,
-                                )
-        _graphviz_fdp_update_positions_with_ports(
-            positions=positions,
-            displacement=displacement,
+                for delta_x, delta_y in (
+                    (-1, -1),
+                    (-1, 0),
+                    (-1, 1),
+                    (0, -1),
+                    (0, 1),
+                    (1, -1),
+                    (1, 0),
+                    (1, 1),
+                ):
+                    for target in grid.get((cell_x + delta_x, cell_y + delta_y), []):
+                        x_delta = x_positions[target] - x_positions[source]
+                        y_delta = y_positions[target] - y_positions[source]
+                        dist2 = x_delta * x_delta + y_delta * y_delta
+                        if dist2 < cell_size2:
+                            _graphviz_fdp_apply_tlayout_repulsion_lists(
+                                x_positions=x_positions,
+                                y_positions=y_positions,
+                                x_displacements=x_displacements,
+                                y_displacements=y_displacements,
+                                source=source,
+                                target=target,
+                                phase=iteration,
+                                port_indices=port_indices,
+                            )
+        _graphviz_fdp_update_position_lists_with_ports(
+            x_positions=x_positions,
+            y_positions=y_positions,
+            x_displacements=x_displacements,
+            y_displacements=y_displacements,
             temperature=temperature,
             port_indices=port_indices,
             half_width=half_width,
             half_height=half_height,
         )
         if node_ids is not None:
-            _fdp_trace_positions("tlayout_gAdjust", iteration, node_ids, positions)
+            _fdp_trace_positions(
+                "tlayout_gAdjust",
+                iteration,
+                node_ids,
+                _graphviz_fdp_positions_from_lists(x_positions, y_positions),
+            )
 
     x_t0 = t0 * (max_iters - pass1) / max_iters
-    return positions, (
+    return _graphviz_fdp_positions_from_lists(x_positions, y_positions), (
         x_t0,
         _GRAPHVIZ_FDP_DEFAULT_K,
         _GRAPHVIZ_FDP_DEFAULT_C,
@@ -2628,6 +2755,37 @@ def _graphviz_fdp_initial_positions(num_nodes: int, seed: int) -> torch.Tensor:
     return positions
 
 
+def _graphviz_fdp_initial_position_lists(
+    num_nodes: int,
+    seed: int,
+) -> Tuple[List[float], List[float]]:
+    """Initialize flat ``tLayout`` positions as Python float lists.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of local nodes.
+    seed : int
+        Graphviz ``seed`` attribute value.
+
+    Returns
+    -------
+    tuple[list[float], list[float]]
+        X and Y coordinates in Graphviz internal inches.
+    """
+    if num_nodes == 0:
+        return [], []
+    rng = _GraphvizDrand48(seed)
+    size = _GRAPHVIZ_FDP_DEFAULT_K * (math.sqrt(num_nodes) + 1.0)
+    half_extent = _GRAPHVIZ_FDP_EXPANSION_FACTOR * (size / 2.0)
+    x_positions: List[float] = []
+    y_positions: List[float] = []
+    for _node_index in range(num_nodes):
+        x_positions.append(half_extent * (2.0 * rng.random() - 1.0))
+        y_positions.append(half_extent * (2.0 * rng.random() - 1.0))
+    return x_positions, y_positions
+
+
 def _graphviz_fdp_disperse_zero_delta(
     source: int,
     target: int,
@@ -2661,6 +2819,233 @@ def _graphviz_fdp_disperse_zero_delta(
     if x_delta == 0.0 and y_delta == 0.0:
         x_delta = 1.0
     return x_delta, y_delta
+
+
+def _graphviz_fdp_reset_displacements(
+    x_displacements: List[float],
+    y_displacements: List[float],
+) -> None:
+    """Reset mutable FDP displacement lists in Graphviz node order.
+
+    Parameters
+    ----------
+    x_displacements : list[float]
+        Mutable X displacement list.
+    y_displacements : list[float]
+        Mutable Y displacement list.
+
+    Returns
+    -------
+    None
+        Updates both lists in place.
+    """
+    for node_index in range(len(x_displacements)):
+        x_displacements[node_index] = 0.0
+        y_displacements[node_index] = 0.0
+
+
+def _graphviz_fdp_apply_tlayout_repulsion_lists(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    x_displacements: List[float],
+    y_displacements: List[float],
+    source: int,
+    target: int,
+    phase: int,
+    port_indices: Optional[frozenset[int]] = None,
+) -> None:
+    """Apply Graphviz ``doRep`` using Python double scalar arithmetic.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    x_displacements : list[float]
+        Mutable X displacement list.
+    y_displacements : list[float]
+        Mutable Y displacement list.
+    source : int
+        Graphviz ``p`` node index.
+    target : int
+        Graphviz ``q`` node index.
+    phase : int
+        Iteration counter for deterministic zero-distance fallback.
+    port_indices : frozenset[int], optional
+        Local port node indices. Graphviz multiplies port-port repulsion by
+        ten in recursive cluster layouts.
+
+    Returns
+    -------
+    None
+        Updates displacement lists in place.
+    """
+    x_delta = x_positions[target] - x_positions[source]
+    y_delta = y_positions[target] - y_positions[source]
+    dist2 = x_delta * x_delta + y_delta * y_delta
+    if dist2 == 0.0:
+        x_delta, y_delta = _graphviz_fdp_disperse_zero_delta(source, target, phase)
+        dist2 = x_delta * x_delta + y_delta * y_delta
+    dist = math.sqrt(dist2)
+    force = _GRAPHVIZ_FDP_DEFAULT_K * _GRAPHVIZ_FDP_DEFAULT_K / (dist * dist2)
+    if port_indices is not None and source in port_indices and target in port_indices:
+        force *= 10.0
+    x_displacements[target] += x_delta * force
+    y_displacements[target] += y_delta * force
+    x_displacements[source] -= x_delta * force
+    y_displacements[source] -= y_delta * force
+
+
+def _graphviz_fdp_apply_tlayout_attraction_lists(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    x_displacements: List[float],
+    y_displacements: List[float],
+    edge: Tuple[int, int, float, float],
+    phase: int,
+) -> None:
+    """Apply Graphviz ``applyAttr`` using Python double scalar arithmetic.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    x_displacements : list[float]
+        Mutable X displacement list.
+    y_displacements : list[float]
+        Mutable Y displacement list.
+    edge : tuple[int, int, float, float]
+        Edge record as ``(source, target, factor, dist)``.
+    phase : int
+        Iteration counter for deterministic zero-distance fallback.
+
+    Returns
+    -------
+    None
+        Updates displacement lists in place.
+    """
+    source, target, factor, edge_dist = edge
+    if source == target:
+        return
+    x_delta = x_positions[target] - x_positions[source]
+    y_delta = y_positions[target] - y_positions[source]
+    dist2 = x_delta * x_delta + y_delta * y_delta
+    if dist2 == 0.0:
+        x_delta, y_delta = _graphviz_fdp_disperse_zero_delta(source, target, phase)
+        dist2 = x_delta * x_delta + y_delta * y_delta
+    dist = math.sqrt(dist2)
+    force = factor * (dist - edge_dist) / dist
+    x_displacements[target] -= x_delta * force
+    y_displacements[target] -= y_delta * force
+    x_displacements[source] += x_delta * force
+    y_displacements[source] += y_delta * force
+
+
+def _graphviz_fdp_update_position_lists(
+    x_positions: List[float],
+    y_positions: List[float],
+    x_displacements: Sequence[float],
+    y_displacements: Sequence[float],
+    temperature: float,
+) -> None:
+    """Apply Graphviz ``updatePos`` to flat Python float coordinate lists.
+
+    Parameters
+    ----------
+    x_positions : list[float]
+        Mutable X coordinates in Graphviz internal inches.
+    y_positions : list[float]
+        Mutable Y coordinates in Graphviz internal inches.
+    x_displacements : Sequence[float]
+        X displacements in Graphviz internal inches.
+    y_displacements : Sequence[float]
+        Y displacements in Graphviz internal inches.
+    temperature : float
+        Current cooling temperature.
+
+    Returns
+    -------
+    None
+        Updates position lists in place.
+    """
+    temp2 = temperature * temperature
+    for node_index in range(len(x_positions)):
+        dx = x_displacements[node_index]
+        dy = y_displacements[node_index]
+        len2 = dx * dx + dy * dy
+        if len2 < temp2:
+            x_positions[node_index] += dx
+            y_positions[node_index] += dy
+        else:
+            factor = temperature / math.sqrt(len2)
+            x_positions[node_index] += dx * factor
+            y_positions[node_index] += dy * factor
+
+
+def _graphviz_fdp_update_position_lists_with_ports(
+    x_positions: List[float],
+    y_positions: List[float],
+    x_displacements: Sequence[float],
+    y_displacements: Sequence[float],
+    temperature: float,
+    port_indices: frozenset[int],
+    half_width: float,
+    half_height: float,
+) -> None:
+    """Apply Graphviz ``updatePos`` with recursive port boundary clamping.
+
+    Parameters
+    ----------
+    x_positions : list[float]
+        Mutable X coordinates in Graphviz internal inches.
+    y_positions : list[float]
+        Mutable Y coordinates in Graphviz internal inches.
+    x_displacements : Sequence[float]
+        X displacements in Graphviz internal inches.
+    y_displacements : Sequence[float]
+        Y displacements in Graphviz internal inches.
+    temperature : float
+        Current cooling temperature.
+    port_indices : frozenset[int]
+        Local node indices that are boundary ports.
+    half_width : float
+        Boundary ellipse half-width.
+    half_height : float
+        Boundary ellipse half-height.
+
+    Returns
+    -------
+    None
+        Updates position lists in place.
+    """
+    temp2 = temperature * temperature
+    half_width2 = half_width * half_width
+    half_height2 = half_height * half_height
+    for node_index in range(len(x_positions)):
+        dx = x_displacements[node_index]
+        dy = y_displacements[node_index]
+        len2 = dx * dx + dy * dy
+        if len2 < temp2:
+            x_value = x_positions[node_index] + dx
+            y_value = y_positions[node_index] + dy
+        else:
+            factor = temperature / math.sqrt(len2)
+            x_value = x_positions[node_index] + dx * factor
+            y_value = y_positions[node_index] + dy * factor
+
+        distance = math.sqrt(x_value * x_value / half_width2 + y_value * y_value / half_height2)
+        if node_index in port_indices and distance > 0.0:
+            x_positions[node_index] = x_value / distance
+            y_positions[node_index] = y_value / distance
+        elif distance >= 1.0:
+            x_positions[node_index] = 0.95 * x_value / distance
+            y_positions[node_index] = 0.95 * y_value / distance
+        else:
+            x_positions[node_index] = x_value
+            y_positions[node_index] = y_value
 
 
 def _graphviz_fdp_apply_tlayout_repulsion(
@@ -2756,7 +3141,7 @@ def _graphviz_fdp_update_positions(
     displacement: torch.Tensor,
     temperature: float,
 ) -> None:
-    """Apply Graphviz's temperature-limited position update.
+    """Apply Graphviz ``xLayout``'s temperature-limited position update.
 
     Parameters
     ----------
@@ -2781,9 +3166,9 @@ def _graphviz_fdp_update_positions(
             positions[node_index, 0] += dx
             positions[node_index, 1] += dy
         else:
-            factor = temperature / math.sqrt(len2)
-            positions[node_index, 0] += dx * factor
-            positions[node_index, 1] += dy * factor
+            length = math.sqrt(len2)
+            positions[node_index, 0] += dx * temperature / length
+            positions[node_index, 1] += dy * temperature / length
 
 
 def _graphviz_fdp_tlayout(
@@ -2815,31 +3200,39 @@ def _graphviz_fdp_tlayout(
         Positions in inches and xLayout parameters
         ``(T0, K, C, numIters, loopcnt)``.
     """
-    positions = _graphviz_fdp_initial_positions(num_nodes=num_nodes, seed=seed)
+    x_positions, y_positions = _graphviz_fdp_initial_position_lists(
+        num_nodes=num_nodes,
+        seed=seed,
+    )
+    x_displacements = [0.0] * num_nodes
+    y_displacements = [0.0] * num_nodes
     outgoing, edges = _graphviz_fdp_edge_lists(edge_index, num_nodes, edge_weights)
     max_iters = _GRAPHVIZ_FDP_DEFAULT_MAX_ITERS
     pass1 = _GRAPHVIZ_FDP_DEFAULT_UNSCALED * max_iters // 100
     t0 = _GRAPHVIZ_FDP_DEFAULT_TFACT * _GRAPHVIZ_FDP_DEFAULT_K * math.sqrt(num_nodes) / 5.0
     loop_count = pass1
     cell_size = 3.0 * _GRAPHVIZ_FDP_DEFAULT_K
+    cell_size2 = cell_size * cell_size
 
     for iteration in range(loop_count):
         temperature = t0 * (max_iters - iteration) / max_iters
         if temperature <= 0.0:
             continue
-        displacement = torch.zeros_like(positions)
+        _graphviz_fdp_reset_displacements(x_displacements, y_displacements)
         grid: dict[tuple[int, int], list[int]] = {}
         for node_index in range(num_nodes):
             cell = (
-                math.floor(float(positions[node_index, 0]) / cell_size),
-                math.floor(float(positions[node_index, 1]) / cell_size),
+                math.floor(x_positions[node_index] / cell_size),
+                math.floor(y_positions[node_index] / cell_size),
             )
             grid.setdefault(cell, []).insert(0, node_index)
         for source in range(num_nodes):
             for edge_id in outgoing[source]:
-                _graphviz_fdp_apply_tlayout_attraction(
-                    positions=positions,
-                    displacement=displacement,
+                _graphviz_fdp_apply_tlayout_attraction_lists(
+                    x_positions=x_positions,
+                    y_positions=y_positions,
+                    x_displacements=x_displacements,
+                    y_displacements=y_displacements,
                     edge=edges[edge_id],
                     phase=iteration,
                 )
@@ -2847,26 +3240,56 @@ def _graphviz_fdp_tlayout(
             for source in nodes:
                 for target in nodes:
                     if source != target:
-                        _graphviz_fdp_apply_tlayout_repulsion(
-                            positions, displacement, source, target, iteration
+                        _graphviz_fdp_apply_tlayout_repulsion_lists(
+                            x_positions=x_positions,
+                            y_positions=y_positions,
+                            x_displacements=x_displacements,
+                            y_displacements=y_displacements,
+                            source=source,
+                            target=target,
+                            phase=iteration,
                         )
-                for dx in (-1, 0, 1):
-                    for dy in (-1, 0, 1):
-                        if dx == 0 and dy == 0:
-                            continue
-                        for target in grid.get((cell_x + dx, cell_y + dy), []):
-                            x_delta = float(positions[target, 0] - positions[source, 0])
-                            y_delta = float(positions[target, 1] - positions[source, 1])
-                            if x_delta * x_delta + y_delta * y_delta < cell_size * cell_size:
-                                _graphviz_fdp_apply_tlayout_repulsion(
-                                    positions, displacement, source, target, iteration
-                                )
-        _graphviz_fdp_update_positions(positions, displacement, temperature)
+                for delta_x, delta_y in (
+                    (-1, -1),
+                    (-1, 0),
+                    (-1, 1),
+                    (0, -1),
+                    (0, 1),
+                    (1, -1),
+                    (1, 0),
+                    (1, 1),
+                ):
+                    for target in grid.get((cell_x + delta_x, cell_y + delta_y), []):
+                        x_delta = x_positions[target] - x_positions[source]
+                        y_delta = y_positions[target] - y_positions[source]
+                        dist2 = x_delta * x_delta + y_delta * y_delta
+                        if dist2 < cell_size2:
+                            _graphviz_fdp_apply_tlayout_repulsion_lists(
+                                x_positions=x_positions,
+                                y_positions=y_positions,
+                                x_displacements=x_displacements,
+                                y_displacements=y_displacements,
+                                source=source,
+                                target=target,
+                                phase=iteration,
+                            )
+        _graphviz_fdp_update_position_lists(
+            x_positions=x_positions,
+            y_positions=y_positions,
+            x_displacements=x_displacements,
+            y_displacements=y_displacements,
+            temperature=temperature,
+        )
         if node_ids is not None:
-            _fdp_trace_positions("tlayout_gAdjust", iteration, node_ids, positions)
+            _fdp_trace_positions(
+                "tlayout_gAdjust",
+                iteration,
+                node_ids,
+                _graphviz_fdp_positions_from_lists(x_positions, y_positions),
+            )
 
     x_t0 = t0 * (max_iters - pass1) / max_iters
-    return positions, (
+    return _graphviz_fdp_positions_from_lists(x_positions, y_positions), (
         x_t0,
         _GRAPHVIZ_FDP_DEFAULT_K,
         _GRAPHVIZ_FDP_DEFAULT_C,
@@ -2906,6 +3329,80 @@ def _graphviz_fdp_node_sizes_in_inches(
     )
     sep = 2.0 * _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_SEP_POINTS / _GRAPHVIZ_FDP_POINTS_PER_INCH
     return torch.maximum(sizes, floors) + sep
+
+
+def _graphviz_fdp_node_size_lists_in_inches(
+    node_sizes: Optional[torch.Tensor],
+    num_nodes: int,
+) -> Tuple[List[float], List[float]]:
+    """Return Graphviz ``xLayout`` node sizes as Python float lists.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor, optional
+        Node sizes in points with shape ``[N, 2]``.
+    num_nodes : int
+        Number of local nodes.
+
+    Returns
+    -------
+    tuple[list[float], list[float]]
+        Widths and heights including Graphviz's default additive separation,
+        in internal inches.
+    """
+    sep = 2.0 * _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_SEP_POINTS / _GRAPHVIZ_FDP_POINTS_PER_INCH
+    widths: List[float] = []
+    heights: List[float] = []
+    if node_sizes is None:
+        for _node_index in range(num_nodes):
+            widths.append(_GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES + sep)
+            heights.append(_GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES + sep)
+        return widths, heights
+
+    sizes_cpu = node_sizes.detach().to(device="cpu", dtype=torch.float64)
+    for node_index in range(num_nodes):
+        width = float(sizes_cpu[node_index, 0].item()) / _GRAPHVIZ_FDP_POINTS_PER_INCH
+        height = float(sizes_cpu[node_index, 1].item()) / _GRAPHVIZ_FDP_POINTS_PER_INCH
+        widths.append(max(width, _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES) + sep)
+        heights.append(max(height, _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES) + sep)
+    return widths, heights
+
+
+def _graphviz_fdp_x_overlap_lists(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    widths_in_inches: Sequence[float],
+    heights_in_inches: Sequence[float],
+    source: int,
+    target: int,
+) -> bool:
+    """Return whether two nodes overlap under Graphviz ``xLayout`` margins.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    widths_in_inches : Sequence[float]
+        Node widths including separation in inches.
+    heights_in_inches : Sequence[float]
+        Node heights including separation in inches.
+    source : int
+        First node index.
+    target : int
+        Second node index.
+
+    Returns
+    -------
+    bool
+        ``True`` when axis-aligned node boxes overlap.
+    """
+    x_delta = abs(x_positions[target] - x_positions[source])
+    y_delta = abs(y_positions[target] - y_positions[source])
+    width = (widths_in_inches[source] + widths_in_inches[target]) / 2.0
+    height = (heights_in_inches[source] + heights_in_inches[target]) / 2.0
+    return x_delta <= width and y_delta <= height
 
 
 def _graphviz_fdp_x_overlap(
@@ -3068,6 +3565,216 @@ def _graphviz_fdp_count_overlaps(
     return overlaps
 
 
+def _graphviz_fdp_count_overlaps_lists(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    widths_in_inches: Sequence[float],
+    heights_in_inches: Sequence[float],
+) -> int:
+    """Count pairwise Graphviz ``xLayout`` overlaps from Python float lists.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    widths_in_inches : Sequence[float]
+        Node widths including separation in inches.
+    heights_in_inches : Sequence[float]
+        Node heights including separation in inches.
+
+    Returns
+    -------
+    int
+        Number of overlapping node pairs.
+    """
+    overlaps = 0
+    for source in range(len(x_positions)):
+        for target in range(source + 1, len(x_positions)):
+            overlaps += int(
+                _graphviz_fdp_x_overlap_lists(
+                    x_positions,
+                    y_positions,
+                    widths_in_inches,
+                    heights_in_inches,
+                    source,
+                    target,
+                )
+            )
+    return overlaps
+
+
+def _graphviz_fdp_apply_xlayout_repulsion_lists(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    widths_in_inches: Sequence[float],
+    heights_in_inches: Sequence[float],
+    x_displacements: List[float],
+    y_displacements: List[float],
+    source: int,
+    target: int,
+    x_overlap_force: float,
+    x_nonoverlap_force: float,
+    phase: int,
+) -> int:
+    """Apply Graphviz ``xLayout`` pair repulsion using Python float lists.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    widths_in_inches : Sequence[float]
+        Node widths including separation in inches.
+    heights_in_inches : Sequence[float]
+        Node heights including separation in inches.
+    x_displacements : list[float]
+        Mutable X displacement list.
+    y_displacements : list[float]
+        Mutable Y displacement list.
+    source : int
+        First node index.
+    target : int
+        Second node index.
+    x_overlap_force : float
+        Overlap repulsion numerator.
+    x_nonoverlap_force : float
+        Non-overlap repulsion numerator.
+    phase : int
+        Iteration counter for deterministic zero-distance fallback.
+
+    Returns
+    -------
+    int
+        ``1`` if nodes overlapped before movement, otherwise ``0``.
+    """
+    x_delta = x_positions[target] - x_positions[source]
+    y_delta = y_positions[target] - y_positions[source]
+    dist2 = x_delta * x_delta + y_delta * y_delta
+    if dist2 == 0.0:
+        x_delta, y_delta = _graphviz_fdp_disperse_zero_delta(source, target, phase)
+        dist2 = x_delta * x_delta + y_delta * y_delta
+    overlaps = _graphviz_fdp_x_overlap_lists(
+        x_positions,
+        y_positions,
+        widths_in_inches,
+        heights_in_inches,
+        source,
+        target,
+    )
+    force = (x_overlap_force if overlaps else x_nonoverlap_force) / dist2
+    x_displacements[target] += x_delta * force
+    y_displacements[target] += y_delta * force
+    x_displacements[source] -= x_delta * force
+    y_displacements[source] -= y_delta * force
+    return 1 if overlaps else 0
+
+
+def _graphviz_fdp_apply_xlayout_attraction_lists(
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    widths_in_inches: Sequence[float],
+    heights_in_inches: Sequence[float],
+    x_displacements: List[float],
+    y_displacements: List[float],
+    edge: Tuple[int, int, float, float],
+    x_k: float,
+) -> None:
+    """Apply Graphviz ``xLayout`` edge attraction using Python float lists.
+
+    Parameters
+    ----------
+    x_positions : Sequence[float]
+        X coordinates in Graphviz internal inches.
+    y_positions : Sequence[float]
+        Y coordinates in Graphviz internal inches.
+    widths_in_inches : Sequence[float]
+        Node widths including separation in inches.
+    heights_in_inches : Sequence[float]
+        Node heights including separation in inches.
+    x_displacements : list[float]
+        Mutable X displacement list.
+    y_displacements : list[float]
+        Mutable Y displacement list.
+    edge : tuple[int, int, float, float]
+        Edge record as ``(source, target, factor, dist)``.
+    x_k : float
+        Current ``xLayout`` spring constant.
+
+    Returns
+    -------
+    None
+        Updates displacement lists in place.
+    """
+    source, target, _factor, _edge_dist = edge
+    if source == target or _graphviz_fdp_x_overlap_lists(
+        x_positions,
+        y_positions,
+        widths_in_inches,
+        heights_in_inches,
+        source,
+        target,
+    ):
+        return
+    x_delta = x_positions[target] - x_positions[source]
+    y_delta = y_positions[target] - y_positions[source]
+    dist = math.hypot(x_delta, y_delta)
+    if dist == 0.0:
+        return
+    source_radius = math.hypot(widths_in_inches[source] / 2.0, heights_in_inches[source] / 2.0)
+    target_radius = math.hypot(widths_in_inches[target] / 2.0, heights_in_inches[target] / 2.0)
+    din = source_radius + target_radius
+    dout = dist - din
+    force = dout * dout / ((x_k + din) * dist)
+    x_displacements[target] -= x_delta * force
+    y_displacements[target] -= y_delta * force
+    x_displacements[source] += x_delta * force
+    y_displacements[source] += y_delta * force
+
+
+def _graphviz_fdp_update_xlayout_position_lists(
+    x_positions: List[float],
+    y_positions: List[float],
+    x_displacements: Sequence[float],
+    y_displacements: Sequence[float],
+    temperature: float,
+) -> None:
+    """Apply Graphviz ``xLayout`` position update to Python float lists.
+
+    Parameters
+    ----------
+    x_positions : list[float]
+        Mutable X coordinates in Graphviz internal inches.
+    y_positions : list[float]
+        Mutable Y coordinates in Graphviz internal inches.
+    x_displacements : Sequence[float]
+        X displacements in Graphviz internal inches.
+    y_displacements : Sequence[float]
+        Y displacements in Graphviz internal inches.
+    temperature : float
+        Current cooling temperature.
+
+    Returns
+    -------
+    None
+        Updates position lists in place.
+    """
+    temp2 = temperature * temperature
+    for node_index in range(len(x_positions)):
+        dx = x_displacements[node_index]
+        dy = y_displacements[node_index]
+        len2 = dx * dx + dy * dy
+        if len2 < temp2:
+            x_positions[node_index] += dx
+            y_positions[node_index] += dy
+        else:
+            length = math.sqrt(len2)
+            x_positions[node_index] += dx * temperature / length
+            y_positions[node_index] += dy * temperature / length
+
+
 def _graphviz_fdp_xlayout(
     positions: torch.Tensor,
     edge_index: torch.Tensor,
@@ -3103,10 +3810,29 @@ def _graphviz_fdp_xlayout(
     num_nodes = int(positions.shape[0])
     if num_nodes <= 1:
         return positions
-    sizes_in_inches = _graphviz_fdp_node_sizes_in_inches(node_sizes, num_nodes)
+    cpu_positions = positions.detach().to(device="cpu", dtype=torch.float64)
+    x_positions = [float(cpu_positions[node_index, 0].item()) for node_index in range(num_nodes)]
+    y_positions = [float(cpu_positions[node_index, 1].item()) for node_index in range(num_nodes)]
+    x_displacements = [0.0] * num_nodes
+    y_displacements = [0.0] * num_nodes
+    widths_in_inches, heights_in_inches = _graphviz_fdp_node_size_lists_in_inches(
+        node_sizes,
+        num_nodes,
+    )
+    sizes_in_inches = None
     outgoing, edges = _graphviz_fdp_edge_lists(edge_index, num_nodes, edge_weights)
-    ov = _graphviz_fdp_count_overlaps(positions, sizes_in_inches)
+    ov = _graphviz_fdp_count_overlaps_lists(
+        x_positions,
+        y_positions,
+        widths_in_inches,
+        heights_in_inches,
+    )
     if node_ids is not None:
+        trace_positions = _graphviz_fdp_positions_from_lists(x_positions, y_positions)
+        sizes_in_inches = torch.tensor(
+            list(zip(widths_in_inches, heights_in_inches)),
+            dtype=torch.float64,
+        )
         _fdp_trace_xlayout_event(
             "initial",
             -1,
@@ -3115,12 +3841,12 @@ def _graphviz_fdp_xlayout(
             ov,
             xpms[1],
             0.0,
-            positions,
+            trace_positions,
             sizes_in_inches,
             len(edges),
         )
     if ov == 0:
-        return positions
+        return _graphviz_fdp_positions_from_lists(x_positions, y_positions)
 
     x_t0, x_k, x_c, x_num_iters, x_loopcnt = xpms
     if x_c <= 0.0:
@@ -3141,7 +3867,7 @@ def _graphviz_fdp_xlayout(
                 ov,
                 x_k,
                 x_t0,
-                positions,
+                _graphviz_fdp_positions_from_lists(x_positions, y_positions),
                 sizes_in_inches,
                 len(edges),
             )
@@ -3158,18 +3884,21 @@ def _graphviz_fdp_xlayout(
                     ov,
                     x_k,
                     temperature,
-                    positions,
+                    _graphviz_fdp_positions_from_lists(x_positions, y_positions),
                     sizes_in_inches,
                     len(edges),
                 )
-            displacement = torch.zeros_like(positions)
+            _graphviz_fdp_reset_displacements(x_displacements, y_displacements)
             overlaps_this_pass = 0
             for source in range(num_nodes):
                 for target in range(source + 1, num_nodes):
-                    overlaps_this_pass += _graphviz_fdp_apply_xlayout_repulsion(
-                        positions=positions,
-                        displacement=displacement,
-                        sizes_in_inches=sizes_in_inches,
+                    overlaps_this_pass += _graphviz_fdp_apply_xlayout_repulsion_lists(
+                        x_positions=x_positions,
+                        y_positions=y_positions,
+                        widths_in_inches=widths_in_inches,
+                        heights_in_inches=heights_in_inches,
+                        x_displacements=x_displacements,
+                        y_displacements=y_displacements,
                         source=source,
                         target=target,
                         x_overlap_force=x_overlap_force,
@@ -3177,10 +3906,13 @@ def _graphviz_fdp_xlayout(
                         phase=try_index * x_loopcnt + iteration,
                     )
                 for edge_id in outgoing[source]:
-                    _graphviz_fdp_apply_xlayout_attraction(
-                        positions=positions,
-                        displacement=displacement,
-                        sizes_in_inches=sizes_in_inches,
+                    _graphviz_fdp_apply_xlayout_attraction_lists(
+                        x_positions=x_positions,
+                        y_positions=y_positions,
+                        widths_in_inches=widths_in_inches,
+                        heights_in_inches=heights_in_inches,
+                        x_displacements=x_displacements,
+                        y_displacements=y_displacements,
                         edge=edges[edge_id],
                         x_k=x_k,
                     )
@@ -3194,19 +3926,25 @@ def _graphviz_fdp_xlayout(
                     ov,
                     x_k,
                     temperature,
-                    positions,
+                    _graphviz_fdp_positions_from_lists(x_positions, y_positions),
                     sizes_in_inches,
                     len(edges),
                 )
             if ov == 0:
                 break
-            _graphviz_fdp_update_positions(positions, displacement, temperature)
+            _graphviz_fdp_update_xlayout_position_lists(
+                x_positions=x_positions,
+                y_positions=y_positions,
+                x_displacements=x_displacements,
+                y_displacements=y_displacements,
+                temperature=temperature,
+            )
             if node_ids is not None:
                 _fdp_trace_positions(
                     "xlayout_adjust",
                     try_index * x_loopcnt + iteration,
                     node_ids,
-                    positions,
+                    _graphviz_fdp_positions_from_lists(x_positions, y_positions),
                 )
         x_k += base_k
         if node_ids is not None:
@@ -3218,11 +3956,11 @@ def _graphviz_fdp_xlayout(
                 ov,
                 x_k,
                 0.0,
-                positions,
+                _graphviz_fdp_positions_from_lists(x_positions, y_positions),
                 sizes_in_inches,
                 len(edges),
             )
-    return positions
+    return _graphviz_fdp_positions_from_lists(x_positions, y_positions)
 
 
 def _graphviz_fdp_component_layout(
