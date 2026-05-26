@@ -1467,11 +1467,11 @@ def _graphviz_fdp_node_size_points(
             _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES * _GRAPHVIZ_FDP_POINTS_PER_INCH,
             _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES * _GRAPHVIZ_FDP_POINTS_PER_INCH,
         ],
-        dtype=torch.float32,
+        dtype=torch.float64,
     )
     if node_sizes is None:
         return floor
-    size = node_sizes[int(node_index)].detach().to(dtype=torch.float32, device="cpu")
+    size = node_sizes[int(node_index)].detach().to(dtype=torch.float64, device="cpu")
     return torch.maximum(size, floor)
 
 
@@ -1508,13 +1508,13 @@ def _fdp_recursion_component_sizes(
             sizes.append(_graphviz_fdp_node_size_points(node_sizes, int(node.key)))
         elif node.kind == "cluster" and str(node.key) in child_layouts:
             child = child_layouts[str(node.key)]
-            sizes.append(torch.tensor([child.width, child.height], dtype=torch.float32))
+            sizes.append(torch.tensor([child.width, child.height], dtype=torch.float64))
         elif node.kind == "port":
-            sizes.append(torch.zeros(2, dtype=torch.float32))
+            sizes.append(torch.zeros(2, dtype=torch.float64))
         else:
-            sizes.append(torch.ones(2, dtype=torch.float32))
+            sizes.append(torch.ones(2, dtype=torch.float64))
     if not sizes:
-        return torch.empty((0, 2), dtype=torch.float32)
+        return torch.empty((0, 2), dtype=torch.float64)
     return torch.stack(sizes)
 
 
@@ -1570,9 +1570,17 @@ def _graphviz_fdp_initial_positions_with_ports(
             if 0 <= other < num_nodes and has_position[other]
         ]
         if len(positioned_neighbors) > 1:
-            positions[node_index] = torch.stack(
-                [positions[other] for other in positioned_neighbors]
-            ).mean(dim=0)
+            x_position = float(positions[positioned_neighbors[0], 0].item())
+            y_position = float(positions[positioned_neighbors[0], 1].item())
+            for neighbor_count, other in enumerate(positioned_neighbors[1:], start=1):
+                x_position = (x_position * neighbor_count + float(positions[other, 0].item())) / (
+                    neighbor_count + 1
+                )
+                y_position = (y_position * neighbor_count + float(positions[other, 1].item())) / (
+                    neighbor_count + 1
+                )
+            positions[node_index, 0] = x_position
+            positions[node_index, 1] = y_position
         elif len(positioned_neighbors) == 1:
             neighbor = positions[positioned_neighbors[0]]
             positions[node_index, 0] = 0.98 * neighbor[0]
@@ -1778,7 +1786,7 @@ def _fdp_recursion_tlayout_component(
         ``xLayout`` parameters returned by the ``tLayout`` pass.
     """
     if len(component) == 0:
-        return torch.empty((0, 2), dtype=torch.float32), (0.0, 0.0, 0.0, 0, 0)
+        return torch.empty((0, 2), dtype=torch.float64), (0.0, 0.0, 0.0, 0, 0)
     local_by_derived = {int(derived_index): index for index, derived_index in enumerate(component)}
     port_alphas = {
         local_by_derived[int(derived_index)]: float(derived.nodes[int(derived_index)].port_alpha)
@@ -1804,7 +1812,7 @@ def _fdp_recursion_tlayout_component(
             edge_weights=None,
             node_ids=node_ids,
         )
-    return (positions * _GRAPHVIZ_FDP_POINTS_PER_INCH).to(dtype=torch.float32), xpms
+    return (positions * _GRAPHVIZ_FDP_POINTS_PER_INCH).to(dtype=torch.float64), xpms
 
 
 def _fdp_recursion_xlayout_component(
@@ -1839,7 +1847,7 @@ def _fdp_recursion_xlayout_component(
         retained unchanged so callers can keep one component-position mapping.
     """
     updated = {
-        int(index): position.detach().to(dtype=torch.float32, device="cpu").clone()
+        int(index): position.detach().to(dtype=torch.float64, device="cpu").clone()
         for index, position in local_positions.items()
     }
     active_component = [
@@ -1867,7 +1875,7 @@ def _fdp_recursion_xlayout_component(
         node_ids=_fdp_recursion_trace_labels(derived, active_component),
     )
     active_positions_points = (active_positions_inches * _GRAPHVIZ_FDP_POINTS_PER_INCH).to(
-        dtype=torch.float32
+        dtype=torch.float64
     )
     for local_index, derived_index in enumerate(active_component):
         updated[derived_index] = active_positions_points[local_index]
@@ -1987,11 +1995,11 @@ def _fdp_recursion_bbox_from_positions(
     for node_index, position in positions.items():
         size = _graphviz_fdp_node_size_points(node_sizes, int(node_index))
         half = size / 2.0
-        lower_parts.append(position.to(dtype=torch.float32, device="cpu") - half)
-        upper_parts.append(position.to(dtype=torch.float32, device="cpu") + half)
+        lower_parts.append(position.to(dtype=torch.float64, device="cpu") - half)
+        upper_parts.append(position.to(dtype=torch.float64, device="cpu") + half)
     for box in cluster_boxes.values():
-        lower_parts.append(torch.tensor([box[0], box[1]], dtype=torch.float32))
-        upper_parts.append(torch.tensor([box[2], box[3]], dtype=torch.float32))
+        lower_parts.append(torch.tensor([box[0], box[1]], dtype=torch.float64))
+        upper_parts.append(torch.tensor([box[2], box[3]], dtype=torch.float64))
     if not lower_parts:
         return (
             0.0,
@@ -2041,12 +2049,19 @@ def _fdp_recursion_shift_to_origin(
         cluster_boxes=cluster_boxes,
     )
     is_empty = not positions and not cluster_boxes
+    if not is_empty:
+        # Graphviz finalCC converts component bboxes through BF2B before
+        # feeding child cluster dimensions into the parent derived graph.
+        x_min = float(_c_round(x_min))
+        y_min = float(_c_round(y_min))
+        x_max = float(_c_round(x_max))
+        y_max = float(_c_round(y_max))
     margin = 0.0 if is_root or is_empty else _GRAPHVIZ_FDP_CLUSTER_MARGIN_POINTS
     bottom_border = 0.0
     top_border = 0.0 if is_root or is_empty else _GRAPHVIZ_FDP_CLUSTER_FINALCC_LABEL_HEIGHT_POINTS
-    shift = torch.tensor([margin - x_min, margin + bottom_border - y_min], dtype=torch.float32)
+    shift = torch.tensor([margin - x_min, margin + bottom_border - y_min], dtype=torch.float64)
     shifted_positions = {
-        node_index: position.to(dtype=torch.float32, device="cpu") + shift
+        node_index: position.to(dtype=torch.float64, device="cpu") + shift
         for node_index, position in positions.items()
     }
     shifted_boxes = {
@@ -2106,11 +2121,11 @@ def _fdp_recursion_component_offsets(
     ]
     if component_node_geometries is not None:
         return [
-            torch.tensor(offset, dtype=torch.float32)
+            torch.tensor(offset, dtype=torch.float64)
             for offset in _graphviz_node_poly_pack_offsets(boxes, component_node_geometries)
         ]
     return [
-        torch.tensor(offset, dtype=torch.float32) for offset in _graphviz_tile_pack_offsets(boxes)
+        torch.tensor(offset, dtype=torch.float64) for offset in _graphviz_tile_pack_offsets(boxes)
     ]
 
 
@@ -2352,7 +2367,7 @@ def _fdp_recursion_layout_level(
             child = child_layouts[str(node.key)]
             child_offset = position - torch.tensor(
                 [child.width / 2.0, child.height / 2.0],
-                dtype=torch.float32,
+                dtype=torch.float64,
             )
             x_shift = float(child_offset[0].item())
             y_shift = float(child_offset[1].item())
@@ -2435,7 +2450,7 @@ def graphviz_fdp_fidelity(
     tree = ClusterTree.from_flat_membership(clusters, cluster_parents or {})
     cpu_edge_index = edge_index.detach().to(device="cpu", dtype=torch.long)
     cpu_node_sizes = (
-        node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        node_sizes.detach().to(device="cpu", dtype=torch.float64)
         if node_sizes is not None
         else None
     )
@@ -2448,9 +2463,9 @@ def graphviz_fdp_fidelity(
         steps=steps,
         seed=seed,
     )
-    positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
+    positions = torch.zeros((num_nodes, 2), dtype=torch.float64)
     for node_index, position in layout.positions.items():
-        positions[int(node_index)] = position.to(dtype=torch.float32, device="cpu")
+        positions[int(node_index)] = position.to(dtype=torch.float64, device="cpu")
     positions[:, 1] *= -1.0
     return positions.to(device=_layout_device(edge_index=edge_index, node_sizes=node_sizes))
 
