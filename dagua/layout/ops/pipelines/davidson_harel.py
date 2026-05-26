@@ -18,6 +18,7 @@ from dagua.layout.ops.davidson_harel import (
     InitializeDHPositions,
     PrepareDHState,
 )
+from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.state import (  # noqa: E402
     ExecutionPlan,
     LayoutProblem,
@@ -56,6 +57,7 @@ def _igraph_davidson_harel_positions(
     rounds: int,
     fineiter: Optional[int],
     device: torch.device,
+    fidelity_dtype: torch.dtype,
 ) -> torch.Tensor:
     """Run python-igraph's Davidson-Harel layout with benchmark seed semantics.
 
@@ -106,7 +108,7 @@ def _igraph_davidson_harel_positions(
     with _igraph_rng_seed(seed):
         layout = graph.layout("davidson_harel", **kwargs)
 
-    positions = torch.zeros((num_nodes, 2), dtype=torch.float32, device=device)
+    positions = torch.zeros((num_nodes, 2), dtype=fidelity_dtype, device=device)
     for index in range(min(len(layout), num_nodes)):
         positions[index, 0] = float(layout[index][0]) * 50.0
         positions[index, 1] = float(layout[index][1]) * 50.0
@@ -200,7 +202,7 @@ def layout_davidson_harel_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     skip_finalization: bool = True,
     fidelity_mode: bool = True,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Run the Davidson-Harel pipeline as a drop-in replacement.
 
@@ -265,10 +267,13 @@ def layout_davidson_harel_pipeline(
         else torch.device("cpu")
     )
     if num_nodes == 0:
-        return torch.empty((0, 2), dtype=torch.float32, device=device)
+        resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
+        return torch.empty((0, 2), dtype=resolved_dtype, device=device)
     if num_nodes == 1:
-        return torch.zeros((1, 2), dtype=torch.float32, device=device)
+        resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
+        return torch.zeros((1, 2), dtype=resolved_dtype, device=device)
 
+    resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
     if fidelity_mode and edge_weights is None and skip_finalization:
         try:
             return _igraph_davidson_harel_positions(
@@ -278,6 +283,7 @@ def layout_davidson_harel_pipeline(
                 rounds=rounds,
                 fineiter=fineiter,
                 device=device,
+                fidelity_dtype=resolved_dtype,
             )
         except ImportError:
             pass

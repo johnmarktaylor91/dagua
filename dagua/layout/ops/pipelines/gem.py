@@ -15,6 +15,7 @@ from dagua.layout.ops.gem import (
     GEMSequentialSolve,
     InitializeGEMPositions,
 )
+from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.state import (  # noqa: E402
     ExecutionPlan,
     LayoutProblem,
@@ -25,7 +26,11 @@ from dagua.layout.ops.state import (  # noqa: E402
 GEMFidelityMode = Optional[Union[bool, str]]
 
 
-def build_gem_pipeline(max_iters: int = 500, fidelity_mode: GEMFidelityMode = False) -> Pipeline:
+def build_gem_pipeline(
+    max_iters: int = 500,
+    fidelity_mode: GEMFidelityMode = False,
+    fidelity_dtype: Optional[torch.dtype] = None,
+) -> Pipeline:
     """Build a GEM graph-embedder pipeline.
 
     Reference fidelity
@@ -67,14 +72,15 @@ def build_gem_pipeline(max_iters: int = 500, fidelity_mode: GEMFidelityMode = Fa
     if max_iters < 0:
         raise ValueError("max_iters must be non-negative.")
 
+    resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
     return Pipeline(
         [
             FixedSteps(FixedStepsConfig(n=max_iters)),
-            InitializeGEMPositions(fidelity_mode=fidelity_mode),
+            InitializeGEMPositions(fidelity_mode=fidelity_mode, fidelity_dtype=resolved_dtype),
             GEMPrepareState(fidelity_mode=fidelity_mode),
-            GEMSequentialSolve(),
+            GEMSequentialSolve(fidelity_dtype=resolved_dtype),
             GEMBatchedSolve(),
-            GEMFinalizePositions(),
+            GEMFinalizePositions(fidelity_dtype=resolved_dtype if fidelity_mode else torch.float32),
         ],
         name="gem_pipeline",
     )
@@ -88,6 +94,7 @@ def layout_gem_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     fidelity_mode: GEMFidelityMode = False,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Run the GEM pipeline as a drop-in replacement.
 
@@ -146,6 +153,7 @@ def layout_gem_pipeline(
     final_state = build_gem_pipeline(
         max_iters=max_iters,
         fidelity_mode=fidelity_mode,
+        fidelity_dtype=fidelity_dtype,
     ).apply(
         problem,
         state,

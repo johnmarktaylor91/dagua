@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from importlib import import_module
+from typing import Any, Optional
 
 import torch
 
@@ -91,6 +92,39 @@ PIPELINE_REGISTRY: dict[str, PipelineSpec] = {
 }
 
 
+def resolve_fidelity_dtype(
+    fidelity_mode: Any,
+    fidelity_dtype: Optional[torch.dtype],
+) -> torch.dtype:
+    """Resolve fidelity-mode internal dtype.
+
+    Parameters
+    ----------
+    fidelity_mode : Any
+        Pipeline-specific fidelity selector.
+    fidelity_dtype : torch.dtype or None
+        Explicit dtype requested by the caller. ``None`` defaults to
+        ``torch.float64`` when fidelity mode is truthy and ``torch.float32``
+        otherwise.
+
+    Returns
+    -------
+    torch.dtype
+        ``torch.float32`` or ``torch.float64``.
+
+    Raises
+    ------
+    ValueError
+        If an unsupported dtype is requested.
+    """
+    resolved = torch.float64 if fidelity_dtype is None and bool(fidelity_mode) else fidelity_dtype
+    if resolved is None:
+        resolved = torch.float32
+    if resolved not in (torch.float32, torch.float64):
+        raise ValueError("fidelity_dtype must be torch.float32 or torch.float64.")
+    return resolved
+
+
 def get_pipeline_function(name: str) -> Callable[..., torch.Tensor]:
     """Resolve a pipeline name to a callable layout function.
 
@@ -119,4 +153,4 @@ def get_pipeline_function(name: str) -> Callable[..., torch.Tensor]:
     return getattr(module, function_name)
 
 
-__all__ = ["PIPELINE_REGISTRY", "get_pipeline_function"]
+__all__ = ["PIPELINE_REGISTRY", "get_pipeline_function", "resolve_fidelity_dtype"]
