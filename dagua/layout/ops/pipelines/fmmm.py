@@ -32,8 +32,41 @@ _FDP_COMPOUND_EDGE_ATTACHMENTS_KEY = "fmmm_fdp_compound_edge_attachments"
 _FDP_COMPOUND_CLUSTER_OBSTACLES_KEY = "fmmm_fdp_compound_cluster_obstacles"
 _FDP_COMPOUND_NODE_OBSTACLES_KEY = "fmmm_fdp_compound_node_obstacles"
 _FDP_EPSILON = 1.0e-9
+_FDP_TRACE_PATH = "/tmp/dagua_fdp_trace.log"
 
 _ObjectKey = Tuple[str, Union[int, str]]
+
+
+def _fdp_trace_positions(
+    phase: str, iteration: int, node_ids: Sequence[str], positions: torch.Tensor
+) -> None:
+    """Append one Graphviz-fidelity FDP position checkpoint.
+
+    Parameters
+    ----------
+    phase : str
+        Graphviz phase name such as ``tlayout_gAdjust`` or ``xlayout_adjust``.
+    iteration : int
+        Zero-based phase iteration.
+    node_ids : Sequence[str]
+        Trace node identifiers aligned with the rows in ``positions``.
+    positions : torch.Tensor
+        Position tensor in Graphviz internal inches with shape ``[N, 2]``.
+
+    Returns
+    -------
+    None
+        Appends trace lines to ``/tmp/dagua_fdp_trace.log``.
+    """
+    cpu_positions = positions.detach().to(device="cpu", dtype=torch.float64)
+    with open(_FDP_TRACE_PATH, "a", encoding="utf-8") as handle:
+        for node_index, node_id in enumerate(node_ids):
+            handle.write(
+                "STEP "
+                f"{phase} {iteration} {node_id} "
+                f"{float(cpu_positions[node_index, 0].item()):.17g} "
+                f"{float(cpu_positions[node_index, 1].item()):.17g}\n"
+            )
 
 
 @dataclass(frozen=True)
@@ -1126,32 +1159,41 @@ def _fdp_recursion_derive_graph(
 
     grouped_edges: Dict[Tuple[int, int], List[int]] = {}
     edge_order: List[Tuple[int, int]] = []
-    for edge_id, (source, target) in enumerate(edge_index.t().tolist()):
-        source_owner = owners.get(int(source))
-        target_owner = owners.get(int(target))
-        if source_owner is None or target_owner is None or source_owner == target_owner:
-            continue
-        source_index = index_by_key[source_owner]
-        target_index = index_by_key[target_owner]
-        key = (
-            (source_index, target_index)
-            if source_index <= target_index
-            else (target_index, source_index)
-        )
-        if key not in grouped_edges:
-            grouped_edges[key] = []
-            edge_order.append(key)
-        grouped_edges[key].append(edge_id)
+    # Graphviz derives child-cluster graphs from the Cgraph subgraph's own
+    # edge set. Dagua's DOT fixtures declare real edges at root scope, so
+    # recursive child levels receive only generated boundary-port edges.
+    if cluster_name is None:
+        for edge_id, (source, target) in enumerate(edge_index.t().tolist()):
+            source_owner = owners.get(int(source))
+            target_owner = owners.get(int(target))
+            if source_owner is None or target_owner is None or source_owner == target_owner:
+                continue
+            source_index = index_by_key[source_owner]
+            target_index = index_by_key[target_owner]
+            key = (
+                (source_index, target_index)
+                if source_index <= target_index
+                else (target_index, source_index)
+            )
+            if key not in grouped_edges:
+                grouped_edges[key] = []
+                edge_order.append(key)
+            grouped_edges[key].append(edge_id)
 
     port_indices: set[int] = set()
-    for port_index, port in enumerate(ports):
+    for port in ports:
         owner = owners.get(int(port.node))
         if owner is None:
             continue
+        edge_source = int(edge_index[0, int(port.edge_id)].item())
+        edge_target = int(edge_index[1, int(port.edge_id)].item())
+        port_key = (
+            f"_port_cluster_{cluster_name}_({edge_source})_({edge_target})_{int(port.edge_id) + 1}"
+        )
         derived_index = len(nodes)
         nodes.append(
             _FdpDerivedNode(
-                key=f"_port_{cluster_name or 'root'}_{port_index}",
+                key=port_key,
                 kind="port",
                 members=frozenset({int(port.node)}),
                 port_alpha=float(port.alpha),
@@ -1225,14 +1267,14 @@ def _fdp_recursion_components(derived: _FdpDerivedGraph) -> Tuple[Tuple[int, ...
         for port_index in sorted(derived.port_indices):
             if not marked[port_index]:
                 dfs(port_index, merged_ports)
-        components.append(tuple(merged_ports))
+        components.append(tuple(sorted(merged_ports)))
 
     for node_index in range(len(derived.nodes)):
         if marked[node_index]:
             continue
         component: List[int] = []
         dfs(node_index, component)
-        components.append(tuple(component))
+        components.append(tuple(sorted(component)))
     return tuple(components)
 
 
@@ -1263,6 +1305,36 @@ def _fdp_recursion_component_edges(
     if not edges:
         return torch.empty((2, 0), dtype=torch.long)
     return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+
+def _fdp_recursion_trace_labels(
+    derived: _FdpDerivedGraph,
+    component: Sequence[int],
+) -> Tuple[str, ...]:
+    """Return Graphviz-style trace labels for a recursive derived component.
+
+    Parameters
+    ----------
+    derived : _FdpDerivedGraph
+        Derived graph.
+    component : Sequence[int]
+        Derived node indices in local layout order.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Node labels aligned with the local component position tensor.
+    """
+    labels: List[str] = []
+    for derived_index in component:
+        node = derived.nodes[int(derived_index)]
+        if node.kind == "leaf":
+            labels.append(f"n{int(node.key)}")
+        elif node.kind == "cluster":
+            labels.append(f"cluster_{node.key}")
+        else:
+            labels.append(str(node.key))
+    return tuple(labels)
 
 
 def _graphviz_fdp_node_size_points(
@@ -1470,6 +1542,7 @@ def _graphviz_fdp_tlayout_with_ports(
     num_nodes: int,
     seed: int,
     port_alphas: Mapping[int, float],
+    node_ids: Optional[Sequence[str]] = None,
 ) -> Tuple[torch.Tensor, Tuple[float, float, float, int, int]]:
     """Run Graphviz ``fdp_tLayout`` for a component with boundary ports.
 
@@ -1483,6 +1556,9 @@ def _graphviz_fdp_tlayout_with_ports(
         Graphviz ``seed`` attribute value.
     port_alphas : Mapping[int, float]
         Local port node index to boundary angle in radians.
+    node_ids : Sequence[str], optional
+        Trace node identifiers. When provided, per-iteration positions are
+        appended in Graphviz trace format.
 
     Returns
     -------
@@ -1559,6 +1635,8 @@ def _graphviz_fdp_tlayout_with_ports(
             half_width=half_width,
             half_height=half_height,
         )
+        if node_ids is not None:
+            _fdp_trace_positions("tlayout_gAdjust", iteration, node_ids, positions)
 
     x_t0 = t0 * (max_iters - pass1) / max_iters
     return positions, (
@@ -1594,8 +1672,6 @@ def _fdp_recursion_tlayout_component(
     """
     if len(component) == 0:
         return torch.empty((0, 2), dtype=torch.float32), (0.0, 0.0, 0.0, 0, 0)
-    if len(component) == 1:
-        return torch.zeros((1, 2), dtype=torch.float32), (0.0, 0.0, 0.0, 0, 0)
     local_by_derived = {int(derived_index): index for index, derived_index in enumerate(component)}
     port_alphas = {
         local_by_derived[int(derived_index)]: float(derived.nodes[int(derived_index)].port_alpha)
@@ -1604,12 +1680,14 @@ def _fdp_recursion_tlayout_component(
         and derived.nodes[int(derived_index)].port_alpha is not None
     }
     component_edges = _fdp_recursion_component_edges(derived, component)
+    node_ids = _fdp_recursion_trace_labels(derived, component)
     if port_alphas:
         positions, xpms = _graphviz_fdp_tlayout_with_ports(
             edge_index=component_edges,
             num_nodes=len(component),
             seed=seed,
             port_alphas=port_alphas,
+            node_ids=node_ids,
         )
     else:
         positions, xpms = _graphviz_fdp_tlayout(
@@ -1617,6 +1695,7 @@ def _fdp_recursion_tlayout_component(
             num_nodes=len(component),
             seed=seed,
             edge_weights=None,
+            node_ids=node_ids,
         )
     return (positions * _GRAPHVIZ_FDP_POINTS_PER_INCH).to(dtype=torch.float32), xpms
 
@@ -1678,6 +1757,7 @@ def _fdp_recursion_xlayout_component(
         node_sizes=active_sizes,
         edge_weights=None,
         xpms=xpms,
+        node_ids=_fdp_recursion_trace_labels(derived, active_component),
     )
     active_positions_points = (active_positions_inches * _GRAPHVIZ_FDP_POINTS_PER_INCH).to(
         dtype=torch.float32
@@ -1880,14 +1960,15 @@ def _fdp_recursion_shift_to_origin(
 
 
 def _fdp_recursion_component_offsets(
-    component_boxes: Sequence[Tuple[float, float]],
+    component_boxes: Sequence[Tuple[float, ...]],
 ) -> List[torch.Tensor]:
     """Pack recursive components with Graphviz fdp tile packing.
 
     Parameters
     ----------
-    component_boxes : Sequence[tuple[float, float]]
-        Width and height for each component.
+    component_boxes : Sequence[tuple[float, ...]]
+        Either full component boxes as ``(x_min, y_min, x_max, y_max)`` or
+        legacy width-height pairs.
 
     Returns
     -------
@@ -1900,7 +1981,14 @@ def _fdp_recursion_component_offsets(
     component bounding boxes. Reusing it here keeps the clustered recursion path
     on the same fdp fidelity component instead of the earlier row-pack fallback.
     """
-    boxes = [(0.0, 0.0, float(width), float(height)) for width, height in component_boxes]
+    boxes = [
+        (
+            (0.0, 0.0, float(box[0]), float(box[1]))
+            if len(box) == 2
+            else (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+        )
+        for box in component_boxes
+    ]
     return [
         torch.tensor(offset, dtype=torch.float32) for offset in _graphviz_tile_pack_offsets(boxes)
     ]
@@ -1949,7 +2037,7 @@ def _fdp_recursion_layout_level(
     components = _fdp_recursion_components(derived)
     child_layouts: Dict[str, _FdpLevelLayout] = {}
     component_positions: List[Dict[int, torch.Tensor]] = []
-    component_boxes: List[Tuple[float, float]] = []
+    component_boxes: List[Tuple[float, float, float, float]] = []
 
     for component in components:
         local_tensor, xpms = _fdp_recursion_tlayout_component(
@@ -2000,7 +2088,7 @@ def _fdp_recursion_layout_level(
             child_layouts,
         )
         if sizes.numel() == 0 or not active_component:
-            component_boxes.append((0.0, 0.0))
+            component_boxes.append((0.0, 0.0, 0.0, 0.0))
         else:
             half_sizes = sizes / 2.0
             active_tensor = torch.stack([local_positions[index] for index in active_component])
@@ -2008,8 +2096,10 @@ def _fdp_recursion_layout_level(
             upper = active_tensor + half_sizes
             component_boxes.append(
                 (
-                    max(float((upper[:, 0].max() - lower[:, 0].min()).item()), 0.0),
-                    max(float((upper[:, 1].max() - lower[:, 1].min()).item()), 0.0),
+                    float(lower[:, 0].min().item()),
+                    float(lower[:, 1].min().item()),
+                    float(upper[:, 0].max().item()),
+                    float(upper[:, 1].max().item()),
                 )
             )
         component_positions.append(local_positions)
@@ -2453,6 +2543,7 @@ def _graphviz_fdp_tlayout(
     num_nodes: int,
     seed: int,
     edge_weights: Optional[torch.Tensor],
+    node_ids: Optional[Sequence[str]] = None,
 ) -> tuple[torch.Tensor, tuple[float, float, float, int, int]]:
     """Run Graphviz ``fdp_tLayout`` for one connected component.
 
@@ -2466,6 +2557,9 @@ def _graphviz_fdp_tlayout(
         Graphviz ``seed`` attribute value.
     edge_weights : torch.Tensor, optional
         Optional edge weights with shape ``[E]``.
+    node_ids : Sequence[str], optional
+        Trace node identifiers. When provided, per-iteration positions are
+        appended in Graphviz trace format.
 
     Returns
     -------
@@ -2520,6 +2614,8 @@ def _graphviz_fdp_tlayout(
                                     positions, displacement, source, target, iteration
                                 )
         _graphviz_fdp_update_positions(positions, displacement, temperature)
+        if node_ids is not None:
+            _fdp_trace_positions("tlayout_gAdjust", iteration, node_ids, positions)
 
     x_t0 = t0 * (max_iters - pass1) / max_iters
     return positions, (
@@ -2730,6 +2826,7 @@ def _graphviz_fdp_xlayout(
     node_sizes: Optional[torch.Tensor],
     edge_weights: Optional[torch.Tensor],
     xpms: tuple[float, float, float, int, int],
+    node_ids: Optional[Sequence[str]] = None,
 ) -> torch.Tensor:
     """Run Graphviz ``fdp_xLayout``'s iterative overlap phase.
 
@@ -2746,6 +2843,9 @@ def _graphviz_fdp_xlayout(
     xpms : tuple[float, float, float, int, int]
         Parameters returned by ``fdp_tLayout`` as
         ``(T0, K, C, numIters, loopcnt)``.
+    node_ids : Sequence[str], optional
+        Trace node identifiers. When provided, overlap-removal updates are
+        appended in Graphviz trace format.
 
     Returns
     -------
@@ -2801,6 +2901,13 @@ def _graphviz_fdp_xlayout(
             if ov == 0:
                 break
             _graphviz_fdp_update_positions(positions, displacement, temperature)
+            if node_ids is not None:
+                _fdp_trace_positions(
+                    "xlayout_adjust",
+                    try_index * x_loopcnt + iteration,
+                    node_ids,
+                    positions,
+                )
         x_k += base_k
     return positions
 
