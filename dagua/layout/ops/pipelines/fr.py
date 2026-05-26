@@ -36,6 +36,108 @@ _FR_DAG_DROP_TOLERANCE = 0.1
 _FR_SCORE_DROP_TOLERANCE = 1.0e-6
 
 
+def _igraph_layout_align_positions(positions: np.ndarray, edges: list[tuple[int, int]]) -> None:
+    """Center and rotate positions using igraph's layout-alignment rule.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Mutable position matrix with shape ``[N, 2]`` and dtype ``float64``.
+    edges : list[tuple[int, int]]
+        Edge list in igraph edge order.
+
+    Returns
+    -------
+    None
+        The ``positions`` array is modified in-place.
+    """
+    num_nodes = int(positions.shape[0])
+    if num_nodes == 0:
+        return
+
+    center_x = 0.0
+    center_y = 0.0
+    for node in range(num_nodes):
+        center_x += float(positions[node, 0])
+        center_y += float(positions[node, 1])
+    center_x /= float(num_nodes)
+    center_y /= float(num_nodes)
+    for node in range(num_nodes):
+        positions[node, 0] -= center_x
+        positions[node, 1] -= center_y
+
+    matrix = np.zeros((2, 2), dtype=np.float64)
+    correction = np.zeros((2, 2), dtype=np.float64)
+    norm2_sum = 0.0
+    correction_norm2_sum = 0.0
+    correction_saved = False
+
+    for source, target in edges:
+        if source == target:
+            continue
+
+        edge_vec = (
+            float(positions[source, 0] - positions[target, 0]),
+            float(positions[source, 1] - positions[target, 1]),
+        )
+        for row in range(2):
+            for col in range(2):
+                term = edge_vec[row] * edge_vec[col]
+                matrix[row, col] += term
+                if row == col:
+                    norm2_sum += term
+
+        if not correction_saved and norm2_sum > 0.0:
+            correction_saved = True
+            correction_norm2_sum = norm2_sum
+            correction[:, :] = matrix
+
+    if norm2_sum == 0.0:
+        for node in range(num_nodes):
+            vertex_vec = (float(positions[node, 0]), float(positions[node, 1]))
+            for row in range(2):
+                for col in range(2):
+                    term = vertex_vec[row] * vertex_vec[col]
+                    matrix[row, col] += term
+                    if row == col:
+                        norm2_sum += term
+
+            if not correction_saved and norm2_sum > 0.0:
+                correction_saved = True
+                correction_norm2_sum = norm2_sum
+                correction[:, :] = matrix
+
+    if norm2_sum == 0.0:
+        return
+
+    retried = False
+    while True:
+        tensor = matrix.copy()
+        tensor *= 1.0 / norm2_sum
+        tensor[0, 0] -= 0.5
+        tensor[1, 1] -= 0.5
+
+        eigenvalues, rotation = np.linalg.eigh(tensor)
+        matrix_norm = max(abs(float(eigenvalues[0])), abs(float(eigenvalues[1])))
+        if matrix_norm > 1.0e-3 or retried:
+            break
+
+        matrix -= correction
+        norm2_sum -= correction_norm2_sum
+        if norm2_sum == 0.0:
+            return
+        retried = True
+
+    temp_layout = positions @ rotation
+    extent_x = float(np.max(temp_layout[:, 0]) - np.min(temp_layout[:, 0]))
+    extent_y = float(np.max(temp_layout[:, 1]) - np.min(temp_layout[:, 1]))
+    if extent_x >= extent_y:
+        positions[:, :] = temp_layout
+    else:
+        positions[:, 0] = temp_layout[:, 1]
+        positions[:, 1] = temp_layout[:, 0]
+
+
 def _dag_consistency_fraction(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
     """Compute the TB directed-edge consistency fraction.
 
@@ -260,6 +362,7 @@ def _igraph_fr_reference_positions(
     edge_weights: Optional[torch.Tensor] = None,
     pos: Optional[torch.Tensor] = None,
     start_temp: Optional[float] = None,
+    output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the igraph 2D Fruchterman-Reingold C-reference loop.
 
@@ -280,20 +383,25 @@ def _igraph_fr_reference_positions(
     start_temp : float, optional
         Initial temperature. ``None`` uses python-igraph's
         ``sqrt(num_nodes) / 10`` default.
+    output_dtype : torch.dtype, default=torch.float32
+        Floating dtype for the returned tensor.
 
     Returns
     -------
     torch.Tensor
-        Adapter-scaled positions with shape ``[N, 2]`` and dtype ``float32``.
+        Adapter-scaled positions with shape ``[N, 2]``.
     """
     if num_nodes == 0:
-        return torch.empty((0, 2), dtype=torch.float32)
+        return torch.empty((0, 2), dtype=output_dtype)
     if pos is None:
         positions = _igraph_seed_positions(num_nodes=num_nodes, seed=seed)
     else:
         positions = pos.detach().to(device="cpu", dtype=torch.float64).numpy().copy()
 
-    edges = edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist()
+    edges = [
+        (int(source), int(target))
+        for source, target in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist()
+    ]
     for source, target in edges:
         source_index = int(source)
         target_index = int(target)
@@ -314,7 +422,8 @@ def _igraph_fr_reference_positions(
             raise ValueError("Weights must be positive for igraph FR fidelity mode.")
 
     if steps == 0:
-        return torch.from_numpy(positions * _IGRAPH_ADAPTER_SCALE).to(dtype=torch.float32)
+        _igraph_layout_align_positions(positions=positions, edges=edges)
+        return torch.from_numpy(positions * _IGRAPH_ADAPTER_SCALE).to(dtype=output_dtype)
 
     temp = math.sqrt(float(num_nodes)) / 10.0 if start_temp is None else float(start_temp)
     difftemp = temp / float(steps)
@@ -338,15 +447,22 @@ def _igraph_fr_reference_positions(
                     dy = jitter_rng.uniform(-_IGRAPH_JITTER, _IGRAPH_JITTER)
                     dlen = dx * dx + dy * dy
                 if connected:
-                    factor = 1.0 / dlen
+                    dispx[source] += dx / dlen
+                    dispy[source] += dy / dlen
+                    dispx[target] -= dx / dlen
+                    dispy[target] -= dy / dlen
                 else:
-                    factor = (component_constant - dlen * math.sqrt(dlen)) / (
-                        dlen * component_constant
+                    rdlen = math.sqrt(dlen)
+                    contribution_x = (
+                        dx * (component_constant - dlen * rdlen) / (dlen * component_constant)
                     )
-                dispx[source] += dx * factor
-                dispy[source] += dy * factor
-                dispx[target] -= dx * factor
-                dispy[target] -= dy * factor
+                    contribution_y = (
+                        dy * (component_constant - dlen * rdlen) / (dlen * component_constant)
+                    )
+                    dispx[source] += contribution_x
+                    dispy[source] += contribution_y
+                    dispx[target] -= contribution_x
+                    dispy[target] -= contribution_y
 
         for (source, target), weight in zip(edges, weights):
             source_index = int(source)
@@ -372,7 +488,8 @@ def _igraph_fr_reference_positions(
 
         temp -= difftemp
 
-    return torch.from_numpy(positions * _IGRAPH_ADAPTER_SCALE).to(dtype=torch.float32)
+    _igraph_layout_align_positions(positions=positions, edges=edges)
+    return torch.from_numpy(positions * _IGRAPH_ADAPTER_SCALE).to(dtype=output_dtype)
 
 
 def build_fr_pipeline(
@@ -565,6 +682,7 @@ def layout_fr_pipeline(
             seed=seed,
             edge_weights=edge_weights,
             pos=pos,
+            output_dtype=fidelity_dtype,
         ).to(device=output_device)
 
     problem = LayoutProblem(
