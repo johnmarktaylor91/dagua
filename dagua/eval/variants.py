@@ -1099,6 +1099,17 @@ VARIANT_REGISTRY: list[AlgorithmVariant] = [
         False,
     ),
     _variant(
+        "classic_fmmm_graphviz_fdp_fidelity",
+        "classic_fmmm",
+        "FM^3 (Graphviz fdp fidelity)",
+        {"steps": 200, "fidelity_mode": True},
+        "graphviz_fdp",
+        {},
+        False,
+        True,
+        False,
+    ),
+    _variant(
         "classic_maxent_stress_default",
         "classic_maxent_stress",
         "Maxent-Stress (default)",
