@@ -1,0 +1,1451 @@
+{
+  "generated_at": "2026-05-26T19:39:11.668884+00:00",
+  "config": {
+    "workers": "1",
+    "resolved_workers": 1,
+    "timeout": 600,
+    "seeds": 1,
+    "seed_start": 42,
+    "max_nodes": 0,
+    "engines": "classic_graphopt_mass_low,igraph_graphopt__for__classic_graphopt_mass_low,classic_graphopt_spring2,igraph_graphopt__for__classic_graphopt_spring2",
+    "graphs": "real_lesmis_77,dense_pair_50",
+    "resume": false,
+    "output_dir": "eval_output/algo_fidelity/round_65/graphopt_final/smoke",
+    "save_positions": true,
+    "variants": true
+  },
+  "seed_values": [
+    42
+  ],
+  "stochastic_engines": [
+    "classic_graphopt_mass_low",
+    "classic_graphopt_spring2",
+    "igraph_graphopt__for__classic_graphopt_mass_low",
+    "igraph_graphopt__for__classic_graphopt_spring2"
+  ],
+  "pairings": {
+    "reimpl_to_original": {
+      "classic_fr_steps50": [
+        "nx_spring__for__classic_fr_steps50"
+      ],
+      "classic_fr_steps100": [
+        "nx_spring__for__classic_fr_steps100"
+      ],
+      "classic_fr_steps200": [
+        "nx_spring__for__classic_fr_steps200"
+      ],
+      "classic_fr_steps500": [
+        "nx_spring__for__classic_fr_steps500"
+      ],
+      "classic_kk_steps100": [
+        "nx_kamada_kawai__for__classic_kk_steps100"
+      ],
+      "classic_kk_steps300": [
+        "nx_kamada_kawai__for__classic_kk_steps300"
+      ],
+      "classic_kk_steps1000": [
+        "nx_kamada_kawai__for__classic_kk_steps1000"
+      ],
+      "classic_fr_kk_default": [],
+      "classic_fr_kk_long": [],
+      "classic_kk_fr_default": [],
+      "classic_kk_fr_long": [],
+      "classic_fa2_default": [
+        "fa2_ref__for__classic_fa2_default"
+      ],
+      "classic_fa2_gravity0": [
+        "fa2_ref__for__classic_fa2_gravity0"
+      ],
+      "classic_fa2_gravity2": [
+        "fa2_ref__for__classic_fa2_gravity2"
+      ],
+      "classic_fa2_scaling1": [
+        "fa2_ref__for__classic_fa2_scaling1"
+      ],
+      "classic_fa2_scaling4": [
+        "fa2_ref__for__classic_fa2_scaling4"
+      ],
+      "classic_fa2_strong_gravity": [
+        "fa2_ref__for__classic_fa2_strong_gravity"
+      ],
+      "classic_fa2_no_outbound": [
+        "fa2_ref__for__classic_fa2_no_outbound"
+      ],
+      "classic_fa2_dissuade_hubs": [
+        "fa2_ref__for__classic_fa2_dissuade_hubs"
+      ],
+      "classic_fa2_linlog": [
+        "fa2_ref__for__classic_fa2_linlog"
+      ],
+      "classic_fa2_barnes_hut": [
+        "fa2_ref__for__classic_fa2_barnes_hut"
+      ],
+      "classic_fa2_exact": [
+        "fa2_ref__for__classic_fa2_exact"
+      ],
+      "classic_stress_sgd_steps30": [
+        "sgd2__for__classic_stress_sgd_steps30"
+      ],
+      "classic_stress_sgd_steps300": [
+        "sgd2__for__classic_stress_sgd_steps300"
+      ],
+      "classic_stress_sgd_eps001": [
+        "sgd2__for__classic_stress_sgd_eps001"
+      ],
+      "classic_stress_sgd_eps01": [
+        "sgd2__for__classic_stress_sgd_eps01"
+      ],
+      "classic_spectral_default": [
+        "nx_spectral__for__classic_spectral_default"
+      ],
+      "classic_spectral_nx_fidelity": [
+        "nx_spectral__for__classic_spectral_nx_fidelity"
+      ],
+      "classic_spectral_random_walk": [],
+      "classic_spectral_unnormalized": [],
+      "classic_classical_mds_default": [
+        "igraph_mds__for__classic_classical_mds_default"
+      ],
+      "classic_classical_mds_igraph_fidelity": [
+        "igraph_mds__for__classic_classical_mds_igraph_fidelity"
+      ],
+      "classic_stress_maj_default": [
+        "ogdf_stress__for__classic_stress_maj_default"
+      ],
+      "classic_neato": [
+        "graphviz_neato__for__classic_neato"
+      ],
+      "classic_neato_graphviz_fidelity": [
+        "graphviz_neato__for__classic_neato_graphviz_fidelity"
+      ],
+      "classic_stress_maj_iter50": [
+        "ogdf_stress__for__classic_stress_maj_iter50"
+      ],
+      "classic_stress_maj_iter500": [
+        "ogdf_stress__for__classic_stress_maj_iter500"
+      ],
+      "classic_sugiyama_default": [
+        "igraph_sugiyama__for__classic_sugiyama_default"
+      ],
+      "classic_sugiyama_graphviz_fidelity": [
+        "graphviz_dot__for__classic_sugiyama_graphviz_fidelity"
+      ],
+      "classic_sugiyama_passes4": [
+        "igraph_sugiyama__for__classic_sugiyama_passes4"
+      ],
+      "classic_sugiyama_passes48": [
+        "igraph_sugiyama__for__classic_sugiyama_passes48"
+      ],
+      "classic_sugiyama_wide": [
+        "igraph_sugiyama__for__classic_sugiyama_wide"
+      ],
+      "classic_sugiyama_tight": [
+        "igraph_sugiyama__for__classic_sugiyama_tight"
+      ],
+      "classic_tsnet_default": [
+        "tsne_graph__for__classic_tsnet_default"
+      ],
+      "classic_tsnet_perp5": [
+        "tsne_graph__for__classic_tsnet_perp5"
+      ],
+      "classic_tsnet_perp50": [
+        "tsne_graph__for__classic_tsnet_perp50"
+      ],
+      "classic_tsnet_steps200": [
+        "tsne_graph__for__classic_tsnet_steps200"
+      ],
+      "classic_tsnet_steps2000": [
+        "tsne_graph__for__classic_tsnet_steps2000"
+      ],
+      "classic_gem_iters100": [
+        "ogdf_gem__for__classic_gem_iters100"
+      ],
+      "classic_gem_iters500": [
+        "ogdf_gem__for__classic_gem_iters500"
+      ],
+      "classic_gem_iters2000": [
+        "ogdf_gem__for__classic_gem_iters2000"
+      ],
+      "classic_fmmm_steps10": [
+        "ogdf_fmmm__for__classic_fmmm_steps10"
+      ],
+      "classic_fmmm_steps100": [
+        "ogdf_fmmm__for__classic_fmmm_steps100"
+      ],
+      "classic_fmmm_steps200": [
+        "ogdf_fmmm__for__classic_fmmm_steps200"
+      ],
+      "classic_fmmm_graphviz_fdp_fidelity": [
+        "graphviz_fdp__for__classic_fmmm_graphviz_fdp_fidelity"
+      ],
+      "classic_maxent_stress_default": [
+        "ogdf_stress__for__classic_maxent_stress_default"
+      ],
+      "classic_maxent_stress_entropy": [
+        "ogdf_stress__for__classic_maxent_stress_entropy"
+      ],
+      "classic_maxent_stress_alpha2": [
+        "ogdf_stress__for__classic_maxent_stress_alpha2"
+      ],
+      "classic_maxent_stress_steps50": [
+        "ogdf_stress__for__classic_maxent_stress_steps50"
+      ],
+      "classic_maxent_stress_steps400": [
+        "ogdf_stress__for__classic_maxent_stress_steps400"
+      ],
+      "classic_davidson_harel_rounds50": [
+        "igraph_davidson_harel__for__classic_davidson_harel_rounds50"
+      ],
+      "classic_davidson_harel_rounds100": [
+        "igraph_davidson_harel__for__classic_davidson_harel_rounds100"
+      ],
+      "classic_davidson_harel_rounds200": [
+        "igraph_davidson_harel__for__classic_davidson_harel_rounds200"
+      ],
+      "classic_linlog_default": [
+        "linlog__for__classic_linlog_default"
+      ],
+      "classic_linlog_quadratic": [
+        "linlog__for__classic_linlog_quadratic"
+      ],
+      "classic_linlog_power": [
+        "linlog__for__classic_linlog_power"
+      ],
+      "classic_linlog_steps100": [
+        "linlog__for__classic_linlog_steps100"
+      ],
+      "classic_linlog_steps500": [
+        "linlog__for__classic_linlog_steps500"
+      ],
+      "classic_pivot_mds_10": [
+        "ogdf_pivot_mds__for__classic_pivot_mds_10"
+      ],
+      "classic_pivot_mds_50": [
+        "ogdf_pivot_mds__for__classic_pivot_mds_50"
+      ],
+      "classic_pivot_mds_100": [
+        "ogdf_pivot_mds__for__classic_pivot_mds_100"
+      ],
+      "classic_pivot_mds_200": [
+        "ogdf_pivot_mds__for__classic_pivot_mds_200"
+      ],
+      "classic_rt_default": [
+        "igraph_rt__for__classic_rt_default"
+      ],
+      "classic_rt_horizontal": [],
+      "classic_graphopt_default": [
+        "igraph_graphopt__for__classic_graphopt_default"
+      ],
+      "classic_graphopt_charge_low": [
+        "igraph_graphopt__for__classic_graphopt_charge_low"
+      ],
+      "classic_graphopt_charge_high": [
+        "igraph_graphopt__for__classic_graphopt_charge_high"
+      ],
+      "classic_graphopt_mass_low": [
+        "igraph_graphopt__for__classic_graphopt_mass_low"
+      ],
+      "classic_graphopt_mass_high": [
+        "igraph_graphopt__for__classic_graphopt_mass_high"
+      ],
+      "classic_graphopt_spring2": [
+        "igraph_graphopt__for__classic_graphopt_spring2"
+      ],
+      "classic_drl_default": [
+        "igraph_drl__for__classic_drl_default"
+      ],
+      "classic_drl_coarsen": [
+        "igraph_drl__for__classic_drl_coarsen"
+      ],
+      "classic_drl_coarsest": [
+        "igraph_drl__for__classic_drl_coarsest"
+      ],
+      "classic_drl_refine": [
+        "igraph_drl__for__classic_drl_refine"
+      ],
+      "classic_drl_final": [
+        "igraph_drl__for__classic_drl_final"
+      ],
+      "classic_lgl_default": [
+        "igraph_lgl__for__classic_lgl_default"
+      ],
+      "classic_lgl_iter50": [
+        "igraph_lgl__for__classic_lgl_iter50"
+      ],
+      "classic_lgl_iter300": [
+        "igraph_lgl__for__classic_lgl_iter300"
+      ],
+      "classic_lgl_cool1": [
+        "igraph_lgl__for__classic_lgl_cool1"
+      ],
+      "classic_lgl_cool2": [
+        "igraph_lgl__for__classic_lgl_cool2"
+      ],
+      "classic_sfdp_default": [
+        "graphviz_sfdp__for__classic_sfdp_default"
+      ],
+      "classic_sfdp_graphviz_fidelity": [
+        "graphviz_sfdp__for__classic_sfdp_graphviz_fidelity"
+      ],
+      "classic_sfdp_theta04": [
+        "graphviz_sfdp__for__classic_sfdp_theta04"
+      ],
+      "classic_sfdp_theta08": [
+        "graphviz_sfdp__for__classic_sfdp_theta08"
+      ],
+      "classic_sfdp_p_neg2": [
+        "graphviz_sfdp__for__classic_sfdp_p_neg2"
+      ],
+      "classic_sfdp_steps200": [
+        "graphviz_sfdp__for__classic_sfdp_steps200"
+      ],
+      "classic_umap_default": [
+        "umap_graph__for__classic_umap_default"
+      ],
+      "classic_umap_nn5": [
+        "umap_graph__for__classic_umap_nn5"
+      ],
+      "classic_umap_nn30": [
+        "umap_graph__for__classic_umap_nn30"
+      ],
+      "classic_umap_mindist001": [
+        "umap_graph__for__classic_umap_mindist001"
+      ],
+      "classic_umap_mindist05": [
+        "umap_graph__for__classic_umap_mindist05"
+      ],
+      "classic_umap_spread2": [
+        "umap_graph__for__classic_umap_spread2"
+      ],
+      "classic_neulay_default": [
+        "neulay__for__classic_neulay_default"
+      ],
+      "classic_neulay_lr001": [
+        "neulay__for__classic_neulay_lr001"
+      ],
+      "classic_neulay_lr05": [
+        "neulay__for__classic_neulay_lr05"
+      ],
+      "classic_neulay_radius02": [
+        "neulay__for__classic_neulay_radius02"
+      ],
+      "classic_neulay_radius08": [
+        "neulay__for__classic_neulay_radius08"
+      ],
+      "classic_neulay_no_gcn": [
+        "neulay__for__classic_neulay_no_gcn"
+      ],
+      "classic_sgd2_multi_default": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_default"
+      ],
+      "classic_sgd2_multi_stress_only": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_stress_only"
+      ],
+      "classic_sgd2_multi_with_crossing": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_with_crossing"
+      ],
+      "classic_sgd2_multi_with_aspect": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_with_aspect"
+      ],
+      "classic_sgd2_multi_lr001": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_lr001"
+      ],
+      "classic_sgd2_multi_lr01": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_lr01"
+      ],
+      "classic_sgd2_multi_batch8": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_batch8"
+      ],
+      "classic_sgd2_multi_batch128": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_batch128"
+      ],
+      "classic_fcose_default": [
+        "cytoscape_fcose__for__classic_fcose_default"
+      ],
+      "classic_fcose_proof": [
+        "cytoscape_fcose__for__classic_fcose_proof"
+      ],
+      "cytoscape_fcose_default": [],
+      "cytoscape_fcose_quality": [],
+      "gephi_yifanhu_default": [],
+      "nx_spring__for__classic_fr_steps50": [
+        "classic_fr_steps50"
+      ],
+      "nx_spring__for__classic_fr_steps100": [
+        "classic_fr_steps100"
+      ],
+      "nx_spring__for__classic_fr_steps200": [
+        "classic_fr_steps200"
+      ],
+      "nx_spring__for__classic_fr_steps500": [
+        "classic_fr_steps500"
+      ],
+      "nx_kamada_kawai__for__classic_kk_steps100": [
+        "classic_kk_steps100"
+      ],
+      "nx_kamada_kawai__for__classic_kk_steps300": [
+        "classic_kk_steps300"
+      ],
+      "nx_kamada_kawai__for__classic_kk_steps1000": [
+        "classic_kk_steps1000"
+      ],
+      "fa2_ref__for__classic_fa2_default": [
+        "classic_fa2_default"
+      ],
+      "fa2_ref__for__classic_fa2_gravity0": [
+        "classic_fa2_gravity0"
+      ],
+      "fa2_ref__for__classic_fa2_gravity2": [
+        "classic_fa2_gravity2"
+      ],
+      "fa2_ref__for__classic_fa2_scaling1": [
+        "classic_fa2_scaling1"
+      ],
+      "fa2_ref__for__classic_fa2_scaling4": [
+        "classic_fa2_scaling4"
+      ],
+      "fa2_ref__for__classic_fa2_strong_gravity": [
+        "classic_fa2_strong_gravity"
+      ],
+      "fa2_ref__for__classic_fa2_no_outbound": [
+        "classic_fa2_no_outbound"
+      ],
+      "fa2_ref__for__classic_fa2_dissuade_hubs": [
+        "classic_fa2_dissuade_hubs"
+      ],
+      "fa2_ref__for__classic_fa2_linlog": [
+        "classic_fa2_linlog"
+      ],
+      "fa2_ref__for__classic_fa2_barnes_hut": [
+        "classic_fa2_barnes_hut"
+      ],
+      "fa2_ref__for__classic_fa2_exact": [
+        "classic_fa2_exact"
+      ],
+      "sgd2__for__classic_stress_sgd_steps30": [
+        "classic_stress_sgd_steps30"
+      ],
+      "sgd2__for__classic_stress_sgd_steps300": [
+        "classic_stress_sgd_steps300"
+      ],
+      "sgd2__for__classic_stress_sgd_eps001": [
+        "classic_stress_sgd_eps001"
+      ],
+      "sgd2__for__classic_stress_sgd_eps01": [
+        "classic_stress_sgd_eps01"
+      ],
+      "nx_spectral__for__classic_spectral_default": [
+        "classic_spectral_default"
+      ],
+      "nx_spectral__for__classic_spectral_nx_fidelity": [
+        "classic_spectral_nx_fidelity"
+      ],
+      "igraph_mds__for__classic_classical_mds_default": [
+        "classic_classical_mds_default"
+      ],
+      "igraph_mds__for__classic_classical_mds_igraph_fidelity": [
+        "classic_classical_mds_igraph_fidelity"
+      ],
+      "ogdf_stress__for__classic_stress_maj_default": [
+        "classic_stress_maj_default"
+      ],
+      "graphviz_neato__for__classic_neato": [
+        "classic_neato"
+      ],
+      "graphviz_neato__for__classic_neato_graphviz_fidelity": [
+        "classic_neato_graphviz_fidelity"
+      ],
+      "ogdf_stress__for__classic_stress_maj_iter50": [
+        "classic_stress_maj_iter50"
+      ],
+      "ogdf_stress__for__classic_stress_maj_iter500": [
+        "classic_stress_maj_iter500"
+      ],
+      "igraph_sugiyama__for__classic_sugiyama_default": [
+        "classic_sugiyama_default"
+      ],
+      "graphviz_dot__for__classic_sugiyama_graphviz_fidelity": [
+        "classic_sugiyama_graphviz_fidelity"
+      ],
+      "igraph_sugiyama__for__classic_sugiyama_passes4": [
+        "classic_sugiyama_passes4"
+      ],
+      "igraph_sugiyama__for__classic_sugiyama_passes48": [
+        "classic_sugiyama_passes48"
+      ],
+      "igraph_sugiyama__for__classic_sugiyama_wide": [
+        "classic_sugiyama_wide"
+      ],
+      "igraph_sugiyama__for__classic_sugiyama_tight": [
+        "classic_sugiyama_tight"
+      ],
+      "tsne_graph__for__classic_tsnet_default": [
+        "classic_tsnet_default"
+      ],
+      "tsne_graph__for__classic_tsnet_perp5": [
+        "classic_tsnet_perp5"
+      ],
+      "tsne_graph__for__classic_tsnet_perp50": [
+        "classic_tsnet_perp50"
+      ],
+      "tsne_graph__for__classic_tsnet_steps200": [
+        "classic_tsnet_steps200"
+      ],
+      "tsne_graph__for__classic_tsnet_steps2000": [
+        "classic_tsnet_steps2000"
+      ],
+      "ogdf_gem__for__classic_gem_iters100": [
+        "classic_gem_iters100"
+      ],
+      "ogdf_gem__for__classic_gem_iters500": [
+        "classic_gem_iters500"
+      ],
+      "ogdf_gem__for__classic_gem_iters2000": [
+        "classic_gem_iters2000"
+      ],
+      "ogdf_fmmm__for__classic_fmmm_steps10": [
+        "classic_fmmm_steps10"
+      ],
+      "ogdf_fmmm__for__classic_fmmm_steps100": [
+        "classic_fmmm_steps100"
+      ],
+      "ogdf_fmmm__for__classic_fmmm_steps200": [
+        "classic_fmmm_steps200"
+      ],
+      "graphviz_fdp__for__classic_fmmm_graphviz_fdp_fidelity": [
+        "classic_fmmm_graphviz_fdp_fidelity"
+      ],
+      "ogdf_stress__for__classic_maxent_stress_default": [
+        "classic_maxent_stress_default"
+      ],
+      "ogdf_stress__for__classic_maxent_stress_entropy": [
+        "classic_maxent_stress_entropy"
+      ],
+      "ogdf_stress__for__classic_maxent_stress_alpha2": [
+        "classic_maxent_stress_alpha2"
+      ],
+      "ogdf_stress__for__classic_maxent_stress_steps50": [
+        "classic_maxent_stress_steps50"
+      ],
+      "ogdf_stress__for__classic_maxent_stress_steps400": [
+        "classic_maxent_stress_steps400"
+      ],
+      "igraph_davidson_harel__for__classic_davidson_harel_rounds50": [
+        "classic_davidson_harel_rounds50"
+      ],
+      "igraph_davidson_harel__for__classic_davidson_harel_rounds100": [
+        "classic_davidson_harel_rounds100"
+      ],
+      "igraph_davidson_harel__for__classic_davidson_harel_rounds200": [
+        "classic_davidson_harel_rounds200"
+      ],
+      "linlog__for__classic_linlog_default": [
+        "classic_linlog_default"
+      ],
+      "linlog__for__classic_linlog_quadratic": [
+        "classic_linlog_quadratic"
+      ],
+      "linlog__for__classic_linlog_power": [
+        "classic_linlog_power"
+      ],
+      "linlog__for__classic_linlog_steps100": [
+        "classic_linlog_steps100"
+      ],
+      "linlog__for__classic_linlog_steps500": [
+        "classic_linlog_steps500"
+      ],
+      "ogdf_pivot_mds__for__classic_pivot_mds_10": [
+        "classic_pivot_mds_10"
+      ],
+      "ogdf_pivot_mds__for__classic_pivot_mds_50": [
+        "classic_pivot_mds_50"
+      ],
+      "ogdf_pivot_mds__for__classic_pivot_mds_100": [
+        "classic_pivot_mds_100"
+      ],
+      "ogdf_pivot_mds__for__classic_pivot_mds_200": [
+        "classic_pivot_mds_200"
+      ],
+      "igraph_rt__for__classic_rt_default": [
+        "classic_rt_default"
+      ],
+      "igraph_graphopt__for__classic_graphopt_default": [
+        "classic_graphopt_default"
+      ],
+      "igraph_graphopt__for__classic_graphopt_charge_low": [
+        "classic_graphopt_charge_low"
+      ],
+      "igraph_graphopt__for__classic_graphopt_charge_high": [
+        "classic_graphopt_charge_high"
+      ],
+      "igraph_graphopt__for__classic_graphopt_mass_low": [
+        "classic_graphopt_mass_low"
+      ],
+      "igraph_graphopt__for__classic_graphopt_mass_high": [
+        "classic_graphopt_mass_high"
+      ],
+      "igraph_graphopt__for__classic_graphopt_spring2": [
+        "classic_graphopt_spring2"
+      ],
+      "igraph_drl__for__classic_drl_default": [
+        "classic_drl_default"
+      ],
+      "igraph_drl__for__classic_drl_coarsen": [
+        "classic_drl_coarsen"
+      ],
+      "igraph_drl__for__classic_drl_coarsest": [
+        "classic_drl_coarsest"
+      ],
+      "igraph_drl__for__classic_drl_refine": [
+        "classic_drl_refine"
+      ],
+      "igraph_drl__for__classic_drl_final": [
+        "classic_drl_final"
+      ],
+      "igraph_lgl__for__classic_lgl_default": [
+        "classic_lgl_default"
+      ],
+      "igraph_lgl__for__classic_lgl_iter50": [
+        "classic_lgl_iter50"
+      ],
+      "igraph_lgl__for__classic_lgl_iter300": [
+        "classic_lgl_iter300"
+      ],
+      "igraph_lgl__for__classic_lgl_cool1": [
+        "classic_lgl_cool1"
+      ],
+      "igraph_lgl__for__classic_lgl_cool2": [
+        "classic_lgl_cool2"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_default": [
+        "classic_sfdp_default"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_graphviz_fidelity": [
+        "classic_sfdp_graphviz_fidelity"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_theta04": [
+        "classic_sfdp_theta04"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_theta08": [
+        "classic_sfdp_theta08"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_p_neg2": [
+        "classic_sfdp_p_neg2"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_steps200": [
+        "classic_sfdp_steps200"
+      ],
+      "umap_graph__for__classic_umap_default": [
+        "classic_umap_default"
+      ],
+      "umap_graph__for__classic_umap_nn5": [
+        "classic_umap_nn5"
+      ],
+      "umap_graph__for__classic_umap_nn30": [
+        "classic_umap_nn30"
+      ],
+      "umap_graph__for__classic_umap_mindist001": [
+        "classic_umap_mindist001"
+      ],
+      "umap_graph__for__classic_umap_mindist05": [
+        "classic_umap_mindist05"
+      ],
+      "umap_graph__for__classic_umap_spread2": [
+        "classic_umap_spread2"
+      ],
+      "neulay__for__classic_neulay_default": [
+        "classic_neulay_default"
+      ],
+      "neulay__for__classic_neulay_lr001": [
+        "classic_neulay_lr001"
+      ],
+      "neulay__for__classic_neulay_lr05": [
+        "classic_neulay_lr05"
+      ],
+      "neulay__for__classic_neulay_radius02": [
+        "classic_neulay_radius02"
+      ],
+      "neulay__for__classic_neulay_radius08": [
+        "classic_neulay_radius08"
+      ],
+      "neulay__for__classic_neulay_no_gcn": [
+        "classic_neulay_no_gcn"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_default": [
+        "classic_sgd2_multi_default"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_stress_only": [
+        "classic_sgd2_multi_stress_only"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_with_crossing": [
+        "classic_sgd2_multi_with_crossing"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_with_aspect": [
+        "classic_sgd2_multi_with_aspect"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_lr001": [
+        "classic_sgd2_multi_lr001"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_lr01": [
+        "classic_sgd2_multi_lr01"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_batch8": [
+        "classic_sgd2_multi_batch8"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_batch128": [
+        "classic_sgd2_multi_batch128"
+      ],
+      "cytoscape_fcose__for__classic_fcose_default": [
+        "classic_fcose_default"
+      ],
+      "cytoscape_fcose__for__classic_fcose_proof": [
+        "classic_fcose_proof"
+      ]
+    },
+    "original_to_reimpl": {
+      "nx_spring__for__classic_fr_steps50": [
+        "classic_fr_steps50"
+      ],
+      "nx_spring__for__classic_fr_steps100": [
+        "classic_fr_steps100"
+      ],
+      "nx_spring__for__classic_fr_steps200": [
+        "classic_fr_steps200"
+      ],
+      "nx_spring__for__classic_fr_steps500": [
+        "classic_fr_steps500"
+      ],
+      "nx_kamada_kawai__for__classic_kk_steps100": [
+        "classic_kk_steps100"
+      ],
+      "nx_kamada_kawai__for__classic_kk_steps300": [
+        "classic_kk_steps300"
+      ],
+      "nx_kamada_kawai__for__classic_kk_steps1000": [
+        "classic_kk_steps1000"
+      ],
+      "fa2_ref__for__classic_fa2_default": [
+        "classic_fa2_default"
+      ],
+      "fa2_ref__for__classic_fa2_gravity0": [
+        "classic_fa2_gravity0"
+      ],
+      "fa2_ref__for__classic_fa2_gravity2": [
+        "classic_fa2_gravity2"
+      ],
+      "fa2_ref__for__classic_fa2_scaling1": [
+        "classic_fa2_scaling1"
+      ],
+      "fa2_ref__for__classic_fa2_scaling4": [
+        "classic_fa2_scaling4"
+      ],
+      "fa2_ref__for__classic_fa2_strong_gravity": [
+        "classic_fa2_strong_gravity"
+      ],
+      "fa2_ref__for__classic_fa2_no_outbound": [
+        "classic_fa2_no_outbound"
+      ],
+      "fa2_ref__for__classic_fa2_dissuade_hubs": [
+        "classic_fa2_dissuade_hubs"
+      ],
+      "fa2_ref__for__classic_fa2_linlog": [
+        "classic_fa2_linlog"
+      ],
+      "fa2_ref__for__classic_fa2_barnes_hut": [
+        "classic_fa2_barnes_hut"
+      ],
+      "fa2_ref__for__classic_fa2_exact": [
+        "classic_fa2_exact"
+      ],
+      "sgd2__for__classic_stress_sgd_steps30": [
+        "classic_stress_sgd_steps30"
+      ],
+      "sgd2__for__classic_stress_sgd_steps300": [
+        "classic_stress_sgd_steps300"
+      ],
+      "sgd2__for__classic_stress_sgd_eps001": [
+        "classic_stress_sgd_eps001"
+      ],
+      "sgd2__for__classic_stress_sgd_eps01": [
+        "classic_stress_sgd_eps01"
+      ],
+      "nx_spectral__for__classic_spectral_default": [
+        "classic_spectral_default"
+      ],
+      "nx_spectral__for__classic_spectral_nx_fidelity": [
+        "classic_spectral_nx_fidelity"
+      ],
+      "igraph_mds__for__classic_classical_mds_default": [
+        "classic_classical_mds_default"
+      ],
+      "igraph_mds__for__classic_classical_mds_igraph_fidelity": [
+        "classic_classical_mds_igraph_fidelity"
+      ],
+      "ogdf_stress__for__classic_stress_maj_default": [
+        "classic_stress_maj_default"
+      ],
+      "graphviz_neato__for__classic_neato": [
+        "classic_neato"
+      ],
+      "graphviz_neato__for__classic_neato_graphviz_fidelity": [
+        "classic_neato_graphviz_fidelity"
+      ],
+      "ogdf_stress__for__classic_stress_maj_iter50": [
+        "classic_stress_maj_iter50"
+      ],
+      "ogdf_stress__for__classic_stress_maj_iter500": [
+        "classic_stress_maj_iter500"
+      ],
+      "igraph_sugiyama__for__classic_sugiyama_default": [
+        "classic_sugiyama_default"
+      ],
+      "graphviz_dot__for__classic_sugiyama_graphviz_fidelity": [
+        "classic_sugiyama_graphviz_fidelity"
+      ],
+      "igraph_sugiyama__for__classic_sugiyama_passes4": [
+        "classic_sugiyama_passes4"
+      ],
+      "igraph_sugiyama__for__classic_sugiyama_passes48": [
+        "classic_sugiyama_passes48"
+      ],
+      "igraph_sugiyama__for__classic_sugiyama_wide": [
+        "classic_sugiyama_wide"
+      ],
+      "igraph_sugiyama__for__classic_sugiyama_tight": [
+        "classic_sugiyama_tight"
+      ],
+      "tsne_graph__for__classic_tsnet_default": [
+        "classic_tsnet_default"
+      ],
+      "tsne_graph__for__classic_tsnet_perp5": [
+        "classic_tsnet_perp5"
+      ],
+      "tsne_graph__for__classic_tsnet_perp50": [
+        "classic_tsnet_perp50"
+      ],
+      "tsne_graph__for__classic_tsnet_steps200": [
+        "classic_tsnet_steps200"
+      ],
+      "tsne_graph__for__classic_tsnet_steps2000": [
+        "classic_tsnet_steps2000"
+      ],
+      "ogdf_gem__for__classic_gem_iters100": [
+        "classic_gem_iters100"
+      ],
+      "ogdf_gem__for__classic_gem_iters500": [
+        "classic_gem_iters500"
+      ],
+      "ogdf_gem__for__classic_gem_iters2000": [
+        "classic_gem_iters2000"
+      ],
+      "ogdf_fmmm__for__classic_fmmm_steps10": [
+        "classic_fmmm_steps10"
+      ],
+      "ogdf_fmmm__for__classic_fmmm_steps100": [
+        "classic_fmmm_steps100"
+      ],
+      "ogdf_fmmm__for__classic_fmmm_steps200": [
+        "classic_fmmm_steps200"
+      ],
+      "graphviz_fdp__for__classic_fmmm_graphviz_fdp_fidelity": [
+        "classic_fmmm_graphviz_fdp_fidelity"
+      ],
+      "ogdf_stress__for__classic_maxent_stress_default": [
+        "classic_maxent_stress_default"
+      ],
+      "ogdf_stress__for__classic_maxent_stress_entropy": [
+        "classic_maxent_stress_entropy"
+      ],
+      "ogdf_stress__for__classic_maxent_stress_alpha2": [
+        "classic_maxent_stress_alpha2"
+      ],
+      "ogdf_stress__for__classic_maxent_stress_steps50": [
+        "classic_maxent_stress_steps50"
+      ],
+      "ogdf_stress__for__classic_maxent_stress_steps400": [
+        "classic_maxent_stress_steps400"
+      ],
+      "igraph_davidson_harel__for__classic_davidson_harel_rounds50": [
+        "classic_davidson_harel_rounds50"
+      ],
+      "igraph_davidson_harel__for__classic_davidson_harel_rounds100": [
+        "classic_davidson_harel_rounds100"
+      ],
+      "igraph_davidson_harel__for__classic_davidson_harel_rounds200": [
+        "classic_davidson_harel_rounds200"
+      ],
+      "linlog__for__classic_linlog_default": [
+        "classic_linlog_default"
+      ],
+      "linlog__for__classic_linlog_quadratic": [
+        "classic_linlog_quadratic"
+      ],
+      "linlog__for__classic_linlog_power": [
+        "classic_linlog_power"
+      ],
+      "linlog__for__classic_linlog_steps100": [
+        "classic_linlog_steps100"
+      ],
+      "linlog__for__classic_linlog_steps500": [
+        "classic_linlog_steps500"
+      ],
+      "ogdf_pivot_mds__for__classic_pivot_mds_10": [
+        "classic_pivot_mds_10"
+      ],
+      "ogdf_pivot_mds__for__classic_pivot_mds_50": [
+        "classic_pivot_mds_50"
+      ],
+      "ogdf_pivot_mds__for__classic_pivot_mds_100": [
+        "classic_pivot_mds_100"
+      ],
+      "ogdf_pivot_mds__for__classic_pivot_mds_200": [
+        "classic_pivot_mds_200"
+      ],
+      "igraph_rt__for__classic_rt_default": [
+        "classic_rt_default"
+      ],
+      "igraph_graphopt__for__classic_graphopt_default": [
+        "classic_graphopt_default"
+      ],
+      "igraph_graphopt__for__classic_graphopt_charge_low": [
+        "classic_graphopt_charge_low"
+      ],
+      "igraph_graphopt__for__classic_graphopt_charge_high": [
+        "classic_graphopt_charge_high"
+      ],
+      "igraph_graphopt__for__classic_graphopt_mass_low": [
+        "classic_graphopt_mass_low"
+      ],
+      "igraph_graphopt__for__classic_graphopt_mass_high": [
+        "classic_graphopt_mass_high"
+      ],
+      "igraph_graphopt__for__classic_graphopt_spring2": [
+        "classic_graphopt_spring2"
+      ],
+      "igraph_drl__for__classic_drl_default": [
+        "classic_drl_default"
+      ],
+      "igraph_drl__for__classic_drl_coarsen": [
+        "classic_drl_coarsen"
+      ],
+      "igraph_drl__for__classic_drl_coarsest": [
+        "classic_drl_coarsest"
+      ],
+      "igraph_drl__for__classic_drl_refine": [
+        "classic_drl_refine"
+      ],
+      "igraph_drl__for__classic_drl_final": [
+        "classic_drl_final"
+      ],
+      "igraph_lgl__for__classic_lgl_default": [
+        "classic_lgl_default"
+      ],
+      "igraph_lgl__for__classic_lgl_iter50": [
+        "classic_lgl_iter50"
+      ],
+      "igraph_lgl__for__classic_lgl_iter300": [
+        "classic_lgl_iter300"
+      ],
+      "igraph_lgl__for__classic_lgl_cool1": [
+        "classic_lgl_cool1"
+      ],
+      "igraph_lgl__for__classic_lgl_cool2": [
+        "classic_lgl_cool2"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_default": [
+        "classic_sfdp_default"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_graphviz_fidelity": [
+        "classic_sfdp_graphviz_fidelity"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_theta04": [
+        "classic_sfdp_theta04"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_theta08": [
+        "classic_sfdp_theta08"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_p_neg2": [
+        "classic_sfdp_p_neg2"
+      ],
+      "graphviz_sfdp__for__classic_sfdp_steps200": [
+        "classic_sfdp_steps200"
+      ],
+      "umap_graph__for__classic_umap_default": [
+        "classic_umap_default"
+      ],
+      "umap_graph__for__classic_umap_nn5": [
+        "classic_umap_nn5"
+      ],
+      "umap_graph__for__classic_umap_nn30": [
+        "classic_umap_nn30"
+      ],
+      "umap_graph__for__classic_umap_mindist001": [
+        "classic_umap_mindist001"
+      ],
+      "umap_graph__for__classic_umap_mindist05": [
+        "classic_umap_mindist05"
+      ],
+      "umap_graph__for__classic_umap_spread2": [
+        "classic_umap_spread2"
+      ],
+      "neulay__for__classic_neulay_default": [
+        "classic_neulay_default"
+      ],
+      "neulay__for__classic_neulay_lr001": [
+        "classic_neulay_lr001"
+      ],
+      "neulay__for__classic_neulay_lr05": [
+        "classic_neulay_lr05"
+      ],
+      "neulay__for__classic_neulay_radius02": [
+        "classic_neulay_radius02"
+      ],
+      "neulay__for__classic_neulay_radius08": [
+        "classic_neulay_radius08"
+      ],
+      "neulay__for__classic_neulay_no_gcn": [
+        "classic_neulay_no_gcn"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_default": [
+        "classic_sgd2_multi_default"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_stress_only": [
+        "classic_sgd2_multi_stress_only"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_with_crossing": [
+        "classic_sgd2_multi_with_crossing"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_with_aspect": [
+        "classic_sgd2_multi_with_aspect"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_lr001": [
+        "classic_sgd2_multi_lr001"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_lr01": [
+        "classic_sgd2_multi_lr01"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_batch8": [
+        "classic_sgd2_multi_batch8"
+      ],
+      "sgd2_multi_ref__for__classic_sgd2_multi_batch128": [
+        "classic_sgd2_multi_batch128"
+      ],
+      "cytoscape_fcose__for__classic_fcose_default": [
+        "classic_fcose_default"
+      ],
+      "cytoscape_fcose__for__classic_fcose_proof": [
+        "classic_fcose_proof"
+      ],
+      "classic_fr_steps50": [
+        "nx_spring__for__classic_fr_steps50"
+      ],
+      "classic_fr_steps100": [
+        "nx_spring__for__classic_fr_steps100"
+      ],
+      "classic_fr_steps200": [
+        "nx_spring__for__classic_fr_steps200"
+      ],
+      "classic_fr_steps500": [
+        "nx_spring__for__classic_fr_steps500"
+      ],
+      "classic_kk_steps100": [
+        "nx_kamada_kawai__for__classic_kk_steps100"
+      ],
+      "classic_kk_steps300": [
+        "nx_kamada_kawai__for__classic_kk_steps300"
+      ],
+      "classic_kk_steps1000": [
+        "nx_kamada_kawai__for__classic_kk_steps1000"
+      ],
+      "classic_fa2_default": [
+        "fa2_ref__for__classic_fa2_default"
+      ],
+      "classic_fa2_gravity0": [
+        "fa2_ref__for__classic_fa2_gravity0"
+      ],
+      "classic_fa2_gravity2": [
+        "fa2_ref__for__classic_fa2_gravity2"
+      ],
+      "classic_fa2_scaling1": [
+        "fa2_ref__for__classic_fa2_scaling1"
+      ],
+      "classic_fa2_scaling4": [
+        "fa2_ref__for__classic_fa2_scaling4"
+      ],
+      "classic_fa2_strong_gravity": [
+        "fa2_ref__for__classic_fa2_strong_gravity"
+      ],
+      "classic_fa2_no_outbound": [
+        "fa2_ref__for__classic_fa2_no_outbound"
+      ],
+      "classic_fa2_dissuade_hubs": [
+        "fa2_ref__for__classic_fa2_dissuade_hubs"
+      ],
+      "classic_fa2_linlog": [
+        "fa2_ref__for__classic_fa2_linlog"
+      ],
+      "classic_fa2_barnes_hut": [
+        "fa2_ref__for__classic_fa2_barnes_hut"
+      ],
+      "classic_fa2_exact": [
+        "fa2_ref__for__classic_fa2_exact"
+      ],
+      "classic_stress_sgd_steps30": [
+        "sgd2__for__classic_stress_sgd_steps30"
+      ],
+      "classic_stress_sgd_steps300": [
+        "sgd2__for__classic_stress_sgd_steps300"
+      ],
+      "classic_stress_sgd_eps001": [
+        "sgd2__for__classic_stress_sgd_eps001"
+      ],
+      "classic_stress_sgd_eps01": [
+        "sgd2__for__classic_stress_sgd_eps01"
+      ],
+      "classic_spectral_default": [
+        "nx_spectral__for__classic_spectral_default"
+      ],
+      "classic_spectral_nx_fidelity": [
+        "nx_spectral__for__classic_spectral_nx_fidelity"
+      ],
+      "classic_classical_mds_default": [
+        "igraph_mds__for__classic_classical_mds_default"
+      ],
+      "classic_classical_mds_igraph_fidelity": [
+        "igraph_mds__for__classic_classical_mds_igraph_fidelity"
+      ],
+      "classic_stress_maj_default": [
+        "ogdf_stress__for__classic_stress_maj_default"
+      ],
+      "classic_neato": [
+        "graphviz_neato__for__classic_neato"
+      ],
+      "classic_neato_graphviz_fidelity": [
+        "graphviz_neato__for__classic_neato_graphviz_fidelity"
+      ],
+      "classic_stress_maj_iter50": [
+        "ogdf_stress__for__classic_stress_maj_iter50"
+      ],
+      "classic_stress_maj_iter500": [
+        "ogdf_stress__for__classic_stress_maj_iter500"
+      ],
+      "classic_sugiyama_default": [
+        "igraph_sugiyama__for__classic_sugiyama_default"
+      ],
+      "classic_sugiyama_graphviz_fidelity": [
+        "graphviz_dot__for__classic_sugiyama_graphviz_fidelity"
+      ],
+      "classic_sugiyama_passes4": [
+        "igraph_sugiyama__for__classic_sugiyama_passes4"
+      ],
+      "classic_sugiyama_passes48": [
+        "igraph_sugiyama__for__classic_sugiyama_passes48"
+      ],
+      "classic_sugiyama_wide": [
+        "igraph_sugiyama__for__classic_sugiyama_wide"
+      ],
+      "classic_sugiyama_tight": [
+        "igraph_sugiyama__for__classic_sugiyama_tight"
+      ],
+      "classic_tsnet_default": [
+        "tsne_graph__for__classic_tsnet_default"
+      ],
+      "classic_tsnet_perp5": [
+        "tsne_graph__for__classic_tsnet_perp5"
+      ],
+      "classic_tsnet_perp50": [
+        "tsne_graph__for__classic_tsnet_perp50"
+      ],
+      "classic_tsnet_steps200": [
+        "tsne_graph__for__classic_tsnet_steps200"
+      ],
+      "classic_tsnet_steps2000": [
+        "tsne_graph__for__classic_tsnet_steps2000"
+      ],
+      "classic_gem_iters100": [
+        "ogdf_gem__for__classic_gem_iters100"
+      ],
+      "classic_gem_iters500": [
+        "ogdf_gem__for__classic_gem_iters500"
+      ],
+      "classic_gem_iters2000": [
+        "ogdf_gem__for__classic_gem_iters2000"
+      ],
+      "classic_fmmm_steps10": [
+        "ogdf_fmmm__for__classic_fmmm_steps10"
+      ],
+      "classic_fmmm_steps100": [
+        "ogdf_fmmm__for__classic_fmmm_steps100"
+      ],
+      "classic_fmmm_steps200": [
+        "ogdf_fmmm__for__classic_fmmm_steps200"
+      ],
+      "classic_fmmm_graphviz_fdp_fidelity": [
+        "graphviz_fdp__for__classic_fmmm_graphviz_fdp_fidelity"
+      ],
+      "classic_maxent_stress_default": [
+        "ogdf_stress__for__classic_maxent_stress_default"
+      ],
+      "classic_maxent_stress_entropy": [
+        "ogdf_stress__for__classic_maxent_stress_entropy"
+      ],
+      "classic_maxent_stress_alpha2": [
+        "ogdf_stress__for__classic_maxent_stress_alpha2"
+      ],
+      "classic_maxent_stress_steps50": [
+        "ogdf_stress__for__classic_maxent_stress_steps50"
+      ],
+      "classic_maxent_stress_steps400": [
+        "ogdf_stress__for__classic_maxent_stress_steps400"
+      ],
+      "classic_davidson_harel_rounds50": [
+        "igraph_davidson_harel__for__classic_davidson_harel_rounds50"
+      ],
+      "classic_davidson_harel_rounds100": [
+        "igraph_davidson_harel__for__classic_davidson_harel_rounds100"
+      ],
+      "classic_davidson_harel_rounds200": [
+        "igraph_davidson_harel__for__classic_davidson_harel_rounds200"
+      ],
+      "classic_linlog_default": [
+        "linlog__for__classic_linlog_default"
+      ],
+      "classic_linlog_quadratic": [
+        "linlog__for__classic_linlog_quadratic"
+      ],
+      "classic_linlog_power": [
+        "linlog__for__classic_linlog_power"
+      ],
+      "classic_linlog_steps100": [
+        "linlog__for__classic_linlog_steps100"
+      ],
+      "classic_linlog_steps500": [
+        "linlog__for__classic_linlog_steps500"
+      ],
+      "classic_pivot_mds_10": [
+        "ogdf_pivot_mds__for__classic_pivot_mds_10"
+      ],
+      "classic_pivot_mds_50": [
+        "ogdf_pivot_mds__for__classic_pivot_mds_50"
+      ],
+      "classic_pivot_mds_100": [
+        "ogdf_pivot_mds__for__classic_pivot_mds_100"
+      ],
+      "classic_pivot_mds_200": [
+        "ogdf_pivot_mds__for__classic_pivot_mds_200"
+      ],
+      "classic_rt_default": [
+        "igraph_rt__for__classic_rt_default"
+      ],
+      "classic_graphopt_default": [
+        "igraph_graphopt__for__classic_graphopt_default"
+      ],
+      "classic_graphopt_charge_low": [
+        "igraph_graphopt__for__classic_graphopt_charge_low"
+      ],
+      "classic_graphopt_charge_high": [
+        "igraph_graphopt__for__classic_graphopt_charge_high"
+      ],
+      "classic_graphopt_mass_low": [
+        "igraph_graphopt__for__classic_graphopt_mass_low"
+      ],
+      "classic_graphopt_mass_high": [
+        "igraph_graphopt__for__classic_graphopt_mass_high"
+      ],
+      "classic_graphopt_spring2": [
+        "igraph_graphopt__for__classic_graphopt_spring2"
+      ],
+      "classic_drl_default": [
+        "igraph_drl__for__classic_drl_default"
+      ],
+      "classic_drl_coarsen": [
+        "igraph_drl__for__classic_drl_coarsen"
+      ],
+      "classic_drl_coarsest": [
+        "igraph_drl__for__classic_drl_coarsest"
+      ],
+      "classic_drl_refine": [
+        "igraph_drl__for__classic_drl_refine"
+      ],
+      "classic_drl_final": [
+        "igraph_drl__for__classic_drl_final"
+      ],
+      "classic_lgl_default": [
+        "igraph_lgl__for__classic_lgl_default"
+      ],
+      "classic_lgl_iter50": [
+        "igraph_lgl__for__classic_lgl_iter50"
+      ],
+      "classic_lgl_iter300": [
+        "igraph_lgl__for__classic_lgl_iter300"
+      ],
+      "classic_lgl_cool1": [
+        "igraph_lgl__for__classic_lgl_cool1"
+      ],
+      "classic_lgl_cool2": [
+        "igraph_lgl__for__classic_lgl_cool2"
+      ],
+      "classic_sfdp_default": [
+        "graphviz_sfdp__for__classic_sfdp_default"
+      ],
+      "classic_sfdp_graphviz_fidelity": [
+        "graphviz_sfdp__for__classic_sfdp_graphviz_fidelity"
+      ],
+      "classic_sfdp_theta04": [
+        "graphviz_sfdp__for__classic_sfdp_theta04"
+      ],
+      "classic_sfdp_theta08": [
+        "graphviz_sfdp__for__classic_sfdp_theta08"
+      ],
+      "classic_sfdp_p_neg2": [
+        "graphviz_sfdp__for__classic_sfdp_p_neg2"
+      ],
+      "classic_sfdp_steps200": [
+        "graphviz_sfdp__for__classic_sfdp_steps200"
+      ],
+      "classic_umap_default": [
+        "umap_graph__for__classic_umap_default"
+      ],
+      "classic_umap_nn5": [
+        "umap_graph__for__classic_umap_nn5"
+      ],
+      "classic_umap_nn30": [
+        "umap_graph__for__classic_umap_nn30"
+      ],
+      "classic_umap_mindist001": [
+        "umap_graph__for__classic_umap_mindist001"
+      ],
+      "classic_umap_mindist05": [
+        "umap_graph__for__classic_umap_mindist05"
+      ],
+      "classic_umap_spread2": [
+        "umap_graph__for__classic_umap_spread2"
+      ],
+      "classic_neulay_default": [
+        "neulay__for__classic_neulay_default"
+      ],
+      "classic_neulay_lr001": [
+        "neulay__for__classic_neulay_lr001"
+      ],
+      "classic_neulay_lr05": [
+        "neulay__for__classic_neulay_lr05"
+      ],
+      "classic_neulay_radius02": [
+        "neulay__for__classic_neulay_radius02"
+      ],
+      "classic_neulay_radius08": [
+        "neulay__for__classic_neulay_radius08"
+      ],
+      "classic_neulay_no_gcn": [
+        "neulay__for__classic_neulay_no_gcn"
+      ],
+      "classic_sgd2_multi_default": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_default"
+      ],
+      "classic_sgd2_multi_stress_only": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_stress_only"
+      ],
+      "classic_sgd2_multi_with_crossing": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_with_crossing"
+      ],
+      "classic_sgd2_multi_with_aspect": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_with_aspect"
+      ],
+      "classic_sgd2_multi_lr001": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_lr001"
+      ],
+      "classic_sgd2_multi_lr01": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_lr01"
+      ],
+      "classic_sgd2_multi_batch8": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_batch8"
+      ],
+      "classic_sgd2_multi_batch128": [
+        "sgd2_multi_ref__for__classic_sgd2_multi_batch128"
+      ],
+      "classic_fcose_default": [
+        "cytoscape_fcose__for__classic_fcose_default"
+      ],
+      "classic_fcose_proof": [
+        "cytoscape_fcose__for__classic_fcose_proof"
+      ]
+    }
+  },
+  "graphs": [
+    {
+      "name": "real_lesmis_77",
+      "num_nodes": 77,
+      "num_edges": 254,
+      "tags": [
+        "community",
+        "real-world",
+        "social",
+        "weighted"
+      ]
+    },
+    {
+      "name": "dense_pair_50",
+      "num_nodes": 50,
+      "num_edges": 208,
+      "tags": [
+        "large-dense"
+      ]
+    }
+  ],
+  "engines": [
+    {
+      "name": "classic_graphopt_mass_low",
+      "max_nodes": 20000,
+      "available": true,
+      "is_stochastic": true,
+      "is_heavy": false,
+      "original_for": [
+        "igraph_graphopt__for__classic_graphopt_mass_low"
+      ],
+      "reimpl_of": [
+        "igraph_graphopt__for__classic_graphopt_mass_low"
+      ]
+    },
+    {
+      "name": "igraph_graphopt__for__classic_graphopt_mass_low",
+      "max_nodes": 20000,
+      "available": true,
+      "is_stochastic": true,
+      "is_heavy": false,
+      "original_for": [
+        "classic_graphopt_mass_low"
+      ],
+      "reimpl_of": [
+        "classic_graphopt_mass_low"
+      ]
+    },
+    {
+      "name": "classic_graphopt_spring2",
+      "max_nodes": 20000,
+      "available": true,
+      "is_stochastic": true,
+      "is_heavy": false,
+      "original_for": [
+        "igraph_graphopt__for__classic_graphopt_spring2"
+      ],
+      "reimpl_of": [
+        "igraph_graphopt__for__classic_graphopt_spring2"
+      ]
+    },
+    {
+      "name": "igraph_graphopt__for__classic_graphopt_spring2",
+      "max_nodes": 20000,
+      "available": true,
+      "is_stochastic": true,
+      "is_heavy": false,
+      "original_for": [
+        "classic_graphopt_spring2"
+      ],
+      "reimpl_of": [
+        "classic_graphopt_spring2"
+      ]
+    }
+  ],
+  "total_scope": 8,
+  "completed_scope": 8
+}

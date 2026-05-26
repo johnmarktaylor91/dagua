@@ -1,0 +1,26 @@
+[
+  {
+    "graph": "real_lesmis_77",
+    "normalized_frobenius": 3.8231814283027035e-08,
+    "rmsd": 4.35691959479158e-09,
+    "variant": "mass_low"
+  },
+  {
+    "graph": "real_lesmis_77",
+    "normalized_frobenius": 3.805102973240095e-08,
+    "rmsd": 4.336317283187235e-09,
+    "variant": "spring2"
+  },
+  {
+    "graph": "dense_pair_50",
+    "normalized_frobenius": 3.617439062493617e-08,
+    "rmsd": 5.115831383236688e-09,
+    "variant": "mass_low"
+  },
+  {
+    "graph": "dense_pair_50",
+    "normalized_frobenius": 3.405271554697425e-08,
+    "rmsd": 4.815781216216413e-09,
+    "variant": "spring2"
+  }
+]
