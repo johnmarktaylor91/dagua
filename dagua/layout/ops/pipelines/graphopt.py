@@ -59,6 +59,10 @@ def build_graphopt_pipeline(
           from python-igraph's returned Layout object; the fidelity metric is
           Procrustes-aligned RMSD.
         - Dagua retains optional weighted behavior outside fidelity mode.
+        - High-gain parameter regimes can amplify machine-epsilon force drift
+          after many explicit steps. Round 64 scale probes found this for
+          ``node_mass=10`` and ``spring_constant=2`` on dense real graphs even
+          though the same cases match python-igraph through the early steps.
 
     Parameters
     ----------
