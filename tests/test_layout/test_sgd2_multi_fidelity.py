@@ -142,3 +142,49 @@ def test_sgd2_multi_crossing_only_no_pairs_matches_stress_fallback() -> None:
     )
 
     assert torch.allclose(crossing_only, stress_only)
+
+
+def test_sgd2_multi_pipeline_has_no_runtime_reference_delegation() -> None:
+    """The layout pipeline must not import measurement/reference backends."""
+    source = Path("dagua/layout/ops/pipelines/sgd2_multi.py").read_text(encoding="utf-8")
+    ops_source = Path("dagua/layout/ops/sgd2_multi.py").read_text(encoding="utf-8")
+    combined = source + "\n" + ops_source
+
+    assert "import s_gd2" not in combined
+    assert "from dagua.eval.competitors" not in combined
+    assert "subprocess" not in combined
+
+
+def test_sgd2_multi_native_default_matches_reference_adapter() -> None:
+    """The native GD2 port should match the reference adapter on a small graph."""
+    if not sgd2_multi_competitor._sgd2_multi_available():
+        pytest.skip("upstream SGD2 sources are unavailable")
+    graph = _make_small_graph()
+    variant_params = {
+        "criteria_weights": {"stress": 1.0, "ideal_edge_length": 1.0},
+        "max_iter": 16,
+        "grad_clamp": 5.0,
+        "optimizer_kwargs": {"lr": 0.01},
+        "sample_sizes": {"stress": 8, "ideal_edge_length": 8},
+    }
+
+    reference = SGD2MultiRef().layout_with_variant(
+        graph,
+        seed=31,
+        variant_params=variant_params,
+    )
+    native = layout_sgd2_multi_pipeline(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        seed=31,
+        steps=16,
+        criteria={"stress": 1.0, "ideal_edge_length": 1.0},
+        lr=0.01,
+        grad_clamp=5.0,
+        batch_size=8,
+        fidelity_mode=True,
+    )
+
+    assert reference.error is None
+    assert reference.pos is not None
+    assert torch.sqrt((native.cpu() - reference.pos).square().mean()).item() < 1.0e-3
