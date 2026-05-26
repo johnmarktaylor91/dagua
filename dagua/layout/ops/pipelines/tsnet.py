@@ -270,6 +270,13 @@ def _fit_tsnet_exact_condensed(
     -------
     numpy.ndarray
         Raw t-SNE embedding with shape ``[N, 2]`` and dtype ``float32``.
+
+    Notes
+    -----
+    sklearn math primitive used: ``sklearn.manifold._t_sne._joint_probabilities``.
+    This deterministic helper converts the fixed precomputed distance matrix and
+    perplexity into the condensed joint-probability vector ``P``. It carries no
+    t-SNE optimizer state and does not run embedding updates.
     """
     from sklearn.manifold._t_sne import _joint_probabilities
 
@@ -330,7 +337,7 @@ def _layout_tsnet_sklearn_reference(
     edge_weights: Optional[torch.Tensor],
     fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
-    """Run a local sklearn exact t-SNE reference port for fidelity mode.
+    """Run the local sklearn-compatible exact t-SNE port for fidelity mode.
 
     Parameters
     ----------
@@ -344,9 +351,9 @@ def _layout_tsnet_sklearn_reference(
     perplexity : float
         Target t-SNE perplexity.
     steps : int
-        Maximum sklearn optimization iterations.
+        Maximum sklearn-compatible optimization iterations.
     seed : int
-        Random seed forwarded to ``sklearn.manifold.TSNE``.
+        Random seed used by the local ``RandomState`` bridge.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
     fidelity_dtype : torch.dtype, default=torch.float32
@@ -360,7 +367,7 @@ def _layout_tsnet_sklearn_reference(
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import shortest_path
 
-    resolved_dtype = resolve_fidelity_dtype(True, fidelity_dtype)
+    resolved_dtype = resolve_fidelity_dtype(False, fidelity_dtype)
     device = layout_device(edge_index, node_sizes)
     if num_nodes == 0:
         return torch.empty((0, 2), dtype=resolved_dtype, device=device)
@@ -417,8 +424,9 @@ def build_tsnet_pipeline(
     Targets: scikit-learn 1.8.0 t-SNE graph adapter / van der Maaten and
         Hinton (2008), "Visualizing Data using t-SNE".
     Fidelity mode: ``fidelity_mode=True`` in the public wrapper routes through
-        sklearn's exact t-SNE implementation; this builder still exposes the
-        native torch composition for direct pipeline tests and diagnostics.
+        dagua's local sklearn-compatible exact t-SNE port; this builder still
+        exposes the native torch composition for direct pipeline tests and
+        diagnostics.
     Verified at: round_32 bounded subset median RMSD 0.398822; final
         100-seed report marks TSNET variants partial match at median RMSD
         0.151 to 0.276.
@@ -435,7 +443,8 @@ def build_tsnet_pipeline(
         Number of optimization updates.
     fidelity_mode : bool | str, default=False
         Preserve native sklearn-diagnostic settings when this builder is used
-        directly.
+        directly. The public wrapper uses a local exact port, not
+        ``sklearn.manifold.TSNE``.
     fidelity_dtype : torch.dtype, default=torch.float32
         Internal dtype used only when ``fidelity_mode`` is enabled.
 
@@ -511,7 +520,7 @@ def layout_tsnet_pipeline(
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
     fidelity_mode : bool | str, default=False
-        Route through the local sklearn exact t-SNE reference port when
+        Route through the local sklearn-compatible exact t-SNE port when
         ``True``, ``"sklearn"``, or ``"exact"``.
     fidelity_dtype : torch.dtype, default=torch.float32
         Internal dtype used only when ``fidelity_mode`` is enabled.
@@ -535,7 +544,11 @@ def layout_tsnet_pipeline(
         raise ValueError("perplexity must be positive.")
     if steps < 0:
         raise ValueError("steps must be non-negative.")
-    resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
+    exact_fidelity = _uses_sklearn_exact_fidelity(fidelity_mode)
+    resolved_dtype = resolve_fidelity_dtype(
+        False if exact_fidelity else fidelity_mode,
+        fidelity_dtype,
+    )
     if edge_weights is not None:
         if edge_weights.ndim != 1:
             raise ValueError("edge_weights must have shape [E].")
@@ -544,7 +557,7 @@ def layout_tsnet_pipeline(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
 
-    if _uses_sklearn_exact_fidelity(fidelity_mode):
+    if exact_fidelity:
         return _layout_tsnet_sklearn_reference(
             edge_index=edge_index,
             num_nodes=num_nodes,

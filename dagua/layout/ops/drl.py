@@ -12,6 +12,7 @@ import random
 from dataclasses import dataclass, field
 from typing import ClassVar, Mapping, Optional, Protocol, Tuple, Union, cast
 
+import numpy as np
 import torch
 
 from dagua.layout.ops._igraph_rng import IgraphPCG32, make_igraph_default_rng
@@ -138,6 +139,11 @@ class OptionObject(Protocol):
 
 DrLOptions = Union[str, Mapping[str, object], OptionObject]
 RandomLike = Union[random.Random, IgraphPCG32]
+
+_IGRAPH_OUTPUT_SCALE = 50.0
+_DENSITY_BOUNDARY_CELLS = 10
+_DENSITY_EDGE_PENALTY = 10_000.0
+_FINE_DENSITY_EPSILON = 1.0e-50
 
 
 @dataclass(frozen=True)
@@ -382,9 +388,7 @@ def _build_undirected_adjacency(
     sources = edge_index_cpu[0].tolist()
     targets = edge_index_cpu[1].tolist()
     for edge_id, (source, target) in enumerate(zip(sources, targets)):
-        if source == target:
-            continue
-        weight = float(weights_cpu[edge_id].item())
+        weight = float(np.float32(weights_cpu[edge_id].item()))
         # igraph stores neighbors in a map and assigns duplicate keys, so the
         # last parallel edge weight wins instead of summing multiedges.
         adjacency[source][target] = weight
@@ -418,6 +422,27 @@ def _initialize_positions(num_nodes: int, seed: int, fidelity_mode: bool = False
     return torch.tensor(data, dtype=torch.float64)
 
 
+def _initialize_adapter_seed_positions(num_nodes: int, seed: int) -> torch.Tensor:
+    """Create the seeded matrix used by the igraph benchmark adapter.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes.
+    seed : int
+        Integer seed forwarded by benchmark runners.
+
+    Returns
+    -------
+    torch.Tensor
+        Initial positions with shape ``[N, 2]`` and dtype ``float64``.
+    """
+    if num_nodes == 0:
+        return torch.empty((0, 2), dtype=torch.float64)
+    positions = np.random.RandomState(seed).uniform(-1.0, 1.0, size=(num_nodes, 2))
+    return torch.from_numpy(positions.astype(np.float64, copy=False))
+
+
 class _DensityGrid:
     """Density proxy used by DrL's coarse/fine repulsion term."""
 
@@ -432,16 +457,20 @@ class _DensityGrid:
         self.grid_size = config.grid_size
         self.view_size = config.view_size
         self.radius = config.radius
-        self.cell_width = config.view_size / float(config.grid_size)
-        self.origin = -0.5 * config.view_size
-        self.density = torch.zeros((config.grid_size, config.grid_size), dtype=torch.float64)
+        self.half_view = 0.5 * config.view_size
+        self.view_to_grid = float(config.grid_size) / config.view_size
+        self.density = np.zeros((config.grid_size, config.grid_size), dtype=np.float32)
         self.node_cells: dict[int, tuple[int, int]] = {}
-        self.buckets: dict[tuple[int, int], set[int]] = {}
+        self.node_sub_positions: dict[int, tuple[float, float]] = {}
+        self.buckets: dict[tuple[int, int], list[tuple[int, float, float]]] = {}
 
-        axis = torch.arange(-config.radius, config.radius + 1, dtype=torch.float64)
-        yy, xx = torch.meshgrid(axis, axis, indexing="ij")
-        distance = torch.sqrt(xx.square() + yy.square())
-        self.kernel = torch.clamp(1.0 - (distance / float(config.radius)), min=0.0)
+        diameter = (config.radius * 2) + 1
+        self.kernel = np.zeros((diameter, diameter), dtype=np.float32)
+        for row, offset_y in enumerate(range(-config.radius, config.radius + 1)):
+            for col, offset_x in enumerate(range(-config.radius, config.radius + 1)):
+                falloff_y = (config.radius - abs(float(offset_y))) / float(config.radius)
+                falloff_x = (config.radius - abs(float(offset_x))) / float(config.radius)
+                self.kernel[row, col] = np.float32(falloff_y * falloff_x)
 
     def _cell_index(self, position: torch.Tensor) -> tuple[int, int]:
         """Convert a point to a clamped cell index.
@@ -454,16 +483,30 @@ class _DensityGrid:
         Returns
         -------
         tuple[int, int]
-            Cell coordinates in ``[0, grid_size)``.
+            Unclamped cell coordinates.
         """
         x_value = float(position[0].item())
         y_value = float(position[1].item())
-        cell_x = int(math.floor((x_value - self.origin) / self.cell_width))
-        cell_y = int(math.floor((y_value - self.origin) / self.cell_width))
-        return (
-            max(0, min(self.grid_size - 1, cell_x)),
-            max(0, min(self.grid_size - 1, cell_y)),
-        )
+        return self._cell_index_xy(x_value=x_value, y_value=y_value)
+
+    def _cell_index_xy(self, x_value: float, y_value: float) -> tuple[int, int]:
+        """Convert scalar coordinates using igraph's bucket formula.
+
+        Parameters
+        ----------
+        x_value : float
+            X coordinate in DrL layout units.
+        y_value : float
+            Y coordinate in DrL layout units.
+
+        Returns
+        -------
+        tuple[int, int]
+            Unclamped integer cell coordinates.
+        """
+        cell_x = int((x_value + self.half_view + 0.5) * self.view_to_grid)
+        cell_y = int((y_value + self.half_view + 0.5) * self.view_to_grid)
+        return cell_x, cell_y
 
     def _apply_kernel(self, cell_x: int, cell_y: int, sign: float) -> None:
         """Apply one tent kernel into the coarse density grid.
@@ -477,44 +520,120 @@ class _DensityGrid:
         sign : float
             ``+1.0`` to add density, ``-1.0`` to remove it.
         """
-        x_start = max(0, cell_x - self.radius)
-        x_end = min(self.grid_size, cell_x + self.radius + 1)
-        y_start = max(0, cell_y - self.radius)
-        y_end = min(self.grid_size, cell_y + self.radius + 1)
+        x_start = cell_x - self.radius
+        y_start = cell_y - self.radius
+        diameter = self.radius * 2
+        if (
+            x_start >= self.grid_size
+            or x_start < 0
+            or y_start >= self.grid_size
+            or y_start < 0
+            or x_start + diameter >= self.grid_size
+            or y_start + diameter >= self.grid_size
+        ):
+            raise RuntimeError("Exceeded density grid in DrL.")
 
-        kernel_x_start = x_start - (cell_x - self.radius)
-        kernel_x_end = kernel_x_start + (x_end - x_start)
-        kernel_y_start = y_start - (cell_y - self.radius)
-        kernel_y_end = kernel_y_start + (y_end - y_start)
+        self.density[
+            y_start : y_start + diameter + 1,
+            x_start : x_start + diameter + 1,
+        ] += np.float32(sign) * self.kernel
 
-        self.density[y_start:y_end, x_start:x_end] += (
-            sign * self.kernel[kernel_y_start:kernel_y_end, kernel_x_start:kernel_x_end]
-        )
+    def add_node(
+        self,
+        node: int,
+        position: torch.Tensor,
+        fine_density: bool = False,
+    ) -> None:
+        """Insert one node into the active density structure.
 
-    def add_node(self, node: int, position: torch.Tensor) -> None:
-        """Insert or update one node in the density grid."""
-        cell = self._cell_index(position)
+        Parameters
+        ----------
+        node : int
+            Node index.
+        position : torch.Tensor
+            Coordinate tensor with shape ``[2]``.
+        fine_density : bool, default=False
+            Whether to update fine-density buckets instead of the coarse grid.
+        """
+        x_value = float(np.float32(position[0].item()))
+        y_value = float(np.float32(position[1].item()))
+        cell = self._cell_index_xy(x_value=x_value, y_value=y_value)
         self.node_cells[node] = cell
-        self._apply_kernel(cell[0], cell[1], sign=1.0)
-        self.buckets.setdefault(cell, set()).add(node)
+        self.node_sub_positions[node] = (x_value, y_value)
+        if fine_density:
+            self.buckets.setdefault(cell, []).append((node, x_value, y_value))
+        else:
+            self._apply_kernel(cell[0], cell[1], sign=1.0)
 
-    def remove_node(self, node: int) -> None:
-        """Remove one node from density grid and local neighbor buckets."""
-        cell = self.node_cells.pop(node, None)
-        if cell is None:
+    def remove_node(
+        self,
+        node: int,
+        fine_density: bool = False,
+        first_add: bool = False,
+        fine_first_add: bool = False,
+    ) -> None:
+        """Remove one node according to igraph's lifecycle flags.
+
+        Parameters
+        ----------
+        node : int
+            Node index.
+        fine_density : bool, default=False
+            Whether the solver is in the fine-density phase.
+        first_add : bool, default=False
+            Whether the coarse grid has not yet received its first sweep.
+        fine_first_add : bool, default=False
+            Whether the fine buckets have not yet received their first sweep.
+        """
+        if fine_density and not fine_first_add:
+            self._fine_subtract(node=node)
+        elif not first_add:
+            self._coarse_subtract(node=node)
+
+    def _coarse_subtract(self, node: int) -> None:
+        """Subtract the node's last coarse-grid footprint.
+
+        Parameters
+        ----------
+        node : int
+            Node index to subtract.
+        """
+        sub_position = self.node_sub_positions.get(node)
+        if sub_position is None:
             return
+        cell = self._cell_index_xy(x_value=sub_position[0], y_value=sub_position[1])
         self._apply_kernel(cell[0], cell[1], sign=-1.0)
-        bucket = self.buckets.get(cell)
-        if bucket is None:
+
+    def _fine_subtract(self, node: int) -> None:
+        """Pop one node copy from its last fine-density bucket.
+
+        Parameters
+        ----------
+        node : int
+            Node index whose stored bucket position is removed.
+        """
+        sub_position = self.node_sub_positions.get(node)
+        if sub_position is None:
             return
-        bucket.discard(node)
+        cell = self._cell_index_xy(x_value=sub_position[0], y_value=sub_position[1])
+        bucket = self.buckets.get(cell)
+        if not bucket:
+            return
+        bucket.pop(0)
         if not bucket:
             del self.buckets[cell]
 
     def coarse_density(self, position: torch.Tensor) -> float:
         """Return coarse density penalty for one coordinate."""
         cell_x, cell_y = self._cell_index(position)
-        value = float(self.density[cell_y, cell_x].item())
+        if (
+            cell_x > self.grid_size - _DENSITY_BOUNDARY_CELLS
+            or cell_x < _DENSITY_BOUNDARY_CELLS
+            or cell_y > self.grid_size - _DENSITY_BOUNDARY_CELLS
+            or cell_y < _DENSITY_BOUNDARY_CELLS
+        ):
+            return _DENSITY_EDGE_PENALTY
+        value = float(self.density[cell_y, cell_x])
         return value * value
 
     def fine_density(
@@ -543,6 +662,13 @@ class _DensityGrid:
             Local fine-density penalty for the candidate coordinate.
         """
         cell_x, cell_y = self._cell_index(position)
+        if (
+            cell_x > self.grid_size - _DENSITY_BOUNDARY_CELLS
+            or cell_x < _DENSITY_BOUNDARY_CELLS
+            or cell_y > self.grid_size - _DENSITY_BOUNDARY_CELLS
+            or cell_y < _DENSITY_BOUNDARY_CELLS
+        ):
+            return _DENSITY_EDGE_PENALTY
         density = 0.0
         for offset_y in (-1, 0, 1):
             for offset_x in (-1, 0, 1):
@@ -550,12 +676,13 @@ class _DensityGrid:
                 bucket = self.buckets.get(neighbor_cell)
                 if not bucket:
                     continue
-                for other in bucket:
+                for other, other_x, other_y in bucket:
                     if other == node:
                         continue
-                    delta = position - positions[other]
-                    distance_sq = float(delta.dot(delta).item()) + config.min_distance
-                    density += config.fine_repulsion_scale / distance_sq
+                    x_dist = float(np.float32(position[0].item())) - other_x
+                    y_dist = float(np.float32(position[1].item())) - other_y
+                    distance_sq = (x_dist * x_dist) + (y_dist * y_dist)
+                    density += config.fine_repulsion_scale / (distance_sq + _FINE_DENSITY_EPSILON)
         return density
 
 
@@ -695,6 +822,627 @@ def _maybe_cut_long_edge(
 
     if worst_neighbor >= 0 and worst_score > cut_off_length:
         adjacency[node].pop(worst_neighbor, None)
+
+
+def _as_float32(value: float) -> float:
+    """Round a scalar through C++ ``float`` precision.
+
+    Parameters
+    ----------
+    value : float
+        Input scalar.
+
+    Returns
+    -------
+    float
+        Python float carrying the nearest ``float32`` value.
+    """
+    return float(np.float32(value))
+
+
+def _tensor_from_xy(x_value: float, y_value: float) -> torch.Tensor:
+    """Build a two-coordinate tensor for density-grid calls.
+
+    Parameters
+    ----------
+    x_value : float
+        X coordinate.
+    y_value : float
+        Y coordinate.
+
+    Returns
+    -------
+    torch.Tensor
+        Coordinate tensor with shape ``[2]`` and dtype ``float64``.
+    """
+    return torch.tensor([x_value, y_value], dtype=torch.float64)
+
+
+def _positions_to_nodes(positions: torch.Tensor) -> list[list[float]]:
+    """Convert an initialized tensor into mutable float32 coordinates.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Initial position tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    list[list[float]]
+        Mutable ``[[x, y], ...]`` coordinates rounded to C++ ``float`` values.
+    """
+    positions_cpu = positions.to(device="cpu", dtype=torch.float64)
+    return [
+        [
+            _as_float32(float(positions_cpu[node, 0].item())),
+            _as_float32(float(positions_cpu[node, 1].item())),
+        ]
+        for node in range(positions_cpu.shape[0])
+    ]
+
+
+def _nodes_to_tensor(nodes: list[list[float]]) -> torch.Tensor:
+    """Convert mutable runtime nodes back to a tensor.
+
+    Parameters
+    ----------
+    nodes : list[list[float]]
+        Mutable ``[[x, y], ...]`` runtime coordinates.
+
+    Returns
+    -------
+    torch.Tensor
+        Position tensor with shape ``[N, 2]`` and dtype ``float64``.
+    """
+    if not nodes:
+        return torch.empty((0, 2), dtype=torch.float64)
+    return torch.tensor(nodes, dtype=torch.float64)
+
+
+def _runtime_energy(
+    node: int,
+    nodes: list[list[float]],
+    adjacency: list[dict[int, float]],
+    attraction: float,
+    stage: int,
+    fine_density: bool,
+    density_grid: _DensityGrid,
+) -> float:
+    """Compute igraph DrL node energy for the current coordinate.
+
+    Parameters
+    ----------
+    node : int
+        Node index to evaluate.
+    nodes : list[list[float]]
+        Mutable runtime coordinates.
+    adjacency : list[dict[int, float]]
+        Weighted undirected adjacency.
+    attraction : float
+        Current attraction parameter.
+    stage : int
+        Current igraph stage number.
+    fine_density : bool
+        Whether fine-density buckets are active.
+    density_grid : _DensityGrid
+        Density grid matching igraph bucket semantics.
+
+    Returns
+    -------
+    float
+        Scalar energy rounded through float32 accumulation.
+    """
+    attraction_factor = _as_float32(
+        _as_float32(_as_float32(_as_float32(attraction * attraction) * attraction) * attraction)
+        * 2.0e-2
+    )
+    node_energy = _as_float32(0.0)
+    node_x, node_y = nodes[node]
+
+    for neighbor in sorted(adjacency[node]):
+        weight = _as_float32(adjacency[node][neighbor])
+        x_dis = _as_float32(node_x - nodes[neighbor][0])
+        y_dis = _as_float32(node_y - nodes[neighbor][1])
+        energy_distance = _as_float32(_as_float32(x_dis * x_dis) + _as_float32(y_dis * y_dis))
+        if stage < 2:
+            energy_distance = _as_float32(energy_distance * energy_distance)
+        if stage == 0:
+            energy_distance = _as_float32(energy_distance * energy_distance)
+        node_energy = _as_float32(
+            node_energy + _as_float32(_as_float32(weight * attraction_factor) * energy_distance)
+        )
+
+    position = _tensor_from_xy(x_value=node_x, y_value=node_y)
+    if fine_density:
+        density = density_grid.fine_density(
+            node=node,
+            position=position,
+            positions=_nodes_to_tensor(nodes),
+            config=DRLEnergyConfig(),
+        )
+    else:
+        density = density_grid.coarse_density(position=position)
+    return _as_float32(node_energy + _as_float32(density))
+
+
+def _runtime_solve_analytic(
+    node: int,
+    nodes: list[list[float]],
+    adjacency: list[dict[int, float]],
+    damping_mult: float,
+    min_edges: float,
+    cut_end: float,
+    cut_off_length: float,
+) -> tuple[float, float]:
+    """Compute igraph's analytic centroid candidate and prune one edge.
+
+    Parameters
+    ----------
+    node : int
+        Node index to update.
+    nodes : list[list[float]]
+        Mutable runtime coordinates.
+    adjacency : list[dict[int, float]]
+        Mutable weighted adjacency.
+    damping_mult : float
+        Current damping multiplier.
+    min_edges : float
+        Current minimum degree threshold for pruning.
+    cut_end : float
+        Unfloored edge-cut parameter used by igraph's no-cut guard.
+    cut_off_length : float
+        Current edge-cut length threshold.
+
+    Returns
+    -------
+    tuple[float, float]
+        Analytic candidate coordinate.
+    """
+    total_weight = _as_float32(0.0)
+    x_sum = _as_float32(0.0)
+    y_sum = _as_float32(0.0)
+
+    for neighbor in sorted(adjacency[node]):
+        weight = _as_float32(adjacency[node][neighbor])
+        total_weight = _as_float32(total_weight + weight)
+        x_sum = _as_float32(x_sum + _as_float32(weight * nodes[neighbor][0]))
+        y_sum = _as_float32(y_sum + _as_float32(weight * nodes[neighbor][1]))
+
+    if total_weight > 0.0:
+        x_cen = _as_float32(x_sum / total_weight)
+        y_cen = _as_float32(y_sum / total_weight)
+        damping = _as_float32(1.0 - damping_mult)
+        centroid_scale = 1.0 - damping
+        pos_x = _as_float32(_as_float32(damping * nodes[node][0]) + (centroid_scale * x_cen))
+        pos_y = _as_float32(_as_float32(damping * nodes[node][1]) + (centroid_scale * y_cen))
+    else:
+        x_cen = _as_float32(0.0)
+        y_cen = _as_float32(0.0)
+        pos_x = nodes[node][0]
+        pos_y = nodes[node][1]
+
+    if min_edges == 99.0 or cut_end >= 39_500.0:
+        return pos_x, pos_y
+
+    num_connections = _as_float32(math.sqrt(float(len(adjacency[node]))))
+    max_length = _as_float32(0.0)
+    max_neighbor: Optional[int] = None
+    for neighbor in sorted(adjacency[node]):
+        if len(adjacency[node]) < min_edges:
+            continue
+        x_dis = _as_float32(x_cen - nodes[neighbor][0])
+        y_dis = _as_float32(y_cen - nodes[neighbor][1])
+        distance = _as_float32(_as_float32(x_dis * x_dis) + _as_float32(y_dis * y_dis))
+        distance = _as_float32(distance * num_connections)
+        if distance > max_length:
+            max_length = distance
+            max_neighbor = neighbor
+
+    if max_neighbor is not None and max_length > cut_off_length:
+        adjacency[node].pop(max_neighbor, None)
+    return pos_x, pos_y
+
+
+def _runtime_update_node(
+    node: int,
+    nodes: list[list[float]],
+    adjacency: list[dict[int, float]],
+    rng: random.Random,
+    density_grid: _DensityGrid,
+    stage: int,
+    temperature: float,
+    attraction: float,
+    damping_mult: float,
+    min_edges: float,
+    cut_end: float,
+    cut_off_length: float,
+    first_add: bool,
+    fine_first_add: bool,
+    fine_density: bool,
+) -> tuple[float, float, float]:
+    """Compute one node's next coordinate using igraph's candidate rule.
+
+    Parameters
+    ----------
+    node : int
+        Node index to update.
+    nodes : list[list[float]]
+        Mutable runtime coordinates.
+    adjacency : list[dict[int, float]]
+        Mutable weighted adjacency.
+    rng : random.Random
+        Python RNG installed by the igraph benchmark adapter.
+    density_grid : _DensityGrid
+        Coarse and fine density storage.
+    stage : int
+        Current igraph stage number.
+    temperature : float
+        Current temperature.
+    attraction : float
+        Current attraction.
+    damping_mult : float
+        Current damping multiplier.
+    min_edges : float
+        Current minimum degree threshold for pruning.
+    cut_end : float
+        Unfloored edge-cut parameter.
+    cut_off_length : float
+        Current edge-cut length threshold.
+    first_add : bool
+        Whether the coarse grid is still empty.
+    fine_first_add : bool
+        Whether the fine buckets are still empty.
+    fine_density : bool
+        Whether fine-density buckets are active.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        New x-coordinate, new y-coordinate, and accepted energy.
+    """
+    old_x, old_y = nodes[node]
+    density_grid.remove_node(
+        node=node,
+        fine_density=fine_density,
+        first_add=first_add,
+        fine_first_add=fine_first_add,
+    )
+    old_energy = _runtime_energy(
+        node=node,
+        nodes=nodes,
+        adjacency=adjacency,
+        attraction=attraction,
+        stage=stage,
+        fine_density=fine_density,
+        density_grid=density_grid,
+    )
+
+    analytic_x, analytic_y = _runtime_solve_analytic(
+        node=node,
+        nodes=nodes,
+        adjacency=adjacency,
+        damping_mult=damping_mult,
+        min_edges=min_edges,
+        cut_end=cut_end,
+        cut_off_length=cut_off_length,
+    )
+    nodes[node][0] = analytic_x
+    nodes[node][1] = analytic_y
+
+    jump_length = _as_float32(0.010 * temperature)
+    random_x = _as_float32(analytic_x + ((0.5 - rng.random()) * jump_length))
+    random_y = _as_float32(analytic_y + ((0.5 - rng.random()) * jump_length))
+    nodes[node][0] = random_x
+    nodes[node][1] = random_y
+    random_energy = _runtime_energy(
+        node=node,
+        nodes=nodes,
+        adjacency=adjacency,
+        attraction=attraction,
+        stage=stage,
+        fine_density=fine_density,
+        density_grid=density_grid,
+    )
+
+    nodes[node][0] = old_x
+    nodes[node][1] = old_y
+    if not fine_density and not first_add:
+        density_grid.add_node(
+            node=node,
+            position=_tensor_from_xy(x_value=old_x, y_value=old_y),
+            fine_density=fine_density,
+        )
+    elif not fine_first_add:
+        density_grid.add_node(
+            node=node,
+            position=_tensor_from_xy(x_value=old_x, y_value=old_y),
+            fine_density=fine_density,
+        )
+
+    if old_energy < random_energy:
+        return analytic_x, analytic_y, old_energy
+    return random_x, random_y, random_energy
+
+
+def _runtime_update_density(
+    node: int,
+    nodes: list[list[float]],
+    new_x: float,
+    new_y: float,
+    density_grid: _DensityGrid,
+    first_add: bool,
+    fine_first_add: bool,
+    fine_density: bool,
+) -> None:
+    """Apply igraph's old-position subtraction and new-position insertion.
+
+    Parameters
+    ----------
+    node : int
+        Node index to update.
+    nodes : list[list[float]]
+        Mutable runtime coordinates.
+    new_x : float
+        Accepted x-coordinate.
+    new_y : float
+        Accepted y-coordinate.
+    density_grid : _DensityGrid
+        Coarse and fine density storage.
+    first_add : bool
+        Whether the coarse grid is still empty.
+    fine_first_add : bool
+        Whether the fine buckets are still empty.
+    fine_density : bool
+        Whether fine-density buckets are active.
+    """
+    density_grid.remove_node(
+        node=node,
+        fine_density=fine_density,
+        first_add=first_add,
+        fine_first_add=fine_first_add,
+    )
+    nodes[node][0] = new_x
+    nodes[node][1] = new_y
+    density_grid.add_node(
+        node=node,
+        position=_tensor_from_xy(x_value=new_x, y_value=new_y),
+        fine_density=fine_density,
+    )
+
+
+def _runtime_update_nodes(
+    nodes: list[list[float]],
+    energies: list[float],
+    adjacency: list[dict[int, float]],
+    rng: random.Random,
+    density_grid: _DensityGrid,
+    stage: int,
+    temperature: float,
+    attraction: float,
+    damping_mult: float,
+    min_edges: float,
+    cut_end: float,
+    cut_off_length: float,
+    first_add: bool,
+    fine_first_add: bool,
+    fine_density: bool,
+) -> tuple[bool, bool]:
+    """Run one full igraph node-update sweep.
+
+    Parameters
+    ----------
+    nodes : list[list[float]]
+        Mutable runtime coordinates.
+    energies : list[float]
+        Per-node accepted energies.
+    adjacency : list[dict[int, float]]
+        Mutable weighted adjacency.
+    rng : random.Random
+        Python RNG used for random jumps.
+    density_grid : _DensityGrid
+        Coarse and fine density storage.
+    stage : int
+        Current igraph stage number.
+    temperature : float
+        Current temperature.
+    attraction : float
+        Current attraction.
+    damping_mult : float
+        Current damping multiplier.
+    min_edges : float
+        Current minimum degree threshold for pruning.
+    cut_end : float
+        Unfloored edge-cut parameter.
+    cut_off_length : float
+        Current edge-cut length threshold.
+    first_add : bool
+        Whether the coarse grid is still empty.
+    fine_first_add : bool
+        Whether the fine buckets are still empty.
+    fine_density : bool
+        Whether fine-density buckets are active.
+
+    Returns
+    -------
+    tuple[bool, bool]
+        Updated ``first_add`` and ``fine_first_add`` flags.
+    """
+    for node in range(len(nodes)):
+        new_x, new_y, energy = _runtime_update_node(
+            node=node,
+            nodes=nodes,
+            adjacency=adjacency,
+            rng=rng,
+            density_grid=density_grid,
+            stage=stage,
+            temperature=temperature,
+            attraction=attraction,
+            damping_mult=damping_mult,
+            min_edges=min_edges,
+            cut_end=cut_end,
+            cut_off_length=cut_off_length,
+            first_add=first_add,
+            fine_first_add=fine_first_add,
+            fine_density=fine_density,
+        )
+        energies[node] = energy
+        _runtime_update_density(
+            node=node,
+            nodes=nodes,
+            new_x=new_x,
+            new_y=new_y,
+            density_grid=density_grid,
+            first_add=first_add,
+            fine_first_add=fine_first_add,
+            fine_density=fine_density,
+        )
+
+    first_add = False
+    if fine_density:
+        fine_first_add = False
+    return first_add, fine_first_add
+
+
+def _run_reference_drl(
+    initial_positions: torch.Tensor,
+    adjacency: list[dict[int, float]],
+    params: _DrlParameters,
+    seed: int,
+    density_config: DRLDensityGridConfig,
+) -> torch.Tensor:
+    """Run igraph's single-process DrL state machine without delegation.
+
+    Parameters
+    ----------
+    initial_positions : torch.Tensor
+        Initial coordinates with shape ``[N, 2]``.
+    adjacency : list[dict[int, float]]
+        Mutable weighted adjacency.
+    params : _DrlParameters
+        Resolved DrL phase parameters.
+    seed : int
+        Seed for igraph's Python RNG hook used by the benchmark adapter.
+    density_config : DRLDensityGridConfig
+        Density-grid constants.
+
+    Returns
+    -------
+    torch.Tensor
+        Final unscaled positions with shape ``[N, 2]`` and dtype ``float64``.
+    """
+    nodes = _positions_to_nodes(initial_positions)
+    energies = [_as_float32(0.0) for _ in nodes]
+    density_grid = _DensityGrid(config=density_config)
+    rng = random.Random(seed)
+
+    stage = 0
+    iterations = int(params.init.iterations)
+    temperature = _as_float32(params.init.temperature)
+    attraction = _as_float32(params.init.attraction)
+    damping_mult = _as_float32(params.init.damping_mult)
+    min_edges = _as_float32(20.0)
+    first_add = True
+    fine_first_add = True
+    fine_density = False
+
+    cut_end = _as_float32(40_000.0 * _as_float32(1.0 - params.edge_cut))
+    cut_length_end = cut_end
+    if cut_length_end <= 1.0:
+        cut_length_end = _as_float32(1.0)
+    cut_length_start = _as_float32(4.0 * cut_length_end)
+    cut_off_length = cut_length_start
+    cut_rate = _as_float32((cut_length_start - cut_length_end) / 400.0)
+
+    while True:
+        first_add, fine_first_add = _runtime_update_nodes(
+            nodes=nodes,
+            energies=energies,
+            adjacency=adjacency,
+            rng=rng,
+            density_grid=density_grid,
+            stage=stage,
+            temperature=temperature,
+            attraction=attraction,
+            damping_mult=damping_mult,
+            min_edges=min_edges,
+            cut_end=cut_end,
+            cut_off_length=cut_off_length,
+            first_add=first_add,
+            fine_first_add=fine_first_add,
+            fine_density=fine_density,
+        )
+        if stage == 6:
+            break
+
+        if stage == 0:
+            if iterations < int(params.liquid.iterations):
+                temperature = _as_float32(params.liquid.temperature)
+                attraction = _as_float32(params.liquid.attraction)
+                damping_mult = _as_float32(params.liquid.damping_mult)
+                iterations += 1
+            else:
+                temperature = _as_float32(params.expansion.temperature)
+                attraction = _as_float32(params.expansion.attraction)
+                damping_mult = _as_float32(params.expansion.damping_mult)
+                iterations = 0
+                stage = 1
+
+        if stage == 1:
+            if iterations < int(params.expansion.iterations):
+                if attraction > 1.0:
+                    attraction = _as_float32(attraction - np.float32(0.05))
+                if min_edges > 12.0:
+                    min_edges = _as_float32(min_edges - np.float32(0.05))
+                cut_off_length = _as_float32(cut_off_length - cut_rate)
+                if damping_mult > 0.1:
+                    damping_mult = _as_float32(damping_mult - np.float32(0.005))
+                iterations += 1
+            else:
+                min_edges = _as_float32(12.0)
+                damping_mult = _as_float32(params.cooldown.damping_mult)
+                stage = 2
+                attraction = _as_float32(params.cooldown.attraction)
+                temperature = _as_float32(params.cooldown.temperature)
+                iterations = 0
+        elif stage == 2:
+            if iterations < int(params.cooldown.iterations):
+                if temperature > 50.0:
+                    temperature = _as_float32(temperature - 10.0)
+                if cut_off_length > cut_length_end:
+                    cut_off_length = _as_float32(
+                        cut_off_length - _as_float32(cut_rate * np.float32(2.0))
+                    )
+                if min_edges > 1.0:
+                    min_edges = _as_float32(min_edges - np.float32(0.2))
+                iterations += 1
+            else:
+                cut_off_length = cut_length_end
+                temperature = _as_float32(params.crunch.temperature)
+                damping_mult = _as_float32(params.crunch.damping_mult)
+                min_edges = _as_float32(1.0)
+                stage = 3
+                iterations = 0
+                attraction = _as_float32(params.crunch.attraction)
+        elif stage == 3:
+            if iterations < int(params.crunch.iterations):
+                iterations += 1
+            else:
+                iterations = 0
+                temperature = _as_float32(params.simmer.temperature)
+                attraction = _as_float32(params.simmer.attraction)
+                damping_mult = _as_float32(params.simmer.damping_mult)
+                min_edges = _as_float32(99.0)
+                fine_density = True
+                stage = 5
+        elif stage == 5:
+            if iterations < int(params.simmer.iterations):
+                if temperature > 50.0:
+                    temperature = _as_float32(temperature - 2.0)
+                iterations += 1
+            else:
+                stage = 6
+
+    return _nodes_to_tensor(nodes)
 
 
 class DRLNodeUpdate:
@@ -1165,11 +1913,17 @@ class DRLInitializePositions(Op):
         """
         del ctx
 
-        state.pos = _initialize_positions(
-            num_nodes=problem.num_nodes,
-            seed=problem.seed,
-            fidelity_mode=self.fidelity_mode,
-        )
+        if self.fidelity_mode:
+            state.pos = _initialize_adapter_seed_positions(
+                num_nodes=problem.num_nodes,
+                seed=problem.seed,
+            )
+        else:
+            state.pos = _initialize_positions(
+                num_nodes=problem.num_nodes,
+                seed=problem.seed,
+                fidelity_mode=False,
+            )
         return state
 
 
@@ -1262,56 +2016,15 @@ class DRLPhaseSolve(Op):
         params: _DrlParameters = state.extras["drl_params"]
         adjacency: list[dict[int, float]] = state.extras["drl_adjacency"]
         num_nodes = problem.num_nodes
-        positions = state.pos
+        del num_nodes
 
-        density_grid = _DensityGrid(config=self.config.density_grid)
-        for node in range(num_nodes):
-            density_grid.add_node(node=node, position=positions[node])
-
-        rng: RandomLike = (
-            make_igraph_default_rng(problem.seed)
-            if self.config.fidelity_mode
-            else random.Random(problem.seed)
+        state.pos = _run_reference_drl(
+            initial_positions=state.pos,
+            adjacency=adjacency,
+            params=params,
+            seed=problem.seed,
+            density_config=self.config.density_grid,
         )
-        cut_end = self.config.cut_base * (1.0 - params.edge_cut)
-        cut_off_length = self.config.cut_off_multiplier * cut_end
-        cut_rate = (
-            0.0
-            if cut_end <= 0.0
-            else (self.config.cut_rate_numerator * cut_end) / self.config.cut_rate_divisor
-        )
-        min_edges = self.config.initial_min_edges
-
-        phase_specs = [
-            ("init", params.init),
-            ("liquid", params.liquid),
-            ("expansion", params.expansion),
-            ("cooldown", params.cooldown),
-            ("crunch", params.crunch),
-            ("simmer", params.simmer),
-        ]
-
-        for phase_name, phase in phase_specs:
-            # Each phase mutates the shared adjacency and density state in place,
-            # which is why the full phase loop remains inside one op.
-            phase_step = DRLPhaseStep(
-                phase_name=phase_name,
-                phase=phase,
-                energy_config=self.config.energy,
-                phase_dynamics_config=self.config.phase_dynamics,
-            )
-            _, min_edges, cut_off_length = phase_step.apply(
-                positions=positions,
-                adjacency=adjacency,
-                rng=rng,
-                density_grid=density_grid,
-                cut_end=cut_end,
-                cut_rate=cut_rate,
-                min_edges=min_edges,
-                cut_off_length=cut_off_length,
-            )
-
-        state.pos = positions
         return state
 
 
@@ -1357,5 +2070,5 @@ class DRLFinalizePositions(Op):
             edge_index=problem.edge_index,
             node_sizes=problem.node_sizes,
         )
-        state.pos = state.pos.to(dtype=torch.float32, device=output_device)
+        state.pos = (state.pos * _IGRAPH_OUTPUT_SCALE).to(dtype=torch.float32, device=output_device)
         return state
