@@ -320,30 +320,38 @@ def _fdp_cluster_boxes(
         Expanded cluster boxes keyed by cluster name.
     """
     boxes: Dict[str, _FdpObstacleBox] = {}
-    if node_sizes is None:
-        sizes = torch.zeros_like(pos)
-    else:
-        sizes = node_sizes.to(device=pos.device, dtype=pos.dtype)
-    for cluster_name in tree.top_down_order():
-        members = [
-            int(node_index)
-            for node_index in tree.descendants_per_cluster[cluster_name]
-            if 0 <= int(node_index) < pos.shape[0]
-        ]
-        if not members:
+    raw_boxes: Dict[str, Tuple[float, float, float, float]] = {}
+    cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
+    cpu_sizes = (
+        node_sizes.detach().to(device="cpu", dtype=torch.float32)
+        if node_sizes is not None
+        else None
+    )
+    for cluster_name in tree.bottom_up_order():
+        direct_positions = {
+            int(node_index): cpu_pos[int(node_index)]
+            for node_index in tree.leaves_per_cluster[cluster_name]
+            if 0 <= int(node_index) < cpu_pos.shape[0]
+        }
+        child_boxes = {
+            child_name: raw_boxes[child_name]
+            for child_name in tree.children_per_cluster[cluster_name]
+            if child_name in raw_boxes
+        }
+        if not direct_positions and not child_boxes:
             continue
-        member_index = torch.tensor(members, dtype=torch.long, device=pos.device)
-        member_pos = pos.index_select(0, member_index)
-        member_sizes = sizes.index_select(0, member_index)
-        half_sizes = member_sizes / 2.0
-        lower = member_pos - half_sizes
-        upper = member_pos + half_sizes
-        bounds = (
-            float(lower[:, 0].min().item()),
-            float(lower[:, 1].min().item()),
-            float(upper[:, 0].max().item()),
-            float(upper[:, 1].max().item()),
+        x_min, y_min, x_max, y_max = _fdp_recursion_bbox_from_positions(
+            positions=direct_positions,
+            node_sizes=cpu_sizes,
+            cluster_boxes=child_boxes,
         )
+        bounds = (
+            x_min - _GRAPHVIZ_FDP_CLUSTER_MARGIN_POINTS,
+            y_min - _GRAPHVIZ_FDP_CLUSTER_MARGIN_POINTS,
+            x_max + _GRAPHVIZ_FDP_CLUSTER_MARGIN_POINTS,
+            y_max + _GRAPHVIZ_FDP_CLUSTER_MARGIN_POINTS + _GRAPHVIZ_FDP_CLUSTER_LABEL_HEIGHT_POINTS,
+        )
+        raw_boxes[cluster_name] = bounds
         boxes[cluster_name] = _fdp_expand_box(
             key=("cluster", cluster_name),
             bounds=bounds,
@@ -846,6 +854,8 @@ _GRAPHVIZ_FDP_DEFAULT_X_TRIES = 9
 _GRAPHVIZ_FDP_POINTS_PER_INCH = 72.0
 _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES = 0.75
 _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES = 0.5
+_GRAPHVIZ_FDP_CLUSTER_MARGIN_POINTS = 8.0
+_GRAPHVIZ_FDP_CLUSTER_LABEL_HEIGHT_POINTS = 18.0
 
 
 class _GraphvizDrand48:
@@ -907,11 +917,14 @@ class _FdpDerivedNode:
         One of ``"leaf"``, ``"cluster"``, or ``"port"``.
     members : frozenset[int]
         Original nodes represented by this derived node.
+    port_alpha : float, optional
+        Boundary angle for generated port nodes.
     """
 
     key: Union[int, str]
     kind: str
     members: frozenset[int]
+    port_alpha: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -1140,6 +1153,7 @@ def _fdp_recursion_derive_graph(
                 key=f"_port_{cluster_name or 'root'}_{port_index}",
                 kind="port",
                 members=frozenset({int(port.node)}),
+                port_alpha=float(port.alpha),
             )
         )
         port_indices.add(derived_index)
@@ -1250,6 +1264,37 @@ def _fdp_recursion_component_edges(
     return torch.tensor(edges, dtype=torch.long).t().contiguous()
 
 
+def _graphviz_fdp_node_size_points(
+    node_sizes: Optional[torch.Tensor],
+    node_index: int,
+) -> torch.Tensor:
+    """Return one Graphviz fdp node size in points.
+
+    Parameters
+    ----------
+    node_sizes : torch.Tensor, optional
+        Optional node sizes in points with shape ``[N, 2]``.
+    node_index : int
+        Node index to read when explicit sizes are available.
+
+    Returns
+    -------
+    torch.Tensor
+        Width and height in points with Graphviz default floors applied.
+    """
+    floor = torch.tensor(
+        [
+            _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES * _GRAPHVIZ_FDP_POINTS_PER_INCH,
+            _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES * _GRAPHVIZ_FDP_POINTS_PER_INCH,
+        ],
+        dtype=torch.float32,
+    )
+    if node_sizes is None:
+        return floor
+    size = node_sizes[int(node_index)].detach().to(dtype=torch.float32, device="cpu")
+    return torch.maximum(size, floor)
+
+
 def _fdp_recursion_component_sizes(
     derived: _FdpDerivedGraph,
     component: Sequence[int],
@@ -1278,7 +1323,9 @@ def _fdp_recursion_component_sizes(
     for derived_index in component:
         node = derived.nodes[derived_index]
         if node.kind == "leaf" and node_sizes is not None:
-            sizes.append(node_sizes[int(node.key)].detach().to(dtype=torch.float32, device="cpu"))
+            sizes.append(_graphviz_fdp_node_size_points(node_sizes, int(node.key)))
+        elif node.kind == "leaf":
+            sizes.append(_graphviz_fdp_node_size_points(node_sizes, int(node.key)))
         elif node.kind == "cluster" and str(node.key) in child_layouts:
             child = child_layouts[str(node.key)]
             sizes.append(torch.tensor([child.width, child.height], dtype=torch.float32))
@@ -1291,14 +1338,241 @@ def _fdp_recursion_component_sizes(
     return torch.stack(sizes)
 
 
-def _fdp_recursion_layout_component(
+def _graphviz_fdp_initial_positions_with_ports(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    seed: int,
+    port_alphas: Mapping[int, float],
+) -> Tuple[torch.Tensor, float, float]:
+    """Initialize a recursive component using Graphviz ``initPositions`` ports.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Local edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of local derived nodes.
+    seed : int
+        Graphviz ``seed`` attribute value.
+    port_alphas : Mapping[int, float]
+        Local port node index to boundary angle in radians.
+
+    Returns
+    -------
+    tuple[torch.Tensor, float, float]
+        Initial positions in inches with shape ``[N, 2]`` plus the boundary
+        ellipse half-width and half-height.
+    """
+    port_indices = set(port_alphas)
+    interior_count = max(num_nodes - len(port_indices), 0)
+    size = _GRAPHVIZ_FDP_DEFAULT_K * (math.sqrt(interior_count) + 1.0)
+    half_width = _GRAPHVIZ_FDP_EXPANSION_FACTOR * (size / 2.0)
+    half_height = half_width
+    positions = torch.zeros((num_nodes, 2), dtype=torch.float64)
+    has_position = [False] * num_nodes
+    for node_index, alpha in port_alphas.items():
+        positions[node_index, 0] = half_width * math.cos(alpha)
+        positions[node_index, 1] = half_height * math.sin(alpha)
+        has_position[node_index] = True
+
+    adjacency: List[List[int]] = [[] for _node in range(num_nodes)]
+    for source, target in edge_index.detach().to(device="cpu", dtype=torch.long).t().tolist():
+        adjacency[int(source)].append(int(target))
+        adjacency[int(target)].append(int(source))
+
+    rng = _GraphvizDrand48(seed)
+    for node_index in range(num_nodes):
+        if node_index in port_indices:
+            continue
+        positioned_neighbors = [
+            other
+            for other in adjacency[node_index]
+            if 0 <= other < num_nodes and has_position[other]
+        ]
+        if len(positioned_neighbors) > 1:
+            positions[node_index] = torch.stack(
+                [positions[other] for other in positioned_neighbors]
+            ).mean(dim=0)
+        elif len(positioned_neighbors) == 1:
+            positions[node_index] = 0.98 * positions[positioned_neighbors[0]]
+        else:
+            angle = 2.0 * math.pi * rng.random()
+            radius = 0.9 * rng.random()
+            positions[node_index, 0] = radius * half_width * math.cos(angle)
+            positions[node_index, 1] = radius * half_height * math.sin(angle)
+        has_position[node_index] = True
+    return positions, half_width, half_height
+
+
+def _graphviz_fdp_update_positions_with_ports(
+    positions: torch.Tensor,
+    displacement: torch.Tensor,
+    temperature: float,
+    port_indices: frozenset[int],
+    half_width: float,
+    half_height: float,
+) -> None:
+    """Apply Graphviz ``updatePos`` with recursive port boundary clamping.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Mutable positions in inches with shape ``[N, 2]``.
+    displacement : torch.Tensor
+        Displacement tensor with shape ``[N, 2]``.
+    temperature : float
+        Current cooling temperature.
+    port_indices : frozenset[int]
+        Local node indices that are boundary ports.
+    half_width : float
+        Boundary ellipse half-width.
+    half_height : float
+        Boundary ellipse half-height.
+
+    Returns
+    -------
+    None
+        Updates ``positions`` in place.
+    """
+    temp2 = temperature * temperature
+    for node_index in range(positions.shape[0]):
+        dx = float(displacement[node_index, 0])
+        dy = float(displacement[node_index, 1])
+        len2 = dx * dx + dy * dy
+        if len2 < temp2:
+            x_value = float(positions[node_index, 0]) + dx
+            y_value = float(positions[node_index, 1]) + dy
+        else:
+            factor = temperature / math.sqrt(len2)
+            x_value = float(positions[node_index, 0]) + dx * factor
+            y_value = float(positions[node_index, 1]) + dy * factor
+
+        distance = math.sqrt(
+            x_value * x_value / (half_width * half_width)
+            + y_value * y_value / (half_height * half_height)
+        )
+        if node_index in port_indices and distance > 0.0:
+            positions[node_index, 0] = x_value / distance
+            positions[node_index, 1] = y_value / distance
+        elif distance >= 1.0:
+            positions[node_index, 0] = 0.95 * x_value / distance
+            positions[node_index, 1] = 0.95 * y_value / distance
+        else:
+            positions[node_index, 0] = x_value
+            positions[node_index, 1] = y_value
+
+
+def _graphviz_fdp_tlayout_with_ports(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    seed: int,
+    port_alphas: Mapping[int, float],
+) -> Tuple[torch.Tensor, Tuple[float, float, float, int, int]]:
+    """Run Graphviz ``fdp_tLayout`` for a component with boundary ports.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Local edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of local derived nodes.
+    seed : int
+        Graphviz ``seed`` attribute value.
+    port_alphas : Mapping[int, float]
+        Local port node index to boundary angle in radians.
+
+    Returns
+    -------
+    tuple[torch.Tensor, tuple[float, float, float, int, int]]
+        Positions in inches and xLayout parameters.
+    """
+    positions, half_width, half_height = _graphviz_fdp_initial_positions_with_ports(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        seed=seed,
+        port_alphas=port_alphas,
+    )
+    outgoing, edges = _graphviz_fdp_edge_lists(edge_index, num_nodes, None)
+    max_iters = _GRAPHVIZ_FDP_DEFAULT_MAX_ITERS
+    pass1 = _GRAPHVIZ_FDP_DEFAULT_UNSCALED * max_iters // 100
+    t0 = _GRAPHVIZ_FDP_DEFAULT_TFACT * _GRAPHVIZ_FDP_DEFAULT_K * math.sqrt(num_nodes) / 5.0
+    loop_count = pass1
+    cell_size = 3.0 * _GRAPHVIZ_FDP_DEFAULT_K
+    port_indices = frozenset(int(index) for index in port_alphas)
+
+    for iteration in range(loop_count):
+        temperature = t0 * (max_iters - iteration) / max_iters
+        if temperature <= 0.0:
+            continue
+        displacement = torch.zeros_like(positions)
+        grid: dict[tuple[int, int], list[int]] = {}
+        for node_index in range(num_nodes):
+            cell = (
+                math.floor(float(positions[node_index, 0]) / cell_size),
+                math.floor(float(positions[node_index, 1]) / cell_size),
+            )
+            grid.setdefault(cell, []).append(node_index)
+        for source in range(num_nodes):
+            for edge_id in outgoing[source]:
+                _graphviz_fdp_apply_tlayout_attraction(
+                    positions=positions,
+                    displacement=displacement,
+                    edge=edges[edge_id],
+                    phase=iteration,
+                )
+        for (cell_x, cell_y), nodes in grid.items():
+            for source in nodes:
+                for target in nodes:
+                    if source != target:
+                        _graphviz_fdp_apply_tlayout_repulsion(
+                            positions,
+                            displacement,
+                            source,
+                            target,
+                            iteration,
+                            port_indices=port_indices,
+                        )
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        for target in grid.get((cell_x + dx, cell_y + dy), []):
+                            x_delta = float(positions[target, 0] - positions[source, 0])
+                            y_delta = float(positions[target, 1] - positions[source, 1])
+                            if x_delta * x_delta + y_delta * y_delta < cell_size * cell_size:
+                                _graphviz_fdp_apply_tlayout_repulsion(
+                                    positions,
+                                    displacement,
+                                    source,
+                                    target,
+                                    iteration,
+                                    port_indices=port_indices,
+                                )
+        _graphviz_fdp_update_positions_with_ports(
+            positions=positions,
+            displacement=displacement,
+            temperature=temperature,
+            port_indices=port_indices,
+            half_width=half_width,
+            half_height=half_height,
+        )
+
+    x_t0 = t0 * (max_iters - pass1) / max_iters
+    return positions, (
+        x_t0,
+        _GRAPHVIZ_FDP_DEFAULT_K,
+        _GRAPHVIZ_FDP_DEFAULT_C,
+        max_iters - pass1,
+        max_iters - pass1,
+    )
+
+
+def _fdp_recursion_tlayout_component(
     derived: _FdpDerivedGraph,
     component: Sequence[int],
-    node_sizes: Optional[torch.Tensor],
-    steps: int,
     seed: int,
-) -> torch.Tensor:
-    """Lay out a derived component with Graphviz fdp ``tLayout``/``xLayout``.
+) -> Tuple[torch.Tensor, Tuple[float, float, float, int, int]]:
+    """Run Graphviz fdp ``tLayout`` for one recursive derived component.
 
     Parameters
     ----------
@@ -1306,29 +1580,108 @@ def _fdp_recursion_layout_component(
         Derived graph.
     component : Sequence[int]
         Derived component node indices.
-    node_sizes : torch.Tensor, optional
-        Original node sizes with shape ``[N, 2]``.
-    steps : int
-        Compatibility parameter retained for the public FMMM variant. Graphviz
-        fdp fidelity uses Graphviz's default ``maxiter`` constant.
     seed : int
         Deterministic seed.
 
     Returns
     -------
-    torch.Tensor
-        Component positions with shape ``[N_component, 2]``.
+    tuple[torch.Tensor, tuple[float, float, float, int, int]]
+        Component positions in points with shape ``[N_component, 2]`` and the
+        ``xLayout`` parameters returned by the ``tLayout`` pass.
     """
     if len(component) == 0:
-        return torch.empty((0, 2), dtype=torch.float32)
-    del steps
-    return _graphviz_fdp_component_layout(
-        edge_index=_fdp_recursion_component_edges(derived, component),
-        num_nodes=len(component),
-        node_sizes=_fdp_recursion_component_sizes(derived, component, node_sizes, {}),
-        seed=seed,
-        flip_y=False,
+        return torch.empty((0, 2), dtype=torch.float32), (0.0, 0.0, 0.0, 0, 0)
+    if len(component) == 1:
+        return torch.zeros((1, 2), dtype=torch.float32), (0.0, 0.0, 0.0, 0, 0)
+    local_by_derived = {int(derived_index): index for index, derived_index in enumerate(component)}
+    port_alphas = {
+        local_by_derived[int(derived_index)]: float(derived.nodes[int(derived_index)].port_alpha)
+        for derived_index in component
+        if derived.nodes[int(derived_index)].kind == "port"
+        and derived.nodes[int(derived_index)].port_alpha is not None
+    }
+    component_edges = _fdp_recursion_component_edges(derived, component)
+    if port_alphas:
+        positions, xpms = _graphviz_fdp_tlayout_with_ports(
+            edge_index=component_edges,
+            num_nodes=len(component),
+            seed=seed,
+            port_alphas=port_alphas,
+        )
+    else:
+        positions, xpms = _graphviz_fdp_tlayout(
+            edge_index=component_edges,
+            num_nodes=len(component),
+            seed=seed,
+            edge_weights=None,
+        )
+    return (positions * _GRAPHVIZ_FDP_POINTS_PER_INCH).to(dtype=torch.float32), xpms
+
+
+def _fdp_recursion_xlayout_component(
+    derived: _FdpDerivedGraph,
+    component: Sequence[int],
+    local_positions: Mapping[int, torch.Tensor],
+    node_sizes: Optional[torch.Tensor],
+    child_layouts: Mapping[str, _FdpLevelLayout],
+    xpms: Tuple[float, float, float, int, int],
+) -> Dict[int, torch.Tensor]:
+    """Run Graphviz fdp ``xLayout`` after child clusters have final sizes.
+
+    Parameters
+    ----------
+    derived : _FdpDerivedGraph
+        Derived graph.
+    component : Sequence[int]
+        Derived component node indices.
+    local_positions : Mapping[int, torch.Tensor]
+        Post-``tLayout`` positions in points keyed by derived node index.
+    node_sizes : torch.Tensor, optional
+        Original node sizes with shape ``[N, 2]``.
+    child_layouts : Mapping[str, _FdpLevelLayout]
+        Already-laid-out child clusters keyed by cluster name.
+    xpms : tuple[float, float, float, int, int]
+        ``xLayout`` parameters returned by ``tLayout``.
+
+    Returns
+    -------
+    dict[int, torch.Tensor]
+        Updated positions in points keyed by derived node index. Port nodes are
+        retained unchanged so callers can keep one component-position mapping.
+    """
+    updated = {
+        int(index): position.detach().to(dtype=torch.float32, device="cpu").clone()
+        for index, position in local_positions.items()
+    }
+    active_component = [
+        int(index) for index in component if derived.nodes[int(index)].kind != "port"
+    ]
+    if len(active_component) <= 1:
+        return updated
+
+    active_positions = torch.stack([updated[index] for index in active_component])
+    active_positions_inches = (
+        active_positions.to(dtype=torch.float64) / _GRAPHVIZ_FDP_POINTS_PER_INCH
     )
+    active_sizes = _fdp_recursion_component_sizes(
+        derived=derived,
+        component=active_component,
+        node_sizes=node_sizes,
+        child_layouts=child_layouts,
+    )
+    active_positions_inches = _graphviz_fdp_xlayout(
+        positions=active_positions_inches,
+        edge_index=_fdp_recursion_component_edges(derived, active_component),
+        node_sizes=active_sizes,
+        edge_weights=None,
+        xpms=xpms,
+    )
+    active_positions_points = (active_positions_inches * _GRAPHVIZ_FDP_POINTS_PER_INCH).to(
+        dtype=torch.float32
+    )
+    for local_index, derived_index in enumerate(active_component):
+        updated[derived_index] = active_positions_points[local_index]
+    return updated
 
 
 def _fdp_recursion_expand_cluster_ports(
@@ -1421,8 +1774,9 @@ def _fdp_recursion_expand_cluster_ports(
 def _fdp_recursion_bbox_from_positions(
     positions: Mapping[int, torch.Tensor],
     node_sizes: Optional[torch.Tensor],
+    cluster_boxes: Mapping[str, Tuple[float, float, float, float]],
 ) -> Tuple[float, float, float, float]:
-    """Compute a bbox around original nodes.
+    """Compute a Graphviz ``compute_bb``-style content bbox.
 
     Parameters
     ----------
@@ -1430,24 +1784,31 @@ def _fdp_recursion_bbox_from_positions(
         Original node positions.
     node_sizes : torch.Tensor, optional
         Original node sizes with shape ``[N, 2]``.
+    cluster_boxes : Mapping[str, tuple[float, float, float, float]]
+        Already-computed child cluster boxes in the same coordinates.
 
     Returns
     -------
     tuple[float, float, float, float]
         Bounds as ``(x_min, y_min, x_max, y_max)``.
     """
-    if not positions:
-        return (0.0, 0.0, 0.0, 0.0)
     lower_parts: List[torch.Tensor] = []
     upper_parts: List[torch.Tensor] = []
     for node_index, position in positions.items():
-        if node_sizes is None:
-            size = torch.ones(2, dtype=torch.float32)
-        else:
-            size = node_sizes[int(node_index)].detach().to(dtype=torch.float32, device="cpu")
+        size = _graphviz_fdp_node_size_points(node_sizes, int(node_index))
         half = size / 2.0
         lower_parts.append(position.to(dtype=torch.float32, device="cpu") - half)
         upper_parts.append(position.to(dtype=torch.float32, device="cpu") + half)
+    for box in cluster_boxes.values():
+        lower_parts.append(torch.tensor([box[0], box[1]], dtype=torch.float32))
+        upper_parts.append(torch.tensor([box[2], box[3]], dtype=torch.float32))
+    if not lower_parts:
+        return (
+            0.0,
+            0.0,
+            _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES * _GRAPHVIZ_FDP_POINTS_PER_INCH,
+            _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES * _GRAPHVIZ_FDP_POINTS_PER_INCH,
+        )
     lower = torch.stack(lower_parts).min(dim=0).values
     upper = torch.stack(upper_parts).max(dim=0).values
     return (
@@ -1462,8 +1823,9 @@ def _fdp_recursion_shift_to_origin(
     positions: Mapping[int, torch.Tensor],
     node_sizes: Optional[torch.Tensor],
     cluster_boxes: Mapping[str, Tuple[float, float, float, float]],
+    is_root: bool,
 ) -> _FdpLevelLayout:
-    """Translate a recursive level so the bbox lower-left is the origin.
+    """Translate a recursive level using Graphviz fdp ``finalCC`` bbox math.
 
     Parameters
     ----------
@@ -1473,26 +1835,43 @@ def _fdp_recursion_shift_to_origin(
         Original node sizes with shape ``[N, 2]``.
     cluster_boxes : Mapping[str, tuple[float, float, float, float]]
         Cluster boxes in the same coordinates as ``positions``.
+    is_root : bool
+        Whether this level is the root graph. Non-root levels receive the
+        default cluster margin and top-label border that Graphviz stores in
+        ``GD_border`` after ``do_graph_label``.
 
     Returns
     -------
     _FdpLevelLayout
         Shifted level layout.
     """
-    x_min, y_min, x_max, y_max = _fdp_recursion_bbox_from_positions(positions, node_sizes)
-    shift = torch.tensor([-x_min, -y_min], dtype=torch.float32)
+    x_min, y_min, x_max, y_max = _fdp_recursion_bbox_from_positions(
+        positions=positions,
+        node_sizes=node_sizes,
+        cluster_boxes=cluster_boxes,
+    )
+    is_empty = not positions and not cluster_boxes
+    margin = 0.0 if is_root or is_empty else _GRAPHVIZ_FDP_CLUSTER_MARGIN_POINTS
+    bottom_border = 0.0
+    top_border = 0.0 if is_root or is_empty else _GRAPHVIZ_FDP_CLUSTER_LABEL_HEIGHT_POINTS
+    shift = torch.tensor([margin - x_min, margin + bottom_border - y_min], dtype=torch.float32)
     shifted_positions = {
         node_index: position.to(dtype=torch.float32, device="cpu") + shift
         for node_index, position in positions.items()
     }
     shifted_boxes = {
-        name: (box[0] - x_min, box[1] - y_min, box[2] - x_min, box[3] - y_min)
+        name: (
+            box[0] + float(shift[0].item()),
+            box[1] + float(shift[1].item()),
+            box[2] + float(shift[0].item()),
+            box[3] + float(shift[1].item()),
+        )
         for name, box in cluster_boxes.items()
     }
     return _FdpLevelLayout(
         positions=shifted_positions,
-        width=max(x_max - x_min, 0.0),
-        height=max(y_max - y_min, 0.0),
+        width=max(x_max - x_min + 2.0 * margin, 0.0),
+        height=max(y_max - y_min + 2.0 * margin + bottom_border + top_border, 0.0),
         cluster_boxes=shifted_boxes,
     )
 
@@ -1570,11 +1949,9 @@ def _fdp_recursion_layout_level(
     component_boxes: List[Tuple[float, float]] = []
 
     for component in components:
-        local_tensor = _fdp_recursion_layout_component(
+        local_tensor, xpms = _fdp_recursion_tlayout_component(
             derived=derived,
             component=component,
-            node_sizes=node_sizes,
-            steps=steps,
             seed=seed,
         )
         local_positions = {
@@ -1602,13 +1979,30 @@ def _fdp_recursion_layout_level(
                 ports=child_ports,
             )
 
-        sizes = _fdp_recursion_component_sizes(derived, component, node_sizes, child_layouts)
-        if sizes.numel() == 0:
+        local_positions = _fdp_recursion_xlayout_component(
+            derived=derived,
+            component=component,
+            local_positions=local_positions,
+            node_sizes=node_sizes,
+            child_layouts=child_layouts,
+            xpms=xpms,
+        )
+        active_component = [
+            int(index) for index in component if derived.nodes[int(index)].kind != "port"
+        ]
+        sizes = _fdp_recursion_component_sizes(
+            derived,
+            active_component,
+            node_sizes,
+            child_layouts,
+        )
+        if sizes.numel() == 0 or not active_component:
             component_boxes.append((0.0, 0.0))
         else:
             half_sizes = sizes / 2.0
-            lower = local_tensor - half_sizes
-            upper = local_tensor + half_sizes
+            active_tensor = torch.stack([local_positions[index] for index in active_component])
+            lower = active_tensor - half_sizes
+            upper = active_tensor + half_sizes
             component_boxes.append(
                 (
                     max(float((upper[:, 0].max() - lower[:, 0].min()).item()), 0.0),
@@ -1652,7 +2046,12 @@ def _fdp_recursion_layout_level(
             for node_index, child_position in child.positions.items():
                 final_positions[int(node_index)] = child_position + child_offset
 
-    return _fdp_recursion_shift_to_origin(final_positions, node_sizes, cluster_boxes)
+    return _fdp_recursion_shift_to_origin(
+        positions=final_positions,
+        node_sizes=node_sizes,
+        cluster_boxes=cluster_boxes,
+        is_root=cluster_name is None,
+    )
 
 
 def graphviz_fdp_fidelity(
@@ -1929,6 +2328,7 @@ def _graphviz_fdp_apply_tlayout_repulsion(
     source: int,
     target: int,
     phase: int,
+    port_indices: Optional[frozenset[int]] = None,
 ) -> None:
     """Apply Graphviz ``tLayout`` pair repulsion.
 
@@ -1944,6 +2344,9 @@ def _graphviz_fdp_apply_tlayout_repulsion(
         Second node index.
     phase : int
         Iteration counter for deterministic zero-distance fallback.
+    port_indices : frozenset[int], optional
+        Local port node indices. Graphviz multiplies port-port repulsion by
+        ten in recursive cluster layouts.
 
     Returns
     -------
@@ -1958,6 +2361,8 @@ def _graphviz_fdp_apply_tlayout_repulsion(
         dist2 = x_delta * x_delta + y_delta * y_delta
     dist = math.sqrt(dist2)
     force = _GRAPHVIZ_FDP_DEFAULT_K * _GRAPHVIZ_FDP_DEFAULT_K / (dist * dist2)
+    if port_indices is not None and source in port_indices and target in port_indices:
+        force *= 10.0
     displacement[target, 0] += x_delta * force
     displacement[target, 1] += y_delta * force
     displacement[source, 0] -= x_delta * force
