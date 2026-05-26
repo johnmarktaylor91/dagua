@@ -45,8 +45,9 @@ def build_gem_pipeline(
         fidelity branch was moved to scalar double state.
     Known divergences:
         - Larger graphs still use Dagua's historical batched approximation.
-        - A topology-sensitive residual remains on star seed 43, consistent
-          with sub-micro differences amplifying after roughly 600 node updates.
+        - Star seed 43 keeps a topology-sensitive residual: a raw impulse
+          delta first appears at update 45, crosses `1e-6` in coordinates at
+          update 402, and crosses `1e-3` at update 624.
 
     Parameters
     ----------
