@@ -69,6 +69,62 @@ def _fdp_trace_positions(
             )
 
 
+def _fdp_trace_xlayout_event(
+    phase: str,
+    iteration: int,
+    try_index: int,
+    cnt: int,
+    overlaps: int,
+    x_k: float,
+    temperature: float,
+    positions: torch.Tensor,
+    sizes_in_inches: torch.Tensor,
+    edge_count: int,
+) -> None:
+    """Append one Graphviz-fidelity ``xLayout`` termination checkpoint.
+
+    Parameters
+    ----------
+    phase : str
+        Event phase matching the instrumented Graphviz trace.
+    iteration : int
+        Flattened ``xLayout`` iteration index.
+    try_index : int
+        Current outer try-loop index.
+    cnt : int
+        Value corresponding to Graphviz's try-loop counter.
+    overlaps : int
+        Pairwise overlap count observed for this phase.
+    x_k : float
+        Current Graphviz ``xLayout`` spring constant.
+    temperature : float
+        Current cooling temperature.
+    positions : torch.Tensor
+        Position tensor in Graphviz internal inches with shape ``[N, 2]``.
+    sizes_in_inches : torch.Tensor
+        Graphviz ``xLayout`` node sizes including separation with shape ``[N, 2]``.
+    edge_count : int
+        Number of local edges used by ``xLayout``.
+
+    Returns
+    -------
+    None
+        Appends trace lines to ``/tmp/dagua_fdp_trace.log``.
+    """
+    cpu_positions = positions.detach().to(device="cpu", dtype=torch.float64)
+    cpu_sizes = sizes_in_inches.detach().to(device="cpu", dtype=torch.float64)
+    lower = (cpu_positions - cpu_sizes / 2.0).min(dim=0).values
+    upper = (cpu_positions + cpu_sizes / 2.0).max(dim=0).values
+    with open(_FDP_TRACE_PATH, "a", encoding="utf-8") as handle:
+        handle.write(
+            f"XLAYOUT {phase} iter={iteration} try={try_index} cnt={cnt} "
+            f"ov={overlaps} K={x_k:.17g} temp={temperature:.17g} "
+            f"bb={float(lower[0].item()):.17g},{float(lower[1].item()):.17g},"
+            f"{float(upper[0].item()):.17g},{float(upper[1].item()):.17g} "
+            f"nodes={positions.shape[0]} edges={edge_count}\n"
+        )
+
+
 @dataclass(frozen=True)
 class _FdpObstacleBox:
     """Axis-aligned obstacle box used by Graphviz fdp compound routing.
@@ -890,6 +946,7 @@ _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES = 0.75
 _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES = 0.5
 _GRAPHVIZ_FDP_CLUSTER_MARGIN_POINTS = 8.0
 _GRAPHVIZ_FDP_CLUSTER_LABEL_HEIGHT_POINTS = 18.0
+_GRAPHVIZ_FDP_CLUSTER_FINALCC_LABEL_HEIGHT_POINTS = 24.0
 
 
 class _GraphvizDrand48:
@@ -1936,7 +1993,7 @@ def _fdp_recursion_shift_to_origin(
     is_empty = not positions and not cluster_boxes
     margin = 0.0 if is_root or is_empty else _GRAPHVIZ_FDP_CLUSTER_MARGIN_POINTS
     bottom_border = 0.0
-    top_border = 0.0 if is_root or is_empty else _GRAPHVIZ_FDP_CLUSTER_LABEL_HEIGHT_POINTS
+    top_border = 0.0 if is_root or is_empty else _GRAPHVIZ_FDP_CLUSTER_FINALCC_LABEL_HEIGHT_POINTS
     shift = torch.tensor([margin - x_min, margin + bottom_border - y_min], dtype=torch.float32)
     shifted_positions = {
         node_index: position.to(dtype=torch.float32, device="cpu") + shift
@@ -2858,6 +2915,19 @@ def _graphviz_fdp_xlayout(
     sizes_in_inches = _graphviz_fdp_node_sizes_in_inches(node_sizes, num_nodes)
     outgoing, edges = _graphviz_fdp_edge_lists(edge_index, num_nodes, edge_weights)
     ov = _graphviz_fdp_count_overlaps(positions, sizes_in_inches)
+    if node_ids is not None:
+        _fdp_trace_xlayout_event(
+            "initial",
+            -1,
+            0,
+            0,
+            ov,
+            xpms[1],
+            0.0,
+            positions,
+            sizes_in_inches,
+            len(edges),
+        )
     if ov == 0:
         return positions
 
@@ -2871,10 +2941,36 @@ def _graphviz_fdp_xlayout(
         k2 = x_k * x_k
         x_overlap_force = x_c * k2
         x_nonoverlap_force = len(edges) * x_overlap_force * 2.0 / (num_nodes * (num_nodes - 1))
+        if node_ids is not None:
+            _fdp_trace_xlayout_event(
+                "try_start",
+                try_index * x_loopcnt,
+                try_index,
+                try_index,
+                ov,
+                x_k,
+                x_t0,
+                positions,
+                sizes_in_inches,
+                len(edges),
+            )
         for iteration in range(x_loopcnt):
             temperature = x_t0 * (x_num_iters - iteration) / x_num_iters
             if temperature <= 0.0:
                 break
+            if node_ids is not None:
+                _fdp_trace_xlayout_event(
+                    "before_adjust",
+                    try_index * x_loopcnt + iteration,
+                    try_index,
+                    try_index,
+                    ov,
+                    x_k,
+                    temperature,
+                    positions,
+                    sizes_in_inches,
+                    len(edges),
+                )
             displacement = torch.zeros_like(positions)
             overlaps_this_pass = 0
             for source in range(num_nodes):
@@ -2898,6 +2994,19 @@ def _graphviz_fdp_xlayout(
                         x_k=x_k,
                     )
             ov = overlaps_this_pass
+            if node_ids is not None:
+                _fdp_trace_xlayout_event(
+                    "after_adjust",
+                    try_index * x_loopcnt + iteration,
+                    try_index,
+                    try_index,
+                    ov,
+                    x_k,
+                    temperature,
+                    positions,
+                    sizes_in_inches,
+                    len(edges),
+                )
             if ov == 0:
                 break
             _graphviz_fdp_update_positions(positions, displacement, temperature)
@@ -2909,6 +3018,19 @@ def _graphviz_fdp_xlayout(
                     positions,
                 )
         x_k += base_k
+        if node_ids is not None:
+            _fdp_trace_xlayout_event(
+                "try_end",
+                (try_index + 1) * x_loopcnt - 1,
+                try_index,
+                try_index + 1,
+                ov,
+                x_k,
+                0.0,
+                positions,
+                sizes_in_inches,
+                len(edges),
+            )
     return positions
 
 
@@ -3022,7 +3144,7 @@ def _graphviz_grid_count(width: float, step: int) -> int:
 
 
 def _graphviz_cell(value: float, step: int) -> int:
-    """Return the rounded Graphviz grid cell containing a coordinate.
+    """Return the Graphviz grid cell containing a coordinate.
 
     Parameters
     ----------
@@ -3034,11 +3156,12 @@ def _graphviz_cell(value: float, step: int) -> int:
     Returns
     -------
     int
-        Rounded grid-cell coordinate.
+        Grid-cell coordinate using Graphviz's C integer truncation.
     """
-    if value >= 0.0:
-        return _c_round(value / step)
-    return _c_round(((value + 1.0) / step) - 1.0)
+    integer_value = int(value)
+    if integer_value >= 0:
+        return _c_int_div(integer_value, step)
+    return _c_int_div(integer_value + 1, step) - 1
 
 
 def _graphviz_pack_step(
