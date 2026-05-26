@@ -299,6 +299,7 @@ def build_stress_sgd_pipeline(
             InitializeStressSGDState(
                 trace_every=trace_every,
                 reference_disconnected_policy=fidelity_mode,
+                independent_shuffle_rng=fidelity_mode,
             ),
             PrepareStressSGDTerms(
                 max_exact_nodes=max_exact_nodes,

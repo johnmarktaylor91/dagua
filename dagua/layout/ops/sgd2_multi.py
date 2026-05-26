@@ -11,6 +11,7 @@ orchestrate the call sequence.
 from __future__ import annotations
 
 import math
+import random
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Dict, Optional, Tuple
@@ -276,6 +277,8 @@ def _set_seed(seed: int) -> None:
         The global RNG state is updated in-place.
     """
     torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
@@ -295,22 +298,37 @@ def _clean_undirected_edges(edge_index: torch.Tensor, device: torch.device) -> t
     torch.Tensor
         Unique undirected edges with shape ``[2, E_unique]``.
     """
-    edges = edge_index.to(device=device, dtype=torch.long)
-    if edges.numel() == 0:
+    if edge_index.numel() == 0:
         return torch.empty((2, 0), dtype=torch.long, device=device)
 
-    src = edges[0]
-    dst = edges[1]
-    non_self = src != dst
-    src = src[non_self]
-    dst = dst[non_self]
-    if src.numel() == 0:
-        return torch.empty((2, 0), dtype=torch.long, device=device)
+    edges = edge_index.detach().cpu().to(dtype=torch.long)
+    adjacency: list[dict[int, None]] = []
+    num_nodes = int(edges.max().item()) + 1 if edges.numel() > 0 else 0
+    adjacency = [dict() for _ in range(num_nodes)]
+    for edge_idx in range(edges.shape[1]):
+        source = int(edges[0, edge_idx].item())
+        target = int(edges[1, edge_idx].item())
+        if source == target:
+            continue
+        max_endpoint = max(source, target)
+        while len(adjacency) <= max_endpoint:
+            adjacency.append({})
+        adjacency[source].setdefault(target, None)
+        adjacency[target].setdefault(source, None)
 
-    lower = torch.minimum(src, dst)
-    upper = torch.maximum(src, dst)
-    unique_pairs = torch.unique(torch.stack([lower, upper], dim=1), dim=0)
-    return unique_pairs.transpose(0, 1).contiguous()
+    ordered_edges: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for source, neighbors in enumerate(adjacency):
+        for target in neighbors:
+            key = (min(source, target), max(source, target))
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered_edges.append((source, target))
+
+    if not ordered_edges:
+        return torch.empty((2, 0), dtype=torch.long, device=device)
+    return torch.tensor(ordered_edges, dtype=torch.long, device=device).transpose(0, 1).contiguous()
 
 
 def _build_adjacency(
@@ -554,15 +572,18 @@ def _build_incident_edge_pairs(
         if degree < 2:
             continue
         neighbor_ids = [neighbor for neighbor, _ in neighbors]
-        for left_index in range(degree - 1):
-            for right_index in range(left_index + 1, degree):
+        incident_edges = [(degree, node, neighbor) for neighbor in neighbor_ids]
+        for left_edge in incident_edges:
+            for right_edge in incident_edges:
+                if left_edge >= right_edge:
+                    continue
                 pairs.append(
                     (
                         degree,
-                        node,
-                        neighbor_ids[left_index],
-                        node,
-                        neighbor_ids[right_index],
+                        left_edge[1],
+                        left_edge[2],
+                        right_edge[1],
+                        right_edge[2],
                     )
                 )
     if not pairs:
@@ -588,18 +609,19 @@ def _build_non_incident_edge_pairs(edges: torch.Tensor) -> torch.Tensor:
     if edge_count < 2:
         return torch.empty((4, 0), dtype=torch.long, device=edges.device)
 
-    pair_indices = torch.triu_indices(edge_count, edge_count, offset=1, device=edges.device)
-    left = edges[:, pair_indices[0]]
-    right = edges[:, pair_indices[1]]
-    non_incident = (
-        (left[0] != right[0])
-        & (left[0] != right[1])
-        & (left[1] != right[0])
-        & (left[1] != right[1])
-    )
-    if not bool(non_incident.any().item()):
+    edge_list = [
+        (int(edges[0, edge_idx].item()), int(edges[1, edge_idx].item()))
+        for edge_idx in range(edge_count)
+    ]
+    pairs = [
+        (*left, *right)
+        for left in edge_list
+        for right in edge_list
+        if left < right and len({*left, *right}) == 4
+    ]
+    if not pairs:
         return torch.empty((4, 0), dtype=torch.long, device=edges.device)
-    return torch.cat([left[:, non_incident], right[:, non_incident]], dim=0)
+    return torch.tensor(pairs, dtype=torch.long, device=edges.device).transpose(0, 1).contiguous()
 
 
 def _prepare_state(
@@ -923,17 +945,29 @@ class _CyclicSampler:
         """
         self._total = total
         self._device = device
-        self._perm = torch.randperm(total, device=device)
+        self._perm = torch.empty((0,), dtype=torch.long, device=device)
         self._offset = 0
 
     def sample(self, batch_size: int) -> torch.Tensor:
-        """Return the next ``batch_size`` indices, reshuffling on epoch boundary."""
+        """Return the next DataLoader-style shuffled mini-batch.
+
+        Parameters
+        ----------
+        batch_size : int
+            Requested maximum batch size.
+
+        Returns
+        -------
+        torch.Tensor
+            Index tensor with shape ``[B]`` where ``B`` may be smaller than
+            ``batch_size`` for the final batch in an epoch.
+        """
         if self._total <= 0:
             return torch.empty((0,), dtype=torch.long, device=self._device)
-        bs = min(batch_size, self._total)
-        if self._offset + bs > self._total:
+        if self._perm.numel() == 0 or self._offset >= self._total:
             self._perm = torch.randperm(self._total, device=self._device)
             self._offset = 0
+        bs = min(batch_size, self._total - self._offset)
         out = self._perm[self._offset : self._offset + bs]
         self._offset += bs
         return out
@@ -965,7 +999,7 @@ def _stress_loss(
     """
     if pair_batch.numel() == 0:
         return pos.sum() * 0.0
-    lengths = torch.linalg.norm(pos[pair_batch[0]] - pos[pair_batch[1]], dim=1)
+    lengths = nn.PairwiseDistance()(pos[pair_batch[0]], pos[pair_batch[1]])
     return (pair_weights * (lengths - pair_distances).square()).mean()
 
 
@@ -992,7 +1026,7 @@ def _ideal_edge_length_loss(
     """
     if edge_batch.numel() == 0:
         return pos.sum() * 0.0
-    lengths = torch.linalg.norm(pos[edge_batch[0]] - pos[edge_batch[1]], dim=1)
+    lengths = nn.PairwiseDistance()(pos[edge_batch[0]], pos[edge_batch[1]])
     safe_target = max(target, _EPS)
     return (((lengths - safe_target) / safe_target).square()).mean()
 
@@ -1524,10 +1558,10 @@ def _aspect_ratio_loss(pos: torch.Tensor, target: float) -> torch.Tensor:
     if pos.shape[0] <= 1:
         return pos.sum() * 0.0
     centered = pos - pos.mean(dim=0, keepdim=True)
-    _, singular_values, _ = torch.linalg.svd(centered, full_matrices=False)
+    singular_values = torch.svd(centered).S
     if singular_values.numel() < 2:
         return pos.sum() * 0.0
-    ratio = (singular_values[1] / singular_values[0].clamp(min=_EPS)).clamp(_EPS, 1.0 - _EPS)
+    ratio = singular_values[1] / singular_values[0]
     target_tensor = torch.tensor(
         float(min(max(target, 0.0), 1.0)),
         device=pos.device,
@@ -1592,7 +1626,7 @@ def _vertex_resolution_loss(
     """
     if pair_batch.numel() == 0:
         return pos.sum() * 0.0
-    distances = torch.linalg.norm(pos[pair_batch[0]] - pos[pair_batch[1]], dim=1)
+    distances = nn.PairwiseDistance()(pos[pair_batch[0]], pos[pair_batch[1]])
     dmax = distances.max().detach()
     target = 1.0 / math.sqrt(float(max(pos.shape[0], 1)))
     target_dist = torch.as_tensor(target, device=pos.device, dtype=pos.dtype) * dmax
@@ -2228,7 +2262,25 @@ class _RunSGD2MultiOptimization(Op):
         active_names = state.extras["sgd2_active_names"]
         num_nodes = problem.num_nodes
 
-        # Build cyclic samplers -- matches classic exactly
+        # Initialize positions -- matches classic: randn * sqrt(N)
+        positions = torch.nn.Parameter(
+            torch.randn((num_nodes, 2), device=device, dtype=torch.float32)
+            * math.sqrt(float(num_nodes))
+        )
+
+        # The reference constructs the neural detector for every GD2 instance,
+        # even when no crossing criterion is active.  Preserving that RNG
+        # consumption keeps later DataLoader-style permutations synchronized.
+        crossing_detector = _CrossingDetector().to(device=device)
+        crossing_state = _CrossingLossState(
+            detector=crossing_detector,
+            optimizer=torch.optim.Adam(crossing_detector.parameters(), lr=_CROSSING_DETECTOR_LR),
+            train_loss=nn.BCELoss(),
+            position_loss=nn.BCELoss(reduction="sum"),
+        )
+
+        # Build cyclic samplers after model initialization, matching the point
+        # where the reference creates shuffled DataLoader iterators.
         samplers: Dict[str, _CyclicSampler] = {}
         for sname in schedules:
             if sname in ("stress", "vertex_resolution") and prepared.stress_pairs is not None:
@@ -2244,25 +2296,6 @@ class _RunSGD2MultiOptimization(Op):
                 and prepared.non_incident_edge_pairs is not None
             ):
                 samplers[sname] = _CyclicSampler(prepared.non_incident_edge_pairs.shape[1], device)
-
-        # Initialize positions -- matches classic: randn * sqrt(N)
-        positions = torch.nn.Parameter(
-            torch.randn((num_nodes, 2), device=device, dtype=torch.float32)
-            * math.sqrt(float(num_nodes))
-        )
-
-        # Crossing detector state
-        crossing_state = None
-        if "crossings" in active_names:
-            crossing_detector = _CrossingDetector().to(device=device)
-            crossing_state = _CrossingLossState(
-                detector=crossing_detector,
-                optimizer=torch.optim.Adam(
-                    crossing_detector.parameters(), lr=_CROSSING_DETECTOR_LR
-                ),
-                train_loss=nn.BCELoss(),
-                position_loss=nn.BCELoss(reduction="sum"),
-            )
 
         # Vertex resolution state
         vertex_resolution_state = None
