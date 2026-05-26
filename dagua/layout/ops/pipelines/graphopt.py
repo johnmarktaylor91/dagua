@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import math
+from dataclasses import dataclass, field
+from typing import Any, ClassVar, Optional, Tuple, cast
 
 import torch
 
-from dagua.layout.ops.base import Pipeline, Repeat
+from dagua.layout.ops.base import Op, Pipeline, Repeat
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig
 from dagua.layout.ops.force import (
     GraphOptIteration,
@@ -29,6 +31,326 @@ from dagua.layout.ops.state import (
     RuntimeContext,
     SolveState,
 )
+
+_GRAPHOPT_COULOMBS_CONSTANT = 8_987_500_000.0
+_GRAPHOPT_MAX_REPULSION_DISTANCE = 500.0
+_GRAPHOPT_SPRING_EDGES_KEY = "graphopt_spring_edges"
+
+
+def _igraph_axis_forces(
+    positions: list[list[float]],
+    directed_force: float,
+    distance: float,
+    other_node: int,
+    this_node: int,
+) -> tuple[float, float]:
+    """Resolve igraph GraphOpt's per-axis force components.
+
+    Parameters
+    ----------
+    positions : list[list[float]]
+        Current coordinates with shape ``[N, 2]`` represented as Python
+        doubles.
+    directed_force : float
+        Scalar force magnitude in igraph's signed convention.
+    distance : float
+        Euclidean distance between ``this_node`` and ``other_node``.
+    other_node : int
+        Node applying the force.
+    this_node : int
+        Node receiving the force.
+
+    Returns
+    -------
+    tuple[float, float]
+        X and Y force components to add to ``this_node``.
+    """
+    y_distance = positions[other_node][1] - positions[this_node][1]
+    if y_distance < 0.0:
+        y_distance = -y_distance
+    y_force = -1.0 * ((directed_force * y_distance) / distance)
+
+    x_distance = positions[other_node][0] - positions[this_node][0]
+    if x_distance < 0.0:
+        x_distance = -x_distance
+    x_force = -1.0 * ((directed_force * x_distance) / distance)
+
+    if positions[other_node][0] < positions[this_node][0]:
+        x_force = x_force * -1.0
+    if positions[other_node][1] < positions[this_node][1]:
+        y_force = y_force * -1.0
+    return x_force, y_force
+
+
+@dataclass(frozen=True)
+class _GraphOptScalarIterationConfig:
+    """Configuration for the igraph-order scalar GraphOpt iteration.
+
+    Parameters
+    ----------
+    node_charge : float, default=0.001
+        Coulomb repulsion charge term.
+    node_mass : float, default=30.0
+        Shared mass in the explicit displacement step.
+    spring_length : float, default=0.0
+        Rest length used by explicit springs.
+    spring_constant : float, default=1.0
+        Spring constant used by explicit edge forces.
+    max_sa_movement : float, default=5.0
+        Absolute displacement clamp per axis.
+    """
+
+    node_charge: float = 0.001
+    node_mass: float = 30.0
+    spring_length: float = 0.0
+    spring_constant: float = 1.0
+    max_sa_movement: float = 5.0
+
+
+@dataclass(frozen=True)
+class _GraphOptScalarIteration(Op):
+    """Run one GraphOpt step using igraph C's scalar accumulation order.
+
+    Notes
+    -----
+    This op is intentionally used only by ``fidelity_mode``. The tensor op is
+    faster, but igraph's high-gain parameter variants amplify ULP-level drift
+    from vectorized reductions over hundreds of explicit Euler steps.
+    """
+
+    config: _GraphOptScalarIterationConfig = field(default_factory=_GraphOptScalarIterationConfig)
+
+    name: ClassVar[str] = "graphopt_scalar_iteration"
+    reads: ClassVar[Tuple[str, ...]] = ("pos", f"extras.{_GRAPHOPT_SPRING_EDGES_KEY}")
+    writes: ClassVar[Tuple[str, ...]] = ("pos", "forces")
+    requires: ClassVar[Tuple[str, ...]] = ("pos",)
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Update positions by one igraph-order scalar GraphOpt iteration.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state with current positions and prepared edge cache.
+        ctx : RuntimeContext
+            Execution context. The scalar fidelity path is CPU-only.
+
+        Returns
+        -------
+        SolveState
+            State with updated ``pos`` and the most recent force buffer.
+        """
+        del problem, ctx
+
+        if state.pos is None:
+            raise ValueError("GraphOpt scalar iteration requires state.pos to be set.")
+
+        spring_edges = state.extras.get(_GRAPHOPT_SPRING_EDGES_KEY)
+        if not isinstance(spring_edges, torch.Tensor):
+            raise ValueError(
+                "GraphOpt scalar iteration requires state.extras['graphopt_spring_edges']."
+            )
+
+        positions_tensor = state.pos.detach().to(device="cpu", dtype=torch.float64).contiguous()
+        positions = cast(list[list[float]], positions_tensor.tolist())
+        node_count = len(positions)
+        pending_x = [0.0] * node_count
+        pending_y = [0.0] * node_count
+
+        if self.config.node_charge != 0.0:
+            for this_node in range(node_count):
+                for other_node in range(this_node + 1, node_count):
+                    distance = self._distance_between(
+                        positions=positions,
+                        first_node=this_node,
+                        second_node=other_node,
+                    )
+                    if distance != 0.0 and distance < _GRAPHOPT_MAX_REPULSION_DISTANCE:
+                        self._apply_electrical_force(
+                            positions=positions,
+                            pending_x=pending_x,
+                            pending_y=pending_y,
+                            other_node=other_node,
+                            this_node=this_node,
+                            distance=distance,
+                        )
+
+        edge_source = spring_edges[0].tolist()
+        edge_target = spring_edges[1].tolist()
+        for this_node, other_node in zip(edge_source, edge_target):
+            self._apply_spring_force(
+                positions=positions,
+                pending_x=pending_x,
+                pending_y=pending_y,
+                other_node=int(other_node),
+                this_node=int(this_node),
+            )
+
+        for this_node in range(node_count):
+            x_movement = pending_x[this_node] / float(self.config.node_mass)
+            if x_movement > self.config.max_sa_movement:
+                x_movement = self.config.max_sa_movement
+            elif x_movement < -self.config.max_sa_movement:
+                x_movement = -self.config.max_sa_movement
+
+            y_movement = pending_y[this_node] / float(self.config.node_mass)
+            if y_movement > self.config.max_sa_movement:
+                y_movement = self.config.max_sa_movement
+            elif y_movement < -self.config.max_sa_movement:
+                y_movement = -self.config.max_sa_movement
+
+            positions[this_node][0] += x_movement
+            positions[this_node][1] += y_movement
+
+        state.forces = torch.tensor(
+            [[pending_x[index], pending_y[index]] for index in range(node_count)],
+            dtype=torch.float64,
+        )
+        state.pos = torch.tensor(positions, dtype=torch.float64)
+        return state
+
+    def _distance_between(
+        self,
+        positions: list[list[float]],
+        first_node: int,
+        second_node: int,
+    ) -> float:
+        """Compute igraph GraphOpt's Euclidean node distance.
+
+        Parameters
+        ----------
+        positions : list[list[float]]
+            Current coordinates with shape ``[N, 2]``.
+        first_node : int
+            First node index.
+        second_node : int
+            Second node index.
+
+        Returns
+        -------
+        float
+            Euclidean distance between the two nodes.
+        """
+        diff_x = positions[first_node][0] - positions[second_node][0]
+        diff_y = positions[first_node][1] - positions[second_node][1]
+        return math.sqrt(diff_x * diff_x + diff_y * diff_y)
+
+    def _apply_electrical_force(
+        self,
+        positions: list[list[float]],
+        pending_x: list[float],
+        pending_y: list[float],
+        other_node: int,
+        this_node: int,
+        distance: float,
+    ) -> None:
+        """Apply igraph GraphOpt's Coulomb force to pending force buffers.
+
+        Parameters
+        ----------
+        positions : list[list[float]]
+            Current coordinates with shape ``[N, 2]``.
+        pending_x : list[float]
+            Mutable pending x-force vector with shape ``[N]``.
+        pending_y : list[float]
+            Mutable pending y-force vector with shape ``[N]``.
+        other_node : int
+            Node applying the force.
+        this_node : int
+            Node receiving the force.
+        distance : float
+            Euclidean distance between the two nodes.
+
+        Returns
+        -------
+        None
+            Force buffers are updated in place.
+        """
+        directed_force = _GRAPHOPT_COULOMBS_CONSTANT * (
+            (float(self.config.node_charge) * float(self.config.node_charge))
+            / (distance * distance)
+        )
+        x_force, y_force = _igraph_axis_forces(
+            positions=positions,
+            directed_force=directed_force,
+            distance=distance,
+            other_node=other_node,
+            this_node=this_node,
+        )
+        pending_x[this_node] += x_force
+        pending_y[this_node] += y_force
+        pending_x[other_node] -= x_force
+        pending_y[other_node] -= y_force
+
+    def _apply_spring_force(
+        self,
+        positions: list[list[float]],
+        pending_x: list[float],
+        pending_y: list[float],
+        other_node: int,
+        this_node: int,
+    ) -> None:
+        """Apply igraph GraphOpt's Hooke spring force to pending buffers.
+
+        Parameters
+        ----------
+        positions : list[list[float]]
+            Current coordinates with shape ``[N, 2]``.
+        pending_x : list[float]
+            Mutable pending x-force vector with shape ``[N]``.
+        pending_y : list[float]
+            Mutable pending y-force vector with shape ``[N]``.
+        other_node : int
+            Edge target node applying the spring force.
+        this_node : int
+            Edge source node receiving the spring force.
+
+        Returns
+        -------
+        None
+            Force buffers are updated in place.
+        """
+        distance = self._distance_between(
+            positions=positions,
+            first_node=other_node,
+            second_node=this_node,
+        )
+        if distance == 0.0:
+            return
+
+        displacement = distance - float(self.config.spring_length)
+        if displacement < 0.0:
+            displacement = -displacement
+        directed_force = -1.0 * float(self.config.spring_constant) * displacement
+
+        if distance == float(self.config.spring_length):
+            x_force = 0.0
+            y_force = 0.0
+        else:
+            x_force, y_force = _igraph_axis_forces(
+                positions=positions,
+                directed_force=directed_force,
+                distance=distance,
+                other_node=other_node,
+                this_node=this_node,
+            )
+            if distance < float(self.config.spring_length):
+                x_force = -1.0 * x_force
+                y_force = -1.0 * y_force
+            x_force = 0.5 * x_force
+            y_force = 0.5 * y_force
+
+        pending_x[this_node] += x_force
+        pending_y[this_node] += y_force
+        pending_x[other_node] -= x_force
+        pending_y[other_node] -= y_force
 
 
 def build_graphopt_pipeline(
@@ -104,15 +426,25 @@ def build_graphopt_pipeline(
         raise ValueError("max_sa_movement must be non-negative.")
 
     resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
-    iteration = GraphOptIteration(
-        config=GraphOptIterationConfig(
-            node_charge=node_charge,
-            node_mass=node_mass,
-            spring_length=spring_length,
-            spring_constant=spring_constant,
-            max_sa_movement=max_sa_movement,
-        )
+    iteration_config = GraphOptIterationConfig(
+        node_charge=node_charge,
+        node_mass=node_mass,
+        spring_length=spring_length,
+        spring_constant=spring_constant,
+        max_sa_movement=max_sa_movement,
     )
+    scalar_iteration_config = _GraphOptScalarIterationConfig(
+        node_charge=node_charge,
+        node_mass=node_mass,
+        spring_length=spring_length,
+        spring_constant=spring_constant,
+        max_sa_movement=max_sa_movement,
+    )
+    iteration: Op
+    if fidelity_mode:
+        iteration = _GraphOptScalarIteration(config=scalar_iteration_config)
+    else:
+        iteration = GraphOptIteration(config=iteration_config)
 
     return Pipeline(
         [
@@ -130,7 +462,11 @@ def build_graphopt_pipeline(
                 ],
             ),
             GraphOptFinalizePositions(
-                output_dtype=resolved_dtype if fidelity_mode else torch.float32
+                output_dtype=(
+                    resolved_dtype
+                    if fidelity_mode and fidelity_dtype is not None
+                    else torch.float32
+                )
             ),
         ],
         name="graphopt_pipeline",
@@ -217,7 +553,6 @@ def layout_graphopt_pipeline(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
 
-    resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,
@@ -237,7 +572,7 @@ def layout_graphopt_pipeline(
         spring_constant=spring_constant,
         max_sa_movement=max_sa_movement,
         fidelity_mode=fidelity_mode,
-        fidelity_dtype=resolved_dtype,
+        fidelity_dtype=fidelity_dtype,
     ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("GraphOpt pipeline did not produce final positions.")
