@@ -14,6 +14,15 @@ from scipy import optimize, sparse
 from scipy.sparse import csgraph
 from scipy.sparse import linalg as sparse_linalg
 
+try:
+    from numba import njit as _numba_njit
+    from numba import prange as _numba_prange
+    from numba import types as _numba_types
+except ImportError:
+    _numba_njit = None
+    _numba_prange = range
+    _numba_types = None
+
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import (
     layout_device,
@@ -55,6 +64,7 @@ _NEGATIVE_SAMPLE_RATE_KEY = "umap_negative_sample_rate"
 _GAMMA_KEY = "umap_gamma"
 _MIN_DIST_KEY = "umap_min_dist"
 _SPREAD_KEY = "umap_spread"
+_OPTIMIZER_RNG_STATE_KEY = "umap_optimizer_rng_state"
 
 
 @dataclass(frozen=True)
@@ -333,67 +343,95 @@ def _symmetrized_fuzzy_graph(
     sigmas: torch.Tensor,
     rhos: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build the symmetrized fuzzy simplicial set used by graph UMAP."""
-    directed_weights: dict[tuple[int, int], float] = {}
-    num_nodes, num_neighbors = knn_indices.shape
+    """Build the symmetrized fuzzy simplicial set used by graph UMAP.
 
+    Parameters
+    ----------
+    knn_indices : torch.Tensor
+        Neighbor index tensor with shape ``[N, K]``.
+    knn_distances : torch.Tensor
+        Neighbor distance tensor with shape ``[N, K]``.
+    sigmas : torch.Tensor
+        Smooth kNN bandwidths with shape ``[N]``.
+    rhos : torch.Tensor
+        Local-connectivity radii with shape ``[N]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        COO row indices, column indices, and fuzzy membership strengths. Both
+        directions are retained because UMAP optimizes the sparse COO graph
+        after fuzzy union, not a collapsed undirected edge list.
+    """
+    num_nodes, num_neighbors = knn_indices.shape
+    rows = np.zeros(num_nodes * num_neighbors, dtype=np.int32)
+    cols = np.zeros(num_nodes * num_neighbors, dtype=np.int32)
+    vals = np.zeros(num_nodes * num_neighbors, dtype=np.float32)
+    indices_np = knn_indices.detach().to(device="cpu", dtype=torch.long).numpy()
+    distances_np = knn_distances.detach().to(device="cpu", dtype=torch.float32).numpy()
+    sigmas_np = sigmas.detach().to(device="cpu", dtype=torch.float32).numpy()
+    rhos_np = rhos.detach().to(device="cpu", dtype=torch.float32).numpy()
+
+    offset = 0
     for row in range(num_nodes):
-        sigma = float(sigmas[row].item())
-        rho = float(rhos[row].item())
+        sigma = float(sigmas_np[row])
+        rho = float(rhos_np[row])
         for column in range(num_neighbors):
-            neighbor = int(knn_indices[row, column].item())
-            distance = float(knn_distances[row, column].item())
-            if not np.isfinite(distance):
-                continue
-            if distance <= rho or sigma <= 0.0:
+            neighbor = int(indices_np[row, column])
+            distance = float(distances_np[row, column])
+            if neighbor < 0:
+                neighbor = 0
+                weight = 0.0
+            elif neighbor == row:
+                weight = 0.0
+            elif not np.isfinite(distance):
+                weight = 0.0
+            elif distance - rho <= 0.0 or sigma == 0.0:
                 weight = 1.0
             else:
                 weight = float(np.exp(-(distance - rho) / sigma))
-            directed_weights[(row, neighbor)] = weight
+            rows[offset] = row
+            cols[offset] = neighbor
+            vals[offset] = weight
+            offset += 1
 
-    undirected: dict[tuple[int, int], float] = {}
-    handled: set[tuple[int, int]] = set()
-    for source, target in directed_weights:
-        key = (min(source, target), max(source, target))
-        if key in handled or source == target:
-            continue
-        handled.add(key)
-        forward = directed_weights.get((source, target), 0.0)
-        backward = directed_weights.get((target, source), 0.0)
-        weight = forward + backward - (forward * backward)
-        if weight > 0.0:
-            undirected[key] = weight
+    result = sparse.coo_matrix((vals, (rows, cols)), shape=(num_nodes, num_nodes))
+    result.eliminate_zeros()
+    transpose = result.transpose()
+    product = result.multiply(transpose)
+    result = result + transpose - product
+    result.eliminate_zeros()
+    coo = result.tocoo()
 
-    if not undirected:
+    if coo.nnz == 0:
         return (
             torch.empty((0,), dtype=torch.long),
             torch.empty((0,), dtype=torch.long),
             torch.empty((0,), dtype=torch.float32),
         )
 
-    pairs = list(undirected.keys())
-    weights = list(undirected.values())
-    head = torch.tensor([pair[0] for pair in pairs], dtype=torch.long)
-    tail = torch.tensor([pair[1] for pair in pairs], dtype=torch.long)
-    weight_tensor = torch.tensor(weights, dtype=torch.float32)
+    head = torch.from_numpy(coo.row.astype(np.int64, copy=True))
+    tail = torch.from_numpy(coo.col.astype(np.int64, copy=True))
+    weight_tensor = torch.from_numpy(coo.data.astype(np.float32, copy=True))
     return head, tail, weight_tensor
 
 
 def _curve_function(x: np.ndarray, a: float, b: float) -> np.ndarray:
     """Evaluate UMAP's smooth low-dimensional membership curve."""
-    return 1.0 / (1.0 + (a * np.power(x, 2.0 * b)))
+    return 1.0 / (1.0 + a * x ** (2 * b))
 
 
 def _fit_ab(min_dist: float, spread: float) -> tuple[float, float]:
     """Fit UMAP's ``a`` and ``b`` curve parameters from ``min_dist``."""
-    xv = np.linspace(0.0, 3.0 * spread, 300)
-    yv = np.where(xv < min_dist, 1.0, np.exp(-(xv - min_dist) / spread))
+    xv = np.linspace(0, spread * 3, 300)
+    yv = np.zeros(xv.shape)
+    yv[xv < min_dist] = 1.0
+    yv[xv >= min_dist] = np.exp(-(xv[xv >= min_dist] - min_dist) / spread)
     try:
         params, _ = optimize.curve_fit(
             _curve_function,
             xv,
             yv,
-            maxfev=10_000,
         )
         return float(params[0]), float(params[1])
     except (RuntimeError, ValueError):
@@ -413,22 +451,27 @@ def _normalize_laplacian(graph: sparse.csr_matrix) -> sparse.csr_matrix:
     scipy.sparse.csr_matrix
         Normalized graph Laplacian with shape ``[N, N]``.
     """
-    degree = np.asarray(graph.sum(axis=1)).reshape(-1)
-    inv_sqrt_degree = np.zeros_like(degree, dtype=np.float64)
-    nonzero = degree > 0.0
-    inv_sqrt_degree[nonzero] = 1.0 / np.sqrt(degree[nonzero])
-    d_inv_sqrt = sparse.diags(inv_sqrt_degree)
-    identity = sparse.identity(graph.shape[0], dtype=np.float64, format="csr")
-    return identity - (d_inv_sqrt @ graph @ d_inv_sqrt)
+    sqrt_degree = np.sqrt(np.asarray(graph.sum(axis=0)).squeeze())
+    inv_sqrt_degree = np.zeros_like(sqrt_degree)
+    nonzero = sqrt_degree > 0.0
+    inv_sqrt_degree[nonzero] = 1.0 / sqrt_degree[nonzero]
+    d_inv_sqrt = sparse.spdiags(inv_sqrt_degree, 0, graph.shape[0], graph.shape[0])
+    identity = sparse.identity(graph.shape[0], dtype=np.float64)
+    return identity - d_inv_sqrt * graph * d_inv_sqrt
 
 
-def _connected_spectral_embedding(graph: sparse.csr_matrix) -> np.ndarray:
+def _connected_spectral_embedding(
+    graph: sparse.csr_matrix,
+    rng: Optional[np.random.RandomState] = None,
+) -> np.ndarray:
     """Compute raw connected-component spectral coordinates with ARPACK.
 
     Parameters
     ----------
     graph : scipy.sparse.csr_matrix
         Connected symmetric sparse fuzzy graph with shape ``[N, N]``.
+    rng : numpy.random.RandomState, optional
+        Random state advanced with UMAP's eigensolver initialization draw.
 
     Returns
     -------
@@ -442,6 +485,11 @@ def _connected_spectral_embedding(graph: sparse.csr_matrix) -> np.ndarray:
     laplacian = _normalize_laplacian(graph=graph)
     k = _SPECTRAL_EIGENVECTOR_COUNT
     ncv = max(7, int(np.sqrt(num_nodes)))
+    if rng is not None:
+        # UMAP draws this normal initialization even for the ARPACK path where
+        # ``eigsh`` receives ``v0`` instead. Preserve that RNG advancement so
+        # spectral noise and negative sampling receive the same base state.
+        rng.normal(size=(num_nodes, k))
     eigenvalues, eigenvectors = sparse_linalg.eigsh(
         laplacian,
         k=k,
@@ -459,13 +507,14 @@ def _connected_spectral_embedding(graph: sparse.csr_matrix) -> np.ndarray:
             ((0, 0), (0, _SPECTRAL_DIMENSIONS - coordinates.shape[1])),
             mode="constant",
         )
-    return coordinates.astype(np.float32, copy=False)
+    return coordinates
 
 
 def _component_meta_embedding(
     n_components: int,
     component_labels: np.ndarray,
     distance_matrix: Optional[np.ndarray],
+    rng: Optional[np.random.RandomState] = None,
 ) -> np.ndarray:
     """Place disconnected fuzzy-graph components before local embeddings.
 
@@ -478,6 +527,8 @@ def _component_meta_embedding(
     distance_matrix : numpy.ndarray | None
         Precomputed graph-distance matrix with shape ``[N, N]``. When
         available, average inter-component distances drive the meta layout.
+    rng : numpy.random.RandomState, optional
+        Random state advanced by larger component-level spectral layouts.
 
     Returns
     -------
@@ -513,7 +564,7 @@ def _component_meta_embedding(
     affinity = np.exp(-(component_distances**2))
     np.fill_diagonal(affinity, 0.0)
     meta_graph = sparse.csr_matrix(affinity, dtype=np.float64)
-    meta_embedding = _connected_spectral_embedding(graph=meta_graph)
+    meta_embedding = _connected_spectral_embedding(graph=meta_graph, rng=rng)
     max_abs = float(np.max(np.abs(meta_embedding))) if meta_embedding.size > 0 else 0.0
     if max_abs > _MIN_SPAN:
         meta_embedding = meta_embedding / max_abs
@@ -524,7 +575,7 @@ def _multi_component_spectral_embedding(
     graph: sparse.csr_matrix,
     n_components: int,
     component_labels: np.ndarray,
-    seed: int,
+    rng: np.random.RandomState,
     distance_matrix: Optional[np.ndarray],
 ) -> np.ndarray:
     """Compute UMAP-style initialization for disconnected fuzzy graphs.
@@ -537,8 +588,9 @@ def _multi_component_spectral_embedding(
         Number of connected components.
     component_labels : numpy.ndarray
         Component labels with shape ``[N]``.
-    seed : int
-        Seed for small-component random placement.
+    rng : numpy.random.RandomState
+        Random state used for small-component placement and eigensolver
+        initialization draws.
     distance_matrix : numpy.ndarray | None
         Dense precomputed graph distances with shape ``[N, N]``.
 
@@ -547,12 +599,12 @@ def _multi_component_spectral_embedding(
     numpy.ndarray
         Raw multi-component spectral coordinates with shape ``[N, 2]``.
     """
-    rng = np.random.RandomState(seed)
     result = np.empty((graph.shape[0], _SPECTRAL_DIMENSIONS), dtype=np.float32)
     meta_embedding = _component_meta_embedding(
         n_components=n_components,
         component_labels=component_labels,
         distance_matrix=distance_matrix,
+        rng=rng,
     )
 
     for label in range(n_components):
@@ -572,7 +624,7 @@ def _multi_component_spectral_embedding(
                 size=(component_graph.shape[0], _SPECTRAL_DIMENSIONS),
             )
         else:
-            component_embedding = _connected_spectral_embedding(graph=component_graph)
+            component_embedding = _connected_spectral_embedding(graph=component_graph, rng=rng)
             max_abs = (
                 float(np.max(np.abs(component_embedding))) if component_embedding.size > 0 else 0.0
             )
@@ -584,32 +636,32 @@ def _multi_component_spectral_embedding(
     return result
 
 
-def _scale_umap_initial_coordinates(coordinates: np.ndarray, seed: int) -> torch.Tensor:
+def _scale_umap_initial_coordinates(
+    coordinates: np.ndarray,
+    rng: np.random.RandomState,
+) -> torch.Tensor:
     """Apply UMAP's noisy max-abs scale and per-axis ``[0, 10]`` rescale.
 
     Parameters
     ----------
     coordinates : numpy.ndarray
         Raw initialization coordinates with shape ``[N, 2]``.
-    seed : int
-        Seed for the small noise added after max-abs scaling.
+    rng : numpy.random.RandomState
+        Random state used for the small noise added after max-abs scaling.
 
     Returns
     -------
     torch.Tensor
         Rescaled initial embedding with shape ``[N, 2]``.
     """
-    coords = coordinates.astype(np.float32, copy=True)
-    max_abs = float(np.max(np.abs(coords))) if coords.size > 0 else 0.0
+    max_abs = float(np.max(np.abs(coordinates))) if coordinates.size > 0 else 0.0
     if max_abs > _MIN_SPAN:
-        coords = coords * (_UMAP_INIT_MAX_COORD / max_abs)
+        coords = (coordinates * (_UMAP_INIT_MAX_COORD / max_abs)).astype(np.float32)
+    else:
+        coords = coordinates.astype(np.float32, copy=True)
 
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed)
-    noise = (
-        torch.randn(coords.shape, generator=generator, dtype=torch.float32) * _SPECTRAL_NOISE_SCALE
-    )
-    coords = coords + noise.numpy()
+    noise = rng.normal(scale=_SPECTRAL_NOISE_SCALE, size=coords.shape).astype(np.float32)
+    coords = coords + noise
 
     axis_min = coords.min(axis=0)
     axis_span = coords.max(axis=0) - axis_min
@@ -646,6 +698,7 @@ def _spectral_initialization(
     weight: torch.Tensor,
     seed: int,
     distance_matrix: Optional[torch.Tensor] = None,
+    rng: Optional[np.random.RandomState] = None,
 ) -> torch.Tensor:
     """Compute the normalized-Laplacian spectral initialization.
 
@@ -664,6 +717,9 @@ def _spectral_initialization(
     distance_matrix : torch.Tensor | None, optional
         Dense graph-distance matrix with shape ``[N, N]`` used to place
         disconnected fuzzy-graph components.
+    rng : numpy.random.RandomState, optional
+        Mutable random state. When provided, it is advanced where umap-learn
+        advances its ``random_state`` during initialization.
 
     Returns
     -------
@@ -677,24 +733,19 @@ def _spectral_initialization(
     if num_nodes == 2:
         return torch.tensor([[-10.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
 
+    random_state = rng if rng is not None else np.random.RandomState(seed)
     if num_nodes < 10:
-        rng = np.random.RandomState(seed)
-        coordinates = rng.uniform(
+        coordinates = random_state.uniform(
             low=-_UMAP_INIT_MAX_COORD,
             high=_UMAP_INIT_MAX_COORD,
             size=(num_nodes, _SPECTRAL_DIMENSIONS),
         )
         return _rescale_umap_random_initial_coordinates(coordinates=coordinates)
 
-    if head.numel() == 0:
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(seed)
-        return (torch.rand((num_nodes, 2), generator=generator, dtype=torch.float32) - 0.5) * 20.0
-
-    rows = torch.cat([head, tail]).numpy()
-    cols = torch.cat([tail, head]).numpy()
-    data = torch.cat([weight, weight]).numpy().astype(np.float64, copy=False)
-    graph = sparse.csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes), dtype=np.float64)
+    rows = head.detach().to(device="cpu", dtype=torch.long).numpy()
+    cols = tail.detach().to(device="cpu", dtype=torch.long).numpy()
+    data = weight.detach().to(device="cpu", dtype=torch.float32).numpy()
+    graph = sparse.coo_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes))
 
     n_components, component_labels = csgraph.connected_components(graph)
     if n_components > 1:
@@ -707,13 +758,13 @@ def _spectral_initialization(
             graph=graph,
             n_components=int(n_components),
             component_labels=component_labels,
-            seed=seed,
+            rng=random_state,
             distance_matrix=distances_np,
         )
     else:
-        coordinates = _connected_spectral_embedding(graph=graph)
+        coordinates = _connected_spectral_embedding(graph=graph, rng=random_state)
 
-    return _scale_umap_initial_coordinates(coordinates=coordinates, seed=seed)
+    return _scale_umap_initial_coordinates(coordinates=coordinates, rng=random_state)
 
 
 def _select_positive_edges(
@@ -721,21 +772,42 @@ def _select_positive_edges(
     tail: torch.Tensor,
     weight: torch.Tensor,
     n_epochs: int,
+    default_epochs: int = 500,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Prune weak edges and build epoch sampling intervals."""
+    """Prune weak edges and build epoch sampling intervals.
+
+    Parameters
+    ----------
+    head : torch.Tensor
+        Fuzzy-graph source indices with shape ``[E]``.
+    tail : torch.Tensor
+        Fuzzy-graph target indices with shape ``[E]``.
+    weight : torch.Tensor
+        Fuzzy membership strengths with shape ``[E]``.
+    n_epochs : int
+        Requested optimization epoch count.
+    default_epochs : int, default=500
+        UMAP's automatic epoch count, used for pruning when ``n_epochs <= 10``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Pruned source indices, target indices, and positive sample intervals.
+    """
     if weight.numel() == 0:
         empty_long = torch.empty((0,), dtype=torch.long)
-        empty_float = torch.empty((0,), dtype=torch.float32)
+        empty_float = torch.empty((0,), dtype=torch.float64)
         return empty_long, empty_long, empty_float
 
     max_weight = float(weight.max().item())
-    min_weight = max_weight / float(max(n_epochs, 1))
+    prune_epochs = n_epochs if n_epochs > 10 else default_epochs
+    min_weight = max_weight / float(max(prune_epochs, 1))
     keep = weight >= min_weight
     kept_head = head[keep]
     kept_tail = tail[keep]
     kept_weight = weight[keep]
-    epochs_per_sample = max_weight / kept_weight
-    return kept_head, kept_tail, epochs_per_sample.to(dtype=torch.float32)
+    epochs_per_sample = max_weight / kept_weight.to(dtype=torch.float64)
+    return kept_head, kept_tail, epochs_per_sample
 
 
 def _positive_gradient(
@@ -765,6 +837,22 @@ def _negative_gradient(
     return torch.clamp(grad_coeff * diff, min=-_GRADIENT_CLIP_VALUE, max=_GRADIENT_CLIP_VALUE)
 
 
+def _clip_gradient(value: float) -> np.float32:
+    """Clamp a scalar UMAP SGD gradient component.
+
+    Parameters
+    ----------
+    value : float
+        Raw gradient component.
+
+    Returns
+    -------
+    numpy.float32
+        Component clipped to UMAP's ``[-4, 4]`` update range.
+    """
+    return np.float32(min(max(value, -_GRADIENT_CLIP_VALUE), _GRADIENT_CLIP_VALUE))
+
+
 def _to_signed_int32(value: int) -> int:
     """Convert an unsigned 32-bit integer to signed int32 range.
 
@@ -784,7 +872,11 @@ def _to_signed_int32(value: int) -> int:
     return masked
 
 
-def _make_tau_state(embedding: torch.Tensor, seed: int) -> np.ndarray:
+def _make_tau_state(
+    embedding: torch.Tensor,
+    seed: int,
+    rng_state: Optional[np.ndarray] = None,
+) -> np.ndarray:
     """Create umap-learn-compatible per-source Tausworthe states.
 
     Parameters
@@ -793,6 +885,9 @@ def _make_tau_state(embedding: torch.Tensor, seed: int) -> np.ndarray:
         Initial low-dimensional coordinates with shape ``[N, 2]``.
     seed : int
         Random seed used to draw UMAP's base three-int RNG state.
+    rng_state : numpy.ndarray, optional
+        Pre-advanced base UMAP RNG state with shape ``[3]``. When supplied,
+        it is used instead of drawing from a fresh ``seed`` state.
 
     Returns
     -------
@@ -801,8 +896,11 @@ def _make_tau_state(embedding: torch.Tensor, seed: int) -> np.ndarray:
         ``int64``. Each source row is offset by the first embedding coordinate
         cast to float64 and reinterpreted as int64, matching umap-learn.
     """
-    random_state = np.random.RandomState(seed)
-    base_state = random_state.randint(_INT32_MIN, _INT32_MAX, 3).astype(np.int64)
+    if rng_state is None:
+        random_state = np.random.RandomState(seed)
+        base_state = random_state.randint(_INT32_MIN, _INT32_MAX, 3).astype(np.int64)
+    else:
+        base_state = rng_state.astype(np.int64, copy=True)
     first_coordinate = embedding.detach().to(device="cpu", dtype=torch.float32)[:, 0].numpy()
     coordinate_state = first_coordinate.astype(np.float64).view(np.int64).reshape(-1, 1)
     return np.full((embedding.shape[0], base_state.shape[0]), base_state, dtype=np.int64) + (
@@ -841,6 +939,217 @@ def _tau_rand_int(state: np.ndarray) -> int:
     return _to_signed_int32(state_0 ^ state_1 ^ state_2)
 
 
+def _tau_rand_int_numba(state: np.ndarray) -> int:
+    """Draw one Tausworthe int using numba's int32 return cast.
+
+    Parameters
+    ----------
+    state : numpy.ndarray
+        Mutable per-source RNG state with shape ``[3]`` and dtype ``int64``.
+
+    Returns
+    -------
+    int
+        Signed int32 random integer after numba applies the declared return
+        type, matching ``umap.utils.tau_rand_int``.
+    """
+    state[0] = (((state[0] & 4294967294) << 12) & _TAU_RAND_MASK) ^ (
+        (((state[0] << 13) & _TAU_RAND_MASK) ^ state[0]) >> 19
+    )
+    state[1] = (((state[1] & 4294967288) << 4) & _TAU_RAND_MASK) ^ (
+        (((state[1] << 2) & _TAU_RAND_MASK) ^ state[1]) >> 25
+    )
+    state[2] = (((state[2] & 4294967280) << 17) & _TAU_RAND_MASK) ^ (
+        (((state[2] << 3) & _TAU_RAND_MASK) ^ state[2]) >> 11
+    )
+    return state[0] ^ state[1] ^ state[2]
+
+
+_UMAP_TAU_RAND_INT = (
+    _numba_njit("i4(i8[:])")(_tau_rand_int_numba) if _numba_njit is not None else _tau_rand_int
+)
+
+
+def _squared_euclidean_distance(
+    current: np.ndarray,
+    other: np.ndarray,
+) -> np.float32:
+    """Compute UMAP's reduced Euclidean distance for two embedding rows.
+
+    Parameters
+    ----------
+    current : numpy.ndarray
+        First coordinate row with shape ``[D]`` and dtype ``float32``.
+    other : numpy.ndarray
+        Second coordinate row with shape ``[D]`` and dtype ``float32``.
+
+    Returns
+    -------
+    numpy.float32
+        Squared Euclidean distance between the two rows.
+    """
+    result = np.float32(0.0)
+    for dimension in range(current.shape[0]):
+        diff = current[dimension] - other[dimension]
+        result += diff * diff
+    return result
+
+
+def _clip_umap_gradient(value: float) -> float:
+    """Clamp one UMAP SGD gradient component.
+
+    Parameters
+    ----------
+    value : float
+        Raw gradient component.
+
+    Returns
+    -------
+    float
+        Component restricted to UMAP's ``[-4, 4]`` clipping range.
+    """
+    if value > _GRADIENT_CLIP_VALUE:
+        return _GRADIENT_CLIP_VALUE
+    if value < -_GRADIENT_CLIP_VALUE:
+        return -_GRADIENT_CLIP_VALUE
+    return value
+
+
+_UMAP_RDIST = (
+    _numba_njit(
+        "f4(f4[::1],f4[::1])",
+        fastmath=True,
+        locals={
+            "result": _numba_types.float32,
+            "diff": _numba_types.float32,
+            "dimension": _numba_types.intp,
+        },
+    )(_squared_euclidean_distance)
+    if _numba_njit is not None
+    else _squared_euclidean_distance
+)
+_UMAP_CLIP = _numba_njit(_clip_umap_gradient) if _numba_njit is not None else _clip_umap_gradient
+
+
+def _native_umap_single_epoch(
+    head_embedding: np.ndarray,
+    tail_embedding: np.ndarray,
+    head: np.ndarray,
+    tail: np.ndarray,
+    n_vertices: int,
+    epochs_per_sample: np.ndarray,
+    a: float,
+    b: float,
+    rng_state_per_sample: np.ndarray,
+    gamma: float,
+    dim: int,
+    move_other: bool,
+    alpha: float,
+    epochs_per_negative_sample: np.ndarray,
+    epoch_of_next_negative_sample: np.ndarray,
+    epoch_of_next_sample: np.ndarray,
+    epoch: int,
+) -> None:
+    """Run one native UMAP Euclidean SGD epoch.
+
+    Parameters
+    ----------
+    embedding : numpy.ndarray
+        Mutable embedding array with shape ``[N, 2]`` and dtype ``float32``.
+    head : numpy.ndarray
+        Positive-edge source indices with shape ``[E]``.
+    tail : numpy.ndarray
+        Positive-edge target indices with shape ``[E]``.
+    n_vertices : int
+        Number of graph vertices.
+    epochs_per_sample : numpy.ndarray
+        Positive-edge sampling intervals with shape ``[E]``.
+    a : float
+        UMAP low-dimensional curve parameter.
+    b : float
+        UMAP low-dimensional curve parameter.
+    rng_state_per_sample : numpy.ndarray
+        Mutable Tausworthe states with shape ``[N, 3]`` and dtype ``int64``.
+    gamma : float
+        Repulsion multiplier for negative samples.
+    dim : int
+        Embedding dimensionality.
+    alpha : float
+        Current learning rate.
+    epochs_per_negative_sample : numpy.ndarray
+        Negative-sample intervals with shape ``[E]``.
+    epoch_of_next_negative_sample : numpy.ndarray
+        Next negative-sample epoch per edge with shape ``[E]``.
+    epoch_of_next_sample : numpy.ndarray
+        Next positive-sample epoch per edge with shape ``[E]``.
+    epoch : int
+        Current epoch number.
+
+    Returns
+    -------
+    None
+        The embedding and epoch counters are mutated in place.
+    """
+    for edge_id in _numba_prange(epochs_per_sample.shape[0]):
+        if epoch_of_next_sample[edge_id] <= epoch:
+            source = head[edge_id]
+            target = tail[edge_id]
+            current = head_embedding[source]
+            other = tail_embedding[target]
+
+            distance_sq = _UMAP_RDIST(current, other)
+
+            if distance_sq > 0.0:
+                grad_coeff = -2.0 * a * b * pow(distance_sq, b - 1.0)
+                grad_coeff /= (a * pow(distance_sq, b)) + 1.0
+            else:
+                grad_coeff = 0.0
+
+            for dimension in range(dim):
+                grad_d = _UMAP_CLIP(grad_coeff * (current[dimension] - other[dimension]))
+                current[dimension] += grad_d * alpha
+                if move_other:
+                    other[dimension] += -grad_d * alpha
+
+            epoch_of_next_sample[edge_id] += epochs_per_sample[edge_id]
+            n_neg_samples = int(
+                (epoch - epoch_of_next_negative_sample[edge_id])
+                / epochs_per_negative_sample[edge_id]
+            )
+
+            for _ in range(n_neg_samples):
+                negative = _UMAP_TAU_RAND_INT(rng_state_per_sample[source]) % n_vertices
+                other = tail_embedding[negative]
+
+                distance_sq = _UMAP_RDIST(current, other)
+
+                if distance_sq > 0.0:
+                    grad_coeff = 2.0 * gamma * b
+                    grad_coeff /= (0.001 + distance_sq) * ((a * pow(distance_sq, b)) + 1.0)
+                elif source == negative:
+                    continue
+                else:
+                    grad_coeff = 0.0
+
+                for dimension in range(dim):
+                    if grad_coeff > 0.0:
+                        grad_d = _UMAP_CLIP(grad_coeff * (current[dimension] - other[dimension]))
+                    else:
+                        grad_d = 0.0
+                    current[dimension] += grad_d * alpha
+
+            epoch_of_next_negative_sample[edge_id] += (
+                n_neg_samples * epochs_per_negative_sample[edge_id]
+            )
+
+
+_UMAP_SINGLE_EPOCH = (
+    _numba_njit(_native_umap_single_epoch, fastmath=True)
+    if _numba_njit is not None
+    else _native_umap_single_epoch
+)
+
+
 def _optimize_embedding(
     embedding: torch.Tensor,
     head: torch.Tensor,
@@ -853,6 +1162,7 @@ def _optimize_embedding(
     a: float,
     b: float,
     seed: int,
+    rng_state: Optional[np.ndarray] = None,
 ) -> torch.Tensor:
     """Run the UMAP cross-entropy SGD with negative sampling.
 
@@ -880,6 +1190,8 @@ def _optimize_embedding(
         UMAP low-dimensional curve parameter.
     seed : int
         Random seed for negative-sample Tausworthe state initialization.
+    rng_state : numpy.ndarray, optional
+        Pre-advanced base UMAP RNG state with shape ``[3]``.
 
     Returns
     -------
@@ -889,50 +1201,54 @@ def _optimize_embedding(
     if head.numel() == 0 or n_epochs <= 0:
         return embedding
 
-    epochs_per_negative_sample = epochs_per_sample / float(max(negative_sample_rate, 1))
-    next_sample_epoch = epochs_per_sample.clone()
-    next_negative_epoch = epochs_per_negative_sample.clone()
+    embedding_np = embedding.detach().to(device="cpu", dtype=torch.float32).numpy().copy()
+    head_np = head.detach().to(device="cpu", dtype=torch.long).numpy()
+    tail_np = tail.detach().to(device="cpu", dtype=torch.long).numpy()
+    epochs_per_sample_np = (
+        epochs_per_sample.detach()
+        .to(
+            device="cpu",
+            dtype=torch.float64,
+        )
+        .numpy()
+    )
+    if negative_sample_rate > 0:
+        epochs_per_negative_sample = epochs_per_sample_np / float(negative_sample_rate)
+    else:
+        epochs_per_negative_sample = np.full_like(epochs_per_sample_np, 1.0e12)
+    next_sample_epoch = epochs_per_sample_np.copy()
+    next_negative_epoch = epochs_per_negative_sample.copy()
     num_nodes = embedding.shape[0]
-    rng_state_per_source = _make_tau_state(embedding=embedding, seed=seed)
+    rng_state_per_source = _make_tau_state(
+        embedding=torch.from_numpy(embedding_np),
+        seed=seed,
+        rng_state=rng_state,
+    )
+    alpha = float(learning_rate)
 
     for epoch in range(n_epochs):
-        alpha = learning_rate * (1.0 - (float(epoch) / float(max(n_epochs, 1))))
-        for edge_id in range(head.shape[0]):
-            if float(next_sample_epoch[edge_id].item()) > float(epoch):
-                continue
+        _UMAP_SINGLE_EPOCH(
+            embedding_np,
+            embedding_np,
+            head_np,
+            tail_np,
+            num_nodes,
+            epochs_per_sample_np,
+            a,
+            b,
+            rng_state_per_source,
+            gamma,
+            embedding_np.shape[1],
+            True,
+            alpha,
+            epochs_per_negative_sample,
+            next_negative_epoch,
+            next_sample_epoch,
+            epoch,
+        )
+        alpha = float(learning_rate) * (1.0 - (float(epoch) / float(max(n_epochs, 1))))
 
-            source = int(head[edge_id].item())
-            target = int(tail[edge_id].item())
-            diff = embedding[source] - embedding[target]
-            distance_sq = float(torch.dot(diff, diff).item())
-            grad = _positive_gradient(diff=diff, distance_sq=distance_sq, a=a, b=b)
-            embedding[source] = embedding[source] + (alpha * grad)
-            embedding[target] = embedding[target] - (alpha * grad)
-            next_sample_epoch[edge_id] = next_sample_epoch[edge_id] + epochs_per_sample[edge_id]
-
-            if negative_sample_rate <= 0:
-                continue
-
-            negative_interval = float(epochs_per_negative_sample[edge_id].item())
-            elapsed_negative_epochs = float(epoch) - float(next_negative_epoch[edge_id].item())
-            n_neg_samples = int(elapsed_negative_epochs / negative_interval)
-            for _ in range(n_neg_samples):
-                negative = _tau_rand_int(state=rng_state_per_source[source]) % num_nodes
-                negative_diff = embedding[source] - embedding[negative]
-                negative_distance_sq = float(torch.dot(negative_diff, negative_diff).item())
-                negative_grad = _negative_gradient(
-                    diff=negative_diff,
-                    distance_sq=negative_distance_sq,
-                    a=a,
-                    b=b,
-                    gamma=gamma,
-                )
-                embedding[source] = embedding[source] + (alpha * negative_grad)
-            next_negative_epoch[edge_id] = next_negative_epoch[edge_id] + (
-                float(n_neg_samples) * epochs_per_negative_sample[edge_id]
-            )
-
-    return embedding
+    return torch.from_numpy(embedding_np).to(device=embedding.device, dtype=torch.float32)
 
 
 @register_op
@@ -1328,7 +1644,7 @@ class SpectralInitialization(Op):
         f"extras.{_FUZZY_TAIL_KEY}",
         f"extras.{_FUZZY_WEIGHT_KEY}",
     )
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
+    writes: ClassVar[Tuple[str, ...]] = ("pos", f"extras.{_OPTIMIZER_RNG_STATE_KEY}")
     requires: ClassVar[Tuple[str, ...]] = (
         f"extras.{_FUZZY_HEAD_KEY}",
         f"extras.{_FUZZY_TAIL_KEY}",
@@ -1347,6 +1663,7 @@ class SpectralInitialization(Op):
         head = state.extras[_FUZZY_HEAD_KEY]
         tail = state.extras[_FUZZY_TAIL_KEY]
         weight = state.extras[_FUZZY_WEIGHT_KEY]
+        rng = np.random.RandomState(problem.seed)
         state.pos = _spectral_initialization(
             num_nodes=problem.num_nodes,
             head=head,
@@ -1354,7 +1671,13 @@ class SpectralInitialization(Op):
             weight=weight,
             seed=problem.seed,
             distance_matrix=state.distance_matrix,
+            rng=rng,
         )
+        state.extras[_OPTIMIZER_RNG_STATE_KEY] = rng.randint(
+            _INT32_MIN,
+            _INT32_MAX,
+            3,
+        ).astype(np.int64)
         return state
 
 
@@ -1426,16 +1749,18 @@ class SelectPositiveEdges(Op):
         ctx: RuntimeContext,
     ) -> SolveState:
         """Select positive edges and per-edge epoch intervals for optimization."""
-        del problem, ctx
+        del ctx
         head = state.extras[_FUZZY_HEAD_KEY]
         tail = state.extras[_FUZZY_TAIL_KEY]
         weight = state.extras[_FUZZY_WEIGHT_KEY]
         n_epochs = state.extras[_N_EPOCHS_KEY]
+        default_epochs = 500 if problem.num_nodes <= 10_000 else 200
         positive_head, positive_tail, epochs_per_sample = _select_positive_edges(
             head=head,
             tail=tail,
             weight=weight,
             n_epochs=n_epochs,
+            default_epochs=default_epochs,
         )
         state.extras[_POSITIVE_HEAD_KEY] = positive_head
         state.extras[_POSITIVE_TAIL_KEY] = positive_tail
@@ -1460,6 +1785,7 @@ class OptimizeUMAPEmbedding(Op):
         f"extras.{_GAMMA_KEY}",
         f"extras.{_CURVE_A_KEY}",
         f"extras.{_CURVE_B_KEY}",
+        f"extras.{_OPTIMIZER_RNG_STATE_KEY}",
     )
     writes: ClassVar[Tuple[str, ...]] = ("pos",)
     requires: ClassVar[Tuple[str, ...]] = ("pos",)
@@ -1488,6 +1814,7 @@ class OptimizeUMAPEmbedding(Op):
             a=state.extras[_CURVE_A_KEY],
             b=state.extras[_CURVE_B_KEY],
             seed=problem.seed,
+            rng_state=state.extras.get(_OPTIMIZER_RNG_STATE_KEY),
         )
         return state
 

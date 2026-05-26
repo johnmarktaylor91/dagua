@@ -162,8 +162,8 @@ def test_connected_spectral_embedding_uses_reference_arpack_parameters(
     assert captured["maxiter"] == 5 * num_nodes
 
 
-def test_fit_ab_uses_scipy_default_initial_guess(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify UMAP curve fitting leaves ``p0`` at SciPy's default ``(1, 1)``."""
+def test_fit_ab_uses_reference_curve_fit_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify UMAP curve fitting leaves SciPy curve-fit controls at defaults."""
     captured: dict[str, Any] = {}
 
     def fake_curve_fit(
@@ -182,7 +182,7 @@ def test_fit_ab_uses_scipy_default_initial_guess(monkeypatch: pytest.MonkeyPatch
 
     assert _fit_ab(min_dist=0.5, spread=2.0) == (1.0, 1.0)
     assert "p0" not in captured
-    assert captured["maxfev"] == 10_000
+    assert "maxfev" not in captured
 
 
 def test_tau_rand_int_uses_umap_per_source_state_sequence() -> None:
