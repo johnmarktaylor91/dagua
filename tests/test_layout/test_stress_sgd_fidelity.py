@@ -197,7 +197,7 @@ def test_stress_sgd_ogdf_mode_matches_seed_42_path_fixture() -> None:
             [-18.675736594414914, 145.076183262894],
             [-52.64898253054323, 239.4451229507347],
         ],
-        dtype=torch.float32,
+        dtype=torch.float64,
     )
 
     actual = layout_stress_sgd_pipeline(
@@ -209,6 +209,16 @@ def test_stress_sgd_ogdf_mode_matches_seed_42_path_fixture() -> None:
     )
 
     assert torch.allclose(actual, expected, atol=1.0e-4, rtol=1.0e-6)
+
+    downgraded = layout_stress_sgd_pipeline(
+        edges,
+        5,
+        steps=200,
+        seed=42,
+        fidelity_mode="ogdf",
+        fidelity_dtype=torch.float32,
+    )
+    assert downgraded.dtype is torch.float32
 
 
 def test_stress_sgd_ogdf_mode_accepts_disconnected_graph() -> None:

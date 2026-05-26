@@ -423,8 +423,11 @@ class FRFinalizePositions(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class GraphOptFinalizePositions(Op):
     """Cast GraphOpt coordinates onto the resolved output device without rescaling."""
+
+    output_dtype: torch.dtype = torch.float32
 
     name: ClassVar[str] = "graphopt_finalize_positions"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
@@ -466,10 +469,10 @@ class GraphOptFinalizePositions(Op):
 
         output_device = _layout_device(edge_index=problem.edge_index, node_sizes=problem.node_sizes)
         if state.pos.numel() == 0:
-            state.pos = torch.empty((0, 2), dtype=torch.float32, device=output_device)
+            state.pos = torch.empty((0, 2), dtype=self.output_dtype, device=output_device)
             return state
 
-        state.pos = state.pos.to(dtype=torch.float32, device=output_device)
+        state.pos = state.pos.to(dtype=self.output_dtype, device=output_device)
         return state
 
 

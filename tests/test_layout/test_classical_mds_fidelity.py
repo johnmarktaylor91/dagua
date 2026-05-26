@@ -126,7 +126,7 @@ def test_igraph_fidelity_variant_is_registered_against_igraph_mds() -> None:
 
 
 def test_ogdf_fidelity_uses_path_special_case() -> None:
-    """OGDF fidelity should return PivotMDS's raw path layout."""
+    """OGDF fidelity should default to float64 raw PivotMDS path layout."""
     edge_index = _path_edge_index(4)
 
     positions = layout_classical_mds_pipeline(
@@ -137,8 +137,19 @@ def test_ogdf_fidelity_uses_path_special_case() -> None:
 
     torch.testing.assert_close(
         positions,
-        torch.tensor([[0.0, 0.0], [100.0, 0.0], [200.0, 0.0], [300.0, 0.0]]),
+        torch.tensor(
+            [[0.0, 0.0], [100.0, 0.0], [200.0, 0.0], [300.0, 0.0]],
+            dtype=torch.float64,
+        ),
     )
+
+    downgraded = layout_classical_mds_pipeline(
+        edge_index=edge_index,
+        num_nodes=4,
+        ogdf_fidelity=True,
+        fidelity_dtype=torch.float32,
+    )
+    assert downgraded.dtype is torch.float32
 
 
 def test_classical_mds_fidelity_modes_are_mutually_exclusive() -> None:
