@@ -2563,10 +2563,9 @@ def graphviz_fdp_fidelity(
 
     Notes
     -----
-    This ports Graphviz fdp's derived-graph recursion and boundary-port
-    expansion. Round 39 ports the flat ``tLayout`` and ``xLayout`` component
-    kernels, but clustered recursion still has known residual divergence from
-    Graphviz's derived-node sizing and cluster bbox interactions.
+    This ports Graphviz fdp's derived-graph recursion, boundary-port
+    expansion, final root-bbox translation, and renderer-visible coordinate
+    precision for the clustered fidelity path.
     """
     if num_nodes < 0:
         raise ValueError("num_nodes must be non-negative.")
@@ -2595,6 +2594,7 @@ def graphviz_fdp_fidelity(
     for node_index, position in layout.positions.items():
         positions[int(node_index)] = position.to(dtype=torch.float64, device="cpu")
     positions[:, 1] *= -1.0
+    positions = _graphviz_quantize_output_points(positions)
     return positions.to(device=_layout_device(edge_index=edge_index, node_sizes=node_sizes))
 
 
@@ -4429,7 +4429,44 @@ def _translate_packed_components_to_origin(
         half_sizes = node_sizes.to(device=packed.device, dtype=packed.dtype) / 2.0
     lower = packed - half_sizes
     mins = lower.min(dim=0).values
-    return packed - mins.unsqueeze(0)
+    # Graphviz finalCC stores root bounding boxes as integer-point boxes before
+    # render plugins emit coordinates, so the root translation must use BF2B
+    # rounding rather than the raw floating lower-left corner.
+    shift = torch.tensor(
+        [
+            -float(_c_round(float(mins[0].item()))),
+            -float(_c_round(float(mins[1].item()))),
+        ],
+        dtype=packed.dtype,
+        device=packed.device,
+    )
+    return packed + shift.unsqueeze(0)
+
+
+def _graphviz_quantize_output_points(positions: torch.Tensor) -> torch.Tensor:
+    """Round final fidelity coordinates like Graphviz JSON/plain output.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Final positions in points with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Positions with each coordinate parsed through Graphviz's ``%.5g`` text
+        formatting, preserving the input dtype and device.
+    """
+    if positions.numel() == 0:
+        return positions
+    cpu_positions = positions.detach().to(device="cpu", dtype=torch.float64)
+    quantized = torch.empty_like(cpu_positions)
+    for node_index in range(cpu_positions.shape[0]):
+        for axis in range(cpu_positions.shape[1]):
+            quantized[node_index, axis] = float(
+                f"{float(cpu_positions[node_index, axis].item()):.5g}"
+            )
+    return quantized.to(device=positions.device, dtype=positions.dtype)
 
 
 def build_fmmm_pipeline(
@@ -4454,8 +4491,6 @@ def build_fmmm_pipeline(
         to 0.179 across step-count variants. Round 33 fdp bounded subset
         remained 0.121966.
     Known divergences:
-        - Graphviz fdp clustered recursion still diverges in derived-node
-          sizing and cluster bbox interactions.
         - Dagua keeps a fallback single-level solve when multilevel setup is
           unsuitable.
 
@@ -4667,7 +4702,7 @@ def _layout_fmmm_fidelity_components(
         packed[component] = (local_pos + offset_tensor).to(device=device, dtype=dtype)
     translated = _translate_packed_components_to_origin(packed, node_sizes).to(dtype=torch.float32)
     translated[:, 1] *= -1.0
-    return translated
+    return _graphviz_quantize_output_points(translated)
 
 
 def layout_fmmm_pipeline(
