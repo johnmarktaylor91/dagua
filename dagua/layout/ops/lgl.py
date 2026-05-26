@@ -16,7 +16,7 @@ from typing import ClassVar, List, Optional, Tuple
 
 import torch
 
-from dagua.layout.ops._igraph_rng import IgraphPCG32, make_igraph_default_rng
+from dagua.layout.ops._igraph_rng import IgraphPCG32
 from dagua.layout.ops.base import Op
 from dagua.layout.ops.graph_utils import layout_device
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -26,6 +26,7 @@ _LGL_MIN_DISTANCE = 1.0e-12
 _LGL_REPULSION_MIN_DISTANCE = 1.0e-5
 _LGL_BUCKET_NEIGHBOR_OFFSETS = ((0, 0), (1, 0), (0, 1), (1, 1))
 _LGL_DISCONNECTED_WARNING = "LGL layout does not support disconnected graphs yet."
+_LGL_BENCHMARK_OUTPUT_SCALE = 50.0
 RandomLike = random.Random | IgraphPCG32
 
 
@@ -53,7 +54,8 @@ class LGLPrepareStateConfig:
         Whether edge weights scale attractive forces. Igraph LGL ignores
         weights, so the default preserves fidelity with that reference.
     fidelity_mode : bool, default=False
-        When ``True``, use igraph's compiled default RNG stream.
+        When ``True``, match the python-igraph benchmark adapter's seeded
+        Python RNG stream.
     """
 
     maxiter: int = 150
@@ -80,7 +82,8 @@ class LGLLayeredRefinementConfig:
         Match igraph LGL's historical convergence rule, which only considers
         positive movement components when updating ``maxchange``.
     fidelity_mode : bool, default=False
-        When ``True``, use igraph's compiled default RNG stream.
+        When ``True``, match the python-igraph benchmark adapter's seeded
+        Python RNG stream.
     """
 
     convergence_epsilon: float = 1.0e-5
@@ -130,6 +133,57 @@ def _build_lgl_bfs_layers(
             bfs_queue.append(neighbor)
 
     return layers, parents, distance
+
+
+def _build_igraph_bfs_simple(
+    num_nodes: int,
+    root_node: int,
+    adjacency: List[List[int]],
+) -> tuple[list[int], list[int], list[int]]:
+    """Build igraph ``igraph_bfs_simple`` order, layer bounds, and parents.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the graph.
+    root_node : int
+        Root vertex for breadth-first traversal.
+    adjacency : List[List[int]]
+        Undirected adjacency list. Neighbor order must already match igraph's
+        ascending vertex order for ``IGRAPH_ALL`` traversals.
+
+    Returns
+    -------
+    tuple[list[int], list[int], list[int]]
+        BFS order vector, layer-start vector with a final sentinel, and parent
+        vector where the root is ``-1`` and unreachable vertices are ``-2``.
+    """
+    order: list[int] = [root_node]
+    layer_bounds: list[int] = [0]
+    parents: list[int] = [-2] * num_nodes
+    parents[root_node] = -1
+    added = [False] * num_nodes
+    added[root_node] = True
+    bfs_queue: deque[tuple[int, int]] = deque([(root_node, 0)])
+    visited_count = 1
+    last_layer = -1
+
+    while bfs_queue:
+        node, distance = bfs_queue.popleft()
+        for neighbor in adjacency[node]:
+            if added[neighbor]:
+                continue
+            added[neighbor] = True
+            parents[neighbor] = node
+            bfs_queue.append((neighbor, distance + 1))
+            if last_layer != distance + 1:
+                layer_bounds.append(visited_count)
+            order.append(neighbor)
+            visited_count += 1
+            last_layer = distance + 1
+
+    layer_bounds.append(visited_count)
+    return order, layer_bounds, parents
 
 
 def _lgl_updated_maxchange(
@@ -251,6 +305,464 @@ def _lgl_clamped_grid_cell(
     )
 
 
+@dataclass
+class _IgraphLGLGrid:
+    """Minimal port of igraph's ``igraph_2dgrid_t`` for LGL fidelity mode.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Mutable coordinate tensor with shape ``[N, 2]`` and dtype ``float64``.
+    radius : float
+        Positive half-width used for bounded grid clamping.
+    cellsize : float
+        Positive cell width along each axis.
+    """
+
+    positions: torch.Tensor
+    radius: float
+    cellsize: float
+
+    def __post_init__(self) -> None:
+        """Initialize igraph-compatible linked-list cell storage."""
+        self.minx = -float(self.radius)
+        self.maxx = float(self.radius)
+        self.miny = -float(self.radius)
+        self.maxy = float(self.radius)
+        self.stepsx = _lgl_grid_steps(radius=self.radius, cellsize=self.cellsize)
+        self.stepsy = self.stepsx
+        self.startidx: list[list[int]] = [
+            [0 for _ in range(self.stepsy)] for _ in range(self.stepsx)
+        ]
+        point_count = int(self.positions.shape[0])
+        self.next: list[int] = [0] * point_count
+        self.prev: list[int] = [0] * point_count
+        self.massx = 0.0
+        self.massy = 0.0
+        self.vertices = 0
+
+    def _which(self, x_coord: float, y_coord: float) -> tuple[int, int]:
+        """Map coordinates to bounded igraph grid cell indices.
+
+        Parameters
+        ----------
+        x_coord : float
+            X coordinate.
+        y_coord : float
+            Y coordinate.
+
+        Returns
+        -------
+        tuple[int, int]
+            Clamped ``(x, y)`` grid cell indices.
+        """
+        return (
+            _lgl_clamped_grid_axis(x_coord, self.minx, self.maxx, self.cellsize, self.stepsx),
+            _lgl_clamped_grid_axis(y_coord, self.miny, self.maxy, self.cellsize, self.stepsy),
+        )
+
+    def add(self, node: int, x_coord: float, y_coord: float) -> None:
+        """Add one vertex to the grid at an explicit coordinate.
+
+        Parameters
+        ----------
+        node : int
+            Vertex index to add.
+        x_coord : float
+            X coordinate assigned to the vertex.
+        y_coord : float
+            Y coordinate assigned to the vertex.
+
+        Returns
+        -------
+        None
+            The grid links, mass, and ``positions`` tensor are updated in place.
+        """
+        self.positions[node, 0] = x_coord
+        self.positions[node, 1] = y_coord
+        cell_x, cell_y = self._which(x_coord, y_coord)
+        first = self.startidx[cell_x][cell_y]
+        self.prev[node] = 0
+        self.next[node] = first
+        if first != 0:
+            self.prev[first - 1] = node + 1
+        self.startidx[cell_x][cell_y] = node + 1
+        self.massx += x_coord
+        self.massy += y_coord
+        self.vertices += 1
+
+    def move(self, node: int, x_delta: float, y_delta: float) -> None:
+        """Move a vertex using igraph's linked-cell update semantics.
+
+        Parameters
+        ----------
+        node : int
+            Vertex index to move.
+        x_delta : float
+            X displacement.
+        y_delta : float
+            Y displacement.
+
+        Returns
+        -------
+        None
+            The grid links, mass, and ``positions`` tensor are updated in place.
+        """
+        old_x = float(self.positions[node, 0].item())
+        old_y = float(self.positions[node, 1].item())
+        new_x = old_x + x_delta
+        new_y = old_y + y_delta
+        old_cell_x, old_cell_y = self._which(old_x, old_y)
+        new_cell_x, new_cell_y = self._which(new_x, new_y)
+
+        if old_cell_x != new_cell_x or old_cell_y != new_cell_y:
+            previous_node = self.prev[node]
+            next_node = self.next[node]
+            if previous_node != 0:
+                self.next[previous_node - 1] = next_node
+            else:
+                self.startidx[old_cell_x][old_cell_y] = next_node
+            if next_node != 0:
+                self.prev[next_node - 1] = previous_node
+
+            first = self.startidx[new_cell_x][new_cell_y]
+            self.prev[node] = 0
+            self.next[node] = first
+            if first != 0:
+                self.prev[first - 1] = node + 1
+            self.startidx[new_cell_x][new_cell_y] = node + 1
+
+        self.massx += -old_x + new_x
+        self.massy += -old_y + new_y
+        self.positions[node, 0] = new_x
+        self.positions[node, 1] = new_y
+
+    def center(self) -> tuple[float, float]:
+        """Return the current grid center of mass.
+
+        Returns
+        -------
+        tuple[float, float]
+            Mean ``(x, y)`` coordinate of vertices added or moved through the
+            grid. This intentionally follows igraph's mutable mass counters.
+        """
+        return self.massx / float(self.vertices), self.massy / float(self.vertices)
+
+    def in_grid(self, node: int) -> bool:
+        """Return igraph's historical grid-membership predicate.
+
+        Parameters
+        ----------
+        node : int
+            Vertex index to test.
+
+        Returns
+        -------
+        bool
+            Whether igraph would report the vertex in the grid. LGL relies on
+            the fact that zero-initialized ``next`` entries satisfy this check.
+        """
+        return self.next[node] != -1
+
+    def iter_neighbor_pairs(self) -> list[tuple[int, int]]:
+        """Enumerate nearby vertex pairs in igraph grid iterator order.
+
+        Returns
+        -------
+        list[tuple[int, int]]
+            Ordered zero-based vertex pairs produced by
+            ``igraph_2dgrid_next`` and ``igraph_2dgrid_next_nei``.
+        """
+        pairs: list[tuple[int, int]] = []
+        x_cell = 0
+        y_cell = 0
+        vertex = self.startidx[0][0]
+        while vertex == 0 and (x_cell < self.stepsx - 1 or y_cell < self.stepsy - 1):
+            x_cell += 1
+            if x_cell == self.stepsx:
+                x_cell = 0
+                y_cell += 1
+            vertex = self.startidx[x_cell][y_cell]
+
+        while vertex != 0:
+            current = vertex
+            neighbor_cells: list[tuple[int, int]] = []
+            if x_cell != self.stepsx - 1:
+                neighbor_cells.append((x_cell + 1, y_cell))
+            if y_cell != self.stepsy - 1:
+                neighbor_cells.append((x_cell, y_cell + 1))
+            if len(neighbor_cells) == 2:
+                neighbor_cells.append((x_cell + 1, y_cell + 1))
+            neighbor_cells.append((x_cell, y_cell))
+
+            neighbor = self.next[current - 1]
+            next_cell_index = len(neighbor_cells) - 1
+            while next_cell_index > 0 and neighbor == 0:
+                next_cell_index -= 1
+                neighbor_x, neighbor_y = neighbor_cells[next_cell_index]
+                neighbor = self.startidx[neighbor_x][neighbor_y]
+            while neighbor != 0:
+                pairs.append((current - 1, neighbor - 1))
+                neighbor = self.next[neighbor - 1]
+                while next_cell_index > 0 and neighbor == 0:
+                    next_cell_index -= 1
+                    neighbor_x, neighbor_y = neighbor_cells[next_cell_index]
+                    neighbor = self.startidx[neighbor_x][neighbor_y]
+
+            vertex = self.next[vertex - 1]
+            while (x_cell < self.stepsx - 1 or y_cell < self.stepsy - 1) and vertex == 0:
+                x_cell += 1
+                if x_cell == self.stepsx:
+                    x_cell = 0
+                    y_cell += 1
+                vertex = self.startidx[x_cell][y_cell]
+
+        return pairs
+
+
+def _normalize_lgl_pair(x_value: float, y_value: float) -> tuple[float, float]:
+    """Normalize a two-dimensional vector like igraph's LGL helper.
+
+    Parameters
+    ----------
+    x_value : float
+        X component.
+    y_value : float
+        Y component.
+
+    Returns
+    -------
+    tuple[float, float]
+        Unit vector components, or the original zero vector when its length is
+        exactly zero.
+    """
+    length = math.sqrt(x_value * x_value + y_value * y_value)
+    if length != 0.0:
+        return x_value / length, y_value / length
+    return x_value, y_value
+
+
+def _lgl_python_igraph_root_draw(rng: random.Random, num_nodes: int) -> int:
+    """Draw a random LGL root like python-igraph's external RNG bridge.
+
+    Parameters
+    ----------
+    rng : random.Random
+        Seeded Python RNG installed by the benchmark adapter.
+    num_nodes : int
+        Number of vertices in the graph.
+
+    Returns
+    -------
+    int
+        Root vertex index in ``[0, num_nodes)``.
+    """
+    return (rng.getrandbits(32) * num_nodes) >> 32
+
+
+def _build_lgl_incident_edges(
+    num_nodes: int,
+    edges: list[tuple[int, int]],
+) -> list[list[int]]:
+    """Build igraph-like incident edge lists for ``IGRAPH_ALL`` traversal.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    edges : list[tuple[int, int]]
+        Directed edge list in edge-id order.
+
+    Returns
+    -------
+    list[list[int]]
+        Incident edge IDs for each vertex, ordered by adjacent vertex then edge
+        ID to match igraph on simple graphs and keep duplicate handling stable.
+    """
+    incident: list[list[tuple[int, int]]] = [[] for _ in range(num_nodes)]
+    for edge_id, (source, target) in enumerate(edges):
+        incident[source].append((target, edge_id))
+        if target != source:
+            incident[target].append((source, edge_id))
+    return [[edge_id for _, edge_id in sorted(items)] for items in incident]
+
+
+def _run_igraph_lgl_refinement(
+    positions: torch.Tensor,
+    *,
+    num_nodes: int,
+    seed: int,
+    root_node: int,
+    root_was_random: bool,
+    adjacency: List[List[int]],
+    directed_edges: list[tuple[int, int]],
+    maxiter: int,
+    maxdelta: float,
+    coolexp: float,
+    frk: float,
+    repulserad: float,
+    cellsize: float,
+    radius: float,
+) -> torch.Tensor:
+    """Run the igraph LGL C algorithm in Python for fidelity mode.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Initial position tensor with shape ``[N, 2]`` and dtype ``float64``.
+    num_nodes : int
+        Number of graph nodes.
+    seed : int
+        Benchmark seed used by python-igraph's installed Python RNG.
+    root_node : int
+        BFS root vertex.
+    root_was_random : bool
+        Whether root selection consumed one RNG draw before random layout.
+    adjacency : List[List[int]]
+        Undirected adjacency list for BFS traversal.
+    directed_edges : list[tuple[int, int]]
+        Edge list in igraph edge-id order.
+    maxiter : int
+        Maximum cooling iterations per layer.
+    maxdelta : float
+        Initial maximum per-iteration movement.
+    coolexp : float
+        Cooling exponent.
+    frk : float
+        Fruchterman-Reingold spacing constant.
+    repulserad : float
+        Repulsion cutoff radius.
+    cellsize : float
+        Grid cell size and local repulsion cutoff.
+    radius : float
+        Half-width of igraph's bounded grid.
+
+    Returns
+    -------
+    torch.Tensor
+        The updated ``positions`` tensor.
+    """
+    order, layer_bounds, parents = _build_igraph_bfs_simple(num_nodes, root_node, adjacency)
+    if min(parents) <= -2:
+        warnings.warn(_LGL_DISCONNECTED_WARNING, UserWarning, stacklevel=2)
+
+    grid = _IgraphLGLGrid(positions=positions, radius=radius, cellsize=cellsize)
+    grid.add(root_node, 0.0, 0.0)
+    no_of_layers = len(layer_bounds) - 1
+    harmonic = sum(1.0 / float(layer_index) for layer_index in range(1, no_of_layers))
+    if harmonic == 0.0:
+        return positions
+    shell_constant = radius / harmonic
+    incident_edges = _build_lgl_incident_edges(num_nodes, directed_edges)
+    active_edge_ids: list[int] = []
+    rng = random.Random(seed)
+    if root_was_random:
+        _lgl_python_igraph_root_draw(rng, num_nodes)
+    for _ in range(2 * num_nodes):
+        rng.uniform(-1.0, 1.0)
+
+    epsilon = 10.0e-6
+    for active_layer in range(1, no_of_layers):
+        child_index = layer_bounds[active_layer]
+        for order_index in range(layer_bounds[active_layer - 1], layer_bounds[active_layer]):
+            vertex = order[order_index]
+            parent = parents[vertex]
+            if parent < 0:
+                if parent == -1:
+                    positions[vertex, 0] = 0.0
+                    positions[vertex, 1] = 0.0
+                continue
+
+            mass_x, mass_y = grid.center()
+            mass_x, mass_y = _normalize_lgl_pair(mass_x, mass_y)
+            parent_x = float(positions[vertex, 0].item()) - float(positions[parent, 0].item())
+            parent_y = float(positions[vertex, 1].item()) - float(positions[parent, 1].item())
+            parent_x, parent_y = _normalize_lgl_pair(parent_x, parent_y)
+            sphere_x = mass_x + parent_x + float(positions[vertex, 0].item())
+            sphere_y = mass_y + parent_y + float(positions[vertex, 1].item())
+
+            while (
+                child_index < layer_bounds[active_layer + 1]
+                and parents[order[child_index]] == vertex
+            ):
+                if active_layer == 1:
+                    phi = 2.0 * math.pi / float(layer_bounds[2] - 1) * float(child_index - 1)
+                    radial_x = math.cos(phi)
+                    radial_y = math.sin(phi)
+                else:
+                    radial_x = rng.uniform(-1.0, 1.0)
+                    radial_y = rng.uniform(-1.0, 1.0)
+                radial_x, radial_y = _normalize_lgl_pair(radial_x, radial_y)
+                radial_x = radial_x / float(active_layer) * shell_constant
+                radial_y = radial_y / float(active_layer) * shell_constant
+                grid.add(order[child_index], sphere_x + radial_x, sphere_y + radial_y)
+                child_index += 1
+
+        for order_index in range(layer_bounds[active_layer], layer_bounds[active_layer + 1]):
+            vertex = order[order_index]
+            for edge_id in incident_edges[vertex]:
+                source, target = directed_edges[edge_id]
+                if (source != vertex and grid.in_grid(source)) or (
+                    target != vertex and grid.in_grid(target)
+                ):
+                    active_edge_ids.append(edge_id)
+
+        iteration = 0
+        maxchange = epsilon + 1.0
+        while iteration < maxiter and maxchange > epsilon:
+            temperature = maxdelta * (((maxiter - iteration) / float(maxiter)) ** coolexp)
+            force_x = [0.0] * num_nodes
+            force_y = [0.0] * num_nodes
+            maxchange = 0.0
+
+            for edge_id in active_edge_ids:
+                source, target = directed_edges[edge_id]
+                x_delta = float(positions[source, 0].item()) - float(positions[target, 0].item())
+                y_delta = float(positions[source, 1].item()) - float(positions[target, 1].item())
+                distance = math.sqrt(x_delta * x_delta + y_delta * y_delta)
+                if distance != 0.0:
+                    x_delta /= distance
+                    y_delta /= distance
+                force = distance * distance / frk
+                force_x[source] -= x_delta * force
+                force_x[target] += x_delta * force
+                force_y[source] -= y_delta * force
+                force_y[target] += y_delta * force
+
+            for vertex, neighbor in grid.iter_neighbor_pairs():
+                x_delta = float(positions[vertex, 0].item()) - float(positions[neighbor, 0].item())
+                y_delta = float(positions[vertex, 1].item()) - float(positions[neighbor, 1].item())
+                distance = math.sqrt(x_delta * x_delta + y_delta * y_delta)
+                if distance < cellsize:
+                    if distance == 0.0:
+                        distance = epsilon
+                    x_delta /= distance
+                    y_delta /= distance
+                    force = frk * frk * (1.0 / distance - distance * distance / repulserad)
+                    force_x[vertex] += x_delta * force
+                    force_x[neighbor] -= x_delta * force
+                    force_y[vertex] += y_delta * force
+                    force_y[neighbor] -= y_delta * force
+
+            for order_index in range(layer_bounds[active_layer + 1]):
+                vertex = order[order_index]
+                move_x = force_x[vertex]
+                move_y = force_y[vertex]
+                distance = math.sqrt(move_x * move_x + move_y * move_y)
+                if distance > temperature:
+                    scale = temperature / distance
+                    move_x *= scale
+                    move_y *= scale
+                grid.move(vertex, move_x, move_y)
+                if move_x > maxchange:
+                    maxchange = move_x
+                if move_y > maxchange:
+                    maxchange = move_y
+            iteration += 1
+
+    return positions
+
+
 @register_op
 @dataclass(frozen=True)
 class LGLPrepareState(Op):
@@ -332,12 +844,15 @@ class LGLPrepareState(Op):
 
         adjacency = [sorted(neighbors) for neighbors in adjacency_sets]
 
-        rng: RandomLike = (
-            make_igraph_default_rng(problem.seed)
-            if self.config.fidelity_mode
-            else random.Random(problem.seed)
-        )
-        root_node = rng.randrange(num_nodes) if self.config.root is None else self.config.root
+        rng: RandomLike = random.Random(problem.seed)
+        if self.config.root is None:
+            root_node = (
+                _lgl_python_igraph_root_draw(rng, num_nodes)
+                if self.config.fidelity_mode
+                else rng.randrange(num_nodes)
+            )
+        else:
+            root_node = self.config.root
         if root_node < 0 or root_node >= num_nodes:
             raise ValueError("root must lie in [0, num_nodes).")
         frk = math.sqrt(resolved_area / float(max(num_nodes, 1)))
@@ -352,6 +867,18 @@ class LGLPrepareState(Op):
         state.extras["lgl_frk"] = frk
         state.extras["lgl_adjacency"] = adjacency
         state.extras["lgl_spring_edges"] = spring_edges
+        state.extras["lgl_directed_edges"] = (
+            [
+                (int(source), int(target))
+                for source, target in zip(
+                    problem.edge_index.to(device="cpu", dtype=torch.long)[0].tolist(),
+                    problem.edge_index.to(device="cpu", dtype=torch.long)[1].tolist(),
+                )
+                if int(source) != int(target)
+            ]
+            if problem.edge_index.numel() > 0
+            else []
+        )
         state.extras["lgl_spring_edge_weights"] = spring_edge_weights
         return state
 
@@ -363,7 +890,8 @@ class LGLInitializePositionsConfig:
     Parameters
     ----------
     fidelity_mode : bool, default=False
-        When ``True``, use igraph's compiled default RNG stream.
+        When ``True``, match the python-igraph benchmark adapter's seeded
+        Python RNG stream.
     """
 
     fidelity_mode: bool = False
@@ -407,13 +935,12 @@ class LGLInitializePositions(Op):
 
         area = float(state.extras["lgl_area"])
         radius = math.sqrt(area / math.pi)
-        rng: RandomLike = (
-            make_igraph_default_rng(problem.seed)
-            if self.config.fidelity_mode
-            else random.Random(problem.seed)
-        )
+        rng: RandomLike = random.Random(problem.seed)
         if bool(state.extras.get("lgl_root_was_random", True)):
-            rng.randrange(problem.num_nodes)
+            if self.config.fidelity_mode:
+                _lgl_python_igraph_root_draw(rng, problem.num_nodes)
+            else:
+                rng.randrange(problem.num_nodes)
         positions = torch.empty((problem.num_nodes, 2), dtype=torch.float64)
         for axis in range(2):
             for node in range(problem.num_nodes):
@@ -478,6 +1005,25 @@ class LGLLayeredRefinement(Op):
         area = float(state.extras["lgl_area"])
         radius = math.sqrt(area / math.pi)
 
+        if self.config.fidelity_mode:
+            state.pos = _run_igraph_lgl_refinement(
+                positions=positions,
+                num_nodes=num_nodes,
+                seed=problem.seed,
+                root_node=root_node,
+                root_was_random=bool(state.extras.get("lgl_root_was_random", True)),
+                adjacency=adjacency,
+                directed_edges=state.extras["lgl_directed_edges"],
+                maxiter=maxiter,
+                maxdelta=maxdelta,
+                coolexp=coolexp,
+                frk=frk,
+                repulserad=repulserad,
+                cellsize=cellsize,
+                radius=radius,
+            )
+            return state
+
         layers, parents, distance = _build_lgl_bfs_layers(num_nodes, root_node, adjacency)
 
         if not layers:
@@ -507,11 +1053,7 @@ class LGLLayeredRefinement(Op):
             sum(1.0 / float(index) for index in range(1, num_terms + 1)) if num_terms > 0 else 1.0
         )
 
-        rng: RandomLike = (
-            make_igraph_default_rng(problem.seed)
-            if self.config.fidelity_mode
-            else random.Random(problem.seed)
-        )
+        rng: RandomLike = random.Random(problem.seed)
         if bool(state.extras.get("lgl_root_was_random", True)):
             rng.randrange(num_nodes)
         for _ in range(2 * num_nodes):
@@ -714,6 +1256,7 @@ class LGLFinalizePositions(Op):
     """Cast positions to the classic LGL output dtype and output device."""
 
     output_dtype: torch.dtype = torch.float32
+    output_scale: float = 1.0
 
     name: ClassVar[str] = "lgl_finalize_positions"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
@@ -727,7 +1270,22 @@ class LGLFinalizePositions(Op):
         state: SolveState,
         ctx: RuntimeContext,
     ) -> SolveState:
-        """Move and cast final layout coordinates like the classic implementation."""
+        """Move, scale, and cast final layout coordinates.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable problem inputs used to choose the output device.
+        state : SolveState
+            Mutable state containing final LGL positions.
+        ctx : RuntimeContext
+            Runtime context (unused).
+
+        Returns
+        -------
+        SolveState
+            State with positions scaled and moved to the public output device.
+        """
 
         del ctx
 
@@ -738,7 +1296,10 @@ class LGLFinalizePositions(Op):
             edge_index=problem.edge_index,
             node_sizes=problem.node_sizes,
         )
-        state.pos = state.pos.to(dtype=self.output_dtype, device=output_device)
+        state.pos = (state.pos * float(self.output_scale)).to(
+            dtype=self.output_dtype,
+            device=output_device,
+        )
         return state
 
 
