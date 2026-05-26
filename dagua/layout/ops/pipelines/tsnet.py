@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from numbers import Integral
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -25,6 +26,298 @@ from dagua.layout.ops.tsnet import (  # noqa: E402
     TsnetPrepareState,
 )
 
+_SKLEARN_EXPLORATION_MAX_ITER = 250
+_SKLEARN_N_ITER_CHECK = 50
+_SKLEARN_EARLY_EXAGGERATION = 12.0
+_SKLEARN_MIN_GRAD_NORM = 1.0e-7
+_SKLEARN_N_ITER_WITHOUT_PROGRESS = 300
+_SKLEARN_MACHINE_EPSILON = np.finfo(np.double).eps
+
+
+def _uses_sklearn_exact_fidelity(fidelity_mode: Union[bool, str]) -> bool:
+    """Return whether the public wrapper should run exact sklearn fidelity.
+
+    Parameters
+    ----------
+    fidelity_mode : bool | str
+        Fidelity selector. ``True``, ``"sklearn"``, and ``"exact"`` enable the
+        local sklearn exact t-SNE port; ``False``, ``"native"``, and ``"torch"``
+        use the native torch pipeline.
+
+    Returns
+    -------
+    bool
+        ``True`` when the sklearn exact fidelity path should run.
+
+    Raises
+    ------
+    ValueError
+        If ``fidelity_mode`` is an unsupported string value.
+    """
+    if isinstance(fidelity_mode, str):
+        normalized = fidelity_mode.lower()
+        if normalized in {"sklearn", "exact"}:
+            return True
+        if normalized in {"false", "native", "torch"}:
+            return False
+        raise ValueError(
+            "fidelity_mode must be a bool or one of 'sklearn', 'exact', 'native', or 'torch'."
+        )
+    return bool(fidelity_mode)
+
+
+def _check_random_state(seed: Union[int, np.random.RandomState, None]) -> np.random.RandomState:
+    """Turn a seed into a NumPy ``RandomState`` using sklearn semantics.
+
+    Parameters
+    ----------
+    seed : int | numpy.random.RandomState | None
+        Random seed, existing ``RandomState``, or ``None``.
+
+    Returns
+    -------
+    numpy.random.RandomState
+        NumPy MT19937 random state matching ``sklearn.utils.check_random_state``.
+
+    Raises
+    ------
+    ValueError
+        If ``seed`` cannot initialize a ``RandomState``.
+    """
+    if seed is None or seed is np.random:
+        return np.random.mtrand._rand  # type: ignore[attr-defined]
+    if isinstance(seed, (Integral, np.integer)):
+        return np.random.RandomState(seed)
+    if isinstance(seed, np.random.RandomState):
+        return seed
+    raise ValueError(f"{seed!r} cannot be used to seed a numpy.random.RandomState instance.")
+
+
+def _kl_divergence_exact(
+    params: np.ndarray,
+    probabilities: np.ndarray,
+    degrees_of_freedom: int,
+    num_nodes: int,
+    n_components: int,
+    skip_num_points: int = 0,
+    compute_error: bool = True,
+) -> tuple[float, np.ndarray]:
+    """Evaluate sklearn exact t-SNE KL divergence and gradient.
+
+    Parameters
+    ----------
+    params : numpy.ndarray
+        Flattened embedding parameter array with shape ``[N * C]``.
+    probabilities : numpy.ndarray
+        Condensed joint probability matrix with shape ``[N * (N - 1) / 2]``.
+    degrees_of_freedom : int
+        Degrees of freedom for the Student t distribution.
+    num_nodes : int
+        Number of nodes ``N``.
+    n_components : int
+        Embedding dimension ``C``.
+    skip_num_points : int, default=0
+        Number of leading points to keep fixed when computing gradients.
+    compute_error : bool, default=True
+        Whether to compute and return the KL objective value.
+
+    Returns
+    -------
+    tuple[float, numpy.ndarray]
+        KL divergence and flattened gradient with shape ``[N * C]``.
+    """
+    from scipy.spatial.distance import pdist, squareform
+
+    embedded = params.reshape(num_nodes, n_components)
+    distances = pdist(embedded, "sqeuclidean")
+    distances /= degrees_of_freedom
+    distances += 1.0
+    distances **= (degrees_of_freedom + 1.0) / -2.0
+    q_values = np.maximum(distances / (2.0 * np.sum(distances)), _SKLEARN_MACHINE_EPSILON)
+
+    if compute_error:
+        kl_divergence = 2.0 * np.dot(
+            probabilities,
+            np.log(np.maximum(probabilities, _SKLEARN_MACHINE_EPSILON) / q_values),
+        )
+    else:
+        kl_divergence = np.nan
+
+    grad = np.ndarray((num_nodes, n_components), dtype=params.dtype)
+    probability_delta = squareform((probabilities - q_values) * distances)
+    for node in range(skip_num_points, num_nodes):
+        grad[node] = np.dot(
+            np.ravel(probability_delta[node], order="K"),
+            embedded[node] - embedded,
+        )
+    grad = grad.ravel()
+    grad *= 2.0 * (degrees_of_freedom + 1.0) / degrees_of_freedom
+    return float(kl_divergence), grad
+
+
+def _gradient_descent_exact(
+    params: np.ndarray,
+    probabilities: np.ndarray,
+    degrees_of_freedom: int,
+    num_nodes: int,
+    n_components: int,
+    start_iter: int,
+    max_iter: int,
+    momentum: float,
+    learning_rate: float,
+    n_iter_without_progress: int,
+    skip_num_points: int = 0,
+) -> tuple[np.ndarray, float, int]:
+    """Run sklearn's batch gradient descent loop for exact t-SNE.
+
+    Parameters
+    ----------
+    params : numpy.ndarray
+        Initial flattened embedding parameters with shape ``[N * C]``.
+    probabilities : numpy.ndarray
+        Condensed joint probability matrix with shape ``[N * (N - 1) / 2]``.
+    degrees_of_freedom : int
+        Degrees of freedom for the Student t distribution.
+    num_nodes : int
+        Number of nodes ``N``.
+    n_components : int
+        Embedding dimension ``C``.
+    start_iter : int
+        First optimizer iteration index.
+    max_iter : int
+        Exclusive maximum optimizer iteration index.
+    momentum : float
+        Momentum coefficient for this optimizer phase.
+    learning_rate : float
+        Learning rate used by sklearn's ``learning_rate="auto"`` schedule.
+    n_iter_without_progress : int
+        Stop after this many checked iterations without KL improvement.
+    skip_num_points : int, default=0
+        Number of leading points to keep fixed when computing gradients.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, float, int]
+        Final flattened parameters, last checked error, and last iteration.
+    """
+    from scipy import linalg
+
+    params = params.copy().ravel()
+    update = np.zeros_like(params)
+    gains = np.ones_like(params)
+    error = np.finfo(float).max
+    best_error = np.finfo(float).max
+    best_iter = iteration = start_iter
+
+    for iteration in range(start_iter, max_iter):
+        check_convergence = (iteration + 1) % _SKLEARN_N_ITER_CHECK == 0
+        compute_error = check_convergence or iteration == max_iter - 1
+        error, grad = _kl_divergence_exact(
+            params,
+            probabilities,
+            degrees_of_freedom,
+            num_nodes,
+            n_components,
+            skip_num_points=skip_num_points,
+            compute_error=compute_error,
+        )
+
+        increase = update * grad < 0.0
+        decrease = np.invert(increase)
+        gains[increase] += 0.2
+        gains[decrease] *= 0.8
+        np.clip(gains, 0.01, np.inf, out=gains)
+        grad *= gains
+        update = momentum * update - learning_rate * grad
+        params += update
+
+        if check_convergence:
+            grad_norm = linalg.norm(grad)
+            if error < best_error:
+                best_error = error
+                best_iter = iteration
+            elif iteration - best_iter > n_iter_without_progress:
+                break
+            if grad_norm <= _SKLEARN_MIN_GRAD_NORM:
+                break
+
+    return params, float(error), int(iteration)
+
+
+def _fit_tsnet_exact_condensed(
+    distances: np.ndarray,
+    perplexity: float,
+    steps: int,
+    seed: int,
+) -> np.ndarray:
+    """Fit exact t-SNE from precomputed graph distances without calling TSNE.
+
+    Parameters
+    ----------
+    distances : numpy.ndarray
+        Dense graph-distance matrix with shape ``[N, N]``. Values are squared
+        in-place to match sklearn's ``metric="precomputed"`` exact path.
+    perplexity : float
+        Target t-SNE perplexity, already clamped below ``N``.
+    steps : int
+        Requested max iteration count. Values below 250 are raised to 250 to
+        preserve the existing dagua fidelity-wrapper behavior.
+    seed : int
+        Seed for sklearn-compatible NumPy ``RandomState`` initialization.
+
+    Returns
+    -------
+    numpy.ndarray
+        Raw t-SNE embedding with shape ``[N, 2]`` and dtype ``float32``.
+    """
+    from sklearn.manifold._t_sne import _joint_probabilities
+
+    num_nodes = int(distances.shape[0])
+    n_components = 2
+    max_iter = max(int(steps), _SKLEARN_EXPLORATION_MAX_ITER)
+    learning_rate = max(num_nodes / _SKLEARN_EARLY_EXAGGERATION / 4.0, 50.0)
+
+    distances **= 2
+    probabilities = _joint_probabilities(distances, perplexity, 0)
+    random_state = _check_random_state(seed)
+    embedded = 1.0e-4 * random_state.standard_normal(size=(num_nodes, n_components)).astype(
+        np.float32
+    )
+    params = embedded.ravel()
+    degrees_of_freedom = max(n_components - 1, 1)
+
+    probabilities *= _SKLEARN_EARLY_EXAGGERATION
+    params, _, iteration = _gradient_descent_exact(
+        params,
+        probabilities,
+        degrees_of_freedom,
+        num_nodes,
+        n_components,
+        start_iter=0,
+        max_iter=_SKLEARN_EXPLORATION_MAX_ITER,
+        momentum=0.5,
+        learning_rate=learning_rate,
+        n_iter_without_progress=_SKLEARN_EXPLORATION_MAX_ITER,
+    )
+
+    probabilities /= _SKLEARN_EARLY_EXAGGERATION
+    remaining = max_iter - _SKLEARN_EXPLORATION_MAX_ITER
+    if iteration < _SKLEARN_EXPLORATION_MAX_ITER or remaining > 0:
+        params, _, _ = _gradient_descent_exact(
+            params,
+            probabilities,
+            degrees_of_freedom,
+            num_nodes,
+            n_components,
+            start_iter=iteration + 1,
+            max_iter=max_iter,
+            momentum=0.8,
+            learning_rate=learning_rate,
+            n_iter_without_progress=_SKLEARN_N_ITER_WITHOUT_PROGRESS,
+        )
+
+    return params.reshape(num_nodes, n_components)
+
 
 def _layout_tsnet_sklearn_reference(
     edge_index: torch.Tensor,
@@ -36,7 +329,7 @@ def _layout_tsnet_sklearn_reference(
     edge_weights: Optional[torch.Tensor],
     fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """Run the sklearn exact t-SNE reference path for fidelity mode.
+    """Run a local sklearn exact t-SNE reference port for fidelity mode.
 
     Parameters
     ----------
@@ -65,7 +358,6 @@ def _layout_tsnet_sklearn_reference(
     """
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import shortest_path
-    from sklearn.manifold import TSNE
 
     device = layout_device(edge_index, node_sizes)
     if num_nodes == 0:
@@ -102,22 +394,18 @@ def _layout_tsnet_sklearn_reference(
         copy=False,
     )
 
-    estimator = TSNE(
-        n_components=2,
-        metric="precomputed",
-        init="random",
-        random_state=seed,
+    coordinates = _fit_tsnet_exact_condensed(
+        distances=dense_distances,
         perplexity=min(float(perplexity), float(num_nodes - 1)),
-        method="exact",
-        max_iter=max(int(steps), 250),
+        steps=steps,
+        seed=seed,
     )
-    coordinates = estimator.fit_transform(dense_distances)
     return torch.tensor(coordinates, dtype=torch.float32, device=device)
 
 
 def build_tsnet_pipeline(
     steps: int = 1000,
-    fidelity_mode: bool = False,
+    fidelity_mode: Union[bool, str] = False,
     fidelity_dtype: torch.dtype = torch.float32,
 ) -> Pipeline:
     """Build a tsNET layout pipeline.
@@ -143,7 +431,7 @@ def build_tsnet_pipeline(
     ----------
     steps : int, default=1000
         Number of optimization updates.
-    fidelity_mode : bool, default=False
+    fidelity_mode : bool | str, default=False
         Preserve native sklearn-diagnostic settings when this builder is used
         directly.
     fidelity_dtype : torch.dtype, default=torch.float32
@@ -166,13 +454,14 @@ def build_tsnet_pipeline(
         raise ValueError("steps must be non-negative.")
     if fidelity_dtype not in (torch.float32, torch.float64):
         raise ValueError("fidelity_dtype must be torch.float32 or torch.float64.")
-    dtype = fidelity_dtype if fidelity_mode else torch.float32
+    exact_fidelity = _uses_sklearn_exact_fidelity(fidelity_mode)
+    dtype = fidelity_dtype if exact_fidelity else torch.float32
 
     return Pipeline(
         [
             FixedSteps(FixedStepsConfig(n=steps)),
             TsnetInitializePositions(
-                TsnetInitializePositionsConfig(fidelity_mode=fidelity_mode, dtype=dtype)
+                TsnetInitializePositionsConfig(fidelity_mode=exact_fidelity, dtype=dtype)
             ),
             TsnetPrepareState(),
             TsnetInitializeOptimizer(),
@@ -196,7 +485,7 @@ def layout_tsnet_pipeline(
     steps: int = 1000,
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
-    fidelity_mode: bool = False,
+    fidelity_mode: Union[bool, str] = False,
     fidelity_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Run the tsNET pipeline as a drop-in replacement.
@@ -220,8 +509,9 @@ def layout_tsnet_pipeline(
         Random seed for the torch generator initialization.
     edge_weights : torch.Tensor, optional
         Optional edge-weight tensor with shape ``[E]``.
-    fidelity_mode : bool, default=False
-        Route through sklearn's exact t-SNE reference when ``True``.
+    fidelity_mode : bool | str, default=False
+        Route through the local sklearn exact t-SNE reference port when
+        ``True``, ``"sklearn"``, or ``"exact"``.
     fidelity_dtype : torch.dtype, default=torch.float32
         Internal dtype used only when ``fidelity_mode`` is enabled.
 
@@ -254,7 +544,7 @@ def layout_tsnet_pipeline(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
 
-    if fidelity_mode:
+    if _uses_sklearn_exact_fidelity(fidelity_mode):
         return _layout_tsnet_sklearn_reference(
             edge_index=edge_index,
             num_nodes=num_nodes,

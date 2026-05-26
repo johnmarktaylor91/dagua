@@ -138,7 +138,7 @@ _GEM_BATCHED_MOVEMENT_KEY = "gem_batched_movement"
 _GEM_BATCHED_EARLY_STOP_KEY = "gem_batched_early_stop"
 _GEM_BATCHED_STEP_INDEX_KEY = "gem_batched_step_index"
 _FIDELITY_MODE_OGDF = "ogdf"
-_OGDF_EPSILON = 1.0e-8
+_OGDF_EPSILON = 1.0e-6
 GEMFidelityMode = Optional[Union[bool, str]]
 
 
@@ -547,6 +547,25 @@ def _ogdf_default_node_desired_lengths(
     )
 
 
+def _ogdf_length(x_coord: float, y_coord: float = 0.0) -> float:
+    """Return OGDF GEM's ``sqrt(x*x + y*y)`` vector length.
+
+    Parameters
+    ----------
+    x_coord : float
+        X component.
+    y_coord : float, default=0.0
+        Y component.
+
+    Returns
+    -------
+    float
+        Euclidean length computed with the same arithmetic sequence as
+        ``GEMLayout::length``.
+    """
+    return math.sqrt(x_coord * x_coord + y_coord * y_coord)
+
+
 def _build_ogdf_adjacency(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -811,9 +830,16 @@ def _run_ogdf_component_gem(
         ``torch.float64``.
     """
     num_nodes = int(positions.shape[0])
-    local_positions = positions.to(dtype=torch.float64, device="cpu").clone()
     if num_nodes == 0:
-        return local_positions
+        return torch.empty((0, 2), dtype=torch.float64, device="cpu")
+
+    initial_positions = positions.to(dtype=torch.float64, device="cpu")
+    x_positions = [
+        float(initial_positions[node_index, 0].item()) for node_index in range(num_nodes)
+    ]
+    y_positions = [
+        float(initial_positions[node_index, 1].item()) for node_index in range(num_nodes)
+    ]
 
     degree_weights = _compute_degree_weights(
         edge_index=edge_index,
@@ -822,39 +848,40 @@ def _run_ogdf_component_gem(
         dtype=torch.float64,
         config=config,
     )
+    degree_weight_values = [float(value) for value in degree_weights.tolist()]
     node_desired_lengths = _ogdf_default_node_desired_lengths(
         num_nodes=num_nodes,
         device=torch.device("cpu"),
         dtype=torch.float64,
         config=config,
     )
+    desired_length_values = [float(value) for value in node_desired_lengths.tolist()]
     adjacency = _build_ogdf_adjacency(edge_index=edge_index, num_nodes=num_nodes)
-    local_temperatures = torch.full((num_nodes,), config.initial_temperature, dtype=torch.float64)
-    previous_impulse = torch.zeros((num_nodes, 2), dtype=torch.float64)
-    skew_gauge = torch.zeros((num_nodes,), dtype=torch.float64)
-    barycenter = (local_positions * degree_weights.unsqueeze(1)).sum(dim=0)
+    local_temperatures = [config.initial_temperature for _ in range(num_nodes)]
+    previous_impulse_x = [0.0 for _ in range(num_nodes)]
+    previous_impulse_y = [0.0 for _ in range(num_nodes)]
+    skew_gauge = [0.0 for _ in range(num_nodes)]
+    barycenter_x = 0.0
+    barycenter_y = 0.0
+    for node_index in range(num_nodes):
+        node_weight = degree_weight_values[node_index]
+        barycenter_x += node_weight * x_positions[node_index]
+        barycenter_y += node_weight * y_positions[node_index]
     global_temperature = config.initial_temperature
 
     permutation: list[int] = []
-    permutation_index = 0
     rounds_remaining = max_iters
     while global_temperature > config.minimal_temperature + _OGDF_EPSILON and rounds_remaining > 0:
-        if permutation_index >= len(permutation):
+        if not permutation:
             permutation = _ogdf_permutation(num_nodes, rng)
-            permutation_index = 0
-        node_index = permutation[permutation_index]
-        permutation_index += 1
+        node_index = permutation.pop(0)
 
-        x_coord = float(local_positions[node_index, 0].item())
-        y_coord = float(local_positions[node_index, 1].item())
-        desired_length = float(node_desired_lengths[node_index].item())
+        x_coord = x_positions[node_index]
+        y_coord = y_positions[node_index]
+        desired_length = desired_length_values[node_index]
         desired_square = desired_length * desired_length
-        impulse_x = (
-            float(barycenter[0].item()) / max(num_nodes, 1) - x_coord
-        ) * config.gravitational_constant
-        impulse_y = (
-            float(barycenter[1].item()) / max(num_nodes, 1) - y_coord
-        ) * config.gravitational_constant
+        impulse_x = (barycenter_x / num_nodes - x_coord) * config.gravitational_constant
+        impulse_y = (barycenter_y / num_nodes - y_coord) * config.gravitational_constant
         disturbance_x, disturbance_y = _consume_ogdf_disturbance(rng=rng, config=config)
         impulse_x += disturbance_x
         impulse_y += disturbance_y
@@ -862,22 +889,23 @@ def _run_ogdf_component_gem(
         for other_index in range(num_nodes):
             if other_index == node_index:
                 continue
-            delta_x = x_coord - float(local_positions[other_index, 0].item())
-            delta_y = y_coord - float(local_positions[other_index, 1].item())
-            distance = math.hypot(delta_x, delta_y)
+            delta_x = x_coord - x_positions[other_index]
+            delta_y = y_coord - y_positions[other_index]
+            distance = _ogdf_length(delta_x, delta_y)
             if distance > _OGDF_EPSILON:
                 distance_square = distance * distance
                 impulse_x += delta_x * desired_square / distance_square
                 impulse_y += delta_y * desired_square / distance_square
 
-        node_weight = float(degree_weights[node_index].item())
+        node_weight = degree_weight_values[node_index]
         for neighbor_index, edge_weight in adjacency[node_index]:
-            delta_x = x_coord - float(local_positions[neighbor_index, 0].item())
-            delta_y = y_coord - float(local_positions[neighbor_index, 1].item())
-            distance = math.hypot(delta_x, delta_y)
+            delta_x = x_coord - x_positions[neighbor_index]
+            delta_y = y_coord - y_positions[neighbor_index]
+            distance = _ogdf_length(delta_x, delta_y)
             if config.attraction_formula == 1:
-                impulse_x -= edge_weight * delta_x * distance / (desired_length * node_weight)
-                impulse_y -= edge_weight * delta_y * distance / (desired_length * node_weight)
+                denominator = desired_length * node_weight
+                impulse_x -= edge_weight * delta_x * distance / denominator
+                impulse_y -= edge_weight * delta_y * distance / denominator
             else:
                 distance_square = distance * distance
                 impulse_x -= (
@@ -887,40 +915,41 @@ def _run_ogdf_component_gem(
                     edge_weight * delta_y * distance_square / (desired_square * node_weight)
                 )
 
-        impulse_length = math.hypot(impulse_x, impulse_y)
+        impulse_length = _ogdf_length(impulse_x, impulse_y)
         if impulse_length > _OGDF_EPSILON:
-            local_temperature = float(local_temperatures[node_index].item())
-            move_x = impulse_x * local_temperature / impulse_length
-            move_y = impulse_y * local_temperature / impulse_length
-            local_positions[node_index, 0] += move_x
-            local_positions[node_index, 1] += move_y
-            barycenter[0] += node_weight * move_x
-            barycenter[1] += node_weight * move_y
+            local_temperature = local_temperatures[node_index]
+            scale = local_temperature / impulse_length
+            move_x = impulse_x * scale
+            move_y = impulse_y * scale
+            x_positions[node_index] += move_x
+            y_positions[node_index] += move_y
+            barycenter_x += node_weight * move_x
+            barycenter_y += node_weight * move_y
 
-            old_x = float(previous_impulse[node_index, 0].item())
-            old_y = float(previous_impulse[node_index, 1].item())
-            product = math.hypot(move_x, move_y) * math.hypot(old_x, old_y)
+            old_x = previous_impulse_x[node_index]
+            old_y = previous_impulse_y[node_index]
+            product = _ogdf_length(move_x, move_y) * _ogdf_length(old_x, old_y)
             if product > _OGDF_EPSILON:
-                global_temperature -= local_temperature / max(num_nodes, 1)
+                global_temperature -= local_temperature / num_nodes
                 sin_beta = (move_x * old_x - move_y * old_y) / product
                 cos_beta = (move_x * old_x + move_y * old_y) / product
-                skew_value = float(skew_gauge[node_index].item())
+                skew_value = skew_gauge[node_index]
                 if sin_beta > config.rotation_sine_threshold + _OGDF_EPSILON:
                     skew_value += config.rotation_sensitivity
-                if abs(cos_beta) > config.oscillation_cosine_threshold + _OGDF_EPSILON:
+                if _ogdf_length(cos_beta) > config.oscillation_cosine_threshold + _OGDF_EPSILON:
                     local_temperature *= 1.0 + cos_beta * config.oscillation_sensitivity
-                local_temperature *= 1.0 - abs(skew_value)
+                local_temperature *= 1.0 - _ogdf_length(skew_value)
                 if local_temperature > config.initial_temperature - _OGDF_EPSILON:
                     local_temperature = config.initial_temperature
                 skew_gauge[node_index] = skew_value
                 local_temperatures[node_index] = local_temperature
-                global_temperature += local_temperature / max(num_nodes, 1)
+                global_temperature += local_temperature / num_nodes
 
-            previous_impulse[node_index, 0] = move_x
-            previous_impulse[node_index, 1] = move_y
+            previous_impulse_x[node_index] = move_x
+            previous_impulse_y[node_index] = move_y
         rounds_remaining -= 1
 
-    return local_positions
+    return torch.tensor(list(zip(x_positions, y_positions)), dtype=torch.float64, device="cpu")
 
 
 def _ogdf_shift_component_to_origin(
