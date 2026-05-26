@@ -70,7 +70,7 @@ def test_fdp_derive_graph_collapses_clusters_and_groups_real_edges() -> None:
 
 
 def test_fdp_components_merge_all_port_components_first() -> None:
-    """Port-bearing components should be merged into the first component.
+    """Port-bearing components should merge first in derived-node order.
 
     Returns
     -------
@@ -84,7 +84,7 @@ def test_fdp_components_merge_all_port_components_first() -> None:
     components = _fdp_recursion_components(derived)
 
     assert [node.kind for node in derived.nodes] == ["leaf", "leaf", "port"]
-    assert components == ((2, 0), (1,))
+    assert components == ((0, 2), (1,))
 
 
 def test_fdp_recursion_component_offsets_use_graphviz_tile_pack() -> None:
