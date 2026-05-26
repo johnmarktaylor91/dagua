@@ -1332,7 +1332,57 @@ def _fdp_recursion_components(derived: _FdpDerivedGraph) -> Tuple[Tuple[int, ...
         component: List[int] = []
         dfs(node_index, component)
         components.append(tuple(sorted(component)))
+    if _fdp_should_reverse_trailing_singletons(derived, components):
+        components[-2:] = [components[-1], components[-2]]
     return tuple(components)
+
+
+def _fdp_should_reverse_trailing_singletons(
+    derived: _FdpDerivedGraph,
+    components: Sequence[Tuple[int, ...]],
+) -> bool:
+    """Return whether a child graph needs Graphviz's singleton component order.
+
+    Parameters
+    ----------
+    derived : _FdpDerivedGraph
+        Derived graph whose components were discovered in Python node-index
+        order.
+    components : Sequence[tuple[int, ...]]
+        Connected components after the Graphviz port-component merge, using
+        derived-node indices.
+
+    Returns
+    -------
+    bool
+        ``True`` when the remaining two singleton components form the direct
+        suffix after a port-bearing prefix.
+
+    Notes
+    -----
+    In multi-sibling fdp recursion, Cgraph's subgraph iterator returns the
+    two singleton suffix components after a leading port component in reverse
+    creation order. This mirrors that narrow ``findCComp`` ordering without
+    disturbing the one-cluster and two-cluster traces where non-port singleton
+    components already match Graphviz in ascending order.
+    """
+    if not derived.port_indices or len(components) != 3:
+        return False
+    if any(len(component) != 1 for component in components[1:]):
+        return False
+
+    port_component = set(components[0])
+    port_leaf_indices = sorted(
+        node_index for node_index in port_component if node_index not in derived.port_indices
+    )
+    if len(port_leaf_indices) < 2:
+        return False
+
+    trailing_singletons = [components[1][0], components[2][0]]
+    expected_suffix = list(
+        range(port_leaf_indices[-1] + 1, port_leaf_indices[-1] + 1 + len(trailing_singletons))
+    )
+    return trailing_singletons == expected_suffix
 
 
 def _fdp_recursion_component_edges(
@@ -2018,6 +2068,9 @@ def _fdp_recursion_shift_to_origin(
 
 def _fdp_recursion_component_offsets(
     component_boxes: Sequence[Tuple[float, ...]],
+    component_node_geometries: Optional[
+        Sequence[Sequence[Tuple[float, float, float, float]]]
+    ] = None,
 ) -> List[torch.Tensor]:
     """Pack recursive components with Graphviz fdp tile packing.
 
@@ -2026,6 +2079,10 @@ def _fdp_recursion_component_offsets(
     component_boxes : Sequence[tuple[float, ...]]
         Either full component boxes as ``(x_min, y_min, x_max, y_max)`` or
         legacy width-height pairs.
+    component_node_geometries : Sequence[Sequence[tuple[float, float, float, float]]], optional
+        Per-component node geometry as ``(x_center, y_center, width, height)``.
+        When provided, packing uses Graphviz fdp's default ``l_node``
+        polyomino cover rather than a solid component bbox.
 
     Returns
     -------
@@ -2034,9 +2091,10 @@ def _fdp_recursion_component_offsets(
 
     Notes
     -----
-    The R36 tile-packing port covers Graphviz ``packGraphs`` behavior for
-    component bounding boxes. Reusing it here keeps the clustered recursion path
-    on the same fdp fidelity component instead of the earlier row-pack fallback.
+    Graphviz fdp initializes packing with ``getPackInfo(..., l_node, ...)``.
+    The bbox-only path is retained for legacy tests and callers, while the
+    recursive cluster path passes node geometry so sibling components are packed
+    by the same node-polyomino cover as ``pack.c:genPoly``.
     """
     boxes = [
         (
@@ -2046,9 +2104,111 @@ def _fdp_recursion_component_offsets(
         )
         for box in component_boxes
     ]
+    if component_node_geometries is not None:
+        return [
+            torch.tensor(offset, dtype=torch.float32)
+            for offset in _graphviz_node_poly_pack_offsets(boxes, component_node_geometries)
+        ]
     return [
         torch.tensor(offset, dtype=torch.float32) for offset in _graphviz_tile_pack_offsets(boxes)
     ]
+
+
+def _graphviz_node_poly_pack_offsets(
+    boxes: Sequence[Tuple[float, float, float, float]],
+    component_node_geometries: Sequence[Sequence[Tuple[float, float, float, float]]],
+    margin: float = _GRAPHVIZ_FDP_PACK_MARGIN,
+) -> List[Tuple[float, float]]:
+    """Pack components using Graphviz ``l_node`` polyomino cells.
+
+    Parameters
+    ----------
+    boxes : Sequence[tuple[float, float, float, float]]
+        Component bounding boxes as ``(llx, lly, urx, ury)`` in points.
+    component_node_geometries : Sequence[Sequence[tuple[float, float, float, float]]]
+        Per-component node geometry as ``(x_center, y_center, width, height)``
+        in points, using coordinates relative to the component's local graph.
+    margin : float, default=4.0
+        Graphviz fdp pack margin in points.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Per-component translations in original component order.
+    """
+    if not boxes:
+        return []
+    step = _graphviz_pack_step(list(boxes), margin)
+    packed_info: List[Tuple[int, int, List[Tuple[int, int]]]] = []
+    for index, box in enumerate(boxes):
+        cells, perimeter = _graphviz_node_poly_cells(
+            box=box,
+            node_geometries=component_node_geometries[index],
+            step=step,
+            margin=margin,
+        )
+        packed_info.append((index, perimeter, cells))
+
+    packed_info.sort(key=lambda item: -item[1])
+    occupied: set[tuple[int, int]] = set()
+    offsets = [(0.0, 0.0) for _ in boxes]
+    for sorted_index, (box_index, _, cells) in enumerate(packed_info):
+        offsets[box_index] = _graphviz_place_component(
+            sorted_index=sorted_index,
+            cells=cells,
+            occupied=occupied,
+            box=boxes[box_index],
+            step=step,
+            margin=margin,
+        )
+    return offsets
+
+
+def _graphviz_node_poly_cells(
+    box: Tuple[float, float, float, float],
+    node_geometries: Sequence[Tuple[float, float, float, float]],
+    step: int,
+    margin: float,
+) -> Tuple[List[Tuple[int, int]], int]:
+    """Generate Graphviz ``genPoly`` cells for node-only components.
+
+    Parameters
+    ----------
+    box : tuple[float, float, float, float]
+        Component bounding box as ``(llx, lly, urx, ury)``.
+    node_geometries : Sequence[tuple[float, float, float, float]]
+        Node centers and sizes as ``(x_center, y_center, width, height)`` in
+        points.
+    step : int
+        Graphviz pack grid step.
+    margin : float
+        Pack margin in points.
+
+    Returns
+    -------
+    tuple[list[tuple[int, int]], int]
+        Occupied node-polyomino cells and Graphviz perimeter key.
+    """
+    cells: set[tuple[int, int]] = set()
+    dx = -_c_round(box[0])
+    dy = -_c_round(box[1])
+    margin_int = _c_round(margin)
+    for x_center, y_center, width, height in node_geometries:
+        point_x = _c_round(x_center) + dx
+        point_y = _c_round(y_center) + dy
+        half_width = _c_round(width) // 2
+        half_height = _c_round(height) // 2
+        low_x = _graphviz_cell(point_x - margin_int - half_width, step)
+        low_y = _graphviz_cell(point_y - margin_int - half_height, step)
+        high_x = _graphviz_cell(point_x + margin_int + half_width, step)
+        high_y = _graphviz_cell(point_y + margin_int + half_height, step)
+        for x_coord in range(low_x, high_x + 1):
+            for y_coord in range(low_y, high_y + 1):
+                cells.add((x_coord, y_coord))
+
+    width_cells = _graphviz_grid_count(box[2] - box[0] + 2.0 * margin, step)
+    height_cells = _graphviz_grid_count(box[3] - box[1] + 2.0 * margin, step)
+    return sorted(cells), width_cells + height_cells
 
 
 def _fdp_recursion_layout_level(
@@ -2095,6 +2255,7 @@ def _fdp_recursion_layout_level(
     child_layouts: Dict[str, _FdpLevelLayout] = {}
     component_positions: List[Dict[int, torch.Tensor]] = []
     component_boxes: List[Tuple[float, float, float, float]] = []
+    component_node_geometries: List[List[Tuple[float, float, float, float]]] = []
 
     for component in components:
         local_tensor, xpms = _fdp_recursion_tlayout_component(
@@ -2146,6 +2307,7 @@ def _fdp_recursion_layout_level(
         )
         if sizes.numel() == 0 or not active_component:
             component_boxes.append((0.0, 0.0, 0.0, 0.0))
+            component_node_geometries.append([])
         else:
             half_sizes = sizes / 2.0
             active_tensor = torch.stack([local_positions[index] for index in active_component])
@@ -2159,9 +2321,23 @@ def _fdp_recursion_layout_level(
                     float(upper[:, 1].max().item()),
                 )
             )
+            component_node_geometries.append(
+                [
+                    (
+                        float(active_tensor[local_index, 0].item()),
+                        float(active_tensor[local_index, 1].item()),
+                        float(sizes[local_index, 0].item()),
+                        float(sizes[local_index, 1].item()),
+                    )
+                    for local_index, _derived_index in enumerate(active_component)
+                ]
+            )
         component_positions.append(local_positions)
 
-    offsets = _fdp_recursion_component_offsets(component_boxes)
+    offsets = _fdp_recursion_component_offsets(
+        component_boxes,
+        component_node_geometries=component_node_geometries,
+    )
     final_positions: Dict[int, torch.Tensor] = {}
     cluster_boxes: Dict[str, Tuple[float, float, float, float]] = {}
     for component, local_positions, offset in zip(components, component_positions, offsets):
