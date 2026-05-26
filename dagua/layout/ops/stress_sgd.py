@@ -52,11 +52,15 @@ class InitializeStressSGDStateConfig:
         Coordinate scale used by the disconnected-graph fallback layout.
     reference_disconnected_policy : bool, default=False
         Whether to mirror ``s_gd2`` adapter behavior for edge-case graphs.
+    independent_shuffle_rng : bool, default=False
+        Whether pair-order shuffling should use a fresh seed stream independent
+        from the Python initialization draws.
     """
 
     trace_every: int = 0
     disconnected_fallback_scale: float = _DISCONNECTED_FALLBACK_SCALE
     reference_disconnected_policy: bool = False
+    independent_shuffle_rng: bool = False
 
 
 @dataclass(frozen=True)
@@ -830,7 +834,12 @@ class InitializeStressSGDState(Op):
     writes: ClassVar[Tuple[str, ...]] = ("extras", "pos", "converged")
     requires: ClassVar[Tuple[str, ...]] = ("adjacency",)
 
-    def __init__(self, trace_every: int = 0, reference_disconnected_policy: bool = False) -> None:
+    def __init__(
+        self,
+        trace_every: int = 0,
+        reference_disconnected_policy: bool = False,
+        independent_shuffle_rng: bool = False,
+    ) -> None:
         """Create an initializer with classic fallback and trace settings.
 
         Parameters
@@ -840,10 +849,15 @@ class InitializeStressSGDState(Op):
         reference_disconnected_policy : bool, default=False
             Return zeros for edgeless graphs and raise for disconnected graphs,
             matching the reference adapter/native split.
+        independent_shuffle_rng : bool, default=False
+            Use a fresh NumPy RNG stream for pair-order shuffling. Native
+            ``s_gd2`` initializes coordinates in Python, then seeds the C++
+            shuffle stream independently with the same seed.
         """
         self.config = InitializeStressSGDStateConfig(
             trace_every=trace_every,
             reference_disconnected_policy=reference_disconnected_policy,
+            independent_shuffle_rng=independent_shuffle_rng,
         )
 
     def apply(
@@ -918,10 +932,15 @@ class InitializeStressSGDState(Op):
                 state.extras.pop(_STRESS_SGD_TRACE_KEY, None)
             return state
 
-        # Initialization matches s_gd2's NumPy draw order; exact shuffle parity
-        # still differs because the native reference uses RandomKit.
+        # ``s_gd2`` draws initial coordinates in Python, then its native kernel
+        # seeds pair-order shuffling independently. Legacy mode keeps the
+        # archive-compatible shared stream; fidelity mode separates the streams.
         np.random.seed(problem.seed)
-        state.extras[_STRESS_SGD_RNG_KEY] = np.random
+        state.extras[_STRESS_SGD_RNG_KEY] = (
+            np.random.RandomState(problem.seed)
+            if self.config.independent_shuffle_rng
+            else np.random
+        )
         state.extras.pop(_STRESS_SGD_CONNECTED_KEY, None)
         return state
 
