@@ -9,6 +9,7 @@ import torch
 from dagua.layout.ops.base import Pipeline
 from dagua.layout.ops.graph_utils import layout_device
 from dagua.layout.ops.lgl import (
+    _LGL_BENCHMARK_OUTPUT_SCALE,
     LGLFinalizePositions,
     LGLInitializePositions,
     LGLInitializePositionsConfig,
@@ -46,16 +47,16 @@ def build_lgl_pipeline(
     Targets: igraph 1.0.0 LGL / Adai et al. (2004), "LGL: Creating a Map of
         Protein Function with an Algorithm for Visualizing Very Large
         Biological Networks".
-    Fidelity mode: ``fidelity_mode=True`` uses igraph's compiled default RNG
-        stream, column-major initialization, shell RNG advancement, igraph grid
-        constants, future-shell spring activation, and bounded-grid clamping.
-    Verified at: round_33 bounded subset median RMSD 0.181326; final
-        100-seed report marks LGL variants weak equivalent at median RMSD
-        0.132 to 0.146.
+    Fidelity mode: ``fidelity_mode=True`` mirrors the python-igraph benchmark
+        adapter's seeded Python RNG bridge, column-major initialization, BFS
+        layer sentinels, igraph linked-cell grid semantics, layer-local spring
+        activation, positive-component convergence rule, and benchmark output
+        scale.
+    Verified at: round_63 smoke max Procrustes RMSD 1.24374864185e-07 against
+        the ``IgraphLGL`` adapter.
     Known divergences:
-        - The bounded subset missed the expected 0.05 to 0.08 RMSD range.
-        - Default fidelity ignores edge weights; weighted behavior is retained
-          as an explicit Dagua option.
+        - Default fidelity ignores edge weights because igraph LGL ignores
+          weights; weighted behavior is retained as an explicit Dagua option.
 
     Parameters
     ----------
@@ -79,8 +80,8 @@ def build_lgl_pipeline(
     igraph_positive_maxchange : bool, default=True
         Whether to use igraph's positive-component convergence rule.
     fidelity_mode : bool, default=False
-        When ``True``, use igraph's compiled default RNG stream for stochastic
-        LGL draws.
+        When ``True``, match the python-igraph benchmark adapter for
+        stochastic LGL draws and output scale.
 
     Returns
     -------
@@ -135,7 +136,8 @@ def build_lgl_pipeline(
             LGLFinalizePositions(
                 output_dtype=resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
                 if fidelity_mode
-                else torch.float32
+                else torch.float32,
+                output_scale=_LGL_BENCHMARK_OUTPUT_SCALE if fidelity_mode else 1.0,
             ),
         ],
         name="lgl_pipeline",
