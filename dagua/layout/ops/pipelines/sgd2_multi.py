@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 import torch
 
@@ -18,157 +18,6 @@ from dagua.layout.ops.state import (
     RuntimeContext,
     SolveState,
 )
-
-_REFERENCE_SGD2_SCALE = 100.0
-
-
-def _reference_sgd2_layout_if_available(
-    edge_index: torch.Tensor,
-    num_nodes: int,
-    seed: int,
-    edge_weights: Optional[torch.Tensor],
-) -> Optional[torch.Tensor]:
-    """Run the canonical stress-SGD backend when it is importable.
-
-    Parameters
-    ----------
-    edge_index : torch.Tensor
-        Graph connectivity tensor with shape ``[2, E]``.
-    num_nodes : int
-        Number of nodes ``N`` in the graph.
-    seed : int
-        Random seed forwarded to the canonical backend.
-    edge_weights : torch.Tensor | None
-        Optional per-edge weights with shape ``[E]``.
-
-    Returns
-    -------
-    torch.Tensor | None
-        Canonical stress-SGD coordinates with shape ``[N, 2]`` when the optional
-        ``s_gd2`` backend can handle the graph, otherwise ``None`` so the
-        native multicriteria PyTorch implementation remains the fallback.
-    """
-    try:
-        import numpy as np
-        import s_gd2
-    except Exception:
-        return None
-
-    if num_nodes == 0:
-        return torch.empty((0, 2), dtype=torch.float32, device=edge_index.device)
-    if num_nodes == 1:
-        return torch.zeros((1, 2), dtype=torch.float32, device=edge_index.device)
-    if edge_index.numel() == 0:
-        return torch.zeros((num_nodes, 2), dtype=torch.float32, device=edge_index.device)
-
-    edges = edge_index.detach().cpu().to(dtype=torch.long)
-    sources = torch.cat([edges[0], edges[1]], dim=0)
-    targets = torch.cat([edges[1], edges[0]], dim=0)
-    non_self = sources != targets
-    sources = sources[non_self]
-    targets = targets[non_self]
-    if sources.numel() == 0:
-        return torch.zeros((num_nodes, 2), dtype=torch.float32, device=edge_index.device)
-
-    # The canonical backend infers N as max(edge endpoint)+1.  Falling back for
-    # trailing isolates keeps the public tensor shape contract intact.
-    if int(torch.maximum(sources.max(), targets.max()).item()) + 1 != num_nodes:
-        return None
-
-    pairs = torch.stack([sources, targets], dim=1)
-    unique_pairs, inverse = torch.unique(pairs, dim=0, return_inverse=True)
-
-    layout_kwargs: dict[str, Any] = {"random_seed": seed}
-    if edge_weights is not None:
-        weights = edge_weights.detach().cpu().to(dtype=torch.float64)
-        sym_weights = torch.cat([weights, weights], dim=0)[non_self]
-        unique_weights = torch.zeros(
-            int(unique_pairs.shape[0]),
-            dtype=torch.float64,
-        )
-        unique_weights.scatter_add_(0, inverse, sym_weights)
-        layout_kwargs["V"] = unique_weights.numpy().tolist()
-
-    coords = s_gd2.layout(
-        unique_pairs[:, 0].numpy().tolist(),
-        unique_pairs[:, 1].numpy().tolist(),
-        **layout_kwargs,
-    )
-    return (
-        torch.as_tensor(np.asarray(coords), dtype=torch.float32, device=edge_index.device)
-        * _REFERENCE_SGD2_SCALE
-    )
-
-
-def _reference_sgd2_multi_layout_if_available(
-    edge_index: torch.Tensor,
-    num_nodes: int,
-    seed: int,
-    criteria: Optional[Dict[str, float]],
-    steps: int,
-    lr: float,
-    grad_clamp: float,
-    batch_size: int,
-) -> Optional[torch.Tensor]:
-    """Run the restored GD2 multicriteria reference when available.
-
-    Parameters
-    ----------
-    edge_index : torch.Tensor
-        Graph connectivity tensor with shape ``[2, E]``.
-    num_nodes : int
-        Number of nodes ``N`` in the graph.
-    seed : int
-        Random seed forwarded to the reference adapter.
-    criteria : dict[str, float] | None
-        Criterion weights for GD2.
-    steps : int
-        Maximum GD2 iterations.
-    lr : float
-        Optimizer learning rate.
-    grad_clamp : float
-        Symmetric gradient clamp.
-    batch_size : int
-        Per-criterion sample size.
-
-    Returns
-    -------
-    torch.Tensor | None
-        Reference coordinates with shape ``[N, 2]`` when the adapter succeeds,
-        otherwise ``None`` so callers can fall back to the native pipeline.
-    """
-    try:
-        from dagua.eval.competitors.sgd2_multi_competitor import SGD2MultiRef
-        from dagua.graph import DaguaGraph
-    except Exception:
-        return None
-
-    graph = DaguaGraph()
-    for node_idx in range(num_nodes):
-        node_id = str(node_idx)
-        graph.add_node(node_id, label=node_id)
-    edges = edge_index.detach().cpu().to(dtype=torch.long)
-    for edge_idx in range(edges.shape[1]):
-        source = int(edges[0, edge_idx].item())
-        target = int(edges[1, edge_idx].item())
-        graph.add_edge(str(source), str(target))
-
-    active_criteria = {"stress": 1.0} if criteria is None else dict(criteria)
-    variant_params: dict[str, Any] = {
-        "criteria_weights": active_criteria,
-        "max_iter": steps,
-        "grad_clamp": grad_clamp,
-        "optimizer_kwargs": {"lr": lr},
-        "sample_sizes": {name: batch_size for name in active_criteria},
-    }
-    result = SGD2MultiRef().layout_with_variant(
-        graph,
-        seed=seed,
-        variant_params=variant_params,
-    )
-    if result.pos is None:
-        return None
-    return result.pos.to(dtype=torch.float32, device=edge_index.device)
 
 
 def _dag_consistency_fraction(pos: torch.Tensor, edge_index: torch.Tensor) -> float:
@@ -246,16 +95,13 @@ def build_sgd2_multi_pipeline(
     ------------------
     Targets: historical ``(SGD)^2`` multi-criteria graph-drawing reference
         sources from the graph-drawing project.
-    Fidelity mode: ``layout_sgd2_multi_pipeline(..., fidelity_mode=True)`` uses
-        the restored GD2 adapter when available.
-    Verified at: final 100-seed report had insufficient data for all
-        ``sgd2_multi`` variants; Round 33 audit found `/tmp/graph-drawing`
-        missing required ``gd2.py`` and ``criteria.py`` reference files.
+    Fidelity mode: ``layout_sgd2_multi_pipeline(..., fidelity_mode=True)`` is
+        retained for variant compatibility and still runs this native port.
+    Verified at: Round 64 replaces runtime reference delegation with a direct
+        PyTorch implementation of the GD2 optimization loop.
     Known divergences:
-        - Paired reference comparison cannot run until the historical upstream
-          source files or an equivalent wrapper are restored.
-        - Dagua's native multi-objective optimizer remains separate from the
-          installed ``s_gd2`` stress-only package.
+        - The native port intentionally avoids importing measurement adapters
+          or optional third-party layout packages from runtime pipelines.
 
     Parameters
     ----------
@@ -291,6 +137,8 @@ def build_sgd2_multi_pipeline(
     """
     if steps < 0:
         raise ValueError("steps must be non-negative.")
+    # The public flag is retained for variant compatibility; the implementation
+    # is now always the native Python port rather than a runtime delegation.
     del fidelity_mode
 
     return Pipeline(
@@ -362,13 +210,9 @@ def layout_sgd2_multi_pipeline(
     edge_weights : torch.Tensor, optional
         Optional per-edge weights with shape ``[E]``.
     use_reference_fallback : bool, default=False
-        Whether direct default calls may substitute the optional canonical
-        ``s_gd2`` backend when it is importable. Fidelity comparisons keep this
-        disabled so ``classic_sgd2_multi`` always exercises the multicriteria
-        pipeline.
+        Deprecated compatibility flag. The native pipeline ignores it.
     fidelity_mode : bool, default=False
-        Whether to return the restored GD2 multicriteria reference output when
-        available.
+        Deprecated compatibility flag. The native pipeline ignores it.
 
     Returns
     -------
@@ -402,37 +246,8 @@ def layout_sgd2_multi_pipeline(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
 
-    if fidelity_mode and criteria_schedules is None and edge_weights is None:
-        reference_multi_pos = _reference_sgd2_multi_layout_if_available(
-            edge_index=edge_index,
-            num_nodes=num_nodes,
-            seed=seed,
-            criteria=criteria,
-            steps=steps,
-            lr=lr,
-            grad_clamp=grad_clamp,
-            batch_size=batch_size,
-        )
-        if reference_multi_pos is not None:
-            return reference_multi_pos
-
     reference_pos = None
-    uses_default_native_hyperparams = (
-        lr == 1.0 and momentum == 0.7 and grad_clamp == 4.0 and batch_size == 16
-    )
-    if (
-        criteria is None
-        and criteria_schedules is None
-        and steps > 0
-        and uses_default_native_hyperparams
-        and use_reference_fallback
-    ):
-        reference_pos = _reference_sgd2_layout_if_available(
-            edge_index=edge_index,
-            num_nodes=num_nodes,
-            seed=seed,
-            edge_weights=edge_weights,
-        )
+    del use_reference_fallback
 
     problem = LayoutProblem(
         edge_index=edge_index,
