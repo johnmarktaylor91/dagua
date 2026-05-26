@@ -852,6 +852,7 @@ _GRAPHVIZ_FDP_DEFAULT_C = 0.0
 _GRAPHVIZ_FDP_DEFAULT_X_C = 1.5
 _GRAPHVIZ_FDP_DEFAULT_X_TRIES = 9
 _GRAPHVIZ_FDP_POINTS_PER_INCH = 72.0
+_GRAPHVIZ_FDP_DEFAULT_XLAYOUT_SEP_POINTS = 4.0
 _GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES = 0.75
 _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES = 0.5
 _GRAPHVIZ_FDP_CLUSTER_MARGIN_POINTS = 8.0
@@ -1394,7 +1395,9 @@ def _graphviz_fdp_initial_positions_with_ports(
                 [positions[other] for other in positioned_neighbors]
             ).mean(dim=0)
         elif len(positioned_neighbors) == 1:
-            positions[node_index] = 0.98 * positions[positioned_neighbors[0]]
+            neighbor = positions[positioned_neighbors[0]]
+            positions[node_index, 0] = 0.98 * neighbor[0]
+            positions[node_index, 1] = 0.90 * neighbor[1]
         else:
             angle = 2.0 * math.pi * rng.random()
             radius = 0.9 * rng.random()
@@ -1511,7 +1514,7 @@ def _graphviz_fdp_tlayout_with_ports(
                 math.floor(float(positions[node_index, 0]) / cell_size),
                 math.floor(float(positions[node_index, 1]) / cell_size),
             )
-            grid.setdefault(cell, []).append(node_index)
+            grid.setdefault(cell, []).insert(0, node_index)
         for source in range(num_nodes):
             for edge_id in outgoing[source]:
                 _graphviz_fdp_apply_tlayout_attraction(
@@ -2489,7 +2492,7 @@ def _graphviz_fdp_tlayout(
                 math.floor(float(positions[node_index, 0]) / cell_size),
                 math.floor(float(positions[node_index, 1]) / cell_size),
             )
-            grid.setdefault(cell, []).append(node_index)
+            grid.setdefault(cell, []).insert(0, node_index)
         for source in range(num_nodes):
             for edge_id in outgoing[source]:
                 _graphviz_fdp_apply_tlayout_attraction(
@@ -2544,7 +2547,8 @@ def _graphviz_fdp_node_sizes_in_inches(
     Returns
     -------
     torch.Tensor
-        Node sizes in inches with shape ``[N, 2]``.
+        Node sizes plus Graphviz fdp's default additive ``xLayout``
+        separation in inches with shape ``[N, 2]``.
     """
     if node_sizes is None:
         sizes = torch.zeros((num_nodes, 2), dtype=torch.float64)
@@ -2556,7 +2560,8 @@ def _graphviz_fdp_node_sizes_in_inches(
         [_GRAPHVIZ_DEFAULT_NODE_WIDTH_INCHES, _GRAPHVIZ_DEFAULT_NODE_HEIGHT_INCHES],
         dtype=torch.float64,
     )
-    return torch.maximum(sizes, floors)
+    sep = 2.0 * _GRAPHVIZ_FDP_DEFAULT_XLAYOUT_SEP_POINTS / _GRAPHVIZ_FDP_POINTS_PER_INCH
+    return torch.maximum(sizes, floors) + sep
 
 
 def _graphviz_fdp_x_overlap(
@@ -2646,6 +2651,7 @@ def _graphviz_fdp_apply_xlayout_attraction(
     displacement: torch.Tensor,
     sizes_in_inches: torch.Tensor,
     edge: tuple[int, int, float, float],
+    x_k: float,
 ) -> None:
     """Apply Graphviz ``xLayout`` edge attraction.
 
@@ -2659,6 +2665,9 @@ def _graphviz_fdp_apply_xlayout_attraction(
         Node sizes in inches with shape ``[N, 2]``.
     edge : tuple[int, int, float, float]
         Edge record as ``(source, target, factor, dist)``.
+    x_k : float
+        Current ``xLayout`` spring constant. Graphviz increases this between
+        overlap-removal tries, so attraction must read the try-local value.
 
     Returns
     -------
@@ -2683,7 +2692,7 @@ def _graphviz_fdp_apply_xlayout_attraction(
     )
     din = source_radius + target_radius
     dout = dist - din
-    force = dout * dout / ((_GRAPHVIZ_FDP_DEFAULT_K + din) * dist)
+    force = dout * dout / ((x_k + din) * dist)
     displacement[target, 0] -= x_delta * force
     displacement[target, 1] -= y_delta * force
     displacement[source, 0] += x_delta * force
@@ -2786,6 +2795,7 @@ def _graphviz_fdp_xlayout(
                         displacement=displacement,
                         sizes_in_inches=sizes_in_inches,
                         edge=edges[edge_id],
+                        x_k=x_k,
                     )
             ov = overlaps_this_pass
             if ov == 0:
