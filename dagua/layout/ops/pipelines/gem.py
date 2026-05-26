@@ -36,12 +36,12 @@ def build_gem_pipeline(max_iters: int = 500, fidelity_mode: GEMFidelityMode = Fa
         OGDF-compatible seed bridge, update order, node geometry, component
         solving, packing, and final coordinate contract for sequential-size
         graphs.
-    Verified at: round_32 bounded subset median RMSD 0.037209; final 100-seed
-        report also showed strong equivalent GEM variants at 0.128 to 0.224.
+    Verified at: round_43 smoke mean RMSD 0.000410 after the sequential
+        fidelity branch was moved to scalar double state.
     Known divergences:
         - Larger graphs still use Dagua's historical batched approximation.
-        - A small direct-coordinate residual remains before Procrustes
-          alignment on at least a 3-node path.
+        - A topology-sensitive residual remains on star seed 43, consistent
+          with sub-micro differences amplifying after roughly 600 node updates.
 
     Parameters
     ----------
