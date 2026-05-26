@@ -11,6 +11,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 
 from dagua.layout.ops.base import Pipeline
+from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.umap import (
     BuildFuzzySimplicialSet,
     BuildUMAPAdjacency,
@@ -249,6 +250,7 @@ def layout_umap_layout_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     fidelity_mode: bool = True,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Run the UMAP graph layout pipeline.
 
@@ -309,7 +311,10 @@ def layout_umap_layout_pipeline(
             repulsion_strength=repulsion_strength,
             edge_weights=edge_weights,
         )
-        return reference_pos.to(device=device)
+        return reference_pos.to(
+            device=device,
+            dtype=resolve_fidelity_dtype(fidelity_mode, fidelity_dtype),
+        )
 
     from dagua.layout.classic.umap_layout import layout_umap
 

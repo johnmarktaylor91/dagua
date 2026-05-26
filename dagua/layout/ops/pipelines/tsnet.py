@@ -11,6 +11,7 @@ import torch
 from dagua.layout.ops.base import Pipeline, Repeat  # noqa: E402
 from dagua.layout.ops.converge import FixedSteps, FixedStepsConfig  # noqa: E402
 from dagua.layout.ops.graph_utils import layout_device
+from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.state import (  # noqa: E402
     ExecutionPlan,
     LayoutProblem,
@@ -327,7 +328,7 @@ def _layout_tsnet_sklearn_reference(
     steps: int,
     seed: int,
     edge_weights: Optional[torch.Tensor],
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Run a local sklearn exact t-SNE reference port for fidelity mode.
 
@@ -359,11 +360,12 @@ def _layout_tsnet_sklearn_reference(
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import shortest_path
 
+    resolved_dtype = resolve_fidelity_dtype(True, fidelity_dtype)
     device = layout_device(edge_index, node_sizes)
     if num_nodes == 0:
-        return torch.empty((0, 2), dtype=torch.float32, device=device)
+        return torch.empty((0, 2), dtype=resolved_dtype, device=device)
     if num_nodes == 1:
-        return torch.zeros((1, 2), dtype=torch.float32, device=device)
+        return torch.zeros((1, 2), dtype=resolved_dtype, device=device)
 
     edge_index_cpu = edge_index.detach().to(device="cpu", dtype=torch.long)
     if edge_index_cpu.numel() == 0:
@@ -374,13 +376,13 @@ def _layout_tsnet_sklearn_reference(
         rows = np.concatenate([edge_index_np[0], edge_index_np[1]])
         cols = np.concatenate([edge_index_np[1], edge_index_np[0]])
     if edge_weights is None:
-        np_dtype = np.float64 if fidelity_dtype is torch.float64 else np.float32
+        np_dtype = np.float64 if resolved_dtype is torch.float64 else np.float32
         data = np.ones(rows.shape[0], dtype=np_dtype)
     else:
-        torch_dtype = torch.float64 if fidelity_dtype is torch.float64 else torch.float32
+        torch_dtype = torch.float64 if resolved_dtype is torch.float64 else torch.float32
         weights = edge_weights.detach().to(device="cpu", dtype=torch_dtype).numpy()
         data = np.concatenate([weights, weights]).astype(
-            np.float64 if fidelity_dtype is torch.float64 else np.float32,
+            np.float64 if resolved_dtype is torch.float64 else np.float32,
             copy=False,
         )
 
@@ -390,7 +392,7 @@ def _layout_tsnet_sklearn_reference(
     max_finite = float(np.max(distances[finite_mask])) if np.any(finite_mask) else 1.0
     fill_value = max(max_finite * 2.0, 1.0)
     dense_distances = np.where(np.isinf(distances), fill_value, distances).astype(
-        np.float64 if fidelity_dtype is torch.float64 else np.float32,
+        np.float64 if resolved_dtype is torch.float64 else np.float32,
         copy=False,
     )
 
@@ -400,13 +402,13 @@ def _layout_tsnet_sklearn_reference(
         steps=steps,
         seed=seed,
     )
-    return torch.tensor(coordinates, dtype=torch.float32, device=device)
+    return torch.tensor(coordinates, dtype=resolved_dtype, device=device)
 
 
 def build_tsnet_pipeline(
     steps: int = 1000,
     fidelity_mode: Union[bool, str] = False,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> Pipeline:
     """Build a tsNET layout pipeline.
 
@@ -452,10 +454,9 @@ def build_tsnet_pipeline(
     """
     if steps < 0:
         raise ValueError("steps must be non-negative.")
-    if fidelity_dtype not in (torch.float32, torch.float64):
-        raise ValueError("fidelity_dtype must be torch.float32 or torch.float64.")
     exact_fidelity = _uses_sklearn_exact_fidelity(fidelity_mode)
-    dtype = fidelity_dtype if exact_fidelity else torch.float32
+    resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
+    dtype = resolved_dtype if exact_fidelity else torch.float32
 
     return Pipeline(
         [
@@ -486,7 +487,7 @@ def layout_tsnet_pipeline(
     seed: int = 42,
     edge_weights: Optional[torch.Tensor] = None,
     fidelity_mode: Union[bool, str] = False,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Run the tsNET pipeline as a drop-in replacement.
 
@@ -534,8 +535,7 @@ def layout_tsnet_pipeline(
         raise ValueError("perplexity must be positive.")
     if steps < 0:
         raise ValueError("steps must be non-negative.")
-    if fidelity_dtype not in (torch.float32, torch.float64):
-        raise ValueError("fidelity_dtype must be torch.float32 or torch.float64.")
+    resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
     if edge_weights is not None:
         if edge_weights.ndim != 1:
             raise ValueError("edge_weights must have shape [E].")
@@ -553,7 +553,7 @@ def layout_tsnet_pipeline(
             steps=steps,
             seed=seed,
             edge_weights=edge_weights,
-            fidelity_dtype=fidelity_dtype,
+            fidelity_dtype=resolved_dtype,
         )
 
     device = layout_device(edge_index, node_sizes)
@@ -577,7 +577,7 @@ def layout_tsnet_pipeline(
     final_state = build_tsnet_pipeline(
         steps=steps,
         fidelity_mode=fidelity_mode,
-        fidelity_dtype=fidelity_dtype,
+        fidelity_dtype=resolved_dtype,
     ).apply(
         problem,
         state,

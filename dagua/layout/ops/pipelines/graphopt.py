@@ -21,6 +21,7 @@ from dagua.layout.ops.init import (
     GraphOptInitializePositionsConfig,
     ValidateGraphOptInputs,
 )
+from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.postprocess import GraphOptFinalizePositions
 from dagua.layout.ops.state import (
     ExecutionPlan,
@@ -38,7 +39,7 @@ def build_graphopt_pipeline(
     spring_constant: float = 1.0,
     max_sa_movement: float = 5.0,
     fidelity_mode: bool = False,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> Pipeline:
     """Build a GraphOpt force-directed layout pipeline.
 
@@ -98,6 +99,7 @@ def build_graphopt_pipeline(
     if max_sa_movement < 0.0:
         raise ValueError("max_sa_movement must be non-negative.")
 
+    resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
     iteration = GraphOptIteration(
         config=GraphOptIterationConfig(
             node_charge=node_charge,
@@ -123,7 +125,9 @@ def build_graphopt_pipeline(
                     iteration,
                 ],
             ),
-            GraphOptFinalizePositions(),
+            GraphOptFinalizePositions(
+                output_dtype=resolved_dtype if fidelity_mode else torch.float32
+            ),
         ],
         name="graphopt_pipeline",
     )
@@ -143,7 +147,7 @@ def layout_graphopt_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     initial_pos: Optional[Any] = None,
     fidelity_mode: bool = False,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Run the GraphOpt force-directed layout pipeline.
 
@@ -209,6 +213,7 @@ def layout_graphopt_pipeline(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
 
+    resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,
@@ -228,7 +233,7 @@ def layout_graphopt_pipeline(
         spring_constant=spring_constant,
         max_sa_movement=max_sa_movement,
         fidelity_mode=fidelity_mode,
-        fidelity_dtype=fidelity_dtype,
+        fidelity_dtype=resolved_dtype,
     ).apply(problem, state, ctx)
     if final_state.pos is None:
         raise RuntimeError("GraphOpt pipeline did not produce final positions.")

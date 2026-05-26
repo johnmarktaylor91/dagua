@@ -1133,11 +1133,18 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 pos = pipeline_fn(**kwargs)
                 direction = config.direction if config else getattr(graph, "direction", "TB")
                 pos = _apply_direction(pos, direction)
+                pos = pos.to(dtype=torch.float32)
                 graph.cache_layout(pos)
                 return pos
             finally:
                 graph._restore_after_layout()
-        return pipeline_fn(**kwargs)
+        result = pipeline_fn(**kwargs)
+        if isinstance(result, tuple):
+            pos, *rest = result
+            if isinstance(pos, torch.Tensor):
+                return (pos.to(dtype=torch.float32), *rest)
+            return result
+        return result.to(dtype=torch.float32)
 
     # Ensure node sizes are computed
     graph.compute_node_sizes()

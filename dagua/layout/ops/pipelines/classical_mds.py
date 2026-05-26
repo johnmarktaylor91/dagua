@@ -11,6 +11,7 @@ import torch
 from dagua.layout.ops.base import Pipeline
 from dagua.layout.ops.distance import ClassicalMDSDistanceMatrix
 from dagua.layout.ops.embed import ClassicalMDSComputeEmbedding, ClassicalMDSComputeEmbeddingConfig
+from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.postprocess import (
     ClassicalMDSFinalizePositions,
     ClassicalMDSFinalizePositionsConfig,
@@ -88,6 +89,7 @@ def layout_classical_mds_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     igraph_fidelity: bool = False,
     ogdf_fidelity: bool = False,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Run the classical multidimensional scaling pipeline.
 
@@ -113,6 +115,9 @@ def layout_classical_mds_pipeline(
         If ``True``, run OGDF ``PivotMDS`` with all nodes as pivots. This
         matches OGDF's documented classical-MDS mode and uses uniform edge cost
         ``100`` plus OGDF's fixed ``srand(0)`` power-iteration basis.
+    fidelity_dtype : torch.dtype, optional
+        Internal and returned dtype for fidelity-mode comparisons. ``None``
+        defaults to ``torch.float64`` when fidelity mode is selected.
 
     Returns
     -------
@@ -140,7 +145,11 @@ def layout_classical_mds_pipeline(
                 f"edge_weights length {edge_weights.shape[0]} != edge count {edge_index.shape[1]}"
             )
     if ogdf_fidelity:
-        return _layout_ogdf_classical_mds(edge_index=edge_index, num_nodes=num_nodes)
+        return _layout_ogdf_classical_mds(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            fidelity_dtype=resolve_fidelity_dtype(True, fidelity_dtype),
+        )
 
     problem = LayoutProblem(
         edge_index=edge_index,
@@ -160,7 +169,11 @@ def layout_classical_mds_pipeline(
     return final_state.pos
 
 
-def _layout_ogdf_classical_mds(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+def _layout_ogdf_classical_mds(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    fidelity_dtype: torch.dtype,
+) -> torch.Tensor:
     """Run OGDF's all-pivots PivotMDS implementation.
 
     Parameters
@@ -169,6 +182,8 @@ def _layout_ogdf_classical_mds(edge_index: torch.Tensor, num_nodes: int) -> torc
         Graph connectivity tensor with shape ``[2, E]``.
     num_nodes : int
         Number of graph nodes ``N``.
+    fidelity_dtype : torch.dtype
+        Output dtype for fidelity comparisons.
 
     Returns
     -------
@@ -184,9 +199,9 @@ def _layout_ogdf_classical_mds(edge_index: torch.Tensor, num_nodes: int) -> torc
         If OGDF's power iteration diverges numerically.
     """
     if num_nodes == 0:
-        return torch.zeros((0, 2), dtype=torch.float32)
+        return torch.zeros((0, 2), dtype=fidelity_dtype)
     if num_nodes == 1:
-        return torch.zeros((1, 2), dtype=torch.float32)
+        return torch.zeros((1, 2), dtype=fidelity_dtype)
 
     adjacency: list[list[int]] = [[] for _ in range(num_nodes)]
     edges = edge_index.detach().to(device="cpu", dtype=torch.long)
@@ -203,7 +218,7 @@ def _layout_ogdf_classical_mds(edge_index: torch.Tensor, num_nodes: int) -> torc
     if len(endpoints) == 2 and not any(
         len(neighbors) > 2 or len(neighbors) == 0 for neighbors in simple_neighbors
     ):
-        positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
+        positions = torch.zeros((num_nodes, 2), dtype=fidelity_dtype)
         previous = -1
         current = endpoints[0]
         for path_index in range(num_nodes):
@@ -354,7 +369,7 @@ def _layout_ogdf_classical_mds(edge_index: torch.Tensor, num_nodes: int) -> torc
             [coordinate_rows[0][node_idx], coordinate_rows[1][node_idx]]
             for node_idx in range(num_nodes)
         ],
-        dtype=torch.float32,
+        dtype=fidelity_dtype,
     )
 
 
