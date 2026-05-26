@@ -1823,7 +1823,7 @@ def _graphviz_fdp_tlayout_with_ports(
                     edge=edges[edge_id],
                     phase=iteration,
                 )
-        for (cell_x, cell_y), nodes in grid.items():
+        for (cell_x, cell_y), nodes in sorted(grid.items()):
             for source in nodes:
                 for target in nodes:
                     if source != target:
@@ -1837,16 +1837,17 @@ def _graphviz_fdp_tlayout_with_ports(
                             phase=iteration,
                             port_indices=port_indices,
                         )
-                for delta_x, delta_y in (
-                    (-1, -1),
-                    (-1, 0),
-                    (-1, 1),
-                    (0, -1),
-                    (0, 1),
-                    (1, -1),
-                    (1, 0),
-                    (1, 1),
-                ):
+            for delta_x, delta_y in (
+                (-1, -1),
+                (-1, 0),
+                (-1, 1),
+                (0, -1),
+                (0, 1),
+                (1, -1),
+                (1, 0),
+                (1, 1),
+            ):
+                for source in nodes:
                     for target in grid.get((cell_x + delta_x, cell_y + delta_y), []):
                         x_delta = x_positions[target] - x_positions[source]
                         y_delta = y_positions[target] - y_positions[source]
@@ -3236,7 +3237,7 @@ def _graphviz_fdp_tlayout(
                     edge=edges[edge_id],
                     phase=iteration,
                 )
-        for (cell_x, cell_y), nodes in grid.items():
+        for (cell_x, cell_y), nodes in sorted(grid.items()):
             for source in nodes:
                 for target in nodes:
                     if source != target:
@@ -3249,16 +3250,17 @@ def _graphviz_fdp_tlayout(
                             target=target,
                             phase=iteration,
                         )
-                for delta_x, delta_y in (
-                    (-1, -1),
-                    (-1, 0),
-                    (-1, 1),
-                    (0, -1),
-                    (0, 1),
-                    (1, -1),
-                    (1, 0),
-                    (1, 1),
-                ):
+            for delta_x, delta_y in (
+                (-1, -1),
+                (-1, 0),
+                (-1, 1),
+                (0, -1),
+                (0, 1),
+                (1, -1),
+                (1, 0),
+                (1, 1),
+            ):
+                for source in nodes:
                     for target in grid.get((cell_x + delta_x, cell_y + delta_y), []):
                         x_delta = x_positions[target] - x_positions[source]
                         y_delta = y_positions[target] - y_positions[source]
