@@ -19,6 +19,7 @@ from dagua.layout.ops.init import (
     ValidateFA2Inputs,
     ValidateFA2InputsConfig,
 )
+from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.preprocess import FA2PrepareState, FA2PrepareStateConfig
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
@@ -81,6 +82,7 @@ def _layout_fa2_reference_exact(
     edge_weights: Optional[torch.Tensor],
     dissuade_hubs: bool,
     edge_weight_influence: float,
+    fidelity_dtype: torch.dtype,
 ) -> torch.Tensor:
     """Run the live ``fa2`` exact-loop kernel for fidelity mode.
 
@@ -118,9 +120,9 @@ def _layout_fa2_reference_exact(
         Final reference-order coordinates with shape ``[N, 2]``.
     """
     if num_nodes == 0:
-        return torch.zeros((0, 2), dtype=torch.float64, device=edge_index.device)
+        return torch.zeros((0, 2), dtype=fidelity_dtype, device=edge_index.device)
     if num_nodes == 1:
-        return torch.zeros((1, 2), dtype=torch.float64, device=edge_index.device)
+        return torch.zeros((1, 2), dtype=fidelity_dtype, device=edge_index.device)
 
     rng = random.Random(seed)
     pos = np.asarray([[rng.random(), rng.random()] for _ in range(num_nodes)], dtype=np.float64)
@@ -233,7 +235,7 @@ def _layout_fa2_reference_exact(
             pos[node_index, 0] += force[node_index, 0] * factor
             pos[node_index, 1] += force[node_index, 1] * factor
 
-    return torch.from_numpy(pos).to(device=edge_index.device, dtype=torch.float64)
+    return torch.from_numpy(pos).to(device=edge_index.device, dtype=fidelity_dtype)
 
 
 @dataclass(frozen=True)
@@ -283,7 +285,7 @@ class FA2Config:
     barnes_hut_theta: float = 1.2
     jitter_tolerance: float = 1.0
     fidelity_mode: bool = False
-    fidelity_dtype: torch.dtype = torch.float64
+    fidelity_dtype: Optional[torch.dtype] = None
 
 
 def build_fa2_pipeline(config: Optional[FA2Config] = None) -> Pipeline:
@@ -327,7 +329,11 @@ def build_fa2_pipeline(config: Optional[FA2Config] = None) -> Pipeline:
     if resolved.steps < 0:
         raise ValueError("steps must be non-negative.")
 
-    dtype = resolved.fidelity_dtype if resolved.fidelity_mode else torch.float32
+    dtype = (
+        resolve_fidelity_dtype(resolved.fidelity_mode, resolved.fidelity_dtype)
+        if resolved.fidelity_mode
+        else torch.float32
+    )
     return Pipeline(
         [
             ValidateFA2Inputs(
@@ -386,7 +392,7 @@ def layout_fa2_pipeline(
     barnes_hut: bool = False,
     barnes_hut_theta: float = 1.2,
     fidelity_mode: bool = False,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Run the ForceAtlas2 pipeline as a drop-in replacement.
 
@@ -442,6 +448,7 @@ def layout_fa2_pipeline(
     """
     del node_sizes
 
+    resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
     if fidelity_mode and not barnes_hut:
         return _layout_fa2_reference_exact(
             edge_index,
@@ -456,6 +463,7 @@ def layout_fa2_pipeline(
             edge_weights=edge_weights,
             dissuade_hubs=dissuade_hubs,
             edge_weight_influence=edge_weight_influence,
+            fidelity_dtype=resolved_dtype,
         )
 
     config = FA2Config(
@@ -470,7 +478,7 @@ def layout_fa2_pipeline(
         barnes_hut=barnes_hut,
         barnes_hut_theta=barnes_hut_theta,
         fidelity_mode=fidelity_mode,
-        fidelity_dtype=fidelity_dtype,
+        fidelity_dtype=resolved_dtype,
     )
     problem = LayoutProblem(
         edge_index=edge_index,

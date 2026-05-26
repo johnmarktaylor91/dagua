@@ -18,6 +18,7 @@ from dagua.layout.ops.drl import (
     DRLPrepareStateConfig,
 )
 from dagua.layout.ops.graph_utils import layout_device
+from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.state import ExecutionPlan, LayoutProblem, RuntimeContext, SolveState
 
 
@@ -27,6 +28,7 @@ def _layout_drl_igraph_reference(
     seed: int,
     edge_weights: Optional[torch.Tensor],
     options: DrLOptions,
+    fidelity_dtype: torch.dtype,
 ) -> Optional[torch.Tensor]:
     """Run python-igraph's DrL implementation for fidelity mode.
 
@@ -83,7 +85,7 @@ def _layout_drl_igraph_reference(
     finally:
         igraph.set_random_number_generator(None)
 
-    positions = torch.empty((num_nodes, 2), dtype=torch.float32)
+    positions = torch.empty((num_nodes, 2), dtype=fidelity_dtype)
     for node in range(num_nodes):
         positions[node, 0] = float(layout[node][0]) * 50.0
         positions[node, 1] = float(layout[node][1]) * 50.0
@@ -93,7 +95,7 @@ def _layout_drl_igraph_reference(
 def build_drl_pipeline(
     options: DrLOptions = "default",
     fidelity_mode: bool = False,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> Pipeline:
     """Build a Distributed Recursive Layout pipeline.
 
@@ -149,7 +151,7 @@ def layout_drl_pipeline(
     edge_weights: Optional[torch.Tensor] = None,
     options: DrLOptions = "default",
     fidelity_mode: bool = False,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Run the Distributed Recursive Layout pipeline.
 
@@ -213,20 +215,20 @@ def layout_drl_pipeline(
         return torch.empty((0, 2), dtype=torch.float32, device=device)
 
     if fidelity_mode:
-        if fidelity_dtype not in (torch.float32, torch.float64):
-            raise ValueError("fidelity_dtype must be torch.float32 or torch.float64.")
+        resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
         reference_pos = _layout_drl_igraph_reference(
             edge_index=edge_index,
             num_nodes=num_nodes,
             seed=seed,
             edge_weights=edge_weights,
             options=options,
+            fidelity_dtype=resolved_dtype,
         )
         if reference_pos is not None:
             output_device = layout_device(edge_index=edge_index, node_sizes=node_sizes)
-            return reference_pos.to(dtype=fidelity_dtype, device=output_device).to(
-                dtype=torch.float32
-            )
+            return reference_pos.to(dtype=resolved_dtype, device=output_device)
+    else:
+        resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
 
     problem = LayoutProblem(
         edge_index=edge_index,
@@ -240,7 +242,7 @@ def layout_drl_pipeline(
     final_state = build_drl_pipeline(
         options=options,
         fidelity_mode=fidelity_mode,
-        fidelity_dtype=fidelity_dtype,
+        fidelity_dtype=resolved_dtype,
     ).apply(problem, state, ctx)
 
     if final_state.pos is None:

@@ -31,11 +31,11 @@ class LayoutConfig:
 
     Parameters
     ----------
-    fidelity_dtype : torch.dtype, default=torch.float32
-        Internal dtype used only by fidelity-mode engine adapters. Use
-        ``torch.float64`` to reproduce external double-precision references
-        more closely at additional runtime and memory cost. Public layout
-        outputs remain ``float32``.
+    fidelity_dtype : torch.dtype, optional
+        Internal dtype used only by fidelity-mode engine adapters. ``None``
+        lets fidelity-mode pipelines default to ``torch.float64`` while
+        non-fidelity paths remain ``torch.float32``. Public layout outputs
+        remain ``float32``.
     """
 
     # Spacing
@@ -81,7 +81,7 @@ class LayoutConfig:
     lr: float = 0.05
     device: str = "cpu"
     seed: Optional[int] = 42
-    fidelity_dtype: torch.dtype = torch.float32
+    fidelity_dtype: Optional[torch.dtype] = None
     multi_start_k: int = 1
     # Route degenerate-layering cyclic graphs (e.g. small_world)
     # to the stress-majorization pipeline instead of the layered native path.
