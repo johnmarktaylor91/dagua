@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from dagua.layout.ops.base import Pipeline
+from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.preprocess import BuildAdjacency, BuildAdjacencyConfig
 from dagua.layout.ops.state import (  # noqa: E402
     ExecutionPlan,
@@ -191,6 +192,7 @@ def _layout_ogdf_stress(
     seed: int,
     steps: int,
     init_pos: Optional[torch.Tensor],
+    fidelity_dtype: torch.dtype,
 ) -> torch.Tensor:
     """Run the OGDF ``StressMinimization`` reference path.
 
@@ -213,7 +215,7 @@ def _layout_ogdf_stress(
         Final coordinates with shape ``[N, 2]``.
     """
     if num_nodes <= 1:
-        return torch.zeros((num_nodes, 2), dtype=torch.float32, device=edge_index.device)
+        return torch.zeros((num_nodes, 2), dtype=fidelity_dtype, device=edge_index.device)
     positions = (
         _ogdf_initial_positions(num_nodes=num_nodes, seed=seed)
         if init_pos is None
@@ -226,7 +228,7 @@ def _layout_ogdf_stress(
     iterations = steps if steps > 0 else _OGDF_DEFAULT_ITERATIONS
     for _ in range(iterations):
         _ogdf_serial_sweep(positions=positions, distances=distances, weights=weights)
-    return torch.from_numpy(positions.astype(np.float32, copy=False)).to(device=edge_index.device)
+    return torch.from_numpy(positions).to(device=edge_index.device, dtype=fidelity_dtype)
 
 
 def build_stress_sgd_pipeline(
@@ -236,7 +238,7 @@ def build_stress_sgd_pipeline(
     sample_size: Union[int, str] = "auto",
     trace_every: int = 0,
     fidelity_mode: bool = False,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> Pipeline:
     """Build a Stress-SGD layout pipeline.
 
@@ -328,7 +330,7 @@ def layout_stress_sgd_pipeline(
     max_exact_nodes: int = _DEFAULT_MAX_EXACT_NODES,
     edge_weights: Optional[torch.Tensor] = None,
     fidelity_mode: bool = False,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> Union[torch.Tensor, "tuple[torch.Tensor, list[torch.Tensor]]"]:
     """Run the Stress-SGD pipeline.
 
@@ -397,6 +399,7 @@ def layout_stress_sgd_pipeline(
     if init_pos is not None:
         if init_pos.ndim != 2 or init_pos.shape != (num_nodes, 2):
             raise ValueError("init_pos must be shape [N, 2].")
+    resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
     if fidelity_mode == "ogdf":
         positions = _layout_ogdf_stress(
             edge_index=edge_index,
@@ -404,6 +407,7 @@ def layout_stress_sgd_pipeline(
             seed=seed,
             steps=steps,
             init_pos=init_pos,
+            fidelity_dtype=resolved_dtype,
         )
         if trace_every > 0:
             return positions, []
@@ -418,7 +422,7 @@ def layout_stress_sgd_pipeline(
     )
     output_device = edge_index.device
     prepared_init_pos = (
-        init_pos.to(device=output_device, dtype=torch.float32) if init_pos is not None else None
+        init_pos.to(device=output_device, dtype=resolved_dtype) if init_pos is not None else None
     )
     state = SolveState(pos=prepared_init_pos)
     ctx = RuntimeContext(plan=ExecutionPlan(device=str(output_device)))
@@ -429,7 +433,7 @@ def layout_stress_sgd_pipeline(
         sample_size=sample_size,
         trace_every=trace_every,
         fidelity_mode=fidelity_mode,
-        fidelity_dtype=fidelity_dtype,
+        fidelity_dtype=resolved_dtype,
     ).apply(problem, state, ctx)
 
     if final_state.pos is None:

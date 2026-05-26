@@ -709,8 +709,11 @@ class LGLLayeredRefinement(Op):
 
 
 @register_op
+@dataclass(frozen=True)
 class LGLFinalizePositions(Op):
     """Cast positions to the classic LGL output dtype and output device."""
+
+    output_dtype: torch.dtype = torch.float32
 
     name: ClassVar[str] = "lgl_finalize_positions"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
@@ -735,7 +738,7 @@ class LGLFinalizePositions(Op):
             edge_index=problem.edge_index,
             node_sizes=problem.node_sizes,
         )
-        state.pos = state.pos.to(dtype=torch.float32, device=output_device)
+        state.pos = state.pos.to(dtype=self.output_dtype, device=output_device)
         return state
 
 

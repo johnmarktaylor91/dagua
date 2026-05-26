@@ -1145,6 +1145,7 @@ class InitializeGEMPositions(Op):
     """
 
     fidelity_mode: GEMFidelityMode = False
+    fidelity_dtype: torch.dtype = torch.float32
 
     name: ClassVar[str] = "gem_initialize_positions"
     category: ClassVar[OpCategory] = OpCategory.INIT
@@ -1181,7 +1182,7 @@ class InitializeGEMPositions(Op):
         output_device = layout_device(problem.edge_index, problem.node_sizes)
 
         if problem.num_nodes == 0:
-            state.pos = torch.empty((0, 2), dtype=torch.float32, device=output_device)
+            state.pos = torch.empty((0, 2), dtype=self.fidelity_dtype, device=output_device)
             state.converged = True
             return state
 
@@ -1197,7 +1198,7 @@ class InitializeGEMPositions(Op):
                 num_nodes=problem.num_nodes,
                 seed=problem.seed,
                 device=output_device,
-                dtype=torch.float64,
+                dtype=self.fidelity_dtype,
             )
             return state
 
@@ -1288,6 +1289,7 @@ class GEMSequentialStep(Op):
     """
 
     config: GEMPhysicsConfig = field(default_factory=GEMPhysicsConfig)
+    fidelity_dtype: torch.dtype = torch.float32
 
     name: ClassVar[str] = "gem_sequential_step"
     category: ClassVar[OpCategory] = OpCategory.FORCE
@@ -1335,7 +1337,7 @@ class GEMSequentialStep(Op):
                 initial_positions=state.pos,
                 max_iters=capped_iters,
                 config=self.config,
-            ).to(dtype=torch.float32)
+            ).to(dtype=self.fidelity_dtype)
             state.local_temperatures = None
             return state
 
@@ -1943,6 +1945,7 @@ class GEMFinalizePositions(Op):
     """Normalize GEM coordinates and move them to the resolved output device."""
 
     config: GEMFinalizeConfig = field(default_factory=GEMFinalizeConfig)
+    fidelity_dtype: torch.dtype = torch.float32
 
     name: ClassVar[str] = "gem_finalize_positions"
     category: ClassVar[OpCategory] = OpCategory.POSTPROCESS
@@ -1990,7 +1993,7 @@ class GEMFinalizePositions(Op):
             device = layout_device(torch.empty((2, 0), dtype=torch.long), None)
 
         if state.extras.get("gem_fidelity_mode") == _FIDELITY_MODE_OGDF:
-            state.pos = state.pos.to(dtype=torch.float32, device=device)
+            state.pos = state.pos.to(dtype=self.fidelity_dtype, device=device)
             return state
 
         extent = float(state.extras.get("gem_extent", self.config.default_extent))

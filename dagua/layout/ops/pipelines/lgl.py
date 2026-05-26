@@ -17,6 +17,7 @@ from dagua.layout.ops.lgl import (
     LGLPrepareState,
     LGLPrepareStateConfig,
 )
+from dagua.layout.ops.pipelines import resolve_fidelity_dtype
 from dagua.layout.ops.state import (
     ExecutionPlan,
     LayoutProblem,
@@ -36,7 +37,7 @@ def build_lgl_pipeline(
     use_edge_weights: bool = False,
     igraph_positive_maxchange: bool = True,
     fidelity_mode: bool = False,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> Pipeline:
     """Build a Large Graph Layout pipeline.
 
@@ -131,7 +132,11 @@ def build_lgl_pipeline(
                     fidelity_mode=fidelity_mode,
                 )
             ),
-            LGLFinalizePositions(),
+            LGLFinalizePositions(
+                output_dtype=resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
+                if fidelity_mode
+                else torch.float32
+            ),
         ],
         name="lgl_pipeline",
     )
@@ -153,7 +158,7 @@ def layout_lgl_pipeline(
     use_edge_weights: bool = False,
     igraph_positive_maxchange: bool = True,
     fidelity_mode: bool = False,
-    fidelity_dtype: torch.dtype = torch.float32,
+    fidelity_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Run the Large Graph Layout pipeline as a drop-in replacement.
 
@@ -245,6 +250,7 @@ def layout_lgl_pipeline(
         output_device = layout_device(edge_index=edge_index, node_sizes=node_sizes)
         return torch.empty((0, 2), dtype=torch.float32, device=output_device)
 
+    resolved_dtype = resolve_fidelity_dtype(fidelity_mode, fidelity_dtype)
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,
@@ -268,7 +274,7 @@ def layout_lgl_pipeline(
         use_edge_weights=use_edge_weights,
         igraph_positive_maxchange=igraph_positive_maxchange,
         fidelity_mode=fidelity_mode,
-        fidelity_dtype=fidelity_dtype,
+        fidelity_dtype=resolved_dtype,
     ).apply(problem, state, ctx)
 
     if final_state.pos is None:
