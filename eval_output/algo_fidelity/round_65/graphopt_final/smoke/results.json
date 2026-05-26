@@ -1,0 +1,138 @@
+{
+  "dense_pair_50::classic_graphopt_mass_low::seed42": {
+    "graph_name": "dense_pair_50",
+    "engine_name": "classic_graphopt_mass_low",
+    "seed": 42,
+    "status": "ok",
+    "runtime_seconds": 0.5943256989121437,
+    "error": null,
+    "positions_file": "positions/dense_pair_50__classic_graphopt_mass_low__seed42.pt",
+    "num_nodes": 50,
+    "num_edges": 208,
+    "is_stochastic": true,
+    "skip_reason": null,
+    "original_for": [],
+    "reimpl_of": [
+      "igraph_graphopt__for__classic_graphopt_mass_low"
+    ]
+  },
+  "dense_pair_50::classic_graphopt_spring2::seed42": {
+    "graph_name": "dense_pair_50",
+    "engine_name": "classic_graphopt_spring2",
+    "seed": 42,
+    "status": "ok",
+    "runtime_seconds": 0.6152744991704822,
+    "error": null,
+    "positions_file": "positions/dense_pair_50__classic_graphopt_spring2__seed42.pt",
+    "num_nodes": 50,
+    "num_edges": 208,
+    "is_stochastic": true,
+    "skip_reason": null,
+    "original_for": [],
+    "reimpl_of": [
+      "igraph_graphopt__for__classic_graphopt_spring2"
+    ]
+  },
+  "dense_pair_50::igraph_graphopt__for__classic_graphopt_mass_low::seed42": {
+    "graph_name": "dense_pair_50",
+    "engine_name": "igraph_graphopt__for__classic_graphopt_mass_low",
+    "seed": 42,
+    "status": "ok",
+    "runtime_seconds": 0.00804959936067462,
+    "error": null,
+    "positions_file": "positions/dense_pair_50__igraph_graphopt__for__classic_graphopt_mass_low__seed42.pt",
+    "num_nodes": 50,
+    "num_edges": 208,
+    "is_stochastic": true,
+    "skip_reason": null,
+    "original_for": [
+      "classic_graphopt_mass_low"
+    ],
+    "reimpl_of": []
+  },
+  "dense_pair_50::igraph_graphopt__for__classic_graphopt_spring2::seed42": {
+    "graph_name": "dense_pair_50",
+    "engine_name": "igraph_graphopt__for__classic_graphopt_spring2",
+    "seed": 42,
+    "status": "ok",
+    "runtime_seconds": 0.00819727685302496,
+    "error": null,
+    "positions_file": "positions/dense_pair_50__igraph_graphopt__for__classic_graphopt_spring2__seed42.pt",
+    "num_nodes": 50,
+    "num_edges": 208,
+    "is_stochastic": true,
+    "skip_reason": null,
+    "original_for": [
+      "classic_graphopt_spring2"
+    ],
+    "reimpl_of": []
+  },
+  "real_lesmis_77::classic_graphopt_mass_low::seed42": {
+    "graph_name": "real_lesmis_77",
+    "engine_name": "classic_graphopt_mass_low",
+    "seed": 42,
+    "status": "ok",
+    "runtime_seconds": 1.310288640204817,
+    "error": null,
+    "positions_file": "positions/real_lesmis_77__classic_graphopt_mass_low__seed42.pt",
+    "num_nodes": 77,
+    "num_edges": 254,
+    "is_stochastic": true,
+    "skip_reason": null,
+    "original_for": [],
+    "reimpl_of": [
+      "igraph_graphopt__for__classic_graphopt_mass_low"
+    ]
+  },
+  "real_lesmis_77::classic_graphopt_spring2::seed42": {
+    "graph_name": "real_lesmis_77",
+    "engine_name": "classic_graphopt_spring2",
+    "seed": 42,
+    "status": "ok",
+    "runtime_seconds": 1.3224773351103067,
+    "error": null,
+    "positions_file": "positions/real_lesmis_77__classic_graphopt_spring2__seed42.pt",
+    "num_nodes": 77,
+    "num_edges": 254,
+    "is_stochastic": true,
+    "skip_reason": null,
+    "original_for": [],
+    "reimpl_of": [
+      "igraph_graphopt__for__classic_graphopt_spring2"
+    ]
+  },
+  "real_lesmis_77::igraph_graphopt__for__classic_graphopt_mass_low::seed42": {
+    "graph_name": "real_lesmis_77",
+    "engine_name": "igraph_graphopt__for__classic_graphopt_mass_low",
+    "seed": 42,
+    "status": "ok",
+    "runtime_seconds": 0.01755031803622842,
+    "error": null,
+    "positions_file": "positions/real_lesmis_77__igraph_graphopt__for__classic_graphopt_mass_low__seed42.pt",
+    "num_nodes": 77,
+    "num_edges": 254,
+    "is_stochastic": true,
+    "skip_reason": null,
+    "original_for": [
+      "classic_graphopt_mass_low"
+    ],
+    "reimpl_of": []
+  },
+  "real_lesmis_77::igraph_graphopt__for__classic_graphopt_spring2::seed42": {
+    "graph_name": "real_lesmis_77",
+    "engine_name": "igraph_graphopt__for__classic_graphopt_spring2",
+    "seed": 42,
+    "status": "ok",
+    "runtime_seconds": 0.017498210072517395,
+    "error": null,
+    "positions_file": "positions/real_lesmis_77__igraph_graphopt__for__classic_graphopt_spring2__seed42.pt",
+    "num_nodes": 77,
+    "num_edges": 254,
+    "is_stochastic": true,
+    "skip_reason": null,
+    "original_for": [
+      "classic_graphopt_spring2"
+    ],
+    "reimpl_of": []
+  }
+}
