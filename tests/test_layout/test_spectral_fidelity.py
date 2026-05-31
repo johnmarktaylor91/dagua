@@ -137,7 +137,7 @@ def test_networkx_fidelity_variant_is_registered_against_nx_spectral() -> None:
     variant = get_variant("classic_spectral_nx_fidelity")
 
     assert variant is not None
-    assert variant.reimpl_params == {"networkx_fidelity": True}
+    assert variant.reimpl_params == {"networkx_fidelity": True, "fidelity_mode": "networkx"}
     assert variant.original_engine == "nx_spectral"
 
 
