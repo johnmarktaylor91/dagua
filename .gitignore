@@ -113,3 +113,4 @@ aesthetic_review/
 
 # Codex CLI tooling marker (empty file dropped by codex exec)
 .codex
+.project-context/research/sprint_rng_matching/status.json

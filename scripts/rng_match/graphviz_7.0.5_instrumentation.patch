@@ -1,0 +1,344 @@
+--- a/lib/common/utils.c
++++ b/lib/common/utils.c
+@@ -16,6 +16,8 @@
+ #include <common/htmltable.h>
+ #include <common/entities.h>
+ #include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
+ #include <gvc/gvc.h>
+ #include <cgraph/strcasecmp.h>
+ #include <stddef.h>
+@@ -24,6 +26,36 @@
+
+ #include <ctype.h>
+
++static FILE *gv_trace_stream(void)
++{
++    char *path;
++
++    if (getenv("GV_TRACE") == NULL)
++	return NULL;
++    path = getenv("GV_TRACE_FILE");
++    if (path == NULL || path[0] == '\0')
++	return stderr;
++    return fopen(path, "a");
++}
++
++static void gv_trace_close(FILE *fp)
++{
++    if (fp != NULL && fp != stderr)
++	fclose(fp);
++}
++
++static void gv_trace_compute_bb(graph_t *g, boxf bb)
++{
++    FILE *fp = gv_trace_stream();
++
++    if (fp == NULL)
++	return;
++    fprintf(fp, "COMPUTE_BB graph=%s nodes=%d edges=%d bb=(%.17g,%.17g,%.17g,%.17g)\n",
++	    agnameof(g), agnnodes(g), agnedges(g), bb.LL.x, bb.LL.y, bb.UR.x,
++	    bb.UR.y);
++    gv_trace_close(fp);
++}
++
+ /*
+  *  a queue of nodes
+  */
+@@ -773,6 +805,7 @@
+     if ((agnnodes(g) == 0) && (GD_n_cluster(g) ==0)) {
+ 	bb.LL = (pointf){0};
+ 	bb.UR = (pointf){0};
++	gv_trace_compute_bb(g, bb);
+ 	return;
+     }
+
+@@ -822,6 +855,7 @@
+     }
+
+     GD_bb(g) = bb;
++    gv_trace_compute_bb(g, bb);
+ }
+
+ bool is_a_cluster (Agraph_t* g)
+--- a/lib/fdpgen/layout.c
++++ b/lib/fdpgen/layout.c
+@@ -45,6 +45,8 @@
+ #include <fdpgen/dbg.h>
+ #include <stddef.h>
+ #include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
+
+ typedef struct {
+     graph_t*  rootg;  /* logical root; graph passed in to fdp_layout */
+@@ -63,6 +65,61 @@
+
+ #define NEW_EDGE(e) (ED_to_virt(e) == 0)
+
++static FILE *gv_trace_stream(void)
++{
++    char *path;
++
++    if (getenv("GV_TRACE") == NULL)
++	return NULL;
++    path = getenv("GV_TRACE_FILE");
++    if (path == NULL || path[0] == '\0')
++	return stderr;
++    return fopen(path, "a");
++}
++
++static void gv_trace_close(FILE *fp)
++{
++    if (fp != NULL && fp != stderr)
++	fclose(fp);
++}
++
++static void gv_trace_finalcc_start(graph_t *g, int c_cnt, graph_t **cc, point *pts)
++{
++    FILE *fp = gv_trace_stream();
++    int i;
++
++    if (fp == NULL)
++	return;
++    fprintf(fp, "FINALCC graph=%s components=%d phase=start\n", agnameof(g), c_cnt);
++    for (i = 0; i < c_cnt; i++) {
++	boxf bb = GD_bb(cc[i]);
++	if (pts != NULL) {
++	    fprintf(fp,
++		    "FINALCC_COMPONENT graph=%s component=%d name=%s bb=(%.17g,%.17g,%.17g,%.17g) translate=(%d,%d)\n",
++		    agnameof(g), i, agnameof(cc[i]), bb.LL.x, bb.LL.y, bb.UR.x,
++		    bb.UR.y, pts[i].x, pts[i].y);
++	} else {
++	    fprintf(fp,
++		    "FINALCC_COMPONENT graph=%s component=%d name=%s bb=(%.17g,%.17g,%.17g,%.17g) translate=(0,0)\n",
++		    agnameof(g), i, agnameof(cc[i]), bb.LL.x, bb.LL.y, bb.UR.x,
++		    bb.UR.y);
++	}
++    }
++    gv_trace_close(fp);
++}
++
++static void gv_trace_finalcc_done(graph_t *g)
++{
++    FILE *fp = gv_trace_stream();
++    boxf bb = GD_bb(g);
++
++    if (fp == NULL)
++	return;
++    fprintf(fp, "FINALCC graph=%s phase=done bb=(%.17g,%.17g,%.17g,%.17g)\n",
++	    agnameof(g), bb.LL.x, bb.LL.y, bb.UR.x, bb.UR.y);
++    gv_trace_close(fp);
++}
++
+ /* finalCC:
+  * Set graph bounding box given list of connected
+  * components, each with its bounding box set.
+@@ -88,6 +145,8 @@
+     int isRoot = rg == infop->rootg;
+     int isEmpty = 0;
+
++    gv_trace_finalcc_start(g, c_cnt, cc, pts);
++
+     /* compute graph bounding box in points */
+     if (c_cnt) {
+ 	cg = *cp++;
+@@ -174,6 +233,7 @@
+     bbf.UR.x = PS2INCH(bb.UR.x);
+     bbf.UR.y = PS2INCH(bb.UR.y);
+     BB(g) = bbf;
++    gv_trace_finalcc_done(g);
+
+ }
+
+--- a/lib/fdpgen/tlayout.c
++++ b/lib/fdpgen/tlayout.c
+@@ -31,6 +31,7 @@
+ #include <sys/types.h>
+ #endif
+ #include <math.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <time.h>
+ #ifndef _WIN32
+@@ -113,6 +114,40 @@
+ #define DFLT_seed  1
+ #define DFLT_smode INIT_RANDOM
+
++static FILE *gv_trace_stream(void)
++{
++    char *path;
++
++    if (getenv("GV_TRACE") == NULL)
++	return NULL;
++    path = getenv("GV_TRACE_FILE");
++    if (path == NULL || path[0] == '\0')
++	return stderr;
++    return fopen(path, "a");
++}
++
++static void gv_trace_close(FILE *fp)
++{
++    if (fp != NULL && fp != stderr)
++	fclose(fp);
++}
++
++static void gv_trace_fdp_step(graph_t *g, int iter, double temp)
++{
++    FILE *fp = gv_trace_stream();
++    Agnode_t *n;
++
++    if (fp == NULL)
++	return;
++    fprintf(fp, "STEP engine=fdp graph=%s iter=%d temp=%.17g K=%.17g nodes=%d edges=%d\n",
++	    agnameof(g), iter, temp, T_K, agnnodes(g), agnedges(g));
++    for (n = agfstnode(g); n; n = agnxtnode(g, n)) {
++	fprintf(fp, "POSITION engine=fdp graph=%s iter=%d node=%s x=%.17g y=%.17g\n",
++		agnameof(g), iter, agnameof(n), ND_pos(n)[0], ND_pos(n)[1]);
++    }
++    gv_trace_close(fp);
++}
++
+ static double cool(int t)
+ {
+     return T_T0 * (T_maxIters - t) / T_maxIters;
+@@ -677,12 +712,14 @@
+ 	for (i = 0; i < T_loopcnt; i++) {
+ 	    temp = cool(i);
+ 	    gAdjust(g, temp, pp, grid);
++	    gv_trace_fdp_step(g, i, temp);
+ 	}
+ 	delGrid(grid);
+     } else {
+ 	for (i = 0; i < T_loopcnt; i++) {
+ 	    temp = cool(i);
+ 	    adjust(g, temp, pp);
++	    gv_trace_fdp_step(g, i, temp);
+ 	}
+     }
+
+--- a/lib/fdpgen/xlayout.c
++++ b/lib/fdpgen/xlayout.c
+@@ -29,6 +29,8 @@
+ #include <fdpgen/dbg.h>
+ #include <ctype.h>
+ #include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
+
+ /* Use bbox based force function */
+ /* #define MS */
+@@ -103,6 +105,38 @@
+ #define X_loopcnt    xParams.loopcnt
+ #define X_C          xParams.C
+
++static FILE *gv_trace_stream(void)
++{
++    char *path;
++
++    if (getenv("GV_TRACE") == NULL)
++	return NULL;
++    path = getenv("GV_TRACE_FILE");
++    if (path == NULL || path[0] == '\0')
++	return stderr;
++    return fopen(path, "a");
++}
++
++static void gv_trace_close(FILE *fp)
++{
++    if (fp != NULL && fp != stderr)
++	fclose(fp);
++}
++
++static void gv_trace_xlayout(graph_t *g, int try, int iter, int ov, double temp)
++{
++    FILE *fp = gv_trace_stream();
++    boxf bb = GD_bb(g);
++
++    if (fp == NULL)
++	return;
++    fprintf(fp,
++	    "XLAYOUT graph=%s try=%d iter=%d overlaps=%d bb=(%.17g,%.17g,%.17g,%.17g) K=%.17g temp=%.17g nodes=%d edges=%d\n",
++	    agnameof(g), try, iter, ov, bb.LL.x, bb.LL.y, bb.UR.x, bb.UR.y, X_K,
++	    temp, agnnodes(g), agnedges(g));
++    gv_trace_close(fp);
++}
++
+
+ static double cool(int t)
+ {
+@@ -484,6 +518,7 @@
+ 	    if (temp <= 0.0)
+ 		break;
+ 	    ov = adjust(g, temp);
++	    gv_trace_xlayout(g, try, i, ov, temp);
+ 	    if (ov == 0)
+ 		break;
+ 	}
+--- a/lib/sfdpgen/spring_electrical.c
++++ b/lib/sfdpgen/spring_electrical.c
+@@ -24,6 +24,8 @@
+ #include <stdbool.h>
+ #include <stddef.h>
+ #include <string.h>
++#include <stdio.h>
++#include <stdlib.h>
+ #include <time.h>
+
+ #define PI M_PI
+@@ -76,6 +78,39 @@
+   "SPRING_ELECTRICAL", "SPRING_MAXENT", "STRESS_MAXENT", "STRESS_APPROX", "STRESS", "UNIFORM_STRESS", "FULL_STRESS", "NONE"
+ };
+
++static FILE *gv_trace_stream(void)
++{
++  char *path;
++
++  if (getenv("GV_TRACE") == NULL) return NULL;
++  path = getenv("GV_TRACE_FILE");
++  if (path == NULL || path[0] == '\0') return stderr;
++  return fopen(path, "a");
++}
++
++static void gv_trace_close(FILE *fp)
++{
++  if (fp != NULL && fp != stderr) fclose(fp);
++}
++
++static void gv_trace_sfdp_step(const char *phase, int iter, int dim, int n,
++			       double step, double K, double Fnorm, double *x)
++{
++  FILE *fp = gv_trace_stream();
++  int i;
++
++  if (fp == NULL) return;
++  fprintf(fp,
++	  "STEP engine=sfdp phase=%s iter=%d step=%.17g K=%.17g Fnorm=%.17g nodes=%d dim=%d\n",
++	  phase, iter, step, K, Fnorm, n, dim);
++  for (i = 0; i < n; i++) {
++    double y = dim > 1 ? x[i * dim + 1] : 0.0;
++    fprintf(fp, "POSITION engine=sfdp phase=%s iter=%d node=%d x=%.17g y=%.17g\n",
++	    phase, iter, i, x[i * dim], y);
++  }
++  gv_trace_close(fp);
++}
++
+ void spring_electrical_control_print(spring_electrical_control ctrl){
+   fprintf (stderr, "spring_electrical_control:\n");
+   fprintf (stderr, "  repulsive and attractive exponents: %.03f %.03f\n", ctrl->p, ctrl->q);
+@@ -612,6 +647,7 @@
+       }
+     }
+
++    gv_trace_sfdp_step("fast", iter, dim, n, step, K, Fnorm, x);
+     step = update_step(adaptive_cooling, step, Fnorm, Fnorm0, cool);
+   } while (step > tol && iter < maxiter);
+
+@@ -767,6 +803,7 @@
+ #endif
+
+
++    gv_trace_sfdp_step("slow", iter, dim, n, step, K, Fnorm, x);
+     step = update_step(adaptive_cooling, step, Fnorm, Fnorm0, cool);
+   } while (step > tol && iter < maxiter);
